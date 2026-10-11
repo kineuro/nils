@@ -63,6 +63,22 @@ pub const CHECK_OPS: [&str; 4] = [">=", "<=", ">", "<"];
 /// The column names a table may not take: the ask's own word for a run.
 pub const RESERVED_COLUMNS: [&str; 1] = ["run"];
 
+/// The kinds a mask output's part set may be (`x-nils.outputs[].parts`,
+/// record 55 H3): the connected components of the named labels, or each
+/// label value a part of its own.
+pub const PART_KINDS: [&str; 2] = ["components", "labels"];
+
+/// How a components set joins voxels: through a face, an edge or a corner.
+pub const CONNECTIVITY: [u8; 3] = [6, 18, 26];
+
+/// What a `derivative:<kind>` input takes of a check's status (record 55
+/// H3, section 6.5): only accepted results, any but a rejected one (the
+/// default), or any.
+pub const CHECKED: [&str; 3] = ["accepted", "not_rejected", "any"];
+
+/// The key of the one set a mask output that declares none is read as.
+pub const WHOLE: &str = "whole";
+
 /// Where an output belongs (`x-nils.outputs[].level`).
 pub const OUTPUT_LEVELS: [&str; 2] = ["unit", "run"];
 
@@ -236,6 +252,26 @@ pub struct TypedInput {
     /// `model`, `label_set` or `derivative:<kind>`.
     pub ty: String,
     pub optional: bool,
+    /// For a `derivative:<kind>` input (record 55 H3): what it takes of a
+    /// check's status, one of [`CHECKED`]; none is `not_rejected`.
+    pub checked: Option<String>,
+}
+
+/// One part set a mask output declares (record 55 H3, section 3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PartSet {
+    /// `[a-z][a-z0-9_]*`, never `whole`.
+    pub key: String,
+    /// What a person reads, such as Lesions.
+    pub words: String,
+    /// `components` or `labels`.
+    pub kind: String,
+    /// The label values it reads; none is every value but 0 (`nonzero`).
+    pub labels: Option<Vec<i64>>,
+    /// For a labels set, each value's name.
+    pub names: std::collections::BTreeMap<i64, String>,
+    /// For a components set: 6, 18 or 26 (the default).
+    pub connectivity: u8,
 }
 
 /// One declared output.
@@ -255,6 +291,11 @@ pub struct Output {
     pub encoders: Vec<String>,
     /// For a table output (record 49 A3): its format and typed columns.
     pub table: Option<Table>,
+    /// For a mask output (record 55 H3): the input role whose stack the
+    /// mask's grid is on (`grid`), and the part sets it is read as
+    /// (`parts`); a mask declaring none is read as one set, whole.
+    pub grid: Option<String>,
+    pub parts: Vec<PartSet>,
 }
 
 /// The type of a table's column.
@@ -736,10 +777,25 @@ pub fn from_value(document: Value) -> Result<Descriptor, String> {
                 OUTPUT_KINDS.join("|")
             ));
         }
+        let checked = opt_text(t, "checked", &at)?;
+        if let Some(c) = &checked {
+            if !ty.starts_with("derivative:") {
+                return Err(format!(
+                    "{at}checked belongs to a derivative input: what it takes of a check's status"
+                ));
+            }
+            if !CHECKED.contains(&c.as_str()) {
+                return Err(format!(
+                    "{at}checked is one of {}, not {c}",
+                    CHECKED.join(", ")
+                ));
+            }
+        }
         inputs.push(TypedInput {
             id,
             ty,
             optional: opt_bool(t, "optional", &at)?.unwrap_or(false),
+            checked,
         });
     }
     if inputs.iter().filter(|t| t.ty == "label_set").count() > 1 {
@@ -826,6 +882,18 @@ pub fn from_value(document: Value) -> Result<Descriptor, String> {
             }
             None
         };
+        let grid = opt_text(o, "grid", &at)?;
+        let parts = parts_of(o, &at)?;
+        if kind != "mask" {
+            if grid.is_some() {
+                return Err(format!(
+                    "{at}grid belongs to a mask output: the input role whose stack its grid is on"
+                ));
+            }
+            if !o["parts"].is_null() {
+                return Err(format!("{at}parts belong to a mask output"));
+            }
+        }
         outputs.push(Output {
             id,
             kind,
@@ -835,6 +903,8 @@ pub fn from_value(document: Value) -> Result<Descriptor, String> {
             card,
             encoders,
             table,
+            grid,
+            parts,
         });
     }
     if outputs.is_empty() {
@@ -1018,6 +1088,28 @@ pub fn from_value(document: Value) -> Result<Descriptor, String> {
             "x-nils.input.roles are the picks a bids input carries; a stacks input has none".into(),
         );
     }
+    // record 55 H3: a mask's grid is the stack a bids unit was given for a
+    // role; a stacks unit's mask is on its own stack's grid
+    for (i, o) in outputs.iter().enumerate() {
+        let Some(role) = &o.grid else { continue };
+        let at = format!("x-nils.outputs[{i}].");
+        if layout != Layout::Bids {
+            return Err(format!(
+                "{at}grid names a role of a bids input; a stacks unit's mask is on its own stack's grid"
+            ));
+        }
+        if !is_ident(role, true) {
+            return Err(format!(
+                "{at}grid {role} is a pick role of the pack, such as t1w"
+            ));
+        }
+        if !roles.is_empty() && !roles.contains(role) {
+            return Err(format!(
+                "{at}grid {role} is not one of the roles a unit is given ({})",
+                roles.join(", ")
+            ));
+        }
+    }
     let header = opt_bool(&x["input"], "header", "x-nils.input.")?.unwrap_or(false);
     if header && layout != Layout::Stacks {
         return Err(
@@ -1050,6 +1142,132 @@ pub fn from_value(document: Value) -> Result<Descriptor, String> {
         unit_minutes,
         document,
     })
+}
+
+/// A mask output's part sets (record 55 H3, section 3): each a key, the
+/// words a person reads, its kind, the labels it reads (a list, or
+/// `nonzero`), for a labels set each value's name (a mapping from value to
+/// name, or a list of `{label, name}`), and for a components set how voxels
+/// join (6, 18 or 26, the default).
+fn parts_of(o: &Value, at: &str) -> Result<Vec<PartSet>, String> {
+    let mut out: Vec<PartSet> = Vec::new();
+    for (j, p) in array(o, "parts", at)?.iter().enumerate() {
+        let pat = format!("{at}parts[{j}].");
+        if !p.is_object() {
+            return Err(format!(
+                "{at}parts[{j}] is a mapping: key, words, kind, labels, names"
+            ));
+        }
+        let key = text(p, "key", &pat)?.to_string();
+        if !is_ident(&key, true) {
+            return Err(format!(
+                "{pat}key {key} is lowercase letters, digits and _, starting with a letter"
+            ));
+        }
+        if key == WHOLE {
+            return Err(format!(
+                "{pat}key {WHOLE} is the set a mask with no parts is read as"
+            ));
+        }
+        if out.iter().any(|q| q.key == key) {
+            return Err(format!("{pat}key {key} is declared twice"));
+        }
+        let words = text(p, "words", &pat)?.trim().to_string();
+        let kind = text(p, "kind", &pat)?.to_string();
+        if !PART_KINDS.contains(&kind.as_str()) {
+            return Err(format!(
+                "{pat}kind is one of {}, not {kind}",
+                PART_KINDS.join(", ")
+            ));
+        }
+        let labels = match &p["labels"] {
+            Value::Null => None,
+            Value::String(s) if s == "nonzero" => None,
+            Value::Array(a) if !a.is_empty() => {
+                let mut ls = Vec::new();
+                for v in a {
+                    match v.as_i64() {
+                        Some(l) if l > 0 => {
+                            if !ls.contains(&l) {
+                                ls.push(l);
+                            }
+                        }
+                        _ => {
+                            return Err(format!(
+                                "{pat}labels are whole numbers above 0, or nonzero"
+                            ));
+                        }
+                    }
+                }
+                Some(ls)
+            }
+            _ => {
+                return Err(format!(
+                    "{pat}labels is a list of label values, such as [99], or nonzero"
+                ));
+            }
+        };
+        if kind == "components" && p["labels"].is_null() {
+            return Err(format!(
+                "{pat}a components set names the labels it joins: a list, or nonzero"
+            ));
+        }
+        let mut names = std::collections::BTreeMap::new();
+        let mut name_of = |label: Option<i64>, name: Option<&str>| -> Result<(), String> {
+            let (Some(l), Some(n)) = (label.filter(|l| *l > 0), name) else {
+                return Err(format!("{pat}names maps a label value above 0 to its name"));
+            };
+            if n.trim().is_empty() {
+                return Err(format!("{pat}names: label {l} has an empty name"));
+            }
+            names.insert(l, n.trim().to_string());
+            Ok(())
+        };
+        match &p["names"] {
+            Value::Null => {}
+            Value::Object(m) => {
+                for (k, v) in m {
+                    name_of(k.trim().parse().ok(), v.as_str())?;
+                }
+            }
+            Value::Array(a) => {
+                for v in a {
+                    name_of(v["label"].as_i64(), v["name"].as_str())?;
+                }
+            }
+            _ => {
+                return Err(format!(
+                    "{pat}names is a mapping from label value to name, or a list of {{label, name}}"
+                ));
+            }
+        }
+        if kind == "components" && !names.is_empty() {
+            return Err(format!(
+                "{pat}names belong to a labels set; a component is named by its number"
+            ));
+        }
+        let connectivity = match &p["connectivity"] {
+            Value::Null => 26,
+            v => match v.as_u64() {
+                Some(c) if c <= 26 && CONNECTIVITY.contains(&(c as u8)) => c as u8,
+                _ => {
+                    return Err(format!("{pat}connectivity is 6, 18 or 26, not {v}"));
+                }
+            },
+        };
+        if kind != "components" && !p["connectivity"].is_null() {
+            return Err(format!("{pat}connectivity belongs to a components set"));
+        }
+        out.push(PartSet {
+            key,
+            words,
+            kind,
+            labels,
+            names,
+            connectivity,
+        });
+    }
+    Ok(out)
 }
 
 /// A table output's format and columns (record 49 A3).
@@ -1594,6 +1812,104 @@ x-nils:
             "  type: docker\n  container-hash: sha256:abc\n",
         );
         assert!(parse(&with_hash).unwrap_err().contains("container-hash"));
+    }
+
+    /// Record 55 H3 (section 8.6): a mask output declares the role whose
+    /// stack its grid is on and the part sets it is read as, and a
+    /// derivative input what it takes of a check's status; all three are
+    /// optional, and refused where they do not belong.
+    #[test]
+    fn a_mask_declares_its_grid_and_parts_and_an_input_what_it_takes_of_a_check() {
+        let base = doc(&format!("antsx/ants@sha256:{HEX}"));
+        // without the keys a mask registers as before
+        let plain = base.replace("kind: output", "kind: mask");
+        let d = parse(&plain).unwrap();
+        assert_eq!(d.outputs[0].grid, None);
+        assert!(d.outputs[0].parts.is_empty());
+        let with = |extra: &str| {
+            base.replace("kind: output", &format!("kind: mask\n{extra}"))
+                .replace(
+                    "  input: {layout: bids}",
+                    "  input: {layout: bids, roles: [t1w, flair]}\n  inputs:\n    - {id: prior, type: \"derivative:mask\", checked: accepted}",
+                )
+        };
+        let d = parse(&with(
+            "      grid: t1w\n      parts:\n        - {key: lesions, words: Lesions, kind: components, labels: [99]}\n        - {key: structures, words: Structures, kind: labels, names: {2: Left-Cerebral-White-Matter, 41: Right-Cerebral-White-Matter}}\n        - {key: spots, words: Spots, kind: components, labels: nonzero, connectivity: 6}",
+        ))
+        .unwrap();
+        let o = &d.outputs[0];
+        assert_eq!(o.grid.as_deref(), Some("t1w"));
+        assert_eq!(o.parts.len(), 3);
+        assert_eq!(o.parts[0].labels, Some(vec![99]));
+        assert_eq!(o.parts[0].connectivity, 26);
+        assert_eq!(o.parts[1].names[&41], "Right-Cerebral-White-Matter");
+        assert_eq!(o.parts[1].labels, None);
+        assert_eq!(
+            (o.parts[2].labels.clone(), o.parts[2].connectivity),
+            (None, 6)
+        );
+        assert_eq!(d.inputs[0].checked.as_deref(), Some("accepted"));
+        // names as a list read the same
+        let d = parse(&with(
+            "      parts:\n        - {key: s, words: S, kind: labels, names: [{label: 17, name: Left-Hippocampus}]}",
+        ))
+        .unwrap();
+        assert_eq!(d.outputs[0].parts[0].names[&17], "Left-Hippocampus");
+        for (extra, words) in [
+            ("      grid: t2w", "not one of the roles"),
+            (
+                "      parts: [{key: whole, words: W, kind: labels}]",
+                "a mask with no parts",
+            ),
+            (
+                "      parts: [{key: a, words: A, kind: blobs}]",
+                "kind is one of",
+            ),
+            (
+                "      parts: [{key: a, words: A, kind: components}]",
+                "names the labels it joins",
+            ),
+            (
+                "      parts: [{key: a, words: A, kind: components, labels: [0]}]",
+                "above 0",
+            ),
+            (
+                "      parts: [{key: a, words: A, kind: components, labels: [1], connectivity: 8}]",
+                "6, 18 or 26",
+            ),
+            (
+                "      parts: [{key: a, words: A, kind: labels, connectivity: 6}]",
+                "belongs to a components set",
+            ),
+            (
+                "      parts: [{key: a, words: A, kind: components, labels: [1], names: {1: x}}]",
+                "belong to a labels set",
+            ),
+            (
+                "      parts: [{key: a, words: A, kind: labels}, {key: a, words: B, kind: labels}]",
+                "declared twice",
+            ),
+            (
+                "      parts: [{key: A, words: A, kind: labels}]",
+                "lowercase",
+            ),
+        ] {
+            let e = parse(&with(extra)).unwrap_err();
+            assert!(e.contains(words), "{extra}: {e}");
+        }
+        // only a mask has a grid and parts, and only a derivative input a check
+        let e = parse(&base.replace("kind: output", "kind: output\n      grid: t1w")).unwrap_err();
+        assert!(e.contains("grid belongs to a mask output"), "{e}");
+        let e = parse(&base.replace(
+            "kind: output",
+            "kind: output\n      parts: [{key: a, words: A, kind: labels}]",
+        ))
+        .unwrap_err();
+        assert!(e.contains("parts belong to a mask output"), "{e}");
+        let e = parse(&with("").replace("checked: accepted", "checked: maybe")).unwrap_err();
+        assert!(e.contains("checked is one of"), "{e}");
+        let e = parse(&with("").replace("\"derivative:mask\"", "model")).unwrap_err();
+        assert!(e.contains("checked belongs to a derivative input"), "{e}");
     }
 
     #[test]

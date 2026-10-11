@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 89;
+pub const SCHEMA_VERSION: i64 = 91;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -410,7 +410,62 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 89,
         apply: a_file_set_aside_by_policy_asks_nobody,
     },
+    Migration {
+        version: 90,
+        apply: a_result_can_be_checked,
+    },
+    Migration {
+        version: 91,
+        apply: a_check_is_a_campaign,
+    },
 ];
+
+/// Job type 3, check a result (record 55 H3, the build spec's section 7,
+/// the campaign's half): a campaign item names the one result it asks
+/// about, the part set it is read as and, at part grain, the part; a check
+/// item's panels are frozen in `campaign_check_panel`. Only columns and a
+/// table are added; no row is touched.
+fn a_check_is_a_campaign(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_columns(
+        store,
+        "campaign_item",
+        &["derivative_id", "part_set", "part_label"],
+    )?;
+    add_indexes(store, "campaign_item")?;
+    add_tables(store, kind, &["campaign_check_panel"])
+}
+
+/// Job type 3, check a result (record 55 H3, the build spec's section 7,
+/// the result's half): a derivative gains its grid, the scan whose grid it
+/// is on and how the two are tied, its part sets, and the status a check
+/// writes; each part of a mask is a row of `derivative_part`. Only columns
+/// and a table are added: a mask registered before gains its grid and its
+/// parts from `nils derivative parts` the first time a check needs them,
+/// and no row is touched here.
+fn a_result_can_be_checked(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_columns(
+        store,
+        "derivative",
+        &[
+            "grid",
+            "grid_stack_id",
+            "grid_link",
+            "part_sets",
+            "check_status",
+            "check_reasons",
+            "check_decision_id",
+            "checked_at",
+        ],
+    )?;
+    add_indexes(store, "derivative")?;
+    add_tables(store, kind, &["derivative_part"])
+}
 
 /// Record 56 (the rules decide; Review asks only what matters), 2026-10-11:
 /// a file the read set aside by policy, a SOP class or a modality outside
@@ -2583,14 +2638,36 @@ fn add_tables(store: &mut Store, kind: Kind, names: &[&str]) -> Result<(), Error
     Ok(())
 }
 
-/// Create a table's declared indexes that are not there yet.
+/// Create a table's declared indexes that are not there yet, of those whose
+/// columns the table has now. The declaration is the current schema's, so
+/// a migration that runs before a later one added a column leaves that
+/// column's index to the migration that adds it (the review of E1, item
+/// 6: a registry at schema 56 to 59 failed at 60 on the indexes of check
+/// and grid_stack_id, which migration 90 adds).
 fn add_indexes(store: &mut Store, table: &str) -> Result<(), Error> {
     if !table_exists(store, table)? {
         return Ok(());
     }
     let dialect = store.dialect();
     let schema = store.schema().map(str::to_string);
-    for ix in dialect.create_indexes(schema.as_deref(), schema::table(table)) {
+    let mut now = schema::table(table).clone();
+    let named: Vec<&'static str> = now
+        .indexes
+        .iter()
+        .flatten()
+        .chain(now.partial_uniques.iter().flat_map(|p| p.columns.iter()))
+        .copied()
+        .collect();
+    let mut has: std::collections::BTreeMap<&'static str, bool> = std::collections::BTreeMap::new();
+    for c in named {
+        if !has.contains_key(c) {
+            has.insert(c, column_exists(store, table, c)?);
+        }
+    }
+    let there = |cols: &[&str]| cols.iter().all(|c| has.get(c).copied().unwrap_or(false));
+    now.indexes.retain(|key| there(key));
+    now.partial_uniques.retain(|p| there(&p.columns));
+    for ix in dialect.create_indexes(schema.as_deref(), &now) {
         store.batch(&ix)?;
     }
     Ok(())

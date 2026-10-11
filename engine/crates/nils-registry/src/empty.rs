@@ -66,6 +66,8 @@ pub const STACK_TABLES: &[(&str, Row)] = &[
         "campaign_anchor_panel",
         Row::Keeps("an anchored campaign shows it"),
     ),
+    // record 55 H3: a check's panel
+    ("campaign_check_panel", Row::Keeps("a check shows it")),
     (
         "review_member",
         Row::Keeps("a grouped review item holds it"),

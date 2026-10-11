@@ -1490,12 +1490,38 @@ fn build_registry() -> Vec<Table> {
                 col("supersedes_id", Type::Int),
                 req("created_at", Type::Timestamp),
                 col("withdrawn_at", Type::Timestamp),
+                // Job type 3, check a result (record 55 H3): a mask's grid,
+                // read from its file's header when it is registered, as
+                // {dims, affine (4 by 4, voxel to RAS millimetres),
+                // datatype}; the scan whose grid it is on; and how the two
+                // are tied: `same` (voxel for voxel), `world` (another grid
+                // in the scan's frame, resampled by world position) or
+                // `none` (no scan known, never drawn).
+                col("grid", Type::Json),
+                col("grid_stack_id", Type::Int),
+                col("grid_link", Type::Text),
+                // The part sets the mask is read as: [{key, words, kind
+                // (components, labels or whole), labels, names,
+                // connectivity, note}], its parts in derivative_part.
+                col("part_sets", Type::Json),
+                // The status a check wrote, as a person's decision:
+                // accepted, rejected, flagged or null (not checked), the
+                // result-level reasons of the deciding answer, the
+                // decision's id and when. `check` is a word SQL keeps for
+                // itself, so the column is `check_status`; the doors call
+                // it `check`.
+                col("check_status", Type::Text),
+                col("check_reasons", Type::Json),
+                col("check_decision_id", Type::Int),
+                col("checked_at", Type::Timestamp),
             ],
         )
         .index(&["stack_id"])
         .index(&["subject_id"])
         .index(&["kind"])
         .index(&["sha256"])
+        .index(&["check_status"])
+        .index(&["grid_stack_id"])
         // Record 43 S4: the embedding cache's key. One live embedding per
         // stack, encoder and preprocessing version; a new preprocessing
         // version is a new key, so its rows sit beside the old ones, and a
@@ -1506,6 +1532,37 @@ fn build_registry() -> Vec<Table> {
             &["kind", "stack_id", "model_id", "preprocess_version"],
             "kind = 'embedding' AND withdrawn_at IS NULL",
         ),
+        // Job type 3, check a result (record 55 H3): one part of a mask,
+        // computed in the mask's own grid when it is registered or by
+        // `nils derivative parts`: a connected component of a lesion
+        // label (`components`), or one label of a label map (`labels`).
+        // `label` is the component's number or the label's value; the
+        // anchor is the part's voxel nearest its centre of mass and the box
+        // the world minimum and maximum of its voxels' corners, both in
+        // millimetres, LPS; `position` the order along the grid scan's
+        // slice direction, bottom to top. `check_status` (accepted,
+        // rejected, flagged) is a person's decision, as the result's is.
+        Table::new(
+            "derivative_part",
+            vec![
+                col("id", Type::Id),
+                req("derivative_id", Type::Int),
+                req("part_set", Type::Text),
+                req("label", Type::Int),
+                col("name", Type::Text),
+                req("voxels", Type::Int),
+                req("volume_mm3", Type::Double),
+                req("anchor_mm", Type::Json),
+                req("box_mm", Type::Json),
+                req("position", Type::Int),
+                req("method", Type::Text),
+                col("check_status", Type::Text),
+                col("check_reason", Type::Text),
+                col("check_decision_id", Type::Int),
+            ],
+        )
+        .unique(&["derivative_id", "part_set", "label"])
+        .index(&["derivative_id"]),
         // Wave 3 §8.5: what a release did, as rows.
         //
         // Not a workbook beside the originals under a password kept in a
@@ -2206,13 +2263,22 @@ fn build_registry() -> Vec<Table> {
                 // Record 48 R1: 1 when a batch accepted in one move held the
                 // item back to be read alone; no later batch takes it.
                 col("held_back", Type::Int),
+                // Job type 3, check a result (record 55 H3): the one result
+                // a check item asks about, the part set it is read as, and at
+                // part grain the part's label (null at result grain).
+                // `input_derivative_ids` stays the starting files of an
+                // annotator (type 4).
+                col("derivative_id", Type::Int),
+                col("part_set", Type::Text),
+                col("part_label", Type::Int),
             ],
         )
         .unique(&["campaign_id", "position"])
         .index(&["review_item_id"])
         .index(&["subject_id"])
         // a commit by filter and a label set read an item by its decision
-        .index(&["decision_id"]),
+        .index(&["decision_id"])
+        .index(&["derivative_id"]),
         Table::new(
             "campaign_assignment",
             vec![
@@ -2431,6 +2497,30 @@ fn build_registry() -> Vec<Table> {
             ],
         )
         .unique(&["item_id", "side"])
+        .index(&["campaign_id"])
+        .index(&["stack_id"]),
+        // Job type 3, check a result (record 55 H3, the build spec's
+        // section 5): one panel of a check item, frozen when the campaign
+        // is made so its content hash names what was shown. Panel 0 is the
+        // scan the result was made on (role `made_on`); the others are the
+        // visit's main scans for the roles the campaign declares (`t1w`,
+        // `flair`, ...), each in the result's frame: `same` where its grid
+        // is the result's own, else `world`.
+        Table::new(
+            "campaign_check_panel",
+            vec![
+                col("id", Type::Id),
+                req("campaign_id", Type::Int),
+                req("item_id", Type::Int),
+                // 0 is made_on, then the declared roles in their order
+                req("panel", Type::Int),
+                req("role", Type::Text),
+                req("stack_id", Type::Int),
+                // same | world
+                req("link", Type::Text),
+            ],
+        )
+        .unique(&["item_id", "panel"])
         .index(&["campaign_id"])
         .index(&["stack_id"]),
         // Post-contrast gold, anchored reading (record 48, 2026-09-29
@@ -2873,6 +2963,8 @@ mod tests {
             "campaign_ab_cause",
             "campaign_pair_side",
             "campaign_anchor_panel",
+            "derivative_part",
+            "campaign_check_panel",
         ] {
             assert!(registry_tables().iter().any(|t| t.name == name), "{name}");
         }

@@ -1616,7 +1616,7 @@ pub(crate) fn build_as(
 /// and the doors read it while a build runs (the manifest door holds a
 /// request for it): written in place, it was read empty or half written,
 /// and the door answered 500 to a picture that was being built.
-fn write_manifest(root: &Path, text: &str) -> Result<(), String> {
+pub(crate) fn write_manifest(root: &Path, text: &str) -> Result<(), String> {
     // a part of its own per writer: two builds of one stack at once must
     // not write one part file together
     static PART: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -1662,10 +1662,21 @@ pub const READS_AT_ONCE: usize = 16;
 
 /// The tile files of one plane, in row-major order of its grid.
 fn plane_tiles(root: &Path, m: &Manifest, level: u32, z: u32) -> Result<Vec<PathBuf>, String> {
-    let lv = m
-        .level_shapes
-        .get(level as usize)
-        .ok_or_else(|| format!("level {level} is not in the pyramid; it has {}", m.levels))?;
+    plane_tiles_in(root, &m.level_shapes, level, z)
+}
+
+fn plane_tiles_in(
+    root: &Path,
+    levels: &[Level],
+    level: u32,
+    z: u32,
+) -> Result<Vec<PathBuf>, String> {
+    let lv = levels.get(level as usize).ok_or_else(|| {
+        format!(
+            "level {level} is not in the pyramid; it has {}",
+            levels.len()
+        )
+    })?;
     if z >= lv.shape[0] {
         return Err(format!("plane {z} is past the stack's {}", lv.shape[0]));
     }
@@ -1881,22 +1892,35 @@ fn read_planes(
     level: u32,
     zs: &[u32],
 ) -> Result<Vec<Vec<Vec<u8>>>, String> {
-    let lv = m
-        .level_shapes
-        .get(level as usize)
-        .ok_or_else(|| format!("level {level} is not in the pyramid; it has {}", m.levels))?;
+    read_planes_in(root, &m.level_shapes, level, zs)
+}
+
+/// [`read_planes`] by a pyramid's levels alone: a picture's, or a result's
+/// layer on it (record 55 H3), which has the same levels.
+fn read_planes_in(
+    root: &Path,
+    levels: &[Level],
+    level: u32,
+    zs: &[u32],
+) -> Result<Vec<Vec<Vec<u8>>>, String> {
+    let lv = levels.get(level as usize).ok_or_else(|| {
+        format!(
+            "level {level} is not in the pyramid; it has {}",
+            levels.len()
+        )
+    })?;
     if let Some(z) = zs.iter().find(|z| **z >= lv.shape[0]) {
         return Err(format!("plane {z} is past the stack's {}", lv.shape[0]));
     }
-    if let Some(p) = packed_level(root, m, level)? {
+    if let Some(p) = packed_level_in(root, levels, level)? {
         return read_packed(&p, zs);
     }
     let mut paths = Vec::new();
     for &z in zs {
-        paths.extend(plane_tiles(root, m, level, z)?);
+        paths.extend(plane_tiles_in(root, levels, level, z)?);
     }
     let read = match read_files_at_once(&paths) {
-        Err(why) if !why.starts_with(UNREADABLE) => match packed_level(root, m, level)? {
+        Err(why) if !why.starts_with(UNREADABLE) => match packed_level_in(root, levels, level)? {
             Some(p) => return read_packed(&p, zs),
             None => return Err(why),
         },
@@ -1913,7 +1937,15 @@ fn packed_level(
     m: &Manifest,
     level: u32,
 ) -> Result<Option<std::sync::Arc<crate::tilepack::Packed>>, String> {
-    let lv = &m.level_shapes[level as usize];
+    packed_level_in(root, &m.level_shapes, level)
+}
+
+fn packed_level_in(
+    root: &Path,
+    levels: &[Level],
+    level: u32,
+) -> Result<Option<std::sync::Arc<crate::tilepack::Packed>>, String> {
+    let lv = &levels[level as usize];
     let p = crate::tilepack::level(root, level).map_err(|e| format!("{UNREADABLE}{e}"))?;
     if let Some(p) = &p
         && p.grid != [lv.shape[0], lv.tiles[0], lv.tiles[1]]
@@ -1960,7 +1992,17 @@ fn read_packed(p: &crate::tilepack::Packed, zs: &[u32]) -> Result<Vec<Vec<Vec<u8
 /// little endian; the offsets are from the start of the container, tiles
 /// in row-major order of the plane's grid.
 pub fn plane_container(root: &Path, m: &Manifest, level: u32, z: u32) -> Result<Vec<u8>, String> {
-    let mut planes = read_planes(root, m, level, &[z])?;
+    plane_container_in(root, &m.level_shapes, level, z)
+}
+
+/// [`plane_container`] by a pyramid's levels alone (a result's layer).
+pub(crate) fn plane_container_in(
+    root: &Path,
+    levels: &[Level],
+    level: u32,
+    z: u32,
+) -> Result<Vec<u8>, String> {
+    let mut planes = read_planes_in(root, levels, level, &[z])?;
     Ok(container(&planes.pop().unwrap_or_default()))
 }
 
@@ -1982,6 +2024,7 @@ pub fn container(tiles: &[Vec<u8>]) -> Vec<u8> {
 /// A slab: the planes `z0..z1` each as a container, concatenated behind a
 /// count and offsets of their own (the same shape one level up). Every
 /// tile of every plane is read at once, [`READS_AT_ONCE`] at a time.
+#[cfg(test)]
 pub fn slab_container(
     root: &Path,
     m: &Manifest,
@@ -1989,8 +2032,19 @@ pub fn slab_container(
     z0: u32,
     z1: u32,
 ) -> Result<Vec<u8>, String> {
+    slab_container_in(root, &m.level_shapes, level, z0, z1)
+}
+
+/// A slab by a pyramid's levels alone: a picture's, or a result's layer.
+pub(crate) fn slab_container_in(
+    root: &Path,
+    levels: &[Level],
+    level: u32,
+    z0: u32,
+    z1: u32,
+) -> Result<Vec<u8>, String> {
     let zs: Vec<u32> = (z0..z1).collect();
-    let planes: Vec<Vec<u8>> = read_planes(root, m, level, &zs)?
+    let planes: Vec<Vec<u8>> = read_planes_in(root, levels, level, &zs)?
         .iter()
         .map(|tiles| container(tiles))
         .collect();
@@ -2004,8 +2058,18 @@ pub fn decode_plane(
     level: u32,
     z: u32,
 ) -> Result<(u32, u32, Vec<u16>), String> {
-    let mut tiles = read_planes(root, m, level, &[z])?;
-    plane_of_tiles(m, level, &tiles.pop().unwrap_or_default())
+    decode_plane_in(root, &m.level_shapes, level, z)
+}
+
+/// [`decode_plane`] by a pyramid's levels alone (a result's layer).
+pub(crate) fn decode_plane_in(
+    root: &Path,
+    levels: &[Level],
+    level: u32,
+    z: u32,
+) -> Result<(u32, u32, Vec<u16>), String> {
+    let mut tiles = read_planes_in(root, levels, level, &[z])?;
+    plane_of_levels(levels, level, &tiles.pop().unwrap_or_default())
 }
 
 /// The planes `zs` decoded, each handed to `each` with its index, read
@@ -2035,8 +2099,15 @@ fn plane_of_tiles(
     level: u32,
     tiles: &[Vec<u8>],
 ) -> Result<(u32, u32, Vec<u16>), String> {
-    let lv = m
-        .level_shapes
+    plane_of_levels(&m.level_shapes, level, tiles)
+}
+
+fn plane_of_levels(
+    levels: &[Level],
+    level: u32,
+    tiles: &[Vec<u8>],
+) -> Result<(u32, u32, Vec<u16>), String> {
+    let lv = levels
         .get(level as usize)
         .ok_or_else(|| format!("level {level} is not in the pyramid"))?;
     let [_, ny, nx] = lv.shape;
@@ -2764,8 +2835,9 @@ const OPEN_WINDOW_SECS: u64 = 600;
 struct Opened {
     /// When a principal's rows of the window were read in.
     warmed: std::collections::HashMap<String, u64>,
-    /// When (principal, stack) was last written, in seconds.
-    at: std::collections::HashMap<(String, i64), u64>,
+    /// When (principal, stack, result) was last written, in seconds: a
+    /// result's layer on the stack (record 55 H3) is its own opening.
+    at: std::collections::HashMap<(String, i64, Option<i64>), u64>,
 }
 
 static OPENED: std::sync::LazyLock<std::sync::Mutex<Opened>> =
@@ -2781,11 +2853,26 @@ pub(crate) fn note_open(
     level: u32,
     purpose: &str,
 ) -> Result<(), String> {
+    note_open_of(registry, caller, stack, through, level, purpose, None)
+}
+
+/// [`note_open`] of a result's layer on a stack (record 55 H3): the row
+/// names the result beside the stack, once per person, stack and result
+/// in the window.
+pub(crate) fn note_open_of(
+    registry: &mut nils_registry::Registry,
+    caller: &Caller,
+    stack: i64,
+    through: Option<i64>,
+    level: u32,
+    purpose: &str,
+    derivative: Option<i64>,
+) -> Result<(), String> {
     use nils_registry::audit::{self, Action, Entry, Filter};
     let now = nils_registry::time::now_secs();
     let since = now.saturating_sub(OPEN_WINDOW_SECS);
     let who = caller.principal.clone();
-    let key = (who.clone(), stack);
+    let key = (who.clone(), stack, derivative);
     let fresh = |o: &Opened| o.at.get(&key).is_some_and(|t| *t >= since);
     let warm = {
         let o = OPENED.lock().map_err(|_| "the open register is poisoned")?;
@@ -2813,7 +2900,9 @@ pub(crate) fn note_open(
                 r.scope["stack"].as_i64(),
                 nils_registry::time::secs_of(&r.at),
             ) {
-                let e = o.at.entry((who.clone(), s)).or_insert(t);
+                let e =
+                    o.at.entry((who.clone(), s, r.scope["derivative"].as_i64()))
+                        .or_insert(t);
                 *e = (*e).max(t);
             }
         }
@@ -2827,11 +2916,17 @@ pub(crate) fn note_open(
         &Entry {
             principal: &caller.principal,
             action: Action::InstanceOpen,
-            scope: match through {
-                Some(c) => serde_json::json!({
-                    "stack": stack, "level": level, "purpose": purpose, "campaign": c,
-                }),
-                None => serde_json::json!({"stack": stack, "level": level, "purpose": purpose}),
+            scope: {
+                let mut scope = match through {
+                    Some(c) => serde_json::json!({
+                        "stack": stack, "level": level, "purpose": purpose, "campaign": c,
+                    }),
+                    None => serde_json::json!({"stack": stack, "level": level, "purpose": purpose}),
+                };
+                if let Some(d) = derivative {
+                    scope["derivative"] = serde_json::json!(d);
+                }
+                scope
             },
             policy: None,
             job_id: None,
@@ -2857,7 +2952,7 @@ static MANIFESTS: std::sync::LazyLock<std::sync::Mutex<Cached>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(Cached::new()));
 
 /// [`manifest`], through the cache the doors share.
-fn manifest_cached(root: &Path) -> Result<Option<Manifest>, String> {
+pub(crate) fn manifest_cached(root: &Path) -> Result<Option<Manifest>, String> {
     let p = root.join("manifest.json");
     let Ok(meta) = std::fs::metadata(&p) else {
         return Ok(None);
@@ -2999,6 +3094,18 @@ fn slab_cached(
     z0: u32,
     z1: u32,
 ) -> Result<std::sync::Arc<Vec<u8>>, Reply> {
+    slab_cached_in(root, &m.level_shapes, level, z0, z1)
+}
+
+/// [`slab_cached`] by a pyramid's levels alone: a result's layer is kept
+/// in the same cache, by its own folder and build.
+pub(crate) fn slab_cached_in(
+    root: &Path,
+    levels: &[Level],
+    level: u32,
+    z0: u32,
+    z1: u32,
+) -> Result<std::sync::Arc<Vec<u8>>, Reply> {
     let key = SlabKey {
         root: root.to_path_buf(),
         built: built_stamp(root)?,
@@ -3012,7 +3119,7 @@ fn slab_cached(
     TILE_READS
         .slabs_reading
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let read = slab_container(root, m, level, z0, z1);
+    let read = slab_container_in(root, levels, level, z0, z1);
     TILE_READS
         .slabs_reading
         .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
@@ -3154,7 +3261,7 @@ fn stack_exists(store: &mut Store, stack: i64) -> Result<bool, Reply> {
 
 /// The reason class a failed single-stack build gave, as the verb printed
 /// it: `stack N: its pyramid was not built (CLASS)`.
-fn failed_class(error: Option<&str>) -> Option<String> {
+pub(crate) fn failed_class(error: Option<&str>) -> Option<String> {
     let e = error?;
     let at = e.find("was not built (")? + "was not built (".len();
     let class = &e[at..at + e[at..].find(')')?];
@@ -3187,7 +3294,7 @@ fn hold_for_manifest(root: &Path, limit: std::time::Duration) -> Result<Option<M
 /// (422) and not queued again by the door, so a stack that cannot be read
 /// is not built over and over; `pyramid build --stack N` at the jobs door
 /// queues it again.
-fn on_demand(
+pub(crate) fn on_demand(
     store: &mut Store,
     caller: &Caller,
     stack: i64,

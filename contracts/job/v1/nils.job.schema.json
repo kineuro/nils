@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://nils.kineuro.se/contracts/job/v1/nils.job.schema.json",
   "title": "NILS pipeline descriptor (nils.job.yml)",
-  "description": "Decision record 09 (D9) and record 43 S1: what a pipeline is, as the engine's runner reads it. v0's descriptor, a subset of Boutiques 0.5 with an x-nils block, kept, with the image pinned by its registry manifest digest or refused (record 43 R3). The file is YAML; this schema is of the value it parses to. The parameters are the Boutiques inputs; everything the Boutiques contract cannot say (the analysis level, the input layout, the typed inputs, the outputs by derivative kind, the needs and the proposals) is under x-nils. Record 49 A3 adds, in place and additively: the table output kind with its format and typed columns, the declared checks (x-nils.qc), the pick roles a unit of a bids input needs (x-nils.input.roles) and a unit's typical minutes (x-nils.needs.unit-minutes). A reader keeps a key it does not know, so a later version can add one without breaking an older reader; a key this version names is checked.",
+  "description": "Decision record 09 (D9) and record 43 S1: what a pipeline is, as the engine's runner reads it. v0's descriptor, a subset of Boutiques 0.5 with an x-nils block, kept, with the image pinned by its registry manifest digest or refused (record 43 R3). The file is YAML; this schema is of the value it parses to. The parameters are the Boutiques inputs; everything the Boutiques contract cannot say (the analysis level, the input layout, the typed inputs, the outputs by derivative kind, the needs and the proposals) is under x-nils. Record 49 A3 adds, in place and additively: the table output kind with its format and typed columns, the declared checks (x-nils.qc), the pick roles a unit of a bids input needs (x-nils.input.roles) and a unit's typical minutes (x-nils.needs.unit-minutes). Record 55 H3 (job type 3, check a result) adds, in place and additively: a mask output's grid and parts, and what a derivative input takes of a check's status (checked). A reader keeps a key it does not know, so a later version can add one without breaking an older reader; a key this version names is checked.",
   "$defs": {
     "value_key": {
       "type": "string",
@@ -39,7 +39,20 @@
           "description": "What is mounted read-only under /inputs/<id>, with a line in /inputs/manifest.json: a registered model (nils run --model), a label set (nils run --labels) or derivatives of one kind. The selection itself is not one of these: it is the input the layout materialises"
         },
         "optional": {"type": "boolean"},
-        "description": {"type": "string"}
+        "description": {"type": "string"},
+        "checked": {"enum": ["accepted", "not_rejected", "any"], "description": "For a derivative input (record 55 H3, job type 3, added in place and additively): what it takes of the status a check wrote onto a result. accepted takes only results a check accepted; not_rejected, the default, any result but one a check rejected; any, every result. A run is never given a rejected result unless its descriptor says any"}
+      }
+    },
+    "part_set": {
+      "type": "object",
+      "required": ["key", "words", "kind"],
+      "properties": {
+        "key": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$", "not": {"const": "whole"}, "description": "The set's key, unique in the output. whole is the set a mask that declares none is read as: the result checked as a whole, with no parts"},
+        "words": {"type": "string", "description": "What a person reads, such as Lesions or Structures"},
+        "kind": {"enum": ["components", "labels"], "description": "components: each connected component of the labels named is a part (a lesion); labels: each label value is a part (a structure), named from names"},
+        "labels": {"oneOf": [{"const": "nonzero"}, {"type": "array", "minItems": 1, "items": {"type": "integer", "minimum": 1}}], "description": "The label values the set reads: a list, such as [99] for SAMSEG's lesions, or nonzero for every value but 0 (a binary mask). A components set names them; a labels set without them reads every value the mask holds"},
+        "names": {"oneOf": [{"type": "object"}, {"type": "array", "items": {"type": "object", "required": ["label", "name"], "properties": {"label": {"type": "integer", "minimum": 1}, "name": {"type": "string"}}}}], "description": "For a labels set: each value's name, as a mapping from the value to its name or as a list of {label, name}"},
+        "connectivity": {"enum": [6, 18, 26], "default": 26, "description": "For a components set: whether voxels touching at a face (6), an edge (18) or a corner (26) are one part"}
       }
     },
     "output": {
@@ -59,7 +72,9 @@
         },
         "encoders": {"type": "array", "items": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}, "description": "For an embedding output (record 43): the encoders, by weight digest, whose embeddings it may make. The runner keeps an embedding only by one of these or by an encoder the run was given as a model, and registers it from the card the results carry"},
         "card": {"type": "string", "pattern": "^[^/].*$", "description": "For a model output: the path under /output of the model's card (contracts/model/v1), whose digest is the artifact's. The runner fills trained_on with the label set the run was given, and refuses a card that names another"},
-        "media-type": {"type": "string"}
+        "media-type": {"type": "string"},
+        "grid": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$", "description": "For a mask output of a bids input (record 55 H3, job type 3, added in place and additively): the role, one of x-nils.input.roles where it names them, whose stack the unit was given and whose grid the mask is on. The runner reads the mask's grid from its header when it registers it and ties it to that scan: same where the grids match within 0.01 mm and 0.001 in direction, world where it is another grid in the scan's frame. Without it, a stack unit's mask is on its own stack's grid, and a session's on the input whose grid it matches"},
+        "parts": {"type": "array", "items": {"$ref": "#/$defs/part_set"}, "description": "For a mask output (record 55 H3): the part sets a check reads it as, each a key, words, a kind, the labels and for a labels set their names. The engine makes the parts when it registers the mask: at most 10,000 in a set, else the set is read whole. A mask declaring none is read as one set, whole, with no parts"}
       }
     },
     "column": {

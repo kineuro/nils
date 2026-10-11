@@ -785,28 +785,60 @@ several readers, blind, with their agreement measured.
 |---|---|---|---|
 | 1. Answer a question about a scan | an axis, several axes, a form | the rate reader | finished: every kind made in the desk |
 | 2. Pick a session's main scan | choose the stack for a role | the session board | finished, with the cohort heatmap |
-| 3. Check a result | accept, reject or flag a pipeline's output | the rate reader with an overlay | new |
+| 3. Check a result | accept, reject or flag a pipeline's output | the check reader: the result over the scan it was made on and the visit's main scans | new |
 | 4. Draw or correct a mask | edit a segmentation | an annotation app | Wave 7b |
 | 5. Settle a disagreement | two answers side by side | the adjudication workspace; the A/B reader | finished |
 
 - **Nothing typed by hand:** the create door draws pair, anchored and A/B items, and
   the desk picks selections, handles and review kinds from lists.
-- **Type 3, new.** Stack items carry their `inputs` (the derivatives to check); the
-  viewer draws a derivative as an overlay on its stack (a mask's outline or fill,
-  with opacity); the question is fixed (accept, reject, flag, with a reason); and the
-  campaign's close writes a QC status onto each derivative (`accepted`, `rejected`,
-  `flagged`, with the decision's id), a new column of the derivative row. A type-3
-  campaign can be seeded from a run's `pipeline:qc` review items.
+- **Type 3, new** (the check-a-result build spec of 2026-10-11). A check is a
+  campaign whose question is "is this result right?" (`kind: check`). Its item is one
+  result, a mask a pipeline registered, read as one of the part sets its output
+  declares (each lesion a connected component of a label, each structure a label of
+  a label map), or at part grain one item per lesion. Every mask records its grid and
+  the scan whose grid it is on, tied `same`, `world` or `none`; a result that cannot
+  be drawn is left out of a check and counted, never drawn approximately.
+  - **Panels:** the scan the result was made on, then the visit's main scans by the
+    roles the check declares (T1w and FLAIR by default, at most 8), frozen when the
+    check is made. The viewer draws the result as a mask layer on each scan's own
+    picture pyramid (fill, outline, opacity, hidden at a key), and a scan is never
+    resampled. On a scan of a sample sealed now a panel says its series description,
+    never its role.
+  - **The answer:** a verdict, accepted, rejected or flagged, with the reasons the
+    check declares (one to seven, the keys 3 to 9), on the whole result, on a lesion,
+    or as a point for a missed lesion; the lesions the rater had in focus are kept.
+    Two raters are compared on the verdict, an agreed flag is the union of their
+    flags, and a different verdict goes to the adjudicator.
+  - **The close** (`closes_into: check`) writes, through the one write path, a
+    decision on the result (scope `derivative`) and on each lesion it judged (scope
+    `derivative_part`), each a person's, and the status (accepted, rejected or
+    flagged, with the decision's id) on the derivative and its parts. A person may
+    also check one result directly, and withdraw it; a later check withdraws the
+    earlier decision, and nothing is deleted.
+  - **What reads it:** a run's derivative input takes no rejected result unless its
+    descriptor asks for any (`checked`), and the ask's measures carry the status of
+    the run's results of each unit, so "where the segmentation was accepted" is one
+    filter.
+  - **Making one** is a button on the run page: a run's results (all, not yet
+    checked, or the units its declared checks flagged), named results, or a
+    selection's newest, with a preview that writes nothing. A flagged result waits
+    for correction, which is type 4 (Wave 7b).
 - **The two proofs** of Wave 6's gate run in the desk on the production install: a
   body-part curation round and a per-axis review, with zero database-level
   integration and no table named for a kind of QC.
 
 ### 13.3 Segmentation checks, learnt from a working prototype (H4)
 
-A segmentation QC tool in daily use outside NILS is the model for type 3: its author
-shows how it is used (what is looked at, the keys, what is recorded, the pace), and
-type 3 is built with that author as its first user, so the checking moves into
-NILS. Manual segmentation (type 4) waits for Wave 7b.
+A segmentation QC tool in daily use outside NILS was read as the model for type 3:
+what is looked at, the keys, what is recorded, the pace. Type 3 is designed from
+that reading (the check-a-result build spec), with nothing asked of its author, and
+keeps what worked: one press per answer, the lesion in focus zoomed with its anchor
+inside it, the mask at an opacity the rater sets, a short note. It adds what the tool
+lacked: a check made from a run in two presses, any campaign's raters, agreement and
+adjudication, the lesions seen recorded, a missed lesion as a point in the same
+check, and a status on the result that later runs and the ask read. The first real
+set is checked by its first user (T33), so the checking moves into NILS. Manual
+segmentation (type 4) waits for Wave 7b.
 
 ### 13.4 The reader (H5)
 

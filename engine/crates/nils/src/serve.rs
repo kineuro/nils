@@ -1966,6 +1966,10 @@ fn routed(
         detail
     };
     caller.allowed(path, need, detail)?;
+    // record 55 H3: a result checked directly, and its check withdrawn
+    if let Some(r) = crate::checks::direct_route(registry, caller, post, &segs, body) {
+        return r;
+    }
     // record 42 S4: the derivative doors that read
     if let Some(r) = crate::derivatives::route(registry, caller, get, &segs, query) {
         return r;
@@ -3606,6 +3610,16 @@ fn routed(
                     "linkage import and linkage merge are the linkage verbs the door queues",
                 ));
             }
+            // Record 55 H3: of the derivative verbs a result's parts and its
+            // layer are jobs; add reads a file of the host and is not.
+            if command[0] == "derivative"
+                && !matches!(command.get(1).map(String::as_str), Some("parts" | "layer"))
+            {
+                return Err(Reply::error(
+                    400,
+                    "derivative parts and derivative layer are the derivative verbs the door queues",
+                ));
+            }
             // Record 26 §1: of the place verbs only the acts on a dataset's
             // originals are jobs; the rest declare a place and are not.
             if command[0] == "place" && command.get(1).map(String::as_str) != Some("originals") {
@@ -3677,7 +3691,7 @@ fn routed(
                     "ask run and ask promote are the ask verbs the door queues",
                 ));
             };
-            let words = if matches!(command[0].as_str(), "ask" | "linkage") {
+            let words = if matches!(command[0].as_str(), "ask" | "linkage" | "derivative") {
                 2
             } else {
                 1
@@ -4721,6 +4735,8 @@ const QUEUEABLE: &[&str] = &[
     "ask",
     // Record 43 S2: a pipeline over a frozen selection, a `pipeline` job.
     "run",
+    // Record 55 H3: a result's parts and its layer on a scan.
+    "derivative",
 ];
 
 /// The grants of the verbs the door queues: `POST /api/jobs` needs any of
@@ -4989,6 +5005,24 @@ pub(crate) fn door(method: &str, segs: &[&str]) -> (Need, Detail) {
             (Need::One("pipelines:see"), Plain)
         }
         ("GET", ["api", "derivatives", _, "content"]) => (Need::One("pipelines:see"), Quasi),
+        // record 55 H3, job type 3: a result's parts are numbers and
+        // positions, its layer on a scan follows anatomy as the pixels do;
+        // without pipelines:see a rater reads them through an open campaign
+        // that holds the result, checked at the door itself
+        ("GET", ["api", "derivatives", _, "parts"]) => (
+            Need::AnyOf(&["pipelines:see", "campaigns:see", "campaigns:work"]),
+            Plain,
+        ),
+        ("GET", ["api", "derivatives", _, "layers", ..]) => (
+            Need::AnyOf(&["pipelines:see", "campaigns:see", "campaigns:work"]),
+            Quasi,
+        ),
+        // record 55 H3, section 8.5: one result checked by a person, and its
+        // check withdrawn, as a reviewer decides
+        ("POST", ["api", "derivatives", _, "check"])
+        | ("POST", ["api", "derivatives", _, "check", "withdraw"]) => {
+            (Need::One("review:work"), Plain)
+        }
         // record 43: the catalog and the runs are the Pipelines page's
         ("GET", ["api", "pipelines" | "pipeline-runs"])
         | ("GET", ["api", "pipelines" | "pipeline-runs", _]) => (Need::One("pipelines:see"), Plain),
@@ -5050,6 +5084,8 @@ pub(crate) fn verb_needs(command: &[String]) -> Option<(&'static str, Detail)> {
         ("fingerprint" | "classify" | "pick" | "session" | "pyramid", _) => {
             ("pipelines:work", Detail::Plain)
         }
+        // record 55 H3: a result's parts and its layer on a scan
+        ("derivative", Some("parts" | "layer")) => ("pipelines:work", Detail::Plain),
         // record 43 S2: a pipeline reads pixels, which open at quasi
         ("run", _) => ("pipelines:work", Detail::Quasi),
         ("backup" | "verify", _) => ("database:work", Detail::Plain),
@@ -5646,6 +5682,8 @@ fn capabilities(
         "backup_dir": doors.backup_dir.is_some(),
         "places": crate::places::capabilities(registry.store()),
         "derivatives": crate::derivatives::capability(registry.store()),
+        // record 55 H3: the questions a campaign asks and a check's limits
+        "campaigns": crate::checks::capability(),
         "pipelines": crate::pipelines::capability(registry),
         "policy": policy(),
         "idempotency": {
@@ -6324,6 +6362,61 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
             "one file",
             "Downloading a derivative",
             "Downloaded a derivative",
+        ),
+        // record 55 H3, job type 3
+        row(
+            "GET /api/derivatives/{id}/parts",
+            false,
+            false,
+            "bounded",
+            "500 parts",
+            "Reading a result's parts",
+            "Read a result's parts",
+        ),
+        row(
+            "POST /api/derivatives/{id}/check",
+            true,
+            false,
+            "bounded",
+            "one result and its parts",
+            "Checking a result",
+            "Checked a result",
+        ),
+        row(
+            "POST /api/derivatives/{id}/check/withdraw",
+            true,
+            false,
+            "bounded",
+            "one result's check",
+            "Withdrawing a result's check",
+            "Withdrew a result's check",
+        ),
+        row(
+            "GET /api/derivatives/{id}/layers/{stack}/{set}/manifest",
+            false,
+            false,
+            "bounded",
+            "one document",
+            "Opening a result's layer",
+            "Opened a result's layer",
+        ),
+        row(
+            "GET /api/derivatives/{id}/layers/{stack}/{set}/tiles/{level}/{z}",
+            false,
+            false,
+            "bounded",
+            "one plane",
+            "Reading a result's layer",
+            "Read a result's layer",
+        ),
+        row(
+            "GET /api/derivatives/{id}/layers/{stack}/{set}/slab/{level}/{z0}-{z1}",
+            false,
+            false,
+            "bounded",
+            "32 planes",
+            "Reading a result's layer",
+            "Read a result's layer",
         ),
         // record 43: the pipeline catalog and its runs
         row(

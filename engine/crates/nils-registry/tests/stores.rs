@@ -2066,10 +2066,7 @@ fn migration_59_gives_pipelines_a_catalog_and_runs_on_both_backends() {
         );
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [
-                59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79,
-                80, 81, 82, 83, 84, 85, 86, 87, 88, 89
-            ],
+            (59..=migrate::SCHEMA_VERSION).collect::<Vec<i64>>(),
             "{name}"
         );
         let descriptor = serde_json::json!({"name": "n4", "x-nils": {"analysis-level": "session"}});
@@ -2226,10 +2223,7 @@ fn migration_61_gives_each_head_its_encoder_as_the_first_of_a_list() {
             .unwrap();
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [
-                61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81,
-                82, 83, 84, 85, 86, 87, 88, 89
-            ],
+            (61..=migrate::SCHEMA_VERSION).collect::<Vec<i64>>(),
             "{name}"
         );
         let head = model::by_digest(&mut store, &hex('b')).unwrap().unwrap();
@@ -2291,10 +2285,7 @@ fn migration_63_times_an_answer_and_lets_a_certificate_unseal_on_both_backends()
         store.batch(&sql).unwrap();
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [
-                63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83,
-                84, 85, 86, 87, 88, 89
-            ],
+            (63..=migrate::SCHEMA_VERSION).collect::<Vec<i64>>(),
             "{name}"
         );
         for (t, col) in [
@@ -2368,10 +2359,7 @@ fn migration_64_schedules_a_run_s_units_on_both_backends() {
         store.batch(&sql).unwrap();
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [
-                64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84,
-                85, 86, 87, 88, 89
-            ],
+            (64..=migrate::SCHEMA_VERSION).collect::<Vec<i64>>(),
             "{name}"
         );
         for col in ["units", "resumes", "threshold"] {
@@ -2420,10 +2408,7 @@ fn migration_65_gives_a_run_s_numbers_a_table_and_a_starter_its_origin_on_both_b
             .unwrap();
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [
-                65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85,
-                86, 87, 88, 89
-            ],
+            (65..=migrate::SCHEMA_VERSION).collect::<Vec<i64>>(),
             "{name}"
         );
         assert!(
@@ -2464,10 +2449,7 @@ fn migration_66_lets_an_answer_be_unsure_on_both_backends() {
         );
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [
-                66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86,
-                87, 88, 89
-            ],
+            (66..=migrate::SCHEMA_VERSION).collect::<Vec<i64>>(),
             "{name}"
         );
         assert!(
@@ -2505,10 +2487,7 @@ fn migration_67_keeps_a_run_s_scratch_apart_on_both_backends() {
         );
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [
-                67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87,
-                88, 89
-            ],
+            (67..=migrate::SCHEMA_VERSION).collect::<Vec<i64>>(),
             "{name}"
         );
         assert!(
@@ -2546,10 +2525,7 @@ fn migration_68_lets_an_answer_keep_what_it_derived_on_both_backends() {
         );
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [
-                68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88,
-                89
-            ],
+            (68..=migrate::SCHEMA_VERSION).collect::<Vec<i64>>(),
             "{name}"
         );
         assert!(
@@ -2583,9 +2559,7 @@ fn migration_69_lets_a_campaign_carry_suggestions_on_both_backends() {
         );
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [
-                69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89
-            ],
+            (69..=migrate::SCHEMA_VERSION).collect::<Vec<i64>>(),
             "{name}"
         );
         assert!(
@@ -2661,9 +2635,7 @@ fn migration_70_lets_an_answer_be_corrected_on_both_backends() {
             .unwrap();
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [
-                70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89
-            ],
+            (70..=migrate::SCHEMA_VERSION).collect::<Vec<i64>>(),
             "{name}"
         );
         assert!(
@@ -2718,9 +2690,7 @@ fn migration_71_gives_a_series_its_pulse_sequence_on_both_backends() {
             .unwrap();
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [
-                71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89
-            ],
+            (71..=migrate::SCHEMA_VERSION).collect::<Vec<i64>>(),
             "{name}"
         );
         for table in ["series_mr", "stack_fingerprint"] {
@@ -2776,9 +2746,7 @@ fn migration_72_writes_what_each_campaign_suggested_on_both_backends() {
             .unwrap();
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [
-                72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89
-            ],
+            (72..=migrate::SCHEMA_VERSION).collect::<Vec<i64>>(),
             "{name}"
         );
         let said: Vec<(String, String)> = store
@@ -2832,9 +2800,7 @@ fn migration_73_lets_a_campaign_settle_candidates_on_both_backends() {
             .unwrap();
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [
-                73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89
-            ],
+            (73..=migrate::SCHEMA_VERSION).collect::<Vec<i64>>(),
             "{name}"
         );
         assert!(
@@ -2880,7 +2846,7 @@ fn migration_75_lets_a_campaign_show_the_pictures_alone_on_both_backends() {
         );
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89],
+            (75..=migrate::SCHEMA_VERSION).collect::<Vec<i64>>(),
             "{name}"
         );
         assert!(
@@ -3017,9 +2983,7 @@ fn migration_74_lets_a_campaign_show_two_stacks_side_by_side_on_both_backends() 
             .unwrap();
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [
-                74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89
-            ],
+            (74..=migrate::SCHEMA_VERSION).collect::<Vec<i64>>(),
             "{name}"
         );
         assert!(
@@ -3054,7 +3018,7 @@ fn migration_76_lets_a_campaign_read_a_stack_beside_two_anchors_on_both_backends
             .unwrap();
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89],
+            (76..=migrate::SCHEMA_VERSION).collect::<Vec<i64>>(),
             "{name}"
         );
         assert!(
@@ -3108,7 +3072,7 @@ fn migration_77_gives_a_series_its_mechanism_on_both_backends() {
         store.batch(&sql).unwrap();
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89],
+            (77..=migrate::SCHEMA_VERSION).collect::<Vec<i64>>(),
             "{name}"
         );
         for c in SERIES {
@@ -3161,7 +3125,7 @@ fn migration_78_gives_a_stack_the_philips_frame_image_type_on_both_backends() {
         }
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89],
+            (78..=migrate::SCHEMA_VERSION).collect::<Vec<i64>>(),
             "{name}"
         );
         for table in ["stack", "stack_fingerprint"] {
@@ -3185,7 +3149,7 @@ fn migration_78_gives_a_stack_the_philips_frame_image_type_on_both_backends() {
             .unwrap();
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89],
+            (78..=migrate::SCHEMA_VERSION).collect::<Vec<i64>>(),
             "{name}"
         );
         for table in ["stack", "stack_fingerprint"] {
@@ -3226,7 +3190,7 @@ fn migration_79_gives_the_fingerprint_its_2026_10_03_fields_on_both_backends() {
         store.batch(&sql).unwrap();
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89],
+            (79..=migrate::SCHEMA_VERSION).collect::<Vec<i64>>(),
             "{name}"
         );
         for (t, cols) in tables {
@@ -3305,7 +3269,7 @@ fn migration_87_says_which_sources_hold_each_stack_on_both_backends() {
             .unwrap();
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [87, 88, 89],
+            (87..=migrate::SCHEMA_VERSION).collect::<Vec<i64>>(),
             "{name}"
         );
         let held = |store: &mut Store| -> Vec<(i64, i64)> {
@@ -3377,7 +3341,7 @@ fn migration_87_says_which_sources_hold_each_stack_on_both_backends() {
             .unwrap();
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [87, 88, 89],
+            (87..=migrate::SCHEMA_VERSION).collect::<Vec<i64>>(),
             "{name}"
         );
         assert_eq!(held(&mut store), [(1, 100), (1, 101), (1, 102)], "{name}");
@@ -3418,7 +3382,7 @@ fn migration_85_gives_a_classification_its_notes_on_both_backends() {
         }
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [85, 86, 87, 88, 89],
+            (85..=migrate::SCHEMA_VERSION).collect::<Vec<i64>>(),
             "{name}"
         );
         for col in ["notes", "disagreements"] {
@@ -3469,7 +3433,7 @@ fn migration_85_gives_a_classification_its_notes_on_both_backends() {
             .unwrap();
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [85, 86, 87, 88, 89],
+            (85..=migrate::SCHEMA_VERSION).collect::<Vec<i64>>(),
             "{name}"
         );
         let (.., kept, count) = read(&mut store);
@@ -3513,7 +3477,7 @@ fn migration_88_keeps_a_scope_s_main_scan_rules_on_both_backends() {
             .unwrap();
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [88, 89],
+            (88..=migrate::SCHEMA_VERSION).collect::<Vec<i64>>(),
             "{name}"
         );
         let n = store
@@ -3549,6 +3513,442 @@ fn migration_88_keeps_a_scope_s_main_scan_rules_on_both_backends() {
             migrate::migrate(&mut store, Kind::Registry)
                 .unwrap()
                 .is_empty()
+        );
+    }
+}
+
+/// Record 55 H3, job type 3 (the check-a-result build spec, section 7), on
+/// both backends: a registry of the schema before gains a derivative's
+/// grid, part sets and check, and the table of parts; every derivative it
+/// held is kept as it was, and nothing is added to it until a job reads the
+/// mask. A set of parts written reads back by position and by size, a
+/// check on a part survives the parts being made again, and the list
+/// narrows to what a check left.
+#[test]
+fn migration_90_lets_a_result_be_checked() {
+    use nils_registry::derivative::{self, Part, PartOrder};
+    for (name, _guard, mut store) in stores() {
+        migrate::migrate(&mut store, Kind::Registry).unwrap();
+        let (d, p, meta) = (
+            store.qualified("derivative"),
+            store.qualified("derivative_part"),
+            store.qualified("registry_meta"),
+        );
+        let (ix_check, ix_grid) = (
+            store.qualified("ix_derivative_check_status"),
+            store.qualified("ix_derivative_grid_stack_id"),
+        );
+        store
+            .batch(&format!(
+                "DROP INDEX IF EXISTS {ix_check};
+                 DROP INDEX IF EXISTS {ix_grid};
+                 ALTER TABLE {d} DROP COLUMN grid;
+                 ALTER TABLE {d} DROP COLUMN grid_stack_id;
+                 ALTER TABLE {d} DROP COLUMN grid_link;
+                 ALTER TABLE {d} DROP COLUMN part_sets;
+                 ALTER TABLE {d} DROP COLUMN check_status;
+                 ALTER TABLE {d} DROP COLUMN check_reasons;
+                 ALTER TABLE {d} DROP COLUMN check_decision_id;
+                 ALTER TABLE {d} DROP COLUMN checked_at;
+                 DROP TABLE {p};
+                 UPDATE {meta} SET value = '88' WHERE key = 'schema_version';
+                 INSERT INTO {d} (kind, scope, subject_id, session_day, place_id, path, bytes, sha256, media_type, created_at)
+                   VALUES ('mask', 'session', 3, '2021-02-03', 1, 'derivatives/mask/ab/abcd.nii.gz', 12, 'abcd', 'application/x-nifti+gzip', '2026-09-24T00:00:00Z')"
+            ))
+            .unwrap();
+        assert_eq!(
+            migrate::standing(&mut store, Kind::Registry).unwrap(),
+            Standing::Behind(88),
+            "{name}"
+        );
+        assert_eq!(
+            migrate::migrate(&mut store, Kind::Registry).unwrap(),
+            (89..=migrate::SCHEMA_VERSION).collect::<Vec<i64>>(),
+            "{name}"
+        );
+        for c in [
+            "grid",
+            "grid_stack_id",
+            "grid_link",
+            "part_sets",
+            "check_status",
+            "check_reasons",
+            "check_decision_id",
+            "checked_at",
+        ] {
+            assert!(
+                migrate::column_exists(&mut store, "derivative", c).unwrap(),
+                "{name}: derivative.{c}"
+            );
+        }
+        assert!(
+            migrate::table_exists(&mut store, "derivative_part").unwrap(),
+            "{name}"
+        );
+        // the derivative from before is as it was, and nothing was added
+        let all = derivative::list(
+            &mut store,
+            &derivative::Filter {
+                limit: 10,
+                ..derivative::Filter::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(all.len(), 1, "{name}");
+        let old = &all[0];
+        assert_eq!(
+            (old.kind.as_str(), old.sha256.as_str(), old.bytes),
+            ("mask", "abcd", 12),
+            "{name}"
+        );
+        assert!(old.grid.is_null() && old.part_sets.is_null(), "{name}");
+        assert_eq!(
+            (&old.grid_link, old.grid_stack_id, &old.check_status),
+            (&None, None, &None),
+            "{name}"
+        );
+        let n = store
+            .query(&format!("SELECT COUNT(*) FROM {p}"), &[])
+            .unwrap()[0]
+            .int(0)
+            .unwrap();
+        assert_eq!(n, 0, "{name}: no part until a job reads the mask");
+
+        // what the job writes, and what reads it
+        let grid = serde_json::json!({"dims": [4, 4, 2], "affine": [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]], "datatype": "uint8"});
+        derivative::set_grid(&mut store, old.id, &grid, Some(7), "world").unwrap();
+        assert!(derivative::set_grid(&mut store, old.id, &grid, None, "near").is_err());
+        let part = |label: i64, voxels: i64, position: i64| Part {
+            label,
+            name: None,
+            voxels,
+            volume_mm3: voxels as f64 * 0.5,
+            anchor_mm: [1.0, 2.0, 3.0],
+            box_mm: [[0.5, 1.5, 2.5], [1.5, 2.5, 3.5]],
+            position,
+            method: "26-connected".into(),
+            check_status: None,
+            check_reason: None,
+            check_decision_id: None,
+        };
+        let sets =
+            serde_json::json!([{"key": "lesions", "words": "Lesions", "kind": "components"}]);
+        derivative::set_parts(
+            &mut store,
+            old.id,
+            &sets,
+            &[(
+                "lesions".to_string(),
+                vec![part(1, 3, 1), part(2, 9, 0), part(3, 1, 2)],
+            )],
+        )
+        .unwrap();
+        let (count, by_position) =
+            derivative::parts(&mut store, old.id, "lesions", PartOrder::Position, 0, 500).unwrap();
+        assert_eq!(count, 3, "{name}");
+        assert_eq!(
+            by_position.iter().map(|p| p.label).collect::<Vec<_>>(),
+            [2, 1, 3],
+            "{name}"
+        );
+        assert_eq!(by_position[0].box_mm, [[0.5, 1.5, 2.5], [1.5, 2.5, 3.5]]);
+        assert_eq!(by_position[0].volume_mm3, 4.5, "{name}");
+        let (_, by_size) =
+            derivative::parts(&mut store, old.id, "lesions", PartOrder::Size, 0, 2).unwrap();
+        assert_eq!(
+            by_size.iter().map(|p| p.label).collect::<Vec<_>>(),
+            [2, 1],
+            "{name}"
+        );
+        // a part a person decided keeps its status when it is made again
+        // the same; one whose label now names other geometry loses it, and
+        // its decision is withdrawn (the review of E1, item 4); one no set
+        // holds any longer and nobody decided goes
+        let dec = store.qualified("decision");
+        store
+            .execute(
+                &format!(
+                    "INSERT INTO {dec} (scope, ref, axis, value, actor, author_kind, decided_at) \
+                     VALUES ('derivative_part', '{}:lesions:3', 'check', 'flagged', 'anna', 'person', '2026-10-11T10:00:00Z')",
+                    old.id
+                ),
+                &[],
+            )
+            .unwrap();
+        let dec3 = store
+            .query(&format!("SELECT MAX(id) FROM {dec}"), &[])
+            .unwrap()[0]
+            .int(0)
+            .unwrap();
+        store
+            .execute(
+                &format!(
+                    "UPDATE {p} SET check_status = 'flagged', check_reason = 'under' WHERE label = 2;"
+                ),
+                &[],
+            )
+            .unwrap();
+        store
+            .execute(
+                &format!(
+                    "UPDATE {p} SET check_status = 'flagged', check_reason = 'over', check_decision_id = {dec3} WHERE label = 3"
+                ),
+                &[],
+            )
+            .unwrap();
+        let withdrawn = derivative::set_parts(
+            &mut store,
+            old.id,
+            &sets,
+            &[("lesions".to_string(), vec![part(2, 9, 0), part(3, 5, 1)])],
+        )
+        .unwrap();
+        assert_eq!(withdrawn, vec![dec3], "{name}");
+        let (_, now) =
+            derivative::parts(&mut store, old.id, "lesions", PartOrder::Position, 0, 500).unwrap();
+        assert_eq!(now[0].check_status.as_deref(), Some("flagged"), "{name}");
+        assert_eq!(
+            (now[1].label, now[1].check_status.clone()),
+            (3, None),
+            "{name}"
+        );
+        let gone = store
+            .query(
+                &format!(
+                    "SELECT COUNT(*) FROM {dec} WHERE id = {dec3} AND withdrawn_at IS NOT NULL"
+                ),
+                &[],
+            )
+            .unwrap()[0]
+            .int(0)
+            .unwrap();
+        assert_eq!(gone, 1, "{name}: withdrawn, never deleted");
+        derivative::set_parts(
+            &mut store,
+            old.id,
+            &sets,
+            &[("lesions".to_string(), vec![part(2, 9, 0)])],
+        )
+        .unwrap();
+        let (count, kept) =
+            derivative::parts(&mut store, old.id, "lesions", PartOrder::Position, 0, 500).unwrap();
+        assert_eq!(count, 1, "{name}");
+        assert_eq!(kept[0].label, 2, "{name}");
+        assert_eq!(kept[0].check_status.as_deref(), Some("flagged"), "{name}");
+        let back = derivative::get(&mut store, old.id).unwrap().unwrap();
+        assert_eq!(back.grid, grid, "{name}");
+        assert_eq!(back.grid_stack_id, Some(7), "{name}");
+        assert_eq!(back.grid_link.as_deref(), Some("world"), "{name}");
+        assert_eq!(back.part_sets, sets, "{name}");
+        // the list narrows to what a check left
+        let by = |store: &mut Store, check: &str| {
+            derivative::list(
+                store,
+                &derivative::Filter {
+                    check: Some(check),
+                    limit: 10,
+                    ..derivative::Filter::default()
+                },
+            )
+            .unwrap()
+            .len()
+        };
+        assert_eq!(by(&mut store, "unchecked"), 1, "{name}");
+        assert_eq!(by(&mut store, "accepted"), 0, "{name}");
+        store
+            .execute(
+                &format!(
+                    "UPDATE {d} SET check_status = 'accepted' WHERE id = {}",
+                    old.id
+                ),
+                &[],
+            )
+            .unwrap();
+        assert_eq!(by(&mut store, "accepted"), 1, "{name}");
+        assert_eq!(by(&mut store, "unchecked"), 0, "{name}");
+        assert!(
+            derivative::list(
+                &mut store,
+                &derivative::Filter {
+                    check: Some("maybe"),
+                    limit: 10,
+                    ..derivative::Filter::default()
+                },
+            )
+            .is_err()
+        );
+        assert!(
+            migrate::migrate(&mut store, Kind::Registry)
+                .unwrap()
+                .is_empty()
+        );
+    }
+}
+
+/// Record 55 H3, job type 3 (the check-a-result build spec, section 7, the
+/// campaign's half), on both backends: a registry of the schema before
+/// gains a campaign item's result, part set and part, and the table of a
+/// check's panels; every item it held is kept as it was, naming no result.
+#[test]
+fn migration_91_lets_a_check_be_a_campaign() {
+    for (name, _guard, mut store) in stores() {
+        migrate::migrate(&mut store, Kind::Registry).unwrap();
+        let (i, p, meta) = (
+            store.qualified("campaign_item"),
+            store.qualified("campaign_check_panel"),
+            store.qualified("registry_meta"),
+        );
+        let ix = store.qualified("ix_campaign_item_derivative_id");
+        store
+            .batch(&format!(
+                "DROP INDEX IF EXISTS {ix};
+                 ALTER TABLE {i} DROP COLUMN derivative_id;
+                 ALTER TABLE {i} DROP COLUMN part_set;
+                 ALTER TABLE {i} DROP COLUMN part_label;
+                 DROP TABLE {p};
+                 UPDATE {meta} SET value = '90' WHERE key = 'schema_version';
+                 INSERT INTO {i} (campaign_id, position, review_item_id, stack_id, key, state, round)
+                   VALUES (1, 0, 5, 12, 'stack:12', 'open', 1)"
+            ))
+            .unwrap();
+        assert_eq!(
+            migrate::standing(&mut store, Kind::Registry).unwrap(),
+            Standing::Behind(90),
+            "{name}"
+        );
+        assert_eq!(
+            migrate::migrate(&mut store, Kind::Registry).unwrap(),
+            (91..=migrate::SCHEMA_VERSION).collect::<Vec<i64>>(),
+            "{name}"
+        );
+        for c in ["derivative_id", "part_set", "part_label"] {
+            assert!(
+                migrate::column_exists(&mut store, "campaign_item", c).unwrap(),
+                "{name}: campaign_item.{c}"
+            );
+        }
+        assert!(
+            migrate::table_exists(&mut store, "campaign_check_panel").unwrap(),
+            "{name}"
+        );
+        // the item from before is as it was, and names no result
+        let it = nils_registry::campaign::items(&mut store, 1).unwrap();
+        assert_eq!(it.len(), 1, "{name}");
+        assert_eq!(
+            (
+                it[0].stack_id,
+                it[0].derivative_id,
+                &it[0].part_set,
+                it[0].part_label
+            ),
+            (Some(12), None, &None, None),
+            "{name}"
+        );
+        let n = store
+            .query(&format!("SELECT COUNT(*) FROM {p}"), &[])
+            .unwrap()[0]
+            .int(0)
+            .unwrap();
+        assert_eq!(n, 0, "{name}");
+        assert!(
+            migrate::migrate(&mut store, Kind::Registry)
+                .unwrap()
+                .is_empty(),
+            "{name}"
+        );
+    }
+}
+
+/// The review of E1, item 6, on both backends: a registry at schema 59, from
+/// before a derivative had a check and a grid scan, migrates to the newest:
+/// migration 60 makes the derivative's indexes it has columns for, and
+/// migration 90 the indexes of the columns it adds.
+#[test]
+fn a_registry_at_59_migrates_past_the_check_s_indexes() {
+    for (name, _guard, mut store) in stores() {
+        migrate::migrate(&mut store, Kind::Registry).unwrap();
+        let (d, p, meta) = (
+            store.qualified("derivative"),
+            store.qualified("derivative_part"),
+            store.qualified("registry_meta"),
+        );
+        let ixs = [
+            "ix_derivative_check_status",
+            "ix_derivative_grid_stack_id",
+            "ix_campaign_item_derivative_id",
+        ]
+        .map(|i| store.qualified(i));
+        let (i, cp) = (
+            store.qualified("campaign_item"),
+            store.qualified("campaign_check_panel"),
+        );
+        store
+            .batch(&format!(
+                "DROP INDEX IF EXISTS {};
+                 DROP INDEX IF EXISTS {};
+                 DROP INDEX IF EXISTS {};
+                 ALTER TABLE {d} DROP COLUMN grid;
+                 ALTER TABLE {d} DROP COLUMN grid_stack_id;
+                 ALTER TABLE {d} DROP COLUMN grid_link;
+                 ALTER TABLE {d} DROP COLUMN part_sets;
+                 ALTER TABLE {d} DROP COLUMN check_status;
+                 ALTER TABLE {d} DROP COLUMN check_reasons;
+                 ALTER TABLE {d} DROP COLUMN check_decision_id;
+                 ALTER TABLE {d} DROP COLUMN checked_at;
+                 ALTER TABLE {i} DROP COLUMN derivative_id;
+                 ALTER TABLE {i} DROP COLUMN part_set;
+                 ALTER TABLE {i} DROP COLUMN part_label;
+                 DROP TABLE {p};
+                 DROP TABLE {cp};
+                 UPDATE {meta} SET value = '59' WHERE key = 'schema_version'",
+                ixs[0], ixs[1], ixs[2],
+            ))
+            .unwrap();
+        assert_eq!(
+            migrate::migrate(&mut store, Kind::Registry).unwrap(),
+            (60..=migrate::SCHEMA_VERSION).collect::<Vec<i64>>(),
+            "{name}"
+        );
+        for c in ["check_status", "grid_stack_id"] {
+            assert!(
+                migrate::column_exists(&mut store, "derivative", c).unwrap(),
+                "{name}: {c}"
+            );
+        }
+        // the indexes are there: a second migration finds nothing to do,
+        // and each is named in the catalogue of its backend
+        let names: Vec<String> = match name.as_str() {
+            "sqlite" => store
+                .query("SELECT name FROM sqlite_master WHERE type = 'index'", &[])
+                .unwrap()
+                .iter()
+                .map(|r| r.text(0).unwrap().to_string())
+                .collect(),
+            _ => store
+                .query(
+                    &format!(
+                        "SELECT indexname FROM pg_indexes WHERE schemaname = '{}'",
+                        store.schema().unwrap()
+                    ),
+                    &[],
+                )
+                .unwrap()
+                .iter()
+                .map(|r| r.text(0).unwrap().to_string())
+                .collect(),
+        };
+        for ix in [
+            "ix_derivative_check_status",
+            "ix_derivative_grid_stack_id",
+            "ix_campaign_item_derivative_id",
+        ] {
+            assert!(names.iter().any(|n| n == ix), "{name}: {ix} in {names:?}");
+        }
+        assert!(
+            migrate::migrate(&mut store, Kind::Registry)
+                .unwrap()
+                .is_empty(),
+            "{name}"
         );
     }
 }

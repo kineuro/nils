@@ -1380,6 +1380,26 @@ fn measure_fields(store: &mut Store) -> Result<Vec<Field>, Error> {
             table: MEASURE_TABLE.into(),
             column: format!("run:{pipeline}:"),
         });
+        // record 55 H3, section 6.5: the status a check left on that run's
+        // results of the unit, so "where the segmentation was accepted" is
+        // one filter
+        out.push(Field {
+            level: scope.clone(),
+            path: format!("measure.{pipeline}.checked"),
+            type_: "text".into(),
+            class: Class::Technical,
+            dated: false,
+            federated: false,
+            description: format!(
+                "what a check said of the {scope}'s results of that {pipeline} run, the worst of them: rejected, flagged, unchecked or accepted; none where the run made no mask for it"
+            ),
+            caveats: None,
+            ai_context: None,
+            curated: false,
+            provenance: "pipeline",
+            table: MEASURE_TABLE.into(),
+            column: format!("checked:{pipeline}:"),
+        });
     }
     Ok(out)
 }
