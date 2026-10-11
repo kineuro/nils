@@ -628,11 +628,17 @@ nils setup --update --model-server https://models.example.org/v1 --model-key-fil
 ```
 
 Once Kvasir runs, setup reads the key from the file and seals it in Kvasir,
-reads the models the server offers through Kvasir, admits the one the
-stations use, and maps each of the stations' purposes to it. That model is
-`--model-server-model ID`; with none named the wizard asks, and a run with
-nobody to ask, as every `--update` is, stops before it changes anything and
-says which models the server offers. The key is never shown and never
+reads the models the server offers through Kvasir, admits every one of them
+on the server's one backend, and maps each of the stations' purposes to the
+one the stations use. That model is `--model-server-model ID`; with none
+named the wizard asks, and a run with nobody to ask, as every `--update` is,
+takes the model the server marks as its default, else its only model, and
+otherwise stops before it changes anything and says which models the server
+offers. The stations' model is asked last, so it is the one left loaded on a
+server with one card. Another model that does not answer or does not pass
+admission is said in one line, and setup goes on. A server that offers more
+than eight models, as a big provider does, has the stations' model alone
+admitted; the others are added from Settings > Kvasir in the desk. The key is never shown and never
 written down: the record keeps the address, the file's path and the model,
 so a later update or repair seals it again from the file. `--print` shows
 the plan with all three and without the key.
@@ -714,7 +720,7 @@ directory is NILS's.
 | `--update` | Straight to the installs, for the parts already there |
 | `--channel URL` | Where releases come from |
 | `--model-server URL`, `--model-key-file FILE` | A model server the stations use, such as a Kvasir serving a card: on an install or with `--update`, Kvasir seals the key from the file and holds the server as one backend |
-| `--model-server-model ID` | With `--model-server`: the model the stations use; asked where there is a terminal, needed where there is none |
+| `--model-server-model ID` | With `--model-server`: the model the stations use; asked where there is a terminal, else the server's default or only model. Every model the server offers is admitted beside it, up to eight |
 
 Windows is not supported yet; the wizard says so and points at the
 documentation.
