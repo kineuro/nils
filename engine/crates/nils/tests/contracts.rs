@@ -470,6 +470,58 @@ fn the_job_contract_is_the_runner_s() {
     );
 }
 
+/// Record 55 H3 (job type 3, check a result): the descriptor keys a mask
+/// output and a derivative input gain are the runner's words as the schema
+/// names them, and a descriptor that uses them checks against both the
+/// schema and the runner; one the runner refuses, the schema refuses too.
+#[test]
+fn the_check_keys_of_the_job_contract_are_the_runner_s() {
+    use nils_pipeline::descriptor;
+    let job = json("job/v1/nils.job.schema.json");
+    let part = &job["$defs"]["part_set"]["properties"];
+    assert_eq!(strings(&part["kind"]["enum"]), descriptor::PART_KINDS);
+    let connectivity: Vec<u8> = part["connectivity"]["enum"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_u64().unwrap() as u8)
+        .collect();
+    assert_eq!(connectivity, descriptor::CONNECTIVITY);
+    assert_eq!(part["key"]["not"]["const"], descriptor::WHOLE);
+    assert_eq!(
+        strings(&job["$defs"]["typed_input"]["properties"]["checked"]["enum"]),
+        descriptor::CHECKED
+    );
+    let out = &job["$defs"]["output"]["properties"];
+    assert_eq!(out["parts"]["items"]["$ref"], "#/$defs/part_set");
+    assert!(out["grid"]["pattern"].is_string());
+    let hex = "59c45f54a1f1dc69134f63bec91a726e41c71c64a16cc21cda0b54526910a3c3";
+    let text = format!(
+        "name: lesions\nschema-version: \"0.5\"\ntool-version: \"1\"\ncontainer-image: {{type: docker, image: \"a/b@sha256:{hex}\"}}\nx-nils:\n  analysis-level: session\n  input: {{layout: bids, roles: [t1w, flair]}}\n  inputs: [{{id: prior, type: \"derivative:mask\", checked: not_rejected}}]\n  outputs:\n    - id: labels\n      kind: mask\n      path-template: \"sub-{{subject}}/ses-{{session}}/anat/*_dseg.nii.gz\"\n      grid: t1w\n      parts:\n        - {{key: lesions, words: Lesions, kind: components, labels: [99]}}\n        - {{key: structures, words: Structures, kind: labels, names: [{{label: 17, name: Left-Hippocampus}}]}}\n        - {{key: spots, words: Spots, kind: components, labels: nonzero, connectivity: 6}}\n"
+    );
+    let value: serde_json::Value = serde_saphyr::from_str(&text).unwrap();
+    let broken = breaks(&job, &job, &value, "descriptor");
+    assert!(broken.is_empty(), "{broken:#?}");
+    let d = descriptor::parse(&text).unwrap();
+    assert_eq!(d.outputs[0].grid.as_deref(), Some("t1w"));
+    assert_eq!(d.outputs[0].parts.len(), 3);
+    for (from, to) in [
+        ("connectivity: 6", "connectivity: 8"),
+        ("labels: [99]", "labels: [0]"),
+        ("key: lesions", "key: whole"),
+        ("kind: labels", "kind: blobs"),
+        ("checked: not_rejected", "checked: maybe"),
+    ] {
+        let bad = text.replace(from, to);
+        let value: serde_json::Value = serde_saphyr::from_str(&bad).unwrap();
+        assert!(
+            !breaks(&job, &job, &value, "descriptor").is_empty(),
+            "the schema takes {to}"
+        );
+        assert!(descriptor::parse(&bad).is_err(), "the runner takes {to}");
+    }
+}
+
 /// A small reader of the JSON Schema keywords the job contract uses
 /// (`$ref`, `type`, `enum`, `const`, `not`, `pattern`, `required`,
 /// `properties`, `additionalProperties: false`, `items`, `minItems`,

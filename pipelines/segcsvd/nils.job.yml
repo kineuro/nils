@@ -39,6 +39,14 @@
 # archive loads as, so its layers are the archive's. Loading the archive
 # and pushing it gives the same manifest digest. It is 13.4 GB, CPU only
 # (its wrappers pass --cpu to the network), and needs no licence file.
+#
+# A check reads each mask as its parts (record 55 H3, job type 3): the
+# WMH and the PVS, each 26-connected component of the mask a part. The
+# PVS mask is on the T1w's grid, so it is tied to the T1w the unit was
+# given (`grid: t1w`). The WMH mask is on the FLAIR's grid, and the FLAIR
+# is no role a unit needs (a session without one gets the PVS alone), so
+# it names no grid role: it is tied to the unit's input whose grid it
+# matches, the FLAIR.
 name: segcsvd
 schema-version: "0.5"
 tool-version: "rc03"
@@ -130,6 +138,8 @@ x-nils:
       kind: mask
       path-template: "sub-{subject}/ses-{session}/anat/*_label-WMH_desc-segcsvd_mask.nii.gz"
       media-type: application/x-nifti+gzip
+      parts:
+        - {key: wmh, words: White-matter hyperintensities, kind: components, labels: nonzero}
     - id: wmh_probability
       kind: output
       path-template: "sub-{subject}/ses-{session}/anat/*_label-WMH_desc-segcsvd_probseg.nii.gz"
@@ -138,6 +148,9 @@ x-nils:
       kind: mask
       path-template: "sub-{subject}/ses-{session}/anat/*_label-PVS_desc-segcsvd_mask.nii.gz"
       media-type: application/x-nifti+gzip
+      grid: t1w
+      parts:
+        - {key: pvs, words: Perivascular spaces, kind: components, labels: nonzero}
     - id: pvs_probability
       kind: output
       path-template: "sub-{subject}/ses-{session}/anat/*_label-PVS_desc-segcsvd_probseg.nii.gz"

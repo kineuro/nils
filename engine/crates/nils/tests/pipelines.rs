@@ -4698,6 +4698,421 @@ exec '{}' "$@""#,
     assert_eq!(lesions, 2, "{calls}");
 }
 
+/// The descriptors whose masks a check reads (record 55 H3, job type 3):
+/// each mask output's grid role, where it names one, and its part sets as
+/// key and kind.
+type CheckedMasks<'a> = &'a [(&'a str, Option<&'a str>, &'a [(&'a str, &'a str)])];
+
+/// Record 55 H3 (job type 3, the pipelines' slice): SAMSEG with lesions,
+/// segcsvd and SynthSeg declare the grid each mask is on and the parts a
+/// check reads it as, and the LST-AI descriptor does too; each parses, and
+/// a structures set names its labels as FreeSurfer's colour table does.
+#[test]
+fn the_masks_a_check_reads_declare_their_grid_and_parts() {
+    let expect: [(&str, CheckedMasks<'_>); 4] = [
+        (
+            "samseg-lesions",
+            &[(
+                "labels",
+                Some("t1w"),
+                &[("lesions", "components"), ("structures", "labels")],
+            )],
+        ),
+        (
+            "segcsvd",
+            &[
+                ("wmh", None, &[("wmh", "components")]),
+                ("pvs", Some("t1w"), &[("pvs", "components")]),
+            ],
+        ),
+        (
+            "synthseg",
+            &[("labels", Some("t1w"), &[("structures", "labels")])],
+        ),
+        (
+            "lst-ai",
+            &[
+                ("lesions", Some("flair"), &[("lesions", "components")]),
+                (
+                    "regions",
+                    Some("flair"),
+                    &[("lesions", "components"), ("regions", "labels")],
+                ),
+            ],
+        ),
+    ];
+    for (name, masks) in expect {
+        let text =
+            std::fs::read_to_string(repo().join(format!("pipelines/{name}/nils.job.yml"))).unwrap();
+        let d = nils_pipeline::descriptor::parse(&text).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let declared: Vec<&str> = d
+            .outputs
+            .iter()
+            .filter(|o| o.kind == "mask")
+            .map(|o| o.id.as_str())
+            .collect();
+        assert_eq!(
+            declared,
+            masks.iter().map(|m| m.0).collect::<Vec<_>>(),
+            "{name}"
+        );
+        for (id, grid, sets) in masks {
+            let o = d.outputs.iter().find(|o| o.id == *id).unwrap();
+            assert_eq!(o.grid.as_deref(), *grid, "{name}.{id}");
+            let got: Vec<(&str, &str)> = o
+                .parts
+                .iter()
+                .map(|p| (p.key.as_str(), p.kind.as_str()))
+                .collect();
+            assert_eq!(got, *sets, "{name}.{id}");
+            for p in &o.parts {
+                assert!(!p.words.is_empty(), "{name}.{id}.{}", p.key);
+                if p.kind == "components" {
+                    assert_eq!(p.connectivity, 26, "{name}.{id}.{}", p.key);
+                }
+            }
+        }
+    }
+    // the lesions SAMSEG writes as 99; FreeSurfer's names for its labels
+    let text =
+        std::fs::read_to_string(repo().join("pipelines/samseg-lesions/nils.job.yml")).unwrap();
+    let samseg = nils_pipeline::descriptor::parse(&text).unwrap();
+    let parts = &samseg.outputs[0].parts;
+    assert_eq!(parts[0].labels, Some(vec![99]));
+    assert_eq!(parts[1].labels, None, "every label the map holds");
+    for (label, name) in [
+        (2, "Left-Cerebral-White-Matter"),
+        (17, "Left-Hippocampus"),
+        (41, "Right-Cerebral-White-Matter"),
+        (99, "Lesion"),
+    ] {
+        assert_eq!(parts[1].names[&label], name);
+    }
+    let text = std::fs::read_to_string(repo().join("pipelines/synthseg/nils.job.yml")).unwrap();
+    let synthseg = nils_pipeline::descriptor::parse(&text).unwrap();
+    let names = &synthseg.outputs[0].parts[0].names;
+    assert_eq!(
+        names.len(),
+        32,
+        "SynthSeg's labels without the parcellation"
+    );
+    assert_eq!(names[&14], "3rd-Ventricle");
+    assert_eq!(names[&60], "Right-VentralDC");
+    // LST-AI's regions, as its annotation numbers them
+    let text = std::fs::read_to_string(repo().join("pipelines/lst-ai/nils.job.yml")).unwrap();
+    let lst = nils_pipeline::descriptor::parse(&text).unwrap();
+    let regions = &lst.outputs[1].parts[1].names;
+    assert_eq!(
+        regions.values().map(String::as_str).collect::<Vec<_>>(),
+        [
+            "Periventricular",
+            "Juxtacortical",
+            "Subcortical",
+            "Infratentorial"
+        ]
+    );
+    assert_eq!(lst.roles, ["t1w", "flair"]);
+}
+
+/// A mask writer the stand-in tools call with the real python3: a NIfTI-1
+/// of u8 labels on the grid of the image it is given (its header kept,
+/// the sform with it), gzipped, as `mode` fills it. `blobs`: two lesions
+/// of value 1, a cube of 8 voxels near one corner and one voxel near the
+/// other; `regions`: the same, the cube 1 (periventricular) and the voxel
+/// 3 (subcortical); `map`: three structures, 2 and 41 on the two halves
+/// of a middle plane and 17 in a block above it; `samseg`: the map with
+/// the two lesions as 99.
+const MKMASK: &str = r#"import gzip, struct, sys
+ref, out, mode = sys.argv[1:4]
+with (gzip.open if ref.endswith(".gz") else open)(ref, "rb") as f:
+    h = bytearray(f.read(348))
+e = "<" if struct.unpack("<i", h[0:4])[0] == 348 else ">"
+d = struct.unpack(e + "8h", h[40:56])
+nx, ny, nz = d[1], d[2], max(d[3], 1)
+struct.pack_into(e + "8h", h, 40, 3, nx, ny, nz, 1, 1, 1, 1)
+struct.pack_into(e + "hh", h, 70, 2, 8)
+struct.pack_into(e + "fff", h, 108, 352.0, 1.0, 0.0)
+data = bytearray(nx * ny * nz)
+def put(i, j, k, v):
+    data[i + nx * (j + ny * k)] = v
+if mode in ("map", "samseg"):
+    for i in range(nx):
+        for j in range(ny):
+            put(i, j, nz // 2, 2 if i < nx // 2 else 41)
+    for i in (1, 2):
+        for j in (1, 2):
+            put(i, j, nz // 2 + 1, 17)
+if mode != "map":
+    a, b = {"blobs": (1, 1), "regions": (1, 3), "samseg": (99, 99)}[mode]
+    for i in (1, 2):
+        for j in (1, 2):
+            for k in (1, 2):
+                put(i, j, k, a)
+    put(nx - 2, ny - 2, nz - 2, b)
+with gzip.open(out, "wb") as f:
+    f.write(bytes(h) + bytes(4) + bytes(data))
+"#;
+
+/// Record 55 H3's proof for the pipelines (job type 3, the build spec of
+/// 2026-10-11, section 16, P1): SynthSeg, segcsvd, SAMSEG with lesions and
+/// LST-AI run as the runner runs them, their command lines as shipped and
+/// the images' tools stood in for by scripts that write real masks on the
+/// grid of the image each is handed, and every mask they make is
+/// registered tied `same` to the scan it is on, read into the part sets
+/// its descriptor declares: on the T1w the unit was given for SynthSeg's
+/// and SAMSEG's label maps and segcsvd's PVS, on the FLAIR for LST-AI's
+/// masks, and for segcsvd's WMH, which names no role, on the input whose
+/// grid it matches. The stand-in podman runs a command line after the
+/// image as an image without an ENTRYPOINT would; LST-AI's own image has
+/// one (its descriptor's notes), so this proves its command line, not its
+/// image.
+#[test]
+fn the_masks_the_starters_make_are_tied_to_their_scans_and_read_into_their_parts() {
+    if !have("python3") || !have("dcm2niix") {
+        eprintln!(
+            "python3 or dcm2niix is not installed; the bids layout needs a converter, so this test is skipped"
+        );
+        return;
+    }
+    let lab = Lab::new("pipelines-check-masks");
+    // the shipped descriptors, each unit asking one core and 2 GB
+    let cores = regex::Regex::new(r"(?m)^    cores: \d+$").unwrap();
+    let memory = regex::Regex::new(r"(?m)^    memory-gb: \d+$").unwrap();
+    let names = ["synthseg", "segcsvd", "samseg-lesions", "lst-ai"];
+    for name in names {
+        let text =
+            std::fs::read_to_string(repo().join(format!("pipelines/{name}/nils.job.yml"))).unwrap();
+        let small = cores.replace_all(&text, "    cores: 1");
+        let small = memory.replace_all(&small, "    memory-gb: 2").to_string();
+        assert_ne!(small, text, "{name} declares its needs");
+        lab.add_descriptor(name, &small);
+    }
+    let python = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+        .map(|d| d.join("python3"))
+        .find(|p| p.is_file())
+        .unwrap();
+    let mkmask = lab.bin.file("mkmask.py", MKMASK.as_bytes());
+    let mk = format!("'{}' '{}'", python.display(), mkmask.display());
+    let tools: [(&str, String); 7] = [
+        (
+            "mri_synthseg",
+            format!(
+                r#"while [ $# -gt 0 ]; do case "$1" in --i) i=$2;; --o) o=$2;; --vol) v=$2;; --qc) q=$2;; esac; shift; done
+{mk} "$i" "$o" map || exit 1
+printf 'subject,total intracranial\nx,1500000\n' > "$v"
+printf 'subject,general white matter,general grey matter,general csf\nx,0.9,0.9,0.9\n' > "$q""#
+            ),
+        ),
+        ("sbtResliceLike", r#"printf x > "$3""#.to_string()),
+        (
+            "segment_wmh",
+            format!(r#"printf x > "$3"; {mk} "$1" "$(dirname "$3")/thr_wmh.nii.gz" blobs"#),
+        ),
+        (
+            "segment_pvs",
+            format!(r#"printf x > "$4"; {mk} "$1" "$(dirname "$4")/thr_pvs.nii.gz" blobs"#),
+        ),
+        // SAMSEG's map, written on its first input's grid, then saved as
+        // the label map; its folder read for its measures; the FLAIR's
+        // resampling written as anything
+        (
+            "run_samseg",
+            format!(
+                r#"while [ $# -gt 0 ]; do case "$1" in -i) [ -n "${{t:-}}" ] || t=$2;; -o) o=$2;; esac; shift; done; mkdir -p "$o"; {mk} "$t" "$o/seg.mgz" samseg"#
+            ),
+        ),
+        (
+            "fspython",
+            r#"for l; do :; done
+case "$2" in
+*resample_like*) printf x > "$l";;
+*json.dumps*) echo '{"Intra-Cranial": 1500000.0, "Lesions": 1200.0}';;
+*) cp "$3" "$l";;
+esac"#
+                .to_string(),
+        ),
+        (
+            "lst",
+            format!(
+                r#"while [ $# -gt 0 ]; do case "$1" in --flair) fl=$2;; --output) o=$2;; esac; shift; done; mkdir -p "$o"
+{mk} "$fl" "$o/space-flair_seg-lst.nii.gz" blobs || exit 1
+{mk} "$fl" "$o/space-flair_desc-annotated_seg-lst.nii.gz" regions || exit 1
+printf 'Num_Lesions,Num_Vox,Lesion_Volume\n2,9,9.0\n' > "$o/lesion_stats.csv""#
+            ),
+        ),
+    ];
+    // python3 runs the stand-in podman too: only segcsvd's nibabel step,
+    // the volumes of the masks it is given in pairs, is stood in for
+    let python3 = format!(
+        r#"case "$2" in
+*nibabel*json.dumps*) shift 2; s=; while [ $# -gt 1 ]; do [ -s "$2" ] || exit 1; s="$s${{s:+, }}\"$1\": 1.0"; shift 2; done; echo "{{$s}}"; exit 0;;
+esac
+exec '{}' "$@""#,
+        python.display()
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for (tool, body) in &tools {
+            let f = lab
+                .bin
+                .file(tool, format!("#!/bin/sh\n{body}\n").as_bytes());
+            std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let f = lab
+            .bin
+            .file("python3", format!("#!/bin/sh\n{python3}\n").as_bytes());
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    // each stack's series, the T1w ending .1 and the FLAIR .2
+    let series_of = |stack: i64| -> String {
+        lab.store()
+            .query(
+                &format!(
+                    "SELECT se.series_instance_uid FROM stack st JOIN series se ON se.id = st.series_id WHERE st.id = {stack}"
+                ),
+                &[],
+            )
+            .unwrap()[0]
+            .text(0)
+            .unwrap()
+            .to_string()
+    };
+    // what each mask output must be tied to, and the part sets with the
+    // parts each holds: the map's three structures, and SAMSEG's 99 too;
+    // two lesions everywhere; LST-AI's regions 1 and 3
+    type Masks<'a> = &'a [(&'a str, Option<&'a str>, &'a [(&'a str, i64)])];
+    let expect: [(&str, Masks<'_>); 4] = [
+        (
+            "synthseg",
+            &[(
+                "_desc-synthseg_dseg.nii.gz",
+                Some("t1w"),
+                &[("structures", 3)],
+            )],
+        ),
+        (
+            "segcsvd",
+            &[
+                ("_label-WMH_desc-segcsvd_mask.nii.gz", None, &[("wmh", 2)]),
+                (
+                    "_label-PVS_desc-segcsvd_mask.nii.gz",
+                    Some("t1w"),
+                    &[("pvs", 2)],
+                ),
+            ],
+        ),
+        (
+            "samseg-lesions",
+            &[(
+                "_desc-samseg_dseg.nii.gz",
+                Some("t1w"),
+                &[("lesions", 2), ("structures", 4)],
+            )],
+        ),
+        (
+            "lst-ai",
+            &[
+                (
+                    "_label-lesion_desc-lstai_mask.nii.gz",
+                    Some("flair"),
+                    &[("lesions", 2)],
+                ),
+                (
+                    "_desc-lstai_dseg.nii.gz",
+                    Some("flair"),
+                    &[("lesions", 2), ("regions", 2)],
+                ),
+            ],
+        ),
+    ];
+    for (name, masks) in expect {
+        let v = lab.json(&["run", name, "--select", "selection:every@1", "--json"]);
+        assert_eq!(v["status"], "done", "{name}: {v}");
+        assert_eq!(v["summary"]["units"]["succeeded"], 2, "{name}: {v}");
+        let rows = lab.json(&[
+            "derivative",
+            "list",
+            "--run",
+            &v["id"].to_string(),
+            "--json",
+        ]);
+        for (suffix, role, sets) in masks {
+            let made: Vec<i64> = rows
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|d| d["path"].as_str().is_some_and(|p| p.ends_with(suffix)))
+                .map(|d| d["id"].as_i64().unwrap())
+                .collect();
+            assert_eq!(made.len(), 2, "{name}: one {suffix} a session: {rows}");
+            for id in made {
+                let shown = lab.json(&["derivative", "show", &id.to_string(), "--json"]);
+                assert_eq!(shown["kind"], "mask", "{name}: {shown}");
+                assert_eq!(shown["grid_link"], "same", "{name} {suffix}: {shown}");
+                let stack = shown["grid_stack_id"].as_i64().unwrap();
+                let uid = series_of(stack);
+                match role {
+                    Some("t1w") => assert!(uid.ends_with(".1"), "{name}: on the T1w: {uid}"),
+                    Some(_) => assert!(uid.ends_with(".2"), "{name}: on the FLAIR: {uid}"),
+                    // the lab's T1w and FLAIR share one lattice, so the
+                    // WMH's matches both, and either is its scan
+                    None => assert!(uid.ends_with(".1") || uid.ends_with(".2"), "{uid}"),
+                }
+                let got: Vec<(&str, i64)> = shown["part_sets"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|s| (s["key"].as_str().unwrap(), s["count"].as_i64().unwrap()))
+                    .collect();
+                assert_eq!(got, *sets, "{name} {suffix}: {shown}");
+            }
+        }
+    }
+}
+
+/// The LST-AI descriptor's image is pinned by a manifest digest its
+/// registry still serves (record 55 H3, P1). It asks Docker Hub, so it
+/// needs the network: run it by name with `--ignored`.
+#[test]
+#[ignore = "asks Docker Hub: run by hand"]
+fn the_lst_ai_image_digest_resolves_at_its_registry() {
+    let text = std::fs::read_to_string(repo().join("pipelines/lst-ai/nils.job.yml")).unwrap();
+    let d = nils_pipeline::descriptor::parse(&text).unwrap();
+    let repository = d
+        .image
+        .repository
+        .strip_prefix("docker.io/")
+        .expect("a Docker Hub image");
+    let mut token = ureq::get(format!(
+        "https://auth.docker.io/token?service=registry.docker.io&scope=repository:{repository}:pull"
+    ))
+    .call()
+    .unwrap();
+    let token: Value = serde_json::from_str(&token.body_mut().read_to_string().unwrap()).unwrap();
+    let answer = ureq::head(format!(
+        "https://registry-1.docker.io/v2/{repository}/manifests/{}",
+        d.image.digest
+    ))
+    .header(
+        "Authorization",
+        format!("Bearer {}", token["token"].as_str().unwrap()),
+    )
+    .header(
+        "Accept",
+        "application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.manifest.v1+json",
+    )
+    .call()
+    .unwrap();
+    assert_eq!(answer.status(), 200);
+    let digest = answer
+        .headers()
+        .get("docker-content-digest")
+        .and_then(|v| v.to_str().ok());
+    assert_eq!(digest, Some(d.image.digest.as_str()));
+}
+
 /// Record 49 A4's proof: an engine started on a fresh registry seeds the
 /// starter catalog, each version marked as a starter and each image pinned;
 /// a second start adds nothing, a person's own version is never gone over,

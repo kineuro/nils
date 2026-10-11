@@ -2239,24 +2239,7 @@ fn units_missing(
         .iter()
         .flat_map(|u| u.stacks.iter().copied())
         .collect();
-    // record 55, decision 6: the picks the release read, as it recorded them
-    let recorded = store
-        .query_opt(
-            &format!(
-                "SELECT {} FROM {} WHERE id = {}",
-                crate::text_of(store, "release", "pick_rules"),
-                store.qualified("release"),
-                d.param(1, Type::Int)
-            ),
-            &[Param::Int(release_id)],
-        )
-        .map_err(err)?
-        .and_then(|r| r.opt_text(0).ok().flatten().map(str::to_string))
-        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok());
-    let of = recorded.as_ref().map_or(
-        nils_registry::pick_truth::Of::Pack,
-        nils_registry::pick_truth::Of::of_record,
-    );
+    let of = release_reading(store, release_id)?;
     let picks = crate::preflight::pick_roles(store, &all, &of)?;
     let mut out = BTreeMap::new();
     for u in units {
@@ -2277,6 +2260,179 @@ fn units_missing(
         }
     }
     Ok(out)
+}
+
+/// Record 55, decision 6: the picks a release read, as it recorded them.
+pub(crate) fn release_reading(
+    store: &mut Store,
+    release_id: i64,
+) -> Result<nils_registry::pick_truth::Of, String> {
+    let d = store.dialect();
+    let recorded = store
+        .query_opt(
+            &format!(
+                "SELECT {} FROM {} WHERE id = {}",
+                crate::text_of(store, "release", "pick_rules"),
+                store.qualified("release"),
+                d.param(1, Type::Int)
+            ),
+            &[Param::Int(release_id)],
+        )
+        .map_err(|e| e.to_string())?
+        .and_then(|r| r.opt_text(0).ok().flatten().map(str::to_string))
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok());
+    // one place of truth (2026-10-11): what the release recorded it read,
+    // else the pack's
+    Ok(recorded.as_ref().map_or(
+        nils_registry::pick_truth::Of::Pack,
+        nils_registry::pick_truth::Of::of_record,
+    ))
+}
+
+/// Record 55 H3 (section 2.2): where a mask a bids unit made is looked for
+/// its grid scan, from the stacks the run's release placed under the
+/// unit's folder (`sub-<s>/ses-<t>/`, or `sub-<s>/`), each with the NIfTI
+/// the release made of it where it is still in the run's input: with the
+/// output's declared grid role, the stacks picked for that role; without,
+/// every stack of the unit. None where the run released no input.
+pub(crate) fn grid_candidates(
+    store: &mut Store,
+    run_id: i64,
+    path: &str,
+    role: Option<&str>,
+) -> crate::derivatives::Where {
+    use crate::derivatives::Where;
+    let Ok(Some(run)) = rows::run(store, run_id) else {
+        return Where::Unknown;
+    };
+    let Some(release_id) = run.input_release_id else {
+        return Where::Unknown;
+    };
+    let segs: Vec<&str> = path.split('/').collect();
+    let Some(i) = segs
+        .iter()
+        .position(|s| s.starts_with("sub-") && !s.contains('_'))
+    else {
+        return Where::Unknown;
+    };
+    let unit = match segs.get(i + 1).filter(|s| s.starts_with("ses-")) {
+        Some(ses) => format!("{}/{ses}/", segs[i]),
+        None => format!("{}/", segs[i]),
+    };
+    let input = run
+        .scratch_place_id
+        .or(run.place_id)
+        .and_then(|id| nils_registry::place::show(store, id).ok().flatten())
+        .map(|p| {
+            Path::new(&p.path)
+                .join(RUNS)
+                .join(run_id.to_string())
+                .join("input")
+        });
+    let placed = match released_stacks(store, release_id) {
+        Ok(p) => p,
+        Err(_) => return Where::Unknown,
+    };
+    let stacks: Vec<(i64, Option<PathBuf>)> = placed
+        .into_iter()
+        .filter(|(_, dir, _)| format!("{dir}/").starts_with(&unit))
+        .map(|(s, dir, stem)| (s, input_nifti(input.as_deref(), &dir, stem.as_deref())))
+        .collect();
+    by_role(store, release_id, stacks, role)
+}
+
+/// Each stack a release placed, with its folder and its file stem.
+fn released_stacks(
+    store: &mut Store,
+    release_id: i64,
+) -> Result<Vec<(i64, String, Option<String>)>, String> {
+    let err = |e: nils_registry::Error| e.to_string();
+    let d = store.dialect();
+    let sql = format!(
+        "SELECT rs.stack_id, rs.dir, rs.stem FROM {} r \
+         JOIN {} rs ON rs.dataset_id = r.dataset_id WHERE r.id = {} ORDER BY rs.stack_id",
+        store.qualified("release"),
+        store.qualified("release_stack"),
+        d.param(1, Type::Int)
+    );
+    store
+        .query(&sql, &[Param::Int(release_id)])
+        .map_err(err)?
+        .iter()
+        .map(|r| {
+            Ok((
+                r.int(0).map_err(err)?,
+                r.text(1).map_err(err)?.to_string(),
+                r.opt_text(2).map_err(err)?.map(str::to_string),
+            ))
+        })
+        .collect()
+}
+
+/// The NIfTI a release made of a stack in a run's input, where it is.
+fn input_nifti(input: Option<&Path>, dir: &str, stem: Option<&str>) -> Option<PathBuf> {
+    let (input, stem) = (input?, stem?);
+    ["nii.gz", "nii"]
+        .iter()
+        .map(|ext| input.join(dir).join(format!("{stem}.{ext}")))
+        .find(|p| p.is_file())
+}
+
+/// The grid candidates of a unit's stacks: those picked for `role` where
+/// the output declares one, else every one.
+fn by_role(
+    store: &mut Store,
+    release_id: i64,
+    stacks: Vec<(i64, Option<PathBuf>)>,
+    role: Option<&str>,
+) -> crate::derivatives::Where {
+    use crate::derivatives::Where;
+    let Some(role) = role else {
+        return Where::Inputs(stacks);
+    };
+    let ids: Vec<i64> = stacks.iter().map(|(s, _)| *s).collect();
+    let picks = release_reading(store, release_id)
+        .and_then(|of| crate::preflight::pick_roles(store, &ids, &of))
+        .unwrap_or_default();
+    Where::Role(
+        stacks
+            .into_iter()
+            .filter(|(s, _)| picks.get(s).is_some_and(|p| p.roles.contains(role)))
+            .collect(),
+    )
+}
+
+/// Where a mask a unit made is looked for its grid scan (record 55 H3): a
+/// stack unit's own stack; a bids unit's stacks, by the output's grid role
+/// or by matching their NIfTI.
+fn unit_grid(
+    store: &mut Store,
+    x: &Execution<'_>,
+    u: &Unit,
+    role: Option<&str>,
+) -> crate::derivatives::Where {
+    use crate::derivatives::Where;
+    if let Some(s) = u.stack_id {
+        return Where::Own(s);
+    }
+    let Some(release_id) = rows::run(store, x.run_id)
+        .ok()
+        .flatten()
+        .and_then(|r| r.input_release_id)
+    else {
+        return Where::Unknown;
+    };
+    let input = Path::new(&x.scratch.path)
+        .join(RUNS)
+        .join(x.run_id.to_string())
+        .join("input");
+    let placed = released_stacks(store, release_id).unwrap_or_default();
+    let stacks: Vec<(i64, Option<PathBuf>)> = placed
+        .into_iter()
+        .filter(|(s, _, _)| u.stacks.contains(s))
+        .map(|(s, dir, stem)| (s, input_nifti(Some(&input), &dir, stem.as_deref())))
+        .collect();
+    by_role(store, release_id, stacks, role)
 }
 
 /// What became of one unit after the container exited.
@@ -3694,9 +3850,14 @@ fn execute_run(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Resul
         let rows = taken.get(&t.id).cloned().unwrap_or_default();
         if rows.is_empty() && !t.optional {
             return Err(format!(
-                "{} needs {kind} derivatives of the selection's stacks for its input {}, and none is registered",
+                "{} needs {kind} derivatives of the selection's stacks for its input {}, and none is registered that its check leaves {}",
                 p.label(),
-                t.id
+                t.id,
+                match t.checked.as_deref().unwrap_or("not_rejected") {
+                    "accepted" => "it: it takes accepted ones only",
+                    "any" => "it",
+                    _ => "it: a rejected one is not taken",
+                }
             ));
         }
         let into = inputs.join(&t.id);
@@ -4920,6 +5081,7 @@ fn register_unit(
     let mut hashed: Vec<Value> = Vec::new();
     let mut refused: Vec<Value> = Vec::new();
     let mut tables: Vec<Value> = Vec::new();
+    let mut masks: Vec<Value> = Vec::new();
     let (mut registered, mut bytes_total, mut embedded, mut cached) =
         (0usize, 0u64, 0usize, 0usize);
     let Some(belongs) = u.belongs() else {
@@ -5016,6 +5178,29 @@ fn register_unit(
             };
             registered += 1;
             bytes_total += bytes;
+            // record 55 H3: a mask's grid, its scan and its parts, read as
+            // it is registered; a mask that cannot be read so is kept, and
+            // the unit's outcome says why
+            if kind == "mask" {
+                let at = unit_grid(registry.store(), x, u, declared.grid.as_deref());
+                let sets: Vec<crate::mask::SetSpec> = if declared.parts.is_empty() {
+                    vec![crate::mask::SetSpec::whole()]
+                } else {
+                    declared
+                        .parts
+                        .iter()
+                        .map(crate::mask::SetSpec::of)
+                        .collect()
+                };
+                let read = derivative::get(registry.store(), id)
+                    .map_err(|e| e.to_string())
+                    .and_then(|d| d.ok_or_else(|| format!("derivative {id} went")))
+                    .and_then(|d| crate::derivatives::read_mask(registry, &d, at, sets));
+                match read {
+                    Ok(r) => masks.push(json!({"file": rel, "derivative": id, "read": r})),
+                    Err(why) => masks.push(json!({"file": rel, "derivative": id, "why": why})),
+                }
+            }
             // a table's rows are the unit's measures (record 49 A3), read
             // when the run is closed, so a resume reads what it kept
             if declared.table.is_some() {
@@ -5035,6 +5220,7 @@ fn register_unit(
         "status": o.status, "error": o.error, "metrics": o.metrics,
         "files": hashed, "refused": refused, "registered": registered,
         "bytes": bytes_total, "embedded": embedded, "cached": cached, "tables": tables,
+        "masks": masks,
     }))
 }
 
@@ -5990,9 +6176,25 @@ fn derivative_inputs(
                 }
             }
         }
+        // record 55 H3, section 6.5: what the input takes of a check's
+        // status; a run is never given a rejected result unless its
+        // descriptor asks for any
+        let checked = t.checked.as_deref().unwrap_or("not_rejected");
+        rows.retain(|r| takes_checked(checked, r.check_status.as_deref()));
         out.insert(t.id.clone(), rows);
     }
     Ok(out)
+}
+
+/// Whether a derivative input that takes `checked` (accepted, not_rejected
+/// or any) takes a result whose check left it so (record 55 H3, section
+/// 6.5). An unchecked result is taken by not_rejected and any.
+pub(crate) fn takes_checked(checked: &str, status: Option<&str>) -> bool {
+    match checked {
+        "any" => true,
+        "accepted" => status == Some("accepted"),
+        _ => status != Some("rejected"),
+    }
 }
 
 /// The sessions of these stacks, each as its subject and its day, the day
@@ -6300,6 +6502,68 @@ fn found_for(outputs: &[descriptor::Output], out: &Path, u: &Unit) -> Vec<String
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Record 55 H3, section 6.5: a `derivative:<kind>` input takes what
+    /// its check leaves it: by default any result but a rejected one, with
+    /// `accepted` only the accepted, with `any` every one.
+    #[test]
+    fn a_derivative_input_takes_what_its_check_leaves_it() {
+        let mut store = Store::sqlite_in_memory().unwrap();
+        nils_registry::migrate::migrate(&mut store, nils_registry::migrate::Kind::Registry)
+            .unwrap();
+        let place = nils_registry::place::add(
+            &mut store,
+            &nils_registry::place::New {
+                name: "work",
+                role: nils_registry::place::Role::Working,
+                path: "/nowhere",
+                guarantees: json!({}),
+                probed: json!({}),
+                handling: Value::Null,
+                dataset: Value::Null,
+            },
+        )
+        .unwrap();
+        let pl = nils_registry::place::show(&mut store, place)
+            .unwrap()
+            .unwrap();
+        let t = store.qualified("derivative");
+        for (i, status) in [
+            (1, "'accepted'"),
+            (2, "'rejected'"),
+            (3, "NULL"),
+            (4, "'flagged'"),
+        ] {
+            store
+                .execute(
+                    &format!(
+                        "INSERT INTO {t} (kind, scope, stack_id, place_id, path, bytes, sha256, media_type, created_at, check_status) \
+                         VALUES ('mask', 'stack', 7, {place}, 'p{i}', 1, 's{i}', 'x', '2026-10-11T10:00:00Z', {status})"
+                    ),
+                    &[],
+                )
+                .unwrap();
+        }
+        let yml = |checked: &str| {
+            format!(
+                "name: takes\nschema-version: \"0.5\"\ntool-version: \"1\"\ncontainer-image:\n  type: docker\n  image: \"example.org/takes@sha256:59c45f54a1f1dc69134f63bec91a726e41c71c64a16cc21cda0b54526910a3c3\"\nx-nils:\n  analysis-level: stack\n  input: {{layout: stacks}}\n  inputs:\n    - {{id: prior, type: \"derivative:mask\"{checked}}}\n  outputs:\n    - {{id: out, kind: output, path-template: \"stack-{{stack}}/out.txt\"}}\n"
+            )
+        };
+        for (checked, want) in [
+            ("", vec!["p1", "p3", "p4"]),
+            (", checked: not_rejected", vec!["p1", "p3", "p4"]),
+            (", checked: accepted", vec!["p1"]),
+            (", checked: any", vec!["p1", "p2", "p3", "p4"]),
+        ] {
+            let d = nils_pipeline::descriptor::parse(&yml(checked)).unwrap();
+            let taken = derivative_inputs(&mut store, &d, &[7], &[&pl]).unwrap();
+            let paths: Vec<&str> = taken["prior"].iter().map(|r| r.path.as_str()).collect();
+            assert_eq!(paths, want, "{checked}");
+        }
+        assert!(takes_checked("not_rejected", None));
+        assert!(!takes_checked("not_rejected", Some("rejected")));
+        assert!(!takes_checked("accepted", Some("flagged")));
+    }
 
     /// The review of record 43: at detail plain a run's document says no
     /// unit by its subject or session, and keeps everything else.

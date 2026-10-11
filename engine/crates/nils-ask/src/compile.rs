@@ -974,6 +974,9 @@ impl<'a> Builder<'a> {
     /// <pipeline>:<name>` as the catalog names it: the value of the newest
     /// run that measured the unit, read beside the base relation by the
     /// unit's key (a stack, a subject and a session's day, or a subject).
+    /// Record 55 H3: `checked:<pipeline>:`, the status a check left on that
+    /// run's results of the unit, the worst of them (rejected, flagged,
+    /// unchecked, accepted); none where the run made no mask for it.
     fn measure_column(&self, level: &str, column: &str) -> Option<Term> {
         let mut parts = column.splitn(3, ':');
         let (what, pipeline, name) = (parts.next()?, parts.next()?, parts.next()?);
@@ -982,6 +985,7 @@ impl<'a> Builder<'a> {
             "number" => "nm.number",
             "text" => "nm.text",
             "run" => "nm.run_id",
+            "checked" => "",
             _ => return None,
         };
         let unit = |a: &str| match level {
@@ -992,7 +996,7 @@ impl<'a> Builder<'a> {
             "subject" => Some(format!("{a}.subject_id = su.id")),
             _ => None,
         };
-        let (mu, ru) = (unit("nm")?, unit("mr")?);
+        let (mu, ru, du) = (unit("nm")?, unit("mr")?, unit("dd")?);
         // the run a unit's values are read from: its newest run of the
         // pipeline's current version (the newest active one), else its
         // newest run of any version; every value, and the run field, come
@@ -1011,6 +1015,15 @@ impl<'a> Builder<'a> {
         );
         if what == "run" {
             return Some(Term::plain(run));
+        }
+        if what == "checked" {
+            return Some(Term::plain(format!(
+                "(SELECT CASE MIN(CASE dd.check_status WHEN 'rejected' THEN 0 WHEN 'flagged' THEN 1 \
+                 WHEN 'accepted' THEN 3 ELSE 2 END) WHEN 0 THEN 'rejected' WHEN 1 THEN 'flagged' \
+                 WHEN 2 THEN 'unchecked' WHEN 3 THEN 'accepted' END FROM {} dd \
+                 WHERE dd.run_id = {run} AND dd.kind = 'mask' AND dd.withdrawn_at IS NULL AND {du})",
+                self.q("derivative"),
+            )));
         }
         Some(Term::plain(format!(
             "(SELECT {value} FROM {} nm WHERE nm.pipeline = {} AND nm.name = {} AND nm.scope = {} \

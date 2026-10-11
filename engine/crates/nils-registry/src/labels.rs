@@ -471,7 +471,8 @@ pub fn campaign_labels(store: &mut Store, campaign: i64, of: Of) -> Result<Vec<L
                         .value
                         .clone()
                         .or_else(|| a.form.as_ref().map(|f| f.to_string())),
-                    derivative_id: a.derivative_id,
+                    // record 55 H3: a check's answer is about its item's result
+                    derivative_id: a.derivative_id.or(it.derivative_id),
                     author_kind: a.author_kind.clone(),
                     author: a.principal.clone(),
                     decision_id: None,
@@ -517,6 +518,7 @@ pub fn campaign_labels(store: &mut Store, campaign: i64, of: Of) -> Result<Vec<L
                     subject_id: it.subject_id,
                     session_day: it.session_day.clone(),
                     what: what.clone(),
+                    derivative_id: it.derivative_id,
                     campaign_id: Some(campaign),
                     unsure: Some(settled_unsure(it, answers.iter())),
                     ..Label::default()

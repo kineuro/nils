@@ -21,6 +21,7 @@ pub mod anchored;
 pub mod asked;
 pub mod audit;
 pub mod campaign;
+pub mod check;
 pub mod clinical;
 pub mod cohort;
 pub mod day;

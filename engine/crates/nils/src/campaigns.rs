@@ -69,6 +69,9 @@ pub(crate) const DOORS: &[&str] = &[
     "GET /api/campaigns/{id}/items/{item}/anchored",
     "GET /api/campaigns/{id}/anchored",
     "GET /api/campaigns/{id}/anchored/values",
+    // record 55 H3, job type 3: what a check would make, and its item
+    "POST /api/campaigns/preview",
+    "GET /api/campaigns/{id}/items/{item}/check",
     "GET /api/certificates",
     "POST /api/certificates",
     "POST /api/certificates/{id}/unseal",
@@ -98,7 +101,7 @@ pub(crate) fn door(method: &str, segs: &[&str]) -> Option<(Need, Detail)> {
                 _,
                 "items",
                 _,
-                "candidates" | "why" | "header" | "ab" | "pair" | "anchored",
+                "candidates" | "why" | "header" | "ab" | "pair" | "anchored" | "check",
             ],
         )
         | ("GET", ["api", "campaigns", _, "ab", "decisions"])
@@ -136,7 +139,10 @@ pub(crate) fn door(method: &str, segs: &[&str]) -> Option<(Need, Detail)> {
         ("POST", ["api", "certificates"]) | ("POST", ["api", "certificates", _, "unseal"]) => {
             (Need::One("models:work"), Plain)
         }
+        // record 55 H3: a check's preview writes nothing; making a check
+        // and its preview need pipelines:see beside, checked at the door
         ("POST", ["api", "campaigns"])
+        | ("POST", ["api", "campaigns", "preview"])
         | ("POST", ["api", "campaigns", _, "claim" | "export"])
         | (
             "POST",
@@ -485,6 +491,24 @@ pub(crate) const POLICY: &[(&str, bool, bool, &str, &str, &str, &str)] = &[
         "Gave a cause",
     ),
     (
+        "POST /api/campaigns/preview",
+        false,
+        true,
+        "bounded",
+        "50,000 items counted",
+        "Previewing a check",
+        "Previewed a check",
+    ),
+    (
+        "GET /api/campaigns/{id}/items/{item}/check",
+        false,
+        false,
+        "bounded",
+        "one item and 2,000 parts",
+        "Reading a check's item",
+        "Read a check's item",
+    ),
+    (
         "GET /api/certificates",
         false,
         false,
@@ -552,6 +576,13 @@ pub(crate) fn ahead_of(store: &mut Store, ahead: &[(i64, Option<i64>)]) -> Resul
     for r in store.query(&sql, &[])? {
         shown.entry(r.int(0)?).or_default().push(r.int(1)?);
     }
+    // record 55 H3: a check's panels, the made-on scan first, and the
+    // result's layer on each
+    let mut layers: BTreeMap<i64, Vec<Value>> = BTreeMap::new();
+    for (item, (stacks, its)) in crate::checks::ahead_stacks(store, &ids)? {
+        shown.entry(item).or_default().extend(stacks);
+        layers.insert(item, its);
+    }
     Ok(Value::Array(
         ahead
             .iter()
@@ -561,7 +592,11 @@ pub(crate) fn ahead_of(store: &mut Store, ahead: &[(i64, Option<i64>)]) -> Resul
                     (None, Some(panels)) => panels.clone(),
                     (None, None) => Vec::new(),
                 };
-                json!({"item": item, "position": position.get(item), "stacks": stacks})
+                let mut v = json!({"item": item, "position": position.get(item), "stacks": stacks});
+                if let Some(l) = layers.get(item) {
+                    v["layers"] = json!(l);
+                }
+                v
             })
             .collect(),
     ))
@@ -627,6 +662,7 @@ pub(crate) fn route(
         // unless the caller reads every campaign; one that is not theirs is
         // answered as one that does not exist
         if let ["api", "campaigns", which, ..] = segs
+            && !(post && segs.len() == 3 && *which == "preview")
             && !oversees(caller)
         {
             let c = campaign::find(registry.store(), which).map_err(campaign_err)?;
@@ -663,6 +699,11 @@ pub(crate) fn route(
                 let doc = json_body(body)?;
                 let made = create_at_door(doors, registry, ask, caller, &doc)?;
                 Ok(Reply::created(made))
+            }
+            // record 55 H3: what a check would make, written nowhere
+            ["api", "campaigns", "preview"] if post => {
+                let doc = json_body(body)?;
+                crate::checks::preview(doors, registry, ask, caller, &doc)
             }
             ["api", "campaigns", which] if get => {
                 let c = campaign::find(registry.store(), which).map_err(campaign_err)?;
@@ -1883,6 +1924,13 @@ pub(crate) fn route(
             }
             // anchored reading (the post-contrast study): one item's three
             // panels, how the campaign goes, and each answer's candidate
+            // record 55 H3, job type 3: a check's item, as the reader reads it
+            ["api", "campaigns", which, "items", item, "check"] if get => {
+                let c = campaign::find(registry.store(), which).map_err(campaign_err)?;
+                let item = id_of(item)?;
+                belongs(registry.store(), c.id, "campaign_item", item)?;
+                crate::checks::item_door(registry, caller, &c, item)
+            }
             ["api", "campaigns", which, "items", item, "anchored"] if get => {
                 let c = campaign::find(registry.store(), which).map_err(campaign_err)?;
                 let item = id_of(item)?;
@@ -2409,7 +2457,7 @@ fn own(store: &mut Store, caller: &Caller, c: &campaign::Campaign) -> Result<boo
 
 /// Whether the caller is named in a campaign as a rater or an adjudicator.
 /// A campaign that names no raters opens nothing through this.
-fn rates_in(caller: &Caller, c: &campaign::Campaign) -> bool {
+pub(crate) fn rates_in(caller: &Caller, c: &campaign::Campaign) -> bool {
     let p = caller.principal.as_str();
     c.raters().iter().any(|r| r == p) || c.adjudicators().iter().any(|a| a == p)
 }
@@ -2470,6 +2518,75 @@ pub(crate) fn pictures_through(
     caller: &Caller,
     stack: i64,
 ) -> Result<Option<i64>, Reply> {
+    for id in showing(store, stack)? {
+        if let Some(c) = campaign::get(store, id).map_err(campaign_err)?
+            && c.status == "open"
+            && rates_in(caller, &c)
+        {
+            return Ok(Some(id));
+        }
+    }
+    Ok(None)
+}
+
+/// Record 55 H3 (job type 3): the open campaign a caller rates in through
+/// which they read a result, its parts and, with `stack`, its layer on that
+/// stack: one whose items hold the result (a check item names it, or an
+/// item's inputs do) and,
+/// with a stack, whose items or panels show the stack, as
+/// [`pictures_through`] finds them. None when no such campaign is open.
+pub(crate) fn results_through(
+    store: &mut Store,
+    caller: &Caller,
+    derivative: i64,
+    stack: Option<i64>,
+) -> Result<Option<i64>, Reply> {
+    let shown = match stack {
+        Some(s) => Some(showing(store, s)?),
+        None => None,
+    };
+    let sql = format!(
+        "SELECT i.campaign_id, {} FROM {} i JOIN {} c ON c.id = i.campaign_id \
+         WHERE c.status = 'open' AND i.input_derivative_ids IS NOT NULL",
+        store.dialect().text_of_qualified(
+            Some("i"),
+            nils_registry::schema::table("campaign_item")
+                .column("input_derivative_ids")
+                .expect("input_derivative_ids"),
+        ),
+        store.qualified("campaign_item"),
+        store.qualified("campaign"),
+    );
+    let mut holding: std::collections::BTreeSet<i64> = std::collections::BTreeSet::new();
+    // a check's items name their result
+    holding.extend(crate::checks::campaigns_holding(store, derivative)?);
+    for r in store.query(&sql, &[])? {
+        let ids: Vec<i64> = r
+            .opt_text(1)?
+            .and_then(|t| serde_json::from_str(t).ok())
+            .unwrap_or_default();
+        if ids.contains(&derivative) {
+            holding.insert(r.int(0)?);
+        }
+    }
+    for id in holding {
+        if shown.as_ref().is_some_and(|s| !s.contains(&id)) {
+            continue;
+        }
+        if let Some(c) = campaign::get(store, id).map_err(campaign_err)?
+            && c.status == "open"
+            && rates_in(caller, &c)
+        {
+            return Ok(Some(id));
+        }
+    }
+    Ok(None)
+}
+
+/// The open campaigns whose items or panels show a stack: an item of the
+/// stack, a pair's side, an anchored panel, or a session item of the
+/// stack's session.
+fn showing(store: &mut Store, stack: i64) -> Result<std::collections::BTreeSet<i64>, Reply> {
     let d = store.dialect();
     let mut asked: std::collections::BTreeSet<i64> = std::collections::BTreeSet::new();
     let sql = format!(
@@ -2488,6 +2605,9 @@ pub(crate) fn pictures_through(
     // anchored reading: nor does an item of an anchored campaign; its
     // panels do
     asked.extend(crate::anchored::campaigns_showing(store, stack)?);
+    // record 55 H3: nor does a check's; its panels do, and "+ scan" opens
+    // the other scans of the made-on scan's frame
+    asked.extend(crate::checks::campaigns_showing(store, stack)?);
     // the sessions the stack is of, each its subject and its day
     let sql = format!(
         "SELECT DISTINCT sc.subject_id, {} FROM {} k JOIN {} r ON r.id = k.series_id \
@@ -2532,15 +2652,7 @@ pub(crate) fn pictures_through(
             }
         }
     }
-    for id in asked {
-        if let Some(c) = campaign::get(store, id).map_err(campaign_err)?
-            && c.status == "open"
-            && rates_in(caller, &c)
-        {
-            return Ok(Some(id));
-        }
-    }
-    Ok(None)
+    Ok(asked)
 }
 
 pub(crate) fn plain(caller: &Caller) -> bool {
@@ -2853,7 +2965,7 @@ pub(crate) fn handle_keys(
 
 /// Run the freezing document of a selection through the ask door itself,
 /// under the caller's own grants, and read the keys of the handle it left.
-fn freeze_at_door(
+pub(crate) fn freeze_at_door(
     doors: &Doors,
     registry: &mut Registry,
     ask: &mut crate::ask_doors::AskState,
@@ -2942,7 +3054,7 @@ pub(crate) fn content_hash(store: &mut Store, handle: i64) -> Result<Option<Stri
     Ok(nils_ask::handle::get(store, handle)?.and_then(|h| h.content_hash))
 }
 
-fn pack_version_of(doors: &Doors) -> Option<String> {
+pub(crate) fn pack_version_of(doors: &Doors) -> Option<String> {
     let dir = doors.pack_dir.as_ref()?;
     let pack = nils_pack::load(&dir.join(&doors.ask_pack), None).ok()?;
     Some(format!("{}@{}", pack.name, pack.version))
@@ -3020,6 +3132,10 @@ fn create_at_door(
     caller: &Caller,
     doc: &Value,
 ) -> Result<Value, Reply> {
+    // record 55 H3: a check is made from results, not from stacks
+    if doc["question"]["kind"] == "check" {
+        return crate::checks::create(doors, registry, ask, caller, doc);
+    }
     let name = doc["name"]
         .as_str()
         .ok_or_else(|| Reply::error(400, "name: what the campaign is called"))?;
@@ -3607,6 +3723,10 @@ fn campaign_stacks(store: &mut Store, c: &campaign::Campaign) -> Result<Vec<i64>
     // anchored reading: nor do an anchored campaign's; its panels do
     if nils_registry::anchored::is_anchored(c) {
         return Ok(nils_registry::anchored::stacks_of(store, c.id)?);
+    }
+    // record 55 H3: nor do a check's; its panels do
+    if nils_registry::check::is_check(c) {
+        return Ok(nils_registry::check::stacks_of(store, c.id)?);
     }
     let mut out = Vec::new();
     for it in campaign::items(store, c.id).map_err(campaign_err)? {
