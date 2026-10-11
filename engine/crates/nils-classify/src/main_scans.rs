@@ -278,8 +278,11 @@ pub fn reference(
 ) -> Result<Reference, Error> {
     let r = &store.query(
         &format!(
-            "SELECT (SELECT COUNT(*) FROM {f}), (SELECT COALESCE(SUM(stack_id), 0) FROM {f}), \
-                    (SELECT COUNT(*) FROM {a}), (SELECT COALESCE(SUM(stack_id + LENGTH(value)), 0) FROM {a})",
+            // a sum is NUMERIC on Postgres, which the store reads only as
+            // text: cast to BIGINT, as SQLite reads it too
+            "SELECT (SELECT COUNT(*) FROM {f}), (SELECT CAST(COALESCE(SUM(stack_id), 0) AS BIGINT) FROM {f}), \
+                    (SELECT COUNT(*) FROM {a}), \
+                    (SELECT CAST(COALESCE(SUM(stack_id + LENGTH(value)), 0) AS BIGINT) FROM {a})",
             f = store.qualified("stack_fingerprint"),
             a = store.qualified("classification_axis"),
         ),

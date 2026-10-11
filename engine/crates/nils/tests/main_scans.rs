@@ -5,7 +5,8 @@
 //! run; the run writes the cohort's own picks beside the pack's; the map,
 //! subjects and strips doors answer from the axes; a person's pick of
 //! nothing on a visit stands in the cohort's scope through a rerun; and a
-//! release of the cohort's picked stacks records the rules it read.
+//! release of the cohort's picked stacks records the rules it read. On
+//! SQLite always, and on Postgres where a test DSN is set.
 
 use std::io::Write as _;
 use std::process::{Command, Stdio};
@@ -28,6 +29,8 @@ fn packs() -> String {
 
 struct Home {
     dir: TempDir,
+    /// The Postgres DSN and schema, when the registry lives there.
+    pg: Option<(String, String)>,
 }
 
 impl Home {
@@ -69,7 +72,39 @@ impl Home {
     }
 
     fn store(&self) -> Store {
-        Store::open_sqlite(&self.dir.path().join("registry.db")).unwrap()
+        match &self.pg {
+            Some((dsn, schema)) => Store::connect_postgres(dsn, schema).unwrap(),
+            None => Store::open_sqlite(&self.dir.path().join("registry.db")).unwrap(),
+        }
+    }
+
+    /// A key and an empty registry, on Postgres when `pg` names one.
+    fn init(name: &str, pg: Option<(String, String)>) -> Home {
+        let home = Home {
+            dir: TempDir::new(name),
+            pg,
+        };
+        let (good, _, err) = home.run(&["key", "add", "k"], Some("a main scans test key\n"));
+        assert!(good, "{err}");
+        match &home.pg {
+            Some((dsn, schema)) => {
+                home.ok(&[
+                    "init",
+                    "--backend",
+                    "postgres",
+                    "--dsn",
+                    dsn,
+                    "--schema",
+                    schema,
+                    "--key",
+                    "k",
+                ]);
+            }
+            None => {
+                home.ok(&["init", "--key", "k"]);
+            }
+        }
+        home
     }
 
     fn count(&self, sql: &str) -> i64 {
@@ -177,13 +212,8 @@ impl Served {
 
 /// A synthetic registry with its sessions built, `role t1w` on every T1w
 /// stack, the pack's picks run, and a cohort of four subjects who hold one.
-fn registry() -> Home {
-    let home = Home {
-        dir: TempDir::new("main-scans-home"),
-    };
-    let (good, _, err) = home.run(&["key", "add", "k"], Some("a main scans test key\n"));
-    assert!(good, "{err}");
-    home.ok(&["init", "--key", "k"]);
+fn registry(pg: Option<(String, String)>) -> Home {
+    let home = Home::init("main-scans-home", pg);
     home.ok(&["synth", "--seed", "11", "--subjects", "12"]);
     home.ok(&["session", "rebuild"]);
     let mut store = home.store();
@@ -222,9 +252,42 @@ fn registry() -> Home {
     home
 }
 
+/// The Postgres DSN of the tests, and a schema of this file's dropped
+/// before and after `run`.
+fn on_postgres(schema: &str, run: impl FnOnce(Option<(String, String)>)) {
+    let Some(dsn) = std::env::var("NILS_TEST_POSTGRES_DSN")
+        .ok()
+        .filter(|d| !d.is_empty())
+    else {
+        return;
+    };
+    let drop = || {
+        let mut store = Store::connect_postgres(&dsn, schema).expect("connect");
+        store
+            .batch(&format!(
+                "DROP SCHEMA IF EXISTS {schema} CASCADE; DROP SCHEMA IF EXISTS {schema}_linkage CASCADE"
+            ))
+            .expect("drop");
+    };
+    drop();
+    run(Some((dsn.clone(), schema.to_string())));
+    drop();
+}
+
 #[test]
 fn a_cohort_s_own_rules_make_its_picks_and_a_release_records_them() {
-    let home = registry();
+    cohort_rules(None);
+}
+
+/// 2026-10-11, the live check of dev.25: on Postgres the map with a draft
+/// and the subjects door answered 500, a sum being NUMERIC there.
+#[test]
+fn a_cohort_s_own_rules_make_its_picks_on_postgres_too() {
+    on_postgres("nils_main_scans_cohort", cohort_rules);
+}
+
+fn cohort_rules(pg: Option<(String, String)>) {
+    let home = registry(pg);
     let p = packs();
     let ingest = TempDir::new("main-scans-ingest");
     let pack_picks = home.count("SELECT COUNT(*) FROM {pick} WHERE rules_scope_kind IS NULL");
@@ -535,7 +598,7 @@ fn a_cohort_s_own_rules_make_its_picks_and_a_release_records_them() {
 /// run pick, and a person's pick there stands.
 #[test]
 fn a_run_removes_its_picks_that_no_longer_win_and_leaves_a_person_s() {
-    let home = registry();
+    let home = registry(None);
     let p = packs();
     let mut store = home.store();
     let pick = store.qualified("pick");
