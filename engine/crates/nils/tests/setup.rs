@@ -3213,3 +3213,347 @@ fn an_uninstall_naming_another_directory_than_the_record_s_removes_nothing() {
         "the record is as it was"
     );
 }
+
+/// What one registry holds, read as the tests read it: its id, its scheme,
+/// its timezone, and the names of its places in force.
+struct Held {
+    id: String,
+    scheme: String,
+    timezone: String,
+    places: Vec<String>,
+    jobs: i64,
+    stacks: i64,
+}
+
+fn held(store: &mut nils_registry::Store) -> Held {
+    let meta = |store: &mut nils_registry::Store, key: &str| -> String {
+        let sql = format!(
+            "SELECT value FROM {} WHERE key = '{key}'",
+            store.qualified("registry_meta")
+        );
+        store
+            .query_opt(&sql, &[])
+            .unwrap()
+            .map(|r| r.text(0).unwrap().to_string())
+            .unwrap_or_default()
+    };
+    let sql = format!(
+        "SELECT name FROM {} WHERE retired_at IS NULL ORDER BY name",
+        store.qualified("place")
+    );
+    let places = store
+        .query(&sql, &[])
+        .unwrap()
+        .iter()
+        .map(|r| r.text(0).unwrap().to_string())
+        .collect();
+    let count = |store: &mut nils_registry::Store, table: &str| -> i64 {
+        let sql = format!("SELECT COUNT(*) FROM {}", store.qualified(table));
+        store.query_opt(&sql, &[]).unwrap().unwrap().int(0).unwrap()
+    };
+    Held {
+        jobs: count(store, "job"),
+        stacks: count(store, "stack"),
+        id: meta(store, "registry_id"),
+        scheme: meta(store, "pseudonym_scheme"),
+        timezone: meta(store, "timezone"),
+        places,
+    }
+}
+
+/// The one folder a registry was set aside into, and its stamp.
+fn set_aside_in(registry: &Path) -> (PathBuf, String) {
+    let found: Vec<PathBuf> = std::fs::read_dir(registry)
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("before-new-registry-"))
+        })
+        .collect();
+    assert_eq!(found.len(), 1, "{found:?}");
+    let stamp = found[0]
+        .file_name()
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .trim_start_matches("before-new-registry-")
+        .to_string();
+    (found[0].clone(), stamp)
+}
+
+/// Wave 7a §15.3, a site's refresh on a throwaway install: `nils setup
+/// --new-registry` keeps the setup (the record, the mode, the ports, the
+/// places it declares) and starts an empty registry on the site's key under
+/// the subject code generator's scheme, with the old timezone carried. The
+/// old registry is set aside, never deleted, and still opens where it went;
+/// `nils place export` and `import` bring back a place the setup does not
+/// declare. On SQLite, and on Postgres where a test DSN is set.
+fn refreshed(postgres: Option<&str>) {
+    // made up for this test; no site's key
+    const OLD_KEY: &str = "test-old-key-not-real";
+    const NEW_KEY: &str = "test-new-key-not-real";
+    let label = if postgres.is_some() { "pg" } else { "sqlite" };
+    let nils = Installed::new(&format!("nils-setup-refresh-{label}"));
+    let config = TempDir::new(&format!("nils-setup-refresh-{label}-config"));
+    let base = TempDir::new(&format!("nils-setup-refresh-{label}-base"));
+    let dir = base.path().join("nils");
+    let registry = dir.join("registry");
+    let source = base.path().join("dicom");
+    let scratch = base.path().join("scratch-nvme");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::create_dir_all(&scratch).unwrap();
+    let key_file = |name: &str, value: &str| {
+        let path = base.path().join(name);
+        std::fs::write(&path, format!("REG_KEY={value}\n")).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        path.display().to_string()
+    };
+    let (old_key, new_key) = (key_file("old-key", OLD_KEY), key_file("new-key", NEW_KEY));
+    let schema = "nils_setup_refresh";
+    let drop = |dsn: &str, names: &[String]| {
+        let mut store = nils_registry::Store::connect_postgres(dsn, schema).expect("connect");
+        for name in names {
+            store
+                .batch(&format!("DROP SCHEMA IF EXISTS {name} CASCADE"))
+                .unwrap();
+        }
+    };
+    if let Some(dsn) = postgres {
+        drop(dsn, &[schema.to_string(), format!("{schema}_linkage")]);
+    }
+    let dir_s = dir.display().to_string();
+    let source_s = source.display().to_string();
+    let mut install = vec![
+        "--yes",
+        "--parts",
+        "engine",
+        "--dir",
+        &dir_s,
+        "--no-service",
+        "--source",
+        &source_s,
+        "--reg-key-file",
+        &old_key,
+        "--scheme",
+        "blake2b-32",
+    ];
+    if let Some(dsn) = postgres {
+        install.extend(["--backend", "postgres", "--dsn", dsn, "--schema", schema]);
+    }
+    let made = setup(&nils.path(), config.path(), &install);
+    assert!(made.ok, "{}\n{}", made.stdout, made.stderr);
+    let record_before = state_of(config.path());
+
+    let nils_at = |at: &Path, words: &[&str]| {
+        let out = output(
+            Command::new(nils.path())
+                .arg("--registry")
+                .arg(at)
+                .args(words)
+                .env("NO_COLOR", "1"),
+        );
+        assert!(
+            out.status.success(),
+            "nils {words:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).to_string()
+    };
+    let open = |at: &Path| {
+        nils_registry::Home::new(at)
+            .open()
+            .expect("the registry opens")
+    };
+    // the old registry: a place the setup does not declare, a timezone, an
+    // ID type in its linkage store
+    nils_at(
+        &registry,
+        &[
+            "place",
+            "add",
+            "scratch-nvme",
+            scratch.to_str().unwrap(),
+            "--role",
+            "working",
+            "--fast",
+        ],
+    );
+    nils_at(
+        &registry,
+        &["settings", "set", "timezone", "Europe/Stockholm"],
+    );
+    nils_at(&registry, &["linkage", "id-type", "add", "old-site-id"]);
+    nils_at(&registry, &["synth", "--subjects", "30"]);
+    let old = held(open(&registry).store());
+    assert_eq!(old.scheme, "blake2b-32");
+    assert!(old.stacks > 0, "the old registry holds nothing");
+    assert!(
+        old.places.contains(&"scratch-nvme".to_string()),
+        "{:?}",
+        old.places
+    );
+    let export = base.path().join("places.json");
+    let exported = output(
+        Command::new(nils.path())
+            .arg("--registry")
+            .arg(&registry)
+            .args(["place", "export", "--out"])
+            .arg(&export),
+    );
+    assert!(
+        exported.status.success(),
+        "{}",
+        String::from_utf8_lossy(&exported.stderr)
+    );
+
+    let never_said = |o: &Out| {
+        for key in [OLD_KEY, NEW_KEY] {
+            assert!(
+                !o.stdout.contains(key) && !o.stderr.contains(key),
+                "a key was said"
+            );
+        }
+    };
+    let refresh = |more: &[&str]| {
+        let mut args = vec!["--new-registry", "--reg-key-file", new_key.as_str()];
+        args.extend_from_slice(more);
+        setup(&nils.path(), config.path(), &args)
+    };
+    // with no terminal and no --yes, nothing is done
+    let unasked = refresh(&[]);
+    assert!(!unasked.ok, "{}", unasked.stdout);
+    assert!(unasked.stderr.contains("--yes"), "{}", unasked.stderr);
+    // --print says it and does nothing
+    let printed = refresh(&["--print"]);
+    assert!(printed.ok, "{}", printed.stderr);
+    printed.says("set aside");
+    printed.says("nothing was changed");
+    never_said(&printed);
+    assert_eq!(
+        held(open(&registry).store()).id,
+        old.id,
+        "a print changed the registry"
+    );
+    assert!(
+        std::fs::read_dir(&registry).unwrap().flatten().all(|e| !e
+            .file_name()
+            .to_string_lossy()
+            .starts_with("before-new-registry-")),
+        "a print set the registry aside"
+    );
+
+    let done = refresh(&["--yes"]);
+    assert!(done.ok, "{}\n{}", done.stdout, done.stderr);
+    never_said(&done);
+    done.says(&nils_registry::pseudonym::fingerprint(NEW_KEY.as_bytes()));
+
+    // an empty registry, on the new key and the generator's scheme, with the
+    // setup's own places and the old timezone
+    let new = held(open(&registry).store());
+    assert_ne!(new.id, old.id, "the registry is the old one");
+    assert_eq!(new.scheme, "blake2b-8");
+    assert_eq!(new.timezone, "Europe/Stockholm");
+    assert!(
+        !new.places.contains(&"scratch-nvme".to_string()),
+        "{:?}",
+        new.places
+    );
+    for kept in ["registry", "source", "backups"] {
+        assert!(
+            new.places.contains(&kept.to_string()),
+            "{kept}: {:?}",
+            new.places
+        );
+    }
+    let types = nils_at(&registry, &["linkage", "id-type", "list"]);
+    assert!(!types.contains("old-site-id"), "{types}");
+    let listed = nils_at(&registry, &["key", "list"]);
+    assert!(
+        listed.contains(&nils_registry::pseudonym::fingerprint(NEW_KEY.as_bytes())),
+        "{listed}"
+    );
+    assert_eq!(
+        (new.jobs, new.stacks),
+        (0, 0),
+        "the new registry is not empty"
+    );
+
+    // the setup itself unchanged but for when it ran and the places' ids
+    let record_after = state_of(config.path());
+    let settled = |text: &str| -> Vec<String> {
+        text.lines()
+            .filter(|l| !l.starts_with("at = ") && !l.starts_with("id = "))
+            .map(str::to_string)
+            .collect()
+    };
+    assert_eq!(settled(&record_after), settled(&record_before));
+
+    // the old registry, set aside and readable where it went
+    let (aside, stamp) = set_aside_in(&registry);
+    assert!(aside.join("nils.toml").is_file());
+    assert!(aside.join("keys").is_dir());
+    if postgres.is_none() {
+        assert!(aside.join("registry.db").is_file());
+        assert!(aside.join("linkage.db").is_file());
+    }
+    let kept = held(open(&aside).store());
+    assert_eq!(kept.id, old.id);
+    assert_eq!(kept.scheme, "blake2b-32");
+    assert!(kept.places.contains(&"scratch-nvme".to_string()));
+    let kept_types = nils_at(&aside, &["linkage", "id-type", "list"]);
+    assert!(kept_types.contains("old-site-id"), "{kept_types}");
+
+    // the place the setup does not declare comes back from the export
+    let imported = nils_at(&registry, &["place", "import", export.to_str().unwrap()]);
+    assert!(imported.contains("scratch-nvme"), "{imported}");
+    assert!(imported.contains("kept as it is"), "{imported}");
+    let after = held(open(&registry).store());
+    assert!(
+        after.places.contains(&"scratch-nvme".to_string()),
+        "{:?}",
+        after.places
+    );
+    assert_eq!(after.id, new.id);
+
+    if let Some(dsn) = postgres {
+        drop(
+            dsn,
+            &[
+                schema.to_string(),
+                format!("{schema}_linkage"),
+                format!("{schema}_before_{stamp}"),
+                format!("{schema}_before_{stamp}_linkage"),
+            ],
+        );
+    }
+}
+
+#[test]
+fn a_new_registry_keeps_the_setup_and_starts_empty_on_the_sites_key() {
+    refreshed(None);
+}
+
+#[test]
+fn a_new_registry_on_postgres_renames_the_old_schemas_and_keeps_them_readable() {
+    match std::env::var("NILS_TEST_POSTGRES_DSN") {
+        Ok(dsn) if !dsn.is_empty() => refreshed(Some(&dsn)),
+        _ => eprintln!("NILS_TEST_POSTGRES_DSN is not set; the Postgres test is skipped"),
+    }
+}
+
+#[test]
+fn a_new_registry_needs_a_setup_and_changes_nothing_without_one() {
+    let nils = Installed::new("nils-setup-refresh-none");
+    let config = TempDir::new("nils-setup-refresh-none-config");
+    let o = setup(&nils.path(), config.path(), &["--new-registry", "--yes"]);
+    assert!(!o.ok, "{}", o.stdout);
+    assert!(o.stderr.contains("no setup is"), "{}", o.stderr);
+    assert!(!config.path().join("nils").join("setup.toml").exists());
+}

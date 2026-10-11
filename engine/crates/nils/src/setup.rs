@@ -616,6 +616,18 @@ pub(crate) struct SetupArgs {
     /// Only bring the parts already installed up to date
     #[arg(long)]
     update: bool,
+    /// Start an installed site again from an empty registry under the same
+    /// setup (Wave 7a section 15.3): the engine is stopped, the registry is
+    /// set aside beside the new one and never deleted (on Postgres its
+    /// schemas are renamed, on SQLite its files moved into a folder of the
+    /// registry's), a new registry is made on the key --reg-key-file or
+    /// --key-file gives, the setup record's places are declared in it, its
+    /// timezone and week start are carried over, and every part is started
+    /// again. The configuration, the desk's people and groups and Kvasir's
+    /// sealed credentials are kept. nils place export and import carry the
+    /// other places
+    #[arg(long, conflicts_with = "update")]
+    new_registry: bool,
     /// Where releases come from; NILS_RELEASES sets the same thing
     #[arg(long, value_name = "URL")]
     channel: Option<String>,
@@ -2853,6 +2865,9 @@ enum Flow {
     Install(Box<(Plan, Answers)>),
     Update(State),
     Repair(State),
+    /// `--new-registry`: the recorded install, started again on an empty
+    /// registry.
+    NewRegistry(State),
     Remove,
     /// `--print` said the plan and changed nothing.
     Printed,
@@ -5998,6 +6013,7 @@ pub(crate) fn setup(args: SetupArgs) -> Result<(), Exit> {
         }
         Flow::Update(state) => update_parts(&state, &args, &mut console),
         Flow::Repair(state) => repair(&state, &args, &mut console),
+        Flow::NewRegistry(state) => new_registry(&state, &args, &mut console),
         Flow::Remove => uninstall(UninstallArgs {
             keep_data: false,
             purge: false,
@@ -6055,6 +6071,9 @@ fn questions(
     // things a person comes back for.
     if let Some(state) = existing {
         console.say(&what_is_there(state));
+        if args.new_registry {
+            return Ok(Flow::NewRegistry(state.clone()));
+        }
         let choice = if args.update {
             0
         } else if console.interactive() {
@@ -6084,6 +6103,13 @@ fn questions(
     } else if args.update {
         return Err(usage(format!(
             "--update needs a setup to update; none is recorded at {}",
+            state_path().display()
+        ))
+        .into());
+    } else if args.new_registry {
+        return Err(usage(format!(
+            "--new-registry starts an installed site's registry again, and no setup is \
+             recorded at {}; nothing was changed",
             state_path().display()
         ))
         .into());
@@ -9495,6 +9521,22 @@ pub(crate) enum RegistryStep {
     /// Declare the places given as JSON on the input as setup declares them,
     /// saying what it did one JSON document a line
     Declare,
+    /// Set the registry aside for a new one (`--new-registry`): its schemas
+    /// renamed on Postgres, its files moved into a folder of the registry's;
+    /// what was done is said as JSON
+    SetAside {
+        /// The stamp the folder and the schemas are named with
+        #[arg(long, value_name = "STAMP")]
+        stamp: String,
+    },
+    /// The registry's timezone and week start, set as the registry set
+    /// aside had them
+    Calendar {
+        #[arg(long, value_name = "NAME")]
+        timezone: String,
+        #[arg(long, value_name = "DAY")]
+        week_start: String,
+    },
 }
 
 /// One step of the registry's, taken by the account running this. Setup runs
@@ -9557,6 +9599,15 @@ pub(crate) fn registry_step(home: &Home, step: RegistryStep) -> Result<(), Exit>
             println!("{}", serde_json::json!({ "places": declared }));
             Ok(())
         }
+        RegistryStep::SetAside { stamp } => {
+            let done = set_aside_here(&home_on_machine(home), &stamp).map_err(fail)?;
+            println!("{done}");
+            Ok(())
+        }
+        RegistryStep::Calendar {
+            timezone,
+            week_start,
+        } => calendar_here(&home_on_machine(home), &timezone, &week_start).map_err(fail),
     }
 }
 
@@ -9648,6 +9699,451 @@ fn drop_schemas_here(dsn: &str, schema: &str) -> Result<(), String> {
     store
         .batch(&drop_schemas_sql(schema))
         .map_err(|e| with_causes(&e))
+}
+
+// ------------------------------------------- a new registry under the same setup
+
+/// The folder of the registry a registry set aside for a new one goes into,
+/// before its stamp.
+const ASIDE_FOLDER: &str = "before-new-registry-";
+
+/// What the schemas of a registry set aside on Postgres are renamed with,
+/// between its schema and the stamp.
+const ASIDE_SCHEMA: &str = "_before_";
+
+/// The stamp a registry set aside is named with: the time, in UTC, as
+/// digits and a `t`, which a folder and a schema name may both hold.
+fn aside_stamp() -> String {
+    nils_registry::time::now_iso()
+        .chars()
+        .filter(|c| c.is_ascii_digit() || *c == 'T')
+        .map(|c| c.to_ascii_lowercase())
+        .collect()
+}
+
+/// `--new-registry` (Wave 7a §15.3): the recorded install started again on
+/// an empty registry. The engine is stopped and the registry set aside, as
+/// the engine's account where one runs it; a new registry is made on the
+/// key given, the setup record's places are declared in it and the old
+/// registry's timezone and week start set; then every part is written and
+/// started again, as a repair does. Nothing else of the install changes:
+/// the configuration, the desk's store, Kvasir's sealed credentials and
+/// the parts' files stay as they are. The registry set aside is never
+/// deleted here.
+fn new_registry(state: &State, args: &SetupArgs, console: &mut Console) -> Result<(), Exit> {
+    let (mut plan, _read) = plan_and_sources(state, args.channel.as_deref());
+    if let Some(refused) = recorded_system_refusal(&plan) {
+        return Err(fail(format!("nothing was changed: {refused}")));
+    }
+    masks_said_or_stop(recorded_masks_refusal(&mut plan), args.print, console)?;
+    let home = Home::new(plan.registry());
+    if !home.exists() {
+        return Err(usage(format!(
+            "there is no registry at {} to start again; nothing was changed",
+            home.dir().display()
+        )));
+    }
+    if let Some(path) = &args.reg_key_file {
+        // read now, so a key file that would be refused costs a sentence
+        // before anything is stopped; the key is read again where it is used
+        reg_key_from_file(path).map_err(usage)?;
+    }
+    plan.registry_exists = false;
+    plan.scheme = scheme_for(args.scheme.as_deref(), None).map_err(usage)?;
+    plan.reg_key_file = args.reg_key_file.clone();
+    // the new registry holds the setup's own places only, until more are
+    // imported or added; the engine is given those
+    plan.sources = recorded_sources(&state.places);
+    let stamp = aside_stamp();
+    let aside = home.dir().join(format!("{ASIDE_FOLDER}{stamp}"));
+    println!();
+    println!("{}", console.bold("Starting the registry again"));
+    print!("{}", plan_text(&plan, console));
+    let mut what = vec![
+        "the engine is stopped".to_string(),
+        match &plan.backend {
+            BackendChoice::Postgres { schema, .. } => format!(
+                "the registry is set aside: its schemas {schema} and {schema}_linkage are \
+                 renamed {schema}{ASIDE_SCHEMA}{stamp} and {schema}{ASIDE_SCHEMA}{stamp}_linkage, \
+                 its nils.toml and key store moved to {}",
+                aside.display()
+            ),
+            BackendChoice::Sqlite => format!(
+                "the registry is set aside: its databases, nils.toml and key store are moved to {}",
+                aside.display()
+            ),
+        },
+        format!(
+            "a new registry is made on {}, with the pseudonym scheme {}",
+            match (&args.reg_key_file, &args.key_file) {
+                (Some(path), _) => format!("the key in {}", path.display()),
+                (None, Some(path)) => format!("the passphrase in {}", path.display()),
+                (None, None) => "a new key".to_string(),
+            },
+            plan.scheme
+        ),
+        format!(
+            "the setup's {} places are declared in it, and its timezone and week start carried",
+            place_specs(&plan).len()
+        ),
+        "every part is written and started again; the desk's people and groups, Kvasir's \
+         sealed credentials and the configuration are kept"
+            .to_string(),
+    ];
+    if args.print {
+        what.push("nothing was changed".to_string());
+    }
+    for line in &what {
+        console.say(line);
+    }
+    if args.print {
+        return Ok(());
+    }
+    if !console.interactive() && !args.yes {
+        return Err(usage(
+            "--new-registry sets this registry aside for a new one; with no terminal to ask \
+             on, run it again with --yes. Nothing was changed",
+        ));
+    }
+    if console.interactive()
+        && !console
+            .ask_yes_no("Set the registry aside and start a new one?", false)
+            .map_err(Stop::into_exit)?
+    {
+        println!("nothing was changed");
+        return Ok(());
+    }
+    let acting = plan
+        .system
+        .as_ref()
+        .and_then(|system| AsAccount::of(Some(system), am_root(), plan.registry()));
+
+    // 1. the engine, which holds the registry, stopped
+    if let Some(unit) = service_units(state).iter().find(|u| u.part == "engine") {
+        let uid = run_quiet("id", &["-u"])
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default();
+        let argv = stop_argv(unit, &uid);
+        let words: Vec<&str> = argv[1..].iter().map(String::as_str).collect();
+        if !quietly(&argv[0], &words) {
+            return Err(fail(format!(
+                "the engine was not stopped ({} was refused); nothing was changed",
+                argv.join(" ")
+            )));
+        }
+        console.progress(&format!("{} is stopped", unit.name));
+    }
+    if port_taken(plan.ports.engine) {
+        return Err(fail(format!(
+            "something still answers on 127.0.0.1:{}, the engine's port; stop the engine that \
+             runs on this registry, then run this again. Nothing was set aside",
+            plan.ports.engine
+        )));
+    }
+
+    // 2. the registry set aside
+    let set_aside = match &acting {
+        None => set_aside_here(&home_on_machine(&home), &stamp).map_err(|why| {
+            fail(format!(
+                "the registry was not set aside: {why}; nothing was changed"
+            ))
+        })?,
+        Some(acting) => {
+            let ran = acting.run(
+                &owned_words(&[REGISTRY_STEP, "set-aside", "--stamp", &stamp]),
+                None,
+            );
+            if !ran.ok {
+                return Err(fail(format!(
+                    "the registry was not set aside as {}: {}; nothing was changed",
+                    acting.account, ran.why
+                )));
+            }
+            serde_json::from_str(ran.stdout.trim()).map_err(|e| {
+                fail(format!(
+                    "{} set the registry aside, and what it answered does not read: {e}",
+                    acting.account
+                ))
+            })?
+        }
+    };
+    console.progress(&format!("the registry set aside at {}", aside.display()));
+    let undo = || {
+        format!(
+            "\n  the old registry is set aside at {}; {}",
+            aside.display(),
+            match &plan.backend {
+                BackendChoice::Postgres { schema, .. } => format!(
+                    "to put it back, move what is in that folder back into {} and rename the \
+                     schemas {schema}{ASIDE_SCHEMA}{stamp} and its _linkage back to {schema} and \
+                     {schema}_linkage",
+                    home.dir().display()
+                ),
+                BackendChoice::Sqlite => format!(
+                    "to put it back, move what is in that folder back into {}",
+                    home.dir().display()
+                ),
+            }
+        )
+    };
+
+    // 3. the new registry, and 4. the setup's places in it
+    make_registry(&plan, &home, console, args, None, acting.as_ref())
+        .map_err(|e| fail(format!("{}{}", e.message, undo())))?;
+    let declared = declare_places(&plan, &home, console, acting.as_ref())
+        .map_err(|e| fail(format!("{}{}", e.message, undo())))?;
+
+    // 5. the calendar the old registry was read under
+    let timezone = set_aside["timezone"]
+        .as_str()
+        .unwrap_or(nils_registry::home::DEFAULT_TIMEZONE);
+    let week_start = set_aside["week_start"]
+        .as_str()
+        .unwrap_or(nils_registry::home::DEFAULT_WEEK_START);
+    if timezone != nils_registry::home::DEFAULT_TIMEZONE
+        || week_start != nils_registry::home::DEFAULT_WEEK_START
+    {
+        let carried = match &acting {
+            None => calendar_here(&home_on_machine(&home), timezone, week_start)
+                .map_err(|why| why.to_string()),
+            Some(acting) => {
+                let ran = acting.run(
+                    &owned_words(&[
+                        REGISTRY_STEP,
+                        "calendar",
+                        "--timezone",
+                        timezone,
+                        "--week-start",
+                        week_start,
+                    ]),
+                    None,
+                );
+                if ran.ok { Ok(()) } else { Err(ran.why) }
+            }
+        };
+        match carried {
+            Ok(()) => console.progress(&format!("timezone {timezone}, week start {week_start}")),
+            Err(why) => console.warn(&format!(
+                "the timezone and week start were not carried ({why}); set them with nils \
+                 settings set timezone {timezone} and nils settings set week_start {week_start}"
+            )),
+        }
+    }
+
+    // 6. on record, and every part started again
+    let mut state = state.clone();
+    state.places = declared;
+    state.at = nils_registry::time::now_iso();
+    write_state(&state)?;
+    make_own_dirs(&plan, console)?;
+    let mut stages = Vec::new();
+    if plan.postgres.is_some() {
+        stages.push((Stage::Postgres, format!("Postgres {POSTGRES_MAJOR}")));
+    }
+    if plan.has(Part::Desk) {
+        stages.push((Stage::Desk, "desk configuration".to_string()));
+    }
+    if plan.has(Part::Assistant) {
+        if plan.llama.is_some() {
+            stages.push((Stage::Runtime, LLAMA_PART.to_string()));
+        }
+        stages.push((Stage::Kvasir, "Kvasir configuration".to_string()));
+    }
+    stages.push((Stage::Services, "services".to_string()));
+    console.start_checklist("Starting again", stages);
+    let mended = mend(&plan, &state, console);
+    console.finish_checklist(
+        mended.is_ok(),
+        if mended.is_ok() {
+            "Started again"
+        } else {
+            "Stopped"
+        },
+    );
+    let services = mended?;
+    summary(&plan, console, &services);
+    console.say(&format!(
+        "the old registry is set aside at {}, and reads there: nils --registry {} status",
+        aside.display(),
+        aside.display()
+    ));
+    console.say(
+        "the places and datasets of the old registry come back with nils place import, from \
+         the file nils place export wrote before",
+    );
+    Ok(())
+}
+
+/// The timezone and week start of the registry at `home`, read as it stands
+/// with nothing changed; the defaults where it cannot be read that way.
+fn calendar_of(home: &Home) -> (String, String) {
+    use nils_registry::store::Param;
+    let read = |key: &str, default: &str| -> String {
+        let Ok(mut store) = home.open_as_it_stands() else {
+            return default.to_string();
+        };
+        let table = store.qualified("registry_meta");
+        let sql = format!(
+            "SELECT value FROM {table} WHERE key = {}",
+            store.dialect().param(1, nils_registry::schema::Type::Text)
+        );
+        store
+            .query_opt(&sql, &[Param::from(key)])
+            .ok()
+            .flatten()
+            .and_then(|row| row.text(0).ok().map(str::to_string))
+            .unwrap_or_else(|| default.to_string())
+    };
+    (
+        read("timezone", nils_registry::home::DEFAULT_TIMEZONE),
+        read("week_start", nils_registry::home::DEFAULT_WEEK_START),
+    )
+}
+
+/// The registry at `home` set aside for a new one, by the account running
+/// this: on Postgres its two schemas renamed `<schema>_before_<stamp>` and
+/// `<schema>_before_<stamp>_linkage`, and on either backend its files
+/// (nils.toml, the databases, the key store, the imports a linkage import
+/// left) moved into `before-new-registry-<stamp>/` in the registry's folder.
+/// The `nils.toml` there names the renamed schema, so the registry set aside
+/// opens where it went: `nils --registry <that folder> status`. Nothing is
+/// deleted. The files move first, and go back where the database refuses
+/// the rename, so a refusal leaves the registry as it was. What was done
+/// comes back, with the calendar the registry was read under.
+fn set_aside_here(home: &Home, stamp: &str) -> Result<serde_json::Value, String> {
+    use nils_registry::home::{CONFIG_FILE, LINKAGE_DB, REGISTRY_DB};
+    if !home.exists() {
+        return Err(format!("there is no registry at {}", home.dir().display()));
+    }
+    if stamp.is_empty() || !stamp.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return Err(format!("{stamp} is not a stamp: letters and digits"));
+    }
+    let config = home.read_config().map_err(|e| e.to_string())?;
+    let (timezone, week_start) = calendar_of(home);
+    let aside = home.dir().join(format!("{ASIDE_FOLDER}{stamp}"));
+    if aside.exists() {
+        return Err(format!("{} is there already", aside.display()));
+    }
+    // on Postgres, the names checked and the database reached before a
+    // file moves
+    let mut postgres = None;
+    if config.backend == Backend::Postgres {
+        let schema = config.schema.clone();
+        let to = format!("{schema}{ASIDE_SCHEMA}{stamp}");
+        if !plain_identifier(&schema) || !plain_identifier(&to) {
+            return Err(format!("{schema} is not a schema name this renames"));
+        }
+        // Postgres keeps 63 bytes of a name, and the linkage schema's is longer
+        if format!("{to}_linkage").len() > 63 {
+            return Err(format!(
+                "{to}_linkage is longer than a Postgres name may be"
+            ));
+        }
+        let dsn = home
+            .dialled()
+            .map(str::to_string)
+            .or_else(|| config.dsn.clone())
+            .ok_or_else(|| format!("{CONFIG_FILE} names no connection string"))?;
+        let mut store = nils_registry::store::Store::connect_postgres(
+            &dsn_from(StepRuns::OnTheMachine, &dsn),
+            &schema,
+        )
+        .map_err(|e| with_causes(&e))?;
+        let taken = store
+            .query(
+                &format!(
+                    "SELECT nspname FROM pg_namespace WHERE nspname IN ('{to}', '{to}_linkage')"
+                ),
+                &[],
+            )
+            .map_err(|e| with_causes(&e))?;
+        if !taken.is_empty() {
+            return Err(format!("the database has a schema {to} already"));
+        }
+        postgres = Some((store, schema, to));
+    }
+    let keys = Path::new(&config.keys_dir);
+    if !(keys.is_relative() && keys.components().count() == 1) {
+        return Err(format!(
+            "the key store {} is not a folder of the registry's own, so it would not go aside \
+             with it; nothing was set aside",
+            config.keys_dir
+        ));
+    }
+    let moves = |name: &str| {
+        name == CONFIG_FILE
+            || name.starts_with(REGISTRY_DB)
+            || name.starts_with(LINKAGE_DB)
+            || name == "imports"
+            || name == "backups-before-restore"
+            || Path::new(name) == keys
+    };
+    let mut entries: Vec<String> = std::fs::read_dir(home.dir())
+        .map_err(|e| format!("{}: {e}", home.dir().display()))?
+        .filter_map(|e| e.ok())
+        .filter_map(|e| e.file_name().to_str().map(str::to_string))
+        .filter(|name| moves(name))
+        .collect();
+    entries.sort();
+    std::fs::create_dir(&aside).map_err(|e| format!("{}: {e}", aside.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let _ = std::fs::set_permissions(&aside, std::fs::Permissions::from_mode(0o700));
+    }
+    let mut moved: Vec<String> = Vec::new();
+    let put_back = |moved: &[String]| {
+        for name in moved {
+            let _ = std::fs::rename(aside.join(name), home.dir().join(name));
+        }
+        let _ = std::fs::remove_dir(&aside);
+    };
+    for name in &entries {
+        if let Err(e) = std::fs::rename(home.dir().join(name), aside.join(name)) {
+            put_back(&moved);
+            return Err(format!("{name} was not moved: {e}; nothing was set aside"));
+        }
+        moved.push(name.clone());
+    }
+    let mut schemas = serde_json::Value::Null;
+    if let Some((mut store, schema, to)) = postgres {
+        if let Err(e) = store.batch(&format!(
+            "ALTER SCHEMA {schema} RENAME TO {to}; ALTER SCHEMA {schema}_linkage RENAME TO {to}_linkage"
+        )) {
+            put_back(&moved);
+            return Err(format!(
+                "the database did not rename the schemas: {}; nothing was set aside",
+                with_causes(&e)
+            ));
+        }
+        // the registry set aside opens where it went
+        let mut kept = config.clone();
+        kept.schema = to.clone();
+        let text = toml::to_string(&kept).map_err(|e| e.to_string())?;
+        write_secret(&aside.join(CONFIG_FILE), &text).map_err(|e| e.message)?;
+        schemas = serde_json::json!([to.clone(), format!("{to}_linkage")]);
+    }
+    Ok(serde_json::json!({
+        "set_aside": aside.display().to_string(),
+        "backend": config.backend.name(),
+        "moved": moved,
+        "schemas": schemas,
+        "timezone": timezone,
+        "week_start": week_start,
+    }))
+}
+
+/// The registry's calendar set by the account running this, audited as
+/// `nils settings set` audits it.
+fn calendar_here(home: &Home, timezone: &str, week_start: &str) -> Result<(), String> {
+    let mut registry = crate::open(home).map_err(|e| e.message)?;
+    let locale = nils_ask::hash::Locale {
+        timezone: timezone.to_string(),
+        week_start: week_start.to_lowercase(),
+    };
+    crate::schedule::set_calendar(&mut registry, &locale, &crate::actor())
+        .map(|_| ())
+        .map_err(|(_, why)| why)
 }
 
 /// The registry's source places as the account running this finds them, as
