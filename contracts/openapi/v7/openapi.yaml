@@ -226,7 +226,8 @@
 # axes, writing nothing. Reading needs data:see or pipelines:see, saving
 # pipelines:work. A scope is a cohort or a dataset, never a root. No date
 # leaves these doors: a visit is its session's id. POST /api/picks takes the
-# same scope.
+# same scope, and its answer names the scope the pick belongs to and no
+# longer carries the session's day.
 openapi: 3.1.0
 info:
   title: NILS engine API
@@ -612,7 +613,7 @@ paths:
       description: "The stacks that stand for a role on the occasion they belong to: one acquisition, on one occasion of one subject under the scheme. `role` must be one the served pack's picks declare, `pick` names the pick when more than one declares it, `scheme` names a stored scheme (the default otherwise), and `why` is required: it is what a reader of the pick has in place of the run's scores. The pick is written with author_kind person; an earlier person's pick on the occasion is withdrawn by it, and the run's pick stops applying and points at it (`overruled_by`). A later `nils pick run` keeps the person's pick and writes its own beside it as evidence that does not apply, and raises no pick.border item on that occasion. An open pick.border item on the occasion is answered (accepted, with the pick as its decision). Only a person writes one: a call whose X-Nils-Actor names an agent or a model is refused 403. Audited as pick.set, which moves the epoch. Record 48, D1 of the move: no decision is written on a stack of a sample sealed now, for any caller, sealed:see included: a pick that names one is refused (409)."
       requestBody: {content: {application/json: {schema: {type: object, required: [role, stacks, why], properties: {role: {type: string}, stacks: {type: array, items: {type: integer}}, why: {type: string}, pick: {type: string}, pack: {type: string}, scheme: {type: string}}}}}}
       responses:
-        "201": {description: "{id, model, role, subject_id, session_day, stacks, overruled, replaced, answered}"}
+        "201": {description: "{id, model, role, subject_id, stacks, overruled, replaced, answered, scope}; amended in place on 2026-10-11: `scope`, {kind, id, name}, is the dataset or cohort whose own picks the pick belongs to (null for the pack's), and no date leaves the door, so `session_day` is gone"}
         "403": {description: "No review:work, or an agent or a model acting for the principal"}
         "409": {description: "Refused in words: a role no pick declares, a stack the fingerprint has not read, stacks of more than one subject or occasion, no why, or no pack served"}
   /api/picks/{id}/withdraw:

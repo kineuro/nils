@@ -4408,7 +4408,14 @@ fn routed(
             )
             .map_err(pick_err)?;
             let mut doc = serde_json::to_value(picked).unwrap_or(serde_json::Value::Null);
-            doc["rules_scope"] = owner.as_ref().map_or(
+            // no date leaves the picks doors (the main-scans study, section
+            // 5); the visit is the one the caller named
+            if let Some(o) = doc.as_object_mut() {
+                o.remove("session_day");
+            }
+            // the scope whose picks it is, {kind, id, name}, or null for the
+            // pack's
+            doc["scope"] = owner.as_ref().map_or(
                 serde_json::Value::Null,
                 nils_registry::pick_rules::Scope::to_json,
             );

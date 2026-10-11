@@ -492,7 +492,13 @@ fn cohort_rules(pg: Option<(String, String)>) {
         CURATOR,
     );
     assert_eq!(status, 201, "{person}");
-    assert_eq!(person["rules_scope"]["name"], "quad", "{person}");
+    assert_eq!(person["scope"]["name"], "quad", "{person}");
+    assert_eq!(person["scope"]["kind"], "cohort", "{person}");
+    assert!(person.get("rules_scope").is_none(), "{person}");
+    assert!(
+        person.get("session_day").is_none(),
+        "no date leaves the door: {person}"
+    );
     let person_id = person["id"].as_i64().unwrap();
     // it stands through a rerun of the cohort, the pack's and its own
     let (status, started) = server.call(
