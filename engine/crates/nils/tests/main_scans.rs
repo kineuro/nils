@@ -672,3 +672,212 @@ fn a_run_removes_its_picks_that_no_longer_win_and_leaves_a_person_s() {
         "the person's pick stands"
     );
 }
+
+/// 2026-10-11, the live check of dev.25: a dataset added from a root. The
+/// root is no scope of the picks doors (the desk offered it as a dataset);
+/// the map's columns by dataset are named after the dataset, not the root
+/// that holds it; the map with a draft and the subjects door answer; and a
+/// person's pick answers its scope and no date.
+#[test]
+fn a_dataset_under_a_root_is_mapped_as_itself() {
+    under_a_root(None);
+}
+
+#[test]
+fn a_dataset_under_a_root_is_mapped_as_itself_on_postgres_too() {
+    on_postgres("nils_main_scans_root", under_a_root);
+}
+
+fn under_a_root(pg: Option<(String, String)>) {
+    use dicom_core::VR;
+    use dicom_dictionary_std::tags;
+    use nils_dicom::synth::{self, MetaFields};
+    let home = Home::init("main-scans-root-home", pg);
+    // a root with one dataset folder: three subjects, two of them seen twice
+    let root = TempDir::new("main-scans-root");
+    let mut n = 0;
+    for (s, patient) in ["S-ONE", "S-TWO", "S-THREE"].iter().enumerate() {
+        let days: &[&str] = if s < 2 {
+            &["20240131", "20250131"]
+        } else {
+            &["20240131"]
+        };
+        for (v, day) in days.iter().enumerate() {
+            n += 1;
+            let study = format!("1.2.826.0.1.3680043.8.498.{n}.1");
+            let series = format!("{study}.1");
+            for instance in 1..=3u32 {
+                let sop = format!("{series}.{instance}");
+                let mut e = synth::minimal_mr(&study, &series, &sop);
+                e.push(synth::text(tags::PATIENT_ID, VR::LO, patient));
+                e.push(synth::text(tags::STUDY_DATE, VR::DA, day));
+                e.push(synth::text(tags::SERIES_NUMBER, VR::IS, "1"));
+                e.push(synth::text(
+                    tags::INSTANCE_NUMBER,
+                    VR::IS,
+                    &instance.to_string(),
+                ));
+                e.push(synth::text(tags::SERIES_DESCRIPTION, VR::LO, "t1 mprage"));
+                root.file(
+                    &format!("fresh/derivatives/dcm-anon/sub-{s}/ses-{v}/IM_{instance:04}"),
+                    &synth::part10(&MetaFields::mr(&sop), &e, true),
+                );
+            }
+        }
+    }
+    home.ok(&[
+        "place",
+        "add",
+        "data",
+        root.path().to_str().unwrap(),
+        "--role",
+        "source",
+    ]);
+    let server = Served::start(&home, root.path());
+    let (status, added) = server.call(
+        "POST",
+        "/api/places",
+        Some(json!({
+            "role": "source", "root": "data", "folder": "fresh",
+            "patient_id": "id-type:patient-id", "subjects": "generated",
+        })),
+        OPS,
+    );
+    assert_eq!(status, 201, "{added}");
+    assert_eq!(added["name"], "fresh", "{added}");
+    // the bring-in: digest, fingerprint, classify and the dataset's pick run
+    let (status, queued) = server.call(
+        "POST",
+        "/api/jobs",
+        Some(json!({"command": ["bring-in", "@fresh", "--name", "first"]})),
+        OPS,
+    );
+    assert_eq!(status, 202, "{queued}");
+    let mut job = server.over(queued["job"].as_i64().unwrap());
+    loop {
+        assert_eq!(job["state"], "done", "{job}");
+        let mut next = job["chain"]["after"].as_i64();
+        for _ in 0..50 {
+            if next.is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            let (_, j) = server.call("GET", &format!("/api/jobs/{}", job["id"]), None, OPS);
+            next = j["chain"]["after"].as_i64();
+        }
+        match next {
+            Some(n) => job = server.over(n),
+            None => break,
+        }
+    }
+    assert_eq!(job["kind"], "pick", "{job}");
+    assert!(
+        home.count("SELECT COUNT(*) FROM {pick} WHERE withdrawn_at IS NULL") > 0,
+        "the bring-in picked"
+    );
+
+    // the root is no scope: it holds datasets and is none
+    let (status, refused) = server.call("GET", "/api/picks/rules?dataset=data", None, OPS);
+    assert_eq!(status, 400, "{refused}");
+    assert_eq!(refused["field"], "dataset", "{refused}");
+    let (status, refused) = server.call(
+        "POST",
+        "/api/picks/map",
+        Some(json!({"scope": {"dataset": "data"}, "role": "t1w"})),
+        OPS,
+    );
+    assert_eq!(status, 400, "{refused}");
+    assert_eq!(refused["field"], "dataset", "{refused}");
+
+    // the columns by dataset are the dataset's, not the root's
+    let (status, map) = server.call(
+        "POST",
+        "/api/picks/map",
+        Some(json!({"scope": {"dataset": "fresh"}, "role": "t1w", "columns": "dataset"})),
+        OPS,
+    );
+    assert_eq!(status, 200, "{map}");
+    let columns = map["columns"].as_array().unwrap();
+    assert!(!columns.is_empty(), "{map}");
+    assert!(
+        columns
+            .iter()
+            .all(|c| c["key"].as_str().unwrap().starts_with("fresh")),
+        "{map}"
+    );
+    assert_eq!(map["metrics"]["subjects"], 3, "{map}");
+
+    // a draft, its subjects and the strips
+    let (status, rules) = server.call("GET", "/api/picks/rules?dataset=fresh", None, OPS);
+    assert_eq!(status, 200, "{rules}");
+    assert_eq!(rules["scope"]["name"], "fresh", "{rules}");
+    let mut draft = rules["current"]["rules"].clone();
+    draft["roles"]["t1w"]["keep_alike"] = json!("within_each_subject");
+    draft["roles"]["t1w"]["dimension"] = json!("3d");
+    let (status, map) = server.call(
+        "POST",
+        "/api/picks/map",
+        Some(json!({"scope": {"dataset": "fresh"}, "role": "t1w", "rules": draft, "columns": "dataset"})),
+        OPS,
+    );
+    assert_eq!(status, 200, "{map}");
+    assert!(map["effect"]["visits_changed"].is_i64(), "{map}");
+    for group in [
+        json!({"by": "breaks"}),
+        json!({"by": "series", "steps": []}),
+    ] {
+        let (status, page) = server.call(
+            "POST",
+            "/api/picks/map/subjects",
+            Some(json!({
+                "scope": {"dataset": "fresh"}, "role": "t1w", "rules": draft,
+                "group": group, "order": "changes", "page": 0, "per_page": 24,
+            })),
+            OPS,
+        );
+        assert_eq!(status, 200, "{page}");
+        assert!(page["total"].is_i64(), "{page}");
+    }
+    let column = columns[0]["key"].clone();
+    let (status, page) = server.call(
+        "POST",
+        "/api/picks/map/subjects",
+        Some(json!({
+            "scope": {"dataset": "fresh"}, "role": "t1w", "columns": "dataset",
+            "group": {"by": "cell", "kind": map["matrix"][0]["kind"], "column": column},
+            "order": "visits",
+        })),
+        OPS,
+    );
+    assert_eq!(status, 200, "{page}");
+    assert!(page["total"].as_i64().unwrap() >= 1, "{page}");
+    let visit = &page["subjects"][0]["visits"][0];
+    assert!(
+        visit["column"].as_str().unwrap().starts_with("fresh"),
+        "{page}"
+    );
+    let (status, strips) = server.call(
+        "POST",
+        "/api/picks/map/strips",
+        Some(json!({"scope": {"dataset": "fresh"}, "role": "t1w", "rules": draft})),
+        OPS,
+    );
+    assert_eq!(status, 200, "{strips}");
+    assert_eq!(strips["subjects"].as_array().unwrap().len(), 3, "{strips}");
+
+    // a person's pick made for the dataset before it has rules is the
+    // pack's, and answers so, with no date
+    let (status, person) = server.call(
+        "POST",
+        "/api/picks",
+        Some(json!({
+            "role": "t1w", "stacks": [], "why": "no usable T1w on this visit",
+            "dataset": "fresh", "subject_id": page["subjects"][0]["subject_id"],
+            "session_id": visit["session_id"],
+        })),
+        CURATOR,
+    );
+    assert_eq!(status, 201, "{person}");
+    assert!(person["scope"].is_null(), "{person}");
+    assert!(person.get("session_day").is_none(), "{person}");
+}

@@ -154,10 +154,28 @@ pub(crate) fn named_scope(
             .map_err(failed)?
             .map(Some)
             .ok_or_else(|| Reply::error(404, format!("no cohort named {c}"))),
-        (None, Some(d)) => Scope::dataset(store, &d)
-            .map_err(failed)?
-            .map(Some)
-            .ok_or_else(|| Reply::error(404, format!("no dataset named {d}"))),
+        (None, Some(d)) => {
+            let scope = Scope::dataset(store, &d)
+                .map_err(failed)?
+                .ok_or_else(|| Reply::error(404, format!("no dataset named {d}")))?;
+            // a root holds datasets and is none itself (Wave 7a): its
+            // folders are each a dataset of their own
+            let root = nils_registry::place::show(store, scope.id)
+                .map_err(failed)?
+                .is_some_and(|p| nils_registry::place::is_root(&p.dataset));
+            if root {
+                let mut r = Reply::error(
+                    400,
+                    format!(
+                        "{} is a root, not a dataset: each folder under it is a dataset of its own",
+                        scope.name
+                    ),
+                );
+                r.body["field"] = Value::from("dataset");
+                return Err(r);
+            }
+            Ok(Some(scope))
+        }
         (None, None) => Ok(None),
     }
 }
@@ -420,20 +438,19 @@ pub(crate) enum Door {
     Strips,
 }
 
-/// The dataset each of the subjects' stacks came through, by the source
-/// places in force.
+/// The dataset each of the subjects' stacks came through: of the active
+/// datasets, the one that holds its source most closely, never a root
+/// (2026-10-11: the root, read first, claimed its datasets' stacks, so the
+/// columns were named after it).
 fn datasets(
     registry: &mut Registry,
     subjects: &BTreeSet<i64>,
 ) -> Result<HashMap<i64, String>, Reply> {
     let store = registry.store();
     let mut by_source: HashMap<i64, String> = HashMap::new();
-    for p in nils_registry::place::active(store).map_err(failed)? {
-        if p.role != nils_registry::place::Role::Source {
-            continue;
-        }
-        for id in crate::sources::source_ids(store, &p).map_err(failed)? {
-            by_source.entry(id).or_insert_with(|| p.name.clone());
+    for d in nils_registry::place::dataset_sources(store).map_err(failed)? {
+        for id in d.sources {
+            by_source.insert(id, d.name.clone());
         }
     }
     let ids: Vec<i64> = subjects.iter().copied().collect();
