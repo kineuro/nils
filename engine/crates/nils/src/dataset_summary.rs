@@ -560,7 +560,13 @@ pub(crate) fn document(
     let sources = list(&ids);
     // the visits are none where nobody has built the session cache, and
     // a count of it where somebody has
-    let (mut subjects, mut studies, mut stacks, mut sessions) = (0, 0, 0, window.map(|_| 0));
+    let (mut studies, mut stacks, mut sessions) = (0, 0, window.map(|_| 0));
+    // Nima, 2026-10-11: its subjects as every reader counts them
+    // (`nils_registry::dataset_subjects`), those with a scan its tree holds
+    // a file of and those it was pseudonymised for with no scan at all,
+    // every file of them set aside by the read
+    let members =
+        nils_registry::dataset_subjects::count(store, dataset.id, &ids).map_err(failed)?;
     let (mut read, mut refused, mut reads, mut classified) = (0, 0, 0, 0);
     // record 55 (2026-10-10): the files read as their instance's own, the
     // copies of an instance another dataset read (`known`) or this one holds
@@ -581,31 +587,19 @@ pub(crate) fn document(
     let mut last_digest: Option<(String, Option<String>)> = None;
     if !ids.is_empty() {
         let q = |t: &str| store.qualified(t);
-        let (batch, stack, study, subject, file, cache, instance, series, class) = (
+        let (batch, stack, study, file, cache, instance, class) = (
             q("ingest_batch"),
             q("stack"),
             q("study"),
-            q("subject"),
             q("source_file"),
             q("session_cache_study"),
             q("instance"),
-            q("series"),
             q("classification"),
         );
         // record 55 (2026-10-10): every scan its tree has a file of, whoever
         // read it first
         let in_tree = crate::operations::held_by(store, "x", &sources);
         let studies_in_tree = crate::operations::studies_held_by(store, "x", &sources);
-        // as the sources door counts them, so the card and its detail agree
-        subjects = count(
-            store,
-            &format!(
-                "SELECT COUNT(DISTINCT se.subject_id) FROM {stack} x \
-                 JOIN {series} se ON se.id = x.series_id JOIN {subject} su ON su.id = se.subject_id \
-                 WHERE {in_tree} AND su.merged_into IS NULL"
-            ),
-        )
-        .map_err(failed)?;
         studies = count(
             store,
             &format!("SELECT COUNT(*) FROM {study} x WHERE {studies_in_tree}"),
@@ -978,7 +972,8 @@ pub(crate) fn document(
         "detail": access.detail.name(),
         "state": state,
         "added_at": dataset.created_at,
-        "subjects": subjects,
+        "subjects": members.subjects,
+        "no_scans": members.no_scans,
         "sessions": sessions,
         "studies": studies,
         "scans": stacks,

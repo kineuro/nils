@@ -2470,3 +2470,290 @@ fn a_file_set_aside_by_policy_is_counted_and_asks_nobody_on_postgres_too() {
     set_aside(Some((dsn.clone(), schema.to_string())));
     drop();
 }
+
+/// An identified file at the top of a dataset's folder, for the person to
+/// move into its originals: an image of a scan, or a file of a SOP class
+/// the read sets aside (`class`).
+fn original_file(dir: &TempDir, patient: &str, study: &str, sop: &str, class: Option<&str>) {
+    let mut e = synth::minimal_mr(study, &format!("{study}.1"), sop);
+    let meta = match class {
+        Some(class) => {
+            e.retain(|x| x.tag != tags::SOP_CLASS_UID);
+            e.push(synth::text(tags::SOP_CLASS_UID, VR::UI, class));
+            MetaFields::with("1.2.840.10008.1.2.1", class, sop)
+        }
+        None => MetaFields::mr(sop),
+    };
+    e.push(synth::text(tags::PATIENT_ID, VR::LO, patient));
+    e.push(synth::text(tags::STUDY_DATE, VR::DA, "20260102"));
+    e.push(synth::text(tags::SERIES_DESCRIPTION, VR::LO, "t1 mprage"));
+    dir.file(&format!("{patient}/{sop}"), &synth::part10(&meta, &e, true));
+}
+
+/// Nima's ruling of 2026-10-11 ("agreed"): a subject whose every file the
+/// read set aside, none of them a scan, is of the dataset it was
+/// pseudonymised from, so the chat and the page tell the same story. An
+/// identified dataset of two subjects is pseudonymised and read: one with
+/// a scan, one with a presentation state and a screen capture alone. The
+/// summary, the card's sources door, the main scans summary, the Grid and
+/// the ask count two subjects, one of them with no scans, and the ask
+/// names the second's dataset. Where no pseudonymise run recorded the
+/// subject (a registry from before the run kept each file's subject), its
+/// dataset is not known: no reader counts it, and the ask answers null.
+fn no_scans(pg: Option<(String, String)>) {
+    let home = Home {
+        dir: TempDir::new("data-page-no-scans"),
+        pg,
+    };
+    let (good, _, err) = home.run(&["key", "add", "k"], Some("a data page test key\n"));
+    assert!(good, "{err}");
+    match &home.pg {
+        Some((dsn, schema)) => {
+            home.ok(&[
+                "init",
+                "--backend",
+                "postgres",
+                "--dsn",
+                dsn,
+                "--schema",
+                schema,
+                "--key",
+                "k",
+            ]);
+        }
+        None => {
+            home.ok(&["init", "--key", "k"]);
+        }
+    }
+    let dir = TempDir::new("data-page-no-scans-ds");
+    original_file(&dir, "PAT-A1", "1.2.9.A", "1.2.9.A.1.1", None);
+    original_file(&dir, "PAT-A1", "1.2.9.A", "1.2.9.A.1.2", None);
+    original_file(
+        &dir,
+        "PAT-B2",
+        "1.2.9.B",
+        "1.2.9.B.9.1",
+        Some("1.2.840.10008.5.1.4.1.1.11.1"),
+    );
+    original_file(
+        &dir,
+        "PAT-B2",
+        "1.2.9.B",
+        "1.2.9.B.9.2",
+        Some("1.2.840.10008.5.1.4.1.1.7"),
+    );
+    home.ok(&[
+        "place",
+        "add",
+        "ds",
+        dir.path().to_str().unwrap(),
+        "--role",
+        "source",
+        "--move-into",
+        "originals",
+        "--confirm-move",
+        "--unmapped",
+        "code",
+    ]);
+    home.ok(&["pseudonymize", "@ds"]);
+    home.ok(&["digest", "--name", "ds", "--no-private", "@ds"]);
+
+    let server = Worked::serve(&home, false);
+    // what the chat is asked: the subjects of the dataset, each with its
+    // dataset, and the subjects by dataset
+    let ask = |doc: Value| -> Value {
+        let (status, ran) = server.call(
+            "POST",
+            "/api/ask/run",
+            Some(json!({"document": doc, "fresh": true})),
+            READS,
+        );
+        assert_eq!(status, 200, "{ran}");
+        ran
+    };
+    let column = |ran: &Value, name: &str| -> Vec<Value> {
+        let i = ran["columns"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .position(|c| c == name || c["name"] == name)
+            .unwrap_or_else(|| panic!("no column {name}: {ran}"));
+        ran["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r[i].clone())
+            .collect()
+    };
+    let everyone = || {
+        ask(json!({
+            "ast_version": 1,
+            "sets": {"people": {"grain": "subject"}},
+            "out": {"set": "people", "level": "record",
+                    "columns": [["field", {}, "id"], ["field", {}, "dataset"]],
+                    "order": [[["field", {}, "id"], "asc"]]}
+        }))
+    };
+    let of_ds = || {
+        let ran = ask(json!({
+            "ast_version": 1,
+            "sets": {"people": {"grain": "subject", "where": [["=", {}, ["field", {}, "dataset"], "ds"]]}},
+            "out": {"set": "people", "level": "record", "columns": [["field", {}, "id"]],
+                    "order": [[["field", {}, "id"], "asc"]]}
+        }));
+        column(&ran, "id")
+            .iter()
+            .map(|v| v.as_i64().unwrap())
+            .collect::<Vec<i64>>()
+    };
+    let by_dataset = || {
+        let ran = ask(json!({
+            "ast_version": 1,
+            "sets": {
+                "people": {"grain": "subject"},
+                "g": {"grain": "group", "group": {"of": "people", "by": [["field", {}, "dataset"]]}}
+            },
+            "out": {"set": "g", "level": "aggregate",
+                    "columns": [["field", {}, "dataset"], ["field", {}, "_rows"]]}
+        }));
+        column(&ran, "dataset")
+            .into_iter()
+            .zip(column(&ran, "_rows"))
+            .collect::<Vec<(Value, Value)>>()
+    };
+    let grid_ids = |grid: &Value| -> Vec<i64> {
+        grid["subjects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["id"].as_i64().unwrap())
+            .collect()
+    };
+
+    let people = everyone();
+    let ids: Vec<i64> = column(&people, "id")
+        .iter()
+        .map(|v| v.as_i64().unwrap())
+        .collect();
+    assert_eq!(ids.len(), 2, "{people}");
+    assert_eq!(
+        column(&people, "dataset"),
+        [json!("ds"), json!("ds")],
+        "{people}"
+    );
+    assert_eq!(of_ds(), ids);
+    assert_eq!(by_dataset(), [(json!("ds"), json!(2))]);
+
+    let s = server.get("/api/datasets/ds/summary", READS);
+    assert_eq!(s["scans"], 1, "{s}");
+    assert_eq!(s["subjects"], 2, "{s}");
+    assert_eq!(s["no_scans"], 1, "{s}");
+    assert_eq!(s["files"]["set_aside"], 2, "{s}");
+    let sources = server.get("/api/sources", READS);
+    let card = sources["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["name"] == "ds")
+        .unwrap_or_else(|| panic!("{sources}"))
+        .clone();
+    assert_eq!(card["totals"]["subjects"], 2, "{card}");
+    assert_eq!(card["totals"]["no_scans"], 1, "{card}");
+    assert_eq!(card["totals"]["stacks"], 1, "{card}");
+    let picks = server.get("/api/picks/summary?dataset=ds", READS);
+    assert_eq!(picks["subjects"], 2, "{picks}");
+    // the Grid lists the subject with nothing counted, and its visits are
+    // none; the other keeps its scan
+    let grid = server.get("/api/datasets/ds/subjects", READS);
+    assert_eq!(grid["totals"]["subjects"], 2, "{grid}");
+    assert_eq!(grid["totals"]["scans"], 1, "{grid}");
+    let unscanned: Vec<i64> = grid["subjects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|x| x["scans"] == 0 && x["visits"] == 0)
+        .map(|x| x["id"].as_i64().unwrap())
+        .collect();
+    assert_eq!(unscanned.len(), 1, "{grid}");
+    let none = unscanned[0];
+    let scanned = *ids.iter().find(|i| **i != none).unwrap();
+    let visits = server.get(&format!("/api/datasets/ds/subjects/{none}/visits"), READS);
+    assert_eq!(visits["visits"], json!([]), "{visits}");
+    let visits = server.get(
+        &format!("/api/datasets/ds/subjects/{scanned}/visits"),
+        READS,
+    );
+    assert_eq!(visits["visits"].as_array().unwrap().len(), 1, "{visits}");
+
+    // a registry from before the run kept each file's subject: the
+    // subject's dataset is not known, so no reader counts it and the ask
+    // says null rather than a guess
+    {
+        let mut store = home.store();
+        store
+            .execute(
+                &format!(
+                    "UPDATE {} SET subject_id = NULL WHERE subject_id = {none}",
+                    store.qualified("pseudonym_file")
+                ),
+                &[],
+            )
+            .unwrap();
+    }
+    let people = everyone();
+    let known: Vec<Value> = ids
+        .iter()
+        .map(|i| {
+            if *i == scanned {
+                json!("ds")
+            } else {
+                Value::Null
+            }
+        })
+        .collect();
+    assert_eq!(column(&people, "dataset"), known, "{people}");
+    assert_eq!(of_ds(), [scanned]);
+    let mut groups = by_dataset();
+    groups.sort_by_key(|(name, _)| name.as_str().map(str::to_string));
+    assert_eq!(groups, [(Value::Null, json!(1)), (json!("ds"), json!(1))]);
+    let s = server.get("/api/datasets/ds/summary", READS);
+    assert_eq!(s["subjects"], 1, "{s}");
+    assert_eq!(s["no_scans"], 0, "{s}");
+    let grid = server.get("/api/datasets/ds/subjects", READS);
+    assert_eq!(grid_ids(&grid), [scanned], "{grid}");
+    let (status, gone) = server.call(
+        "GET",
+        &format!("/api/datasets/ds/subjects/{none}/visits"),
+        None,
+        READS,
+    );
+    assert_eq!(status, 404, "{gone}");
+}
+
+#[test]
+fn a_subject_whose_every_file_was_set_aside_is_of_the_dataset_it_was_pseudonymised_from() {
+    no_scans(None);
+}
+
+#[test]
+fn a_subject_whose_every_file_was_set_aside_is_of_its_dataset_on_postgres_too() {
+    let Some(dsn) = std::env::var("NILS_TEST_POSTGRES_DSN")
+        .ok()
+        .filter(|d| !d.is_empty())
+    else {
+        eprintln!("NILS_TEST_POSTGRES_DSN is not set; the Postgres half is skipped");
+        return;
+    };
+    let schema = "nils_data_page_no_scans";
+    let drop = || {
+        let mut store = Store::connect_postgres(&dsn, schema).expect("connect");
+        store
+            .batch(&format!(
+                "DROP SCHEMA IF EXISTS {schema} CASCADE; DROP SCHEMA IF EXISTS {schema}_linkage CASCADE"
+            ))
+            .expect("drop");
+    };
+    drop();
+    no_scans(Some((dsn.clone(), schema.to_string())));
+    drop();
+}

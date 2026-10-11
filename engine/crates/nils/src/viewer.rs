@@ -183,10 +183,17 @@ impl Scope {
     }
 
     /// The current members of a cohort, every one of them whether or not a
-    /// scan of theirs is in the scope; none for a dataset.
+    /// scan of theirs is in the scope; of a dataset, the subjects it was
+    /// pseudonymised for with no scan at all (Nima, 2026-10-11: a dataset's
+    /// subjects as every reader counts them, `dataset_subjects`), the rest
+    /// coming with their scans.
     fn members(&self, store: &mut Store) -> Result<Option<Vec<i64>>, StoreError> {
         match self {
-            Scope::Dataset { .. } => Ok(None),
+            Scope::Dataset { place, .. } => Ok(Some(
+                nils_registry::dataset_subjects::with_no_scans(store, place.id)?
+                    .into_iter()
+                    .collect(),
+            )),
             Scope::Cohort(c) => Ok(Some(
                 nils_registry::cohort::open_members(store, c.id)?
                     .into_iter()
@@ -1069,12 +1076,14 @@ pub(crate) fn visits(
             .collect::<Result<_, StoreError>>()
             .map_err(failed)?,
     };
-    // a dataset's subject is one with a scan in it; a cohort's, a current
-    // member, whether or not a scan of theirs is to be seen
-    let present = match scope.members(store).map_err(failed)? {
-        Some(members) => members.contains(&subject),
-        None => !stacks.is_empty(),
-    };
+    // a dataset's subject is one with a scan in it, or one it was
+    // pseudonymised for with no scan at all; a cohort's, a current member,
+    // whether or not a scan of theirs is to be seen
+    let present = !stacks.is_empty()
+        || scope
+            .members(store)
+            .map_err(failed)?
+            .is_some_and(|members| members.contains(&subject));
     if !present {
         return Err(missing());
     }

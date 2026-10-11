@@ -139,7 +139,7 @@ fn source(
     if ids.is_empty() {
         doc["digests"] = json!({"count": 0, "first": null, "last": null, "recent": []});
         doc["totals"] = json!({
-            "subjects": 0, "studies": 0, "sessions": 0, "stacks": 0, "refused_files": 0,
+            "subjects": 0, "no_scans": 0, "studies": 0, "sessions": 0, "stacks": 0, "refused_files": 0,
             "same_instance_files": 0,
             "to_sort": 0, "sure": 0, "unsorted": 0, "need_a_look": {}, "noted": {},
         });
@@ -147,16 +147,14 @@ fn source(
     }
     let sources = list(ids);
     let q = |t: &str| store.qualified(t);
-    let (batch, stack, study, subject, file, cache, class) = (
+    let (batch, stack, study, file, cache, class) = (
         q("ingest_batch"),
         q("stack"),
         q("study"),
-        q("subject"),
         q("source_file"),
         q("session_cache_study"),
         q("classification"),
     );
-    let series = q("series");
     // record 55 (2026-10-10): what the dataset holds is every scan its tree
     // has a file of, whoever read it first
     let in_tree = crate::operations::held_by(store, "x", &sources);
@@ -288,15 +286,11 @@ fn source(
     // whoever made them. A map makes the subjects of a dataset and its
     // digests meet them, so counting what a digest created answers nothing
     // for exactly the dataset that has a map. Record 55 (2026-10-10): and
-    // so are its studies, scans and visits, whoever read them first.
-    let subjects = count(
-        store,
-        &format!(
-            "SELECT COUNT(DISTINCT se.subject_id) FROM {stack} x \
-             JOIN {series} se ON se.id = x.series_id JOIN {subject} su ON su.id = se.subject_id \
-             WHERE {in_tree} AND su.merged_into IS NULL"
-        ),
-    )?;
+    // so are its studies, scans and visits, whoever read them first. Nima,
+    // 2026-10-11: and the subjects it was pseudonymised for with no scan
+    // at all, as every reader counts a dataset's subjects
+    // (`nils_registry::dataset_subjects`)
+    let members = nils_registry::dataset_subjects::count(store, p.id, ids)?;
     let studies = count(
         store,
         &format!("SELECT COUNT(*) FROM {study} x WHERE {studies_in_tree}"),
@@ -340,7 +334,8 @@ fn source(
         "recent": shown.into_iter().map(|(_, d)| d).collect::<Vec<_>>(),
     });
     doc["totals"] = json!({
-        "subjects": subjects,
+        "subjects": members.subjects,
+        "no_scans": members.no_scans,
         "studies": studies,
         "sessions": sessions,
         "stacks": stacks,
