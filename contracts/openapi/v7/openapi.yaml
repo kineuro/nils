@@ -216,6 +216,17 @@
 # and wrong to right against a person's decisions in force, the scope and
 # what the change ships as. A stack of a sample sealed now is never read.
 # pipelines:work or review:work, the grant that proposes an overlay.
+# Added in place, additively, on 2026-10-11 (record 55, decision 6; the
+# main-scans study, section 5): a dataset's or a cohort's own main-scan
+# rules. GET /api/picks/rules and GET /api/picks/rules/text read a scope's
+# rules (version 1 is the pack's defaults, never stored); POST
+# /api/picks/rules saves version based_on + 1 with a reason and queues the
+# scope's pick run; POST /api/picks/map, /map/subjects and /map/strips
+# answer what the saved rules, or a draft, take for a role, from the stored
+# axes, writing nothing. Reading needs data:see or pipelines:see, saving
+# pipelines:work. A scope is a cohort or a dataset, never a root. No date
+# leaves these doors: a visit is its session's id. POST /api/picks takes the
+# same scope.
 openapi: 3.1.0
 info:
   title: NILS engine API
@@ -646,6 +657,76 @@ paths:
         "400": {description: No dataset or cohort named}
         "403": {description: Neither data:see nor pipelines:see}
         "404": {description: "No dataset of that name or id, or no cohort of that name"}
+  /api/picks/rules:
+    get:
+      summary: A dataset's or a cohort's main-scan rules (record 55, decision 6; added in place 2026-10-11; data:see or pipelines:see)
+      description: "The rules a scope's picks are made with, one document per scope stored as JSON: per role the way kinds are kept alike, the kinds in order, the kinds not used and what is allowed; and how two scans of one kind in one visit are told apart. With nothing saved, `current` is version 1, the pack's defaults, `saved` false, reason \"the pack's defaults\". `versions` lists the saved versions, the newest first, version 1 last. `picks` says what the scope's picks are read from now, and a version whose run has not finished."
+      parameters:
+        - {name: cohort, in: query, schema: {type: string}, description: "A cohort's name; required unless `dataset` is given"}
+        - {name: dataset, in: query, schema: {type: string}, description: "A dataset's name (with or without @) or id, never a root's"}
+        - {name: pack, in: query, schema: {type: string, default: mri}}
+      responses:
+        "200": {description: "{scope: {kind, id, name}, pack: {name, version}, current: {version, saved, reason, author, at, digest, rules}, versions: [{version, reason, author, at}], picks}"}
+        "400": {description: "No scope, both a cohort and a dataset, or a root named as a dataset (`field`: dataset)"}
+        "403": {description: Neither data:see nor pipelines:see}
+        "404": {description: No such cohort or dataset}
+        "409": {description: No pack of that name that declares picks is served}
+    post:
+      summary: Save a scope's main-scan rules as a new version and queue its pick run (added in place 2026-10-11; pipelines:work)
+      description: "Saves version `based_on + 1` with its reason and author, never changing or deleting a version, and queues `pick run --cohort|--dataset NAME --own-rules` as a job named after the scope. A version whose run cannot be queued is taken back. The first saved version takes in the persons' picks made for the scope while it read the pack's (`carried`)."
+      parameters:
+        - {name: cohort, in: query, schema: {type: string}, description: "A cohort's name; required unless `dataset` is given"}
+        - {name: dataset, in: query, schema: {type: string}, description: "A dataset's name (with or without @) or id, never a root's"}
+        - {name: pack, in: query, schema: {type: string, default: mri}}
+      requestBody: {content: {application/json: {schema: {type: object, required: [rules, reason, based_on], properties: {rules: {type: object}, reason: {type: string, maxLength: 500}, based_on: {type: integer}, cohort: {type: string}, dataset: {type: string}}}}}}
+      responses:
+        "201": {description: "{version, job, scope: {kind, id, name}, carried}"}
+        "400": {description: "Rules that do not pass the checks, with `field` naming the field; no based_on; a root named as a dataset"}
+        "403": {description: No pipelines:work}
+        "404": {description: No such cohort or dataset}
+        "409": {description: "based_on is not the latest version (`latest` says which is), or no pack that declares picks is served"}
+        "422": {description: "No reason (`field`: reason)"}
+  /api/picks/rules/text:
+    get:
+      summary: A version of a scope's main-scan rules as YAML, with comments (added in place 2026-10-11; data:see or pipelines:see)
+      parameters:
+        - {name: cohort, in: query, schema: {type: string}, description: "A cohort's name; required unless `dataset` is given"}
+        - {name: dataset, in: query, schema: {type: string}, description: "A dataset's name (with or without @) or id, never a root's"}
+        - {name: pack, in: query, schema: {type: string, default: mri}}
+        - {name: version, in: query, schema: {type: integer}, description: The current version without it; 1 is the pack's defaults}
+      responses:
+        "200": {description: "The rules as text/yaml, the comments beside the fields"}
+        "400": {description: "No scope, a version that is not a number, or a root named as a dataset"}
+        "404": {description: "No such cohort, dataset or version"}
+  /api/picks/map:
+    post:
+      summary: What the rules, saved or drafted, take for a role in a scope (added in place 2026-10-11; data:see or pipelines:see)
+      description: "Read from the stored axes; nothing is written. `kinds` are the kinds the scope holds for the role with the visits that have and take each; `metrics` the five numbers; `columns` the scanners (manufacturer and model with the field strength, the eight with the most visits and the rest as Other scanners) or the datasets (the dataset that holds each scan's source most closely, with the field strength); `matrix` the visits taken per kind and column, a kind of null being no pick; `series` the subjects' series of kinds over their visits; `by_visit` the kinds per visit number, the fifth and later folded into 5. With a draft `rules`, `effect` compares it with the saved current version. A person's pick counts on both sides. A stack of a sample sealed now is no part of the map for a caller who may not read it."
+      requestBody: {content: {application/json: {schema: {type: object, required: [scope, role], properties: {scope: {type: object, properties: {cohort: {type: string}, dataset: {type: string}}, description: "The cohort or the dataset; also taken at the top of the body"}, role: {type: string}, rules: {type: object, description: "A draft of the rules, as GET /api/picks/rules answers them; the saved current version without it"}, pack: {type: string}, scheme: {type: string}, columns: {type: string, enum: [scanner, dataset], default: scanner}}}}}}
+      responses:
+        "200": {description: "{role, rules_version, kinds: [{key, visits_with, visits_taken, allowed, used, new}], metrics: {visits, visits_taken, subjects, subjects_taken, alike_data: {kind, visits}, alike_within: {subjects, of}, series_complete: {subjects, of}}, columns: [{key, visits}], matrix: [{kind, cells}], series: [{steps, subjects}], single_visit_subjects, by_visit: [{visit, visits, kinds}], effect?: {visits_changed, subjects_changed, before}}"}
+        "400": {description: "No scope or role, a role the pick does not declare, columns other than scanner or dataset, a draft that does not pass the checks (`field`), or a root named as a dataset"}
+        "403": {description: Neither data:see nor pipelines:see}
+        "404": {description: No such cohort or dataset}
+  /api/picks/map/subjects:
+    post:
+      summary: One page of a group's subjects with their visits as the rules take them (added in place 2026-10-11; data:see or pipelines:see)
+      description: "`group` is {by: breaks} (subjects whose kind changes between visits), {by: series, steps} or {by: cell, kind, column}; `order` is changes or visits; `per_page` is at most 48. Each visit carries its session's id (no date), its number, column, field strength, kind, the stack and stacks taken, who decided it (rules or person), whether a draft changes it, the person's pick and why, and the candidates with their kinds and scores. Below detail quasi a subject's code and a person's words are shown by their shape."
+      requestBody: {content: {application/json: {schema: {type: object, required: [scope, role, group], properties: {scope: {type: object, properties: {cohort: {type: string}, dataset: {type: string}}, description: "The cohort or the dataset; also taken at the top of the body"}, role: {type: string}, rules: {type: object, description: "A draft of the rules, as GET /api/picks/rules answers them; the saved current version without it"}, pack: {type: string}, scheme: {type: string}, columns: {type: string, enum: [scanner, dataset]}, group: {type: object}, order: {type: string, enum: [changes, visits]}, page: {type: integer}, per_page: {type: integer, maximum: 48}}}}}}
+      responses:
+        "200": {description: "{total, page, per_page, subjects: [{subject_id, subject, visits: [{session_id, visit, column, field, kind, stack, stacks, by, changed, pick, why, candidates}]}]}"}
+        "400": {description: "As at /api/picks/map, or a group or order that does not read"}
+        "403": {description: Neither data:see nor pipelines:see}
+        "404": {description: No such cohort or dataset}
+  /api/picks/map/strips:
+    post:
+      summary: Every subject's kinds per visit, compactly (added in place 2026-10-11; data:see or pipelines:see)
+      requestBody: {content: {application/json: {schema: {type: object, required: [scope, role], properties: {scope: {type: object, properties: {cohort: {type: string}, dataset: {type: string}}, description: "The cohort or the dataset; also taken at the top of the body"}, role: {type: string}, rules: {type: object, description: "A draft of the rules, as GET /api/picks/rules answers them; the saved current version without it"}, pack: {type: string}, scheme: {type: string}, columns: {type: string, enum: [scanner, dataset]}}}}}}
+      responses:
+        "200": {description: "{kinds: [key], columns: [{key, visits}], subjects: [{subject_id, column, visits: [kind index, -1 for no pick]}]}"}
+        "400": {description: As at /api/picks/map}
+        "403": {description: Neither data:see nor pipelines:see}
+        "404": {description: No such cohort or dataset}
   /api/timeline/{kind}/{id}:
     get:
       summary: Every event on one object in order, typed, each with the object it produced (Wave 5 section 12.2)

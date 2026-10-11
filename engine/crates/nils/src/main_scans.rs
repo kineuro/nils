@@ -35,6 +35,77 @@ pub(crate) fn sized(body: &str) -> Result<(), Reply> {
     Ok(())
 }
 
+/// The doors of this module, as the capabilities list them (2026-10-11:
+/// they were routed and granted but not listed, so the desk hid the page).
+pub(crate) const DOORS: [&str; 6] = [
+    "GET /api/picks/rules",
+    "GET /api/picks/rules/text",
+    "POST /api/picks/rules",
+    "POST /api/picks/map",
+    "POST /api/picks/map/subjects",
+    "POST /api/picks/map/strips",
+];
+
+/// Their policy rows: whether a door writes, takes an idempotency key, its
+/// cost, its result cap and its label; the grant and the detail are read
+/// from the door table.
+pub(crate) const POLICY: &[(&str, bool, bool, &str, &str, &str, &str)] = &[
+    (
+        "GET /api/picks/rules",
+        false,
+        false,
+        "free",
+        "one document",
+        "Reading main-scan rules",
+        "Read main-scan rules",
+    ),
+    (
+        "GET /api/picks/rules/text",
+        false,
+        false,
+        "free",
+        "one document",
+        "Reading main-scan rules as text",
+        "Read main-scan rules as text",
+    ),
+    (
+        "POST /api/picks/rules",
+        true,
+        false,
+        "job",
+        "one id",
+        "Saving main-scan rules",
+        "Saved main-scan rules",
+    ),
+    (
+        "POST /api/picks/map",
+        false,
+        false,
+        "bounded",
+        "one document",
+        "Mapping main scans",
+        "Mapped main scans",
+    ),
+    (
+        "POST /api/picks/map/subjects",
+        false,
+        false,
+        "bounded",
+        "per_page subjects",
+        "Listing a group's subjects",
+        "Listed a group's subjects",
+    ),
+    (
+        "POST /api/picks/map/strips",
+        false,
+        false,
+        "bounded",
+        "every subject of the scope",
+        "Reading every subject's kinds",
+        "Read every subject's kinds",
+    ),
+];
+
 fn failed(e: impl std::fmt::Display) -> Reply {
     Reply::error(500, e.to_string())
 }

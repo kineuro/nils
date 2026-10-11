@@ -5475,23 +5475,11 @@ fn review_err(e: nils_registry::review::Error) -> Reply {
     }
 }
 
-fn capabilities(
-    doors: &Doors,
-    registry: &mut Registry,
-    caller: &Caller,
-    ask: &mut crate::ask_doors::AskState,
-) -> serde_json::Value {
-    let meta = registry.meta().clone();
-    let packs: Vec<serde_json::Value> = doors
-        .pack_dir
-        .as_ref()
-        .and_then(|dir| crate::packs_in(dir).ok())
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|p| nils_pack::load(&p, None).ok())
-        .map(|p| serde_json::json!({ "name": p.name, "version": p.version.to_string(), "contract": p.contract }))
-        .collect();
-    let doors_list: Vec<String> = [
+/// Every door the engine serves, as the capabilities list them; a door
+/// routed and not listed here is hidden from the desk (the test below reads
+/// the routes).
+pub(crate) fn doors_list() -> Vec<String> {
+    [
         "GET /api/capabilities",
         "GET /api/status",
         "GET /api/summary",
@@ -5563,6 +5551,8 @@ fn capabilities(
         "POST /api/places",
         "POST /api/places/explore",
         "PUT /api/places/{id}",
+        "GET /api/places/{id}/folders",
+        "GET /api/places/{id}/folders/{name}",
         "GET /api/places/{id}/originals",
         "POST /api/places/{id}/originals",
         "GET /api/backups",
@@ -5584,8 +5574,28 @@ fn capabilities(
     .chain(crate::linkage_doors::DOORS.iter())
     .chain(crate::campaigns::DOORS.iter())
     .chain(crate::ask_doors::DOORS.iter())
+    .chain(crate::main_scans::DOORS.iter())
     .map(|d| (*d).to_string())
-    .collect();
+    .collect()
+}
+
+fn capabilities(
+    doors: &Doors,
+    registry: &mut Registry,
+    caller: &Caller,
+    ask: &mut crate::ask_doors::AskState,
+) -> serde_json::Value {
+    let meta = registry.meta().clone();
+    let packs: Vec<serde_json::Value> = doors
+        .pack_dir
+        .as_ref()
+        .and_then(|dir| crate::packs_in(dir).ok())
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|p| nils_pack::load(&p, None).ok())
+        .map(|p| serde_json::json!({ "name": p.name, "version": p.version.to_string(), "contract": p.contract }))
+        .collect();
+    let doors_list = doors_list();
     serde_json::json!({
         "engine": { "name": "nils", "version": env!("CARGO_PKG_VERSION") },
         "contracts": {
@@ -6684,6 +6694,25 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
             "Changing a place",
             "Changed a place",
         ),
+        // Wave 7a: a root's folders, read a page at a time, and one folder
+        row(
+            "GET /api/places/{id}/folders",
+            false,
+            false,
+            "bounded",
+            "limit rows",
+            "Listing a root's folders",
+            "Listed a root's folders",
+        ),
+        row(
+            "GET /api/places/{id}/folders/{name}",
+            false,
+            false,
+            "bounded",
+            "one document",
+            "Looking at a folder",
+            "Looked at a folder",
+        ),
         row(
             "GET /api/places/{id}/originals",
             false,
@@ -7186,6 +7215,7 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
     .chain(
         crate::campaigns::POLICY
             .iter()
+            .chain(crate::main_scans::POLICY.iter())
             .map(|(door, writes, idem, cost, cap, now, then)| {
                 row(door, *writes, *idem, cost, cap, now, then)
             }),
@@ -7203,6 +7233,119 @@ fn not_held(registry: &mut Registry, id: i64) -> Result<(), Reply> {
         }
         Ok(None) => Ok(()),
         Err(e) => Err(Reply::error(500, e.to_string())),
+    }
+}
+
+#[cfg(test)]
+mod door_list_tests {
+    use super::{doors_list, policy};
+
+    /// The routes of the door match above, read from this file: each arm
+    /// `["api", ...] if get|post|put|delete`, a name or `_` read as any
+    /// segment and `name @ ("a" | "b")` as each of its words. An arm that
+    /// takes the rest of the path (`rest @ ..`) is left out: its doors are
+    /// listed one by one.
+    fn routes() -> Vec<(String, Vec<Option<String>>)> {
+        let mut out = Vec::new();
+        for line in include_str!("serve.rs").lines() {
+            let t = line.trim_start();
+            let Some(inner) = t.strip_prefix("[\"api\"") else {
+                continue;
+            };
+            let Some((pattern, guard)) = inner.split_once("] if ") else {
+                continue;
+            };
+            let method: String = guard
+                .chars()
+                .take_while(char::is_ascii_alphabetic)
+                .collect();
+            if !matches!(method.as_str(), "get" | "post" | "put" | "delete")
+                || pattern.contains("..")
+            {
+                continue;
+            }
+            let mut paths: Vec<Vec<Option<String>>> = vec![vec![Some("api".into())]];
+            for part in pattern.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+                let words: Vec<Option<String>> = if let Some(w) = part.strip_prefix('"') {
+                    vec![Some(w.trim_end_matches('"').to_string())]
+                } else if let Some((_, alts)) = part.split_once('@') {
+                    alts.trim()
+                        .trim_matches(|c| c == '(' || c == ')')
+                        .split('|')
+                        .map(|a| Some(a.trim().trim_matches('"').to_string()))
+                        .collect()
+                } else {
+                    vec![None]
+                };
+                paths = paths
+                    .iter()
+                    .flat_map(|p| {
+                        words.iter().map(move |w| {
+                            let mut p = p.clone();
+                            p.push(w.clone());
+                            p
+                        })
+                    })
+                    .collect();
+            }
+            for p in paths {
+                out.push((method.to_uppercase(), p));
+            }
+        }
+        out
+    }
+
+    fn listed(door: &str, method: &str, path: &[Option<String>]) -> bool {
+        let Some((m, p)) = door.split_once(' ') else {
+            return false;
+        };
+        let segs: Vec<&str> = p.trim_start_matches('/').split('/').collect();
+        m == method
+            && segs.len() == path.len()
+            && segs.iter().zip(path).all(|(s, w)| match w {
+                Some(w) => s == w,
+                None => s.starts_with('{') && s.ends_with('}'),
+            })
+    }
+
+    /// 2026-10-11: the Main scans doors were routed and granted and not
+    /// listed, so the desk hid the page on every install. Every door the
+    /// match routes is listed, and every listed door has its policy row.
+    #[test]
+    fn every_routed_door_is_listed_and_has_its_policy_row() {
+        let routes = routes();
+        assert!(routes.len() > 70, "the routes were not read: {routes:?}");
+        let doors = doors_list();
+        let missing: Vec<String> = routes
+            .iter()
+            .filter(|(m, p)| !doors.iter().any(|d| listed(d, m, p)))
+            .map(|(m, p)| {
+                let p: Vec<&str> = p.iter().map(|w| w.as_deref().unwrap_or("{}")).collect();
+                format!("{m} /{}", p.join("/"))
+            })
+            .collect();
+        assert!(missing.is_empty(), "routed and not listed: {missing:?}");
+        // listed before this test with no row of the policy table; a door
+        // added since has its row
+        const UNRULED: [&str; 7] = [
+            "POST /api/pipelines/{name}/preflight",
+            "GET /api/campaigns/{id}/items/{item}/pair",
+            "GET /api/campaigns/{id}/pair",
+            "GET /api/campaigns/{id}/pair/values",
+            "GET /api/campaigns/{id}/items/{item}/anchored",
+            "GET /api/campaigns/{id}/anchored",
+            "GET /api/campaigns/{id}/anchored/values",
+        ];
+        let rows = policy();
+        let unruled: Vec<&String> = doors
+            .iter()
+            .filter(|d| !UNRULED.contains(&d.as_str()))
+            .filter(|d| !rows.iter().any(|r| r["door"] == d.as_str()))
+            .collect();
+        assert!(unruled.is_empty(), "listed with no policy row: {unruled:?}");
+        for d in crate::main_scans::DOORS {
+            assert!(doors.iter().any(|x| x == d), "{d} is not listed");
+        }
     }
 }
 
