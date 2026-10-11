@@ -287,8 +287,8 @@ fn fixed_fields() -> Vec<Field> {
              provenance: &'static str,
              description: &str| {
         let (table, column): (&str, &str) = match (level, path) {
-            // Wave 7a: the name of a source place, through a stack's first
-            // digest and its source
+            // Wave 7a: the name of a source place, through the sources
+            // holding a file of a stack
             (_, "dataset") => (DATASET_TABLE, "name"),
             ("cohort", _) => ("cohort", path),
             ("subject", _) => ("subject", path),
@@ -390,7 +390,7 @@ fn fixed_fields() -> Vec<Field> {
             false,
             false,
             "registry",
-            "the datasets the subject's stacks came from, by name, or for a subject with no scan at all the datasets it was pseudonymised for (every file of it set aside, none a scan); null where neither is known; = and in ask whether one is among them",
+            "the datasets holding some of the subject's stacks, by name: a dataset is a folder of stacks and a subject is counted in it when some of its stacks are there (only a cohort has members); null for a subject with no stack in any; = and in ask whether one is among them",
         ),
         f(
             "subject",
@@ -510,7 +510,7 @@ fn fixed_fields() -> Vec<Field> {
             false,
             false,
             "registry",
-            "the datasets the session's stacks came from, by name; = and in ask whether one is among them",
+            "the datasets holding some of the session's stacks, by name; null where none does; = and in ask whether one is among them",
         ),
         f(
             "study",
@@ -610,7 +610,7 @@ fn fixed_fields() -> Vec<Field> {
             false,
             false,
             "registry",
-            "the dataset the stack came from, by name: the source place whose digest first read it",
+            "the datasets whose folder holds a file of the stack, by name: a stack with copies in two datasets is one stack in both; = and in ask whether one is among them",
         ),
         f(
             "stack",

@@ -447,7 +447,7 @@ pub fn describe(
     ];
     if reads_dataset(ask) {
         conventions.push(
-            "a stack is of the dataset whose digest first read it; a subject or a session is of every dataset one of its stacks is of, and a group by its dataset counts it under each; a subject with no scan at all, every file of it set aside, is of the dataset it was pseudonymised for, and its dataset is null, not known, where no pseudonymise run recorded it"
+            "datasets are folders that hold stacks: a stack is in every dataset whose folder holds a file of it, one stack however many copies; a subject or a session is counted in a dataset when some of its stacks are there, its dataset null where none is, and a group by its dataset counts it under each; only cohorts have members"
                 .to_string(),
         );
     }

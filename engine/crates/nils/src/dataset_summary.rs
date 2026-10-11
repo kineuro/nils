@@ -482,12 +482,20 @@ pub(crate) struct SetAside {
     pub(crate) count: i64,
 }
 
-/// The policy classes as a SQL list of their names.
-fn policy_reasons() -> String {
+/// The names of the policy classes, the reasons a read sets a file aside.
+fn policy_names() -> Vec<&'static str> {
     nils_dicom::QuarantineClass::ALL
         .into_iter()
         .filter(|c| c.is_policy_class())
-        .map(|c| format!("'{}'", c.name()))
+        .map(|c| c.name())
+        .collect()
+}
+
+/// The policy classes as a SQL list of their names.
+fn policy_reasons() -> String {
+    policy_names()
+        .into_iter()
+        .map(|n| format!("'{n}'"))
         .collect::<Vec<_>>()
         .join(", ")
 }
@@ -561,12 +569,10 @@ pub(crate) fn document(
     // the visits are none where nobody has built the session cache, and
     // a count of it where somebody has
     let (mut studies, mut stacks, mut sessions) = (0, 0, window.map(|_| 0));
-    // Nima, 2026-10-11: its subjects as every reader counts them
-    // (`nils_registry::dataset_subjects`), those with a scan its tree holds
-    // a file of and those it was pseudonymised for with no scan at all,
-    // every file of them set aside by the read
-    let members =
-        nils_registry::dataset_subjects::count(store, dataset.id, &ids).map_err(failed)?;
+    // Nima, 2026-10-12: a dataset holds stacks and files, never subjects;
+    // the subjects counted in it are those with a stack its tree holds a
+    // file of, as every reader counts them (`nils_registry::dataset_subjects`)
+    let subjects = nils_registry::dataset_subjects::count(store, &ids).map_err(failed)?;
     let (mut read, mut refused, mut reads, mut classified) = (0, 0, 0, 0);
     // record 55 (2026-10-10): the files read as their instance's own, the
     // copies of an instance another dataset read (`known`) or this one holds
@@ -581,6 +587,9 @@ pub(crate) fn document(
     // record 56 (2026-10-11): the files the read set aside by policy, which
     // ask nobody anything, by kind in plain words
     let mut set_aside: Vec<SetAside> = Vec::new();
+    // and the subjects with no stack in it its set-aside files are of, a
+    // fact about those files (2026-10-12)
+    let mut set_aside_no_scans = nils_registry::dataset_subjects::SetAside::default();
     let mut certainty = crate::certainty::Certainty::default();
     let mut passes = 0;
     let (mut kinds, mut regions) = (Vec::new(), Vec::new());
@@ -705,6 +714,13 @@ pub(crate) fn document(
         .map_err(failed)?;
         twice = (copies - known).max(0);
         set_aside = set_aside_of(store, &sources).map_err(failed)?;
+        set_aside_no_scans = nils_registry::dataset_subjects::set_aside_without_stacks(
+            store,
+            dataset.id,
+            &ids,
+            &policy_names(),
+        )
+        .map_err(failed)?;
         // the newest batch that refused a file a person may look at: none
         // set aside by policy, none held for its instance
         refused_batch = store
@@ -972,8 +988,7 @@ pub(crate) fn document(
         "detail": access.detail.name(),
         "state": state,
         "added_at": dataset.created_at,
-        "subjects": members.subjects,
-        "no_scans": members.no_scans,
+        "subjects": subjects,
         "sessions": sessions,
         "studies": studies,
         "scans": stacks,
@@ -1001,6 +1016,10 @@ pub(crate) fn document(
                 .iter()
                 .map(|k| json!({"kind": k.kind, "words": k.words, "count": k.count}))
                 .collect::<Vec<_>>(),
+            "set_aside_no_scans": {
+                "subjects": set_aside_no_scans.subjects,
+                "files": set_aside_no_scans.files,
+            },
             "held": held,
         },
         "pictures_place": working.map(|w| w.name),

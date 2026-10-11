@@ -2642,7 +2642,7 @@ fn plant_datasets(home: &TempDir, dir: &TempDir) -> Planted {
         dir.path(),
         serde_json::json!({"kind": "root"}),
     );
-    let mut batches = Vec::new();
+    let (mut batches, mut sources) = (Vec::new(), Vec::new());
     let mut small = 0;
     for name in ["study-big", "study-small"] {
         let tree = dir.path().join(name).join("derivatives/dcm-anon");
@@ -2696,6 +2696,7 @@ fn plant_datasets(home: &TempDir, dir: &TempDir) -> Planted {
             .int(0)
             .unwrap();
         batches.push(batch);
+        sources.push(source);
     }
     // the stacks a stack set sees, with their subject, session, T1w or not
     let seen = |store: &mut nils_registry::Store| -> Vec<(i64, i64, Option<i64>, i64, bool)> {
@@ -2758,6 +2759,13 @@ fn plant_datasets(home: &TempDir, dir: &TempDir) -> Planted {
                 &[],
             )
             .unwrap();
+    }
+    // each tree holds a file of its stacks, as a read records them (record
+    // 55): a dataset is a folder of stacks, and its stacks are the ones it
+    // holds a file of
+    for (source, ids) in [(sources[0], &big), (sources[1], &small_stacks)] {
+        let held: BTreeSet<i64> = ids.iter().copied().collect();
+        nils_registry::location::record(store, source, &held, "2026-10-09T08:00:00Z").unwrap();
     }
     let mut planted = Planted {
         t1w: BTreeMap::new(),
