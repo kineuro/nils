@@ -390,7 +390,7 @@ fn fixed_fields() -> Vec<Field> {
             false,
             false,
             "registry",
-            "the datasets the subject's stacks came from, by name; = and in ask whether one is among them",
+            "the datasets the subject's stacks came from, by name, or for a subject with no scan at all the datasets it was pseudonymised for (every file of it set aside, none a scan); null where neither is known; = and in ask whether one is among them",
         ),
         f(
             "subject",

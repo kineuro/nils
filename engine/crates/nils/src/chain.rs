@@ -52,50 +52,17 @@ pub(crate) fn parse_then(doc: &Value) -> Result<Vec<Vec<String>>, String> {
     Ok(out)
 }
 
-/// Record 55 H2: the subjects of a dataset, whose files a digest read from
-/// its pseudonymised tree: what a pick run for the dataset decides.
+/// Record 55 H2: the subjects of a dataset, what a pick run for the dataset
+/// decides and its main scans count. Nima, 2026-10-11: as every reader
+/// counts a dataset's subjects (`nils_registry::dataset_subjects`), those
+/// with a scan its tree holds a file of and those it was pseudonymised for
+/// with no scan at all.
 pub(crate) fn dataset_subjects(
     store: &mut Store,
     place: &Place,
 ) -> Result<std::collections::BTreeSet<i64>, nils_registry::store::Error> {
-    use nils_registry::schema::Type;
-    use nils_registry::store::Param;
-    let tree = place
-        .tree_path("anon")
-        .unwrap_or_else(|| std::path::PathBuf::from(&place.path));
-    let real = std::fs::canonicalize(&tree).unwrap_or(tree);
-    let sql = format!(
-        "SELECT id, root_canonical FROM {}",
-        store.qualified("source")
-    );
-    let sources: Vec<i64> = store
-        .query(&sql, &[])?
-        .iter()
-        .filter_map(|r| {
-            let root = r.text(1).ok()?;
-            std::path::Path::new(root)
-                .starts_with(&real)
-                .then(|| r.int(0).ok())
-                .flatten()
-        })
-        .collect();
-    let sql = format!(
-        "SELECT DISTINCT se.subject_id FROM {} sf \
-         JOIN {} i ON i.id = sf.instance_id \
-         JOIN {} se ON se.id = i.series_id \
-         WHERE sf.source_id = {} AND sf.status <> 'gone' AND se.subject_id IS NOT NULL",
-        store.qualified("source_file"),
-        store.qualified("instance"),
-        store.qualified("series"),
-        store.dialect().param(1, Type::Int)
-    );
-    let mut out = std::collections::BTreeSet::new();
-    for source in sources {
-        for r in store.query(&sql, &[Param::Int(source)])? {
-            out.insert(r.int(0)?);
-        }
-    }
-    Ok(out)
+    let sources = crate::sources::source_ids(store, place)?;
+    nils_registry::dataset_subjects::of(store, place.id, &sources)
 }
 
 /// Whether the pack of that name, in that directory, declares picks.

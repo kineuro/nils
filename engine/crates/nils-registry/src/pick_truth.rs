@@ -17,7 +17,9 @@
 //!   ([`crate::pick_rules::reading`]), the latest such version and the
 //!   persons' picks of the scope; else the pack's. Either way, of the
 //!   scope's subjects alone: a cohort's open members, a dataset's subjects
-//!   with a stack its tree holds a file of.
+//!   with a stack its tree holds a file of
+//!   ([`crate::dataset_subjects::scanned`]; a subject with no scan has no
+//!   pick).
 //! - **A reader about no scope**: each subject's own dataset's picks by the
 //!   same rule, else the pack's. A subject's dataset is one whose tree holds
 //!   a file of one of its stacks (record 55's duplicate policy: a dataset
@@ -258,6 +260,8 @@ impl Of {
                 };
                 // the scope's subjects: a cohort's open members, a
                 // dataset's subjects with a stack its tree holds a file of
+                // (a subject with no scan has no pick to read,
+                // `dataset_subjects`)
                 let members = match kind {
                     ScopeKind::Cohort => format!(
                         "{a}.subject_id IN (SELECT cm.subject_id FROM {} cm \
@@ -266,13 +270,8 @@ impl Of {
                     ),
                     ScopeKind::Dataset if sources.is_empty() => "1 = 0".to_string(),
                     ScopeKind::Dataset => format!(
-                        "{a}.subject_id IN (SELECT hse.subject_id FROM {} hss \
-                         JOIN {} hst ON hst.id = hss.stack_id JOIN {} hse ON hse.id = hst.series_id \
-                         WHERE hss.source_id IN ({}))",
-                        qualified(schema, "source_stack"),
-                        qualified(schema, "stack"),
-                        qualified(schema, "series"),
-                        list(sources)
+                        "{a}.subject_id IN ({})",
+                        crate::dataset_subjects::scanned(schema, sources)
                     ),
                 };
                 let read = match version {

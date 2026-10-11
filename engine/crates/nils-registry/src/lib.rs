@@ -24,6 +24,7 @@ pub mod campaign;
 pub mod check;
 pub mod clinical;
 pub mod cohort;
+pub mod dataset_subjects;
 pub mod day;
 pub mod derivative;
 pub mod dialect;

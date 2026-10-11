@@ -902,6 +902,10 @@ impl<'a> Builder<'a> {
     /// relation through each stack's first batch and that batch's source.
     /// The stacks rolled up are the ones a stack set sees: none the pack
     /// ruled out, and none of a sample sealed now where those are withheld.
+    /// Nima, 2026-10-11: a subject with no scan at all is of the datasets it
+    /// was pseudonymised for (`nils_registry::dataset_subjects`), and of none
+    /// where no pseudonymise run recorded it, so its dataset reads null: not
+    /// known, never a guess.
     fn dataset_column(&self, level: &str) -> Option<Term> {
         if !matches!(level, "stack" | "session" | "subject") {
             return None;
@@ -966,8 +970,35 @@ impl<'a> Builder<'a> {
                 sources.join(", ")
             ))
         };
+        if level == "subject" {
+            term = self.or_pseudonymised_for(term);
+        }
         term.members = level != "stack";
         Some(term)
+    }
+
+    /// A subject's datasets, or where its stacks name none and it has no
+    /// stack at all, the datasets it was pseudonymised for, in the order
+    /// [`Sql::name_list`] sorts names (byte by byte), so a subject's
+    /// list reads the same whichever way it was found.
+    fn or_pseudonymised_for(&self, scans: Term) -> Term {
+        let mut named: Vec<(i64, String)> = self
+            .ctx
+            .names
+            .datasets()
+            .into_iter()
+            .map(|d| (d.id, d.name))
+            .collect();
+        if named.is_empty() {
+            return scans;
+        }
+        named.sort_by(|a, b| a.1.cmp(&b.1));
+        let pseudonymised = nils_registry::dataset_subjects::unscanned_names(
+            self.ctx.schema.as_deref(),
+            "su.id",
+            &named,
+        );
+        Term::plain(format!("COALESCE({}, {pseudonymised})", scans.sql))
     }
 
     /// A run's measure of a unit (record 49 A3), `<number|text|run>:
