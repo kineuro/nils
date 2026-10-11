@@ -67,6 +67,25 @@ impl QuarantineClass {
     }
 }
 
+impl QuarantineClass {
+    /// The class written as `name`, if it is one.
+    pub fn from_name(name: &str) -> Option<QuarantineClass> {
+        QuarantineClass::ALL.into_iter().find(|c| c.name() == name)
+    }
+
+    /// True for the classes the batch's knobs decide: a file NILS read well
+    /// and does not take by policy (a screen capture, a report, another
+    /// modality). Record 56 (the rules decide, Review asks only what
+    /// matters): such a file is set aside and counted, and nobody is asked
+    /// about it; the other classes keep their review item.
+    pub fn is_policy_class(self) -> bool {
+        matches!(
+            self,
+            QuarantineClass::UnsupportedSopClass | QuarantineClass::UnsupportedModality
+        )
+    }
+}
+
 impl fmt::Display for QuarantineClass {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.name())
@@ -114,6 +133,46 @@ pub fn sop_class_kind(uid: &str) -> &'static str {
         r if r.starts_with("481.") => "radiotherapy",
         "30" | "30.1" => "parametric map",
         _ => "another image class",
+    }
+}
+
+/// What a set-aside file is in the words a person reads on the desk
+/// (record 56, 2026-10-11): a key that stays the same and the plural words,
+/// `("screen_capture", "screen captures")`. The one place a refused class
+/// and its UID become words a newcomer knows; the kind of
+/// [`set_aside_kind`] stays the report's and the review item's.
+pub fn set_aside_words(
+    class: QuarantineClass,
+    detail: Option<&str>,
+) -> (&'static str, &'static str) {
+    if class == QuarantineClass::UnsupportedSopClass
+        && detail == Some("1.2.840.10008.5.1.4.1.1.104.1")
+    {
+        return ("pdf", "PDFs");
+    }
+    match set_aside_kind(class, detail) {
+        "secondary capture" => ("screen_capture", "screen captures"),
+        "presentation state" => ("presentation_state", "presentation states"),
+        "structured report" => ("structured_report", "structured reports"),
+        "key object selection" => ("key_images", "key image notes"),
+        "raw data" => ("raw_data", "raw data"),
+        "registration" => ("spatial_registration", "spatial registrations"),
+        "fiducials" => ("fiducials", "fiducial marks"),
+        "segmentation" => ("segmentation", "segmentations"),
+        "encapsulated document" => ("document", "documents"),
+        "waveform" => ("waveform", "waveforms"),
+        "radiotherapy" => ("radiotherapy", "radiotherapy plans and doses"),
+        "parametric map" => ("parametric_map", "parametric maps"),
+        "another image class" => ("other_image", "other kinds of image"),
+        "another standard class" => ("other_object", "other DICOM objects"),
+        "a private class" => ("vendor_object", "vendor objects"),
+        "another modality" => ("other_modality", "other modalities"),
+        "not DICOM" => ("not_dicom", "not DICOM"),
+        "unreadable" => ("unreadable", "unreadable"),
+        "a broken header" => ("broken_header", "broken headers"),
+        "no identifier" => ("no_identifier", "no identifier"),
+        "no modality" => ("no_modality", "no modality"),
+        _ => ("other", "others"),
     }
 }
 
@@ -222,6 +281,62 @@ mod tests {
         assert_eq!(
             set_aside_kind(QuarantineClass::UnsupportedModality, Some("US")),
             "another modality"
+        );
+    }
+
+    #[test]
+    fn only_the_knobs_classes_are_policy_and_they_have_plain_words() {
+        let policy: Vec<_> = QuarantineClass::ALL
+            .into_iter()
+            .filter(|c| c.is_policy_class())
+            .collect();
+        assert_eq!(
+            policy,
+            [
+                QuarantineClass::UnsupportedSopClass,
+                QuarantineClass::UnsupportedModality
+            ]
+        );
+        // a policy class is never a reader's
+        assert!(policy.iter().all(|c| !c.is_reader_class()));
+        assert!(!QuarantineClass::MissingModality.is_policy_class());
+        for c in QuarantineClass::ALL {
+            assert_eq!(QuarantineClass::from_name(c.name()), Some(c));
+        }
+        assert_eq!(QuarantineClass::from_name("identity.unmapped"), None);
+        let words = |uid: &str| set_aside_words(QuarantineClass::UnsupportedSopClass, Some(uid));
+        assert_eq!(
+            words("1.2.840.10008.5.1.4.1.1.7"),
+            ("screen_capture", "screen captures")
+        );
+        assert_eq!(
+            words("1.2.840.10008.5.1.4.1.1.11.1"),
+            ("presentation_state", "presentation states")
+        );
+        assert_eq!(
+            words("1.2.840.10008.5.1.4.1.1.88.22"),
+            ("structured_report", "structured reports")
+        );
+        assert_eq!(
+            words("1.2.840.10008.5.1.4.1.1.66"),
+            ("raw_data", "raw data")
+        );
+        assert_eq!(
+            words("1.2.840.10008.5.1.4.1.1.66.1"),
+            ("spatial_registration", "spatial registrations")
+        );
+        assert_eq!(words("1.2.840.10008.5.1.4.1.1.104.1"), ("pdf", "PDFs"));
+        assert_eq!(
+            words("1.2.840.10008.5.1.4.1.1.104.2"),
+            ("document", "documents")
+        );
+        assert_eq!(
+            words("1.3.46.670589.11.0.0.12.2"),
+            ("vendor_object", "vendor objects")
+        );
+        assert_eq!(
+            set_aside_words(QuarantineClass::UnsupportedModality, Some("US")),
+            ("other_modality", "other modalities")
         );
     }
 
