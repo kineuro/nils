@@ -1010,6 +1010,29 @@ impl<'a> Builder<'a> {
             _ => None,
         };
         let (mu, ru, du) = (unit("nm")?, unit("mr")?, unit("dd")?);
+        // record 48, D1 of the move: a unit's measure is what a system said
+        // of the stacks it was given, so where a sealed sample's stacks are
+        // withheld, a session's or a subject's that holds one reads null,
+        // its run and its check too (a stack's own leaves with the stack,
+        // by the base's standing predicate)
+        let guard = match (self.ctx.withhold_sealed, level) {
+            (true, "session") => format!(
+                " AND NOT EXISTS (SELECT 1 FROM {} mcs JOIN {} mse ON mse.study_id = mcs.study_id \
+                 JOIN {} mst ON mst.series_id = mse.id JOIN {} mss ON mss.stack_id = mst.id \
+                 WHERE mcs.session_id = sc.id AND mse.subject_id = sc.subject_id \
+                 AND mss.unsealed_at IS NULL)",
+                self.q("session_cache_study"),
+                self.q("series"),
+                self.q("stack"),
+                self.q("sealed_stack")
+            ),
+            (true, "subject") => format!(
+                " AND NOT EXISTS (SELECT 1 FROM {} mss WHERE mss.subject_id = su.id \
+                 AND mss.unsealed_at IS NULL)",
+                self.q("sealed_stack")
+            ),
+            _ => String::new(),
+        };
         // the run a unit's values are read from: its newest run of the
         // pipeline's current version (the newest active one), else its
         // newest run of any version; every value, and the run field, come
@@ -1019,8 +1042,10 @@ impl<'a> Builder<'a> {
             self.q("pipeline"),
             quote(pipeline)
         );
+        // the guard rides on the run, which every value and the check read
+        // their row by
         let run = format!(
-            "(SELECT mr.run_id FROM {} mr WHERE mr.pipeline = {} AND mr.scope = {} AND {ru} \
+            "(SELECT mr.run_id FROM {} mr WHERE mr.pipeline = {} AND mr.scope = {} AND {ru}{guard} \
              ORDER BY CASE WHEN mr.pipeline_id = {current} THEN 1 ELSE 0 END DESC, mr.run_id DESC LIMIT 1)",
             self.q("measure"),
             quote(pipeline),

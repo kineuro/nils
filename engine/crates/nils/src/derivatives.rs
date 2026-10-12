@@ -804,6 +804,618 @@ pub(crate) fn file_of(store: &mut Store, d: &Derivative) -> Result<PathBuf, Refu
     }
 }
 
+// ------------------------------------------------------------ sealed means sealed
+
+/// The largest table the content door reads row by row to leave out the
+/// rows of a sealed stack (record 48); a larger one is decided whole, by
+/// what it was made from.
+pub(crate) const SPLIT_MAX: i64 = 256 * 1024 * 1024;
+
+/// Record 48, D1 of the move: what a derivative was made from, as the
+/// registry tells it ([`made_of`]).
+#[derive(Debug, Default)]
+pub(crate) struct MadeFrom {
+    /// The stacks it was made from.
+    pub(crate) stacks: Vec<i64>,
+    /// The subjects any of whose stacks it may have been made from, where
+    /// the registry keeps no finer word.
+    pub(crate) subjects: Vec<i64>,
+    /// For a run's own file, each unit of the run by its name with the
+    /// stacks it was given: a run's table names its rows by them.
+    pub(crate) units: Vec<(String, Vec<i64>)>,
+    /// False where what it was made from can no longer be told.
+    pub(crate) known: bool,
+}
+
+/// The unit folder a run's file of a subject or a session lies under:
+/// `sub-<s>`, and `ses-<t>` below it, as the bids units name their files.
+fn unit_folder(path: &str) -> Option<(String, Option<String>)> {
+    let segs: Vec<&str> = path.split('/').collect();
+    let i = segs
+        .iter()
+        .position(|s| s.starts_with("sub-") && !s.contains('_'))?;
+    let session = segs
+        .get(i + 1)
+        .filter(|s| s.starts_with("ses-"))
+        .map(|s| s.to_string());
+    Some((segs[i].to_string(), session))
+}
+
+/// Record 48, D1 of the move: what a derivative was made from, by its
+/// manifest. A stack's file is of its stack, and a mask of the scan its
+/// grid is on as well. A run's file of a subject or a session is of the
+/// stacks the run gave that unit (a stack unit its stack, a subject's or a
+/// session's the stacks the run's release placed in its folder), and,
+/// where those are gone, of any stack of its subject; a run's own file is
+/// of every unit's stacks, else of the list the run was frozen over. A file
+/// registered at the door is of its stack, its series' stacks, or any
+/// stack of its subject. Nothing is read of the run's folder, which its
+/// container could write.
+pub(crate) fn made_of(store: &mut Store, d: &Derivative) -> Result<MadeFrom, String> {
+    let mut m = MadeFrom {
+        known: true,
+        ..MadeFrom::default()
+    };
+    m.stacks.extend(d.stack_id);
+    m.stacks.extend(d.grid_stack_id);
+    match (d.scope.as_str(), d.run_id) {
+        ("stack" | "model", _) => {}
+        ("series", _) => {
+            if let Some(series) = d.series_id {
+                let sql = format!(
+                    "SELECT id FROM {} WHERE series_id = {}",
+                    store.qualified("stack"),
+                    store.dialect().param(1, nils_registry::schema::Type::Int)
+                );
+                for r in store
+                    .query(&sql, &[nils_registry::Param::Int(series)])
+                    .map_err(|e| e.to_string())?
+                {
+                    m.stacks.push(r.int(0).map_err(|e| e.to_string())?);
+                }
+            }
+        }
+        ("run", Some(run)) => {
+            let units = crate::pipelines::unit_stacks(store, run)?;
+            if units.is_empty() || units.iter().any(|(_, s)| s.is_empty()) {
+                let frozen = crate::pipelines::frozen_stacks(store, run)?;
+                m.known = !frozen.is_empty();
+                m.stacks.extend(frozen);
+            }
+            for (_, s) in &units {
+                m.stacks.extend(s.iter().copied());
+            }
+            m.units = units;
+        }
+        ("session" | "subject", Some(run)) => {
+            let names: Vec<String> = match unit_folder(&d.path) {
+                Some((subject, Some(session))) => vec![format!("{subject}_{session}"), subject],
+                Some((subject, None)) => vec![subject],
+                None => Vec::new(),
+            };
+            let units = if names.is_empty() {
+                Vec::new()
+            } else {
+                crate::pipelines::unit_stacks(store, run)?
+            };
+            let given = names.iter().find_map(|n| {
+                units
+                    .iter()
+                    .find(|(u, s)| u == n && !s.is_empty())
+                    .map(|(_, s)| s.clone())
+            });
+            match given {
+                Some(stacks) => m.stacks.extend(stacks),
+                None => m.subjects.extend(d.subject_id),
+            }
+        }
+        _ => m.subjects.extend(d.subject_id),
+    }
+    if m.stacks.is_empty() && m.subjects.is_empty() && d.scope != "model" {
+        m.known = false;
+    }
+    m.stacks.sort_unstable();
+    m.stacks.dedup();
+    Ok(m)
+}
+
+/// What of a derivative's content is not shown to a caller who does not
+/// read what a system said of a stack of a sample sealed now (record 48,
+/// D1 of the move), as [`withheld`] finds it.
+#[derive(Debug)]
+pub(crate) enum Withheld {
+    /// Nothing: the file as it was registered.
+    Nothing,
+    /// A table whose rows name their stacks, less the rows of a stack
+    /// sealed now (and, where it was made from one, the rows that name no
+    /// stack it can be told by): the bytes left, and how many rows went.
+    Rows { bytes: Vec<u8>, rows: usize },
+    /// The whole of it, and why.
+    Whole(String),
+}
+
+/// The sentence that ends every refusal of a sealed stack's derivative.
+const UNTIL_UNSEALED: &str = "what a system said of a stack of a sample sealed for certification is withheld until a certificate unseals it (record 48); a holder of sealed:see reads it, audited as sealed.read";
+
+/// What of derivative `d` is withheld from a caller who does not read
+/// sealed stacks. A stack's pictures (a pyramid) are the file, never an
+/// answer, and a model's artifact is no stack's, so neither is withheld,
+/// and nothing is while no sample is sealed. A stack's own file is all of
+/// it said of its stack. A table whose rows name their stacks (a run's
+/// table by its declared unit column, another by a column of stack ids)
+/// loses the rows of the stacks sealed now; anything else made from one is
+/// withheld whole, by what its manifest says it was made from.
+pub(crate) fn withheld(store: &mut Store, d: &Derivative) -> Result<Withheld, Reply> {
+    if matches!(d.kind.as_str(), "pyramid" | "model") || !crate::sealed::any(store)? {
+        return Ok(Withheld::Nothing);
+    }
+    let made = made_of(store, d).map_err(|e| Reply::error(500, e))?;
+    let (stacks, subjects) = crate::sealed::now_of(store, &made.stacks, &made.subjects)?;
+    let sealed = !stacks.is_empty() || !subjects.is_empty() || !made.known;
+    let own = d.scope == "stack" && d.stack_id.is_some_and(|s| stacks.contains(&s));
+    if !own
+        && d.kind == "table"
+        && d.bytes <= SPLIT_MAX
+        && let Some(split) = split_table(store, d, &made, sealed)?
+    {
+        return Ok(split);
+    }
+    if !sealed {
+        return Ok(Withheld::Nothing);
+    }
+    let whole = match (d.kind.as_str(), own) {
+        ("table", false) if d.bytes > SPLIT_MAX => {
+            ", and it is too large to be read a row at a time, so it is withheld whole"
+        }
+        ("table", false) => {
+            ", and its rows do not say which stack each is of, so it is withheld whole"
+        }
+        _ => "",
+    };
+    let why = if !made.known {
+        format!(
+            "what derivative {} was made from can no longer be told (its run keeps neither its units nor the list it was frozen over) while a sample is sealed, so it is withheld whole: {UNTIL_UNSEALED}",
+            d.id
+        )
+    } else if stacks.is_empty() {
+        format!(
+            "derivative {} is of a subject with a stack of a sample sealed for certification, and the registry does not say which of their stacks it was made from{whole}: {UNTIL_UNSEALED}",
+            d.id
+        )
+    } else {
+        format!(
+            "derivative {} was made from a stack of a sample sealed for certification{whole}: {UNTIL_UNSEALED}",
+            d.id
+        )
+    };
+    Ok(Withheld::Whole(why))
+}
+
+/// A table's format and the column that names each row's unit, as the run
+/// that wrote it declared them (record 49 A3); else its format by its media
+/// type or its name, with no unit column.
+fn table_shape(store: &mut Store, d: &Derivative) -> Option<(String, Option<String>)> {
+    if let Some((desc, id)) = output_of(store, d)
+        && let Some(t) = desc
+            .outputs
+            .iter()
+            .find(|o| o.id == id)
+            .and_then(|o| o.table.as_ref())
+    {
+        return Some((t.format.clone(), t.unit_column.clone()));
+    }
+    let media = d.media_type.to_ascii_lowercase();
+    let path = d.path.to_ascii_lowercase();
+    let format = if media.contains("csv") || path.ends_with(".csv") {
+        "csv"
+    } else if media.contains("tab-separated") || path.ends_with(".tsv") {
+        "tsv"
+    } else if media.contains("json") || path.ends_with(".json") {
+        "json"
+    } else {
+        return None;
+    };
+    Some((format.to_string(), None))
+}
+
+/// The column of `headers` a declared name is: the header written so, or
+/// the one whose folded form is the name's, as a table is read.
+fn column_named(headers: &[String], name: &str) -> Option<usize> {
+    headers
+        .iter()
+        .position(|h| h.trim() == name.trim())
+        .or_else(|| {
+            let folded = nils_pipeline::descriptor::fold(name);
+            headers
+                .iter()
+                .position(|h| nils_pipeline::descriptor::fold(h) == folded)
+        })
+}
+
+/// A column of stack ids: `stack_id`, `stack` or `stackid`, folded.
+fn stack_column(headers: &[String]) -> Option<usize> {
+    headers.iter().position(|h| {
+        matches!(
+            nils_pipeline::descriptor::fold(h).as_str(),
+            "stack_id" | "stack" | "stackid"
+        )
+    })
+}
+
+/// How a table's rows are written back, given which of them are kept.
+type Rebuild = Box<dyn Fn(&[bool]) -> Vec<u8>>;
+
+/// A table read for its rows: the text that names each row's stack (none
+/// where its cell is empty), and how the rows kept are written back.
+struct TableRows {
+    keys: Vec<Option<String>>,
+    /// One JSON object, which is one row: withholding it is withholding
+    /// the whole.
+    single: bool,
+    rebuild: Rebuild,
+}
+
+/// The rows of a CSV or TSV table, each by its own bytes, so a row kept
+/// is written back exactly as it was; none where it does not read, or no
+/// column names its rows.
+fn delimited_rows(bytes: &[u8], delimiter: u8, unit_column: Option<&str>) -> Option<TableRows> {
+    let mut reader = csv::ReaderBuilder::new()
+        .delimiter(delimiter)
+        .flexible(true)
+        .has_headers(false)
+        .from_reader(bytes);
+    let mut record = csv::ByteRecord::new();
+    let mut head_end: Option<usize> = None;
+    let mut column = None;
+    let mut spans: Vec<std::ops::Range<usize>> = Vec::new();
+    let mut keys = Vec::new();
+    // the reader stops between the CR and the LF of a CRLF: the LF is the
+    // record's it ends, so a row left out takes its own line end with it
+    let at = |p: u64| {
+        let p = p as usize;
+        if p > 0 && p < bytes.len() && bytes[p] == b'\n' && bytes[p - 1] == b'\r' {
+            p + 1
+        } else {
+            p
+        }
+    };
+    loop {
+        let start = at(reader.position().byte());
+        if !reader.read_byte_record(&mut record).ok()? {
+            break;
+        }
+        let end = at(reader.position().byte());
+        let Some(at) = column else {
+            let names: Vec<String> = record
+                .iter()
+                .map(|f| String::from_utf8_lossy(f).trim().to_string())
+                .collect();
+            column = Some(match unit_column {
+                Some(u) => column_named(&names, u)?,
+                None => stack_column(&names)?,
+            });
+            head_end = Some(end);
+            continue;
+        };
+        keys.push(
+            record
+                .get(at)
+                .map(|f| String::from_utf8_lossy(f).trim().to_string())
+                .filter(|t| !t.is_empty()),
+        );
+        spans.push(start..end);
+    }
+    let head_end = head_end?;
+    let tail = spans.last().map_or(head_end, |s| s.end);
+    let bytes = bytes.to_vec();
+    Some(TableRows {
+        keys,
+        single: false,
+        rebuild: Box::new(move |kept| {
+            let mut out = bytes[..head_end].to_vec();
+            for (span, keep) in spans.iter().zip(kept) {
+                if *keep {
+                    out.extend_from_slice(&bytes[span.clone()]);
+                }
+            }
+            out.extend_from_slice(&bytes[tail..]);
+            out
+        }),
+    })
+}
+
+/// The rows of a JSON table: a list of objects, each a row, written back
+/// as a list, or one object, which is one row; none where it does not
+/// read, or no row has a column that names it.
+fn json_rows(bytes: &[u8], unit_column: Option<&str>) -> Option<TableRows> {
+    let doc: Value = serde_json::from_slice(bytes).ok()?;
+    let key_of = |o: &serde_json::Map<String, Value>| -> Option<Option<String>> {
+        let names: Vec<String> = o.keys().cloned().collect();
+        let at = match unit_column {
+            Some(u) => column_named(&names, u),
+            None => stack_column(&names),
+        }?;
+        Some(match &o[&names[at]] {
+            Value::String(s) => Some(s.trim().to_string()).filter(|t| !t.is_empty()),
+            Value::Number(n) => Some(n.to_string()),
+            _ => None,
+        })
+    };
+    let pretty = bytes.contains(&b'\n');
+    let newline = bytes.ends_with(b"\n");
+    match doc {
+        Value::Object(o) => {
+            let key = key_of(&o)?;
+            Some(TableRows {
+                keys: vec![key],
+                single: true,
+                rebuild: Box::new(|_| Vec::new()),
+            })
+        }
+        Value::Array(items) => {
+            let mut keys = Vec::with_capacity(items.len());
+            let mut named = items.is_empty();
+            for item in &items {
+                let key = item.as_object().and_then(key_of);
+                named |= key.is_some();
+                keys.push(key.flatten());
+            }
+            if !named {
+                return None;
+            }
+            Some(TableRows {
+                keys,
+                single: false,
+                rebuild: Box::new(move |kept| {
+                    let left: Vec<&Value> = items
+                        .iter()
+                        .zip(kept)
+                        .filter(|(_, k)| **k)
+                        .map(|(v, _)| v)
+                        .collect();
+                    let mut out = if pretty {
+                        serde_json::to_vec_pretty(&left)
+                    } else {
+                        serde_json::to_vec(&left)
+                    }
+                    .unwrap_or_default();
+                    if newline {
+                        out.push(b'\n');
+                    }
+                    out
+                }),
+            })
+        }
+        _ => None,
+    }
+}
+
+/// The stack a cell of stack ids names: `12`, `12.0` or `stack-12`.
+fn stack_named(text: &str) -> Option<i64> {
+    let t = nils_pipeline::results::normalise(text);
+    let id = t.strip_prefix("stack-").unwrap_or(&t);
+    id.parse::<i64>().ok().or_else(|| {
+        id.parse::<f64>()
+            .ok()
+            .filter(|f| f.is_finite() && f.fract() == 0.0)
+            .map(|f| f as i64)
+    })
+}
+
+/// A table split by its rows' stacks: the rows naming a stack sealed now
+/// go, and, where the table was made from one (`sealed`), so do the rows
+/// that name no stack it can be told by. None where its rows do not name
+/// their stacks, which leaves it to be decided whole.
+fn split_table(
+    store: &mut Store,
+    d: &Derivative,
+    made: &MadeFrom,
+    sealed: bool,
+) -> Result<Option<Withheld>, Reply> {
+    let Some((format, unit_column)) = table_shape(store, d) else {
+        return Ok(None);
+    };
+    let file = file_of(store, d).map_err(|(status, m)| Reply::error(status, m))?;
+    let bytes = std::fs::read(&file).map_err(|e| {
+        Reply::error(
+            500,
+            format!("the file of derivative {} could not be read: {e}", d.id),
+        )
+    })?;
+    let rows = match format.as_str() {
+        "csv" => delimited_rows(&bytes, b',', unit_column.as_deref()),
+        "tsv" => delimited_rows(&bytes, b'\t', unit_column.as_deref()),
+        "json" => json_rows(&bytes, unit_column.as_deref()),
+        _ => None,
+    };
+    let Some(rows) = rows else {
+        return Ok(None);
+    };
+    // each row's stacks: its unit's, for a run's table, else its own
+    let stacks_of: Vec<Option<Vec<i64>>> = rows
+        .keys
+        .iter()
+        .map(|k| {
+            let k = k.as_deref()?;
+            if unit_column.is_some() {
+                let name =
+                    crate::measures::unit_name_of(k, made.units.iter().map(|(u, _)| u.as_str()))?;
+                made.units
+                    .iter()
+                    .find(|(u, _)| u == name)
+                    .map(|(_, s)| s.clone())
+                    .filter(|s| !s.is_empty())
+            } else {
+                stack_named(k).map(|s| vec![s])
+            }
+        })
+        .collect();
+    let named: Vec<i64> = stacks_of.iter().flatten().flatten().copied().collect();
+    let now = crate::sealed::now(store, &named)?;
+    let kept: Vec<bool> = stacks_of
+        .iter()
+        .map(|s| match s {
+            Some(stacks) => !stacks.iter().any(|s| now.contains(s)),
+            None => !sealed,
+        })
+        .collect();
+    let gone = kept.iter().filter(|k| !**k).count();
+    if gone == 0 {
+        return Ok(Some(Withheld::Nothing));
+    }
+    if rows.single {
+        return Ok(Some(Withheld::Whole(format!(
+            "derivative {} is one row, of a stack of a sample sealed for certification: {UNTIL_UNSEALED}",
+            d.id
+        ))));
+    }
+    Ok(Some(Withheld::Rows {
+        bytes: (rows.rebuild)(&kept),
+        rows: gone,
+    }))
+}
+
+/// How long a result's parts and layer doors keep what [`withheld`] said of
+/// it: a viewer asks for many tiles of one layer, and each would read the
+/// run's units again.
+const WITHHELD_KEPT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// What [`withheld`] said of a result lately, by its id: when, and the
+/// refusal where it is withheld whole.
+type Kept = std::collections::HashMap<i64, (std::time::Instant, Option<String>)>;
+
+static WITHHELD_LATELY: std::sync::LazyLock<std::sync::Mutex<Kept>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(Kept::new()));
+
+/// Why a result is withheld whole from a caller without sealed:see, or
+/// none, as [`withheld`] says and keeps for [`WITHHELD_KEPT`]; a result is
+/// no table, so it is withheld whole or not at all.
+fn withheld_whole(store: &mut Store, d: &Derivative) -> Result<Option<String>, Reply> {
+    {
+        let kept = WITHHELD_LATELY.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((at, why)) = kept.get(&d.id)
+            && at.elapsed() < WITHHELD_KEPT
+        {
+            return Ok(why.clone());
+        }
+    }
+    let why = match withheld(store, d)? {
+        Withheld::Whole(why) => Some(why),
+        Withheld::Nothing | Withheld::Rows { .. } => None,
+    };
+    let mut kept = WITHHELD_LATELY.lock().unwrap_or_else(|e| e.into_inner());
+    if kept.len() >= 4096 {
+        kept.retain(|_, (at, _)| at.elapsed() < WITHHELD_KEPT);
+    }
+    kept.insert(d.id, (std::time::Instant::now(), why.clone()));
+    Ok(why)
+}
+
+/// Record 48, D1 of the move: a derivative's row as a caller who does not
+/// read sealed stacks reads it. Where its content is withheld whole, what a
+/// system found in it and what a person checked of it go: each part set's
+/// `count` and `note` (its key, words, kind and labels are its pipeline's,
+/// declared before anything ran) and the check (`check`, `check_reasons`,
+/// `check_decision_id`, `checked_at`), and `sealed` says so. The file's own
+/// facts stay: what it is, of what, where, its bytes, digest and grid.
+/// Answers whether the row was shaped.
+pub(crate) fn shape_sealed(
+    store: &mut Store,
+    d: &Derivative,
+    v: &mut Value,
+) -> Result<bool, Reply> {
+    if d.part_sets.is_null() && d.check_status.is_none() && d.check_decision_id.is_none() {
+        return Ok(false);
+    }
+    if withheld_whole(store, d)?.is_none() {
+        return Ok(false);
+    }
+    if let Some(sets) = v["part_sets"].as_array_mut() {
+        for set in sets.iter_mut().filter_map(Value::as_object_mut) {
+            set.remove("count");
+            set.remove("note");
+        }
+    }
+    for key in ["check", "check_reasons", "check_decision_id", "checked_at"] {
+        v[key] = Value::Null;
+    }
+    v["sealed"] = json!(true);
+    Ok(true)
+}
+
+/// [`shape_sealed`] at the keyboard, which withholds the same unless
+/// `--unsealed-access` says why (or the caller that queued the job held
+/// sealed:see).
+fn keyboard_shape(store: &mut Store, d: &Derivative, v: &mut Value) -> Result<bool, crate::Exit> {
+    if crate::sealed::keyboard_reads() {
+        return Ok(false);
+    }
+    shape_sealed(store, d, v).map_err(|r| {
+        crate::fail(
+            r.body["error"]
+                .as_str()
+                .unwrap_or("the seal could not be read")
+                .to_string(),
+        )
+    })
+}
+
+/// What a command at the keyboard says in place of what a result made from
+/// a sealed stack holds.
+const KEYBOARD_WITHHELD: &str = "what it holds is withheld, since it was made from a stack of a sample sealed for certification (record 48); pass --unsealed-access REASON to read it";
+
+/// Whether the keyboard withholds what result `id` holds (its parts' counts,
+/// its layer's voxels): one made from a stack of a sample sealed now, unless
+/// `--unsealed-access` says why. The work is done all the same.
+fn keyboard_withholds(store: &mut Store, id: i64) -> Result<bool, crate::Exit> {
+    if crate::sealed::keyboard_reads() {
+        return Ok(false);
+    }
+    let Some(d) = derivative::get(store, id).map_err(|e| crate::fail(e.to_string()))? else {
+        return Ok(false);
+    };
+    withheld_whole(store, &d).map(|w| w.is_some()).map_err(|r| {
+        crate::fail(
+            r.body["error"]
+                .as_str()
+                .unwrap_or("the seal could not be read")
+                .to_string(),
+        )
+    })
+}
+
+/// Record 48, D1 of the move: the `sealed.read` row of a caller holding
+/// sealed:see whom a door showed what it withholds from everyone else.
+fn audit_sealed(
+    registry: &mut Registry,
+    caller: &Caller,
+    door: &str,
+    d: &Derivative,
+    held: &Withheld,
+) -> Result<(), Reply> {
+    let (what, rows) = match held {
+        Withheld::Nothing => return Ok(()),
+        Withheld::Rows { rows, .. } => ("rows", Some(*rows)),
+        Withheld::Whole(_) => ("whole", None),
+    };
+    nils_registry::audit::record(
+        registry,
+        &nils_registry::audit::Entry {
+            principal: &caller.principal,
+            action: nils_registry::audit::Action::SealedRead,
+            scope: json!({
+                "door": door, "derivative": d.id, "kind": d.kind, "withheld": what,
+                "rows": rows,
+            }),
+            policy: None,
+            job_id: None,
+            details: Some(json!({"grant": crate::grants::UNSEALED})),
+        },
+    )
+    .map(|_| ())
+    .map_err(|e| Reply::error(500, e.to_string()))
+}
+
 fn int_of(
     query: &std::collections::HashMap<String, String>,
     key: &str,
@@ -877,7 +1489,11 @@ pub(crate) fn upload(
     };
     let d = register(registry, &ask, request.as_reader())
         .map_err(|(status, m)| Reply::error(status, m))?;
-    Ok(Reply::created(doc(registry.store(), &d)))
+    let mut v = doc(registry.store(), &d);
+    if !crate::sealed::reads(&caller.access) {
+        shape_sealed(registry.store(), &d, &mut v)?;
+    }
+    Ok(Reply::created(v))
 }
 
 /// The reading doors: the listing, one derivative, and its bytes.
@@ -961,7 +1577,7 @@ pub(crate) fn route(
                     );
                 }
             }
-            let docs: Vec<Value> = rows
+            let mut docs: Vec<Value> = rows
                 .iter()
                 .map(|d| {
                     let (name, shared) = places
@@ -972,6 +1588,23 @@ pub(crate) fn route(
                     doc_in(d, name, shared)
                 })
                 .collect();
+            // record 48, D1 of the move: a result made from a sealed stack
+            // keeps its file's facts and loses its parts' counts and its
+            // check; nor is it listed by a check's status, which is a
+            // person's word on what a system said of the stack
+            if !crate::sealed::reads(&caller.access) {
+                let mut shaped = Vec::with_capacity(docs.len());
+                for (d, v) in rows.iter().zip(docs.iter_mut()) {
+                    shaped.push(shape_sealed(store, d, v)?);
+                }
+                if check.is_some() {
+                    let mut i = 0;
+                    docs.retain(|_| {
+                        i += 1;
+                        !shaped[i - 1]
+                    });
+                }
+            }
             Ok(Reply::ok(json!({
                 "derivatives": docs,
                 "capability": capability(store),
@@ -979,17 +1612,46 @@ pub(crate) fn route(
         })(),
         ["api", "derivatives", id] => (|| {
             let d = one(registry, id_of(id)?)?;
-            Ok(Reply::ok(doc(registry.store(), &d)))
+            let mut v = doc(registry.store(), &d);
+            if !crate::sealed::reads(&caller.access) {
+                shape_sealed(registry.store(), &d, &mut v)?;
+            }
+            Ok(Reply::ok(v))
         })(),
         ["api", "derivatives", id, "content"] => (|| {
             let d = one(registry, id_of(id)?)?;
             let path =
                 file_of(registry.store(), &d).map_err(|(status, m)| Reply::error(status, m))?;
+            // record 48, D1 of the move: what a system said of a stack of a
+            // sample sealed now is withheld from every caller but a holder
+            // of sealed:see, whose read of it is audited as sealed.read
+            let reads = crate::sealed::reads(&caller.access);
+            let held = withheld(registry.store(), &d)?;
+            if !reads && let Withheld::Whole(why) = &held {
+                let mut r = Reply::error(403, why.clone());
+                r.body["sealed"] = json!(true);
+                return Err(r);
+            }
+            let door = "GET /api/derivatives/{id}/content";
             // record 43 S3: the second transport, a path on a volume the
             // caller shares with the engine, gated and audited as the bytes
             match query.get("transport").map(String::as_str) {
                 None | Some("door") => {}
                 Some("share") => {
+                    // a shared path reads the whole file, so a table whose
+                    // rows of a sealed stack are left out comes by the door
+                    if !reads && let Withheld::Rows { rows, .. } = &held {
+                        let mut r = Reply::error(
+                            403,
+                            format!(
+                                "{rows} row(s) of derivative {} name a stack of a sample sealed for certification and are withheld, and a shared path reads the whole file; the rest of it comes by the door (transport=door): {UNTIL_UNSEALED}",
+                                d.id
+                            ),
+                        );
+                        r.body["sealed"] = json!(true);
+                        r.body["withheld_sealed"] = json!(rows);
+                        return Err(r);
+                    }
                     let p = place::show(registry.store(), d.place_id)
                         .map_err(|e| Reply::error(500, e.to_string()))?
                         .ok_or_else(|| {
@@ -1020,6 +1682,9 @@ pub(crate) fn route(
                         },
                     )
                     .map_err(|e| Reply::error(500, e.to_string()))?;
+                    if reads {
+                        audit_sealed(registry, caller, door, &d, &held)?;
+                    }
                     return Ok(Reply::ok(json!({
                         "derivative": d.id, "transport": "share", "path": shared,
                         "place": p.name, "bytes": d.bytes, "sha256": d.sha256,
@@ -1033,6 +1698,10 @@ pub(crate) fn route(
                     ));
                 }
             }
+            let left_out = match &held {
+                Withheld::Rows { rows, .. } if !reads => Some(*rows),
+                _ => None,
+            };
             nils_registry::audit::record(
                 registry,
                 &nils_registry::audit::Entry {
@@ -1044,19 +1713,40 @@ pub(crate) fn route(
                     }),
                     policy: None,
                     job_id: None,
-                    details: None,
+                    details: left_out.map(|n| json!({"withheld_sealed": n})),
                 },
             )
             .map_err(|e| Reply::error(500, e.to_string()))?;
-            Ok(Reply::file(
-                &d.media_type,
-                path,
-                vec![
-                    ("X-Nils-Sha256".to_string(), d.sha256.clone()),
-                    ("X-Nils-Derivative".to_string(), d.id.to_string()),
-                    ("Cache-Control".to_string(), "private, no-store".to_string()),
-                ],
-            ))
+            if reads {
+                audit_sealed(registry, caller, door, &d, &held)?;
+            }
+            match held {
+                // a table less its rows of a sealed stack: the bytes served,
+                // their own digest, and how many rows went, never which
+                Withheld::Rows { bytes, rows } if !reads => {
+                    let sha =
+                        hex::encode(ring::digest::digest(&ring::digest::SHA256, &bytes).as_ref());
+                    Ok(Reply::raw(
+                        &d.media_type,
+                        bytes,
+                        vec![
+                            ("X-Nils-Sha256".to_string(), sha),
+                            ("X-Nils-Derivative".to_string(), d.id.to_string()),
+                            ("X-Nils-Withheld-Sealed".to_string(), rows.to_string()),
+                            ("Cache-Control".to_string(), "private, no-store".to_string()),
+                        ],
+                    ))
+                }
+                _ => Ok(Reply::file(
+                    &d.media_type,
+                    path,
+                    vec![
+                        ("X-Nils-Sha256".to_string(), d.sha256.clone()),
+                        ("X-Nils-Derivative".to_string(), d.id.to_string()),
+                        ("Cache-Control".to_string(), "private, no-store".to_string()),
+                    ],
+                )),
+            }
         })(),
         // record 55 H3, job type 3
         ["api", "derivatives", id, "parts"] => (|| {
@@ -1082,6 +1772,10 @@ pub(crate) fn route(
 /// first: to a caller without pipelines:see a result that is not there,
 /// one that is not a mask and one they do not rate are one answer, 404, so
 /// the door says nothing of what it holds (the review of E1, item 16).
+/// Record 48, D1 of the move: a result made from a stack of a sample sealed
+/// now is what a system said of it, and pipelines:see alone does not read
+/// it (403, saying why); sealed:see does, and so does a rater of a campaign
+/// that holds it, which reads its results as a check is made to.
 fn reader_of(
     registry: &mut Registry,
     caller: &Caller,
@@ -1101,6 +1795,18 @@ fn reader_of(
                     nils_registry::a_or_an(&d.kind)
                 ),
             ));
+        }
+        if !crate::sealed::reads(&caller.access)
+            && let Some(why) = withheld_whole(registry.store(), &d)?
+        {
+            return match crate::campaigns::results_through(registry.store(), caller, d.id, stack)? {
+                Some(c) => Ok((d, Some(c))),
+                None => {
+                    let mut r = Reply::error(403, why);
+                    r.body["sealed"] = json!(true);
+                    Err(r)
+                }
+            };
         }
         return Ok((d, None));
     }
@@ -1702,7 +2408,9 @@ pub(crate) fn command(
                 }
             })?;
             if json {
-                return print(&doc(registry.store(), &d));
+                let mut v = doc(registry.store(), &d);
+                keyboard_shape(registry.store(), &d, &mut v)?;
+                return print(&v);
             }
             println!(
                 "derivative {}: {} of {} {}, {} bytes, sha256 {}",
@@ -1742,8 +2450,21 @@ pub(crate) fn command(
             )
             .map_err(|e| crate::usage(e.to_string()))?;
             let store = registry.store();
+            // record 48, D1 of the move: as the listing door, a result made
+            // from a sealed stack loses its parts' counts and its check, and
+            // is not listed by a check's status
+            let mut rows_left = Vec::with_capacity(rows.len());
+            let mut docs: Vec<Value> = Vec::with_capacity(rows.len());
+            for d in rows {
+                let mut v = doc(store, &d);
+                if keyboard_shape(store, &d, &mut v)? && check.is_some() {
+                    continue;
+                }
+                docs.push(v);
+                rows_left.push(d);
+            }
+            let rows = rows_left;
             if json {
-                let docs: Vec<Value> = rows.iter().map(|d| doc(store, d)).collect();
                 return print(&json!(docs));
             }
             println!(
@@ -1776,7 +2497,8 @@ pub(crate) fn command(
             let d = derivative::get(registry.store(), id)
                 .map_err(|e| crate::fail(e.to_string()))?
                 .ok_or_else(|| crate::usage(format!("no derivative {id}")))?;
-            let v = doc(registry.store(), &d);
+            let mut v = doc(registry.store(), &d);
+            let sealed = keyboard_shape(registry.store(), &d, &mut v)?;
             if json {
                 return print(&v);
             }
@@ -1833,7 +2555,11 @@ pub(crate) fn command(
                         .unwrap_or_default()
                 );
             }
-            if let Some(c) = &d.check_status {
+            if sealed {
+                println!(
+                    "  sealed           made from a stack of a sample sealed for certification: its parts' counts and its check are withheld (record 48); pass --unsealed-access REASON to read them"
+                );
+            } else if let Some(c) = &d.check_status {
                 println!("  check            {c}");
             }
             Ok(())
@@ -1895,6 +2621,13 @@ pub(crate) fn command(
                         continue;
                     }
                 };
+                if keyboard_withholds(registry.store(), id)? {
+                    if !json {
+                        println!("result {id}: read; {KEYBOARD_WITHHELD}");
+                    }
+                    done.push(json!({"derivative": id, "withheld_sealed": true}));
+                    continue;
+                }
                 if !json {
                     println!(
                         "result {id}: grid {}{}, {}",
@@ -1946,6 +2679,12 @@ pub(crate) fn command(
             let (mut built, mut failed) = (0usize, 0usize);
             for (d, stack) in pairs {
                 match build_layers(&mut registry, d, stack, force, workers) {
+                    Ok(_) if keyboard_withholds(registry.store(), d)? => {
+                        built += 1;
+                        done.push(
+                            json!({"derivative": d, "stack": stack, "withheld_sealed": true}),
+                        );
+                    }
                     Ok(v) => {
                         built += 1;
                         done.push(v);
@@ -1994,6 +2733,15 @@ pub(crate) fn command(
                         crate::usage(m)
                     }
                 })?;
+            if keyboard_withholds(registry.store(), id)? {
+                if json {
+                    return print(
+                        &json!({"derivative": id, "stack": stack, "withheld_sealed": true}),
+                    );
+                }
+                println!("result {id} on stack {stack}: built; {KEYBOARD_WITHHELD}");
+                return Ok(());
+            }
             if json {
                 return print(&built);
             }
@@ -2178,6 +2926,72 @@ pub(crate) fn build_layers(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Record 48: a table's rows are found with what names their stacks,
+    /// and a row kept is written back byte for byte as it was, a quoted
+    /// line break, a blank line and CRLF endings among them.
+    #[test]
+    fn a_table_s_rows_are_written_back_as_they_were_less_the_ones_left_out() {
+        let csv = b"\xef\xbb\xbfunit,note\r\nstack-3,\"two\r\nlines\"\r\n\r\nstack-4,plain\r\nstack-5,last";
+        let rows = delimited_rows(csv, b',', Some("unit")).unwrap();
+        assert_eq!(
+            rows.keys,
+            [
+                Some("stack-3".into()),
+                Some("stack-4".into()),
+                Some("stack-5".into())
+            ]
+        );
+        assert_eq!((rows.rebuild)(&[true, true, true]), csv.to_vec());
+        assert_eq!(
+            (rows.rebuild)(&[true, false, true]),
+            b"\xef\xbb\xbfunit,note\r\nstack-3,\"two\r\nlines\"\r\nstack-5,last".to_vec()
+        );
+        assert_eq!(
+            (rows.rebuild)(&[false, true, false]),
+            b"\xef\xbb\xbfunit,note\r\n\r\nstack-4,plain\r\n".to_vec()
+        );
+        // a column of stack ids, folded; none is no way to split
+        let tsv = b"Stack ID\tvolume\n12\t1.5\n\t2\n13\t3\n";
+        let rows = delimited_rows(tsv, b'\t', None).unwrap();
+        assert_eq!(rows.keys, [Some("12".into()), None, Some("13".into())]);
+        assert_eq!(
+            (rows.rebuild)(&[true, true, false]),
+            b"Stack ID\tvolume\n12\t1.5\n\t2\n".to_vec()
+        );
+        assert!(delimited_rows(b"subject\tvolume\n1\t2\n", b'\t', None).is_none());
+        assert!(delimited_rows(b"stack,volume\n1,2\n", b',', Some("unit")).is_none());
+        // JSON: a list of objects is rows, one object one row
+        let json = br#"[{"stack_id": 7, "v": 1.25}, {"stack_id": "stack-8", "v": 2}, {"v": 3}]"#;
+        let rows = json_rows(json, None).unwrap();
+        assert!(!rows.single);
+        assert_eq!(rows.keys, [Some("7".into()), Some("stack-8".into()), None]);
+        let kept: Value = serde_json::from_slice(&(rows.rebuild)(&[false, true, true])).unwrap();
+        assert_eq!(kept, json!([{"stack_id": "stack-8", "v": 2}, {"v": 3}]));
+        let one = json_rows(br#"{"stack": 9, "v": 1}"#, None).unwrap();
+        assert!(one.single);
+        assert_eq!(one.keys, [Some("9".into())]);
+        assert!(json_rows(br#"{"score": 1}"#, None).is_none());
+        assert!(json_rows(b"not json", None).is_none());
+        for (text, id) in [
+            ("12", Some(12)),
+            ("12.0", Some(12)),
+            ("stack-12", Some(12)),
+            ("sub-1", None),
+            ("1.5", None),
+        ] {
+            assert_eq!(stack_named(text), id, "{text}");
+        }
+        assert_eq!(
+            unit_folder("derivatives/p/3/sub-01_ses-a/sub-01/ses-a/anat/x.json"),
+            Some(("sub-01".into(), Some("ses-a".into())))
+        );
+        assert_eq!(
+            unit_folder("derivatives/p/3/sub-01/x.json"),
+            Some(("sub-01".into(), None))
+        );
+        assert_eq!(unit_folder("derivatives/p/3/scores.csv"), None);
+    }
 
     #[test]
     fn only_a_plain_extension_of_a_name_is_kept() {

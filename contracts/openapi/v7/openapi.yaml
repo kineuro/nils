@@ -278,6 +278,26 @@
 # else the pack's. The map doors' saved side is those picks. The ask's
 # `picked` takes `{dataset: NAME}` or `{cohort: NAME}`, and an ask that reads
 # picks is never answered from the cache. No door's shape changes.
+# Added in place, additively, on 2026-10-12 by record 48 (sealed means
+# sealed at the derivative doors). What a pipeline or a person made of a
+# stack of a sample sealed now is withheld from every caller but a holder
+# of sealed:see, as everything else a system said of it is. GET
+# /api/derivatives/{id}/content answers a table whose rows name their
+# stacks (a run's table by its declared unit column, another by a column
+# of stack ids) without the rows of a sealed stack, `X-Nils-Withheld-Sealed`
+# saying how many went and never which, and `X-Nils-Sha256` the digest of
+# the bytes served. Anything else made from a sealed stack, as its row and
+# its run's units say, is refused whole (403, `sealed: true`, saying why),
+# and transport=share is refused where rows would be withheld. The parts
+# and layer doors refuse a result made from a sealed stack to pipelines:see
+# alone; a rater of an open campaign that holds it reads it as before. Its
+# row, on the listing and at its own door, keeps the file's facts without
+# its parts' counts and its check (`sealed: true`), and the listing leaves
+# it out where `check` names a status. A holder of sealed:see reads all of
+# it, and the content door audits each such read as sealed.read, naming
+# the derivative. The ask reads a pipeline's measure of a session or a
+# subject that holds a sealed stack as null, with its run and its check. A
+# stack's pictures (a pyramid) and a model's artifact are never withheld.
 openapi: 3.1.0
 info:
   title: NILS engine API
@@ -835,7 +855,7 @@ paths:
   /api/ask/run:
     post:
       summary: "The bounded path, inside the caps (Wave 4b section 11.5): a handle with its first page of rows"
-      description: "The document, or a document handle, with a name for the handle, keep, after, limit and purpose; a capped run is flagged truncated and has no hash. Identifiers are projected only at detail sensitive, with an audit row. Since Wave 5 (section 12.8) the content hash is a cache key: a core that ran before at the same epoch, pack version and scheme, whose handle is kept whole and not invalidated, is answered with that handle again, flagged `cached: true` with `produced_at` and `produced_by`; `fresh: true` in the body forces a new run. Record 48, D1 of the move: every stack of a sample sealed now (until a certificate unseals it) is left out of every set, and so of every count, group and measure over stacks, for every caller but a holder of sealed:see; a handle records which it did in its suppression (`sealed`: withheld or read), so a cached answer is never another scope's. Since 2026-10-10 (Wave 7a) a handle also records `axis_values: any_name`, so no answer cached while an axis value named by its identity missed the rows that store its label is served again. The same holds on every door that runs a question: jobs, preview, profile, diagnose, options, the value sampler and the assistant's tools."
+      description: "The document, or a document handle, with a name for the handle, keep, after, limit and purpose; a capped run is flagged truncated and has no hash. Identifiers are projected only at detail sensitive, with an audit row. Since Wave 5 (section 12.8) the content hash is a cache key: a core that ran before at the same epoch, pack version and scheme, whose handle is kept whole and not invalidated, is answered with that handle again, flagged `cached: true` with `produced_at` and `produced_by`; `fresh: true` in the body forces a new run. Record 48, D1 of the move: every stack of a sample sealed now (until a certificate unseals it) is left out of every set, and so of every count, group and measure over stacks, for every caller but a holder of sealed:see; a handle records which it did in its suppression (`sealed`: withheld or read), so a cached answer is never another scope's. Since 2026-10-10 (Wave 7a) a handle also records `axis_values: any_name`, so no answer cached while an axis value named by its identity missed the rows that store its label is served again. The same holds on every door that runs a question: jobs, preview, profile, diagnose, options, the value sampler and the assistant's tools. Added in place on 2026-10-12: for such a caller a pipeline's measure of a session or a subject (`measure.<pipeline>.<column>`, its run and its check) reads null where the session or the subject holds a stack of a sample sealed now; a stack's measure leaves with its stack."
       requestBody: {content: {application/json: {schema: {type: object, properties: {document: {type: object}, document_id: {type: integer}, name: {type: string}, keep: {type: boolean}, after: {type: integer}, limit: {type: integer}, purpose: {type: string}, fresh: {type: boolean}}}}}}
       responses:
         "200": {description: "{handle, hash, columns, rows, truncated, pages, measures, drift, kept, identifiers, declaration, epoch} and, on a cached answer, {cached: true, produced_at, produced_by}; the declaration (Wave 4c section 6.4) names the grain, the session scheme and its digest, the membership reading, the key namespace, the pick rule, the denominator, the disclosure and whether a cap truncated"}
@@ -1446,7 +1466,7 @@ paths:
   /api/derivatives:
     get:
       summary: The derivatives, newest first (record 42 S4; nils derivative list)
-      description: "Each row as GET /api/derivatives/{id} answers it, with the capability beside them. pipelines:see."
+      description: "Each row as GET /api/derivatives/{id} answers it, with the capability beside them. pipelines:see. Added in place on 2026-10-12 by record 48: to a caller without sealed:see a result made from a stack of a sample sealed now is listed as that door shapes it, and is not listed at all where `check` names a status, which is a person's word on what a system said of the stack."
       parameters:
         - {name: kind, in: query, schema: {type: string, enum: [mask, embedding, pyramid, output, seeds, model]}}
         - {name: stack, in: query, schema: {type: integer}}
@@ -1483,7 +1503,7 @@ paths:
   /api/derivatives/{id}:
     get:
       summary: One derivative (record 42 S4; nils derivative show)
-      description: "{id, kind (record 43 adds seeds and model, which only a pipeline run writes and the POST refuses), scope (stack, series, session or subject, or since record 43 run: a run's own file, which names no subject, or since record 50 model: a registered model's artifact kept by nils model keep, which names the model in model_id and neither a subject nor a run), stack_id, series_id, subject_id, session_day, place_id, place, path (under the place), bytes, sha256, media_type, registered_by, actor, model_id, run_id, preprocess_version, supersedes_id, created_at, withdrawn_at, content (the door its bytes are read from), transports (record 43 S3: `door`, and `share` where its place declares a share path)}. `run_id` names the pipeline run that made it, null for an upload. pipelines:see. Added in place by record 55 H3: grid ({dims, affine (4 by 4, voxel to RAS millimetres), datatype, form: sform, qform or none}, null until a mask is read), grid_stack_id, grid_link (same, world or none; null until read), part_sets ([{key, words, kind: components, labels or whole, labels, names, connectivity, count, note}], null until read; a set of more than 10,000 parts is kept whole with a note), and the status a check wrote: check (accepted, rejected, flagged or null), check_reasons, check_decision_id, checked_at."
+      description: "{id, kind (record 43 adds seeds and model, which only a pipeline run writes and the POST refuses), scope (stack, series, session or subject, or since record 43 run: a run's own file, which names no subject, or since record 50 model: a registered model's artifact kept by nils model keep, which names the model in model_id and neither a subject nor a run), stack_id, series_id, subject_id, session_day, place_id, place, path (under the place), bytes, sha256, media_type, registered_by, actor, model_id, run_id, preprocess_version, supersedes_id, created_at, withdrawn_at, content (the door its bytes are read from), transports (record 43 S3: `door`, and `share` where its place declares a share path)}. `run_id` names the pipeline run that made it, null for an upload. pipelines:see. Added in place by record 55 H3: grid ({dims, affine (4 by 4, voxel to RAS millimetres), datatype, form: sform, qform or none}, null until a mask is read), grid_stack_id, grid_link (same, world or none; null until read), part_sets ([{key, words, kind: components, labels or whole, labels, names, connectivity, count, note}], null until read; a set of more than 10,000 parts is kept whole with a note), and the status a check wrote: check (accepted, rejected, flagged or null), check_reasons, check_decision_id, checked_at. Added in place on 2026-10-12 by record 48: to a caller without sealed:see, a result made from a stack of a sample sealed now (as the content door finds it) keeps the file's facts and loses what it holds: each part set's `count` and `note` are left out, its key, words, kind and labels being its pipeline's, and the check fields are null; `sealed: true` says so. `nils derivative list` and `show` answer the same unless --unsealed-access says why."
       parameters: [{name: id, in: path, required: true, schema: {type: integer}}]
       responses:
         "200": {description: The derivative}
@@ -1491,14 +1511,14 @@ paths:
   /api/derivatives/{id}/content:
     get:
       summary: The bytes of one derivative, or the shared path it is read at (record 42 S4, record 43 S3)
-      description: "The file as it was registered, streamed with its media type, `X-Nils-Sha256` and `X-Nils-Derivative`. A mask or an embedding is drawn from the pixels, so the door needs pipelines:see at detail quasi. A file whose size is not the registered one is not served. Every read is audited as derivative.read, which does not move the epoch. Since record 43, `transport=share` asks for the second transport of decision record 07: where the derivative's place declares `share` in its guarantees (the absolute path at which the clients that share its volume reach the place's folder), the answer is JSON, `{derivative, transport: share, path, place, bytes, sha256, media_type}`, the path the file is read at on that volume, gated and audited as the bytes are, with `transport` in the audit row's details; where it declares none the door answers 409 and the bytes come by `transport=door`, the default."
+      description: "The file as it was registered, streamed with its media type, `X-Nils-Sha256` and `X-Nils-Derivative`. A mask or an embedding is drawn from the pixels, so the door needs pipelines:see at detail quasi. A file whose size is not the registered one is not served. Every read is audited as derivative.read, which does not move the epoch. Since record 43, `transport=share` asks for the second transport of decision record 07: where the derivative's place declares `share` in its guarantees (the absolute path at which the clients that share its volume reach the place's folder), the answer is JSON, `{derivative, transport: share, path, place, bytes, sha256, media_type}`, the path the file is read at on that volume, gated and audited as the bytes are, with `transport` in the audit row's details; where it declares none the door answers 409 and the bytes come by `transport=door`, the default. Added in place, additively, on 2026-10-12 by record 48, for every caller but a holder of sealed:see: a table whose rows name their stacks (a run's table by the unit column it declares, another by a column `stack_id` or `stack`) is answered without the rows of a stack of a sample sealed now and, where the table was made from one, without the rows that name no stack it can be told by; `X-Nils-Withheld-Sealed` says how many rows went, never which, and `X-Nils-Sha256` is the digest of the bytes served. Anything else made from such a stack is refused whole: a stack's own file, a file of a run's unit whose stacks (a stack unit's own, a subject's or a session's as the run's release placed them) hold one, a run's own file whose units' stacks hold one, and a file registered at the door of a series or a subject that holds one; a stack's pictures (a pyramid) and a model's artifact are never withheld. transport=share reads the whole file, so it is refused where rows would be withheld. A holder of sealed:see reads the file as registered, and each such read of what is withheld from others writes a `sealed.read` audit row {door, derivative, kind, withheld: rows or whole, rows} beside derivative.read; the derivative.read row of a table answered without some rows carries `withheld_sealed` in its details."
       parameters:
         - {name: id, in: path, required: true, schema: {type: integer}}
         - {name: transport, in: query, schema: {type: string, enum: [door, share], default: door}}
       responses:
         "200": {description: "The file, or with transport=share the path it is read at"}
         "400": {description: A transport that is neither door nor share}
-        "403": {description: "No pipelines:see, or below detail quasi"}
+        "403": {description: "No pipelines:see, or below detail quasi; added in place by record 48, a derivative made from a stack of a sample sealed now, to a caller without sealed:see ({error, sealed: true}, saying why), or transport=share where rows of one would be withheld ({error, sealed: true, withheld_sealed})"}
         "404": {description: "No such derivative, or its file is not in its place"}
         "409": {description: "Its place is retired or gone, its file is not the size registered, or transport=share and its place declares no share path"}
   /api/derivatives/{id}/check:
@@ -1540,7 +1560,7 @@ paths:
         "200": {description: "One page of the set's parts"}
         "202": {description: "The parts are being made: {building: true, job, state, progress, retry_after, retry_after_ms, message}"}
         "400": {description: "An order that is neither position nor size, or a page that is not a number"}
-        "403": {description: "Without pipelines:see, campaigns:see or campaigns:work"}
+        "403": {description: "Without pipelines:see, campaigns:see or campaigns:work; added in place by record 48, a result made from a stack of a sample sealed now, to pipelines:see without sealed:see and outside an open campaign the caller rates in that holds it ({error, sealed: true})"}
         "404": {description: "No such derivative, one that is not a mask, or a set it is not read as; to a caller without pipelines:see, added in place by record 55 H3, also a result no open campaign they rate in holds, answered as one that is not there"}
         "422": {description: "The job that makes the parts failed; the door does not queue it again"}
   /api/derivatives/{id}/layers/{stack}/{set}/manifest:
@@ -1554,7 +1574,7 @@ paths:
       responses:
         "200": {description: "The layer's manifest"}
         "202": {description: "The layer, the parts, or the scan's picture is being built: {building: true, job, state, progress, retry_after, retry_after_ms, message}, with Retry-After"}
-        "403": {description: "Below detail quasi, or without pipelines:see, campaigns:see or campaigns:work"}
+        "403": {description: "Below detail quasi, or without pipelines:see, campaigns:see or campaigns:work; added in place by record 48, a result made from a stack of a sample sealed now, to pipelines:see without sealed:see and outside an open campaign the caller rates in that holds it ({error, sealed: true})"}
         "404": {description: "No such derivative, one that is not a mask, a set it is not read as, or not a door; to a caller without pipelines:see, added in place by record 55 H3, also a result or a scan no open campaign they rate in holds and shows, answered as one that is not there"}
         "409": {description: "No working place, a result no scan is known for, a scan of another frame, or a scan whose planes are not one volume"}
         "422": {description: "The job that builds it failed; the door does not queue it again"}
