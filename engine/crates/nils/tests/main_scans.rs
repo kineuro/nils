@@ -1110,3 +1110,201 @@ fn held_twice(pg: Option<(String, String)>) {
         .sum();
     assert_eq!(shown, 3, "{map}");
 }
+
+/// 2026-10-12 (Nima on the development build): a dataset's run of its main
+/// scans finished at once, its log said "Main scans picked for 10
+/// subjects", and nothing was picked. A pick run brings the session cache
+/// up to date before it reads visits, and says what it wrote: the visits
+/// and subjects it picked on, or, where it wrote nothing, why (no scan of a
+/// main role, no visit). The Main scans map of a dataset read after the
+/// cache was built shows its visits, and the dataset's summary says no
+/// count of visits while the cache lacks some of its studies, rather than
+/// 0.
+#[test]
+fn a_pick_run_and_the_map_read_visits_the_cache_did_not_hold() {
+    uncached(None);
+}
+
+#[test]
+fn a_pick_run_and_the_map_read_visits_the_cache_did_not_hold_on_postgres_too() {
+    on_postgres("nils_main_scans_uncached", uncached);
+}
+
+fn uncached(pg: Option<(String, String)>) {
+    use dicom_core::VR;
+    use dicom_dictionary_std::tags;
+    use nils_dicom::synth::{self, MetaFields};
+    let home = Home::init("main-scans-uncached-home", pg);
+    let root = TempDir::new("main-scans-uncached");
+    // four datasets: `fresh`, a T1 on two days of one subject and one of
+    // another; `nameless`, one subject whose only series no rule reads;
+    // `undated`, one subject's T1 in a study with no date; and `later`, two
+    // subjects' T1s read after the cache was built
+    let mut n = 0;
+    let mut write = |folder: &str, patient: &str, day: Option<&str>, description: &str| {
+        n += 1;
+        let study = format!("1.2.826.0.1.3680043.8.497.{n}.1");
+        let series = format!("{study}.1");
+        for instance in 1..=3u32 {
+            let sop = format!("{series}.{instance}");
+            let mut e = synth::minimal_mr(&study, &series, &sop);
+            e.push(synth::text(tags::PATIENT_ID, VR::LO, patient));
+            if let Some(day) = day {
+                e.push(synth::text(tags::STUDY_DATE, VR::DA, day));
+            }
+            e.push(synth::text(tags::SERIES_NUMBER, VR::IS, "1"));
+            e.push(synth::text(
+                tags::INSTANCE_NUMBER,
+                VR::IS,
+                &instance.to_string(),
+            ));
+            e.push(synth::text(tags::SERIES_DESCRIPTION, VR::LO, description));
+            root.file(
+                &format!("{folder}/derivatives/dcm-anon/{patient}/{n}/IM_{instance:04}"),
+                &synth::part10(&MetaFields::mr(&sop), &e, true),
+            );
+        }
+    };
+    write("fresh", "S-ONE", Some("20240131"), "t1 mprage");
+    write("fresh", "S-ONE", Some("20250131"), "t1 mprage");
+    write("fresh", "S-TWO", Some("20240131"), "t1 mprage");
+    write("nameless", "S-THREE", Some("20240131"), "zzqx");
+    write("undated", "S-FOUR", None, "t1 mprage");
+    write("later", "S-FIVE", Some("20240131"), "t1 mprage");
+    write("later", "S-SIX", Some("20240131"), "t1 mprage");
+    let packs = packs();
+    let tree = |name: &str| {
+        root.path()
+            .join(name)
+            .join("derivatives/dcm-anon")
+            .to_str()
+            .unwrap()
+            .to_string()
+    };
+    for name in ["fresh", "nameless", "undated", "later"] {
+        home.ok(&[
+            "place",
+            "add",
+            name,
+            root.path().join(name).to_str().unwrap(),
+            "--role",
+            "source",
+            "--patient-id",
+            "id-type:patient-id",
+            "--subjects",
+            "generated",
+        ]);
+    }
+    let sort = |home: &Home| {
+        home.ok(&["fingerprint"]);
+        home.ok(&["classify", "--pack-dir", &packs]);
+    };
+    // read and sorted from the keyboard, so no pick run follows the sort
+    // and nothing builds the cache
+    for name in ["fresh", "nameless", "undated"] {
+        home.ok(&["digest", &tree(name), "--name", name]);
+    }
+    sort(&home);
+    let cached = |home: &Home| {
+        let mut store = home.store();
+        let sql = format!(
+            "SELECT COUNT(*) FROM {}",
+            store.qualified("session_cache_study")
+        );
+        store.query(&sql, &[]).unwrap()[0].int(0).unwrap()
+    };
+    assert_eq!(cached(&home), 0, "nothing has built the cache");
+
+    // the pick run builds it, and picks each visit's T1
+    let run = |dataset: &str| -> Value {
+        let out = home.ok(&[
+            "pick",
+            "run",
+            "--dataset",
+            dataset,
+            "--pack-dir",
+            &packs,
+            "--json",
+        ]);
+        serde_json::from_str(&out).unwrap_or_else(|e| panic!("{e}: {out}"))
+    };
+    let fresh = run("fresh");
+    assert_eq!(fresh["subjects"], 2, "{fresh}");
+    assert_eq!(fresh["written"], 3, "{fresh}");
+    assert_eq!(fresh["visits"], 3, "{fresh}");
+    assert_eq!(fresh["visits_picked"], 3, "{fresh}");
+    assert_eq!(fresh["subjects_picked"], 2, "{fresh}");
+    assert!(fresh.get("nothing").is_none(), "{fresh}");
+    assert_eq!(
+        fresh["said"], "Main scans picked for 3 visits of 2 subjects",
+        "{fresh}"
+    );
+    assert!(cached(&home) > 0, "the run built the cache");
+    let listed = home.ok(&["pick", "list", "--dataset", "fresh", "--json"]);
+    let listed: Value = serde_json::from_str(&listed).unwrap();
+    assert_eq!(listed.as_array().unwrap().len(), 3, "{listed}");
+    // the job says it too
+    let job = fresh["job"].as_i64().unwrap().to_string();
+    let shown = home.ok(&["jobs", "show", &job]);
+    assert!(
+        shown.contains("said        Main scans picked for 3 visits of 2 subjects"),
+        "{shown}"
+    );
+    // and a run that writes nothing says why
+    let nameless = run("nameless");
+    assert_eq!(nameless["written"], 0, "{nameless}");
+    assert_eq!(nameless["visits_picked"], 0, "{nameless}");
+    assert_eq!(
+        nameless["nothing"], "its one subject has no scan of a main role",
+        "{nameless}"
+    );
+    assert_eq!(
+        nameless["said"], "No main scans picked: its one subject has no scan of a main role",
+        "{nameless}"
+    );
+    let undated = run("undated");
+    assert_eq!(undated["written"], 0, "{undated}");
+    assert_eq!(
+        undated["nothing"], "no visits found for its one subject, whose studies carry no date",
+        "{undated}"
+    );
+    let text = home.ok(&["pick", "run", "--dataset", "undated", "--pack-dir", &packs]);
+    assert!(
+        text.contains("No main scans picked: no visits found for its one subject"),
+        "{text}"
+    );
+
+    // a dataset read after the cache was built: its summary counts no
+    // visits until they are in it, and its map shows them
+    home.ok(&["digest", &tree("later"), "--name", "later"]);
+    sort(&home);
+    let server = Served::start(&home, root.path());
+    let (status, summary) = server.call("GET", "/api/datasets/later/summary", None, OPS);
+    assert_eq!(status, 200, "{summary}");
+    assert_eq!(summary["subjects"], 2, "{summary}");
+    assert!(
+        summary["sessions"].is_null(),
+        "the cache holds none of its visits yet: {summary}"
+    );
+    let (status, map) = server.call(
+        "POST",
+        "/api/picks/map",
+        Some(json!({"scope": {"dataset": "later"}, "role": "t1w"})),
+        OPS,
+    );
+    assert_eq!(status, 200, "{map}");
+    assert_eq!(map["metrics"]["subjects"], 2, "{map}");
+    assert_eq!(map["metrics"]["visits"], 2, "{map}");
+    let (status, strips) = server.call(
+        "POST",
+        "/api/picks/map/strips",
+        Some(json!({"scope": {"dataset": "later"}, "role": "t1w"})),
+        OPS,
+    );
+    assert_eq!(status, 200, "{strips}");
+    assert_eq!(strips["subjects"].as_array().unwrap().len(), 2, "{strips}");
+    let (_, summary) = server.call("GET", "/api/datasets/later/summary", None, OPS);
+    assert_eq!(summary["sessions"], 2, "{summary}");
+    let (_, summary) = server.call("GET", "/api/datasets/fresh/summary", None, OPS);
+    assert_eq!(summary["sessions"], 3, "{summary}");
+}
