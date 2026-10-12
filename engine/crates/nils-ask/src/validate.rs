@@ -1884,23 +1884,49 @@ fn check_clause(
                     )),
                 }
             }
-            "share" => match cl.opts.get("over").and_then(Value::as_str) {
-                // said above: a name read as a boolean
-                None if matches!(cl.opts.get("over"), Some(Value::Bool(_))) => {}
-                None => issues.push(issue(
-                    Code::UnknownSet,
-                    path,
-                    "share names its denominator: {over: <set>}",
-                    "add over",
-                )),
-                Some(over) if !ask.sets.contains_key(over) => issues.push(issue(
-                    Code::UnknownSet,
-                    path,
-                    format!("no set named {over}"),
-                    "name the denominator's set",
-                )),
-                Some(_) => {}
-            },
+            "share" => {
+                // what a share divides is read in this set as a field is,
+                // and held to the caller's classes as one (2026-10-12)
+                match cl.opts.get("of") {
+                    Some(Value::String(of)) => {
+                        match resolve_field(of, set, set_name, ask, so_far, exposed, names, 0) {
+                            Ok(Some(info)) => check_class(&info, of, path, scope, issues),
+                            Ok(None) => {}
+                            Err(m) => issues.push(issue(
+                                Code::UnknownField,
+                                path,
+                                m,
+                                "GET /api/ask/options for what this set exposes",
+                            )),
+                        }
+                    }
+                    // said above: a name read as a boolean
+                    Some(Value::Bool(_)) => {}
+                    _ => issues.push(issue(
+                        Code::UnknownField,
+                        path,
+                        "share names what it divides: {of: <a binding or a field>, over: <set>}",
+                        "add of",
+                    )),
+                }
+                match cl.opts.get("over").and_then(Value::as_str) {
+                    // said above: a name read as a boolean
+                    None if matches!(cl.opts.get("over"), Some(Value::Bool(_))) => {}
+                    None => issues.push(issue(
+                        Code::UnknownSet,
+                        path,
+                        "share names its denominator: {over: <set>}",
+                        "add over",
+                    )),
+                    Some(over) if !ask.sets.contains_key(over) => issues.push(issue(
+                        Code::UnknownSet,
+                        path,
+                        format!("no set named {over}"),
+                        "name the denominator's set",
+                    )),
+                    Some(_) => {}
+                }
+            }
             op if AGGREGATES.contains(&op) => {
                 check_aggregate_form(cl, op, path, issues);
                 match cl.opts.get("set").and_then(Value::as_str) {
@@ -2030,15 +2056,18 @@ fn check_aggregate_form(cl: &Clause, op: &str, path: &str, issues: &mut Vec<Issu
         .get("set")
         .and_then(Value::as_str)
         .unwrap_or("<set>");
+    let rows_alone = matches!(op, "count" | "distinct");
     let placeholder = "[\"field\", {}, \"<column>\"]".to_string();
     let form = |column: &str| format!("write [\"{op}\", {{set: {set}}}, {column}]");
     let mut misplaced = false;
     for (k, v) in cl.opts.iter().filter(|(k, _)| k.as_str() != "set") {
         misplaced = true;
-        let column = match v {
-            Value::String(name) => format!("[\"field\", {{}}, \"{name}\"]"),
-            Value::Array(_) => v.to_string(),
-            _ => placeholder.clone(),
+        let next = match v {
+            Value::String(name) => form(&format!("[\"field\", {{}}, \"{name}\"]")),
+            Value::Array(_) => form(&v.to_string()),
+            // a count of the rows themselves takes no column at all
+            _ if rows_alone => format!("write [\"{op}\", {{set: {set}}}]"),
+            _ => form(&placeholder),
         };
         issues.push(issue(
             Code::UnknownField,
@@ -2046,7 +2075,7 @@ fn check_aggregate_form(cl: &Clause, op: &str, path: &str, issues: &mut Vec<Issu
             format!(
                 "{op} takes one option, set, and {k} is not one: the column an aggregate reads is its argument, after the options"
             ),
-            form(&column),
+            next,
         ));
     }
     if cl.args.len() > 1 {
@@ -2058,7 +2087,7 @@ fn check_aggregate_form(cl: &Clause, op: &str, path: &str, issues: &mut Vec<Issu
         ));
     }
     match cl.args.first() {
-        None if !misplaced && !matches!(op, "count" | "distinct") => issues.push(issue(
+        None if !misplaced && !rows_alone => issues.push(issue(
             Code::UnknownField,
             path,
             format!("{op} names the column it reads; without one it would read the rows' own keys"),
@@ -2338,6 +2367,14 @@ impl Shapes<'_> {
                 let target = c.opts.get("set").and_then(Value::as_str).unwrap_or(set);
                 c.args.iter().any(|a| self.arg(a, target, depth + 1))
             }
+            // a share divides the name its `of` gives by a count the answer
+            // also says, so it carries what it divides: a share of an age
+            // over a set of 38 is the age over 38 (2026-10-12)
+            "share" => c
+                .opts
+                .get("of")
+                .and_then(Value::as_str)
+                .is_some_and(|of| self.path(of, set, 0)),
             _ => c.args.iter().any(|a| self.arg(a, set, depth + 1)),
         }
     }

@@ -1253,6 +1253,17 @@ fn an_aggregate_reads_its_column_as_its_argument_never_an_option() {
                 "{bind}: {issues:?}"
             );
         }
+        // a count of the rows is told to drop the option, not to add a column
+        let flagged = first_ages(
+            json!({"m": ["count", {"set": "firsts", "distinct": true}]}),
+            by.clone(),
+            cols(&["m"]),
+        );
+        let issues = issues_at(&flagged, &scope);
+        assert_eq!(
+            issues[0].next, r#"write ["count", {set: firsts}]"#,
+            "{issues:?}"
+        );
         let counted = first_ages(
             json!({"rows": ["count", {"set": "firsts"}], "members": ["distinct", {"set": "firsts"}]}),
             by.clone(),
@@ -1415,6 +1426,77 @@ fn an_aggregate_of_a_quasi_field_follows_the_field_below_detail_quasi() {
             other => panic!("{measure}: {:?}", other.map(|p| p.hash)),
         }
         prepare(ask(), &Fixture, &quasi_scope()).unwrap_or_else(|e| panic!("{measure}: {e}"));
+    }
+}
+
+/// A share divides the name its `of` gives by a count the answer also says,
+/// so a share of an age over a set of 38 was the age over 38, answered raw
+/// below detail quasi beside the age's own shape (2026-10-12). It carries
+/// what it divides, and what it divides is held to the caller's classes as
+/// a field is.
+#[test]
+fn a_share_carries_what_it_divides() {
+    let records = |columns: Value| {
+        let mut v = first_ages(
+            json!({"n_subjects": ["count", {"set": "firsts"}]}),
+            json!([["param", {}, "all"]]),
+            json!([["field", {}, "n_subjects"]]),
+        );
+        v["out"] = json!({"set": "firsts", "level": "record", "columns": columns});
+        v
+    };
+    let shares = records(json!([
+        ["field", {}, "age"],
+        ["share", {"of": "age", "over": "firsts"}],
+        ["share", {"of": "n", "over": "firsts"}],
+        ["share", {"of": "subject.birth_date", "over": "firsts"}]
+    ]));
+    let shaped = |scope: &Scope| -> Vec<usize> {
+        prepare(
+            serde_json::from_value(shares.clone()).unwrap(),
+            &Fixture,
+            scope,
+        )
+        .unwrap_or_else(|e| panic!("{e}"))
+        .validated
+        .shaped
+        .into_iter()
+        .collect()
+    };
+    // the age and the shares of it and of the birth date; not the share of
+    // the visit's ordinal
+    assert_eq!(shaped(&Scope::default()), vec![0, 1, 3]);
+    assert!(shaped(&quasi_scope()).is_empty());
+
+    // a sensitive field, divided at detail quasi: refused as it is read
+    let stacks = doc(
+        json!({"s": {"grain": "stack"}, "t": {"grain": "stack"}}),
+        json!({"set": "s", "level": "record", "columns": [
+            ["share", {"of": "patient_comments", "over": "t"}]
+        ]}),
+    );
+    let issues = issues_at(&stacks, &quasi_scope());
+    assert!(
+        issues
+            .iter()
+            .any(|i| i.code == Code::ForbiddenField && i.path == "out.columns[0]"),
+        "{issues:?}"
+    );
+    // a share of nothing, or of no name of the set
+    for of in [
+        json!({"over": "firsts"}),
+        json!({"of": "nothing", "over": "firsts"}),
+    ] {
+        let mut opts = of.clone();
+        opts["over"] = json!("firsts");
+        let v = records(json!([["share", opts]]));
+        let issues = issues_at(&v, &Scope::default());
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.code == Code::UnknownField && i.path == "out.columns[0]"),
+            "{of}: {issues:?}"
+        );
     }
 }
 

@@ -7,9 +7,10 @@
 //! the oldest and the mean age are their shapes, in the answer, the handle
 //! and its pages, and the answer says which columns those are; the counts
 //! are answered at both; a group of one and a group keyed by the age follow
-//! the same rule; the median of the age is refused below quasi; and the
-//! document as the bench wrote it, its column as an option, is refused at
-//! both details with the form to write.
+//! the same rule; the median of the age is refused below quasi; a share of
+//! the age, the age over a count the answer says, is a shape below quasi;
+//! and the document as the bench wrote it, its column as an option, is
+//! refused at both details with the form to write.
 
 mod common;
 
@@ -348,6 +349,36 @@ fn an_aggregate_of_a_quasi_field_follows_the_field_on_both_backends() {
         assert_eq!(
             number(column(&measured, "median.age")[0]),
             middle,
+            "{}",
+            l.name
+        );
+
+        // a share of the age divides it by a count the answer also says, so
+        // below quasi it is a shape, as the age is
+        let shares = document(
+            "",
+            r#"  set: firsts
+  level: record
+  columns: [["field", {}, "age"], ["share", {of: age, over: firsts}]]
+  order: [[["field", {}, "id"], asc]]"#,
+        );
+        let s_raw = ok(&mut l, &shares, &quasi);
+        let s_plain = ok(&mut l, &shares, &plain);
+        assert_eq!(s_plain.answer.shaped_names(), vec!["age", "col1"]);
+        assert!(s_raw.answer.shaped_names().is_empty());
+        let subjects = number(column(&raw, "n_subjects")[0]);
+        for (age, share) in column(&s_raw, "age").iter().zip(column(&s_raw, "col1")) {
+            if !matches!(age, Cell::Null) {
+                assert!((number(share) * subjects - number(age)).abs() < 1e-6);
+            }
+        }
+        let shapes: Vec<Cell> = column(&s_raw, "col1").into_iter().map(shaped).collect();
+        assert_eq!(
+            column(&s_plain, "col1")
+                .into_iter()
+                .cloned()
+                .collect::<Vec<_>>(),
+            shapes,
             "{}",
             l.name
         );
