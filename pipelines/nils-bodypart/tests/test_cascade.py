@@ -501,6 +501,51 @@ def test_the_cache_keeps_each_input_by_its_files_identity(world, tmp_path, stand
         assert np.allclose(model.encoder.probabilities(v, ta[f"{key}.geo"]), ta[f"{key}.image"], atol=1e-6)
 
 
+@pytest.mark.parametrize("damage", ["empty", "garbage"])
+def test_a_damaged_cache_file_costs_no_answer(world, tmp_path, stand_in, damage):
+    """A session's cache file that cannot be read (the review's
+    cache_corrupt.py) failed every later run touching that study before its
+    answers were written. The answers are written first now, and the
+    damaged file is replaced by the run's entries."""
+    inp = inputs(world, tmp_path, deferral="mixed")
+    cache = tmp_path / "slice-cache"
+    code, first = run(world, inp, tmp_path / "out1", "--cache", str(cache))
+    assert code == 0
+    victim = slicecache.Path(cache) / slicecache.SLICE / f"{slicecache.session_name(cd.study_uid(100))}.npz"
+    victim.write_bytes(b"" if damage == "empty" else b"not an archive at all")
+    code, again = run(world, inp, tmp_path / "out2", "--cache", str(cache))
+    assert code == 0
+    assert len(again["units"]) == len(first["units"]) and again["proposals"] == first["proposals"]
+    assert again["metrics"]["cache"]["sessions_damaged_replaced"] == 1 and again["metrics"]["cache"]["sessions_failed"] == 0
+    index, _ = slicecache.read(cache, slicecache.SLICE, cd.study_uid(100))
+    assert len(index) == 5
+
+
+def test_a_cache_that_cannot_be_written_costs_no_answer(world, tmp_path, stand_in, monkeypatch):
+    """A full disk under the cache: each session is written on its own, the
+    one that fails is counted by kind and left as it was, and the run's
+    answers are written all the same."""
+    inp = inputs(world, tmp_path, deferral="mixed")
+    cache = tmp_path / "slice-cache"
+    real = slicecache.os.replace
+    calls = {"n": 0}
+
+    def full(src, dst):  # the cache's first session file meets a full disk
+        if "slice-cache" in str(dst):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise OSError(28, "No space left on device")
+        return real(src, dst)
+
+    monkeypatch.setattr(slicecache.os, "replace", full)
+    code, r = run(world, inp, tmp_path / "out", "--cache", str(cache))
+    assert code == 0
+    assert len(r["units"]) == 11 and r["proposals"]
+    c = r["metrics"]["cache"]
+    assert c["sessions_failed"] == 1 and c["failures"] == {"OSError": 1} and c["sessions_written"] >= 1
+    assert not list(cache.rglob("*.partial"))
+
+
 def test_two_stacks_of_one_enhanced_file_are_two_cache_entries(tmp_path, stand_in):
     """One enhanced file whose frames are two stacks (1-6 and 7-12): each
     stack's planes are an entry of their own, keyed by the stack's frames of

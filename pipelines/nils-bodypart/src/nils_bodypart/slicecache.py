@@ -26,8 +26,12 @@ model or calibration scores them again in minutes.
 
 Only the run's main process writes, a session at a time, under a lock on
 the session's file, so runs side by side merge their entries: an entry of
-the same key is replaced. A file is written whole and renamed into place.
-Nothing here logs a path or a UID.
+the same key is replaced. A file is written whole, synced to the disk and
+renamed into place. The cache is written after the run's answers and on a
+best-effort basis: a session's file that cannot be read (empty, cut short,
+not an archive) is replaced by the run's entries, and a session that cannot
+be written (a full disk) is counted and left as it was, never failing the
+run. Nothing here logs a path or a UID.
 """
 
 from __future__ import annotations
@@ -120,7 +124,7 @@ class Writer:
         self.root = Path(root)
         self.made_by = made_by
         self.held: dict[tuple[str, str], dict[str, tuple[dict, dict]]] = defaultdict(dict)
-        self.counts = {"entries": 0, "sessions_written": 0, "skipped_no_identity": 0}
+        self.counts = {"entries": 0, "sessions_written": 0, "skipped_no_identity": 0, "sessions_damaged_replaced": 0, "sessions_failed": 0}
 
     def add(self, version: str, study_uid: str | None, files: list[tuple] | None, arrays: dict, meta: dict | None = None,
             kept: str | None = None) -> bool:
@@ -134,12 +138,18 @@ class Writer:
         return True
 
     def flush(self, study_uids=None) -> None:
-        """Write the held sessions (those of ``study_uids``, or all)."""
+        """Write the held sessions (those of ``study_uids``, or all), each on
+        its own: one that fails is counted, and the others are written."""
         for version, uid in list(self.held):
             if study_uids is not None and uid not in study_uids:
                 continue
             entries = self.held.pop((version, uid))
-            self._merge(version, uid, entries)
+            try:
+                self._merge(version, uid, entries)
+            except Exception as e:  # noqa: BLE001 - best-effort: counted by kind, never a path
+                self.counts["sessions_failed"] += 1
+                kinds = self.counts.setdefault("failures", {})
+                kinds[type(e).__name__] = kinds.get(type(e).__name__, 0) + 1
 
     def _merge(self, version: str, uid: str, entries: dict) -> None:
         folder = self.root / version
@@ -147,8 +157,13 @@ class Writer:
         path = folder / f"{session_name(uid)}.npz"
         with open(folder / f".{path.stem}.lock", "a") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
+            tmp = path.with_name(path.name + ".partial")
             try:
-                index, arrays = _load(path)
+                try:
+                    index, arrays = _load(path)
+                except Exception:  # noqa: BLE001 - a damaged file is replaced by what this run holds
+                    index, arrays = {}, {}
+                    self.counts["sessions_damaged_replaced"] += 1
                 for key, (rec, arrs) in entries.items():
                     for name in [n for n in arrays if n.startswith(f"{key}.")]:
                         del arrays[name]
@@ -157,11 +172,15 @@ class Writer:
                         arrays[f"{key}.{name}"] = a
                 buf = io.BytesIO()
                 np.savez_compressed(buf, index=np.array(json.dumps(index, sort_keys=True)), **arrays)
-                tmp = path.with_name(path.name + ".partial")
                 fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
                 with os.fdopen(fd, "wb") as f:
                     f.write(buf.getvalue())
+                    f.flush()
+                    os.fsync(f.fileno())
                 os.replace(tmp, path)
                 self.counts["sessions_written"] += 1
+            except BaseException:
+                tmp.unlink(missing_ok=True)
+                raise
             finally:
                 fcntl.flock(lock, fcntl.LOCK_UN)

@@ -841,13 +841,13 @@ def _infer_cascade(a: argparse.Namespace, model, cas, device: str) -> Run:
                                   "model_digest": model.coarse_part.digest})
         if writer is not None:
             _cache_entries(writer, o, r, model)
-    if writer is not None:
-        writer.flush()
     run.metrics = {"stacks": len(stacks), **counts, "per_value": per_value, "stages": stages, "reasons": reasons,
                    "files_read": files_total, "files_per_scored_stack": round(files_total / max(1, sum(stages.values())), 3),
                    "stage1": {k: v for k, v in stats.items() if k.startswith("stage1") or k in ("straight_to_planes", "context_stacks")}}
     if writer is not None:
+        # the answers are written first; the cache after them, best-effort
         run.metrics["cache"] = writer.counts
+        run.after_write = writer.flush
     return run
 
 
@@ -949,6 +949,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"nils-bodypart {a.entry}: {e}", file=sys.stderr)
         return 1
     path = run.write()
+    if run.after_write is not None:
+        try:
+            run.after_write()
+        except Exception as e:  # noqa: BLE001 - the answers stand without it
+            logger.warning("the run's writes after its answers failed (%s); its answers are written", type(e).__name__)
+        path = run.write()
     c = run.counts()
     print(f"nils-bodypart {a.entry}: {c['succeeded']} succeeded, {c['skipped']} skipped, {c['failed']} failed; {path}")
     return 0

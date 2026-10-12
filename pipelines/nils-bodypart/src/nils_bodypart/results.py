@@ -76,6 +76,9 @@ class Run:
         self.models: list[dict] = []
         self.proposals: list[dict] = []
         self.extra: dict[str, Any] = {}
+        # what runs after the results are written (the slice cache's
+        # writes, best-effort), and then the results are written again
+        self.after_write = None
         self.started = time.time()
         self.output.mkdir(parents=True, exist_ok=True)
 
@@ -120,5 +123,8 @@ class Run:
         if self.proposals:
             doc["proposals"] = self.proposals
         p = self.output / "results.json"
-        p.write_text(json.dumps(doc, indent=2, sort_keys=False) + "\n", encoding="utf-8")
+        # whole or not at all: a run writes it again after the slice cache
+        tmp = p.with_name(p.name + ".partial")
+        tmp.write_text(json.dumps(doc, indent=2, sort_keys=False) + "\n", encoding="utf-8")
+        os.replace(tmp, p)
         return p
