@@ -62,9 +62,17 @@ or `sensitive`), as a door gives a person of that detail. Below detail
 quasi a column that reads a quasi-identifying field is answered as its
 shape (record 55 K7), and the canonical lists those columns under
 `shaped`, so both backends must answer the same shapes for the same
-columns. `quasi-aggregates-plain` holds the rule for aggregates: the
-youngest, the oldest and the mean age of a group are shapes at plain,
-and the counts are numbers.
+columns. A group's mean, spread and count of distinct values of such a
+field are answered for a group of 5 subjects or more with a value and
+held back (null) below (the ruling of 2026-10-12), and the canonical
+lists the columns with a value held back under `held_back`.
+`quasi-aggregates-plain` holds the rule for one group of 38: the youngest
+and the oldest age are shapes, the mean age and the count of distinct
+ages are numbers. `quasi-by-visit-plain` holds both kinds of group at
+once: the last visit number has 3 subjects, so its mean, its count of
+distinct ages and its spread are held back while the other groups answer
+them. `gold-c-demographics-plain` answers gold C's mean and spread of age
+per cohort at plain.
 
 ## The Wave 4c fixtures
 

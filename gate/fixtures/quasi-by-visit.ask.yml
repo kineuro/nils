@@ -1,0 +1,38 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Record 55 K7, the ruling of 2026-10-12: the age at each visit number in
+# ms-cohort-a, by its mean, its youngest, its count of distinct values and
+# its spread. The later visit numbers hold fewer subjects, so at detail
+# plain a group under 5 subjects holds its mean, its count and its spread
+# back while the larger groups answer them.
+ast_version: 1
+name: the age at each visit number in ms-cohort-a
+scheme: default
+sets:
+  scope:  {grain: cohort, where: [["=", {}, ["field", {}, "name"], "ms-cohort-a"]]}
+  people: {grain: subject, of: scope}
+  visits:
+    grain: session
+    of: people
+    bind:
+      n:   ["ordinal", {}]
+      age: ["age_at", {}, ["field", {}, "subject.birth_date"], ["field", {}, "first"]]
+  by_visit:
+    grain: group
+    group: {of: visits, by: [["field", {}, "n"]]}
+    bind:
+      mean_age: ["avg", {set: visits}, ["field", {}, "age"]]
+      youngest: ["min", {set: visits}, ["field", {}, "age"]]
+      n_ages:   ["distinct", {set: visits}, ["field", {}, "age"]]
+keep: [by_visit]
+out:
+  set: by_visit
+  level: aggregate
+  columns:
+    - ["field", {}, "n"]
+    - ["field", {}, "_subjects"]
+    - ["field", {}, "mean_age"]
+    - ["field", {}, "youngest"]
+    - ["field", {}, "n_ages"]
+  measures:
+    - {stddev: {of: age}}
+  order: [[["field", {}, "n"], asc]]
