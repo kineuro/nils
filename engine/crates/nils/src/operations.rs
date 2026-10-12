@@ -992,6 +992,7 @@ fn freeze(
         truncated: false,
         content_hash: Some(hash),
         elapsed_ms: 0,
+        shaped: Vec::new(),
     };
     let node = nils_registry::job::hostname();
     let spec = nils_ask::handle::Spec {

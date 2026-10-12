@@ -667,6 +667,9 @@ fn mcp_holds_quasi_identifying_columns_to_the_callers_detail() {
             !quasi["rows"].as_array().unwrap().is_empty(),
             "{tool}: no rows: {quasi}"
         );
+        // the answer says which columns this detail sees as shapes
+        assert_eq!(plain["shaped"], json!(["station_name", "day"]), "{tool}");
+        assert_eq!(quasi["shaped"], json!([]), "{tool}");
         for name in ["station_name", "day"] {
             let raw = column(quasi, name);
             let shaped: Vec<Value> = raw.iter().map(shape).collect();

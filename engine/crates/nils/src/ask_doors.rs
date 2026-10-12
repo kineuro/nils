@@ -674,6 +674,7 @@ fn answer(
                     "content_hash": h.content_hash,
                     "truncated": h.truncated,
                     "columns": h.columns,
+                    "shaped": h.shaped(),
                     "rows": rows,
                     "page_rows": page_rows,
                     "pages": pages,
@@ -752,6 +753,8 @@ fn answer(
                 "content_hash": out.handle.content_hash,
                 "truncated": out.answer.truncated,
                 "columns": out.answer.columns,
+                // record 55 K7: the columns this detail sees as shapes
+                "shaped": out.answer.shaped_names(),
                 "rows": rows,
                 "page_rows": page_rows,
                 "pages": n.div_ceil(page_rows),
@@ -1596,6 +1599,7 @@ fn answer(
             let pins = handle::pinned_by(registry.store(), id)
                 .map_err(|e| Reply::error(500, e.to_string()))?;
             let mut v = serde_json::to_value(&h).unwrap_or(Value::Null);
+            v["shaped"] = json!(h.shaped());
             v["pinned_by"] = json!(pins);
             // Wave 5 §12.8: the invalidation, when there is one, and what
             // it means for the answer
@@ -1653,7 +1657,7 @@ fn answer(
                 epoch,
             )
             .map_err(|e| Reply::error(500, e.to_string()))?;
-            let mut v = json!({"handle": id, "page": page, "pages": pages, "columns": h.columns, "rows": rows});
+            let mut v = json!({"handle": id, "page": page, "pages": pages, "columns": h.columns, "shaped": h.shaped(), "rows": rows});
             if withheld > 0 {
                 v["withheld_sealed"] = json!(withheld);
             }

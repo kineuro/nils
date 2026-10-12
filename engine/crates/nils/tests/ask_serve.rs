@@ -2470,6 +2470,9 @@ fn every_door_that_runs_a_question_holds_quasi_fields_to_the_detail() {
             !raw["rows"].as_array().unwrap().is_empty(),
             "{door}: no rows to compare: {raw}"
         );
+        // the answer says which columns this detail sees as shapes
+        assert_eq!(plain["shaped"], serde_json::json!(held), "{door}");
+        assert_eq!(quasi["shaped"], serde_json::json!([]), "{door}");
         for name in held {
             let r = column(raw, name);
             assert!(
@@ -2564,6 +2567,18 @@ fn every_door_that_runs_a_question_holds_quasi_fields_to_the_detail() {
         job["result"]["handle"].as_i64().unwrap()
     };
     let handles: Vec<i64> = jobs.iter().map(|j| handle_of(*j)).collect();
+    // a job's result says which columns its detail answered as shapes
+    let shaped_of = |id: i64| {
+        listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|j| j["id"] == id)
+            .map(|j| j["result"]["shaped"].clone())
+            .unwrap_or_default()
+    };
+    assert_eq!(shaped_of(jobs[0]), serde_json::json!(held));
+    assert_eq!(shaped_of(jobs[1]), serde_json::json!([]));
     let server = Server::start(
         &home,
         2,
@@ -2596,6 +2611,179 @@ fn every_door_that_runs_a_question_holds_quasi_fields_to_the_detail() {
     let (j_plain, j_quasi) = (page(handles[0]), page(handles[1]));
     server.finish();
     check("job", &j_plain, &j_quasi, &raw);
+}
+
+/// Record 55 K7 on aggregates (the chat sandbox bench, 2026-10-12): the
+/// bench's grouped question, the spread of the age at the first visit, at
+/// every door that answers rows. Below detail quasi the youngest, the oldest
+/// and the mean age come back as their shapes and the count of subjects as
+/// a number, and each answer says which columns it shaped: a fresh run, the
+/// cached run, the preview, the handle and a page of it; at detail quasi
+/// none. The document as the bench wrote it, the column as an option, is
+/// refused at the draft door with the form to write.
+#[test]
+fn every_door_says_which_columns_of_an_aggregate_it_shaped() {
+    let home = synthetic();
+    let server = Server::start(
+        &home,
+        8,
+        &[
+            "--auth",
+            "token",
+            "--token",
+            "a-reader-token-of-length=reader@lab:reader",
+            "--token",
+            "a-reviewer-token-of-leng=rev@lab:reviewer",
+        ],
+    );
+    let reader = Some("a-reader-token-of-length");
+    let reviewer = Some("a-reviewer-token-of-leng");
+    let spread = |youngest: serde_json::Value, oldest: serde_json::Value| {
+        serde_json::json!({
+            "ast_version": 1,
+            "name": "spread of age at the first visit in ms-cohort-a",
+            "params": {"all": {"type": "text", "value": "all"}},
+            "sets": {
+                "scope": {"grain": "cohort", "where": [["=", {}, ["field", {}, "name"], "ms-cohort-a"]]},
+                "people": {"grain": "subject", "of": "scope"},
+                "visits": {"grain": "session", "of": "people", "bind": {
+                    "n": ["ordinal", {}],
+                    "age": ["age_at", {}, ["field", {}, "subject.birth_date"], ["field", {}, "first"]]
+                }},
+                "firsts": {"grain": "session", "from": "visits", "where": [["=", {}, ["field", {}, "n"], 1]]},
+                "spread": {"grain": "group", "group": {"of": "firsts", "by": [["param", {}, "all"]]}, "bind": {
+                    "n_subjects": ["count", {"set": "firsts"}],
+                    "youngest": youngest,
+                    "oldest": oldest,
+                    "mean_age": ["avg", {"set": "firsts"}, ["field", {}, "age"]]
+                }}
+            },
+            "out": {"set": "spread", "level": "aggregate", "columns": [
+                ["field", {}, "n_subjects"],
+                ["field", {}, "youngest"],
+                ["field", {}, "oldest"],
+                ["field", {}, "mean_age"]
+            ]}
+        })
+    };
+    let doc = spread(
+        serde_json::json!(["min", {"set": "firsts"}, ["field", {}, "age"]]),
+        serde_json::json!(["max", {"set": "firsts"}, ["field", {}, "age"]]),
+    );
+    let held = serde_json::json!(["youngest", "oldest", "mean_age"]);
+    // one cell of an answer's one row, by its column's name
+    fn cell(answer: &serde_json::Value, name: &str) -> serde_json::Value {
+        let i = answer["columns"]
+            .as_array()
+            .unwrap_or_else(|| panic!("no columns: {answer}"))
+            .iter()
+            .position(|c| c == name || c["name"] == name)
+            .unwrap_or_else(|| panic!("no column {name} in {answer}"));
+        answer["rows"][0][i].clone()
+    }
+    let run = |token: Option<&str>, fresh: bool| {
+        let (status, answer) = server.request(
+            "POST",
+            "/api/ask/run",
+            Some(&body(serde_json::json!({"document": doc, "fresh": fresh}))),
+            token,
+        );
+        assert_eq!(status, 200, "{answer}");
+        answer
+    };
+    let plain = run(reader, true);
+    let quasi = run(reviewer, true);
+    assert_eq!(plain["shaped"], held, "{plain}");
+    assert_eq!(quasi["shaped"], serde_json::json!([]), "{quasi}");
+    for name in ["youngest", "oldest", "mean_age"] {
+        let raw = cell(&quasi, name);
+        assert!(raw.is_number(), "{name}: {quasi}");
+        // as the engine renders a number: a whole one without decimals
+        let text = match raw.as_f64() {
+            Some(x) if x.fract() == 0.0 => format!("{}", x as i64),
+            _ => raw.to_string(),
+        };
+        assert_eq!(
+            cell(&plain, name),
+            serde_json::json!(nils_ask::validate::shape(&text)),
+            "{name}"
+        );
+    }
+    assert!(cell(&plain, "n_subjects").as_i64().unwrap() > 20, "{plain}");
+    assert_eq!(cell(&plain, "n_subjects"), cell(&quasi, "n_subjects"));
+    // the cached answer, from the handle the plain run left
+    let cached = run(reader, false);
+    assert_eq!(cached["cached"], true, "{cached}");
+    assert_eq!(cached["handle"], plain["handle"]);
+    assert_eq!(cached["shaped"], held, "{cached}");
+    assert_eq!(cell(&cached, "youngest"), cell(&plain, "youngest"));
+    // the preview
+    let previewed = |token: Option<&str>| {
+        let (status, answer) = server.request(
+            "POST",
+            "/api/ask/preview",
+            Some(&body(serde_json::json!({"document": doc}))),
+            token,
+        );
+        assert_eq!(status, 200, "{answer}");
+        answer
+    };
+    let p_plain = previewed(reader);
+    assert_eq!(p_plain["shaped"], held, "{p_plain}");
+    assert_eq!(cell(&p_plain, "oldest"), cell(&plain, "oldest"));
+    assert_eq!(previewed(reviewer)["shaped"], serde_json::json!([]));
+    // a page of the handle, and the handle
+    let h = plain["handle"].as_i64().unwrap();
+    let (status, page) = server.request(
+        "GET",
+        &format!("/api/ask/handles/{h}/rows?page=0"),
+        None,
+        reader,
+    );
+    assert_eq!(status, 200, "{page}");
+    assert_eq!(page["shaped"], held, "{page}");
+    assert_eq!(cell(&page, "mean_age"), cell(&plain, "mean_age"));
+    let flagged: Vec<&str> = page["columns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c["shaped"] == true)
+        .filter_map(|c| c["name"].as_str())
+        .collect();
+    assert_eq!(flagged, vec!["youngest", "oldest", "mean_age"], "{page}");
+    let (status, shown) = server.request("GET", &format!("/api/ask/handles/{h}"), None, reader);
+    assert_eq!(status, 200, "{shown}");
+    assert_eq!(shown["shaped"], held, "{shown}");
+    // the document as the bench wrote it, the column as an option
+    let bench = spread(
+        serde_json::json!(["min", {"set": "firsts", "column": ["field", {}, "age"]}]),
+        serde_json::json!(["max", {"set": "firsts", "field": "age"}]),
+    );
+    let (status, drafted) = server.request(
+        "POST",
+        "/api/ask/draft",
+        Some(&body(serde_json::json!({"text": bench.to_string()}))),
+        reader,
+    );
+    assert_eq!(status, 200, "{drafted}");
+    assert_eq!(drafted["document"], serde_json::Value::Null, "{drafted}");
+    let issues = drafted["diagnosis"]["issues"].as_array().unwrap();
+    let at = |path: &str| {
+        issues
+            .iter()
+            .find(|i| i["path"] == path)
+            .unwrap_or_else(|| panic!("nothing at {path}: {drafted}"))
+    };
+    assert_eq!(at("sets.spread.bind.youngest")["code"], "unknown_field");
+    assert_eq!(
+        at("sets.spread.bind.youngest")["next"],
+        r#"write ["min", {set: firsts}, ["field",{},"age"]]"#
+    );
+    assert_eq!(
+        at("sets.spread.bind.oldest")["next"],
+        r#"write ["max", {set: firsts}, ["field", {}, "age"]]"#
+    );
+    server.finish();
 }
 
 /// Wave 7a: two datasets planted on a synthetic home, as the ask reads

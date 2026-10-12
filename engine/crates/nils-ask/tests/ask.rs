@@ -149,7 +149,12 @@ const FIXTURES: &[&str] = &["yardstick", "gold-a", "gold-b", "gold-c"];
 
 #[test]
 fn the_four_fixtures_parse_desugar_once_validate_and_hash() {
-    let scope = Scope::default();
+    // the documents read quasi identifying fields, as the gate runs them
+    let scope = Scope {
+        classes: [Class::QuasiIdentifying].into_iter().collect(),
+        ..Scope::default()
+    };
+    let plain = Scope::default();
     let mut hashes = BTreeSet::new();
     for name in FIXTURES {
         let ask = parse(&fixture(name)).unwrap_or_else(|e| panic!("{name}: {e}"));
@@ -171,6 +176,24 @@ fn the_four_fixtures_parse_desugar_once_validate_and_hash() {
         );
         let prepared =
             prepare(ask.clone(), &Fixture, &scope).unwrap_or_else(|e| panic!("{name}: {e}"));
+        // record 55 K7: at detail plain each validates too, but for gold C's
+        // standard deviation of age, which the post pass would read from the
+        // ages themselves
+        match prepare(ask.clone(), &Fixture, &plain) {
+            Ok(p) => {
+                assert_ne!(*name, "gold-c", "the stddev of age at plain");
+                assert_eq!(p.hash, prepared.hash, "{name}");
+            }
+            Err(e) => {
+                let text = e.to_string();
+                assert_eq!(*name, "gold-c", "{name}: {text}");
+                assert!(
+                    text.contains("forbidden_field at out.measures[1]")
+                        && text.contains("stddev of age"),
+                    "{text}"
+                );
+            }
+        }
         assert_eq!(prepared.hash.len(), 64, "{name}");
         assert!(
             prepared
@@ -1104,6 +1127,295 @@ fn a_quasi_column_nested_past_the_bound_is_refused_not_answered_unshaped() {
         text.contains("not_compilable") && text.contains("nest"),
         "{text}"
     );
+}
+
+/// The chat sandbox bench of 2026-10-12, as a document: each subject's age
+/// at the first visit, and a spread of it in one group, its aggregates as
+/// given. Sessions carry the age; the first is picked by its ordinal.
+fn first_ages(bind: Value, by: Value, columns: Value) -> Value {
+    json!({
+        "ast_version": 1,
+        "name": "spread of age at the first visit",
+        "params": {"all": {"type": "text", "value": "all"}},
+        "sets": {
+            "people": {"grain": "subject"},
+            "visits": {
+                "grain": "session",
+                "of": "people",
+                "bind": {
+                    "n": ["ordinal", {}],
+                    "age": ["age_at", {}, ["field", {}, "subject.birth_date"], ["field", {}, "first"]]
+                }
+            },
+            "firsts": {"grain": "session", "from": "visits", "where": [["=", {}, ["field", {}, "n"], 1]]},
+            "spread": {"grain": "group", "group": {"of": "firsts", "by": by}, "bind": bind}
+        },
+        "out": {"set": "spread", "level": "aggregate", "columns": columns}
+    })
+}
+
+fn issues_at(v: &Value, scope: &Scope) -> Vec<nils_ask::Issue> {
+    let ask = serde_json::from_value(v.clone()).expect("a document");
+    match prepare(ask, &Fixture, scope) {
+        Err(nils_ask::Error::Invalid(issues)) => issues,
+        Err(e) => panic!("refused another way: {e}"),
+        Ok(p) => panic!("accepted: {}", p.hash),
+    }
+}
+
+fn quasi_scope() -> Scope {
+    Scope {
+        classes: [Class::QuasiIdentifying].into_iter().collect(),
+        ..Scope::default()
+    }
+}
+
+/// The chat sandbox bench of 2026-10-12: an aggregate whose column was
+/// written as an option (`column:`, `field:`) or left out read nothing, and
+/// `min`, `max` and `avg` totalled the rows' own keys, so an answer named the
+/// youngest and the oldest age and held row numbers. An aggregate takes one
+/// option, `set`, and reads one column, its argument: anything else is
+/// refused at every detail with the form to write; `count` and `distinct`
+/// still read the rows without a column.
+#[test]
+fn an_aggregate_reads_its_column_as_its_argument_never_an_option() {
+    let by = json!([["param", {}, "all"]]);
+    let cols = |names: &[&str]| -> Value {
+        names
+            .iter()
+            .map(|n| json!(["field", {}, n]))
+            .collect::<Vec<_>>()
+            .into()
+    };
+    for scope in [Scope::default(), quasi_scope()] {
+        // as the bench wrote it: the column as an option
+        let bench = first_ages(
+            json!({
+                "n_subjects": ["count", {"set": "firsts"}],
+                "youngest": ["min", {"set": "firsts", "column": ["field", {}, "age"]}],
+                "oldest": ["max", {"set": "firsts", "field": "age"}]
+            }),
+            by.clone(),
+            cols(&["n_subjects", "youngest", "oldest"]),
+        );
+        let issues = issues_at(&bench, &scope);
+        let at = |path: &str| {
+            issues
+                .iter()
+                .find(|i| i.path == path)
+                .unwrap_or_else(|| panic!("nothing at {path}: {issues:?}"))
+        };
+        let youngest = at("sets.spread.bind.youngest");
+        assert_eq!(youngest.code, Code::UnknownField);
+        assert!(youngest.message.contains("column is not one"), "{youngest}");
+        assert_eq!(
+            youngest.next,
+            r#"write ["min", {set: firsts}, ["field",{},"age"]]"#
+        );
+        let oldest = at("sets.spread.bind.oldest");
+        assert_eq!(
+            oldest.next,
+            r#"write ["max", {set: firsts}, ["field", {}, "age"]]"#
+        );
+        assert!(
+            !issues
+                .iter()
+                .any(|i| i.path == "sets.spread.bind.n_subjects"),
+            "{issues:?}"
+        );
+
+        // no column at all, a tuple, a literal: refused; count and distinct
+        // without a column: answered
+        for (bind, path) in [
+            (
+                json!({"m": ["max", {"set": "firsts"}]}),
+                "sets.spread.bind.m",
+            ),
+            (
+                json!({"m": ["avg", {"set": "firsts"}, ["field", {}, "age"], ["field", {}, "n"]]}),
+                "sets.spread.bind.m",
+            ),
+            (
+                json!({"m": ["sum", {"set": "firsts"}, "age"]}),
+                "sets.spread.bind.m",
+            ),
+            (
+                json!({"m": ["count", {"set": "firsts", "distinct": true}]}),
+                "sets.spread.bind.m",
+            ),
+        ] {
+            let v = first_ages(bind.clone(), by.clone(), cols(&["m"]));
+            let issues = issues_at(&v, &scope);
+            assert!(
+                issues
+                    .iter()
+                    .any(|i| i.path == path && i.code == Code::UnknownField),
+                "{bind}: {issues:?}"
+            );
+        }
+        let counted = first_ages(
+            json!({"rows": ["count", {"set": "firsts"}], "members": ["distinct", {"set": "firsts"}]}),
+            by.clone(),
+            cols(&["rows", "members"]),
+        );
+        prepare(serde_json::from_value(counted).unwrap(), &Fixture, &scope)
+            .unwrap_or_else(|e| panic!("{e}"));
+
+        // a second aggregate in one clause is checked as the first is
+        let both = first_ages(
+            json!({"range": ["-", {},
+                ["max", {"set": "firsts"}, ["field", {}, "age"]],
+                ["min", {"set": "firsts", "column": ["field", {}, "age"]}]]}),
+            by.clone(),
+            cols(&["range"]),
+        );
+        let issues = issues_at(&both, &scope);
+        assert!(
+            issues.iter().any(|i| i.path == "sets.spread.bind.range"
+                && i.message.contains("min takes one option")),
+            "{issues:?}"
+        );
+    }
+}
+
+/// A clause beside an aggregate is checked in its own set's namespace:
+/// validation once stopped at the first aggregate of a clause, so a field
+/// after it went unchecked, a sensitive one projected raw at detail quasi.
+#[test]
+fn a_clause_beside_an_aggregate_is_checked_as_any_other() {
+    let stacks = |column: Value| {
+        doc(
+            json!({"s": {"grain": "stack"}, "t": {"grain": "stack"}}),
+            json!({"set": "s", "level": "record", "columns": [column]}),
+        )
+    };
+    let after = |field: &str| json!(["concat", {}, ["count", {"set": "t"}], ["field", {}, field]]);
+    // an unknown field
+    let issues = issues_at(&stacks(after("no_such_field")), &quasi_scope());
+    assert!(
+        issues
+            .iter()
+            .any(|i| i.code == Code::UnknownField && i.path == "out.columns[0]"),
+        "{issues:?}"
+    );
+    // a sensitive field, without the class, at quasi and at plain
+    for scope in [quasi_scope(), Scope::default()] {
+        let issues = issues_at(&stacks(after("patient_comments")), &scope);
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.code == Code::ForbiddenField && i.path == "out.columns[0]"),
+            "{issues:?}"
+        );
+    }
+    // with the class, answered
+    let sensitive = Scope {
+        classes: [Class::QuasiIdentifying, Class::Sensitive]
+            .into_iter()
+            .collect(),
+        ..Scope::default()
+    };
+    prepare(
+        serde_json::from_value(stacks(after("patient_comments"))).unwrap(),
+        &Fixture,
+        &sensitive,
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
+}
+
+/// Record 55 K7 on aggregates (the chat sandbox bench, 2026-10-12): below
+/// detail quasi an aggregate that can read back a value of a quasi
+/// identifying field is answered as its shape, as the field is: its `min`,
+/// `max`, `avg`, `sum` and `list`, at every size of the group, and a
+/// group's key made from it. A count of rows and a count of distinct values
+/// read no value and are answered. A post pass measure that reads it, the
+/// median or a percentile of a group's child field, is refused with the
+/// reason. At detail quasi every one is answered raw.
+#[test]
+fn an_aggregate_of_a_quasi_field_follows_the_field_below_detail_quasi() {
+    let shaped = |v: &Value, scope: &Scope| -> Vec<usize> {
+        prepare(serde_json::from_value(v.clone()).unwrap(), &Fixture, scope)
+            .unwrap_or_else(|e| panic!("{e}"))
+            .validated
+            .shaped
+            .into_iter()
+            .collect()
+    };
+    let columns = json!([
+        ["field", {}, "n_subjects"],
+        ["field", {}, "youngest"],
+        ["field", {}, "oldest"],
+        ["field", {}, "mean_age"],
+        ["field", {}, "total"],
+        ["field", {}, "ages"],
+        ["field", {}, "n_ages"],
+        ["field", {}, "range"],
+        ["field", {}, "older"],
+        ["field", {}, "_rows"]
+    ]);
+    let bind = json!({
+        "n_subjects": ["count", {"set": "firsts"}],
+        "youngest": ["min", {"set": "firsts"}, ["field", {}, "age"]],
+        "oldest": ["max", {"set": "firsts"}, ["field", {}, "age"]],
+        "mean_age": ["avg", {"set": "firsts"}, ["field", {}, "age"]],
+        "total": ["sum", {"set": "firsts"}, ["field", {}, "age"]],
+        "ages": ["list", {"set": "firsts"}, ["field", {}, "age"]],
+        "n_ages": ["distinct", {"set": "firsts"}, ["field", {}, "age"]],
+        "range": ["-", {}, ["field", {}, "oldest"], ["field", {}, "youngest"]],
+        "older": [">", {}, ["field", {}, "oldest"], 60]
+    });
+    // the bench's question: one group of every first visit
+    let spread = first_ages(bind.clone(), json!([["param", {}, "all"]]), columns.clone());
+    // youngest, oldest, mean, total, the list and the range: shapes; the
+    // counts and a comparison: answered
+    assert_eq!(shaped(&spread, &Scope::default()), vec![1, 2, 3, 4, 5, 7]);
+    assert!(shaped(&spread, &quasi_scope()).is_empty());
+    // a group of one, each subject's own: the same, whatever the size
+    let mut each = first_ages(
+        bind.clone(),
+        json!([["field", {}, "subject.id"]]),
+        columns.clone(),
+    );
+    assert_eq!(shaped(&each, &Scope::default()), vec![1, 2, 3, 4, 5, 7]);
+    // a group keyed by the age: its key shaped, its count answered
+    let by_age = first_ages(
+        json!({"n": ["count", {"set": "firsts"}]}),
+        json!([["field", {}, "age"]]),
+        json!([
+            ["field", {}, "age"],
+            ["field", {}, "n"],
+            ["field", {}, "_subjects"]
+        ]),
+    );
+    assert_eq!(shaped(&by_age, &Scope::default()), vec![0]);
+    assert!(shaped(&by_age, &quasi_scope()).is_empty());
+
+    // a scalar measure of the child's age: refused below quasi, answered at
+    // quasi; of a column that reads no quasi field, answered at plain
+    for (measure, refused) in [
+        (json!({"median": {"of": "age"}}), true),
+        (json!({"percentile": {"of": "age", "p": 90}}), true),
+        (json!({"stddev": {"of": "age"}}), true),
+        (json!({"median": {"of": "subject.birth_date"}}), true),
+        (json!({"median": {"of": "n"}}), false),
+        (json!({"median": {"of": "n_subjects"}}), false),
+    ] {
+        each["out"]["measures"] = json!([measure.clone()]);
+        let ask = || serde_json::from_value(each.clone()).unwrap();
+        match prepare(ask(), &Fixture, &Scope::default()) {
+            Err(e) if refused => {
+                let text = e.to_string();
+                assert!(
+                    text.contains("forbidden_field at out.measures[0]")
+                        && text.contains("record 55 K7"),
+                    "{measure}: {text}"
+                );
+            }
+            Ok(_) if !refused => {}
+            other => panic!("{measure}: {:?}", other.map(|p| p.hash)),
+        }
+        prepare(ask(), &Fixture, &quasi_scope()).unwrap_or_else(|e| panic!("{measure}: {e}"));
+    }
 }
 
 /// Wave 7a: a value of an axis is named by its identity, an identity it had
