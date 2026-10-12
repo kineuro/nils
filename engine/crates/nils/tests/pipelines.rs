@@ -9521,3 +9521,72 @@ fn a_run_is_refused_before_it_is_queued_for_what_it_lacks() {
     assert_eq!(count("SELECT COUNT(*) FROM job WHERE kind = 'pipeline'"), 0);
     assert_eq!(count("SELECT COUNT(*) FROM pipeline_run"), 0);
 }
+
+/// 2026-10-12, with record 48: a unit's error is what its pipeline said of
+/// its stack, so once that stack is of a sample sealed, a reader who does
+/// not read sealed stacks reads the unit's failure by its kind and cause
+/// and never its words, at the door and at the keyboard; the keyboard with
+/// --unsealed-access reads them.
+#[test]
+fn a_sealed_stack_s_unit_says_its_failure_and_not_its_words() {
+    if !have("python3") {
+        eprintln!(
+            "python3 is not installed; the stand-in podman needs it, so this test is skipped"
+        );
+        return;
+    }
+    let lab = Lab::new("pipelines-sealed-errors");
+    lab.add_descriptor("disk-full", DISK_FULL);
+    let v = lab.json(&[
+        "run",
+        "disk-full",
+        "--select",
+        "selection:every@1",
+        "--json",
+    ]);
+    assert_eq!(v["status"], "partial", "{v}");
+    let id = v["id"].to_string();
+    let shown = lab.json(&["pipeline", "runs", &id, "--json"]);
+    let failed = shown["units_run"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|u| u["status"] == "failed")
+        .cloned()
+        .unwrap();
+    let unit = failed["unit"].as_str().unwrap().to_string();
+    let stack: i64 = unit.trim_start_matches("stack-").parse().unwrap();
+    seal(&lab, "sealed_errors", &[stack]);
+    let of = |doc: &Value| -> Value {
+        doc["units_run"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|u| u["unit"] == unit.as_str())
+            .cloned()
+            .unwrap()
+    };
+    let kept = of(&lab.json(&["pipeline", "runs", &id, "--json"]));
+    assert!(kept["error"].is_null(), "{kept}");
+    assert_eq!(kept["sealed"], true, "{kept}");
+    assert_eq!(kept["failure"]["cause"], "disk", "{kept}");
+    let read = of(&lab.json(&[
+        "pipeline",
+        "runs",
+        &id,
+        "--json",
+        "--unsealed-access",
+        "reading why a sealed unit failed",
+    ]));
+    assert_eq!(
+        read["error"], "OSError: [Errno 28] No space left on device",
+        "{read}"
+    );
+    let server = Server::start(&lab);
+    let (status, doc) = server.call("GET", &format!("/api/pipeline-runs/{id}"), None, OPERATOR);
+    assert_eq!(status, 200, "{doc}");
+    let at_door = of(&doc);
+    assert!(at_door["error"].is_null(), "{at_door}");
+    assert_eq!(at_door["failure"]["kind"], "resource", "{at_door}");
+    drop(server);
+}

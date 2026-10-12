@@ -781,6 +781,36 @@ pub(crate) fn summary_unsealed(
     Ok(sealed.len())
 }
 
+/// 2026-10-12, with record 48: the error a unit's pipeline wrote of a unit
+/// holding a stack of a sample sealed now is what a system said of that
+/// stack, so a reader who does not read such stacks reads the unit's
+/// failure by its kind and cause, never its words: on those units of
+/// `units_run`, `error` is null and `sealed` true. Answers how many.
+pub(crate) fn units_run_unsealed(
+    store: &mut Store,
+    run_id: i64,
+    doc: &mut Value,
+) -> Result<usize, String> {
+    let named: Vec<String> = doc["units_run"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|u| u["error"].is_string())
+        .filter_map(|u| u["unit"].as_str().map(str::to_string))
+        .collect();
+    let sealed = sealed_units(store, run_id, &named)?;
+    if sealed.is_empty() {
+        return Ok(0);
+    }
+    for u in doc["units_run"].as_array_mut().into_iter().flatten() {
+        if u["unit"].as_str().is_some_and(|n| sealed.contains(n)) {
+            u["error"] = Value::Null;
+            u["sealed"] = json!(true);
+        }
+    }
+    Ok(sealed.len())
+}
+
 /// A job's document as [`summary_unsealed`] leaves a run's summary: the
 /// result of a pipeline run. Answers how many units went.
 pub(crate) fn job_unsealed(store: &mut Store, job: &mut Value) -> Result<usize, String> {
@@ -932,6 +962,11 @@ pub(crate) fn route(
                 r.id,
                 &mut doc["summary"],
             )?;
+            // 2026-10-12: nor a unit's own words of a stack of such a sample
+            if !crate::sealed::reads(&caller.access) {
+                units_run_unsealed(registry.store(), r.id, &mut doc)
+                    .map_err(|e| Reply::error(500, e))?;
+            }
             if !quasi {
                 run_totals_only(&mut doc);
             }
@@ -1708,6 +1743,7 @@ pub(crate) fn command(home: &Home, command: PipelineCommand) -> Result<(), Exit>
                 let mut doc = run_doc(registry.store(), &r);
                 if !unsealed {
                     summary_unsealed(registry.store(), r.id, &mut doc["summary"]).map_err(fail)?;
+                    units_run_unsealed(registry.store(), r.id, &mut doc).map_err(fail)?;
                 }
                 if json {
                     return print(&doc);
