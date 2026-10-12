@@ -119,7 +119,7 @@ nils pipeline show n4-bias-correction
 
 ## Run one
 
-1. Save the selection to run over, as a question (`nils ask selections save`), or name a frozen handle.
+1. Save the selection to run over, as a question (`nils ask selections save`), or name a frozen handle. A run can also go straight over a dataset's or a cohort's main scans of a role, with no selection made first: see *Run over a dataset's or a cohort's main scans*.
 
 2. Check what the run would do, without running it:
 
@@ -184,6 +184,30 @@ curl -X POST http://127.0.0.1:8437/api/pipelines/samseg-lesions/preflight \
 ```
 
 The pre-flight's budget check reads the lane's own budget (see *Set the lane*).
+
+## Run over a dataset's or a cohort's main scans
+
+1. Check what the run would do over a dataset's main T1w scans:
+
+   ```sh
+   nils run synthseg --select main:t1w@dataset:study-anon --preflight
+   ```
+
+   The pre-flight says how many scans the list holds, of how many visits, and under which rules they were picked. It counts the visits that have no main scan of the role, by why, and names each at detail quasi: it holds no scan of the role; it holds one and none is picked (`nils pick run` picks it); a person said none stands for it; or, of a dataset, its main scan is one only another dataset's folder holds.
+
+2. Run it:
+
+   ```sh
+   nils run synthseg --select main:t1w@dataset:study-anon
+   ```
+
+   `main:<role>@cohort:<name>` names a cohort instead. The role is one the pack's picks name (`t1w`, `flair` and `t2w` in the MRI pack, listed as `main_roles` among the engine's capabilities). Through the doors the same text goes where a selection does: `{"select": "main:t1w@dataset:study-anon"}` to the pre-flight door, and `"--select", "main:t1w@dataset:study-anon"` in a run queued at the jobs door. `--chunk N` splits the list as it splits a selection.
+
+What the list is: the scope's scans (a dataset's, the stacks its folder holds a file of; a cohort's, every stack of its open members) that the main-scan pick of their visit names. The picks are the scope's own once a run of its saved rules finished, else the pack's, as the Main scans page shows them. One pick a visit, with every stack it names.
+
+The list is resolved when the run is made and frozen into a handle, as a selection is, and the handle records the picks it was read under: the version of the scope's rules, their digest and the pick run that made them read, or the pack's defaults. A run over the handle takes the same stacks after the rules change, since a bids input is released from the list as it was frozen, each stack the main scan of its role; the input's release records the picks. `nils pipeline runs <run>` says it under `main`.
+
+> **Warning:** a scope's newer rules replace the picks of the version before once their run finishes, so the pick table no longer holds the picks an older list was read under. The list itself, and what its handle records, are what a run over it reads.
 
 ## When a run fails
 

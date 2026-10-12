@@ -259,12 +259,11 @@ pub(crate) fn resolve(
         ScopeKind::Dataset => crate::operations::Scope::Sources(&ids),
         ScopeKind::Cohort => crate::operations::Scope::Cohort(scope.id),
     };
+    let holds = held.holds(store);
+    let (stack, series) = (store.qualified("stack"), store.qualified("series"));
     let sql = format!(
-        "SELECT x.id, xse.study_id FROM {} x JOIN {} xse ON xse.id = x.series_id \
-         WHERE {} ORDER BY x.id",
-        store.qualified("stack"),
-        store.qualified("series"),
-        held.holds(store)
+        "SELECT x.id, xse.study_id FROM {stack} x JOIN {series} xse ON xse.id = x.series_id \
+         WHERE {holds} ORDER BY x.id"
     );
     let mut in_scope: BTreeSet<i64> = BTreeSet::new();
     let mut visits: BTreeMap<(i64, String), Vec<i64>> = BTreeMap::new();
@@ -280,29 +279,19 @@ pub(crate) fn resolve(
     }
 
     // which of them hold the role
-    let all: Vec<i64> = in_scope.iter().copied().collect();
+    let sql = format!(
+        "SELECT DISTINCT a.stack_id FROM {} a JOIN {stack} x ON x.id = a.stack_id \
+         WHERE a.axis = 'role' AND a.value = {} AND {holds}",
+        store.qualified("classification_axis"),
+        d.param(1, Type::Text),
+    );
     let mut holding: BTreeSet<i64> = BTreeSet::new();
-    for chunk in all.chunks(500) {
-        let sql = format!(
-            "SELECT DISTINCT stack_id FROM {} WHERE axis = 'role' AND value = {} \
-             AND stack_id IN ({})",
-            store.qualified("classification_axis"),
-            d.param(1, Type::Text),
-            list(chunk)
-        );
-        for r in store.query(&sql, &[Param::from(role)]).map_err(said)? {
-            holding.insert(r.int(0).map_err(said)?);
-        }
+    for r in store.query(&sql, &[Param::from(role)]).map_err(said)? {
+        holding.insert(r.int(0).map_err(said)?);
     }
 
     // the live picks of the role on the scope's subjects, as the resolver
-    // reads them, by subject and day: a person's over a run's
-    let subjects: Vec<i64> = visits
-        .keys()
-        .map(|(s, _)| *s)
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect();
+    // reads them, each with the stacks it names
     let relation = of.picks(store);
     let day = d.text_of_qualified(
         Some("p"),
@@ -310,47 +299,40 @@ pub(crate) fn resolve(
             .column("session_day")
             .expect("pick.session_day"),
     );
+    let sql = format!(
+        "SELECT p.id, p.subject_id, {day}, p.author_kind, ps.stack_id FROM {relation} p \
+         LEFT JOIN {} ps ON ps.pick_id = p.id \
+         WHERE p.role = {} AND p.model = {} AND p.scheme_digest = {} \
+         AND p.subject_id IN (SELECT xse.subject_id FROM {stack} x \
+         JOIN {series} xse ON xse.id = x.series_id WHERE {holds}) \
+         ORDER BY p.id, ps.stack_id",
+        store.qualified("pick_stack"),
+        d.param(1, Type::Text),
+        d.param(2, Type::Text),
+        d.param(3, Type::Text),
+    );
+    let params = [
+        Param::from(role),
+        Param::from(model.name.as_str()),
+        Param::from(scheme.digest()),
+    ];
     let mut found: Vec<((i64, String), i64, bool)> = Vec::new();
-    for chunk in subjects.chunks(500) {
-        let sql = format!(
-            "SELECT p.id, p.subject_id, {day}, p.author_kind FROM {relation} p \
-             WHERE p.role = {} AND p.model = {} AND p.scheme_digest = {} \
-             AND p.subject_id IN ({}) ORDER BY p.id",
-            d.param(1, Type::Text),
-            d.param(2, Type::Text),
-            d.param(3, Type::Text),
-            list(chunk)
-        );
-        let params = [
-            Param::from(role),
-            Param::from(model.name.as_str()),
-            Param::from(scheme.digest()),
-        ];
-        for r in store.query(&sql, &params).map_err(said)? {
+    let mut named: BTreeMap<i64, Vec<i64>> = BTreeMap::new();
+    for r in store.query(&sql, &params).map_err(said)? {
+        let id = r.int(0).map_err(said)?;
+        if found.last().is_none_or(|(_, last, _)| *last != id) {
             let day = r.text(2).map_err(said)?;
             found.push((
                 (
                     r.int(1).map_err(said)?,
                     day[..day.len().min(10)].to_string(),
                 ),
-                r.int(0).map_err(said)?,
+                id,
                 r.text(3).map_err(said)? == "person",
             ));
         }
-    }
-    let ids: Vec<i64> = found.iter().map(|(_, id, _)| *id).collect();
-    let mut named: BTreeMap<i64, Vec<i64>> = BTreeMap::new();
-    for chunk in ids.chunks(500) {
-        let sql = format!(
-            "SELECT pick_id, stack_id FROM {} WHERE pick_id IN ({}) ORDER BY stack_id",
-            store.qualified("pick_stack"),
-            list(chunk)
-        );
-        for r in store.query(&sql, &[]).map_err(said)? {
-            named
-                .entry(r.int(0).map_err(said)?)
-                .or_default()
-                .push(r.int(1).map_err(said)?);
+        if let Some(s) = r.opt_int(4).map_err(said)? {
+            named.entry(id).or_default().push(s);
         }
     }
     let mut on: BTreeMap<(i64, String), (i64, bool)> = BTreeMap::new();
