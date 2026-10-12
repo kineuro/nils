@@ -3213,3 +3213,169 @@ fn the_dataset_field_answers_at_every_door_that_runs_a_question() {
         "{page}"
     );
 }
+
+/// The schema the Postgres half of a door test registers in.
+const DRAFT_SCHEMA: &str = "nils_ask_serve_draft_test";
+
+fn drop_schema(dsn: &str, schema: &str) {
+    if let Ok(mut store) = nils_registry::Store::connect_postgres(dsn, "public") {
+        let _ = store.batch(&format!(
+            "DROP SCHEMA IF EXISTS {schema} CASCADE; DROP SCHEMA IF EXISTS {schema}_linkage CASCADE"
+        ));
+    }
+}
+
+/// [`synthetic`] on Postgres, in a schema of its own, dropped first so a
+/// run killed mid-test leaves nothing that refuses the next.
+fn synthetic_postgres(dsn: &str, schema: &str) -> TempDir {
+    drop_schema(dsn, schema);
+    let home = TempDir::new("ask-serve-home");
+    run(&home, &["key", "add", "k"], Some("an ask serve test key\n"));
+    run(
+        &home,
+        &[
+            "init",
+            "--backend",
+            "postgres",
+            "--dsn",
+            dsn,
+            "--schema",
+            schema,
+            "--key",
+            "k",
+        ],
+        None,
+    );
+    run(&home, &["synth", "--seed", "11", "--subjects", "48"], None);
+    run(&home, &["session", "rebuild"], None);
+    home
+}
+
+/// The chat sandbox bench (2026-10-12), on each backend: a `bucket` bound
+/// without its unit passed the validator and failed the compiler while the
+/// draft door's diagnosis counted, so the door answered a bare 500. The
+/// draft door refuses it now with the reason and the form to write, as it
+/// refuses any malformed clause; the run door refuses the same document;
+/// the diagnose door refuses what only the compiler refuses (a parameter
+/// without a value) before it counts; and the form named drafts and is
+/// stored.
+#[test]
+fn the_draft_door_refuses_a_bucket_without_its_unit_with_its_form() {
+    let dsn = std::env::var("NILS_TEST_POSTGRES_DSN")
+        .ok()
+        .filter(|d| !d.is_empty());
+    if dsn.is_none() {
+        eprintln!("NILS_TEST_POSTGRES_DSN is not set; the Postgres half is skipped");
+    }
+    let document = |month: serde_json::Value| {
+        serde_json::json!({
+            "ast_version": 1,
+            "name": "visits by month",
+            "sets": {
+                "people": {"grain": "subject"},
+                "visits": {"grain": "session", "of": "people", "bind": {"month": month}},
+                "by_month": {
+                    "grain": "group",
+                    "group": {"of": "visits", "by": [["field", {}, "month"]]},
+                    "bind": {"n": ["count", {"set": "visits"}]}
+                }
+            },
+            "out": {"set": "by_month", "level": "aggregate",
+                    "columns": [["field", {}, "month"], ["field", {}, "n"]]}
+        })
+    };
+    let bench = document(serde_json::json!(["bucket", {}, ["field", {}, "first"]]));
+    let named = document(serde_json::json!(["bucket", {"unit": "month"}, ["field", {}, "first"]]));
+    let mut unbound = document(serde_json::json!([
+        "shift",
+        {},
+        ["field", {}, "first"],
+        ["param", {}, "later"]
+    ]));
+    unbound["params"] = serde_json::json!({"later": {"type": "integer"}});
+    let form = r#"write ["bucket", {unit: month}, ["field",{},"first"]]"#;
+    for (backend, dsn) in [("sqlite", None), ("postgres", dsn)] {
+        let home = match (backend, &dsn) {
+            ("sqlite", _) => synthetic(),
+            (_, Some(dsn)) => synthetic_postgres(dsn, DRAFT_SCHEMA),
+            _ => continue,
+        };
+        let server = Server::start(&home, 5, &[]);
+        let (status, drafted) = server.request(
+            "POST",
+            "/api/ask/draft",
+            Some(&body(serde_json::json!({"text": bench.to_string()}))),
+            None,
+        );
+        assert_eq!(status, 200, "{backend}: {drafted}");
+        let d = &drafted["diagnosis"];
+        assert_eq!(d["valid"], false, "{backend}: {drafted}");
+        assert!(drafted["document"].is_null(), "{backend}: {drafted}");
+        assert_eq!(d["issues"][0]["code"], "not_compilable", "{backend}: {d}");
+        assert_eq!(d["issues"][0]["path"], "sets.visits.bind.month", "{d}");
+        assert_eq!(
+            d["issues"][0]["message"], "bucket needs its unit: year, month or day",
+            "{d}"
+        );
+        assert_eq!(d["issues"][0]["next"], form, "{d}");
+        assert_eq!(d["next"], serde_json::json!([form]), "{d}");
+        // the run door refuses the same document as a document
+        let (status, ran) = server.request(
+            "POST",
+            "/api/ask/run",
+            Some(&body(serde_json::json!({"document": bench}))),
+            None,
+        );
+        assert_eq!(status, 400, "{backend}: {ran}");
+        assert_eq!(ran["error"], "the document is refused", "{ran}");
+        assert_eq!(ran["next"], serde_json::json!([form]), "{ran}");
+        // what only the compiler refuses, the diagnosis refuses before it
+        // counts anything
+        let (status, diagnosed) = server.request(
+            "POST",
+            "/api/ask/diagnose",
+            Some(&body(serde_json::json!({"document": unbound}))),
+            None,
+        );
+        assert_eq!(status, 200, "{backend}: {diagnosed}");
+        assert_eq!(diagnosed["valid"], false, "{backend}: {diagnosed}");
+        assert_eq!(
+            diagnosed["issues"][0]["code"], "not_compilable",
+            "{diagnosed}"
+        );
+        assert_eq!(
+            diagnosed["issues"][0]["path"], "sets.visits.bind.month",
+            "{diagnosed}"
+        );
+        assert_eq!(
+            diagnosed["issues"][0]["message"], "parameter later has no value",
+            "{diagnosed}"
+        );
+        assert_eq!(diagnosed["funnel"], serde_json::json!([]), "{diagnosed}");
+        let (status, drafted) = server.request(
+            "POST",
+            "/api/ask/draft",
+            Some(&body(serde_json::json!({"text": unbound.to_string()}))),
+            None,
+        );
+        assert_eq!(status, 200, "{backend}: {drafted}");
+        assert_eq!(drafted["diagnosis"]["valid"], false, "{drafted}");
+        assert!(drafted["document"].is_null(), "{drafted}");
+        // the form named drafts, and is stored
+        let (status, drafted) = server.request(
+            "POST",
+            "/api/ask/draft",
+            Some(&body(serde_json::json!({"text": named.to_string()}))),
+            None,
+        );
+        assert_eq!(status, 200, "{backend}: {drafted}");
+        assert_eq!(drafted["diagnosis"]["valid"], true, "{backend}: {drafted}");
+        assert!(drafted["document"].is_number(), "{backend}: {drafted}");
+        server.finish();
+        if let Some(dsn) = &dsn
+            && backend == "postgres"
+        {
+            drop_schema(dsn, DRAFT_SCHEMA);
+        }
+    }
+}

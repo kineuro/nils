@@ -856,3 +856,134 @@ out: {set: by_sex, level: aggregate, columns: [["field", {}, "sex"], ["field", {
         assert!(answer.rows.len() >= 2, "{}: {:?}", l.name, answer.rows);
     }
 }
+
+/// The chat sandbox bench of 2026-10-12, on each backend: a `bucket` bound
+/// without its unit passed the validator and failed the compiler while the
+/// draft's diagnosis counted, and the draft door answered a bare 500. The
+/// draft refuses it now as it refuses any malformed clause, with the
+/// reason and the form to write, and stores nothing; what only the
+/// compiler refuses, a parameter without a value, is refused the same way
+/// before anything is counted; and the form named drafts, stores and runs.
+#[test]
+fn the_draft_refuses_a_clause_the_compiler_cannot_read() {
+    let text = |params: &str, month: &str| {
+        format!(
+            r#"
+ast_version: 1
+name: visits by month
+{params}
+sets:
+  people: {{grain: subject}}
+  visits:
+    grain: session
+    of: people
+    bind:
+      month: {month}
+  by_month:
+    grain: group
+    group: {{of: visits, by: [["field", {{}}, "month"]]}}
+    bind:
+      n: ["count", {{set: visits}}]
+out: {{set: by_month, level: aggregate, columns: [["field", {{}}, "month"], ["field", {{}}, "n"]]}}
+"#
+        )
+    };
+    for mut l in labs() {
+        let scope = common::quasi();
+        let scheme = Scheme::default();
+        let s = Setting {
+            names: &l.catalog,
+            scope: &scope,
+            scheme: &scheme,
+            principal: "author",
+            bounds: bounds(),
+            values_cap: 50,
+        };
+        let before = document_count(&mut l.registry);
+        // as the bench wrote it: refused, with the form to write
+        let bench = text("", r#"["bucket", {}, ["field", {}, "first"]]"#);
+        let drafted = affordance::draft(&mut l.registry, &bench, &s, None)
+            .unwrap_or_else(|e| panic!("{}: {e}", l.name));
+        let d = &drafted.diagnosis;
+        assert!(!d.valid, "{}", l.name);
+        assert!(drafted.document.is_none() && drafted.hash.is_none());
+        assert_eq!(d.issues.len(), 1, "{}: {:?}", l.name, d.issues);
+        let form = r#"write ["bucket", {unit: month}, ["field",{},"first"]]"#;
+        let i = &d.issues[0];
+        assert_eq!(i.code, nils_ask::Code::NotCompilable, "{}", l.name);
+        assert_eq!(i.path, "sets.visits.bind.month");
+        assert_eq!(i.message, "bucket needs its unit: year, month or day");
+        assert_eq!(i.next, form);
+        assert_eq!(d.next, vec![form.to_string()]);
+        assert!(d.funnel.is_empty(), "{}", l.name);
+        // what only the compiler refuses is refused before anything counts
+        let unbound = text(
+            "params:\n  later: {type: integer}",
+            r#"["shift", {}, ["field", {}, "first"], ["param", {}, "later"]]"#,
+        );
+        let drafted = affordance::draft(&mut l.registry, &unbound, &s, None)
+            .unwrap_or_else(|e| panic!("{}: {e}", l.name));
+        let d = &drafted.diagnosis;
+        assert!(!d.valid && drafted.document.is_none(), "{}", l.name);
+        assert!(
+            d.issues
+                .iter()
+                .any(|i| i.code == nils_ask::Code::NotCompilable
+                    && i.path == "sets.visits.bind.month"
+                    && i.message == "parameter later has no value"),
+            "{}: {:?}",
+            l.name,
+            d.issues
+        );
+        assert!(d.funnel.is_empty(), "{}", l.name);
+        assert_eq!(document_count(&mut l.registry), before, "{}", l.name);
+        // the form named drafts, stores and runs: the visits by month
+        let named = text("", r#"["bucket", {unit: month}, ["field", {}, "first"]]"#);
+        let drafted = affordance::draft(&mut l.registry, &named, &s, None)
+            .unwrap_or_else(|e| panic!("{}: {e}", l.name));
+        assert!(
+            drafted.diagnosis.valid,
+            "{}: {:?}",
+            l.name, drafted.diagnosis.issues
+        );
+        assert!(drafted.document.is_some(), "{}", l.name);
+        assert_eq!(document_count(&mut l.registry), before + 1, "{}", l.name);
+        let (ask, _) = nils_ask::parse_repaired(&named).unwrap();
+        let (_, answer) = common::run_ask(&mut l, ask);
+        let at = |name: &str| {
+            answer
+                .columns
+                .iter()
+                .position(|c| c == name)
+                .unwrap_or_else(|| panic!("no column {name}: {:?}", answer.columns))
+        };
+        let (month, n) = (at("month"), at("n"));
+        let months: Vec<String> = answer
+            .rows
+            .iter()
+            .filter_map(|r| match &r.0[month] {
+                nils_registry::store::Cell::Text(t) => Some(t.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(months.len() >= 2, "{}: {:?}", l.name, answer.rows);
+        for m in &months {
+            assert!(
+                m.len() == 7
+                    && m.as_bytes()[4] == b'-'
+                    && m.chars().filter(char::is_ascii_digit).count() == 6,
+                "{}: {m}",
+                l.name
+            );
+        }
+        assert!(
+            answer
+                .rows
+                .iter()
+                .all(|r| matches!(r.0[n], nils_registry::store::Cell::Int(c) if c > 0)),
+            "{}: {:?}",
+            l.name,
+            answer.rows
+        );
+    }
+}

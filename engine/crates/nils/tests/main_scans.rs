@@ -881,3 +881,232 @@ fn under_a_root(pg: Option<(String, String)>) {
     assert!(person["scope"].is_null(), "{person}");
     assert!(person.get("session_day").is_none(), "{person}");
 }
+
+/// Nima, 2026-10-12: a dataset is a folder that holds stacks, and a scan
+/// copied into two datasets is one stack with a path in each (the
+/// duplicate policy of 2026-10-10). The map by dataset shows it under
+/// every dataset whose folder holds a file of it, as the one place that
+/// says which folders hold a stack reads them; each of those columns
+/// counts its visit, and the map says how many visits it shows under more
+/// than one column; what is no column's (the visits, the subjects, the
+/// strips) counts it once; and a cell's subjects are found under either
+/// dataset.
+#[test]
+fn a_scan_two_datasets_hold_is_mapped_under_each() {
+    held_twice(None);
+}
+
+#[test]
+fn a_scan_two_datasets_hold_is_mapped_under_each_on_postgres_too() {
+    on_postgres("nils_main_scans_twice", held_twice);
+}
+
+fn held_twice(pg: Option<(String, String)>) {
+    use dicom_core::VR;
+    use dicom_dictionary_std::tags;
+    use nils_dicom::synth::{self, MetaFields};
+    let home = Home::init("main-scans-twice-home", pg);
+    // S-ONE seen twice in the first dataset, its first visit copied into
+    // the second; S-TWO in the first alone, S-THREE in the second alone
+    let first = TempDir::new("main-scans-first");
+    let second = TempDir::new("main-scans-second");
+    for (n, (patient, day, trees)) in [
+        ("S-ONE", "20240131", &[&first, &second][..]),
+        ("S-ONE", "20250131", &[&first][..]),
+        ("S-TWO", "20240131", &[&first][..]),
+        ("S-THREE", "20240131", &[&second][..]),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let study = format!("1.2.826.0.1.3680043.8.498.{}.1", n + 1);
+        let series = format!("{study}.1");
+        for instance in 1..=3u32 {
+            let sop = format!("{series}.{instance}");
+            let mut e = synth::minimal_mr(&study, &series, &sop);
+            e.push(synth::text(tags::PATIENT_ID, VR::LO, patient));
+            e.push(synth::text(tags::STUDY_DATE, VR::DA, day));
+            e.push(synth::text(tags::SERIES_NUMBER, VR::IS, "1"));
+            e.push(synth::text(
+                tags::INSTANCE_NUMBER,
+                VR::IS,
+                &instance.to_string(),
+            ));
+            e.push(synth::text(tags::SERIES_DESCRIPTION, VR::LO, "t1 mprage"));
+            let bytes = synth::part10(&MetaFields::mr(&sop), &e, true);
+            for tree in trees {
+                tree.file(
+                    &format!("derivatives/dcm-anon/{patient}/{n}/IM_{instance:04}"),
+                    &bytes,
+                );
+            }
+        }
+    }
+    for (name, tree) in [("first", &first), ("second", &second)] {
+        home.ok(&[
+            "place",
+            "add",
+            name,
+            tree.path().to_str().unwrap(),
+            "--role",
+            "source",
+            "--patient-id",
+            "id-type:patient-id",
+            "--subjects",
+            "generated",
+        ]);
+        home.ok(&[
+            "digest",
+            "--name",
+            name,
+            "--no-private",
+            &format!("@{name}"),
+        ]);
+    }
+    home.ok(&["fingerprint"]);
+    home.ok(&["classify", "--pack-dir", &packs()]);
+    home.ok(&["pick", "run", "--pack-dir", &packs(), "--json"]);
+    // the copied scan is one stack, with a file in each folder
+    let mut store = home.store();
+    let sql = format!("SELECT COUNT(*) FROM {}", store.qualified("stack"));
+    let stacks = store.query(&sql, &[]).unwrap()[0].int(0).unwrap();
+    assert_eq!(stacks, 4, "the copied scan is one stack");
+    let sql = format!(
+        "SELECT COUNT(*) FROM (SELECT stack_id FROM {} GROUP BY stack_id HAVING COUNT(*) = 2) t",
+        store.qualified("source_stack")
+    );
+    let held = store.query(&sql, &[]).unwrap()[0].int(0).unwrap();
+    assert_eq!(held, 1, "one stack has a file in each folder");
+    drop(store);
+
+    let ingest = TempDir::new("main-scans-twice-ingest");
+    let server = Served::start(&home, ingest.path());
+    let map_of = |scope: &str| -> Value {
+        let (status, map) = server.call(
+            "POST",
+            "/api/picks/map",
+            Some(json!({"scope": {"dataset": scope}, "role": "t1w", "columns": "dataset"})),
+            OPS,
+        );
+        assert_eq!(status, 200, "{map}");
+        map
+    };
+    // a column's key, by its dataset's name
+    let key = |map: &Value, name: &str| -> (usize, Value) {
+        let columns = map["columns"].as_array().unwrap();
+        let i = columns
+            .iter()
+            .position(|c| c["key"].as_str().unwrap().starts_with(name))
+            .unwrap_or_else(|| panic!("no column {name}: {map}"));
+        (i, columns[i]["key"].clone())
+    };
+
+    // the first dataset's subjects, S-ONE and S-TWO, and their three visits:
+    // S-ONE's first visit is in both columns, and each counts it
+    let map = map_of("first");
+    assert_eq!(map["metrics"]["subjects"], 2, "{map}");
+    assert_eq!(map["metrics"]["visits"], 3, "{map}");
+    let columns = map["columns"].as_array().unwrap();
+    assert_eq!(columns.len(), 2, "{map}");
+    let ((a, first_key), (b, second_key)) = (key(&map, "first"), key(&map, "second"));
+    assert_eq!((a, b), (0, 1), "the column with more visits first: {map}");
+    assert_eq!(columns[a]["visits"], 3, "{map}");
+    assert_eq!(columns[a]["shared"], 1, "{map}");
+    assert_eq!(columns[b]["visits"], 1, "{map}");
+    assert_eq!(columns[b]["shared"], 1, "{map}");
+    assert_eq!(map["shared_visits"], 1, "{map}");
+    let cells: i64 = map["matrix"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|r| r["cells"].as_array().unwrap().iter())
+        .map(|c| c.as_i64().unwrap())
+        .sum();
+    assert_eq!(cells, 3 + 1, "the visits, and the shared one again: {map}");
+    let by_visit: i64 = map["by_visit"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v["visits"].as_i64().unwrap())
+        .sum();
+    assert_eq!(by_visit, 3, "each visit once: {map}");
+
+    // a cell of the second dataset finds S-ONE through the copied scan,
+    // whose visit names both columns, the first first
+    let kind = map["matrix"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["cells"][b].as_i64().unwrap() > 0)
+        .map(|r| r["kind"].clone())
+        .unwrap_or_else(|| panic!("no cell under the second dataset: {map}"));
+    let (status, page) = server.call(
+        "POST",
+        "/api/picks/map/subjects",
+        Some(json!({
+            "scope": {"dataset": "first"}, "role": "t1w", "columns": "dataset",
+            "group": {"by": "cell", "kind": kind, "column": second_key},
+            "order": "visits",
+        })),
+        OPS,
+    );
+    assert_eq!(status, 200, "{page}");
+    assert_eq!(page["total"], 1, "{page}");
+    let visits = page["subjects"][0]["visits"].as_array().unwrap();
+    assert_eq!(visits.len(), 2, "{page}");
+    let copied = visits
+        .iter()
+        .find(|v| v["columns"].as_array().unwrap().len() == 2)
+        .unwrap_or_else(|| panic!("no visit under both: {page}"));
+    assert_eq!(copied["columns"], json!([first_key, second_key]), "{page}");
+    assert_eq!(copied["column"], first_key, "{page}");
+    assert!(
+        visits.iter().any(|v| v["columns"] == json!([first_key])),
+        "{page}"
+    );
+
+    // the strips draw each subject once
+    let (status, strips) = server.call(
+        "POST",
+        "/api/picks/map/strips",
+        Some(json!({"scope": {"dataset": "first"}, "role": "t1w", "columns": "dataset"})),
+        OPS,
+    );
+    assert_eq!(status, 200, "{strips}");
+    assert_eq!(strips["subjects"].as_array().unwrap().len(), 2, "{strips}");
+    assert_eq!(strips["shared_visits"], 1, "{strips}");
+    assert_eq!(strips["columns"], map["columns"], "{strips}");
+
+    // the second dataset's subjects, S-ONE and S-THREE: S-ONE's visits in
+    // the first are its own too, the copied one in both
+    let map = map_of("second");
+    assert_eq!(map["metrics"]["subjects"], 2, "{map}");
+    assert_eq!(map["metrics"]["visits"], 3, "{map}");
+    let ((_, first_key), (_, second_key)) = (key(&map, "first"), key(&map, "second"));
+    assert_eq!(
+        map["columns"],
+        json!([
+            {"key": first_key, "visits": 2, "shared": 1},
+            {"key": second_key, "visits": 2, "shared": 1},
+        ]),
+        "{map}"
+    );
+    assert_eq!(map["shared_visits"], 1, "{map}");
+
+    // by scanner a visit is in one column
+    let (status, map) = server.call(
+        "POST",
+        "/api/picks/map",
+        Some(json!({"scope": {"dataset": "first"}, "role": "t1w", "columns": "scanner"})),
+        OPS,
+    );
+    assert_eq!(status, 200, "{map}");
+    assert_eq!(map["shared_visits"], 0, "{map}");
+    let shown: i64 = map["columns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["visits"].as_i64().unwrap())
+        .sum();
+    assert_eq!(shown, 3, "{map}");
+}

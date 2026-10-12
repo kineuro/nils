@@ -1611,3 +1611,153 @@ out: {set: t1, level: count}
         "out": {"set": "t", "level": "count"}
     }));
 }
+
+/// The chat sandbox bench of 2026-10-12 bound a `bucket` without its unit:
+/// the validator passed it, the compiler refused it, and the draft door,
+/// whose diagnosis compiles what it counts, answered a bare 500. A clause
+/// the compiler cannot read is refused at validate, at its path, with the
+/// reason and the form to write: the arguments its op reads, the unit of
+/// `bucket`, `part` and `shift`, a list only as the list of `in`, a
+/// literal text for `contains`, whole places for `round`, and the role of
+/// `picked`.
+#[test]
+fn a_clause_the_compiler_cannot_read_is_refused_with_its_form() {
+    let visits = |set: Value| {
+        doc(
+            json!({"people": {"grain": "subject"}, "visits": set}),
+            json!({"set": "visits", "level": "count"}),
+        )
+    };
+    let bound =
+        |clause: Value| visits(json!({"grain": "session", "of": "people", "bind": {"x": clause}}));
+    let kept =
+        |clause: Value| visits(json!({"grain": "session", "of": "people", "where": [clause]}));
+    let one = |v: Value| -> nils_ask::Issue {
+        let issues = refused(v);
+        assert_eq!(issues.len(), 1, "{issues:?}");
+        issues.into_iter().next().unwrap()
+    };
+    // as the bench wrote it
+    let i = one(bound(json!(["bucket", {}, ["field", {}, "first"]])));
+    assert_eq!(i.code, Code::NotCompilable);
+    assert_eq!(i.path, "sets.visits.bind.x");
+    assert_eq!(i.message, "bucket needs its unit: year, month or day");
+    assert_eq!(
+        i.next,
+        r#"write ["bucket", {unit: month}, ["field",{},"first"]]"#
+    );
+    for (clause, message, next) in [
+        (
+            json!(["bucket", {"unit": "week"}, ["field", {}, "first"]]),
+            "bucket's unit is year, month or day, and week is not one",
+            r#"write ["bucket", {unit: month}, ["field",{},"first"]]"#,
+        ),
+        // the validator once offered hour, which the compiler never read
+        (
+            json!(["part", {"unit": "hour"}, ["field", {}, "first"]]),
+            "part's unit is year, month, day or dow, and hour is not one",
+            r#"write ["part", {unit: year}, ["field",{},"first"]]"#,
+        ),
+        (
+            json!(["part", {}, ["field", {}, "first"]]),
+            "part needs its unit: year, month, day or dow",
+            r#"write ["part", {unit: year}, ["field",{},"first"]]"#,
+        ),
+        (
+            json!(["shift", {"unit": "week"}, ["field", {}, "first"], 2]),
+            "shift's unit is day, month or year, and week is not one",
+            r#"write ["shift", {unit: day}, ["field",{},"first"], 2]"#,
+        ),
+        (
+            json!(["bucket", {"unit": "month"}]),
+            "bucket reads a date; it has none",
+            r#"write ["bucket", {unit: month}, ["field", {}, "<date>"]]"#,
+        ),
+        (
+            json!(["days_between", {}, ["field", {}, "first"]]),
+            "days_between reads two dates; it has one",
+            r#"write ["days_between", {}, ["field",{},"first"], ["field", {}, "<date>"]]"#,
+        ),
+        (
+            json!(["coalesce", {}]),
+            "coalesce reads one value or more; it has none",
+            r#"write ["coalesce", {}, ["field", {}, "<field>"]]"#,
+        ),
+        (
+            json!(["round", {}, ["field", {}, "n_studies"], 1.5]),
+            "round's places are a literal whole number",
+            r#"write ["round", {}, ["field",{},"n_studies"], <places>]"#,
+        ),
+        (
+            json!(["contains", {}, ["field", {}, "label"], 1]),
+            "contains reads a literal text after its value",
+            r#"write ["contains", {}, ["field",{},"label"], "<text>"]"#,
+        ),
+    ] {
+        let i = one(bound(clause.clone()));
+        assert_eq!(i.code, Code::NotCompilable, "{clause}");
+        assert_eq!(i.path, "sets.visits.bind.x", "{clause}");
+        assert_eq!(i.message, message, "{clause}");
+        assert_eq!(i.next, next, "{clause}");
+    }
+    // in a where, as in a binding
+    for (clause, message, next) in [
+        (
+            json!(["=", {}, ["field", {}, "n_studies"], [1, 2]]),
+            "a list is read only as the list of in or not_in, never as an argument of =",
+            r#"write ["in", {}, ["field",{},"n_studies"], [1,2]] for one of the list"#,
+        ),
+        (
+            json!(["in", {}, ["field", {}, "n_studies"], 2]),
+            "in reads its values as a list, or as a list parameter",
+            r#"write ["in", {}, ["field",{},"n_studies"], [<value>, <value>]]"#,
+        ),
+        (
+            json!(["and", {}]),
+            "and reads one clause or more; it has none",
+            r#"write ["and", {}, <clause>]"#,
+        ),
+        (
+            json!(["=", {}, ["field", {}, "n_studies"]]),
+            "= reads two values; it has one",
+            r#"write ["=", {}, ["field",{},"n_studies"], <value>]"#,
+        ),
+    ] {
+        let i = one(kept(clause.clone()));
+        assert_eq!(i.code, Code::NotCompilable, "{clause}");
+        assert_eq!(i.path, "sets.visits.where[0]", "{clause}");
+        assert_eq!(i.message, message, "{clause}");
+        assert_eq!(i.next, next, "{clause}");
+    }
+    // picked names its role, as a name
+    let stacks = |clause: Value| {
+        doc(
+            json!({"t": {"grain": "stack", "where": [clause]}}),
+            json!({"set": "t", "level": "count"}),
+        )
+    };
+    let i = one(stacks(json!(["picked", {}])));
+    assert_eq!(i.message, "picked names the role whose main scans it reads");
+    assert_eq!(
+        i.next,
+        r#"write ["picked", {role: <role>}] in a stack set's where"#
+    );
+    let i = one(stacks(json!(["picked", {"role": 1}])));
+    assert_eq!(
+        i.message,
+        "picked's role is a role's name, and 1 is not one"
+    );
+    // the forms named are read
+    for clause in [
+        json!(["bucket", {"unit": "month"}, ["field", {}, "first"]]),
+        json!(["part", {"unit": "dow"}, ["field", {}, "first"]]),
+        json!(["shift", {}, ["field", {}, "first"], 30]),
+        json!(["round", {}, ["field", {}, "n_studies"], 1]),
+        json!(["coalesce", {}, ["field", {}, "label"]]),
+        json!(["ordinal", {}]),
+    ] {
+        accepted(bound(clause));
+    }
+    accepted(kept(json!(["in", {}, ["field", {}, "n_studies"], [1, 2]])));
+    accepted(stacks(json!(["picked", {"role": "t1w"}])));
+}

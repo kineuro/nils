@@ -277,22 +277,7 @@ pub struct Drafted {
 /// What the compiler would refuse, as issues, before a document is stored
 /// or called valid (Wave 4c, kineuro/nils#93): validate and run agree.
 pub fn compile_issues(registry: &mut Registry, ask: &Ask, s: &Setting<'_>) -> Vec<Issue> {
-    match crate::run::explain(registry, ask.clone(), s.names, s.scope, s.scheme) {
-        Err(RunError::Message(text)) => {
-            let (path, message) = text
-                .split_once(": ")
-                .map(|(p, m)| (p.to_string(), m.to_string()))
-                .unwrap_or_else(|| ("document".to_string(), text.clone()));
-            vec![Issue {
-                code: Code::NotCompilable,
-                path,
-                message,
-                next: "change the document as the message says; validate compiles what run would"
-                    .to_string(),
-            }]
-        }
-        _ => Vec::new(),
-    }
+    crate::run::not_compilable(registry, ask, s.names, s.scope, s.scheme)
 }
 
 /// Parse an authored text with add only repair, diagnose it, and store it
@@ -304,6 +289,8 @@ pub fn draft(
     reader: Option<&mut Store>,
 ) -> Result<Drafted, AffordanceError> {
     let (ask, repairs) = parse_repaired(text)?;
+    // the diagnosis refuses what the validator and the compiler refuse
+    // before it counts anything, and stores nothing then
     let diagnosis = diagnose(
         registry,
         ask.clone(),
@@ -315,14 +302,6 @@ pub fn draft(
         false,
         reader,
     )?;
-    let mut diagnosis = diagnosis;
-    if diagnosis.valid {
-        let issues = compile_issues(registry, &ask, s);
-        if !issues.is_empty() {
-            diagnosis.valid = false;
-            diagnosis.issues.extend(issues);
-        }
-    }
     let (document, hash) = if diagnosis.valid {
         let prepared = prepare(ask.clone(), s.names, s.scope)?;
         let d = document::put(registry.store(), &ask, &prepared.hash, s.principal, None)?;

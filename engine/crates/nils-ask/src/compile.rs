@@ -3433,11 +3433,16 @@ impl<'a> Builder<'a> {
                     .get("unit")
                     .and_then(Value::as_str)
                     .ok_or_else(|| err(at, format!("{op} needs {{unit}}")))?;
-                plain(if op == "bucket" {
-                    self.sql.bucket(&d.sql, unit)?
-                } else {
-                    self.sql.part(&d.sql, unit)?
-                })
+                // a unit the dialect does not read is refused at the
+                // clause's path, not the op's name
+                plain(
+                    if op == "bucket" {
+                        self.sql.bucket(&d.sql, unit)
+                    } else {
+                        self.sql.part(&d.sql, unit)
+                    }
+                    .map_err(|e| err(at, e.message))?,
+                )
             }
             "least" | "greatest" => {
                 let a = self.arg(

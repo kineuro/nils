@@ -438,14 +438,19 @@ pub(crate) enum Door {
     Strips,
 }
 
-/// The dataset each of the subjects' stacks came through: of the active
-/// datasets, the one that holds its source most closely, never a root
+/// The datasets whose folders hold a file of each of the subjects' stacks,
+/// by name, as the one place that says which folders hold a stack reads
+/// them (`dataset_subjects::holders`): of the active datasets, each
+/// `source` row the one's that holds it most closely, never a root
 /// (2026-10-11: the root, read first, claimed its datasets' stacks, so the
-/// columns were named after it).
+/// columns were named after it). Nima, 2026-10-12: a dataset is a folder
+/// that holds stacks, and a stack copied into two datasets is one stack
+/// with a path in each (the duplicate policy of 2026-10-10), so it is in
+/// both; the map named the first that read it alone.
 fn datasets(
     registry: &mut Registry,
     subjects: &BTreeSet<i64>,
-) -> Result<HashMap<i64, String>, Reply> {
+) -> Result<HashMap<i64, Vec<String>>, Reply> {
     let store = registry.store();
     let mut by_source: HashMap<i64, String> = HashMap::new();
     for d in nils_registry::place::dataset_sources(store).map_err(failed)? {
@@ -454,12 +459,13 @@ fn datasets(
         }
     }
     let ids: Vec<i64> = subjects.iter().copied().collect();
-    let mut out = HashMap::new();
+    let mut out: HashMap<i64, Vec<String>> = HashMap::new();
     for chunk in ids.chunks(500) {
         let sql = format!(
-            "SELECT ss.stack_id, ss.source_id FROM {} ss JOIN {} f ON f.stack_id = ss.stack_id \
+            "SELECT hst.id, hss.source_id FROM {} hst {} JOIN {} f ON f.stack_id = hst.id \
              WHERE f.subject_id IN ({})",
-            store.qualified("source_stack"),
+            store.qualified("stack"),
+            nils_registry::dataset_subjects::holders(store.schema(), "hst", "hss"),
             store.qualified("stack_fingerprint"),
             chunk
                 .iter()
@@ -469,10 +475,15 @@ fn datasets(
         );
         for r in store.query(&sql, &[]).map_err(failed)? {
             if let Some(name) = by_source.get(&r.int(1).map_err(failed)?) {
-                out.entry(r.int(0).map_err(failed)?)
-                    .or_insert_with(|| name.clone());
+                let names = out.entry(r.int(0).map_err(failed)?).or_default();
+                if !names.contains(name) {
+                    names.push(name.clone());
+                }
             }
         }
+    }
+    for names in out.values_mut() {
+        names.sort();
     }
     Ok(out)
 }
