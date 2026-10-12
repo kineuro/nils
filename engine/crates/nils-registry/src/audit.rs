@@ -159,6 +159,9 @@ pub enum Action {
     /// series that hold no instance removed (`nils repair empty-stacks`).
     /// The rows gone are what an ask reads, so it moves the epoch.
     RegistryRepair,
+    /// 2026-10-12: a tool the engine runs beside itself installed by an
+    /// admin, dcm2niix, from its pinned release. It changes no judgement.
+    ToolInstall,
 }
 
 impl Action {
@@ -234,6 +237,7 @@ impl Action {
             Action::PipelineRun => "pipeline.run",
             Action::PipelineRuntime => "pipeline.runtime",
             Action::RegistryRepair => "registry.repair",
+            Action::ToolInstall => "tool.install",
         }
     }
 
@@ -281,6 +285,7 @@ impl Action {
                 | Action::PipelineAdd
                 | Action::PipelineRun
                 | Action::PipelineRuntime
+                | Action::ToolInstall
         )
     }
 }

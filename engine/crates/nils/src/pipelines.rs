@@ -2005,6 +2005,9 @@ struct Materialised {
     /// With the geometry, the rest of each session the run holds part of
     /// (record 55 E2, P1b), `stacks.json`'s `context`.
     context: Vec<Value>,
+    /// For the bids layout, the converter its release ran with, where it
+    /// was found and how (2026-10-12); null otherwise.
+    converter: Value,
 }
 
 /// At most this many folders are bound one by one for a stacks input; a
@@ -2277,6 +2280,7 @@ fn materialise_stacks(
         entries,
         listed,
         context,
+        converter: Value::Null,
     })
 }
 
@@ -2429,6 +2433,7 @@ fn materialise_bids(
             entries: Vec::new(),
             listed: Vec::new(),
             context: Vec::new(),
+            converter: Value::Null,
         });
     }
     if !status.success() {
@@ -2448,7 +2453,14 @@ fn materialise_bids(
         .as_i64()
         .ok_or("the release's report names no release")?;
     rows::set_input_release(registry.store(), run_id, release_id).map_err(|e| e.to_string())?;
-    released(registry, release_id, level)
+    let mut m = released(registry, release_id, level)?;
+    // 2026-10-12: which converter the release ran, and how it was found
+    m.converter = json!({
+        "version": report["converter"],
+        "path": report["converter_path"],
+        "found_by": report["converter_found_by"],
+    });
+    Ok(m)
 }
 
 /// The units of a run's bids input, read back from the release that wrote
@@ -2523,6 +2535,7 @@ fn released(
         entries: Vec::new(),
         listed: Vec::new(),
         context: Vec::new(),
+        converter: Value::Null,
     })
 }
 
@@ -4155,6 +4168,7 @@ fn execute_run(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Resul
                     entries: Vec::new(),
                     listed: Vec::new(),
                     context: Vec::new(),
+                    converter: Value::Null,
                 },
                 Some(lock) => {
                     let m = materialise_bids(
@@ -6302,6 +6316,8 @@ fn finalize(
         "numbers": notes.summary(measures_written, d.checks.len()),
         "breaches": breached,
         "input_release_id": m.release_id,
+        // 2026-10-12: the converter a bids input was released with
+        "converter": m.converter,
         // what the container was given of the sources: one bind per folder
         // of the selection's files, or the roots past the limit, and why
         "scope": m.scope,

@@ -82,6 +82,7 @@ mod summary;
 mod supervise;
 mod tilepack;
 mod timeline;
+mod tools;
 mod tui;
 mod update;
 mod viewer;
@@ -305,6 +306,11 @@ enum Command {
     },
     /// Run a pipeline over a frozen selection: its outputs become derivatives, its failed units review items (record 43)
     Run(Box<pipelines::RunArgs>),
+    /// The tools the engine runs beside itself: dcm2niix, whether it is here, and its install from the pinned release
+    Tools {
+        #[command(subcommand)]
+        command: Option<tools::ToolsCommand>,
+    },
     /// The registry's settings: the timezone and the week start its dates are read under (Wave 5 section 12.6)
     Settings {
         #[command(subcommand)]
@@ -2255,6 +2261,7 @@ fn main() -> ExitCode {
         Command::Derivative { command } => derivatives::command(&home, command),
         Command::Pipeline { command } => pipelines::command(&home, command),
         Command::Run(args) => pipelines::run_command(&home, *args),
+        Command::Tools { command } => tools::command(&home, command),
         Command::Login(args) => login_command(args),
         Command::Logout => {
             if login::logout() {
@@ -11087,11 +11094,18 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
     // §9.6. Found once, before anything is written, and recorded on the run and
     // in `GeneratedBy`. v0 discovers a missing converter per stack, in a worker
     // process, as N identical failures.
-    let converter = match layout {
+    // 2026-10-12: the default name is looked for on the search path, beside
+    // this binary, where the setup record names it and in the registry's
+    // tools folder; a path is taken as given. Which one ran is reported.
+    let (converter, converter_found_by) = match layout {
         run::Layout::Bids => {
-            Some(nils_release::bids::convert::Converter::find(&args.dcm2niix).map_err(usage)?)
+            let (path, by) = crate::tools::dcm2niix_for(&args.dcm2niix, Some(home.dir()));
+            (
+                Some(nils_release::bids::convert::Converter::find(&path).map_err(usage)?),
+                by,
+            )
         }
-        run::Layout::Descriptive => None,
+        run::Layout::Descriptive => (None, None),
     };
 
     // Before the pack directory is taken out of `args`.
@@ -11186,10 +11200,15 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
         other => fail(other.to_string()),
     })?;
 
+    let converter_path = converter.as_ref().map(|c| c.path.display().to_string());
     if args.json {
+        let mut doc =
+            serde_json::to_value(&report).map_err(|e| fail(format!("will not serialize: {e}")))?;
+        doc["converter_path"] = serde_json::json!(converter_path);
+        doc["converter_found_by"] = serde_json::json!(converter_found_by);
         println!(
             "{}",
-            serde_json::to_string_pretty(&report)
+            serde_json::to_string_pretty(&doc)
                 .map_err(|e| fail(format!("will not serialize: {e}")))?
         );
         return Ok(());
@@ -11245,6 +11264,19 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
     }
     if let Some(c) = &report.converter {
         println!("  converted by     {c}");
+        if let Some(path) = &converter_path {
+            println!(
+                "                   {path} ({})",
+                match converter_found_by {
+                    Some("given") => "as given",
+                    Some("path") => "on the search path",
+                    Some("beside") => "beside nils",
+                    Some("setup") => "where the setup record names it",
+                    Some("tools") => "in the registry's tools folder",
+                    _ => "as named",
+                }
+            );
+        }
     }
     match &report.previous {
         Some(before) => println!("  since            {before}"),

@@ -1985,6 +1985,18 @@ fn routed(
     if let Some(r) = crate::pipelines::route(registry, caller, quasi, get, &pipeline_segs, query) {
         return r;
     }
+    // 2026-10-12: the tools the engine runs beside itself, and an admin's
+    // install of dcm2niix
+    if let Some(r) = crate::tools::route(
+        doors.home.dir(),
+        registry,
+        &caller.principal,
+        get,
+        post,
+        &segs,
+    ) {
+        return r;
+    }
     // record 49 A3: the pre-flight of a run
     if let Some(r) = crate::preflight::route(
         &doors.home,
@@ -5048,6 +5060,12 @@ pub(crate) fn door(method: &str, segs: &[&str]) -> (Need, Detail) {
         | ("GET", ["api", "pipelines" | "pipeline-runs", _]) => (Need::One("pipelines:see"), Plain),
         // record 49 A3: the pre-flight reads and starts nothing
         ("POST", ["api", "pipelines", _, "preflight"]) => (Need::One("pipelines:see"), Plain),
+        // 2026-10-12: what the engine runs beside itself is read on the
+        // Pipelines page and the Parts page; installing it is an admin's
+        ("GET", ["api", "tools"]) => (Need::AnyOf(&["install:see", "pipelines:see"]), Plain),
+        ("POST", ["api", "tools", _, "install"]) => {
+            (Need::One(nils_pipeline::failure::INSTALL_GRANT), Plain)
+        }
         ("POST", ["api", "derivatives"]) => (Need::One("pipelines:work"), Plain),
         ("POST", ["api", "jobs"]) | ("POST", ["api", "jobs", _, "cancel"]) => {
             (Need::AnyOf(JOB_GRANTS), Plain)
@@ -5637,6 +5655,7 @@ pub(crate) fn doors_list() -> Vec<String> {
     .chain(crate::derivatives::DOORS.iter())
     .chain(crate::pipelines::DOORS.iter())
     .chain(std::iter::once(&crate::preflight::DOOR))
+    .chain(crate::tools::DOORS.iter())
     .chain(crate::linkage_doors::DOORS.iter())
     .chain(crate::campaigns::DOORS.iter())
     .chain(crate::ask_doors::DOORS.iter())
@@ -5705,6 +5724,9 @@ fn capabilities(
         // record 55 H3: the questions a campaign asks and a check's limits
         "campaigns": crate::checks::capability(),
         "pipelines": crate::pipelines::capability(registry),
+        // 2026-10-12: whether dcm2niix is here, where and which build, and
+        // the install the engine offers an admin
+        "tools": crate::tools::capability(doors.home.dir()),
         "policy": policy(),
         "idempotency": {
             "header": "Idempotency-Key",
@@ -6492,6 +6514,25 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
             "one run",
             "Reading a pipeline run",
             "Read a pipeline run",
+        ),
+        // 2026-10-12: the tools the engine runs beside itself
+        row(
+            "GET /api/tools",
+            false,
+            false,
+            "free",
+            "the tools",
+            "Reading the engine's tools",
+            "Read the engine's tools",
+        ),
+        row(
+            "POST /api/tools/dcm2niix/install",
+            true,
+            true,
+            "bounded",
+            "one tool",
+            "Installing dcm2niix",
+            "Installed dcm2niix",
         ),
         row(
             "GET /api/events",

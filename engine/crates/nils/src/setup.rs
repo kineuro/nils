@@ -4044,6 +4044,22 @@ pub(crate) struct State {
     /// it and seal the key again from the file.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) model_server: Option<ModelServer>,
+    /// dcm2niix, which a BIDS release and a run's bids input convert with
+    /// (2026-10-12): where it is, its build, and whether this install
+    /// placed it, and so updates and removes it, or the site named it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) dcm2niix: Option<ConverterState>,
+}
+
+/// The converter an install runs with, as the record keeps it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ConverterState {
+    pub(crate) path: String,
+    #[serde(default)]
+    pub(crate) version: String,
+    /// Placed by setup from the pinned release, not found or given.
+    #[serde(default)]
+    pub(crate) placed: bool,
 }
 
 /// A model server the stations use (record 47): its OpenAI address, the file
@@ -8171,6 +8187,7 @@ fn do_it(
             .map(|node| node.display().to_string())
             .unwrap_or_default(),
         model_server: plan.model_server.clone(),
+        dcm2niix: existing.as_ref().and_then(|s| s.dcm2niix.clone()),
     };
     let previous_parts = state.parts.clone();
     let existing_places = existing.map(|s| s.places).unwrap_or_default();
