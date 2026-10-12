@@ -2372,51 +2372,6 @@ fn migration_59_gives_pipelines_a_catalog_and_runs_on_both_backends() {
         assert_eq!(back.params, params, "{name}");
         assert_eq!(back.failure, serde_json::Value::Null, "{name}");
         assert_eq!(back.summary, summary, "{name}");
-        // 2026-10-12: a failed run keeps its failure beside its error, and a
-        // run taken up again has neither until it ends again
-        let failed = pipeline::start(
-            &mut store,
-            &pipeline::NewRun {
-                pipeline_id: entry.id,
-                job_id: Some(8),
-                handle_id: Some(3),
-                selection: None,
-                params: &params,
-                runtime: "podman",
-                runtime_version: "5.0.3",
-                host: "ward-3",
-                device: "cpu",
-                model_ids: &[],
-                label_set_id: None,
-                place_id: Some(1),
-                scratch_place_id: None,
-                principal: "ops@lab",
-                actor: None,
-                started_at: "2026-09-24T10:03:00Z",
-            },
-        )
-        .unwrap();
-        let failure = serde_json::json!({"kind": "dependency", "cause": "dcm2niix", "advice": "install it", "fix": null});
-        pipeline::finish(
-            &mut store,
-            failed,
-            &pipeline::Finish {
-                status: "failed",
-                finished_at: "2026-09-24T10:04:00Z",
-                exit_code: None,
-                results_digest: None,
-                summary: &serde_json::json!({}),
-                error: Some("the release of the input failed: dcm2niix is not runnable"),
-                failure: Some(&failure),
-            },
-        )
-        .unwrap();
-        let back = pipeline::run(&mut store, failed).unwrap().unwrap();
-        assert_eq!(back.failure, failure, "{name}");
-        pipeline::resume(&mut store, failed, 9).unwrap();
-        let back = pipeline::run(&mut store, failed).unwrap().unwrap();
-        assert_eq!(back.failure, serde_json::Value::Null, "{name}");
-        assert_eq!(back.error, None, "{name}");
         assert_eq!(back.model_ids, serde_json::json!([]), "{name}");
         assert_eq!(
             back.finished_at.as_deref(),
@@ -4295,5 +4250,111 @@ fn a_registry_at_59_migrates_past_the_check_s_indexes() {
                 .is_empty(),
             "{name}"
         );
+    }
+}
+
+/// 2026-10-12, migration 92, on both backends: a registry from before gains
+/// `pipeline_run.failure`, and a failed run keeps its failure beside its
+/// error until it is taken up again.
+#[test]
+fn migration_92_keeps_a_run_s_failure_on_both_backends() {
+    use nils_registry::pipeline;
+    for (name, _guard, mut store) in stores() {
+        migrate::migrate(&mut store, Kind::Registry).unwrap();
+        let (r, meta) = (
+            store.qualified("pipeline_run"),
+            store.qualified("registry_meta"),
+        );
+        store
+            .batch(&format!(
+                "ALTER TABLE {r} DROP COLUMN failure;
+                 UPDATE {meta} SET value = '91' WHERE key = 'schema_version'"
+            ))
+            .unwrap();
+        assert_eq!(
+            migrate::standing(&mut store, Kind::Registry).unwrap(),
+            Standing::Behind(91),
+            "{name}"
+        );
+        assert_eq!(
+            migrate::migrate(&mut store, Kind::Registry).unwrap(),
+            (92..=migrate::SCHEMA_VERSION).collect::<Vec<i64>>(),
+            "{name}"
+        );
+        assert!(
+            migrate::column_exists(&mut store, "pipeline_run", "failure").unwrap(),
+            "{name}"
+        );
+        let descriptor = serde_json::json!({"name": "n4", "x-nils": {"analysis-level": "session"}});
+        let (entry, _) = pipeline::add(
+            &mut store,
+            &pipeline::New {
+                name: "n4",
+                tool_version: "2.6",
+                descriptor: &descriptor,
+                descriptor_digest: "sha256:01",
+                image: "antsx/ants@sha256:00",
+                image_digest: "sha256:00",
+                layout: "bids",
+                level: "session",
+                added_by: "ops@lab",
+                added_at: "2026-09-24T10:00:00Z",
+            },
+        )
+        .unwrap();
+        let params = serde_json::json!({});
+        let failed = pipeline::start(
+            &mut store,
+            &pipeline::NewRun {
+                pipeline_id: entry.id,
+                job_id: Some(8),
+                handle_id: Some(3),
+                selection: None,
+                params: &params,
+                runtime: "podman",
+                runtime_version: "5.0.3",
+                host: "ward-3",
+                device: "cpu",
+                model_ids: &[],
+                label_set_id: None,
+                place_id: Some(1),
+                scratch_place_id: None,
+                principal: "ops@lab",
+                actor: None,
+                started_at: "2026-09-24T10:03:00Z",
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            pipeline::run(&mut store, failed).unwrap().unwrap().failure,
+            serde_json::Value::Null,
+            "{name}"
+        );
+        let failure = serde_json::json!({"kind": "dependency", "cause": "dcm2niix", "advice": "install it", "fix": null});
+        pipeline::finish(
+            &mut store,
+            failed,
+            &pipeline::Finish {
+                status: "failed",
+                finished_at: "2026-09-24T10:04:00Z",
+                exit_code: None,
+                results_digest: None,
+                summary: &serde_json::json!({}),
+                error: Some("the release of the input failed: dcm2niix is not runnable"),
+                failure: Some(&failure),
+            },
+        )
+        .unwrap();
+        let kept = pipeline::run(&mut store, failed).unwrap().unwrap();
+        assert_eq!(kept.failure, failure, "{name}");
+        assert_eq!(
+            kept.error.as_deref(),
+            Some("the release of the input failed: dcm2niix is not runnable"),
+            "{name}"
+        );
+        pipeline::resume(&mut store, failed, 9).unwrap();
+        let resumed = pipeline::run(&mut store, failed).unwrap().unwrap();
+        assert_eq!(resumed.failure, serde_json::Value::Null, "{name}");
+        assert_eq!(resumed.error, None, "{name}");
     }
 }
