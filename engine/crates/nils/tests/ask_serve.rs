@@ -3683,3 +3683,66 @@ fn the_run_door_refuses_a_picked_role_the_pack_does_not_pick() {
         }
     }
 }
+
+/// 2026-10-12, found by the chat bench: the catalog door listed cohorts by
+/// name and size only, so the chat could not say which cohort was made
+/// third. Each cohort it lists says when it was made, as the cohorts door
+/// says it, and the cohort level carries the cohort's own dates, made and
+/// retired, as technical fields, on each backend.
+#[test]
+fn the_catalog_door_says_when_each_cohort_was_made() {
+    let dsn = std::env::var("NILS_TEST_POSTGRES_DSN")
+        .ok()
+        .filter(|d| !d.is_empty());
+    if dsn.is_none() {
+        eprintln!("NILS_TEST_POSTGRES_DSN is not set; the Postgres half is skipped");
+    }
+    let schema = "nils_ask_serve_cohort_dates";
+    for (backend, dsn) in [("sqlite", None), ("postgres", dsn)] {
+        let home = match (backend, &dsn) {
+            ("sqlite", _) => synthetic(),
+            (_, Some(dsn)) => synthetic_postgres(dsn, schema),
+            _ => continue,
+        };
+        let server = Server::start(&home, 3, &[]);
+        let (status, catalog) = server.request("GET", "/api/ask/catalog", None, None);
+        assert_eq!(status, 200, "{backend}: {catalog}");
+        let (status, cohorts) = server.request("GET", "/api/cohorts", None, None);
+        assert_eq!(status, 200, "{backend}: {cohorts}");
+        let made: std::collections::BTreeMap<String, String> = cohorts
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| {
+                (
+                    c["name"].as_str().unwrap().to_string(),
+                    c["created_at"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect();
+        let listed = catalog["cohorts"].as_array().unwrap();
+        assert!(!listed.is_empty(), "{backend}: {catalog}");
+        for c in listed {
+            let name = c["name"].as_str().unwrap();
+            assert_eq!(c["created_at"], made[name], "{backend}: {c}");
+        }
+        let (status, level) = server.request("GET", "/api/ask/catalog/cohort", None, None);
+        assert_eq!(status, 200, "{backend}: {level}");
+        for path in ["created_at", "retired_at"] {
+            let f = level["fields"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|f| f["path"] == path)
+                .unwrap_or_else(|| panic!("{backend}: no cohort.{path} in {level}"));
+            assert_eq!(f["class"], "technical", "{backend}: {f}");
+            assert_eq!(f["type"], "timestamp", "{backend}: {f}");
+        }
+        server.finish();
+        if let Some(dsn) = &dsn
+            && backend == "postgres"
+        {
+            drop_schema(dsn, schema);
+        }
+    }
+}

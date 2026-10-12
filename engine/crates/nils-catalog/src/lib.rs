@@ -162,6 +162,10 @@ pub struct CohortRecord {
     pub name: String,
     pub owner: String,
     pub members: i64,
+    /// When the cohort was made, `YYYY-MM-DDTHH:MM:SSZ` on either backend:
+    /// the cohort's own date, not a subject's, so the chat can say which
+    /// cohort was made when (2026-10-12).
+    pub created_at: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -361,6 +365,28 @@ fn fixed_fields() -> Vec<Field> {
             false,
             "registry",
             "what the cohort is",
+        ),
+        // a cohort's dates are the cohort's own, never a subject's, so they
+        // are technical at every detail (2026-10-12)
+        f(
+            "cohort",
+            "created_at",
+            "timestamp",
+            Technical,
+            true,
+            false,
+            "registry",
+            "when the cohort was made, YYYY-MM-DDTHH:MM:SSZ: the cohort's own date, not a subject's",
+        ),
+        f(
+            "cohort",
+            "retired_at",
+            "timestamp",
+            Technical,
+            true,
+            false,
+            "registry",
+            "when the cohort was retired, null while it is in use; a retired cohort keeps its members and is read at this grain, never in the catalog's list of cohorts",
         ),
         f(
             "subject",
@@ -1705,10 +1731,15 @@ impl Catalog {
             .map(|(n, _)| n.to_string())
             .collect();
         let mut cohorts = Vec::new();
+        let created = store.dialect().text_of_qualified(
+            Some("c"),
+            table("cohort").column("created_at").expect("created_at"),
+        );
         for r in store.query(
             &format!(
                 "SELECT c.id, c.name, c.owner, \
-                 (SELECT COUNT(*) FROM {} m WHERE m.cohort_id = c.id AND m.left_at IS NULL) \
+                 (SELECT COUNT(*) FROM {} m WHERE m.cohort_id = c.id AND m.left_at IS NULL), \
+                 {created} \
                  FROM {} c WHERE c.retired_at IS NULL ORDER BY c.name",
                 store.qualified("cohort_member"),
                 store.qualified("cohort")
@@ -1720,6 +1751,7 @@ impl Catalog {
                 name: r.text(1)?.to_string(),
                 owner: r.text(2)?.to_string(),
                 members: r.int(3)?,
+                created_at: r.opt_text(4)?.unwrap_or_default().to_string(),
             });
         }
         let mut schemes = Vec::new();
