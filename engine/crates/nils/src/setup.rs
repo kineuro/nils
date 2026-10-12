@@ -2489,7 +2489,9 @@ fn converter_plan(
         }
         _ => {}
     }
-    if let Some(path) = which_on_path(tools::DCM2NIIX) {
+    if let Some(path) = which_on_path(tools::DCM2NIIX)
+        .filter(|p| nils_release::bids::convert::Converter::find(p).is_ok())
+    {
         return Some(Converter::Found {
             path,
             placed: false,
@@ -2499,13 +2501,32 @@ fn converter_plan(
         .map(|p| std::fs::canonicalize(&p).unwrap_or(p))
         .unwrap_or_else(|_| PathBuf::from("nils"));
     let beside = binary_dir(&me, plan).join(tools::DCM2NIIX);
-    if runnable_file(&beside) {
-        return Some(Converter::Found {
-            path: beside,
-            placed: false,
-        });
+    // what is beside nils and was not placed by setup is never replaced:
+    // one that runs is kept, and one that does not is said
+    if std::fs::symlink_metadata(&beside).is_ok() {
+        return Some(
+            match nils_release::bids::convert::Converter::find(&beside) {
+                Ok(_) => Converter::Found {
+                    path: beside,
+                    placed: false,
+                },
+                Err(why) => Converter::Unavailable(format!(
+                    "{} is there and does not run as dcm2niix ({why}); setup replaces only what \
+                     it placed, so mend or remove it, or name one with --dcm2niix PATH",
+                    beside.display()
+                )),
+            },
+        );
     }
     Some(pinned(beside))
+}
+
+/// A plan of a recorded install given a site's dcm2niix now, with
+/// `--dcm2niix` on an update, a repair or a new registry.
+fn with_given_converter(plan: &mut Plan, args: &SetupArgs) {
+    if let Some(given) = args.dcm2niix.as_deref() {
+        plan.dcm2niix = converter_plan(plan, Some(given), None);
+    }
 }
 
 /// A program on this process's search path.
@@ -2553,6 +2574,14 @@ fn place_converter(c: &Converter, state: &mut State, console: &Console) {
     };
     match c {
         Converter::Given(path) => {
+            // a build this install placed before goes, now the site names
+            // its own
+            if let Some(before) = state.dcm2niix.clone().filter(|b| b.placed())
+                && Path::new(&before.path) != path.as_path()
+            {
+                let _ = std::fs::remove_file(&before.path);
+                state.programs.retain(|p| *p != before.path);
+            }
             match Found::find(path) {
                 Ok(f) => console.progress(&format!("dcm2niix as given: {}", f.version)),
                 Err(e) => console.warn(&format!("the dcm2niix given does not run: {e}")),
@@ -7425,6 +7454,7 @@ fn what_is_there(state: &State) -> String {
 /// names, brought to the newest release, without a question.
 fn update_parts(state: &State, args: &SetupArgs, console: &mut Console) -> Result<(), Exit> {
     let (mut plan, read) = plan_and_sources(state, args.channel.as_deref());
+    with_given_converter(&mut plan, args);
     // a model server named now takes the place of the one on record; the
     // model named for the same server before is kept where none is named now
     if let Some(mut server) = model_server_of(args).map_err(usage)? {
@@ -7564,6 +7594,7 @@ fn sources_said_or_stop(
 /// what the state records, for an install whose files were lost or edited.
 fn repair(state: &State, args: &SetupArgs, console: &mut Console) -> Result<(), Exit> {
     let (mut plan, read) = plan_and_sources(state, args.channel.as_deref());
+    with_given_converter(&mut plan, args);
     if let Some(refused) = recorded_system_refusal(&plan) {
         return Err(fail(format!("nothing was changed: {refused}")));
     }
@@ -9996,6 +10027,7 @@ fn aside_stamp() -> String {
 /// deleted here.
 fn new_registry(state: &State, args: &SetupArgs, console: &mut Console) -> Result<(), Exit> {
     let (mut plan, _read) = plan_and_sources(state, args.channel.as_deref());
+    with_given_converter(&mut plan, args);
     if let Some(refused) = recorded_system_refusal(&plan) {
         return Err(fail(format!("nothing was changed: {refused}")));
     }

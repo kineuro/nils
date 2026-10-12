@@ -133,6 +133,10 @@ pub(crate) fn of_job(job: &Value) -> Value {
     let Some(error) = job["error"].as_str() else {
         return Value::Null;
     };
+    // a run refused before it started names its cause in its words
+    if let Some(cause) = failure::marked(error) {
+        return cause.refusal_doc();
+    }
     let said = Said::error(error);
     if job["kind"] == "pipeline" || job["result"]["run"].is_i64() {
         return failure::cause_of(&said).doc();

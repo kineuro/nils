@@ -63,7 +63,7 @@ impl Check {
             "check": self.check,
             "ok": self.ok,
             "said": self.said,
-            "failure": self.cause.map_or(Value::Null, Cause::doc),
+            "failure": self.cause.map_or(Value::Null, Cause::refusal_doc),
         });
         if let Value::Object(more) = &self.extra {
             for (k, x) in more {
@@ -78,9 +78,9 @@ impl Check {
     pub(crate) fn refusal(&self) -> String {
         let cause = self.cause.unwrap_or(Cause::Pipeline);
         format!(
-            "refused before it was queued: {}; {} {}",
+            "refused before it started: {}; {} {}",
             self.said,
-            cause.advice(),
+            cause.advice_before(),
             nils_pipeline::failure::mark(cause)
         )
     }
@@ -103,6 +103,7 @@ pub(crate) struct Asked<'a> {
 fn found_by_words(by: &str) -> &'static str {
     match by {
         "given" => "as given",
+        "setup-given" => "as the site gave it to setup",
         "path" => "on the engine's search path",
         "beside" => "beside nils",
         "setup" => "where the setup record names it",
@@ -125,23 +126,28 @@ fn converter(home: &Path, given: &Path) -> Check {
             json!({"path": null, "found_by": null}),
         );
     };
-    let extra = json!({"path": found.path.display().to_string(), "found_by": found.by});
-    match nils_release::bids::convert::Converter::find(&found.path) {
-        Ok(c) => {
-            let mut extra = extra;
-            extra["version"] = json!(c.version);
-            Check::ok(
-                "converter",
-                format!(
-                    "{} at {} ({})",
-                    c.version,
-                    found.path.display(),
-                    found_by_words(found.by)
-                ),
-                extra,
-            )
-        }
-        Err(e) => Check::failed("converter", Cause::Dcm2niix, e, extra),
+    let extra = json!({
+        "path": found.path.display().to_string(), "found_by": found.by,
+        "version": found.version,
+    });
+    match (&found.version, &found.problem) {
+        (Some(version), _) => Check::ok(
+            "converter",
+            format!(
+                "{version} at {} ({})",
+                found.path.display(),
+                found_by_words(found.by)
+            ),
+            extra,
+        ),
+        (None, problem) => Check::failed(
+            "converter",
+            Cause::Dcm2niix,
+            problem
+                .clone()
+                .unwrap_or_else(|| format!("{} does not run", found.path.display())),
+            extra,
+        ),
     }
 }
 
@@ -225,10 +231,7 @@ fn runtime_and_image(
                 .map(|places| {
                     let form = crate::pipelines::image_form(registry);
                     let dir = Path::new(&places.scratch.path).join(crate::pipelines::IMAGES);
-                    runtime::image_verified(
-                        &runtime::local_image(&dir, &p.image_digest, form),
-                        form,
-                    )
+                    runtime::image_recorded(&runtime::local_image(&dir, &p.image_digest, form))
                 })
         }
         _ => runtime::image_here(&rt, &p.image, IMAGE_CAP),
@@ -488,7 +491,7 @@ pub(crate) fn at_the_door(
         return Ok(());
     };
     let mut r = Reply::error(409, failed.refusal());
-    r.body["failure"] = failed.cause.map_or(Value::Null, Cause::doc);
+    r.body["failure"] = failed.cause.map_or(Value::Null, Cause::refusal_doc);
     r.body["requirements"] = json!(all.iter().map(Check::doc).collect::<Vec<_>>());
     Err(r)
 }
@@ -517,7 +520,7 @@ mod tests {
             json!({}),
         );
         let words = c.refusal();
-        assert!(words.starts_with("refused before it was queued: the units would write"));
+        assert!(words.starts_with("refused before it started: the units would write"));
         assert_eq!(
             nils_pipeline::failure::cause_of(&nils_pipeline::failure::Said::error(&words)),
             Cause::Disk

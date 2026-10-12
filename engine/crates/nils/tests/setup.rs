@@ -3740,7 +3740,37 @@ fn a_machine_install_places_dcm2niix_beside_nils_and_a_purge_removes_it() {
         written
     );
 
-    // a purge removes it with the install
+    // the site names its own: the one setup placed goes, the site's stays
+    let own = TempDir::new("nils-setup-dcm2niix-own");
+    let site = own.file(
+        "dcm2niix",
+        b"#!/bin/sh\necho \"Chris Rorden's dcm2niiX version v1.0.20250505 (the site's)\"\n",
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&site, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let with_site: Vec<&str> = yes
+        .iter()
+        .copied()
+        .chain(["--dcm2niix", site.to_str().unwrap()])
+        .collect();
+    let o = setup_env(&nils.path(), config.path(), &with_site, &env);
+    assert!(o.ok, "{}\n{}", o.stdout, o.stderr);
+    assert!(
+        !beside.exists(),
+        "the build setup placed went: {}",
+        o.stdout
+    );
+    let state = state_of(config.path());
+    assert!(state.contains("how = \"given\""), "{state}");
+    assert!(
+        !state.contains(&beside.display().to_string()),
+        "no longer a program of the install: {state}"
+    );
+
+    // a purge removes the install, and the site's own stays
     let o = uninstall(
         &nils.path(),
         config.path(),
@@ -3748,8 +3778,8 @@ fn a_machine_install_places_dcm2niix_beside_nils_and_a_purge_removes_it() {
         &["--purge", "--yes"],
     );
     assert!(o.ok, "{}\n{}", o.stdout, o.stderr);
-    assert!(!beside.exists(), "{}", o.stdout);
     assert!(!dir.exists(), "{}", o.stdout);
+    assert!(site.is_file(), "the site's dcm2niix stays: {}", o.stdout);
 }
 
 /// 2026-10-12: a site's own dcm2niix, named with --dcm2niix, is taken as it
@@ -3812,6 +3842,35 @@ fn a_dcm2niix_given_is_taken_and_an_unreachable_one_stops_nothing() {
         &env,
     );
     o.says(&format!("{}, as given with --dcm2niix", given.display()));
+
+    // something beside nils that setup did not place is never replaced,
+    // even where it does not run
+    let nils = Installed::new("nils-setup-dcm2niix-broken");
+    let config = TempDir::new("nils-setup-dcm2niix-broken-config");
+    let base = TempDir::new("nils-setup-dcm2niix-broken-base");
+    let dir = base.path().join("nils");
+    let broken = nils.path().parent().unwrap().join("dcm2niix");
+    std::fs::write(&broken, "not a program").unwrap();
+    let o = setup_env(
+        &nils.path(),
+        config.path(),
+        &[
+            "--yes",
+            "--parts",
+            "engine",
+            "--dir",
+            dir.to_str().unwrap(),
+            "--no-service",
+            "--channel",
+            &releases.url(),
+        ],
+        &env,
+    );
+    assert!(o.ok, "{}\n{}", o.stdout, o.stderr);
+    let said = format!("{}{}", o.stdout, o.stderr);
+    assert!(said.contains("does not run as dcm2niix"), "{said}");
+    assert_eq!(std::fs::read_to_string(&broken).unwrap(), "not a program");
+    assert!(!state_of(config.path()).contains("[dcm2niix]"));
 
     // a machine that cannot reach the releases installs all the same
     if dcm2niix_archive_here().is_some() {

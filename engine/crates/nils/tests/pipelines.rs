@@ -9464,7 +9464,7 @@ fn a_run_is_refused_before_it_is_queued_for_what_it_lacks() {
         None,
     );
     assert!(!good);
-    assert!(err.contains("refused before it was queued"), "{err}");
+    assert!(err.contains("refused before it started"), "{err}");
     assert!(err.contains("nils tools install dcm2niix"), "{err}");
     let count = |sql: &str| -> i64 { lab.store().query(sql, &[]).unwrap()[0].int(0).unwrap() };
     assert_eq!(count("SELECT COUNT(*) FROM job WHERE kind = 'pipeline'"), 0);

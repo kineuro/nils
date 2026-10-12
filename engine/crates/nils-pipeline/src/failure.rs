@@ -186,6 +186,32 @@ impl Cause {
         }
     }
 
+    /// What to do where a run is refused for this before it starts
+    /// (2026-10-12): as [`Cause::advice`], but where a refusal is not a
+    /// failure that happened, said as one that would.
+    pub fn advice_before(self) -> &'static str {
+        match self {
+            Cause::Memory => {
+                "a unit asks more memory than this machine has: run it on a machine with more \
+                 memory, or lower the pipeline's memory-gb where its tool allows"
+            }
+            Cause::Disk => {
+                "the working place has too little free space for the units' outputs: free space \
+                 there, or send the outputs to a place with more (nils pipeline lane \
+                 --output-place), then run it again"
+            }
+            other => other.advice(),
+        }
+    }
+
+    /// The failure of a refusal before a run starts, as [`Cause::doc`] with
+    /// [`Cause::advice_before`].
+    pub fn refusal_doc(self) -> Value {
+        let mut v = self.doc();
+        v["advice"] = json!(self.advice_before());
+        v
+    }
+
     /// The fix the engine offers itself, where it has one: the tool it
     /// installs, with its door, its command and the grant they need.
     pub fn fix(self) -> Value {
@@ -252,31 +278,29 @@ fn any(text: &str, words: &[&str]) -> bool {
 
 /// The cause of a failure where its words or its exit say one; none where
 /// nothing is known, which a run or a unit reads as the pipeline's own.
-/// The more particular causes are asked first: a missing converter before
-/// a missing file, the subordinate ids before an image, a card's memory
-/// before memory.
+///
+/// The error is the engine's own words, or a tool's for a unit it reported
+/// failed; the log is a container's own output, read only for what the
+/// runtime writes when it fails (a pull, the subordinate ids, the GPU's
+/// devices, a full disk, the memory), never for what a tool prints on its
+/// way, such as a library it could not load. The more particular causes are
+/// asked first: a container killed before anything it said, a full disk
+/// and a card's memory before memory, the runtime's GPU before an image.
 pub fn known(said: &Said<'_>) -> Option<Cause> {
     // a refusal the engine wrote names its cause itself
     if let Some(cause) = marked(said.error) {
         return Some(cause);
     }
-    let mut text = said.error.to_lowercase();
-    if let Some(log) = said.log {
-        text.push('\n');
-        text.push_str(&log.to_lowercase());
-    }
-    let t = text.as_str();
-    if t.contains("dcm2niix")
+    let e = said.error.to_lowercase();
+    let log = said.log.map(str::to_lowercase).unwrap_or_default();
+    let either = |words: &[&str]| any(&e, words) || any(&log, words);
+    // the engine's own words of a converter it could not run
+    if e.contains("dcm2niix")
         && any(
-            t,
+            &e,
             &[
-                "not runnable",
-                "no such file",
-                "not found",
-                "cannot execute",
-                "permission denied",
-                "exec format error",
-                "error while loading shared libraries",
+                "is not runnable",
+                "is not on the engine's search path",
                 "said nothing about its version",
             ],
         )
@@ -286,29 +310,57 @@ pub fn known(said: &Said<'_>) -> Option<Cause> {
     // a container killed (137 as podman and docker report it, a signal 9
     // as apptainer's process ends) ran, so its image was there: the
     // machine's memory, whatever else its log says
-    if said.exit_code == Some(137) || said.signal == Some(9) || t.contains("exited 137") {
+    if said.exit_code == Some(137) || said.signal == Some(9) || e.contains("exited 137") {
         return Some(Cause::Memory);
     }
-    if any(
-        t,
-        &[
-            "insufficient uids or gids",
-            "/etc/subuid",
-            "/etc/subgid",
-            "newuidmap",
-            "newgidmap",
-            "not enough ids available",
-            "there might not be enough ids",
-        ],
-    ) {
+    if either(&[
+        "insufficient uids or gids",
+        "not enough ids available",
+        "newuidmap",
+        "newgidmap",
+    ]) {
         return Some(Cause::Subuid);
     }
-    if any(
-        t,
+    if either(&[
+        "no space left on device",
+        "os error 28",
+        "disk quota exceeded",
+        "os error 122",
+    ]) {
+        return Some(Cause::Disk);
+    }
+    if either(&[
+        "cuda out of memory",
+        "cuda error: out of memory",
+        "outofmemoryerror: cuda",
+        "cublas_status_alloc_failed",
+        "out of memory on device",
+        "hip out of memory",
+    ]) {
+        return Some(Cause::GpuMemory);
+    }
+    if either(&[
+        "oomkilled",
+        "oom-kill",
+        "oom killer",
+        "cannot allocate memory",
+        "os error 12",
+        "memoryerror",
+        "std::bad_alloc",
+        "out of memory: killed process",
+    ]) || any(&e, &["out of memory", "killed process"])
+    {
+        return Some(Cause::Memory);
+    }
+    // the runtime's own words of the GPU anywhere; a library's only in an
+    // error, since a tool logs them on every start, with a card or without
+    if either(&[
+        "nvidia-container-cli",
+        "could not select device driver",
+        "unresolvable cdi devices",
+    ]) || any(
+        &e,
         &[
-            "nvidia-container-cli",
-            "could not select device driver",
-            "unresolvable cdi devices",
             "found no nvidia driver",
             "no nvidia driver",
             "cuda driver version is insufficient",
@@ -321,56 +373,27 @@ pub fn known(said: &Said<'_>) -> Option<Cause> {
     ) {
         return Some(Cause::GpuDriver);
     }
-    if any(
-        t,
-        &[
-            "no space left on device",
-            "os error 28",
-            "disk quota exceeded",
-            "os error 122",
-            "enospc",
-        ],
-    ) {
-        return Some(Cause::Disk);
-    }
-    if any(
-        t,
-        &[
-            "cuda out of memory",
-            "cuda error: out of memory",
-            "outofmemoryerror: cuda",
-            "cublas_status_alloc_failed",
-            "out of memory on device",
-            "hip out of memory",
-        ],
-    ) {
-        return Some(Cause::GpuMemory);
-    }
-    if any(
-        t,
-        &[
-            "manifest unknown",
-            "pull access denied",
-            "toomanyrequests",
-            "error pulling image",
-            "unable to pull",
-            "initializing source docker://",
-            "copying system image",
-            "failed to resolve reference",
-            "requested access to the resource is denied",
-            "reading manifest",
-            "image not known",
-            "no such image",
-            "image is not known",
-            "unable to find image",
-            "could not build",
-            "short-name",
-        ],
-    ) {
+    if either(&[
+        "manifest unknown",
+        "pull access denied",
+        "toomanyrequests",
+        "error pulling image",
+        "unable to pull",
+        "initializing source docker://",
+        "copying system image",
+        "failed to resolve reference",
+        "requested access to the resource is denied",
+        "reading manifest",
+        "image not known",
+        "image is not known",
+        "no such image",
+        "short-name resolution",
+    ]) || e.contains("could not build")
+    {
         return Some(Cause::Image);
     }
     if any(
-        t,
+        &e,
         &[
             "no container runtime",
             "pipelines are off",
@@ -383,28 +406,12 @@ pub fn known(said: &Said<'_>) -> Option<Cause> {
     ) {
         return Some(Cause::Runtime);
     }
-    if any(
-        t,
-        &[
-            "oomkilled",
-            "oom-kill",
-            "oom killer",
-            "out of memory",
-            "cannot allocate memory",
-            "os error 12",
-            "memoryerror",
-            "std::bad_alloc",
-            "killed process",
-        ],
-    ) {
-        return Some(Cause::Memory);
-    }
     // 125 is podman's and docker's own failure, never the pipeline's
-    if said.exit_code == Some(125) || t.contains("exited 125") {
+    if said.exit_code == Some(125) || e.contains("exited 125") {
         return Some(Cause::Runtime);
     }
     if any(
-        t,
+        &e,
         &[
             "the lane's budget",
             "and the lane has",
@@ -414,12 +421,15 @@ pub fn known(said: &Said<'_>) -> Option<Cause> {
         return Some(Cause::Lane);
     }
     if said.exit_code == Some(124)
-        || any(t, &["time limit", "deadline exceeded", "due to time limit"])
+        || any(
+            &e,
+            &["time limit", "deadline exceeded", "due to time limit"],
+        )
     {
         return Some(Cause::Time);
     }
     if any(
-        t,
+        &e,
         &[
             "missing an input",
             "for its input",
@@ -443,7 +453,7 @@ pub fn mark(cause: Cause) -> String {
 }
 
 /// The cause a refusal's words name, where they end with [`mark`]'s.
-fn marked(error: &str) -> Option<Cause> {
+pub fn marked(error: &str) -> Option<Cause> {
     let (_, rest) = error.rsplit_once("(failure: ")?;
     Cause::parse(rest.split(')').next()?.trim())
 }
@@ -690,10 +700,48 @@ mod tests {
         // a refusal the engine wrote is read for the cause it names
         assert_eq!(
             of(&format!(
-                "refused before it was queued: 2 GB free {}",
+                "refused before it started: 2 GB free {}",
                 mark(Cause::Disk)
             )),
             Cause::Disk
+        );
+    }
+
+    /// What a tool or a runtime prints on its way is no cause: a library a
+    /// tool could not load, podman's warning of a single mapping, docker
+    /// finding an image is not local yet, a BIDS app's own converter.
+    #[test]
+    fn a_log_says_only_what_the_runtime_writes_when_it_fails() {
+        let whole = |log: &'static str| {
+            cause_of(&Said {
+                error: "the container exited 1 and wrote no results.json",
+                exit_code: Some(1),
+                log: Some(log),
+                ..Said::default()
+            })
+        };
+        for log in [
+            "W tensorflow/stream_executor/platform/default/dso_loader.cc:64] Could not load dynamic library 'libcuda.so.1'\nTraceback: ValueError: bad shape\n",
+            "WARN[0000] Using rootless single mapping into the namespace. This might break some images. Check /etc/subuid and /etc/subgid for adding sub*ids if not using a network user\n",
+            "Unable to find image 'example.org/x:1' locally\n1: Pulling from x\nKeyError: 'T1w'\n",
+            "dcm2niix: command not found\n",
+        ] {
+            assert_eq!(whole(log), Cause::Pipeline, "{log}");
+        }
+        // the same words in a unit's own error are its cause
+        assert_eq!(
+            of("RuntimeError: Found no NVIDIA driver on your system"),
+            Cause::GpuDriver
+        );
+        // a killed container is memory whatever its log says
+        assert_eq!(
+            cause_of(&Said {
+                error: "the container exited 137",
+                exit_code: Some(137),
+                log: Some("dcm2niix is not runnable\nError: image not known\n"),
+                ..Said::default()
+            }),
+            Cause::Memory
         );
     }
 

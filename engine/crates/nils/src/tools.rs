@@ -10,11 +10,13 @@
 //! system path is.
 //!
 //! The engine finds dcm2niix in this order: a path a run or a release
-//! names with `--dcm2niix`; the name on the search path; beside the running
-//! nils; where the setup record names one; and the registry's tools
-//! folder. A unit of systemd has the default search path, which a
-//! person's `~/.local/bin` is not on, so a converter beside nils is found
-//! there all the same.
+//! names with `--dcm2niix`; the one a site gave setup with `--dcm2niix`;
+//! the name on the search path; beside the running nils; where the setup
+//! record names one setup found or placed; and the registry's tools folder.
+//! The first that answers its version is taken, so a broken one does not
+//! hide a working one after it. A unit of systemd has the default search
+//! path, which a person's `~/.local/bin` is not on, so a converter beside
+//! nils is found there all the same.
 
 use std::path::{Path, PathBuf};
 
@@ -227,7 +229,12 @@ pub(crate) fn binary_of(bytes: &[u8], want: &str) -> Result<Vec<u8>, String> {
 pub(crate) fn place_binary(binary: &[u8], into: &Path) -> Result<(), String> {
     let dir = into.parent().ok_or("the binary's folder")?;
     std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    let partial = dir.join(format!(".{DCM2NIIX}.partial-{}", std::process::id()));
+    static PLACED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let partial = dir.join(format!(
+        ".{DCM2NIIX}.partial-{}-{}",
+        std::process::id(),
+        PLACED.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+    ));
     let written = std::fs::write(&partial, binary).and_then(|()| {
         #[cfg(unix)]
         {
@@ -280,12 +287,38 @@ impl NotFetched {
     }
 }
 
+/// How long a download of an archive may take, so a stalled one never
+/// holds a door's thread.
+const FETCH_CAP: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// An archive's bytes, from a folder (`file://`) or a server, within
+/// [`FETCH_CAP`].
+fn fetch(url: &str) -> Result<Vec<u8>, String> {
+    use std::io::Read as _;
+    if let Some(path) = url.strip_prefix("file://") {
+        return std::fs::read(path).map_err(|e| format!("{url}: {e}"));
+    }
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(FETCH_CAP))
+        .build()
+        .into();
+    let mut response = agent.get(url).call().map_err(|e| format!("{url}: {e}"))?;
+    let mut bytes = Vec::new();
+    response
+        .body_mut()
+        .as_reader()
+        .take(64 * 1024 * 1024)
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("{url}: {e}"))?;
+    Ok(bytes)
+}
+
 /// The pinned build downloaded, checked and placed at `into`. Nothing is
 /// written where the archive is not the pinned one.
 pub(crate) fn fetch_into(into: &Path) -> Result<String, NotFetched> {
     let pin = pin_here().ok_or_else(|| NotFetched::NoBuild(no_build_here()))?;
     let url = archive_url(&releases_base(), &pin);
-    let bytes = crate::supervise::fetch(&url).map_err(|why| NotFetched::Unreachable {
+    let bytes = fetch(&url).map_err(|why| NotFetched::Unreachable {
         url: url.clone(),
         why,
     })?;
@@ -313,12 +346,33 @@ pub(crate) fn installed_at(home: &Path) -> PathBuf {
         .join(DCM2NIIX)
 }
 
-/// How dcm2niix was found.
+/// How dcm2niix was found, and what it said of its version.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Found {
     pub(crate) path: PathBuf,
-    /// given, path, beside, setup or tools.
+    /// given, setup-given, path, beside, setup or tools.
     pub(crate) by: &'static str,
+    /// The first line it said of its version, where it ran.
+    pub(crate) version: Option<String>,
+    /// Why it did not run, where it did not.
+    pub(crate) problem: Option<String>,
+}
+
+impl Found {
+    fn of(path: PathBuf, by: &'static str) -> Found {
+        let said = nils_release::bids::convert::Converter::find(&path);
+        Found {
+            path,
+            by,
+            version: said.as_ref().ok().map(|c| c.version.clone()),
+            problem: said.err(),
+        }
+    }
+
+    /// Whether it ran and said its version.
+    pub(crate) fn runs(&self) -> bool {
+        self.version.is_some()
+    }
 }
 
 fn runnable(p: &Path) -> bool {
@@ -334,46 +388,62 @@ fn runnable(p: &Path) -> bool {
 }
 
 /// Where dcm2niix is, as `given` names it and `home` (the registry's
-/// folder) keeps it: a path with a folder in it is the site's and taken as
-/// it is; a bare name is looked for on the search path, and the default
-/// name then beside the running nils, where the setup record names it, and
-/// in the registry's tools folder. None where it is in none of them.
+/// folder) keeps it. A path with a folder in it is taken as it is. A bare
+/// name is looked for on the search path; the default name also as a site
+/// gave it to setup (first), beside the running nils, where the setup
+/// record names one setup found or placed, and in the registry's tools
+/// folder. The first of them that answers its version is taken; where none
+/// does, the first there is, so its error says why; none where there is
+/// none.
 pub(crate) fn find_dcm2niix(
     given: &Path,
     home: Option<&Path>,
     search: Option<&std::ffi::OsStr>,
 ) -> Option<Found> {
     if given.is_absolute() || given.components().count() > 1 {
-        return Some(Found {
-            path: given.to_path_buf(),
-            by: "given",
-        });
+        return Some(Found::of(given.to_path_buf(), "given"));
     }
     let name = given.to_str()?;
+    let recorded = (name == DCM2NIIX)
+        .then(crate::setup::read_state)
+        .flatten()
+        .and_then(|s| s.dcm2niix);
+    let mut candidates: Vec<(PathBuf, &'static str)> = Vec::new();
+    if let Some(r) = recorded.as_ref().filter(|r| r.how == "given") {
+        candidates.push((PathBuf::from(&r.path), "setup-given"));
+    }
     if let Some(path) = nils_pipeline::runtime::which(name, search) {
-        return Some(Found { path, by: "path" });
+        candidates.push((path, "path"));
     }
-    if name != DCM2NIIX {
-        return None;
+    if name == DCM2NIIX {
+        if let Some(path) = std::env::current_exe()
+            .ok()
+            .map(|me| std::fs::canonicalize(&me).unwrap_or(me))
+            .and_then(|me| me.parent().map(|d| d.join(DCM2NIIX)))
+        {
+            candidates.push((path, "beside"));
+        }
+        if let Some(r) = recorded.as_ref().filter(|r| r.how != "given") {
+            candidates.push((PathBuf::from(&r.path), "setup"));
+        }
+        if let Some(home) = home {
+            candidates.push((installed_at(home), "tools"));
+        }
     }
-    let beside = std::env::current_exe()
-        .ok()
-        .map(|me| std::fs::canonicalize(&me).unwrap_or(me))
-        .and_then(|me| me.parent().map(|d| d.join(DCM2NIIX)))
-        .filter(|p| runnable(p));
-    if let Some(path) = beside {
-        return Some(Found { path, by: "beside" });
+    let mut first: Option<Found> = None;
+    let mut seen: Vec<PathBuf> = Vec::new();
+    for (path, by) in candidates {
+        if !runnable(&path) || seen.contains(&path) {
+            continue;
+        }
+        seen.push(path.clone());
+        let found = Found::of(path, by);
+        if found.runs() {
+            return Some(found);
+        }
+        first.get_or_insert(found);
     }
-    let recorded = crate::setup::read_state()
-        .and_then(|s| s.dcm2niix)
-        .map(|c| PathBuf::from(c.path))
-        .filter(|p| runnable(p));
-    if let Some(path) = recorded {
-        return Some(Found { path, by: "setup" });
-    }
-    home.map(installed_at)
-        .filter(|p| runnable(p))
-        .map(|path| Found { path, by: "tools" })
+    first
 }
 
 /// The converter a run or a release runs: found, or the name as it was
@@ -393,14 +463,9 @@ pub(crate) fn dcm2niix_status(home: Option<&Path>) -> Value {
         home,
         std::env::var_os("PATH").as_deref(),
     );
-    let checked = found
-        .as_ref()
-        .map(|f| nils_release::bids::convert::Converter::find(&f.path));
-    let (present, version, problem) = match &checked {
-        Some(Ok(c)) => (true, Some(c.version.clone()), None),
-        Some(Err(e)) => (false, None, Some(e.clone())),
-        None => (false, None, None),
-    };
+    let present = found.as_ref().is_some_and(Found::runs);
+    let version = found.as_ref().and_then(|f| f.version.clone());
+    let problem = found.as_ref().and_then(|f| f.problem.clone());
     let pin = pin_here();
     let into = home.map(installed_at);
     json!({
@@ -475,6 +540,9 @@ pub(crate) fn install(
             }),
         )
     };
+    // one install at a time: a second waits, and finds the first's
+    static INSTALLING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _one = INSTALLING.lock().unwrap_or_else(|e| e.into_inner());
     let before = dcm2niix_status(Some(home));
     if before["present"] == true {
         return Ok(json!({
@@ -801,36 +869,46 @@ mod tests {
     }
 
     #[test]
-    fn a_name_is_looked_for_and_a_path_is_taken_as_given() {
+    fn a_name_is_looked_for_and_a_broken_one_does_not_hide_a_working_one() {
         let root = std::env::temp_dir().join(format!("nils-tools-find-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let on_path = root.join("bin");
         let home = root.join("registry");
         std::fs::create_dir_all(&on_path).unwrap();
         std::fs::create_dir_all(&home).unwrap();
+        let says = b"#!/bin/sh\necho \"Chris Rorden's dcm2niiX version v1.0.20260724\"\n";
+        let silent = b"#!/bin/sh\nexit 1\n";
         // a path is the site's, found or not
         let given = find_dcm2niix(Path::new("/opt/x/dcm2niix"), Some(&home), None).unwrap();
         assert_eq!(
             (given.path, given.by),
             (PathBuf::from("/opt/x/dcm2niix"), "given")
         );
-        // the engine's own install, where nothing else has one
-        let mine = installed_at(&home);
-        place_binary(b"#!/bin/sh\n", &mine).unwrap();
+        assert!(given.problem.is_some());
+        // a broken one on the search path, a working one in the tools folder
+        place_binary(silent, &on_path.join(DCM2NIIX)).unwrap();
+        place_binary(says, &installed_at(&home)).unwrap();
         let search = std::ffi::OsString::from(on_path.as_os_str());
-        let found = find_dcm2niix(Path::new(DCM2NIIX), Some(&home), Some(&search));
-        // beside the test binary or on record there is none, so it is the
-        // tools folder's
-        if let Some(f) = &found
-            && f.by != "beside"
-            && f.by != "setup"
-        {
-            assert_eq!((f.path.clone(), f.by), (mine.clone(), "tools"));
+        let found = find_dcm2niix(Path::new(DCM2NIIX), Some(&home), Some(&search)).unwrap();
+        // beside the test binary or on record there is none to come first
+        if found.by != "beside" && !found.by.starts_with("setup") {
+            assert_eq!(
+                (found.path.clone(), found.by),
+                (installed_at(&home), "tools")
+            );
+            assert!(found.runs());
         }
-        // the search path comes before it
-        place_binary(b"#!/bin/sh\n", &on_path.join(DCM2NIIX)).unwrap();
+        // the search path comes first once the one there runs
+        place_binary(says, &on_path.join(DCM2NIIX)).unwrap();
         let found = find_dcm2niix(Path::new(DCM2NIIX), Some(&home), Some(&search)).unwrap();
         assert_eq!((found.path, found.by), (on_path.join(DCM2NIIX), "path"));
+        // with none that runs, the first there is says why
+        place_binary(silent, &on_path.join(DCM2NIIX)).unwrap();
+        place_binary(silent, &installed_at(&home)).unwrap();
+        let found = find_dcm2niix(Path::new(DCM2NIIX), Some(&home), Some(&search)).unwrap();
+        if found.by == "path" {
+            assert!(!found.runs() && found.problem.is_some());
+        }
         // another name is looked for on the search path alone
         assert!(find_dcm2niix(Path::new("dcm2niix-old"), Some(&home), Some(&search)).is_none());
         let _ = std::fs::remove_dir_all(&root);

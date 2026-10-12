@@ -11270,6 +11270,7 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
                 "                   {path} ({})",
                 match converter_found_by {
                     Some("given") => "as given",
+                    Some("setup-given") => "as the site gave it to setup",
                     Some("path") => "on the search path",
                     Some("beside") => "beside nils",
                     Some("setup") => "where the setup record names it",

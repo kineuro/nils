@@ -819,6 +819,14 @@ pub fn image_verified(target: &Path, form: ImageForm) -> bool {
     image_fingerprint(target, form).is_ok_and(|d| d == recorded.trim())
 }
 
+/// Whether a cached image is there with the record of its digest beside
+/// it, read without hashing it (2026-10-12): what a check before a run may
+/// ask, which never reads a whole image. The run verifies it before it is
+/// used.
+pub fn image_recorded(target: &Path) -> bool {
+    std::fs::symlink_metadata(target).is_ok() && image_record(target).is_file()
+}
+
 /// How an invocation ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Ended {
