@@ -2388,6 +2388,21 @@ fn check_picked_names(cl: &Clause, path: &str, names: &dyn Names, issues: &mut V
             ),
             next(Some(("role", role))),
         )),
+        // a role the pack does not pick read no rows at all (2026-10-12):
+        // it is refused, naming the roles the served pack picks
+        Some(Value::String(r)) if names.role(r).is_none() => issues.push(issue(
+            Code::UnknownValue,
+            path,
+            if roles.is_empty() {
+                format!("picked reads no role named {r}")
+            } else {
+                format!(
+                    "picked reads no role named {r}; the pack's roles are {}",
+                    roles.join(", ")
+                )
+            },
+            next(Some(("role", role))),
+        )),
         Some(_) => {}
     }
     if let Some(v) = cl.opts.get("model")

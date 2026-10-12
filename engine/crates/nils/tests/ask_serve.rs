@@ -3632,3 +3632,54 @@ fn the_jobs_door_refuses_what_only_the_compiler_refuses_before_it_queues() {
         serde_json::json!({"document": unbound(), "name": "never-queued"}),
     );
 }
+
+/// 2026-10-12: a `picked` whose role the served pack does not pick read no
+/// rows, and the run door answered 200 with none. It is refused as a
+/// document, naming the roles the pack picks, on each backend; a role the
+/// pack picks runs.
+#[test]
+fn the_run_door_refuses_a_picked_role_the_pack_does_not_pick() {
+    let dsn = std::env::var("NILS_TEST_POSTGRES_DSN")
+        .ok()
+        .filter(|d| !d.is_empty());
+    if dsn.is_none() {
+        eprintln!("NILS_TEST_POSTGRES_DSN is not set; the Postgres half is skipped");
+    }
+    let schema = "nils_ask_serve_picked_role";
+    let main_scans = |role: &str| {
+        serde_json::json!({"document": {
+            "ast_version": 1,
+            "name": "main scans of a role",
+            "sets": {"t": {"grain": "stack", "where": [["picked", {"role": role}]]}},
+            "out": {"set": "t", "level": "count"}
+        }})
+    };
+    for (backend, dsn) in [("sqlite", None), ("postgres", dsn)] {
+        let home = match (backend, &dsn) {
+            ("sqlite", _) => synthetic(),
+            (_, Some(dsn)) => synthetic_postgres(dsn, schema),
+            _ => continue,
+        };
+        let server = Server::start(&home, 2, &[]);
+        let (status, refused) =
+            server.request("POST", "/api/ask/run", Some(&body(main_scans("t2"))), None);
+        assert_eq!(status, 400, "{backend}: {refused}");
+        assert_eq!(refused["error"], "the document is refused", "{refused}");
+        let issue = &refused["issues"][0];
+        assert_eq!(issue["code"], "unknown_value", "{refused}");
+        assert_eq!(issue["path"], "sets.t.where[0]", "{refused}");
+        assert_eq!(
+            issue["message"], "picked reads no role named t2; the pack's roles are t1w, flair, t2w",
+            "{refused}"
+        );
+        let (status, ran) =
+            server.request("POST", "/api/ask/run", Some(&body(main_scans("t2w"))), None);
+        assert_eq!(status, 200, "{backend}: {ran}");
+        server.finish();
+        if let Some(dsn) = &dsn
+            && backend == "postgres"
+        {
+            drop_schema(dsn, schema);
+        }
+    }
+}

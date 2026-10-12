@@ -1900,3 +1900,35 @@ fn a_clause_the_compiler_cannot_read_is_refused_with_its_form() {
     accepted(kept(json!(["in", {}, ["field", {}, "n_studies"], [1, 2]])));
     accepted(stacks(json!(["picked", {"role": "t1w"}])));
 }
+
+/// 2026-10-12: a `picked` whose role the pack does not pick read no rows at
+/// all, so a question about main scans of a role written another way (t2,
+/// T1w) answered nothing. It is refused, as a dataset or a cohort `picked`
+/// does not know is; a role the pack picks is read, and a role given as a
+/// parameter is the parameter's value.
+#[test]
+fn picked_refuses_a_role_the_pack_does_not_pick() {
+    let stacks = |role: Value| {
+        doc(
+            json!({"t": {"grain": "stack", "where": [["picked", {"role": role}]]}}),
+            json!({"set": "t", "level": "count"}),
+        )
+    };
+    for role in ["t2", "T1w", "main"] {
+        let issues = refused(stacks(json!(role)));
+        assert_eq!(issues.len(), 1, "{role}: {issues:?}");
+        let i = &issues[0];
+        assert_eq!(i.code, Code::UnknownValue, "{role}");
+        assert_eq!(i.path, "sets.t.where[0]", "{role}");
+        assert_eq!(i.message, format!("picked reads no role named {role}"));
+        assert_eq!(
+            i.next,
+            r#"write ["picked", {role: <role>}] in a stack set's where"#
+        );
+    }
+    accepted(stacks(json!("t1w")));
+    accepted(stacks(json!("flair")));
+    let mut by_param = stacks(json!(["param", {}, "role"]));
+    by_param["params"] = json!({"role": {"type": "text", "value": "t1w"}});
+    accepted(by_param);
+}

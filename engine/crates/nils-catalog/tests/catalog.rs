@@ -405,3 +405,49 @@ fn the_function_table_lists_picked() {
         .collect();
     assert!(comparison.contains(&"picked"), "{table}");
 }
+
+/// 2026-10-12: a `picked` whose role the served pack does not pick read no
+/// rows at all. It is refused at validate, naming the roles the pack's
+/// picks declare (the MRI pack's main picks t1w, flair and t2w), and each
+/// of those roles is read.
+#[test]
+fn picked_is_refused_a_role_the_served_pack_does_not_pick() {
+    let (mut registry, _dir) = registry();
+    let catalog = Catalog::build(&mut registry, &pack()).unwrap();
+    assert_eq!(catalog.roles, vec!["t1w", "flair", "t2w"]);
+    let doc = |role: &str| {
+        parse(
+            &serde_json::json!({
+                "ast_version": 1,
+                "sets": {"t": {"grain": "stack", "where": [["picked", {"role": role}]]}},
+                "out": {"set": "t", "level": "count"}
+            })
+            .to_string(),
+        )
+        .unwrap()
+    };
+    for role in ["t1w", "flair", "t2w"] {
+        prepare(doc(role), &catalog, &Scope::default()).unwrap_or_else(|e| panic!("{role}: {e}"));
+    }
+    for role in ["dwi", "T2w", "main"] {
+        match prepare(doc(role), &catalog, &Scope::default()) {
+            Err(nils_ask::Error::Invalid(issues)) => {
+                assert_eq!(issues.len(), 1, "{role}: {issues:?}");
+                let i = &issues[0];
+                assert_eq!(i.code, Code::UnknownValue, "{role}");
+                assert_eq!(i.path, "sets.t.where[0]", "{role}");
+                assert_eq!(
+                    i.message,
+                    format!(
+                        "picked reads no role named {role}; the pack's roles are t1w, flair, t2w"
+                    )
+                );
+                assert_eq!(
+                    i.next,
+                    r#"write ["picked", {role: t1w}] in a stack set's where; the roles are t1w, flair, t2w"#
+                );
+            }
+            other => panic!("{role} accepted: {other:?}"),
+        }
+    }
+}
