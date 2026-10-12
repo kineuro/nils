@@ -769,16 +769,26 @@ fn a_check_closes_into_a_status_on_its_results_and_their_parts() {
         assert_eq!(ri.status, "accepted", "{name}");
         assert_eq!(ri.scope, "derivative", "{name}");
         let failed = its.iter().find(|i| i.derivative_id == Some(d0)).unwrap();
-        assert_eq!(failed.state, "agreed", "{name}");
+        // no decision for the failed item: it is kept refused, saying why,
+        // and its question stays open for a later close (after the T33
+        // pipe test; it was closed as superseded with the campaign before)
+        assert_eq!(failed.state, "refused", "{name}");
+        assert!(
+            failed
+                .refused_why
+                .as_deref()
+                .is_some_and(|w| w.contains("part 3")),
+            "{name}: {:?}",
+            failed.refused_why
+        );
         let ri = nils_registry::review::item(st, failed.review_item_id)
             .unwrap()
             .unwrap();
-        // no decision for the failed item; its question, unresolved, is
-        // closed as superseded with the campaign (the review of E2, item 7)
         assert_eq!(
-            ri.status, "superseded",
+            ri.status, "open",
             "{name}: nothing written for the failed item"
         );
+        assert_eq!(ri.evidence["campaign_state"], "refused", "{name}");
 
         // part grain: one item per lesion; the result follows once every
         // part item of it is resolved
@@ -1160,9 +1170,11 @@ fn a_part_two_raters_flag_for_different_reasons_is_written_once_with_both() {
             "{name}: {}",
             zero.outcome
         );
-        // the refused item: unresolved, nothing written for it
+        // the refused item: unresolved, nothing written for it, and it says
+        // so
         let one = now.iter().find(|i| i.derivative_id == Some(d1)).unwrap();
-        assert_eq!(one.state, "agreed", "{name}");
+        assert_eq!(one.state, "refused", "{name}");
+        assert_eq!(one.refused_why.as_deref(), Some(why.as_str()), "{name}");
         assert!(
             decisions(st, "derivative", &d1.to_string()).is_empty(),
             "{name}"
@@ -1649,5 +1661,380 @@ fn a_page_of_parts_past_the_set_is_empty() {
             [3],
             "{name}"
         );
+    }
+}
+
+/// The id of the check in force on a result.
+fn decisions_of(reg: &mut Registry, d: i64) -> i64 {
+    derivative::get(reg.store(), d)
+        .unwrap()
+        .unwrap()
+        .check_decision_id
+        .unwrap()
+}
+
+/// The status of a review item, by id.
+fn review_status(reg: &mut Registry, id: i64) -> (String, Value) {
+    let ri = nils_registry::review::item(reg.store(), id)
+        .unwrap()
+        .unwrap();
+    (ri.status, ri.evidence)
+}
+
+/// A check whose two raters agree on two results, with the second's outcome
+/// spoiled as the T33 pipe test spoiled it (`parts` is no list).
+fn two_results_one_spoiled(
+    reg: &mut Registry,
+    name: &'static str,
+    d0: i64,
+    d1: i64,
+    s0: i64,
+    s1: i64,
+    minute: u32,
+) -> (i64, i64, i64) {
+    let q = question("result");
+    let c = campaign::create(
+        reg,
+        &new(
+            name,
+            &q,
+            vec![item(d0, None, s0, s1), item(d1, None, s0, s1)],
+            2,
+            vec![],
+        ),
+    )
+    .unwrap();
+    for (i, who) in ["anna@lab", "bo@lab", "anna@lab", "bo@lab"]
+        .iter()
+        .enumerate()
+    {
+        let form = if i < 2 {
+            json!({"seen": [1, 2]})
+        } else {
+            json!({"parts": [{"label": 2, "reason": "under"}], "seen": [1, 2]})
+        };
+        let value = if i < 2 { "accepted" } else { "flagged" };
+        read(
+            reg,
+            c.id,
+            who,
+            Role::Rater,
+            value,
+            form,
+            None,
+            minute + 2 * i as u32,
+        )
+        .unwrap();
+    }
+    let items = campaign::items(reg.store(), c.id).unwrap();
+    let spoiled = items
+        .iter()
+        .find(|i| i.derivative_id == Some(d1))
+        .unwrap()
+        .clone();
+    assert_eq!(spoiled.state, "agreed");
+    set_outcome_form(
+        reg,
+        &spoiled,
+        json!({"reasons": [], "parts": "x", "points": [], "seen": [], "shown": []}),
+    );
+    (c.id, spoiled.id, spoiled.review_item_id)
+}
+
+/// After the T33 pipe test: a check's close that cannot read an
+/// item's outcome writes nothing for it, and the item says so. It is kept
+/// refused, with when and why, its question stays open in the queue, said
+/// to be refused, and the campaign says a person may close it again. A
+/// later close by an agent is refused; a person's, once the outcome reads,
+/// writes the item as any close does and clears the refusal; with nothing
+/// left to write, the campaign is closed for good.
+#[test]
+fn a_refused_check_item_stays_refused_until_a_later_close_writes_it() {
+    for mut l in labs() {
+        let name = l.name;
+        let reg = &mut l.registry;
+        let (s0, s1, _) = scans(reg);
+        let (d0, d1) = (mask(reg, s0, 11), mask(reg, s0, 12));
+        let (c, refused_item, question_id) =
+            two_results_one_spoiled(reg, "t33-refused", d0, d1, s0, s1, 0);
+
+        let closed = close_as_person(reg, c, 20);
+        assert_eq!(
+            (closed.resolved, closed.unresolved, closed.refused.len()),
+            (1, 1, 1),
+            "{name}: {closed:?}"
+        );
+        assert_eq!(closed.refused[0].0, refused_item, "{name}");
+        let why = closed.refused[0].1.clone();
+        assert!(
+            why.contains("cannot be read") && why.contains("form.parts is a list"),
+            "{name}: {why}"
+        );
+        // the item: refused, with when and why, and nothing written for it
+        let it = campaign::item(reg.store(), refused_item).unwrap().unwrap();
+        assert_eq!(it.state, "refused", "{name}");
+        assert_eq!(it.refused_why.as_deref(), Some(why.as_str()), "{name}");
+        assert_eq!(
+            it.refused_at.as_deref().map(|t| &t[..16]),
+            Some("2026-10-11T11:20"),
+            "{name}"
+        );
+        assert_eq!(it.as_json()["refused"]["why"], json!(why), "{name}");
+        assert!(
+            decisions(reg.store(), "derivative", &d1.to_string()).is_empty(),
+            "{name}"
+        );
+        // its question stays open, said to be refused
+        let (status, evidence) = review_status(reg, question_id);
+        assert_eq!(status, "open", "{name}");
+        assert_eq!(evidence["campaign_state"], "refused", "{name}");
+        // the campaign is closed, counts the item as refused, and may be
+        // closed again
+        let camp = campaign::get(reg.store(), c).unwrap().unwrap();
+        assert_eq!(camp.status, "closed", "{name}");
+        assert!(
+            campaign::closes_again(reg.store(), &camp).unwrap(),
+            "{name}"
+        );
+        let counts = campaign::counts(reg.store(), c).unwrap();
+        assert_eq!(counts["items"]["refused"], 1, "{name}: {counts}");
+        assert_eq!(counts["items"]["resolved"], 1, "{name}: {counts}");
+
+        // a later close while the outcome still cannot be read refuses it
+        // again, and nothing else changes
+        let again = close_as_person(reg, c, 24);
+        assert_eq!(
+            (again.resolved, again.refused.len(), again.decisions.len()),
+            (1, 1, 0),
+            "{name}: {again:?}"
+        );
+        assert_eq!(review_status(reg, question_id).0, "open", "{name}");
+
+        // an agent never closes it again: a check is a person's
+        let e = campaign::close(
+            reg,
+            &Close {
+                campaign: c,
+                who: "bot@lab",
+                author_kind: "agent",
+                model: None,
+                picks: None,
+            },
+            &at(26),
+        )
+        .unwrap_err();
+        assert!(
+            e.to_string().contains("a person closes it again"),
+            "{name}: {e}"
+        );
+
+        // the outcome reads again (settled again, or the row mended): a
+        // person's later close writes it as usual
+        let it = campaign::item(reg.store(), refused_item).unwrap().unwrap();
+        set_outcome_form(
+            reg,
+            &it,
+            json!({"reasons": [], "parts": [{"label": 2, "reason": "under"}], "points": [], "seen": [1, 2], "shown": []}),
+        );
+        let later = close_as_person(reg, c, 30);
+        assert_eq!(
+            (later.resolved, later.unresolved, later.refused.len()),
+            (2, 0, 0),
+            "{name}: {later:?}"
+        );
+        assert_eq!(
+            later.decisions,
+            vec![decisions_of(reg, d1)],
+            "{name}: the result's"
+        );
+        let it = campaign::item(reg.store(), refused_item).unwrap().unwrap();
+        assert_eq!(it.state, "resolved", "{name}");
+        assert_eq!((&it.refused_at, &it.refused_why), (&None, &None), "{name}");
+        assert_eq!(it.as_json()["refused"], Value::Null, "{name}");
+        let st = reg.store();
+        assert_eq!(
+            decisions(st, "derivative", &d1.to_string()),
+            vec![("flagged".into(), None, false)],
+            "{name}"
+        );
+        assert_eq!(
+            part_status(st, d1)[..2],
+            [
+                (1, Some("accepted".into()), None),
+                (2, Some("flagged".into()), Some("under".into()))
+            ],
+            "{name}"
+        );
+        assert_eq!(review_status(reg, question_id).0, "accepted", "{name}");
+        let camp = campaign::get(reg.store(), c).unwrap().unwrap();
+        assert_eq!(camp.status, "closed", "{name}");
+        assert_eq!(
+            camp.closed_at.as_deref().map(|t| &t[..16]),
+            Some("2026-10-11T11:30"),
+            "{name}"
+        );
+        assert!(
+            !campaign::closes_again(reg.store(), &camp).unwrap(),
+            "{name}"
+        );
+        // nothing is left to write: closed for good
+        let e = campaign::close(
+            reg,
+            &Close {
+                campaign: c,
+                who: "cleo@lab",
+                author_kind: "person",
+                model: None,
+                picks: None,
+            },
+            &at(40),
+        )
+        .unwrap_err();
+        assert!(e.to_string().contains("is closed"), "{name}: {e}");
+    }
+}
+
+/// A later close never writes an older judgement over a newer one: while
+/// another open check holds the result, the item stays refused and its
+/// question open; once that check has written the result, the later close
+/// leaves its check standing, keeps the item refused saying so, and closes
+/// its question. A direct check made since does the same.
+#[test]
+fn a_later_close_leaves_a_newer_check_of_the_result_standing() {
+    for mut l in labs() {
+        let name = l.name;
+        let reg = &mut l.registry;
+        let (s0, s1, _) = scans(reg);
+        let (d0, d1, d2) = (mask(reg, s0, 21), mask(reg, s0, 22), mask(reg, s0, 23));
+        let (c, refused_item, question_id) =
+            two_results_one_spoiled(reg, "t33-older", d0, d1, s0, s1, 0);
+        close_as_person(reg, c, 20);
+        let mend = |reg: &mut Registry, item_id: i64| {
+            let it = campaign::item(reg.store(), item_id).unwrap().unwrap();
+            set_outcome_form(
+                reg,
+                &it,
+                json!({"reasons": [], "parts": [], "points": [], "seen": [1], "shown": []}),
+            );
+        };
+        mend(reg, refused_item);
+
+        // a newer check holds the result: it decides it
+        let q = question("result");
+        let newer = campaign::create(
+            reg,
+            &new("t33-newer", &q, vec![item(d1, None, s0, s1)], 1, vec![]),
+        )
+        .unwrap();
+        let held = close_as_person(reg, c, 30);
+        assert_eq!(held.refused.len(), 1, "{name}: {held:?}");
+        assert!(
+            held.refused[0]
+                .1
+                .contains("held by the open check t33-newer"),
+            "{name}: {held:?}"
+        );
+        assert_eq!(review_status(reg, question_id).0, "open", "{name}");
+        assert!(
+            decisions(reg.store(), "derivative", &d1.to_string()).is_empty(),
+            "{name}"
+        );
+
+        // the newer check closes and writes the result
+        read(
+            reg,
+            newer.id,
+            "anna@lab",
+            Role::Rater,
+            "rejected",
+            json!({}),
+            None,
+            32,
+        )
+        .unwrap();
+        let wrote = close_as_person(reg, newer.id, 40);
+        assert_eq!(wrote.resolved, 1, "{name}: {wrote:?}");
+        // the older campaign's later close leaves that check standing
+        let camp = campaign::get(reg.store(), c).unwrap().unwrap();
+        assert!(
+            campaign::closes_again(reg.store(), &camp).unwrap(),
+            "{name}"
+        );
+        let later = close_as_person(reg, c, 50);
+        assert_eq!(
+            (later.decisions.len(), later.refused.len()),
+            (0, 1),
+            "{name}: {later:?}"
+        );
+        let why = &later.refused[0].1;
+        assert!(
+            why.contains(&format!("result {d1} was checked again"))
+                && why.contains("that check stands"),
+            "{name}: {why}"
+        );
+        assert_eq!(
+            decisions(reg.store(), "derivative", &d1.to_string()),
+            vec![("rejected".into(), None, false)],
+            "{name}: the newer check stands"
+        );
+        assert_eq!(
+            derivative::get(reg.store(), d1)
+                .unwrap()
+                .unwrap()
+                .check_status
+                .as_deref(),
+            Some("rejected"),
+            "{name}"
+        );
+        let it = campaign::item(reg.store(), refused_item).unwrap().unwrap();
+        assert_eq!(it.state, "refused", "{name}");
+        assert_eq!(it.refused_why.as_deref(), Some(why.as_str()), "{name}");
+        // its question is closed by the newer check, and nothing is left to
+        // write
+        assert_eq!(review_status(reg, question_id).0, "superseded", "{name}");
+        let camp = campaign::get(reg.store(), c).unwrap().unwrap();
+        assert!(
+            !campaign::closes_again(reg.store(), &camp).unwrap(),
+            "{name}"
+        );
+
+        // a direct check made since the refusal stands the same way
+        let (c2, refused2, question2) =
+            two_results_one_spoiled(reg, "t33-direct", d0, d2, s0, s1, 0);
+        // d0 was checked by the first campaign: this one writes it again
+        let first = close_as_person(reg, c2, 20);
+        assert_eq!(first.refused.len(), 1, "{name}: {first:?}");
+        let direct = check::check_directly(
+            reg,
+            &check::Direct {
+                derivative: d2,
+                value: "accepted",
+                reasons: &[],
+                parts: &[],
+                set: Some("lesions"),
+                why: None,
+                who: "dan@lab",
+                kind: "person",
+            },
+        )
+        .unwrap();
+        mend(reg, refused2);
+        let later = close_as_person(reg, c2, 59);
+        assert_eq!(later.refused.len(), 1, "{name}: {later:?}");
+        assert!(
+            later.refused[0]
+                .1
+                .contains(&format!("(decision {})", direct.decision)),
+            "{name}: {later:?}"
+        );
+        assert_eq!(
+            derivative::get(reg.store(), d2)
+                .unwrap()
+                .unwrap()
+                .check_decision_id,
+            Some(direct.decision),
+            "{name}"
+        );
+        assert_eq!(review_status(reg, question2).0, "superseded", "{name}");
     }
 }

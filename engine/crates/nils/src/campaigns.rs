@@ -2880,6 +2880,9 @@ pub(crate) fn shown(store: &mut Store, c: &campaign::Campaign) -> Result<Value, 
     if c.status == "open" {
         v["agreement"] = campaign::agreement(store, c.id).map_err(campaign_err)?;
     }
+    // after type 3's pipe test: a closed check holding an item its close
+    // refused, whose question is open, is closed again by a person
+    v["close_again"] = json!(campaign::closes_again(store, c).map_err(campaign_err)?);
     Ok(v)
 }
 
