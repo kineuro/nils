@@ -976,6 +976,27 @@ fn round(pg: Option<(String, String)>) {
         OPS,
     );
     assert_eq!(status, 200, "{dropped}");
+    // a newer descriptor that takes no cascade (as one from before it
+    // did) is refused for the cascade, never run on its parts alone
+    let older = work.file(
+        "bodypart-infer-fusion-3.yml",
+        stand_in()
+            .replace("tool-version: \"1\"", "tool-version: \"3\"")
+            .as_bytes(),
+    );
+    let added = home.json(&["pipeline", "add", older.to_str().unwrap(), "--json"]);
+    std::fs::remove_file(&older).unwrap();
+    assert_eq!(added["label"], "bodypart-infer-fusion@3", "{added}");
+    let s = server.get("/api/datasets/ds/summary", READS);
+    let refusal = &step(&s, "body_part")["refusal"];
+    assert_eq!(refusal["reason"], "no_pipeline", "{s}");
+    assert!(
+        refusal["error"]
+            .as_str()
+            .unwrap()
+            .contains("takes no model input cascade, student, deferral"),
+        "{s}"
+    );
     // the plain head keeps its run on the first descriptor's inputs: a
     // cascade's inputs are optional and left out without one
     home.ok(&[

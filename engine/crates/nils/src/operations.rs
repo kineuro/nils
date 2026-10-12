@@ -329,6 +329,32 @@ fn body_part(store: &mut Store) -> Result<Result<Plan, Refused>, StoreError> {
             return refused("no_model", why);
         }
     }
+    // a descriptor that takes no cascade (one older than it), or not each
+    // of its parts, would run the plain path from the parts, or a cascade
+    // without one: refused, so the run is never another model's
+    if cascade {
+        let takes: BTreeSet<&str> = d
+            .inputs
+            .iter()
+            .filter(|t| t.ty == "model")
+            .map(|t| t.id.as_str())
+            .collect();
+        let missing: Vec<&str> = std::iter::once("cascade")
+            .chain(parts.iter().map(|(n, _)| n.as_str()))
+            .filter(|n| !takes.contains(n))
+            .collect();
+        if !missing.is_empty() {
+            return refused(
+                "no_pipeline",
+                format!(
+                    "{} takes no model input {}, which the cascade {} is run with; add a descriptor version that takes it",
+                    p.label(),
+                    missing.join(", "),
+                    head.label()
+                ),
+            );
+        }
+    }
     let part = |input: &str| {
         parts
             .iter()
