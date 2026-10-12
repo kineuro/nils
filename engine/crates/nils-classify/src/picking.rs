@@ -2007,8 +2007,8 @@ pub fn keep(
         .ok_or_else(|| refused(format!("no review item {item}")))?;
     if it.kind != review::PICK_BORDER_KIND {
         return Err(refused(format!(
-            "review item {item} is a {}, not a {}",
-            it.kind,
+            "review item {item} is {}, not a {}",
+            nils_registry::a_or_an(&it.kind),
             review::PICK_BORDER_KIND
         )));
     }

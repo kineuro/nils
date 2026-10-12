@@ -1118,9 +1118,9 @@ pub(crate) fn command(home: &Home, command: PipelineCommand) -> Result<(), Exit>
             }
             for o in doc["outputs"].as_array().into_iter().flatten() {
                 println!(
-                    "  output           {}: a {} at {}",
+                    "  output           {}: {} at {}",
                     o["id"].as_str().unwrap_or_default(),
-                    o["kind"].as_str().unwrap_or_default(),
+                    nils_registry::a_or_an(o["kind"].as_str().unwrap_or_default()),
                     o["path-template"].as_str().unwrap_or_default()
                 );
             }
@@ -3916,8 +3916,23 @@ fn execute_run(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Resul
     // record 49 A3: a unit whose input lacks a role the descriptor names,
     // as the release wrote it, is not run: it is over as skipped, missing
     // an input, as the pre-flight said it would be, and no review item
-    if d.layout == Layout::Bids && !d.roles.is_empty() {
-        let missing = units_missing(registry.store(), m.release_id, &m.units, &d.roles)?;
+    let mut missing = if d.layout == Layout::Bids && !d.roles.is_empty() {
+        units_missing(registry.store(), m.release_id, &m.units, &d.roles)?
+    } else {
+        BTreeMap::new()
+    };
+    // record 55 H3, section 6.5 (the T33 pipe test): nor is a unit the
+    // inputs hold no derivative of for an input that needs one, its check
+    // having left out every one there is
+    let place_ids: Vec<i64> = lane_places(x).iter().map(|pl| pl.id).collect();
+    let stacks_of: Vec<&[i64]> = m.units.iter().map(|u| u.stacks.as_slice()).collect();
+    let lacking = derivatives_missing(registry.store(), d, &stacks_of, &place_ids)?;
+    for (u, why) in m.units.iter().zip(lacking) {
+        if !why.is_empty() {
+            missing.entry(u.id.clone()).or_default().extend(why);
+        }
+    }
+    if !missing.is_empty() {
         let now = nils_registry::time::now_iso();
         for u in rows::units(registry.store(), x.run_id).map_err(err)? {
             if let Some(why) = missing.get(&u.unit)
@@ -6143,13 +6158,45 @@ fn derivative_inputs(
     stacks: &[i64],
     places: &[&nils_registry::place::Place],
 ) -> Result<BTreeMap<String, Vec<derivative::Derivative>>, String> {
-    let mut out: BTreeMap<String, Vec<derivative::Derivative>> = BTreeMap::new();
+    let place_ids: Vec<i64> = places.iter().map(|pl| pl.id).collect();
+    let mut out = derivative_candidates(store, d, stacks, &place_ids)?.rows;
+    // record 55 H3, section 6.5: what the input takes of a check's
+    // status; a run is never given a rejected result unless its
+    // descriptor asks for any
+    for t in d.inputs.iter().filter(|t| t.ty.starts_with("derivative:")) {
+        let checked = t.checked.as_deref().unwrap_or("not_rejected");
+        if let Some(rows) = out.get_mut(&t.id) {
+            rows.retain(|r| takes_checked(checked, r.check_status.as_deref()));
+        }
+    }
+    Ok(out)
+}
+
+/// The derivatives each derivative input of a descriptor could take, by
+/// the input's id, before their checks are read, and the session of each
+/// stack they were read for.
+struct Candidates {
+    rows: BTreeMap<String, Vec<derivative::Derivative>>,
+    sessions: BTreeMap<i64, (i64, String)>,
+}
+
+/// What [`derivative_inputs`] reads, its check left to the caller: the
+/// derivatives of the stacks, and those of the stacks' sessions and
+/// subjects, in these places.
+fn derivative_candidates(
+    store: &mut Store,
+    d: &Descriptor,
+    stacks: &[i64],
+    place_ids: &[i64],
+) -> Result<Candidates, String> {
+    let mut rows: BTreeMap<String, Vec<derivative::Derivative>> = BTreeMap::new();
     let wanted = d.inputs.iter().any(|t| t.ty.starts_with("derivative:"));
-    let sessions = if wanted {
-        sessions_of(store, stacks)?
+    let of_stack = if wanted {
+        stack_sessions(store, stacks)?
     } else {
         Default::default()
     };
+    let sessions: std::collections::BTreeSet<(i64, String)> = of_stack.values().cloned().collect();
     let subjects: Vec<i64> = sessions
         .iter()
         .map(|(s, _)| *s)
@@ -6158,13 +6205,13 @@ fn derivative_inputs(
         .collect();
     for t in d.inputs.iter().filter(|t| t.ty.starts_with("derivative:")) {
         let kind = t.ty.trim_start_matches("derivative:");
-        let mut rows = Vec::new();
-        for pl in places {
-            rows.extend(
-                derivative::of_stacks(store, kind, stacks, pl.id).map_err(|e| e.to_string())?,
+        let mut found = Vec::new();
+        for &place in place_ids {
+            found.extend(
+                derivative::of_stacks(store, kind, stacks, place).map_err(|e| e.to_string())?,
             );
             for r in
-                derivative::of_subjects(store, kind, &subjects, pl.id).map_err(|e| e.to_string())?
+                derivative::of_subjects(store, kind, &subjects, place).map_err(|e| e.to_string())?
             {
                 let ours = match (r.scope.as_str(), r.subject_id, &r.session_day) {
                     ("subject", Some(_), _) => true,
@@ -6172,18 +6219,16 @@ fn derivative_inputs(
                     _ => false,
                 };
                 if ours {
-                    rows.push(r);
+                    found.push(r);
                 }
             }
         }
-        // record 55 H3, section 6.5: what the input takes of a check's
-        // status; a run is never given a rejected result unless its
-        // descriptor asks for any
-        let checked = t.checked.as_deref().unwrap_or("not_rejected");
-        rows.retain(|r| takes_checked(checked, r.check_status.as_deref()));
-        out.insert(t.id.clone(), rows);
+        rows.insert(t.id.clone(), found);
     }
-    Ok(out)
+    Ok(Candidates {
+        rows,
+        sessions: of_stack,
+    })
 }
 
 /// Whether a derivative input that takes `checked` (accepted, not_rejected
@@ -6197,16 +6242,93 @@ pub(crate) fn takes_checked(checked: &str, status: Option<&str>) -> bool {
     }
 }
 
+/// Record 55 H3, section 6.5, found by the T33 pipe test: why each unit,
+/// given by its stacks, lacks a derivative an input that is not optional
+/// needs, in the order the units are given (nothing for a unit that lacks
+/// none). A derivative is the unit's when it is of one of its stacks, or
+/// of the subject or the session of one of them, as the run's inputs read
+/// them; the unit lacks the input when none is registered, or when its
+/// check leaves out every one there is, so the run's inputs hold none for
+/// it. The pre-flight and the run judge the units by it, so both agree
+/// with the inputs: a unit whose only mask was rejected is not ready, and
+/// is not run.
+pub(crate) fn derivatives_missing(
+    store: &mut Store,
+    d: &Descriptor,
+    units: &[&[i64]],
+    place_ids: &[i64],
+) -> Result<Vec<Vec<String>>, String> {
+    let mut out: Vec<Vec<String>> = vec![Vec::new(); units.len()];
+    let needed: Vec<&descriptor::TypedInput> = d
+        .inputs
+        .iter()
+        .filter(|t| t.ty.starts_with("derivative:") && !t.optional)
+        .collect();
+    if needed.is_empty() || units.is_empty() {
+        return Ok(out);
+    }
+    let stacks: Vec<i64> = units
+        .iter()
+        .flat_map(|u| u.iter().copied())
+        .collect::<std::collections::BTreeSet<i64>>()
+        .into_iter()
+        .collect();
+    let found = derivative_candidates(store, d, &stacks, place_ids)?;
+    for t in needed {
+        let kind = t.ty.trim_start_matches("derivative:");
+        let checked = t.checked.as_deref().unwrap_or("not_rejected");
+        let rows = found.rows.get(&t.id).map(Vec::as_slice).unwrap_or_default();
+        for (u, why) in units.iter().zip(out.iter_mut()) {
+            let sessions: Vec<&(i64, String)> =
+                u.iter().filter_map(|s| found.sessions.get(s)).collect();
+            let own: Vec<&derivative::Derivative> = rows
+                .iter()
+                .filter(|r| match (r.stack_id, r.scope.as_str(), r.subject_id) {
+                    (Some(s), ..) => u.contains(&s),
+                    (None, "subject", Some(subject)) => sessions.iter().any(|(s, _)| *s == subject),
+                    (None, "session", Some(subject)) => r
+                        .session_day
+                        .as_deref()
+                        .is_some_and(|day| sessions.iter().any(|(s, d)| *s == subject && d == day)),
+                    _ => false,
+                })
+                .collect();
+            if own
+                .iter()
+                .any(|r| takes_checked(checked, r.check_status.as_deref()))
+            {
+                continue;
+            }
+            why.push(match (own.len(), checked) {
+                (0, _) => format!("no {kind} derivative of it for the input {}", t.id),
+                (_, "accepted") => format!(
+                    "no {kind} derivative of it for the input {} is accepted by a check, and the input takes accepted ones only",
+                    t.id
+                ),
+                (1, _) => format!(
+                    "its {kind} derivative for the input {} was rejected by a check, and the input takes no rejected one",
+                    t.id
+                ),
+                (n, _) => format!(
+                    "its {n} {kind} derivatives for the input {} were all rejected by a check, and the input takes no rejected one",
+                    t.id
+                ),
+            });
+        }
+    }
+    Ok(out)
+}
+
 /// The sessions of these stacks, each as its subject and its day, the day
-/// a run of the bids layout names a session's derivatives by.
-fn sessions_of(
+/// a run of the bids layout names a session's derivatives by, by stack.
+fn stack_sessions(
     store: &mut Store,
     stacks: &[i64],
-) -> Result<std::collections::BTreeSet<(i64, String)>, String> {
+) -> Result<BTreeMap<i64, (i64, String)>, String> {
     let err = |e: nils_registry::Error| e.to_string();
     let labels = nils_session::labels_by_study(store, &nils_registry::session::Scheme::default())
         .unwrap_or_default();
-    let mut out = std::collections::BTreeSet::new();
+    let mut out = BTreeMap::new();
     for chunk in stacks.chunks(500) {
         let list = chunk
             .iter()
@@ -6214,19 +6336,19 @@ fn sessions_of(
             .collect::<Vec<_>>()
             .join(", ");
         let sql = format!(
-            "SELECT se.subject_id, se.study_id FROM {} st JOIN {} se ON se.id = st.series_id \
+            "SELECT st.id, se.subject_id, se.study_id FROM {} st JOIN {} se ON se.id = st.series_id \
              WHERE st.id IN ({list})",
             store.qualified("stack"),
             store.qualified("series"),
         );
         for r in store.query(&sql, &[]).map_err(err)? {
             let (Some(subject), Some(study)) =
-                (r.opt_int(0).map_err(err)?, r.opt_int(1).map_err(err)?)
+                (r.opt_int(1).map_err(err)?, r.opt_int(2).map_err(err)?)
             else {
                 continue;
             };
             if let Some(l) = labels.get(&study) {
-                out.insert((subject, l.first.to_string()));
+                out.insert(r.int(0).map_err(err)?, (subject, l.first.to_string()));
             }
         }
     }

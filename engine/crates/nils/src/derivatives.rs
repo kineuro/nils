@@ -309,8 +309,9 @@ pub(crate) fn check(store: &mut Store, a: &Ask<'_>) -> Result<Checked, Refused> 
             return Err((
                 400,
                 format!(
-                    "derivative {old} is a {}; a {} does not supersede it",
-                    prior.kind, a.kind
+                    "derivative {old} is {}; {} does not supersede it",
+                    nils_registry::a_or_an(&prior.kind),
+                    nils_registry::a_or_an(a.kind)
                 ),
             ));
         }
@@ -332,8 +333,8 @@ pub(crate) fn check(store: &mut Store, a: &Ask<'_>) -> Result<Checked, Refused> 
             return Err((
                 400,
                 format!(
-                    "grid_stack names the scan a mask's grid is on; a {} has no grid",
-                    a.kind
+                    "grid_stack names the scan a mask's grid is on; {} has no grid",
+                    nils_registry::a_or_an(a.kind)
                 ),
             ));
         }
@@ -1095,8 +1096,9 @@ fn reader_of(
             return Err(Reply::error(
                 404,
                 format!(
-                    "derivative {} is a {}; only a mask has parts and layers",
-                    d.id, d.kind
+                    "derivative {} is {}; only a mask has parts and layers",
+                    d.id,
+                    nils_registry::a_or_an(&d.kind)
                 ),
             ));
         }
@@ -1703,9 +1705,9 @@ pub(crate) fn command(
                 return print(&doc(registry.store(), &d));
             }
             println!(
-                "derivative {}: a {} of {} {}, {} bytes, sha256 {}",
+                "derivative {}: {} of {} {}, {} bytes, sha256 {}",
                 d.id,
-                d.kind,
+                nils_registry::a_or_an(&d.kind),
                 d.scope,
                 d.stack_id
                     .or(d.series_id)
@@ -1778,7 +1780,7 @@ pub(crate) fn command(
             if json {
                 return print(&v);
             }
-            println!("derivative {id}: a {}", d.kind);
+            println!("derivative {id}: {}", nils_registry::a_or_an(&d.kind));
             println!(
                 "  belongs to       {} {}{}",
                 d.scope,
@@ -1870,8 +1872,8 @@ pub(crate) fn command(
                     .ok_or_else(|| crate::usage(format!("no derivative {id}")))?;
                 if d.kind != "mask" {
                     return Err(crate::usage(format!(
-                        "derivative {id} is a {}; only a mask has parts",
-                        d.kind
+                        "derivative {id} is {}; only a mask has parts",
+                        nils_registry::a_or_an(&d.kind)
                     )));
                 }
                 if !force && !d.part_sets.is_null() && d.grid_link.is_some() {
@@ -2052,7 +2054,10 @@ pub(crate) fn build_layers(
     if d.kind != "mask" {
         return Err((
             400,
-            format!("derivative {id} is a {}; only a mask has layers", d.kind),
+            format!(
+                "derivative {id} is {}; only a mask has layers",
+                nils_registry::a_or_an(&d.kind)
+            ),
         ));
     }
     if d.part_sets.is_null() || d.grid_link.is_none() {

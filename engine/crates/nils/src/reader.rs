@@ -573,7 +573,8 @@ pub(crate) fn why(
         match (&set_by["kind"], decided.as_ref()) {
             (Value::String(k), _) if k != "rule" => {
                 line.push_str(&format!(
-                    ", a {k}'s ({})",
+                    ", {}'s ({})",
+                    nils_registry::a_or_an(k),
                     set_by["actor"].as_str().unwrap_or("unnamed")
                 ));
             }

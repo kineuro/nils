@@ -458,12 +458,26 @@ impl Form {
     /// Every reason it gives, on the result, on a part or with a point,
     /// each once.
     pub fn every_reason(&self) -> BTreeSet<String> {
-        self.reasons
+        self.all_reasons().into_iter().collect()
+    }
+
+    /// Every reason it gives, in the order it gives them: on the result,
+    /// on its parts (each of a part's reasons where an outcome joined
+    /// several), with its points; each once.
+    pub fn all_reasons(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for r in self
+            .reasons
             .iter()
-            .cloned()
-            .chain(self.parts.iter().map(|(_, r)| r.clone()))
-            .chain(self.points.iter().map(|(r, _)| r.clone()))
-            .collect()
+            .map(String::as_str)
+            .chain(self.parts.iter().flat_map(|(_, r)| reasons_in(r)))
+            .chain(self.points.iter().map(|(r, _)| r.as_str()))
+        {
+            if !out.iter().any(|x| x == r) {
+                out.push(r.to_string());
+            }
+        }
+        out
     }
 
     /// The reasons on the whole result: its own and its points', in order,
@@ -495,6 +509,20 @@ impl Form {
     fn is_empty_judgement(&self) -> bool {
         self.reasons.is_empty() && self.parts.is_empty() && self.points.is_empty()
     }
+}
+
+/// The reasons one text gives: a reason id, or the reasons of a part
+/// several raters flagged, joined (see [`outcome`]). Reason ids hold no
+/// comma, so the join is read back whole.
+pub fn reasons_in(text: &str) -> impl Iterator<Item = &str> {
+    text.split(',').map(str::trim).filter(|r| !r.is_empty())
+}
+
+/// A part's reasons as the one text its outcome entry, its decision's why
+/// and its status hold: each once, in order, joined as a decision's why
+/// joins a result's reasons.
+fn joined(reasons: &[String]) -> String {
+    reasons.join(", ")
 }
 
 /// Read a check answer's form, held to its shape: each field a list of what
@@ -776,12 +804,34 @@ pub fn frames_of(
     Ok(out)
 }
 
+/// A union's flagged parts, each once by label with its reasons joined,
+/// from parts that may name a label more than once.
+fn parts_joined<'a>(parts: impl IntoIterator<Item = (i64, &'a str)>) -> Vec<(i64, String)> {
+    let mut by_label: BTreeMap<i64, Vec<String>> = BTreeMap::new();
+    for (label, reason) in parts {
+        let list = by_label.entry(label).or_default();
+        for r in reasons_in(reason) {
+            if !list.iter().any(|x| x == r) {
+                list.push(r.to_string());
+            }
+        }
+    }
+    by_label
+        .into_iter()
+        .map(|(l, rs)| (l, joined(&rs)))
+        .collect()
+}
+
 /// What a check's item came to from the answers behind it (section 6.3):
 /// the verdict they agree on, and the union of their reasons, flagged parts
 /// (a part either rater flagged goes to correction), points, parts seen and
-/// scans shown.
+/// scans shown. A part several raters flagged is in the union once, with
+/// its reasons as a set: each once, in the order the answers give them,
+/// joined with ", " as a decision's why joins a result's reasons (section
+/// 6.4), so the close writes one decision and one status for it.
 pub fn outcome(answers: &[Answer]) -> Value {
     let mut union = Form::default();
+    let mut flagged: Vec<(i64, String)> = Vec::new();
     for a in answers {
         let Ok(f) = form_of(a.form.as_ref()) else {
             continue;
@@ -791,11 +841,7 @@ pub fn outcome(answers: &[Answer]) -> Value {
                 union.reasons.push(r);
             }
         }
-        for p in f.parts {
-            if !union.parts.contains(&p) {
-                union.parts.push(p);
-            }
-        }
+        flagged.extend(f.parts);
         for p in f.points {
             if !union.points.contains(&p) {
                 union.points.push(p);
@@ -812,13 +858,39 @@ pub fn outcome(answers: &[Answer]) -> Value {
             }
         }
     }
-    union.parts.sort();
+    union.parts = parts_joined(flagged.iter().map(|(l, r)| (*l, r.as_str())));
     union.seen.sort_unstable();
     json!({
         "value": answers.first().and_then(|a| a.value.clone()),
         "form": union.as_json(),
         "answers": answers.iter().map(|a| a.id).collect::<Vec<_>>(),
     })
+}
+
+/// Read the form of an item's outcome, the union [`outcome`] made, held to
+/// an answer's shape. An outcome made before a part's reasons were joined
+/// names such a part once per reason; it is read as one part with its
+/// reasons joined.
+pub fn outcome_form(v: &Value) -> Result<Form, Error> {
+    let mut v = v.clone();
+    if let Some(parts) = v.get("parts").and_then(Value::as_array)
+        && parts
+            .iter()
+            .all(|p| p["label"].is_i64() && p["reason"].is_string())
+    {
+        let joined = parts_joined(
+            parts
+                .iter()
+                .filter_map(|p| Some((p["label"].as_i64()?, p["reason"].as_str()?))),
+        );
+        v["parts"] = json!(
+            joined
+                .iter()
+                .map(|(l, r)| json!({"label": l, "reason": r}))
+                .collect::<Vec<_>>()
+        );
+    }
+    form_of(Some(&v))
 }
 
 /// How far the raters' reasons agree (section 6.3): over the items every
@@ -945,8 +1017,9 @@ fn decide(
 }
 
 /// Write the decisions and statuses of a result's parts: each flagged part
-/// `flagged` with its reason, and, unless `only_flagged`, each part seen
-/// and not flagged `accepted`. Answers the decisions by label, or why not.
+/// `flagged` with its reasons, once however many raters flagged it, and
+/// each part seen and not flagged `accepted`. Answers the decisions by
+/// label, or why not.
 fn decide_parts(
     registry: &mut Registry,
     review_item: i64,
@@ -956,19 +1029,13 @@ fn decide_parts(
     seen: &[i64],
     by: By<'_>,
 ) -> Result<Result<BTreeMap<i64, i64>, String>, Error> {
-    let mut reasons: BTreeMap<i64, Vec<String>> = BTreeMap::new();
-    for (l, r) in flagged {
-        let list = reasons.entry(*l).or_default();
-        if !list.contains(r) {
-            list.push(r.clone());
-        }
-    }
-    let mut judged: Vec<(i64, &str, Option<String>)> = reasons
+    let flagged = parts_joined(flagged.iter().map(|(l, r)| (*l, r.as_str())));
+    let mut judged: Vec<(i64, &str, Option<String>)> = flagged
         .iter()
-        .map(|(l, rs)| (*l, "flagged", Some(rs[0].clone())))
+        .map(|(l, r)| (*l, "flagged", Some(r.clone()).filter(|r| !r.is_empty())))
         .collect();
     for l in seen {
-        if !reasons.contains_key(l) {
+        if !flagged.iter().any(|(f, _)| f == l) {
             judged.push((*l, "accepted", None));
         }
     }
@@ -981,17 +1048,15 @@ fn decide_parts(
         )));
     }
     let mut out = BTreeMap::new();
+    // the decision's why and the status's reason are the part's reasons,
+    // joined where several raters gave different ones
     for (label, verdict, reason) in judged {
-        let why = reasons
-            .get(&label)
-            .and_then(|rs| why_of(rs, None))
-            .or_else(|| reason.clone());
         let decision = match decide(
             registry,
             review_item,
             Some((set, label)),
             verdict,
-            why.as_deref(),
+            reason.as_deref(),
             by,
         )? {
             Ok(d) => d,
@@ -1111,7 +1176,17 @@ pub fn close_item(
     else {
         return Ok(Err("the item came to no verdict".into()));
     };
-    let form = form_of(Some(&it.outcome["form"])).unwrap_or_default();
+    // an outcome that cannot be read is refused, never written as an empty
+    // form: the item stays unresolved and the close names it
+    let form = match outcome_form(&it.outcome["form"]) {
+        Ok(f) => f,
+        Err(e) => {
+            return Ok(Err(format!(
+                "the outcome of item {} (result {d}) cannot be read, so nothing is written for it: {e}",
+                it.position + 1
+            )));
+        }
+    };
     let mut decisions: Vec<i64> = Vec::new();
     let mut parts_written: BTreeMap<i64, i64> = BTreeMap::new();
     let mut result_decision = None;
@@ -1158,24 +1233,21 @@ pub fn close_item(
             }
         }
         Some(label) => {
-            let reason = form
-                .reasons
-                .first()
-                .cloned()
-                .or_else(|| form.parts.first().map(|(_, r)| r.clone()));
             let held = derivative::labels_held(registry.store(), d, &set, &[label])?;
             if !held.contains(&label) {
                 return Ok(Err(format!(
                     "part {label} of set {set} is no part of result {d} now; its parts were made again"
                 )));
             }
-            let reasons: Vec<String> = form.every_reason().into_iter().collect();
+            // the part's reasons, every rater's, joined as at result grain:
+            // the decision's why and the status's reason alike
+            let reason = why_of(&form.all_reasons(), None);
             let own = match decide(
                 registry,
                 it.review_item_id,
                 Some((&set, label)),
                 &verdict,
-                why_of(&reasons, None).as_deref(),
+                reason.as_deref(),
                 by,
             )? {
                 Ok(id) => id,
@@ -1232,11 +1304,13 @@ pub fn close_item(
                     .all(|p| p.check_status.as_deref() == Some("accepted"));
                 let status = if every { "accepted" } else { "flagged" };
                 let mut reasons: Vec<String> = Vec::new();
-                for p in &ours {
-                    if let Some(r) = &p.check_reason
-                        && !reasons.contains(r)
-                    {
-                        reasons.push(r.clone());
+                for r in ours
+                    .iter()
+                    .filter_map(|p| p.check_reason.as_deref())
+                    .flat_map(reasons_in)
+                {
+                    if !reasons.iter().any(|x| x == r) {
+                        reasons.push(r.to_string());
                     }
                 }
                 let whole = match decide(
@@ -1321,7 +1395,8 @@ impl Checked {
 fn a_persons(kind: &str) -> Result<(), Error> {
     if kind != "person" {
         return Err(Error::Forbidden(format!(
-            "a check is a person's decision; this caller acts as a {kind}"
+            "a check is a person's decision; this caller acts as {}",
+            crate::a_or_an(kind)
         )));
     }
     Ok(())
@@ -1334,8 +1409,8 @@ fn checkable(store: &mut Store, id: i64) -> Result<derivative::Derivative, Error
         .ok_or_else(|| Error::NotFound(format!("no derivative {id}")))?;
     if d.kind != "mask" {
         return Err(invalid(format!(
-            "derivative {id} is a {}; a check is of a mask",
-            d.kind
+            "derivative {id} is {}; a check is of a mask",
+            crate::a_or_an(&d.kind)
         )));
     }
     if d.withdrawn_at.is_some() {
@@ -1779,6 +1854,85 @@ mod tests {
         assert_eq!(t["verdicts"]["flagged"], 2);
         assert_eq!(t["reasons"]["under"], 1);
         assert_eq!(t["reasons"]["missed"], 1);
+    }
+
+    /// The T33 pipe test: two raters flag the same part with different
+    /// reasons. The union names it once, its reasons joined; an outcome
+    /// made before that (the part once per reason) is read the same way,
+    /// and one that cannot be read is an error, never an empty form.
+    #[test]
+    fn a_part_several_raters_flag_is_one_part_with_its_reasons_joined() {
+        let a = answer(
+            1,
+            9,
+            "a",
+            "flagged",
+            json!({"parts": [{"label": 47, "reason": "under"}, {"label": 18, "reason": "over"}], "seen": [18, 47]}),
+        );
+        let b = answer(
+            2,
+            9,
+            "b",
+            "flagged",
+            json!({"parts": [{"label": 47, "reason": "not_lesion"}, {"label": 18, "reason": "over"}]}),
+        );
+        let c = answer(
+            3,
+            9,
+            "c",
+            "flagged",
+            json!({"parts": [{"label": 47, "reason": "under"}]}),
+        );
+        let o = outcome(&[a, b, c]);
+        assert_eq!(
+            o["form"]["parts"],
+            json!([{"label": 18, "reason": "over"}, {"label": 47, "reason": "under, not_lesion"}])
+        );
+        let f = outcome_form(&o["form"]).unwrap();
+        assert_eq!(
+            f.parts,
+            vec![
+                (18, "over".to_string()),
+                (47, "under, not_lesion".to_string())
+            ]
+        );
+        assert_eq!(f.all_reasons(), vec!["over", "under", "not_lesion"]);
+        assert_eq!(
+            f.every_reason().into_iter().collect::<Vec<_>>(),
+            vec!["not_lesion", "over", "under"]
+        );
+        let old = json!({"parts": [
+            {"label": 18, "reason": "over"},
+            {"label": 47, "reason": "not_lesion"},
+            {"label": 47, "reason": "under"},
+            {"label": 47, "reason": "not_lesion"},
+        ]});
+        assert!(
+            form_of(Some(&old))
+                .unwrap_err()
+                .to_string()
+                .contains("twice")
+        );
+        assert_eq!(
+            outcome_form(&old).unwrap().parts,
+            vec![
+                (18, "over".to_string()),
+                (47, "not_lesion, under".to_string())
+            ]
+        );
+        assert_eq!(outcome_form(&Value::Null).unwrap(), Form::default());
+        for bad in [
+            json!({"parts": [{"label": 47}]}),
+            json!({"parts": "47"}),
+            json!({"verdict": "flagged"}),
+            json!("flagged"),
+        ] {
+            assert!(outcome_form(&bad).is_err(), "{bad}");
+        }
+        assert_eq!(
+            reasons_in(" under, not_lesion ,").collect::<Vec<_>>(),
+            vec!["under", "not_lesion"]
+        );
     }
 
     #[test]

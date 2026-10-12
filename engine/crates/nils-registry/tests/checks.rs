@@ -983,6 +983,252 @@ fn a_check_closes_into_a_status_on_its_results_and_their_parts() {
     }
 }
 
+fn close_as_person(reg: &mut Registry, c: i64, minute: u32) -> campaign::Closed {
+    campaign::close(
+        reg,
+        &Close {
+            campaign: c,
+            who: "cleo@lab",
+            author_kind: "person",
+            model: None,
+            picks: None,
+        },
+        &at(minute),
+    )
+    .unwrap()
+}
+
+/// Replace an item's stored outcome form, as an older engine or a damaged
+/// row would leave it.
+fn set_outcome_form(reg: &mut Registry, it: &campaign::Item, form: Value) {
+    let mut o = it.outcome.clone();
+    o["form"] = form;
+    reg.store()
+        .update_by_id(
+            table("campaign_item"),
+            &[("outcome", Param::from(o.to_string()))],
+            "id",
+            it.id,
+        )
+        .unwrap();
+}
+
+/// The T33 pipe test of type 3: two raters flag the same part for
+/// different reasons. The close writes that part once, flagged, its
+/// decision's why and its status holding both reasons, beside every other
+/// part they flagged or saw; an outcome an older engine left with the part
+/// once per reason closes the same way; at part grain the part's status
+/// holds both reasons too. An item whose outcome cannot be read is refused
+/// and named, counted unresolved, and nothing is written for it.
+#[test]
+fn a_part_two_raters_flag_for_different_reasons_is_written_once_with_both() {
+    for mut l in labs() {
+        let name = l.name;
+        let reg = &mut l.registry;
+        let (s0, s1, _) = scans(reg);
+        let (d0, d1, d2, d3) = (
+            mask(reg, s0, 1),
+            mask(reg, s0, 2),
+            mask(reg, s0, 3),
+            mask(reg, s0, 4),
+        );
+        let q = question("result");
+        let c = campaign::create(
+            reg,
+            &new(
+                "t33",
+                &q,
+                vec![
+                    item(d0, None, s0, s1),
+                    item(d1, None, s0, s1),
+                    item(d3, None, s0, s1),
+                ],
+                2,
+                vec![],
+            ),
+        )
+        .unwrap();
+        let answers = [
+            // d0: part 1 for two reasons, part 3 for the same one
+            json!({"parts": [{"label": 1, "reason": "under"}, {"label": 3, "reason": "over"}], "seen": [1, 2, 3]}),
+            json!({"parts": [{"label": 1, "reason": "not_lesion"}, {"label": 3, "reason": "over"}]}),
+            // d1: its outcome is spoiled below
+            json!({"parts": [{"label": 2, "reason": "under"}]}),
+            json!({"parts": [{"label": 2, "reason": "under"}]}),
+            // d3: its outcome is put back in the shape an older engine left
+            json!({"parts": [{"label": 2, "reason": "under"}]}),
+            json!({"parts": [{"label": 2, "reason": "not_lesion"}]}),
+        ];
+        for (i, form) in answers.iter().enumerate() {
+            let who = if i % 2 == 0 { "anna@lab" } else { "bo@lab" };
+            let a = read(
+                reg,
+                c.id,
+                who,
+                Role::Rater,
+                "flagged",
+                form.clone(),
+                None,
+                2 * i as u32,
+            )
+            .unwrap();
+            if i % 2 == 1 {
+                assert_eq!(a.state, "agreed", "{name}: {i}");
+            }
+        }
+        let items = campaign::items(reg.store(), c.id).unwrap();
+        let of = |d: i64| items.iter().find(|i| i.derivative_id == Some(d)).unwrap();
+        assert_eq!(
+            of(d0).outcome["form"]["parts"],
+            json!([{"label": 1, "reason": "under, not_lesion"}, {"label": 3, "reason": "over"}]),
+            "{name}"
+        );
+        set_outcome_form(reg, of(d1), json!({"parts": [{"label": 2}]}));
+        set_outcome_form(
+            reg,
+            of(d3),
+            json!({"parts": [{"label": 2, "reason": "under"}, {"label": 2, "reason": "not_lesion"}]}),
+        );
+
+        let closed = close_as_person(reg, c.id, 20);
+        assert_eq!(
+            (closed.resolved, closed.unresolved),
+            (2, 1),
+            "{name}: {closed:?}"
+        );
+        assert_eq!(closed.refused.len(), 1, "{name}: {closed:?}");
+        assert_eq!(closed.refused[0].0, of(d1).id, "{name}");
+        let why = &closed.refused[0].1;
+        assert!(
+            why.contains("cannot be read") && why.contains(&format!("result {d1}")),
+            "{name}: {why}"
+        );
+        assert_eq!(
+            closed.as_json()["refused"][0]["item"],
+            json!(of(d1).id),
+            "{name}"
+        );
+
+        let st = reg.store();
+        let part = |n: i64, l: i64| format!("{n}:lesions:{l}");
+        assert_eq!(
+            decisions(st, "derivative_part", &part(d0, 1)),
+            vec![("flagged".into(), Some("under, not_lesion".into()), false)],
+            "{name}"
+        );
+        assert_eq!(
+            decisions(st, "derivative_part", &part(d0, 3)),
+            vec![("flagged".into(), Some("over".into()), false)],
+            "{name}"
+        );
+        assert_eq!(
+            decisions(st, "derivative_part", &part(d0, 2)),
+            vec![("accepted".into(), None, false)],
+            "{name}"
+        );
+        assert_eq!(
+            part_status(st, d0),
+            vec![
+                (1, Some("flagged".into()), Some("under, not_lesion".into())),
+                (2, Some("accepted".into()), None),
+                (3, Some("flagged".into()), Some("over".into())),
+            ],
+            "{name}"
+        );
+        assert_eq!(
+            derivative::get(st, d0)
+                .unwrap()
+                .unwrap()
+                .check_status
+                .as_deref(),
+            Some("flagged"),
+            "{name}"
+        );
+        assert_eq!(
+            part_status(st, d3)[1],
+            (2, Some("flagged".into()), Some("under, not_lesion".into())),
+            "{name}"
+        );
+        let now = campaign::items(st, c.id).unwrap();
+        let zero = now.iter().find(|i| i.derivative_id == Some(d0)).unwrap();
+        assert_eq!(zero.state, "resolved", "{name}");
+        assert_eq!(
+            zero.outcome["decisions"]["parts"]
+                .as_object()
+                .map(|m| m.len()),
+            Some(3),
+            "{name}: {}",
+            zero.outcome
+        );
+        // the refused item: unresolved, nothing written for it
+        let one = now.iter().find(|i| i.derivative_id == Some(d1)).unwrap();
+        assert_eq!(one.state, "agreed", "{name}");
+        assert!(
+            decisions(st, "derivative", &d1.to_string()).is_empty(),
+            "{name}"
+        );
+        assert!(
+            decisions(st, "derivative_part", &part(d1, 2)).is_empty(),
+            "{name}"
+        );
+        assert_eq!(
+            derivative::get(st, d1).unwrap().unwrap().check_status,
+            None,
+            "{name}"
+        );
+        assert!(
+            part_status(st, d1).iter().all(|(_, s, _)| s.is_none()),
+            "{name}"
+        );
+
+        // part grain: two raters flag one lesion for different reasons
+        let pq = question("part");
+        let c = campaign::create(
+            reg,
+            &new("t33-p", &pq, vec![item(d2, Some(1), s0, s1)], 2, vec![]),
+        )
+        .unwrap();
+        read(
+            reg,
+            c.id,
+            "anna@lab",
+            Role::Rater,
+            "flagged",
+            json!({"reasons": ["under"]}),
+            None,
+            30,
+        )
+        .unwrap();
+        read(
+            reg,
+            c.id,
+            "bo@lab",
+            Role::Rater,
+            "flagged",
+            json!({"reasons": ["over"]}),
+            None,
+            32,
+        )
+        .unwrap();
+        let closed = close_as_person(reg, c.id, 40);
+        assert_eq!(closed.resolved, 1, "{name}: {closed:?}");
+        let st = reg.store();
+        assert_eq!(
+            part_status(st, d2)[0],
+            (1, Some("flagged".into()), Some("under, over".into())),
+            "{name}"
+        );
+        assert_eq!(
+            decisions(st, "derivative_part", &part(d2, 1)),
+            vec![("flagged".into(), Some("under, over".into()), false)],
+            "{name}"
+        );
+        let two = derivative::get(st, d2).unwrap().unwrap();
+        assert_eq!(two.check_status.as_deref(), Some("flagged"), "{name}");
+        assert_eq!(two.check_reasons, json!(["under", "over"]), "{name}");
+    }
+}
+
 /// Close a one-rater check over `results`, each answered as given, by a
 /// person. Answers the campaign.
 fn closed_check(

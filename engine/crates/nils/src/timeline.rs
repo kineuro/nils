@@ -895,7 +895,10 @@ fn decision_events(r: &nils_registry::store::Row) -> Result<Vec<Event>, String> 
             at,
             "staged",
             actor.as_deref(),
-            format!("decision {id} staged by a {kind}: {what}"),
+            format!(
+                "decision {id} staged by {}: {what}",
+                nils_registry::a_or_an(&kind)
+            ),
             produced("decision", id),
             "decision",
         ));
@@ -914,7 +917,7 @@ fn decision_events(r: &nils_registry::store::Row) -> Result<Vec<Event>, String> 
             at,
             "decision",
             actor.as_deref(),
-            format!("decision {id} by a {kind}: {what}"),
+            format!("decision {id} by {}: {what}", nils_registry::a_or_an(&kind)),
             produced("decision", id),
             "decision",
         ));

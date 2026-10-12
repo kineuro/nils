@@ -26,7 +26,10 @@
 //! modifier, with it in its `acq-` (a `flair` pick as
 //! `acq-Ax+2D+FLAIR+IRTSE_T2w`, record 55 C4; a `t1w` pick the release
 //! names `T2w` is no T1w), and the run skips it; a stack when the registry
-//! holds no file of it, or no derivative a typed input needs.
+//! holds no file of it. A unit of either layout is missing an input when
+//! it has no derivative a typed input needs that the input's check takes
+//! (a mask a check rejected is none, unless the input takes any), and the
+//! run skips that one too.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -143,30 +146,16 @@ fn stack_units(
             subject.insert(r.int(0).map_err(err)?, r.int(1).map_err(err)?);
         }
     }
-    // the derivatives each typed input takes, stack by stack
-    let mut derived: Vec<(String, String, BTreeSet<i64>)> = Vec::new();
-    for t in d
-        .inputs
-        .iter()
-        .filter(|t| t.ty.starts_with("derivative:") && !t.optional)
-    {
-        let kind = t.ty.trim_start_matches("derivative:");
-        // where the runner looks: the lane's output place, then its
-        // scratch place (record 49 R7)
-        let mut have: BTreeSet<i64> = BTreeSet::new();
-        for place in place_ids {
-            have.extend(
-                nils_registry::derivative::of_stacks(store, kind, stacks, *place)
-                    .map_err(err)?
-                    .into_iter()
-                    .filter_map(|r| r.stack_id),
-            );
-        }
-        derived.push((t.id.clone(), kind.to_string(), have));
-    }
+    // the derivatives each typed input takes, stack by stack, as the run's
+    // inputs take them: of the stack, its session or its subject, and left
+    // out where the input's check leaves them out (the T33 pipe test)
+    let one: Vec<[i64; 1]> = stacks.iter().map(|&s| [s]).collect();
+    let units: Vec<&[i64]> = one.iter().map(|s| s.as_slice()).collect();
+    let lacking = crate::pipelines::derivatives_missing(store, d, &units, place_ids)?;
     Ok(stacks
         .iter()
-        .map(|&s| {
+        .zip(lacking)
+        .map(|(&s, lacks)| {
             let mut u = Unit {
                 stack_id: Some(s),
                 subject_id: subject.get(&s).copied(),
@@ -180,12 +169,7 @@ fn stack_units(
                 u.missing
                     .push("the registry holds no file of it to read".into());
             }
-            for (input, kind, have) in &derived {
-                if !have.contains(&s) {
-                    u.missing
-                        .push(format!("no {kind} derivative of it for the input {input}"));
-                }
-            }
+            u.missing.extend(lacks);
             u
         })
         .collect())
@@ -327,6 +311,7 @@ fn bids_units(
     d: &Descriptor,
     stacks: &[i64],
     pack: Option<&nils_pack::Pack>,
+    place_ids: &[i64],
 ) -> Result<(Vec<Unit>, LeftOut), String> {
     // a run's input is a selection, released under the main scans as the
     // release of one reads them: each subject's own dataset's once read,
@@ -435,6 +420,13 @@ fn bids_units(
             }
         }
         out.push(u);
+    }
+    // the derivatives each unit's inputs need, as the run judges them: a
+    // unit whose only one was rejected by its check is not ready either
+    let units: Vec<&[i64]> = out.iter().map(|u| u.stacks.as_slice()).collect();
+    let lacking = crate::pipelines::derivatives_missing(registry.store(), d, &units, place_ids)?;
+    for (u, lacks) in out.iter_mut().zip(lacking) {
+        u.missing.extend(lacks);
     }
     left.sort();
     Ok((out, left))
@@ -561,7 +553,7 @@ pub(crate) fn check(registry: &mut Registry, asked: &Asked<'_>) -> Result<Value,
             stack_units(registry.store(), &d, &stacks, &place_ids)?,
             LeftOut::new(),
         ),
-        Layout::Bids => bids_units(registry, &d, &stacks, asked.pack)?,
+        Layout::Bids => bids_units(registry, &d, &stacks, asked.pack, &place_ids)?,
     };
     if units.is_empty() {
         blockers.push(match d.layout {

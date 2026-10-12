@@ -4296,6 +4296,230 @@ fn is_flair_image(name: &str) -> bool {
     })
 }
 
+/// A reader of masks an earlier run made, as segcsvd reads one: each
+/// session writes the names of the masks its input holds. Its input takes
+/// what a check left standing, as every derivative input does unless it
+/// says otherwise: a mask a check rejected is none.
+const MASK_READER: &str = r#"name: mask-reader
+schema-version: "0.5"
+tool-version: "1"
+container-image:
+  type: docker
+  image: "example.org/mask-reader@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+command-line: |
+  python3 -c '
+  import glob, os, sys
+  src, out, masks = sys.argv[1], sys.argv[2], sys.argv[3]
+  seen = sorted(os.path.basename(f) for f in glob.glob(masks + "/**/*", recursive=True) if os.path.isfile(f))
+  for s in sorted(glob.glob(src + "/sub-*/ses-*")):
+      d = os.path.join(out, os.path.relpath(s, src), "anat"); os.makedirs(d, exist_ok=True)
+      open(os.path.join(d, "seen.txt"), "w").write("\n".join(seen) + "\n")
+  ' [InputDataset] [OutputLocation] [Inputs]/mask
+x-nils:
+  analysis-level: session
+  input: {layout: bids}
+  units: apart
+  inputs:
+    - {id: mask, type: "derivative:mask"}
+  outputs:
+    - id: seen
+      kind: output
+      path-template: "sub-{subject}/ses-{session}/anat/seen.txt"
+"#;
+
+/// Record 55 H3, section 6.5, found by the T33 pipe test: a session whose
+/// only mask a check rejected is not ready, and the pre-flight says why;
+/// the run's inputs leave that mask out, and the run skips the session as
+/// the pre-flight said and runs the other. Every mask rejected, the run is
+/// refused before anything runs.
+#[test]
+fn a_session_whose_only_mask_was_rejected_is_neither_ready_nor_run() {
+    if !have("python3") || !have("dcm2niix") {
+        eprintln!(
+            "python3 or dcm2niix is not installed; the bids layout needs a converter, so this test is skipped"
+        );
+        return;
+    }
+    let lab = Lab::new("pipelines-checked-mask");
+    lab.add_descriptor("mask-reader", MASK_READER);
+    let preflight = || {
+        lab.json(&[
+            "run",
+            "mask-reader",
+            "--select",
+            "selection:every@1",
+            "--preflight",
+            "--json",
+        ])
+    };
+    // no mask yet: neither session has its input
+    let pre = preflight();
+    assert_eq!(pre["units"]["missing"], 2, "{pre}");
+    let sessions: Vec<(i64, String)> = pre["missing"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| {
+            assert_eq!(
+                m["why"],
+                json!(["no mask derivative of it for the input mask"]),
+                "{pre}"
+            );
+            (
+                m["subject_id"].as_i64().unwrap(),
+                m["session_day"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    // the first session's mask is the session's, as a run of the bids
+    // layout registers one (SynthSeg's label map); the second's is of its
+    // T1w
+    let t1 = lab
+        .store()
+        .query(
+            &format!(
+                "SELECT ps.stack_id FROM pick_stack ps JOIN pick p ON p.id = ps.pick_id \
+                 JOIN stack st ON st.id = ps.stack_id JOIN series se ON se.id = st.series_id \
+                 WHERE p.role = 't1w' AND p.withdrawn_at IS NULL AND se.subject_id = {}",
+                sessions[1].0
+            ),
+            &[],
+        )
+        .unwrap()[0]
+        .int(0)
+        .unwrap()
+        .to_string();
+    let add = |i: usize, of: &[&str]| -> i64 {
+        let file = lab.work.path().join(format!("mask-{i}.nii.gz"));
+        std::fs::write(&file, format!("the mask of session {i}")).unwrap();
+        let mut args = vec![
+            "derivative",
+            "add",
+            file.to_str().unwrap(),
+            "--kind",
+            "mask",
+        ];
+        args.extend(of);
+        args.push("--json");
+        let v = lab.json(&args);
+        std::fs::remove_file(&file).unwrap();
+        v["id"].as_i64().unwrap_or_else(|| panic!("{v}"))
+    };
+    let subject = sessions[0].0.to_string();
+    let masks = [
+        add(0, &["--subject", &subject, "--day", &sessions[0].1]),
+        add(1, &["--stack", &t1]),
+    ];
+    let pre = preflight();
+    assert_eq!(pre["units"]["missing"], 0, "both masks are inputs: {pre}");
+    let reject = |ids: &[i64]| {
+        let list = ids
+            .iter()
+            .map(i64::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        lab.store()
+            .execute(
+                &format!("UPDATE derivative SET check_status = 'rejected' WHERE id IN ({list})"),
+                &[],
+            )
+            .unwrap();
+    };
+    // a check rejects the first session's mask
+    reject(&masks[..1]);
+    let pre = preflight();
+    assert_eq!(pre["units"]["total"], 2, "{pre}");
+    assert_eq!(pre["units"]["missing"], 1, "{pre}");
+    assert_eq!(pre["missing"][0]["subject_id"], sessions[0].0, "{pre}");
+    let why = pre["missing"][0]["why"].to_string();
+    assert!(why.contains("rejected by a check"), "{pre}");
+    assert_eq!(pre["ready"], true, "the other session runs: {pre}");
+    let text = lab.ok(
+        &[
+            "run",
+            "mask-reader",
+            "--select",
+            "selection:every@1",
+            "--preflight",
+        ],
+        None,
+    );
+    assert!(text.contains("2 (1 ready, 1 missing an input)"), "{text}");
+    assert!(lab.podman_runs().is_empty(), "nothing ran");
+
+    // the run: the rejected mask is no input, and its session is not run
+    let v = lab.json(&[
+        "run",
+        "mask-reader",
+        "--select",
+        "selection:every@1",
+        "--json",
+    ]);
+    assert_eq!(v["summary"]["units"]["total"], 2, "{v}");
+    assert_eq!(
+        v["summary"]["units"]["skipped"], pre["units"]["missing"],
+        "{v}"
+    );
+    assert_eq!(
+        v["summary"]["units"]["succeeded"], pre["units"]["ready"],
+        "{v}"
+    );
+    assert_eq!(v["summary"]["units"]["failed"], 0, "{v}");
+    assert_eq!(
+        lab.podman_runs().len(),
+        1,
+        "one container, the other session's"
+    );
+    let run = v["id"].as_i64().unwrap();
+    let manifest: Value = serde_json::from_str(
+        &std::fs::read_to_string(
+            lab.work
+                .path()
+                .join(format!("runs/{run}/inputs/manifest.json")),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let taken: Vec<i64> = manifest["derivatives"]["mask"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["id"].as_i64().unwrap())
+        .collect();
+    assert_eq!(taken, masks[1..], "{manifest}");
+    let skipped: Vec<&Value> = v["units_run"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|u| u["status"] == "skipped")
+        .collect();
+    assert_eq!(skipped.len(), 1, "{v}");
+    assert_eq!(skipped[0]["attempts"], 0, "no container: {v}");
+    let outcome = lab
+        .store()
+        .query("SELECT outcome FROM pipeline_unit WHERE attempts = 0", &[])
+        .unwrap()[0]
+        .text(0)
+        .unwrap()
+        .to_string();
+    assert!(
+        outcome.contains("missing an input") && outcome.contains("rejected by a check"),
+        "{outcome}"
+    );
+
+    // every mask rejected: refused before anything runs
+    reject(&masks);
+    let pre = preflight();
+    assert_eq!(pre["units"]["missing"], 2, "{pre}");
+    let (good, _, err) = lab.run(
+        &["run", "mask-reader", "--select", "selection:every@1"],
+        None,
+    );
+    assert!(!good, "a run with no mask it takes is refused");
+    assert!(err.contains("none is registered"), "{err}");
+    assert_eq!(lab.podman_runs().len(), 1, "no container more");
+}
+
 /// Record 49 A3's proof, the second half: the pre-flight of a selection
 /// whose one session lacks its FLAIR counts the units the run then has and
 /// names the one it then fails, at the command line and at the door, and
@@ -4613,7 +4837,18 @@ exec '{}' "$@""#,
         };
         assert_eq!(pre["roles"], roles, "{pre}");
         assert_eq!(pre["units"]["total"], 2, "{name}: {pre}");
-        assert_eq!(pre["units"]["missing"], 0, "{name}: {pre}");
+        // segcsvd's label maps are SynthSeg's, which has not run yet: each
+        // session lacks that input, as the run would find (the T33 pipe
+        // test), and has its roles
+        let lacking = if name == "segcsvd" { 2 } else { 0 };
+        assert_eq!(pre["units"]["missing"], lacking, "{name}: {pre}");
+        for m in pre["missing"].as_array().unwrap() {
+            assert_eq!(
+                m["why"],
+                json!(["no mask derivative of it for the input synthseg"]),
+                "{pre}"
+            );
+        }
     }
 
     let run = |name: &str| -> Value {
@@ -4643,6 +4878,15 @@ exec '{}' "$@""#,
     };
 
     run("synthseg");
+    let pre = lab.json(&[
+        "run",
+        "segcsvd",
+        "--select",
+        "selection:every@1",
+        "--preflight",
+        "--json",
+    ]);
+    assert_eq!(pre["units"]["missing"], 0, "SynthSeg's label maps: {pre}");
     let v = run("segcsvd");
     let flairs = handed("segment_wmh");
     assert_eq!(flairs.len(), 2, "a FLAIR in each session: {flairs:?}");

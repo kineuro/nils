@@ -540,8 +540,8 @@ fn apply_as(
         }
         (_, Some(_)) => {
             return Err(refused(format!(
-                "a {} is not a model; only a model's decision names a model",
-                a.author.kind
+                "{} is not a model; only a model's decision names a model",
+                crate::a_or_an(a.author.kind)
             )));
         }
         _ => None,
@@ -730,8 +730,10 @@ fn apply_as(
         let held_by = r.opt_text(1)?.unwrap_or("").to_string();
         if rank(&held_kind) > rank(a.author.kind) {
             return Err(refused(format!(
-                "{} at {scope} {reference} was decided by a {held_kind} ({held_by}); a {} does not override that (C15). Withdraw it first if it was wrong.",
-                axis, a.author.kind
+                "{} at {scope} {reference} was decided by {} ({held_by}); {} does not override that (C15). Withdraw it first if it was wrong.",
+                axis,
+                crate::a_or_an(&held_kind),
+                crate::a_or_an(a.author.kind)
             )));
         }
     }

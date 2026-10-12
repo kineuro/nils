@@ -5323,9 +5323,14 @@ fn a_dataset_is_pseudonymised_at_the_keyboard_and_brought_in_as_a_chain() {
     assert!(ran.iter().all(|j| j["state"] == "done"), "{listed}");
     assert_eq!(ran[0]["then"].as_array().unwrap().len(), 3, "{listed}");
     let ended = &ran[1]["result"]["chain_ended"];
+    // the sort names the packs the keyboard's nils found (the T33 pipe
+    // test): the worker that runs it knows none of its own
     assert_eq!(
         ended["skipped"],
-        serde_json::json!([["fingerprint"], ["classify", "--pack", "mri"]]),
+        serde_json::json!([
+            ["fingerprint"],
+            ["classify", "--pack", "mri", "--pack-dir", packs_dir()]
+        ]),
         "{listed}"
     );
     assert!(

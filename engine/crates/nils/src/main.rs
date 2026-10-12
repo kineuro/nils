@@ -3153,8 +3153,8 @@ fn place_command(home: &Home, command: PlaceCommand) -> Result<(), Exit> {
             let asked = dataset.asked()?;
             if dataset::fields_given(&asked) && role != Role::Source {
                 return Err(usage(format!(
-                    "the dataset flags belong to a source place, not a {} place",
-                    role.name()
+                    "the dataset flags belong to a source place, not {} place",
+                    nils_registry::a_or_an(role.name())
                 )));
             }
             let mut found = Vec::new();
@@ -3484,9 +3484,9 @@ fn place_command(home: &Home, command: PlaceCommand) -> Result<(), Exit> {
             let dataset_given = dataset::fields_given(&asked);
             if dataset_given && current.role != Role::Source {
                 return Err(usage(format!(
-                    "the dataset flags belong to a source place; {} is a {} place",
+                    "the dataset flags belong to a source place; {} is {} place",
                     current.name,
-                    current.role.name()
+                    nils_registry::a_or_an(current.role.name())
                 )));
             }
             let mut found = Vec::new();
@@ -5195,16 +5195,19 @@ fn bring_in(home: &Home, args: BringInArgs) -> Result<(), Exit> {
     let unread = chain::unread_in_tree(registry.store(), &dataset);
     // record 55 H2: a pick run ends the thread where the dataset feeds a
     // cohort and the pack declares picks
-    let picks = pack_dir(home, None)
-        .ok()
-        .is_some_and(|d| chain::pack_has_picks(Some(&d), args.pack.as_deref().unwrap_or("mri")));
+    let packs = pack_dir(home, None).ok();
+    let picks = packs
+        .as_deref()
+        .is_some_and(|d| chain::pack_has_picks(Some(d), args.pack.as_deref().unwrap_or("mri")));
     let (first, then) = chain::bring_in(
         &dataset,
         args.name.as_deref(),
         args.pack.as_deref(),
+        packs.as_deref(),
         unread.is_some(),
         picks,
     );
+    let then = chain::picks_named(then, packs.as_deref());
     let name = first
         .iter()
         .position(|w| w == "--name")
@@ -7144,7 +7147,8 @@ pub(crate) fn review_accept_as(
     let pick = if kind == nils_registry::review::PICK_BORDER_KIND {
         if author_kind != "person" {
             return Err(AcceptError::Forbidden(format!(
-                "keeping the run's pick on review item {id} writes a person's pick, and a {author_kind} acting for {who} does not write one"
+                "keeping the run's pick on review item {id} writes a person's pick, and {} acting for {who} does not write one",
+                nils_registry::a_or_an(author_kind)
             )));
         }
         Some(

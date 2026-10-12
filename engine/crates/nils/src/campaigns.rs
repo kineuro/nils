@@ -831,7 +831,7 @@ pub(crate) fn route(
                         doc
                     }
                     None => json!({"assignment": null, "item": null, "why": format!(
-                        "nothing in campaign {} is left for {principal} as a {}", c.name, role.name()
+                        "nothing in campaign {} is left for {principal} as {}", c.name, nils_registry::a_or_an(role.name())
                     )}),
                 }))
             }
@@ -2356,7 +2356,10 @@ fn person_only(doors: &Doors, caller: &Caller, act: &str) -> Result<(), Reply> {
     if kind != "person" {
         return Err(Reply::error(
             403,
-            format!("{act} is a person's act, and this caller acts as a {kind}"),
+            format!(
+                "{act} is a person's act, and this caller acts as {}",
+                nils_registry::a_or_an(kind)
+            ),
         ));
     }
     Ok(())
