@@ -653,6 +653,7 @@ pub(crate) fn check(registry: &mut Registry, asked: &Asked<'_>) -> Result<Value,
             descriptor: &d,
             dcm2niix: asked.dcm2niix,
             units: units.len().max(1),
+            detected: Some(&detected),
         },
     );
     for c in requirements.iter().filter(|c| !c.ok) {

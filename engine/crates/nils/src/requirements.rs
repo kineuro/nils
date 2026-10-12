@@ -95,6 +95,9 @@ pub(crate) struct Asked<'a> {
     /// The units the run would have; where it is not known, one, so the
     /// disk is held only to what one unit takes.
     pub(crate) units: usize,
+    /// The runtime as the caller found it already, so it is not looked for
+    /// twice; none to take the engine's own look.
+    pub(crate) detected: Option<&'a runtime::Detected>,
 }
 
 fn found_by_words(by: &str) -> &'static str {
@@ -194,8 +197,12 @@ fn subids_here() -> Option<bool> {
 }
 
 /// The runtime, and whether it can take the image or holds it already.
-fn runtime_and_image(registry: &mut Registry, p: &Pipeline) -> Vec<Check> {
-    let detected = crate::pipelines::detect_cached(registry);
+fn runtime_and_image(
+    registry: &mut Registry,
+    p: &Pipeline,
+    detected: &runtime::Detected,
+) -> Vec<Check> {
+    let detected = detected.clone();
     let Some(rt) = detected.runtime else {
         return vec![Check::failed(
             "runtime",
@@ -259,7 +266,12 @@ fn runtime_and_image(registry: &mut Registry, p: &Pipeline) -> Vec<Check> {
 
 /// The memory a unit asks, against the machine's and the lane's, and a GPU
 /// where the pipeline needs one.
-fn memory_and_card(registry: &mut Registry, p: &Pipeline, d: &Descriptor) -> Vec<Check> {
+fn memory_and_card(
+    registry: &mut Registry,
+    p: &Pipeline,
+    d: &Descriptor,
+    detected: &runtime::Detected,
+) -> Vec<Check> {
     let mut out = Vec::new();
     let ask = nils_pipeline::lane::Ask {
         cores: d.needs.cores,
@@ -309,9 +321,7 @@ fn memory_and_card(registry: &mut Registry, p: &Pipeline, d: &Descriptor) -> Vec
         )
     });
     if d.gpu == Gpu::Required {
-        let card = crate::pipelines::detect_cached(registry)
-            .runtime
-            .and_then(|r| r.gpu);
+        let card = detected.runtime.as_ref().and_then(|r| r.gpu.clone());
         out.push(match (card, lane.card) {
             (None, _) => Check::failed(
                 "gpu",
@@ -399,8 +409,17 @@ pub(crate) fn checks(registry: &mut Registry, home: &Path, a: &Asked<'_>) -> Vec
     if a.descriptor.layout == Layout::Bids {
         out.push(converter(home, a.dcm2niix));
     }
-    out.extend(runtime_and_image(registry, a.pipeline));
-    out.extend(memory_and_card(registry, a.pipeline, a.descriptor));
+    let detected = match a.detected {
+        Some(d) => d.clone(),
+        None => crate::pipelines::detect_cached(registry),
+    };
+    out.extend(runtime_and_image(registry, a.pipeline, &detected));
+    out.extend(memory_and_card(
+        registry,
+        a.pipeline,
+        a.descriptor,
+        &detected,
+    ));
     out.extend(disk(registry, a.descriptor, a.units));
     out
 }
@@ -462,6 +481,7 @@ pub(crate) fn at_the_door(
             descriptor: &d,
             dcm2niix: Path::new(crate::tools::DCM2NIIX),
             units,
+            detected: None,
         },
     );
     let Some(failed) = refusing(&all) else {

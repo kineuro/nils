@@ -3247,6 +3247,7 @@ pub(crate) fn run_command(home: &Home, args: RunArgs) -> Result<(), Exit> {
             descriptor: &d,
             dcm2niix: &args.dcm2niix,
             units: 1,
+            detected: Some(&detected),
         },
     );
     if let Some(failed) = crate::requirements::refusing(&checked) {
