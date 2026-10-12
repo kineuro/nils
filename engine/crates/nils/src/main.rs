@@ -9527,7 +9527,14 @@ fn jobs_command(home: &Home, command: JobsCommand) -> Result<(), Exit> {
         JobsCommand::List { all, limit, json } => {
             let jobs = job::list(store, all, limit).map_err(err)?;
             if json {
-                let doc: Vec<serde_json::Value> = jobs.iter().map(job::Job::as_json).collect();
+                let mut doc: Vec<serde_json::Value> = jobs.iter().map(job::Job::as_json).collect();
+                // record 48, D1 of the move: no unit's QC of a sealed stack,
+                // unless --unsealed-access says why
+                if !sealed::keyboard_reads() {
+                    for d in &mut doc {
+                        pipelines::job_unsealed(store, d).map_err(fail)?;
+                    }
+                }
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&doc).map_err(|e| fail(e.to_string()))?
@@ -9570,9 +9577,13 @@ fn jobs_command(home: &Home, command: JobsCommand) -> Result<(), Exit> {
                 return Err(usage(format!("no job {id}")));
             };
             if json {
+                let mut doc = j.as_json();
+                if !sealed::keyboard_reads() {
+                    pipelines::job_unsealed(store, &mut doc).map_err(fail)?;
+                }
                 println!(
                     "{}",
-                    serde_json::to_string_pretty(&j.as_json()).map_err(|e| fail(e.to_string()))?
+                    serde_json::to_string_pretty(&doc).map_err(|e| fail(e.to_string()))?
                 );
                 return Ok(());
             }

@@ -8883,3 +8883,331 @@ fn a_session_is_withheld_by_the_stacks_its_unit_was_given() {
         },
     );
 }
+
+/// The `sealed.read` rows of the audit that name a run: each one's
+/// principal and how many units' breaches it read.
+fn sealed_run_reads(lab: &Lab, run: i64) -> Vec<(String, i64)> {
+    lab.store()
+        .query(
+            "SELECT principal, scope FROM audit WHERE action = 'sealed.read' ORDER BY id",
+            &[],
+        )
+        .unwrap()
+        .iter()
+        .filter_map(|r| {
+            let scope: Value = serde_json::from_str(r.text(1).unwrap()).unwrap();
+            (scope["run"].as_i64() == Some(run)).then(|| {
+                (
+                    r.text(0).unwrap().to_string(),
+                    scope["breaches_of_units"].as_i64().unwrap_or(-1),
+                )
+            })
+        })
+        .collect()
+}
+
+/// Record 48, D1 of the move: sealed means sealed in a run's QC summary.
+/// Every unit of a run breaches a check, and one unit's stack is of a
+/// sample sealed after the run. At detail quasi the run doors, the jobs
+/// doors and the keyboard leave that unit's breaches out, its name and its
+/// value with them, and say how many units went, never which; below quasi
+/// the counts by check leave it out as well, and the count of what went is
+/// held as any count of scans is; a holder of sealed:see reads every
+/// breach, each read audited as sealed.read, and so does the keyboard with
+/// --unsealed-access.
+#[test]
+fn a_run_s_qc_summary_withholds_the_breaches_of_a_sealed_stack() {
+    if !have("python3") {
+        eprintln!(
+            "python3 is not installed; the stand-in podman needs it, so this test is skipped"
+        );
+        return;
+    }
+    on_both("pipelines-sealed-qc", "nils_pipelines_sealed_qc", |lab| {
+        lab.add_descriptor("volumes", VOLUMES);
+        let stacks: Vec<i64> = lab
+            .store()
+            .query("SELECT id FROM stack ORDER BY id", &[])
+            .unwrap()
+            .iter()
+            .map(|r| r.int(0).unwrap())
+            .collect();
+        assert_eq!(stacks.len(), 4);
+        let server = Server::start(lab);
+        // every volume over the check's bound: each of the four units breaches it
+        let command = json!({"command": ["run", "volumes", "--select", "selection:every@1", "--param", "scale=1000000000"]});
+        let (status, doc) = server.call("POST", "/api/jobs", Some(command), OPERATOR);
+        assert_eq!(status, 202, "{doc}");
+        let job = doc["job"].as_i64().unwrap();
+        let mut state = Value::Null;
+        for _ in 0..600 {
+            let (_, j) = server.call("GET", &format!("/api/jobs/{job}"), None, OPERATOR);
+            state = j;
+            if matches!(
+                state["state"].as_str(),
+                Some("done" | "failed" | "cancelled")
+            ) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        assert_eq!(state["state"], "done", "{state}");
+        let run = state["result"]["run"].as_i64().unwrap();
+        let units = |s: &Value| -> Vec<String> {
+            s["breaches"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{s}"))
+                .iter()
+                .map(|b| b["unit"].as_str().unwrap().to_string())
+                .collect()
+        };
+        assert_eq!(units(&state["result"]["summary"]).len(), 4, "{state}");
+        // the sample is sealed after the run, as a certification sample is
+        let sealed = stacks[1];
+        seal(lab, "sealed_qc", &[sealed]);
+        let unit = format!("stack-{sealed}");
+        let value = format!("{}", 1_000_000_000 * sealed);
+        let open: Vec<String> = stacks
+            .iter()
+            .filter(|s| **s != sealed)
+            .map(|s| format!("stack-{s}"))
+            .collect();
+        // the unit is still one the run ran (`units_run`); what its check
+        // said of it, its breach and the value, is gone from every summary
+        let quiet = |what: &str, doc: &Value| {
+            let text = doc.to_string();
+            assert!(!text.contains(&value), "{what}: its value in {text}");
+            let mut docs = vec![doc];
+            docs.extend(doc["runs"].as_array().into_iter().flatten());
+            docs.extend(doc["jobs"].as_array().into_iter().flatten());
+            for d in docs {
+                for s in [&d["summary"], &d["result"]["summary"]] {
+                    for b in s["breaches"].as_array().into_iter().flatten() {
+                        assert_ne!(b["unit"], unit.as_str(), "{what}: its breach in {text}");
+                    }
+                }
+            }
+        };
+        let withheld = |what: &str, s: &Value| {
+            let mut shown = units(s);
+            shown.sort();
+            assert_eq!(shown, open, "{what}: {s}");
+            assert_eq!(s["breaches_withheld_sealed"], 1, "{what}: {s}");
+            // the run's own counts stay what they were
+            assert_eq!(s["numbers"]["checks"]["breaches"], 4, "{what}: {s}");
+        };
+
+        // detail quasi: the run doors and the jobs doors
+        let (status, doc) =
+            server.call("GET", &format!("/api/pipeline-runs/{run}"), None, OPERATOR);
+        assert_eq!(status, 200, "{doc}");
+        quiet("the run door", &doc);
+        withheld("the run door", &doc["summary"]);
+        let (_, list) = server.call("GET", "/api/pipeline-runs", None, OPERATOR);
+        quiet("the runs door", &list);
+        let listed = list["runs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["id"] == run)
+            .unwrap()
+            .clone();
+        withheld("the runs door", &listed["summary"]);
+        let (_, j) = server.call("GET", &format!("/api/jobs/{job}"), None, OPERATOR);
+        quiet("the job door", &j);
+        withheld("the job door", &j["result"]["summary"]);
+        let (_, all) = server.call("GET", "/api/jobs?all=1", None, OPERATOR);
+        quiet("the jobs door", &all);
+        let mine = all["jobs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["id"] == job)
+            .unwrap()
+            .clone();
+        withheld("the jobs door", &mine["result"]["summary"]);
+
+        // below detail quasi: the counts by check leave it out, and how many
+        // went is a count of scans, held below 5
+        let (_, plain) = server.call("GET", &format!("/api/pipeline-runs/{run}"), None, PLAIN);
+        quiet("below quasi", &plain);
+        let s = &plain["summary"];
+        assert_eq!(s["detail"], "totals", "{plain}");
+        assert!(s["breaches_withheld_sealed"].is_null(), "{plain}");
+        assert!(
+            s["withheld"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|w| w == "breaches_withheld_sealed"),
+            "{plain}"
+        );
+        assert_eq!(
+            s["breaches_by_check"],
+            json!([{"check": "brain_volume <= 100000000", "metric": "brain_volume", "units": null, "withheld": true}]),
+            "three units, fewer than five: {plain}"
+        );
+        assert!(sealed_run_reads(lab, run).is_empty());
+
+        // the certificate's grant reads every breach, each read audited
+        let (_, cert) = server.call("GET", &format!("/api/pipeline-runs/{run}"), None, CERT);
+        let mut every = units(&cert["summary"]);
+        every.sort();
+        assert_eq!(every.len(), 4, "{cert}");
+        assert!(every.contains(&unit), "{cert}");
+        assert!(
+            cert["summary"].get("breaches_withheld_sealed").is_none(),
+            "{cert}"
+        );
+        let (_, j) = server.call("GET", &format!("/api/jobs/{job}"), None, CERT);
+        assert_eq!(units(&j["result"]["summary"]).len(), 4, "{j}");
+        assert_eq!(
+            sealed_run_reads(lab, run),
+            vec![("cert@lab".to_string(), 1), ("cert@lab".to_string(), 1)]
+        );
+        drop(server);
+
+        // the keyboard withholds the same, unless --unsealed-access says why
+        let run_id = run.to_string();
+        let shown = lab.json(&["pipeline", "runs", &run_id, "--json"]);
+        quiet("the keyboard", &shown);
+        withheld("the keyboard", &shown["summary"]);
+        let listed = lab.json(&["pipeline", "runs", "--json"]);
+        quiet("the keyboard's list", &listed);
+        let shown_job = lab.json(&["jobs", "show", &job.to_string(), "--json"]);
+        quiet("the keyboard's job", &shown_job);
+        withheld("the keyboard's job", &shown_job["result"]["summary"]);
+        let why = "grading the QC of the sealed sample";
+        let read = lab.json(&[
+            "pipeline",
+            "runs",
+            &run_id,
+            "--json",
+            "--unsealed-access",
+            why,
+        ]);
+        assert_eq!(units(&read["summary"]).len(), 4, "{read}");
+        assert!(
+            read["summary"].get("breaches_withheld_sealed").is_none(),
+            "{read}"
+        );
+    });
+}
+
+/// Record 48: a pipeline of the bids layout whose every session breaches
+/// its check, as the volumes pipeline's stacks do.
+const SESSION_QC: &str = r#"name: session-qc
+schema-version: "0.5"
+tool-version: "1"
+container-image:
+  type: docker
+  image: "example.org/session-qc@sha256:abababababababababababababababababababababababababababababababab"
+command-line: |
+  python3 -c '
+  import glob, json, os, sys
+  src, out = sys.argv[1], sys.argv[2]
+  units = []
+  for s in sorted(glob.glob(src + "/sub-*/ses-*")):
+      rel = os.path.relpath(s, src); sub, ses = rel.split(os.sep)
+      d = os.path.join(out, rel, "anat"); os.makedirs(d, exist_ok=True)
+      open(os.path.join(d, "qc.txt"), "w").write("read\n")
+      units.append({"unit_id": sub + "_" + ses, "status": "succeeded", "derivatives": [rel + "/anat/qc.txt"], "metrics": {"snr": 3.25}})
+  json.dump({"schema_version": "1", "units": units}, open(os.path.join(out, "results.json"), "w"))
+  ' [InputDataset] [OutputLocation]
+x-nils:
+  analysis-level: session
+  input: {layout: bids}
+  outputs:
+    - id: qc
+      kind: output
+      path-template: "sub-{subject}/ses-{session}/anat/qc.txt"
+  qc: ["snr >= 8"]
+"#;
+
+/// Record 48, D1 of the move: a session's unit holds the stacks its run
+/// placed in its folder, so where one of them is of a sample sealed now,
+/// the session's breaches leave the run's QC summary and its `pipeline:qc`
+/// item leaves the review doors, for every caller but a holder of
+/// sealed:see; the other session's stay.
+#[test]
+fn a_session_s_qc_is_withheld_where_the_session_holds_a_sealed_stack() {
+    if !have("python3") || !have("dcm2niix") {
+        eprintln!(
+            "python3 or dcm2niix is not installed; the bids layout needs a converter, so this test is skipped"
+        );
+        return;
+    }
+    on_both(
+        "pipelines-sealed-session-qc",
+        "nils_pipelines_sealed_session_qc",
+        |lab| {
+            lab.add_descriptor("session-qc", SESSION_QC);
+            let v = lab.json(&[
+                "run",
+                "session-qc",
+                "--select",
+                "selection:every@1",
+                "--json",
+            ]);
+            assert_eq!(v["status"], "done", "{v}");
+            let run = v["id"].as_i64().unwrap();
+            let units = |s: &Value| -> Vec<String> {
+                let mut out: Vec<String> = s["breaches"]
+                    .as_array()
+                    .unwrap_or_else(|| panic!("{s}"))
+                    .iter()
+                    .map(|b| b["unit"].as_str().unwrap().to_string())
+                    .collect();
+                out.sort();
+                out
+            };
+            let both = units(&v["summary"]);
+            assert_eq!(both.len(), 2, "{v}");
+            // the first session's unit, its subject, and a stack of it
+            let (unit, subject): (String, i64) = lab
+                .store()
+                .query(
+                    "SELECT ref FROM review_item WHERE kind = 'pipeline:qc' ORDER BY id",
+                    &[],
+                )
+                .unwrap()
+                .iter()
+                .map(|r| {
+                    let reference: Value = serde_json::from_str(r.text(0).unwrap()).unwrap();
+                    (
+                        reference["unit"].as_str().unwrap().to_string(),
+                        reference["subject_id"].as_i64().unwrap(),
+                    )
+                })
+                .find(|(u, _)| *u == both[0])
+                .unwrap();
+            assert!(unit.contains("_ses-"), "a session's unit: {unit}");
+            let stack = lab.count(&format!(
+                "SELECT MIN(st.id) FROM stack st JOIN series se ON se.id = st.series_id WHERE se.subject_id = {subject}"
+            ));
+            seal(lab, "sealed_session", &[stack]);
+
+            let server = Server::start(lab);
+            let (status, doc) =
+                server.call("GET", &format!("/api/pipeline-runs/{run}"), None, OPERATOR);
+            assert_eq!(status, 200, "{doc}");
+            assert_eq!(units(&doc["summary"]), vec![both[1].clone()], "{doc}");
+            assert_eq!(doc["summary"]["breaches_withheld_sealed"], 1, "{doc}");
+            // the review doors: the session's item is not listed, the other is
+            let (_, items) = server.call("GET", "/api/review?kind=pipeline:qc", None, OPERATOR);
+            let listed: Vec<&str> = items["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|i| i["ref"]["unit"].as_str().unwrap())
+                .collect();
+            assert_eq!(listed, vec![both[1].as_str()], "{items}");
+            assert!(!items.to_string().contains(&unit), "{items}");
+            // the certificate's grant reads both
+            let (_, cert) = server.call("GET", &format!("/api/pipeline-runs/{run}"), None, CERT);
+            assert_eq!(units(&cert["summary"]), both, "{cert}");
+            let (_, items) = server.call("GET", "/api/review?kind=pipeline:qc", None, CERT);
+            assert_eq!(items["count"], 2, "{items}");
+        },
+    );
+}

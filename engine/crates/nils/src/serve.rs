@@ -1982,7 +1982,7 @@ fn routed(
     // here, as the query is
     let decoded_segs: Vec<String> = segs.iter().map(|s| decoded(s)).collect();
     let pipeline_segs: Vec<&str> = decoded_segs.iter().map(String::as_str).collect();
-    if let Some(r) = crate::pipelines::route(registry, quasi, get, &pipeline_segs, query) {
+    if let Some(r) = crate::pipelines::route(registry, caller, quasi, get, &pipeline_segs, query) {
         return r;
     }
     // record 49 A3: the pre-flight of a run
@@ -3563,6 +3563,10 @@ fn routed(
                     .collect(),
             };
             let mut docs: Vec<_> = jobs.iter().map(nils_registry::job::Job::as_json).collect();
+            // record 48, D1 of the move: no unit's QC of a sealed stack
+            for doc in &mut docs {
+                crate::pipelines::job_shown_unsealed(registry, caller, "GET /api/jobs", doc)?;
+            }
             // record 49 R4: a run's result below detail quasi is its totals
             if !quasi {
                 docs.iter_mut().for_each(crate::pipelines::job_totals_only);
@@ -3748,6 +3752,12 @@ fn routed(
             match nils_registry::job::show(registry.store(), id).map_err(job_err)? {
                 Some(j) => {
                     let mut doc = j.as_json();
+                    crate::pipelines::job_shown_unsealed(
+                        registry,
+                        caller,
+                        "GET /api/jobs/{id}",
+                        &mut doc,
+                    )?;
                     if !quasi {
                         crate::pipelines::job_totals_only(&mut doc);
                     }
@@ -5826,6 +5836,15 @@ fn events(doors: &Doors, registry: &mut Registry, request: Request, all: bool) {
             .filter(|j| all || !nils_registry::job::is_worker(&j.kind))
             .collect();
         let mut docs: Vec<_> = jobs.iter().map(nils_registry::job::Job::as_json).collect();
+        // record 48, D1 of the move: no unit's QC of a sealed stack, and a
+        // job's result is withheld whole where its run's could not be read
+        if !crate::sealed::reads(&caller.access) {
+            for doc in &mut docs {
+                if crate::pipelines::job_unsealed(registry.store(), doc).is_err() {
+                    doc["result"] = serde_json::Value::Null;
+                }
+            }
+        }
         if caller.access.detail < Detail::Quasi {
             docs.iter_mut().for_each(crate::pipelines::job_totals_only);
         }
