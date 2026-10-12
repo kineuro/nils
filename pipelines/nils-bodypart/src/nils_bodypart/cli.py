@@ -772,11 +772,54 @@ def _cache_entries(writer, o, r, model) -> None:
         )
 
 
+def _emit(run: Run, model, cas, o) -> tuple[Unit, list[dict]]:
+    """One stack's outcome in the cascade: its table written, its unit and
+    its proposals (record 55 E2, P1b)."""
+    from . import fusion
+
+    st, r = o.stack, o.result
+    if r is None:
+        reason = o.reason or "unreadable"
+        status, error = o.why or (FAILED, "the stack could not be scored")
+        u = Unit(st.unit, status=status, error=error)
+        table = _reason_table(st.stack_id, reason, model, cas, files_read=len(o.opened or ()))
+        table["stage1"] = o.stage1
+        body = (json.dumps(table, indent=2) + "\n").encode()
+        u.outputs.append(run.output_file(f"bodypart-fusion/{st.stack_id}.json", body, "table", "application/json"))
+        return u, []
+    files = _files_read(st, r)
+    doc = _fusion_table(st.stack_id, r, model, cas, stage=r.stage, files_read=files)
+    doc["stage1"] = o.stage1
+    if o.d3 is not None:
+        doc["deferral"] = round(o.d3, 6)
+    metrics = {"stage": r.stage, "files_read": files}
+    for mode, a_ in r.answers.items():
+        metrics[f"{mode}_value"] = a_["value"]
+        metrics[f"{mode}_confidence"] = round(a_["confidence"], 4)
+        metrics[f"{mode}_answers"] = bool(a_["answers"])
+    u = Unit(st.unit, metrics=metrics)
+    hashes = _read_hashes(st, r)
+    if hashes:
+        u.extra["read"] = hashes
+    body = (json.dumps(doc, indent=2, sort_keys=False) + "\n").encode()
+    u.outputs.append(run.output_file(f"bodypart-fusion/{st.stack_id}.json", body, "table", "application/json"))
+    # each body_part decision names the cascade that made it (ruling R1
+    # (a)); each body_region decision the coarse part the run used, the
+    # one the cascade's file names
+    f = r.answers["fine"]
+    proposals = [{"stack_id": st.stack_id, "axis": fusion.FINE_AXIS, "value": f["value"], "probabilities": fusion.proposed(f), "model_digest": cas.digest}]
+    c = r.answers.get("coarse")
+    if c is not None:
+        proposals.append({"stack_id": st.stack_id, "axis": fusion.COARSE_AXIS, "value": c["value"], "probabilities": fusion.proposed(c),
+                          "model_digest": model.coarse_part.digest})
+    return u, proposals
+
+
 def _infer_cascade(a: argparse.Namespace, model, cas, device: str) -> Run:
     """infer-fusion with a cascade (record 55 E2, P1b): every stack answered
     by the first stage that may, or given a reason."""
     from . import cascade as cascade_mod
-    from . import fusion, slicecache, volume
+    from . import slicecache, volume
 
     from .gpu import torch_cuda_available
 
@@ -799,19 +842,30 @@ def _infer_cascade(a: argparse.Namespace, model, cas, device: str) -> Run:
         # of the planes stages' workers, how many decode on the card
         params.update({"decode_device": device, "gpu_workers": min(a.gpu_workers, a.threads)})
     run = Run("bodypart-infer-fusion", a.output, params, device)
-    doc = manifest.read(a.stacks)
-    stacks = manifest.parse(doc, source_root=a.source_root)
-    # the rest of each session the run holds part of, for the session's top
-    context = manifest.context(doc, skip={st.stack_id for st in stacks})
-    del doc
     writer = None
     if a.cache is not None:
         writer = slicecache.Writer(a.cache, {"image": "nils-bodypart", "version": __version__, **{k: v["digest"] for k, v in params["models"].items()}})
     stats: dict = {}
-    outcomes = cascade_mod.score(model, cas, a.inputs, stacks, workers=a.threads, device=device, chunk=a.chunk, depth=a.readahead,
-                                 student_batch=a.student_batch, fill=a.cache_fill == "touched", keep_inputs=writer is not None, stats=stats,
-                                 gpu_workers=a.gpu_workers, context=context, student_device=student_device, student_threads=a.student_threads,
-                                 overlap=a.overlap == "on")
+    common = dict(device=device, chunk=a.chunk, depth=a.readahead, student_batch=a.student_batch, fill=a.cache_fill == "touched",
+                  keep_inputs=writer is not None, stats=stats, gpu_workers=a.gpu_workers, student_device=student_device, student_threads=a.student_threads)
+    written: dict = {}  # each stack's unit and proposals, its table written
+    if a.overlap == "on" and a.threads > 1:
+        # the manifest read as it is used, its stacks planned in the pool,
+        # and each table written once its stack's outcome is final (the
+        # speed study's A5.2.3e); with the slice cache, after the run
+        final = None
+        if writer is None and a.cache_fill == "none":
+            def final(o) -> None:
+                written[o.stack.stack_id] = _emit(run, model, cas, o)
+        outcomes = cascade_mod.score_stream(model, cas, a.inputs, manifest.stream(a.stacks, source_root=a.source_root), workers=a.threads,
+                                            on_final=final, **common)
+    else:
+        doc = manifest.read(a.stacks)
+        stacks = manifest.parse(doc, source_root=a.source_root)
+        # the rest of each session the run holds part of, for the session's top
+        context = manifest.context(doc, skip={st.stack_id for st in stacks})
+        del doc
+        outcomes = cascade_mod.score(model, cas, a.inputs, stacks, workers=a.threads, context=context, overlap=a.overlap == "on", **common)
     counts = {"answered_fine": 0, "answered_coarse": 0, "failed": 0, "cohort_calibrated": 0}
     stages = {"s1": 0, cas.b24: 0, "touched": 0}
     reasons = {k: 0 for k in cascade_mod.REASONS}
@@ -819,56 +873,27 @@ def _infer_cascade(a: argparse.Namespace, model, cas, device: str) -> Run:
     files_total = 0
     for o in outcomes:
         st, r = o.stack, o.result
+        u, proposals = written.pop(st.stack_id, None) or _emit(run, model, cas, o)
+        run.units.append(u)
+        run.proposals.extend(proposals)
         if r is None:
-            reason = o.reason or "unreadable"
-            reasons[reason] += 1
-            status, error = o.why or (FAILED, "the stack could not be scored")
-            counts["failed"] += int(status == FAILED)
-            u = Unit(st.unit, status=status, error=error)
-            table = _reason_table(st.stack_id, reason, model, cas, files_read=len(o.opened or ()))
-            table["stage1"] = o.stage1
-            body = (json.dumps(table, indent=2) + "\n").encode()
-            u.outputs.append(run.output_file(f"bodypart-fusion/{st.stack_id}.json", body, "table", "application/json"))
-            run.units.append(u)
+            reasons[o.reason or "unreadable"] += 1
+            counts["failed"] += int(u.status == FAILED)
             continue
-        files = _files_read(st, r)
+        files = u.metrics["files_read"]
         files_total += files
         stages[r.stage] = stages.get(r.stage, 0) + 1
-        doc = _fusion_table(st.stack_id, r, model, cas, stage=r.stage, files_read=files)
-        doc["stage1"] = o.stage1
-        if o.d3 is not None:
-            doc["deferral"] = round(o.d3, 6)
-        if doc["reason"]:
-            reasons[doc["reason"]] += 1
-        metrics = {"stage": r.stage, "files_read": files}
+        reason = _no_region(r)
+        if reason:
+            reasons[reason] += 1
         for mode, a_ in r.answers.items():
-            metrics[f"{mode}_value"] = a_["value"]
-            metrics[f"{mode}_confidence"] = round(a_["confidence"], 4)
-            metrics[f"{mode}_answers"] = bool(a_["answers"])
             counts[f"answered_{mode}"] += int(a_["answers"])
             pv = per_value[mode]
             pv[a_["value"]] = pv.get(a_["value"], 0) + 1
         counts["cohort_calibrated"] += int(r.cohort is not None)
-        u = Unit(st.unit, metrics=metrics)
-        hashes = _read_hashes(st, r)
-        if hashes:
-            u.extra["read"] = hashes
-        body = (json.dumps(doc, indent=2, sort_keys=False) + "\n").encode()
-        u.outputs.append(run.output_file(f"bodypart-fusion/{st.stack_id}.json", body, "table", "application/json"))
-        run.units.append(u)
-        # each body_part decision names the cascade that made it (ruling R1
-        # (a)); each body_region decision the coarse part the run used, the
-        # one the cascade's file names
-        f = r.answers["fine"]
-        run.proposals.append({"stack_id": st.stack_id, "axis": fusion.FINE_AXIS, "value": f["value"], "probabilities": fusion.proposed(f),
-                              "model_digest": cas.digest})
-        c = r.answers.get("coarse")
-        if c is not None:
-            run.proposals.append({"stack_id": st.stack_id, "axis": fusion.COARSE_AXIS, "value": c["value"], "probabilities": fusion.proposed(c),
-                                  "model_digest": model.coarse_part.digest})
         if writer is not None:
             _cache_entries(writer, o, r, model)
-    run.metrics = {"stacks": len(stacks), **counts, "per_value": per_value, "stages": stages, "reasons": reasons,
+    run.metrics = {"stacks": len(outcomes), **counts, "per_value": per_value, "stages": stages, "reasons": reasons,
                    "files_read": files_total, "files_per_scored_stack": round(files_total / max(1, sum(stages.values())), 3),
                    "stage1": {k: v for k, v in stats.items() if k.startswith("stage1") or k in ("straight_to_planes", "context_stacks")}}
     if writer is not None:

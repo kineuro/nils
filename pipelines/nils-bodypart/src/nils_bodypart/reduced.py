@@ -235,6 +235,19 @@ def _parallel_mask(k: np.ndarray, ok: np.ndarray, K: int) -> np.ndarray:
 def plan(frames: list[Frame], orientation: str | None, policy: str, bad: set[str] | None = None) -> Plan:
     """The kept frames and the frames to read, from the frames' geometry
     alone, as ``volume.build`` would choose and place them."""
+    return _plan(frames, orientation, policy, bad, points=True)
+
+
+def geometry(frames: list[Frame], orientation: str | None) -> Plan:
+    """``plan``'s kept frames and geometry without the plane points and the
+    frames to read (``idx``, ``ok``, ``touched`` and ``read`` are left
+    empty): what ``_meta`` and the stack's geometry numbers read, number
+    for number, without the grid of every voxel the points are cut from.
+    Raises where ``plan`` raises."""
+    return _plan(frames, orientation, "touched", None, points=False)
+
+
+def _plan(frames: list[Frame], orientation: str | None, policy: str, bad: set[str] | None, points: bool) -> Plan:
     chosen = volume.preselect(frames, orientation)
     frames = [f for f in frames if f.path in chosen]
     usable = [f for f in frames if f.path not in (bad or set())]
@@ -258,8 +271,12 @@ def plan(frames: list[Frame], orientation: str | None, policy: str, bad: set[str
     if K == 1:
         corners = np.concatenate([corners - n * thick / 2, corners + n * thick / 2])
     ctr = (corners.min(0) + corners.max(0)) / 2
+    Minv = np.linalg.inv(M)  # raises for a degenerate geometry, with the points or without
+    if not points:
+        empty = np.zeros((0, 3))
+        return Plan(geo, uniq, n, r_dir, c_dir, n_frames_all, n_unique, o, M, sv, spacing, thick, H, W, empty, np.zeros(0, bool), [], [],
+                    {f.path for f in frames})
     P = _GRID + ctr
-    Minv = np.linalg.inv(M)
     idx = ((P - o) @ Minv.T)[_FLAT]
     tol_k = 0.5 if K > 1 else max(0.5, (thick or 1.0) / 2.0 / max(spacing, 1e-3))
     k = idx[:, 0]

@@ -44,6 +44,12 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
+# The standard library's bytecode. The base image ships it for some modules
+# only, and the image runs as a user who cannot write it, so every process
+# (a run's main process and each of its workers) compiled the rest again at
+# every start. pip compiles what it installs below.
+RUN python -m compileall -q -j 0 -x '/site-packages/' "$(python -c 'import sysconfig; print(sysconfig.get_path("stdlib"))')"
+
 # torch first, in its own layer, from the index the build asks for.
 RUN pip install --index-url "${TORCH_INDEX}" "torch==${TORCH_VERSION}" "torchvision==${TORCHVISION_VERSION}"
 

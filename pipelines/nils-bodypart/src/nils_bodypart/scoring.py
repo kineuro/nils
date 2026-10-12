@@ -314,20 +314,30 @@ def _pooled(model, inputs, stacks, workers, gpu_decode, torch_encoder, batch, ch
 
 
 class Lane:
-    """One pool of worker processes for the whole cascade (A5.2.3b, the
-    overlap): started before the student, it reads stage 1's slot-0 slices
-    and the student's tokens, and climbs the planes stages of each stack the
-    moment stage 1 defers it, so the fallbacks decode while the student
-    scores the next batch. Each stack is read and scored as ``score`` does
-    with the same ladder; only the order of the work changes."""
+    """One pool of worker processes for the whole cascade (the overlap,
+    A5.2.3b and A5.2.3e): started before the student loads, it plans the
+    stacks (``first``), reads stage 1's slot-0 slices (``read``) and climbs
+    the planes stages of each stack the moment it is known to need them
+    (``submit``), so the fallbacks decode while the student scores the next
+    batch. Each stack is read and scored as ``score`` does with the same
+    ladder; only the order of the work changes.
+
+    The work waits in three queues, taken in that order of priority, and at
+    most ``window`` pieces are in the pool at once, so the planning and the
+    student's slices are never queued behind the planes. With
+    ``hold_reads`` nothing that reads a file goes to the pool before
+    ``open_reads``."""
+
+    FIRST, READ, PLANES = 0, 1, 2
 
     def __init__(self, model, inputs, *, workers: int, device: str, chunk: int, depth: int, ladder: dict, gpu_workers: int,
-                 prefetch: bool | None = None) -> None:
+                 prefetch: bool | None = None, hold_reads: bool = False, window: int | None = None) -> None:
         import threading
 
         if prefetch is None:
             prefetch = os.environ.get("NILS_BODYPART_PREFETCH", "1") != "0"
         self.chunk = max(1, chunk)
+        self.workers = max(1, workers)
         self.jobs: list = []
         self.lock = threading.Lock()
         self.decoded = {"gpu_frames": 0, "cpu_frames": 0}
@@ -343,17 +353,99 @@ class Lane:
             initializer=_init,
             initargs=(str(inputs), self.gpu_decode, False, prefetch, ctx.Value("i", 0), gpu_workers, "reduced:" + ladder["stages"][0][0], depth, ladder),
         )
+        self.window = max(2, int(window or 2 * max(1, workers)))
+        self.queues: tuple[deque, deque, deque] = (deque(), deque(), deque())
+        self.cond = threading.Condition()
+        self.inflight = 0
+        self.reads_open = not hold_reads
+        self.closed = False
+        self.feeder = threading.Thread(target=self._feed, name="nils-bodypart-lane", daemon=True)
+        self.feeder.start()
 
-    def stage1(self, items: list):
-        """A future of ``_stage1`` over (slot-0 path, the stack's row, its registry geometry) items."""
-        return self.pool.submit(_stage1, items)
+    def _put(self, prio: int, fn, arg):
+        from concurrent.futures import Future
+
+        fut: Future = Future()
+        with self.cond:
+            if self.closed:
+                fut.cancel()
+                return fut
+            self.queues[prio].append((fn, arg, fut))
+            self.cond.notify_all()
+        return fut
+
+    def _next(self):
+        """The next piece of work that may go to the pool now, or None."""
+        if self.inflight >= self.window:
+            return None
+        if self.queues[self.FIRST]:
+            return self.queues[self.FIRST].popleft()
+        if self.reads_open:
+            for q in self.queues[self.READ :]:
+                if q:
+                    return q.popleft()
+        return None
+
+    def _feed(self) -> None:
+        while True:
+            with self.cond:
+                job = self._next()
+                while job is None and not self.closed:
+                    self.cond.wait()
+                    job = self._next()
+                if self.closed:
+                    return
+                self.inflight += 1
+            fn, arg, fut = job
+            if not fut.set_running_or_notify_cancel():
+                self._done(None, None)
+                continue
+            try:
+                pf = self.pool.submit(fn, arg)
+            except BaseException as e:  # noqa: BLE001 - the waiting caller raises it
+                fut.set_exception(e)
+                self._done(None, None)
+                continue
+            pf.add_done_callback(lambda pf, fut=fut: self._done(fut, pf))
+
+    def _done(self, fut, pf) -> None:
+        with self.cond:
+            self.inflight -= 1
+            self.cond.notify_all()
+        if fut is None:
+            return
+        try:
+            fut.set_result(pf.result())
+        except BaseException as e:  # noqa: BLE001
+            fut.set_exception(e)
+
+    def warm(self) -> None:
+        """Start every worker now (each loads the model as it starts), not
+        as the first work comes."""
+        for _ in range(self.workers):
+            self.first(abs, 0)
+
+    def open_reads(self) -> None:
+        with self.cond:
+            self.reads_open = True
+            self.cond.notify_all()
+
+    def first(self, fn, arg):
+        """A future of ``fn(arg)`` in a worker, before any read: work that opens no file."""
+        return self._put(self.FIRST, fn, arg)
+
+    def read(self, fn, arg):
+        """A future of ``fn(arg)`` in a worker, before the planes stages: stage 1's reads."""
+        return self._put(self.READ, fn, arg)
 
     def submit(self, stacks: list) -> None:
         """The planes stages for these stacks, in chunks as ``_pooled`` sends them."""
         with self.lock:
             for i in range(0, len(stacks), self.chunk):
                 c = stacks[i : i + self.chunk]
-                self.jobs.append((c, self.pool.submit(_chunk, c)))
+                # a worker reads a stack's files and its geometry; its
+                # list of slices stays here
+                self.jobs.append((c, self._put(self.PLANES, _chunk, [_bare(st) for st in c])))
 
     def results(self) -> Iterator[tuple[manifest.Stack, fusion.StackResult | None, tuple[str, str] | None]]:
         with self.lock:
@@ -366,6 +458,15 @@ class Lane:
                 yield st, r, why
 
     def close(self) -> None:
+        with self.cond:
+            self.closed = True
+            waiting = [job for q in self.queues for job in q]
+            for q in self.queues:
+                q.clear()
+            self.cond.notify_all()
+        for _, _, fut in waiting:
+            fut.cancel()
+        self.feeder.join()
         self.pool.shutdown(wait=True, cancel_futures=True)
         for k, v in self._saved.items():
             if v is None:
@@ -374,24 +475,17 @@ class Lane:
                 os.environ[k] = v
 
 
-def _stage1(items: list) -> list:
-    """Stage 1's inputs in a worker: per (path, row, registry geometry) the
-    slot-0 slice read as ``tiles`` reads it, with the student's 42 tokens as
-    ``cascade.score`` builds them, ``(read, tokens)``; where the file does
-    not decode the read is ``tiles``' ``(None, why)`` and the tokens None."""
-    import numpy as np
+def _bare(st: manifest.Stack) -> manifest.Stack:
+    """A stack as a worker reads it: its files, their geometry and its
+    facts, without the list of its slices, which only the results name."""
+    import dataclasses
 
-    from . import fewslice
+    return dataclasses.replace(st, slices=[]) if st.slices else st
 
-    out = []
-    for path, row, geo in items:
-        t = _tile(path)
-        if t[0] is None:
-            out.append((t, None))
-            continue
-        tok = np.concatenate([fewslice.stack_tokens(row), fewslice.geo_feats(geo[None, :])[0]]).astype(np.float32)
-        out.append((t, tok))
-    return out
+
+def tiles_of(paths: list[str]) -> list:
+    """Stage 1's slot-0 slices in a worker of the overlap, as ``tiles`` reads them."""
+    return [_tile(p) for p in paths]
 
 
 def _tile(path: str):
