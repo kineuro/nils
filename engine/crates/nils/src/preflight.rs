@@ -14,6 +14,13 @@
 //! the registry has not moved), and the session cache the release reads,
 //! which the release would build the same way.
 //!
+//! Record 55 (rulings of 2026-10-12, item 6): a run over a dataset's or a
+//! cohort's main scans of a role (`main:<role>@dataset:<name>`) is
+//! pre-flown over the list a run would freeze now, and says which picks it
+//! read and the scope's visits that have no main scan of the role, counted
+//! by why and named (`crate::main_input`). Its bids units are planned under
+//! the picks the list was resolved from, as the run releases its input.
+//!
 //! The units are counted the way the runner makes them: in the stacks
 //! layout one a stack; in the bids layout one a session (or a participant)
 //! of the release's own tree, since the runner's input is a release with
@@ -63,6 +70,10 @@ pub(crate) struct Asked<'a> {
     pub handle: i64,
     pub selection: Option<&'a str>,
     pub params: &'a [(String, String)],
+    /// Record 55: where the handle is a dataset's or a cohort's main scans,
+    /// what was resolved, the visits with none named; else what the handle
+    /// records of them.
+    pub main: Option<Value>,
 }
 
 /// The lane's budget (record 49 A1, R6), as the lane itself reads it: the
@@ -190,6 +201,49 @@ pub(crate) struct Picked {
 /// The stacks the selection leaves out of a run's input, each with why.
 type LeftOut = Vec<(i64, String)>;
 
+/// Record 55 (rulings of 2026-10-12, item 6): a frozen list of a dataset's
+/// or a cohort's main scans, each stack the main scan of the list's role on
+/// its visit, as it was resolved; what a run over it takes whatever the
+/// picks say now (a scope's newer rules replace the picks of the version
+/// before). Each with its subject and its visit's day under the default
+/// scheme, as a pick names them.
+pub(crate) fn frozen_picks(
+    registry: &mut Registry,
+    stacks: &[i64],
+    role: &str,
+) -> Result<BTreeMap<i64, Picked>, String> {
+    let err = |e: nils_registry::Error| e.to_string();
+    let scheme = nils_registry::session::Scheme::default();
+    let anchors = nils_session::Anchors::resolve(registry, &scheme, BTreeMap::new())
+        .map_err(|e| e.to_string())?;
+    nils_session::ensure(registry, &scheme, &anchors, None, false).map_err(|e| e.to_string())?;
+    let labels =
+        nils_session::labels_by_study(registry.store(), &scheme).map_err(|e| e.to_string())?;
+    let store = registry.store();
+    let mut out: BTreeMap<i64, Picked> = BTreeMap::new();
+    for chunk in stacks.chunks(500) {
+        let sql = format!(
+            "SELECT st.id, se.subject_id, se.study_id FROM {} st JOIN {} se ON se.id = st.series_id \
+             WHERE st.id IN ({})",
+            store.qualified("stack"),
+            store.qualified("series"),
+            list(chunk)
+        );
+        for r in store.query(&sql, &[]).map_err(err)? {
+            let label = labels.get(&r.int(2).map_err(err)?);
+            out.insert(
+                r.int(0).map_err(err)?,
+                Picked {
+                    roles: BTreeSet::from([role.to_string()]),
+                    subject: label.map_or(r.int(1).map_err(err)?, |l| l.subject_id),
+                    day: label.map(|l| l.first.to_string()).unwrap_or_default(),
+                },
+            );
+        }
+    }
+    Ok(out)
+}
+
 /// The live picks among `stacks`, by stack.
 pub(crate) fn pick_roles(
     store: &mut Store,
@@ -316,12 +370,25 @@ fn bids_units(
     stacks: &[i64],
     pack: Option<&nils_pack::Pack>,
     place_ids: &[i64],
+    main: Option<&Value>,
 ) -> Result<(Vec<Unit>, LeftOut), String> {
     // a run's input is a selection, released under the main scans as the
     // release of one reads them: each subject's own dataset's once read,
-    // else the pack's (one place of truth, 2026-10-11)
-    let of = nils_registry::pick_truth::Of::own(registry.store()).map_err(|e| e.to_string())?;
-    let picks = pick_roles(registry.store(), stacks, &of)?;
+    // else the pack's (one place of truth, 2026-10-11); a frozen list of a
+    // dataset's or a cohort's main scans as it was resolved (record 55,
+    // rulings of 2026-10-12, item 6)
+    let (of, picks) = match main {
+        Some(m) => (
+            nils_registry::pick_truth::Of::of_record(&m["picks"]),
+            frozen_picks(registry, stacks, m["main"].as_str().unwrap_or_default())?,
+        ),
+        None => {
+            let of =
+                nils_registry::pick_truth::Of::own(registry.store()).map_err(|e| e.to_string())?;
+            let picks = pick_roles(registry.store(), stacks, &of)?;
+            (of, picks)
+        }
+    };
     let unpicked = "no live pick takes it, so the release of the input leaves it out".to_string();
     let mut left: LeftOut = stacks
         .iter()
@@ -338,6 +405,7 @@ fn bids_units(
                 pack,
                 &nils_registry::session::Scheme::default(),
                 &picked,
+                main.map(|m| &m["picks"]),
             )
             .map_err(|e| format!("the plan of the input's release: {e}"))?;
             let planned: BTreeSet<i64> = plan.iter().map(|p| p.stack).collect();
@@ -552,17 +620,24 @@ pub(crate) fn check(registry: &mut Registry, asked: &Asked<'_>) -> Result<Value,
     {
         place_ids.push(p.scratch.id);
     }
+    // record 55: a dataset's or a cohort's main scans say what was read,
+    // and their bids input is released under those picks
+    let main = asked
+        .main
+        .clone()
+        .or_else(|| crate::main_input::entry_of(registry.store(), asked.handle));
     let (units, left) = match d.layout {
         Layout::Stacks => (
             stack_units(registry.store(), &d, &stacks, &place_ids)?,
             LeftOut::new(),
         ),
-        Layout::Bids => bids_units(registry, &d, &stacks, asked.pack, &place_ids)?,
+        Layout::Bids => bids_units(registry, &d, &stacks, asked.pack, &place_ids, main.as_ref())?,
     };
     if units.is_empty() {
-        blockers.push(match d.layout {
-            Layout::Bids => "no stack of the selection is picked, so the release of the input would hold no subject's images; nils pick run picks them".into(),
-            Layout::Stacks => "the selection holds no stacks".into(),
+        blockers.push(match (&main, d.layout) {
+            (Some(m), _) if stacks.is_empty() => crate::main_input::nothing(m),
+            (_, Layout::Bids) => "no stack of the selection is picked, so the release of the input would hold no subject's images; nils pick run picks them".into(),
+            (_, Layout::Stacks) => "the selection holds no stacks".into(),
         });
     }
     let missing: Vec<&Unit> = units.iter().filter(|u| !u.missing.is_empty()).collect();
@@ -672,6 +747,7 @@ pub(crate) fn check(registry: &mut Registry, asked: &Asked<'_>) -> Result<Value,
         "pipeline_id": p.id,
         "handle": asked.handle,
         "selection": asked.selection,
+        "main": main,
         "params": params,
         "layout": d.layout.name(),
         "level": d.level.name(),
@@ -733,13 +809,47 @@ fn left_why(left: &[(i64, String)]) -> Value {
 }
 
 /// A pre-flight read at detail plain: the counts and the reasons, no unit
-/// named by its subject or its session's day.
+/// and no visit without a main scan named by its subject or its day.
 pub(crate) fn plain(v: &mut Value) {
     if let Some(list) = v["missing"].as_array_mut() {
         for m in list.iter_mut() {
             *m = json!({"why": m["why"].clone()});
         }
     }
+    if let Some(list) = v["main"]["without"]["named"].as_array_mut() {
+        for m in list.iter_mut() {
+            *m = json!({"why": m["why"].clone()});
+        }
+    }
+}
+
+/// What a pre-flight is over: a dataset's or a cohort's main scans,
+/// resolved and frozen now with the visits with none named (record 55); a
+/// saved selection, frozen as a run freezes it; or a handle.
+fn frozen_over(
+    home: &Home,
+    spec: Option<&str>,
+    handle: Option<i64>,
+    pack_dir: Option<PathBuf>,
+    pack: &str,
+) -> Result<Option<(i64, Option<Value>)>, crate::Exit> {
+    let grain = nils_ask::ast::Grain::Stack;
+    let whole = crate::ask_cli::Freeze::Whole;
+    Ok(match (spec, handle) {
+        (Some(spec), _) => match crate::main_input::Spec::parse(spec) {
+            Some(main) => {
+                let main = main.map_err(usage)?;
+                let (f, r) = crate::main_input::freeze(home, &main, grain, pack_dir, pack, whole)?;
+                Some((f.handle, Some(r.preflight())))
+            }
+            None => Some((
+                crate::ask_cli::freeze(home, spec, grain, pack_dir, pack, whole)?.handle,
+                None,
+            )),
+        },
+        (None, Some(h)) => Some((h, None)),
+        (None, None) => None,
+    })
 }
 
 /// `POST /api/pipelines/{name}/preflight`: `{select: "selection:<name>@<v>"}`
@@ -792,28 +902,20 @@ pub(crate) fn route(
             }
         };
         let selection = doc["select"].as_str().map(str::to_string);
-        let handle = match (&selection, doc["handle"].as_i64()) {
-            (Some(spec), _) => {
-                let pack = doc["pack"].as_str().unwrap_or("mri");
-                crate::ask_cli::freeze(
-                    home,
-                    spec,
-                    nils_ask::ast::Grain::Stack,
-                    pack_dir.map(PathBuf::from),
-                    pack,
-                    crate::ask_cli::Freeze::Whole,
-                )
-                .map(|f| f.handle)
-                .map_err(|e| Reply::error(400, e.message))?
-            }
-            (None, Some(h)) => h,
-            (None, None) => {
-                return Err(Reply::error(
-                    400,
-                    "a pre-flight is over a selection: {select: \"selection:<name>@<v>\"} or {handle: <id>}",
-                ));
-            }
-        };
+        let (handle, main) = frozen_over(
+            home,
+            selection.as_deref(),
+            doc["handle"].as_i64(),
+            pack_dir.map(PathBuf::from),
+            doc["pack"].as_str().unwrap_or("mri"),
+        )
+        .map_err(|e| Reply::error(400, e.message))?
+        .ok_or_else(|| {
+            Reply::error(
+                400,
+                "a pre-flight is over a selection: {select: \"selection:<name>@<v>\"}, a dataset's or a cohort's main scans {select: \"main:<role>@dataset:<name>\"}, or {handle: <id>}",
+            )
+        })?;
         let pack = pack_dir
             .map(Path::to_path_buf)
             .or_else(|| crate::pack_dir(home, None).ok())
@@ -830,6 +932,7 @@ pub(crate) fn route(
                 handle,
                 selection: selection.as_deref(),
                 params: &params,
+                main,
             },
         )
         .map_err(|e| {
@@ -857,23 +960,18 @@ pub(crate) fn command(home: &Home, args: &crate::pipelines::RunArgs) -> Result<(
         .pipeline
         .as_deref()
         .ok_or_else(|| usage("run <pipeline> --preflight: the pipeline to check"))?;
-    let handle = match (&args.select, args.handle) {
-        (Some(spec), _) => crate::ask_cli::freeze(
-            home,
-            spec,
-            nils_ask::ast::Grain::Stack,
-            args.pack_dir.clone(),
-            &args.pack,
-            crate::ask_cli::Freeze::Whole,
+    let (handle, main) = frozen_over(
+        home,
+        args.select.as_deref(),
+        args.handle,
+        args.pack_dir.clone(),
+        &args.pack,
+    )?
+    .ok_or_else(|| {
+        usage(
+            "a pre-flight is over a frozen selection: --select selection:<name>@<v>, a dataset's or a cohort's main scans (--select main:<role>@dataset:<name>), or --handle <id>",
         )
-        .map(|f| f.handle)?,
-        (None, Some(h)) => h,
-        (None, None) => {
-            return Err(usage(
-                "a pre-flight is over a frozen selection: --select selection:<name>@<v>, or --handle <id>",
-            ));
-        }
-    };
+    })?;
     let params: Vec<(String, String)> = args
         .params
         .iter()
@@ -897,6 +995,7 @@ pub(crate) fn command(home: &Home, args: &crate::pipelines::RunArgs) -> Result<(
             handle,
             selection: args.select.as_deref(),
             params: &params,
+            main,
         },
     )
     .map_err(usage)?;
@@ -914,6 +1013,22 @@ pub(crate) fn command(home: &Home, args: &crate::pipelines::RunArgs) -> Result<(
         v["stacks"],
         v["handle"]
     );
+    if v["main"].is_object() {
+        println!("  main scans       {}", crate::main_input::line(&v["main"]));
+        for m in v["main"]["without"]["named"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .take(20)
+        {
+            println!(
+                "    {} {}: {}",
+                m["subject"].as_str().unwrap_or_default(),
+                m["session_day"].as_str().unwrap_or_default(),
+                m["why"].as_str().unwrap_or_default()
+            );
+        }
+    }
     println!(
         "  units            {} ({} ready, {} missing an input)",
         v["units"]["total"], v["units"]["ready"], v["units"]["missing"]

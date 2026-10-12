@@ -68,6 +68,14 @@ pub struct Selection {
     /// Record 26 §13: only the files under these datasets' pseudonymised
     /// trees, by the source places' names.
     pub datasets: Vec<String>,
+    /// Record 55 (rulings of 2026-10-12, item 6): the stacks are a pipeline
+    /// run's frozen list of a dataset's or a cohort's main scans, and these
+    /// the picks it was resolved from, as `pick_truth::Of::record` writes
+    /// them. A release of picked stacks takes the list as it was frozen,
+    /// whatever the picks say now (a scope's newer rules replace the picks
+    /// of the version before), and records these picks; none, the picks as
+    /// [`picks_read`] says.
+    pub picks: Option<serde_json::Value>,
 }
 
 impl Selection {
@@ -83,6 +91,7 @@ impl Selection {
             "axes": self.axes,
             "cohorts": self.cohorts,
             "datasets": self.datasets,
+            "picks": self.picks,
         })
     }
 
@@ -2065,12 +2074,14 @@ pub struct PlannedStack {
 /// The plan of a BIDS release of the picked stacks among `stacks`, under
 /// `scheme` and the pack's mapping, with the release's default placements:
 /// what a pipeline run's input would hold (record 49 A3). Reads the
-/// session cache the release builds, and writes nothing else.
+/// session cache the release builds, and writes nothing else. `picks` are
+/// the picks a run's frozen list recorded, where it did (record 55).
 pub fn plan_picked(
     registry: &mut Registry,
     pack: &nils_pack::pack::Pack,
     scheme: &Scheme,
     stacks: &[i64],
+    picks: Option<&serde_json::Value>,
 ) -> Result<Vec<PlannedStack>, Error> {
     let anchors =
         nils_session::Anchors::resolve(registry, scheme, BTreeMap::new()).map_err(session_err)?;
@@ -2093,6 +2104,7 @@ pub fn plan_picked(
     let selection = Selection {
         stacks: stacks.to_vec(),
         picked_only: true,
+        picks: picks.cloned(),
         ..Selection::default()
     };
     let mut out = Vec::new();
@@ -2776,7 +2788,7 @@ fn selection_where(
              AND a.value IN ({any}))"
         ));
     }
-    if selection.picked_only {
+    if selection.picked_only && selection.picks.is_none() {
         // Record 55, decision 6, and one place of truth (2026-10-11): a
         // release of a cohort or a dataset reads its own picks once read,
         // else the pack's; any other, each subject's own dataset's by the
@@ -2822,6 +2834,15 @@ fn picks_read(
 ) -> Result<(nils_registry::pick_truth::Of, Option<serde_json::Value>), Error> {
     if !selection.picked_only {
         return Ok((nils_registry::pick_truth::Of::Pack, None));
+    }
+    // record 55 (rulings of 2026-10-12, item 6): a run's frozen list of a
+    // dataset's or a cohort's main scans is the picks it was resolved from,
+    // which the release records as they were recorded
+    if let Some(doc) = &selection.picks {
+        return Ok((
+            nils_registry::pick_truth::Of::of_record(doc),
+            Some(doc.clone()),
+        ));
     }
     let (of, doc) = nils_registry::pick_truth::for_release(
         store,

@@ -5681,7 +5681,12 @@ fn capabilities(
         .unwrap_or_default()
         .into_iter()
         .filter_map(|p| nils_pack::load(&p, None).ok())
-        .map(|p| serde_json::json!({ "name": p.name, "version": p.version.to_string(), "contract": p.contract }))
+        .map(|p| {
+            // record 55 (rulings of 2026-10-12, item 6): the roles a run over
+            // a dataset's or a cohort's main scans takes
+            let roles: Vec<&String> = p.picks.iter().flat_map(|m| m.roles.iter()).collect();
+            serde_json::json!({ "name": p.name, "version": p.version.to_string(), "contract": p.contract, "main_roles": roles })
+        })
         .collect();
     let doors_list = doors_list();
     serde_json::json!({

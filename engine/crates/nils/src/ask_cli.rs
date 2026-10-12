@@ -331,7 +331,7 @@ pub(crate) struct AskTimeArgs {
     runs: usize,
 }
 
-fn principal() -> String {
+pub(crate) fn principal() -> String {
     std::env::var("NILS_PRINCIPAL")
         .ok()
         .filter(|p| !p.is_empty())
@@ -1707,7 +1707,10 @@ fn whole_bounds() -> Bounds {
 }
 
 /// Freeze a saved selection into a handle of its stacks or sessions, as
-/// much of it as `how` keeps.
+/// much of it as `how` keeps. Record 55 (rulings of 2026-10-12, item 6): a
+/// dataset's or a cohort's main scans by role, `main:<role>@dataset:<name>`
+/// or `main:<role>@cohort:<name>`, are frozen the same way, resolved now
+/// (`crate::main_input`).
 pub(crate) fn freeze(
     home: &Home,
     spec: &str,
@@ -1716,6 +1719,11 @@ pub(crate) fn freeze(
     pack_name: &str,
     how: Freeze,
 ) -> Result<Frozen, Exit> {
+    if let Some(main) = crate::main_input::Spec::parse(spec) {
+        let main = main.map_err(usage)?;
+        return crate::main_input::freeze(home, &main, want, pack_dir, pack_name, how)
+            .map(|(f, _)| f);
+    }
     let dir = crate::pack_dir(home, pack_dir)
         .map_err(|_| usage("no packs here: pass --pack-dir DIR to freeze a selection"))?;
     let pack = load_pack(&dir, pack_name)?;
