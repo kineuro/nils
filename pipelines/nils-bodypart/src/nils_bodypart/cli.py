@@ -549,7 +549,7 @@ def _digests(model, cas=None) -> dict:
     return doc
 
 
-def _reason_table(sid: int, reason: str, model, cas=None) -> dict:
+def _reason_table(sid: int, reason: str, model, cas=None, files_read: int = 0) -> dict:
     """The scores table of a stack with no answer: why, and the parts of
     the run (record 55 E2, T24: every scan carries a body region or a stated
     reason)."""
@@ -560,7 +560,7 @@ def _reason_table(sid: int, reason: str, model, cas=None) -> dict:
         for v in values:
             doc[f"{mode}_{column(v)}"] = None
         doc.update({f"{mode}_value": None, f"{mode}_confidence": None, f"{mode}_answers": None})
-    return {**doc, "stage": None, "files_read": 0, "reason": reason, **_digests(model, cas), "stack_id": sid}
+    return {**doc, "stage": None, "files_read": files_read, "reason": reason, **_digests(model, cas), "stack_id": sid}
 
 
 def _no_region(r) -> str | None:
@@ -589,6 +589,7 @@ def _fusion_table(sid: int, r, model, cas=None, stage: str | None = None, files_
         doc[f"{mode}_answers"] = int(a["answers"])
     doc["stage"] = stage
     doc["files_read"] = files_read
+    doc["stage1"] = None  # the cascade's says how its first stage ended
     doc["reason"] = _no_region(r)
     doc.update(_digests(model, cas))
     doc["stack_id"] = sid
@@ -789,7 +790,8 @@ def _infer_cascade(a: argparse.Namespace, model, cas, device: str) -> Run:
         a.gpu_workers = 1 if student_device == "cuda" else 2
     params = {"threads": a.threads, "models": {**model.refs(), **cas.refs()}, "preprocessing": volume.PREPROCESSING,
               "cascade": {"stages": [s["stage"] for s in cas.doc["stages"]], "deferral_at_least": cas.d3_threshold,
-                          "margin_logit_at_least": cas.m3, "student_device": student_device, "readahead": a.readahead,
+                          "margin_logit_at_least": cas.m3, "student_device": student_device, "student_threads": a.student_threads,
+                          "student_batch": a.student_batch, "readahead": a.readahead,
                           "chunk": a.chunk}}
     if a.cache_fill != "none":
         params["cascade"]["cache_fill"] = a.cache_fill
@@ -808,7 +810,7 @@ def _infer_cascade(a: argparse.Namespace, model, cas, device: str) -> Run:
     stats: dict = {}
     outcomes = cascade_mod.score(model, cas, a.inputs, stacks, workers=a.threads, device=device, chunk=a.chunk, depth=a.readahead,
                                  student_batch=a.student_batch, fill=a.cache_fill == "touched", keep_inputs=writer is not None, stats=stats,
-                                 gpu_workers=a.gpu_workers, context=context, student_device=student_device)
+                                 gpu_workers=a.gpu_workers, context=context, student_device=student_device, student_threads=a.student_threads)
     counts = {"answered_fine": 0, "answered_coarse": 0, "failed": 0, "cohort_calibrated": 0}
     stages = {"s1": 0, cas.b24: 0, "touched": 0}
     reasons = {k: 0 for k in cascade_mod.REASONS}
@@ -822,7 +824,9 @@ def _infer_cascade(a: argparse.Namespace, model, cas, device: str) -> Run:
             status, error = o.why or (FAILED, "the stack could not be scored")
             counts["failed"] += int(status == FAILED)
             u = Unit(st.unit, status=status, error=error)
-            body = (json.dumps(_reason_table(st.stack_id, reason, model, cas), indent=2) + "\n").encode()
+            table = _reason_table(st.stack_id, reason, model, cas, files_read=len(o.opened or ()))
+            table["stage1"] = o.stage1
+            body = (json.dumps(table, indent=2) + "\n").encode()
             u.outputs.append(run.output_file(f"bodypart-fusion/{st.stack_id}.json", body, "table", "application/json"))
             run.units.append(u)
             continue
@@ -830,6 +834,7 @@ def _infer_cascade(a: argparse.Namespace, model, cas, device: str) -> Run:
         files_total += files
         stages[r.stage] = stages.get(r.stage, 0) + 1
         doc = _fusion_table(st.stack_id, r, model, cas, stage=r.stage, files_read=files)
+        doc["stage1"] = o.stage1
         if o.d3 is not None:
             doc["deferral"] = round(o.d3, 6)
         if doc["reason"]:
@@ -950,6 +955,7 @@ def parser() -> argparse.ArgumentParser:
     f.add_argument("--chunk", type=int, default=4, help="stacks a worker takes at a time")
     f.add_argument("--cascade", choices=("auto", "on", "off"), default="auto", help="auto runs the cascade where the run was given one (record 55 E2); off runs the certified reader alone")
     f.add_argument("--student-batch", type=int, default=64, help="stacks a batch of the cascade's student")
+    f.add_argument("--student-threads", type=int, default=32, help="the cascade's student's threads on the CPU, its own and not --threads, so its numbers do not depend on the workers: 32, as the graded CPU answers were made")
     f.add_argument("--cache", type=Path, default=None, help="the slice cache's folder, read-write: the inputs the cascade read are kept there per session")
     f.add_argument("--cache-fill", choices=("none", "touched"), default="none", help="touched also builds the touched planes of stacks an earlier stage answered, for the cache (scoring at arrival, R5)")
     return p

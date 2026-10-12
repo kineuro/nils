@@ -316,6 +316,12 @@ def test_every_stack_carries_a_region_or_a_reason(world, tmp_path, stand_in):
     reasons = {26: "sealed", 27: "not-mr", 28: "no-geometry", 30: "unreadable"}
     for sid, why in reasons.items():
         assert t[sid]["reason"] == why and t[sid]["stage"] is None and t[sid]["fine_value"] is None, sid
+    # how stage 1 ended, per stack, and what an unanswered stack's reads tried
+    assert t[29]["stage1"] == "multi-frame" and t[30]["stage1"] == "slice-unreadable"
+    assert {t[s]["stage1"] for s in (26, 27, 28)} == {None}
+    assert all(t[s]["stage1"] in ("answered", "deferred") for s in (21, 22, 23, 24, 25, 31))
+    assert all((t[s]["stage1"] == "answered") == (t[s]["stage"] == "s1") for s in (21, 22, 23, 24, 25, 31))
+    assert t[30]["files_read"] >= 1 and {t[s]["files_read"] for s in (26, 27, 28)} == {0}
     assert (status["stack-26"]["status"], status["stack-30"]["status"]) == ("skipped", "failed")
     for sid, d in t.items():
         answered = d.get("coarse_answers") == 1
@@ -406,6 +412,28 @@ def test_the_cascade_passes_gpu_workers_on(world, tmp_path, stand_in, monkeypatc
     code, r = run(world, inp, tmp_path / "out-default", "--device", "cuda")
     assert code == 0, r.get("error")
     assert set(seen) == {("cuda", 1)} and r["params"]["gpu_workers"] == 1
+
+
+def test_the_students_threads_are_its_own(world, tmp_path, monkeypatch):
+    """The student's numbers on the CPU depend on its threads, so it takes
+    a count of its own (32, as the graded answers were made), not the run's
+    --threads; --student-threads sets another."""
+    from nils_bodypart import student
+
+    asked = []
+
+    class Counted(StandIn):
+        def __init__(self, path, device="cpu", threads=None):
+            asked.append(threads)
+            super().__init__(path, device, threads)
+
+    monkeypatch.setattr(student, "Student", Counted)
+    inp = inputs(world, tmp_path, deferral="all")
+    for n, more in (("a", ["--threads", "1"]), ("b", ["--threads", "2"]), ("c", ["--student-threads", "4"])):
+        code, r = run(world, inp, tmp_path / n, *more)
+        assert code == 0, r.get("error")
+    assert asked == [32, 32, 4]
+    assert r["params"]["cascade"]["student_threads"] == 4
 
 
 def test_a_cpu_torch_runs_the_student_on_the_cpu_where_a_card_is_seen(world, tmp_path, monkeypatch):

@@ -111,7 +111,7 @@ def _init(
             logger.warning("the GPU decoder did not start (%s); decoding on the CPU", type(e).__name__)
 
 
-def climb(model, st: manifest.Stack, ladder: dict, decode=None):
+def climb(model, st: manifest.Stack, ladder: dict, decode=None, memo: dict | None = None):
     """The cascade's planes stages on one stack (record 55 E2, P1b): each
     policy of ``ladder["stages"]`` in turn, ``(policy, margin)``, until one
     answers with at least its margin from both thresholds (None: always),
@@ -121,7 +121,7 @@ def climb(model, st: manifest.Stack, ladder: dict, decode=None):
     the answer never changes for it."""
     from . import cascade
 
-    memo: dict = {}
+    memo = memo if memo is not None else {}  # the caller's, to count what a failed stack opened
     answer = None
     for policy, need in ladder["stages"]:
         prep = fusion.prepare_reduced(st, policy, decode, memo)
@@ -153,9 +153,10 @@ def climb(model, st: manifest.Stack, ladder: dict, decode=None):
 
 
 def _one(st: manifest.Stack):
+    memo: dict = {}
     try:
         if _W.get("ladder"):
-            return climb(_W["model"], st, _W["ladder"], _W["decode"]), None
+            return climb(_W["model"], st, _W["ladder"], _W["decode"], memo), None
         if _W.get("reader", "full") != "full":
             prep = fusion.prepare_reduced(st, _W["reader"].split(":", 1)[1], _W["decode"])
             if _W["prepare_only"]:
@@ -165,7 +166,10 @@ def _one(st: manifest.Stack):
             return fusion.prepare(st.files, st.extra.get("header"), _W["decode"]), None
         return fusion.predict(_W["model"], st.files, st.extra.get("header"), _W["decode"]), None
     except Exception as e:  # noqa: BLE001 - a unit fails, the run goes on
-        return None, outcome(e)
+        why = outcome(e)
+        if _W.get("ladder"):  # the cascade counts the files a failed stack's reads opened
+            why = (*why, sorted(memo.get("opened") or ()))
+        return None, why
 
 
 def _chunk(stacks: list[manifest.Stack]):

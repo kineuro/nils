@@ -181,7 +181,8 @@ x-nils:
         - {name: coarse_digest, type: text, description: The coarse mode file, when the run had one}
         - {name: encoder_digest, type: text, description: The image encoder}
         - {name: stage, type: text, description: "The stage that answered: s1, b24 or touched with a cascade; the reader alone (reduced:touched, full) without one; null for a stack with a reason"}
-        - {name: files_read, type: integer, description: The files the stack's reads opened}
+        - {name: files_read, type: integer, description: The files the stack's reads opened, a stack with no answer's too}
+        - {name: stage1, type: text, description: "How the cascade's first stage ended for the stack: answered, deferred (D3 below its threshold), no-study, no-file-geometry, multi-frame, no-slice, slice-unreadable; null where it was never a candidate (sealed, not-mr, no-geometry) or without a cascade"}
         - {name: reason, type: text, description: "Why the stack carries no body region: sealed, not-mr, no-geometry, not-sure (scored, the coarse mode abstains) or unreadable; null where it carries one"}
         - {name: cascade_digest, type: text, description: The cascade, when the run had one}
         - {name: student_digest, type: text, description: The cascade's student}

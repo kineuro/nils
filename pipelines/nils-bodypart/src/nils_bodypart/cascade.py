@@ -210,6 +210,15 @@ def margin(answers: dict, thresholds: dict) -> float:
 # --- the cascade over a run's stacks ---------------------------------------------------------------------------------------
 
 REASONS = ("sealed", "not-mr", "no-geometry", "not-sure", "unreadable")
+# why stage 1 did not answer a stack it could score: it went straight to
+# the planes (no study from the engine, a file whose registry geometry
+# cannot stand in for its header, a multi-frame file or no slice to read),
+# its slice did not decode, or D3 deferred it
+STAGE1 = ("answered", "deferred", "no-study", "no-file-geometry", "multi-frame", "no-slice", "slice-unreadable")
+# the student's threads on the CPU, its own and not the run's --threads, so
+# its numbers do not depend on how many workers read: the count the graded
+# CPU answers were made with (the speed study's A5.2 run line, 32 workers)
+STUDENT_THREADS = 32
 # stage 1's slices read at a time (rounded down to whole batches of the
 # student): what the main process holds of them, about 37 kB a slice
 STAGE1_BLOCK = 2048
@@ -230,11 +239,15 @@ class Outcome:
     tile_ident: dict | None = None
     tile_path: str | None = None
     d3: float | None = None
+    stage1: str | None = None  # how stage 1 ended for it (``STAGE1``); None where it was never a candidate
+    tried: str | None = None  # a slot-0 file opened whose slice did not decode
+    opened: set | None = None  # the files a stack with no answer had its reads open
 
 
 def score(model: fusion.Model, cas: Cascade, inputs: Path, stacks: list, *, workers: int = 1, device: str = "cpu", chunk: int = 4,
           depth: int = 1, student_batch: int = 64, fill: bool = False, keep_inputs: bool = False, student_factory=None,
-          stats: dict | None = None, gpu_workers: int = 2, context: list | None = None, student_device: str | None = None) -> list[Outcome]:
+          stats: dict | None = None, gpu_workers: int = 2, context: list | None = None, student_device: str | None = None,
+          student_threads: int = STUDENT_THREADS) -> list[Outcome]:
     """Every stack's outcome, in the manifest's order.
 
     First the reasons that need no read: a stack sealed now (``sealed``),
@@ -276,6 +289,9 @@ def score(model: fusion.Model, cas: Cascade, inputs: Path, stacks: list, *, work
         reg = fewslice.registry_inputs(st, model) if g.get("study_id") is not None else None
         s0 = fewslice.slot0(g) if reg is not None else None
         if reg is None or s0 is None:
+            why = ("no-study" if g.get("study_id") is None else "multi-frame" if (g.get("max_frames") or 1) > 1
+                   else "no-file-geometry" if reg is None else "no-slice")
+            out[st.stack_id] = Outcome(st, stage1=why)
             rest.append(st)
             continue
         cands.append((st, g, reg, s0[0], s0[1]))
@@ -299,7 +315,7 @@ def score(model: fusion.Model, cas: Cascade, inputs: Path, stacks: list, *, work
             student_device = "cuda" if device == "cuda" and torch_cuda_available() else "cpu"
         # loaded before any slice is read, so a student that cannot load
         # fails the run before its reads
-        net = Student(cas.student.artifact, device=student_device, threads=max(1, workers))
+        net = Student(cas.student.artifact, device=student_device, threads=max(1, int(student_threads)))
     pending: list = []  # (candidate, read) decoded, waiting for the student
 
     def stage1(take: list) -> None:
@@ -319,7 +335,7 @@ def score(model: fusion.Model, cas: Cascade, inputs: Path, stacks: list, *, work
         for (c, t), row, q in zip(take, table, d3):
             st = c[0]
             path = st.files[c[3]][0]
-            o = Outcome(st, tile=t[0][0] if keep_inputs or fill else None, tile_ident=t[0][1], tile_path=path, d3=float(q))
+            o = Outcome(st, tile=t[0][0] if keep_inputs or fill else None, tile_ident=t[0][1], tile_path=path, d3=float(q), stage1="answered")
             if q >= cas.d3_threshold:
                 header = st.extra.get("header") or {}
                 cls = header.get("classification")
@@ -329,6 +345,7 @@ def score(model: fusion.Model, cas: Cascade, inputs: Path, stacks: list, *, work
                                               header_features.rules_row(cls), {"files_read": 1}, stage="s1", idents={path: t[0][1]},
                                               read_files=[path], opened={path})
             else:
+                o.stage1 = "deferred"
                 rest.append(st)
             out[st.stack_id] = o
 
@@ -340,7 +357,8 @@ def score(model: fusion.Model, cas: Cascade, inputs: Path, stacks: list, *, work
         for c, t in zip(part, read):
             if t[0] is None:
                 rest.append(c[0])
-                out[c[0].stack_id] = Outcome(c[0])  # deferred: the slice did not decode
+                # to the planes: the slice did not decode
+                out[c[0].stack_id] = Outcome(c[0], stage1="slice-unreadable", tried=c[0].files[c[3]][0])
                 unreadable += 1
             else:
                 pending.append((c, t))
@@ -363,13 +381,18 @@ def score(model: fusion.Model, cas: Cascade, inputs: Path, stacks: list, *, work
                                     gpu_workers=gpu_workers):
         o = out.get(st.stack_id) or Outcome(st)
         if r is None:
-            o.why = why
+            o.why = tuple(why[:2]) if why else why
             o.reason = "unreadable" if why and why[0] != SKIPPED else "no-geometry"
+            # what its reads opened before they failed, its slice's file too
+            o.opened = set(why[2] if why and len(why) > 2 else ()) | {p for p in (o.tile_path, o.tried) if p}
         else:
             if o.tile_path is not None:  # the student read its slice first
                 r.idents = dict(r.idents or {})
                 r.idents[o.tile_path] = o.tile_ident
                 r.opened = set(r.opened or ()) | {o.tile_path}
+                r.reader = dict(r.reader or {}, files_read=len(r.opened))
+            elif o.tried is not None:  # its slice's file was opened, and did not decode
+                r.opened = set(r.opened or ()) | {o.tried}
                 r.reader = dict(r.reader or {}, files_read=len(r.opened))
             o.result = r
         out[st.stack_id] = o

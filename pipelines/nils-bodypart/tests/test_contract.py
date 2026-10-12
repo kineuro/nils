@@ -192,7 +192,7 @@ def test_the_fusion_descriptor_declares_its_models_table_and_axes():
     coarse = [f"coarse_{v}" for v in ("head", "spine", "chest", "other")]
     assert list(cols) == fine + ["fine_value", "fine_confidence", "fine_answers"] + coarse + [
         "coarse_value", "coarse_confidence", "coarse_answers", "head_digest", "coarse_digest", "encoder_digest",
-        "stage", "files_read", "reason", "cascade_digest", "student_digest", "deferral_digest",
+        "stage", "files_read", "stage1", "reason", "cascade_digest", "student_digest", "deferral_digest",
     ]
     assert all(cols[c] == "number" for c in fine + coarse + ["fine_confidence", "coarse_confidence"])
     assert cols["fine_answers"] == cols["coarse_answers"] == cols["files_read"] == "integer"
@@ -243,7 +243,7 @@ def test_the_fusion_results_and_its_tables_are_the_contracts(tmp_path):
         found = {fold(k): v for k, v in row.items()}
         for name, ty in declared.items():
             v = found[name]
-            if name in ("reason", "cascade_digest", "student_digest", "deferral_digest"):
+            if name in ("reason", "stage1", "cascade_digest", "student_digest", "deferral_digest"):
                 assert v is None or (isinstance(v, str) and v)  # null without a cascade, or where the stack has a region
                 continue
             if name == "files_read":
