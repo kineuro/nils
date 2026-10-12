@@ -1451,7 +1451,30 @@ impl Server {
         held.port = addr.rsplit(':').next().unwrap().parse().unwrap();
         // the worker prints a line a job; nobody need read them
         std::thread::spawn(move || for _ in lines {});
+        held.runtime_looked();
         held
+    }
+
+    /// Wait until the engine has finished its first look for a container
+    /// runtime: until then its doors say pipelines are off for a moment,
+    /// and the jobs door refuses a run, which a test would read as its own
+    /// failure on a slow machine. The capabilities say it: `pipelines.reason`
+    /// is the moment's sentence while the engine looks.
+    fn runtime_looked(&self) {
+        const LOOKING: &str = "the engine is still looking for a container runtime";
+        let started = std::time::Instant::now();
+        loop {
+            let (status, caps) = self.call("GET", "/api/capabilities", None, OPERATOR);
+            let reason = caps["pipelines"]["reason"].as_str().unwrap_or_default();
+            if status == 200 && !reason.contains(LOOKING) {
+                return;
+            }
+            assert!(
+                started.elapsed().as_secs() < 60,
+                "nils serve was still looking for a container runtime after 60 s ({status}): {caps}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
     }
 
     fn raw(&self, method: &str, path: &str, body: Option<Value>, token: &str) -> (u16, Vec<u8>) {
