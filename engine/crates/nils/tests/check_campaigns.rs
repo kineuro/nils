@@ -269,6 +269,17 @@ impl Drop for Server {
 
 impl Server {
     fn start(home: &Home) -> Server {
+        Server::start_as(home, true)
+    }
+
+    /// A server with no worker of its own: what it queues waits until a
+    /// server with one starts, so a test reads the moment before a job runs
+    /// however fast the machine is.
+    fn start_idle(home: &Home) -> Server {
+        Server::start_as(home, false)
+    }
+
+    fn start_as(home: &Home, worker: bool) -> Server {
         let trust = format!(
             "issuer={ISSUER},audience=nils,jwks={}",
             fixtures().join("jwks.json").display()
@@ -282,12 +293,12 @@ impl Server {
                 "127.0.0.1:0",
                 "--workers",
                 "4",
-                "--worker",
                 "--auth",
                 "oidc",
                 "--oidc-trust",
                 &trust,
             ])
+            .args(worker.then_some("--worker"))
             .args(["--pack-dir", packs().to_str().unwrap()])
             .env("USER", "cleo")
             .env("HOSTNAME", "lab")
@@ -691,7 +702,9 @@ fn checks(pg: Option<(String, String)>) {
         .unwrap();
     }
 
-    let server = Server::start(&home);
+    // no worker yet: the parts job the preview queues waits, so the check
+    // made too early is refused whatever the machine's speed
+    let server = Server::start_idle(&home);
     let ops = token(
         "ops",
         &[
@@ -769,7 +782,9 @@ fn checks(pg: Option<(String, String)>) {
         &ops,
     );
     assert_eq!(status, 409, "{refused}");
-    // the job reads the three masks
+    // a server with its worker takes the job up, and it reads the three masks
+    drop(server);
+    let server = Server::start(&home);
     let mut read = Value::Null;
     for _ in 0..600 {
         read = server.ok(
