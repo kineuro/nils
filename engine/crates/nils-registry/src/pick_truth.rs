@@ -28,20 +28,31 @@
 //!
 //! Whether a scope is read is asked in the statement itself, so a reader
 //! never holds an answer that a finished run has since changed. A release
-//! records what it read ([`Of::pinned`], [`Of::record`]), and a pipeline
-//! run over the release reads that again ([`Of::of_record`]).
+//! records what it read ([`Of::pinned`], [`Of::record`]) and freezes the
+//! picks it read into `release_pick` ([`freeze`]), since a scope's newer
+//! rules replace the picks of the version before and the pack's run makes
+//! its own again (record 55, rulings of 2026-10-12, item 6, carried to
+//! releases); every reader of a release's picks after it was made reads
+//! that list ([`of_release`]). A release from before keeps the live picks
+//! of what it recorded while they are there, and says so where they are
+//! gone.
 //!
 //! The picks are a relation, [`Of::relation`]: the live picks (none
 //! withdrawn) of the scope the rule names, which a reader joins in place of
-//! the `pick` table. Nothing else names the table but the run that writes
-//! picks and the few readers the test at the end of this file names, each
-//! with why.
+//! the `pick` table; and as stacks, [`Picks::relation`]: a row per pick and
+//! stack, live or as a release froze them. Nothing else names the `pick`
+//! table but the run that writes picks and the few readers the test at the
+//! end of this file names, each with why; nothing but this module names
+//! `release_pick`.
+
+use std::collections::BTreeSet;
 
 use serde_json::{Value, json};
 
 use crate::dialect::qualified;
 use crate::pick_rules::{self, Reading, Scope, ScopeKind};
-use crate::store::{Error as StoreError, Store};
+use crate::schema::{Type, table};
+use crate::store::{Error as StoreError, Insert, Param, Store};
 
 /// Which version of a scope's picks is read: the one read now (the latest
 /// whose run finished over all its subjects, asked in the statement), one
@@ -560,6 +571,403 @@ pub fn for_release(
     Ok((pinned, doc))
 }
 
+/// The picked stacks a reader reads, one row per pick and stack it names:
+/// `subject_id` and `session_day` (the visit, as the pick names it, a
+/// date), `role`, `stack_id`, and the scope and version of the rules the
+/// pick was made with (`rules_scope_kind`, `rules_scope_id`,
+/// `rules_version`, the scope null for the pack's). Of the live picks a
+/// rule says ([`Of`]), or of the list a release froze when it was made
+/// ([`freeze`]), which every reader of a release's picks after it reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Picks {
+    Live(Of),
+    /// A release's, by its id.
+    Frozen(i64),
+}
+
+impl Picks {
+    /// As a relation with the columns above, to select from or join.
+    pub fn relation(&self, schema: Option<&str>) -> String {
+        match self {
+            Picks::Live(of) => format!(
+                "(SELECT lp.subject_id, lp.session_day, lp.role, lps.stack_id, \
+                 lp.rules_scope_kind, lp.rules_scope_id, lp.rules_version \
+                 FROM {} lps JOIN {} lp ON lp.id = lps.pick_id)",
+                qualified(schema, "pick_stack"),
+                of.relation(schema)
+            ),
+            Picks::Frozen(release) => format!(
+                "(SELECT fp.subject_id, fp.session_day, fp.role, fp.stack_id, \
+                 fp.rules_scope_kind, fp.rules_scope_id, fp.rules_version \
+                 FROM {} fp WHERE fp.release_id = {release})",
+                qualified(schema, "release_pick")
+            ),
+        }
+    }
+
+    /// [`Picks::relation`] in a store's schema.
+    pub fn stacks(&self, store: &Store) -> String {
+        self.relation(store.schema())
+    }
+}
+
+/// A run's frozen list of a scope's main scans, which a release takes as it
+/// was frozen (record 55, rulings of 2026-10-12, item 6): the role its
+/// stacks are the main scans of, and each stack with its subject and its
+/// visit's first day under the default scheme, as a pick names a visit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Listed {
+    pub role: String,
+    pub stacks: Vec<(i64, i64, String)>,
+}
+
+/// What a release froze of the picks it read, counted: the visits it took
+/// a stack of, the picks on them (one a visit and role), and the stacks
+/// they name; of a run's list, how many of its stacks were frozen from the
+/// list, since no live pick of its role named them when the release was
+/// made (a newer version of the rules had replaced them by then).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Frozen {
+    pub visits: usize,
+    pub picks: usize,
+    pub stacks: usize,
+    pub listed: Option<usize>,
+}
+
+impl Frozen {
+    /// As `release.pick_rules.frozen` keeps it.
+    pub fn doc(&self) -> Value {
+        let mut doc = json!({"visits": self.visits, "picks": self.picks, "stacks": self.stacks});
+        if let Some(n) = self.listed {
+            doc["listed"] = json!(n);
+        }
+        doc
+    }
+}
+
+/// One frozen pick of a stack: the subject, the visit's first day, the
+/// role, the stack, and the scope kind, id and version of the rules.
+type FrozenRow = (
+    i64,
+    String,
+    String,
+    i64,
+    Option<String>,
+    Option<i64>,
+    Option<i64>,
+);
+
+/// Freeze what a release read of the picks (record 55, rulings of
+/// 2026-10-12, item 6, carried to releases): of each visit one of `taken`
+/// (its stacks, each with its subject) is picked on, every live pick of
+/// `of` with each stack it names, of every role, as [`Picks::Live`] reads
+/// them; and of a run's list, each of its stacks the release took that no
+/// frozen pick of the list's role names, as the main scan of the role on
+/// its visit under the version the list was read under. Written into
+/// `release_pick` under `release`, and never changed after. Answers what it
+/// froze, counted.
+pub fn freeze(
+    store: &mut Store,
+    release: i64,
+    of: &Of,
+    taken: &[(i64, i64)],
+    listed: Option<&Listed>,
+) -> Result<Frozen, StoreError> {
+    let took: BTreeSet<i64> = taken.iter().map(|(s, _)| *s).collect();
+    let subjects: Vec<i64> = taken
+        .iter()
+        .map(|(_, s)| *s)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let live = Picks::Live(of.clone()).stacks(store);
+    let day = store.dialect().text_of_qualified(
+        Some("p"),
+        table("release_pick")
+            .column("session_day")
+            .expect("release_pick.session_day"),
+    );
+    let mut read: Vec<FrozenRow> = Vec::new();
+    for chunk in subjects.chunks(500) {
+        let sql = format!(
+            "SELECT p.subject_id, {day}, p.role, p.stack_id, p.rules_scope_kind, \
+             p.rules_scope_id, p.rules_version FROM {live} p WHERE p.subject_id IN ({})",
+            list(chunk)
+        );
+        for r in store.query(&sql, &[])? {
+            let day = r.text(1)?;
+            read.push((
+                r.int(0)?,
+                day[..day.len().min(10)].to_string(),
+                r.text(2)?.to_string(),
+                r.int(3)?,
+                r.opt_text(4)?.map(str::to_string),
+                r.opt_int(5)?,
+                r.opt_int(6)?,
+            ));
+        }
+    }
+    // the visits the release took a stack of, and every pick on them
+    let visits: BTreeSet<(i64, String)> = read
+        .iter()
+        .filter(|r| took.contains(&r.3))
+        .map(|r| (r.0, r.1.clone()))
+        .collect();
+    let mut rows: BTreeSet<FrozenRow> = read
+        .into_iter()
+        .filter(|r| visits.contains(&(r.0, r.1.clone())))
+        .collect();
+    // a run's list: each of its stacks the main scan of its role, as it
+    // was resolved, where the picks of the version it was read under are
+    // gone by now
+    let mut from_list = None;
+    if let Some(l) = listed {
+        let (kind, id, version) = match of {
+            Of::Scope {
+                kind,
+                id: Id::Id(id),
+                version: Version::At(v),
+                ..
+            } => (Some(kind.name().to_string()), Some(*id), Some(*v)),
+            _ => (None, None, Some(1)),
+        };
+        let named: BTreeSet<(i64, String, i64)> = rows
+            .iter()
+            .filter(|r| r.2 == l.role)
+            .map(|r| (r.0, r.1.clone(), r.3))
+            .collect();
+        let mut n = 0usize;
+        for (stack, subject, day) in &l.stacks {
+            if !took.contains(stack) || named.contains(&(*subject, day.clone(), *stack)) {
+                continue;
+            }
+            rows.insert((
+                *subject,
+                day.clone(),
+                l.role.clone(),
+                *stack,
+                kind.clone(),
+                id,
+                version,
+            ));
+            n += 1;
+        }
+        from_list = Some(n);
+    }
+    let params: Vec<Vec<Param>> = rows
+        .iter()
+        .map(|r| {
+            vec![
+                Param::Int(release),
+                Param::Int(r.0),
+                Param::from(r.1.as_str()),
+                Param::from(r.2.as_str()),
+                Param::Int(r.3),
+                r.4.as_deref().map_or(Param::Null, Param::from),
+                r.5.map_or(Param::Null, Param::Int),
+                r.6.map_or(Param::Null, Param::Int),
+            ]
+        })
+        .collect();
+    if !params.is_empty() {
+        let insert = Insert::new(
+            table("release_pick"),
+            &[
+                "release_id",
+                "subject_id",
+                "session_day",
+                "role",
+                "stack_id",
+                "rules_scope_kind",
+                "rules_scope_id",
+                "rules_version",
+            ],
+        );
+        store.begin()?;
+        for chunk in params.chunks(1_000) {
+            if let Err(e) = store.insert(&insert, chunk) {
+                store.rollback().ok();
+                return Err(e);
+            }
+        }
+        store.commit()?;
+    }
+    Ok(Frozen {
+        visits: rows
+            .iter()
+            .map(|r| (r.0, r.1.as_str()))
+            .collect::<BTreeSet<_>>()
+            .len(),
+        picks: rows
+            .iter()
+            .map(|r| (r.0, r.1.as_str(), r.2.as_str()))
+            .collect::<BTreeSet<_>>()
+            .len(),
+        stacks: rows.iter().map(|r| r.3).collect::<BTreeSet<_>>().len(),
+        listed: from_list,
+    })
+}
+
+/// What a reader of a release's picks reads after the release was made
+/// (record 55, rulings of 2026-10-12, item 6, carried to releases).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OfRelease {
+    /// The list it froze when it was made ([`freeze`]).
+    Frozen(i64),
+    /// A release from before releases froze what they read, or one that
+    /// read no picks: the live picks of what it recorded it read (the
+    /// pack's, where it recorded none), as before.
+    Recorded(Of),
+    /// A release from before whose picks are gone, and why in words: a
+    /// newer version of the rules it read replaced them, or what it read
+    /// no longer names a stack it holds.
+    Gone { of: Of, why: String },
+}
+
+impl OfRelease {
+    /// The picked stacks a reader of the release reads; none where they
+    /// are gone.
+    pub fn picks(&self) -> Option<Picks> {
+        match self {
+            OfRelease::Frozen(id) => Some(Picks::Frozen(*id)),
+            OfRelease::Recorded(of) => Some(Picks::Live(of.clone())),
+            OfRelease::Gone { .. } => None,
+        }
+    }
+
+    /// Why its picks are gone, where they are.
+    pub fn gone(&self) -> Option<&str> {
+        match self {
+            OfRelease::Gone { why, .. } => Some(why),
+            _ => None,
+        }
+    }
+}
+
+/// What a reader of release `id`'s picks reads; none where there is no
+/// such release. A release made since releases froze what they read
+/// (`pick_rules.frozen`) is read from its list. One from before is read
+/// from the live picks of what it recorded, unless they are gone: a run of
+/// a newer version of the scope's rules it recorded has replaced them, or,
+/// of a release of picked stacks, what it recorded no longer names a stack
+/// whose state it last wrote.
+pub fn of_release(store: &mut Store, id: i64) -> Result<Option<OfRelease>, StoreError> {
+    let t = table("release");
+    let d = store.dialect();
+    let sql = format!(
+        "SELECT {}, {} FROM {} WHERE id = {}",
+        d.text_of(t.column("pick_rules").expect("release.pick_rules")),
+        d.text_of(t.column("selection").expect("release.selection")),
+        store.qualified("release"),
+        d.param(1, Type::Int)
+    );
+    let Some(r) = store.query_opt(&sql, &[Param::Int(id)])? else {
+        return Ok(None);
+    };
+    let doc = |text: Option<&str>| {
+        text.and_then(|t| serde_json::from_str::<Value>(t).ok())
+            .unwrap_or(Value::Null)
+    };
+    let recorded = doc(r.opt_text(0)?);
+    let selection = doc(r.opt_text(1)?);
+    if recorded["frozen"].is_object() {
+        return Ok(Some(OfRelease::Frozen(id)));
+    }
+    let of = match recorded {
+        Value::Null => Of::Pack,
+        ref doc => Of::of_record(doc),
+    };
+    if selection["picked_only"] != true {
+        return Ok(Some(OfRelease::Recorded(of)));
+    }
+    if let Some(why) = replaced(store, id, &of)? {
+        return Ok(Some(OfRelease::Gone { of, why }));
+    }
+    let sql = format!(
+        "SELECT COUNT(*) FROM {} rs WHERE rs.release_id = {} \
+         AND NOT EXISTS (SELECT 1 FROM {} p WHERE p.stack_id = rs.stack_id)",
+        store.qualified("release_stack"),
+        d.param(1, Type::Int),
+        Picks::Live(of.clone()).stacks(store)
+    );
+    let unnamed = store
+        .query_opt(&sql, &[Param::Int(id)])?
+        .map(|r| r.int(0))
+        .transpose()?
+        .unwrap_or(0);
+    if unnamed > 0 {
+        let why = format!(
+            "{}, which no longer name {unnamed} of the stacks it holds",
+            of.describe()
+        );
+        return Ok(Some(OfRelease::Gone { of, why }));
+    }
+    Ok(Some(OfRelease::Recorded(of)))
+}
+
+/// Of a release from before: where a version of a scope's rules it
+/// recorded has been replaced since (a run of a newer version over all the
+/// scope's subjects drops the picks of every other), or the scope is gone,
+/// why in words. Of a release of no scope, the datasets it recorded whose
+/// subjects it holds a stack of.
+fn replaced(store: &mut Store, release: i64, of: &Of) -> Result<Option<String>, StoreError> {
+    let read: Vec<(ScopeKind, i64, String, i64)> = match of {
+        Of::Scope {
+            kind,
+            id: Id::Id(id),
+            name,
+            version: Version::At(v),
+            ..
+        } => vec![(*kind, *id, name.clone(), *v)],
+        Of::Own(holders) => {
+            let mut read = Vec::new();
+            for h in holders {
+                let Version::At(v) = h.version else {
+                    continue;
+                };
+                let sql = format!(
+                    "SELECT COUNT(*) FROM {} rs JOIN {} st ON st.id = rs.stack_id \
+                     JOIN {} se ON se.id = st.series_id WHERE rs.release_id = {} \
+                     AND se.subject_id IN ({})",
+                    store.qualified("release_stack"),
+                    store.qualified("stack"),
+                    store.qualified("series"),
+                    store.dialect().param(1, Type::Int),
+                    crate::dataset_subjects::scanned(store.schema(), &h.sources)
+                );
+                let held = store
+                    .query_opt(&sql, &[Param::Int(release)])?
+                    .map(|r| r.int(0))
+                    .transpose()?
+                    .unwrap_or(0);
+                if held > 0 {
+                    read.push((ScopeKind::Dataset, h.id, h.name.clone(), v));
+                }
+            }
+            read
+        }
+        _ => Vec::new(),
+    };
+    for (kind, id, name, v) in read {
+        let read = format!(
+            "{} {name}'s main scans under its own rules, version {v}",
+            kind.name()
+        );
+        let Some(scope) = Scope::of(store, kind, id)? else {
+            return Ok(Some(format!("{read}, of a {} that is gone", kind.name())));
+        };
+        if let Some(now) = pick_rules::reading(store, &scope)?
+            && now.version != v
+        {
+            return Ok(Some(format!(
+                "{read}, which version {} replaced",
+                now.version
+            )));
+        }
+    }
+    Ok(None)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -652,6 +1060,59 @@ mod tests {
         );
     }
 
+    /// A reader of picked stacks reads the same columns of the live picks
+    /// and of a release's frozen list, so it is given either.
+    #[test]
+    fn the_live_picks_and_a_release_s_frozen_ones_are_one_relation() {
+        let columns = "subject_id, session_day, role, stack_id, rules_scope_kind, rules_scope_id, rules_version";
+        let live = Picks::Live(Of::Pack).relation(Some("s"));
+        assert!(
+            live.starts_with(
+                "(SELECT lp.subject_id, lp.session_day, lp.role, lps.stack_id, lp.rules_scope_kind, \
+                 lp.rules_scope_id, lp.rules_version FROM s.pick_stack lps JOIN (SELECT * FROM s.pick mp"
+            ),
+            "{live}"
+        );
+        let frozen = Picks::Frozen(12).relation(None);
+        assert_eq!(
+            frozen,
+            "(SELECT fp.subject_id, fp.session_day, fp.role, fp.stack_id, fp.rules_scope_kind, \
+             fp.rules_scope_id, fp.rules_version FROM release_pick fp WHERE fp.release_id = 12)"
+        );
+        for c in columns.split(", ") {
+            assert!(live.contains(&format!(".{c},")) || live.contains(&format!(".{c} ")));
+            assert!(frozen.contains(&format!("fp.{c}")));
+        }
+        assert_eq!(
+            OfRelease::Frozen(12).picks(),
+            Some(Picks::Frozen(12)),
+            "a release made since reads its list"
+        );
+        assert_eq!(
+            OfRelease::Recorded(Of::Pack).picks(),
+            Some(Picks::Live(Of::Pack))
+        );
+        assert_eq!(
+            OfRelease::Gone {
+                of: Of::Pack,
+                why: "gone".into()
+            }
+            .picks(),
+            None
+        );
+        assert_eq!(
+            Frozen {
+                visits: 3,
+                picks: 4,
+                stacks: 5,
+                listed: Some(1),
+            }
+            .doc(),
+            json!({"visits": 3, "picks": 4, "stacks": 5, "listed": 1})
+        );
+        assert!(Frozen::default().doc().get("listed").is_none());
+    }
+
     /// One place of truth: every SQL statement that names the `pick` table
     /// is the resolver's, or one of the named exceptions below, each with
     /// why and how many times it names it. A new reader that reads `pick`
@@ -705,10 +1166,17 @@ mod tests {
                 "pick explain reads one pick by its id",
             ),
         ];
+        // a release's frozen picks are read and written here alone
+        let frozen = |line: &str| -> bool {
+            (line.contains("qualified(") && line.contains("\"release_pick\")"))
+                || line.contains("FROM release_pick ")
+                || line.contains("JOIN release_pick ")
+        };
         let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .expect("the crates folder");
         let mut found: Vec<(String, usize)> = Vec::new();
+        let mut release_pick: Vec<String> = Vec::new();
         let mut dirs = vec![crates.to_path_buf()];
         while let Some(dir) = dirs.pop() {
             for entry in std::fs::read_dir(&dir).expect("a folder of the crates") {
@@ -731,6 +1199,9 @@ mod tests {
                 }
                 let body = std::fs::read_to_string(&path).expect("a source file");
                 let n = body.lines().filter(|l| names(l)).count();
+                if body.lines().any(frozen) {
+                    release_pick.push(rel.clone());
+                }
                 if n > 0 {
                     found.push((rel, n));
                 }
@@ -758,5 +1229,10 @@ mod tests {
         }
         assert!(found.len() > 3, "the sources were not read: {found:?}");
         assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+        assert_eq!(
+            release_pick,
+            vec!["nils-registry/src/pick_truth.rs".to_string()],
+            "a release's frozen picks are read through pick_truth::Picks::Frozen"
+        );
     }
 }

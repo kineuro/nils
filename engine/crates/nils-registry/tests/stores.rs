@@ -4358,3 +4358,149 @@ fn migration_93_keeps_a_run_s_failure_on_both_backends() {
         assert_eq!(resumed.error, None, "{name}");
     }
 }
+
+/// Record 55 (rulings of 2026-10-12, item 6, carried to releases),
+/// migration 94, on both backends: a registry of schema 93 gains
+/// `release_pick` empty. A release from before it, of picked stacks, reads
+/// the live picks of what it recorded while they name the stacks it holds,
+/// and says they are gone once they no longer do; a release that froze its
+/// picks reads the list it froze, whatever the live picks say by then.
+#[test]
+fn migration_94_keeps_the_picks_a_release_read_on_both_backends() {
+    use nils_registry::pick_truth::{self, Of, OfRelease, Picks};
+    for (name, _guard, mut store) in stores() {
+        migrate::migrate(&mut store, Kind::Registry).unwrap();
+        let (rp, meta) = (
+            store.qualified("release_pick"),
+            store.qualified("registry_meta"),
+        );
+        store
+            .batch(&format!(
+                "DROP TABLE {rp};\n\
+                 UPDATE {meta} SET value = '93' WHERE key = 'schema_version'"
+            ))
+            .unwrap();
+        assert_eq!(
+            migrate::migrate(&mut store, Kind::Registry).unwrap(),
+            (94..=migrate::SCHEMA_VERSION).collect::<Vec<i64>>(),
+            "{name}"
+        );
+        assert!(
+            migrate::table_exists(&mut store, "release_pick").unwrap(),
+            "{name}"
+        );
+        // the pack's pick of subject 2's visit names stack 5; two releases
+        // of picked stacks hold it, one recorded from before, one frozen
+        let (p, ps, r, rs) = (
+            store.qualified("pick"),
+            store.qualified("pick_stack"),
+            store.qualified("release"),
+            store.qualified("release_stack"),
+        );
+        let one = |store: &mut Store, sql: &str| store.query(sql, &[]).unwrap()[0].int(0).unwrap();
+        store
+            .batch(&format!(
+                "INSERT INTO {p} (model, role, subject_id, session_day, scheme, reference, pack, pack_version, \
+                 actor, author_kind, decided_at, rules_version) VALUES ('main', 't1w', 2, '2020-01-01', 's', \
+                 'registry', 'mri', '1', 'a', 'agent', '2026-10-01T10:00:00Z', 1)"
+            ))
+            .unwrap();
+        let pick = one(&mut store, &format!("SELECT MAX(id) FROM {p}"));
+        store
+            .batch(&format!(
+                "INSERT INTO {ps} (pick_id, stack_id) VALUES ({pick}, 5)"
+            ))
+            .unwrap();
+        let mut release = |name: &str| -> i64 {
+            store
+                .batch(&format!(
+                    "INSERT INTO {r} (name, version, root, policy, selection, categories, session_scheme, \
+                     layout, placements, pack, pack_version, actor, started_at, files, subjects, unchanged, \
+                     moved, rewritten, added, removed, pick_rules) VALUES ('{name}', '2026.10.12.1', \
+                     '/out/{name}', '{{}}', '{{\"picked_only\": true}}', '', '{{}}', 'descriptive', '{{}}', \
+                     'mri', '1', 'anna', '2026-10-12T10:00:00Z', 1, 1, 0, 0, 0, 1, 0, \
+                     '{{\"scope\": null, \"version\": 1, \"defaults\": true}}')"
+                ))
+                .unwrap();
+            let id = one(
+                &mut store,
+                &format!("SELECT id FROM {r} WHERE name = '{name}'"),
+            );
+            store
+                .batch(&format!(
+                    "INSERT INTO {rs} (dataset_id, stack_id, release_id, content, dir, route, files, bytes, digest) \
+                     VALUES ({id}, 5, {id}, 'c', 'sub-a/ses-b', 'raw', 1, 1, 'd')"
+                ))
+                .unwrap();
+            id
+        };
+        let (before, kept) = (release("from-before"), release("kept"));
+        let frozen = pick_truth::freeze(&mut store, kept, &Of::Pack, &[(5, 2)], None).unwrap();
+        assert_eq!(
+            frozen.doc(),
+            serde_json::json!({"visits": 1, "picks": 1, "stacks": 1}),
+            "{name}"
+        );
+        store
+            .batch(&format!(
+                "UPDATE {r} SET pick_rules = '{{\"scope\": null, \"version\": 1, \"defaults\": true, \
+                 \"frozen\": {}}}' WHERE id = {kept}",
+                frozen.doc()
+            ))
+            .unwrap();
+        assert_eq!(
+            pick_truth::of_release(&mut store, before).unwrap(),
+            Some(OfRelease::Recorded(Of::Pack)),
+            "{name}: from before, its picks there"
+        );
+        assert_eq!(
+            pick_truth::of_release(&mut store, kept).unwrap(),
+            Some(OfRelease::Frozen(kept)),
+            "{name}"
+        );
+        assert_eq!(
+            pick_truth::of_release(&mut store, kept + 100).unwrap(),
+            None
+        );
+        // the pack's run picks stack 6 instead
+        store
+            .batch(&format!(
+                "UPDATE {ps} SET stack_id = 6 WHERE pick_id = {pick}"
+            ))
+            .unwrap();
+        let gone = pick_truth::of_release(&mut store, before).unwrap().unwrap();
+        assert_eq!(gone.picks(), None, "{name}");
+        assert_eq!(
+            gone.gone(),
+            Some("the pack's main scans, which no longer name 1 of the stacks it holds"),
+            "{name}"
+        );
+        let read = |store: &mut Store, picks: &Picks| -> Vec<(i64, String, String, i64)> {
+            let sql = format!(
+                "SELECT p.subject_id, CAST(p.session_day AS TEXT), p.role, p.stack_id FROM {} p",
+                picks.stacks(store)
+            );
+            store
+                .query(&sql, &[])
+                .unwrap()
+                .iter()
+                .map(|r| {
+                    (
+                        r.int(0).unwrap(),
+                        r.text(1).unwrap().chars().take(10).collect(),
+                        r.text(2).unwrap().to_string(),
+                        r.int(3).unwrap(),
+                    )
+                })
+                .collect()
+        };
+        let row = |stack: i64| vec![(2, "2020-01-01".to_string(), "t1w".to_string(), stack)];
+        assert_eq!(read(&mut store, &Picks::Frozen(kept)), row(5), "{name}");
+        assert_eq!(read(&mut store, &Picks::Live(Of::Pack)), row(6), "{name}");
+        assert!(
+            migrate::migrate(&mut store, Kind::Registry)
+                .unwrap()
+                .is_empty()
+        );
+    }
+}

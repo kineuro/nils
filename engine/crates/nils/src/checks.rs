@@ -136,6 +136,8 @@ struct Plan {
     chosen: Vec<(Derivative, Vec<Panel>, i64)>,
     panels_missing: BTreeMap<String, usize>,
     panels_other_frame: BTreeMap<String, usize>,
+    /// Results whose run's input release lost its picks, by why.
+    panels_gone: BTreeMap<String, usize>,
     handle: Option<i64>,
 }
 
@@ -403,12 +405,13 @@ fn ids(list: &[i64]) -> String {
 }
 
 /// The main scans of these subjects' visits for some roles, as a reading
-/// of the picks says them: by (subject, day, role), the stacks picked.
+/// of the picks says them, live or as a release froze them: by (subject,
+/// day, role), the stacks picked.
 fn picks_of(
     store: &mut Store,
     subjects: &[i64],
     roles: &[String],
-    of: &nils_registry::pick_truth::Of,
+    read: &nils_registry::pick_truth::Picks,
 ) -> Result<Picks, Reply> {
     let mut out: Picks = BTreeMap::new();
     if roles.is_empty() {
@@ -416,8 +419,8 @@ fn picks_of(
     }
     let d = store.dialect();
     // one place of truth (2026-10-11): the picks as every reader reads
-    // them, through the resolver's relation
-    let picks = of.picks(store);
+    // them, through the resolver's relation of picked stacks
+    let picks = read.stacks(store);
     let quoted = roles
         .iter()
         .map(|r| format!("'{}'", r.replace('\'', "''")))
@@ -431,10 +434,9 @@ fn picks_of(
     );
     for chunk in subjects.chunks(500) {
         let sql = format!(
-            "SELECT p.subject_id, {day}, p.role, ps.stack_id FROM {picks} p JOIN {} ps ON ps.pick_id = p.id \
+            "SELECT p.subject_id, {day}, p.role, p.stack_id FROM {picks} p \
              WHERE p.role IN ({quoted}) AND p.subject_id IN ({}) \
-             ORDER BY ps.stack_id",
-            store.qualified("pick_stack"),
+             ORDER BY p.stack_id",
             ids(chunk),
         );
         for r in store.query(&sql, &[])? {
@@ -705,7 +707,7 @@ fn plan(
         return Err(bad("source.sample: a number of results"));
     }
     // the panels of each, through the visits' main scans
-    let (chosen, panels_missing, panels_other_frame) =
+    let (chosen, panels_missing, panels_other_frame, panels_gone) =
         panels_for(registry.store(), &drawable, &roles, &part_set)?;
     Ok(Plan {
         question,
@@ -722,6 +724,7 @@ fn plan(
         chosen,
         panels_missing,
         panels_other_frame,
+        panels_gone,
         handle,
     })
 }
@@ -830,10 +833,14 @@ fn of_selection(
 
 /// Each result's panels, through the visits' main scans: the made-on scan,
 /// then each role's pick of the visit in the made-on scan's frame. Answers
-/// the results with their panels and their part count, and per role the
-/// visits that had no pick, and those whose pick is in another frame.
+/// the results with their panels and their part count, per role the
+/// visits that had no pick and those whose pick is in another frame, and,
+/// by why, the results whose run's input release is from before releases
+/// froze their picks and whose picks are gone, which show the made-on scan
+/// alone.
 type Panelled = (
     Vec<(Derivative, Vec<Panel>, i64)>,
+    BTreeMap<String, usize>,
     BTreeMap<String, usize>,
     BTreeMap<String, usize>,
 );
@@ -857,10 +864,14 @@ fn panels_for(
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
-    // the picks read: what the run's release read, as it recorded it;
-    // for a result of no release, the main scans of no scope, as every
-    // reader of picks reads them (one place of truth, 2026-10-11)
-    let mut readings: BTreeMap<Option<i64>, nils_registry::pick_truth::Of> = BTreeMap::new();
+    // the picks read: what the run's release read, as it froze them when
+    // it was made (record 55, rulings of 2026-10-12, item 6, carried to
+    // releases), or of a release from before as it recorded them, unless
+    // they are gone; for a result of no release, the main scans of no
+    // scope, as every reader of picks reads them (one place of truth,
+    // 2026-10-11)
+    let mut readings: BTreeMap<Option<i64>, Result<nils_registry::pick_truth::Picks, String>> =
+        BTreeMap::new();
     for d in results {
         if readings.contains_key(&d.run_id) {
             continue;
@@ -871,20 +882,34 @@ fn panels_for(
                 .flatten()
                 .and_then(|r| r.input_release_id)
         });
-        let of = match release {
-            Some(release) => crate::pipelines::release_reading(store, release)
-                .map_err(|e| Reply::error(500, e))?,
-            None => nils_registry::pick_truth::Of::own(store)?,
+        let read = match (release, d.run_id) {
+            (Some(release), Some(run)) => {
+                let reading = crate::pipelines::release_reading(store, release)
+                    .map_err(|e| Reply::error(500, e))?;
+                reading.picks().ok_or_else(|| {
+                    format!(
+                        "the picks run {run}'s input release read are gone ({})",
+                        reading.gone().unwrap_or_default()
+                    )
+                })
+            }
+            _ => Ok(nils_registry::pick_truth::Picks::Live(
+                nils_registry::pick_truth::Of::own(store)?,
+            )),
         };
-        readings.insert(d.run_id, of);
+        readings.insert(d.run_id, read);
     }
     let mut picks: BTreeMap<Option<i64>, Picks> = BTreeMap::new();
     let mut picked: BTreeSet<i64> = BTreeSet::new();
-    for (run, of) in &readings {
-        let p = picks_of(store, &subjects, roles, of)?;
+    for (run, read) in &readings {
+        let Ok(read) = read else {
+            continue;
+        };
+        let p = picks_of(store, &subjects, roles, read)?;
         picked.extend(p.values().flatten().copied());
         picks.insert(*run, p);
     }
+    let mut gone: BTreeMap<String, usize> = BTreeMap::new();
     let frames = reg::frames_of(store, &picked.into_iter().collect::<Vec<_>>())?;
     let mut missing: BTreeMap<String, usize> = BTreeMap::new();
     let mut other_frame: BTreeMap<String, usize> = BTreeMap::new();
@@ -900,6 +925,12 @@ fn panels_for(
             stack: grid,
             link,
         }];
+        // its run's input release's picks are gone: the made-on scan alone
+        if let Some(Err(why)) = readings.get(&d.run_id) {
+            *gone.entry(why.clone()).or_default() += 1;
+            out.push((d.clone(), panels, count_of(d, set)));
+            continue;
+        }
         let v = visits.get(&grid).cloned().unwrap_or_default();
         let of_run = picks.get(&d.run_id);
         for role in roles {
@@ -939,7 +970,7 @@ fn panels_for(
         }
         out.push((d.clone(), panels, count_of(d, set)));
     }
-    Ok((out, missing, other_frame))
+    Ok((out, missing, other_frame, gone))
 }
 
 /// What is not built yet of a plan's pictures and layers: the panels'
@@ -1054,6 +1085,10 @@ fn counts(store: &mut Store, p: &Plan, parts_jobs: &[i64]) -> Value {
         "parts_jobs": parts_jobs,
         "panels_missing": p.panels_missing,
         "panels_other_frame": p.panels_other_frame,
+        // record 55, rulings of 2026-10-12, item 6, carried to releases: a
+        // run's input release from before releases froze their picks,
+        // whose picks are gone, shows the made-on scan alone, and says why
+        "panels_gone": p.panels_gone.iter().map(|(why, n)| json!({"why": why, "results": n})).collect::<Vec<_>>(),
         "panels": {
             "roles": std::iter::once(reg::MADE_ON.to_string()).chain(p.roles.iter().cloned()).collect::<Vec<_>>(),
             "most": panels.iter().max(), "fewest": panels.iter().min(),
@@ -1209,7 +1244,12 @@ pub(crate) fn create(
     // by panel where it may
     let mut kept = counts(registry.store(), &p, &[]);
     if let Some(m) = kept.as_object_mut() {
-        for k in ["panels", "panels_missing", "panels_other_frame"] {
+        for k in [
+            "panels",
+            "panels_missing",
+            "panels_other_frame",
+            "panels_gone",
+        ] {
             m.remove(k);
         }
     }
@@ -1337,7 +1377,7 @@ fn shows(store: &mut Store, role: &str, stack: i64, sealed: bool) -> Result<Stri
         }
         // the role the page and the chat would say: the main scans of no
         // scope, one place of truth (2026-10-11)
-        let of = nils_registry::pick_truth::Of::own(store)?;
+        let of = nils_registry::pick_truth::Picks::Live(nils_registry::pick_truth::Of::own(store)?);
         let picked =
             crate::preflight::pick_roles(store, &[stack], &of).map_err(|e| Reply::error(500, e))?;
         if let Some(r) = picked.get(&stack).and_then(|p| p.roles.iter().next()) {

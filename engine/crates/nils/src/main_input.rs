@@ -23,7 +23,8 @@
 //!   that made them read ([`Of::record`]), and the visits counted. A run's
 //!   bids input is released under those picks again (`nils release
 //!   --picks-read`), whatever the scope's rules say by then, so the run
-//!   reproduces.
+//!   reproduces; the release freezes each stack of the list as the main
+//!   scan of its role, beside what it read of the picks of its visits.
 //! - **The visits with none.** A visit of the scope with no main scan of the
 //!   role is counted and named, with why: it holds no scan of the role; it
 //!   holds one and none is picked; a person said none stands for it; or, of
@@ -478,9 +479,18 @@ pub(crate) fn entry_of(store: &mut Store, handle: i64) -> Option<Value> {
 }
 
 /// The picks a handle of a scope's main scans was resolved from, as a
-/// release records them: what a run over it releases its input under.
+/// release records them, with `main`, the role its stacks are the main
+/// scans of: what a run over it releases its input under, and what the
+/// release freezes each of its stacks as (record 55, rulings of
+/// 2026-10-12, item 6, carried to releases).
 pub(crate) fn reading_of(store: &mut Store, handle: i64) -> Option<Value> {
-    entry_of(store, handle).map(|e| e["picks"].clone())
+    entry_of(store, handle).map(|e| {
+        let mut picks = e["picks"].clone();
+        if picks.is_object() {
+            picks["main"] = e["main"].clone();
+        }
+        picks
+    })
 }
 
 /// A main-scans entry in a line: what was read, and the visits with none.

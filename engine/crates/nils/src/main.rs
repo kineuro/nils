@@ -511,9 +511,10 @@ struct ReleaseArgs {
     into_run: Option<i64>,
     /// Record 55 (rulings of 2026-10-12, item 6): the selection is a run's
     /// frozen list of a dataset's or a cohort's main scans, and this file
-    /// (JSON) the picks it was resolved from, which the runner alone passes:
-    /// the list is released as it was frozen, whatever the picks say now,
-    /// and the release records these picks
+    /// (JSON) the picks it was resolved from with `main`, the role of its
+    /// stacks, which the runner alone passes: the list is released as it
+    /// was frozen, whatever the picks say now, and the release records
+    /// these picks and freezes each stack as the main scan of the role
     #[arg(
         long = "picks-read",
         value_name = "FILE",
@@ -11550,6 +11551,7 @@ fn releases_doc(
     let policy = text_of(store, "release", "policy");
     let policies = text_of(store, "release", "policies");
     let scheme = text_of(store, "release", "session_scheme");
+    let pick_rules = text_of(store, "release", "pick_rules");
     let mut wheres = String::new();
     let mut params: Vec<Param> = Vec::new();
     if let Some(name) = name {
@@ -11564,8 +11566,8 @@ fn releases_doc(
     let sql = format!(
         "SELECT id, name, version, root, {started}, files, subjects, unchanged, moved, rewritten, \
          added, removed, layout, actor, {withdrawn}, withdrawn_by, withdrawn_why, {policy}, \
-         {policies}, {scheme}, session_naming, categories, naming, purpose FROM {}{wheres} \
-         ORDER BY id DESC LIMIT {}",
+         {policies}, {scheme}, session_naming, categories, naming, purpose, {pick_rules} \
+         FROM {}{wheres} ORDER BY id DESC LIMIT {}",
         store.qualified("release"),
         limit.max(1)
     );
@@ -11628,6 +11630,12 @@ fn releases_doc(
                 "naming": r.opt_text(22)?,
                 // Record 43: run_input for a pipeline run's bids input.
                 "purpose": r.opt_text(23)?,
+                // Record 55, decision 6: the main scans it read, a scope's
+                // rules at their version or the pack's defaults, null where
+                // it read none; and since the rulings of 2026-10-12, item
+                // 6, carried to releases, `frozen`, what it kept of them,
+                // which every reader of its picks after it reads
+                "picks": json(r.opt_text(24)?),
             }))
         })
         .collect::<Result<_, nils_registry::Error>>()?;
@@ -11690,6 +11698,41 @@ struct Version {
     files: i64,
     /// Unchanged, moved, rewritten, added, removed, in that order.
     counts: [i64; 5],
+    /// Record 55, decision 6: the main scans it read, where it read any.
+    picks: Option<serde_json::Value>,
+}
+
+/// What a release read of the main scans, in words, for its history: the
+/// rules it read, and what it kept of the picks (record 55, rulings of
+/// 2026-10-12, item 6, carried to releases).
+fn picks_line(doc: &serde_json::Value) -> String {
+    let scope = &doc["scope"];
+    let read = match (
+        scope["kind"].as_str(),
+        scope["name"].as_str(),
+        doc["version"].as_i64(),
+    ) {
+        (Some(kind), Some(name), Some(v)) => format!("{kind} {name}'s rules, version {v}"),
+        _ => match doc["datasets"].as_array().map(Vec::len) {
+            Some(n) if n > 0 => format!(
+                "each subject's own dataset's rules ({n} with rules of their own), else the pack's defaults"
+            ),
+            _ => "the pack's defaults".to_string(),
+        },
+    };
+    let read = match doc["main"].as_str() {
+        Some(role) => format!("a run's list of main {role} scans, read under {read}"),
+        None => read,
+    };
+    match doc["frozen"].as_object() {
+        Some(f) => format!(
+            "{read}; kept: {} picks of {} visits, {} stacks",
+            f.get("picks").cloned().unwrap_or_default(),
+            f.get("visits").cloned().unwrap_or_default(),
+            f.get("stacks").cloned().unwrap_or_default()
+        ),
+        None => format!("{read}; not kept (made before releases kept the picks they read)"),
+    }
 }
 
 /// Every version of one dataset, and what each did (§8.6).
@@ -11738,9 +11781,10 @@ fn history(home: &Home, args: &ReleaseArgs) -> Result<(), Exit> {
             .column("started_at")
             .expect("release.started_at is a column"),
     );
+    let pick_rules = text_of(store, "release", "pick_rules");
     let sql = format!(
         "SELECT id, name, version, root, {started}, files, unchanged, moved, rewritten, added, \
-         removed FROM {}{wheres} ORDER BY id",
+         removed, {pick_rules} FROM {}{wheres} ORDER BY id",
         store.qualified("release"),
     );
     let rows = store
@@ -11764,6 +11808,10 @@ fn history(home: &Home, args: &ReleaseArgs) -> Result<(), Exit> {
             started: r.text(4).map_err(|e| fail(e.to_string()))?.to_string(),
             files: r.int(5).map_err(|e| fail(e.to_string()))?,
             counts,
+            picks: r
+                .opt_text(11)
+                .map_err(|e| fail(e.to_string()))?
+                .and_then(|t| serde_json::from_str(t).ok()),
         });
     }
     let mut last_name = String::new();
@@ -11776,6 +11824,9 @@ fn history(home: &Home, args: &ReleaseArgs) -> Result<(), Exit> {
         let when = v.started.split('T').next().unwrap_or(&v.started);
         let (version, files) = (&v.version, v.files);
         println!("  {version:<16} {when}   {files:>9} files in the tree");
+        if let Some(p) = &v.picks {
+            println!("      main scans   {}", picks_line(p));
+        }
         let mut said = false;
         for (n, what) in [
             (v.counts[0], "left alone"),
