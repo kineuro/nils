@@ -442,9 +442,11 @@ mod tests {
             // the alignment check, masks that agree; the volumes of the
             // masks it is given in pairs, each there, and the numbers
             // beside them; otherwise an image written to its last word
+            // the manifest's word on what made the label map is not
+            // there, so the unit names the run by its folder alone
             (
                 "python3",
-                r#"case "$2" in *threshold_otsu*) echo 0.97;; *json.dumps*) shift 2; s=; while [ $# -gt 1 ]; do v=$2; case "$1" in *_volume) [ -s "$2" ] || exit 1; v=1.0;; esac; s="$s${s:+, }\"$1\": $v"; shift 2; done; echo "{$s}";; *) for l; do :; done; printf x > "$l";; esac"#,
+                r#"case "$2" in *made_by*) exit 1;; *threshold_otsu*) echo 0.97;; *json.dumps*) shift 2; s=; while [ $# -gt 1 ]; do v=$2; case "$1" in *_volume) [ -s "$2" ] || exit 1; v=1.0;; esac; s="$s${s:+, }\"$1\": $v"; shift 2; done; echo "{$s}";; *) for l; do :; done; printf x > "$l";; esac"#,
             ),
             // the alignment check, masks that agree; SAMSEG's folder read
             // for its measures, and the numbers after it; otherwise an
@@ -632,6 +634,8 @@ mod tests {
                         flair.is_some(),
                         "{ses}: {volumes}"
                     );
+                    assert_eq!(volumes["synthseg_run"], 7, "{ses}: {volumes}");
+                    assert!(volumes.get("synthseg_robust").is_none(), "{volumes}");
                 }
                 // the alignment, a column of the unit's table where it
                 // had a FLAIR to check
@@ -662,5 +666,363 @@ mod tests {
             line[from..].split_once("done; };").unwrap().0.to_string()
         };
         assert_eq!(flair_of(&texts[0]), flair_of(&texts[1]));
+    }
+
+    /// A starter's command line run on the host as the flair test runs
+    /// it: each container path written as a folder under `root` (its
+    /// `input`, `inputs` and `output`), and each tool a script in
+    /// `root/bin` that keeps its words in `root/tools.log`, a line a call,
+    /// and then runs its body. Answers the run and the calls.
+    #[cfg(unix)]
+    fn stand_in_run(
+        name: &str,
+        given: &[(&str, &str)],
+        root: &std::path::Path,
+        tools: &[(&str, String)],
+    ) -> (std::process::Output, Vec<Vec<String>>) {
+        use std::os::unix::fs::PermissionsExt;
+        let log = root.join("tools.log");
+        let _ = std::fs::remove_file(&log);
+        for (tool, body) in tools {
+            let keep = format!(
+                "l=${{0##*/}}; for a; do l=\"$l\t$a\"; done; printf '%s\\n' \"$l\" >> '{}'",
+                log.display()
+            );
+            let f = root.join("bin").join(tool);
+            std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+            std::fs::write(&f, format!("#!/bin/sh\n{keep}\n{body}\n")).unwrap();
+            std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let _ = std::fs::remove_dir_all(root.join("output"));
+        std::fs::create_dir_all(root.join("output")).unwrap();
+        let (_, text) = CATALOG.iter().find(|(n, _)| *n == name).unwrap();
+        let d = descriptor::parse(text).unwrap();
+        let given: Vec<(String, String)> = given
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        let at = [
+            ("/inputs", root.join("inputs")),
+            ("/input", root.join("input")),
+            ("/output", root.join("output")),
+        ];
+        let words: Vec<String> = d
+            .argv(&d.resolve(&given).unwrap(), &[])
+            .unwrap()
+            .iter()
+            .map(|w| on_host(w, &at))
+            .collect();
+        let mut path = root.join("bin").into_os_string();
+        if let Some(p) = std::env::var_os("PATH") {
+            path.push(":");
+            path.push(p);
+        }
+        let out = std::process::Command::new(&words[0])
+            .args(&words[1..])
+            .env("PATH", &path)
+            .output()
+            .unwrap();
+        let calls = std::fs::read_to_string(&log)
+            .unwrap_or_default()
+            .lines()
+            .map(|l| l.split('\t').map(str::to_string).collect())
+            .collect();
+        (out, calls)
+    }
+
+    /// Record 57 P11 (research 02, SAMSEG's wiki): SAMSEG separates the
+    /// pallidum from the white matter only with the FLAIR among its
+    /// inputs, never from the T1w alone, and the unit's table says which
+    /// it did, since the two give other pallidum and white-matter volumes.
+    #[cfg(unix)]
+    #[test]
+    fn samseg_separates_the_pallidum_only_beside_a_flair_and_says_so() {
+        use nils_dicom::synth::TempDir;
+        if std::process::Command::new("bash")
+            .args(["-c", "true"])
+            .status()
+            .is_err()
+        {
+            eprintln!(
+                "bash is not installed; the starters' command lines need it, so this test is skipped"
+            );
+            return;
+        }
+        let root = TempDir::new("starter-samseg-pallidum");
+        // one session with a FLAIR, one without
+        for f in [
+            "ses-1/anat/sub-a_ses-1_acq-3D+MPRAGE_T1w",
+            "ses-1/anat/sub-a_ses-1_acq-Ax+2D+FLAIR+IRTSE_T2w",
+            "ses-2/anat/sub-a_ses-2_acq-3D+MPRAGE_T1w",
+        ] {
+            root.file(&format!("input/sub-a/{f}.nii.gz"), b"x");
+        }
+        let tools: Vec<(&str, String)> = vec![
+            (
+                "fspython",
+                r#"case "$2" in *affine_transform*) echo 0.97;; *samseg.stats*) shift 3; s='"Intra-Cranial": 1500000.0'; while [ $# -gt 1 ]; do s="$s, \"$1\": $2"; shift 2; done; echo "{$s}";; *) for l; do :; done; printf x > "$l";; esac"#.into(),
+            ),
+            (
+                "run_samseg",
+                r#"while [ $# -gt 0 ]; do [ "$1" = -o ] && o=$2; shift; done; mkdir -p "$o"; printf x > "$o/seg.mgz""#.into(),
+            ),
+            (
+                "mri_synthstrip",
+                r#"while [ $# -gt 0 ]; do [ "$1" = -m ] && m=$2; shift; done; printf x > "$m""#.into(),
+            ),
+        ];
+        let table = |ses: &str| -> Option<serde_json::Value> {
+            let p = root.path().join(format!(
+                "output/sub-a/{ses}/anat/sub-a_{ses}_acq-3D+MPRAGE_desc-samseg_volumes.json"
+            ));
+            std::fs::read(p)
+                .ok()
+                .map(|b| serde_json::from_slice(&b).unwrap())
+        };
+        // each case: the settings, and for each session whether SAMSEG ran,
+        // with the FLAIR, and separated the pallidum
+        type Case<'a> = (
+            &'a [(&'a str, &'a str)],
+            [(&'a str, Option<(bool, bool)>); 2],
+        );
+        let cases: [Case<'_>; 3] = [
+            // the defaults: lesions on, the setting on; the session
+            // without a FLAIR is not run
+            (&[], [("ses-1", Some((true, true))), ("ses-2", None)]),
+            // lesions off: the T1w alone, so never separated, whatever the
+            // setting says
+            (
+                &[("lesion", "off")],
+                [
+                    ("ses-1", Some((false, false))),
+                    ("ses-2", Some((false, false))),
+                ],
+            ),
+            // the setting off: with the FLAIR, not separated
+            (
+                &[("pallidum_separate", "false")],
+                [("ses-1", Some((true, false))), ("ses-2", None)],
+            ),
+        ];
+        for (given, sessions) in cases {
+            let (out, calls) = stand_in_run("samseg-lesions", given, root.path(), &tools);
+            let said = String::from_utf8_lossy(&out.stdout);
+            assert!(
+                out.status.success(),
+                "{given:?}: {said}{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            let samseg: Vec<&Vec<String>> = calls.iter().filter(|c| c[0] == "run_samseg").collect();
+            assert_eq!(
+                samseg.len(),
+                sessions.iter().filter(|(_, s)| s.is_some()).count(),
+                "{given:?}: {calls:?}"
+            );
+            for (ses, ran) in sessions {
+                let call = samseg
+                    .iter()
+                    .find(|c| c.iter().any(|w| w.contains(&format!("/{ses}/"))));
+                match ran {
+                    None => {
+                        assert!(call.is_none(), "{given:?}, {ses}: {calls:?}");
+                        assert!(table(ses).is_none(), "{given:?}, {ses}");
+                    }
+                    Some((flair, separate)) => {
+                        let call = call.unwrap_or_else(|| panic!("{given:?}, {ses}: {calls:?}"));
+                        let inputs = call.iter().filter(|w| *w == "-i").count();
+                        assert_eq!(inputs, if flair { 2 } else { 1 }, "{given:?}: {call:?}");
+                        assert_eq!(
+                            call.iter().any(|w| w == "--pallidum-separate"),
+                            separate,
+                            "{given:?}, {ses}: {call:?}"
+                        );
+                        let t = table(ses).unwrap_or_else(|| panic!("{given:?}, {ses}"));
+                        assert_eq!(
+                            t["pallidum_separate"],
+                            serde_json::json!(if separate { 1 } else { 0 }),
+                            "{given:?}, {ses}: {t}"
+                        );
+                    }
+                }
+            }
+        }
+        // and the table declares the column the ask reads, a whole number
+        let (_, text) = CATALOG
+            .iter()
+            .find(|(n, _)| *n == "samseg-lesions")
+            .unwrap();
+        let d = descriptor::parse(text).unwrap();
+        let col = d
+            .outputs
+            .iter()
+            .filter_map(|o| o.table.as_ref())
+            .flat_map(|t| &t.columns)
+            .find(|c| c.name == "pallidum_separate")
+            .expect("samseg-lesions declares pallidum_separate");
+        assert_eq!(col.ty, descriptor::ColumnType::Integer);
+        assert!(
+            d.replaces
+                .as_ref()
+                .is_some_and(|r| r.why.contains("pallidum")),
+            "the new version says it replaces the earlier ones for the pallidum"
+        );
+    }
+
+    /// Record 57 P11 (research 04): segcsvd's results name the SynthSeg
+    /// they read, its run, its pipeline as name@version, whether it ran
+    /// robust and the contrast it read, from what the engine's manifest
+    /// says made each label map (`made_by`); without that word, the run
+    /// alone, by the folder the map came in.
+    #[cfg(unix)]
+    #[test]
+    fn segcsvd_names_the_synthseg_it_read() {
+        use nils_dicom::synth::TempDir;
+        let Some(python) = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+            .map(|d| d.join("python3"))
+            .find(|p| p.is_file())
+        else {
+            eprintln!(
+                "python3 is not installed; segcsvd's command line reads the manifest with it, so this test is skipped"
+            );
+            return;
+        };
+        let root = TempDir::new("starter-segcsvd-synthseg");
+        // three sessions, each a T1w (and no FLAIR, so no WMH)
+        let stem = |ses: &str| format!("sub-a_ses-{ses}_acq-3D+MPRAGE");
+        for ses in ["1", "2", "3"] {
+            root.file(
+                &format!("input/sub-a/ses-{ses}/anat/{}_T1w.nii.gz", stem(ses)),
+                b"x",
+            );
+        }
+        // the label maps the run takes, as the runner links them: the
+        // pipeline, its run, the unit; session 2 has one of two runs, and
+        // the newer is read
+        let map = |ses: &str, run: i64| {
+            format!(
+                "synthseg/{run}/sub-a_ses-{ses}/sub-a/ses-{ses}/anat/{}_desc-synthseg_dseg.nii.gz",
+                stem(ses)
+            )
+        };
+        let maps = [("1", 7), ("2", 7), ("2", 9), ("3", 7)];
+        for (ses, run) in maps {
+            root.file(&format!("inputs/synthseg/{}", map(ses, run)), b"x");
+        }
+        // the manifest: run 7 robust, read from the T1w; run 9 not
+        // robust, read from a FLAIR (a T2w with the token); session 3's
+        // map has no word on what made it
+        let made = |run: i64, version: i64, robust: bool, grid: &str| {
+            serde_json::json!({
+                "run": run, "pipeline": "synthseg", "version": version,
+                "params": {"robust": robust, "threads": 4},
+                "grid_stack_id": 40 + run, "grid_stem": grid,
+            })
+        };
+        let listed: Vec<serde_json::Value> = maps
+            .iter()
+            .map(|(ses, run)| {
+                let by = match (*ses, *run) {
+                    ("3", _) => serde_json::Value::Null,
+                    (_, 7) => made(7, 2, true, &format!("{}_T1w", stem(ses))),
+                    _ => made(9, 3, false, "sub-a_ses-2_acq-Ax+2D+FLAIR+IRTSE_T2w"),
+                };
+                serde_json::json!({"id": run * 10, "kind": "mask", "path": map(ses, *run), "made_by": by})
+            })
+            .collect();
+        root.file(
+            "inputs/manifest.json",
+            serde_json::to_vec(&serde_json::json!({"derivatives": {"synthseg": listed}}))
+                .unwrap()
+                .as_slice(),
+        );
+        // segcsvd's tools; its python3 runs the manifest's reading as it
+        // is, writes the empty prior, and writes the volumes as JSON, the
+        // numbers as numbers and the rest as text
+        let tools: Vec<(&str, String)> = vec![
+            ("sbtResliceLike", r#"printf x > "$3""#.into()),
+            (
+                "segment_pvs",
+                r#"printf x > "$4"; printf x > "$(dirname "$4")/thr_pvs.nii.gz""#.into(),
+            ),
+            (
+                "python3",
+                format!(
+                    r#"case "$2" in *made_by*) exec '{}' "$@";; *json.dumps*) shift 2; s=; while [ $# -gt 1 ]; do v=$2; case "$1" in *_volume) v=1.0;; esac; case "$v" in *[!0-9.]*) v="\"$v\"";; esac; s="$s${{s:+, }}\"$1\": $v"; shift 2; done; echo "{{$s}}";; *) for l; do :; done; printf x > "$l";; esac"#,
+                    python.display()
+                ),
+            ),
+        ];
+        let (out, _) = stand_in_run("segcsvd", &[], root.path(), &tools);
+        let said = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success(),
+            "{said}{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let table = |ses: &str| -> serde_json::Value {
+            serde_json::from_slice(
+                &std::fs::read(root.path().join(format!(
+                    "output/sub-a/ses-{ses}/anat/{}_desc-segcsvd_volumes.json",
+                    stem(ses)
+                )))
+                .unwrap(),
+            )
+            .unwrap()
+        };
+        let read = |ses: &str| -> serde_json::Value {
+            let t = table(ses);
+            serde_json::Value::Object(
+                t.as_object()
+                    .unwrap()
+                    .iter()
+                    .filter(|(k, _)| k.starts_with("synthseg_"))
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect(),
+            )
+        };
+        assert_eq!(
+            read("1"),
+            serde_json::json!({"synthseg_run": 7, "synthseg_pipeline": "synthseg@2", "synthseg_robust": 1, "synthseg_contrast": "T1w"}),
+            "{said}"
+        );
+        assert_eq!(
+            read("2"),
+            serde_json::json!({"synthseg_run": 9, "synthseg_pipeline": "synthseg@3", "synthseg_robust": 0, "synthseg_contrast": "FLAIR"}),
+            "{said}"
+        );
+        assert_eq!(read("3"), serde_json::json!({"synthseg_run": 7}), "{said}");
+        assert!(
+            said.contains("the SynthSeg label map of run 9 (synthseg_run 9 synthseg_pipeline synthseg@3 synthseg_robust 0 synthseg_contrast FLAIR)"),
+            "{said}"
+        );
+
+        // the table declares the four, typed, and the new version says it
+        // replaces the earlier ones for them
+        let (_, text) = CATALOG.iter().find(|(n, _)| *n == "segcsvd").unwrap();
+        let d = descriptor::parse(text).unwrap();
+        let columns: Vec<(String, descriptor::ColumnType)> = d
+            .outputs
+            .iter()
+            .filter_map(|o| o.table.as_ref())
+            .flat_map(|t| &t.columns)
+            .filter(|c| c.name.starts_with("synthseg_"))
+            .map(|c| (c.name.clone(), c.ty))
+            .collect();
+        use descriptor::ColumnType::{Integer, Text};
+        assert_eq!(
+            columns,
+            [
+                ("synthseg_run".to_string(), Integer),
+                ("synthseg_pipeline".to_string(), Text),
+                ("synthseg_robust".to_string(), Integer),
+                ("synthseg_contrast".to_string(), Text),
+            ]
+        );
+        assert!(
+            d.replaces
+                .as_ref()
+                .is_some_and(|r| r.why.contains("SynthSeg")),
+            "the new version says it replaces the earlier ones for the SynthSeg it read"
+        );
     }
 }

@@ -4939,13 +4939,14 @@ fn the_starters_that_read_a_flair_find_it_in_the_release_a_run_makes() {
     // its threads follow
     let cores = regex::Regex::new(r"(?m)^    cores: \d+$").unwrap();
     let memory = regex::Regex::new(r"(?m)^    memory-gb: \d+$").unwrap();
+    let mut labels = BTreeMap::new();
     for name in ["synthseg", "segcsvd", "samseg-lesions"] {
         let text =
             std::fs::read_to_string(repo().join(format!("pipelines/{name}/nils.job.yml"))).unwrap();
         let small = cores.replace_all(&text, "    cores: 1");
         let small = memory.replace_all(&small, "    memory-gb: 2").to_string();
         assert_ne!(small, text, "{name} declares its needs");
-        lab.add_descriptor(name, &small);
+        labels.insert(name, lab.add_descriptor(name, &small)["label"].clone());
     }
     // the images' tools: each keeps its words, a line a call, and writes
     // what the command line reads next
@@ -5003,7 +5004,7 @@ esac"#,
     let python3 = format!(
         r#"case "$2" in
 *threshold_otsu*) if mkdir "$(dirname "$0")/segcsvd-low" 2>/dev/null; then echo 0.60; else echo 0.97; fi; exit 0;;
-*nibabel*json.dumps*) shift 2; s=; while [ $# -gt 1 ]; do v=$2; case "$1" in *_volume) [ -s "$2" ] || exit 1; v=1.0;; esac; s="$s${{s:+, }}\"$1\": $v"; shift 2; done; echo "{{$s}}"; exit 0;;
+*nibabel*json.dumps*) shift 2; s=; while [ $# -gt 1 ]; do v=$2; case "$1" in *_volume) [ -s "$2" ] || exit 1; v=1.0;; esac; case "$v" in *[!0-9.]*) v="\"$v\"";; esac; s="$s${{s:+, }}\"$1\": $v"; shift 2; done; echo "{{$s}}"; exit 0;;
 *nibabel*) for l; do :; done; printf x > "$l"; exit 0;;
 esac
 exec '{}' "$@""#,
@@ -5081,7 +5082,7 @@ exec '{}' "$@""#,
         out
     };
 
-    run("synthseg");
+    let synthseg = run("synthseg");
     let pre = lab.json(&[
         "run",
         "segcsvd",
@@ -5133,6 +5134,17 @@ exec '{}' "$@""#,
         volumes.iter().all(|t| t["wmh_volume"] == 1.0),
         "{volumes:?}"
     );
+    // record 57 P11: each unit names the SynthSeg it read, from what the
+    // manifest says made the label map: the run, its pipeline and
+    // version, and robust (the starter's default); the stand-in's map is
+    // no image, so it was never tied to a scan and its contrast is not
+    // said (the masks test below has it)
+    for t in &volumes {
+        assert_eq!(t["synthseg_run"], synthseg["id"], "{t}");
+        assert_eq!(t["synthseg_pipeline"], labels["synthseg"], "{t}");
+        assert_eq!(t["synthseg_robust"], 1, "{t}");
+        assert!(t.get("synthseg_contrast").is_none(), "{t}");
+    }
     // the review of 2026-10-12: each unit checks its FLAIR against its
     // T1w, the agreement a column of its table; the session whose masks
     // agree below 0.85 is flagged, a pipeline:qc item, and its unit still
@@ -5170,8 +5182,12 @@ exec '{}' "$@""#,
     let lesions = calls
         .lines()
         .filter(|l| l.starts_with("run_samseg\t") && l.contains("\t--lesion\t"))
+        .filter(|l| l.contains("\t--pallidum-separate"))
         .count();
-    assert_eq!(lesions, 2, "{calls}");
+    assert_eq!(
+        lesions, 2,
+        "the pallidum separated beside the FLAIR: {calls}"
+    );
     let rows = lab.json(&[
         "derivative",
         "list",
@@ -5188,6 +5204,10 @@ exec '{}' "$@""#,
         .map(|p| serde_json::from_slice(&std::fs::read(lab.work.path().join(p)).unwrap()).unwrap())
         .collect();
     assert_eq!(volumes.len(), 2, "{rows}");
+    assert!(
+        volumes.iter().all(|t| t["pallidum_separate"] == 1),
+        "{volumes:?}"
+    );
     flagged(&v, &volumes);
     // each brain mask made of the session's own two images
     let stripped = calls
@@ -5441,10 +5461,11 @@ printf 'Num_Lesions,Num_Vox,Lesion_Volume\n2,9,9.0\n' > "$o/lesion_stats.csv""#
         ),
     ];
     // python3 runs the stand-in podman too: only segcsvd's nibabel step,
-    // the volumes of the masks it is given in pairs, is stood in for
+    // the volumes of the masks it is given in pairs and the numbers and
+    // words beside them, is stood in for
     let python3 = format!(
         r#"case "$2" in
-*nibabel*json.dumps*) shift 2; s=; while [ $# -gt 1 ]; do [ -s "$2" ] || exit 1; s="$s${{s:+, }}\"$1\": 1.0"; shift 2; done; echo "{{$s}}"; exit 0;;
+*nibabel*json.dumps*) shift 2; s=; while [ $# -gt 1 ]; do v=1.0; case "$1" in *_volume) [ -s "$2" ] || exit 1;; *) v=$2; case "$v" in *[!0-9.]*) v="\"$v\"";; esac;; esac; s="$s${{s:+, }}\"$1\": $v"; shift 2; done; echo "{{$s}}"; exit 0;;
 esac
 exec '{}' "$@""#,
         python.display()
@@ -5526,6 +5547,7 @@ exec '{}' "$@""#,
             ],
         ),
     ];
+    let mut synthseg = Value::Null;
     for (name, masks) in expect {
         let v = lab.json(&["run", name, "--select", "selection:every@1", "--json"]);
         assert_eq!(v["status"], "done", "{name}: {v}");
@@ -5537,6 +5559,30 @@ exec '{}' "$@""#,
             &v["id"].to_string(),
             "--json",
         ]);
+        if name == "synthseg" {
+            synthseg = v["id"].clone();
+        }
+        // record 57 P11: segcsvd names the SynthSeg it read, and, its
+        // label map tied to the T1w, the contrast that run read
+        if name == "segcsvd" {
+            let tables: Vec<Value> = rows
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|d| d["path"].as_str())
+                .filter(|p| p.ends_with("_desc-segcsvd_volumes.json"))
+                .map(|p| {
+                    serde_json::from_slice(&std::fs::read(lab.work.path().join(p)).unwrap())
+                        .unwrap()
+                })
+                .collect();
+            assert_eq!(tables.len(), 2, "{rows}");
+            for t in &tables {
+                assert_eq!(t["synthseg_run"], synthseg, "{t}");
+                assert_eq!(t["synthseg_robust"], 1, "{t}");
+                assert_eq!(t["synthseg_contrast"], "T1w", "{t}");
+            }
+        }
         for (suffix, role, sets) in masks {
             let made: Vec<i64> = rows
                 .as_array()
@@ -10618,8 +10664,8 @@ fn a_replaced_version_is_not_offered_for_a_new_run_and_its_old_run_still_reads()
 /// Nima's ruling of 2026-10-12, at the starters: where a catalog holds an
 /// older starter, the engine seeds the new one as the name's next version,
 /// and the four whose new version fixes the old (recon-all's memory,
-/// MRIQC's `--notrack`, SAMSEG's and segcsvd's FLAIR alignment check)
-/// replace it, while N4's, whose spline distance and bias field change what
+/// MRIQC's `--notrack`, SAMSEG's pallidum beside a FLAIR and segcsvd's
+/// SynthSeg named, after their FLAIR alignment check) replace it, while N4's, whose spline distance and bias field change what
 /// it makes, leaves it selectable.
 #[test]
 fn the_starters_that_fix_their_older_versions_replace_them_and_n4_leaves_its_own() {
@@ -10680,6 +10726,21 @@ fn the_starters_that_fix_their_older_versions_replace_them_and_n4_leaves_its_own
         assert_eq!(standing(&format!("{name}@1")), "replaced", "{name}");
         assert_eq!(standing(&format!("{name}@2")), "current", "{name}");
     }
+    // and why, in the newest starter's words: SAMSEG's pallidum and the
+    // SynthSeg segcsvd read (record 57 P11)
+    let why = |label: &str| {
+        listed["pipelines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["label"] == label)
+            .unwrap()["replaced_why"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string()
+    };
+    assert!(why("samseg-lesions@1").contains("pallidum"), "{listed}");
+    assert!(why("segcsvd@1").contains("SynthSeg"), "{listed}");
     assert_eq!(standing("n4-bias-correction@1"), "selectable");
     assert_eq!(standing("n4-bias-correction@2"), "current");
     assert_eq!(standing("synthstrip@1"), "current");
