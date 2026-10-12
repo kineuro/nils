@@ -1173,13 +1173,42 @@ fn frozen(pg: Option<(String, String)>) {
         ),
         (&old[1], "which no longer name 2 of the stacks it holds"),
     ] {
-        for o in lab.resume(m.run) {
-            assert_eq!(o["status"], "skipped", "run {}: {o}", m.run);
+        // none of its units can run, so taking it up again is refused
+        // before it starts, saying why of each unit (a run taken up again is
+        // checked as a new run is)
+        lab.interrupt(m.run);
+        let pre = lab.json(&[
+            "run",
+            "--resume",
+            &m.run.to_string(),
+            "--preflight",
+            "--json",
+        ]);
+        assert_eq!(pre["units"]["ready"], 0, "run {}: {pre}", m.run);
+        let missing = pre["missing"].as_array().unwrap();
+        assert!(!missing.is_empty(), "run {}: {pre}", m.run);
+        for u in missing {
             assert!(
-                o["error"].as_str().is_some_and(|e| e.contains(why)),
-                "run {}: {o}",
+                u["why"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|w| w.as_str().is_some_and(|w| w.contains(why))),
+                "run {}: {u}",
                 m.run
             );
         }
+        let (good, out, err) = lab.run(&["run", "--resume", &m.run.to_string(), "--json"], None);
+        assert!(!good, "run {}: {out}", m.run);
+        assert!(
+            err.contains("refused before it started") && err.contains(why),
+            "run {}: {err}",
+            m.run
+        );
+        let ran = lab.int(&format!(
+            "SELECT COUNT(*) FROM {{pipeline_unit}} WHERE run_id = {} AND outcome IS NOT NULL",
+            m.run
+        ));
+        assert_eq!(ran, 0, "run {}: no unit was taken up", m.run);
     }
 }

@@ -1126,7 +1126,14 @@ pub(crate) fn run_door(
     }
     let command = crate::pipelines::located(doors.pack_dir.as_deref(), command)?;
     // 2026-10-12: refused by its kind where it lacks what it needs here
-    crate::requirements::at_the_door(doors.home.dir(), registry, &command)?;
+    // (its scans are counted above, and its units are a stack each)
+    crate::requirements::at_the_door(
+        &doors.home,
+        doors.pack_dir.as_deref(),
+        registry,
+        &command,
+        false,
+    )?;
     let store = registry.store();
     // the step and what it is for, which its state and the dataset's log
     // find it by, beside who asked and under what

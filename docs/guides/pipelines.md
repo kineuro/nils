@@ -131,6 +131,16 @@ nils pipeline show n4-bias-correction
 
    The pre-flight counts the units, names the units that lack an input and why (a session with no FLAIR picked, a stack with no file or no derivative its input needs), counts the stacks no unit takes, estimates the time from the pipeline's own past runs here or else from its descriptor, says whether it wants a GPU and what it would run on, and holds what a unit needs against the lane's budget. `ready` false lists the blockers. Nothing runs.
 
+   The units that cannot run are said one line a reason, in a few words, with the units under it, and a run whose units can all run says so:
+
+   ```text
+     units            4 (1 ready, 3 missing an input)
+     cannot run       3 sessions: no FLAIR picked
+       sub-7a8b9c0d_ses-1, sub-1e2f3a4b_ses-1, sub-5c6d7e8f_ses-2
+   ```
+
+   The answer's `cannot` holds the same, `{why, units, named}` a reason, and each of `missing` its `lacks`. A run none of whose units could run would make nothing, so it is not ready (`no session can run: 4 of 4 lack an input (no FLAIR picked)`), and `nils run` and the jobs door refuse it before anything is made or queued, with the same words; the door answers 409 with `failure` (input), `units` and `cannot`.
+
    It also checks what the run needs of this machine (`requirements`), each check with what it found:
 
    | check | what it holds |
@@ -168,6 +178,8 @@ nils pipeline show n4-bias-correction
    nils derivative list --run <run>
    nils review list --kind pipeline:qc
    ```
+
+   A run is read by what its units made, beside its status: `4 of 4 made`, `3 of 4 made · 1 skipped: no FLAIR picked`, or, for a run that ended and made nothing, `nothing made · 4 of 4 skipped: no FLAIR picked`. The doors answer it as `made` on the run, in the listing and on the run's job, with the counts (made, failed, skipped, left), each reason with its count, `nothing` and the `line`; each unit of a run says its own status, and a skipped one what it lacked (`lacks`).
 
 Through the engine's doors a run is a job, queued by someone who holds `pipelines:work` at detail quasi:
 
@@ -284,6 +296,14 @@ A run whose units run apart (`x-nils.units: apart`) keeps each unit it finished.
    The units in flight when it stopped run again from a clean folder; a unit whose container had ended is taken in from what it left, and nothing is registered twice. `nils jobs resume <job>` of the run's job does the same. A run whose units run together goes on from the start, unless its container had ended, when it is taken in from what that left.
 
    A run taken up again goes on beside the runs whose stacks it does not share, and is refused, as a new run is, while a running run holds one of its stacks.
+
+   It is checked first as a new run is, for the units it still has to run: those of the bids input it released before, where it did, else those a new run over its handle would have, the units it is over with kept. Its pre-flight says which cannot run and why:
+
+   ```sh
+   nils run --resume <run> --preflight
+   ```
+
+   The door takes the same as `{"resume": <run>}` at `POST /api/pipelines/{name}/preflight`. `nils run --resume` and the jobs door refuse a run taken up again whose checks fail (dcm2niix only where its input is still to be released), one that could run none of the units it still has and made nothing, and one that cannot be taken up (done, failed after its containers ended, or running), before anything is claimed or queued. A run that made some of its units goes on though none left could run, and closes with what it made. The job that stopped says which later job took its run up again (`taken_up` at the jobs doors, and `nils jobs show <job>`).
 
 ## Give a pipeline a secret
 

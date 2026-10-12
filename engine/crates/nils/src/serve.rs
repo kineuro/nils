@@ -3575,6 +3575,9 @@ fn routed(
                     .collect(),
             };
             let mut docs: Vec<_> = jobs.iter().map(crate::failures::job_doc).collect();
+            // 2026-10-12: what a run's job made, and the job that took its run
+            // up again where a later one did
+            crate::made::jobs(registry.store(), &mut docs);
             // record 48, D1 of the move: no unit's QC of a sealed stack
             for doc in &mut docs {
                 crate::pipelines::job_shown_unsealed(registry, caller, "GET /api/jobs", doc)?;
@@ -3718,8 +3721,16 @@ fn routed(
             caller.allowed(&format!("{path} {verb}"), Need::One(grant), detail)?;
             let command = located(doors, registry.store(), command)?;
             // 2026-10-12: a run is checked for what it needs of this machine
-            // before it is queued, and refused by its kind where it lacks it
-            crate::requirements::at_the_door(doors.home.dir(), registry, &command)?;
+            // before it is queued, and refused by its kind where it lacks it;
+            // a run taken up again as well, and a run that could run none of
+            // its units
+            crate::requirements::at_the_door(
+                &doors.home,
+                doors.pack_dir.as_deref(),
+                registry,
+                &command,
+                true,
+            )?;
             // each step of the chain a verb the door queues, its tree
             // located now; its grant is checked when its turn comes, and a
             // refusal then ends the chain (record 26 §7)
@@ -3767,6 +3778,7 @@ fn routed(
             match nils_registry::job::show(registry.store(), id).map_err(job_err)? {
                 Some(j) => {
                     let mut doc = crate::failures::job_doc(&j);
+                    crate::made::jobs(registry.store(), std::slice::from_mut(&mut doc));
                     crate::pipelines::job_shown_unsealed(
                         registry,
                         caller,
@@ -5865,8 +5877,10 @@ fn events(doors: &Doors, registry: &mut Registry, request: Request, all: bool) {
             .into_iter()
             .filter(|j| all || !nils_registry::job::is_worker(&j.kind))
             .collect();
-        // 2026-10-12: each job with its failure, as the jobs doors answer it
+        // 2026-10-12: each job with its failure, as the jobs doors answer it,
+        // and what a run's job made
         let mut docs: Vec<_> = jobs.iter().map(crate::failures::job_doc).collect();
+        crate::made::jobs(registry.store(), &mut docs);
         // record 48, D1 of the move: no unit's QC of a sealed stack, and a
         // job's result is withheld whole where its run's could not be read
         if !crate::sealed::reads(&caller.access) {

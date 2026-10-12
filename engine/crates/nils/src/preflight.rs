@@ -37,6 +37,18 @@
 //! it has no derivative a typed input needs that the input's check takes
 //! (a mask a check rejected is none, unless the input takes any), and the
 //! run skips that one too.
+//!
+//! 2026-10-12 (Nima: "if the selection does not fulfill or maybe some part
+//! of it the pipeline should say that these sessions cannot be [run] unless
+//! they have whatever"): the units that cannot run are said by what they
+//! lack in a few words ([`brief`], "no FLAIR picked"), one line a reason
+//! with the units under it (`cannot`), and a run none of whose units could
+//! run is not ready, since it would make nothing. A run taken up again
+//! (`nils run --resume`, `{resume: <run>}` at the door) is checked as a new
+//! run is, for the units it still has to run: of the bids input it released
+//! before where it did, else as a new run over its handle, the units it is
+//! over with kept. The jobs door and `nils run` refuse a run that could run
+//! none of its units and has made nothing ([`units_refusal`]).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -74,6 +86,9 @@ pub(crate) struct Asked<'a> {
     /// what was resolved, the visits with none named; else what the handle
     /// records of them.
     pub main: Option<Value>,
+    /// 2026-10-12: the run taken up again, whose pipeline, parameters and
+    /// handle these are; none for a new run.
+    pub resume: Option<i64>,
 }
 
 /// The lane's budget (record 49 A1, R6), as the lane itself reads it: the
@@ -120,6 +135,157 @@ fn list(ids: &[i64]) -> String {
         .map(i64::to_string)
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// How many units one reason of `cannot` names; the rest are counted.
+const CANNOT_NAMED: usize = 200;
+
+/// A role as a person reads it: its BIDS suffix where the standard has one
+/// (`flair` as FLAIR, `t1w` as T1w), else as the pack names it.
+fn role_word(role: &str) -> String {
+    nils_release::run::role_suffix(role).map_or_else(|| role.to_string(), str::to_string)
+}
+
+/// Why a unit cannot run, in a few words (2026-10-12): what it lacks, as a
+/// run's line and the pre-flight's `cannot` say it ("no FLAIR picked" for
+/// "no flair is picked for it among the selection's stacks"). Read from the
+/// engine's own words, so a run from before reads the same; a reason it has
+/// no short words for is said whole.
+pub(crate) fn brief(why: &str) -> String {
+    let why = why.trim();
+    if let Some(role) = why
+        .strip_prefix("no ")
+        .and_then(|r| r.strip_suffix(" is picked for it among the selection's stacks"))
+    {
+        return format!("no {} picked", role_word(role));
+    }
+    if let Some((role, _)) = why
+        .strip_prefix("no ")
+        .and_then(|r| r.split_once(" stands for it: a person's pick "))
+    {
+        return format!("a person said no {} stands", role_word(role));
+    }
+    if let Some((role, _)) = why
+        .strip_prefix("its ")
+        .and_then(|r| r.split_once(" pick is released outside the session's BIDS folders"))
+    {
+        return format!("its {} is outside the input", role_word(role));
+    }
+    if let Some((role, rest)) = why
+        .strip_prefix("its ")
+        .and_then(|r| r.split_once(" pick is released as "))
+    {
+        let as_ = rest.split(", not ").next().unwrap_or(rest);
+        return format!("its {} is released as {as_}", role_word(role));
+    }
+    // a derivative an input needs (crate::pipelines::derivative_lack)
+    if let Some((kind, input)) = why
+        .strip_prefix("no ")
+        .and_then(|r| r.split_once(" derivative of it for the input "))
+    {
+        return if input.contains(" is accepted by a check") {
+            format!("no accepted {kind}")
+        } else {
+            format!("no {kind} yet")
+        };
+    }
+    if let Some((kind, _)) = why
+        .strip_prefix("its ")
+        .and_then(|r| r.split_once(" derivative for the input "))
+        .filter(|(_, rest)| rest.contains("was rejected by a check"))
+    {
+        return format!("its {kind} was rejected");
+    }
+    if let Some(rest) = why
+        .strip_prefix("its ")
+        .filter(|r| r.contains(" were all rejected by a check"))
+    {
+        let kind = rest
+            .split_once(" derivatives for the input ")
+            .map(|(n_kind, _)| n_kind.split_once(' ').map_or(n_kind, |(_, k)| k))
+            .unwrap_or("derivative");
+        return format!("every {kind} rejected");
+    }
+    match why {
+        "the registry does not hold this stack" => "not in the registry".into(),
+        "the registry holds no file of it to read" => "no file to read".into(),
+        _ => why.to_string(),
+    }
+}
+
+/// A unit's reasons in a few words, each once, in the order it has them.
+fn briefs(missing: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for w in missing {
+        let b = brief(w);
+        if !out.contains(&b) {
+            out.push(b);
+        }
+    }
+    out
+}
+
+/// What one unit of a pipeline is called (2026-10-12): a session or a
+/// subject of the bids layout's release, a stack of the stacks layout.
+pub(crate) fn unit_word(layout: Layout, level: Level) -> &'static str {
+    match (layout, level) {
+        (Layout::Stacks, _) => "stack",
+        (Layout::Bids, Level::Session) => "session",
+        (Layout::Bids, _) => "subject",
+    }
+}
+
+/// A count of units in words: "1 session", "4 sessions".
+fn units_words(n: usize, word: &str) -> String {
+    format!("{n} {word}{}", if n == 1 { "" } else { "s" })
+}
+
+/// The units that cannot run, one entry a reason in a few words, the most
+/// first: `{why, units, named}`, each unit counted once under each reason
+/// it has, and at most [`CANNOT_NAMED`] of them named, as the run names
+/// them.
+fn cannot_of(missing: &[&Unit]) -> Vec<Value> {
+    let mut by: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for u in missing {
+        for why in briefs(&u.missing) {
+            by.entry(why).or_default().push(u.name());
+        }
+    }
+    let mut out: Vec<(String, Vec<String>)> = by.into_iter().collect();
+    out.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then(a.0.cmp(&b.0)));
+    out.into_iter()
+        .map(|(why, units)| {
+            json!({
+                "why": why,
+                "units": units.len(),
+                "named": units.into_iter().take(CANNOT_NAMED).collect::<Vec<_>>(),
+            })
+        })
+        .collect()
+}
+
+/// The reasons of `cannot` on one line: "no FLAIR picked", or with their
+/// counts where there are several, "no FLAIR picked: 3; no T1w picked: 1".
+pub(crate) fn reasons_line(cannot: &[Value]) -> String {
+    let why = |c: &Value| c["why"].as_str().unwrap_or_default().to_string();
+    match cannot {
+        [one] => why(one),
+        many => many
+            .iter()
+            .map(|c| format!("{}: {}", why(c), c["units"]))
+            .collect::<Vec<_>>()
+            .join("; "),
+    }
+}
+
+/// Why a run none of whose units could run is not ready, and is refused:
+/// "no session can run: 4 of 4 lack an input (no FLAIR picked)".
+fn none_can_run(word: &str, n: usize, cannot: &[Value]) -> String {
+    format!(
+        "no {word} can run: {n} of {n} {} an input ({})",
+        if n == 1 { "lacks" } else { "lack" },
+        reasons_line(cannot)
+    )
 }
 
 /// The stacks layout: one unit a stack, missing where the registry holds no
@@ -593,11 +759,147 @@ fn past_seconds(store: &mut Store, name: &str) -> Result<Option<(f64, usize)>, S
     Ok(Some((per_unit[per_unit.len() / 2], per_unit.len())))
 }
 
+/// A run taken up again (2026-10-12): the run, the units it is over with,
+/// and how many of those made what they were for.
+pub(crate) struct Taken {
+    pub(crate) run: rows::Run,
+    over: BTreeSet<String>,
+    made: usize,
+}
+
+/// A run to take up again, as it stands.
+pub(crate) fn taken_up(store: &mut Store, run_id: i64) -> Result<Taken, String> {
+    let err = |e: nils_registry::Error| e.to_string();
+    let run = rows::run(store, run_id)
+        .map_err(err)?
+        .ok_or_else(|| format!("no pipeline run {run_id}"))?;
+    let mut over = BTreeSet::new();
+    let mut made = 0;
+    for u in rows::units(store, run_id).map_err(err)? {
+        if u.state == "over" {
+            if u.outcome["status"] == "succeeded" {
+                made += 1;
+            }
+            over.insert(u.unit);
+        }
+    }
+    Ok(Taken { run, over, made })
+}
+
+/// The units a run would have, as the runner makes them, and the stacks it
+/// leaves out; for a run taken up again (2026-10-12) the units it still has
+/// to run, with how many are over already and how many of those made what
+/// they were for.
+struct Planned {
+    units: Vec<Unit>,
+    left: LeftOut,
+    kept: usize,
+    made: usize,
+}
+
+/// The units of a run over `stacks`: a new run's as its release would plan
+/// them; a run taken up again goes on with the bids input it released
+/// before, where it did, and its units over already are kept.
+fn plan_units(
+    registry: &mut Registry,
+    d: &Descriptor,
+    stacks: &[i64],
+    pack: Option<&nils_pack::Pack>,
+    place_ids: &[i64],
+    main: Option<&Value>,
+    taken: Option<&Taken>,
+) -> Result<Planned, String> {
+    let released = taken
+        .and_then(|t| t.run.input_release_id)
+        .filter(|_| d.layout == Layout::Bids);
+    let (mut units, left) = match (d.layout, released) {
+        (Layout::Stacks, _) => (
+            stack_units(registry.store(), d, stacks, place_ids)?,
+            LeftOut::new(),
+        ),
+        (Layout::Bids, Some(release)) => (
+            released_units(registry, d, release, place_ids, main)?,
+            LeftOut::new(),
+        ),
+        (Layout::Bids, None) => bids_units(registry, d, stacks, pack, place_ids, main)?,
+    };
+    let (kept, made) = match taken {
+        Some(t) => {
+            units.retain(|u| !t.over.contains(&u.name()));
+            (t.over.len(), t.made)
+        }
+        None => (0, 0),
+    };
+    Ok(Planned {
+        units,
+        left,
+        kept,
+        made,
+    })
+}
+
+/// The units of the bids input a run released before, as a run taken up
+/// again goes on with them (record 49 A1): each with the roles it lacks as
+/// the runner judges them, and the derivatives its inputs need.
+fn released_units(
+    registry: &mut Registry,
+    d: &Descriptor,
+    release: i64,
+    place_ids: &[i64],
+    main: Option<&Value>,
+) -> Result<Vec<Unit>, String> {
+    let mut out: Vec<Unit> =
+        crate::pipelines::released_units(registry, release, d.level, &d.roles, main)?
+            .into_iter()
+            .map(|r| Unit {
+                id: Some(r.id),
+                subject_id: r.subject_id,
+                session_day: r.session_day,
+                stacks: r.stacks,
+                missing: r.missing,
+                ..Unit::default()
+            })
+            .collect();
+    let units: Vec<&[i64]> = out.iter().map(|u| u.stacks.as_slice()).collect();
+    let lacking = crate::pipelines::derivatives_missing(registry.store(), d, &units, place_ids)?;
+    for (u, lacks) in out.iter_mut().zip(lacking) {
+        u.missing.extend(lacks);
+    }
+    Ok(out)
+}
+
+/// Whether `named` names this pipeline: by its id, its name@version or its
+/// name; nothing named is any.
+fn names(p: &rows::Pipeline, named: &str) -> bool {
+    named.is_empty() || named == p.name || named == p.label() || named == p.id.to_string()
+}
+
 /// The pre-flight of one run, from the registry alone.
 pub(crate) fn check(registry: &mut Registry, asked: &Asked<'_>) -> Result<Value, String> {
-    let p = rows::resolve(registry.store(), asked.pipeline)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("no pipeline {} in the catalog", asked.pipeline))?;
+    // 2026-10-12: a run taken up again is checked as a new run is, under
+    // what it recorded, for the units it still has to run
+    let taken = match asked.resume {
+        Some(id) => Some(taken_up(registry.store(), id)?),
+        None => None,
+    };
+    let p = match &taken {
+        Some(t) => rows::get(registry.store(), t.run.pipeline_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("run {} names a pipeline the catalog lost", t.run.id))?,
+        None => rows::resolve(registry.store(), asked.pipeline)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("no pipeline {} in the catalog", asked.pipeline))?,
+    };
+    if let Some(t) = &taken
+        && !names(&p, asked.pipeline)
+    {
+        return Err(format!(
+            "run {} is a run of {}, not of {}",
+            t.run.id,
+            p.label(),
+            asked.pipeline
+        ));
+    }
     let d = descriptor::from_value(p.descriptor.clone()).map_err(|e| {
         format!(
             "{}: the catalog's descriptor no longer checks: {e}",
@@ -605,39 +907,54 @@ pub(crate) fn check(registry: &mut Registry, asked: &Asked<'_>) -> Result<Value,
         )
     })?;
     let mut blockers: Vec<String> = Vec::new();
-    if p.state != "active" {
-        blockers.push(format!("{} is {}", p.label(), p.state));
-    }
-    let params = match d.resolve(asked.params) {
-        Ok(v) => Value::Object(v),
-        Err(e) => {
-            blockers.push(e);
-            Value::Null
+    // a run taken up again goes on with its pipeline whatever the catalog
+    // says of it since, and with the parameters it recorded
+    let params = match &taken {
+        Some(t) => {
+            if let Some(refused) = crate::pipelines::resume_refused(registry.store(), &t.run) {
+                blockers.push(refused.message);
+            }
+            t.run.params.clone()
+        }
+        None => {
+            if p.state != "active" {
+                blockers.push(format!("{} is {}", p.label(), p.state));
+            }
+            match d.resolve(asked.params) {
+                Ok(v) => Value::Object(v),
+                Err(e) => {
+                    blockers.push(e);
+                    Value::Null
+                }
+            }
         }
     };
     let stacks =
         crate::pipelines::handle_stacks(registry.store(), asked.handle).map_err(|e| e.message)?;
-    let places = crate::pipelines::run_places(registry.store()).ok();
-    let mut place_ids: Vec<i64> = places.iter().map(|p| p.output.id).collect();
-    if let Some(p) = &places
-        && p.scratch.id != p.output.id
-    {
-        place_ids.push(p.scratch.id);
-    }
+    let place_ids = places_of(registry.store(), taken.as_ref());
     // record 55: a dataset's or a cohort's main scans say what was read,
     // and their bids input is released under those picks
     let main = asked
         .main
         .clone()
         .or_else(|| crate::main_input::entry_of(registry.store(), asked.handle));
-    let (units, left) = match d.layout {
-        Layout::Stacks => (
-            stack_units(registry.store(), &d, &stacks, &place_ids)?,
-            LeftOut::new(),
-        ),
-        Layout::Bids => bids_units(registry, &d, &stacks, asked.pack, &place_ids, main.as_ref())?,
-    };
-    if units.is_empty() {
+    let Planned {
+        units,
+        left,
+        kept,
+        made,
+    } = plan_units(
+        registry,
+        &d,
+        &stacks,
+        asked.pack,
+        &place_ids,
+        main.as_ref(),
+        taken.as_ref(),
+    )?;
+    // a run taken up again with every unit over has none left to run, and
+    // taking it up closes it with what they made
+    if units.is_empty() && kept == 0 {
         blockers.push(match (&main, d.layout) {
             (Some(m), _) if stacks.is_empty() => crate::main_input::nothing(m),
             (_, Layout::Bids) => "no stack of the selection is picked, so the release of the input would hold no subject's images; nils pick run picks them".into(),
@@ -645,6 +962,15 @@ pub(crate) fn check(registry: &mut Registry, asked: &Asked<'_>) -> Result<Value,
         });
     }
     let missing: Vec<&Unit> = units.iter().filter(|u| !u.missing.is_empty()).collect();
+    let ready_units = units.len() - missing.len();
+    let word = unit_word(d.layout, d.level);
+    let cannot = cannot_of(&missing);
+    // 2026-10-12: a run none of whose units could run would make nothing,
+    // and is not ready; one taken up again that made some is, since going
+    // on closes it with what they made
+    if !units.is_empty() && ready_units == 0 && made == 0 {
+        blockers.push(none_can_run(word, units.len(), &cannot));
+    }
 
     // the runtime, the working place and the GPU
     let detected = crate::pipelines::detect_cached(registry);
@@ -656,6 +982,17 @@ pub(crate) fn check(registry: &mut Registry, asked: &Asked<'_>) -> Result<Value,
                 .unwrap_or("pipelines are off here")
                 .to_string(),
         );
+    }
+    // a run taken up again goes on under the runtime it ran under
+    if let (Some(t), Some(now)) = (&taken, detected.runtime.as_ref())
+        && now.kind.name() != t.run.runtime
+    {
+        blockers.push(format!(
+            "run {} ran under {}, and pipelines here run under {} now; its units would not be alike, so start a new run",
+            t.run.id,
+            t.run.runtime,
+            now.kind.name()
+        ));
     }
     // the GPU as a run would take it: the runtime's, and only where the
     // lane names a card to lease
@@ -680,6 +1017,14 @@ pub(crate) fn check(registry: &mut Registry, asked: &Asked<'_>) -> Result<Value,
             None
         }
     };
+    if let (Some(t), Some(now)) = (&taken, device.as_deref())
+        && (t.run.device == "cpu") != (now == "cpu")
+    {
+        blockers.push(format!(
+            "run {} ran on {}, and would go on on {now}; start a new run",
+            t.run.id, t.run.device
+        ));
+    }
 
     // what a unit needs, against the lane
     let ask = nils_pipeline::lane::Ask {
@@ -723,7 +1068,8 @@ pub(crate) fn check(registry: &mut Registry, asked: &Asked<'_>) -> Result<Value,
 
     // 2026-10-12: what the run needs of this machine, each check answered,
     // and a failed one a blocker by its kind (the runtime, the lane and the
-    // GPU are said above already)
+    // GPU are said above already); a run taken up again needs the converter
+    // only where its bids input is still to be released
     let requirements = crate::requirements::checks(
         registry,
         asked.home,
@@ -733,6 +1079,9 @@ pub(crate) fn check(registry: &mut Registry, asked: &Asked<'_>) -> Result<Value,
             dcm2niix: asked.dcm2niix,
             units: units.len().max(1),
             detected: Some(&detected),
+            releases: taken
+                .as_ref()
+                .is_none_or(|t| t.run.input_release_id.is_none()),
         },
     );
     for c in requirements.iter().filter(|c| !c.ok) {
@@ -750,21 +1099,27 @@ pub(crate) fn check(registry: &mut Registry, asked: &Asked<'_>) -> Result<Value,
         "pipeline": p.label(),
         "pipeline_id": p.id,
         "handle": asked.handle,
-        "selection": asked.selection,
+        "selection": asked.selection.or(taken.as_ref().and_then(|t| t.run.selection.as_deref())),
         "main": main,
         "params": params,
         "layout": d.layout.name(),
         "level": d.level.name(),
+        "unit": word,
         "stacks": stacks.len(),
         "units": {
             "total": units.len(),
-            "ready": units.len() - missing.len(),
+            "ready": ready_units,
             "missing": missing.len(),
         },
         "missing": missing.iter().map(|u| json!({
             "unit": u.name(), "subject_id": u.subject_id, "session_day": u.session_day,
-            "stack_id": u.stack_id, "why": u.missing,
+            "stack_id": u.stack_id, "why": u.missing, "lacks": briefs(&u.missing),
         })).collect::<Vec<_>>(),
+        "cannot": cannot,
+        "resume": taken.as_ref().map(|t| json!({
+            "run": t.run.id, "status": t.run.status, "job": t.run.job_id,
+            "kept": kept, "made": made,
+        })),
         "roles": d.roles,
         "left_out": {
             "stacks": left.len(),
@@ -795,6 +1150,154 @@ pub(crate) fn check(registry: &mut Registry, asked: &Asked<'_>) -> Result<Value,
     }))
 }
 
+/// A run refused before it starts for its units (2026-10-12): the words,
+/// which end as a refusal does with its cause (input), the units that
+/// cannot run by why, one entry a reason, how many units it has, and what
+/// one is called.
+pub(crate) struct UnitsRefused {
+    pub(crate) words: String,
+    pub(crate) cannot: Vec<Value>,
+    pub(crate) units: usize,
+    pub(crate) unit: &'static str,
+}
+
+impl UnitsRefused {
+    /// What a door answers beside the words: the failure, the units and why
+    /// they cannot run.
+    pub(crate) fn doc(&self) -> Value {
+        json!({
+            "failure": nils_pipeline::failure::Cause::Input.refusal_doc(),
+            "unit": self.unit,
+            "units": {"total": self.units, "ready": 0, "missing": self.units},
+            "cannot": self.cannot,
+        })
+    }
+}
+
+/// The places a run's derivative inputs are found in: a run taken up again
+/// keeps its own, a new run the lane's.
+fn places_of(store: &mut Store, taken: Option<&Taken>) -> Vec<i64> {
+    match taken {
+        Some(t) => [t.run.place_id, t.run.scratch_place_id]
+            .into_iter()
+            .flatten()
+            .collect(),
+        None => {
+            let places = crate::pipelines::run_places(store).ok();
+            let mut ids: Vec<i64> = places.iter().map(|p| p.output.id).collect();
+            if let Some(p) = &places
+                && p.scratch.id != p.output.id
+            {
+                ids.push(p.scratch.id);
+            }
+            ids
+        }
+    }
+}
+
+/// 2026-10-12: a run over `handle` (or `resume`, taken up again) that could
+/// run none of the units it has, or still has, and has made nothing, would
+/// make nothing: it is refused before it starts, by the pre-flight's units
+/// and in its words. None where a unit could run, where it has no unit at
+/// all (which the run says itself), or where a run taken up again made
+/// something, since going on closes it with that.
+pub(crate) fn units_refusal(
+    registry: &mut Registry,
+    d: &Descriptor,
+    handle: i64,
+    pack: Option<&nils_pack::Pack>,
+    main: Option<&Value>,
+    resume: Option<i64>,
+) -> Result<Option<UnitsRefused>, String> {
+    let taken = match resume {
+        Some(id) => Some(taken_up(registry.store(), id)?),
+        None => None,
+    };
+    let stacks =
+        crate::pipelines::handle_stacks(registry.store(), handle).map_err(|e| e.message)?;
+    let place_ids = places_of(registry.store(), taken.as_ref());
+    let main = main
+        .cloned()
+        .or_else(|| crate::main_input::entry_of(registry.store(), handle));
+    let planned = plan_units(
+        registry,
+        d,
+        &stacks,
+        pack,
+        &place_ids,
+        main.as_ref(),
+        taken.as_ref(),
+    )?;
+    let missing: Vec<&Unit> = planned
+        .units
+        .iter()
+        .filter(|u| !u.missing.is_empty())
+        .collect();
+    if planned.units.is_empty() || missing.len() < planned.units.len() || planned.made > 0 {
+        return Ok(None);
+    }
+    let cannot = cannot_of(&missing);
+    let unit = unit_word(d.layout, d.level);
+    let said = none_can_run(unit, planned.units.len(), &cannot);
+    let cause = nils_pipeline::failure::Cause::Input;
+    Ok(Some(UnitsRefused {
+        words: format!(
+            "refused before it started: {said}; {} {}",
+            cause.advice_before(),
+            nils_pipeline::failure::mark(cause)
+        ),
+        cannot,
+        units: planned.units.len(),
+        unit,
+    }))
+}
+
+/// The jobs door's look at a run's units (2026-10-12): over the handle its
+/// command names, its selection frozen as the run would freeze it, or the
+/// run it takes up again; refused where it could run none of them. What
+/// cannot be read here (a selection that is not there, a pack that does not
+/// load) is left to the run, which says it when it starts.
+pub(crate) fn door_units(
+    home: &Home,
+    pack_dir: Option<&Path>,
+    registry: &mut Registry,
+    command: &[String],
+    d: &Descriptor,
+) -> Option<UnitsRefused> {
+    let flag = |name: &str| {
+        command
+            .iter()
+            .position(|w| w == name)
+            .and_then(|i| command.get(i + 1))
+            .cloned()
+    };
+    let pack_name = flag("--pack").unwrap_or_else(|| "mri".to_string());
+    let dir = flag("--pack-dir")
+        .map(PathBuf::from)
+        .or_else(|| pack_dir.map(Path::to_path_buf))
+        .or_else(|| crate::pack_dir(home, None).ok());
+    let resume = flag("--resume").and_then(|r| r.parse::<i64>().ok());
+    let (handle, main) = match resume {
+        Some(run) => (
+            rows::run(registry.store(), run).ok().flatten()?.handle_id?,
+            None,
+        ),
+        None => frozen_over(
+            home,
+            flag("--select").as_deref(),
+            flag("--handle").and_then(|h| h.parse::<i64>().ok()),
+            dir.clone(),
+            &pack_name,
+        )
+        .ok()
+        .flatten()?,
+    };
+    let pack = dir.and_then(|dir| crate::ask_cli::load_pack(&dir, &pack_name).ok());
+    units_refusal(registry, d, handle, pack.as_ref(), main.as_ref(), resume)
+        .ok()
+        .flatten()
+}
+
 /// Why the stacks left out are, each reason once with its count.
 fn left_why(left: &[(i64, String)]) -> Value {
     if left.is_empty() {
@@ -817,7 +1320,12 @@ fn left_why(left: &[(i64, String)]) -> Value {
 pub(crate) fn plain(v: &mut Value) {
     if let Some(list) = v["missing"].as_array_mut() {
         for m in list.iter_mut() {
-            *m = json!({"why": m["why"].clone()});
+            *m = json!({"why": m["why"].clone(), "lacks": m["lacks"].clone()});
+        }
+    }
+    if let Some(list) = v["cannot"].as_array_mut() {
+        for c in list.iter_mut() {
+            c["named"] = json!([]);
         }
     }
     if let Some(list) = v["main"]["without"]["named"].as_array_mut() {
@@ -906,20 +1414,39 @@ pub(crate) fn route(
             }
         };
         let selection = doc["select"].as_str().map(str::to_string);
-        let (handle, main) = frozen_over(
-            home,
-            selection.as_deref(),
-            doc["handle"].as_i64(),
-            pack_dir.map(PathBuf::from),
-            doc["pack"].as_str().unwrap_or("mri"),
-        )
-        .map_err(|e| Reply::error(400, e.message))?
-        .ok_or_else(|| {
-            Reply::error(
-                400,
-                "a pre-flight is over a selection: {select: \"selection:<name>@<v>\"}, a dataset's or a cohort's main scans {select: \"main:<role>@dataset:<name>\"}, or {handle: <id>}",
+        // 2026-10-12: a run taken up again, over the handle it pinned
+        let resume = match &doc["resume"] {
+            Value::Null => None,
+            r => Some(
+                r.as_i64()
+                    .ok_or_else(|| Reply::error(400, "resume is a run's id"))?,
+            ),
+        };
+        let (handle, main) = match resume {
+            Some(run) => {
+                let r = rows::run(registry.store(), run)
+                    .map_err(|e| Reply::error(500, e.to_string()))?
+                    .ok_or_else(|| Reply::error(404, format!("no pipeline run {run}")))?;
+                let handle = r.handle_id.ok_or_else(|| {
+                    Reply::error(409, format!("run {run} pinned no handle"))
+                })?;
+                (handle, None)
+            }
+            None => frozen_over(
+                home,
+                selection.as_deref(),
+                doc["handle"].as_i64(),
+                pack_dir.map(PathBuf::from),
+                doc["pack"].as_str().unwrap_or("mri"),
             )
-        })?;
+            .map_err(|e| Reply::error(400, e.message))?
+            .ok_or_else(|| {
+                Reply::error(
+                    400,
+                    "a pre-flight is over a selection: {select: \"selection:<name>@<v>\"}, a dataset's or a cohort's main scans {select: \"main:<role>@dataset:<name>\"}, {handle: <id>}, or a run taken up again {resume: <run>}",
+                )
+            })?,
+        };
         let pack = pack_dir
             .map(Path::to_path_buf)
             .or_else(|| crate::pack_dir(home, None).ok())
@@ -937,6 +1464,7 @@ pub(crate) fn route(
                 selection: selection.as_deref(),
                 params: &params,
                 main,
+                resume,
             },
         )
         .map_err(|e| {
@@ -955,27 +1483,38 @@ pub(crate) fn route(
 
 /// `nils run --preflight`: the pre-flight printed, nothing run.
 pub(crate) fn command(home: &Home, args: &crate::pipelines::RunArgs) -> Result<(), Exit> {
-    if args.resume.is_some() {
-        return Err(usage(
-            "a pre-flight is of a new run, not of one taken up again: leave out --resume",
-        ));
-    }
-    let pipeline = args
-        .pipeline
-        .as_deref()
-        .ok_or_else(|| usage("run <pipeline> --preflight: the pipeline to check"))?;
-    let (handle, main) = frozen_over(
-        home,
-        args.select.as_deref(),
-        args.handle,
-        args.pack_dir.clone(),
-        &args.pack,
-    )?
-    .ok_or_else(|| {
-        usage(
-            "a pre-flight is over a frozen selection: --select selection:<name>@<v>, a dataset's or a cohort's main scans (--select main:<role>@dataset:<name>), or --handle <id>",
-        )
-    })?;
+    // 2026-10-12: a run taken up again is pre-flown over the handle it
+    // pinned, for the units it still has to run
+    let (pipeline, handle, main) = match args.resume {
+        Some(run) => {
+            let mut registry = crate::open(home)?;
+            let r = rows::run(registry.store(), run)?
+                .ok_or_else(|| usage(format!("no pipeline run {run}")))?;
+            let handle = r
+                .handle_id
+                .ok_or_else(|| usage(format!("run {run} pinned no handle")))?;
+            (args.pipeline.as_deref().unwrap_or_default(), handle, None)
+        }
+        None => {
+            let pipeline = args
+                .pipeline
+                .as_deref()
+                .ok_or_else(|| usage("run <pipeline> --preflight: the pipeline to check"))?;
+            let (handle, main) = frozen_over(
+                home,
+                args.select.as_deref(),
+                args.handle,
+                args.pack_dir.clone(),
+                &args.pack,
+            )?
+            .ok_or_else(|| {
+                usage(
+                    "a pre-flight is over a frozen selection: --select selection:<name>@<v>, a dataset's or a cohort's main scans (--select main:<role>@dataset:<name>), --handle <id>, or a run taken up again (--resume <run>)",
+                )
+            })?;
+            (pipeline, handle, main)
+        }
+    };
     let params: Vec<(String, String)> = args
         .params
         .iter()
@@ -1000,6 +1539,7 @@ pub(crate) fn command(home: &Home, args: &crate::pipelines::RunArgs) -> Result<(
             selection: args.select.as_deref(),
             params: &params,
             main,
+            resume: args.resume,
         },
     )
     .map_err(usage)?;
@@ -1033,22 +1573,55 @@ pub(crate) fn command(home: &Home, args: &crate::pipelines::RunArgs) -> Result<(
             );
         }
     }
+    if v["resume"].is_object() {
+        let r = &v["resume"];
+        println!(
+            "  taken up again   run {} ({}): {} over and kept, {} of them made",
+            r["run"],
+            r["status"].as_str().unwrap_or_default(),
+            r["kept"],
+            r["made"]
+        );
+    }
     println!(
         "  units            {} ({} ready, {} missing an input)",
         v["units"]["total"], v["units"]["ready"], v["units"]["missing"]
     );
-    for m in v["missing"].as_array().into_iter().flatten().take(20) {
-        let why: Vec<&str> = m["why"]
+    // 2026-10-12: the units that cannot run, one line a reason with the
+    // units under it, or that every one can
+    let word = v["unit"].as_str().unwrap_or("unit");
+    let total = v["units"]["total"].as_u64().unwrap_or(0) as usize;
+    if total > 0 && v["units"]["missing"].as_u64() == Some(0) {
+        println!(
+            "  can run          every {word}: {}",
+            units_words(total, word)
+        );
+    }
+    for c in v["cannot"].as_array().into_iter().flatten() {
+        let n = c["units"].as_u64().unwrap_or(0) as usize;
+        println!(
+            "  cannot run       {}: {}",
+            units_words(n, word),
+            c["why"].as_str().unwrap_or_default()
+        );
+        let named: Vec<&str> = c["named"]
             .as_array()
             .into_iter()
             .flatten()
             .filter_map(Value::as_str)
             .collect();
-        println!(
-            "    {}: {}",
-            m["unit"].as_str().unwrap_or_default(),
-            why.join("; ")
-        );
+        if !named.is_empty() {
+            let shown = named.len().min(10);
+            println!(
+                "    {}{}",
+                named[..shown].join(", "),
+                if n > shown {
+                    format!(" and {} more", n - shown)
+                } else {
+                    String::new()
+                }
+            );
+        }
     }
     if v["left_out"]["stacks"].as_u64().unwrap_or(0) > 0 {
         println!(
@@ -1096,10 +1669,13 @@ pub(crate) fn command(home: &Home, args: &crate::pipelines::RunArgs) -> Result<(
         );
     }
     if v["ready"] == true {
-        println!(
-            "ready: nils run {} starts it",
-            v["pipeline"].as_str().unwrap_or_default()
-        );
+        match args.resume {
+            Some(run) => println!("ready: nils run --resume {run} takes it up again"),
+            None => println!(
+                "ready: nils run {} starts it",
+                v["pipeline"].as_str().unwrap_or_default()
+            ),
+        }
     } else {
         for b in v["blockers"].as_array().into_iter().flatten() {
             println!("not ready: {}", b.as_str().unwrap_or_default());
@@ -1114,6 +1690,92 @@ pub(crate) fn command(home: &Home, args: &crate::pipelines::RunArgs) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 2026-10-12: a unit's reason in a few words, from the words the
+    /// pre-flight and the run say, a reason it has none for said whole; the
+    /// units that cannot run one entry a reason, the most first; and a run
+    /// none of whose units could run says so.
+    #[test]
+    fn a_reason_is_said_in_a_few_words_and_the_units_folded_by_it() {
+        let roles = vec!["t1w".to_string(), "flair".to_string()];
+        let no_t1w = roles_missing(&roles, &held(&[("flair", &[Some("FLAIR")])]));
+        assert_eq!(brief(&no_t1w[0]), "no T1w picked");
+        let no_flair = roles_missing(&roles, &held(&[("t1w", &[Some("T1w")])]));
+        assert_eq!(brief(&no_flair[0]), "no FLAIR picked");
+        let as_t2 = held(&[
+            ("t1w", &[Some("sub-a_ses-b_acq-x_T2w")]),
+            ("flair", &[Some("FLAIR")]),
+        ]);
+        assert_eq!(
+            brief(&roles_missing(&roles, &as_t2)[0]),
+            "its T1w is released as T2w"
+        );
+        let outside = held(&[("t1w", &[None]), ("flair", &[Some("FLAIR")])]);
+        assert_eq!(
+            brief(&roles_missing(&roles, &outside)[0]),
+            "its T1w is outside the input"
+        );
+        assert_eq!(
+            brief("no flair stands for it: a person's pick 12 says so"),
+            "a person said no FLAIR stands"
+        );
+        assert_eq!(
+            brief("no dixon is picked for it among the selection's stacks"),
+            "no dixon picked"
+        );
+        use crate::pipelines::derivative_lack;
+        assert_eq!(
+            brief(&derivative_lack(0, "mask", "mask", "not_rejected")),
+            "no mask yet"
+        );
+        assert_eq!(
+            brief(&derivative_lack(2, "mask", "mask", "accepted")),
+            "no accepted mask"
+        );
+        assert_eq!(
+            brief(&derivative_lack(1, "mask", "mask", "not_rejected")),
+            "its mask was rejected"
+        );
+        assert_eq!(
+            brief(&derivative_lack(3, "mask", "lesions", "not_rejected")),
+            "every mask rejected"
+        );
+        assert_eq!(
+            brief("the registry holds no file of it to read"),
+            "no file to read"
+        );
+        assert_eq!(brief("a reason of its own"), "a reason of its own");
+
+        let a = Unit {
+            id: Some("sub-a_ses-1".into()),
+            missing: no_t1w.clone(),
+            ..Unit::default()
+        };
+        let b = Unit {
+            id: Some("sub-b_ses-1".into()),
+            missing: [no_t1w.clone(), no_flair.clone()].concat(),
+            ..Unit::default()
+        };
+        let cannot = cannot_of(&[&a, &b]);
+        assert_eq!(
+            cannot,
+            vec![
+                json!({"why": "no T1w picked", "units": 2, "named": ["sub-a_ses-1", "sub-b_ses-1"]}),
+                json!({"why": "no FLAIR picked", "units": 1, "named": ["sub-b_ses-1"]}),
+            ]
+        );
+        assert_eq!(
+            none_can_run("session", 2, &cannot),
+            "no session can run: 2 of 2 lack an input (no T1w picked: 2; no FLAIR picked: 1)"
+        );
+        assert_eq!(
+            none_can_run("session", 1, &cannot_of(&[&a])),
+            "no session can run: 1 of 1 lacks an input (no T1w picked)"
+        );
+        assert_eq!(unit_word(Layout::Bids, Level::Session), "session");
+        assert_eq!(unit_word(Layout::Bids, Level::Participant), "subject");
+        assert_eq!(unit_word(Layout::Stacks, Level::Stack), "stack");
+    }
 
     fn held(pairs: &[(&str, &[Option<&str>])]) -> BTreeMap<String, Vec<Option<String>>> {
         pairs

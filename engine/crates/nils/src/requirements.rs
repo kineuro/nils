@@ -98,6 +98,10 @@ pub(crate) struct Asked<'a> {
     /// The runtime as the caller found it already, so it is not looked for
     /// twice; none to take the engine's own look.
     pub(crate) detected: Option<&'a runtime::Detected>,
+    /// Whether the run releases a bids input, which needs the converter: a
+    /// new run does, a run taken up again only where it released none
+    /// before (2026-10-12).
+    pub(crate) releases: bool,
 }
 
 fn found_by_words(by: &str) -> &'static str {
@@ -398,7 +402,7 @@ pub(crate) fn disk(registry: &mut Registry, d: &Descriptor, units: usize) -> Opt
 /// Every check of a run, in the order a person reads them.
 pub(crate) fn checks(registry: &mut Registry, home: &Path, a: &Asked<'_>) -> Vec<Check> {
     let mut out = Vec::new();
-    if a.descriptor.layout == Layout::Bids {
+    if a.descriptor.layout == Layout::Bids && a.releases {
         out.push(converter(home, a.dcm2niix));
     }
     let detected = match a.detected {
@@ -435,54 +439,118 @@ fn named(command: &[String]) -> Option<&str> {
     None
 }
 
+/// The value a flag of a command line takes.
+fn flag<'a>(command: &'a [String], name: &str) -> Option<&'a str> {
+    command
+        .iter()
+        .position(|w| w == name)
+        .and_then(|i| command.get(i + 1))
+        .map(String::as_str)
+}
+
 /// The run door's checks (2026-10-12): a `run` a door is about to queue,
 /// refused with 409, its kind, its reason and every check, where one fails;
-/// nothing is queued then. A run taken up again is not asked again, nor a
-/// pipeline the catalog does not hold, which the run refuses itself.
+/// nothing is queued then. A pipeline the catalog does not hold is left to
+/// the run, which refuses it itself.
+///
+/// A run taken up again (`--resume`) is checked as a new run is, under the
+/// pipeline it recorded, the converter only where its bids input is still
+/// to be released; one that cannot be taken up (done, failed after its
+/// containers ended, or running) is refused as `nils run --resume` refuses
+/// it. With `units`, a run that could run none of its units (a run taken
+/// up again, of those it still has to run) and has made nothing is refused
+/// as well, by the pre-flight's units and in its words, with `cannot`
+/// ([`crate::preflight::door_units`]).
 pub(crate) fn at_the_door(
-    home: &Path,
+    home: &nils_registry::home::Home,
+    pack_dir: Option<&Path>,
     registry: &mut Registry,
     command: &[String],
+    units: bool,
 ) -> Result<(), Reply> {
-    if command.first().map(String::as_str) != Some("run") || command.iter().any(|w| w == "--resume")
-    {
+    if command.first().map(String::as_str) != Some("run") {
         return Ok(());
     }
-    let Some(name) = named(command) else {
-        return Ok(());
+    let resumed = match command.iter().any(|w| w == "--resume") {
+        true => {
+            let Some(r) = flag(command, "--resume")
+                .and_then(|r| r.parse::<i64>().ok())
+                .and_then(|id| {
+                    nils_registry::pipeline::run(registry.store(), id)
+                        .ok()
+                        .flatten()
+                })
+            else {
+                return Ok(());
+            };
+            if let Some(refused) = crate::pipelines::resume_refused(registry.store(), &r) {
+                return Err(Reply::error(409, refused.message));
+            }
+            Some(r)
+        }
+        false => None,
     };
-    let Ok(Some(p)) = nils_registry::pipeline::resolve(registry.store(), name) else {
+    let p = match &resumed {
+        Some(r) => nils_registry::pipeline::get(registry.store(), r.pipeline_id)
+            .ok()
+            .flatten(),
+        None => named(command)
+            .and_then(|name| nils_registry::pipeline::resolve(registry.store(), name).ok())
+            .flatten(),
+    };
+    let Some(p) = p else {
         return Ok(());
     };
     let Ok(d) = nils_pipeline::descriptor::from_value(p.descriptor.clone()) else {
         return Ok(());
     };
-    let units = match command.iter().position(|w| w == "--handle") {
-        Some(i) if d.layout == Layout::Stacks => command
-            .get(i + 1)
-            .and_then(|h| h.parse::<i64>().ok())
-            .and_then(|h| crate::pipelines::handle_stacks(registry.store(), h).ok())
-            .map_or(1, |s| s.len()),
+    let handle = match &resumed {
+        Some(r) => r.handle_id,
+        None => flag(command, "--handle").and_then(|h| h.parse::<i64>().ok()),
+    };
+    let count = match handle {
+        Some(h) if d.layout == Layout::Stacks => {
+            crate::pipelines::handle_stacks(registry.store(), h)
+                .ok()
+                .map_or(1, |s| s.len())
+        }
         _ => 1,
     };
     let all = checks(
         registry,
-        home,
+        home.dir(),
         &Asked {
             pipeline: &p,
             descriptor: &d,
             dcm2niix: Path::new(crate::tools::DCM2NIIX),
-            units,
+            units: count,
             detected: None,
+            releases: resumed
+                .as_ref()
+                .is_none_or(|r| r.input_release_id.is_none()),
         },
     );
-    let Some(failed) = refusing(&all) else {
+    let docs = || json!(all.iter().map(Check::doc).collect::<Vec<_>>());
+    if let Some(failed) = refusing(&all) {
+        let mut r = Reply::error(409, failed.refusal());
+        r.body["failure"] = failed.cause.map_or(Value::Null, Cause::refusal_doc);
+        r.body["requirements"] = docs();
+        return Err(r);
+    }
+    if !units {
         return Ok(());
-    };
-    let mut r = Reply::error(409, failed.refusal());
-    r.body["failure"] = failed.cause.map_or(Value::Null, Cause::refusal_doc);
-    r.body["requirements"] = json!(all.iter().map(Check::doc).collect::<Vec<_>>());
-    Err(r)
+    }
+    if let Some(refused) = crate::preflight::door_units(home, pack_dir, registry, command, &d) {
+        let mut r = Reply::error(409, refused.words.clone());
+        if let Value::Object(more) = refused.doc() {
+            for (k, v) in more {
+                r.body[k] = v;
+            }
+        }
+        r.body["requirements"] = docs();
+        return Err(r);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
