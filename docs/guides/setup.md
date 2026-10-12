@@ -610,13 +610,15 @@ read = true
 ```
 
 A model server named with `--model-server` is recorded by its address and
-the file its key is read from, never the key, which only Kvasir holds:
+the file its key is read from, never the key, which only Kvasir holds, with
+the stations' model and whether it thinks:
 
 ```toml
 [model_server]
 url = "https://models.example.org/v1"
 key_file = "/home/you/model-server.key"
 model = "qwen38-27b"
+thinking = "on"
 ```
 
 Run `nils setup` again and it opens with what is installed, where, in what
@@ -695,6 +697,25 @@ admitted; the others are added from Settings > Kvasir in the desk. The key is ne
 written down: the record keeps the address, the file's path and the model,
 so a later update or repair seals it again from the file. `--print` shows
 the plan with all three and without the key.
+
+The stations think before they answer. Setup asks Kvasir for thinking on,
+which Kvasir sends as the chat template's `enable_thinking` to every model
+of the server that reasons, and holds the stations' model with answers of up
+to 16,384 tokens, the thinking included, never more than the server allows.
+That is how the assistant's chat bench measured it: better answers, and no
+words before its tools, for about a second more a turn.
+`--model-thinking off` turns it off:
+
+```
+nils setup --update --model-thinking off
+```
+
+The record keeps the choice, so every update and repair sends it again; a
+record from before reads as on. Kvasir holds a server it holds already again
+in place, so the change asks nothing of the models and loads nothing on the
+server. Setup says what Kvasir holds, beside what the server allows, and a
+Kvasir from before thinking was set per backend leaves the thinking to the
+server's own default, which setup says too.
 
 ## Starting again from an empty registry
 
@@ -810,6 +831,7 @@ directory is NILS's.
 | `--channel URL` | Where releases come from |
 | `--model-server URL`, `--model-key-file FILE` | A model server the stations use, such as a Kvasir serving a card: on an install or with `--update`, Kvasir seals the key from the file and holds the server as one backend |
 | `--model-server-model ID` | With `--model-server`: the model the stations use; asked where there is a terminal, else the server's default or only model. On the first add, every model the server offers is admitted beside it, up to eight |
+| `--model-thinking on\|off` | Whether the stations' models on the model server think before they answer: `on`, the default, with up to 16,384 tokens an answer, or `off`. Recorded; with `--update` alone it changes the server on record |
 | `--dcm2niix PATH` | The site's own dcm2niix, taken as it is and recorded; without it, setup keeps one it finds or places the pinned build beside `nils` |
 
 Windows is not supported yet; the wizard says so and points at the

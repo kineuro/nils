@@ -2724,9 +2724,46 @@ fn a_model_server_is_planned_by_its_address_and_key_file_and_its_key_is_never_sh
     assert!(o.ok, "{}", o.stderr);
     o.says(&format!(
         "https://models.example.org/v1, its key read from {key_arg} and sealed in Kvasir; the \
-         stations on qwen38-27b"
+         stations on qwen38-27b, thinking on"
     ));
     clean(&o);
+    assert!(!dir.exists(), "--print made {}", dir.display());
+    // thinking is on unless it is turned off, and nothing else is a value
+    let install_print = |thinking: &str| {
+        setup(
+            &nils.path(),
+            config.path(),
+            &[
+                "--print",
+                "--parts",
+                "engine,desk,assistant",
+                "--runtime",
+                "machine",
+                "--dir",
+                dir.to_str().unwrap(),
+                "--model-server",
+                "https://models.example.org/v1",
+                "--model-key-file",
+                key_arg,
+                "--model-server-model",
+                "qwen38-27b",
+                "--model-thinking",
+                thinking,
+            ],
+        )
+    };
+    let o = install_print("off");
+    assert!(o.ok, "{}", o.stderr);
+    o.says("the stations on qwen38-27b, thinking off");
+    let refused = install_print("maybe");
+    assert!(!refused.ok);
+    assert!(
+        refused
+            .stderr
+            .contains("--model-thinking maybe is not on or off"),
+        "{}",
+        refused.stderr
+    );
     assert!(!dir.exists(), "--print made {}", dir.display());
     assert!(
         !config.path().join("nils").join("setup.toml").exists(),
@@ -2884,7 +2921,24 @@ fn a_model_server_is_planned_by_its_address_and_key_file_and_its_key_is_never_sh
         &["--update", "--print", "--channel", &channel],
     );
     assert!(o.ok, "{}", o.stderr);
-    o.says("the stations on qwen38-27b");
+    // a record from before thinking was kept: on, which the update asks of Kvasir
+    o.says("the stations on qwen38-27b, thinking on");
+    clean(&o);
+    // thinking named alone changes the server on record
+    let o = setup(
+        &nils.path(),
+        config.path(),
+        &[
+            "--update",
+            "--print",
+            "--channel",
+            &channel,
+            "--model-thinking",
+            "off",
+        ],
+    );
+    assert!(o.ok, "{}", o.stderr);
+    o.says("the stations on qwen38-27b, thinking off");
     clean(&o);
     assert_eq!(
         std::fs::read_to_string(config.path().join("nils").join("setup.toml")).unwrap(),
@@ -2892,6 +2946,26 @@ fn a_model_server_is_planned_by_its_address_and_key_file_and_its_key_is_never_sh
         "--print changed the record"
     );
     assert!(!dir.exists(), "--print made {}", dir.display());
+    // and with no model server on record or named, it is refused
+    std::fs::write(config.path().join("nils").join("setup.toml"), &record).unwrap();
+    let refused = setup(
+        &nils.path(),
+        config.path(),
+        &[
+            "--update",
+            "--print",
+            "--channel",
+            &channel,
+            "--model-thinking",
+            "off",
+        ],
+    );
+    assert!(!refused.ok, "{}", refused.stdout);
+    assert!(
+        refused.stderr.contains("name one with --model-server"),
+        "{}",
+        refused.stderr
+    );
 }
 
 /// `nils uninstall` with no terminal, a configuration directory and a home of
