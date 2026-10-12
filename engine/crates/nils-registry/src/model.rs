@@ -819,6 +819,71 @@ pub fn parts(store: &mut Store, m: &Model) -> Result<Vec<(String, Model)>, Store
     Ok(out)
 }
 
+/// Whether a model's card names `digest` as one of its parts (record 55 E2).
+fn names_part(m: &Model, digest: &str) -> bool {
+    m.card
+        .get("parts")
+        .and_then(Value::as_object)
+        .is_some_and(|p| p.values().any(|d| d.as_str() == Some(digest)))
+}
+
+/// The admitted or promoted cascades that read `part` (record 55 E2), each
+/// with the name of the input the part fills, leaving out those `except`
+/// names.
+fn holders(
+    store: &mut Store,
+    part: &Model,
+    except: &[i64],
+) -> Result<Vec<(String, Model)>, StoreError> {
+    Ok(list(store, &Filter::default())?
+        .into_iter()
+        .filter(|m| matches!(m.state.as_str(), "admitted" | "promoted") && !except.contains(&m.id))
+        .filter_map(|m| {
+            let name = m
+                .card
+                .get("parts")?
+                .as_object()?
+                .iter()
+                .find(|(_, d)| d.as_str() == Some(part.digest.as_str()))?
+                .0
+                .clone();
+            Some((name, m))
+        })
+        .collect())
+}
+
+/// Refused for a cascade one of whose parts is retired (record 55 E2): it
+/// can be neither admitted nor promoted, since no run would be given it.
+fn parts_stand(store: &mut Store, m: &Model, doing: &str) -> Result<(), Error> {
+    if let Some((name, gone)) = parts(store, m)?.into_iter().find(|(_, p)| p.state == "retired") {
+        return Err(refused(format!(
+            "model {} ({}) reads its part {name}, model {} ({}), which is retired, so it is not {doing}; register a cascade of parts that stand",
+            m.id,
+            m.label(),
+            gone.id,
+            gone.label()
+        )));
+    }
+    Ok(())
+}
+
+/// Refused where retiring `old` would leave an admitted or promoted
+/// cascade (other than those `except` names) without one of its parts
+/// (record 55 E2): the cascade names it, and goes first.
+fn not_held(store: &mut Store, old: &Model, except: &[i64], why: &str) -> Result<(), Error> {
+    if let Some((name, c)) = holders(store, old, except)?.into_iter().next() {
+        return Err(refused(format!(
+            "{why}: model {} ({}) is the part {name} of cascade {} ({}), which is {}; retire the cascade first",
+            old.id,
+            old.label(),
+            c.id,
+            c.label(),
+            c.state
+        )));
+    }
+    Ok(())
+}
+
 /// Check a check against `contracts/model/v1/lifecycle.schema.json`: a
 /// suite, a verdict and the checks behind it, which must agree.
 fn checked_check(check: &Value) -> Result<bool, Error> {
@@ -878,6 +943,7 @@ pub fn admit(registry: &mut Registry, id: i64, check: &Value, who: &str) -> Resu
             m.state
         )));
     }
+    parts_stand(store, &m, "admitted")?;
     let now = now_iso();
     let mut recorded = check.clone();
     if recorded.get("at").is_none() {
@@ -954,8 +1020,11 @@ pub struct Promoted {
 
 /// Promote a model: refused unless it was admitted by a check that passed.
 /// The model promoted before it in the same task and slot is retired, so a
-/// slot has at most one promoted model, unless it is one of the promoted
-/// model's parts: a cascade retires none of its parts (record 55 E2).
+/// slot has at most one promoted model, with two exceptions for a cascade
+/// (record 55 E2): a cascade retires none of its parts, and a part retires
+/// no cascade that reads it. A cascade with a retired part is refused, and
+/// so is a promotion that would retire a part of an admitted or promoted
+/// cascade not retired with it.
 pub fn promote(
     registry: &mut Registry,
     id: i64,
@@ -989,6 +1058,7 @@ pub fn promote(
             m.label()
         )));
     }
+    parts_stand(store, &m, "promoted")?;
     let d = store.dialect();
     let sql = format!(
         "SELECT id FROM {} WHERE task = {} AND slot = {} AND state = 'promoted' AND id <> {}",
@@ -1014,6 +1084,26 @@ pub fn promote(
         .into_iter()
         .filter(|old| !own.contains(old))
         .collect();
+    // a part's promotion retires no cascade that reads it
+    let mut kept = Vec::with_capacity(before.len());
+    for old in before {
+        if !names_part(&known(store, old)?, &m.digest) {
+            kept.push(old);
+        }
+    }
+    let before = kept;
+    // and no promotion leaves a served cascade without a part
+    let mut going = before.clone();
+    going.push(id);
+    for old in &before {
+        let o = known(store, *old)?;
+        not_held(
+            store,
+            &o,
+            &going,
+            &format!("promoting model {} ({}) would retire a cascade's part", m.id, m.label()),
+        )?;
+    }
     let now = now_iso();
     in_transaction(store, |store| {
         for old in &before {
@@ -1083,7 +1173,9 @@ pub fn promote(
     Ok(Promoted { model, retired })
 }
 
-/// Retire a model. Its decisions stay, and keep naming it.
+/// Retire a model. Its decisions stay, and keep naming it. Refused for a
+/// part of an admitted or promoted cascade (record 55 E2): the cascade is
+/// retired first.
 pub fn retire(
     registry: &mut Registry,
     id: i64,
@@ -1099,6 +1191,7 @@ pub fn retire(
             m.label()
         )));
     }
+    not_held(store, &m, &[], "a served cascade reads it")?;
     let now = now_iso();
     let d = store.dialect();
     in_transaction(store, |store| {

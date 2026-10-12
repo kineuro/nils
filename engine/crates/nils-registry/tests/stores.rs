@@ -1883,6 +1883,80 @@ fn a_cascade_names_its_parts_and_promoting_it_retires_none_on_both_backends() {
     }
 }
 
+/// Record 55 E2 on both backends: a served cascade keeps its parts. A
+/// part's promotion retires no cascade that reads it; a promotion that
+/// would retire a part of a served cascade is refused, and so is retiring
+/// one, each naming the cascade; a cascade with a retired part is neither
+/// admitted nor promoted.
+#[test]
+fn a_served_cascade_keeps_its_parts_on_both_backends() {
+    use nils_registry::model::{self, Error};
+    for (name, _guard, _dir, mut reg) in registries() {
+        let digest = |c: char| format!("sha256:{}", c.to_string().repeat(64));
+        let passed = serde_json::json!({"suite": "s", "passed": true, "checks": [{"name": "c", "passed": true}]});
+        let who = "anna@ward-3";
+        let add = |reg: &mut nils_registry::Registry, card: serde_json::Value| model::register(reg, &card, who).unwrap();
+        let state = |reg: &mut nils_registry::Registry, id: i64| model::get(reg.store(), id).unwrap().unwrap().state;
+        let refused = |r: Result<model::Promoted, Error>| match r {
+            Err(Error::Refused(m)) => m,
+            other => panic!("{name}: {other:?}"),
+        };
+        add(&mut reg, serde_json::json!({"name": "tiny", "version": "1", "kind": "encoder", "digest": digest('e'), "task": "features:image"}));
+        let head = add(&mut reg, serde_json::json!({"name": "fusion", "version": "1", "kind": "head", "digest": digest('a'), "task": "axis:body_part", "encoders": [{"digest": digest('e')}], "threshold": 0.9}));
+        let coarse = add(&mut reg, serde_json::json!({"name": "coarse", "version": "1", "kind": "head", "digest": digest('5'), "task": "axis:body_region", "encoders": [{"digest": digest('e')}], "threshold": 0.9}));
+        let student = add(&mut reg, serde_json::json!({"name": "student", "version": "1", "kind": "encoder", "digest": digest('b'), "task": "features:slice"}));
+        add(&mut reg, serde_json::json!({"name": "deferral", "version": "1", "kind": "head", "digest": digest('d'), "task": "cascade:body_part", "encoders": [{"digest": digest('b')}]}));
+        let parts = serde_json::json!({"encoder": digest('e'), "head": digest('a'), "coarse": digest('5'), "student": digest('b'), "deferral": digest('d')});
+        let cascade = add(&mut reg, serde_json::json!({"name": "cascade", "version": "1", "kind": "head", "digest": digest('c'), "task": "axis:body_part",
+                                                       "encoders": [{"digest": digest('e')}, {"digest": digest('b')}], "threshold": 0.9, "parts": parts}));
+        for id in [head.id, coarse.id, cascade.id] {
+            model::admit(&mut reg, id, &passed, who).unwrap();
+        }
+        model::promote(&mut reg, coarse.id, who, None, None).unwrap();
+        model::promote(&mut reg, cascade.id, who, None, None).unwrap();
+        // promoting the cascade's own head retires no cascade that reads it
+        let p = model::promote(&mut reg, head.id, who, None, None).unwrap();
+        assert_eq!(p.retired, None, "{name}");
+        assert_eq!(state(&mut reg, cascade.id), "promoted", "{name}");
+        // a new coarse mode would retire the cascade's coarse part: refused,
+        // naming the cascade, and nothing moves
+        let coarse2 = add(&mut reg, serde_json::json!({"name": "coarse", "version": "2", "kind": "head", "digest": digest('6'), "task": "axis:body_region", "encoders": [{"digest": digest('e')}], "threshold": 0.9}));
+        model::admit(&mut reg, coarse2.id, &passed, who).unwrap();
+        let m = refused(model::promote(&mut reg, coarse2.id, who, None, None));
+        assert!(m.contains("the part coarse of cascade") && m.contains(&format!("cascade {}", cascade.id)), "{name}: {m}");
+        assert_eq!((state(&mut reg, coarse.id), state(&mut reg, coarse2.id)), ("promoted".into(), "admitted".into()), "{name}");
+        // retiring a part of a served cascade is refused, a registered part's too
+        for part in [coarse.id, student.id, head.id] {
+            let e = model::retire(&mut reg, part, who, None).unwrap_err();
+            assert!(matches!(&e, Error::Refused(m) if m.contains(&format!("cascade {}", cascade.id))), "{name}: {e:?}");
+        }
+        // a plain head promoted over the slot retires the cascade and the
+        // head it reads together, and then a part may go
+        let other = add(&mut reg, serde_json::json!({"name": "fusion", "version": "2", "kind": "head", "digest": digest('2'), "task": "axis:body_part", "encoders": [{"digest": digest('e')}], "threshold": 0.9}));
+        model::admit(&mut reg, other.id, &passed, who).unwrap();
+        model::promote(&mut reg, other.id, who, None, None).unwrap();
+        assert_eq!((state(&mut reg, cascade.id), state(&mut reg, head.id)), ("retired".into(), "retired".into()), "{name}");
+        model::retire(&mut reg, student.id, who, Some("no cascade reads it")).unwrap();
+        // a cascade with a retired part is neither admitted nor promoted
+        let late = add(&mut reg, serde_json::json!({"name": "cascade", "version": "2", "kind": "head", "digest": digest('3'), "task": "axis:body_part",
+                                                    "encoders": [{"digest": digest('e')}], "threshold": 0.9,
+                                                    "parts": {"encoder": digest('e'), "head": digest('2'), "coarse": digest('5')}}));
+        let admitted = add(&mut reg, serde_json::json!({"name": "cascade", "version": "3", "kind": "head", "digest": digest('4'), "task": "axis:body_part",
+                                                        "encoders": [{"digest": digest('e')}], "threshold": 0.9,
+                                                        "parts": {"encoder": digest('e'), "head": digest('2'), "coarse": digest('6')}}));
+        model::admit(&mut reg, admitted.id, &passed, who).unwrap();
+        // a part retired behind the cascade's back, as an older engine could
+        let store = reg.store();
+        let t = store.qualified("model");
+        store.execute(&format!("UPDATE {t} SET state = 'retired' WHERE id IN ({}, {})", other.id, coarse2.id), &[]).unwrap();
+        let e = model::admit(&mut reg, late.id, &passed, who).unwrap_err();
+        assert!(matches!(&e, Error::Refused(m) if m.contains("which is retired")), "{name}: {e:?}");
+        let m = refused(model::promote(&mut reg, admitted.id, who, None, None));
+        assert!(m.contains("which is retired"), "{name}: {m}");
+        assert_eq!((state(&mut reg, late.id), state(&mut reg, admitted.id)), ("registered".into(), "admitted".into()), "{name}");
+    }
+}
+
 /// Record 42 S2 on both backends: register by digest, promotion refused
 /// before admission, a failed check moving nothing, one promoted model per
 /// slot, a cohort slot only for a cohort that exists; and a model's answer
