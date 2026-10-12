@@ -88,6 +88,7 @@ mod timeline;
 mod tools;
 mod tui;
 mod update;
+mod versions;
 mod viewer;
 mod worker;
 use nils_digest::{Cancel, Cancelled, DigestError, Filter, Report, Rule, Settings};

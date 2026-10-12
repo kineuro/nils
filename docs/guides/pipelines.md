@@ -96,7 +96,7 @@ The engine seeds the first analyses of record 49 into its catalog each time it s
    nils pipeline starter --on
    ```
 
-A version a person added is never gone over, and a starter a person retired stays retired. A newer engine with newer pins adds them as the name's next version only where the newest version is the engine's own starter.
+A version a person added is never gone over, and a starter a person retired stays retired. A newer engine with newer pins adds them as the name's next version only where the newest version is the engine's own starter. A newer starter that fixes the older one replaces it (see *Choose a version*).
 
 > **Warning:** the starters' images are large (FreeSurfer 8.2.0 is about 14 GB, MRIQC about 5 GB) and are pulled on a run's first use. FreeSurfer recon-all reads the lab's licence as a secret input (record 49 R3) and does not start without it.
 
@@ -118,6 +118,49 @@ A descriptor of the bids layout finds each pick's image by the name the release 
 nils pipeline list
 nils pipeline show n4-bias-correction
 ```
+
+## Choose a version
+
+A name keeps every version added under it. A version that fixes the earlier ones says so in its descriptor, and a new run no longer takes them:
+
+```yaml
+x-nils:
+  replaces:
+    why: "It checks that each FLAIR sits on its T1w; the earlier versions never checked it."
+```
+
+Without `versions`, it replaces every earlier version of the name in the catalog it is added to. Name them, as `versions: [1, 2]`, to replace those alone. A version that changes what a pipeline makes without fixing the earlier one leaves `replaces` out, and the earlier one stays selectable.
+
+1. See each version and how it stands:
+
+   ```sh
+   nils pipeline list
+   ```
+
+   | standing | what it means |
+   |---|---|
+   | `current` | the newest version; `nils run <name>` runs it |
+   | `selectable` | an older version nothing replaces; `nils run <name>@<version>` runs it |
+   | `replaced` | a later version fixes it; a new run is refused, naming that version and why |
+   | `retired` | retired by a person; it replaces nothing |
+
+2. Run an older version that nothing replaces by its number:
+
+   ```sh
+   nils run n4-bias-correction@1 --select selection:ms-baseline@1
+   ```
+
+3. Run a replaced version only where you must, at the keyboard:
+
+   ```sh
+   nils run samseg-lesions@1 --replaced --select selection:ms-baseline@1
+   ```
+
+   The desk and the doors never run one: the jobs door refuses it with 409 and the pre-flight names it as a blocker.
+
+The runs, files and checks of a replaced version keep its name and read as before.
+
+Of the starters, recon-all's memory, MRIQC's `--notrack`, and the FLAIR alignment check of SAMSEG and segcsvd fix their earlier versions, so those are replaced. N4's spline distance and bias field change what it makes, so its earlier version stays selectable.
 
 ## Run one
 

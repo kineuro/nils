@@ -340,6 +340,34 @@ pub(crate) fn pipeline_doc(p: &Pipeline) -> Value {
     })
 }
 
+/// Catalog entries as the doors and `--json` answer them, each with how it
+/// stands for a new run (Nima's ruling of 2026-10-12, [`crate::versions`]):
+/// current, selectable, replaced (by which version, and why) or retired.
+pub(crate) fn pipeline_docs(list: &[Pipeline]) -> (Vec<Value>, Value) {
+    let standing = crate::versions::of_catalog(list);
+    let docs = list
+        .iter()
+        .map(|p| {
+            let mut doc = pipeline_doc(p);
+            if let Some(s) = standing.get(&p.id) {
+                s.fields(&mut doc);
+            }
+            doc
+        })
+        .collect();
+    (docs, crate::versions::names(list, &standing))
+}
+
+/// One catalog entry as the doors and `--json` answer it, with its standing
+/// read beside the other versions of its name.
+pub(crate) fn pipeline_doc_of(store: &mut Store, p: &Pipeline) -> Value {
+    let mut doc = pipeline_doc(p);
+    if let Ok(s) = crate::versions::of_one(store, p) {
+        s.fields(&mut doc);
+    }
+    doc
+}
+
 /// A run as the doors and `--json` answer it: the row, the pipeline by its
 /// label, and the derivatives it made.
 pub(crate) fn run_doc(store: &mut Store, r: &Run) -> Value {
@@ -942,9 +970,10 @@ pub(crate) fn route(
     Some(match segs {
         ["api", "pipelines"] => (|| {
             let list = rows::list(registry.store()).map_err(err)?;
-            let docs: Vec<Value> = list.iter().map(pipeline_doc).collect();
+            let (docs, names) = pipeline_docs(&list);
             Ok(Reply::ok(json!({
                 "pipelines": docs,
+                "names": names,
                 "capability": capability(registry),
             })))
         })(),
@@ -953,7 +982,7 @@ pub(crate) fn route(
             let p = rows::get(registry.store(), id)
                 .map_err(err)?
                 .ok_or_else(|| Reply::error(404, format!("no pipeline {id}")))?;
-            Ok(Reply::ok(pipeline_doc(&p)))
+            Ok(Reply::ok(pipeline_doc_of(registry.store(), &p)))
         })(),
         ["api", "pipeline-runs"] => (|| {
             let pipeline = query
@@ -1265,6 +1294,11 @@ pub(crate) struct RunArgs {
     /// run taken up again would do, of the units it still has to run
     #[arg(long)]
     pub(crate) preflight: bool,
+    /// Run a version a later one replaces because it fixes it, named by
+    /// name@version or its id (2026-10-12): a new run is otherwise refused
+    /// and the doors never take it
+    #[arg(long, conflicts_with = "resume")]
+    pub(crate) replaced: bool,
     /// Machine-readable output
     #[arg(long)]
     pub(crate) json: bool,
@@ -1312,9 +1346,18 @@ pub(crate) fn command(home: &Home, command: PipelineCommand) -> Result<(), Exit>
                     Some(json!({"descriptor": p.descriptor_digest, "image": p.image_digest})),
                 )?;
             }
+            // 2026-10-12: the earlier versions it replaces, which a new
+            // run no longer takes
+            let replaced: Vec<String> = rows::versions(registry.store(), &p.name)?
+                .iter()
+                .filter(|q| q.version < p.version && q.state == "active")
+                .filter(|q| d.replaces.as_ref().is_some_and(|r| r.covers(q.version)))
+                .map(Pipeline::label)
+                .collect();
             if json {
-                let mut v = pipeline_doc(&p);
+                let mut v = pipeline_doc_of(registry.store(), &p);
                 v["added"] = json!(fresh);
+                v["replaces"] = json!(replaced);
                 return print(&v);
             }
             println!(
@@ -1329,6 +1372,13 @@ pub(crate) fn command(home: &Home, command: PipelineCommand) -> Result<(), Exit>
                     "; the catalog already held this descriptor"
                 }
             );
+            if !replaced.is_empty() {
+                println!(
+                    "it replaces {}, which a new run no longer takes: {}",
+                    replaced.join(", "),
+                    d.replaces.as_ref().map_or("", |r| r.why.as_str())
+                );
+            }
             Ok(())
         }
         PipelineCommand::List { json } => {
@@ -1338,26 +1388,40 @@ pub(crate) fn command(home: &Home, command: PipelineCommand) -> Result<(), Exit>
                 let extra = lane_doc(&mut registry);
                 capability_with(registry.store(), &d, Some(extra))
             };
+            let (docs, names) = pipeline_docs(&list);
             if json {
                 return print(&json!({
-                    "pipelines": list.iter().map(pipeline_doc).collect::<Vec<_>>(),
+                    "pipelines": docs,
+                    "names": names,
                     "capability": cap,
                 }));
             }
+            // 2026-10-12: each version as a new run takes it: current,
+            // selectable, replaced or retired
             println!(
-                "{:>5}  {:<32} {:<8} {:<11} {:<7} image",
+                "{:>5}  {:<32} {:<8} {:<11} {:<10} image",
                 "id", "pipeline", "layout", "level", "state"
             );
-            for p in &list {
+            for (p, doc) in list.iter().zip(&docs) {
                 println!(
-                    "{:>5}  {:<32} {:<8} {:<11} {:<7} {}",
+                    "{:>5}  {:<32} {:<8} {:<11} {:<10} {}",
                     p.id,
                     p.label(),
                     p.layout,
                     p.level,
-                    p.state,
+                    doc["standing"].as_str().unwrap_or(p.state.as_str()),
                     p.image
                 );
+            }
+            for (p, doc) in list.iter().zip(&docs) {
+                if doc["standing"] == "replaced" {
+                    println!(
+                        "{} is replaced by {}: {}",
+                        p.label(),
+                        doc["replaced_by"].as_str().unwrap_or_default(),
+                        doc["replaced_why"].as_str().unwrap_or_default()
+                    );
+                }
             }
             if cap["enabled"] == true {
                 println!(
@@ -1379,11 +1443,20 @@ pub(crate) fn command(home: &Home, command: PipelineCommand) -> Result<(), Exit>
         PipelineCommand::Show { pipeline, json } => {
             let p = rows::resolve(registry.store(), &pipeline)?
                 .ok_or_else(|| usage(format!("no pipeline {pipeline} in the catalog")))?;
-            let doc = pipeline_doc(&p);
+            let doc = pipeline_doc_of(registry.store(), &p);
             if json {
                 return print(&doc);
             }
             println!("pipeline {}: {}", p.id, p.label());
+            match doc["standing"].as_str() {
+                Some("replaced") => println!(
+                    "  standing         replaced by {}: {}",
+                    doc["replaced_by"].as_str().unwrap_or_default(),
+                    doc["replaced_why"].as_str().unwrap_or_default()
+                ),
+                Some(state) => println!("  standing         {state}"),
+                None => {}
+            }
             println!("  tool version     {}", p.tool_version);
             println!("  image            {}", p.image);
             println!("  descriptor       {}", p.descriptor_digest);
@@ -3429,6 +3502,16 @@ pub(crate) fn run_command(home: &Home, args: RunArgs) -> Result<(), Exit> {
     })?;
     if p.state != "active" {
         return Err(usage(format!("{} is {}", p.label(), p.state)));
+    }
+    // 2026-10-12: a version a later one replaces runs only when asked for
+    // by name at the keyboard
+    if !args.replaced
+        && let Some(refused) = crate::versions::refused(registry.store(), &p)
+    {
+        return Err(usage(format!(
+            "{refused}; nils run {} --replaced runs it still",
+            p.label()
+        )));
     }
     let d = descriptor::from_value(p.descriptor.clone()).map_err(|e| {
         fail(format!(

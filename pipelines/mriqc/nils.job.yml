@@ -66,6 +66,11 @@ command-line: >-
 x-nils:
   contract: 1
   analysis-level: session
+  # It fixes the earlier versions (the review of 2026-10-12), so a new
+  # run no longer takes them; their runs and results keep their names.
+  # No version list: every earlier version of the name in a catalog.
+  replaces:
+    why: "It passes --notrack, so MRIQC sends no usage report; the earlier versions left that on."
   input:
     layout: bids
     roles: [t1w]

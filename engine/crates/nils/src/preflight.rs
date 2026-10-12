@@ -89,6 +89,9 @@ pub(crate) struct Asked<'a> {
     /// 2026-10-12: the run taken up again, whose pipeline, parameters and
     /// handle these are; none for a new run.
     pub resume: Option<i64>,
+    /// 2026-10-12: a version a later one replaces is asked for at the
+    /// keyboard with `--replaced`; a door never asks so.
+    pub replaced: bool,
 }
 
 /// The lane's budget (record 49 A1, R6), as the lane itself reads it: the
@@ -1008,6 +1011,10 @@ pub(crate) fn check(registry: &mut Registry, asked: &Asked<'_>) -> Result<Value,
         None => {
             if p.state != "active" {
                 blockers.push(format!("{} is {}", p.label(), p.state));
+            } else if !asked.replaced
+                && let Some(refused) = crate::versions::refused(registry.store(), &p)
+            {
+                blockers.push(refused);
             }
             match d.resolve(asked.params) {
                 Ok(v) => Value::Object(v),
@@ -1576,6 +1583,7 @@ pub(crate) fn route(
                 params: &params,
                 main,
                 resume,
+                replaced: false,
             },
         )
         .map_err(|e| {
@@ -1656,6 +1664,7 @@ pub(crate) fn command(home: &Home, args: &crate::pipelines::RunArgs) -> Result<(
             params: &params,
             main,
             resume: args.resume,
+            replaced: args.replaced,
         },
     )
     .map_err(usage)?;

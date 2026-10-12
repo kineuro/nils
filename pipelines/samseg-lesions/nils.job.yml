@@ -113,6 +113,11 @@ command-line: >-
 x-nils:
   contract: 1
   analysis-level: session
+  # It fixes the earlier versions (the review of 2026-10-12), so a new
+  # run no longer takes them; their runs and results keep their names.
+  # No version list: every earlier version of the name in a catalog.
+  replaces:
+    why: "It checks that each FLAIR sits on its T1w (flair_t1_brain_dice, flagged below 0.85); the earlier versions placed the FLAIR by its header alone and never checked it."
   input:
     layout: bids
     roles: [t1w, flair]

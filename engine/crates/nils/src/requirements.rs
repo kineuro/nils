@@ -501,6 +501,23 @@ pub(crate) fn at_the_door(
     let Some(p) = p else {
         return Ok(());
     };
+    // 2026-10-12: a new run of a version a later one replaces is refused
+    // at the door, naming the version that replaces it; only the keyboard
+    // runs it still (`nils run <name>@<version> --replaced`). A run taken
+    // up again goes on with the version it recorded.
+    if resumed.is_none()
+        && let Ok(s) = crate::versions::of_one(registry.store(), &p)
+        && let Some(words) = s.refusal(&p.label())
+    {
+        let mut r = Reply::error(409, words);
+        r.body["replaced"] = json!({
+            "pipeline": p.label(),
+            "replaced_by": s.replaced_by.as_ref().map(|(_, l)| l),
+            "why": s.why,
+            "current": s.current.as_ref().map(|(_, l)| l),
+        });
+        return Err(r);
+    }
     let Ok(d) = nils_pipeline::descriptor::from_value(p.descriptor.clone()) else {
         return Ok(());
     };
