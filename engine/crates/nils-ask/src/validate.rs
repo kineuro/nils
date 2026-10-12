@@ -1883,6 +1883,7 @@ fn check_clause(
                         "{dataset: NAME} or {cohort: NAME}",
                     )),
                 }
+                check_picked_names(cl, path, names, issues);
             }
             "share" => {
                 // what a share divides is read in this set as a field is,
@@ -1997,14 +1998,7 @@ fn check_clause(
                         "add {tol: <number>}",
                     ));
                 }
-                if op == "part" && !cl.opts.contains_key("unit") {
-                    issues.push(issue(
-                        Code::MissingOrder,
-                        path,
-                        "part needs {unit: year | month | day | dow | hour}",
-                        "add unit",
-                    ));
-                }
+                check_form(cl, op, path, issues);
             }
             other => {
                 // a role written as an op: the main scans are asked with
@@ -2102,6 +2096,290 @@ fn check_aggregate_form(cl: &Clause, op: &str, path: &str, issues: &mut Vec<Issu
             form(&placeholder),
         )),
         _ => {}
+    }
+}
+
+/// What an op reads, as the compiler reads it: its arguments in words,
+/// each as the form to write shows it, and how many a clause must have.
+/// The chat sandbox bench of 2026-10-12 bound a `bucket` without its unit:
+/// the validator passed it, the compiler refused it, and the draft door,
+/// whose diagnosis compiles what it counts, answered a bare 500. A clause
+/// the compiler cannot read is refused here instead, at its path, with
+/// the form to write in `next`, as an aggregate without its column is.
+fn form_of(op: &str) -> Option<(&'static str, &'static [&'static str], usize)> {
+    const VALUE: &str = "[\"field\", {}, \"<field>\"]";
+    const DATE: &str = "[\"field\", {}, \"<date>\"]";
+    const CLAUSE: &str = "<clause>";
+    Some(match op {
+        "=" | "<>" | ">" | ">=" | "<" | "<=" | "~=" => ("two values", &[VALUE, "<value>"], 2),
+        "in" | "not_in" => ("a value and a list", &[VALUE, "[<value>, <value>]"], 2),
+        "has" => (
+            "an axis and a value",
+            &["[\"axis\", {}, \"<axis>\"]", "<value>"],
+            2,
+        ),
+        "not_null" | "is_null" | "abs" | "prev" | "next" => ("a value", &[VALUE], 1),
+        "contains" | "starts_with" => ("a value and a text", &[VALUE, "\"<text>\""], 2),
+        "and" | "or" => ("one clause or more", &[CLAUSE], 1),
+        "not" => ("a clause", &[CLAUSE], 1),
+        "+" | "-" | "*" | "/" => ("two values", &[VALUE, "<value>"], 2),
+        "round" => (
+            "a value, and its places as a whole number if any",
+            &[VALUE, "<places>"],
+            1,
+        ),
+        "coalesce" | "concat" => ("one value or more", &[VALUE], 1),
+        "case" => (
+            "a condition and a then, and an else if any",
+            &[CLAUSE, "<then>", "<else>"],
+            2,
+        ),
+        "days_between" => ("two dates", &[DATE, DATE], 2),
+        "shift" => ("a date and a count", &[DATE, "<count>"], 2),
+        "age_at" => (
+            "a birth date and a day",
+            &["[\"field\", {}, \"subject.birth_date\"]", DATE],
+            2,
+        ),
+        "bucket" | "part" => ("a date", &[DATE], 1),
+        _ => return None,
+    })
+}
+
+/// The units an op's `unit` takes, as the compiler reads them, whether a
+/// clause must name one, and the one the form to write shows.
+fn units_of(op: &str) -> Option<(&'static [&'static str], bool, &'static str)> {
+    match op {
+        "bucket" => Some((&["year", "month", "day"], true, "month")),
+        "part" => Some((&["year", "month", "day", "dow"], true, "year")),
+        "shift" => Some((&["day", "month", "year"], false, "day")),
+        _ => None,
+    }
+}
+
+/// `a, b or c`.
+fn either(items: &[&str]) -> String {
+    match items {
+        [] => String::new(),
+        [one] => (*one).to_string(),
+        [rest @ .., last] => format!("{} or {last}", rest.join(", ")),
+    }
+}
+
+/// How many arguments a clause was given, in words.
+fn given(n: usize) -> String {
+    match n {
+        0 => "it has none".to_string(),
+        1 => "it has one".to_string(),
+        n => format!("it has {n}"),
+    }
+}
+
+/// An option's value as a form shows it: a name bare, anything else as
+/// JSON.
+fn option_text(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
+}
+
+/// An argument as it was written, as JSON.
+fn arg_text(a: &Arg) -> String {
+    serde_json::to_string(a).unwrap_or_default()
+}
+
+/// A clause as the form to write: its op and its own options with `fill`
+/// in place, then its arguments as written, each one missing below
+/// `needed` or `bad` written as its slot's form.
+fn written(
+    cl: &Clause,
+    slots: &[&str],
+    needed: usize,
+    fill: Option<(&str, &str)>,
+    bad: &[usize],
+) -> String {
+    let mut opts: BTreeMap<&str, String> = cl
+        .opts
+        .iter()
+        .map(|(k, v)| (k.as_str(), option_text(v)))
+        .collect();
+    if let Some((k, v)) = fill {
+        opts.insert(k, v.to_string());
+    }
+    let opts: Vec<String> = opts.iter().map(|(k, v)| format!("{k}: {v}")).collect();
+    let mut parts = vec![format!("\"{}\"", cl.op), format!("{{{}}}", opts.join(", "))];
+    for i in 0..needed.max(cl.args.len()) {
+        match (cl.args.get(i), slots.get(i)) {
+            (Some(a), _) if !bad.contains(&i) => parts.push(arg_text(a)),
+            (_, Some(slot)) => parts.push((*slot).to_string()),
+            (Some(a), None) => parts.push(arg_text(a)),
+            (None, None) => {}
+        }
+    }
+    format!("[{}]", parts.join(", "))
+}
+
+/// Whether an argument is a parameter ref.
+fn is_param(a: &Arg) -> bool {
+    matches!(a, Arg::Clause(c) if c.op == "param")
+}
+
+/// A clause's form, checked as the compiler reads it (2026-10-12): the
+/// arguments its op reads, the unit `bucket` and `part` must name and
+/// `shift` may, a list only as the list of `in` and `not_in`, holding
+/// literals, a literal text for `contains` and `starts_with`, whole places
+/// for `round`, and a clause before `has`'s value. Each refusal names the
+/// clause's path and carries the form to write.
+fn check_form(cl: &Clause, op: &str, path: &str, issues: &mut Vec<Issue>) {
+    let Some((words, slots, needed)) = form_of(op) else {
+        return;
+    };
+    let mut wrong: Vec<String> = Vec::new();
+    let mut fill = None;
+    let mut bad: Vec<usize> = Vec::new();
+    // a whole other form, where the clause asked for one of a list
+    let mut instead: Option<String> = None;
+    if let Some((units, required, shown)) = units_of(op) {
+        let listed = either(units);
+        match cl.opts.get("unit") {
+            None if required => {
+                wrong.push(format!("{op} needs its unit: {listed}"));
+                fill = Some(("unit", shown));
+            }
+            None => {}
+            Some(Value::String(u)) if units.contains(&u.as_str()) => {}
+            Some(v) => {
+                wrong.push(format!(
+                    "{op}'s unit is {listed}, and {} is not one",
+                    option_text(v)
+                ));
+                fill = Some(("unit", shown));
+            }
+        }
+    }
+    if cl.args.len() < needed {
+        wrong.push(format!("{op} reads {words}; {}", given(cl.args.len())));
+    }
+    let list_at = matches!(op, "in" | "not_in").then_some(1);
+    for (i, a) in cl.args.iter().enumerate() {
+        let Arg::List(items) = a else {
+            continue;
+        };
+        if list_at == Some(i) {
+            if !items
+                .iter()
+                .all(|x| matches!(x, Arg::Text(_) | Arg::Int(_) | Arg::Number(_)))
+            {
+                wrong.push(format!("{op}'s list holds texts and numbers alone"));
+                bad.push(i);
+            }
+            continue;
+        }
+        wrong.push(format!(
+            "a list is read only as the list of in or not_in, never as an argument of {op}"
+        ));
+        bad.push(i);
+        // one of several values is asked with in
+        if i == 1
+            && let (Some(first), Some(one_of)) = (
+                cl.args.first(),
+                match op {
+                    "=" | "has" => Some("in"),
+                    "<>" => Some("not_in"),
+                    _ => None,
+                },
+            )
+        {
+            instead = Some(format!(
+                "write [\"{one_of}\", {{}}, {}, {}] for one of the list",
+                arg_text(first),
+                arg_text(a)
+            ));
+        }
+    }
+    match (op, cl.args.first(), cl.args.get(1)) {
+        ("in" | "not_in", _, Some(a)) if !matches!(a, Arg::List(_)) && !is_param(a) => {
+            wrong.push(format!(
+                "{op} reads its values as a list, or as a list parameter"
+            ));
+            bad.push(1);
+        }
+        ("contains" | "starts_with", _, Some(a)) if !matches!(a, Arg::Text(_)) => {
+            wrong.push(format!("{op} reads a literal text after its value"));
+            bad.push(1);
+        }
+        ("round", _, Some(a)) if !matches!(a, Arg::Int(_)) => {
+            wrong.push("round's places are a literal whole number".to_string());
+            bad.push(1);
+        }
+        ("has", Some(a), _) if !matches!(a, Arg::Clause(_)) => {
+            wrong.push("has reads an axis, or a dataset field, then a value".to_string());
+            bad.push(0);
+        }
+        _ => {}
+    }
+    if wrong.is_empty() {
+        return;
+    }
+    let next =
+        instead.unwrap_or_else(|| format!("write {}", written(cl, slots, needed, fill, &bad)));
+    for message in wrong {
+        issues.push(issue(Code::NotCompilable, path, message, next.clone()));
+    }
+}
+
+/// What `picked` names beside its scope (2026-10-12): the role whose main
+/// scans it reads, and a model where it names one, each a name or a
+/// parameter. The compiler reads the role first and refused a `picked`
+/// without one, which the draft door answered with a bare 500; a role
+/// written as a number reached Postgres as one.
+fn check_picked_names(cl: &Clause, path: &str, names: &dyn Names, issues: &mut Vec<Issue>) {
+    let named =
+        |v: &Value| v.is_string() || crate::ast::clause_of(v).is_ok_and(|c| c.op == "param");
+    let roles = names.roles();
+    let role = roles.first().map_or("<role>", String::as_str);
+    let next = |fill: Option<(&str, &str)>| {
+        let listed = if roles.is_empty() {
+            String::new()
+        } else {
+            format!("; the roles are {}", roles.join(", "))
+        };
+        format!(
+            "write {} in a stack set's where{listed}",
+            written(cl, &[], 0, fill, &[])
+        )
+    };
+    match cl.opts.get("role") {
+        None => issues.push(issue(
+            Code::NotCompilable,
+            path,
+            "picked names the role whose main scans it reads",
+            next(Some(("role", role))),
+        )),
+        Some(v) if !named(v) => issues.push(issue(
+            Code::NotCompilable,
+            path,
+            format!(
+                "picked's role is a role's name, and {} is not one",
+                option_text(v)
+            ),
+            next(Some(("role", role))),
+        )),
+        Some(_) => {}
+    }
+    if let Some(v) = cl.opts.get("model")
+        && !named(v)
+    {
+        issues.push(issue(
+            Code::NotCompilable,
+            path,
+            format!(
+                "picked's model is a pick's name, and {} is not one",
+                option_text(v)
+            ),
+            "write the model's name as text, or drop it to read every model's picks",
+        ));
     }
 }
 

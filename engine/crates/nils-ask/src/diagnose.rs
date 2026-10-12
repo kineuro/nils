@@ -110,6 +110,28 @@ fn by_set() -> String {
 }
 
 impl Diagnosis {
+    /// A document refused before anything runs: its issues and their next
+    /// calls, the repairs made, its cost class, and no counts.
+    pub fn refused(issues: Vec<Issue>, repairs: Vec<Repair>, cost: Cost) -> Diagnosis {
+        let next: Vec<String> = issues.iter().map(|i| i.next.clone()).collect();
+        Diagnosis {
+            valid: false,
+            issues,
+            repairs,
+            warnings: Vec::new(),
+            zero_rows: None,
+            drops: Vec::new(),
+            ties: Vec::new(),
+            unresolved: Vec::new(),
+            coarse: Vec::new(),
+            cost,
+            funnel: Vec::new(),
+            by: by_set(),
+            groups: Vec::new(),
+            next,
+        }
+    }
+
     /// Key the funnel by clause group (Wave 5 section 12.3): the stages of
     /// each set folded into the language's groups, in order; a group a set
     /// has no clause of is not a row; the answer's set ends with `out`.
@@ -347,8 +369,8 @@ impl Counter<'_> {
     }
 }
 
-/// Diagnose a document: its issues when invalid (no query), else the
-/// funnel and the counts.
+/// Diagnose a document: its issues when invalid or when the compiler
+/// refuses it (no query), else the funnel and the counts.
 #[allow(clippy::too_many_arguments)]
 pub fn diagnose(
     registry: &mut Registry,
@@ -362,29 +384,20 @@ pub fn diagnose(
     reader: Option<&mut Store>,
 ) -> Result<Diagnosis, RunError> {
     let cost = cost_of(&ask);
+    // the diagnosis compiles what it counts, so what the compiler refuses
+    // is refused before anything is counted, as what the validator refuses
+    // is: a clause the validator passed and the compiler refused, a
+    // `bucket` bound without its unit, failed a count, and the draft door
+    // answered a bare 500 (2026-10-12)
+    let unreadable = crate::run::not_compilable(registry, &ask, names, scope, scheme);
     let prepared = match prepare(ask, names, scope) {
         Ok(p) => p,
-        Err(AskError::Invalid(issues)) => {
-            let next: Vec<String> = issues.iter().map(|i| i.next.clone()).collect();
-            return Ok(Diagnosis {
-                valid: false,
-                issues,
-                repairs,
-                warnings: Vec::new(),
-                zero_rows: None,
-                drops: Vec::new(),
-                ties: Vec::new(),
-                unresolved: Vec::new(),
-                coarse: Vec::new(),
-                cost,
-                funnel: Vec::new(),
-                by: by_set(),
-                groups: Vec::new(),
-                next,
-            });
-        }
+        Err(AskError::Invalid(issues)) => return Ok(Diagnosis::refused(issues, repairs, cost)),
         Err(e) => return Err(e.into()),
     };
+    if !unreadable.is_empty() {
+        return Ok(Diagnosis::refused(unreadable, repairs, cost));
+    }
     let mut ask = prepared.ask;
     let warnings = prepared.validated.warnings.clone();
     let inlined = inline_selections(registry, &mut ask)?;

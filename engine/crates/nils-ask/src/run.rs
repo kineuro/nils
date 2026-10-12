@@ -25,7 +25,7 @@ use crate::exec::{Answer, Bounds, ExecError, run as execute};
 use crate::handle::{self, Handle, HandleError, Provenance, Spec};
 use crate::measure::{self, MeasureError, Measured};
 use crate::selection::{self, Inlined, SelectionError};
-use crate::validate::{Names, Scope, Validated, validate};
+use crate::validate::{Code, Issue, Names, Scope, Validated, validate};
 use crate::{Error as AskError, prepare};
 
 #[derive(Debug)]
@@ -866,6 +866,35 @@ pub fn explain(
         postgres: pg.sql,
         inlined,
     })
+}
+
+/// What the compiler refuses of a document, as issues at its paths, no
+/// statement run (Wave 4c, kineuro/nils#93: validate compiles what run
+/// would). None where it compiles, and none where it is refused before it
+/// is compiled, which its validation says.
+pub fn not_compilable(
+    registry: &mut Registry,
+    ask: &Ask,
+    names: &dyn Names,
+    scope: &Scope,
+    scheme: &Scheme,
+) -> Vec<Issue> {
+    match explain(registry, ask.clone(), names, scope, scheme) {
+        Err(RunError::Message(text)) => {
+            let (path, message) = text
+                .split_once(": ")
+                .map(|(p, m)| (p.to_string(), m.to_string()))
+                .unwrap_or_else(|| ("document".to_string(), text.clone()));
+            vec![Issue {
+                code: Code::NotCompilable,
+                path,
+                message,
+                next: "change the document as the message says; validate compiles what run would"
+                    .to_string(),
+            }]
+        }
+        _ => Vec::new(),
+    }
 }
 
 /// The first cell of a count level answer, for callers reading a count.
