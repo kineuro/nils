@@ -335,7 +335,8 @@ class _Text:
             raise ManifestError(f"stacks.json is not JSON: {ch!r} expected")
         self.pos += 1
 
-    def value(self):
+    def value(self, text: bool = False):
+        """The next value; with ``text``, the value and its text as written."""
         self.peek()
         while True:
             try:
@@ -346,28 +347,28 @@ class _Text:
                 raise ManifestError(f"stacks.json is not JSON: {e}") from e
             if end == len(self.buf) and self._more():
                 continue  # a number may go on in the next piece
-            self.pos = end
-            return v
+            start, self.pos = self.pos, end
+            return (v, self.buf[start:end]) if text else v
 
 
-def stream(path: Path, *, source_root: Path | None = None, frames_of: Callable[[str], int] = number_of_frames, piece: int = 1 << 22):
-    """The run's stacks, then its context stacks, one at a time as the
-    file is read: ``("stack", Stack)`` in the order of ``parse`` and
-    ``("context", Stack)`` in the order of ``context(doc, skip=<the run's
-    stacks>)``, the same stacks, without holding the file or every entry at
-    once (an archive's part of 20,000 stacks is most of a gigabyte). The
-    engine writes ``contract``, ``sources``, ``stacks`` and ``context`` in
-    that order; a manifest in another order is read whole, as ``read``,
-    ``parse`` and ``context`` read it."""
+def texts(path: Path, *, piece: int = 1 << 22):
+    """The manifest's entries as they are written, one at a time as the file
+    is read: first ``("head", members)``, the members before the stacks
+    (its ``sources`` among them), then ``("stack", stack id, text)`` for
+    each of ``stacks`` and ``("context", stack id, text)`` for each of
+    ``context``, each text the entry's JSON. The engine writes
+    ``contract``, ``sources``, ``stacks`` and ``context`` in that order; a
+    manifest in another order is read whole and each entry written out again
+    (``json.loads`` of it gives the same entry). Nothing here checks that a
+    stack is listed once or leaves out a context stack the run holds:
+    ``stream`` does."""
     with open(path, "rb") as f:
         t = _Text(f, piece)
         if t.peek() != "{":
-            yield from _whole(path, source_root, frames_of)
+            yield from _whole_texts(path)
             return
         t.take("{")
         head: dict = {}
-        mounts = bases = None
-        seen: set[int] = set()
         state = "head"  # then "stacks" once they are read, "context" once that is
         first = True
         while True:
@@ -383,35 +384,25 @@ def stream(path: Path, *, source_root: Path | None = None, frames_of: Callable[[
             t.take(":")
             if key == "stacks" and state == "head":
                 if not isinstance(head.get("sources"), list) or t.peek() != "[":
-                    yield from _whole(path, source_root, frames_of)
+                    yield from _whole_texts(path)
                     return
-                mounts = _mounts(head, source_root)
-                bases = {k: _base(m) for k, m in mounts.items()}
+                yield "head", head
                 state = "stacks"
-                for s in _items(t):
-                    st = _stack(s, mounts, bases, frames_of)
-                    if st.stack_id in seen:
-                        raise ManifestError(f"stack {st.stack_id} is listed twice")
-                    seen.add(st.stack_id)
-                    yield "stack", st
+                for s, text in _items(t):
+                    yield "stack", _stack_id(s), text
             elif key == "context" and state == "stacks":
                 state = "context"
                 if t.peek() != "[":
-                    v = t.value()
-                    if v:
+                    if t.value():
                         raise ManifestError("stacks.json's context is not a list")
                     continue
-                for s in _items(t):
-                    sid = _context_id(s)
-                    if sid in seen:
-                        continue
-                    seen.add(sid)
-                    yield "context", _context_stack(s)
+                for s, text in _items(t):
+                    yield "context", _context_id(s), text
             elif state == "head" and key != "context":
                 head[key] = t.value()
             elif key in ("stacks", "context", "sources"):
                 if state == "head":  # the context before the stacks
-                    yield from _whole(path, source_root, frames_of)
+                    yield from _whole_texts(path)
                     return
                 raise ManifestError(f"stacks.json names its {key} twice, or after the stacks")
             else:
@@ -422,26 +413,102 @@ def stream(path: Path, *, source_root: Path | None = None, frames_of: Callable[[
             raise ManifestError("stacks.json holds no list of stacks")
 
 
+def _whole_texts(path: Path):
+    doc = read(path)
+    if not isinstance(doc, dict) or not isinstance(doc.get("stacks"), list):
+        raise ManifestError("stacks.json holds no list of stacks")
+    yield "head", {k: v for k, v in doc.items() if k not in ("stacks", "context")}
+    for s in doc["stacks"]:
+        yield "stack", _stack_id(s), json.dumps(s)
+    ctx = doc.get("context") or []
+    for s in ctx:
+        yield "context", _context_id(s), json.dumps(s)
+
+
+def _stack_id(s) -> int:
+    try:
+        return int(s["stack_id"])
+    except (KeyError, TypeError, ValueError) as e:
+        raise ManifestError("a stack without an integer stack_id") from e
+
+
+class Entries:
+    """``texts`` made into stacks: each stack once, each context stack
+    neither a stack of the run nor listed before. ``entry`` takes one of
+    ``texts``' entries (the head first) and says whether it is kept;
+    ``stack`` makes a kept entry's Stack, here or in a worker process."""
+
+    def __init__(self, source_root: Path | None = None) -> None:
+        self.source_root = source_root
+        self.mounts: dict[int, Path] = {}
+        self.bases: dict[int, str] = {}
+        self.seen: set[int] = set()
+
+    def entry(self, e: tuple) -> bool:
+        if e[0] == "head":
+            self.mounts = _mounts(e[1], self.source_root)
+            self.bases = {k: _base(m) for k, m in self.mounts.items()}
+            return False
+        kind, sid = e[0], e[1]
+        if sid in self.seen:
+            if kind == "stack":
+                raise ManifestError(f"stack {sid} is listed twice")
+            return False
+        self.seen.add(sid)
+        return True
+
+    def stack(self, kind: str, text: str, frames_of: Callable[[str], int] = number_of_frames) -> Stack:
+        s = json.loads(text)
+        return _context_stack(s) if kind == "context" else _stack(s, self.mounts, self.bases, frames_of)
+
+
+def stream(path: Path, *, source_root: Path | None = None, frames_of: Callable[[str], int] = number_of_frames, piece: int = 1 << 22):
+    """The run's stacks, then its context stacks, one at a time as the
+    file is read: ``("stack", Stack)`` in the order of ``parse`` and
+    ``("context", Stack)`` in the order of ``context(doc, skip=<the run's
+    stacks>)``, the same stacks, without holding the file or every entry at
+    once (an archive's part of 20,000 stacks is most of a gigabyte)."""
+    e = Entries(source_root)
+    for got in texts(path, piece=piece):
+        if e.entry(got):
+            yield got[0], e.stack(got[0], got[2], frames_of)
+
+
+def split(path: str, conn, piece: int = 1 << 22, batch: int = 64) -> None:
+    """``texts`` in a process of its own, sent through ``conn`` a list of
+    entries at a time, then None; an error is sent as ``("error", its
+    message)``. Reading the file costs the interpreter's lock, which the
+    run's main process needs for the student."""
+    try:
+        part: list = []
+        for e in texts(Path(path), piece=piece):
+            if e[0] == "head":
+                conn.send([e])
+                continue
+            part.append(e)
+            if len(part) >= batch:
+                conn.send(part)
+                part = []
+        if part:
+            conn.send(part)
+        conn.send(None)
+    except Exception as e:  # noqa: BLE001 - the main process raises it
+        conn.send(("error", f"{e}" if isinstance(e, ManifestError) else f"stacks.json could not be read ({type(e).__name__})"))
+    finally:
+        conn.close()
+
+
 def _items(t: _Text):
     t.take("[")
     if t.peek() == "]":
         t.pos += 1
         return
     while True:
-        yield t.value()
+        yield t.value(text=True)
         if t.peek() == "]":
             t.pos += 1
             return
         t.take(",")
-
-
-def _whole(path: Path, source_root, frames_of):
-    doc = read(path)
-    stacks = parse(doc, source_root=source_root, frames_of=frames_of)
-    for st in stacks:
-        yield "stack", st
-    for c in context(doc, skip={st.stack_id for st in stacks}):
-        yield "context", c
 
 
 def read(path: Path) -> dict:

@@ -857,8 +857,8 @@ def _infer_cascade(a: argparse.Namespace, model, cas, device: str) -> Run:
         if writer is None and a.cache_fill == "none":
             def final(o) -> None:
                 written[o.stack.stack_id] = _emit(run, model, cas, o)
-        outcomes = cascade_mod.score_stream(model, cas, a.inputs, manifest.stream(a.stacks, source_root=a.source_root), workers=a.threads,
-                                            on_final=final, **common)
+        outcomes = cascade_mod.score_stream(model, cas, a.inputs, Path(a.stacks), source_root=a.source_root, workers=a.threads, on_final=final,
+                                            **common)
     else:
         doc = manifest.read(a.stacks)
         stacks = manifest.parse(doc, source_root=a.source_root)

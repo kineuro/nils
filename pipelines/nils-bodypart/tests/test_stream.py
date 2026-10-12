@@ -356,3 +356,30 @@ def test_a_decision_the_final_top_changes_is_the_sequential_one(world, tmp_path,
         assert _key(a) == _key(b), a.stack.stack_id
     g21 = next(o for o in got if o.stack.stack_id == 21)
     assert g21.result is not None and g21.result.stage == ("s1" if flip == "to-accepted" else w21.result.stage)
+
+
+def test_the_splitter_sends_the_entries_as_written(world, tmp_path):
+    """``split``, the process that reads the file for a run, sends what
+    ``texts`` gives, a list at a time, then None; a damaged manifest is
+    sent as an error, never a path."""
+    import multiprocessing as mp
+    import threading
+
+    path = _with_context(world, tmp_path)
+    for p, want_error in ((path, False), (tmp_path / "bad.json", True)):
+        if want_error:
+            p.write_text('{"sources": [], "stacks": [{"stack_id": 1}, ')
+        recv, send = mp.Pipe(duplex=False)
+        th = threading.Thread(target=manifest.split, args=(str(p), send), kwargs={"batch": 3})
+        th.start()
+        got, msg = [], recv.recv()
+        while isinstance(msg, list):
+            got.extend(msg)
+            msg = recv.recv()
+        th.join()
+        if want_error:
+            assert isinstance(msg, tuple) and msg[0] == "error" and str(tmp_path) not in msg[1]
+            continue
+        assert msg is None
+        assert got == list(manifest.texts(p))
+        assert [e[0] for e in got][:1] == ["head"] and {e[0] for e in got[1:]} == {"stack", "context"}

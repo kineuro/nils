@@ -289,17 +289,35 @@ def _routed(st, why: str) -> Outcome:
 def _rows(items: list) -> list:
     """The overlap's first work in a worker: per ``(stack, context)`` the
     stack's registry row without its files' list and, for a stack of the
-    run, stage 1's plan (``plan_stack``)."""
+    run, stage 1's plan (``plan_stack``): ``(None, row, *plan)``."""
+    return [(None, *_row(st, is_context)) for st, is_context in items]
+
+
+def _rows_text(arg: tuple) -> list:
+    """``_rows`` over manifest entries as written (``manifest.texts``):
+    each parsed here into its Stack, which comes back without its list of
+    slices beside its row and plan."""
+    from . import manifest
+    from .scoring import _bare
+
+    mounts, bases, items = arg
+    e = manifest.Entries()
+    e.mounts, e.bases = mounts, bases
+    out = []
+    for kind, text in items:
+        st = _bare(e.stack(kind, text))
+        out.append((st, *_row(st, kind == "context")))
+    return out
+
+
+def _row(st, is_context: bool) -> tuple:
     from . import fewslice
     from .scoring import _W
 
-    out = []
-    for st, is_context in items:
-        g = fewslice.row_of(st)
-        plan = (None, None, None) if is_context else plan_stack(st, g, _W["model"])
-        g.pop("files", None)  # read by the choice of slot 0 alone
-        out.append((g, *plan))
-    return out
+    g = fewslice.row_of(st)
+    plan = (None, None, None) if is_context else plan_stack(st, g, _W["model"])
+    g.pop("files", None)  # read by the choice of slot 0 alone
+    return (g, *plan)
 
 
 def _tokens(c: tuple) -> np.ndarray:
@@ -525,21 +543,25 @@ class _Once:
             self.lane.submit(new)
 
 
-def score_stream(model: fusion.Model, cas: Cascade, inputs: Path, items, *, workers: int, device: str = "cpu", chunk: int = 4, depth: int = 1,
+def score_stream(model: fusion.Model, cas: Cascade, inputs: Path, items, *, workers: int, source_root: Path | None = None, device: str = "cpu",
+                 chunk: int = 4, depth: int = 1,
                  student_batch: int = 64, fill: bool = False, keep_inputs: bool = False, student_factory=None, stats: dict | None = None,
                  gpu_workers: int = 2, student_device: str | None = None, student_threads: int = STUDENT_THREADS,
                  block: int | None = None, on_final=None) -> list[Outcome]:
     """``score`` with ``overlap``: the same outcomes, with the main process
     doing only what must be done in one place (the speed study's A5.2.3e).
 
-    ``items`` are the manifest's stacks and then its context stacks,
-    ``("stack" | "context", Stack)``, as ``manifest.stream`` reads them from
-    the file. One worker pool takes everything else, in this order of
-    priority:
+    ``items`` is the manifest's path (with ``source_root`` for its
+    sources), or its stacks and then its context stacks, ``("stack" |
+    "context", Stack)``, as ``manifest.stream`` reads them. From a path, a
+    process of its own reads the file (``manifest.split``) and the workers
+    parse each entry. One worker pool takes everything else, in this order
+    of priority:
 
     1. the planning: a thread hands the stacks to the pool as they are read,
        ``block`` at a time, and the workers make each one's registry row
-       and stage 1's plan (``_rows``: ``row_of``, ``plan_stack``);
+       and stage 1's plan (``_rows``, ``_rows_text``: ``row_of``,
+       ``plan_stack``);
     2. the slot-0 slices of the stacks the student reads (``tiles_of``);
     3. the planes stages of the stacks that go straight to them, of those
        whose slice does not decode and of those D3 defers.
@@ -591,28 +613,71 @@ def score_stream(model: fusion.Model, cas: Cascade, inputs: Path, items, *, work
     lane = scoring.Lane(model, inputs, workers=workers, device=device, chunk=chunk, depth=depth, ladder=ladder, gpu_workers=gpu_workers,
                         hold_reads=True)
     stacks: list = []  # the run's, in the manifest's order
-    counts = {"context": 0}
+    counts = {"context": 0, "stacks": 0}
     planned: queue.Queue = queue.Queue()  # (items, future of _rows), then None at the end, or an error
     stop = threading.Event()
+    splitter: list = []
+
+    def from_stacks() -> None:
+        part: list = []
+        for kind, st in items:
+            if stop.is_set():
+                return
+            ctx = kind == "context"
+            counts["context" if ctx else "stacks"] += 1
+            part.append((st, ctx))
+            if len(part) >= block:
+                planned.put((part, lane.first(_rows, [(scoring._bare(s), c) for s, c in part])))
+                part = []
+        if part:
+            planned.put((part, lane.first(_rows, [(scoring._bare(s), c) for s, c in part])))
+
+    def from_file() -> None:
+        import multiprocessing as mp
+
+        from . import manifest
+
+        ctx_ = mp.get_context("spawn")
+        recv, send = ctx_.Pipe(duplex=False)
+        proc = ctx_.Process(target=manifest.split, args=(str(items), send), name="nils-bodypart-manifest", daemon=True)
+        proc.start()
+        splitter.append(proc)
+        send.close()
+        entries = manifest.Entries(source_root)
+        part: list = []
+        texts: list = []
+
+        def flush() -> None:
+            planned.put((list(part), lane.first(_rows_text, (entries.mounts, entries.bases, list(texts)))))
+            part.clear()
+            texts.clear()
+
+        while not stop.is_set():
+            try:
+                msg = recv.recv()
+            except EOFError:
+                raise manifest.ManifestError("stacks.json could not be read: its reader ended") from None
+            if msg is None:
+                break
+            if isinstance(msg, tuple):
+                raise manifest.ManifestError(msg[1])
+            for e in msg:
+                if not entries.entry(e):
+                    continue
+                ctx = e[0] == "context"
+                counts["context" if ctx else "stacks"] += 1
+                part.append((None, ctx))
+                texts.append((e[0], e[2]))
+                if len(part) >= block:
+                    flush()
+        if part:
+            flush()
+        proc.join()
 
     def read() -> None:
         try:
-            part: list = []
-            for kind, st in items:
-                if stop.is_set():
-                    return
-                ctx = kind == "context"
-                if ctx:
-                    counts["context"] += 1
-                else:
-                    stacks.append(st)
-                part.append((st, ctx))
-                if len(part) >= block:
-                    planned.put((part, lane.first(_rows, [(scoring._bare(s), c) for s, c in part])))
-                    part = []
-            if part:
-                planned.put((part, lane.first(_rows, [(scoring._bare(s), c) for s, c in part])))
-            log.info("the manifest: %d stacks and %d context stacks read in %.1f s", len(stacks), counts["context"], time.monotonic() - t0)
+            (from_file if isinstance(items, (str, Path)) else from_stacks)()
+            log.info("the manifest: %d stacks and %d context stacks read in %.1f s", counts["stacks"], counts["context"], time.monotonic() - t0)
             planned.put(None)
         except BaseException as e:  # noqa: BLE001 - the main thread raises it
             planned.put(e)
@@ -709,12 +774,14 @@ def score_stream(model: fusion.Model, cas: Cascade, inputs: Path, items, *, work
             while parts and parts[0][1].done():
                 part, fut = parts.pop(0)
                 progressed = True
-                for (st, ctx), (g, why, reg, choice) in zip(part, fut.result()):
+                for (st, ctx), (parsed, g, why, reg, choice) in zip(part, fut.result()):
+                    st = st if st is not None else parsed
                     if fewslice.in_top(g):
                         tops[g["study_id"]] = max(tops.get(g["study_id"], g["z_hi"]), g["z_hi"])
                     if ctx:
                         context_rows.append(g)
                         continue
+                    stacks.append(st)
                     rows[st.stack_id] = g
                     if why is None:
                         cands.append([st, g, reg, choice, len(rows)])
@@ -764,7 +831,7 @@ def score_stream(model: fusion.Model, cas: Cascade, inputs: Path, items, *, work
             last = all_rows and not reads
             while readable and (len(readable) >= batch or last):
                 take = readable[:batch]
-                if not last and len(stacks) - take[-1][0][4] < STREAM_LAG and not done_reading:
+                if not last and counts["stacks"] - take[-1][0][4] < STREAM_LAG and not done_reading:
                     break
                 del readable[:batch]
                 progressed = True
@@ -809,8 +876,13 @@ def score_stream(model: fusion.Model, cas: Cascade, inputs: Path, items, *, work
             stats.update(lane.decoded)
     finally:
         stop.set()
+        for proc in splitter:
+            if proc.is_alive():
+                proc.terminate()
         if reader.ident is not None:  # started
             reader.join()
+        for proc in splitter:
+            proc.join(timeout=10)
         decider.shutdown(wait=True)
         lane.close()
     order = {st.stack_id: i for i, st in enumerate(stacks)}
