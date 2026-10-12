@@ -184,7 +184,7 @@ def test_the_fusion_descriptor_declares_its_models_table_and_axes():
         ("student", "model", True), ("deferral", "model", True), ("cascade", "model", True),
     ]
     assert {p["axis"] for p in x["proposals"]} == {"body_part", "body_region"}
-    assert x["needs"] == {"gpu": "none", "memory-gb": 8, "cores": 16, "cores-input": "threads"}
+    assert x["needs"] == {"gpu": "none", "memory-gb": 12, "cores": 16, "cores-input": "threads"}
     (table,) = x["outputs"]
     assert (table["kind"], table["format"], table["path-template"]) == ("table", "json", "bodypart-fusion/{stack}.json")
     cols = {c["name"]: c.get("type", "number") for c in table["columns"]}

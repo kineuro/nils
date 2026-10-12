@@ -207,6 +207,8 @@ def test_a_stack_gets_the_same_answer_in_a_run_of_part_of_its_session(world, tmp
     student's real network (random weights), in the run of the whole
     session and in a run without the session's top that the engine gave
     the rest of the session as context."""
+    pytest.importorskip("torch")
+    pytest.importorskip("timm")
     stu = cd.write_student(tmp_path / "student.safetensors")
     inp = inputs(world, tmp_path, deferral="all", student=stu)
     out = {}
@@ -441,6 +443,8 @@ def test_a_cpu_torch_runs_the_student_on_the_cpu_where_a_card_is_seen(world, tmp
     card, and torch cannot use it. A cascade run with --device cuda (or
     auto) crashed in the student; it runs the student on the CPU now and
     says so (the review's cpu_torch_cuda.py)."""
+    pytest.importorskip("torch")
+    pytest.importorskip("timm")
     import torch
 
     from nils_bodypart import gpu
