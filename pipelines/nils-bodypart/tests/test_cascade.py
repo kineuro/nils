@@ -501,6 +501,38 @@ def test_the_cache_keeps_each_input_by_its_files_identity(world, tmp_path, stand
         assert np.allclose(model.encoder.probabilities(v, ta[f"{key}.geo"]), ta[f"{key}.image"], atol=1e-6)
 
 
+def test_stage_one_streams_in_the_students_own_batches(world, tmp_path, monkeypatch):
+    """Stage 1 reads its slices a block at a time and frees them, and gives
+    the student whole batches in the run's order, so every batch is the one
+    a single pass over the run makes (the student's numbers depend on its
+    batches): blocks of two slices with an unreadable one among them give
+    the batches and the answers of one block."""
+    import hashlib as h
+
+    from nils_bodypart import student
+
+    seen: list = []
+
+    class Recorder(StandIn):
+        def predict(self, tiles, sgeo, tokens, batch=64):
+            for i in range(0, len(tiles), batch):
+                seen.append(tuple(h.sha1(t.tobytes()).hexdigest()[:12] for t in tiles[i : i + batch]))
+            return super().predict(tiles, sgeo, tokens, batch)
+
+    monkeypatch.setattr(student, "Student", Recorder)
+    inp = inputs(world, tmp_path, deferral="mixed")
+    got = {}
+    for block in (2048, 2):
+        monkeypatch.setattr(cascade, "STAGE1_BLOCK", block)
+        seen.clear()
+        code, r = run(world, inp, tmp_path / f"out-{block}", "--student-batch", "2")
+        assert code == 0, r.get("error")
+        got[block] = (list(seen), tables(tmp_path / f"out-{block}"), r["metrics"]["stage1"])
+    assert got[2][0] == got[2048][0] and [len(b) for b in got[2][0]] == [2, 2, 2]
+    assert got[2][1] == got[2048][1]
+    assert got[2][2] == got[2048][2] and got[2][2]["stage1_unreadable"] == 1
+
+
 @pytest.mark.parametrize("damage", ["empty", "garbage"])
 def test_a_damaged_cache_file_costs_no_answer(world, tmp_path, stand_in, damage):
     """A session's cache file that cannot be read (the review's

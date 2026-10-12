@@ -204,6 +204,9 @@ def margin(answers: dict, thresholds: dict) -> float:
 # --- the cascade over a run's stacks ---------------------------------------------------------------------------------------
 
 REASONS = ("sealed", "not-mr", "no-geometry", "not-sure", "unreadable")
+# stage 1's slices read at a time (rounded down to whole batches of the
+# student): what the main process holds of them, about 37 kB a slice
+STAGE1_BLOCK = 2048
 
 
 @dataclass
@@ -270,31 +273,36 @@ def score(model: fusion.Model, cas: Cascade, inputs: Path, stacks: list, *, work
         cands.append((st, g, reg, s0[0], s0[1]))
     stats.update(stage1_candidates=len(cands), straight_to_planes=len(rest), context_stacks=len(context or []))
 
-    # stage 1: the slot-0 slices, the student, the head, D3
-    read = scoring.tiles([c[0].files[c[3]][0] for c in cands], workers)
-    ok = [(c, t) for c, t in zip(cands, read) if t[0] is not None]
-    for c, t in zip(cands, read):
-        if t[0] is None:
-            rest.append(c[0])
-            out[c[0].stack_id] = Outcome(c[0])  # deferred: the slice did not decode
-    stats["stage1_unreadable"] = len(cands) - len(ok)
-    if ok:
-        tiles = np.stack([t[0][0] for _, t in ok])
-        sgeo = np.stack([c[4] for c, _ in ok]).astype(np.float32)
-        tokens = np.stack([np.concatenate([fewslice.stack_tokens(c[1]), fewslice.geo_feats(c[2][0][None, :])[0]]) for c, _ in ok]).astype(np.float32)
-        if student_factory is None:
-            from .student import Student
+    # stage 1: the slot-0 slices, the student, the head, D3. Streamed: the
+    # slices are read a block at a time and the student is given them in
+    # its own batches, in the run's order, so each batch is the one a single
+    # pass over the run makes (the student's numbers depend on its batches;
+    # the graded runs did not pad the last one, and neither does this), and
+    # a slice is dropped once its stack's stage is done unless the cache
+    # keeps it
+    batch = max(1, int(student_batch))
+    net = None
+    if cands and student_factory is None:
+        from .student import Student
 
-            net = Student(cas.student.artifact, device="cuda" if device == "cuda" else "cpu", threads=max(1, workers))
-            P = net.predict(tiles, sgeo, tokens, batch=student_batch)
+        net = Student(cas.student.artifact, device="cuda" if device == "cuda" else "cpu", threads=max(1, workers))
+    pending: list = []  # (candidate, read) decoded, waiting for the student
+
+    def stage1(take: list) -> None:
+        tiles = np.stack([t[0][0] for _, t in take])
+        sgeo = np.stack([c[4] for c, _ in take]).astype(np.float32)
+        tokens = np.stack([np.concatenate([fewslice.stack_tokens(c[1]), fewslice.geo_feats(c[2][0][None, :])[0]]) for c, _ in take]).astype(np.float32)
+        if net is not None:
+            P = net.predict(tiles, sgeo, tokens, batch=batch)
         else:
             P = np.asarray(student_factory(tiles, sgeo, tokens), np.float32)
-        h44 = np.stack([c[2][1] for c, _ in ok]).astype(np.float32)
-        cohorts = [c[2][2] for c, _ in ok]
+        del tiles
+        h44 = np.stack([c[2][1] for c, _ in take]).astype(np.float32)
+        cohorts = [c[2][2] for c, _ in take]
         table = stage_table(model, P, h44, cohorts)
-        X = [d3_features(t["feats"], c[2][1], c[1]) for (c, _), t in zip(ok, table)]
+        X = [d3_features(t["feats"], c[2][1], c[1]) for (c, _), t in zip(take, table)]
         d3 = defer_scores(cas, X)
-        for (c, t), row, q in zip(ok, table, d3):
+        for (c, t), row, q in zip(take, table, d3):
             st = c[0]
             path = st.files[c[3]][0]
             o = Outcome(st, tile=t[0][0] if keep_inputs or fill else None, tile_ident=t[0][1], tile_path=path, d3=float(q))
@@ -309,6 +317,28 @@ def score(model: fusion.Model, cas: Cascade, inputs: Path, stacks: list, *, work
             else:
                 rest.append(st)
             out[st.stack_id] = o
+
+    unreadable = 0
+    block = batch * max(1, STAGE1_BLOCK // batch)  # slices read at a time, whole batches
+    for i in range(0, len(cands), block):
+        part = cands[i : i + block]
+        read = scoring.tiles([c[0].files[c[3]][0] for c in part], workers)
+        for c, t in zip(part, read):
+            if t[0] is None:
+                rest.append(c[0])
+                out[c[0].stack_id] = Outcome(c[0])  # deferred: the slice did not decode
+                unreadable += 1
+            else:
+                pending.append((c, t))
+        del read, part
+        whole = len(pending) // batch * batch
+        if whole:
+            stage1(pending[:whole])
+            del pending[:whole]
+    if pending:
+        stage1(pending)
+        pending.clear()
+    stats["stage1_unreadable"] = unreadable
     stats["stage1_accepted"] = sum(1 for o in out.values() if o.result is not None and o.result.stage == "s1")
 
     # stages 2 and 3, and the touched planes of stage 1's answers for the cache
