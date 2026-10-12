@@ -6153,10 +6153,20 @@ fn a_stacks_input_carries_each_file_s_geometry_when_it_asks() {
             // with the geometry the file is compact, three to four times
             // smaller than pretty-printed; without it, as before
             let text = |r: i64| {
-                std::fs::read_to_string(lab.work.path().join("runs").join(r.to_string()).join("input/stacks.json")).unwrap()
+                std::fs::read_to_string(
+                    lab.work
+                        .path()
+                        .join("runs")
+                        .join(r.to_string())
+                        .join("input/stacks.json"),
+                )
+                .unwrap()
             };
             assert!(!text(geo_run).contains('\n'), "compact with the geometry");
-            assert!(text(run("stack-echo")).contains("\n  "), "pretty without it");
+            assert!(
+                text(run("stack-echo")).contains("\n  "),
+                "pretty without it"
+            );
             let entries = on["stacks"].as_array().unwrap();
             assert_eq!(
                 entries.len(),
@@ -6359,10 +6369,18 @@ fn a_stacks_input_carries_each_file_s_geometry_when_it_asks() {
                 assert_eq!(own["stacks"][0]["geometry"], e["geometry"], "{unit}");
                 assert_eq!(own["stacks"][0]["files"], e["files"], "{unit}");
                 // and the rest of its session as its context (P1b)
-                let others: Vec<&Value> = own["context"].as_array().unwrap().iter().map(|c| &c["stack_id"]).collect();
+                let others: Vec<&Value> = own["context"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|c| &c["stack_id"])
+                    .collect();
                 let want: Vec<&Value> = entries
                     .iter()
-                    .filter(|o| o["geometry"]["study"] == e["geometry"]["study"] && o["stack_id"] != e["stack_id"])
+                    .filter(|o| {
+                        o["geometry"]["study"] == e["geometry"]["study"]
+                            && o["stack_id"] != e["stack_id"]
+                    })
                     .map(|o| &o["stack_id"])
                     .collect();
                 assert_eq!(others, want, "{unit}: {own}");
@@ -6397,7 +6415,9 @@ fn a_stacks_input_carries_each_file_s_geometry_when_it_asks() {
                 let study = &held["geometry"]["study"];
                 let want: Vec<Value> = entries
                     .iter()
-                    .filter(|e| &e["geometry"]["study"] == study && e["stack_id"] != held["stack_id"])
+                    .filter(|e| {
+                        &e["geometry"]["study"] == study && e["stack_id"] != held["stack_id"]
+                    })
                     .filter(|e| e["stack_id"].as_i64() != sealed)
                     .map(|e| {
                         let files: Vec<Value> = e["files"]
@@ -6422,7 +6442,15 @@ fn a_stacks_input_carries_each_file_s_geometry_when_it_asks() {
                     .map(|r| r["id"].as_i64().unwrap())
                     .collect();
                 let (good, _out, err) = lab.run(
-                    &["run", "stack-geo", "--select", "selection:every@1", "--chunk", "1", "--json"],
+                    &[
+                        "run",
+                        "stack-geo",
+                        "--select",
+                        "selection:every@1",
+                        "--chunk",
+                        "1",
+                        "--json",
+                    ],
                     None,
                 );
                 assert!(good, "{err}");
@@ -6440,7 +6468,11 @@ fn a_stacks_input_carries_each_file_s_geometry_when_it_asks() {
                     let doc = stacks_json(lab, id, None);
                     assert_eq!(doc["stacks"].as_array().unwrap().len(), 1, "{doc}");
                     if doc["stacks"][0]["stack_id"].as_i64() == sealed {
-                        assert_eq!(doc["context"], json!([]), "a sealed stack's session is not read: {doc}");
+                        assert_eq!(
+                            doc["context"],
+                            json!([]),
+                            "a sealed stack's session is not read: {doc}"
+                        );
                     } else {
                         listed += context_of(&doc, sealed);
                     }
@@ -6450,7 +6482,10 @@ fn a_stacks_input_carries_each_file_s_geometry_when_it_asks() {
                 listed
             };
             let listed = paged(None);
-            assert!(listed >= 2, "the file of frames' two stacks, each the other's context");
+            assert!(
+                listed >= 2,
+                "the file of frames' two stacks, each the other's context"
+            );
 
             // P1b: a stack of a sample sealed now says so, and only it; one
             // unsealed again does not

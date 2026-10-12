@@ -902,8 +902,12 @@ fn round(pg: Option<(String, String)>) {
         "an admitted cascade is not the step's model: {started}"
     );
     let waiting_job = started["job"].as_i64().unwrap();
-    let (status, dropped) =
-        server.call("POST", &format!("/api/jobs/{waiting_job}/cancel"), None, OPS);
+    let (status, dropped) = server.call(
+        "POST",
+        &format!("/api/jobs/{waiting_job}/cancel"),
+        None,
+        OPS,
+    );
     assert_eq!(status, 200, "{dropped}");
     // promoted, a cascade is refused at plan time while a part is merely
     // registered, then for the part it does not name

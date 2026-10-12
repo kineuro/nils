@@ -855,7 +855,10 @@ fn holders(
 /// Refused for a cascade one of whose parts is retired (record 55 E2): it
 /// can be neither admitted nor promoted, since no run would be given it.
 fn parts_stand(store: &mut Store, m: &Model, doing: &str) -> Result<(), Error> {
-    if let Some((name, gone)) = parts(store, m)?.into_iter().find(|(_, p)| p.state == "retired") {
+    if let Some((name, gone)) = parts(store, m)?
+        .into_iter()
+        .find(|(_, p)| p.state == "retired")
+    {
         return Err(refused(format!(
             "model {} ({}) reads its part {name}, model {} ({}), which is retired, so it is not {doing}; register a cascade of parts that stand",
             m.id,
@@ -1103,7 +1106,11 @@ pub fn promote(
             store,
             &o,
             &going,
-            &format!("promoting model {} ({}) would retire a cascade's part", m.id, m.label()),
+            &format!(
+                "promoting model {} ({}) would retire a cascade's part",
+                m.id,
+                m.label()
+            ),
         )?;
     }
     let now = now_iso();

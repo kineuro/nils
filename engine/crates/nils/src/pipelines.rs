@@ -6221,7 +6221,11 @@ fn stack_files(
 /// what its images are and how many there are; `sealed` is false until the
 /// caller marks it.
 fn stack_facts(r: &nils_registry::store::Row, at: usize) -> Result<Value, nils_registry::Error> {
-    let mut g = stack_geometry(r.opt_text(at)?, r.opt_double(at + 1)?, r.opt_double(at + 2)?);
+    let mut g = stack_geometry(
+        r.opt_text(at)?,
+        r.opt_double(at + 1)?,
+        r.opt_double(at + 2)?,
+    );
     g["study"] = json!(r.int(at + 3)?);
     g["image_type"] = json!(r.opt_text(at + 4)?);
     g["sop_class_uid"] = json!(r.opt_text(at + 5)?);
@@ -6249,7 +6253,11 @@ fn session_context(
     let studies: Vec<i64> = studies.iter().copied().collect();
     let mut modality: BTreeMap<i64, String> = BTreeMap::new();
     for chunk in studies.chunks(500) {
-        let list = chunk.iter().map(i64::to_string).collect::<Vec<_>>().join(", ");
+        let list = chunk
+            .iter()
+            .map(i64::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
         // the image's modality: the stack's own, else its fingerprint's
         let sql = format!(
             "SELECT st.id, COALESCE(NULLIF(st.modality, ''), fp.modality) FROM {} st \
@@ -6263,7 +6271,10 @@ fn session_context(
         for r in store.query(&sql, &[]).map_err(err)? {
             let id = r.int(0).map_err(err)?;
             if !own.contains(&id) {
-                modality.insert(id, r.opt_text(1).map_err(err)?.unwrap_or_default().to_string());
+                modality.insert(
+                    id,
+                    r.opt_text(1).map_err(err)?.unwrap_or_default().to_string(),
+                );
             }
         }
     }
@@ -6274,7 +6285,11 @@ fn session_context(
     let mut geometry_of: BTreeMap<i64, Value> = BTreeMap::new();
     let mut files_of: BTreeMap<i64, Vec<StackFile>> = BTreeMap::new();
     for chunk in ids.chunks(500) {
-        let list = chunk.iter().map(i64::to_string).collect::<Vec<_>>().join(", ");
+        let list = chunk
+            .iter()
+            .map(i64::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
         let sql = format!(
             "SELECT st.id, st.image_orientation_patient, fp.slice_thickness, fp.spacing_between_slices, \
              se.study_id, st.image_type, fp.sop_class_uid, st.n_instances FROM {} st \
