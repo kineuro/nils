@@ -90,6 +90,7 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ### Fixed
 
+- nils-bodypart's cascade with its student on the card decodes on the card with one worker by default, not two, so the card holds two processes, as the card's lease allows; `--gpu-workers` still sets it, and without the cascade the default stays 2.
 - nils-bodypart's CPU build on a machine with a card: `infer-fusion --device cuda` (or `auto`) ran the cascade's student, and `--encoder-device cuda` the encoder, on a card this torch cannot use, and the run crashed. Each now runs on the card only where torch can use one, and on the CPU otherwise with a warning; the student is loaded before any slice is read.
 - nils-bodypart refuses a cascade whose card names no threshold, or not its head's: the engine stages each `body_part` decision at the threshold of the card that names it, the cascade's, so another would stage what the run said abstains, or the reverse.
 - nils-bodypart's reduced reader (0.4.0's default `reduced:touched`, and the cascade's middle stages) no longer plans a stack again for ever when a file's SliceThickness reads as not a number: it takes the first kept file's thickness once, NaN included, as the full reader does.

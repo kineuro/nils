@@ -401,6 +401,11 @@ def test_the_cascade_passes_gpu_workers_on(world, tmp_path, stand_in, monkeypatc
     assert code == 0, r.get("error")
     assert seen and set(seen) == {("cuda", 0)}
     assert (r["params"]["gpu_workers"], r["params"]["cascade"]["student_device"]) == (0, "cuda")
+    # unasked, one worker decodes on the card beside the student, not two
+    seen.clear()
+    code, r = run(world, inp, tmp_path / "out-default", "--device", "cuda")
+    assert code == 0, r.get("error")
+    assert set(seen) == {("cuda", 1)} and r["params"]["gpu_workers"] == 1
 
 
 def test_a_cpu_torch_runs_the_student_on_the_cpu_where_a_card_is_seen(world, tmp_path, monkeypatch):

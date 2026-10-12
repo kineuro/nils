@@ -647,6 +647,7 @@ def cmd_infer_fusion(a: argparse.Namespace) -> Run:
 
     model = fusion.load(a.inputs)
     device = _fusion_device(a.device)
+    gpu_workers_asked = a.gpu_workers
     encoder_device = "cpu"
     if device == "cuda" and a.encoder_device == "cuda":
         from .gpu import torch_cuda_available
@@ -666,6 +667,8 @@ def cmd_infer_fusion(a: argparse.Namespace) -> Run:
         except reduced.PolicyError as e:
             raise RunError(str(e)) from e
         params.update({"reader": a.reader, "readahead": a.readahead, "chunk": a.chunk})
+    if a.gpu_workers is None:
+        a.gpu_workers = 2
     if device != "cpu":
         params.update({"decode_device": device, "encoder_device": encoder_device})
         params["gpu_workers"] = min(a.gpu_workers, a.threads)
@@ -682,6 +685,7 @@ def cmd_infer_fusion(a: argparse.Namespace) -> Run:
         if cas is None and a.cascade == "on":
             raise RunError("--cascade on, and the run was given no cascade model")
     if cas is not None:
+        a.gpu_workers = gpu_workers_asked  # the cascade's default depends on where its student runs
         return _infer_cascade(a, model, cas, device)
     run = Run("bodypart-infer-fusion", a.output, params, device)
     stacks = manifest.load(a.stacks, source_root=a.source_root)
@@ -780,6 +784,9 @@ def _infer_cascade(a: argparse.Namespace, model, cas, device: str) -> Run:
     student_device = "cuda" if device == "cuda" and torch_cuda_available() else "cpu"
     if device == "cuda" and student_device == "cpu":
         logger.warning("this torch cannot use the card: the cascade's student runs on the CPU")
+    if a.gpu_workers is None:
+        # the student on the card is a process on it: one decoder beside it
+        a.gpu_workers = 1 if student_device == "cuda" else 2
     params = {"threads": a.threads, "models": {**model.refs(), **cas.refs()}, "preprocessing": volume.PREPROCESSING,
               "cascade": {"stages": [s["stage"] for s in cas.doc["stages"]], "deferral_at_least": cas.d3_threshold,
                           "margin_logit_at_least": cas.m3, "student_device": student_device, "readahead": a.readahead,
@@ -937,7 +944,7 @@ def parser() -> argparse.ArgumentParser:
     f.add_argument("--device", default=os.environ.get("NILS_BODYPART_FUSION_DEVICE", "cpu"), help="cpu (the default), cuda, or auto (cuda where a card is found): where lossless JPEG 2000 is decoded")
     f.add_argument("--encoder-device", choices=("cpu", "cuda"), default="cpu", help="cuda runs the image encoder on the card in batches (not bit for bit the CPU's)")
     f.add_argument("--batch", type=int, default=64, help="stacks a batch of the encoder on the card")
-    f.add_argument("--gpu-workers", type=int, default=2, help="of the workers, how many decode on the card; the others decode on the CPU")
+    f.add_argument("--gpu-workers", type=int, default=None, help="of the workers, how many decode on the card; the others decode on the CPU (2, or 1 where the cascade's student is on the card, so the card holds at most two processes)")
     f.add_argument("--reader", default="full", help="full (every file, as the model was certified) or reduced:<policy> (full, touched or b<N>): only the frames the encoder's planes need, chosen from the manifest's geometry")
     f.add_argument("--readahead", type=int, default=1, help="with the reduced reader, how many stacks ahead a worker asks the kernel to read")
     f.add_argument("--chunk", type=int, default=4, help="stacks a worker takes at a time")
