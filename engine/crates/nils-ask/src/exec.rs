@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 use blake2::digest::consts::{U8, U32};
 use blake2::{Blake2b, Digest};
 use nils_registry::store::{Cell, Error as StoreError, Row, Store};
+use serde::{Deserialize, Serialize};
 
 use crate::compile::Compiled;
 
@@ -63,6 +64,19 @@ pub struct Answer {
     /// quasi identifying field read below detail quasi, so that every door
     /// says which they are (2026-10-12).
     pub shaped: Vec<usize>,
+    /// Record 55 K7, the ruling of 2026-10-12: the places of the columns
+    /// with a value held back, a group's mean, spread or count of distinct
+    /// values of such a field where the group holds fewer than
+    /// `MEASURE_K` subjects with a value; the value is null.
+    pub held_back: Vec<usize>,
+}
+
+/// A column of an answer with values held back, and why (record 55 K7, the
+/// ruling of 2026-10-12), so the chat can tell the person.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HeldBack {
+    pub column: String,
+    pub why: String,
 }
 
 impl Answer {
@@ -73,6 +87,30 @@ impl Answer {
             .filter_map(|&i| self.columns.get(i).cloned())
             .collect()
     }
+
+    /// The columns with a value held back, in order, each with why.
+    pub fn held_back_named(&self) -> Vec<HeldBack> {
+        let why = crate::validate::held_back_why();
+        self.held_back
+            .iter()
+            .filter_map(|&i| self.columns.get(i))
+            .map(|c| HeldBack {
+                column: c.clone(),
+                why: why.clone(),
+            })
+            .collect()
+    }
+}
+
+/// Record 55 K7, the ruling of 2026-10-12: which of the columns held to a
+/// group's subjects hold a value back in these rows. Such a value is null,
+/// and a mean or a count of distinct values is never null where the group
+/// holds the subjects it needs.
+pub fn held_back_in(held: &[usize], rows: &[Row]) -> Vec<usize> {
+    held.iter()
+        .copied()
+        .filter(|&i| rows.iter().any(|r| matches!(r.0.get(i), Some(Cell::Null))))
+        .collect()
 }
 
 fn cell_bytes(c: &Cell) -> usize {
@@ -220,6 +258,7 @@ pub fn run(store: &mut Store, compiled: &Compiled, bounds: Bounds) -> Result<Ans
     ended?;
     shape_columns(compiled, &mut rows);
     let content_hash = (!truncated).then(|| content_hash(compiled, &rows));
+    let held_back = held_back_in(&compiled.held_columns, &rows);
     Ok(Answer {
         columns: compiled.columns.clone(),
         rows,
@@ -227,5 +266,6 @@ pub fn run(store: &mut Store, compiled: &Compiled, bounds: Bounds) -> Result<Ans
         content_hash,
         elapsed_ms: started.elapsed().as_millis() as u64,
         shaped: compiled.shaped_columns.clone(),
+        held_back,
     })
 }

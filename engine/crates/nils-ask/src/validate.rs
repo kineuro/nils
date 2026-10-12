@@ -394,6 +394,22 @@ pub struct Validated {
     /// quasi identifying field this scope may not project raw, and so are
     /// answered as their shapes (see [`may_project_raw`]).
     pub shaped: BTreeSet<usize>,
+    /// Record 55 K7, the ruling of 2026-10-12: the places in `out.columns`
+    /// that read a group's mean or count of distinct values of such a
+    /// field, answered where the group holds [`MEASURE_K`] subjects with a
+    /// value and held back (null) where it holds fewer; each with the
+    /// bindings of the answer's group set whose subjects hold it.
+    pub held: BTreeMap<usize, BTreeSet<String>>,
+    /// The `stddev` of a quasi identifying field of a group's child, by the
+    /// name of its column: the group's spread, held back for a group under
+    /// [`MEASURE_K`] subjects with a value.
+    pub held_measures: BTreeSet<String>,
+}
+
+/// Why a value of an answer is held back below detail quasi (record 55 K7,
+/// the ruling of 2026-10-12).
+pub fn held_back_why() -> String {
+    format!("a group under {MEASURE_K} subjects")
 }
 
 /// Record 55 K7, the one place the quasi-identifier rule is decided:
@@ -432,7 +448,11 @@ pub fn shape(v: &str) -> String {
 
 /// The smallest group of scans whose totals of a measure the ask shows
 /// below detail quasi: D27's federation default k, applied to a pipeline's
-/// measures alone (D51 stands for everything else).
+/// measures alone (D51 stands for everything else). Record 55 K7, the
+/// ruling of 2026-10-12: also the smallest group of subjects whose mean,
+/// spread or count of distinct values of a quasi identifying field it
+/// shows below detail quasi, counting the subjects with a value, never
+/// the rows.
 pub const MEASURE_K: i64 = 5;
 
 const ARITHMETIC: &[&str] = &["+", "-", "*", "/"];
@@ -743,9 +763,11 @@ pub fn validate(ask: &Ask, names: &dyn Names, scope: &Scope) -> Result<Validated
     measures_within_detail(ask, scope, &mut issues);
     rows_within_detail(ask, scope, &mut issues);
     out.small_cells = small_cells(ask, scope);
-    let (shaped, refused) = shapes_of(ask, names, scope, &out);
-    out.shaped = shaped;
-    issues.extend(refused);
+    let rule = shapes_of(ask, names, scope, &out);
+    out.shaped = rule.shaped;
+    out.held = rule.held;
+    out.held_measures = rule.held_measures;
+    issues.extend(rule.refused);
 
     let (warnings, errors): (Vec<Issue>, Vec<Issue>) =
         issues.into_iter().partition(|i| i.code.is_warning());
@@ -2603,47 +2625,121 @@ pub const MAX_CLAUSE_DEPTH: usize = 64;
 /// identifying field.
 const QUASI_DERIVED: &[&str] = &["study_day"];
 
+/// What a value read below detail quasi carries of a quasi identifying field
+/// (record 55 K7).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+enum Carry {
+    /// Nothing of one: a technical or a clinical value, a count of rows, a
+    /// comparison or a predicate.
+    #[default]
+    Nothing,
+    /// A group's mean or count of distinct values of one (the ruling of
+    /// 2026-10-12): a number where the group holds [`MEASURE_K`] subjects
+    /// with a value, held back where it holds fewer. It names the bindings
+    /// of its group set whose subjects hold it.
+    Held(BTreeSet<String>),
+    /// The value itself, or one person's own: the field, a value made from
+    /// it, its min, max, sum or list, a group's key made from it, a share
+    /// of it. It is answered as its shape.
+    Raw,
+}
+
+impl Carry {
+    fn join(self, other: Carry) -> Carry {
+        match (self, other) {
+            (Carry::Raw, _) | (_, Carry::Raw) => Carry::Raw,
+            (Carry::Held(mut a), Carry::Held(b)) => {
+                a.extend(b);
+                Carry::Held(a)
+            }
+            (Carry::Held(a), Carry::Nothing) | (Carry::Nothing, Carry::Held(a)) => Carry::Held(a),
+            (Carry::Nothing, Carry::Nothing) => Carry::Nothing,
+        }
+    }
+
+    /// What it carries where nothing holds it to its group's subjects: read
+    /// by another set, or made in a set the answer does not project, a
+    /// held value is the field's own.
+    fn unheld(self) -> Carry {
+        match self {
+            Carry::Held(_) => Carry::Raw,
+            c => c,
+        }
+    }
+}
+
+/// The aggregates a group's subjects hold below detail quasi (the ruling of
+/// 2026-10-12): its mean and its count of distinct values. Its min, max and
+/// list are one person's own value, and its sum stays a shape.
+fn held_kind(op: &str) -> bool {
+    matches!(op, "avg" | "distinct")
+}
+
 /// What reads a quasi identifying field the scope may not project raw
-/// (record 55 K7): per set, the names it exposes that do, bindings and a
-/// group's keys, filled in topological order.
+/// (record 55 K7): per set, what each name it exposes carries, bindings and
+/// a group's keys, filled in topological order.
 struct Shapes<'a> {
     ask: &'a Ask,
     names: &'a dyn Names,
     scope: &'a Scope,
     v: &'a Validated,
-    tainted: BTreeMap<String, BTreeSet<String>>,
+    carried: BTreeMap<String, BTreeMap<String, Carry>>,
 }
 
 impl Shapes<'_> {
-    fn below(&self, info: &FieldInfo) -> bool {
-        !may_project_raw(info.class, self.scope)
+    fn below(&self, info: &FieldInfo) -> Carry {
+        if may_project_raw(info.class, self.scope) {
+            Carry::Nothing
+        } else {
+            Carry::Raw
+        }
     }
 
-    /// Whether a clause's value, read in a set, carries a field below the
-    /// rule. A comparison or a predicate answers a boolean and a count or a
-    /// distinct count a number, as a filter does, so neither carries it.
-    fn clause(&self, c: &Clause, set: &str, depth: u8) -> bool {
+    fn below_quasi(&self) -> Carry {
+        if may_project_raw(Class::QuasiIdentifying, self.scope) {
+            Carry::Nothing
+        } else {
+            Carry::Raw
+        }
+    }
+
+    /// What a clause's value, read in a set, carries of a field below the
+    /// rule. A comparison or a predicate answers a boolean and a count of
+    /// rows a number, as a filter does, so neither carries it. An aggregate
+    /// of such a field is the field's own wherever it is made but as a
+    /// group set's own mean or count of distinct values (see `traced`): a
+    /// row's aggregate in any other set reads the rows of the row's own
+    /// subject, session or stack, one person's.
+    fn clause(&self, c: &Clause, set: &str, depth: u8) -> Carry {
         let op = c.op.as_str();
         // past the bound nothing is traced, so the value counts as carrying
         // the field: validate refuses such a document first, and this keeps
         // the check closed if it ever is not
         if usize::from(depth) >= MAX_CLAUSE_DEPTH {
-            return true;
+            return Carry::Raw;
         }
         if COMPARISONS.contains(&op) || PREDICATES.contains(&op) {
-            return false;
+            return Carry::Nothing;
         }
         match op {
-            "field" => c.ref_name().is_some_and(|p| self.path(p, set, 0)),
-            "derived" => c.ref_name().is_some_and(|n| {
-                QUASI_DERIVED.contains(&n) && !may_project_raw(Class::QuasiIdentifying, self.scope)
-            }),
-            "axis" | "param" => false,
-            "count" | "distinct" => false,
+            "field" => c
+                .ref_name()
+                .map_or(Carry::Nothing, |p| self.path(p, set, 0)),
+            "derived" => match c.ref_name() {
+                Some(n) if QUASI_DERIVED.contains(&n) => self.below_quasi(),
+                _ => Carry::Nothing,
+            },
+            "axis" | "param" | "count" => Carry::Nothing,
             op if AGGREGATES.contains(&op) => {
-                // the aggregated clause reads the target's names
+                // the aggregated clause reads the target's names, and what
+                // another set holds to its subjects is the field's here
                 let target = c.opts.get("set").and_then(Value::as_str).unwrap_or(set);
-                c.args.iter().any(|a| self.arg(a, target, depth + 1))
+                c.args
+                    .iter()
+                    .fold(Carry::Nothing, |acc, a| {
+                        acc.join(self.arg(a, target, depth + 1))
+                    })
+                    .unheld()
             }
             // a share divides the name its `of` gives by a count the answer
             // also says, so it carries what it divides: a share of an age
@@ -2652,33 +2748,44 @@ impl Shapes<'_> {
                 .opts
                 .get("of")
                 .and_then(Value::as_str)
-                .is_some_and(|of| self.path(of, set, 0)),
-            _ => c.args.iter().any(|a| self.arg(a, set, depth + 1)),
+                .map_or(Carry::Nothing, |of| self.path(of, set, 0)),
+            _ => c.args.iter().fold(Carry::Nothing, |acc, a| {
+                acc.join(self.arg(a, set, depth + 1))
+            }),
         }
     }
 
-    fn arg(&self, a: &Arg, set: &str, depth: u8) -> bool {
+    fn arg(&self, a: &Arg, set: &str, depth: u8) -> Carry {
         match a {
             Arg::Clause(c) => self.clause(c, set, depth),
-            Arg::List(items) => items.iter().any(|i| self.arg(i, set, depth)),
-            _ => false,
+            Arg::List(items) => items
+                .iter()
+                .fold(Carry::Nothing, |acc, i| acc.join(self.arg(i, set, depth))),
+            _ => Carry::Nothing,
         }
     }
 
-    /// Whether a path, read in a set, is a field below the rule or a name
-    /// made from one; the walk follows `resolve_field`'s.
-    fn path(&self, path: &str, set_name: &str, depth: u8) -> bool {
+    /// What a path, read in a set, carries: a field below the rule or a
+    /// name made from one; the walk follows `resolve_field`'s. What another
+    /// set holds to its subjects is the field's own here.
+    fn path(&self, path: &str, set_name: &str, depth: u8) -> Carry {
         let (Some(set), Some(exposed)) = (self.ask.sets.get(set_name), self.v.sets.get(set_name))
         else {
-            return false;
+            return Carry::Nothing;
         };
         if depth > 6 {
             // resolve_field refuses a path this deep; closed if it ever does not
-            return true;
+            return Carry::Raw;
         }
-        let own = self.tainted.get(set_name);
+        let own = || {
+            self.carried
+                .get(set_name)
+                .and_then(|t| t.get(path))
+                .cloned()
+                .unwrap_or_default()
+        };
         if exposed.bindings.iter().any(|b| b == path) {
-            return own.is_some_and(|t| t.contains(path));
+            return own();
         }
         for b in &exposed.change_bindings {
             if let Some(rest) = path
@@ -2686,36 +2793,39 @@ impl Shapes<'_> {
                 .and_then(|r| r.strip_prefix('.'))
             {
                 // a change pair's days, and the days between them
-                return matches!(rest, "from_date" | "to_date" | "gap_days")
-                    && !may_project_raw(Class::QuasiIdentifying, self.scope);
+                return match rest {
+                    "from_date" | "to_date" | "gap_days" => self.below_quasi(),
+                    _ => Carry::Nothing,
+                };
             }
         }
         if set.grain == Grain::Group {
-            return own.is_some_and(|t| t.contains(path));
+            return own();
         }
         if is_measure_path(path) {
             // record 49 R4 decides a pipeline's measures
-            return false;
+            return Carry::Nothing;
         }
         let (first, rest) = match path.split_once('.') {
             Some((f, r)) => (f, Some(r)),
             None => (path, None),
         };
         if first == "pick" {
-            return false;
+            return Carry::Nothing;
         }
         if let Some(partner) = exposed.partners.get(first) {
-            return rest.is_some_and(|r| match r {
+            return match rest {
+                None => Carry::Nothing,
                 // the partner's day, and the days to it
-                "date" | "offset_days" => !may_project_raw(Class::QuasiIdentifying, self.scope),
-                r if PARTNER_EXTRAS.contains(&r) => false,
-                r => self.path(r, partner, depth + 1),
-            });
+                Some("date" | "offset_days") => self.below_quasi(),
+                Some(r) if PARTNER_EXTRAS.contains(&r) => Carry::Nothing,
+                Some(r) => self.path(r, partner, depth + 1).unheld(),
+            };
         }
         if let Some(of) = &exposed.of
             && of == first
         {
-            return rest.is_some_and(|r| self.path(r, of, depth + 1));
+            return rest.map_or(Carry::Nothing, |r| self.path(r, of, depth + 1).unheld());
         }
         if let Some(rest) = rest
             && level_prefix(set.grain, first)
@@ -2723,18 +2833,28 @@ impl Shapes<'_> {
             return self
                 .names
                 .field(first, rest)
-                .is_some_and(|i| self.below(&i));
+                .map_or(Carry::Nothing, |i| self.below(&i));
         }
         self.names
             .field(set.grain.name(), path)
-            .is_some_and(|i| self.below(&i))
+            .map_or(Carry::Nothing, |i| self.below(&i))
+    }
+
+    /// Whether a group's binding is a mean or a count of distinct values of
+    /// a field below the rule over the group's own child: the group's
+    /// subjects hold it (2026-10-12).
+    fn group_held(&self, c: &Clause, child: &str) -> bool {
+        held_kind(&c.op)
+            && c.opts.get("set").and_then(Value::as_str) == Some(child)
+            && c.args.len() == 1
+            && self.arg(&c.args[0], child, 1) == Carry::Raw
     }
 }
 
 impl<'a> Shapes<'a> {
     /// The trace of a document below detail quasi: per set, in topological
-    /// order, the names it exposes that read a quasi identifying field. None
-    /// at detail quasi and above, where nothing is shaped.
+    /// order, what the names it exposes carry. None at detail quasi and
+    /// above, where nothing is shaped or held.
     fn traced(
         ask: &'a Ask,
         names: &'a dyn Names,
@@ -2749,91 +2869,123 @@ impl<'a> Shapes<'a> {
             names,
             scope,
             v,
-            tainted: BTreeMap::new(),
+            carried: BTreeMap::new(),
         };
         for name in &v.order {
             let Some(set) = ask.sets.get(name) else {
                 continue;
             };
-            let mut t: BTreeSet<String> = BTreeSet::new();
-            // what a set narrows or combines passes its bindings on
+            let mut t: BTreeMap<String, Carry> = BTreeMap::new();
+            fn pass(t: &mut BTreeMap<String, Carry>, from: Option<&BTreeMap<String, Carry>>) {
+                for (k, c) in from.into_iter().flatten() {
+                    let e = t.entry(k.clone()).or_default();
+                    *e = std::mem::take(e).join(c.clone().unheld());
+                }
+            }
+            // what a set narrows or combines passes its bindings on, where
+            // nothing holds them to a group's subjects any more
             if let Some(Src::Set(from)) = &set.from {
-                t.extend(s.tainted.get(from).cloned().unwrap_or_default());
+                pass(&mut t, s.carried.get(from));
             }
             if let Some(a) = &set.algebra {
                 for operand in &a.sets {
-                    t.extend(s.tainted.get(operand).cloned().unwrap_or_default());
+                    pass(&mut t, s.carried.get(operand));
                 }
             }
             if let Some(g) = &set.group {
                 for c in &g.by {
-                    if let Some(p) = c.ref_name()
-                        && s.clause(c, &g.of, 0)
-                    {
-                        t.insert(p.to_string());
+                    if let Some(p) = c.ref_name() {
+                        let carry = s.clause(c, &g.of, 0).unheld();
+                        if carry != Carry::Nothing {
+                            t.insert(p.to_string(), carry);
+                        }
                     }
                 }
             }
-            s.tainted.insert(name.clone(), t);
-            // bind reads what was bound before it
+            s.carried.insert(name.clone(), t);
+            // bind reads what was bound before it; a group's mean and count
+            // of distinct values are held to its subjects, and what its
+            // other bindings make of them with them
             for (b, c) in &set.bind.0 {
-                if s.clause(c, name, 0) {
-                    s.tainted.entry(name.clone()).or_default().insert(b.clone());
+                let carry = match &set.group {
+                    Some(g) if s.group_held(c, &g.of) => Carry::Held([b.clone()].into()),
+                    Some(_) => s.clause(c, name, 0),
+                    None => s.clause(c, name, 0).unheld(),
+                };
+                if carry != Carry::Nothing {
+                    s.carried
+                        .entry(name.clone())
+                        .or_default()
+                        .insert(b.clone(), carry);
                 }
             }
         }
         Some(s)
     }
 
-    /// The places in `out.columns` that read a field below the rule.
-    fn columns(&self) -> BTreeSet<usize> {
+    /// What each column of the answer carries, in order.
+    fn columns(&self) -> Vec<Carry> {
         self.ask
             .out
             .columns
             .iter()
-            .enumerate()
-            .filter(|(_, c)| self.clause(c, &self.ask.out.set, 0))
-            .map(|(i, _)| i)
+            .map(|c| self.clause(c, &self.ask.out.set, 0))
             .collect()
     }
+}
+
+/// What record 55 K7 makes of a document's answer below detail quasi.
+#[derive(Debug, Default)]
+struct Rule {
+    shaped: BTreeSet<usize>,
+    held: BTreeMap<usize, BTreeSet<String>>,
+    held_measures: BTreeSet<String>,
+    refused: Vec<Issue>,
 }
 
 /// Record 55 K7 (spec §7.1): below detail quasi, a column of the answer that
 /// reads a quasi identifying field is projected as its shape, as the values
 /// sampler shows it, whichever door ran the question (a run, a preview, a
 /// job, and MCP through them): the field itself, a binding or a group's key
-/// made from it, a value computed from it, and its `min`, `max`, `sum`,
-/// `avg` and `list` over a set, at every size of the set. Its use as a
-/// filter, an order or a count (`count`, `distinct`) stays allowed. Answers
-/// the shaped places, empty at detail quasi and above, and the measures
-/// refused for reading such a field.
-fn shapes_of(
-    ask: &Ask,
-    names: &dyn Names,
-    scope: &Scope,
-    v: &Validated,
-) -> (BTreeSet<usize>, Vec<Issue>) {
+/// made from it, a value computed from it, a share of it, and its `min`,
+/// `max`, `sum` and `list` over a set, which are one person's own value or
+/// a shape still. Its use as a filter, an order or a count of rows stays
+/// allowed. The ruling of 2026-10-12: a group set's mean (`avg`) and count
+/// of distinct values (`distinct`) of such a field over its child, and
+/// what its other bindings and the answer's columns make of them alone,
+/// are answered where the group holds [`MEASURE_K`] subjects with a value
+/// and held back (null) where it holds fewer. A mean made anywhere else is
+/// one person's, a row's aggregate over its own subject's rows, and a
+/// shape. Empty at detail quasi and above.
+fn shapes_of(ask: &Ask, names: &dyn Names, scope: &Scope, v: &Validated) -> Rule {
     let Some(s) = Shapes::traced(ask, names, scope, v) else {
-        return (BTreeSet::new(), Vec::new());
+        return Rule::default();
     };
-    let shaped = s.columns();
-    let mut issues = Vec::new();
-    measures_of_shapes(ask, &shaped, &s, &mut issues);
-    (shaped, issues)
+    let mut rule = Rule::default();
+    for (i, carry) in s.columns().into_iter().enumerate() {
+        match carry {
+            Carry::Raw => {
+                rule.shaped.insert(i);
+            }
+            Carry::Held(by) => {
+                rule.held.insert(i, by);
+            }
+            Carry::Nothing => {}
+        }
+    }
+    measures_of_shapes(ask, &mut rule, &s);
+    rule
 }
 
-/// A post pass measure that reads a field below the rule would compute
-/// over the raw values a caller may not see, so it is refused (record 55
-/// K7): a measure of a shaped column, and a group's scalar measure
-/// (`stddev`, `median`, `percentile`) of a field of the group's child that
-/// the answer does not carry, which the post pass reads row by row (the
-/// percentiles of an age, 2026-10-12).
-fn measures_of_shapes(
-    ask: &Ask,
-    shaped: &BTreeSet<usize>,
-    s: &Shapes<'_>,
-    issues: &mut Vec<Issue>,
-) {
+/// A post pass measure that reads a field below the rule. A measure of a
+/// shaped column would compute over values the caller may not see, so it is
+/// refused (record 55 K7). A group's scalar measure of a field of its child
+/// that the answer does not carry is read row by row: its `stddev`, the
+/// group's spread, is answered for a group of [`MEASURE_K`] subjects with a
+/// value and held back below (the ruling of 2026-10-12); its `median` and
+/// `percentile` are one person's own value and refused (the percentiles of
+/// an age, 2026-10-12).
+fn measures_of_shapes(ask: &Ask, rule: &mut Rule, s: &Shapes<'_>) {
     let column_name = |i: usize, c: &Clause| {
         c.ref_name()
             .map(str::to_string)
@@ -2844,7 +2996,7 @@ fn measures_of_shapes(
         .columns
         .iter()
         .enumerate()
-        .filter(|(i, _)| shaped.contains(i))
+        .filter(|(i, _)| rule.shaped.contains(i))
         .map(|(i, c)| column_name(i, c))
         .collect();
     let carried: BTreeSet<String> = ask
@@ -2860,33 +3012,48 @@ fn measures_of_shapes(
         .get(&ask.out.set)
         .and_then(|set| set.group.as_ref())
         .map(|g| g.of.as_str());
+    let k = MEASURE_K;
     for (i, m) in ask.out.measures.iter().enumerate() {
-        for (k, v) in &m.0 {
+        for (kind, v) in &m.0 {
             let Some(of) = v.get("of").and_then(Value::as_str) else {
                 continue;
             };
             if shaped_names.contains(of) {
-                issues.push(issue(
+                rule.refused.push(issue(
                     Code::ForbiddenField,
                     format!("out.measures[{i}]"),
                     format!(
-                        "{k} of {of}: {of} reads a quasi identifying field, which this detail sees only as its shape (record 55 K7)"
+                        "{kind} of {of}: {of} reads a quasi identifying field, which this detail sees only as its shape (record 55 K7)"
                     ),
-                    "measure another column, or ask for detail quasi",
+                    if kind == "stddev" {
+                        format!(
+                            "group the set and measure the stddev of the field the group's rows carry, answered for a group of {k} subjects or more, or ask for detail quasi"
+                        )
+                    } else {
+                        "measure another column, or ask for detail quasi".to_string()
+                    },
                 ));
             } else if let Some(child) = child
-                && crate::measure::is_scalar(k)
+                && crate::measure::is_scalar(kind)
                 && !carried.contains(of)
-                && s.path(of, child, 0)
+                && s.path(of, child, 0) != Carry::Nothing
             {
-                issues.push(issue(
-                    Code::ForbiddenField,
-                    format!("out.measures[{i}]"),
-                    format!(
-                        "{k} of {of}: {of} of {child} reads a quasi identifying field, which this detail sees only as its shape (record 55 K7); its {k} would be read from the values themselves"
-                    ),
-                    "measure another column, or ask for detail quasi",
-                ));
+                if kind == "stddev" {
+                    // the group's spread, held to its subjects
+                    rule.held_measures
+                        .insert(crate::measure::name_of(kind, of, None));
+                } else {
+                    rule.refused.push(issue(
+                        Code::ForbiddenField,
+                        format!("out.measures[{i}]"),
+                        format!(
+                            "{kind} of {of}: {of} of {child} reads a quasi identifying field, and a {kind} is one person's own value, which this detail never sees (record 55 K7)"
+                        ),
+                        format!(
+                            "measure its mean (avg) or its spread (stddev), answered for a group of {k} subjects or more, or ask for detail quasi"
+                        ),
+                    ));
+                }
             }
         }
     }

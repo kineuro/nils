@@ -176,24 +176,30 @@ fn the_four_fixtures_parse_desugar_once_validate_and_hash() {
         );
         let prepared =
             prepare(ask.clone(), &Fixture, &scope).unwrap_or_else(|e| panic!("{name}: {e}"));
-        // record 55 K7: at detail plain each validates too, but for gold C's
-        // standard deviation of age, which the post pass would read from the
-        // ages themselves
-        match prepare(ask.clone(), &Fixture, &plain) {
-            Ok(p) => {
-                assert_ne!(*name, "gold-c", "the stddev of age at plain");
-                assert_eq!(p.hash, prepared.hash, "{name}");
-            }
-            Err(e) => {
-                let text = e.to_string();
-                assert_eq!(*name, "gold-c", "{name}: {text}");
-                assert!(
-                    text.contains("forbidden_field at out.measures[1]")
-                        && text.contains("stddev of age"),
-                    "{text}"
-                );
-            }
+        // record 55 K7: at detail plain each validates too, gold C's standard
+        // deviation of age among them since the ruling of 2026-10-12: a
+        // group's spread is answered for 5 subjects or more, held back below
+        let p = prepare(ask.clone(), &Fixture, &plain).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(p.hash, prepared.hash, "{name}");
+        let held: Vec<&str> = p
+            .validated
+            .held_measures
+            .iter()
+            .map(String::as_str)
+            .collect();
+        if *name == "gold-c" {
+            assert_eq!(held, ["stddev.age"], "{name}");
+            // its mean age is held to the cohort's subjects, its youngest
+            // and oldest are shapes
+            assert_eq!(p.validated.held.keys().copied().collect::<Vec<_>>(), [4]);
+            assert_eq!(
+                p.validated.shaped.iter().copied().collect::<Vec<_>>(),
+                [5, 6]
+            );
+        } else {
+            assert!(held.is_empty(), "{name}: {held:?}");
         }
+        assert!(prepared.validated.held.is_empty() && prepared.validated.held_measures.is_empty());
         assert_eq!(prepared.hash.len(), 64, "{name}");
         assert!(
             prepared
@@ -1335,23 +1341,36 @@ fn a_clause_beside_an_aggregate_is_checked_as_any_other() {
 }
 
 /// Record 55 K7 on aggregates (the chat sandbox bench, 2026-10-12): below
-/// detail quasi an aggregate that can read back a value of a quasi
+/// detail quasi an aggregate that reads back one person's value of a quasi
 /// identifying field is answered as its shape, as the field is: its `min`,
-/// `max`, `avg`, `sum` and `list`, at every size of the group, and a
-/// group's key made from it. A count of rows and a count of distinct values
-/// read no value and are answered. A post pass measure that reads it, the
-/// median or a percentile of a group's child field, is refused with the
-/// reason. At detail quasi every one is answered raw.
+/// `max`, `sum` and `list`, and a group's key made from it. The ruling of
+/// 2026-10-12: a group's mean and its count of distinct values are held to
+/// the group's subjects (answered for 5 or more with a value, held back
+/// below, which only a run can tell), and so is what a binding makes of
+/// them alone; a value made of one with a shaped value is a shape. A count
+/// of rows and a comparison read no value and are answered. Of the post
+/// pass's measures of a group's child field, the spread (`stddev`) is held
+/// to the group's subjects too, and the median and the percentiles, one
+/// person's value each, are refused with the reason. At detail quasi every
+/// one is answered raw.
 #[test]
 fn an_aggregate_of_a_quasi_field_follows_the_field_below_detail_quasi() {
-    let shaped = |v: &Value, scope: &Scope| -> Vec<usize> {
+    let validated = |v: &Value, scope: &Scope| -> nils_ask::Validated {
         prepare(serde_json::from_value(v.clone()).unwrap(), &Fixture, scope)
             .unwrap_or_else(|e| panic!("{e}"))
             .validated
-            .shaped
+    };
+    let shaped = |v: &Value, scope: &Scope| -> Vec<usize> {
+        validated(v, scope).shaped.into_iter().collect()
+    };
+    let held = |v: &Value, scope: &Scope| -> Vec<(usize, Vec<String>)> {
+        validated(v, scope)
+            .held
             .into_iter()
+            .map(|(i, by)| (i, by.into_iter().collect()))
             .collect()
     };
+    let by = |names: &[&str]| -> Vec<String> { names.iter().map(|n| n.to_string()).collect() };
     let columns = json!([
         ["field", {}, "n_subjects"],
         ["field", {}, "youngest"],
@@ -1362,7 +1381,12 @@ fn an_aggregate_of_a_quasi_field_follows_the_field_below_detail_quasi() {
         ["field", {}, "n_ages"],
         ["field", {}, "range"],
         ["field", {}, "older"],
-        ["field", {}, "_rows"]
+        ["field", {}, "_rows"],
+        ["field", {}, "rounded"],
+        ["field", {}, "both"],
+        ["field", {}, "off"],
+        ["round", {}, ["field", {}, "mean_age"], 1],
+        ["share", {"of": "mean_age", "over": "firsts"}]
     ]);
     let bind = json!({
         "n_subjects": ["count", {"set": "firsts"}],
@@ -1373,21 +1397,42 @@ fn an_aggregate_of_a_quasi_field_follows_the_field_below_detail_quasi() {
         "ages": ["list", {"set": "firsts"}, ["field", {}, "age"]],
         "n_ages": ["distinct", {"set": "firsts"}, ["field", {}, "age"]],
         "range": ["-", {}, ["field", {}, "oldest"], ["field", {}, "youngest"]],
-        "older": [">", {}, ["field", {}, "oldest"], 60]
+        "older": [">", {}, ["field", {}, "oldest"], 60],
+        "rounded": ["round", {}, ["field", {}, "mean_age"], 0],
+        "both": ["+", {}, ["field", {}, "mean_age"], ["field", {}, "n_ages"]],
+        "off": ["-", {}, ["field", {}, "mean_age"], ["field", {}, "youngest"]]
     });
     // the bench's question: one group of every first visit
     let spread = first_ages(bind.clone(), json!([["param", {}, "all"]]), columns.clone());
-    // youngest, oldest, mean, total, the list and the range: shapes; the
-    // counts and a comparison: answered
-    assert_eq!(shaped(&spread, &Scope::default()), vec![1, 2, 3, 4, 5, 7]);
+    // youngest, oldest, total, the list, the range, and a mean less a
+    // youngest: shapes
+    assert_eq!(shaped(&spread, &Scope::default()), vec![1, 2, 4, 5, 7, 12]);
+    // the mean, the count of distinct ages, what is made of them alone and
+    // a share of the mean: held to the group's subjects, each by the
+    // bindings that hold it
+    assert_eq!(
+        held(&spread, &Scope::default()),
+        vec![
+            (3, by(&["mean_age"])),
+            (6, by(&["n_ages"])),
+            (10, by(&["mean_age"])),
+            (11, by(&["mean_age", "n_ages"])),
+            (13, by(&["mean_age"])),
+            (14, by(&["mean_age"])),
+        ]
+    );
+    // the counts of rows and subjects and a comparison: answered as they are
     assert!(shaped(&spread, &quasi_scope()).is_empty());
-    // a group of one, each subject's own: the same, whatever the size
+    assert!(held(&spread, &quasi_scope()).is_empty());
+    // a group of one, each subject's own: the same, since only a run can
+    // tell a group's size
     let mut each = first_ages(
         bind.clone(),
         json!([["field", {}, "subject.id"]]),
         columns.clone(),
     );
-    assert_eq!(shaped(&each, &Scope::default()), vec![1, 2, 3, 4, 5, 7]);
+    assert_eq!(shaped(&each, &Scope::default()), vec![1, 2, 4, 5, 7, 12]);
+    assert_eq!(held(&each, &Scope::default()).len(), 6);
     // a group keyed by the age: its key shaped, its count answered
     let by_age = first_ages(
         json!({"n": ["count", {"set": "firsts"}]}),
@@ -1399,17 +1444,28 @@ fn an_aggregate_of_a_quasi_field_follows_the_field_below_detail_quasi() {
         ]),
     );
     assert_eq!(shaped(&by_age, &Scope::default()), vec![0]);
+    assert!(held(&by_age, &Scope::default()).is_empty());
     assert!(shaped(&by_age, &quasi_scope()).is_empty());
 
-    // a scalar measure of the child's age: refused below quasi, answered at
-    // quasi; of a column that reads no quasi field, answered at plain
-    for (measure, refused) in [
-        (json!({"median": {"of": "age"}}), true),
-        (json!({"percentile": {"of": "age", "p": 90}}), true),
-        (json!({"stddev": {"of": "age"}}), true),
-        (json!({"median": {"of": "subject.birth_date"}}), true),
-        (json!({"median": {"of": "n"}}), false),
-        (json!({"median": {"of": "n_subjects"}}), false),
+    // a scalar measure of the child's age: its spread held to the group's
+    // subjects, its median and percentiles refused below quasi; all of them
+    // answered at quasi, and of a column that reads no quasi field, or one
+    // a group holds, answered at plain
+    for (measure, refused, held) in [
+        (json!({"median": {"of": "age"}}), true, None),
+        (json!({"percentile": {"of": "age", "p": 90}}), true, None),
+        (json!({"stddev": {"of": "age"}}), false, Some("stddev.age")),
+        (
+            json!({"stddev": {"of": "subject.birth_date"}}),
+            false,
+            Some("stddev.subject.birth_date"),
+        ),
+        (json!({"median": {"of": "subject.birth_date"}}), true, None),
+        (json!({"median": {"of": "n"}}), false, None),
+        (json!({"stddev": {"of": "n"}}), false, None),
+        (json!({"median": {"of": "n_subjects"}}), false, None),
+        (json!({"median": {"of": "mean_age"}}), false, None),
+        (json!({"stddev": {"of": "n_ages"}}), false, None),
     ] {
         each["out"]["measures"] = json!([measure.clone()]);
         let ask = || serde_json::from_value(each.clone()).unwrap();
@@ -1418,15 +1474,98 @@ fn an_aggregate_of_a_quasi_field_follows_the_field_below_detail_quasi() {
                 let text = e.to_string();
                 assert!(
                     text.contains("forbidden_field at out.measures[0]")
-                        && text.contains("record 55 K7"),
+                        && text.contains("record 55 K7")
+                        && text.contains("one person's own value"),
                     "{measure}: {text}"
                 );
             }
-            Ok(_) if !refused => {}
+            Ok(p) if !refused => assert_eq!(
+                p.validated.held_measures.into_iter().collect::<Vec<_>>(),
+                held.map(str::to_string).into_iter().collect::<Vec<_>>(),
+                "{measure}"
+            ),
             other => panic!("{measure}: {:?}", other.map(|p| p.hash)),
         }
-        prepare(ask(), &Fixture, &quasi_scope()).unwrap_or_else(|e| panic!("{measure}: {e}"));
+        let quasi =
+            prepare(ask(), &Fixture, &quasi_scope()).unwrap_or_else(|e| panic!("{measure}: {e}"));
+        assert!(quasi.validated.held_measures.is_empty());
     }
+    // a measure of a shaped column is refused; the spread is pointed at the
+    // group's child
+    each["out"]["measures"] = json!([{"stddev": {"of": "youngest"}}]);
+    let issues = issues_at(&each, &Scope::default());
+    assert!(
+        issues.iter().any(|i| i.path == "out.measures[0]"
+            && i.code == Code::ForbiddenField
+            && i.next
+                .contains("answered for a group of 5 subjects or more")),
+        "{issues:?}"
+    );
+}
+
+/// A mean or a count of distinct values made anywhere but as a group set's
+/// own binding reads one subject's rows: a row's aggregate links to its own
+/// subject, session or stack. It stays a shape below detail quasi, in a
+/// column or bound, and so does a group's mean read through another set
+/// (2026-10-12).
+#[test]
+fn a_mean_outside_its_group_is_one_persons_and_a_shape() {
+    let visits = json!({
+        "grain": "session",
+        "bind": {"age": ["age_at", {}, ["field", {}, "subject.birth_date"], ["field", {}, "first"]]}
+    });
+    let v = doc(
+        json!({
+            "visits": visits,
+            "people": {"grain": "subject", "bind": {
+                "bound_mean": ["avg", {"set": "visits"}, ["field", {}, "age"]],
+                "visits_n": ["count", {"set": "visits"}]
+            }}
+        }),
+        json!({"set": "people", "level": "record", "columns": [
+            ["avg", {"set": "visits"}, ["field", {}, "age"]],
+            ["field", {}, "bound_mean"],
+            ["distinct", {"set": "visits"}, ["field", {}, "age"]],
+            ["field", {}, "visits_n"],
+            [">", {}, ["avg", {"set": "visits"}, ["field", {}, "age"]], 60]
+        ]}),
+    );
+    let p = prepare(
+        serde_json::from_value(v.clone()).unwrap(),
+        &Fixture,
+        &Scope::default(),
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(
+        p.validated.shaped.into_iter().collect::<Vec<_>>(),
+        vec![0, 1, 2]
+    );
+    assert!(p.validated.held.is_empty());
+    let q = prepare(serde_json::from_value(v).unwrap(), &Fixture, &quasi_scope())
+        .unwrap_or_else(|e| panic!("{e}"));
+    assert!(q.validated.shaped.is_empty() && q.validated.held.is_empty());
+
+    // a group's mean, read by a set the group is keyed by: one subject's
+    let through = doc(
+        json!({
+            "visits": visits,
+            "people": {"grain": "subject"},
+            "per": {"grain": "group",
+                "group": {"of": "visits", "by": [["field", {}, "subject.id"]]},
+                "bind": {"mean_age": ["avg", {"set": "visits"}, ["field", {}, "age"]]}}
+        }),
+        json!({"set": "people", "level": "record", "columns": [
+            ["max", {"set": "per"}, ["field", {}, "mean_age"]]
+        ]}),
+    );
+    let p = prepare(
+        serde_json::from_value(through).unwrap(),
+        &Fixture,
+        &Scope::default(),
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(p.validated.shaped.into_iter().collect::<Vec<_>>(), vec![0]);
+    assert!(p.validated.held.is_empty());
 }
 
 /// A share divides the name its `of` gives by a count the answer also says,
