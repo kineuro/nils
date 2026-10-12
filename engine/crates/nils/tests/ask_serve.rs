@@ -2400,9 +2400,10 @@ fn the_catalog_lists_only_the_kinds_the_callers_detail_opens() {
 #[test]
 fn every_door_that_runs_a_question_holds_quasi_fields_to_the_detail() {
     let home = synthetic();
+    // thirteen requests: three runs, three previews, five samples, two jobs
     let server = Server::start(
         &home,
-        12,
+        13,
         &[
             "--auth",
             "token",
