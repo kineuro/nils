@@ -43,8 +43,11 @@ pub struct Ask<'a> {
     /// one resolver says (`nils_registry::pick_truth`): the scope's own once
     /// read, else the pack's.
     pub picks: &'a Of,
-    /// The dataset of each stack, for columns by dataset.
-    pub datasets: &'a HashMap<i64, String>,
+    /// The datasets whose folders hold a file of each stack, by name, for
+    /// columns by dataset. A stack copied into two datasets is one stack
+    /// with a path in each, and is in both (Nima, 2026-10-12: a dataset is
+    /// a folder that holds stacks).
+    pub datasets: &'a HashMap<i64, Vec<String>>,
     /// Stacks the caller is not shown (of a sample sealed now): no part of
     /// any visit.
     pub withheld: &'a BTreeSet<i64>,
@@ -77,7 +80,7 @@ struct Subject {
 /// A scope's visits for one role, read.
 pub struct Read {
     subjects: Vec<Subject>,
-    datasets: HashMap<i64, String>,
+    datasets: HashMap<i64, Vec<String>>,
 }
 
 /// What one visit takes under one set of rules.
@@ -363,22 +366,25 @@ impl Read {
             .collect()
     }
 
-    /// A visit's column and field: those of the scan taken, else of its
-    /// first candidate.
-    fn column_of(&self, v: &Visit, t: &Taken, by: Columns) -> (String, String) {
+    /// A visit's columns and field: those of the scan taken, else of its
+    /// first candidate. By scanner a visit is in one column; by dataset in
+    /// one for every dataset whose folder holds a file of the scan, so a
+    /// scan two datasets hold is in both (2026-10-12: it was in the first
+    /// that read it alone).
+    fn columns_of(&self, v: &Visit, t: &Taken, by: Columns) -> (Vec<String>, String) {
         let c = t
             .stacks
             .first()
             .and_then(|s| v.candidates.iter().find(|c| c.stacks.contains(s)))
             .or(v.candidates.first());
         let Some(c) = c else {
-            return (String::new(), String::new());
+            return (vec![String::new()], String::new());
         };
         let field = match c.get("field_strength_normalized").trim().parse::<f64>() {
             Ok(f) => format!("{} T", trim_number(f)),
             Err(_) => String::new(),
         };
-        let label = match by {
+        let labels = match by {
             Columns::Scanner => {
                 let maker = maker(c.get("manufacturer"));
                 let name = c.get("manufacturer_model_name").trim();
@@ -388,19 +394,25 @@ impl Read {
                     (true, false) => name.to_string(),
                     (false, false) => format!("{maker} {name}"),
                 };
-                with_field(&scanner, &field)
+                vec![with_field(&scanner, &field)]
             }
             Columns::Dataset => {
-                let name = c
+                let mut names: Vec<&str> = c
                     .stacks
                     .iter()
-                    .find_map(|s| self.datasets.get(s))
-                    .cloned()
-                    .unwrap_or_else(|| "No dataset".to_string());
-                with_field(&name, &field)
+                    .filter_map(|s| self.datasets.get(s))
+                    .flatten()
+                    .map(String::as_str)
+                    .collect();
+                names.sort_unstable();
+                names.dedup();
+                if names.is_empty() {
+                    names.push("No dataset");
+                }
+                names.iter().map(|n| with_field(n, &field)).collect()
             }
         };
-        (label, field)
+        (labels, field)
     }
 }
 
@@ -558,61 +570,111 @@ impl Compare {
     }
 }
 
-/// The named columns and how many visits each holds.
-type Counted = Vec<(String, i64)>;
+/// One column of the map: its key, how many visits it shows, and how many
+/// of those another column shows too.
+#[derive(Debug, Clone, PartialEq)]
+struct Column {
+    key: String,
+    visits: i64,
+    shared: i64,
+}
 
-/// The column of every visit under the shown side, the named ones and the
-/// rest as one.
-fn columns(read: &Read, cmp: &Compare, by: Columns) -> (Vec<Vec<(String, String)>>, Counted) {
-    let shown = cmp.shown();
-    let raw: Vec<Vec<(String, String)>> = read
+impl Column {
+    fn to_json(&self) -> Value {
+        json!({"key": self.key, "visits": self.visits, "shared": self.shared})
+    }
+}
+
+/// Where the map puts every visit under the shown side.
+#[derive(Debug, Clone, PartialEq)]
+struct Laid {
+    /// Each visit's columns, in the columns' order, and its field
+    /// strength, by subject and visit.
+    visits: Vec<Vec<(Vec<String>, String)>>,
+    /// The named columns, then the rest as one.
+    columns: Vec<Column>,
+    /// The visits shown under more than one column.
+    shared: i64,
+}
+
+/// The columns of every visit under the shown side, the named ones and the
+/// rest as one. A visit is counted once in each column it is shown under,
+/// so where a scan several datasets hold shows it under each, the columns'
+/// visits add up to more than the visits, and `shared` says how many
+/// visits that is; the rest counts each visit once, as one column.
+fn columns(read: &Read, taken: &[Vec<Taken>], by: Columns) -> Laid {
+    let raw: Vec<Vec<(Vec<String>, String)>> = read
         .subjects
         .iter()
-        .zip(&shown.taken)
+        .zip(taken)
         .map(|(s, t)| {
             s.visits
                 .iter()
                 .zip(t)
-                .map(|(v, x)| read.column_of(v, x, by))
+                .map(|(v, x)| read.columns_of(v, x, by))
                 .collect()
         })
         .collect();
     let mut counts: BTreeMap<&str, i64> = BTreeMap::new();
-    for (label, _) in raw.iter().flatten() {
-        *counts.entry(label.as_str()).or_insert(0) += 1;
+    for (labels, _) in raw.iter().flatten() {
+        for label in labels {
+            *counts.entry(label.as_str()).or_insert(0) += 1;
+        }
     }
     let mut ordered: Vec<(&str, i64)> = counts.into_iter().collect();
     ordered.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
-    let named: BTreeSet<&str> = ordered
+    let named: Vec<&str> = ordered
         .iter()
         .take(NAMED_COLUMNS)
         .map(|(k, _)| *k)
         .collect();
-    let mut out: Vec<(String, i64)> = ordered
+    let mut columns: Vec<Column> = named
         .iter()
-        .take(NAMED_COLUMNS)
-        .map(|(k, n)| (k.to_string(), *n))
+        .map(|k| k.to_string())
+        .chain(std::iter::once(by.other().to_string()))
+        .map(|key| Column {
+            key,
+            visits: 0,
+            shared: 0,
+        })
         .collect();
-    let rest: i64 = ordered.iter().skip(NAMED_COLUMNS).map(|(_, n)| n).sum();
-    if rest > 0 {
-        out.push((by.other().to_string(), rest));
-    }
-    let labelled = raw
+    let mut shared = 0;
+    let visits: Vec<Vec<(Vec<String>, String)>> = raw
         .iter()
         .map(|vs| {
             vs.iter()
-                .map(|(label, field)| {
-                    let l = if named.contains(label.as_str()) {
-                        label.clone()
-                    } else {
-                        by.other().to_string()
-                    };
-                    (l, field.clone())
+                .map(|(labels, field)| {
+                    // a column past the named ones is the rest, once a visit
+                    let mut at: Vec<usize> = labels
+                        .iter()
+                        .map(|l| named.iter().position(|n| n == l).unwrap_or(named.len()))
+                        .collect();
+                    at.sort_unstable();
+                    at.dedup();
+                    let several = at.len() > 1;
+                    if several {
+                        shared += 1;
+                    }
+                    for i in &at {
+                        columns[*i].visits += 1;
+                        if several {
+                            columns[*i].shared += 1;
+                        }
+                    }
+                    let keys = at.iter().map(|i| columns[*i].key.clone()).collect();
+                    (keys, field.clone())
                 })
                 .collect()
         })
         .collect();
-    (labelled, out)
+    if columns.last().is_some_and(|c| c.visits == 0) {
+        columns.pop();
+    }
+    Laid {
+        visits,
+        columns,
+        shared,
+    }
 }
 
 /// The kinds of the role in the shown rules' order: every kind a visit
@@ -670,29 +732,33 @@ pub fn map(
 ) -> Value {
     let shown = cmp.shown();
     let (keys, kinds) = kinds(read, cmp, model, role);
-    let (labels, columns) = columns(read, cmp, by);
-    let index: HashMap<&str, usize> = columns
+    let laid = columns(read, &shown.taken, by);
+    let index: HashMap<&str, usize> = laid
+        .columns
         .iter()
         .enumerate()
-        .map(|(i, (k, _))| (k.as_str(), i))
+        .map(|(i, c)| (c.key.as_str(), i))
         .collect();
     let mut cells: BTreeMap<Option<String>, Vec<i64>> = BTreeMap::new();
     let mut series: BTreeMap<Vec<String>, i64> = BTreeMap::new();
     let mut single = 0;
     let mut by_visit: BTreeMap<usize, (i64, BTreeMap<Option<String>, i64>)> = BTreeMap::new();
-    for ((s, t), cols) in read.subjects.iter().zip(&shown.taken).zip(&labels) {
+    for ((s, t), cols) in read.subjects.iter().zip(&shown.taken).zip(&laid.visits) {
         if s.visits.len() == 1 {
             single += 1;
         } else if s.visits.len() >= 2 {
             *series.entry(steps(t)).or_insert(0) += 1;
         }
-        for (i, (x, (col, _))) in t.iter().zip(cols).enumerate() {
+        for (i, (x, (under, _))) in t.iter().zip(cols).enumerate() {
             let kind = x.kind.clone();
             let row = cells
                 .entry(kind.clone())
-                .or_insert_with(|| vec![0; columns.len()]);
-            if let Some(c) = index.get(col.as_str()) {
-                row[*c] += 1;
+                .or_insert_with(|| vec![0; laid.columns.len()]);
+            // a visit is in each column it is shown under
+            for col in under {
+                if let Some(c) = index.get(col.as_str()) {
+                    row[*c] += 1;
+                }
             }
             let at = by_visit.entry((i + 1).min(5)).or_default();
             at.0 += 1;
@@ -721,10 +787,10 @@ pub fn map(
         "rules_version": version,
         "kinds": kinds,
         "metrics": metrics(read, &shown.taken),
-        "columns": columns
-            .iter()
-            .map(|(k, n)| json!({"key": k, "visits": n}))
-            .collect::<Vec<_>>(),
+        "columns": laid.columns.iter().map(Column::to_json).collect::<Vec<_>>(),
+        // the visits shown under more than one column: their scan is in
+        // several datasets, and each column counts them (2026-10-12)
+        "shared_visits": laid.shared,
         "matrix": matrix,
         "series": series
             .iter()
@@ -813,17 +879,17 @@ pub fn subjects(
     per_page: usize,
 ) -> Value {
     let shown = cmp.shown();
-    let (labels, _) = columns(read, cmp, by);
+    let labels = columns(read, &shown.taken, by).visits;
     let mut found: Vec<(usize, usize, usize)> = Vec::new();
     for (si, (s, t)) in read.subjects.iter().zip(&shown.taken).enumerate() {
         let kinds: BTreeSet<&String> = t.iter().filter_map(|x| x.kind.as_ref()).collect();
         let member = match group {
             Group::Breaks => kinds.len() >= 2,
             Group::Series(want) => s.visits.len() >= 2 && steps(t) == *want,
-            Group::Cell { kind, column } => t.iter().zip(&labels[si]).any(|(x, (col, _))| {
-                let k = x.kind.clone();
-                k == *kind && col == column
-            }),
+            Group::Cell { kind, column } => t
+                .iter()
+                .zip(&labels[si])
+                .any(|(x, (at, _))| x.kind == *kind && at.iter().any(|c| c == column)),
         };
         if member {
             let changed = (0..s.visits.len()).filter(|v| cmp.changed(si, *v)).count();
@@ -856,13 +922,16 @@ pub fn subjects(
                 .zip(&shown.taken[*si])
                 .zip(&labels[*si])
                 .enumerate()
-                .map(|(vi, ((v, x), (col, field)))| {
+                .map(|(vi, ((v, x), (at, field)))| {
                     let stored = v.stored.as_ref();
                     // no date leaves the door: a visit is its session's id
                     json!({
                         "session_id": v.session_id,
                         "visit": vi + 1,
-                        "column": col,
+                        // the first of the columns it is shown under, which
+                        // are several where several datasets hold its scan
+                        "column": at.first(),
+                        "columns": at,
                         "field": field,
                         "kind": x.kind.clone(),
                         "stack": x.stacks.first(),
@@ -902,20 +971,21 @@ fn candidates(v: &Visit, chosen: &Chosen) -> Vec<Value> {
 pub fn strips(read: &Read, cmp: &Compare, model: &Model, role: &str, by: Columns) -> Value {
     let shown = cmp.shown();
     let (keys, _) = kinds(read, cmp, model, role);
-    let (labels, columns) = columns(read, cmp, by);
-    let index: HashMap<&str, usize> = columns
+    let laid = columns(read, &shown.taken, by);
+    let index: HashMap<&str, usize> = laid
+        .columns
         .iter()
         .enumerate()
-        .map(|(i, (k, _))| (k.as_str(), i))
+        .map(|(i, c)| (c.key.as_str(), i))
         .collect();
     let subjects: Vec<Value> = read
         .subjects
         .iter()
         .zip(&shown.taken)
-        .zip(&labels)
+        .zip(&laid.visits)
         .map(|((s, t), cols)| {
             let mut count: BTreeMap<usize, usize> = BTreeMap::new();
-            for (col, _) in cols {
+            for col in cols.iter().flat_map(|(at, _)| at) {
                 if let Some(i) = index.get(col.as_str()) {
                     *count.entry(*i).or_insert(0) += 1;
                 }
@@ -936,10 +1006,8 @@ pub fn strips(read: &Read, cmp: &Compare, model: &Model, role: &str, by: Columns
         .collect();
     json!({
         "kinds": keys,
-        "columns": columns
-            .iter()
-            .map(|(k, n)| json!({"key": k, "visits": n}))
-            .collect::<Vec<_>>(),
+        "columns": laid.columns.iter().map(Column::to_json).collect::<Vec<_>>(),
+        "shared_visits": laid.shared,
         "subjects": subjects,
     })
 }
@@ -982,5 +1050,98 @@ mod tests {
             }
         );
         assert!(Group::parse(&json!({"by": "nothing"})).is_err());
+    }
+
+    /// Nima, 2026-10-12: a dataset is a folder that holds stacks, and a
+    /// stack copied into two datasets is one stack with a path in each. By
+    /// dataset, a visit whose scan two named datasets hold is in both
+    /// columns and each counts it; the map says how many visits are shown
+    /// under more than one column; and the rest counts a visit once,
+    /// however many of the datasets past the named ones hold its scan.
+    #[test]
+    fn a_scan_several_datasets_hold_is_in_each_column_and_the_rest_counts_it_once() {
+        let held: &[&[&str]] = &[
+            &["a", "b"],
+            &["a"],
+            &["b"],
+            &["c"],
+            &["c"],
+            &["d"],
+            &["d"],
+            &["e"],
+            &["e"],
+            &["f"],
+            &["f"],
+            &["g"],
+            &["g"],
+            &["h"],
+            &["h"],
+            &["x", "y"],
+            &["a", "x"],
+            &[],
+        ];
+        let mut datasets: HashMap<i64, Vec<String>> = HashMap::new();
+        let mut subjects = Vec::new();
+        let mut taken = Vec::new();
+        for (i, names) in held.iter().enumerate() {
+            let stack = i as i64 + 1;
+            if !names.is_empty() {
+                datasets.insert(stack, names.iter().map(|n| n.to_string()).collect());
+            }
+            subjects.push(Subject {
+                id: stack,
+                code: format!("S{stack}"),
+                visits: vec![Visit {
+                    day: Day::new(2024, 1, 1).unwrap(),
+                    session_id: stack,
+                    candidates: vec![Candidate {
+                        stacks: vec![stack],
+                        ..Candidate::default()
+                    }],
+                    stored: None,
+                }],
+            });
+            taken.push(vec![Taken {
+                kind: Some("3D MPRAGE".into()),
+                stacks: vec![stack],
+                by: "rules",
+                chosen: Chosen::default(),
+            }]);
+        }
+        let read = Read { subjects, datasets };
+        let laid = columns(&read, &taken, Columns::Dataset);
+        let at = |stack: usize| laid.visits[stack - 1][0].0.clone();
+        assert_eq!(at(1), ["a", "b"]);
+        assert_eq!(at(2), ["a"]);
+        assert_eq!(at(16), ["Other datasets"], "x and y are the rest, once");
+        assert_eq!(at(17), ["a", "Other datasets"]);
+        assert_eq!(at(18), ["Other datasets"], "no dataset is past the named");
+        let column = |key: &str, visits: i64, shared: i64| Column {
+            key: key.to_string(),
+            visits,
+            shared,
+        };
+        assert_eq!(
+            laid.columns,
+            [
+                column("a", 3, 2),
+                column("b", 2, 1),
+                column("c", 2, 0),
+                column("d", 2, 0),
+                column("e", 2, 0),
+                column("f", 2, 0),
+                column("g", 2, 0),
+                column("h", 2, 0),
+                column("Other datasets", 3, 1),
+            ]
+        );
+        assert_eq!(laid.shared, 2);
+        // the columns add up to the visits and the shared ones once more
+        let shown: i64 = laid.columns.iter().map(|c| c.visits).sum();
+        assert_eq!(shown, held.len() as i64 + laid.shared);
+        // by scanner a visit is in one column
+        let laid = columns(&read, &taken, Columns::Scanner);
+        assert_eq!(laid.shared, 0);
+        assert_eq!(laid.columns, [column("Unknown scanner", 18, 0)]);
     }
 }
