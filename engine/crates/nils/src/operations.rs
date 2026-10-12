@@ -243,9 +243,10 @@ fn served(store: &mut Store, task: &str, reads: Option<i64>) -> Result<Vec<Model
 /// from the same encoder, its card naming the head where one does, which
 /// the run goes without where none is served. Where the served model is a
 /// cascade (record 55 E2), each input its card names a part for gets that
-/// part, the input `cascade` gets the cascade, and the coarse mode is one
-/// naming the cascade or else its part; an optional input nothing fills is
-/// left out.
+/// part, the input `cascade` gets the cascade, and the coarse mode is the
+/// cascade's own part `coarse` and no other, since the image refuses a
+/// coarse mode its cascade file does not name; a cascade naming none is
+/// refused here. An optional input nothing fills is left out.
 fn body_part(store: &mut Store) -> Result<Result<Plan, Refused>, StoreError> {
     let refused =
         |reason: &'static str, error: String| -> Result<Result<Plan, Refused>, StoreError> {
@@ -300,18 +301,28 @@ fn body_part(store: &mut Store) -> Result<Result<Plan, Refused>, StoreError> {
     };
     // the coarse mode names the head it sums: one whose card names this
     // head first, else one of the same encoder (the image refuses a mode
-    // file of another head)
-    let modes = served(store, "axis:body_region", Some(encoder.id))?;
-    // a cascade's own coarse mode first (one naming it), then its part, as
-    // a head's own mode comes before any of its encoder's
-    let named = modes
-        .iter()
-        .find(|m| m.card.to_string().contains(&head.digest))
-        .map(|m| m.id);
+    // file of another head). A cascade answers both modes with the coarse
+    // part its file names, so it is given that part and no other: a mode
+    // naming the cascade could never pass, since the cascade's file would
+    // have to hold that mode's digest and the mode the cascade's
     let coarse = if parts.is_empty() {
+        let modes = served(store, "axis:body_region", Some(encoder.id))?;
+        let named = modes
+            .iter()
+            .find(|m| m.card.to_string().contains(&head.digest))
+            .map(|m| m.id);
         named.or(modes.first().map(|m| m.id))
     } else {
-        named.or(part("coarse"))
+        let Some(id) = part("coarse") else {
+            return refused(
+                "no_model",
+                format!(
+                    "{} names no coarse part: a cascade answers body_region with the coarse mode its file names",
+                    head.label()
+                ),
+            );
+        };
+        Some(id)
     };
     let mut models = Vec::new();
     let mut skipped: Option<&str> = None;

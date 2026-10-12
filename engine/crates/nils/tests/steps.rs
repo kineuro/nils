@@ -562,7 +562,7 @@ fn round(pg: Option<(String, String)>) {
                "encoder": {"digest": encoder_digest}, "threshold": 0.5}),
         b"a head",
     );
-    let (coarse, _) = register(
+    let (coarse, coarse_digest) = register(
         &home,
         &files,
         json!({"name": "bp-coarse", "version": "t1", "kind": "head", "task": "axis:body_region",
@@ -793,8 +793,8 @@ fn round(pg: Option<(String, String)>) {
     drop(server);
 
     // record 55 E2: a cascade served, one model naming its parts: the
-    // step gives each input its part, the cascade's own coarse mode, and
-    // the cascade itself, in the descriptor's order
+    // step gives each input its part, the coarse mode among them, and the
+    // cascade itself, in the descriptor's order
     let cascade_descriptor = work.file(
         "bodypart-infer-fusion-2.yml",
         stand_in()
@@ -835,19 +835,31 @@ fn round(pg: Option<(String, String)>) {
         &files,
         json!({"name": "bp-cascade", "version": "t1", "kind": "head", "task": "axis:body_part",
                "encoders": [{"digest": encoder_digest}, {"digest": student_digest}], "threshold": 0.5,
-               "parts": {"encoder": encoder_digest, "head": head_digest, "student": student_digest,
-                         "deferral": deferral_digest}}),
+               "parts": {"encoder": encoder_digest, "head": head_digest, "coarse": coarse_digest,
+                         "student": student_digest, "deferral": deferral_digest}}),
         b"a cascade",
     );
-    let (cascade_coarse, _) = register(
+    // a coarse mode naming the cascade, newer and served, is never given:
+    // the cascade answers body_region with the coarse part its file names
+    let (named_coarse, _) = register(
         &home,
         &files,
         json!({"name": "bp-cascade-coarse", "version": "t1", "kind": "head", "task": "axis:body_region",
-               "encoders": [{"digest": encoder_digest}, {"digest": student_digest}], "threshold": 0.5,
+               "encoder": {"digest": encoder_digest}, "threshold": 0.5,
                "params": {"head": {"digest": cascade_digest}}}),
-        b"the cascade's coarse mode",
+        b"a coarse mode naming the cascade",
     );
-    for m in [cascade, cascade_coarse] {
+    // a cascade naming no coarse part is refused when it is served
+    let (no_coarse, _) = register(
+        &home,
+        &files,
+        json!({"name": "bp-cascade-fine", "version": "t1", "kind": "head", "task": "axis:body_part",
+               "encoders": [{"digest": encoder_digest}, {"digest": student_digest}], "threshold": 0.5,
+               "parts": {"encoder": encoder_digest, "head": head_digest, "student": student_digest,
+                         "deferral": deferral_digest}}),
+        b"a cascade of the fine mode alone",
+    );
+    for m in [cascade, named_coarse, no_coarse] {
         home.ok(&[
             "model",
             "admit",
@@ -857,6 +869,23 @@ fn round(pg: Option<(String, String)>) {
         ]);
     }
     let server = Served::start(&home, &path, false, &logged);
+    let s = server.get("/api/datasets/ds/summary", READS);
+    let refusal = &step(&s, "body_part")["refusal"];
+    assert_eq!(refusal["reason"], "no_model", "{s}");
+    assert!(
+        refusal["error"]
+            .as_str()
+            .unwrap()
+            .contains("names no coarse part"),
+        "{s}"
+    );
+    home.ok(&[
+        "model",
+        "retire",
+        &no_coarse.to_string(),
+        "--why",
+        "it answers no body_region",
+    ]);
     let (status, started) = server.run("datasets/ds", "body_part", OPS);
     assert_eq!(status, 202, "{started}");
     let words: Vec<String> = started["command"]
@@ -873,8 +902,8 @@ fn round(pg: Option<(String, String)>) {
         .collect();
     assert_eq!(
         models,
-        [encoder, head, cascade_coarse, student, deferral, cascade].map(|m| m.to_string()),
-        "a cascade's parts, its own coarse mode and itself: {started}"
+        [encoder, head, coarse, student, deferral, cascade].map(|m| m.to_string()),
+        "a cascade's parts, its coarse part among them, and itself: {started}"
     );
     let cascade_job = started["job"].as_i64().unwrap();
     let (status, dropped) = server.call(

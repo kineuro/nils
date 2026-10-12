@@ -251,7 +251,8 @@ def test_every_stack_carries_a_region_or_a_reason(world, tmp_path, stand_in):
         assert d["reason"] in (None, *cascade.REASONS)
         assert (d["cascade_digest"], d["student_digest"], d["deferral_digest"]) == (inp["cascade"], inp["student"], inp["deferral"])
         assert (d["head_digest"], d["coarse_digest"], d["encoder_digest"]) == (inp["head"], inp["coarse"], inp["encoder"])
-    # each decision names the cascade, the coarse mode its own file; no proposal for a reason
+    # each body_part decision names the cascade, each body_region one the
+    # cascade's own coarse part; no proposal for a reason
     props = r["proposals"]
     assert {p["stack_id"] for p in props} == {21, 22, 23, 24, 25, 29, 31}
     for p in props:
@@ -361,8 +362,11 @@ def test_a_cascade_that_does_not_name_the_runs_parts_is_refused(world, tmp_path)
     assert code == 1 and "cascade" in r["error"]
 
 
-def test_a_coarse_mode_may_name_the_cascade(world, tmp_path):
-    """The coarse twin of R1 (a) names the cascade, not the head it reads."""
+def test_a_coarse_mode_naming_the_cascade_is_refused(world, tmp_path):
+    """A coarse mode names the head it sums. One naming the cascade (the
+    coarse twin ruling R1 (a) described) can never be the part the cascade's
+    file names, since each would hold the other's digest, so it is refused;
+    the cascade answers body_region with its own coarse part."""
     inp = inputs(world, tmp_path)
     root = inp["inputs"]
     mf = json.loads((root / "manifest.json").read_text())
@@ -373,8 +377,8 @@ def test_a_coarse_mode_may_name_the_cascade(world, tmp_path):
     path.write_text(json.dumps(mode))
     entry["digest"] = entry["card"]["digest"] = fd.digest(path)
     (root / "manifest.json").write_text(json.dumps(mf))
-    model = fusion.load(root)
-    assert model.coarse_part.digest == entry["digest"]
+    with pytest.raises(fusion.ModelError, match="another head"):
+        fusion.load(root)
 
 
 # ------------------------------------------------------------- the slice cache

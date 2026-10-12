@@ -820,8 +820,9 @@ def _infer_cascade(a: argparse.Namespace, model, cas, device: str) -> Run:
         body = (json.dumps(doc, indent=2, sort_keys=False) + "\n").encode()
         u.outputs.append(run.output_file(f"bodypart-fusion/{st.stack_id}.json", body, "table", "application/json"))
         run.units.append(u)
-        # each decision names the cascade that made it (ruling R1 (a)); the
-        # coarse mode its own file
+        # each body_part decision names the cascade that made it (ruling R1
+        # (a)); each body_region decision the coarse part the run used, the
+        # one the cascade's file names
         f = r.answers["fine"]
         run.proposals.append({"stack_id": st.stack_id, "axis": fusion.FINE_AXIS, "value": f["value"], "probabilities": fusion.proposed(f),
                               "model_digest": cas.digest})

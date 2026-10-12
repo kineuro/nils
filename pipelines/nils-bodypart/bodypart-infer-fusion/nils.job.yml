@@ -140,7 +140,7 @@ x-nils:
     - id: coarse
       type: model
       optional: true
-      description: The coarse mode file (task axis:body_region), which names the head or the cascade; without it only fine mode runs
+      description: The coarse mode file (task axis:body_region), which names the head; with a cascade, the coarse part the cascade names; without it only fine mode runs
     - id: student
       type: model
       optional: true

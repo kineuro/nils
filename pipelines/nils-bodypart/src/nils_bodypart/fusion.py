@@ -179,11 +179,10 @@ def load(inputs: Path) -> Model:
             raise ModelError("the coarse mode file is not JSON") from e
         if not isinstance(mode, dict) or mode.get("mode") != "coarse":
             raise ModelError("the coarse model is not a coarse mode file")
-        # a coarse mode names the head, or (record 55 E2, R1) the cascade
-        # that reads the head, whose coarse twin it is
-        named = (mode.get("head") or {}).get("digest")
-        cas = parts.get("cascade")
-        if named != head.digest and (cas is None or named != cas.digest):
+        # a coarse mode names the head it sums; a cascade (record 55 E2)
+        # answers body_region with the coarse part its file names, which
+        # names the head
+        if (mode.get("head") or {}).get("digest") != head.digest:
             raise ModelError("the coarse mode file names another head than the one the run was given")
         if list(mode.get("classes") or []) != COARSE:
             raise ModelError(f"the coarse mode's classes are not {', '.join(COARSE)}")
