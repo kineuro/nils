@@ -200,7 +200,7 @@ A run that failed, and each unit that failed, says why beside its error, which i
 
 ## dcm2niix
 
-A run with a bids input is given a release of its selection, which dcm2niix converts. The engine finds dcm2niix in this order: a path given with `--dcm2niix`; `dcm2niix` on the engine's search path; beside the running `nils`; where the setup record names one; and the registry's `tools/` folder. The run's summary says which it used (`summary.converter`: version, path, found_by).
+A run with a bids input is given a release of its selection, which dcm2niix converts. The engine finds dcm2niix in this order: a path given with `--dcm2niix`; the one the site gave setup with `--dcm2niix`; `dcm2niix` on the engine's search path; beside the running `nils`; where the setup record names one setup found or placed; and the registry's `tools/` folder. The first that answers its version is taken. The run's summary says which it used (`summary.converter`: version, path, found_by).
 
 `nils setup` places the pinned build beside `nils` on an install on this machine (see the setup guide). Where none is found, an admin installs it:
 

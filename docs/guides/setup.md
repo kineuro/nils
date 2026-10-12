@@ -450,10 +450,12 @@ llama.cpp read. Its log is written there too. `kvasir.json` names it under
 
 dcm2niix converts DICOM to NIfTI for a BIDS release and for a pipeline whose
 input is a BIDS tree, so setup provides it. The engine finds it in this
-order: a path a run or a release names with `--dcm2niix`; `dcm2niix` on the
-engine's search path; beside the running `nils`; where the setup record names
-one; and the registry's own `tools/` folder. A service of systemd has the
-default search path, which `~/.local/bin` is not on, so a converter beside
+order: a path a run or a release names with `--dcm2niix`; the one the site
+gave setup with `--dcm2niix`; `dcm2niix` on the engine's search path; beside
+the running `nils`; where the setup record names one setup found or placed;
+and the registry's own `tools/` folder. The first that answers its version is
+taken, so a broken one does not hide a working one. A service of systemd has
+the default search path, which `~/.local/bin` is not on, so a converter beside
 `nils` is found there all the same.
 
 On an install on this machine, setup keeps a `dcm2niix` it finds on the
@@ -466,8 +468,10 @@ arm has no build to take, and the plan says to install the distribution's
 package or build it from source. `NILS_DCM2NIIX_RELEASES` points at a mirror
 laid out as the releases are (`<version>/dcm2niix_lnx.zip`), held to the same
 digests. A site that keeps its own gives it with `--dcm2niix PATH`: it is
-taken as it is, recorded, and never replaced. `--print` says which of these
-the install takes.
+taken as it is, recorded, and never replaced; given on a later run, an
+update or a repair, it replaces the build setup placed, which goes. Something
+beside `nils` that setup did not place is never replaced: where it does not
+run, the plan says so. `--print` says which of these the install takes.
 
 A converter that cannot be downloaded does not stop the install. The install
 says so, and until dcm2niix is there a BIDS release and a run with a BIDS
