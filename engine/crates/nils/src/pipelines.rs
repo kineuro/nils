@@ -1770,6 +1770,9 @@ struct Materialised {
     /// apart is given of it (record 49 A1).
     entries: Vec<Value>,
     listed: Vec<Value>,
+    /// With the geometry, the rest of each session the run holds part of
+    /// (record 55 E2, P1b), `stacks.json`'s `context`.
+    context: Vec<Value>,
 }
 
 /// At most this many folders are bound one by one for a stacks input; a
@@ -1998,16 +2001,18 @@ fn materialise_stacks(
             stacks: vec![stack],
         });
     }
-    let mut manifest =
-        json!({"contract": nils_pipeline::CONTRACT, "sources": listed, "stacks": entries});
     // the rest of each session the run holds part of, for the student's
     // session top (record 55 E2, P1b): read, never scored
-    if geometry {
-        manifest["context"] = Value::Array(session_context(store, stacks, &geometry_of_studies)?);
-    }
-    std::fs::write(
-        input.join("stacks.json"),
-        serde_json::to_vec_pretty(&manifest).unwrap_or_default(),
+    let context = if geometry {
+        session_context(store, stacks, &geometry_of_studies)?
+    } else {
+        Vec::new()
+    };
+    write_stacks_json(
+        &input.join("stacks.json"),
+        &listed,
+        &entries,
+        geometry.then_some(context.as_slice()),
     )
     .map_err(|e| format!("the run's input: {e}"))?;
     let scope = if by_folder {
@@ -2039,7 +2044,86 @@ fn materialise_stacks(
         scope,
         entries,
         listed,
+        context,
     })
+}
+
+/// `stacks.json` written from the entries as they are, with no copy of
+/// them: compact where it carries the geometry (`context` is given then),
+/// since the files' geometry makes it three to four times the size,
+/// pretty-printed otherwise as before.
+fn write_stacks_json(
+    path: &Path,
+    sources: &[Value],
+    stacks: &[Value],
+    context: Option<&[Value]>,
+) -> std::io::Result<()> {
+    #[derive(serde::Serialize)]
+    struct Doc<'a> {
+        contract: &'a str,
+        sources: &'a [Value],
+        stacks: &'a [Value],
+        #[serde(skip_serializing_if = "Option::is_none")]
+        context: Option<&'a [Value]>,
+    }
+    let doc = Doc {
+        contract: nils_pipeline::CONTRACT,
+        sources,
+        stacks,
+        context,
+    };
+    let mut w = std::io::BufWriter::new(std::fs::File::create(path)?);
+    if context.is_some() {
+        serde_json::to_writer(&mut w, &doc)?;
+    } else {
+        serde_json::to_writer_pretty(&mut w, &doc)?;
+    }
+    std::io::Write::flush(&mut w)
+}
+
+/// A unit run apart holds one stack of its session (record 55 E2, P1b):
+/// its context is the rest of the session, the run's other stacks of its
+/// study that are MR and not sealed, in the context's shape, and the run's
+/// context of that study. None for a manifest without the geometry.
+fn unit_context(m: &Materialised, i: usize) -> Option<Vec<Value>> {
+    let entry = m.entries.get(i)?;
+    let g = entry.get("geometry").filter(|g| g.is_object())?;
+    let Some(study) = g["study"].as_i64().filter(|_| g["sealed"] != true) else {
+        return Some(Vec::new());
+    };
+    let mut out: Vec<Value> = m
+        .entries
+        .iter()
+        .enumerate()
+        .filter(|(j, e)| {
+            *j != i && e["geometry"]["study"].as_i64() == Some(study) && e["geometry"]["sealed"] != true
+        })
+        .filter_map(|(_, e)| {
+            // the image's modality: the stack's own, else its fingerprint's
+            let modality = e["modality"]
+                .as_str()
+                .filter(|t| !t.is_empty())
+                .or_else(|| e["header"]["fingerprint"]["modality"].as_str())
+                .unwrap_or("");
+            let files: Vec<Value> = e["files"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|f| json!({"geometry": f["geometry"]}))
+                .collect();
+            modality.eq_ignore_ascii_case("MR").then(|| {
+                json!({"stack_id": e["stack_id"], "modality": modality, "geometry": e["geometry"], "files": files})
+            })
+        })
+        .collect();
+    out.extend(
+        m.context
+            .iter()
+            .filter(|c| c["geometry"]["study"].as_i64() == Some(study))
+            .cloned(),
+    );
+    out.sort_by_key(|c| c["stack_id"].as_i64());
+    Some(out)
 }
 
 /// The bids layout: a release of the stacks with the picks applied into
@@ -2112,6 +2196,7 @@ fn materialise_bids(
             scope: Value::Null,
             entries: Vec::new(),
             listed: Vec::new(),
+            context: Vec::new(),
         });
     }
     if !status.success() {
@@ -2205,6 +2290,7 @@ fn released(
         scope: json!({"sources": "release"}),
         entries: Vec::new(),
         listed: Vec::new(),
+        context: Vec::new(),
     })
 }
 
@@ -3822,6 +3908,7 @@ fn execute_run(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Resul
                     scope: Value::Null,
                     entries: Vec::new(),
                     listed: Vec::new(),
+                    context: Vec::new(),
                 },
                 Some(lock) => {
                     let m = materialise_bids(
@@ -4536,10 +4623,12 @@ fn invocation_of(
                         .filter(|l| l["id"].as_i64().is_some_and(|n| used.contains(&n)))
                         .cloned()
                         .collect();
-                    let doc = json!({"contract": nils_pipeline::CONTRACT, "sources": listed, "stacks": [entry]});
-                    std::fs::write(
-                        uin.join("stacks.json"),
-                        serde_json::to_vec_pretty(&doc).unwrap_or_default(),
+                    let context = unit_context(m, i);
+                    write_stacks_json(
+                        &uin.join("stacks.json"),
+                        &listed,
+                        std::slice::from_ref(&entry),
+                        context.as_deref(),
                     )
                     .map_err(|e| format!("the unit's input: {e}"))?;
                     sources = m

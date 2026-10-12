@@ -6148,7 +6148,15 @@ fn a_stacks_input_carries_each_file_s_geometry_when_it_asks() {
                 r["id"].as_i64().unwrap()
             };
             let off = stacks_json(lab, run("stack-echo"), None);
-            let on = stacks_json(lab, run("stack-geo"), None);
+            let geo_run = run("stack-geo");
+            let on = stacks_json(lab, geo_run, None);
+            // with the geometry the file is compact, three to four times
+            // smaller than pretty-printed; without it, as before
+            let text = |r: i64| {
+                std::fs::read_to_string(lab.work.path().join("runs").join(r.to_string()).join("input/stacks.json")).unwrap()
+            };
+            assert!(!text(geo_run).contains('\n'), "compact with the geometry");
+            assert!(text(run("stack-echo")).contains("\n  "), "pretty without it");
             let entries = on["stacks"].as_array().unwrap();
             assert_eq!(
                 entries.len(),
@@ -6350,6 +6358,14 @@ fn a_stacks_input_carries_each_file_s_geometry_when_it_asks() {
                 assert_eq!(own["stacks"].as_array().unwrap().len(), 1);
                 assert_eq!(own["stacks"][0]["geometry"], e["geometry"], "{unit}");
                 assert_eq!(own["stacks"][0]["files"], e["files"], "{unit}");
+                // and the rest of its session as its context (P1b)
+                let others: Vec<&Value> = own["context"].as_array().unwrap().iter().map(|c| &c["stack_id"]).collect();
+                let want: Vec<&Value> = entries
+                    .iter()
+                    .filter(|o| o["geometry"]["study"] == e["geometry"]["study"] && o["stack_id"] != e["stack_id"])
+                    .map(|o| &o["stack_id"])
+                    .collect();
+                assert_eq!(others, want, "{unit}: {own}");
             }
 
             // beside the header: each entry carries both, and nothing else
