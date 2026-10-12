@@ -58,8 +58,9 @@ impl Converter {
         let out = Command::new(path).arg("--version").output().map_err(|e| {
             format!(
                 "{} is not runnable ({e}). dcm2niix is a prerequisite of a deployment: \
-                 install a current build from rordenlab/dcm2niix, which a distribution's \
-                 package lags, and pass --dcm2niix if it is not on the path.",
+                 nils tools install dcm2niix installs the build this version pins, nils \
+                 setup places it beside nils, or pass --dcm2niix with the path of a current \
+                 build from rordenlab/dcm2niix, which a distribution's package lags.",
                 path.display()
             )
         })?;

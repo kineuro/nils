@@ -9211,3 +9211,382 @@ fn a_session_s_qc_is_withheld_where_the_session_holds_a_sealed_stack() {
         },
     );
 }
+
+/// 2026-10-12: a stacks pipeline whose first unit fails for a full disk,
+/// as a tool says it, and whose others succeed.
+const DISK_FULL: &str = r#"name: disk-full
+schema-version: "0.5"
+tool-version: "1"
+container-image:
+  type: docker
+  image: "example.org/disk-full@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+command-line: |
+  python3 -c '
+  import json, os, sys
+  m = json.load(open(sys.argv[1])); out = sys.argv[2]
+  units = []
+  for i, s in enumerate(m["stacks"]):
+      u = s["unit"]
+      if i == 0:
+          units.append({"unit_id": u, "status": "failed", "error": "OSError: [Errno 28] No space left on device"})
+          continue
+      d = os.path.join(out, u); os.makedirs(d, exist_ok=True)
+      open(os.path.join(d, "out.txt"), "w").write("x")
+      units.append({"unit_id": u, "status": "succeeded", "derivatives": [u + "/out.txt"]})
+  json.dump({"schema_version": "1", "units": units}, open(os.path.join(out, "results.json"), "w"))
+  ' [Manifest] [OutputLocation]
+x-nils:
+  analysis-level: stack
+  input: {layout: stacks}
+  outputs:
+    - id: out
+      kind: output
+      path-template: "stack-{stack}/out.txt"
+      media-type: text/plain
+  needs: {gpu: none}
+"#;
+
+/// The newest run, as `nils pipeline runs <id>` answers it.
+fn newest_run(lab: &Lab) -> Value {
+    let runs = lab.json(&["pipeline", "runs", "--json"]);
+    let id = runs[0]["id"].as_i64().unwrap_or_else(|| panic!("{runs}"));
+    lab.json(&["pipeline", "runs", &id.to_string(), "--json"])
+}
+
+/// 2026-10-12: a run's failure, and each unit's, says its kind beside its
+/// error, on both backends: a unit whose tool found the disk full is a
+/// resource's and the run partial; a container killed with 137 is memory
+/// for every unit and the run, its job saying the same; podman's own 125
+/// with an image it cannot find is a dependency. The error stays as it was
+/// written, and the words a person reads say what to do.
+#[test]
+fn a_failure_says_its_kind_beside_its_error() {
+    if !have("python3") {
+        eprintln!(
+            "python3 is not installed; the stand-in podman needs it, so this test is skipped"
+        );
+        return;
+    }
+    on_both("pipelines-failures", "nils_failures", |lab| {
+        lab.add_descriptor("disk-full", DISK_FULL);
+        let v = lab.json(&[
+            "run",
+            "disk-full",
+            "--select",
+            "selection:every@1",
+            "--json",
+        ]);
+        assert_eq!(v["status"], "partial", "{v}");
+        assert!(v["failure"].is_null(), "a partial run did not fail: {v}");
+        assert_eq!(
+            v["summary"]["failures_by_cause"],
+            json!([{"kind": "resource", "cause": "disk", "units": 1}]),
+            "{v}"
+        );
+        let shown = newest_run(lab);
+        let failed: Vec<&Value> = shown["units_run"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|u| u["status"] == "failed")
+            .collect();
+        assert_eq!(failed.len(), 1, "{shown}");
+        assert_eq!(failed[0]["failure"]["kind"], "resource", "{shown}");
+        assert_eq!(failed[0]["failure"]["cause"], "disk", "{shown}");
+        assert_eq!(
+            failed[0]["error"], "OSError: [Errno 28] No space left on device",
+            "the error is kept as it was written: {shown}"
+        );
+        assert!(
+            shown["units_run"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|u| u["status"] == "succeeded")
+                .all(|u| u["failure"].is_null()),
+            "{shown}"
+        );
+
+        lab.add_descriptor(
+            "stack-echo",
+            &stack_echo(&format!("example.org/stack-echo@sha256:{}", "a".repeat(64))),
+        );
+        let killed = lab
+            .command(&lab.path)
+            .args(["run", "stack-echo", "--select", "selection:every@1"])
+            .env("FAKE_PODMAN_EXIT", "137")
+            .output()
+            .unwrap();
+        assert!(!killed.status.success());
+        let err = String::from_utf8_lossy(&killed.stderr);
+        assert!(err.contains("the container exited 137"), "{err}");
+        assert!(
+            err.contains("resource (memory): a container was killed for memory"),
+            "{err}"
+        );
+        let run = newest_run(lab);
+        assert_eq!(run["status"], "failed", "{run}");
+        assert!(
+            run["error"].as_str().unwrap().contains("exited 137"),
+            "{run}"
+        );
+        assert_eq!(run["failure"]["kind"], "resource", "{run}");
+        assert_eq!(run["failure"]["cause"], "memory", "{run}");
+        assert!(run["failure"]["fix"].is_null(), "{run}");
+        assert!(
+            run["units_run"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|u| u["failure"]["cause"] == "memory"),
+            "{run}"
+        );
+        let job = lab.json(&["jobs", "show", &run["job_id"].to_string(), "--json"]);
+        assert_eq!(job["state"], "failed", "{job}");
+        assert_eq!(job["failure"]["cause"], "memory", "{job}");
+        let text = lab.ok(&["pipeline", "runs", &run["id"].to_string()], None);
+        assert!(
+            text.contains("failure          resource (memory)"),
+            "{text}"
+        );
+        let text = lab.ok(&["jobs", "show", &run["job_id"].to_string()], None);
+        assert!(text.contains("failure     resource (memory)"), "{text}");
+        let text = lab.ok(&["pipeline", "runs"], None);
+        assert!(text.contains("resource (memory)"), "{text}");
+
+        let missing = lab
+            .command(&lab.path)
+            .args(["run", "stack-echo", "--select", "selection:every@1"])
+            .env("FAKE_PODMAN_EXIT", "125")
+            .output()
+            .unwrap();
+        assert!(!missing.status.success());
+        let run = newest_run(lab);
+        assert_eq!(run["failure"]["kind"], "dependency", "{run}");
+        assert_eq!(run["failure"]["cause"], "image", "{run}");
+    });
+}
+
+/// A search path for a lab that holds python3 and no dcm2niix.
+fn path_without_dcm2niix(lab: &Lab) -> OsString {
+    let tools = lab.bin.path().join("no-dcm2niix");
+    std::fs::create_dir_all(&tools).unwrap();
+    let python = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+        .map(|d| d.join("python3"))
+        .find(|p| p.is_file())
+        .expect("python3");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&python, tools.join("python3")).unwrap();
+    let mut path = lab.bin.path().as_os_str().to_owned();
+    path.push(":");
+    path.push(tools.as_os_str());
+    path
+}
+
+/// 2026-10-12: what a run needs of this machine is checked before it is
+/// queued. Without dcm2niix a bids run is refused at the pre-flight, at
+/// `nils run` and at the jobs door, by its kind and with the engine's own
+/// install as the fix, and nothing is queued; a unit whose declared disk is
+/// more than the working place has free is refused as a resource's. An
+/// image not pulled yet is information, never a refusal.
+#[test]
+fn a_run_is_refused_before_it_is_queued_for_what_it_lacks() {
+    if !have("python3") {
+        eprintln!(
+            "python3 is not installed; the stand-in podman needs it, so this test is skipped"
+        );
+        return;
+    }
+    let lab = Lab::new("pipelines-refused");
+    let path = path_without_dcm2niix(&lab);
+    lab.add_descriptor("bids-copy", BIDS_COPY);
+    let pre = lab.run_on(
+        &path,
+        &[
+            "run",
+            "bids-copy",
+            "--select",
+            "selection:every@1",
+            "--preflight",
+            "--json",
+        ],
+        None,
+    );
+    assert!(pre.0, "{}", pre.2);
+    let pre: Value = serde_json::from_str(&pre.1).unwrap();
+    assert_eq!(pre["ready"], false, "{pre}");
+    assert_eq!(pre["failure"]["kind"], "dependency", "{pre}");
+    assert_eq!(pre["failure"]["cause"], "dcm2niix", "{pre}");
+    assert_eq!(
+        pre["failure"]["fix"]["door"], "POST /api/tools/dcm2niix/install",
+        "{pre}"
+    );
+    let converter = pre["requirements"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["check"] == "converter")
+        .unwrap();
+    assert_eq!(converter["ok"], false, "{pre}");
+    assert!(
+        pre["blockers"]
+            .to_string()
+            .contains("dcm2niix is not on the engine's search path"),
+        "{pre}"
+    );
+    let image = pre["requirements"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["check"] == "image")
+        .unwrap();
+    assert_eq!(image["ok"], true, "the stand-in holds every image: {pre}");
+    let text = lab.run_on(
+        &path,
+        &[
+            "run",
+            "bids-copy",
+            "--select",
+            "selection:every@1",
+            "--preflight",
+        ],
+        None,
+    );
+    assert!(
+        text.1.contains("what to do: dependency (dcm2niix)"),
+        "{}",
+        text.1
+    );
+
+    let (good, _, err) = lab.run_on(
+        &path,
+        &["run", "bids-copy", "--select", "selection:every@1"],
+        None,
+    );
+    assert!(!good);
+    assert!(err.contains("refused before it started"), "{err}");
+    assert!(err.contains("nils tools install dcm2niix"), "{err}");
+    let count = |sql: &str| -> i64 { lab.store().query(sql, &[]).unwrap()[0].int(0).unwrap() };
+    assert_eq!(count("SELECT COUNT(*) FROM job WHERE kind = 'pipeline'"), 0);
+    assert_eq!(count("SELECT COUNT(*) FROM pipeline_run"), 0);
+
+    // a declared disk no place has free
+    let huge = stack_echo(&format!("example.org/stack-echo@sha256:{}", "a".repeat(64))).replace(
+        "needs: {gpu: optional}",
+        "needs: {gpu: optional, disk-gb: 900000000}",
+    );
+    lab.add_descriptor("stack-echo", &huge);
+    let (good, _, err) = lab.run_on(
+        &path,
+        &["run", "stack-echo", "--select", "selection:every@1"],
+        None,
+    );
+    assert!(!good);
+    assert!(err.contains("(failure: disk)"), "{err}");
+    assert!(err.contains("which has"), "{err}");
+
+    // the doors refuse the same and queue nothing
+    let server = Server::start_env(&lab, &[], &[("PATH", Path::new(&path))]);
+    let (status, refused) = server.call(
+        "POST",
+        "/api/jobs",
+        Some(json!({"command": ["run", "bids-copy", "--select", "selection:every@1"]})),
+        OPERATOR,
+    );
+    assert_eq!(status, 409, "{refused}");
+    assert_eq!(refused["failure"]["cause"], "dcm2niix", "{refused}");
+    assert_eq!(
+        refused["failure"]["fix"]["grant"], "install:work",
+        "{refused}"
+    );
+    assert!(refused["requirements"].is_array(), "{refused}");
+    let (status, refused) = server.call(
+        "POST",
+        "/api/jobs",
+        Some(json!({"command": ["run", "stack-echo", "--select", "selection:every@1"]})),
+        OPERATOR,
+    );
+    assert_eq!(status, 409, "{refused}");
+    assert_eq!(refused["failure"]["kind"], "resource", "{refused}");
+    assert_eq!(refused["failure"]["cause"], "disk", "{refused}");
+    let (status, door) = server.call(
+        "POST",
+        "/api/pipelines/bids-copy/preflight",
+        Some(json!({"select": "selection:every@1"})),
+        OPERATOR,
+    );
+    assert_eq!(status, 200, "{door}");
+    assert_eq!(door["failure"]["cause"], "dcm2niix", "{door}");
+    drop(server);
+    assert_eq!(count("SELECT COUNT(*) FROM job WHERE kind = 'pipeline'"), 0);
+    assert_eq!(count("SELECT COUNT(*) FROM pipeline_run"), 0);
+}
+
+/// 2026-10-12, with record 48: a unit's error is what its pipeline said of
+/// its stack, so once that stack is of a sample sealed, a reader who does
+/// not read sealed stacks reads the unit's failure by its kind and cause
+/// and never its words, at the door and at the keyboard; the keyboard with
+/// --unsealed-access reads them.
+#[test]
+fn a_sealed_stack_s_unit_says_its_failure_and_not_its_words() {
+    if !have("python3") {
+        eprintln!(
+            "python3 is not installed; the stand-in podman needs it, so this test is skipped"
+        );
+        return;
+    }
+    let lab = Lab::new("pipelines-sealed-errors");
+    lab.add_descriptor("disk-full", DISK_FULL);
+    let v = lab.json(&[
+        "run",
+        "disk-full",
+        "--select",
+        "selection:every@1",
+        "--json",
+    ]);
+    assert_eq!(v["status"], "partial", "{v}");
+    let id = v["id"].to_string();
+    let shown = lab.json(&["pipeline", "runs", &id, "--json"]);
+    let failed = shown["units_run"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|u| u["status"] == "failed")
+        .cloned()
+        .unwrap();
+    let unit = failed["unit"].as_str().unwrap().to_string();
+    let stack: i64 = unit.trim_start_matches("stack-").parse().unwrap();
+    seal(&lab, "sealed_errors", &[stack]);
+    let of = |doc: &Value| -> Value {
+        doc["units_run"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|u| u["unit"] == unit.as_str())
+            .cloned()
+            .unwrap()
+    };
+    let kept = of(&lab.json(&["pipeline", "runs", &id, "--json"]));
+    assert!(kept["error"].is_null(), "{kept}");
+    assert_eq!(kept["sealed"], true, "{kept}");
+    assert_eq!(kept["failure"]["cause"], "disk", "{kept}");
+    let read = of(&lab.json(&[
+        "pipeline",
+        "runs",
+        &id,
+        "--json",
+        "--unsealed-access",
+        "reading why a sealed unit failed",
+    ]));
+    assert_eq!(
+        read["error"], "OSError: [Errno 28] No space left on device",
+        "{read}"
+    );
+    let server = Server::start(&lab);
+    let (status, doc) = server.call("GET", &format!("/api/pipeline-runs/{id}"), None, OPERATOR);
+    assert_eq!(status, 200, "{doc}");
+    let at_door = of(&doc);
+    assert!(at_door["error"].is_null(), "{at_door}");
+    assert_eq!(at_door["failure"]["kind"], "resource", "{at_door}");
+    drop(server);
+}

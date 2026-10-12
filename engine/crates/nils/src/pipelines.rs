@@ -355,6 +355,9 @@ pub(crate) fn run_doc(store: &mut Store, r: &Run) -> Value {
                 "attempts": u.attempts, "device": u.device, "gpu_card": u.gpu_card,
                 "cores": u.cores, "memory_mb": u.memory_mb, "exit_code": u.exit_code,
                 "started_at": u.started_at, "finished_at": u.finished_at,
+                // 2026-10-12: why a unit failed, beside what it said
+                "error": u.outcome["error"],
+                "failure": crate::failures::of_unit(&u.outcome),
             }))
             .collect::<Vec<_>>()
     );
@@ -394,6 +397,9 @@ pub(crate) fn runs_docs(store: &mut Store, runs: &[Run]) -> Vec<Value> {
             let mut v = serde_json::to_value(r).unwrap_or(Value::Null);
             v["pipeline"] = json!(labels.get(&r.pipeline_id));
             v["derivatives"] = json!(made.get(&r.id).cloned().unwrap_or_default());
+            // 2026-10-12: a run that failed before its failure was recorded
+            // is read from its error
+            v["failure"] = crate::failures::of_run_doc(&v);
             v
         })
         .collect()
@@ -549,6 +555,18 @@ pub(crate) fn summary_totals_only(s: &mut Value) {
         }
     }
     s["failures_by_reason"] = json!(held_list("reason", "units", by_reason));
+    // 2026-10-12: the failures by their cause, each count held as a count
+    // of units is
+    if let Some(list) = s["failures_by_cause"].as_array_mut() {
+        for f in list.iter_mut() {
+            let n = f["units"].as_u64().unwrap_or(0) as usize;
+            let kept = held("units", n);
+            f["units"] = kept["units"].clone();
+            if kept["withheld"] == true {
+                f["withheld"] = json!(true);
+            }
+        }
+    }
     s["detail"] = json!("totals");
     s["withheld"] = json!(withheld);
 }
@@ -763,6 +781,36 @@ pub(crate) fn summary_unsealed(
     Ok(sealed.len())
 }
 
+/// 2026-10-12, with record 48: the error a unit's pipeline wrote of a unit
+/// holding a stack of a sample sealed now is what a system said of that
+/// stack, so a reader who does not read such stacks reads the unit's
+/// failure by its kind and cause, never its words: on those units of
+/// `units_run`, `error` is null and `sealed` true. Answers how many.
+pub(crate) fn units_run_unsealed(
+    store: &mut Store,
+    run_id: i64,
+    doc: &mut Value,
+) -> Result<usize, String> {
+    let named: Vec<String> = doc["units_run"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|u| u["error"].is_string())
+        .filter_map(|u| u["unit"].as_str().map(str::to_string))
+        .collect();
+    let sealed = sealed_units(store, run_id, &named)?;
+    if sealed.is_empty() {
+        return Ok(0);
+    }
+    for u in doc["units_run"].as_array_mut().into_iter().flatten() {
+        if u["unit"].as_str().is_some_and(|n| sealed.contains(n)) {
+            u["error"] = Value::Null;
+            u["sealed"] = json!(true);
+        }
+    }
+    Ok(sealed.len())
+}
+
 /// A job's document as [`summary_unsealed`] leaves a run's summary: the
 /// result of a pipeline run. Answers how many units went.
 pub(crate) fn job_unsealed(store: &mut Store, job: &mut Value) -> Result<usize, String> {
@@ -914,6 +962,11 @@ pub(crate) fn route(
                 r.id,
                 &mut doc["summary"],
             )?;
+            // 2026-10-12: nor a unit's own words of a stack of such a sample
+            if !crate::sealed::reads(&caller.access) {
+                units_run_unsealed(registry.store(), r.id, &mut doc)
+                    .map_err(|e| Reply::error(500, e))?;
+            }
             if !quasi {
                 run_totals_only(&mut doc);
             }
@@ -1690,6 +1743,7 @@ pub(crate) fn command(home: &Home, command: PipelineCommand) -> Result<(), Exit>
                 let mut doc = run_doc(registry.store(), &r);
                 if !unsealed {
                     summary_unsealed(registry.store(), r.id, &mut doc["summary"]).map_err(fail)?;
+                    units_run_unsealed(registry.store(), r.id, &mut doc).map_err(fail)?;
                 }
                 if json {
                     return print(&doc);
@@ -1716,12 +1770,20 @@ pub(crate) fn command(home: &Home, command: PipelineCommand) -> Result<(), Exit>
                 return print(&json!(docs));
             }
             println!(
-                "{:>5}  {:<28} {:<9} {:<10} {:>6}  started",
-                "run", "pipeline", "status", "runtime", "files"
+                "{:>5}  {:<28} {:<9} {:<10} {:>6}  {:<24}  why",
+                "run", "pipeline", "status", "runtime", "files", "started"
             );
             for d in &docs {
+                // 2026-10-12: a failed run's kind and cause, beside it
+                let why = match (
+                    d["failure"]["kind"].as_str(),
+                    d["failure"]["cause"].as_str(),
+                ) {
+                    (Some(kind), Some(cause)) => format!("{kind} ({cause})"),
+                    _ => String::new(),
+                };
                 println!(
-                    "{:>5}  {:<28} {:<9} {:<10} {:>6}  {}",
+                    "{:>5}  {:<28} {:<9} {:<10} {:>6}  {:<24}  {why}",
                     d["id"],
                     d["pipeline"].as_str().unwrap_or("-"),
                     d["status"].as_str().unwrap_or_default(),
@@ -1769,6 +1831,21 @@ fn print_run(doc: &Value) {
     }
     if let Some(e) = doc["error"].as_str() {
         println!("  error            {e}");
+    }
+    if let Some(f) = crate::failures::line(&doc["failure"]) {
+        println!("  failure          {f}");
+    }
+    for f in doc["summary"]["failures_by_cause"]
+        .as_array()
+        .into_iter()
+        .flatten()
+    {
+        println!(
+            "  units failed     {} for {} ({})",
+            f["units"],
+            f["cause"].as_str().unwrap_or_default(),
+            f["kind"].as_str().unwrap_or_default()
+        );
     }
 }
 
@@ -1972,6 +2049,9 @@ struct Materialised {
     /// With the geometry, the rest of each session the run holds part of
     /// (record 55 E2, P1b), `stacks.json`'s `context`.
     context: Vec<Value>,
+    /// For the bids layout, the converter its release ran with, where it
+    /// was found and how (2026-10-12); null otherwise.
+    converter: Value,
 }
 
 /// At most this many folders are bound one by one for a stacks input; a
@@ -2244,6 +2324,7 @@ fn materialise_stacks(
         entries,
         listed,
         context,
+        converter: Value::Null,
     })
 }
 
@@ -2396,6 +2477,7 @@ fn materialise_bids(
             entries: Vec::new(),
             listed: Vec::new(),
             context: Vec::new(),
+            converter: Value::Null,
         });
     }
     if !status.success() {
@@ -2415,7 +2497,14 @@ fn materialise_bids(
         .as_i64()
         .ok_or("the release's report names no release")?;
     rows::set_input_release(registry.store(), run_id, release_id).map_err(|e| e.to_string())?;
-    released(registry, release_id, level)
+    let mut m = released(registry, release_id, level)?;
+    // 2026-10-12: which converter the release ran, and how it was found
+    m.converter = json!({
+        "version": report["converter"],
+        "path": report["converter_path"],
+        "found_by": report["converter_found_by"],
+    });
+    Ok(m)
 }
 
 /// The units of a run's bids input, read back from the release that wrote
@@ -2490,6 +2579,7 @@ fn released(
         entries: Vec::new(),
         listed: Vec::new(),
         context: Vec::new(),
+        converter: Value::Null,
     })
 }
 
@@ -2937,10 +3027,19 @@ fn ask_of(d: &Descriptor) -> lane::Ask {
 
 /// Refuse a pipeline whose unit could never fit in the lane.
 fn fits(d: &Descriptor, p: &Pipeline, lane: &Lane) -> Result<(), Exit> {
-    if lane.ledger.could(ask_of(d)) {
-        return Ok(());
+    match lane_refusal(d, p, lane) {
+        None => Ok(()),
+        Some(words) => Err(usage(words)),
     }
-    Err(usage(format!(
+}
+
+/// Why a unit could never fit in the lane, in the words a refusal says;
+/// none where it could.
+pub(crate) fn lane_refusal(d: &Descriptor, p: &Pipeline, lane: &Lane) -> Option<String> {
+    if lane.ledger.could(ask_of(d)) {
+        return None;
+    }
+    Some(format!(
         "{} asks {} cores and {} GB of memory for each of its {}, and the pipeline lane has {} cores and {} GB{}; nils pipeline lane --cores <n> --memory-gb <n> sets it",
         p.label(),
         d.needs.cores,
@@ -2956,7 +3055,7 @@ fn fits(d: &Descriptor, p: &Pipeline, lane: &Lane) -> Result<(), Exit> {
             .as_deref()
             .map(|w| format!(" ({w})"))
             .unwrap_or_default()
-    )))
+    ))
 }
 
 /// The device a run takes and whether it takes the GPU: a GPU where the
@@ -3076,6 +3175,7 @@ pub(crate) fn take_up_interrupted(store: &mut Store) -> Result<usize, String> {
                     results_digest: None,
                     summary: &json!({"phase": "run"}),
                     error: Some("stopped with its engine; nils run --resume goes on"),
+                    failure: None,
                 },
             )
             .map_err(err)?;
@@ -3189,6 +3289,23 @@ pub(crate) fn run_command(home: &Home, args: RunArgs) -> Result<(), Exit> {
     // the lane it runs in: a unit that could never fit, a GPU it cannot
     // lease and a secret the site has not set are refused before anything
     let lane = lane_of(&mut registry);
+    // 2026-10-12: what the run needs of this machine, checked before
+    // anything is frozen or claimed; a check that fails refuses it by its
+    // kind, and nothing is queued
+    let checked = crate::requirements::checks(
+        &mut registry,
+        home.dir(),
+        &crate::requirements::Asked {
+            pipeline: &p,
+            descriptor: &d,
+            dcm2niix: &args.dcm2niix,
+            units: 1,
+            detected: Some(&detected),
+        },
+    );
+    if let Some(failed) = crate::requirements::refusing(&checked) {
+        return Err(fail(failed.refusal()));
+    }
     let (device, gpu) = device_for(&d, &p, &rt, &lane)?;
     fits(&d, &p, &lane)?;
     let given = secrets_for(&mut registry, &d, &p)?;
@@ -3292,6 +3409,13 @@ pub(crate) fn run_command(home: &Home, args: RunArgs) -> Result<(), Exit> {
                 return Err(usage(
                     "the selection holds no stacks; there is nothing to run",
                 ));
+            }
+            // 2026-10-12: the disk its units take, now their count is known
+            if d.layout == Layout::Stacks
+                && let Some(c) = crate::requirements::disk(&mut registry, &d, stacks.len())
+                && !c.ok
+            {
+                return Err(fail(c.refusal()));
             }
 
             // the job: beside every run whose stacks are not these, and
@@ -3809,6 +3933,10 @@ fn conclude(
         Ok(o) => o,
         Err(e) => ("failed", json!({}), None, None, Some(e)),
     };
+    // 2026-10-12: a run that failed says why, by its kind, beside its error
+    let failure = (status == "failed").then(|| {
+        crate::failures::of_run(error.as_deref().unwrap_or_default(), exit_code, &summary)
+    });
     let finished = nils_registry::time::now_iso();
     rows::finish(
         registry.store(),
@@ -3820,6 +3948,7 @@ fn conclude(
             results_digest: digest.as_deref(),
             summary: &summary,
             error: error.as_deref(),
+            failure: failure.as_ref(),
         },
     )?;
     // record 49 A3: a run that loaded measures changed what the ask
@@ -3858,7 +3987,10 @@ fn conclude(
     let _ = job::set_result(
         registry.store(),
         c.job_id,
-        &json!({"run": run_id, "status": status, "summary": summary, "results_digest": digest}),
+        &json!({
+            "run": run_id, "status": status, "summary": summary, "results_digest": digest,
+            "failure": failure,
+        }),
     );
     job::finish(registry.store(), c.job_id, job_state, error.as_deref())
         .map_err(|e| fail(e.to_string()))?;
@@ -3880,8 +4012,13 @@ fn conclude(
             ),
         }),
         _ => Err(fail(format!(
-            "run {run_id} {}",
-            error.unwrap_or_else(|| "failed".into())
+            "run {run_id} {}{}",
+            error.unwrap_or_else(|| "failed".into()),
+            failure
+                .as_ref()
+                .and_then(crate::failures::line)
+                .map(|l| format!("\n  {l}"))
+                .unwrap_or_default()
         ))),
     }
 }
@@ -4108,6 +4245,7 @@ fn execute_run(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Resul
                     entries: Vec::new(),
                     listed: Vec::new(),
                     context: Vec::new(),
+                    converter: Value::Null,
                 },
                 Some(lock) => {
                     let m = materialise_bids(
@@ -4297,6 +4435,7 @@ fn execute_run(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Resul
                     "status": "skipped",
                     "error": format!("missing an input: {}", why.join("; ")),
                     "missing": why, "metrics": {}, "files": [], "refused": [],
+                    "failure": nils_pipeline::failure::Cause::Input.doc(),
                 });
                 rows::unit_over(registry.store(), u.id, None, &outcome, &now).map_err(err)?;
             }
@@ -4391,7 +4530,7 @@ fn execute_run(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Resul
             .and_then(|u| u.exit_code)
             .and_then(|c| i32::try_from(c).ok());
         let b = batch_of(units)?;
-        take_in(registry, x, &m, &b, code, &row_of, &mut taken_files)?;
+        take_in(registry, x, &m, &b, code, None, &row_of, &mut taken_files)?;
     }
     let mut pending: std::collections::VecDeque<Batch> = Default::default();
     for units in group(&|s| s == "queued" || s == "running") {
@@ -4733,7 +4872,16 @@ fn schedule(
                 Ok(Some(status)) => {
                     let r = running.remove(i);
                     ledger.give(ask);
-                    take_in(registry, x, m, &r.batch, status.code(), row_of, taken_files)?;
+                    take_in(
+                        registry,
+                        x,
+                        m,
+                        &r.batch,
+                        status.code(),
+                        signal_of(&status),
+                        row_of,
+                        taken_files,
+                    )?;
                 }
                 Ok(None) => i += 1,
                 Err(e) => return Err(format!("a container of the run: {e}")),
@@ -4743,6 +4891,20 @@ fn schedule(
             return Ok(Scheduled::Done);
         }
         std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// The signal a container's process was ended by, where one ended it: how
+/// the kernel's OOM killer ends a process apptainer runs (2026-10-12).
+fn signal_of(status: &std::process::ExitStatus) -> Option<i32> {
+    #[cfg(unix)]
+    {
+        std::os::unix::process::ExitStatusExt::signal(status)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = status;
+        None
     }
 }
 
@@ -5309,12 +5471,14 @@ fn sweep_batch(
     Ok((swept, shut))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn take_in(
     registry: &mut Registry,
     x: &Execution<'_>,
     m: &Materialised,
     b: &Batch,
     code: Option<i32>,
+    signal: Option<i32>,
     row_of: &BTreeMap<String, (i64, String)>,
     taken_files: &mut std::collections::BTreeSet<PathBuf>,
 ) -> Result<(), String> {
@@ -5354,6 +5518,11 @@ fn take_in(
         .strip_prefix(&x.scratch.path)
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|_| format!("{RUNS}/{}/log.txt", x.run_id));
+    // 2026-10-12: a container that failed as a whole is read for its cause
+    // in the end of its log, where the runtime and the tool said it
+    let log_tail = whole
+        .then(|| nils_pipeline::failure::log_tail(&b.log))
+        .flatten();
     for (n, &i) in b.units.iter().enumerate() {
         let u = &m.units[i];
         let o = outcome_of(
@@ -5411,6 +5580,11 @@ fn take_in(
         doc["out"] = json!(b.rel_out);
         if n == 0 && !swept.is_empty() {
             doc["swept"] = json!(swept);
+        }
+        if whole {
+            crate::failures::mark_unit(&mut doc, exit_code, signal, log_tail.as_deref());
+        } else {
+            crate::failures::mark_unit(&mut doc, None, None, None);
         }
         rows::unit_over(registry.store(), *row_id, exit_code, &doc, &now)
             .map_err(|e| e.to_string())?;
@@ -6183,6 +6357,13 @@ fn finalize(
     })?;
 
     let count = |s: &str| statuses.iter().filter(|x| x.1 == s).count();
+    // 2026-10-12: why its units failed, by cause
+    let failures_by_cause = crate::failures::by_cause(
+        unit_rows
+            .iter()
+            .filter(|u| by_name.contains_key(u.unit.as_str()))
+            .map(|u| &u.outcome),
+    );
     let first_log = unit_rows
         .first()
         .and_then(|u| u.outcome["log"].as_str().map(str::to_string));
@@ -6192,6 +6373,7 @@ fn finalize(
             "skipped": count("skipped"), "unreported": count("unreported"),
             "missing_input": missing_input,
         },
+        "failures_by_cause": failures_by_cause,
         "derivatives": registered,
         "bytes": bytes_total,
         "embeddings": {"registered": embedded, "kept": cached},
@@ -6211,6 +6393,8 @@ fn finalize(
         "numbers": notes.summary(measures_written, d.checks.len()),
         "breaches": breached,
         "input_release_id": m.release_id,
+        // 2026-10-12: the converter a bids input was released with
+        "converter": m.converter,
         // what the container was given of the sources: one bind per folder
         // of the selection's files, or the roots past the limit, and why
         "scope": m.scope,
@@ -6275,6 +6459,18 @@ fn finalize(
 fn this_account() -> (u32, u32) {
     // SAFETY: neither call takes a pointer, touches memory, or can fail.
     unsafe { (libc::getuid(), libc::getgid()) }
+}
+
+/// The uid the engine runs as, whose subordinate ids rootless podman
+/// unpacks an image with (2026-10-12).
+#[cfg(unix)]
+pub(crate) fn engine_uid() -> u32 {
+    this_account().0
+}
+
+#[cfg(not(unix))]
+pub(crate) fn engine_uid() -> u32 {
+    0
 }
 
 /// A run's seeds, as the runner kept them: the document of its derivative

@@ -446,6 +446,57 @@ llama.cpp read. Its log is written there too. `kvasir.json` names it under
 `local.runtime`, and where Kvasir runs in a container it also names
 `hostAlias`, the name Kvasir reaches this machine's own loopback by.
 
+### dcm2niix
+
+dcm2niix converts DICOM to NIfTI for a BIDS release and for a pipeline whose
+input is a BIDS tree, so setup provides it. The engine finds it in this
+order: a path a run or a release names with `--dcm2niix`; the one the site
+gave setup with `--dcm2niix`; `dcm2niix` on the engine's search path; beside
+the running `nils`; where the setup record names one setup found or placed;
+and the registry's own `tools/` folder. The first that answers its version is
+taken, so a broken one does not hide a working one. A service of systemd has
+the default search path, which `~/.local/bin` is not on, so a converter beside
+`nils` is found there all the same.
+
+On an install on this machine, setup keeps a `dcm2niix` it finds on the
+search path or beside `nils`. Where there is none, it downloads the build
+this version of `nils` pins, v1.0.20260724 from
+[rordenlab/dcm2niix](https://github.com/rordenlab/dcm2niix/releases), checks
+the archive against the sha256 pinned beside it, and places the binary beside
+`nils`. rordenlab publishes it for Linux on x86_64 and for macOS; a Linux on
+arm has no build to take, and the plan says to install the distribution's
+package or build it from source. `NILS_DCM2NIIX_RELEASES` points at a mirror
+laid out as the releases are (`<version>/dcm2niix_lnx.zip`), held to the same
+digests. A site that keeps its own gives it with `--dcm2niix PATH`: it is
+taken as it is, recorded, and never replaced; given on a later run, an
+update or a repair, it replaces the build setup placed, which goes. Something
+beside `nils` that setup did not place is never replaced: where it does not
+run, the plan says so. `--print` says which of these the install takes.
+
+A converter that cannot be downloaded does not stop the install. The install
+says so, and until dcm2niix is there a BIDS release and a run with a BIDS
+input are refused before they start, with what to do. An admin then
+installs it from the desk, or with:
+
+```
+nils tools install dcm2niix
+```
+
+which downloads the same pinned build into the registry's `tools/` folder,
+checks it and asks its version, and is audited. Where the engine cannot
+reach GitHub, it says so and gives the way by hand: the archive, its sha256,
+and where the binary goes. `nils tools list` says whether dcm2niix is here,
+where, which build, and how it was found.
+
+An update takes the pinned build again when a newer `nils` pins another, a
+repair takes it again when the one setup placed is gone, and an uninstall
+removes the one setup placed with the install's other programs. A converter
+the site gave, or one setup found, is never touched.
+
+The engine's container image does not carry dcm2niix. In a container install
+an admin installs it with `nils tools install dcm2niix` or from the desk; the
+registry's folder is mounted, so it stays across updates.
+
 `<dir>/assistant/assistant.env` holds everything the assistant reads: the
 engine's address, Kvasir's, the key file, the model (`chatgpt` for the
 subscription), the stores and the port. The assistant's key is minted at
@@ -687,7 +738,7 @@ nils uninstall
 ```
 
 It asks what should go. Keeping your data removes the services, the
-programs, the packs, llama.cpp's build and what building Kvasir and the
+programs (the dcm2niix setup placed among them), the packs, llama.cpp's build and what building Kvasir and the
 assistant made, and keeps the registry and its key, the backups, the desk's
 people, the assistant's history, and Kvasir's models, its store with their
 keys and the sealed credentials, its seal key and pepper and the assistant's
@@ -759,6 +810,7 @@ directory is NILS's.
 | `--channel URL` | Where releases come from |
 | `--model-server URL`, `--model-key-file FILE` | A model server the stations use, such as a Kvasir serving a card: on an install or with `--update`, Kvasir seals the key from the file and holds the server as one backend |
 | `--model-server-model ID` | With `--model-server`: the model the stations use; asked where there is a terminal, else the server's default or only model. On the first add, every model the server offers is admitted beside it, up to eight |
+| `--dcm2niix PATH` | The site's own dcm2niix, taken as it is and recorded; without it, setup keeps one it finds or places the pinned build beside `nils` |
 
 Windows is not supported yet; the wizard says so and points at the
 documentation.

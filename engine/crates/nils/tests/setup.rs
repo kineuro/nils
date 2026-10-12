@@ -3557,3 +3557,347 @@ fn a_new_registry_needs_a_setup_and_changes_nothing_without_one() {
     assert!(o.stderr.contains("no setup is"), "{}", o.stderr);
     assert!(!config.path().join("nils").join("setup.toml").exists());
 }
+
+// ---------------------------------------------------------------- dcm2niix
+
+const DCM2NIIX_VERSION: &str = "v1.0.20260724";
+
+/// The archive of dcm2niix this machine takes, where rordenlab publishes
+/// one.
+fn dcm2niix_archive_here() -> Option<&'static str> {
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("linux", "x86_64") => Some("dcm2niix_lnx.zip"),
+        ("macos", _) => Some("dcm2niix_mac.zip"),
+        _ => None,
+    }
+}
+
+/// A zip archive of one file, deflated, shaped as rordenlab's.
+fn zip_of_one(name: &str, body: &[u8]) -> Vec<u8> {
+    use std::io::Write as _;
+    let mut deflated =
+        flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
+    deflated.write_all(body).unwrap();
+    let packed = deflated.finish().unwrap();
+    let mut crc = flate2::Crc::new();
+    crc.update(body);
+    let header = |sig: u32, central: bool| {
+        let mut h = Vec::new();
+        h.extend(sig.to_le_bytes());
+        if central {
+            h.extend(20u16.to_le_bytes());
+        }
+        h.extend(20u16.to_le_bytes());
+        h.extend(0u16.to_le_bytes());
+        h.extend(8u16.to_le_bytes());
+        h.extend(0u32.to_le_bytes());
+        h.extend(crc.sum().to_le_bytes());
+        h.extend((packed.len() as u32).to_le_bytes());
+        h.extend((body.len() as u32).to_le_bytes());
+        h.extend((name.len() as u16).to_le_bytes());
+        h.extend(0u16.to_le_bytes());
+        if central {
+            h.extend([0u8; 6]);
+            h.extend(0o100_755u32.wrapping_shl(16).to_le_bytes());
+            h.extend(0u32.to_le_bytes());
+        }
+        h.extend(name.as_bytes());
+        h
+    };
+    let mut out = header(0x0403_4b50, false);
+    out.extend(&packed);
+    let start = out.len() as u32;
+    let directory = header(0x0201_4b50, true);
+    out.extend(&directory);
+    out.extend(0x0605_4b50u32.to_le_bytes());
+    out.extend([0u8; 4]);
+    out.extend(1u16.to_le_bytes());
+    out.extend(1u16.to_le_bytes());
+    out.extend((directory.len() as u32).to_le_bytes());
+    out.extend(start.to_le_bytes());
+    out.extend(0u16.to_le_bytes());
+    out
+}
+
+/// [`setup`] with variables of its own.
+fn setup_env(binary: &Path, config: &Path, args: &[&str], env: &[(&str, &str)]) -> Out {
+    let mut command = Command::new(binary);
+    command
+        .arg("setup")
+        .args(args)
+        .env("NILS_NO_TTY", "1")
+        .env("NO_COLOR", "1")
+        .env("XDG_CONFIG_HOME", config)
+        .env_remove("NILS_RELEASES")
+        .env_remove("NILS_DESK_RELEASES")
+        .env_remove("NILS_DCM2NIIX_RELEASES")
+        .env_remove("NILS_DCM2NIIX_TEST_SHA256");
+    for (k, v) in env {
+        command.env(k, v);
+    }
+    let out = output(&mut command);
+    Out {
+        ok: out.status.success(),
+        stdout: String::from_utf8_lossy(&out.stdout).to_string(),
+        stderr: String::from_utf8_lossy(&out.stderr).to_string(),
+    }
+}
+
+/// 2026-10-12: an install on this machine with no dcm2niix here takes the
+/// build this version pins, from a mirror and offline, beside nils, and
+/// says so in its plan first; the run after it takes nothing, since the one
+/// it placed is the pinned build and there; a purge removes it with the
+/// install, and nothing outside the test's own folders was touched.
+#[test]
+fn a_machine_install_places_dcm2niix_beside_nils_and_a_purge_removes_it() {
+    let Some(archive) = dcm2niix_archive_here() else {
+        eprintln!("rordenlab builds no dcm2niix for this machine; skipped");
+        return;
+    };
+    let releases = Releases::new("99.0.0");
+    let nils = Installed::new("nils-setup-dcm2niix");
+    let config = TempDir::new("nils-setup-dcm2niix-config");
+    let base = TempDir::new("nils-setup-dcm2niix-base");
+    let home = TempDir::new("nils-setup-dcm2niix-home");
+    let empty = TempDir::new("nils-setup-dcm2niix-path");
+    let dir = base.path().join("nils");
+    let mirror = TempDir::new("nils-setup-dcm2niix-mirror");
+    let zip = zip_of_one(
+        "dcm2niix",
+        b"#!/bin/sh\necho \"Chris Rorden's dcm2niiX version v1.0.20260724 (stand-in)\"\n",
+    );
+    mirror.file(&format!("{DCM2NIIX_VERSION}/{archive}"), &zip);
+    let mirror_url = format!("file://{}", mirror.path().display());
+    let digest = sha256_hex(&zip);
+    let env = [
+        ("NILS_DCM2NIIX_RELEASES", mirror_url.as_str()),
+        ("NILS_DCM2NIIX_TEST_SHA256", digest.as_str()),
+        ("PATH", empty.path().to_str().unwrap()),
+        ("HOME", home.path().to_str().unwrap()),
+    ];
+    let args = [
+        "--parts",
+        "engine",
+        "--dir",
+        dir.to_str().unwrap(),
+        "--no-service",
+        "--channel",
+        &releases.url(),
+    ];
+    let beside = nils.path().parent().unwrap().join("dcm2niix");
+
+    let print: Vec<&str> = ["--print"].iter().chain(args.iter()).copied().collect();
+    let o = setup_env(&nils.path(), config.path(), &print, &env);
+    assert!(o.ok, "{}\n{}", o.stdout, o.stderr);
+    o.says(&format!(
+        "{DCM2NIIX_VERSION} from {mirror_url} into {}, its sha256 pinned",
+        beside.display()
+    ));
+    assert!(!beside.exists(), "--print writes nothing");
+
+    let yes: Vec<&str> = ["--yes"].iter().chain(args.iter()).copied().collect();
+    let o = setup_env(&nils.path(), config.path(), &yes, &env);
+    assert!(o.ok, "{}\n{}", o.stdout, o.stderr);
+    assert!(beside.is_file(), "{}", o.stdout);
+    let state = state_of(config.path());
+    assert!(state.contains("[dcm2niix]"), "{state}");
+    assert!(
+        state.contains(&format!("path = \"{}\"", beside.display())),
+        "{state}"
+    );
+    assert!(
+        state.contains(&format!("version = \"{DCM2NIIX_VERSION}\"")),
+        "{state}"
+    );
+    assert!(state.contains("how = \"placed\""), "{state}");
+    // nothing outside the test's folders: no service, no lingering
+    assert!(state.contains("service = \"none\""), "{state}");
+    assert!(!state.contains("linger"), "{state}");
+    assert!(
+        state.contains(&beside.display().to_string()),
+        "a program of the install: {state}"
+    );
+    // the engine finds it beside itself
+    let o = output(
+        Command::new(nils.path())
+            .args(["--registry", dir.join("registry").to_str().unwrap()])
+            .args(["tools", "list", "--json"])
+            .env("PATH", empty.path())
+            .env("XDG_CONFIG_HOME", config.path()),
+    );
+    let listed: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap();
+    assert_eq!(listed["tools"][0]["found_by"], "beside", "{listed}");
+    assert_eq!(listed["tools"][0]["present"], true, "{listed}");
+
+    // the next run takes nothing: the one placed is the pinned build
+    let written = std::fs::metadata(&beside).unwrap().modified().unwrap();
+    let o = setup_env(&nils.path(), config.path(), &print, &env);
+    o.says("which an earlier setup placed");
+    let o = setup_env(&nils.path(), config.path(), &yes, &env);
+    assert!(o.ok, "{}\n{}", o.stdout, o.stderr);
+    assert_eq!(
+        std::fs::metadata(&beside).unwrap().modified().unwrap(),
+        written
+    );
+
+    // the site names its own: the one setup placed goes, the site's stays
+    let own = TempDir::new("nils-setup-dcm2niix-own");
+    let site = own.file(
+        "dcm2niix",
+        b"#!/bin/sh\necho \"Chris Rorden's dcm2niiX version v1.0.20250505 (the site's)\"\n",
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&site, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let with_site: Vec<&str> = yes
+        .iter()
+        .copied()
+        .chain(["--dcm2niix", site.to_str().unwrap()])
+        .collect();
+    let o = setup_env(&nils.path(), config.path(), &with_site, &env);
+    assert!(o.ok, "{}\n{}", o.stdout, o.stderr);
+    assert!(
+        !beside.exists(),
+        "the build setup placed went: {}",
+        o.stdout
+    );
+    let state = state_of(config.path());
+    assert!(state.contains("how = \"given\""), "{state}");
+    assert!(
+        !state.contains(&beside.display().to_string()),
+        "no longer a program of the install: {state}"
+    );
+
+    // a purge removes the install, and the site's own stays
+    let o = uninstall(
+        &nils.path(),
+        config.path(),
+        home.path(),
+        &["--purge", "--yes"],
+    );
+    assert!(o.ok, "{}\n{}", o.stdout, o.stderr);
+    assert!(!dir.exists(), "{}", o.stdout);
+    assert!(site.is_file(), "the site's dcm2niix stays: {}", o.stdout);
+}
+
+/// 2026-10-12: a site's own dcm2niix, named with --dcm2niix, is taken as it
+/// is and recorded, and nothing is downloaded, mirror or none; an install
+/// whose machine cannot reach the releases still installs, and says how to
+/// take dcm2niix later.
+#[test]
+fn a_dcm2niix_given_is_taken_and_an_unreachable_one_stops_nothing() {
+    let releases = Releases::new("99.0.0");
+    let nils = Installed::new("nils-setup-dcm2niix-given");
+    let config = TempDir::new("nils-setup-dcm2niix-given-config");
+    let base = TempDir::new("nils-setup-dcm2niix-given-base");
+    let empty = TempDir::new("nils-setup-dcm2niix-given-path");
+    let own = TempDir::new("nils-setup-dcm2niix-given-own");
+    let given = own.file(
+        "dcm2niix-site",
+        b"#!/bin/sh\necho \"Chris Rorden's dcm2niiX version v1.0.20250505 (the site's)\"\n",
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&given, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let dir = base.path().join("nils");
+    let env = [
+        ("NILS_DCM2NIIX_RELEASES", "http://127.0.0.1:9"),
+        ("PATH", empty.path().to_str().unwrap()),
+    ];
+    let beside = nils.path().parent().unwrap().join("dcm2niix");
+    let o = setup_env(
+        &nils.path(),
+        config.path(),
+        &[
+            "--yes",
+            "--parts",
+            "engine",
+            "--dir",
+            dir.to_str().unwrap(),
+            "--no-service",
+            "--channel",
+            &releases.url(),
+            "--dcm2niix",
+            given.to_str().unwrap(),
+        ],
+        &env,
+    );
+    assert!(o.ok, "{}\n{}", o.stdout, o.stderr);
+    assert!(!beside.exists(), "nothing downloaded: {}", o.stdout);
+    let state = state_of(config.path());
+    assert!(
+        state.contains(&format!("path = \"{}\"", given.display())),
+        "{state}"
+    );
+    assert!(state.contains("how = \"given\""), "{state}");
+    // an update keeps the site's
+    let o = setup_env(
+        &nils.path(),
+        config.path(),
+        &["--print", "--dir", dir.to_str().unwrap()],
+        &env,
+    );
+    o.says(&format!("{}, as given with --dcm2niix", given.display()));
+
+    // something beside nils that setup did not place is never replaced,
+    // even where it does not run
+    let nils = Installed::new("nils-setup-dcm2niix-broken");
+    let config = TempDir::new("nils-setup-dcm2niix-broken-config");
+    let base = TempDir::new("nils-setup-dcm2niix-broken-base");
+    let dir = base.path().join("nils");
+    let broken = nils.path().parent().unwrap().join("dcm2niix");
+    std::fs::write(&broken, "not a program").unwrap();
+    let o = setup_env(
+        &nils.path(),
+        config.path(),
+        &[
+            "--yes",
+            "--parts",
+            "engine",
+            "--dir",
+            dir.to_str().unwrap(),
+            "--no-service",
+            "--channel",
+            &releases.url(),
+        ],
+        &env,
+    );
+    assert!(o.ok, "{}\n{}", o.stdout, o.stderr);
+    let said = format!("{}{}", o.stdout, o.stderr);
+    assert!(said.contains("does not run as dcm2niix"), "{said}");
+    assert_eq!(std::fs::read_to_string(&broken).unwrap(), "not a program");
+    assert!(!state_of(config.path()).contains("[dcm2niix]"));
+
+    // a machine that cannot reach the releases installs all the same
+    if dcm2niix_archive_here().is_some() {
+        let nils = Installed::new("nils-setup-dcm2niix-offline");
+        let config = TempDir::new("nils-setup-dcm2niix-offline-config");
+        let base = TempDir::new("nils-setup-dcm2niix-offline-base");
+        let dir = base.path().join("nils");
+        let o = setup_env(
+            &nils.path(),
+            config.path(),
+            &[
+                "--yes",
+                "--parts",
+                "engine",
+                "--dir",
+                dir.to_str().unwrap(),
+                "--no-service",
+                "--channel",
+                &releases.url(),
+            ],
+            &env,
+        );
+        assert!(o.ok, "{}\n{}", o.stdout, o.stderr);
+        let said = format!("{}{}", o.stdout, o.stderr);
+        assert!(said.contains("was not installed"), "{said}");
+        assert!(said.contains("nils tools install dcm2niix"), "{said}");
+        assert!(!nils.path().parent().unwrap().join("dcm2niix").exists());
+        assert!(!state_of(config.path()).contains("[dcm2niix]"));
+    }
+}
