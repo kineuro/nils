@@ -27,7 +27,7 @@ use clap::{Args, Subcommand};
 use serde::{Deserialize, Serialize};
 
 use crate::{Exit, fail, usage};
-use crate::{tui, update};
+use crate::{tools, tui, update};
 use nils_registry::home::{Home, InitOptions};
 use nils_registry::{Backend, Scheme};
 
@@ -646,6 +646,14 @@ pub(crate) struct SetupArgs {
     /// eight
     #[arg(long, value_name = "ID", requires = "model_server")]
     model_server_model: Option<String>,
+    /// The dcm2niix a BIDS release and a run with a bids input convert
+    /// with, where the site keeps its own: taken as it is and recorded.
+    /// Without it, an install on this machine keeps one it finds on the
+    /// search path or beside nils, and otherwise downloads the build this
+    /// version pins beside nils, its sha256 checked (NILS_DCM2NIIX_RELEASES
+    /// names a mirror)
+    #[arg(long, value_name = "PATH")]
+    dcm2niix: Option<PathBuf>,
 }
 
 // ---------------------------------------------------------------- the parts
@@ -2414,6 +2422,194 @@ pub(crate) struct Llama {
     pub(crate) loader: bool,
 }
 
+// ---------------------------------------------------------------- dcm2niix
+
+/// dcm2niix as an install takes it (2026-10-12): the converter a BIDS
+/// release and a run with a bids input need, decided when the plan is made.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Converter {
+    /// The site's, named with --dcm2niix now or before: taken as it is.
+    Given(PathBuf),
+    /// Here already: on the search path or beside nils, or placed by an
+    /// earlier run of setup and still the pinned build.
+    Found { path: PathBuf, placed: bool },
+    /// The pinned build, downloaded and checked, placed here.
+    Fetch { into: PathBuf },
+    /// None can be taken here, and why.
+    Unavailable(String),
+}
+
+fn runnable_file(p: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+    }
+    #[cfg(not(unix))]
+    {
+        p.is_file()
+    }
+}
+
+/// What a plan takes of dcm2niix: none where the engine runs in a
+/// container, whose image does not carry it (an admin installs it into the
+/// registry's tools folder from the desk); the site's, where one is given or
+/// on record as given; the one this install placed, while it is the pinned
+/// build and there, and the pinned build again where it is not; one found
+/// on the search path or beside nils; else the pinned build, downloaded
+/// beside nils, where rordenlab publishes one for this machine.
+fn converter_plan(
+    plan: &Plan,
+    given: Option<&Path>,
+    recorded: Option<&ConverterState>,
+) -> Option<Converter> {
+    if plan.runtime.container() {
+        return None;
+    }
+    if let Some(path) = given {
+        return Some(Converter::Given(
+            std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf()),
+        ));
+    }
+    let pinned = |into: PathBuf| match tools::pin_here() {
+        Some(_) => Converter::Fetch { into },
+        None => Converter::Unavailable(tools::no_build_here()),
+    };
+    match recorded {
+        Some(r) if r.how == "given" => return Some(Converter::Given(PathBuf::from(&r.path))),
+        Some(r) if r.placed() => {
+            let path = PathBuf::from(&r.path);
+            return Some(
+                if r.version == tools::DCM2NIIX_VERSION && runnable_file(&path) {
+                    Converter::Found { path, placed: true }
+                } else {
+                    pinned(path)
+                },
+            );
+        }
+        _ => {}
+    }
+    if let Some(path) = which_on_path(tools::DCM2NIIX) {
+        return Some(Converter::Found {
+            path,
+            placed: false,
+        });
+    }
+    let me = std::env::current_exe()
+        .map(|p| std::fs::canonicalize(&p).unwrap_or(p))
+        .unwrap_or_else(|_| PathBuf::from("nils"));
+    let beside = binary_dir(&me, plan).join(tools::DCM2NIIX);
+    if runnable_file(&beside) {
+        return Some(Converter::Found {
+            path: beside,
+            placed: false,
+        });
+    }
+    Some(pinned(beside))
+}
+
+/// A program on this process's search path.
+fn which_on_path(program: &str) -> Option<PathBuf> {
+    nils_pipeline::runtime::which(program, std::env::var_os("PATH").as_deref())
+}
+
+/// The plan's dcm2niix as `--print` says it.
+fn converter_row(plan: &Plan) -> String {
+    match &plan.dcm2niix {
+        None => "not in the engine's image: an admin installs it into the registry's tools \
+                 folder from the desk, or with nils tools install dcm2niix"
+            .to_string(),
+        Some(Converter::Given(path)) => format!("{}, as given with --dcm2niix", path.display()),
+        Some(Converter::Found { path, placed: true }) => format!(
+            "{} at {}, which an earlier setup placed",
+            tools::DCM2NIIX_VERSION,
+            path.display()
+        ),
+        Some(Converter::Found { path, .. }) => format!("{}, here already", path.display()),
+        Some(Converter::Fetch { into }) => format!(
+            "{} from {} into {}, its sha256 pinned",
+            tools::DCM2NIIX_VERSION,
+            match std::env::var(tools::DCM2NIIX_MIRROR_ENV) {
+                Ok(m) if !m.trim().is_empty() => m.trim().to_string(),
+                _ => "rordenlab/dcm2niix".to_string(),
+            },
+            into.display()
+        ),
+        Some(Converter::Unavailable(why)) => why.clone(),
+    }
+}
+
+/// dcm2niix placed and recorded as the plan takes it. A converter that
+/// cannot be taken stops nothing: the install goes on, and the engine
+/// refuses a BIDS release or a bids run until one is there, saying how to
+/// install it. One this install placed is a program of the install, which
+/// an uninstall removes.
+fn place_converter(c: &Converter, state: &mut State, console: &Console) {
+    use nils_release::bids::convert::Converter as Found;
+    let recorded = |path: &Path, version: String, how: &str| ConverterState {
+        path: path.display().to_string(),
+        version,
+        how: how.to_string(),
+    };
+    match c {
+        Converter::Given(path) => {
+            match Found::find(path) {
+                Ok(f) => console.progress(&format!("dcm2niix as given: {}", f.version)),
+                Err(e) => console.warn(&format!("the dcm2niix given does not run: {e}")),
+            }
+            let version = Found::find(path).map(|f| f.version).unwrap_or_default();
+            state.dcm2niix = Some(recorded(path, version, "given"));
+        }
+        Converter::Found { path, placed } => {
+            let version = if *placed {
+                tools::DCM2NIIX_VERSION.to_string()
+            } else {
+                Found::find(path).map(|f| f.version).unwrap_or_default()
+            };
+            console.progress(&format!("dcm2niix at {}", path.display()));
+            state.dcm2niix = Some(recorded(
+                path,
+                version,
+                if *placed { "placed" } else { "found" },
+            ));
+        }
+        Converter::Fetch { into } => {
+            console.doing(&format!("taking dcm2niix {}", tools::DCM2NIIX_VERSION));
+            let taken = tools::fetch_into(into)
+                .map_err(|e| e.said(into))
+                .and_then(|_| {
+                    Found::find(into).map_err(|e| {
+                        let _ = std::fs::remove_file(into);
+                        format!("it was downloaded and does not run here, so it was taken away again: {e}")
+                    })
+                });
+            match taken {
+                Ok(found) => {
+                    state.keep_program(into);
+                    state.dcm2niix = Some(recorded(
+                        into,
+                        tools::DCM2NIIX_VERSION.to_string(),
+                        "placed",
+                    ));
+                    console.progress(&format!(
+                        "dcm2niix {} at {}: {}",
+                        tools::DCM2NIIX_VERSION,
+                        into.display(),
+                        found.version
+                    ));
+                }
+                Err(e) => console.warn(&format!(
+                    "dcm2niix {}, which a BIDS release and a run with a bids input convert with, \
+                     was not installed: {e}; until it is, they are refused with what to do, and \
+                     nils tools install dcm2niix installs it",
+                    tools::DCM2NIIX_VERSION
+                )),
+            }
+        }
+        Converter::Unavailable(why) => console.note(why),
+    }
+}
+
 /// The archive a machine takes by its system, its processor and whether it
 /// has graphics: macOS by its processor; Linux the Vulkan build where there
 /// is a card or a render node, and the CPU build otherwise. None where
@@ -4055,11 +4251,21 @@ pub(crate) struct State {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ConverterState {
     pub(crate) path: String,
+    /// For one setup placed, the pinned build it took; else what the
+    /// converter said of its version.
     #[serde(default)]
     pub(crate) version: String,
-    /// Placed by setup from the pinned release, not found or given.
+    /// given (the site's, named with --dcm2niix), found (on the search
+    /// path or beside nils) or placed (downloaded by setup, and so updated
+    /// and removed with the install).
     #[serde(default)]
-    pub(crate) placed: bool,
+    pub(crate) how: String,
+}
+
+impl ConverterState {
+    pub(crate) fn placed(&self) -> bool {
+        self.how == "placed"
+    }
 }
 
 /// A model server the stations use (record 47): its OpenAI address, the file
@@ -4180,6 +4386,8 @@ fn kept_record_path(dir: &Path) -> PathBuf {
 fn kept_record_of(state: &State) -> State {
     let mut kept = state.clone();
     kept.programs.clear();
+    // a dcm2niix this install placed goes with the programs
+    kept.dcm2niix = kept.dcm2niix.filter(|c| !c.placed());
     kept.helper = None;
     kept.unfinished = false;
     kept
@@ -4326,6 +4534,9 @@ pub(crate) struct Plan {
     /// The model server the stations use, where one was named: Kvasir
     /// holds it as one backend once it answers (record 47).
     pub(crate) model_server: Option<ModelServer>,
+    /// dcm2niix as the install takes it (2026-10-12): none where the engine
+    /// does not run on this machine.
+    pub(crate) dcm2niix: Option<Converter>,
 }
 
 /// The provider the desk signs people in at, as the desk, the engine and
@@ -4611,9 +4822,18 @@ fn plan_and_sources(state: &State, channel: Option<&str>) -> (Plan, Option<(Stri
         closed: Vec::new(),
         node: None,
         model_server: state.model_server.clone(),
+        dcm2niix: None,
     };
     let node = node_for(&plan, Some(&state.node));
-    (Plan { node, ..plan }, read)
+    let dcm2niix = converter_plan(&plan, None, state.dcm2niix.as_ref());
+    (
+        Plan {
+            node,
+            dcm2niix,
+            ..plan
+        },
+        read,
+    )
 }
 
 /// Where a recorded install's desk answers and where it binds: the origin a
@@ -7082,8 +7302,14 @@ fn questions(
         closed: Vec::new(),
         node: None,
         model_server,
+        dcm2niix: None,
     };
     plan.node = node_for(&plan, existing.map(|s| s.node.as_str()));
+    plan.dcm2niix = converter_plan(
+        &plan,
+        args.dcm2niix.as_deref(),
+        existing.and_then(|s| s.dcm2niix.as_ref()),
+    );
     // Every path a unit would keep a part out of is looked at here, as root,
     // the way systemd looks at it before the part starts, now that the
     // places and the accounts are settled. A path the part's account could
@@ -7360,6 +7586,9 @@ fn repair(state: &State, args: &SetupArgs, console: &mut Console) -> Result<(), 
     }
     make_own_dirs(&plan, console)?;
     let mut stages = Vec::new();
+    if matches!(plan.dcm2niix, Some(Converter::Fetch { .. })) {
+        stages.push((Stage::Converter, tools::DCM2NIIX.to_string()));
+    }
     if plan.postgres.is_some() {
         stages.push((Stage::Postgres, format!("Postgres {POSTGRES_MAJOR}")));
     }
@@ -7394,6 +7623,12 @@ fn repair(state: &State, args: &SetupArgs, console: &mut Console) -> Result<(), 
 fn mend(plan: &Plan, state: &State, console: &mut Console) -> Result<Vec<Service>, Exit> {
     // what a repair places is recorded, so the services and an uninstall know it
     let mut state = state.clone();
+    // 2026-10-12: a dcm2niix this install placed, taken again where it went
+    if let Some(c @ Converter::Fetch { .. }) = &plan.dcm2niix {
+        console.begin(Stage::Converter);
+        place_converter(c, &mut state, console);
+        let _ = write_state(&state);
+    }
     // A Postgres this setup runs, started again with its data and password.
     if let Some(pg) = plan.postgres {
         console.begin(Stage::Postgres);
@@ -7597,6 +7832,7 @@ fn plan_rows(plan: &Plan) -> Vec<(&'static str, String)> {
             ),
         ));
     }
+    rows.push((tools::DCM2NIIX, converter_row(plan)));
     if plan.has(Part::Assistant) {
         rows.push((LLAMA_PART, llama_row(plan)));
     }
@@ -8018,6 +8254,7 @@ fn sources_text(plan: &Plan, console: &Console) -> String {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Stage {
     Engine,
+    Converter,
     NodeImage,
     DeskImage,
     Postgres,
@@ -8044,6 +8281,9 @@ fn stages(plan: &Plan, only_update: bool) -> Vec<(Stage, String)> {
         }
     } else {
         out.push((Stage::Engine, "rule packs".to_string()));
+    }
+    if plan.dcm2niix.is_some() {
+        out.push((Stage::Converter, tools::DCM2NIIX.to_string()));
     }
     if plan.postgres.is_some() {
         out.push((Stage::Postgres, format!("Postgres {POSTGRES_MAJOR}")));
@@ -8371,6 +8611,13 @@ fn place(
     );
     console.progress(&format!("engine {} ready", update::VERSION));
     checkpoint(state);
+
+    // 2026-10-12: dcm2niix beside the engine, where it runs on this machine
+    if let Some(c) = &plan.dcm2niix {
+        console.begin(Stage::Converter);
+        place_converter(c, state, console);
+        checkpoint(state);
+    }
 
     // A Postgres this setup runs, up before the registry it holds.
     if let Some(pg) = plan.postgres {
@@ -9954,6 +10201,9 @@ fn new_registry(state: &State, args: &SetupArgs, console: &mut Console) -> Resul
     write_state(&state)?;
     make_own_dirs(&plan, console)?;
     let mut stages = Vec::new();
+    if matches!(plan.dcm2niix, Some(Converter::Fetch { .. })) {
+        stages.push((Stage::Converter, tools::DCM2NIIX.to_string()));
+    }
     if plan.postgres.is_some() {
         stages.push((Stage::Postgres, format!("Postgres {POSTGRES_MAJOR}")));
     }
@@ -19906,6 +20156,7 @@ mod tests {
             closed: Vec::new(),
             node: Some(PathBuf::from("/opt/node/bin/node")),
             model_server: None,
+            dcm2niix: None,
         }
     }
 
@@ -30259,6 +30510,85 @@ mod tests {
             plists[0].1
         );
         assert!(plists[0].1.starts_with("<?xml"), "{}", plists[0].1);
+    }
+
+    /// 2026-10-12: what a plan takes of dcm2niix, decided before anything
+    /// is looked for on the search path: none in a container, the site's
+    /// where given now or on record, the build this install placed while it
+    /// is the pinned one and there, and the pinned build again where not.
+    #[test]
+    fn a_plan_takes_the_site_s_dcm2niix_or_the_pinned_one() {
+        let root = scratch("converter-plan");
+        assert_eq!(
+            converter_plan(&plan(Runtime::Podman), Some(Path::new("/x/dcm2niix")), None),
+            None,
+            "the engine runs in its image"
+        );
+        let machine = plan(Runtime::Machine);
+        assert_eq!(
+            converter_plan(
+                &machine,
+                Some(Path::new("/opt/dcm2niix/bin/dcm2niix")),
+                None
+            ),
+            Some(Converter::Given(PathBuf::from(
+                "/opt/dcm2niix/bin/dcm2niix"
+            )))
+        );
+        let given = ConverterState {
+            path: "/opt/dcm2niix/bin/dcm2niix".into(),
+            version: "v1.0.20250505".into(),
+            how: "given".into(),
+        };
+        assert_eq!(
+            converter_plan(&machine, None, Some(&given)),
+            Some(Converter::Given(PathBuf::from(
+                "/opt/dcm2niix/bin/dcm2niix"
+            )))
+        );
+        let at = root.join("bin").join("dcm2niix");
+        std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+        std::fs::write(&at, "#!/bin/sh\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&at, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let placed = ConverterState {
+            path: at.display().to_string(),
+            version: tools::DCM2NIIX_VERSION.into(),
+            how: "placed".into(),
+        };
+        assert_eq!(
+            converter_plan(&machine, None, Some(&placed)),
+            Some(Converter::Found {
+                path: at.clone(),
+                placed: true
+            })
+        );
+        let older = ConverterState {
+            version: "v1.0.20250506".into(),
+            ..placed.clone()
+        };
+        let taken_again = converter_plan(&machine, None, Some(&older)).unwrap();
+        if tools::pin_here().is_some() {
+            assert_eq!(taken_again, Converter::Fetch { into: at.clone() });
+        } else {
+            assert!(matches!(taken_again, Converter::Unavailable(_)));
+        }
+        std::fs::remove_file(&at).unwrap();
+        assert!(!matches!(
+            converter_plan(&machine, None, Some(&placed)),
+            Some(Converter::Found { placed: true, .. })
+        ));
+        let mut printed = machine.clone();
+        printed.dcm2niix = Some(Converter::Fetch { into: at.clone() });
+        assert!(
+            converter_row(&printed).ends_with(&format!("into {}, its sha256 pinned", at.display()))
+        );
+        printed.dcm2niix = None;
+        assert!(converter_row(&printed).contains("nils tools install dcm2niix"));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
