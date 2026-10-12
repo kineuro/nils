@@ -187,6 +187,30 @@ gate:
         with the captures in it, which is the defect of record 35 this
         gate could not see before the generator wrote one.
 
+    # --- record 55 K7: an aggregate of a quasi identifying field follows
+    # the field, at the detail a fixture names (`detail`, record 25)
+    - name: quasi-aggregates
+      family: record 55
+      question: The spread of each subject's age at the first visit in ms-cohort-a
+      file: fixtures/quasi-aggregates.ask.yml
+      outcome: passes
+      note: >-
+        The bench's grouped question at the gate's own detail, which reads
+        quasi identifying fields: the count of subjects, the youngest, the
+        oldest and the mean age at the first visit, and the count of
+        distinct ages, as values.
+    - name: quasi-aggregates-plain
+      family: record 55
+      question: The same spread, asked at detail plain
+      file: fixtures/quasi-aggregates.ask.yml
+      outcome: passes
+      detail: plain
+      note: >-
+        The same document at detail plain: the youngest, the oldest and the
+        mean age are answered as their shapes, as the age itself is, and the
+        canonical names those three columns as shaped; the two counts read
+        no value and are the numbers of the fixture above.
+
     # --- what this wave does not answer, named rather than hidden
     - name: pair-grain-matching
       family: family 6, pairs

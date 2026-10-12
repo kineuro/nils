@@ -59,6 +59,20 @@ pub struct Answer {
     pub truncated: bool,
     pub content_hash: Option<String>,
     pub elapsed_ms: u64,
+    /// Record 55 K7: the places of the columns answered as their shapes, a
+    /// quasi identifying field read below detail quasi, so that every door
+    /// says which they are (2026-10-12).
+    pub shaped: Vec<usize>,
+}
+
+impl Answer {
+    /// The names of the columns answered as their shapes, in order.
+    pub fn shaped_names(&self) -> Vec<String> {
+        self.shaped
+            .iter()
+            .filter_map(|&i| self.columns.get(i).cloned())
+            .collect()
+    }
 }
 
 fn cell_bytes(c: &Cell) -> usize {
@@ -212,5 +226,6 @@ pub fn run(store: &mut Store, compiled: &Compiled, bounds: Bounds) -> Result<Ans
         truncated,
         content_hash,
         elapsed_ms: started.elapsed().as_millis() as u64,
+        shaped: compiled.shaped_columns.clone(),
     })
 }

@@ -167,7 +167,9 @@ const MAX_DEPTH: usize = 4;
 /// again below detail quasi. Wave 7a: `axis_values` says a value of an axis
 /// was found by every name a row may hold it under, so no answer cached
 /// while a document's identity missed the rows that store the label is
-/// answered again.
+/// answered again. Record 55 K7, 2026-10-12: `shaped` says the handle's
+/// columns name the ones answered as shapes, so a cached answer always says
+/// which they are.
 pub fn suppression_of(scope: &Scope) -> Value {
     let raw = crate::validate::may_project_raw(crate::validate::Class::QuasiIdentifying, scope);
     json!({
@@ -175,6 +177,7 @@ pub fn suppression_of(scope: &Scope) -> Value {
         "sealed": if scope.unsealed { "read" } else { "withheld" },
         "quasi": if raw { "raw" } else { "shape" },
         "axis_values": "any_name",
+        "shaped": "named",
     })
 }
 

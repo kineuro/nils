@@ -84,6 +84,11 @@ pub struct Column {
     pub name: String,
     #[serde(rename = "type")]
     pub type_: String,
+    /// Record 55 K7: the column was answered as its shape, a quasi
+    /// identifying field read below detail quasi (2026-10-12). Absent on a
+    /// column answered raw, and on every column of a handle written before.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub shaped: bool,
 }
 
 /// A handle as read.
@@ -135,6 +140,15 @@ impl Handle {
     /// the key of the run cache and of a saved selection (record 43).
     pub fn bound_hash(&self) -> Option<String> {
         self.ask.as_ref().map(crate::hash::bound_hash)
+    }
+
+    /// The names of the columns answered as their shapes (record 55 K7).
+    pub fn shaped(&self) -> Vec<String> {
+        self.columns
+            .iter()
+            .filter(|c| c.shaped)
+            .map(|c| c.name.clone())
+            .collect()
     }
 }
 
@@ -274,7 +288,8 @@ fn cell_type(c: &Cell) -> Option<&'static str> {
     }
 }
 
-/// The columns of an answer with the type each showed.
+/// The columns of an answer with the type each showed, and whether it was
+/// answered as its shape.
 pub fn columns_of(answer: &Answer) -> Vec<Column> {
     answer
         .columns
@@ -288,6 +303,7 @@ pub fn columns_of(answer: &Answer) -> Vec<Column> {
                 .find_map(|r| r.0.get(i).and_then(cell_type))
                 .unwrap_or("null")
                 .to_string(),
+            shaped: answer.shaped.contains(&i),
         })
         .collect()
 }

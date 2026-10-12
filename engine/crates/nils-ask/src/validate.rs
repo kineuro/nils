@@ -743,8 +743,9 @@ pub fn validate(ask: &Ask, names: &dyn Names, scope: &Scope) -> Result<Validated
     measures_within_detail(ask, scope, &mut issues);
     rows_within_detail(ask, scope, &mut issues);
     out.small_cells = small_cells(ask, scope);
-    out.shaped = shaped_columns(ask, names, scope, &out);
-    measures_of_shapes(ask, &out.shaped, &mut issues);
+    let (shaped, refused) = shapes_of(ask, names, scope, &out);
+    out.shaped = shaped;
+    issues.extend(refused);
 
     let (warnings, errors): (Vec<Issue>, Vec<Issue>) =
         issues.into_iter().partition(|i| i.code.is_warning());
@@ -1643,7 +1644,14 @@ fn check_clause(
             }
         }
     }
-    for cl in all {
+    // the clauses read in this set's namespace: an aggregate's inner clause
+    // reads its target's names and is checked there, so the walk stops at
+    // it, and every clause beside an aggregate is still checked here (it
+    // once stopped at the first aggregate and left the rest of the clause
+    // unchecked)
+    let mut own: Vec<&Clause> = Vec::new();
+    outside_aggregates(c, &mut own);
+    for cl in own {
         let op = cl.op.as_str();
         for key in NAME_OPTIONS {
             if let Some(Value::Bool(b)) = cl.opts.get(*key) {
@@ -1876,24 +1884,51 @@ fn check_clause(
                     )),
                 }
             }
-            "share" => match cl.opts.get("over").and_then(Value::as_str) {
-                // said above: a name read as a boolean
-                None if matches!(cl.opts.get("over"), Some(Value::Bool(_))) => {}
-                None => issues.push(issue(
-                    Code::UnknownSet,
-                    path,
-                    "share names its denominator: {over: <set>}",
-                    "add over",
-                )),
-                Some(over) if !ask.sets.contains_key(over) => issues.push(issue(
-                    Code::UnknownSet,
-                    path,
-                    format!("no set named {over}"),
-                    "name the denominator's set",
-                )),
-                Some(_) => {}
-            },
+            "share" => {
+                // what a share divides is read in this set as a field is,
+                // and held to the caller's classes as one (2026-10-12)
+                match cl.opts.get("of") {
+                    Some(Value::String(of)) => {
+                        match resolve_field(of, set, set_name, ask, so_far, exposed, names, 0) {
+                            Ok(Some(info)) => check_class(&info, of, path, scope, issues),
+                            Ok(None) => {}
+                            Err(m) => issues.push(issue(
+                                Code::UnknownField,
+                                path,
+                                m,
+                                "GET /api/ask/options for what this set exposes",
+                            )),
+                        }
+                    }
+                    // said above: a name read as a boolean
+                    Some(Value::Bool(_)) => {}
+                    _ => issues.push(issue(
+                        Code::UnknownField,
+                        path,
+                        "share names what it divides: {of: <a binding or a field>, over: <set>}",
+                        "add of",
+                    )),
+                }
+                match cl.opts.get("over").and_then(Value::as_str) {
+                    // said above: a name read as a boolean
+                    None if matches!(cl.opts.get("over"), Some(Value::Bool(_))) => {}
+                    None => issues.push(issue(
+                        Code::UnknownSet,
+                        path,
+                        "share names its denominator: {over: <set>}",
+                        "add over",
+                    )),
+                    Some(over) if !ask.sets.contains_key(over) => issues.push(issue(
+                        Code::UnknownSet,
+                        path,
+                        format!("no set named {over}"),
+                        "name the denominator's set",
+                    )),
+                    Some(_) => {}
+                }
+            }
             op if AGGREGATES.contains(&op) => {
+                check_aggregate_form(cl, op, path, issues);
                 match cl.opts.get("set").and_then(Value::as_str) {
                     None => issues.push(issue(
                         Code::UnknownSet,
@@ -1989,10 +2024,84 @@ fn check_clause(
                 ));
             }
         }
-        // an aggregate's inner clause was checked in the target's namespace
-        if AGGREGATES.contains(&op) {
-            break;
+    }
+}
+
+/// Every clause of `c` that reads the namespace `c` is read in, depth
+/// first: an aggregate is listed and its inner clause, which reads its
+/// target set's names, is not.
+fn outside_aggregates<'a>(c: &'a Clause, out: &mut Vec<&'a Clause>) {
+    fn arg<'a>(a: &'a Arg, out: &mut Vec<&'a Clause>) {
+        match a {
+            Arg::Clause(inner) => outside_aggregates(inner, out),
+            Arg::List(items) => items.iter().for_each(|i| arg(i, out)),
+            _ => {}
         }
+    }
+    out.push(c);
+    if !AGGREGATES.contains(&c.op.as_str()) {
+        c.args.iter().for_each(|a| arg(a, out));
+    }
+}
+
+/// An aggregate's form: its one option is `set`, and the column it reads is
+/// its one argument, a clause. The chat sandbox bench of 2026-10-12 wrote
+/// the column as an option (`column:`, `field:`), which was read as
+/// nothing: `min`, `max` and `avg` then totalled the rows' own keys, and an
+/// answer named the youngest and the oldest age while it held row numbers.
+/// `count` and `distinct` read the rows themselves without a column.
+fn check_aggregate_form(cl: &Clause, op: &str, path: &str, issues: &mut Vec<Issue>) {
+    let set = cl
+        .opts
+        .get("set")
+        .and_then(Value::as_str)
+        .unwrap_or("<set>");
+    let rows_alone = matches!(op, "count" | "distinct");
+    let placeholder = "[\"field\", {}, \"<column>\"]".to_string();
+    let form = |column: &str| format!("write [\"{op}\", {{set: {set}}}, {column}]");
+    let mut misplaced = false;
+    for (k, v) in cl.opts.iter().filter(|(k, _)| k.as_str() != "set") {
+        misplaced = true;
+        let next = match v {
+            Value::String(name) => form(&format!("[\"field\", {{}}, \"{name}\"]")),
+            Value::Array(_) => form(&v.to_string()),
+            // a count of the rows themselves takes no column at all
+            _ if rows_alone => format!("write [\"{op}\", {{set: {set}}}]"),
+            _ => form(&placeholder),
+        };
+        issues.push(issue(
+            Code::UnknownField,
+            path,
+            format!(
+                "{op} takes one option, set, and {k} is not one: the column an aggregate reads is its argument, after the options"
+            ),
+            next,
+        ));
+    }
+    if cl.args.len() > 1 {
+        issues.push(issue(
+            Code::UnknownField,
+            path,
+            format!("{op} reads one column; an aggregate of a tuple is not available"),
+            "group by the columns instead",
+        ));
+    }
+    match cl.args.first() {
+        None if !misplaced && !rows_alone => issues.push(issue(
+            Code::UnknownField,
+            path,
+            format!("{op} names the column it reads; without one it would read the rows' own keys"),
+            form(&placeholder),
+        )),
+        Some(a) if !matches!(a, Arg::Clause(_)) => issues.push(issue(
+            Code::UnknownField,
+            path,
+            format!(
+                "{op} reads a column, a clause such as [\"field\", {{}}, \"age\"], not a literal"
+            ),
+            form(&placeholder),
+        )),
+        _ => {}
     }
 }
 
@@ -2258,6 +2367,14 @@ impl Shapes<'_> {
                 let target = c.opts.get("set").and_then(Value::as_str).unwrap_or(set);
                 c.args.iter().any(|a| self.arg(a, target, depth + 1))
             }
+            // a share divides the name its `of` gives by a count the answer
+            // also says, so it carries what it divides: a share of an age
+            // over a set of 38 is the age over 38 (2026-10-12)
+            "share" => c
+                .opts
+                .get("of")
+                .and_then(Value::as_str)
+                .is_some_and(|of| self.path(of, set, 0)),
             _ => c.args.iter().any(|a| self.arg(a, set, depth + 1)),
         }
     }
@@ -2336,90 +2453,159 @@ impl Shapes<'_> {
     }
 }
 
-/// Record 55 K7 (spec §7.1): below detail quasi, a column of the answer that
-/// reads a quasi identifying field is projected as its shape, as the values
-/// sampler shows it, whichever door ran the question (a run, a preview, a
-/// job, and MCP through them). Its use as a filter, an order or a count
-/// stays allowed. Empty at detail quasi and above.
-fn shaped_columns(ask: &Ask, names: &dyn Names, scope: &Scope, v: &Validated) -> BTreeSet<usize> {
-    let mut out = BTreeSet::new();
-    if may_project_raw(Class::QuasiIdentifying, scope) || !ask.sets.contains_key(&ask.out.set) {
-        return out;
-    }
-    let mut s = Shapes {
-        ask,
-        names,
-        scope,
-        v,
-        tainted: BTreeMap::new(),
-    };
-    for name in &v.order {
-        let Some(set) = ask.sets.get(name) else {
-            continue;
+impl<'a> Shapes<'a> {
+    /// The trace of a document below detail quasi: per set, in topological
+    /// order, the names it exposes that read a quasi identifying field. None
+    /// at detail quasi and above, where nothing is shaped.
+    fn traced(
+        ask: &'a Ask,
+        names: &'a dyn Names,
+        scope: &'a Scope,
+        v: &'a Validated,
+    ) -> Option<Shapes<'a>> {
+        if may_project_raw(Class::QuasiIdentifying, scope) || !ask.sets.contains_key(&ask.out.set) {
+            return None;
+        }
+        let mut s = Shapes {
+            ask,
+            names,
+            scope,
+            v,
+            tainted: BTreeMap::new(),
         };
-        let mut t: BTreeSet<String> = BTreeSet::new();
-        // what a set narrows or combines passes its bindings on
-        if let Some(Src::Set(from)) = &set.from {
-            t.extend(s.tainted.get(from).cloned().unwrap_or_default());
-        }
-        if let Some(a) = &set.algebra {
-            for operand in &a.sets {
-                t.extend(s.tainted.get(operand).cloned().unwrap_or_default());
+        for name in &v.order {
+            let Some(set) = ask.sets.get(name) else {
+                continue;
+            };
+            let mut t: BTreeSet<String> = BTreeSet::new();
+            // what a set narrows or combines passes its bindings on
+            if let Some(Src::Set(from)) = &set.from {
+                t.extend(s.tainted.get(from).cloned().unwrap_or_default());
             }
-        }
-        if let Some(g) = &set.group {
-            for c in &g.by {
-                if let Some(p) = c.ref_name()
-                    && s.clause(c, &g.of, 0)
-                {
-                    t.insert(p.to_string());
+            if let Some(a) = &set.algebra {
+                for operand in &a.sets {
+                    t.extend(s.tainted.get(operand).cloned().unwrap_or_default());
+                }
+            }
+            if let Some(g) = &set.group {
+                for c in &g.by {
+                    if let Some(p) = c.ref_name()
+                        && s.clause(c, &g.of, 0)
+                    {
+                        t.insert(p.to_string());
+                    }
+                }
+            }
+            s.tainted.insert(name.clone(), t);
+            // bind reads what was bound before it
+            for (b, c) in &set.bind.0 {
+                if s.clause(c, name, 0) {
+                    s.tainted.entry(name.clone()).or_default().insert(b.clone());
                 }
             }
         }
-        s.tainted.insert(name.clone(), t);
-        // bind reads what was bound before it
-        for (b, c) in &set.bind.0 {
-            if s.clause(c, name, 0) {
-                s.tainted.entry(name.clone()).or_default().insert(b.clone());
-            }
-        }
+        Some(s)
     }
-    for (i, c) in ask.out.columns.iter().enumerate() {
-        if s.clause(c, &ask.out.set, 0) {
-            out.insert(i);
-        }
+
+    /// The places in `out.columns` that read a field below the rule.
+    fn columns(&self) -> BTreeSet<usize> {
+        self.ask
+            .out
+            .columns
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| self.clause(c, &self.ask.out.set, 0))
+            .map(|(i, _)| i)
+            .collect()
     }
-    out
 }
 
-/// A post pass measure over a shaped column would compute over the raw
-/// values a caller may not see; it is refused (record 55 K7).
-fn measures_of_shapes(ask: &Ask, shaped: &BTreeSet<usize>, issues: &mut Vec<Issue>) {
-    if shaped.is_empty() {
-        return;
-    }
+/// Record 55 K7 (spec §7.1): below detail quasi, a column of the answer that
+/// reads a quasi identifying field is projected as its shape, as the values
+/// sampler shows it, whichever door ran the question (a run, a preview, a
+/// job, and MCP through them): the field itself, a binding or a group's key
+/// made from it, a value computed from it, and its `min`, `max`, `sum`,
+/// `avg` and `list` over a set, at every size of the set. Its use as a
+/// filter, an order or a count (`count`, `distinct`) stays allowed. Answers
+/// the shaped places, empty at detail quasi and above, and the measures
+/// refused for reading such a field.
+fn shapes_of(
+    ask: &Ask,
+    names: &dyn Names,
+    scope: &Scope,
+    v: &Validated,
+) -> (BTreeSet<usize>, Vec<Issue>) {
+    let Some(s) = Shapes::traced(ask, names, scope, v) else {
+        return (BTreeSet::new(), Vec::new());
+    };
+    let shaped = s.columns();
+    let mut issues = Vec::new();
+    measures_of_shapes(ask, &shaped, &s, &mut issues);
+    (shaped, issues)
+}
+
+/// A post pass measure that reads a field below the rule would compute
+/// over the raw values a caller may not see, so it is refused (record 55
+/// K7): a measure of a shaped column, and a group's scalar measure
+/// (`stddev`, `median`, `percentile`) of a field of the group's child that
+/// the answer does not carry, which the post pass reads row by row (the
+/// percentiles of an age, 2026-10-12).
+fn measures_of_shapes(
+    ask: &Ask,
+    shaped: &BTreeSet<usize>,
+    s: &Shapes<'_>,
+    issues: &mut Vec<Issue>,
+) {
+    let column_name = |i: usize, c: &Clause| {
+        c.ref_name()
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("col{i}"))
+    };
     let shaped_names: BTreeSet<String> = ask
         .out
         .columns
         .iter()
         .enumerate()
         .filter(|(i, _)| shaped.contains(i))
-        .map(|(i, c)| {
-            c.ref_name()
-                .map(str::to_string)
-                .unwrap_or_else(|| format!("col{i}"))
-        })
+        .map(|(i, c)| column_name(i, c))
         .collect();
+    let carried: BTreeSet<String> = ask
+        .out
+        .columns
+        .iter()
+        .enumerate()
+        .map(|(i, c)| column_name(i, c))
+        .chain(["_key".to_string(), "_subject".to_string()])
+        .collect();
+    let child = ask
+        .sets
+        .get(&ask.out.set)
+        .and_then(|set| set.group.as_ref())
+        .map(|g| g.of.as_str());
     for (i, m) in ask.out.measures.iter().enumerate() {
         for (k, v) in &m.0 {
-            if let Some(of) = v.get("of").and_then(Value::as_str)
-                && shaped_names.contains(of)
-            {
+            let Some(of) = v.get("of").and_then(Value::as_str) else {
+                continue;
+            };
+            if shaped_names.contains(of) {
                 issues.push(issue(
                     Code::ForbiddenField,
                     format!("out.measures[{i}]"),
                     format!(
                         "{k} of {of}: {of} reads a quasi identifying field, which this detail sees only as its shape (record 55 K7)"
+                    ),
+                    "measure another column, or ask for detail quasi",
+                ));
+            } else if let Some(child) = child
+                && crate::measure::is_scalar(k)
+                && !carried.contains(of)
+                && s.path(of, child, 0)
+            {
+                issues.push(issue(
+                    Code::ForbiddenField,
+                    format!("out.measures[{i}]"),
+                    format!(
+                        "{k} of {of}: {of} of {child} reads a quasi identifying field, which this detail sees only as its shape (record 55 K7); its {k} would be read from the values themselves"
                     ),
                     "measure another column, or ask for detail quasi",
                 ));

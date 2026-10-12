@@ -1377,6 +1377,9 @@ fn ask_run(home: &Home, args: AskRunArgs) -> Result<(), Exit> {
                 "content_hash": out.handle.content_hash,
                 "truncated": out.answer.truncated,
                 "columns": out.answer.columns,
+                // record 55 K7: under a queued detail below quasi, the
+                // columns it answered as shapes; none at the keyboard
+                "shaped": out.answer.shaped_names(),
                 "kept": out.kept.iter().map(|k| k.id).collect::<Vec<_>>(),
                 "drift": out.drift,
                 "job": job,

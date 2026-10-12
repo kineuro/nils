@@ -68,10 +68,24 @@ fn fixture(name: &str) -> String {
 fn the_four_fixtures_validate_against_the_real_catalog() {
     let (mut registry, _dir) = registry();
     let catalog = Catalog::build(&mut registry, &pack()).unwrap();
+    // the documents read quasi identifying fields, as the gate runs them
+    let quasi = Scope {
+        classes: [Class::QuasiIdentifying].into_iter().collect(),
+        ..Scope::default()
+    };
     for name in ["yardstick", "gold-a", "gold-b", "gold-c"] {
         let ask = parse(&fixture(name)).unwrap();
-        let prepared =
-            prepare(ask, &catalog, &Scope::default()).unwrap_or_else(|e| panic!("{name}: {e}"));
+        // record 55 K7: at detail plain each validates too, but for gold C's
+        // standard deviation of age, which the post pass would read from the
+        // ages themselves
+        match prepare(ask.clone(), &catalog, &Scope::default()) {
+            Ok(_) => assert_ne!(name, "gold-c", "the stddev of age at plain"),
+            Err(e) => assert!(
+                name == "gold-c" && e.to_string().contains("stddev of age"),
+                "{name}: {e}"
+            ),
+        }
+        let prepared = prepare(ask, &catalog, &quasi).unwrap_or_else(|e| panic!("{name}: {e}"));
         assert!(
             prepared
                 .validated

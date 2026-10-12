@@ -216,6 +216,10 @@ pub struct Preview {
     pub columns: Vec<String>,
     pub rows: Vec<Vec<Value>>,
     pub truncated: bool,
+    /// Record 55 K7: the columns answered as their shapes, by name, so the
+    /// chat can say which values this detail does not show (2026-10-12).
+    #[serde(default)]
+    pub shaped: Vec<String>,
 }
 
 /// A preview of the answer: `rows` rows at record or aggregate level, the
@@ -256,6 +260,7 @@ pub fn preview(
             .map(|r| r.0.iter().map(cell_json).collect())
             .collect(),
         truncated: answer.truncated,
+        shaped: answer.shaped_names(),
     })
 }
 
