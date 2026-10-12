@@ -246,6 +246,17 @@ mod tests {
                 .any(|o| o.template.ends_with("*_desc-n4_biasfield.nii.gz")),
             "n4 declares its bias field"
         );
+        // the two starters that place a FLAIR on the T1w by the headers
+        // alone check the alignment, a flag at 0.85, never a failure
+        for name in ["samseg-lesions", "segcsvd"] {
+            let d = starter(name);
+            let c = d
+                .checks
+                .iter()
+                .find(|c| c.metric == "flair_t1_brain_dice")
+                .unwrap_or_else(|| panic!("{name} checks the FLAIR's alignment"));
+            assert!(c.holds(0.85) && c.holds(0.97) && !c.holds(0.84), "{name}");
+        }
         // mri_synthstrip peaked at 5.7 GB on the CPU; a unit held to 4 GB
         // was killed (record 49 slice G)
         let strip = descriptor::parse(CATALOG[1].1).unwrap();
@@ -327,10 +338,12 @@ mod tests {
     /// release wrote; never a T2w without the token, a token that only
     /// holds the word (`SynFLAIR`), the word in another entity, or another
     /// suffix (a T1-FLAIR). segcsvd names the WMH for the FLAIR's stem
-    /// without its suffix, and its own templates find them. Their command
-    /// lines run on the host, each container path written as a folder of
-    /// the test's, and each tool of the images is a script that keeps its
-    /// words, so no container runs.
+    /// without its suffix, and its own templates find them. Both check the
+    /// FLAIR they took against the session's T1w (the review of
+    /// 2026-10-12) and write the agreement into the unit's table, where it
+    /// had a FLAIR. Their command lines run on the host, each container
+    /// path written as a folder of the test's, and each tool of the images
+    /// is a script that keeps its words, so no container runs.
     #[cfg(unix)]
     #[test]
     fn the_starters_that_read_a_flair_take_it_as_the_release_names_it() {
@@ -395,7 +408,7 @@ mod tests {
 
         // the images' tools: each keeps its words, a line a call, and
         // writes what the command line reads next
-        let stubs: [(&str, &str); 6] = [
+        let stubs: [(&str, &str); 7] = [
             ("sbtResliceLike", r#"printf x > "$3""#),
             (
                 "segment_wmh",
@@ -405,21 +418,28 @@ mod tests {
                 "segment_pvs",
                 r#"printf x > "$4"; printf x > "$(dirname "$4")/thr_pvs.nii.gz""#,
             ),
-            // the volumes of the masks it is given in pairs, each there;
-            // otherwise an image written to its last word
+            // the alignment check, masks that agree; the volumes of the
+            // masks it is given in pairs, each there, and the numbers
+            // beside them; otherwise an image written to its last word
             (
                 "python3",
-                r#"case "$2" in *json.dumps*) shift 2; s=; while [ $# -gt 1 ]; do [ -s "$2" ] || exit 1; s="$s${s:+, }\"$1\": 1.0"; shift 2; done; echo "{$s}";; *) for l; do :; done; printf x > "$l";; esac"#,
+                r#"case "$2" in *threshold_otsu*) echo 0.97;; *json.dumps*) shift 2; s=; while [ $# -gt 1 ]; do v=$2; case "$1" in *_volume) [ -s "$2" ] || exit 1; v=1.0;; esac; s="$s${s:+, }\"$1\": $v"; shift 2; done; echo "{$s}";; *) for l; do :; done; printf x > "$l";; esac"#,
             ),
-            // SAMSEG's folder read for its measures; otherwise an image
-            // written to its last word
+            // the alignment check, masks that agree; SAMSEG's folder read
+            // for its measures, and the numbers after it; otherwise an
+            // image written to its last word
             (
                 "fspython",
-                r#"for l; do :; done; if [ -d "$l" ]; then echo '{"Intra-Cranial": 1500000.0}'; else printf x > "$l"; fi"#,
+                r#"case "$2" in *affine_transform*) echo 0.97;; *samseg.stats*) shift 3; s='"Intra-Cranial": 1500000.0'; while [ $# -gt 1 ]; do s="$s, \"$1\": $2"; shift 2; done; echo "{$s}";; *) for l; do :; done; printf x > "$l";; esac"#,
             ),
             (
                 "run_samseg",
                 r#"while [ $# -gt 0 ]; do [ "$1" = -o ] && o=$2; shift; done; mkdir -p "$o"; printf x > "$o/seg.mgz""#,
+            ),
+            // a brain mask of the image it is given
+            (
+                "mri_synthstrip",
+                r#"while [ $# -gt 0 ]; do [ "$1" = -m ] && m=$2; shift; done; printf x > "$m""#,
             ),
         ];
 
@@ -515,6 +535,25 @@ mod tests {
             want.sort();
             assert_eq!(handed, want, "{name}: {calls}");
 
+            // and the alignment check, each session's T1w beside the same
+            // FLAIR: the T1w and the FLAIR are the first two words after
+            // its code
+            let mut checked: Vec<String> = calls
+                .lines()
+                .map(|l| l.split('\t').collect::<Vec<_>>())
+                .filter_map(|w| match w.as_slice() {
+                    ["python3" | "fspython", "-c", code, t1, flair, ..]
+                        if code.contains("brain masks agree") =>
+                    {
+                        assert!(t1.ends_with("_T1w.nii.gz"), "{name}: {t1}");
+                        Some(flair.to_string())
+                    }
+                    _ => None,
+                })
+                .collect();
+            checked.sort();
+            assert_eq!(checked, want, "{name}: {calls}");
+
             // what each session wrote, each a file its templates find
             let output = root.path().join("output");
             for (ses, t1w, _, flair) in &sessions {
@@ -571,6 +610,27 @@ mod tests {
                         volumes.get("wmh_volume").is_some(),
                         flair.is_some(),
                         "{ses}: {volumes}"
+                    );
+                }
+                // the alignment, a column of the unit's table where it
+                // had a FLAIR to check
+                let table = anat.join(format!(
+                    "{t1}_desc-{}_volumes.json",
+                    name.trim_end_matches("-lesions")
+                ));
+                if flair.is_some() {
+                    let volumes: serde_json::Value =
+                        serde_json::from_slice(&std::fs::read(&table).unwrap()).unwrap();
+                    assert_eq!(
+                        volumes["flair_t1_brain_dice"],
+                        serde_json::json!(0.97),
+                        "{name}, session {ses}: {volumes}"
+                    );
+                } else if let Ok(bytes) = std::fs::read(&table) {
+                    let volumes: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                    assert!(
+                        volumes.get("flair_t1_brain_dice").is_none(),
+                        "{name}, session {ses}: {volumes}"
                     );
                 }
             }

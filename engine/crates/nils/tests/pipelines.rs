@@ -4783,7 +4783,9 @@ fn the_preflight_counts_what_the_run_then_does() {
 /// stood in for by scripts that keep their words, and each unit's needs
 /// made small enough for any machine's lane: SynthSeg's label maps,
 /// segcsvd's WMH segmented on each session's FLAIR and named for it, and
-/// SAMSEG with the FLAIR resampled onto the T1w.
+/// SAMSEG with the FLAIR resampled onto the T1w. Both check each FLAIR
+/// against its T1w first (the review of 2026-10-12), and the session whose
+/// brain masks agree below 0.85 is flagged, never failed.
 #[test]
 fn the_starters_that_read_a_flair_find_it_in_the_release_a_run_makes() {
     if !have("python3") || !have("dcm2niix") {
@@ -4812,7 +4814,7 @@ fn the_starters_that_read_a_flair_find_it_in_the_release_a_run_makes() {
         "l=${{0##*/}}; for a; do l=\"$l\t$a\"; done; printf '%s\\n' \"$l\" >> '{}'",
         log.display()
     );
-    let tools: [(&str, &str); 6] = [
+    let tools: [(&str, &str); 7] = [
         (
             "mri_synthseg",
             r#"while [ $# -gt 0 ]; do case "$1" in --o) o=$2;; --vol) v=$2;; --qc) q=$2;; esac; shift; done
@@ -4829,26 +4831,39 @@ printf 'subject,general white matter,general grey matter,general csf\nx,0.9,0.9,
             "segment_pvs",
             r#"printf x > "$4"; printf x > "$(dirname "$4")/thr_pvs.nii.gz""#,
         ),
-        // SAMSEG's folder read for its measures; otherwise an image written
-        // to its last word
+        // the alignment check, the masks of the first session it is given
+        // agreeing at 0.6, the other's at 0.97; SAMSEG's folder read for
+        // its measures, and the numbers after it; otherwise an image
+        // written to its last word
         (
             "fspython",
-            r#"for l; do :; done; if [ -d "$l" ]; then echo '{"Intra-Cranial": 1500000.0, "Lesions": 1200.0}'; else printf x > "$l"; fi"#,
+            r#"case "$2" in
+*affine_transform*) if mkdir "$(dirname "$0")/samseg-low" 2>/dev/null; then echo 0.60; else echo 0.97; fi;;
+*samseg.stats*) shift 3; s='"Intra-Cranial": 1500000.0, "Lesions": 1200.0'; while [ $# -gt 1 ]; do s="$s, \"$1\": $2"; shift 2; done; echo "{$s}";;
+*) for l; do :; done; printf x > "$l";;
+esac"#,
         ),
         (
             "run_samseg",
             r#"while [ $# -gt 0 ]; do [ "$1" = -o ] && o=$2; shift; done; mkdir -p "$o"; printf x > "$o/seg.mgz""#,
         ),
+        // a brain mask of the image it is given
+        (
+            "mri_synthstrip",
+            r#"while [ $# -gt 0 ]; do [ "$1" = -m ] && m=$2; shift; done; printf x > "$m""#,
+        ),
     ];
     // python3 runs the stand-in podman too: only the image's nibabel steps
-    // are stood in for, the volumes of the masks given in pairs, each there
+    // are stood in for, the alignment check as fspython's is, and the
+    // volumes of the masks given in pairs, each there, beside the numbers
     let python = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
         .map(|d| d.join("python3"))
         .find(|p| p.is_file())
         .unwrap();
     let python3 = format!(
         r#"case "$2" in
-*nibabel*json.dumps*) shift 2; s=; while [ $# -gt 1 ]; do [ -s "$2" ] || exit 1; s="$s${{s:+, }}\"$1\": 1.0"; shift 2; done; echo "{{$s}}"; exit 0;;
+*threshold_otsu*) if mkdir "$(dirname "$0")/segcsvd-low" 2>/dev/null; then echo 0.60; else echo 0.97; fi; exit 0;;
+*nibabel*json.dumps*) shift 2; s=; while [ $# -gt 1 ]; do v=$2; case "$1" in *_volume) [ -s "$2" ] || exit 1; v=1.0;; esac; s="$s${{s:+, }}\"$1\": $v"; shift 2; done; echo "{{$s}}"; exit 0;;
 *nibabel*) for l; do :; done; printf x > "$l"; exit 0;;
 esac
 exec '{}' "$@""#,
@@ -4978,6 +4993,34 @@ exec '{}' "$@""#,
         volumes.iter().all(|t| t["wmh_volume"] == 1.0),
         "{volumes:?}"
     );
+    // the review of 2026-10-12: each unit checks its FLAIR against its
+    // T1w, the agreement a column of its table; the session whose masks
+    // agree below 0.85 is flagged, a pipeline:qc item, and its unit still
+    // succeeded
+    let flagged = |v: &Value, volumes: &[Value]| {
+        let mut dice: Vec<f64> = volumes
+            .iter()
+            .map(|t| t["flair_t1_brain_dice"].as_f64().unwrap_or(f64::NAN))
+            .collect();
+        dice.sort_by(f64::total_cmp);
+        assert_eq!(dice, [0.6, 0.97], "{volumes:?}");
+        assert_eq!(v["summary"]["numbers"]["checks"]["breaches"], 1, "{v}");
+        let items = lab.json(&["review", "list", "--kind", "pipeline:qc", "--json"]);
+        let mine: Vec<&Value> = items["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|i| i["ref"]["run_id"] == v["id"])
+            .collect();
+        assert_eq!(mine.len(), 1, "{items}");
+        assert_eq!(mine[0]["evidence"]["status"], "breach", "{items}");
+        assert_eq!(
+            mine[0]["evidence"]["error"],
+            "flair_t1_brain_dice is 0.6, and the check is flair_t1_brain_dice >= 0.85",
+            "{items}"
+        );
+    };
+    flagged(&v, &volumes);
 
     let v = run("samseg-lesions");
     let resampled = handed("fspython");
@@ -4989,6 +5032,29 @@ exec '{}' "$@""#,
         .filter(|l| l.starts_with("run_samseg\t") && l.contains("\t--lesion\t"))
         .count();
     assert_eq!(lesions, 2, "{calls}");
+    let rows = lab.json(&[
+        "derivative",
+        "list",
+        "--run",
+        &v["id"].to_string(),
+        "--json",
+    ]);
+    let volumes: Vec<Value> = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|d| d["path"].as_str())
+        .filter(|p| p.ends_with("_desc-samseg_volumes.json"))
+        .map(|p| serde_json::from_slice(&std::fs::read(lab.work.path().join(p)).unwrap()).unwrap())
+        .collect();
+    assert_eq!(volumes.len(), 2, "{rows}");
+    flagged(&v, &volumes);
+    // each brain mask made of the session's own two images
+    let stripped = calls
+        .lines()
+        .filter(|l| l.starts_with("mri_synthstrip\t"))
+        .count();
+    assert_eq!(stripped, 4, "{calls}");
 }
 
 /// The descriptors whose masks a check reads (record 55 H3, job type 3):

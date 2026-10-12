@@ -17,6 +17,22 @@
 # reaches this without its FLAIR writes nothing here, so the run makes it
 # a pipeline:qc item.
 #
+# The resampling trusts the image headers alone: nothing registers the
+# FLAIR to the T1w, and SAMSEG needs its inputs aligned. Until NILS has a
+# registration step, each unit checks the alignment (the review of
+# 2026-10-12): mri_synthstrip, which reads any contrast, makes a brain
+# mask of the T1w and one of the FLAIR on the T1w's grid, and the Dice of
+# the two, inside the FLAIR's field of view, is the table's column
+# flair_t1_brain_dice. The check holds it against 0.85 (a NILS policy,
+# from the review's segcsvd QC table): below it the session is flagged, a
+# pipeline:qc item, and not failed, and the unit's log says "FLAIR and T1
+# may not be aligned (brain masks agree at 0.xx)". On three open sessions
+# whose two series share the scanner's coordinates the masks agreed at
+# 0.95 to 0.99, and with the FLAIR moved 15 mm at 0.80 to 0.86: the check
+# catches a FLAIR off by 15 mm or more (a patient who moved, another
+# series), not a few millimetres. A unit whose masks could not be made
+# says so and goes on without the column.
+#
 # The image is FreeSurfer 8.2.0 (run_samseg, surfa in fspython), pinned by
 # its registry manifest digest, resolved 2026-09-24 by a registry manifest
 # request, not pulled. v0 ran SAMSEG standalone (MIT) in a private image;
@@ -81,10 +97,17 @@ command-line: >-
   if [ "[LESION]" = on ]; then
   if [ -z "$fl" ]; then echo "$a holds no FLAIR, so no lesions"; rm -rf "$w"; continue; fi;
   fspython -c "import sys, surfa; surfa.load_volume(sys.argv[1]).resample_like(surfa.load_volume(sys.argv[2])).save(sys.argv[3])" "$fl" "$f" "$w/flair.mgz" || { rm -rf "$w"; continue; };
+  if mri_synthstrip -i "$f" -m "$w/t1_brain.nii.gz" -t [THREADS] && mri_synthstrip -i "$w/flair.mgz" -m "$w/flair_brain.nii.gz" -t [THREADS]
+  && al=$(fspython -c "import sys, numpy as np, nibabel as n, scipy.ndimage as d; t, f, p, q = (n.load(x) for x in sys.argv[1:5]); m = np.linalg.inv(f.affine) @ t.affine;
+  v = d.affine_transform(np.ones(f.shape[:3], np.float32), m[:3, :3], m[:3, 3], t.shape[:3], order=0) > 0.5; a = (np.asarray(p.dataobj) > 0) & v; b = (np.asarray(q.dataobj) > 0) & v;
+  r = round(2 * float((a & b).sum()) / max(int(a.sum() + b.sum()), 1), 2); print(\"%.2f\" % r);
+  r < 0.85 and print(sys.argv[5] + \": FLAIR and T1 may not be aligned (brain masks agree at %.2f)\" % r, file=sys.stderr)" "$f" "$fl" "$w/t1_brain.nii.gz" "$w/flair_brain.nii.gz" "$a") && [ -n "$al" ];
+  then echo "$a: the brain masks of the FLAIR and the T1w agree at $al (Dice)"; else al=""; echo "$a: the FLAIR was not checked against the T1w"; fi;
   run_samseg -i "$f" -i "$w/flair.mgz" --lesion --lesion-mask-pattern 0 1 -o "$w/out" --threads [THREADS] [PALLIDUM] || { rm -rf "$w"; continue; };
-  else run_samseg -i "$f" -o "$w/out" --threads [THREADS] [PALLIDUM] || { rm -rf "$w"; continue; }; fi;
+  else al=""; run_samseg -i "$f" -o "$w/out" --threads [THREADS] [PALLIDUM] || { rm -rf "$w"; continue; }; fi;
   fspython -c "import sys, surfa; surfa.load_volume(sys.argv[1]).save(sys.argv[2])" "$w/out/seg.mgz" "$d/${b}_desc-samseg_dseg.nii.gz" || { rm -rf "$w"; continue; };
-  fspython -c "import sys, json; print(json.dumps(dict((p[0].strip(), float(p[1])) for n in (\"samseg.stats\", \"sbtiv.stats\") for l in open(sys.argv[1] + \"/\" + n) if l.startswith(\"# Measure\") for p in [l[9:].split(\",\")])))" "$w/out" > "$d/${b}_desc-samseg_volumes.json";
+  fspython -c "import sys, json; r = dict((p[0].strip(), float(p[1])) for n in (\"samseg.stats\", \"sbtiv.stats\") for l in open(sys.argv[1] + \"/\" + n) if l.startswith(\"# Measure\") for p in [l[9:].split(\",\")]);
+  r.update(zip(sys.argv[2::2], map(float, sys.argv[3::2]))); print(json.dumps(r))" "$w/out" ${al:+flair_t1_brain_dice $al} > "$d/${b}_desc-samseg_volumes.json";
   rm -rf "$w"; done'
 
 x-nils:
@@ -169,9 +192,11 @@ x-nils:
         - {name: right_hippocampus, unit: mm3}
         - {name: brain_stem, unit: mm3}
         - {name: csf, unit: mm3}
+        - {name: flair_t1_brain_dice, description: "How well the FLAIR sits on the T1w: the Dice of their SynthStrip brain masks on the T1w's grid, inside the FLAIR's field of view; absent when lesions were off"}
   qc:
     - {metric: intracranial, op: ">=", value: 900000, description: "An intracranial volume under 0.9 litres is a failed segmentation more often than a head"}
     - {metric: intracranial, op: "<=", value: 2300000, description: "Over 2.3 litres the segmentation took more than the head"}
+    - {metric: flair_t1_brain_dice, op: ">=", value: 0.85, description: "FLAIR and T1 may not be aligned: their brain masks agree below 0.85 (a NILS policy), and nothing registers them yet"}
   needs:
     cores-input: threads
     gpu: none
