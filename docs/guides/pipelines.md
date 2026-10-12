@@ -100,7 +100,9 @@ A version a person added is never gone over, and a starter a person retired stay
 
 > **Warning:** the starters' images are large (FreeSurfer 8.2.0 is about 14 GB, MRIQC about 5 GB) and are pulled on a run's first use. FreeSurfer recon-all reads the lab's licence as a secret input (record 49 R3) and does not start without it.
 
-> **Warning:** segcsvd (white-matter hyperintensities on the FLAIR, enlarged perivascular spaces on the T1w) reads each session's SynthSeg label map, so run `synthseg` over the selection first: a run of segcsvd with none is refused, and a session without one fails. Its image, segcsvd rc03 as its authors publish it (GPL-3.0), is about 13 GB. A session without a FLAIR gets the perivascular spaces alone.
+> **Warning:** segcsvd (white-matter hyperintensities on the FLAIR, enlarged perivascular spaces on the T1w) reads each session's SynthSeg label map, so run `synthseg` over the selection first: a run of segcsvd with none is refused, and a session without one fails. Its image, segcsvd rc03 as its authors publish it (GPL-3.0), is about 13 GB. A session without a FLAIR gets the perivascular spaces alone. Its WMH model is validated for hyperintensities of vascular origin at 3 T, not for MS lesions.
+
+> **Warning:** SAMSEG with lesions and segcsvd place each FLAIR on its T1w by the image headers alone; nothing registers them yet. Each unit compares a brain mask of the two images and writes their agreement (Dice) to its table as `flair_t1_brain_dice`. Below 0.85 the session is flagged with a `pipeline:qc` item, "FLAIR and T1 may not be aligned", and its results stand: look at the two images together before you use them.
 
 ## Add a pipeline
 

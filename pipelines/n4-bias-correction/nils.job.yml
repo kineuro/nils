@@ -29,6 +29,25 @@
 # Record 49 A4: a starter the engine seeds at boot; the roles a session
 # needs (a picked T1w), its units run apart, and a unit's typical minutes.
 #
+# N4's settings, after the review of 2026-10-12 (ANTs wiki,
+# N4BiasFieldCorrection). The B-spline distance "should always be set
+# explicitly", 100 to 200 mm for a brain, and the wiki's example is 180:
+# it is the knob spline_distance, recorded with every run like the others,
+# with the cubic order (3) fixed. Left out, ANTs fits one mesh element over
+# the whole image. It halves at each of the four levels, so 180 ends at
+# 22.5 mm. The convergence (-c) and the histogram sharpening (-t) are ANTs'
+# own defaults, written out so a reader of the descriptor sees every
+# setting that changes the result. The estimated bias field is written
+# beside the corrected image, as a second output, for a check of the
+# field itself.
+#
+# Pack rules for later, not dependencies of this starter: a brain mask (-x)
+# restricts the fit to the brain, as the wiki advises, but it needs a
+# SynthStrip run first, so a pack rule will run synthstrip and hand its
+# mask to N4; and N4 is redundant before FreeSurfer's recon-all and SAMSEG,
+# which correct the bias themselves, so a pack will not chain it before
+# them.
+#
 # Add it:  nils pipeline add pipelines/n4-bias-correction/nils.job.yml
 # Run it:  nils run n4-bias-correction --select selection:<name>@<v>
 name: n4-bias-correction
@@ -36,8 +55,9 @@ schema-version: "0.5"
 tool-version: "2.6.5.dev1-gfdce4d2"
 description: >-
   Correct the low-frequency intensity non-uniformity (bias field) of each
-  session's T1-weighted image with ANTs N4BiasFieldCorrection. One session is
-  one unit; no GPU, no licence.
+  session's T1-weighted image with ANTs N4BiasFieldCorrection: the corrected
+  image and the estimated bias field. One session is one unit; no GPU, no
+  licence.
 
 container-image:
   type: docker
@@ -62,19 +82,32 @@ inputs:
     integer: true
     minimum: 1
     maximum: 8
+  - id: spline_distance
+    name: Spline distance
+    type: Number
+    description: "The B-spline mesh spacing at the coarsest of N4's four levels, halved at each level; the ANTs wiki gives 100 to 200 mm for a brain, and 180 as its example."
+    value-key: "[SPLINE]"
+    default-value: 180
+    minimum: 100
+    maximum: 200
+    unit: mm
 
 command-line: >-
   bash -c 'set -eu; shopt -s nullglob; cd [InputDataset]; n=0;
   for f in sub-*/ses-*/anat/*_T1w.nii.gz sub-*/ses-*/anat/*_T1w.nii; do
   d=[OutputLocation]/$(dirname "$f"); mkdir -p "$d";
   b=$(basename "$f"); b=${b%.gz}; b=${b%.nii}; b=${b%_T1w};
-  N4BiasFieldCorrection -d [DIM] -s [SHRINK] -i "$f" -o "$d/${b}_desc-n4_T1w.nii.gz";
+  N4BiasFieldCorrection -d [DIM] -s [SHRINK] -b "[[SPLINE],3]" -c "[50x50x50x50,0.0]" -t "[0.15,0.01,200]"
+  -i "$f" -o "[$d/${b}_desc-n4_T1w.nii.gz,$d/${b}_desc-n4_biasfield.nii.gz]";
   n=$((n+1)); done; echo "N4 corrected $n images"'
 
 output-files:
   - id: n4_image
     name: N4 bias-corrected T1w
     path-template: "sub-[SubjectLabel]/ses-[SessionLabel]/anat/*_desc-n4_T1w.nii.gz"
+  - id: bias_field
+    name: N4 bias field
+    path-template: "sub-[SubjectLabel]/ses-[SessionLabel]/anat/*_desc-n4_biasfield.nii.gz"
 
 suggested-resources:
   cpu-cores: 2
@@ -92,6 +125,10 @@ x-nils:
     - id: n4_image
       kind: output
       path-template: "sub-{subject}/ses-{session}/anat/*_desc-n4_T1w.nii.gz"
+      media-type: application/x-nifti+gzip
+    - id: bias_field
+      kind: output
+      path-template: "sub-{subject}/ses-{session}/anat/*_desc-n4_biasfield.nii.gz"
       media-type: application/x-nifti+gzip
   needs:
     gpu: none
