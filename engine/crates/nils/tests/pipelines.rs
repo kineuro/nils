@@ -10394,3 +10394,301 @@ fn a_run_taken_up_again_is_checked_as_a_new_run_is() {
         drop(server);
     });
 }
+
+/// Nima's ruling of 2026-10-12 on pipeline versions: a version that fixes
+/// earlier ones says so (`x-nils.replaces`), and the catalog answers each
+/// name's versions with how each stands: current, selectable, or replaced
+/// by which and why. A replaced version is not offered for a new run: the
+/// run, the pre-flight and the jobs door refuse it naming the version that
+/// replaces it, and only `--replaced` at the keyboard runs it still. Its
+/// old run is read and named as before. On SQLite and on Postgres.
+#[test]
+fn a_replaced_version_is_not_offered_for_a_new_run_and_its_old_run_still_reads() {
+    if !have("python3") {
+        eprintln!("python3 is not installed; the lab needs it, so this test is skipped");
+        return;
+    }
+    on_both("pipelines-versions", "nils_pipelines_versions", |lab| {
+        let image = format!("example.org/stack-echo@sha256:{}", "a".repeat(64));
+        let v1 = stack_echo(&image);
+        lab.add_descriptor("stack-echo-1", &v1);
+        // a run of the first version, before any later one
+        let old = lab.json(&[
+            "run",
+            "stack-echo",
+            "--select",
+            "selection:every@1",
+            "--json",
+        ]);
+        assert_eq!(old["status"], "done", "{old}");
+        assert_eq!(old["pipeline"], "stack-echo@1");
+        let old_id = old["id"].as_i64().unwrap();
+
+        // the second version fixes the first; the third changes what it
+        // makes and replaces nothing, so the second stays selectable
+        let v2 = v1.replace(
+            "  analysis-level: stack\n",
+            "  analysis-level: stack\n  replaces: {why: \"the first counted a stack's files twice\"}\n",
+        );
+        let added = lab.add_descriptor("stack-echo-2", &v2);
+        assert_eq!(added["label"], "stack-echo@2", "{added}");
+        assert_eq!(added["replaces"], json!(["stack-echo@1"]), "{added}");
+        let v3 = v1.replace("tool-version: \"1\"", "tool-version: \"2\"");
+        assert_eq!(
+            lab.add_descriptor("stack-echo-3", &v3)["label"],
+            "stack-echo@3"
+        );
+
+        let listed = lab.json(&["pipeline", "list", "--json"]);
+        let entry = |label: &str| {
+            listed["pipelines"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|p| p["label"] == label)
+                .unwrap_or_else(|| panic!("{label}: {listed}"))
+                .clone()
+        };
+        let (e1, e2, e3) = (
+            entry("stack-echo@1"),
+            entry("stack-echo@2"),
+            entry("stack-echo@3"),
+        );
+        assert_eq!(e1["standing"], "replaced", "{e1}");
+        assert_eq!(e1["replaced_by"], "stack-echo@2", "{e1}");
+        assert_eq!(
+            e1["replaced_why"],
+            "the first counted a stack's files twice"
+        );
+        assert_eq!(e1["state"], "active", "replacing retires nothing");
+        assert_eq!(e2["standing"], "selectable", "{e2}");
+        assert_eq!(e3["standing"], "current", "{e3}");
+        let name = listed["names"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|n| n["name"] == "stack-echo")
+            .unwrap_or_else(|| panic!("{listed}"))
+            .clone();
+        assert_eq!(name["current"], e3["id"], "{name}");
+        assert_eq!(
+            name["offered"],
+            json!([e3["id"], e2["id"]]),
+            "newest first: {name}"
+        );
+        assert_eq!(name["versions"][2]["standing"], "replaced", "{name}");
+        let text = lab.ok(&["pipeline", "list"], None);
+        assert!(
+            text.contains("stack-echo@1 is replaced by stack-echo@2: the first counted"),
+            "{text}"
+        );
+        let shown = lab.ok(&["pipeline", "show", "stack-echo@1"], None);
+        assert!(shown.contains("replaced by stack-echo@2"), "{shown}");
+
+        // a new run of it is refused, naming what replaces it and what a
+        // new run takes; a name alone runs the current version
+        let (good, _, err) = lab.run(
+            &["run", "stack-echo@1", "--select", "selection:every@1"],
+            None,
+        );
+        assert!(!good);
+        assert!(
+            err.contains("stack-echo@1 is replaced by stack-echo@2")
+                && err.contains("a new run takes stack-echo@3")
+                && err.contains("--replaced"),
+            "{err}"
+        );
+        let pre = lab.json(&[
+            "run",
+            "stack-echo@1",
+            "--preflight",
+            "--select",
+            "selection:every@1",
+            "--json",
+        ]);
+        assert!(
+            pre["blockers"]
+                .to_string()
+                .contains("is replaced by stack-echo@2"),
+            "{pre}"
+        );
+        let pre = lab.json(&[
+            "run",
+            "stack-echo@1",
+            "--replaced",
+            "--preflight",
+            "--select",
+            "selection:every@1",
+            "--json",
+        ]);
+        assert!(!pre["blockers"].to_string().contains("replaced"), "{pre}");
+        // asked for by name at the keyboard with --replaced, it runs still
+        let again = lab.json(&[
+            "run",
+            "stack-echo@1",
+            "--replaced",
+            "--select",
+            "selection:every@1",
+            "--json",
+        ]);
+        assert_eq!(again["status"], "done", "{again}");
+        assert_eq!(again["pipeline"], "stack-echo@1");
+        let selectable = lab.json(&[
+            "run",
+            "stack-echo@2",
+            "--select",
+            "selection:every@1",
+            "--json",
+        ]);
+        assert_eq!(selectable["pipeline"], "stack-echo@2", "{selectable}");
+
+        // its old run reads and names it as before
+        let read = lab.json(&["pipeline", "runs", &old_id.to_string(), "--json"]);
+        assert_eq!(read["pipeline"], "stack-echo@1", "{read}");
+        assert_eq!(read["derivatives"].as_array().unwrap().len(), 4, "{read}");
+
+        // the doors: the catalog by name, the run read, the jobs door and
+        // the pre-flight door refuse it, and --replaced is no door's word
+        let server = Server::start(lab);
+        let (status, cat) = server.call("GET", "/api/pipelines", None, OPERATOR);
+        assert_eq!(status, 200, "{cat}");
+        let names = cat["names"].as_array().unwrap();
+        let echo = names.iter().find(|n| n["name"] == "stack-echo").unwrap();
+        assert_eq!(echo["offered"], json!([e3["id"], e2["id"]]), "{echo}");
+        let (status, one) = server.call(
+            "GET",
+            &format!("/api/pipelines/{}", e1["id"]),
+            None,
+            OPERATOR,
+        );
+        assert_eq!(status, 200, "{one}");
+        assert_eq!(one["standing"], "replaced", "{one}");
+        assert_eq!(one["current"], "stack-echo@3", "{one}");
+        let (status, run) = server.call(
+            "GET",
+            &format!("/api/pipeline-runs/{old_id}"),
+            None,
+            OPERATOR,
+        );
+        assert_eq!(status, 200, "{run}");
+        assert_eq!(run["pipeline"], "stack-echo@1", "{run}");
+        let (status, refused) = server.call(
+            "POST",
+            "/api/jobs",
+            Some(json!({"command": ["run", "stack-echo@1", "--select", "selection:every@1"]})),
+            OPERATOR,
+        );
+        assert_eq!(status, 409, "{refused}");
+        assert_eq!(
+            refused["replaced"]["replaced_by"], "stack-echo@2",
+            "{refused}"
+        );
+        assert_eq!(refused["replaced"]["current"], "stack-echo@3", "{refused}");
+        assert!(
+            refused["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("is replaced by stack-echo@2"),
+            "{refused}"
+        );
+        let (status, doc) = server.call(
+            "POST",
+            "/api/jobs",
+            Some(json!({"command": ["run", "stack-echo@1", "--replaced", "--select", "selection:every@1"]})),
+            OPERATOR,
+        );
+        assert_eq!(status, 400, "{doc}");
+        let (status, pre) = server.call(
+            "POST",
+            "/api/pipelines/stack-echo@1/preflight",
+            Some(json!({"select": "selection:every@1"})),
+            OPERATOR,
+        );
+        assert_eq!(status, 200, "{pre}");
+        assert!(
+            pre["blockers"]
+                .to_string()
+                .contains("is replaced by stack-echo@2"),
+            "{pre}"
+        );
+        drop(server);
+    });
+}
+
+/// Nima's ruling of 2026-10-12, at the starters: where a catalog holds an
+/// older starter, the engine seeds the new one as the name's next version,
+/// and the four whose new version fixes the old (recon-all's memory,
+/// MRIQC's `--notrack`, SAMSEG's and segcsvd's FLAIR alignment check)
+/// replace it, while N4's, whose spline distance and bias field change what
+/// it makes, leaves it selectable.
+#[test]
+fn the_starters_that_fix_their_older_versions_replace_them_and_n4_leaves_its_own() {
+    if !have("python3") {
+        eprintln!("python3 is not installed; the lab needs it, so this test is skipped");
+        return;
+    }
+    let lab = Lab::new("pipelines-starter-versions");
+    let fixes = ["freesurfer-recon-all", "mriqc", "samseg-lesions", "segcsvd"];
+    // an older starter of each: today's without what it replaces, and
+    // marked so N4's differs too
+    for name in fixes.iter().chain(&["n4-bias-correction"]) {
+        let text =
+            std::fs::read_to_string(repo().join(format!("pipelines/{name}/nils.job.yml"))).unwrap();
+        let mut old: Vec<&str> = Vec::new();
+        let mut skipping = false;
+        for line in text.lines() {
+            if line == "  replaces:" {
+                skipping = true;
+                continue;
+            }
+            if skipping && line.starts_with("    ") {
+                continue;
+            }
+            skipping = false;
+            old.push(line);
+        }
+        let old = old.join("\n").replace(
+            "  contract: 1\n",
+            "  contract: 1\n  note: an older starter\n",
+        );
+        assert_eq!(lab.add_descriptor(name, &old)["label"], format!("{name}@1"));
+    }
+    lab.store()
+        .batch("UPDATE pipeline SET origin = 'starter'")
+        .unwrap();
+    let seeded = lab.json(&["pipeline", "starter", "--seed", "--json"]);
+    let added: Vec<&str> = seeded["added"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|a| a["label"].as_str())
+        .collect();
+    for name in fixes.iter().chain(&["n4-bias-correction"]) {
+        assert!(added.contains(&format!("{name}@2").as_str()), "{seeded}");
+    }
+    let listed = lab.json(&["pipeline", "list", "--json"]);
+    let standing = |label: &str| {
+        listed["pipelines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["label"] == label)
+            .unwrap_or_else(|| panic!("{label}: {listed}"))["standing"]
+            .clone()
+    };
+    for name in fixes {
+        assert_eq!(standing(&format!("{name}@1")), "replaced", "{name}");
+        assert_eq!(standing(&format!("{name}@2")), "current", "{name}");
+    }
+    assert_eq!(standing("n4-bias-correction@1"), "selectable");
+    assert_eq!(standing("n4-bias-correction@2"), "current");
+    assert_eq!(standing("synthstrip@1"), "current");
+    let (good, _, err) = lab.run(
+        &["run", "samseg-lesions@1", "--select", "selection:every@1"],
+        None,
+    );
+    assert!(
+        !good && err.contains("is replaced by samseg-lesions@2"),
+        "{err}"
+    );
+}

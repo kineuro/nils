@@ -70,6 +70,11 @@ command-line: >-
 x-nils:
   contract: 1
   analysis-level: session
+  # It fixes the earlier versions (the review of 2026-10-12), so a new
+  # run no longer takes them; their runs and results keep their names.
+  # No version list: every earlier version of the name in a catalog.
+  replaces:
+    why: "It declares the 32 GB FreeSurfer 8's recon-all takes; the earlier versions declared 8 GB, and a unit held to that could be killed for memory."
   input:
     layout: bids
     roles: [t1w]

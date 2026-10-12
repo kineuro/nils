@@ -210,6 +210,75 @@ pub struct Secret {
     pub optional: bool,
 }
 
+/// What a version replaces because it fixes it (`x-nils.replaces`, Nima's
+/// ruling of 2026-10-12): the earlier versions of its name a new run no
+/// longer takes, and why. Their runs, derivatives and checks still read and
+/// name them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Replaces {
+    /// The earlier versions it replaces, by number; none is every earlier
+    /// version of the name in the catalog it is added to, which is how a
+    /// descriptor written for many catalogs says it.
+    pub versions: Option<Vec<i64>>,
+    /// Why, in a line a person reads where the older version is refused.
+    pub why: String,
+}
+
+impl Replaces {
+    /// Whether it replaces `version`, an earlier version of its name.
+    pub fn covers(&self, version: i64) -> bool {
+        self.versions.as_ref().is_none_or(|v| v.contains(&version))
+    }
+}
+
+/// `x-nils.replaces` as a document holds it, read without checking the rest
+/// of the descriptor: what the catalog reads of each version it keeps.
+/// None where it says nothing, or says it in a form this version does not
+/// take.
+pub fn replaces_of(document: &Value) -> Option<Replaces> {
+    replaces(&document["x-nils"]).ok().flatten()
+}
+
+fn replaces(x: &Value) -> Result<Option<Replaces>, String> {
+    let r = &x["replaces"];
+    if r.is_null() {
+        return Ok(None);
+    }
+    let at = "x-nils.replaces.";
+    if !r.is_object() {
+        return Err(
+            "x-nils.replaces is a mapping: why, and versions where not every earlier one".into(),
+        );
+    }
+    let why = text(r, "why", at)?.trim().to_string();
+    let versions = match &r["versions"] {
+        Value::Null => None,
+        Value::Array(list) if !list.is_empty() => {
+            let mut out: Vec<i64> = Vec::new();
+            for (i, v) in list.iter().enumerate() {
+                match v.as_i64() {
+                    Some(n) if n >= 1 => {
+                        if !out.contains(&n) {
+                            out.push(n);
+                        }
+                    }
+                    _ => {
+                        return Err(format!("{at}versions[{i}] is a version number, 1 or more"));
+                    }
+                }
+            }
+            out.sort_unstable();
+            Some(out)
+        }
+        _ => {
+            return Err(format!(
+                "{at}versions is a list of earlier version numbers; leave it out for every earlier version"
+            ));
+        }
+    };
+    Ok(Some(Replaces { versions, why }))
+}
+
 /// The image, by its registry manifest digest.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Image {
@@ -455,6 +524,9 @@ pub struct Descriptor {
     /// the run door hold against the place's free space before a run is
     /// queued; none where the descriptor does not say.
     pub disk_gb: Option<f64>,
+    /// The earlier versions of its name it replaces because it fixes them
+    /// (`x-nils.replaces`, 2026-10-12); none where it replaces none.
+    pub replaces: Option<Replaces>,
     /// The document as it parsed, kept whole.
     pub document: Value,
 }
@@ -1144,6 +1216,7 @@ pub fn from_value(document: Value) -> Result<Descriptor, String> {
         Some(g) if g > 0.0 && g.is_finite() => Some(g),
         Some(g) => return Err(format!("x-nils.needs.disk-gb is above 0, not {g}")),
     };
+    let replaces = replaces(x)?;
     Ok(Descriptor {
         name,
         tool_version,
@@ -1165,6 +1238,7 @@ pub fn from_value(document: Value) -> Result<Descriptor, String> {
         geometry,
         unit_minutes,
         disk_gb,
+        replaces,
         document,
     })
 }
@@ -1837,6 +1911,49 @@ x-nils:
             "  type: docker\n  container-hash: sha256:abc\n",
         );
         assert!(parse(&with_hash).unwrap_err().contains("container-hash"));
+    }
+
+    /// Nima's ruling of 2026-10-12: a version that fixes earlier ones says
+    /// so, with why, and which where not every earlier one; a form it does
+    /// not take is refused, and the catalog reads it from a document alone.
+    #[test]
+    fn a_version_says_which_earlier_versions_it_replaces_and_why() {
+        let base = doc(&format!("antsx/ants@sha256:{HEX}"));
+        assert_eq!(parse(&base).unwrap().replaces, None);
+        let with = |r: &str| {
+            base.replace(
+                "  needs: {gpu: optional}",
+                &format!("  needs: {{gpu: optional}}\n  replaces: {r}"),
+            )
+        };
+        let d = parse(&with("{why: \"the old mask was off by a voxel\"}")).unwrap();
+        let r = d.replaces.clone().unwrap();
+        assert_eq!(r.versions, None);
+        assert_eq!(r.why, "the old mask was off by a voxel");
+        assert!(r.covers(1) && r.covers(7), "every earlier version");
+        let d = parse(&with("{versions: [2, 1, 2], why: fixed}")).unwrap();
+        let r = d.replaces.clone().unwrap();
+        assert_eq!(r.versions, Some(vec![1, 2]));
+        assert!(r.covers(2) && !r.covers(3));
+        assert_eq!(replaces_of(&d.document), Some(r));
+        for (bad, words) in [
+            ("{versions: [1]}", "why is required"),
+            ("{why: \"  \"}", "why is required"),
+            ("{versions: [], why: x}", "versions is a list"),
+            ("{versions: [0], why: x}", "versions[0] is a version number"),
+            (
+                "{versions: [one], why: x}",
+                "versions[0] is a version number",
+            ),
+            ("[1]", "x-nils.replaces is a mapping"),
+        ] {
+            let e = parse(&with(bad)).unwrap_err();
+            assert!(e.contains(words), "{bad}: {e}");
+        }
+        assert_eq!(
+            replaces_of(&serde_json::json!({"x-nils": {"replaces": [1]}})),
+            None
+        );
     }
 
     /// Record 55 H3 (section 8.6): a mask output declares the role whose

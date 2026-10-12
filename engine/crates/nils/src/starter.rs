@@ -10,7 +10,11 @@
 //! when the name's newest version is the engine's own starter. A version a
 //! person added, or a starter a person retired, is never gone over. Each
 //! seeded version says `origin: starter`. The setting `pipeline_starter`
-//! (`nils pipeline starter --off`) turns the seeding off.
+//! (`nils pipeline starter --off`) turns the seeding off. A starter whose
+//! new version fixes the earlier ones says so (`x-nils.replaces`, Nima's
+//! ruling of 2026-10-12), and a new run no longer takes those
+//! ([`crate::versions`]); one whose new version changes what it makes, as
+//! N4's spline distance did, leaves them selectable.
 
 use nils_pipeline::descriptor;
 use nils_registry::Registry;
@@ -256,6 +260,23 @@ mod tests {
                 .find(|c| c.metric == "flair_t1_brain_dice")
                 .unwrap_or_else(|| panic!("{name} checks the FLAIR's alignment"));
             assert!(c.holds(0.85) && c.holds(0.97) && !c.holds(0.84), "{name}");
+        }
+        // Nima's ruling of 2026-10-12: a version that fixes the earlier
+        // ones replaces them, so a new run no longer takes them; N4's new
+        // version changes its output (the spline distance, the bias field),
+        // so its earlier version stays selectable
+        for (name, _) in CATALOG {
+            let r = starter(name).replaces;
+            let fixes =
+                ["freesurfer-recon-all", "mriqc", "samseg-lesions", "segcsvd"].contains(&name);
+            assert_eq!(r.is_some(), fixes, "{name} replaces the earlier versions");
+            if let Some(r) = r {
+                assert_eq!(
+                    r.versions, None,
+                    "{name}: every earlier version, in any catalog"
+                );
+                assert!(r.why.len() > 20, "{name} says why");
+            }
         }
         // mri_synthstrip peaked at 5.7 GB on the CPU; a unit held to 4 GB
         // was killed (record 49 slice G)
