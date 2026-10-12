@@ -247,3 +247,48 @@ def test_a_card_decoder_gives_the_cpu_paths_answer(world):
     assert card.meta == cpu.meta == volume.build(st.files, "sagittal").meta
     assert np.array_equal(card.vol, cpu.vol)
     assert card.stats.get("thick_from_file") == cpu.stats.get("thick_from_file") == 1
+
+
+@pytest.mark.parametrize("policy", ["b24", "touched"])
+def test_a_thickness_that_is_not_a_number_is_taken_once(tmp_path, policy):
+    """A file whose SliceThickness reads as NaN: the full reader takes it,
+    and the reduced reader takes it once instead of planning again for ever
+    (NaN never equals itself; the review's nan_thick.py hung 0.4.0's
+    default reader)."""
+    import threading
+
+    import pydicom
+    from pydicom import config
+
+    files, geo = [], []
+    mode = config.settings.writing_validation_mode
+    try:
+        config.settings.writing_validation_mode = config.IGNORE
+        for k in range(12):
+            p = tmp_path / f"{k:03d}.dcm"
+            ipp = [-128.0, -128.0, -30.0 + 5.0 * k]
+            fd.write_slice(p, ipp=ipp, iop=fd.AXIAL, ps=[4.0, 4.0], rows=64, cols=64, thick=5.0, inum=k + 1)
+            ds = pydicom.dcmread(p)
+            ds["SliceThickness"].value = "NaN"
+            ds.save_as(p, enforce_file_format=True)
+            files.append((str(p), None))
+            geo.append({"ipp": ipp, "ps": [4.0, 4.0], "rows": 64, "cols": 64, "inum": k + 1, "frames": None})
+    finally:
+        config.settings.writing_validation_mode = mode
+    done: dict = {}
+
+    def go():
+        try:
+            done["built"] = reduced.build(files, geo, {"iop": fd.AXIAL, "thick": 5.0, "modality": "MR"}, "axial", policy)
+        except Exception as e:  # noqa: BLE001
+            done["error"] = e
+
+    th = threading.Thread(target=go, daemon=True)
+    th.start()
+    th.join(60)
+    assert not th.is_alive(), "the reduced reader plans again for ever"
+    assert "error" not in done, done.get("error")
+    full = volume.build(files, "axial")
+    b = done["built"]
+    assert b.stats.get("thick_from_file") == 1
+    assert np.isnan(b.meta["thick"]) == np.isnan(full.meta["thick"])

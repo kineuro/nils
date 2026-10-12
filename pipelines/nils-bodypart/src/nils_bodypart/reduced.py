@@ -45,6 +45,7 @@ Every count it keeps is a count: no path or header value is logged.
 
 from __future__ import annotations
 
+import math
 import os
 import re
 from dataclasses import dataclass, field
@@ -313,6 +314,19 @@ def files_to_read(files, file_geo, stack_geo, orientation, policy) -> list[str]:
         return []
 
 
+def _same_thickness(a, b) -> bool:
+    """Whether two thicknesses are one: equal numbers, both missing, or
+    both not a number (a header's NaN is the full reader's thickness too,
+    and NaN never equals itself)."""
+    if a is None or b is None:
+        return a is None and b is None
+    try:
+        a, b = float(a), float(b)
+    except (TypeError, ValueError):
+        return False
+    return a == b or (math.isnan(a) and math.isnan(b))
+
+
 def build(files, file_geo, stack_geo, orientation: str | None, policy: str, decode=None, memo: dict | None = None) -> Built:
     """The stack's six planes in a (64, 64, 64) volume that is zero
     elsewhere, and its geometry, as ``volume.build`` gives them for the
@@ -335,6 +349,7 @@ def build(files, file_geo, stack_geo, orientation: str | None, policy: str, deco
     opened: set[str] = memo.setdefault("opened", set())
     ident: dict[str, dict] = memo.setdefault("ident", {})
     bad: set[str] = set()
+    thick_taken = False  # the first kept file's thickness is taken once
     while True:
         p = plan(frames, orientation, policy, bad)
         need = p.need()
@@ -377,11 +392,12 @@ def build(files, file_geo, stack_geo, orientation: str | None, policy: str, deco
             first = heads.get(p.geo[0].path)
             if first is None:
                 first = next((heads[p.geo[p.uniq[t]].path] for t in p.read if p.geo[p.uniq[t]].path in heads), None)
-            if first is not None and first[1] != p.geo[0].thick:
+            if first is not None and not thick_taken and not _same_thickness(first[1], p.geo[0].thick):
                 th = first[1]
                 for f in frames:
                     f.thick = th
                 stats["thick_from_file"] = 1
+                thick_taken = True
                 continue
         pixels: dict[int, np.ndarray] = {}
         failed = False
