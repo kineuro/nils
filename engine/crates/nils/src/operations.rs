@@ -300,17 +300,34 @@ fn body_part(store: &mut Store) -> Result<Result<Plan, Refused>, StoreError> {
         );
     };
     // record 55 E2: a cascade names its parts, each by the input it fills,
-    // and fills the input `cascade` itself
+    // and fills the input `cascade` itself; each part it names must be
+    // registered, not retired, and admitted or promoted, as the model it
+    // stands for would have to be
     let parts = model::parts(store, &head)?;
-    if let Some((name, gone)) = parts.iter().find(|(_, m)| m.state == "retired") {
-        return refused(
-            "no_model",
-            format!(
-                "{} reads its part {name}, {}, which is retired",
-                head.label(),
-                gone.label()
-            ),
-        );
+    let cascade = is_cascade(&head);
+    if cascade {
+        for (name, digest) in head.card["parts"].as_object().into_iter().flatten() {
+            let why = match parts.iter().find(|(n, _)| n == name) {
+                None => format!(
+                    "{} names a part {name}, {}, that is not registered",
+                    head.label(),
+                    digest.as_str().unwrap_or("?")
+                ),
+                Some((_, m)) if m.state == "retired" => format!(
+                    "{} reads its part {name}, {}, which is retired",
+                    head.label(),
+                    m.label()
+                ),
+                Some((_, m)) if !m.answers() => format!(
+                    "{} reads its part {name}, {}, which is {} and neither admitted nor promoted",
+                    head.label(),
+                    m.label(),
+                    m.state
+                ),
+                Some(_) => continue,
+            };
+            return refused("no_model", why);
+        }
     }
     let part = |input: &str| {
         parts
@@ -334,7 +351,7 @@ fn body_part(store: &mut Store) -> Result<Result<Plan, Refused>, StoreError> {
     // part its file names, so it is given that part and no other: a mode
     // naming the cascade could never pass, since the cascade's file would
     // have to hold that mode's digest and the mode the cascade's
-    let coarse = if parts.is_empty() {
+    let coarse = if !cascade {
         let modes = served(store, "axis:body_region", Some(encoder.id))?;
         let named = modes
             .iter()
@@ -356,11 +373,24 @@ fn body_part(store: &mut Store) -> Result<Result<Plan, Refused>, StoreError> {
     let mut models = Vec::new();
     let mut skipped: Option<&str> = None;
     for t in d.inputs.iter().filter(|t| t.ty == "model") {
+        // a cascade fills every input but its own from its parts: the
+        // cascade is never its own head, nor its encoder the encoder
+        if cascade && t.id != "cascade" && t.id != "coarse" && part(&t.id).is_none() {
+            return refused(
+                "no_model",
+                format!(
+                    "{} names no part {}, which {} reads",
+                    head.label(),
+                    t.id,
+                    p.label()
+                ),
+            );
+        }
         let given = match t.id.as_str() {
             "encoder" => part("encoder").or(Some(encoder.id)),
             "head" => part("head").or(Some(head.id)),
             "coarse" => coarse,
-            "cascade" => (!parts.is_empty()).then_some(head.id),
+            "cascade" => cascade.then_some(head.id),
             other => match part(other) {
                 Some(id) => Some(id),
                 None if t.optional => None,

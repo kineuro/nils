@@ -859,7 +859,17 @@ fn round(pg: Option<(String, String)>) {
                          "deferral": deferral_digest}}),
         b"a cascade of the fine mode alone",
     );
-    for m in [cascade, named_coarse, no_coarse] {
+    // and so is one naming no head part: it is never its own head
+    let (no_head, _) = register(
+        &home,
+        &files,
+        json!({"name": "bp-cascade-headless", "version": "t1", "kind": "head", "task": "axis:body_part",
+               "encoders": [{"digest": encoder_digest}, {"digest": student_digest}], "threshold": 0.5,
+               "parts": {"encoder": encoder_digest, "coarse": coarse_digest, "student": student_digest,
+                         "deferral": deferral_digest}}),
+        b"a cascade without its head",
+    );
+    for m in [cascade, named_coarse, no_coarse, no_head] {
         home.ok(&[
             "model",
             "admit",
@@ -895,25 +905,49 @@ fn round(pg: Option<(String, String)>) {
     let (status, dropped) =
         server.call("POST", &format!("/api/jobs/{waiting_job}/cancel"), None, OPS);
     assert_eq!(status, 200, "{dropped}");
-    // promoted, a cascade naming no coarse part is refused
+    // promoted, a cascade is refused at plan time while a part is merely
+    // registered, then for the part it does not name
+    let refusal_of = |server: &Served| -> Value {
+        let s = server.get("/api/datasets/ds/summary", READS);
+        let refusal = step(&s, "body_part")["refusal"].clone();
+        assert_eq!(refusal["reason"], "no_model", "{s}");
+        refusal
+    };
+    home.ok(&["model", "promote", &no_head.to_string()]);
+    let refusal = refusal_of(&server);
+    assert!(
+        refusal["error"]
+            .as_str()
+            .unwrap()
+            .contains("which is registered and neither admitted nor promoted"),
+        "{refusal}"
+    );
+    for m in [encoder, student, deferral] {
+        home.ok(&[
+            "model",
+            "admit",
+            &m.to_string(),
+            "--check",
+            check.to_str().unwrap(),
+        ]);
+    }
+    let refusal = refusal_of(&server);
+    assert!(
+        refusal["error"]
+            .as_str()
+            .unwrap()
+            .contains("names no part head"),
+        "{refusal}"
+    );
     home.ok(&["model", "promote", &no_coarse.to_string()]);
-    let s = server.get("/api/datasets/ds/summary", READS);
-    let refusal = &step(&s, "body_part")["refusal"];
-    assert_eq!(refusal["reason"], "no_model", "{s}");
+    let refusal = refusal_of(&server);
     assert!(
         refusal["error"]
             .as_str()
             .unwrap()
             .contains("names no coarse part"),
-        "{s}"
+        "{refusal}"
     );
-    home.ok(&[
-        "model",
-        "retire",
-        &no_coarse.to_string(),
-        "--why",
-        "it answers no body_region",
-    ]);
     home.ok(&["model", "promote", &cascade.to_string()]);
     let (status, started) = server.run("datasets/ds", "body_part", OPS);
     assert_eq!(status, 202, "{started}");
