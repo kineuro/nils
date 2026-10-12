@@ -11,10 +11,13 @@ model or calibration scores them again in minutes.
   slice), ``bodypart-planes-b24:v1`` and ``bodypart-planes-touched:v1`` (the
   certified encoder's six planes, as the 24-frame and the touched readers
   build them). A new version never matches an old entry.
-- **Key:** each entry's key is the sha256 of its input version and the
-  identity of the files it came from, each file's SOP Instance UID and the
-  sha256 of its bytes, sorted. Never a registry id, so an entry survives
-  the production refresh. The session's file is named by a hash of its
+- **Key:** each entry's key is the sha256 of its input version, the
+  identity of the files it came from (each file's SOP Instance UID, the
+  sha256 of its bytes and the frames of it that are the stack's, empty
+  for every frame), sorted, and a digest of the frames the input was made
+  of (each file's SOP Instance UID and frame from zero, sorted), so the
+  stacks one enhanced file holds are entries of their own. Never a
+  registry id, so an entry survives the production refresh. The session's file is named by a hash of its
   StudyInstanceUID, never the UID itself.
 - **What an entry holds:** the input (the tile, or the six planes with the
   15 geometry numbers, the encoder's six probabilities, the 44 header
@@ -43,24 +46,48 @@ SLICE = "bodypart-slice-192:v1"
 PLANES = {"b24": "bodypart-planes-b24:v1", "touched": "bodypart-planes-touched:v1"}
 
 
-def entry_key(version: str, files: list[tuple[str, str]]) -> str:
-    lines = "\n".join(f"{uid} {sha}" for uid, sha in sorted(files))
-    return hashlib.sha256(f"{version}\n{lines}".encode()).hexdigest()
+def entry_key(version: str, files: list[tuple], kept: str | None = None) -> str:
+    lines = "\n".join(" ".join(str(x) for x in f) for f in sorted(files))
+    text = f"{version}\n{lines}"
+    if kept:
+        text += f"\nkept {kept}"
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+def frames_text(which) -> str:
+    """The frames of a file that are the stack's, as a key writes them:
+    empty for every frame, else each from zero, comma separated."""
+    return "" if which is None else ",".join(str(int(i)) for i in which)
+
+
+def kept_digest(kept, idents: dict | None) -> str | None:
+    """A digest of the frames an input was made of: each file's SOP
+    Instance UID and frame from zero, sorted; None where a file's identity
+    is not known."""
+    rows = []
+    for path, frame in kept or []:
+        uid = ((idents or {}).get(path) or {}).get("sop_instance_uid")
+        if not uid:
+            return None
+        rows.append(f"{uid} {int(frame)}")
+    return hashlib.sha256("\n".join(sorted(rows)).encode()).hexdigest() if rows else None
 
 
 def session_name(study_uid: str) -> str:
     return hashlib.sha256(f"nils-slice-cache-session:{study_uid}".encode()).hexdigest()[:32]
 
 
-def identities(paths, idents: dict | None) -> list[tuple[str, str]] | None:
-    """The (SOP Instance UID, sha256) of each path, or None when one of them
-    was not read whole (a card decodes without the bytes)."""
+def identities(paths, idents: dict | None, frames_of: dict | None = None) -> list[tuple[str, str, str]] | None:
+    """The (SOP Instance UID, sha256, the stack's frames of it) of each
+    path, or None when one of them was not read whole (a card decodes
+    without the bytes); ``frames_of`` maps a path to the stack's frames
+    from zero (None for every frame), as the manifest lists them."""
     out = []
     for p in paths:
         i = (idents or {}).get(p)
         if not i or not i.get("sop_instance_uid") or not i.get("sha256"):
             return None
-        out.append((i["sop_instance_uid"], i["sha256"]))
+        out.append((i["sop_instance_uid"], i["sha256"], frames_text((frames_of or {}).get(p))))
     return out
 
 
@@ -95,12 +122,13 @@ class Writer:
         self.held: dict[tuple[str, str], dict[str, tuple[dict, dict]]] = defaultdict(dict)
         self.counts = {"entries": 0, "sessions_written": 0, "skipped_no_identity": 0}
 
-    def add(self, version: str, study_uid: str | None, files: list[tuple[str, str]] | None, arrays: dict, meta: dict | None = None) -> bool:
-        if not study_uid or not files:
+    def add(self, version: str, study_uid: str | None, files: list[tuple] | None, arrays: dict, meta: dict | None = None,
+            kept: str | None = None) -> bool:
+        if not study_uid or not files or not kept:
             self.counts["skipped_no_identity"] += 1
             return False
-        key = entry_key(version, files)
-        rec = {"version": version, "files": [list(f) for f in sorted(files)], "made_by": self.made_by, **(meta or {})}
+        key = entry_key(version, files, kept)
+        rec = {"version": version, "files": [list(f) for f in sorted(files)], "kept": kept, "made_by": self.made_by, **(meta or {})}
         self.held[(version, study_uid)][key] = (rec, {k: np.asarray(v) for k, v in arrays.items()})
         self.counts["entries"] += 1
         return True

@@ -736,10 +736,14 @@ def _cache_entries(writer, o, r, model) -> None:
     touched planes filled beside an earlier answer)."""
     from . import slicecache, volume
 
+    # each entry is keyed by its files, the stack's frames of each, and the
+    # frames it was made of, so two stacks of one enhanced file are two
+    frames_of = {path: which for path, which in o.stack.files}
     if o.tile is not None and o.tile_ident:
         i = o.tile_ident
-        writer.add(slicecache.SLICE, i.get("study_instance_uid"), [(i.get("sop_instance_uid"), i.get("sha256"))] if i.get("sop_instance_uid") else None,
-                   {"tile": o.tile}, {"slot": 0})
+        own = {o.tile_path: i}
+        writer.add(slicecache.SLICE, i.get("study_instance_uid"), slicecache.identities([o.tile_path], own, frames_of),
+                   {"tile": o.tile}, {"slot": 0}, kept=slicecache.kept_digest([(o.tile_path, 0)], own))
     for res in (r, getattr(r, "filled", None)):
         if res is None or res.planes is None or res.stage not in slicecache.PLANES:
             continue
@@ -748,10 +752,11 @@ def _cache_entries(writer, o, r, model) -> None:
         writer.add(
             slicecache.PLANES[res.stage],
             slicecache.study_of(files, idents),
-            slicecache.identities(files, idents),
+            slicecache.identities(files, idents, frames_of),
             {"planes": res.planes, "geo": volume.Built(None, res.meta).geo(), "image": np.asarray(res.image, np.float32),
              "header44": np.asarray(res.header44, np.float32)},
             {"cohort": res.cohort, "encoder": model.enc.digest},
+            kept=slicecache.kept_digest(res.kept, idents),
         )
 
 

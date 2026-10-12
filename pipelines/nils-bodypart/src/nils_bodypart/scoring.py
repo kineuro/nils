@@ -126,7 +126,7 @@ def climb(model, st: manifest.Stack, ladder: dict, decode=None):
     for policy, need in ladder["stages"]:
         prep = fusion.prepare_reduced(st, policy, decode, memo)
         r = fusion.finish(model, prep, model.encoder.probabilities(prep.built.vol, prep.built.geo()))
-        r.stage, r.read_files = policy, prep.built.read_files
+        r.stage, r.read_files, r.kept = policy, prep.built.read_files, getattr(prep.built, "kept", None)
         if ladder.get("planes"):
             r.planes = fusion.planes_of(prep.built.vol)
         if need is None or cascade.margin(r.answers, ladder["thresholds"]) >= need:
@@ -142,6 +142,7 @@ def climb(model, st: manifest.Stack, ladder: dict, decode=None):
             prep = fusion.prepare_reduced(st, "touched", decode, memo)
             filled = fusion.finish(model, prep, model.encoder.probabilities(prep.built.vol, prep.built.geo()))
             filled.stage, filled.read_files, filled.planes = "touched", prep.built.read_files, fusion.planes_of(prep.built.vol)
+            filled.kept = getattr(prep.built, "kept", None)
         except Exception:  # noqa: BLE001 - the answer stands; the cache goes without
             filled = None
     answer.idents = dict(memo.get("ident") or {})

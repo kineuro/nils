@@ -276,6 +276,7 @@ class StackResult:
     planes: np.ndarray | None = None
     idents: dict | None = None
     read_files: list | None = None
+    kept: list | None = None  # the (file, frame from zero) the planes were made of
     filled: StackResult | None = None  # the touched planes built for the cache where an earlier stage answered
     opened: set | None = None  # the files the stack's reads opened (never written out)
 

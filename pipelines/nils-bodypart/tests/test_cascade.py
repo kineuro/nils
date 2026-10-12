@@ -476,7 +476,8 @@ def test_the_cache_keeps_each_input_by_its_files_identity(world, tmp_path, stand
     assert len(index) == 5  # stacks 21 to 25; 30's slice did not decode
     for key, rec in index.items():
         assert arrays[f"{key}.tile"].shape == (192, 192) and arrays[f"{key}.tile"].dtype == np.uint8
-        assert key == slicecache.entry_key(slicecache.SLICE, [tuple(f) for f in rec["files"]])
+        assert key == slicecache.entry_key(slicecache.SLICE, [tuple(f) for f in rec["files"]], rec["kept"])
+        assert [f[2] for f in rec["files"]] == [""]  # a single frame file: every frame
         assert rec["made_by"]["cascade"] == inp["cascade"]
     touched, ta = slicecache.read(cache, slicecache.PLANES["touched"], cd.study_uid(100))
     assert len(touched) == 6  # 21 to 25 and 29
@@ -498,6 +499,39 @@ def test_the_cache_keeps_each_input_by_its_files_identity(world, tmp_path, stand
         p = ta[f"{key}.planes"]
         v[31], v[32], v[:, 31], v[:, 32], v[:, :, 31], v[:, :, 32] = p
         assert np.allclose(model.encoder.probabilities(v, ta[f"{key}.geo"]), ta[f"{key}.image"], atol=1e-6)
+
+
+def test_two_stacks_of_one_enhanced_file_are_two_cache_entries(tmp_path, stand_in):
+    """One enhanced file whose frames are two stacks (1-6 and 7-12): each
+    stack's planes are an entry of their own, keyed by the stack's frames of
+    the file and the frames its planes were made of (the review's
+    cache_multiframe.py: one entry, the second stack's over the first's)."""
+    src = tmp_path / "source" / "0"
+    positions = [[-128.0, -128.0, -60.0 + 5.0 * k] for k in range(6)] + [[-128.0, -128.0, 100.0 + 5.0 * k] for k in range(6)]
+    fd.write_enhanced(src / "mf.dcm", positions=positions, iop=fd.AXIAL, ps=[4.0, 4.0], rows=64, cols=64, thick=5.0)
+    cd.stamp(src / "mf.dcm", 7)
+    st = []
+    for sid, frames, first in ((41, "1-6", positions[0]), (42, "7-12", positions[6])):
+        f = cd._file("mf.dcm", first, frames=12)
+        f["frames"] = frames
+        st.append(cd._stack(sid, [f], fd.AXIAL, study=7, orientation="axial", sop="1.2.840.10008.5.1.4.1.1.4.1"))
+    (tmp_path / "stacks.json").write_text(json.dumps({"contract": "job/v1", "sources": [{"id": 0, "mount": "/source/0"}], "stacks": st}))
+    inp = cd.add_cascade(fd.write_inputs(tmp_path / "in"), deferral="none", m3=1e9)
+    cache = tmp_path / "cache"
+    code = cli.main(["infer-fusion", "--stacks", str(tmp_path / "stacks.json"), "--source-root", str(tmp_path / "source"), "--inputs",
+                     str(inp["inputs"]), "--output", str(tmp_path / "out"), "--device", "cpu", "--threads", "2", "--cache", str(cache)])
+    assert code == 0
+    t = tables(tmp_path / "out")
+    assert {t[41]["stage"], t[42]["stage"]} == {"touched"}
+    index, arrays = slicecache.read(cache, slicecache.PLANES["touched"], cd.study_uid(7))
+    assert len(index) == 2
+    frames = sorted(rec["files"][0][2] for rec in index.values())
+    assert frames == ["0,1,2,3,4,5", "6,7,8,9,10,11"]
+    # each entry is its own stack's planes: the geometry the table gave
+    ext = sorted(float(arrays[f"{k}.geo"][2]) for k in index)
+    assert ext == sorted(float(t[s]["geometry"]["ext_z"]) for s in (41, 42)) or len(set(ext)) == 2
+    for key, rec in index.items():
+        assert key == slicecache.entry_key(slicecache.PLANES["touched"], [tuple(f) for f in rec["files"]], rec["kept"])
 
 
 # ------------------------------------------------------- the frozen set (opt in)

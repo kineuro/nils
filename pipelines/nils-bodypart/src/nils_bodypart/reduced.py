@@ -464,8 +464,10 @@ def build(files, file_geo, stack_geo, orientation: str | None, policy: str, deco
     meta = _meta(p, meta0)
     b = Built(vol, meta, errors)
     b.stats = stats
-    # the files whose frames the planes were made of, for the slice cache
+    # the files whose frames the planes were made of, and those frames
+    # (each file's frame from zero), for the slice cache's key
     b.read_files = sorted(p.need())
+    b.kept = sorted({(p.geo[p.uniq[t]].path, int(p.geo[p.uniq[t]].index)) for t in p.read})
     return b
 
 
