@@ -4253,11 +4253,11 @@ fn a_registry_at_59_migrates_past_the_check_s_indexes() {
     }
 }
 
-/// 2026-10-12, migration 92, on both backends: a registry from before gains
+/// 2026-10-12, migration 93, on both backends: a registry from before gains
 /// `pipeline_run.failure`, and a failed run keeps its failure beside its
 /// error until it is taken up again.
 #[test]
-fn migration_92_keeps_a_run_s_failure_on_both_backends() {
+fn migration_93_keeps_a_run_s_failure_on_both_backends() {
     use nils_registry::pipeline;
     for (name, _guard, mut store) in stores() {
         migrate::migrate(&mut store, Kind::Registry).unwrap();
@@ -4268,17 +4268,17 @@ fn migration_92_keeps_a_run_s_failure_on_both_backends() {
         store
             .batch(&format!(
                 "ALTER TABLE {r} DROP COLUMN failure;
-                 UPDATE {meta} SET value = '91' WHERE key = 'schema_version'"
+                 UPDATE {meta} SET value = '92' WHERE key = 'schema_version'"
             ))
             .unwrap();
         assert_eq!(
             migrate::standing(&mut store, Kind::Registry).unwrap(),
-            Standing::Behind(91),
+            Standing::Behind(92),
             "{name}"
         );
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            (92..=migrate::SCHEMA_VERSION).collect::<Vec<i64>>(),
+            (93..=migrate::SCHEMA_VERSION).collect::<Vec<i64>>(),
             "{name}"
         );
         assert!(
