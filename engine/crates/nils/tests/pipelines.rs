@@ -1996,8 +1996,8 @@ fn real_containers_run_n4_rootless_with_no_network() {
         assert_eq!(owner(&out.join("kept.txt")), me);
     }
 
-    // N4 over the frozen selection: one derivative per session, and the
-    // same digests again
+    // N4 over the frozen selection: the corrected image and the bias field
+    // of each session, and the same digests again
     let n4 = repo().join("pipelines/n4-bias-correction/nils.job.yml");
     ok(&["pipeline", "add", n4.to_str().unwrap()]);
     let first = ok(&[
@@ -2012,8 +2012,32 @@ fn real_containers_run_n4_rootless_with_no_network() {
     assert_eq!(first["status"], "done", "{first}");
     assert_eq!(first["summary"]["units"]["succeeded"], 2, "{first}");
     assert_eq!(
-        first["summary"]["derivatives"], 2,
-        "one per session: {first}"
+        first["summary"]["derivatives"], 4,
+        "two per session: {first}"
+    );
+    let rows = ok(&[
+        "derivative",
+        "list",
+        "--run",
+        &first["id"].to_string(),
+        "--json",
+    ]);
+    let mut names: Vec<&str> = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|d| d["path"].as_str()?.rsplit_once("_desc-n4_").map(|(_, n)| n))
+        .collect();
+    names.sort();
+    assert_eq!(
+        names,
+        [
+            "T1w.nii.gz",
+            "T1w.nii.gz",
+            "biasfield.nii.gz",
+            "biasfield.nii.gz"
+        ],
+        "{rows}"
     );
     let second = ok(&[
         "run",

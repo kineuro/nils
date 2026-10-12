@@ -192,7 +192,60 @@ mod tests {
                 );
                 assert!(!d.checks.is_empty(), "{name} declares its checks");
             }
+            // a check reads a column its unit writes, else it holds nothing
+            for c in &d.checks {
+                assert!(
+                    d.outputs
+                        .iter()
+                        .filter_map(|o| o.table.as_ref())
+                        .any(|t| t.columns.iter().any(|col| col.name == c.metric)),
+                    "{name}: the check {} reads no column of its tables",
+                    c.text()
+                );
+            }
         }
+        let starter = |name: &str| {
+            let (_, text) = CATALOG.iter().find(|(n, _)| *n == name).unwrap();
+            descriptor::parse(text).unwrap()
+        };
+        // the review of 2026-10-12: FreeSurfer 8's recon-all takes about
+        // 24 GB (release notes) to 80 GB at a peak (install notes)
+        assert!(
+            starter("freesurfer-recon-all").needs.memory_gb >= 32.0,
+            "recon-all declares the memory FreeSurfer 8 takes"
+        );
+        // MRIQC uploads its IQMs and reports usage unless told not to
+        let mriqc = starter("mriqc");
+        let line = mriqc.command_line.as_deref().unwrap_or_default();
+        for flag in ["--no-sub", "--notrack"] {
+            assert!(
+                line.split_whitespace().any(|w| w == flag),
+                "mriqc passes {flag}: {line}"
+            );
+        }
+        // N4 sets its spline distance, convergence and sharpening
+        // explicitly, records the distance as a parameter, and writes the
+        // bias field as an output of its own
+        let n4 = starter("n4-bias-correction");
+        assert_eq!(
+            n4.resolve(&[]).unwrap()["spline_distance"],
+            serde_json::json!(180)
+        );
+        let line = n4.command_line.as_deref().unwrap_or_default();
+        for words in [
+            r#"-b "[[SPLINE],3]""#,
+            r#"-c "[50x50x50x50,0.0]""#,
+            r#"-t "[0.15,0.01,200]""#,
+            r#"_desc-n4_biasfield.nii.gz]""#,
+        ] {
+            assert!(line.contains(words), "n4: {words}: {line}");
+        }
+        assert!(
+            n4.outputs
+                .iter()
+                .any(|o| o.template.ends_with("*_desc-n4_biasfield.nii.gz")),
+            "n4 declares its bias field"
+        );
         // mri_synthstrip peaked at 5.7 GB on the CPU; a unit held to 4 GB
         // was killed (record 49 slice G)
         let strip = descriptor::parse(CATALOG[1].1).unwrap();

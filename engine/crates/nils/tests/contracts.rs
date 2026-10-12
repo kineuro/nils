@@ -530,7 +530,7 @@ fn the_job_contract_is_the_runner_s() {
     assert_eq!(n4.layout, descriptor::Layout::Bids);
     assert_eq!(
         serde_json::Value::Object(n4.resolve(&[]).unwrap()),
-        serde_json::json!({"dimension": 3, "shrink_factor": 4})
+        serde_json::json!({"dimension": 3, "shrink_factor": 4, "spline_distance": 180})
     );
 }
 
