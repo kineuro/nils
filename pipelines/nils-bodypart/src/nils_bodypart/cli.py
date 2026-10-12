@@ -647,7 +647,14 @@ def cmd_infer_fusion(a: argparse.Namespace) -> Run:
 
     model = fusion.load(a.inputs)
     device = _fusion_device(a.device)
-    encoder_device = "cuda" if device == "cuda" and a.encoder_device == "cuda" else "cpu"
+    encoder_device = "cpu"
+    if device == "cuda" and a.encoder_device == "cuda":
+        from .gpu import torch_cuda_available
+
+        if torch_cuda_available():
+            encoder_device = "cuda"
+        else:
+            logger.warning("this torch cannot use the card: the encoder runs on the CPU")
     params = {"threads": a.threads, "models": model.refs(), "preprocessing": volume.PREPROCESSING}
     if a.reader != "full":
         from . import reduced
@@ -766,9 +773,16 @@ def _infer_cascade(a: argparse.Namespace, model, cas, device: str) -> Run:
     from . import cascade as cascade_mod
     from . import fusion, slicecache, volume
 
+    from .gpu import torch_cuda_available
+
+    # the student on the card only where this torch can use one: the CPU
+    # build's torch cannot, even where the decoders see a card
+    student_device = "cuda" if device == "cuda" and torch_cuda_available() else "cpu"
+    if device == "cuda" and student_device == "cpu":
+        logger.warning("this torch cannot use the card: the cascade's student runs on the CPU")
     params = {"threads": a.threads, "models": {**model.refs(), **cas.refs()}, "preprocessing": volume.PREPROCESSING,
               "cascade": {"stages": [s["stage"] for s in cas.doc["stages"]], "deferral_at_least": cas.d3_threshold,
-                          "margin_logit_at_least": cas.m3, "student_device": "cuda" if device == "cuda" else "cpu", "readahead": a.readahead,
+                          "margin_logit_at_least": cas.m3, "student_device": student_device, "readahead": a.readahead,
                           "chunk": a.chunk}}
     if a.cache_fill != "none":
         params["cascade"]["cache_fill"] = a.cache_fill
@@ -787,7 +801,7 @@ def _infer_cascade(a: argparse.Namespace, model, cas, device: str) -> Run:
     stats: dict = {}
     outcomes = cascade_mod.score(model, cas, a.inputs, stacks, workers=a.threads, device=device, chunk=a.chunk, depth=a.readahead,
                                  student_batch=a.student_batch, fill=a.cache_fill == "touched", keep_inputs=writer is not None, stats=stats,
-                                 gpu_workers=a.gpu_workers, context=context)
+                                 gpu_workers=a.gpu_workers, context=context, student_device=student_device)
     counts = {"answered_fine": 0, "answered_coarse": 0, "failed": 0, "cohort_calibrated": 0}
     stages = {"s1": 0, cas.b24: 0, "touched": 0}
     reasons = {k: 0 for k in cascade_mod.REASONS}

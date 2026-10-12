@@ -234,7 +234,7 @@ class Outcome:
 
 def score(model: fusion.Model, cas: Cascade, inputs: Path, stacks: list, *, workers: int = 1, device: str = "cpu", chunk: int = 4,
           depth: int = 1, student_batch: int = 64, fill: bool = False, keep_inputs: bool = False, student_factory=None,
-          stats: dict | None = None, gpu_workers: int = 2, context: list | None = None) -> list[Outcome]:
+          stats: dict | None = None, gpu_workers: int = 2, context: list | None = None, student_device: str | None = None) -> list[Outcome]:
     """Every stack's outcome, in the manifest's order.
 
     First the reasons that need no read: a stack sealed now (``sealed``),
@@ -246,7 +246,9 @@ def score(model: fusion.Model, cas: Cascade, inputs: Path, stacks: list, *, work
     of the session, never scored), so a stack's input is the same in any
     run that holds it; then the planes stages over the rest,
     in worker processes. ``student_factory`` stands in for the student in
-    tests (a callable taking the tiles, slice geometry and tokens)."""
+    tests (a callable taking the tiles, slice geometry and tokens);
+    ``student_device`` is where the student runs (by default the card where
+    ``device`` is one and this torch can use it, else the CPU)."""
     from . import fewslice, scoring
     from .results import SKIPPED
 
@@ -291,7 +293,13 @@ def score(model: fusion.Model, cas: Cascade, inputs: Path, stacks: list, *, work
     if cands and student_factory is None:
         from .student import Student
 
-        net = Student(cas.student.artifact, device="cuda" if device == "cuda" else "cpu", threads=max(1, workers))
+        if student_device is None:
+            from .gpu import torch_cuda_available
+
+            student_device = "cuda" if device == "cuda" and torch_cuda_available() else "cpu"
+        # loaded before any slice is read, so a student that cannot load
+        # fails the run before its reads
+        net = Student(cas.student.artifact, device=student_device, threads=max(1, workers))
     pending: list = []  # (candidate, read) decoded, waiting for the student
 
     def stage1(take: list) -> None:

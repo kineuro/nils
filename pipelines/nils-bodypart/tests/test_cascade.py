@@ -394,12 +394,32 @@ def test_the_cascade_passes_gpu_workers_on(world, tmp_path, stand_in, monkeypatc
         return real(*args, **{**kw, "device": "cpu"})  # no card in a test
 
     monkeypatch.setattr(gpu, "cuda_available", lambda: True)
+    monkeypatch.setattr(gpu, "torch_cuda_available", lambda: True)  # the stand-in student never touches it
     monkeypatch.setattr(scoring, "score", spy)
     inp = inputs(world, tmp_path, deferral="all")
     code, r = run(world, inp, tmp_path / "out", "--device", "cuda", "--gpu-workers", "0")
     assert code == 0, r.get("error")
     assert seen and set(seen) == {("cuda", 0)}
     assert (r["params"]["gpu_workers"], r["params"]["cascade"]["student_device"]) == (0, "cuda")
+
+
+def test_a_cpu_torch_runs_the_student_on_the_cpu_where_a_card_is_seen(world, tmp_path, monkeypatch):
+    """The image's CPU build on a machine with a card: the decoders see the
+    card, and torch cannot use it. A cascade run with --device cuda (or
+    auto) crashed in the student; it runs the student on the CPU now and
+    says so (the review's cpu_torch_cuda.py)."""
+    import torch
+
+    from nils_bodypart import gpu
+
+    monkeypatch.setattr(gpu, "cuda_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    stu = cd.write_student(tmp_path / "student.safetensors")
+    inp = inputs(world, tmp_path, deferral="all", student=stu)
+    code, r = run(world, inp, tmp_path / "out", "--device", "cuda", "--gpu-workers", "0")
+    assert code == 0, r.get("error")
+    assert r["params"]["cascade"]["student_device"] == "cpu"
+    assert r["metrics"]["stages"]["s1"] >= 1
 
 
 def test_d3_decides_at_its_threshold(world, tmp_path):
