@@ -230,6 +230,10 @@ def frozen_inputs(models: Path, dest: Path) -> Path:
             target.symlink_to(art)
         d = fd.digest(art)
         card = json.loads(card_path.read_text()) if card_path is not None else {"name": f"bodypart-{inp}", "version": "r7-fast", "digest": d}
+        if inp == "cascade":
+            # the cascade's card carries its head's threshold, at which the
+            # engine stages its body_part decisions
+            card["threshold"] = json.loads((reg / "card-head.json").read_text())["threshold"]
         models_doc.append({"input": inp, "model_id": i + 1, "name": card.get("name"), "version": card.get("version"), "digest": d,
                            "kind": card.get("kind", "head"), "card": card, "encoder_model_ids": [], "artifact": f"/inputs/{inp}/{art.name}"})
     doc = {"contract": 1, "run": 1, "pipeline": {"name": "bodypart-infer-fusion", "version": 1}, "params": {}, "level": "stack", "layout": "stacks",

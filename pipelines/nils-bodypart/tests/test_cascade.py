@@ -434,6 +434,27 @@ def test_a_cascade_that_does_not_name_the_runs_parts_is_refused(world, tmp_path)
     assert code == 1 and "cascade" in r["error"]
 
 
+@pytest.mark.parametrize("threshold", [0.6, None, "0.5"])
+def test_a_cascade_card_without_the_heads_threshold_is_refused(world, tmp_path, threshold):
+    """The engine stages a body_part decision at the threshold of the card
+    that names it, the cascade's, so the cascade's card must carry the
+    head's threshold: another, none or one that is not a number is refused."""
+    inp = inputs(world, tmp_path)
+    root = inp["inputs"]
+    mf = json.loads((root / "manifest.json").read_text())
+    entry = next(m for m in mf["models"] if m["input"] == "cascade")
+    model = fusion.load(root)
+    assert entry["card"]["threshold"] == model.fine_threshold
+    assert cascade.load(root, model) is not None
+    if threshold is None:
+        del entry["card"]["threshold"]
+    else:
+        entry["card"]["threshold"] = threshold
+    (root / "manifest.json").write_text(json.dumps(mf))
+    with pytest.raises(cascade.CascadeError, match="threshold"):
+        cascade.load(root, fusion.load(root))
+
+
 def test_a_coarse_mode_naming_the_cascade_is_refused(world, tmp_path):
     """A coarse mode names the head it sums. One naming the cascade (the
     coarse twin ruling R1 (a) described) can never be the part the cascade's

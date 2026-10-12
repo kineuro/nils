@@ -108,6 +108,12 @@ def load(inputs: Path, model: fusion.Model) -> Cascade | None:
         for k, v in card_parts.items():
             if k in given and v != given[k]:
                 raise CascadeError(f"the cascade's card names another {k} than its file")
+    # the engine stages each body_part decision at the threshold of the
+    # card that names it, the cascade's: it must be the head's, or the
+    # engine would stage what the run said abstains, or the reverse
+    ct = cas.card.get("threshold")
+    if isinstance(ct, bool) or not isinstance(ct, (int, float)) or abs(float(ct) - float(model.fine_threshold)) > 1e-9:
+        raise CascadeError("the cascade's card names no threshold, or not the head's")
     th = doc.get("thresholds") or {}
     for mode, have in (("fine", model.fine_threshold), ("coarse", model.coarse_threshold)):
         t = th.get(mode)
