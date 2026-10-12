@@ -650,20 +650,20 @@ paths:
         "200": {description: The model}
         "400": {description: Not a check}
         "404": {description: No such model}
-        "409": {description: The model is promoted or retired}
+        "409": {description: "The model is promoted or retired, or (record 55 E2) a cascade with a retired part"}
   /api/models/{id}/promote:
     post:
       summary: Promote a model in its task and slot (nils model promote)
-      description: "Refused unless the model was admitted by a check that passed. The model promoted before it in the same task and slot is retired, so a slot holds at most one promoted model. review_item names the item a person accepted to promote it, when one did. Under models:work; an audit row."
+      description: "Refused unless the model was admitted by a check that passed. The model promoted before it in the same task and slot is retired, so a slot holds at most one promoted model; since record 55 E2 a cascade retires none of its parts and a part none of the cascades that read it. review_item names the item a person accepted to promote it, when one did. Under models:work; an audit row."
       parameters: [{name: id, in: path, required: true, schema: {type: integer}}]
       requestBody:
         content:
           application/json:
             schema: {type: object, properties: {review_item: {type: integer}, why: {type: string}}}
       responses:
-        "200": {description: "{model, retired: model | null}"}
+        "200": {description: "{model, retired: model | null, retired_models: [model]}: retired_models (record 55 E2, added in place) names every model the promotion retired, by id, since a cascade and the head it reads are retired together; retired is the first of them, or null, as before"}
         "404": {description: No such model}
-        "409": {description: "Not admitted, or promoted or retired already"}
+        "409": {description: "Not admitted, or promoted or retired already; since record 55 E2 also a cascade with a retired part, and a promotion that would retire a part of an admitted or promoted cascade, which is named"}
   /api/models/{id}/retire:
     post:
       summary: Retire a model (nils model retire)
@@ -676,7 +676,7 @@ paths:
       responses:
         "200": {description: The model}
         "404": {description: No such model}
-        "409": {description: Retired already}
+        "409": {description: "Retired already, or (record 55 E2) a part of an admitted or promoted cascade, which is named and goes first"}
   /api/picks:
     post:
       summary: A person's pick, which a pick run leaves standing (record 42 S3; nils pick set)

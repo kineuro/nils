@@ -1014,8 +1014,10 @@ pub fn admit(registry: &mut Registry, id: i64, check: &Value, who: &str) -> Resu
 #[derive(Debug, Clone, PartialEq)]
 pub struct Promoted {
     pub model: Model,
-    /// The model promoted before it in the same task and slot, retired now.
-    pub retired: Option<Model>,
+    /// Every model promoted before it in the same task and slot, retired
+    /// now, by id: one, or none, but a cascade and the head it reads go
+    /// together (record 55 E2).
+    pub retired: Vec<Model>,
 }
 
 /// Promote a model: refused unless it was admitted by a check that passed.
@@ -1159,10 +1161,10 @@ pub fn promote(
         Ok(())
     })?;
     let model = known(registry.store(), id)?;
-    let retired = match before.first() {
-        Some(old) => Some(known(registry.store(), *old)?),
-        None => None,
-    };
+    let mut retired = Vec::with_capacity(before.len());
+    for old in &before {
+        retired.push(known(registry.store(), *old)?);
+    }
     audit_row(
         registry,
         Action::ModelPromote,

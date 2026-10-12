@@ -1848,7 +1848,7 @@ fn a_cascade_names_its_parts_and_promoting_it_retires_none_on_both_backends() {
         model::admit(&mut reg, cascade.id, &passed, "anna@ward-3").unwrap();
         let promoted =
             model::promote(&mut reg, cascade.id, "anna@ward-3", None, Some("faster")).unwrap();
-        assert_eq!(promoted.retired, None, "{name}");
+        assert!(promoted.retired.is_empty(), "{name}");
         assert_eq!(
             model::get(reg.store(), head.id).unwrap().unwrap().state,
             "promoted",
@@ -1858,9 +1858,12 @@ fn a_cascade_names_its_parts_and_promoting_it_retires_none_on_both_backends() {
         let other = add(&mut reg, serde_json::json!({"name": "fusion", "version": "2", "kind": "head", "digest": digest('2'), "task": "axis:body_part", "encoders": [{"digest": digest('e')}]})).unwrap();
         model::admit(&mut reg, other.id, &passed, "anna@ward-3").unwrap();
         let plain = model::promote(&mut reg, other.id, "anna@ward-3", None, None).unwrap();
-        assert!(
-            plain.retired.is_some(),
-            "{name}: a plain head retires the slot's"
+        let mut gone: Vec<i64> = plain.retired.iter().map(|m| m.id).collect();
+        gone.sort_unstable();
+        assert_eq!(
+            gone,
+            [head.id, cascade.id],
+            "{name}: a plain head retires the slot's, the cascade and the head it reads, and says both"
         );
         for id in [head.id, cascade.id] {
             assert_eq!(
@@ -1916,7 +1919,7 @@ fn a_served_cascade_keeps_its_parts_on_both_backends() {
         model::promote(&mut reg, cascade.id, who, None, None).unwrap();
         // promoting the cascade's own head retires no cascade that reads it
         let p = model::promote(&mut reg, head.id, who, None, None).unwrap();
-        assert_eq!(p.retired, None, "{name}");
+        assert!(p.retired.is_empty(), "{name}");
         assert_eq!(state(&mut reg, cascade.id), "promoted", "{name}");
         // a new coarse mode would retire the cascade's coarse part: refused,
         // naming the cascade, and nothing moves
@@ -2048,7 +2051,7 @@ fn the_model_registry_keeps_its_rules_on_both_backends() {
         );
         model::admit(&mut reg, one.id, &passed, "anna@ward-3").unwrap();
         let first = model::promote(&mut reg, one.id, "anna@ward-3", None, None).unwrap();
-        assert_eq!(first.retired, None, "{name}");
+        assert!(first.retired.is_empty(), "{name}");
         // the second promotion in the slot retires the first
         let two = model::register(
             &mut reg,
@@ -2059,11 +2062,11 @@ fn the_model_registry_keeps_its_rules_on_both_backends() {
         model::admit(&mut reg, two.id, &passed, "anna@ward-3").unwrap();
         let second = model::promote(&mut reg, two.id, "anna@ward-3", None, Some("better")).unwrap();
         assert_eq!(
-            second.retired.as_ref().map(|m| m.id),
-            Some(one.id),
+            second.retired.iter().map(|m| m.id).collect::<Vec<_>>(),
+            [one.id],
             "{name}"
         );
-        assert_eq!(second.retired.unwrap().state, "retired", "{name}");
+        assert_eq!(second.retired[0].state, "retired", "{name}");
         let promoted = model::list(
             reg.store(),
             &model::Filter {

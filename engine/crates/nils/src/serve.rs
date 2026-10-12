@@ -4348,7 +4348,13 @@ fn routed(
             .map_err(model_err)?;
             Ok(Reply::ok(serde_json::json!({
                 "model": done.model.to_json(),
-                "retired": done.retired.as_ref().map(nils_registry::model::Model::to_json),
+                // the first, as before, and since record 55 E2 every one
+                "retired": done.retired.first().map(nils_registry::model::Model::to_json),
+                "retired_models": done
+                    .retired
+                    .iter()
+                    .map(nils_registry::model::Model::to_json)
+                    .collect::<Vec<_>>(),
             })))
         }
         ["api", "models", _, "retire"] if post => {
