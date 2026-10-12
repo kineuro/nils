@@ -2798,6 +2798,8 @@ exit 1
 /// A pipeline of the stacks layout whose units run apart (record 49 A1):
 /// each unit sees its own stack alone, notes when it starts and ends in the
 /// file `LANE_TRACE` names, waits while the file `SLOW_HOLD` names is there,
+/// and, where `SLOW_GATE` names a gate, notes its process in
+/// `<gate>-<unit>.pid` and waits until `<gate>-<unit>` is there; then
 /// sleeps, and writes one file.
 fn stack_slow(name: &str, needs: &str, extra: &str) -> String {
     format!(
@@ -2829,6 +2831,12 @@ command-line: |
   hold = os.environ.get("SLOW_HOLD")
   while hold and os.path.exists(hold):
       time.sleep(0.05)
+  gate = os.environ.get("SLOW_GATE")
+  if gate:
+      gate = gate + "-" + os.environ["NILS_UNIT"]
+      open(gate + ".pid", "w").write(str(os.getpid()))
+      while not os.path.exists(gate):
+          time.sleep(0.05)
   time.sleep(float(sys.argv[3]))
   s = m["stacks"][0]; u = s["unit"]; d = os.path.join(out, u); os.makedirs(d, exist_ok=True)
   open(os.path.join(d, "out.txt"), "w").write("stack %d\n" % s["stack_id"])
@@ -3020,6 +3028,58 @@ fn a_killed_run_is_taken_up_where_it_stopped() {
         None,
     );
     let t = lab.work.path().join("trace");
+    // each unit of the run that is killed waits at a gate of its own: the
+    // first two are let through and end; the two after them wait at theirs
+    // until something stops them, however slow the machine, so only the
+    // resume's stop of what the dead engine left can end them
+    let gate = lab.work.path().join("gate");
+    let gate_of = |unit: &str| PathBuf::from(format!("{}-{unit}", gate.display()));
+    let pid_of = |unit: &str| -> Option<i32> {
+        std::fs::read_to_string(format!("{}.pid", gate_of(unit).display()))
+            .ok()
+            .and_then(|p| p.trim().parse().ok())
+    };
+    let alive = |pid: i32| {
+        std::fs::read_to_string(format!("/proc/{pid}/stat"))
+            .ok()
+            .and_then(|s| s.rsplit(')').next().map(|r| r.trim_start().to_string()))
+            .is_some_and(|state| !state.starts_with('Z'))
+    };
+    // whatever happens, nothing the run started outlives the test: every
+    // gate is opened at the end, so a unit still waiting goes on and ends
+    struct Reap(PathBuf);
+    impl Drop for Reap {
+        fn drop(&mut self) {
+            let dir = self.0.parent().unwrap();
+            let mut opened = Vec::new();
+            for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+                let name = e.file_name().to_string_lossy().to_string();
+                if let Some(gate) = name.strip_suffix(".pid").filter(|n| n.starts_with("gate-")) {
+                    let _ = std::fs::write(dir.join(gate), "");
+                    opened.push(e.path());
+                }
+            }
+            // and waited for, before the lab's folder goes with the gates
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            for pid in opened
+                .iter()
+                .filter_map(|p| std::fs::read_to_string(p).ok())
+            {
+                let proc = format!("/proc/{}/stat", pid.trim());
+                while std::fs::read_to_string(&proc).is_ok_and(|s| {
+                    !s.rsplit(')')
+                        .next()
+                        .unwrap_or("")
+                        .trim_start()
+                        .starts_with('Z')
+                }) && std::time::Instant::now() < until
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+            }
+        }
+    }
+    let _reap = Reap(gate.clone());
     let mut child = {
         use std::os::unix::process::CommandExt;
         lab.command(&lab.path)
@@ -3029,31 +3089,51 @@ fn a_killed_run_is_taken_up_where_it_stopped() {
                 "--select",
                 "selection:every@1",
                 "--param",
-                "sleep=2",
+                "sleep=0.2",
             ])
             .env("LANE_TRACE", &t)
+            .env("SLOW_GATE", &gate)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
-            // a group of its own, so the kill takes its containers with it
+            // a group of its own, so the kill takes the engine; each
+            // unit's runtime leads a group of its own, which it leaves
             .process_group(0)
             .spawn()
             .unwrap()
     };
-    // the first two units end, the next two start; then the engine dies
+    // the first two units end; the next two start and wait at their gates;
+    // then the engine dies
+    let mut through: Vec<String> = Vec::new();
     let started = std::time::Instant::now();
-    loop {
+    let waiting: Vec<String> = loop {
+        let begun: Vec<String> = trace(&t)
+            .into_iter()
+            .filter(|e| e.0 == "start")
+            .map(|e| e.2)
+            .collect();
+        for unit in begun.iter().take(2) {
+            if !through.contains(unit) {
+                std::fs::write(gate_of(unit), "").unwrap();
+                through.push(unit.clone());
+            }
+        }
         let over = lab.count("SELECT COUNT(*) FROM pipeline_unit WHERE state = 'over'");
-        let marked = trace(&t).iter().filter(|e| e.0 == "start").count();
-        if over >= 2 && marked >= 3 {
-            break;
+        let held: Vec<String> = begun
+            .iter()
+            .skip(2)
+            .filter(|u| pid_of(u).is_some())
+            .cloned()
+            .collect();
+        if over == 2 && held.len() == 2 {
+            break held;
         }
         assert!(
             started.elapsed().as_secs() < 60,
-            "the run never got half way"
+            "the run never got half way: {begun:?}, {over} over"
         );
         std::thread::sleep(std::time::Duration::from_millis(50));
-    }
+    };
     let pgid = child.id();
     // `--` before the group: procps 4.0.4 (Ubuntu 24.04) reads a bare
     // `-<pgid>` after the signal as something else, kills nothing and says 0
@@ -3073,10 +3153,17 @@ fn a_killed_run_is_taken_up_where_it_stopped() {
         .iter()
         .map(|r| r.text(0).unwrap().to_string())
         .collect();
-    assert!(
-        over_before.len() >= 2 && over_before.len() < 4,
-        "{over_before:?}"
-    );
+    let mut first = through.clone();
+    first.sort();
+    assert_eq!(over_before, first, "the two let through");
+    // the two in flight outlive the engine, waiting at their gates
+    let orphans: Vec<i32> = waiting.iter().map(|u| pid_of(u).unwrap()).collect();
+    for (unit, pid) in waiting.iter().zip(&orphans) {
+        assert!(
+            alive(*pid),
+            "{unit} went with the engine; the test proves nothing"
+        );
+    }
     assert_eq!(
         lab.count("SELECT COUNT(*) FROM pipeline_run WHERE status = 'running'"),
         1,
@@ -3117,6 +3204,16 @@ fn a_killed_run_is_taken_up_where_it_stopped() {
         "{}",
         std::fs::read_to_string(&said).unwrap_or_default()
     );
+    // the resume stopped what the dead engine left: the two at their gates,
+    // which nothing else would have ended (their gates are shut still)
+    for (unit, pid) in waiting.iter().zip(&orphans) {
+        assert!(!gate_of(unit).exists());
+        let stopping = std::time::Instant::now();
+        while alive(*pid) && stopping.elapsed().as_secs() < 10 {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(!alive(*pid), "the resume left {unit} running");
+    }
     let run: Value =
         serde_json::from_str(&lab.ok(&["pipeline", "runs", "1", "--json"], None)).unwrap();
     assert_eq!(run["status"], "done", "{run}");
@@ -3138,11 +3235,16 @@ fn a_killed_run_is_taken_up_where_it_stopped() {
             .count();
         assert_eq!(starts, 1, "{unit} ran again: {events:?}");
     }
-    // every unit ended once at least, and the ones in flight twice started
+    // the two in flight started twice, and ended once, in the resume: the
+    // stop ended their first start before it got anywhere
+    for unit in &waiting {
+        let of = |w: &str| events.iter().filter(|e| e.0 == w && &e.2 == unit).count();
+        assert_eq!((of("start"), of("end")), (2, 1), "{unit}: {events:?}");
+    }
     let starts = events.iter().filter(|e| e.0 == "start").count();
-    assert!(starts > 4 && starts <= 6, "{events:?}");
+    assert_eq!(starts, 6, "{events:?}");
     let ends = events.iter().filter(|e| e.0 == "end").count();
-    assert_eq!(ends, 4, "a killed unit never ended: {events:?}");
+    assert_eq!(ends, 4, "a stopped unit never ended: {events:?}");
     let attempts: i64 = lab.count("SELECT SUM(attempts) FROM pipeline_unit");
     assert_eq!(attempts as usize, starts, "{events:?}");
     // the job that took it up ran as the one the killed run recorded
