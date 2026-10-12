@@ -376,10 +376,6 @@ pub fn known(said: &Said<'_>) -> Option<Cause> {
             "pipelines are off",
             "could not start the container",
             "could not start a build",
-            "oci runtime",
-            "crun:",
-            "runc:",
-            "conmon",
             "cannot connect to the docker daemon",
             "is the docker daemon running",
             "cannot connect to podman",
@@ -418,15 +414,7 @@ pub fn known(said: &Said<'_>) -> Option<Cause> {
         return Some(Cause::Lane);
     }
     if said.exit_code == Some(124)
-        || any(
-            t,
-            &[
-                "time limit",
-                "timed out",
-                "deadline exceeded",
-                "due to time limit",
-            ],
-        )
+        || any(t, &["time limit", "deadline exceeded", "due to time limit"])
     {
         return Some(Cause::Time);
     }
@@ -655,6 +643,22 @@ mod tests {
             Cause::Lane
         );
         assert_eq!(of("fastsurfer: time limit reached"), Cause::Time);
+        // a tool's own words that only look like a cause are its own: a
+        // command the image lacks, a download a container with no network
+        // could not make
+        assert_eq!(
+            cause_of(&Said {
+                error: "the container exited 127 and wrote no results.json",
+                exit_code: Some(127),
+                log: Some("Error: crun: executable file `segment` not found in $PATH: No such file or directory: OCI runtime attempted to invoke a command that was not found\n"),
+                ..Said::default()
+            }),
+            Cause::Pipeline
+        );
+        assert_eq!(
+            of("urllib.error.URLError: <urlopen error [Errno 110] Connection timed out>"),
+            Cause::Pipeline
+        );
         assert_eq!(
             of("missing an input: no stack is picked for the role t1w"),
             Cause::Input
