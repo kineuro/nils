@@ -415,6 +415,7 @@ pub fn known(said: &Said<'_>) -> Option<Cause> {
         &[
             "the lane's budget",
             "and the lane has",
+            "and the pipeline lane has",
             "the pipeline lane uses no card",
         ],
     ) {

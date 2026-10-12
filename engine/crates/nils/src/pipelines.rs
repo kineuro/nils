@@ -2991,10 +2991,19 @@ fn ask_of(d: &Descriptor) -> lane::Ask {
 
 /// Refuse a pipeline whose unit could never fit in the lane.
 fn fits(d: &Descriptor, p: &Pipeline, lane: &Lane) -> Result<(), Exit> {
-    if lane.ledger.could(ask_of(d)) {
-        return Ok(());
+    match lane_refusal(d, p, lane) {
+        None => Ok(()),
+        Some(words) => Err(usage(words)),
     }
-    Err(usage(format!(
+}
+
+/// Why a unit could never fit in the lane, in the words a refusal says;
+/// none where it could.
+pub(crate) fn lane_refusal(d: &Descriptor, p: &Pipeline, lane: &Lane) -> Option<String> {
+    if lane.ledger.could(ask_of(d)) {
+        return None;
+    }
+    Some(format!(
         "{} asks {} cores and {} GB of memory for each of its {}, and the pipeline lane has {} cores and {} GB{}; nils pipeline lane --cores <n> --memory-gb <n> sets it",
         p.label(),
         d.needs.cores,
@@ -3010,7 +3019,7 @@ fn fits(d: &Descriptor, p: &Pipeline, lane: &Lane) -> Result<(), Exit> {
             .as_deref()
             .map(|w| format!(" ({w})"))
             .unwrap_or_default()
-    )))
+    ))
 }
 
 /// The device a run takes and whether it takes the GPU: a GPU where the

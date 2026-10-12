@@ -298,19 +298,8 @@ fn memory_and_card(
             ),
             extra,
         )
-    } else if !lane.ledger.could(ask) {
-        Check::failed(
-            "memory",
-            Cause::Lane,
-            format!(
-                "a unit needs {} cores and {} GB, and the lane has {} cores and {} GB",
-                d.needs.cores,
-                nils_pipeline::descriptor::number_text(d.needs.memory_gb),
-                lane.ledger.cores,
-                gb(lane.ledger.memory_mib)
-            ),
-            extra,
-        )
+    } else if let Some(words) = crate::pipelines::lane_refusal(d, p, &lane) {
+        Check::failed("memory", Cause::Lane, words, extra)
     } else {
         Check::ok(
             "memory",
