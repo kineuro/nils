@@ -247,7 +247,7 @@ class Outcome:
 def score(model: fusion.Model, cas: Cascade, inputs: Path, stacks: list, *, workers: int = 1, device: str = "cpu", chunk: int = 4,
           depth: int = 1, student_batch: int = 64, fill: bool = False, keep_inputs: bool = False, student_factory=None,
           stats: dict | None = None, gpu_workers: int = 2, context: list | None = None, student_device: str | None = None,
-          student_threads: int = STUDENT_THREADS) -> list[Outcome]:
+          student_threads: int = STUDENT_THREADS, overlap: bool = False) -> list[Outcome]:
     """Every stack's outcome, in the manifest's order.
 
     First the reasons that need no read: a stack sealed now (``sealed``),
@@ -261,7 +261,12 @@ def score(model: fusion.Model, cas: Cascade, inputs: Path, stacks: list, *, work
     in worker processes. ``student_factory`` stands in for the student in
     tests (a callable taking the tiles, slice geometry and tokens);
     ``student_device`` is where the student runs (by default the card where
-    ``device`` is one and this torch can use it, else the CPU)."""
+    ``device`` is one and this torch can use it, else the CPU). With
+    ``overlap`` (and more than one worker) one worker pool reads stage 1's
+    slices and climbs the planes stages of each stack the moment stage 1
+    defers it, while the student scores the next batch and a second thread
+    runs the head, the calibration and D3: the same batches, functions and
+    inputs, so the same answers, in another order of work."""
     from . import fewslice, scoring
     from .results import SKIPPED
 
@@ -318,15 +323,20 @@ def score(model: fusion.Model, cas: Cascade, inputs: Path, stacks: list, *, work
         net = Student(cas.student.artifact, device=student_device, threads=max(1, int(student_threads)))
     pending: list = []  # (candidate, read) decoded, waiting for the student
 
-    def stage1(take: list) -> None:
+    def predict(take: list) -> np.ndarray:
         tiles = np.stack([t[0][0] for _, t in take])
         sgeo = np.stack([c[4] for c, _ in take]).astype(np.float32)
-        tokens = np.stack([np.concatenate([fewslice.stack_tokens(c[1]), fewslice.geo_feats(c[2][0][None, :])[0]]) for c, _ in take]).astype(np.float32)
+        # the tokens a worker of the overlap built beside the slice, else here
+        tokens = np.stack([t[2] if len(t) > 2 else np.concatenate([fewslice.stack_tokens(c[1]), fewslice.geo_feats(c[2][0][None, :])[0]])
+                           for c, t in take]).astype(np.float32)
         if net is not None:
-            P = net.predict(tiles, sgeo, tokens, batch=batch)
-        else:
-            P = np.asarray(student_factory(tiles, sgeo, tokens), np.float32)
-        del tiles
+            return net.predict(tiles, sgeo, tokens, batch=batch)
+        return np.asarray(student_factory(tiles, sgeo, tokens), np.float32)
+
+    deferred_to: list = []  # the overlap's pool, which climbs each deferred stack at once
+
+    def decide(take: list, P: np.ndarray) -> None:
+        deferred = []
         h44 = np.stack([c[2][1] for c, _ in take]).astype(np.float32)
         cohorts = [c[2][2] for c, _ in take]
         table = stage_table(model, P, h44, cohorts)
@@ -347,7 +357,17 @@ def score(model: fusion.Model, cas: Cascade, inputs: Path, stacks: list, *, work
             else:
                 o.stage1 = "deferred"
                 rest.append(st)
+                deferred.append(st)
             out[st.stack_id] = o
+        if deferred_to:
+            deferred_to[0].submit(deferred)
+
+    def stage1(take: list) -> None:
+        decide(take, predict(take))
+
+    if overlap and workers > 1 and cands:
+        return _overlapped(model, cas, inputs, stacks, out, cands, rest, predict, decide, deferred_to, stats, batch=batch, workers=workers,
+                           device=device, chunk=chunk, depth=depth, fill=fill, keep_inputs=keep_inputs, gpu_workers=gpu_workers)
 
     unreadable = 0
     block = batch * max(1, STAGE1_BLOCK // batch)  # slices read at a time, whole batches
@@ -379,23 +399,38 @@ def score(model: fusion.Model, cas: Cascade, inputs: Path, stacks: list, *, work
     ladder = {"stages": [(cas.b24, cas.m3), ("touched", None)], "thresholds": cas.thresholds, "fill": fill, "planes": keep_inputs or fill}
     for st, r, why in scoring.score(model, inputs, rest, workers=workers, device=device, chunk=chunk, depth=depth, ladder=ladder, stats=stats,
                                     gpu_workers=gpu_workers):
-        o = out.get(st.stack_id) or Outcome(st)
-        if r is None:
-            o.why = tuple(why[:2]) if why else why
-            o.reason = "unreadable" if why and why[0] != SKIPPED else "no-geometry"
-            # what its reads opened before they failed, its slice's file too
-            o.opened = set(why[2] if why and len(why) > 2 else ()) | {p for p in (o.tile_path, o.tried) if p}
-        else:
-            if o.tile_path is not None:  # the student read its slice first
-                r.idents = dict(r.idents or {})
-                r.idents[o.tile_path] = o.tile_ident
-                r.opened = set(r.opened or ()) | {o.tile_path}
-                r.reader = dict(r.reader or {}, files_read=len(r.opened))
-            elif o.tried is not None:  # its slice's file was opened, and did not decode
-                r.opened = set(r.opened or ()) | {o.tried}
-                r.reader = dict(r.reader or {}, files_read=len(r.opened))
-            o.result = r
-        out[st.stack_id] = o
+        _planes_answer(out, st, r, why)
+    _fill(model, cas, inputs, out, order, fill, workers=workers, device=device, chunk=chunk, depth=depth, gpu_workers=gpu_workers)
+    return [out[st.stack_id] for st in stacks]
+
+
+def _planes_answer(out: dict, st, r, why) -> None:
+    """A planes stage's answer, or its reason, into the stack's outcome."""
+    from .results import SKIPPED
+
+    o = out.get(st.stack_id) or Outcome(st)
+    if r is None:
+        o.why = tuple(why[:2]) if why else why
+        o.reason = "unreadable" if why and why[0] != SKIPPED else "no-geometry"
+        # what its reads opened before they failed, its slice's file too
+        o.opened = set(why[2] if why and len(why) > 2 else ()) | {p for p in (o.tile_path, o.tried) if p}
+    else:
+        if o.tile_path is not None:  # the student read its slice first
+            r.idents = dict(r.idents or {})
+            r.idents[o.tile_path] = o.tile_ident
+            r.opened = set(r.opened or ()) | {o.tile_path}
+            r.reader = dict(r.reader or {}, files_read=len(r.opened))
+        elif o.tried is not None:  # its slice's file was opened, and did not decode
+            r.opened = set(r.opened or ()) | {o.tried}
+            r.reader = dict(r.reader or {}, files_read=len(r.opened))
+        o.result = r
+    out[st.stack_id] = o
+
+
+def _fill(model, cas, inputs, out: dict, order: dict, fill: bool, *, workers, device, chunk, depth, gpu_workers) -> None:
+    """The touched planes of stage 1's answers, for the cache (R5)."""
+    from . import scoring
+
     if fill:
         accepted = [o.stack for o in out.values() if o.result is not None and o.result.stage == "s1"]
         accepted.sort(key=lambda st: order[st.stack_id])
@@ -404,4 +439,62 @@ def score(model: fusion.Model, cas: Cascade, inputs: Path, stacks: list, *, work
                                          gpu_workers=gpu_workers):
             if r is not None:
                 out[st.stack_id].result.filled = r
+
+
+def _overlapped(model, cas, inputs, stacks, out: dict, cands: list, rest: list, predict, decide, deferred_to: list, stats: dict, *,
+                batch: int, workers: int, device: str, chunk: int, depth: int, fill: bool, keep_inputs: bool, gpu_workers: int,
+                block: int = 32) -> list[Outcome]:
+    """``score``'s stage 1 and planes stages overlapped (the speed study's
+    A5.2.3b). The pool, started after the student loads, reads the slot-0
+    slices and builds the tokens in blocks of ``block`` candidates; the
+    student scores them in the main process in ``score``'s batches (the
+    readable candidates in order, ``batch`` at a time, the last one not
+    padded); a second thread runs ``decide`` on each batch while the
+    student scores the next, and ``decide`` hands the stacks it defers to
+    the pool at once. The stacks that go straight to the planes and those
+    whose slice does not decode go to the pool when they are known."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from . import scoring
+
+    order = {st.stack_id: i for i, st in enumerate(stacks)}
+    ladder = {"stages": [(cas.b24, cas.m3), ("touched", None)], "thresholds": cas.thresholds, "fill": fill, "planes": keep_inputs or fill}
+    lane = scoring.Lane(model, inputs, workers=workers, device=device, chunk=chunk, depth=depth, ladder=ladder, gpu_workers=gpu_workers)
+    deferred_to.append(lane)
+    decider = ThreadPoolExecutor(max_workers=1)
+    try:
+        lane.submit(list(rest))  # straight to the planes, in the manifest's order
+        blocks = [cands[i : i + block] for i in range(0, len(cands), block)]
+        reads = [lane.stage1([(c[0].files[c[3]][0], c[1], c[2][0]) for c in b]) for b in blocks]
+        decided: list = []
+        pending: list = []
+        unreadable = 0
+        for b, fut in zip(blocks, reads):
+            for c, (t, tok) in zip(b, fut.result()):
+                if t[0] is None:
+                    rest.append(c[0])
+                    # to the planes: the slice did not decode
+                    out[c[0].stack_id] = Outcome(c[0], stage1="slice-unreadable", tried=c[0].files[c[3]][0])
+                    unreadable += 1
+                    lane.submit([c[0]])
+                else:
+                    pending.append((c, (*t, tok)))
+            while len(pending) >= batch:
+                take = pending[:batch]
+                del pending[:batch]
+                decided.append(decider.submit(decide, take, predict(take)))
+        if pending:
+            decided.append(decider.submit(decide, pending, predict(pending)))
+        for f in decided:
+            f.result()
+        stats["stage1_unreadable"] = unreadable
+        stats["stage1_accepted"] = sum(1 for o in out.values() if o.result is not None and o.result.stage == "s1")
+        for st, r, why in lane.results():
+            _planes_answer(out, st, r, why)
+        if lane.gpu_decode:
+            stats.update(lane.decoded)
+    finally:
+        decider.shutdown(wait=True)
+        lane.close()
+    _fill(model, cas, inputs, out, order, fill, workers=workers, device=device, chunk=chunk, depth=depth, gpu_workers=gpu_workers)
     return [out[st.stack_id] for st in stacks]

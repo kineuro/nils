@@ -313,6 +313,87 @@ def _pooled(model, inputs, stacks, workers, gpu_decode, torch_encoder, batch, ch
         stats.update(decoded)
 
 
+class Lane:
+    """One pool of worker processes for the whole cascade (A5.2.3b, the
+    overlap): started before the student, it reads stage 1's slot-0 slices
+    and the student's tokens, and climbs the planes stages of each stack the
+    moment stage 1 defers it, so the fallbacks decode while the student
+    scores the next batch. Each stack is read and scored as ``score`` does
+    with the same ladder; only the order of the work changes."""
+
+    def __init__(self, model, inputs, *, workers: int, device: str, chunk: int, depth: int, ladder: dict, gpu_workers: int,
+                 prefetch: bool | None = None) -> None:
+        import threading
+
+        if prefetch is None:
+            prefetch = os.environ.get("NILS_BODYPART_PREFETCH", "1") != "0"
+        self.chunk = max(1, chunk)
+        self.jobs: list = []
+        self.lock = threading.Lock()
+        self.decoded = {"gpu_frames": 0, "cpu_frames": 0}
+        self.gpu_decode = device == "cuda"
+        # the workers are spawned as work arrives, so the environment they
+        # start with stays set for the pool's life, as in _pooled
+        self._saved = {k: os.environ.get(k) for k in ONE_THREAD}
+        os.environ.update(ONE_THREAD)
+        ctx = mp.get_context("spawn")
+        self.pool = ProcessPoolExecutor(
+            max_workers=max(1, workers),
+            mp_context=ctx,
+            initializer=_init,
+            initargs=(str(inputs), self.gpu_decode, False, prefetch, ctx.Value("i", 0), gpu_workers, "reduced:" + ladder["stages"][0][0], depth, ladder),
+        )
+
+    def stage1(self, items: list):
+        """A future of ``_stage1`` over (slot-0 path, the stack's row, its registry geometry) items."""
+        return self.pool.submit(_stage1, items)
+
+    def submit(self, stacks: list) -> None:
+        """The planes stages for these stacks, in chunks as ``_pooled`` sends them."""
+        with self.lock:
+            for i in range(0, len(stacks), self.chunk):
+                c = stacks[i : i + self.chunk]
+                self.jobs.append((c, self.pool.submit(_chunk, c)))
+
+    def results(self) -> Iterator[tuple[manifest.Stack, fusion.StackResult | None, tuple[str, str] | None]]:
+        with self.lock:
+            jobs = list(self.jobs)
+        for c, fut in jobs:
+            got, st_stats = fut.result()
+            for k in self.decoded:
+                self.decoded[k] += st_stats.get(k, 0)
+            for st, (r, why) in zip(c, got):
+                yield st, r, why
+
+    def close(self) -> None:
+        self.pool.shutdown(wait=True, cancel_futures=True)
+        for k, v in self._saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
+def _stage1(items: list) -> list:
+    """Stage 1's inputs in a worker: per (path, row, registry geometry) the
+    slot-0 slice read as ``tiles`` reads it, with the student's 42 tokens as
+    ``cascade.score`` builds them, ``(read, tokens)``; where the file does
+    not decode the read is ``tiles``' ``(None, why)`` and the tokens None."""
+    import numpy as np
+
+    from . import fewslice
+
+    out = []
+    for path, row, geo in items:
+        t = _tile(path)
+        if t[0] is None:
+            out.append((t, None))
+            continue
+        tok = np.concatenate([fewslice.stack_tokens(row), fewslice.geo_feats(geo[None, :])[0]]).astype(np.float32)
+        out.append((t, tok))
+    return out
+
+
 def _tile(path: str):
     try:
         from .fewslice import read_tile

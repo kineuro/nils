@@ -459,6 +459,38 @@ def test_a_cpu_torch_runs_the_student_on_the_cpu_where_a_card_is_seen(world, tmp
     assert r["metrics"]["stages"]["s1"] >= 1
 
 
+def test_the_overlap_gives_the_sequential_answers_in_the_same_batches(world, tmp_path, monkeypatch):
+    """--overlap on: one worker pool reads the slot-0 slices and climbs the
+    planes stages while the student scores; the student's network sees the
+    batches the sequential path forms, and every table is the same."""
+    from nils_bodypart import student
+
+    def recorder(sizes: list):
+        class Rec(StandIn):
+            def predict(self, tiles, sgeo, tokens, batch=64):
+                sizes.extend(min(batch, len(tiles) - i) for i in range(0, len(tiles), batch))
+                return super().predict(tiles, sgeo, tokens, batch)
+
+        return Rec
+
+    sizes: dict = {}
+    got: dict = {}
+    inp = inputs(world, tmp_path / "inputs")
+    for mode in ("off", "on"):
+        sizes[mode] = []
+        monkeypatch.setattr(student, "Student", recorder(sizes[mode]))
+        code, r = run(world, inp, tmp_path / mode / "out", "--student-batch", "2", "--overlap", mode)
+        assert code == 0, r.get("error")
+        assert r["params"]["cascade"]["overlap"] is (mode == "on")
+        got[mode] = (tables(tmp_path / mode / "out"), {k: v for k, v in r["metrics"].items() if k not in ("seconds",)}, r["counts"])
+    assert sizes["on"] == sizes["off"] and len(sizes["off"]) > 1
+    t_off, t_on = got["off"][0], got["on"][0]
+    assert sorted(t_on) == sorted(t_off) and {t["stage"] for t in t_off.values() if t.get("stage")} >= {"s1"}
+    for sid in t_off:
+        assert t_on[sid] == t_off[sid], sid
+    assert got["on"][1:] == got["off"][1:]
+
+
 def test_d3_decides_at_its_threshold(world, tmp_path):
     inp = inputs(world, tmp_path, deferral="mixed")
     model = fusion.load(inp["inputs"])
