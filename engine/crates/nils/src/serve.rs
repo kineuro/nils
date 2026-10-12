@@ -5860,7 +5860,8 @@ fn events(doors: &Doors, registry: &mut Registry, request: Request, all: bool) {
             .into_iter()
             .filter(|j| all || !nils_registry::job::is_worker(&j.kind))
             .collect();
-        let mut docs: Vec<_> = jobs.iter().map(nils_registry::job::Job::as_json).collect();
+        // 2026-10-12: each job with its failure, as the jobs doors answer it
+        let mut docs: Vec<_> = jobs.iter().map(crate::failures::job_doc).collect();
         // record 48, D1 of the move: no unit's QC of a sealed stack, and a
         // job's result is withheld whole where its run's could not be read
         if !crate::sealed::reads(&caller.access) {
