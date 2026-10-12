@@ -646,6 +646,13 @@ pub(crate) struct SetupArgs {
     /// eight
     #[arg(long, value_name = "ID", requires = "model_server")]
     model_server_model: Option<String>,
+    /// Whether the stations' models on the model server think before they
+    /// answer: on, the default, asks it of every model of the server that
+    /// reasons, with up to 16,384 tokens an answer, reasoning included;
+    /// off turns it off. Recorded, so an update and a repair keep it; with
+    /// --update alone it changes the server on record
+    #[arg(long, value_name = "on|off")]
+    model_thinking: Option<String>,
     /// The dcm2niix a BIDS release and a run with a bids input convert
     /// with, where the site keeps its own: taken as it is and recorded.
     /// Without it, an install on this machine keeps one it finds on the
@@ -4307,6 +4314,81 @@ pub(crate) struct ModelServer {
     pub(crate) key_file: PathBuf,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) model: Option<String>,
+    /// Whether the stations' models think before they answer, where they
+    /// reason. A record from before it was kept reads as on, so an update
+    /// of such an install asks it of Kvasir.
+    #[serde(default)]
+    pub(crate) thinking: Thinking,
+}
+
+/// Whether the models of the stations' model server think before they
+/// answer (2026-10-12): on, the default, which the assistant's one-chat
+/// bench measured at 79 % against 71 % and with no words before its tools,
+/// for about a second more a turn; or off. Kvasir asks it of every model of
+/// the server that reasons, through the chat template.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum Thinking {
+    #[default]
+    On,
+    Off,
+}
+
+impl Thinking {
+    fn name(self) -> &'static str {
+        match self {
+            Thinking::On => "on",
+            Thinking::Off => "off",
+        }
+    }
+
+    fn parse(word: &str) -> Result<Thinking, String> {
+        match word.trim() {
+            "on" => Ok(Thinking::On),
+            "off" => Ok(Thinking::Off),
+            other => Err(format!("--model-thinking {other} is not on or off")),
+        }
+    }
+}
+
+/// The thinking the flags name, where they name one.
+fn thinking_of(args: &SetupArgs) -> Result<Option<Thinking>, String> {
+    args.model_thinking
+        .as_deref()
+        .map(Thinking::parse)
+        .transpose()
+}
+
+/// The stations' model server as the flags and the record give it: the one
+/// the flags name, else the one on record. The thinking the flags name goes
+/// to either; where they name none, the server on record keeps its own,
+/// also when the flags name it again. Thinking named with no model server
+/// at all is refused.
+fn server_with_record(
+    args: &SetupArgs,
+    recorded: Option<&ModelServer>,
+) -> Result<Option<ModelServer>, String> {
+    let thinking = thinking_of(args)?;
+    let mut server = match model_server_of(args)? {
+        Some(mut named) => {
+            if let Some(was) = recorded.filter(|was| was.url == named.url) {
+                named.thinking = was.thinking;
+            }
+            Some(named)
+        }
+        None => recorded.cloned(),
+    };
+    match (&mut server, thinking) {
+        (Some(server), Some(thinking)) => server.thinking = thinking,
+        (None, Some(_)) => {
+            return Err(
+                "--model-thinking is for the stations' model server: name one with --model-server"
+                    .to_string(),
+            );
+        }
+        _ => {}
+    }
+    Ok(server)
 }
 
 /// The model server the flags name, its address checked and its key file
@@ -4342,6 +4424,7 @@ fn model_server_of(args: &SetupArgs) -> Result<Option<ModelServer>, String> {
         url,
         key_file,
         model,
+        thinking: thinking_of(args)?.unwrap_or_default(),
     }))
 }
 
@@ -7038,17 +7121,18 @@ fn questions(
     // A model server named with the flags is what the stations use, and no
     // model is asked for; the model on it is asked where none was named, and
     // with nobody to ask the run stops before anything is placed (record 47).
-    let mut model_server = model_server_of(args).map_err(usage)?;
-    if model_server.is_some() && !parts.contains(&Part::Assistant) {
+    if model_server_of(args).map_err(usage)?.is_some() && !parts.contains(&Part::Assistant) {
         return Err(usage(
             "--model-server is for the assistant's stations, and the assistant is not installed",
         )
         .into());
     }
-    // one on record stays, while the assistant does, unless the flags name another
-    if model_server.is_none() && parts.contains(&Part::Assistant) {
-        model_server = existing.and_then(|s| s.model_server.clone());
-    }
+    // one on record stays, while the assistant does, unless the flags name
+    // another; its thinking stays unless the flags name one (2026-10-12)
+    let recorded = existing
+        .and_then(|s| s.model_server.as_ref())
+        .filter(|_| parts.contains(&Part::Assistant));
+    let mut model_server = server_with_record(args, recorded).map_err(usage)?;
     // The model the assistant asks for is kept unless another is chosen, and
     // a rerun is how the model is changed; with none named yet, it is asked.
     let on_record = if parts.contains(&Part::Assistant) {
@@ -7456,21 +7540,24 @@ fn update_parts(state: &State, args: &SetupArgs, console: &mut Console) -> Resul
     let (mut plan, read) = plan_and_sources(state, args.channel.as_deref());
     with_given_converter(&mut plan, args);
     // a model server named now takes the place of the one on record; the
-    // model named for the same server before is kept where none is named now
-    if let Some(mut server) = model_server_of(args).map_err(usage)? {
-        if !plan.has(Part::Assistant) {
-            return Err(usage(
-                "--model-server is for the assistant's stations, and this install has no assistant",
-            ));
-        }
-        if server.model.is_none() {
-            server.model = state
-                .model_server
-                .as_ref()
-                .filter(|was| was.url == server.url)
-                .and_then(|was| was.model.clone());
-        }
-        plan.model_server = Some(server);
+    // model and the thinking named for the same server before are kept
+    // where none is named now, and thinking named alone changes the one on
+    // record
+    if args.model_server.is_some() && !plan.has(Part::Assistant) {
+        return Err(usage(
+            "--model-server is for the assistant's stations, and this install has no assistant",
+        ));
+    }
+    plan.model_server = server_with_record(args, state.model_server.as_ref()).map_err(usage)?;
+    if let Some(server) = &mut plan.model_server
+        && args.model_server.is_some()
+        && server.model.is_none()
+    {
+        server.model = state
+            .model_server
+            .as_ref()
+            .filter(|was| was.url == server.url)
+            .and_then(|was| was.model.clone());
     }
     // an update asks nothing, so the model is named, or is the server's
     // default or only one, or the update stops here
@@ -12993,13 +13080,14 @@ fn list_models(url: &str, key: Option<&str>) -> Option<Vec<String>> {
 }
 
 /// The plan's row for a model server: its address, where its key is read
-/// from, and the model the stations go to. Never the key.
+/// from, the model the stations go to and whether it thinks. Never the key.
 fn model_server_row(server: &ModelServer) -> String {
     format!(
-        "{}, its key read from {} and sealed in Kvasir; the stations on {}",
+        "{}, its key read from {} and sealed in Kvasir; the stations on {}, thinking {}",
         server.url,
         server.key_file.display(),
-        server.model.as_deref().unwrap_or("a model not named yet")
+        server.model.as_deref().unwrap_or("a model not named yet"),
+        server.thinking.name()
     )
 }
 
@@ -14329,6 +14417,12 @@ const SERVER_WAIT_SECONDS: u64 = 3_600;
 /// stations' model alone and the rest are ticked in the desk.
 const SERVER_MODELS_AT_ONCE: usize = 8;
 
+/// The longest answer the stations' model is held with on a model server,
+/// its thinking included, whether it thinks or not: what the assistant's
+/// one-chat bench measured thinking on with (2026-10-12). Kvasir holds no
+/// more than the server allows for the model, or its context.
+const STATIONS_ANSWER_TOKENS: u64 = 16_384;
+
 /// The model the stations use on a model server where none was named: the
 /// one the server marks as its default, else its only one.
 fn offered_default(offered: &[serde_json::Value]) -> Option<String> {
@@ -14519,7 +14613,17 @@ fn use_model_server(
     // which loads a cold model on the server first, and put through the suite
     let started = std::time::Instant::now();
     let asked = kvasir.clone();
-    let body = serde_json::json!({ "url": url, "id": id, "key_ref": key_ref, "models": admitting });
+    // the server's thinking as the record has it, on unless it was turned
+    // off, and the longest answer the stations' bench measured; a server
+    // held already takes both again, without its models being asked
+    let body = serde_json::json!({
+        "url": url,
+        "id": id,
+        "key_ref": key_ref,
+        "models": admitting,
+        "thinking": server.thinking.name(),
+        "max_tokens": STATIONS_ANSWER_TOKENS,
+    });
     let wait = SERVER_WAIT_SECONDS * admitting.len() as u64;
     let run = std::thread::spawn(move || asked.answer("POST", "/v1/servers", Some(&body), wait));
     let waiting_on = if admitting.len() == 1 {
@@ -14602,6 +14706,11 @@ fn use_model_server(
         }
     };
     console.progress(&format!("Kvasir holds {model} from {url} as {backend}"));
+    let said = answered
+        .as_ref()
+        .map(|(_, said)| said.clone())
+        .unwrap_or_default();
+    say_thinking(kvasir, console, server, &model, &backend, &offered, &said);
     // each of the stations' purposes goes to that model, once Kvasir lists
     // them: right after a restart it may not list them yet, and Kvasir maps
     // no purpose it does not list
@@ -14682,6 +14791,84 @@ fn use_model_server(
         ))?;
     }
     Ok(())
+}
+
+/// What the stations' thinking came to, said once Kvasir holds their model
+/// on a model server: whether it thinks, and how long an answer may be
+/// beside what the server allows, as Kvasir now holds it. A model the server
+/// does not say reasons has no thinking to set, and a Kvasir from before
+/// thinking was set leaves it to the server; either is said, and setup goes
+/// on, since the stations work either way.
+fn say_thinking(
+    kvasir: &Kvasir,
+    console: &Console,
+    server: &ModelServer,
+    model: &str,
+    backend: &str,
+    offered: &[serde_json::Value],
+    said: &serde_json::Value,
+) {
+    let spec = offered.iter().find(|m| m["id"] == model);
+    if !spec.is_some_and(|m| m["reasoning"] == true) {
+        console.note(&format!(
+            "{} does not say {model} reasons, so it has no thinking to turn {}",
+            server.url,
+            server.thinking.name()
+        ));
+        return;
+    }
+    // what Kvasir holds now: the backend's thinking and the model's longest answer
+    let held = kvasir
+        .call("GET", "/v1/backends", None, 10)
+        .and_then(|answer| {
+            answer["backends"]
+                .as_array()?
+                .iter()
+                .find(|b| b["id"] == backend)
+                .cloned()
+        })
+        .unwrap_or_default();
+    let thinking = said["backend"]["thinking"]
+        .as_str()
+        .or_else(|| held["thinking"].as_str());
+    let answer = held["entries"]
+        .as_array()
+        .and_then(|entries| entries.iter().find(|e| e["id"] == model))
+        .and_then(|e| e["max_tokens"].as_u64());
+    let limits = match (
+        spec.and_then(|m| m["max_output_tokens"].as_u64()),
+        spec.and_then(|m| m["context_length"].as_u64()),
+    ) {
+        (Some(most), Some(context)) => {
+            format!(" (the server allows {most}, in a context of {context})")
+        }
+        (Some(most), None) => format!(" (the server allows {most})"),
+        (None, Some(context)) => format!(" (in a context of {context})"),
+        (None, None) => String::new(),
+    };
+    let longest = answer.map_or_else(String::new, |n| {
+        format!(", with up to {n} tokens an answer{limits}")
+    });
+    match thinking {
+        Some(t) if t == server.thinking.name() => console.say(&match server.thinking {
+            Thinking::On => format!("the stations think before they answer{longest}"),
+            Thinking::Off => format!("the stations answer without thinking{longest}"),
+        }),
+        Some(t) => console.say(&format!(
+            "Kvasir holds the thinking of {backend} {t}, not {}; nils setup --update asks again",
+            server.thinking.name()
+        )),
+        None => console.say(&match server.thinking {
+            Thinking::On => format!(
+                "this Kvasir sets no thinking, so {model} thinks as the server has it by \
+                 default{longest}; one that does asks it on the next nils setup --update"
+            ),
+            Thinking::Off => format!(
+                "this Kvasir cannot turn thinking off, so {model} thinks as the server has it \
+                 by default{longest}; one that can turns it off on the next nils setup --update"
+            ),
+        }),
+    }
 }
 
 /// How long setup waits for Kvasir to list the stations' purposes, and how
@@ -20835,6 +21022,10 @@ mod tests {
         purposes_late: usize,
         /// Purposes `/v1/purposes` never lists.
         purposes_unlisted: Vec<&'static str>,
+        /// A Kvasir from before thinking was set per backend: an add's
+        /// `thinking` and `max_tokens` are not read, and a model is held
+        /// with the longest answer its server allows.
+        old_kvasir: bool,
     }
 
     /// Kvasir's doors over what it holds. A backend is added unless one of
@@ -21006,6 +21197,49 @@ mod tests {
                             held.sealed.insert(id.clone(), key);
                         }
                     }
+                    // the backend's thinking and each ticked model's longest
+                    // answer, never more than the server allows, as a Kvasir
+                    // that sets thinking holds them
+                    let old = held.old_kvasir;
+                    let offered = held.offered.clone();
+                    let most = |m: &str| {
+                        offered
+                            .iter()
+                            .find(|o| o["id"] == m)
+                            .and_then(|o| {
+                                o["max_output_tokens"]
+                                    .as_u64()
+                                    .or_else(|| o["context_length"].as_u64())
+                            })
+                            .unwrap_or(4_096)
+                    };
+                    if let Some(b) = held.backends.iter_mut().find(|b| b["id"] == id.as_str()) {
+                        if !old && sent.get("thinking").is_some() {
+                            b["thinking"] = sent["thinking"].clone();
+                        }
+                        let mut entries = b["entries"].as_array().cloned().unwrap_or_default();
+                        for m in &taken {
+                            let longest = match sent["max_tokens"].as_u64() {
+                                Some(asked) if !old => asked.min(most(m)),
+                                _ => most(m),
+                            };
+                            match entries.iter_mut().find(|e| e["id"] == m.as_str()) {
+                                Some(e) => e["max_tokens"] = json!(longest),
+                                None => entries.push(json!({"id": m, "max_tokens": longest})),
+                            }
+                        }
+                        b["entries"] = json!(entries);
+                    }
+                    let thinking = held
+                        .backends
+                        .iter()
+                        .find(|b| b["id"] == id.as_str())
+                        .map(|b| b["thinking"].clone())
+                        .unwrap_or_default();
+                    let mut backend = json!({"id": id, "models": models});
+                    if !thinking.is_null() {
+                        backend["thinking"] = thinking;
+                    }
                     // a staged key goes once the backend holds its own
                     if key_ref.starts_with(SERVER_STAGING) {
                         held.sealed.remove(&key_ref);
@@ -21019,8 +21253,7 @@ mod tests {
                     held.listed.extend(admitted);
                     (
                         201,
-                        json!({"backend": {"id": id, "models": models}, "results": results})
-                            .to_string(),
+                        json!({"backend": backend, "results": results}).to_string(),
                     )
                 }
                 ("POST", "/v1/subscriptions/chatgpt/sign-in") => ok(json!({
@@ -21187,6 +21420,7 @@ mod tests {
             url: "https://models.example.org/v1".to_string(),
             key_file: key_file.clone(),
             model: Some("flash-next".to_string()),
+            thinking: Thinking::On,
         });
         let console = Console::new(true);
         console.strict.set(true);
@@ -21279,6 +21513,7 @@ mod tests {
             url: "https://models.example.org/v1".to_string(),
             key_file: key_file.clone(),
             model: Some("qwen38-27b-fast".to_string()),
+            thinking: Thinking::On,
         });
         let console = Console::new(true);
         console.strict.set(true);
@@ -21310,7 +21545,8 @@ mod tests {
             vec![
                 json!({"url": "https://models.example.org/v1", "id": "models-example-org",
                         "key_ref": "server-staging:models-example-org",
-                        "models": ["flash-next", "qwen38-27b"]})
+                        "models": ["flash-next", "qwen38-27b"],
+                        "thinking": "on", "max_tokens": STATIONS_ANSWER_TOKENS})
             ]
         );
         for purpose in ["assistant.operator", "assistant.ask-help"] {
@@ -21414,6 +21650,7 @@ mod tests {
             url: "https://other.example.org/v1".to_string(),
             key_file: key_file.clone(),
             model: Some("silent".to_string()),
+            thinking: Thinking::On,
         });
         held.lock().unwrap().offered = vec![json!({"id": "silent"})];
         let stopped = ready_kvasir(&plan, &console, None).unwrap_err();
@@ -21472,6 +21709,7 @@ mod tests {
             url: "https://models.example.org/v1".to_string(),
             key_file: key_file.clone(),
             model: None,
+            thinking: Thinking::On,
         });
         let console = Console::new(true);
         console.strict.set(true);
@@ -21649,6 +21887,7 @@ mod tests {
             url: format!("http://127.0.0.1:{port}/v1"),
             key_file,
             model: None,
+            thinking: Thinking::On,
         };
         assert_eq!(unnamed_server_model(&server).as_deref(), Ok("qwen-large"));
         *listed.lock().unwrap() = serde_json::json!([{"id": "qwen-small"}, {"id": "qwen-large"}]);
@@ -21657,6 +21896,288 @@ mod tests {
             stopped.contains("--model-server-model")
                 && stopped.contains("offers qwen-small, qwen-large"),
             "{stopped}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// What a console kept for a person to read: its lines and its notes.
+    fn kept_said(console: &Console) -> String {
+        console
+            .screens
+            .as_ref()
+            .map(|replay| {
+                replay
+                    .borrow()
+                    .said
+                    .iter()
+                    .filter_map(|s| match s {
+                        tui::Said::Text(t) | tui::Said::Note(t) => Some(t.clone()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .unwrap_or_default()
+    }
+
+    /// The stations think on a model server by default (2026-10-12): an
+    /// install asks Kvasir for thinking on and the bench's longest answer,
+    /// an update with thinking off sends the stations' model alone with it,
+    /// which Kvasir holds again in place, and what Kvasir holds is said with
+    /// the server's limits. A Kvasir from before thinking was set, and a
+    /// model the server does not say reasons, are said and do not stop it.
+    #[test]
+    fn the_stations_think_on_a_model_server_and_an_update_changes_it_in_place() {
+        use serde_json::json;
+        let record_before = std::fs::read(state_path()).ok();
+        let dir = kvasir_dir(
+            "model-server-thinking",
+            json!([{"id": "assistant.ask-help", "content": "rows"}]),
+        );
+        let key_file = dir.join("server.key");
+        std::fs::write(&key_file, "kvs_card0.a-secret\n").unwrap();
+        let reasoning = || {
+            vec![
+                json!({"id": "flash-next", "default": true, "status": "loaded", "reasoning": true,
+                       "context_length": 262_144, "max_output_tokens": 65_536}),
+                json!({"id": "qwen38-27b", "status": "cold", "reasoning": true,
+                       "context_length": 262_144, "max_output_tokens": 65_536}),
+            ]
+        };
+        let held = std::sync::Arc::new(std::sync::Mutex::new(Held {
+            purposes: json!([
+                {"purpose": "assistant.ask-help", "content": "rows", "backend": null}
+            ]),
+            offered: reasoning(),
+            ..Held::default()
+        }));
+        let (port, calls) = fake_kvasir(held.clone());
+        let mut plan = plan(Runtime::Machine);
+        plan.dir = dir.clone();
+        plan.ports.kvasir = port;
+        plan.model_server = Some(ModelServer {
+            url: "https://models.example.org/v1".to_string(),
+            key_file: key_file.clone(),
+            model: Some("flash-next".to_string()),
+            thinking: Thinking::On,
+        });
+        let mut console = Console::new(false);
+        console.screens = Some(std::cell::RefCell::new(Replay::default()));
+        console.strict.set(true);
+        let sent =
+            |calls: &std::sync::Arc<std::sync::Mutex<Vec<String>>>| -> Vec<serde_json::Value> {
+                calls
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter_map(|c| c.strip_prefix("POST /v1/servers "))
+                    .map(|body| serde_json::from_str(body).unwrap())
+                    .collect()
+            };
+        let again = |console: &Console, calls: &std::sync::Arc<std::sync::Mutex<Vec<String>>>| {
+            calls.lock().unwrap().clear();
+            if let Some(replay) = &console.screens {
+                replay.borrow_mut().said.clear();
+            }
+        };
+
+        // the install: every model ticked with thinking on and the bench's answer
+        assert_eq!(ready_kvasir(&plan, &console, None).ok(), Some(true));
+        let bodies = sent(&calls);
+        assert_eq!(bodies.len(), 1, "{bodies:?}");
+        assert_eq!(bodies[0]["models"], json!(["qwen38-27b", "flash-next"]));
+        assert_eq!(bodies[0]["thinking"], "on");
+        assert_eq!(bodies[0]["max_tokens"], 16_384);
+        assert_eq!(held.lock().unwrap().backends[0]["thinking"], "on");
+        assert!(
+            kept_said(&console).contains(
+                "the stations think before they answer, with up to 16384 tokens an answer (the \
+                 server allows 65536, in a context of 262144)"
+            ),
+            "{}",
+            kept_said(&console)
+        );
+
+        // an update with thinking off: the stations' model alone, under the
+        // backend's own key, and Kvasir holds the backend's thinking off
+        again(&console, &calls);
+        plan.model_server.as_mut().unwrap().thinking = Thinking::Off;
+        assert_eq!(ready_kvasir(&plan, &console, None).ok(), Some(true));
+        assert_eq!(
+            sent(&calls),
+            vec![
+                json!({"url": "https://models.example.org/v1", "id": "models-example-org",
+                        "key_ref": "models-example-org", "models": ["flash-next"],
+                        "thinking": "off", "max_tokens": 16_384})
+            ]
+        );
+        assert_eq!(held.lock().unwrap().backends[0]["thinking"], "off");
+        assert!(
+            kept_said(&console).contains(
+                "the stations answer without thinking, with up to 16384 tokens an answer"
+            ),
+            "{}",
+            kept_said(&console)
+        );
+
+        // and on again, as an update of an install from before does
+        again(&console, &calls);
+        plan.model_server.as_mut().unwrap().thinking = Thinking::On;
+        assert_eq!(ready_kvasir(&plan, &console, None).ok(), Some(true));
+        assert_eq!(sent(&calls)[0]["thinking"], "on");
+        assert_eq!(held.lock().unwrap().backends[0]["thinking"], "on");
+
+        // a Kvasir from before thinking was set takes neither: the stations
+        // keep the server's default and its longest answer, which is said,
+        // and the update goes on
+        {
+            let mut held = held.lock().unwrap();
+            held.old_kvasir = true;
+            held.backends.clear();
+            held.sealed.clear();
+        }
+        for (thinking, words) in [
+            (
+                Thinking::On,
+                "this Kvasir sets no thinking, so flash-next thinks as the server has it by \
+                 default, with up to 65536 tokens an answer",
+            ),
+            (
+                Thinking::Off,
+                "this Kvasir cannot turn thinking off, so flash-next thinks as the server has it \
+                 by default",
+            ),
+        ] {
+            again(&console, &calls);
+            plan.model_server.as_mut().unwrap().thinking = thinking;
+            assert_eq!(ready_kvasir(&plan, &console, None).ok(), Some(true));
+            assert!(
+                kept_said(&console).contains(words),
+                "{words} is not in:\n{}",
+                kept_said(&console)
+            );
+        }
+
+        // a model the server does not say reasons has no thinking to set
+        {
+            let mut held = held.lock().unwrap();
+            held.old_kvasir = false;
+            held.backends.clear();
+            held.sealed.clear();
+            held.offered = vec![json!({"id": "flash-next", "default": true})];
+        }
+        again(&console, &calls);
+        assert_eq!(ready_kvasir(&plan, &console, None).ok(), Some(true));
+        assert!(
+            kept_said(&console).contains(
+                "https://models.example.org/v1 does not say flash-next reasons, so it has no \
+                 thinking to turn off"
+            ),
+            "{}",
+            kept_said(&console)
+        );
+
+        assert_eq!(
+            std::fs::read(state_path()).ok(),
+            record_before,
+            "the machine's own record changed"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `--model-thinking on|off` names the stations' thinking, on by
+    /// default; the record keeps it, and a record from before reads as on;
+    /// alone it changes the server on record, a server named again keeps its
+    /// own, another starts on, and with no server at all it is refused.
+    #[test]
+    fn the_stations_thinking_is_a_flag_the_record_keeps_and_on_by_default() {
+        use clap::Parser as _;
+        const URL: &str = "https://models.example.org/v1";
+        let dir = scratch("model-thinking-record");
+        let key_file = dir.join("server.key");
+        std::fs::write(&key_file, "kvs_card0.a-secret").unwrap();
+        let key = key_file.to_str().unwrap();
+        let parsed = |extra: &[&str]| {
+            let mut argv = vec!["nils", "--dir", "/x/nils"];
+            argv.extend_from_slice(extra);
+            Wizard::try_parse_from(argv).map(|w| w.setup).unwrap()
+        };
+        let named = |url: &str, extra: &[&str]| {
+            let mut argv = vec!["--model-server", url, "--model-key-file", key];
+            argv.extend_from_slice(extra);
+            parsed(&argv)
+        };
+        assert_eq!(
+            model_server_of(&named(URL, &[])).unwrap().unwrap().thinking,
+            Thinking::On
+        );
+        assert_eq!(
+            model_server_of(&named(URL, &["--model-thinking", "off"]))
+                .unwrap()
+                .unwrap()
+                .thinking,
+            Thinking::Off
+        );
+        assert!(
+            model_server_of(&named(URL, &["--model-thinking", "maybe"]))
+                .unwrap_err()
+                .contains("--model-thinking maybe is not on or off")
+        );
+
+        // the record keeps it; one written before it was kept reads as on
+        let off = ModelServer {
+            url: URL.to_string(),
+            key_file: key_file.clone(),
+            model: Some("qwen38-27b".to_string()),
+            thinking: Thinking::Off,
+        };
+        let state = State {
+            dir: "/x/nils".to_string(),
+            mode: "off".to_string(),
+            model_server: Some(off.clone()),
+            ..State::default()
+        };
+        let text = toml::to_string(&state).unwrap();
+        assert!(text.contains("thinking = \"off\""), "{text}");
+        let back: State = toml::from_str(&text).unwrap();
+        assert_eq!(back.model_server.as_ref(), Some(&off));
+        let before: State = toml::from_str(&format!(
+            "dir = \"/x/nils\"\nmode = \"off\"\n\n[model_server]\nurl = \"{URL}\"\nkey_file = \
+             \"{key}\"\nmodel = \"qwen38-27b\"\n"
+        ))
+        .unwrap();
+        assert_eq!(before.model_server.unwrap().thinking, Thinking::On);
+        assert!(
+            model_server_row(&off).ends_with("the stations on qwen38-27b, thinking off"),
+            "{}",
+            model_server_row(&off)
+        );
+
+        // with a server on record
+        let with = |args: SetupArgs| server_with_record(&args, Some(&off)).unwrap().unwrap();
+        assert_eq!(with(parsed(&[])), off);
+        assert_eq!(
+            with(parsed(&["--model-thinking", "on"])),
+            ModelServer {
+                thinking: Thinking::On,
+                ..off.clone()
+            }
+        );
+        assert_eq!(with(named(URL, &[])).thinking, Thinking::Off);
+        assert_eq!(
+            with(named(URL, &["--model-thinking", "on"])).thinking,
+            Thinking::On
+        );
+        assert_eq!(
+            with(named("https://other.example.org/v1", &[])).thinking,
+            Thinking::On
+        );
+        // and with none
+        assert_eq!(server_with_record(&parsed(&[]), None), Ok(None));
+        assert!(
+            server_with_record(&parsed(&["--model-thinking", "off"]), None)
+                .unwrap_err()
+                .contains("name one with --model-server")
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -22931,6 +23452,7 @@ mod tests {
             url: "https://models.example.org/v1".to_string(),
             key_file: root.join("model.key"),
             model: None,
+            thinking: Thinking::On,
         });
         state.parts.insert(
             "desk".to_string(),
