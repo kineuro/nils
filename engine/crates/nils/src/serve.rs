@@ -3717,6 +3717,9 @@ fn routed(
             let verb = command[..words.min(command.len())].join(" ");
             caller.allowed(&format!("{path} {verb}"), Need::One(grant), detail)?;
             let command = located(doors, registry.store(), command)?;
+            // 2026-10-12: a run is checked for what it needs of this machine
+            // before it is queued, and refused by its kind where it lacks it
+            crate::requirements::at_the_door(doors.home.dir(), registry, &command)?;
             // each step of the chain a verb the door queues, its tree
             // located now; its grant is checked when its turn comes, and a
             // refusal then ends the chain (record 26 §7)

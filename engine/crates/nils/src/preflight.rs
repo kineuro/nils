@@ -52,6 +52,10 @@ const PAST_RUNS: usize = 20;
 
 /// What the pre-flight is asked.
 pub(crate) struct Asked<'a> {
+    /// The registry's folder, where the engine keeps the tools it installs.
+    pub home: &'a Path,
+    /// The converter as the run would name it (2026-10-12).
+    pub dcm2niix: &'a Path,
     pub pipeline: &'a str,
     /// The pack the run's release names its stacks by; without it the bids
     /// units are counted from the picks alone.
@@ -638,6 +642,29 @@ pub(crate) fn check(registry: &mut Registry, asked: &Asked<'_>) -> Result<Value,
     let n = units.len() as f64;
     let seconds = per_unit.map(|s| ((n / slots).ceil() * s).round());
 
+    // 2026-10-12: what the run needs of this machine, each check answered,
+    // and a failed one a blocker by its kind (the runtime, the lane and the
+    // GPU are said above already)
+    let requirements = crate::requirements::checks(
+        registry,
+        asked.home,
+        &crate::requirements::Asked {
+            pipeline: &p,
+            descriptor: &d,
+            dcm2niix: asked.dcm2niix,
+            units: units.len().max(1),
+        },
+    );
+    for c in requirements.iter().filter(|c| !c.ok) {
+        if matches!(c.check, "converter" | "image" | "disk")
+            || c.cause == Some(nils_pipeline::failure::Cause::Memory)
+        {
+            blockers.push(c.said.clone());
+        }
+    }
+    let failure = crate::requirements::refusing(&requirements)
+        .and_then(|c| c.cause)
+        .map_or(Value::Null, nils_pipeline::failure::Cause::doc);
     let ready = blockers.is_empty();
     Ok(json!({
         "pipeline": p.label(),
@@ -682,6 +709,8 @@ pub(crate) fn check(registry: &mut Registry, asked: &Asked<'_>) -> Result<Value,
         "scratch": capability["scratch"],
         "ready": ready,
         "blockers": blockers,
+        "requirements": requirements.iter().map(crate::requirements::Check::doc).collect::<Vec<_>>(),
+        "failure": failure,
     }))
 }
 
@@ -793,6 +822,8 @@ pub(crate) fn route(
         let mut v = check(
             registry,
             &Asked {
+                home: home.dir(),
+                dcm2niix: Path::new(crate::tools::DCM2NIIX),
                 pipeline: name,
                 pack: pack.as_ref(),
                 handle,
@@ -858,6 +889,8 @@ pub(crate) fn command(home: &Home, args: &crate::pipelines::RunArgs) -> Result<(
     let v = check(
         &mut registry,
         &Asked {
+            home: home.dir(),
+            dcm2niix: &args.dcm2niix,
             pipeline,
             pack: pack.as_ref(),
             handle,
@@ -934,6 +967,14 @@ pub(crate) fn command(home: &Home, args: &crate::pipelines::RunArgs) -> Result<(
             .map(|w| format!(" ({w})"))
             .unwrap_or_default()
     );
+    for c in v["requirements"].as_array().into_iter().flatten() {
+        println!(
+            "  {:<16} {}{}",
+            c["check"].as_str().unwrap_or_default(),
+            if c["ok"] == true { "" } else { "not met: " },
+            c["said"].as_str().unwrap_or_default()
+        );
+    }
     if v["ready"] == true {
         println!(
             "ready: nils run {} starts it",
@@ -942,6 +983,9 @@ pub(crate) fn command(home: &Home, args: &crate::pipelines::RunArgs) -> Result<(
     } else {
         for b in v["blockers"].as_array().into_iter().flatten() {
             println!("not ready: {}", b.as_str().unwrap_or_default());
+        }
+        if let Some(f) = crate::failures::line(&v["failure"]) {
+            println!("what to do: {f}");
         }
     }
     Ok(())

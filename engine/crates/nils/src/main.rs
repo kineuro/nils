@@ -71,6 +71,7 @@ mod pyramid;
 mod reader;
 mod rehearse;
 mod releases;
+mod requirements;
 mod scans;
 mod schedule;
 mod sealed;

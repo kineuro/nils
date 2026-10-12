@@ -3236,6 +3236,22 @@ pub(crate) fn run_command(home: &Home, args: RunArgs) -> Result<(), Exit> {
     // the lane it runs in: a unit that could never fit, a GPU it cannot
     // lease and a secret the site has not set are refused before anything
     let lane = lane_of(&mut registry);
+    // 2026-10-12: what the run needs of this machine, checked before
+    // anything is frozen or claimed; a check that fails refuses it by its
+    // kind, and nothing is queued
+    let checked = crate::requirements::checks(
+        &mut registry,
+        home.dir(),
+        &crate::requirements::Asked {
+            pipeline: &p,
+            descriptor: &d,
+            dcm2niix: &args.dcm2niix,
+            units: 1,
+        },
+    );
+    if let Some(failed) = crate::requirements::refusing(&checked) {
+        return Err(fail(failed.refusal()));
+    }
     let (device, gpu) = device_for(&d, &p, &rt, &lane)?;
     fits(&d, &p, &lane)?;
     let given = secrets_for(&mut registry, &d, &p)?;
@@ -3339,6 +3355,13 @@ pub(crate) fn run_command(home: &Home, args: RunArgs) -> Result<(), Exit> {
                 return Err(usage(
                     "the selection holds no stacks; there is nothing to run",
                 ));
+            }
+            // 2026-10-12: the disk its units take, now their count is known
+            if d.layout == Layout::Stacks
+                && let Some(c) = crate::requirements::disk(&mut registry, &d, stacks.len())
+                && !c.ok
+            {
+                return Err(fail(c.refusal()));
             }
 
             // the job: beside every run whose stacks are not these, and
@@ -6382,6 +6405,18 @@ fn finalize(
 fn this_account() -> (u32, u32) {
     // SAFETY: neither call takes a pointer, touches memory, or can fail.
     unsafe { (libc::getuid(), libc::getgid()) }
+}
+
+/// The uid the engine runs as, whose subordinate ids rootless podman
+/// unpacks an image with (2026-10-12).
+#[cfg(unix)]
+pub(crate) fn engine_uid() -> u32 {
+    this_account().0
+}
+
+#[cfg(not(unix))]
+pub(crate) fn engine_uid() -> u32 {
+    0
 }
 
 /// A run's seeds, as the runner kept them: the document of its derivative

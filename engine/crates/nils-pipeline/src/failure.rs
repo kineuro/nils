@@ -256,6 +256,10 @@ fn any(text: &str, words: &[&str]) -> bool {
 /// a missing file, the subordinate ids before an image, a card's memory
 /// before memory.
 pub fn known(said: &Said<'_>) -> Option<Cause> {
+    // a refusal the engine wrote names its cause itself
+    if let Some(cause) = marked(said.error) {
+        return Some(cause);
+    }
     let mut text = said.error.to_lowercase();
     if let Some(log) = said.log {
         text.push('\n');
@@ -278,6 +282,12 @@ pub fn known(said: &Said<'_>) -> Option<Cause> {
         )
     {
         return Some(Cause::Dcm2niix);
+    }
+    // a container killed (137 as podman and docker report it, a signal 9
+    // as apptainer's process ends) ran, so its image was there: the
+    // machine's memory, whatever else its log says
+    if said.exit_code == Some(137) || said.signal == Some(9) || t.contains("exited 137") {
+        return Some(Cause::Memory);
     }
     if any(
         t,
@@ -351,6 +361,7 @@ pub fn known(said: &Said<'_>) -> Option<Cause> {
             "reading manifest",
             "image not known",
             "no such image",
+            "image is not known",
             "unable to find image",
             "could not build",
             "short-name",
@@ -376,24 +387,20 @@ pub fn known(said: &Said<'_>) -> Option<Cause> {
     ) {
         return Some(Cause::Runtime);
     }
-    if said.exit_code == Some(137)
-        || said.signal == Some(9)
-        || any(
-            t,
-            &[
-                "exited 137",
-                "oomkilled",
-                "oom-kill",
-                "oom killer",
-                "out of memory",
-                "cannot allocate memory",
-                "os error 12",
-                "memoryerror",
-                "std::bad_alloc",
-                "killed process",
-            ],
-        )
-    {
+    if any(
+        t,
+        &[
+            "oomkilled",
+            "oom-kill",
+            "oom killer",
+            "out of memory",
+            "cannot allocate memory",
+            "os error 12",
+            "memoryerror",
+            "std::bad_alloc",
+            "killed process",
+        ],
+    ) {
         return Some(Cause::Memory);
     }
     // 125 is podman's and docker's own failure, never the pipeline's
@@ -438,6 +445,19 @@ pub fn known(said: &Said<'_>) -> Option<Cause> {
         return Some(Cause::Input);
     }
     None
+}
+
+/// The words that end a refusal the engine wrote itself, naming its
+/// cause, so the job that carries only its error is read for the same
+/// cause: `(failure: <cause>)`.
+pub fn mark(cause: Cause) -> String {
+    format!("(failure: {})", cause.name())
+}
+
+/// The cause a refusal's words name, where they end with [`mark`]'s.
+fn marked(error: &str) -> Option<Cause> {
+    let (_, rest) = error.rsplit_once("(failure: ")?;
+    Cause::parse(rest.split(')').next()?.trim())
 }
 
 /// The cause of a run's or a unit's failure: what is known, else the
@@ -661,6 +681,14 @@ mod tests {
             );
         }
         assert_eq!(recorded(&Cause::Disk.doc()), Some(Cause::Disk));
+        // a refusal the engine wrote is read for the cause it names
+        assert_eq!(
+            of(&format!(
+                "refused before it was queued: 2 GB free {}",
+                mark(Cause::Disk)
+            )),
+            Cause::Disk
+        );
     }
 
     #[test]

@@ -450,6 +450,11 @@ pub struct Descriptor {
     /// Typical minutes a unit takes on the CPU (`x-nils.needs.unit-minutes`),
     /// which the pre-flight estimates from until the pipeline has run here.
     pub unit_minutes: Option<f64>,
+    /// The GB of disk one scheduling unit's outputs take in the output
+    /// place (`x-nils.needs.disk-gb`, 2026-10-12), which the pre-flight and
+    /// the run door hold against the place's free space before a run is
+    /// queued; none where the descriptor does not say.
+    pub disk_gb: Option<f64>,
     /// The document as it parsed, kept whole.
     pub document: Value,
 }
@@ -1134,6 +1139,11 @@ pub fn from_value(document: Value) -> Result<Descriptor, String> {
         Some(m) if m > 0.0 && m.is_finite() => Some(m),
         Some(m) => return Err(format!("x-nils.needs.unit-minutes is above 0, not {m}")),
     };
+    let disk_gb = match opt_number(&x["needs"], "disk-gb", "x-nils.needs.")? {
+        None => None,
+        Some(g) if g > 0.0 && g.is_finite() => Some(g),
+        Some(g) => return Err(format!("x-nils.needs.disk-gb is above 0, not {g}")),
+    };
     Ok(Descriptor {
         name,
         tool_version,
@@ -1154,6 +1164,7 @@ pub fn from_value(document: Value) -> Result<Descriptor, String> {
         header,
         geometry,
         unit_minutes,
+        disk_gb,
         document,
     })
 }
@@ -2297,7 +2308,7 @@ x-nils:
             };
             base.replace(
                 "  needs: {gpu: optional}",
-                &format!("{extra}  needs: {{gpu: optional, unit-minutes: 5}}\n{x}"),
+                &format!("{extra}  needs: {{gpu: optional, unit-minutes: 5, disk-gb: 1.5}}\n{x}"),
             )
         };
         let table = "    - id: vols\n      kind: table\n      path-template: \"sub-{subject}/ses-{session}/vols.csv\"\n      columns:\n        - {name: total_intracranial, unit: mm3}\n        - {name: third_ventricle, from: 3rd ventricle}\n        - {name: site, type: text}\n";
@@ -2317,6 +2328,7 @@ x-nils:
         assert!(d.checks[1].holds(5000.0) && !d.checks[1].holds(5000.5));
         assert_eq!(d.roles, ["t1w", "flair"]);
         assert_eq!(d.unit_minutes, Some(5.0));
+        assert_eq!(d.disk_gb, Some(1.5));
         assert_eq!(fold(" Left-Hippocampus "), "left_hippocampus");
         assert_eq!(fold("putamen+pallidum"), "putamen_pallidum");
         for (extra, x, words) in [
