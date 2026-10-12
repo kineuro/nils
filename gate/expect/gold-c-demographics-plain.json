@@ -1,7 +1,7 @@
 {
   "name": "gold-c-demographics-plain",
   "question": "The same demographics, asked at detail plain",
-  "hash": "6ec1704bffdd295c18f5a8f66e72f3388109fac4b6731a12c04b5b00c784ed40",
+  "hash": "ecbe0b7189cf113150aba21a14108b8573525d3f2749a86bf04a9ea613efa3eb",
   "columns": [
     "_key",
     "_subject",
@@ -22,8 +22,8 @@
       "",
       "1",
       "38",
-      "31",
-      "0.815789474",
+      "",
+      "",
       "58.470588235",
       "99",
       "99",
@@ -35,8 +35,8 @@
       "",
       "2",
       "12",
-      "9",
-      "0.75",
+      "",
+      "",
       "49.8",
       "99",
       "99",
@@ -51,5 +51,9 @@
   "shaped": [
     "min_age",
     "max_age"
+  ],
+  "held_back": [
+    "n_female",
+    "pct_female"
   ]
 }

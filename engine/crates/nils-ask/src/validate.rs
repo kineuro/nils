@@ -404,12 +404,75 @@ pub struct Validated {
     /// name of its column: the group's spread, held back for a group under
     /// [`MEASURE_K`] subjects with a value.
     pub held_measures: BTreeSet<String>,
+    /// Record 55 K7, small counts at plain (the ruling of 2026-10-12): the
+    /// sets whose rows a quasi identifying field the scope may not project
+    /// raw chose or grouped, below detail quasi. A count of such a set is
+    /// answered for none or [`MEASURE_K`] subjects and more, and held back
+    /// between. Empty at detail quasi and above.
+    pub quasi_sets: BTreeSet<String>,
+    /// The same ruling: the answer's group counts held back below
+    /// [`MEASURE_K`] subjects, and those held beside them so that none is
+    /// found by subtraction.
+    pub counts: CountRule,
+}
+
+/// Record 55 K7, small counts at plain (the ruling of 2026-10-12): how the
+/// counts of the answer's group set are held. Each size is one number a
+/// group's row is held by; each column of the answer made from a count
+/// names the sizes that hold it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CountRule {
+    pub sizes: Vec<CountSize>,
+    /// Per place in `out.columns`, the sizes (places in `sizes`) that hold it.
+    pub columns: BTreeMap<usize, BTreeSet<usize>>,
+}
+
+impl CountRule {
+    pub fn is_empty(&self) -> bool {
+        self.sizes.is_empty()
+    }
+}
+
+impl Validated {
+    /// The same validation with no count held: for a read the engine makes
+    /// for itself and holds as the answer it serves says (a share's
+    /// denominator), or that answers its own door's rule (the values
+    /// sampler, which merges values into shapes before it counts them).
+    pub fn counting_all(mut self) -> Validated {
+        self.quasi_sets.clear();
+        self.counts = CountRule::default();
+        self
+    }
+}
+
+/// One number a group's counts are held by.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CountSize {
+    /// The group's subjects, where a quasi identifying field chose or keyed
+    /// the group's rows: its `_rows`, `_subjects`, `count` and `distinct`.
+    Group,
+    /// The subjects a binding of the group counts by a quasi identifying
+    /// field of its own: a `count` of a value made from one (the subjects
+    /// with a value), or a `sum` or `avg` of one read through a comparison,
+    /// such as the women of a group (the subjects whose value is not 0).
+    /// The group's other subjects are a count too, its total less this one.
+    Own { binding: String, nonzero: bool },
 }
 
 /// Why a value of an answer is held back below detail quasi (record 55 K7,
 /// the ruling of 2026-10-12).
 pub fn held_back_why() -> String {
     format!("a group under {MEASURE_K} subjects")
+}
+
+/// Why a count is held back below detail quasi (record 55 K7, small counts
+/// at plain, the ruling of 2026-10-12): fewer than [`MEASURE_K`], or held
+/// beside such a count so that neither is found by subtracting the counts
+/// shown from a total.
+pub fn held_count_why() -> String {
+    format!(
+        "fewer than {MEASURE_K}, or held beside a count of fewer than {MEASURE_K} so that it is not found by subtraction"
+    )
 }
 
 /// Record 55 K7, the one place the quasi-identifier rule is decided:
@@ -863,6 +926,8 @@ pub fn validate(ask: &Ask, names: &dyn Names, scope: &Scope) -> Result<Validated
     out.shaped = rule.shaped;
     out.held = rule.held;
     out.held_measures = rule.held_measures;
+    out.quasi_sets = rule.quasi_sets;
+    out.counts = rule.counts;
     issues.extend(rule.refused);
 
     let (warnings, errors): (Vec<Issue>, Vec<Issue>) =
@@ -3087,12 +3152,342 @@ impl<'a> Shapes<'a> {
     }
 }
 
+/// Record 55 K7, small counts at plain (the ruling of 2026-10-12): what
+/// reads a quasi identifying field below detail quasi, whatever it makes of
+/// it. Unlike [`Carry`], a comparison, a predicate and a count read the
+/// field too: a count of the subjects aged 40 to 44 is answered as a
+/// number, and still says how many people a quasi identifying field picked.
+/// Per set, in topological order: the names it exposes whose value reads
+/// one (`names`), and whether such a field chose or grouped its rows
+/// (`sets`).
+struct Reads<'a, 's> {
+    s: &'a Shapes<'s>,
+    names: BTreeMap<String, BTreeSet<String>>,
+    sets: BTreeSet<String>,
+}
+
+impl<'a, 's> Reads<'a, 's> {
+    fn below_quasi(&self) -> bool {
+        self.s.below_quasi() != Carry::Nothing
+    }
+
+    /// Whether a clause, read in a set, reads a field below the rule.
+    fn clause(&self, c: &Clause, set: &str, depth: u8) -> bool {
+        if usize::from(depth) >= MAX_CLAUSE_DEPTH {
+            return true;
+        }
+        let op = c.op.as_str();
+        match op {
+            "field" => c.ref_name().is_some_and(|p| self.path(p, set, 0)),
+            "derived" => c
+                .ref_name()
+                .is_some_and(|n| QUASI_DERIVED.contains(&n) && self.below_quasi()),
+            "axis" | "param" => false,
+            // a share reads what it divides
+            "share" => c
+                .opts
+                .get("of")
+                .and_then(Value::as_str)
+                .is_some_and(|of| self.path(of, set, 0)),
+            op if AGGREGATES.contains(&op) => {
+                // an aggregate reads the target's rows: what chose them, and
+                // what it reads of them
+                let target = c.opts.get("set").and_then(Value::as_str).unwrap_or(set);
+                self.sets.contains(target) || c.args.iter().any(|a| self.arg(a, target, depth + 1))
+            }
+            _ => c.args.iter().any(|a| self.arg(a, set, depth + 1)),
+        }
+    }
+
+    fn arg(&self, a: &Arg, set: &str, depth: u8) -> bool {
+        match a {
+            Arg::Clause(c) => self.clause(c, set, depth),
+            Arg::List(items) => items.iter().any(|i| self.arg(i, set, depth)),
+            _ => false,
+        }
+    }
+
+    /// Whether a path, read in a set, reads a field below the rule; the walk
+    /// follows [`Shapes::path`]'s.
+    fn path(&self, path: &str, set_name: &str, depth: u8) -> bool {
+        let (Some(set), Some(exposed)) =
+            (self.s.ask.sets.get(set_name), self.s.v.sets.get(set_name))
+        else {
+            return false;
+        };
+        if depth > 6 {
+            return true;
+        }
+        let own = || self.names.get(set_name).is_some_and(|n| n.contains(path));
+        if exposed.bindings.iter().any(|b| b == path) {
+            return own();
+        }
+        for b in &exposed.change_bindings {
+            if let Some(rest) = path
+                .strip_prefix(b.as_str())
+                .and_then(|r| r.strip_prefix('.'))
+            {
+                return match rest {
+                    "from_date" | "to_date" | "gap_days" => self.below_quasi(),
+                    _ => self.names.get(set_name).is_some_and(|n| n.contains(b)),
+                };
+            }
+        }
+        if set.grain == Grain::Group {
+            return own();
+        }
+        if is_measure_path(path) {
+            // record 49 R4 decides a pipeline's measures (`small_cells`)
+            return false;
+        }
+        let (first, rest) = match path.split_once('.') {
+            Some((f, r)) => (f, Some(r)),
+            None => (path, None),
+        };
+        if first == "pick" {
+            return false;
+        }
+        if let Some(partner) = exposed.partners.get(first) {
+            // a near's partner is found by the days between the two rows, a
+            // partner window, so everything read of it reads a day
+            if set.near.iter().any(|n| n.as_ == first) {
+                return self.below_quasi();
+            }
+            return match rest {
+                None => false,
+                Some(r) if PARTNER_EXTRAS.contains(&r) => false,
+                Some(r) => self.sets.contains(partner) || self.path(r, partner, depth + 1),
+            };
+        }
+        if let Some(of) = &exposed.of
+            && of == first
+        {
+            return rest.is_some_and(|r| self.path(r, of, depth + 1));
+        }
+        if let Some(rest) = rest
+            && level_prefix(set.grain, first)
+        {
+            return self
+                .s
+                .names
+                .field(first, rest)
+                .is_some_and(|i| self.s.below(&i) != Carry::Nothing);
+        }
+        self.s
+            .names
+            .field(set.grain.name(), path)
+            .is_some_and(|i| self.s.below(&i) != Carry::Nothing)
+    }
+
+    /// The trace, set by set in topological order. A set's rows are chosen
+    /// by a quasi identifying field when it narrows, combines, groups or is
+    /// under such a set; when a near finds its partners by a window of days
+    /// (every near does) and keeps only the rows with one; when it keeps
+    /// the rows that have rows of such a set or rows within a window of
+    /// days (`has`), or that have a partner of such a set (`attach`); when
+    /// a group is keyed by such a field or a value made from one (a band, a
+    /// year); and when a `where` reads one. A `pick` keeps the same number
+    /// of rows whatever it orders by, and so chooses none.
+    fn traced(s: &'a Shapes<'s>) -> Reads<'a, 's> {
+        let mut r = Reads {
+            s,
+            names: BTreeMap::new(),
+            sets: BTreeSet::new(),
+        };
+        for name in &s.v.order {
+            let Some(set) = s.ask.sets.get(name) else {
+                continue;
+            };
+            let mut quasi = false;
+            let mut names: BTreeSet<String> = BTreeSet::new();
+            if let Some(Src::Set(from)) = &set.from {
+                quasi |= r.sets.contains(from);
+                names.extend(r.names.get(from).cloned().unwrap_or_default());
+            }
+            if let Some(of) = &set.of {
+                quasi |= r.sets.contains(of);
+            }
+            if let Some(a) = &set.algebra {
+                for operand in &a.sets {
+                    quasi |= r.sets.contains(operand);
+                    names.extend(r.names.get(operand).cloned().unwrap_or_default());
+                }
+                if let Some(tag) = &a.tag
+                    && a.sets.iter().any(|o| r.sets.contains(o))
+                {
+                    names.insert(tag.clone());
+                }
+            }
+            if let Some(g) = &set.group {
+                quasi |= r.sets.contains(&g.of);
+                for c in &g.by {
+                    if r.clause(c, &g.of, 0) {
+                        quasi = true;
+                        if let Some(p) = c.ref_name() {
+                            names.insert(p.to_string());
+                        }
+                    }
+                }
+            }
+            if set.near.iter().any(|n| !n.optional) && r.below_quasi() {
+                quasi = true;
+            }
+            for a in &set.attach {
+                quasi |= !a.optional && r.sets.contains(&a.set);
+            }
+            for h in &set.has {
+                let reads = r.sets.contains(&h.set) || (h.window.is_some() && r.below_quasi());
+                if let Some(as_) = &h.as_
+                    && reads
+                {
+                    names.insert(as_.clone());
+                }
+                quasi |= reads && (h.min.is_some() || h.max.is_some());
+            }
+            r.names.insert(name.clone(), names);
+            if set.group.is_some() && quasi {
+                // a group's counts read what chose or keyed its rows
+                let counts = r.names.entry(name.clone()).or_default();
+                counts.insert("_rows".into());
+                counts.insert("_subjects".into());
+            }
+            if quasi {
+                r.sets.insert(name.clone());
+            }
+            for (b, c) in &set.bind.0 {
+                let reads = match &set.group {
+                    // a group's aggregate reads its child's rows; a count of
+                    // a group keyed by such a field reads it too
+                    Some(_) if quasi && AGGREGATES.contains(&c.op.as_str()) => true,
+                    _ => r.clause(c, name, 0),
+                };
+                if reads {
+                    r.names.entry(name.clone()).or_default().insert(b.clone());
+                }
+            }
+            if set.where_.iter().any(|c| r.clause(c, name, 0)) {
+                r.sets.insert(name.clone());
+            }
+        }
+        r
+    }
+}
+
+/// What a value of the answer's group set counts, by the sizes that hold
+/// it (record 55 K7, small counts at plain).
+struct Counted<'a, 'r, 's> {
+    reads: &'a Reads<'r, 's>,
+    rule: CountRule,
+    /// Per name the group exposes, the sizes holding it.
+    by_name: BTreeMap<String, BTreeSet<usize>>,
+}
+
+impl Counted<'_, '_, '_> {
+    fn size(&mut self, size: CountSize) -> usize {
+        match self.rule.sizes.iter().position(|s| *s == size) {
+            Some(i) => i,
+            None => {
+                self.rule.sizes.push(size);
+                self.rule.sizes.len() - 1
+            }
+        }
+    }
+
+    /// The sizes holding a value made in the group from its names.
+    fn of_clause(&self, c: &Clause) -> BTreeSet<usize> {
+        let mut all = Vec::new();
+        c.walk(&mut all);
+        let mut out = BTreeSet::new();
+        for inner in all {
+            let named = match inner.op.as_str() {
+                "field" => inner.ref_name(),
+                "share" => inner.opts.get("of").and_then(Value::as_str),
+                _ => None,
+            };
+            if let Some(sizes) = named.and_then(|n| self.by_name.get(n)) {
+                out.extend(sizes.iter().copied());
+            }
+        }
+        out
+    }
+
+    /// The rule for the answer's set, when it is a group set: which of its
+    /// counts are held, by which sizes, and which answer columns read them.
+    fn rule(reads: &Reads<'_, '_>) -> CountRule {
+        let ask = reads.s.ask;
+        let Some(set) = ask.sets.get(&ask.out.set) else {
+            return CountRule::default();
+        };
+        let Some(g) = &set.group else {
+            return CountRule::default();
+        };
+        if !matches!(ask.out.level, Level::Aggregate | Level::Record) {
+            return CountRule::default();
+        }
+        let mut c = Counted {
+            reads,
+            rule: CountRule::default(),
+            by_name: BTreeMap::new(),
+        };
+        let keyed = reads.sets.contains(&ask.out.set);
+        let group = keyed.then(|| c.size(CountSize::Group));
+        for n in ["_rows", "_subjects"] {
+            c.by_name.insert(n.into(), group.into_iter().collect());
+        }
+        for (b, clause) in &set.bind.0 {
+            let op = clause.op.as_str();
+            let mut sizes = BTreeSet::new();
+            if AGGREGATES.contains(&op) {
+                let first = clause.args.first();
+                let own = first.is_some_and(|a| c.reads.arg(a, &g.of, 1));
+                // its value as the shapes see it: a comparison or a count
+                // carries nothing of the field, so a sum of one is a count
+                let carried = first.map_or(Carry::Nothing, |a| c.reads.s.arg(a, &g.of, 1));
+                match op {
+                    "count" => {
+                        sizes.extend(group);
+                        if own {
+                            sizes.insert(c.size(CountSize::Own {
+                                binding: b.clone(),
+                                nonzero: false,
+                            }));
+                        }
+                    }
+                    "distinct" => sizes.extend(group),
+                    "sum" | "avg" if own && carried == Carry::Nothing => {
+                        sizes.insert(c.size(CountSize::Own {
+                            binding: b.clone(),
+                            nonzero: true,
+                        }));
+                    }
+                    _ => {}
+                }
+            } else {
+                sizes = c.of_clause(clause);
+            }
+            c.by_name.insert(b.clone(), sizes);
+        }
+        for (i, col) in ask.out.columns.iter().enumerate() {
+            let sizes = c.of_clause(col);
+            if !sizes.is_empty() {
+                c.rule.columns.insert(i, sizes);
+            }
+        }
+        if c.rule.columns.is_empty() {
+            return CountRule::default();
+        }
+        c.rule
+    }
+}
+
 /// What record 55 K7 makes of a document's answer below detail quasi.
 #[derive(Debug, Default)]
 struct Rule {
     shaped: BTreeSet<usize>,
     held: BTreeMap<usize, BTreeSet<String>>,
     held_measures: BTreeSet<String>,
+    quasi_sets: BTreeSet<String>,
+    counts: CountRule,
     refused: Vec<Issue>,
 }
 
@@ -3127,6 +3522,10 @@ fn shapes_of(ask: &Ask, names: &dyn Names, scope: &Scope, v: &Validated) -> Rule
         }
     }
     measures_of_shapes(ask, &mut rule, &s);
+    // small counts at plain (the ruling of 2026-10-12)
+    let reads = Reads::traced(&s);
+    rule.counts = Counted::rule(&reads);
+    rule.quasi_sets = reads.sets;
     rule
 }
 

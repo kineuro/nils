@@ -418,8 +418,13 @@ pub fn values(
         "out": {"set": "g", "level": "count"}
     });
     let distinct_ask: Ask = crate::parse(&distinct_text.to_string())?;
-    let prepared = prepare(ask, s.names, s.scope)?;
-    let counted = prepare(distinct_ask, s.names, s.scope)?;
+    let mut prepared = prepare(ask, s.names, s.scope)?;
+    let mut counted = prepare(distinct_ask, s.names, s.scope)?;
+    // the sampler's own rule: a quasi identifying field's values are merged
+    // into their shapes before they are counted, so its counts are the
+    // shapes', read whole (record 55 K7's small counts are the ask's)
+    prepared.validated = prepared.validated.counting_all();
+    counted.validated = counted.validated.counting_all();
     let mut runner = Runner {
         names: s.names,
         scheme: s.scheme,

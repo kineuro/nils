@@ -84,9 +84,12 @@ gate:
         Record 55 K7, the ruling of 2026-10-12: at detail plain each
         cohort's mean age and its spread (stddev) are the numbers of the
         fixture above, since each cohort holds 5 subjects or more, and its
-        youngest and oldest age are shapes. The count and the share of
-        women count a comparison of the sex, as a filter's count does, and
-        are numbers.
+        youngest and oldest age are shapes. The sex is quasi identifying,
+        so the count of women is a count a quasi identifying field chose
+        (small counts, the ruling of 2026-10-12): ms-cohort-b's 9 women of
+        12 subjects leave 3 men, under 5, so its count and share of women
+        are held back, and ms-cohort-a's with them, so that the women of
+        both cohorts less ms-cohort-a's do not say ms-cohort-b's.
 
     # --- the conformance suite (section 13.3): every hook and every
     #     disputed construct, hashed on both backends
@@ -266,6 +269,46 @@ gate:
         are the values above in a group of 5 subjects or more, and null in
         the last group, which holds 3, and the canonical names those three
         columns as held back.
+
+    - name: quasi-age-bands
+      family: record 55
+      question: The subjects of ms-cohort-a per five-year band of their age at the first visit
+      file: fixtures/quasi-age-bands.ask.yml
+      outcome: passes
+      note: >-
+        At the gate's own detail every band's count of subjects, its count
+        of first sessions and its share of the cohort are numbers.
+    - name: quasi-age-bands-plain
+      family: record 55
+      question: The same bands, asked at detail plain
+      file: fixtures/quasi-age-bands.ask.yml
+      outcome: passes
+      detail: plain
+      note: >-
+        At detail plain (small counts, the ruling of 2026-10-12) the band
+        is a shape, and the counts of the subjects an age grouped are held
+        back for a band under 5 subjects: the band of 45 and over holds 2,
+        so its subjects, its sessions and its share are null, and so are
+        the band of 25 to 34's, the smallest band beside it, so that the 44
+        subjects with an age less the band shown say neither. The funnel
+        holds back the subjects with an age at the first visit, since the
+        clause that chose them dropped 4 subjects from the 48 before it.
+    - name: quasi-count-few
+      family: record 55
+      question: How many subjects were 45 or older at their first visit
+      file: fixtures/quasi-count-few.ask.yml
+      outcome: passes
+      note: At the gate's own detail, a count of 2 subjects and 2 sessions.
+    - name: quasi-count-few-plain
+      family: record 55
+      question: The same count, asked at detail plain
+      file: fixtures/quasi-count-few.ask.yml
+      outcome: passes
+      detail: plain
+      note: >-
+        At detail plain (small counts, the ruling of 2026-10-12) a filter on
+        an age chose the rows, and they are 2 subjects, under 5: the count
+        of rows and of subjects is held back.
 
     # --- what this wave does not answer, named rather than hidden
     - name: pair-grain-matching

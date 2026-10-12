@@ -1,0 +1,24 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Record 55 K7, small counts at plain (the ruling of 2026-10-12): how many
+# subjects were 45 or older at their first visit. A filter on an age chose
+# them, and they are 2, so at detail plain the count is held back.
+ast_version: 1
+name: subjects 45 or older at their first visit
+scheme: default
+sets:
+  people: {grain: subject}
+  visits:
+    grain: session
+    of: people
+    bind:
+      n:   ["ordinal", {}]
+      age: ["age_at", {}, ["field", {}, "subject.birth_date"], ["field", {}, "first"]]
+  older:
+    grain: session
+    from: visits
+    where:
+      - ["=", {}, ["field", {}, "n"], 1]
+      - [">=", {}, ["field", {}, "age"], 45]
+out:
+  set: older
+  level: count

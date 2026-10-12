@@ -1,0 +1,42 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Record 55 K7, small counts at plain (the ruling of 2026-10-12): the
+# subjects with a known age per ten-year band of their age at the first
+# visit, their first sessions, and each band's share of all subjects. The
+# chat bench's plain reader rebuilt ages from counts like these; at detail
+# plain the band under 5 subjects is held back, and the smallest band
+# beside it, so that the count of subjects with an age less the band shown
+# says neither.
+ast_version: 1
+name: subjects per ten-year band of their age at the first visit
+scheme: default
+sets:
+  people: {grain: subject}
+  visits:
+    grain: session
+    of: people
+    bind:
+      n:    ["ordinal", {}]
+      age:  ["age_at", {}, ["field", {}, "subject.birth_date"], ["field", {}, "first"]]
+      band: ["+", {}, ["*", {}, ["round", {"key": true}, ["/", {}, ["-", {}, ["field", {}, "age"], 9.5], 10], 0], 10], 5]
+  firsts:
+    grain: session
+    from: visits
+    where:
+      - ["=", {}, ["field", {}, "n"], 1]
+      - ["not_null", {}, ["field", {}, "age"]]
+  bands:
+    grain: group
+    group: {of: firsts, by: [["field", {}, "band"]]}
+    bind:
+      sessions: ["count", {set: firsts}]
+keep: [bands]
+out:
+  set: bands
+  level: aggregate
+  columns:
+    - ["field", {}, "band"]
+    - ["field", {}, "_subjects"]
+    - ["field", {}, "sessions"]
+  measures:
+    - {share: {of: "_subjects", over: people}}
+  order: [[["field", {}, "band"], asc]]

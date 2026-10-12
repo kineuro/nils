@@ -103,6 +103,11 @@ pub struct Compiled {
     /// for a group of `MEASURE_K` subjects with a value and null where it
     /// is held back.
     pub held_columns: Vec<usize>,
+    /// Record 55 K7, small counts at plain (the ruling of 2026-10-12): which
+    /// answer columns are counts of rows a quasi identifying field chose or
+    /// grouped, held back (null) for fewer than `MEASURE_K` subjects and
+    /// beside such a count.
+    pub count_columns: Vec<usize>,
 }
 
 /// The dialect layer: the hooks (H1 to H11) and the closures (§11.2, §11.3).
@@ -456,6 +461,9 @@ struct Frame {
     /// Record 55 K7, the ruling of 2026-10-12: a group's held bindings, each
     /// with the column that counts the subjects whose value it reads.
     held_counts: BTreeMap<String, String>,
+    /// Record 55 K7, small counts at plain: per size of the count rule, the
+    /// column that is 1 where the group's counts by it are held back.
+    count_flags: Vec<String>,
 }
 
 fn column_name(binding: &str) -> String {
@@ -545,6 +553,12 @@ struct Builder<'a> {
     /// each, and the held columns' places in the answer.
     held: BTreeMap<usize, BTreeSet<String>>,
     held_columns: Vec<usize>,
+    /// Record 55 K7, small counts at plain (the ruling of 2026-10-12): the
+    /// sets a quasi identifying field chose or grouped, the rule for the
+    /// answer's group counts, and the count columns' places in the answer.
+    quasi_sets: BTreeSet<String>,
+    counts: crate::validate::CountRule,
+    count_columns: Vec<usize>,
 }
 
 const AGGREGATES: &[&str] = &["count", "distinct", "min", "max", "sum", "avg", "list"];
@@ -582,6 +596,29 @@ fn subjects_with(x: &str, has_subj: bool) -> String {
 /// The column of a group's layer that counts the subjects of a held binding.
 fn held_count_col(binding: &str) -> String {
     format!("kn_{}", binding.replace('.', "__"))
+}
+
+/// Record 55 K7, small counts at plain (the ruling of 2026-10-12): the
+/// column of the answer's group layer that counts its subjects, whatever
+/// else holds its `_subjects`.
+const COUNT_SUBJECTS: &str = "kq_subjects";
+
+/// The column of the answer's group layer that counts the subjects a
+/// binding counts by a quasi identifying field of its own.
+fn own_count_col(binding: &str) -> String {
+    format!("kq_{}", binding.replace('.', "__"))
+}
+
+/// How many subjects (rows, where the rows have none) of the rows `ch` a
+/// count of `x` counts: those with a value, or, for a sum or a mean of a
+/// comparison such as the women of a group, those whose value is not 0.
+fn subjects_counted(x: &str, nonzero: bool, has_subj: bool) -> String {
+    let who = if has_subj { "ch.subj" } else { "ch.k" };
+    if nonzero {
+        format!("COUNT(DISTINCT CASE WHEN ({x}) <> 0 THEN {who} END)")
+    } else {
+        format!("COUNT(DISTINCT CASE WHEN ({x}) IS NOT NULL THEN {who} END)")
+    }
 }
 
 fn window_days(w: &crate::ast::WindowSpec, at: &str) -> R<(Option<i64>, Option<i64>)> {
@@ -2305,6 +2342,20 @@ impl<'a> Builder<'a> {
                 "COUNT(DISTINCT ch.k)".into()
             })
         ));
+        // Record 55 K7, small counts at plain (the ruling of 2026-10-12):
+        // the answer's group counts its subjects as they are, whatever a
+        // measure's rule holds, so its counts are held by them
+        let counted = name == self.ask.out.set && !self.counts.is_empty();
+        if counted {
+            cols.push(format!(
+                "{} AS {COUNT_SUBJECTS}",
+                if child.has_subj {
+                    "COUNT(DISTINCT ch.subj)"
+                } else {
+                    "COUNT(DISTINCT ch.k)"
+                }
+            ));
+        }
         frame.bindings.push(("_rows".into(), "_rows".into()));
         frame
             .bindings
@@ -2359,6 +2410,24 @@ impl<'a> Builder<'a> {
                     cols.push(format!("{} AS {count}", subjects_with(x, child.has_subj)));
                     frame.held_counts.insert(b.clone(), count);
                 }
+                // small counts at plain: the subjects a binding counts by a
+                // quasi identifying field of its own
+                if counted {
+                    for size in &self.counts.sizes {
+                        if let crate::validate::CountSize::Own { binding, nonzero } = size
+                            && binding == b
+                        {
+                            let x = inner
+                                .as_deref()
+                                .ok_or_else(|| err(&bp, "a held count reads a column"))?;
+                            cols.push(format!(
+                                "{} AS {}",
+                                subjects_counted(x, *nonzero, child.has_subj),
+                                own_count_col(b)
+                            ));
+                        }
+                    }
+                }
                 dated
             } else {
                 post.push((b.clone(), col.clone()));
@@ -2391,6 +2460,11 @@ impl<'a> Builder<'a> {
             "SELECT q.*, ROW_NUMBER() OVER (ORDER BY {}) AS k, NULL AS subj FROM ({layer}) q",
             order.join(", ")
         );
+        if counted {
+            let (held, flags) = self.count_flags(&layer, &frame);
+            layer = held;
+            frame.count_flags = flags;
+        }
         if !set.where_.is_empty() {
             let mut preds = Vec::new();
             for (i, c) in set.where_.iter().enumerate() {
@@ -2407,6 +2481,93 @@ impl<'a> Builder<'a> {
         self.frames.insert(name.to_string(), frame);
         self.push_cte(name, &layer);
         Ok(())
+    }
+
+    /// Record 55 K7, small counts at plain (the ruling of 2026-10-12): which
+    /// of the answer's groups hold their counts back, one flag column per
+    /// size of the rule over the layer `layer` (whose rows carry `k` and
+    /// the keys), so the answer reads 1 where a count is held.
+    ///
+    /// A group is held where the size counts fewer than `MEASURE_K`
+    /// subjects; for a binding's own count, also where the group's other
+    /// subjects are fewer, since the group's total less the count is them.
+    /// Then, so that no held count is the difference between a total the
+    /// ask answers elsewhere and the counts shown, every line of groups
+    /// (the groups that share all keys but one; with one key, all of them)
+    /// that holds a count holds one more: where the line holds one alone,
+    /// or holds only counts under the bound (two groups of one each would
+    /// be found from their sum), the group with the fewest subjects of
+    /// those shown, the first by key on a tie. With several keys this runs
+    /// a pass per key three times, so that a group held for one line is
+    /// never alone in another. Every group's flags are decided over all
+    /// the groups, before the group's own `where`, a page or a limit, so
+    /// the rows shown never decide which are held.
+    fn count_flags(&self, layer: &str, frame: &Frame) -> (String, Vec<String>) {
+        let k = crate::validate::MEASURE_K;
+        let all = format!("q.{COUNT_SUBJECTS}");
+        let mut sizes: Vec<(String, String)> = Vec::new();
+        for size in &self.counts.sizes {
+            match size {
+                crate::validate::CountSize::Group => {
+                    sizes.push((all.clone(), format!("{all} < {k}")));
+                }
+                crate::validate::CountSize::Own { binding, .. } => {
+                    let own = format!("q.{}", own_count_col(binding));
+                    sizes.push((
+                        own.clone(),
+                        format!(
+                            "({own} BETWEEN 1 AND {small}) OR ({all} - {own} BETWEEN 1 AND {small})",
+                            small = k - 1
+                        ),
+                    ));
+                }
+            }
+        }
+        let mut cols = Vec::new();
+        for (i, (_, small)) in sizes.iter().enumerate() {
+            cols.push(format!("CASE WHEN {small} THEN 1 ELSE 0 END AS kp{i}"));
+            cols.push(format!("CASE WHEN {small} THEN 1 ELSE 0 END AS kh{i}_0"));
+        }
+        let mut layer = format!("SELECT q.*, {} FROM ({layer}) q", cols.join(", "));
+        let keys: Vec<String> = frame
+            .group_by
+            .iter()
+            .map(|(_, c)| format!("q.{c}"))
+            .collect();
+        let passes = if keys.len() <= 1 { 1 } else { 3 * keys.len() };
+        for pass in 1..=passes {
+            let mut cols = Vec::new();
+            for (i, (size, _)) in sizes.iter().enumerate() {
+                let h = format!("q.kh{i}_{}", pass - 1);
+                let lines: Vec<String> = (0..keys.len().max(1))
+                    .map(|j| {
+                        let others: Vec<&str> = keys
+                            .iter()
+                            .enumerate()
+                            .filter(|(x, _)| *x != j)
+                            .map(|(_, c)| c.as_str())
+                            .collect();
+                        let part = if others.is_empty() {
+                            String::new()
+                        } else {
+                            format!("PARTITION BY {} ", others.join(", "))
+                        };
+                        format!(
+                            "(SUM({h}) OVER ({part}) >= 1 AND (SUM({h}) OVER ({part}) = 1 OR SUM({h} * (1 - q.kp{i})) OVER ({part}) = 0) AND ROW_NUMBER() OVER ({part}ORDER BY {h}, CASE WHEN {size} = 0 THEN 1 ELSE 0 END, {size}, q.k) = 1)"
+                        )
+                    })
+                    .collect();
+                cols.push(format!(
+                    "CASE WHEN {h} = 1 OR {} THEN 1 ELSE 0 END AS kh{i}_{pass}",
+                    lines.join(" OR ")
+                ));
+            }
+            layer = format!("SELECT q.*, {} FROM ({layer}) q", cols.join(", "));
+        }
+        let flags = (0..sizes.len())
+            .map(|i| format!("kh{i}_{passes}"))
+            .collect();
+        (layer, flags)
     }
 
     fn aggregate(&self, op: &str, inner: Option<&str>, path: &str) -> R<String> {
@@ -3995,6 +4156,28 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// Record 55 K7, small counts at plain (the ruling of 2026-10-12): how
+    /// many subjects a count of the answer's set counts, where a quasi
+    /// identifying field chose or grouped its rows; none where none did. A
+    /// group set's rows are its keys' values, so its count is held by the
+    /// subjects under it, as a count of distinct values is.
+    fn quasi_subjects(&self, frame: &Frame) -> Option<String> {
+        let out = &self.ask.out;
+        if !self.quasi_sets.contains(&out.set) {
+            return None;
+        }
+        let set = self.ask.sets.get(&out.set)?;
+        Some(match &set.group {
+            Some(g) => {
+                let child = self.frames.get(&g.of).cloned().unwrap_or_default();
+                let who = if child.has_subj { "ch.subj" } else { "ch.k" };
+                format!("(SELECT COUNT(DISTINCT {who}) FROM {} ch)", cte_name(&g.of))
+            }
+            None if frame.has_subj => "COUNT(DISTINCT o.subj)".into(),
+            None => "COUNT(*)".into(),
+        })
+    }
+
     /// The final SELECT over the answer's set.
     fn answer(&mut self) -> R<String> {
         let out = &self.ask.out;
@@ -4005,6 +4188,7 @@ impl<'a> Builder<'a> {
         let mut code_columns = Vec::new();
         let mut shaped_columns = Vec::new();
         let mut held_columns = Vec::new();
+        let mut count_columns = Vec::new();
         match out.level {
             crate::ast::Level::Count => {
                 let subjects = if frame.has_subj {
@@ -4024,16 +4208,51 @@ impl<'a> Builder<'a> {
                         e
                     }
                 };
+                // record 55 K7, small counts at plain (the ruling of
+                // 2026-10-12): a count of a set a quasi identifying field
+                // chose or grouped, none or MEASURE_K subjects and more,
+                // else held back
+                let quasi = self.quasi_subjects(&frame);
+                let held_q = |e: String| -> String {
+                    match &quasi {
+                        Some(n) => format!(
+                            "CASE WHEN {n} = 0 OR {n} >= {} THEN {e} END",
+                            crate::validate::MEASURE_K
+                        ),
+                        None => e,
+                    }
+                };
                 let sql = format!(
                     "SELECT {} AS rows_, {} AS subjects_ FROM {} o",
-                    held(self.sql.as_bigint("COUNT(*)")),
-                    held(self.sql.as_bigint(subjects)),
+                    held_q(held(self.sql.as_bigint("COUNT(*)"))),
+                    held_q(held(self.sql.as_bigint(subjects))),
                     cte_name(&out.set)
                 );
                 self.answer_columns = vec!["rows".into(), "subjects".into()];
+                if quasi.is_some() {
+                    self.count_columns = vec![0, 1];
+                }
                 return Ok(sql);
             }
             crate::ast::Level::Boolean => {
+                // record 55 K7, small counts at plain: whether any is a
+                // count too, so it answers none, MEASURE_K subjects and
+                // more, or is held back between
+                if let Some(n) = self.quasi_subjects(&frame) {
+                    let k = crate::validate::MEASURE_K;
+                    let measured = if self.small_cells.contains(&out.set) {
+                        format!(" AND COUNT(*) >= {k}")
+                    } else {
+                        String::new()
+                    };
+                    let sql = format!(
+                        "SELECT CASE WHEN COUNT(*) = 0 THEN 0 WHEN {n} >= {k}{measured} THEN 1 END AS any_ FROM {} o",
+                        cte_name(&out.set)
+                    );
+                    self.answer_columns = vec!["any".into()];
+                    self.count_columns = vec![0];
+                    return Ok(sql);
+                }
                 let sql = if self.small_cells.contains(&out.set) {
                     format!(
                         "SELECT CASE WHEN COUNT(*) = 0 THEN 0 WHEN COUNT(*) >= {} THEN 1 END AS any_ FROM {} o",
@@ -4094,6 +4313,22 @@ impl<'a> Builder<'a> {
                 }
                 held_columns.push(cols.len());
             }
+            // record 55 K7, small counts at plain (the ruling of
+            // 2026-10-12): a count of the groups' rows a quasi identifying
+            // field chose or keyed, and what is made of it, shows only where
+            // no flag of its sizes holds it back
+            if let Some(sizes) = self.counts.columns.get(&i) {
+                let mut holds = Vec::new();
+                for &s in sizes {
+                    let flag = frame
+                        .count_flags
+                        .get(s)
+                        .ok_or_else(|| err(&at, "no flag holds this count"))?;
+                    holds.push(format!("o.{flag} = 0"));
+                }
+                rendered = format!("CASE WHEN {} THEN {rendered} END", holds.join(" AND "));
+                count_columns.push(cols.len());
+            }
             cols.push(format!("{rendered} AS c{i}"));
             names.push(name);
         }
@@ -4135,6 +4370,7 @@ impl<'a> Builder<'a> {
         self.code_columns = code_columns;
         self.shaped_columns = shaped_columns;
         self.held_columns = held_columns;
+        self.count_columns = count_columns;
         Ok(sql)
     }
 }
@@ -4167,6 +4403,9 @@ pub fn compile(ask: &Ask, validated: &Validated, ctx: &Context<'_>) -> R<Compile
         small_cells: validated.small_cells.clone(),
         held: validated.held.clone(),
         held_columns: Vec::new(),
+        quasi_sets: validated.quasi_sets.clone(),
+        counts: validated.counts.clone(),
+        count_columns: Vec::new(),
     };
     for name in &validated.order {
         b.current = Some(ask.sets[name].grain);
@@ -4182,5 +4421,6 @@ pub fn compile(ask: &Ask, validated: &Validated, ctx: &Context<'_>) -> R<Compile
         code_columns: b.code_columns.clone(),
         shaped_columns: b.shaped_columns.clone(),
         held_columns: b.held_columns.clone(),
+        count_columns: b.count_columns.clone(),
     })
 }

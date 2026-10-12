@@ -72,7 +72,18 @@ ages are numbers. `quasi-by-visit-plain` holds both kinds of group at
 once: the last visit number has 3 subjects, so its mean, its count of
 distinct ages and its spread are held back while the other groups answer
 them. `gold-c-demographics-plain` answers gold C's mean and spread of age
-per cohort at plain.
+per cohort at plain, and holds back its count and share of women, since
+the sex is quasi identifying and one cohort's women leave 3 men.
+
+A count of rows a quasi-identifying field chose or grouped is answered at
+plain for none or 5 subjects and more, and held back (null) between, with
+one count more held in each line of groups that holds one, so that a total
+less the counts shown never says it (small counts, the ruling of
+2026-10-12). The canonical lists such columns under `held_back` too, and a
+stage of the funnel held back is `null`. `quasi-age-bands-plain` holds the
+band of 45 and over, 2 subjects, and the band of 25 to 34 beside it, while
+the band of 35 to 44 answers 34; `quasi-count-few-plain` holds a count of 2
+subjects an age chose.
 
 ## Dates written as text
 

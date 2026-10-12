@@ -353,7 +353,7 @@ subject's five visits are one subject.
 | The count of distinct values (`distinct`) | the same |
 | The min, the max, the median, a percentile | never answered: each is one person's own value. The min and the max are shapes; the median and a percentile are refused |
 | The sum and the list | shapes |
-| A count of rows or subjects, a comparison | answered |
+| A count of rows or subjects, a comparison | answered, but a count of rows the field chose or grouped is held below 5 subjects (small counts, below) |
 
 A held-back value is null, and every answer that holds rows names its columns
 with a value held back and why, beside `shaped`: `held_back`, as
@@ -364,14 +364,76 @@ row's own subject, session or stack, one person's rows, and stays a shape. What 
 group's other bindings and the answer's columns make of a mean alone (a rounded
 mean, a share of it) is held with it; made with a shaped value, it is a shape.
 
+**Small counts (the ruling of 2026-10-12).** Below detail quasi, at plain, a
+count of rows that a quasi-identifying field chose or grouped is answered only for
+none or 5 subjects and more (`MEASURE_K`); between, it is held back: null, and
+named in `held_back` with why `fewer than 5, or held beside a count of fewer than
+5 so that it is not found by subtraction`. Counts of rows that technical and
+clinical fields alone chose and grouped stay exact, and detail quasi and above see
+every count. The chat bench found it: a plain reader rebuilt ages as counts per
+age band, one band holding a single subject.
+
+A quasi-identifying field chooses a set's rows where:
+
+| The set | Example |
+|---|---|
+| a `where` reads one, through any comparison or function, or a binding made from one | `age >= 45`, `sex = 'F'`, `first between two dates` |
+| it is a group keyed by one, or by a value made from one | a band of the age, the year of a date |
+| it keeps the rows that have rows within a window of days (`has` with a window), or that have a partner a near finds (every near reads a window of days; an optional near does not filter, but everything read of its partner reads a day) | sessions with a score within 90 days |
+| it keeps the rows that have rows of such a set (`has`, `attach`), narrows one (`from`), lies under one (`of`), combines one (`algebra`), or groups one | the sessions of the subjects aged 40 to 44 |
+| a group's own `where` reads one | the bands whose mean age is over 40 |
+
+A `pick` keeps the same number of rows whatever it orders by, so it chooses none.
+A subject's ordinal, the visit number, is no quasi-identifying field.
+
+What is held, at plain:
+
+| The count | Held |
+|---|---|
+| `level: count` of such a set: its rows and its subjects | when it holds 1 to 4 subjects |
+| `level: boolean` of such a set | null (neither 0 nor 1) when it holds 1 to 4 subjects |
+| a count of a group set at `level: count` (its number of groups) | when the groups hold 1 to 4 subjects |
+| a group's `_rows`, `_subjects`, `count` and `distinct`, where such a field chose the group's child or keys the group | when the group holds 1 to 4 subjects, every count of the group's row |
+| a group's count of its own by such a field: a `count` of a value made from one (the subjects with a value), a `sum` or an `avg` of one read through a comparison (`n_female`, the subjects whose value is not 0) | when it counts 1 to 4 subjects, or the group's other subjects are 1 to 4, which its total less it would say |
+| what the group's other bindings and the answer's columns make of a held count (twice it, a share of it), and a `share` measure of one | with it |
+| a `share` measure over such a set | in every row, when the set holds 1 to 4 subjects |
+| the diagnosis's funnel: a stage's rows and subjects, its keys, and what its clause group lost | when such a field chose the stage and it holds 1 to 4 subjects, when it dropped 1 to 4 from the stage before it, and when it starts from a set whose last stage is held |
+
+**No count is found by subtraction.** The ask answers a group's total anyway,
+as another question: the subjects of a cohort, the subjects with an age. So a
+group's count held alone would be that total less the counts shown. I chose to
+hold one count more, never the total, since the total is an ordinary question
+of its own: in every line of groups (with one key, all the answer's groups; with
+several, the groups that share every key but one) that holds a count, where the
+line holds one count alone, or only counts under 5 (two groups of 1 would be
+found from their sum of 2), the line's group with the fewest subjects of those
+shown is held too, the first by key on a tie. A count held beside another is not
+under 5 itself, so the why says both, and the desk and the chat never say which
+it is: saying it would tell the reader the other one. With several keys, the
+passes run three times over every key, so a count held for one line is not left
+alone in another. The groups held are decided over every group of the answer,
+before the group's own `where`, a page or a limit, so the rows a page shows never
+change which are held.
+
+What the desk and the chat see: a held count is null in the rows (an empty cell),
+and the answer's `held_back` names its column with the why, on a run and its
+cached answer, a preview, a handle and a page of it, and a job's result; the
+diagnosis's stages carry `held_back` too, with null `rows` and `subjects`. A
+handle records `quasi_counts` in its suppression, so no answer cached while such
+counts were numbers is served again.
+
 > **Limit: plain detail still filters.** A filter, an order and a count read a
 > quasi-identifying field itself at every detail, and the ask holds each answer to
 > these rules, not a person's series of questions. So repeated questions can
 > narrow a value: asked again with a narrower filter (ages 40 to 50, then 40 to
-> 45), a count says how many people are left in the range, and a group's mean
-> moves by what the narrower filter took out. The real protection is who is given
-> plain detail (record 25): give it only to people who may see such counts and
-> summaries of the registry.
+> 45), a count of 5 or more says how many people are left in the range, a
+> count of the ages outside the range less the whole says the ones inside, and a
+> group's mean moves by what the narrower filter took out. A list of the rows a
+> quasi-identifying field chose (`level: record` or `aggregate` over a set that is
+> not a group) is still answered at plain, and its length is a count; a row's own
+> count of its subject's rows (a subject's visits in a year) is one person's and
+> is answered too. The real protection is who is given plain detail (record 25):
+> give it only to people who may see such counts and summaries of the registry.
 
 ### 7.2 What a release records about itself (K9)
 

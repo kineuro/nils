@@ -838,7 +838,7 @@ fn the_catalog_serves_the_field_and_its_values_and_refuses_a_name_it_does_not_ho
             .unwrap_or_else(|| panic!("{}: {:?}", l.name, drafted.diagnosis.funnel));
         assert_eq!(
             kept.subjects,
-            t.subjects[&Some(SMALL)].len() as i64,
+            Some(t.subjects[&Some(SMALL)].len() as i64),
             "{}",
             l.name
         );
