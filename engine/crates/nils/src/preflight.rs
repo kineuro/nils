@@ -244,30 +244,30 @@ pub(crate) fn frozen_picks(
     Ok(out)
 }
 
-/// The live picks among `stacks`, by stack.
+/// The picks among `stacks`, by stack: the live ones, or those a release
+/// froze when it was made.
 pub(crate) fn pick_roles(
     store: &mut Store,
     stacks: &[i64],
-    of: &nils_registry::pick_truth::Of,
+    picks: &nils_registry::pick_truth::Picks,
 ) -> Result<BTreeMap<i64, Picked>, String> {
     // record 55, decision 6, and one place of truth (2026-10-11): the picks
-    // a release read (its pick_rules), or the main scans as every reader
-    // reads them
-    let picks = of.picks(store);
+    // a release read, as it froze them (the rulings of 2026-10-12, item 6,
+    // carried to releases), or the main scans as every reader reads them
+    let picks = picks.stacks(store);
     let err = |e: nils_registry::Error| e.to_string();
     let mut out: BTreeMap<i64, Picked> = BTreeMap::new();
     let d_ = store.dialect();
     for chunk in stacks.chunks(500) {
         let sql = format!(
-            "SELECT ps.stack_id, p.subject_id, {}, p.role FROM {} ps JOIN {picks} p ON p.id = ps.pick_id \
-             WHERE ps.stack_id IN ({}) ORDER BY ps.stack_id",
+            "SELECT p.stack_id, p.subject_id, {}, p.role FROM {picks} p \
+             WHERE p.stack_id IN ({}) ORDER BY p.stack_id",
             d_.text_of_qualified(
                 Some("p"),
                 nils_registry::schema::table("pick")
                     .column("session_day")
                     .expect("pick.session_day")
             ),
-            store.qualified("pick_stack"),
             list(chunk)
         );
         for r in store.query(&sql, &[]).map_err(err)? {
@@ -385,7 +385,11 @@ fn bids_units(
         None => {
             let of =
                 nils_registry::pick_truth::Of::own(registry.store()).map_err(|e| e.to_string())?;
-            let picks = pick_roles(registry.store(), stacks, &of)?;
+            let picks = pick_roles(
+                registry.store(),
+                stacks,
+                &nils_registry::pick_truth::Picks::Live(of.clone()),
+            )?;
             (of, picks)
         }
     };

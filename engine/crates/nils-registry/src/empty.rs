@@ -78,6 +78,8 @@ pub const STACK_TABLES: &[(&str, Row)] = &[
     ("release_plan", Row::Keeps("a release planned it")),
     ("release_absent", Row::Keeps("a release names it")),
     ("release_move", Row::Keeps("a release moved it")),
+    // the main scans a release read, frozen when it was made
+    ("release_pick", Row::Keeps("a release read a pick of it")),
 ];
 
 /// Every table with a `series_id` column, and what a sweep does to it.

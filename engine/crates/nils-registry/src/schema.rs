@@ -1866,6 +1866,34 @@ fn build_registry() -> Vec<Table> {
             ],
         )
         .index(&["release_id"]),
+        // Record 55 (rulings of 2026-10-12, item 6, carried to releases):
+        // the main scans a release read, frozen when it was made. A
+        // scope's newer rules replace the picks of the version before, and
+        // the pack's run makes its own again, so a reader of a release's
+        // picks after it was made reads these, never the live picks
+        // (`pick_truth::Picks::Frozen`). One row per visit, role and
+        // stack: of each visit the release took a stack of, every live
+        // pick of what it read (`release.pick_rules`) with each stack the
+        // pick names, and the scope and version of the rules the pick was
+        // made with, the scope null for the pack's. Never changed.
+        Table::new(
+            "release_pick",
+            vec![
+                col("id", Type::Id),
+                req("release_id", Type::Int),
+                req("subject_id", Type::Int),
+                // the visit, as the pick names it: its first day
+                req("session_day", Type::Date),
+                req("role", Type::Text),
+                req("stack_id", Type::Int),
+                col("rules_scope_kind", Type::Text),
+                col("rules_scope_id", Type::Int),
+                col("rules_version", Type::Int),
+            ],
+        )
+        .index(&["release_id"])
+        .index(&["stack_id"])
+        .index(&["subject_id"]),
         Table::new(
             "diagnostic",
             vec![

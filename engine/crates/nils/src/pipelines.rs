@@ -2666,9 +2666,30 @@ fn units_missing(
                 .map(|s| (*s, std::collections::BTreeSet::from([role.clone()])))
                 .collect()
         }
+        // the picks its input release froze when it was made (record 55,
+        // rulings of 2026-10-12, item 6, carried to releases); of a
+        // release from before, the live picks of what it recorded, and
+        // where they are gone, every unit says so
         None => {
-            let of = release_reading(store, release_id)?;
-            crate::preflight::pick_roles(store, &all, &of)?
+            let reading = release_reading(store, release_id)?;
+            let Some(picks) = reading.picks() else {
+                let why = reading.gone().unwrap_or_default();
+                return Ok(units
+                    .iter()
+                    .map(|u| {
+                        let unknown = roles
+                            .iter()
+                            .map(|role| {
+                                format!(
+                                    "which of its stacks stands for {role} is not known: the picks its input release read are gone ({why})"
+                                )
+                            })
+                            .collect();
+                        (u.id.clone(), unknown)
+                    })
+                    .collect());
+            };
+            crate::preflight::pick_roles(store, &all, &picks)?
                 .into_iter()
                 .map(|(s, p)| (s, p.roles))
                 .collect()
@@ -2695,31 +2716,20 @@ fn units_missing(
     Ok(out)
 }
 
-/// Record 55, decision 6: the picks a release read, as it recorded them.
+/// Record 55, decision 6, and its rulings of 2026-10-12, item 6, carried
+/// to releases: the picks a release read, as a reader after it reads them:
+/// the list it froze when it was made; of a release from before, the live
+/// picks of what it recorded (the pack's where it recorded none), unless
+/// they are gone (one place of truth, 2026-10-11).
 pub(crate) fn release_reading(
     store: &mut Store,
     release_id: i64,
-) -> Result<nils_registry::pick_truth::Of, String> {
-    let d = store.dialect();
-    let recorded = store
-        .query_opt(
-            &format!(
-                "SELECT {} FROM {} WHERE id = {}",
-                crate::text_of(store, "release", "pick_rules"),
-                store.qualified("release"),
-                d.param(1, Type::Int)
-            ),
-            &[Param::Int(release_id)],
-        )
+) -> Result<nils_registry::pick_truth::OfRelease, String> {
+    Ok(nils_registry::pick_truth::of_release(store, release_id)
         .map_err(|e| e.to_string())?
-        .and_then(|r| r.opt_text(0).ok().flatten().map(str::to_string))
-        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok());
-    // one place of truth (2026-10-11): what the release recorded it read,
-    // else the pack's
-    Ok(recorded.as_ref().map_or(
-        nils_registry::pick_truth::Of::Pack,
-        nils_registry::pick_truth::Of::of_record,
-    ))
+        .unwrap_or(nils_registry::pick_truth::OfRelease::Recorded(
+            nils_registry::pick_truth::Of::Pack,
+        )))
 }
 
 /// Record 48, D1 of the move: each unit of a run by the name the run gave
@@ -2886,9 +2896,16 @@ fn by_role(
         return Where::Inputs(stacks);
     };
     let ids: Vec<i64> = stacks.iter().map(|(s, _)| *s).collect();
-    let picks = release_reading(store, release_id)
-        .and_then(|of| crate::preflight::pick_roles(store, &ids, &of))
-        .unwrap_or_default();
+    // the picks the release froze; of one from before whose picks are
+    // gone, no stack is said to be of the role, and the mask's grid is
+    // the input its file's grid matches
+    let picks = match release_reading(store, release_id) {
+        Ok(reading) => match reading.picks() {
+            Some(picks) => crate::preflight::pick_roles(store, &ids, &picks).unwrap_or_default(),
+            None => return Where::Inputs(stacks),
+        },
+        Err(_) => BTreeMap::new(),
+    };
     Where::Role(
         stacks
             .into_iter()
