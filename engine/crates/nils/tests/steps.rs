@@ -869,6 +869,34 @@ fn round(pg: Option<(String, String)>) {
         ]);
     }
     let server = Served::start(&home, &path, false, &logged);
+    let models_of = |started: &Value| -> Vec<String> {
+        let words: Vec<String> = started["command"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|w| w.as_str().unwrap().to_string())
+            .collect();
+        words
+            .windows(2)
+            .filter(|w| w[0] == "--model")
+            .map(|w| w[1].clone())
+            .collect()
+    };
+    // admitted, a cascade waits: the step keeps the admitted single model
+    // until a person promotes the cascade (the plan's 4.3)
+    let (status, started) = server.run("datasets/ds", "body_part", OPS);
+    assert_eq!(status, 202, "{started}");
+    assert_eq!(
+        models_of(&started),
+        [encoder, head, coarse].map(|m| m.to_string()),
+        "an admitted cascade is not the step's model: {started}"
+    );
+    let waiting_job = started["job"].as_i64().unwrap();
+    let (status, dropped) =
+        server.call("POST", &format!("/api/jobs/{waiting_job}/cancel"), None, OPS);
+    assert_eq!(status, 200, "{dropped}");
+    // promoted, a cascade naming no coarse part is refused
+    home.ok(&["model", "promote", &no_coarse.to_string()]);
     let s = server.get("/api/datasets/ds/summary", READS);
     let refusal = &step(&s, "body_part")["refusal"];
     assert_eq!(refusal["reason"], "no_model", "{s}");
@@ -886,6 +914,7 @@ fn round(pg: Option<(String, String)>) {
         "--why",
         "it answers no body_region",
     ]);
+    home.ok(&["model", "promote", &cascade.to_string()]);
     let (status, started) = server.run("datasets/ds", "body_part", OPS);
     assert_eq!(status, 202, "{started}");
     let words: Vec<String> = started["command"]

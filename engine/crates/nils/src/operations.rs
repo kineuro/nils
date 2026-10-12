@@ -236,13 +236,23 @@ fn served(store: &mut Store, task: &str, reads: Option<i64>) -> Result<Vec<Model
     Ok(all)
 }
 
+/// Whether a model is a cascade (record 55 E2): its card names parts.
+fn is_cascade(m: &Model) -> bool {
+    m.card
+        .get("parts")
+        .and_then(Value::as_object)
+        .is_some_and(|p| !p.is_empty())
+}
+
 /// Body part's run: the newest active `bodypart-infer-fusion` and the
 /// certified model's three parts, each the one served, in the order the
 /// descriptor declares them: the encoder the head names, the head that
 /// answers `body_part`, and the coarse mode that answers `body_region`
 /// from the same encoder, its card naming the head where one does, which
 /// the run goes without where none is served. Where the served model is a
-/// cascade (record 55 E2), each input its card names a part for gets that
+/// cascade (record 55 E2), and it is one only once a person has promoted
+/// it (an admitted cascade waits, and the promoted or admitted single
+/// model answers), each input its card names a part for gets that
 /// part, the input `cascade` gets the cascade, and the coarse mode is the
 /// cascade's own part `coarse` and no other, since the image refuses a
 /// coarse mode its cascade file does not name; a cascade naming none is
@@ -267,8 +277,27 @@ fn body_part(store: &mut Store) -> Result<Result<Plan, Refused>, StoreError> {
             );
         }
     };
-    let Some(head) = served(store, "axis:body_part", None)?.into_iter().next() else {
-        return refused("no_model", "no body-part model is installed".into());
+    // record 55 E2: a cascade answers the step only once it is promoted,
+    // since choosing and promoting the body-part model is a person's (the
+    // fast-path plan's 4.3); until then the single model served answers
+    let candidates = served(store, "axis:body_part", None)?;
+    let waiting = candidates
+        .iter()
+        .find(|m| is_cascade(m) && m.state != "promoted")
+        .map(Model::label);
+    let Some(head) = candidates
+        .into_iter()
+        .find(|m| m.state == "promoted" || !is_cascade(m))
+    else {
+        return refused(
+            "no_model",
+            match waiting {
+                Some(c) => format!(
+                    "no body-part model is served: the cascade {c} is admitted, and answers the step once it is promoted"
+                ),
+                None => "no body-part model is installed".into(),
+            },
+        );
     };
     // record 55 E2: a cascade names its parts, each by the input it fills,
     // and fills the input `cascade` itself
