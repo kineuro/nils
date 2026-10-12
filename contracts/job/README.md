@@ -13,7 +13,7 @@ directory beside the old one, which stays.
 
 | version | documents | since |
 |---|---|---|
-| 1 | [`v1/`](v1/) | Record 43 slice S1, 2026-09-24; amended in place and additively by record 49 A3 (the table kind, the checks, the roles a unit needs, a unit's minutes) and by record 55 H3 (a mask's grid and parts, a derivative input's checked) |
+| 1 | [`v1/`](v1/) | Record 43 slice S1, 2026-09-24; amended in place and additively by record 49 A3 (the table kind, the checks, the roles a unit needs, a unit's minutes) and by record 55 H3 (a mask's grid and parts, a derivative input's checked), and on 2026-10-12 (a unit's disk, `x-nils.needs.disk-gb`, held against the output place's free space before a run is queued) |
 
 ## What version 1 fixes
 
