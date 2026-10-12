@@ -2364,12 +2364,59 @@ fn migration_59_gives_pipelines_a_catalog_and_runs_on_both_backends() {
                 results_digest: Some("sha256:ab"),
                 summary: &summary,
                 error: None,
+                failure: None,
             },
         )
         .unwrap();
         let back = pipeline::run(&mut store, run).unwrap().unwrap();
         assert_eq!(back.params, params, "{name}");
+        assert_eq!(back.failure, serde_json::Value::Null, "{name}");
         assert_eq!(back.summary, summary, "{name}");
+        // 2026-10-12: a failed run keeps its failure beside its error, and a
+        // run taken up again has neither until it ends again
+        let failed = pipeline::start(
+            &mut store,
+            &pipeline::NewRun {
+                pipeline_id: entry.id,
+                job_id: Some(8),
+                handle_id: Some(3),
+                selection: None,
+                params: &params,
+                runtime: "podman",
+                runtime_version: "5.0.3",
+                host: "ward-3",
+                device: "cpu",
+                model_ids: &[],
+                label_set_id: None,
+                place_id: Some(1),
+                scratch_place_id: None,
+                principal: "ops@lab",
+                actor: None,
+                started_at: "2026-09-24T10:03:00Z",
+            },
+        )
+        .unwrap();
+        let failure = serde_json::json!({"kind": "dependency", "cause": "dcm2niix", "advice": "install it", "fix": null});
+        pipeline::finish(
+            &mut store,
+            failed,
+            &pipeline::Finish {
+                status: "failed",
+                finished_at: "2026-09-24T10:04:00Z",
+                exit_code: None,
+                results_digest: None,
+                summary: &serde_json::json!({}),
+                error: Some("the release of the input failed: dcm2niix is not runnable"),
+                failure: Some(&failure),
+            },
+        )
+        .unwrap();
+        let back = pipeline::run(&mut store, failed).unwrap().unwrap();
+        assert_eq!(back.failure, failure, "{name}");
+        pipeline::resume(&mut store, failed, 9).unwrap();
+        let back = pipeline::run(&mut store, failed).unwrap().unwrap();
+        assert_eq!(back.failure, serde_json::Value::Null, "{name}");
+        assert_eq!(back.error, None, "{name}");
         assert_eq!(back.model_ids, serde_json::json!([]), "{name}");
         assert_eq!(
             back.finished_at.as_deref(),

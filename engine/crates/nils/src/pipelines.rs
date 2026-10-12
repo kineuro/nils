@@ -355,6 +355,9 @@ pub(crate) fn run_doc(store: &mut Store, r: &Run) -> Value {
                 "attempts": u.attempts, "device": u.device, "gpu_card": u.gpu_card,
                 "cores": u.cores, "memory_mb": u.memory_mb, "exit_code": u.exit_code,
                 "started_at": u.started_at, "finished_at": u.finished_at,
+                // 2026-10-12: why a unit failed, beside what it said
+                "error": u.outcome["error"],
+                "failure": crate::failures::of_unit(&u.outcome),
             }))
             .collect::<Vec<_>>()
     );
@@ -394,6 +397,9 @@ pub(crate) fn runs_docs(store: &mut Store, runs: &[Run]) -> Vec<Value> {
             let mut v = serde_json::to_value(r).unwrap_or(Value::Null);
             v["pipeline"] = json!(labels.get(&r.pipeline_id));
             v["derivatives"] = json!(made.get(&r.id).cloned().unwrap_or_default());
+            // 2026-10-12: a run that failed before its failure was recorded
+            // is read from its error
+            v["failure"] = crate::failures::of_run_doc(&v);
             v
         })
         .collect()
@@ -549,6 +555,18 @@ pub(crate) fn summary_totals_only(s: &mut Value) {
         }
     }
     s["failures_by_reason"] = json!(held_list("reason", "units", by_reason));
+    // 2026-10-12: the failures by their cause, each count held as a count
+    // of units is
+    if let Some(list) = s["failures_by_cause"].as_array_mut() {
+        for f in list.iter_mut() {
+            let n = f["units"].as_u64().unwrap_or(0) as usize;
+            let kept = held("units", n);
+            f["units"] = kept["units"].clone();
+            if kept["withheld"] == true {
+                f["withheld"] = json!(true);
+            }
+        }
+    }
     s["detail"] = json!("totals");
     s["withheld"] = json!(withheld);
 }
@@ -1769,6 +1787,21 @@ fn print_run(doc: &Value) {
     }
     if let Some(e) = doc["error"].as_str() {
         println!("  error            {e}");
+    }
+    if let Some(f) = crate::failures::line(&doc["failure"]) {
+        println!("  failure          {f}");
+    }
+    for f in doc["summary"]["failures_by_cause"]
+        .as_array()
+        .into_iter()
+        .flatten()
+    {
+        println!(
+            "  units failed     {} for {} ({})",
+            f["units"],
+            f["cause"].as_str().unwrap_or_default(),
+            f["kind"].as_str().unwrap_or_default()
+        );
     }
 }
 
@@ -3076,6 +3109,7 @@ pub(crate) fn take_up_interrupted(store: &mut Store) -> Result<usize, String> {
                     results_digest: None,
                     summary: &json!({"phase": "run"}),
                     error: Some("stopped with its engine; nils run --resume goes on"),
+                    failure: None,
                 },
             )
             .map_err(err)?;
@@ -3809,6 +3843,10 @@ fn conclude(
         Ok(o) => o,
         Err(e) => ("failed", json!({}), None, None, Some(e)),
     };
+    // 2026-10-12: a run that failed says why, by its kind, beside its error
+    let failure = (status == "failed").then(|| {
+        crate::failures::of_run(error.as_deref().unwrap_or_default(), exit_code, &summary)
+    });
     let finished = nils_registry::time::now_iso();
     rows::finish(
         registry.store(),
@@ -3820,6 +3858,7 @@ fn conclude(
             results_digest: digest.as_deref(),
             summary: &summary,
             error: error.as_deref(),
+            failure: failure.as_ref(),
         },
     )?;
     // record 49 A3: a run that loaded measures changed what the ask
@@ -3858,7 +3897,10 @@ fn conclude(
     let _ = job::set_result(
         registry.store(),
         c.job_id,
-        &json!({"run": run_id, "status": status, "summary": summary, "results_digest": digest}),
+        &json!({
+            "run": run_id, "status": status, "summary": summary, "results_digest": digest,
+            "failure": failure,
+        }),
     );
     job::finish(registry.store(), c.job_id, job_state, error.as_deref())
         .map_err(|e| fail(e.to_string()))?;
@@ -3880,8 +3922,13 @@ fn conclude(
             ),
         }),
         _ => Err(fail(format!(
-            "run {run_id} {}",
-            error.unwrap_or_else(|| "failed".into())
+            "run {run_id} {}{}",
+            error.unwrap_or_else(|| "failed".into()),
+            failure
+                .as_ref()
+                .and_then(crate::failures::line)
+                .map(|l| format!("\n  {l}"))
+                .unwrap_or_default()
         ))),
     }
 }
@@ -4297,6 +4344,7 @@ fn execute_run(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Resul
                     "status": "skipped",
                     "error": format!("missing an input: {}", why.join("; ")),
                     "missing": why, "metrics": {}, "files": [], "refused": [],
+                    "failure": nils_pipeline::failure::Cause::Input.doc(),
                 });
                 rows::unit_over(registry.store(), u.id, None, &outcome, &now).map_err(err)?;
             }
@@ -4391,7 +4439,7 @@ fn execute_run(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Resul
             .and_then(|u| u.exit_code)
             .and_then(|c| i32::try_from(c).ok());
         let b = batch_of(units)?;
-        take_in(registry, x, &m, &b, code, &row_of, &mut taken_files)?;
+        take_in(registry, x, &m, &b, code, None, &row_of, &mut taken_files)?;
     }
     let mut pending: std::collections::VecDeque<Batch> = Default::default();
     for units in group(&|s| s == "queued" || s == "running") {
@@ -4733,7 +4781,16 @@ fn schedule(
                 Ok(Some(status)) => {
                     let r = running.remove(i);
                     ledger.give(ask);
-                    take_in(registry, x, m, &r.batch, status.code(), row_of, taken_files)?;
+                    take_in(
+                        registry,
+                        x,
+                        m,
+                        &r.batch,
+                        status.code(),
+                        signal_of(&status),
+                        row_of,
+                        taken_files,
+                    )?;
                 }
                 Ok(None) => i += 1,
                 Err(e) => return Err(format!("a container of the run: {e}")),
@@ -4743,6 +4800,20 @@ fn schedule(
             return Ok(Scheduled::Done);
         }
         std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// The signal a container's process was ended by, where one ended it: how
+/// the kernel's OOM killer ends a process apptainer runs (2026-10-12).
+fn signal_of(status: &std::process::ExitStatus) -> Option<i32> {
+    #[cfg(unix)]
+    {
+        std::os::unix::process::ExitStatusExt::signal(status)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = status;
+        None
     }
 }
 
@@ -5309,12 +5380,14 @@ fn sweep_batch(
     Ok((swept, shut))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn take_in(
     registry: &mut Registry,
     x: &Execution<'_>,
     m: &Materialised,
     b: &Batch,
     code: Option<i32>,
+    signal: Option<i32>,
     row_of: &BTreeMap<String, (i64, String)>,
     taken_files: &mut std::collections::BTreeSet<PathBuf>,
 ) -> Result<(), String> {
@@ -5354,6 +5427,11 @@ fn take_in(
         .strip_prefix(&x.scratch.path)
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|_| format!("{RUNS}/{}/log.txt", x.run_id));
+    // 2026-10-12: a container that failed as a whole is read for its cause
+    // in the end of its log, where the runtime and the tool said it
+    let log_tail = whole
+        .then(|| nils_pipeline::failure::log_tail(&b.log))
+        .flatten();
     for (n, &i) in b.units.iter().enumerate() {
         let u = &m.units[i];
         let o = outcome_of(
@@ -5411,6 +5489,11 @@ fn take_in(
         doc["out"] = json!(b.rel_out);
         if n == 0 && !swept.is_empty() {
             doc["swept"] = json!(swept);
+        }
+        if whole {
+            crate::failures::mark_unit(&mut doc, exit_code, signal, log_tail.as_deref());
+        } else {
+            crate::failures::mark_unit(&mut doc, None, None, None);
         }
         rows::unit_over(registry.store(), *row_id, exit_code, &doc, &now)
             .map_err(|e| e.to_string())?;
@@ -6183,6 +6266,13 @@ fn finalize(
     })?;
 
     let count = |s: &str| statuses.iter().filter(|x| x.1 == s).count();
+    // 2026-10-12: why its units failed, by cause
+    let failures_by_cause = crate::failures::by_cause(
+        unit_rows
+            .iter()
+            .filter(|u| by_name.contains_key(u.unit.as_str()))
+            .map(|u| &u.outcome),
+    );
     let first_log = unit_rows
         .first()
         .and_then(|u| u.outcome["log"].as_str().map(str::to_string));
@@ -6192,6 +6282,7 @@ fn finalize(
             "skipped": count("skipped"), "unreported": count("unreported"),
             "missing_input": missing_input,
         },
+        "failures_by_cause": failures_by_cause,
         "derivatives": registered,
         "bytes": bytes_total,
         "embeddings": {"registered": embedded, "kept": cached},

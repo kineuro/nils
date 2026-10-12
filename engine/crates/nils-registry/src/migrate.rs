@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 92;
+pub const SCHEMA_VERSION: i64 = 93;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -422,6 +422,10 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 92,
         apply: a_refused_item_says_why,
     },
+    Migration {
+        version: 93,
+        apply: a_failure_says_its_kind,
+    },
 ];
 
 /// After type 3's pipe test (record 55 H3): an item its close could not
@@ -432,6 +436,17 @@ fn a_refused_item_says_why(store: &mut Store, kind: Kind) -> Result<(), Error> {
         return Ok(());
     }
     add_columns(store, "campaign_item", &["refused_at", "refused_why"])
+}
+
+/// 2026-10-12: a run's failure is recorded with its kind (dependency,
+/// resource, input or the pipeline's own), its cause and what to do, beside
+/// the error it keeps. Only a column is added; a run from before reads its
+/// failure from its error.
+fn a_failure_says_its_kind(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_columns(store, "pipeline_run", &["failure"])
 }
 
 /// Job type 3, check a result (record 55 H3, the build spec's section 7,

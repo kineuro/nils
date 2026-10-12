@@ -2721,6 +2721,11 @@ fn build_registry() -> Vec<Table> {
                 // is not the output's; none on a run from before, which
                 // kept both in place_id
                 col("scratch_place_id", Type::Int),
+                // 2026-10-12: what its failure was, {kind, cause, advice,
+                // fix}, beside its error; none on a run that did not fail
+                // and on one from before, which the doors read from its
+                // error
+                col("failure", Type::Json),
             ],
         )
         .index(&["pipeline_id"])

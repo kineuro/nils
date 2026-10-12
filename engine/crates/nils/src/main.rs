@@ -42,6 +42,7 @@ mod derivatives;
 mod disagreements;
 mod door_client;
 mod explain;
+mod failures;
 mod file_header;
 mod folders;
 mod gate;
@@ -9527,7 +9528,8 @@ fn jobs_command(home: &Home, command: JobsCommand) -> Result<(), Exit> {
         JobsCommand::List { all, limit, json } => {
             let jobs = job::list(store, all, limit).map_err(err)?;
             if json {
-                let mut doc: Vec<serde_json::Value> = jobs.iter().map(job::Job::as_json).collect();
+                let mut doc: Vec<serde_json::Value> =
+                    jobs.iter().map(crate::failures::job_doc).collect();
                 // record 48, D1 of the move: no unit's QC of a sealed stack,
                 // unless --unsealed-access says why
                 if !sealed::keyboard_reads() {
@@ -9576,8 +9578,8 @@ fn jobs_command(home: &Home, command: JobsCommand) -> Result<(), Exit> {
             let Some(j) = job::show(store, id).map_err(err)? else {
                 return Err(usage(format!("no job {id}")));
             };
+            let mut doc = crate::failures::job_doc(&j);
             if json {
-                let mut doc = j.as_json();
                 if !sealed::keyboard_reads() {
                     pipelines::job_unsealed(store, &mut doc).map_err(fail)?;
                 }
@@ -9603,6 +9605,9 @@ fn jobs_command(home: &Home, command: JobsCommand) -> Result<(), Exit> {
             }
             if let Some(e) = &j.error {
                 println!("  error       {e}");
+            }
+            if let Some(f) = crate::failures::line(&doc["failure"]) {
+                println!("  failure     {f}");
             }
             if let Some(p) = &j.progress {
                 println!("  progress    {p}");
