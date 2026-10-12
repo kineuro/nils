@@ -4679,6 +4679,7 @@ fn execute_run(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Resul
     let mut derivative_doc = serde_json::Map::new();
     let mut derivative_dirs: Vec<(String, PathBuf)> = Vec::new();
     let taken = derivative_inputs(registry.store(), d, x.stacks, &lane_places(x))?;
+    let mut made_by = MadeBy::default();
     for t in d.inputs.iter().filter(|t| t.ty.starts_with("derivative:")) {
         let kind = t.ty.trim_start_matches("derivative:");
         let rows = taken.get(&t.id).cloned().unwrap_or_default();
@@ -4709,11 +4710,13 @@ fn execute_run(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Resul
             if !linked.insert(rel.clone()) {
                 continue;
             }
+            let made = made_by.of(registry.store(), &row);
             listed.push(json!({
                 "id": row.id, "kind": row.kind, "stack_id": row.stack_id,
                 "subject_id": row.subject_id, "model_id": row.model_id,
                 "preprocess_version": row.preprocess_version,
                 "path": rel, "sha256": row.sha256,
+                "made_by": made,
             }));
         }
         derivative_doc.insert(t.id.clone(), json!(listed));
@@ -7535,6 +7538,65 @@ fn lane_places<'a>(x: &Execution<'a>) -> Vec<&'a nils_registry::place::Place> {
 /// derivatives tree, by a hard link (a copy where the two are not on one
 /// filesystem). The file is taken only where it resolves inside the
 /// working place's derivatives tree. Answers the path under the input.
+/// What made each derivative a run takes (record 57 P11), for the
+/// manifest, so a pipeline can say which result it read: the run, its
+/// pipeline's name and version, the parameters it ran with, and the scan
+/// the derivative's grid is on with the file name the release that run
+/// read gave it (`sub-a_ses-1_acq-Sag+3D+MPRAGE_T1w`, its contrast the
+/// suffix and the `acq-` tokens). Each run and release is read once.
+#[derive(Default)]
+struct MadeBy {
+    runs: BTreeMap<i64, Option<(Value, Option<i64>)>>,
+    stems: BTreeMap<i64, BTreeMap<i64, Option<String>>>,
+}
+
+impl MadeBy {
+    /// Null for a derivative no run made, or a run the registry no longer
+    /// holds; a grid not read yet, or a scan no release named, is null.
+    fn of(&mut self, store: &mut Store, row: &derivative::Derivative) -> Value {
+        let Some(run_id) = row.run_id else {
+            return Value::Null;
+        };
+        let made = self
+            .runs
+            .entry(run_id)
+            .or_insert_with(|| {
+                let run = rows::run(store, run_id).ok().flatten()?;
+                let p = rows::get(store, run.pipeline_id).ok().flatten()?;
+                Some((
+                    json!({
+                        "run": run_id, "pipeline": p.name, "version": p.version,
+                        "params": run.params,
+                    }),
+                    run.input_release_id,
+                ))
+            })
+            .clone();
+        let Some((mut doc, release)) = made else {
+            return Value::Null;
+        };
+        let stem = match (release, row.grid_stack_id) {
+            (Some(release), Some(stack)) => self
+                .stems
+                .entry(release)
+                .or_insert_with(|| {
+                    released_stacks(store, release)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|(s, _, stem)| (s, stem))
+                        .collect()
+                })
+                .get(&stack)
+                .cloned()
+                .flatten(),
+            _ => None,
+        };
+        doc["grid_stack_id"] = json!(row.grid_stack_id);
+        doc["grid_stem"] = json!(stem);
+        doc
+    }
+}
+
 fn link_input(working: &Path, path: &str, into: &Path) -> Result<String, String> {
     let rel = path
         .strip_prefix(&format!("{}/", derivative::TREE))

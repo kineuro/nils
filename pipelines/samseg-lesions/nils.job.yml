@@ -33,6 +33,16 @@
 # series), not a few millimetres. A unit whose masks could not be made
 # says so and goes on without the column.
 #
+# SAMSEG models the pallidum as white matter unless told to separate it,
+# since on a T1w the two "can't be discerned easily" (SAMSEG's wiki): its
+# wiki, and the review of the starters' rules (record 57, research 02),
+# separate it only with a T2w or a FLAIR among the inputs. So the unit
+# passes `--pallidum-separate` only where it gives SAMSEG the FLAIR, with
+# lesions on and the setting on, and never with the T1w alone, as the
+# earlier versions did. Separating it changes the pallidum and white-matter
+# volumes, so the table's column pallidum_separate says which each unit
+# did, 1 or 0, and results of the two are not compared.
+#
 # The image is FreeSurfer 8.2.0 (run_samseg, surfa in fspython), pinned by
 # its registry manifest digest, resolved 2026-09-24 by a registry manifest
 # request, not pulled. v0 ran SAMSEG standalone (MIT) in a private image;
@@ -71,7 +81,7 @@ inputs:
   - id: pallidum_separate
     name: Separate pallidum
     type: Flag
-    description: Segment the pallidum as a class of its own rather than with the putamen.
+    description: "Segment the pallidum as a class of its own rather than as white matter, where the FLAIR is among SAMSEG's inputs (lesions on); with the T1w alone it is never separated, since a T1w cannot tell the two apart. The table's pallidum_separate says which each session had: it changes the pallidum and white-matter volumes."
     value-key: "[PALLIDUM]"
     command-line-flag: "--pallidum-separate"
     default-value: true
@@ -103,11 +113,13 @@ command-line: >-
   r = round(2 * float((a & b).sum()) / max(int(a.sum() + b.sum()), 1), 2); print(\"%.2f\" % r);
   r < 0.85 and print(sys.argv[5] + \": FLAIR and T1 may not be aligned (brain masks agree at %.2f)\" % r, file=sys.stderr)" "$f" "$fl" "$w/t1_brain.nii.gz" "$w/flair_brain.nii.gz" "$a") && [ -n "$al" ];
   then echo "$a: the brain masks of the FLAIR and the T1w agree at $al (Dice)"; else al=""; echo "$a: the FLAIR was not checked against the T1w"; fi;
+  ps=0; [ -n "[PALLIDUM]" ] && ps=1;
   run_samseg -i "$f" -i "$w/flair.mgz" --lesion --lesion-mask-pattern 0 1 -o "$w/out" --threads [THREADS] [PALLIDUM] || { rm -rf "$w"; continue; };
-  else al=""; run_samseg -i "$f" -o "$w/out" --threads [THREADS] [PALLIDUM] || { rm -rf "$w"; continue; }; fi;
+  else al=""; ps=0; run_samseg -i "$f" -o "$w/out" --threads [THREADS] || { rm -rf "$w"; continue; }; fi;
+  echo "$a: the pallidum separate from the white matter: $([ $ps = 1 ] && echo yes || echo no)";
   fspython -c "import sys, surfa; surfa.load_volume(sys.argv[1]).save(sys.argv[2])" "$w/out/seg.mgz" "$d/${b}_desc-samseg_dseg.nii.gz" || { rm -rf "$w"; continue; };
   fspython -c "import sys, json; r = dict((p[0].strip(), float(p[1])) for n in (\"samseg.stats\", \"sbtiv.stats\") for l in open(sys.argv[1] + \"/\" + n) if l.startswith(\"# Measure\") for p in [l[9:].split(\",\")]);
-  r.update(zip(sys.argv[2::2], map(float, sys.argv[3::2]))); print(json.dumps(r))" "$w/out" ${al:+flair_t1_brain_dice $al} > "$d/${b}_desc-samseg_volumes.json";
+  r.update(zip(sys.argv[2::2], map(float, sys.argv[3::2]))); print(json.dumps(r))" "$w/out" ${al:+flair_t1_brain_dice $al} pallidum_separate $ps > "$d/${b}_desc-samseg_volumes.json";
   rm -rf "$w"; done'
 
 x-nils:
@@ -117,7 +129,7 @@ x-nils:
   # run no longer takes them; their runs and results keep their names.
   # No version list: every earlier version of the name in a catalog.
   replaces:
-    why: "It checks that each FLAIR sits on its T1w (flair_t1_brain_dice, flagged below 0.85); the earlier versions placed the FLAIR by its header alone and never checked it."
+    why: "It separates the pallidum from the white matter only with the FLAIR among SAMSEG's inputs and says which in pallidum_separate; the earlier versions passed --pallidum-separate for a T1w alone too, where SAMSEG cannot tell the two apart, which changes the pallidum and white-matter volumes."
   input:
     layout: bids
     roles: [t1w, flair]
@@ -198,6 +210,7 @@ x-nils:
         - {name: brain_stem, unit: mm3}
         - {name: csf, unit: mm3}
         - {name: flair_t1_brain_dice, description: "How well the FLAIR sits on the T1w: the Dice of their SynthStrip brain masks on the T1w's grid, inside the FLAIR's field of view; absent when lesions were off"}
+        - {name: pallidum_separate, type: integer, description: "1 where SAMSEG segmented the pallidum apart from the white matter (the FLAIR among its inputs and the setting on), 0 where it did not (the T1w alone, or the setting off); it changes the pallidum and white-matter volumes, so results of 1 and 0 are not comparable"}
   qc:
     - {metric: intracranial, op: ">=", value: 900000, description: "An intracranial volume under 0.9 litres is a failed segmentation more often than a head"}
     - {metric: intracranial, op: "<=", value: 2300000, description: "Over 2.3 litres the segmentation took more than the head"}

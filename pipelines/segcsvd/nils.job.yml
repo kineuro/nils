@@ -47,6 +47,19 @@
 # (the review, research 04): read its WMH in an MS cohort as not validated
 # there, and measure MS lesions with samseg-lesions or LST-AI.
 #
+# The WMH model was trained with a SynthSeg of the FLAIR, and this reads
+# the T1w's; and SynthSeg robust and not are different networks (the
+# review of the starters' rules, record 57, research 02 and 04). So each
+# unit says which SynthSeg it read, in four columns of its table, for a
+# result's key to carry: the run (synthseg_run), its pipeline as
+# name@version (synthseg_pipeline), whether it ran robust (synthseg_robust,
+# 1 or 0) and the contrast it read (synthseg_contrast: the suffix of the
+# file the release gave the scan its label map is tied to, FLAIR for a T2w
+# with FLAIR among its `acq-` tokens). The run is the folder the map came
+# in; the rest is what the engine's manifest says made each derivative
+# (`made_by`), and a column the manifest does not answer is left out, as
+# the contrast is where the map was never tied to a scan.
+#
 # One session's T1w (and FLAIR) in; a binary mask and a probability map
 # for each target, the WMH named for the FLAIR's stem without its suffix
 # and on its grid, the PVS for the T1w's and on its, and a table of the
@@ -129,7 +142,12 @@ command-line: >-
   q=${p#[Inputs]/synthseg/}; q=${q#*/}; r=${q%%/*};
   if [ "$r" -eq "$r" ] 2>/dev/null && [ "$r" -gt "$n" ]; then n=$r; s=$p; fi; done;
   if [ -z "$s" ]; then echo "$f has no SynthSeg label map from a synthseg run: run synthseg on it first"; rc=1; continue; fi;
-  echo "$f: the SynthSeg label map of run $n";
+  k=$(python3 -c "import sys, json; e = [x for x in json.load(open(sys.argv[1])).get(\"derivatives\", {}).get(\"synthseg\", []) if x.get(\"path\") == sys.argv[2]];
+  m = (e[0].get(\"made_by\") if e else None) or {}; r = (m.get(\"params\") or {}).get(\"robust\"); g = (m.get(\"grid_stem\") or \"\").split(\"_\");
+  c = \"FLAIR\" if g[-1] == \"FLAIR\" or any(\"FLAIR\" in x[4:].split(\"+\") for x in g[:-1] if x.startswith(\"acq-\")) else g[-1];
+  print(\" \".join([\"synthseg_run\", str(m.get(\"run\") or sys.argv[3])] + ([\"synthseg_pipeline\", \"%s@%s\" % (m[\"pipeline\"], m[\"version\"])] if m.get(\"pipeline\") and m.get(\"version\") else [])
+  + ([\"synthseg_robust\", str(int(r))] if isinstance(r, bool) else []) + ([\"synthseg_contrast\", c] if c.isalnum() else [])))" [Inputs]/manifest.json "${s#[Inputs]/synthseg/}" "$n") || k="synthseg_run $n";
+  echo "$f: the SynthSeg label map of run $n ($k)";
   w=$(mktemp -d [OutputLocation]/.work-XXXXXX); mkdir -p "$w/outdir"; export MPLCONFIGDIR=$w HOME=$w;
   fl=$(flair "$a"); c=$(basename "$fl" .nii.gz); c=${c%_*};
   sbtResliceLike "$s" "$f" "$w/synthseg.nii.gz" 1 || { rc=1; rm -rf "$w"; continue; };
@@ -159,7 +177,8 @@ command-line: >-
   mv "$w/outdir/thr_pvs.nii.gz" "$d/${b}_label-PVS_desc-segcsvd_mask.nii.gz";
   mv "$w/outdir/pvs.nii.gz" "$d/${b}_label-PVS_desc-segcsvd_probseg.nii.gz";
   python3 -c "import sys, json, nibabel as n, numpy as np; a = sys.argv[1:]; m = lambda p: float((np.asarray(n.load(p).dataobj) > 0).sum() * np.prod(n.load(p).header.get_zooms()[:3]));
-  print(json.dumps(dict((a[i], m(a[i + 1]) if a[i].endswith(\"_volume\") else float(a[i + 1])) for i in range(0, len(a), 2))))" pvs_volume "$d/${b}_label-PVS_desc-segcsvd_mask.nii.gz" $v ${al:+flair_t1_brain_dice $al} > "$d/${b}_desc-segcsvd_volumes.json" || { echo "$a: the volumes were not measured"; rc=1; };
+  t = (\"synthseg_pipeline\", \"synthseg_contrast\");
+  print(json.dumps(dict((a[i], m(a[i + 1]) if a[i].endswith(\"_volume\") else a[i + 1] if a[i] in t else float(a[i + 1])) for i in range(0, len(a), 2))))" pvs_volume "$d/${b}_label-PVS_desc-segcsvd_mask.nii.gz" $v ${al:+flair_t1_brain_dice $al} $k > "$d/${b}_desc-segcsvd_volumes.json" || { echo "$a: the volumes were not measured"; rc=1; };
   rm -rf "$w"; done; exit $rc'
 
 x-nils:
@@ -169,7 +188,7 @@ x-nils:
   # run no longer takes them; their runs and results keep their names.
   # No version list: every earlier version of the name in a catalog.
   replaces:
-    why: "It checks that each FLAIR sits on its T1w (flair_t1_brain_dice, flagged below 0.85); the earlier versions placed the FLAIR by its header alone and never checked it."
+    why: "It says which SynthSeg each unit read (synthseg_run, synthseg_pipeline, synthseg_robust and synthseg_contrast), so a result's key can carry it; the earlier versions did not, though robust and not are different networks and the WMH model was trained with a SynthSeg of the FLAIR, not the T1w's this reads."
   input:
     layout: bids
     roles: [t1w]
@@ -208,6 +227,10 @@ x-nils:
         - {name: wmh_volume, unit: mm3, description: "White-matter hyperintensity volume on the FLAIR, by a model validated for WMH of vascular origin at 3 T and not for MS lesions; absent where the session has no FLAIR"}
         - {name: pvs_volume, unit: mm3, description: "Enlarged perivascular space volume on the T1w"}
         - {name: flair_t1_brain_dice, description: "How well the FLAIR sits on the T1w: the Dice of the T1w's SynthSeg brain mask and a threshold brain mask of the FLAIR on the T1w's grid, inside the FLAIR's field of view; absent where the session has no FLAIR"}
+        - {name: synthseg_run, type: integer, description: "The run whose SynthSeg label map the unit read"}
+        - {name: synthseg_pipeline, type: text, description: "That run's pipeline, as name@version"}
+        - {name: synthseg_robust, type: integer, description: "1 where that run was SynthSeg-robust, 0 where not: the two are different networks, so the WMH and PVS read from one are not comparable with the other's"}
+        - {name: synthseg_contrast, type: text, description: "The contrast that SynthSeg read (T1w, FLAIR, T2w), the suffix of the file of the scan its map is tied to, absent where it is tied to none; the WMH model was trained with a SynthSeg of the FLAIR"}
   qc:
     - {metric: pvs_volume, op: ">", value: 0, description: "A starting point: no enlarged perivascular space at all is more often a failed segmentation than an adult brain without any"}
     - {metric: flair_t1_brain_dice, op: ">=", value: 0.85, description: "FLAIR and T1 may not be aligned: their brain masks agree below 0.85 (a NILS policy), and nothing registers them yet"}

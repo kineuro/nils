@@ -13,7 +13,7 @@ directory beside the old one, which stays.
 
 | version | documents | since |
 |---|---|---|
-| 1 | [`v1/`](v1/) | Record 43 slice S1, 2026-09-24; amended in place and additively by record 49 A3 (the table kind, the checks, the roles a unit needs, a unit's minutes) and by record 55 H3 (a mask's grid and parts, a derivative input's checked), and on 2026-10-12 (a unit's disk, `x-nils.needs.disk-gb`, held against the output place's free space before a run is queued; the earlier versions a version replaces because it fixes them, `x-nils.replaces`, which a new run no longer takes) |
+| 1 | [`v1/`](v1/) | Record 43 slice S1, 2026-09-24; amended in place and additively by record 49 A3 (the table kind, the checks, the roles a unit needs, a unit's minutes) and by record 55 H3 (a mask's grid and parts, a derivative input's checked), and on 2026-10-12 (a unit's disk, `x-nils.needs.disk-gb`, held against the output place's free space before a run is queued; the earlier versions a version replaces because it fixes them, `x-nils.replaces`, which a new run no longer takes; what made each derivative a run takes, `made_by` in `/inputs/manifest.json`) |
 
 ## What version 1 fixes
 
@@ -31,7 +31,7 @@ directory beside the old one, which stays.
 |---|---|
 | `/input` | read-only: the BIDS tree (bids layout), or `stacks.json` (stacks layout) |
 | `/source/<n>` | read-only, stacks layout only: the source places the manifest's paths are under |
-| `/inputs` | read-only: `manifest.json` (the run, the pipeline, every parameter, the units, the models and the label set) and one folder per typed input |
+| `/inputs` | read-only: `manifest.json` (the run, the pipeline, every parameter, the units, the models, the label set, and the derivatives each typed input takes, each since 2026-10-12 with `made_by`: the run that made it, its pipeline's `name` and `version`, the `params` it ran with, and the scan it is tied to, `grid_stack_id`, with the file name its release gave it, `grid_stem`; null where no run made it) and one folder per typed input |
 | `/output` | the only place it writes; the engine's `<working>/derivatives/<pipeline>/<run>/` |
 
 The container has no network, and its process is not root on the host:
