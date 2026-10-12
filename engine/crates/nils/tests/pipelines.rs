@@ -9351,6 +9351,8 @@ fn a_failure_says_its_kind_beside_its_error() {
         );
         let text = lab.ok(&["jobs", "show", &run["job_id"].to_string()], None);
         assert!(text.contains("failure     resource (memory)"), "{text}");
+        let text = lab.ok(&["pipeline", "runs"], None);
+        assert!(text.contains("resource (memory)"), "{text}");
 
         let missing = lab
             .command(&lab.path)

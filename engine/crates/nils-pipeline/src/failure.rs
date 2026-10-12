@@ -650,7 +650,9 @@ mod tests {
             cause_of(&Said {
                 error: "the container exited 127 and wrote no results.json",
                 exit_code: Some(127),
-                log: Some("Error: crun: executable file `segment` not found in $PATH: No such file or directory: OCI runtime attempted to invoke a command that was not found\n"),
+                log: Some(
+                    "Error: crun: executable file `segment` not found in $PATH: No such file or directory: OCI runtime attempted to invoke a command that was not found\n"
+                ),
                 ..Said::default()
             }),
             Cause::Pipeline

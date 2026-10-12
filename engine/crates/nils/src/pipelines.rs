@@ -1734,12 +1734,20 @@ pub(crate) fn command(home: &Home, command: PipelineCommand) -> Result<(), Exit>
                 return print(&json!(docs));
             }
             println!(
-                "{:>5}  {:<28} {:<9} {:<10} {:>6}  started",
-                "run", "pipeline", "status", "runtime", "files"
+                "{:>5}  {:<28} {:<9} {:<10} {:>6}  {:<24}  why",
+                "run", "pipeline", "status", "runtime", "files", "started"
             );
             for d in &docs {
+                // 2026-10-12: a failed run's kind and cause, beside it
+                let why = match (
+                    d["failure"]["kind"].as_str(),
+                    d["failure"]["cause"].as_str(),
+                ) {
+                    (Some(kind), Some(cause)) => format!("{kind} ({cause})"),
+                    _ => String::new(),
+                };
                 println!(
-                    "{:>5}  {:<28} {:<9} {:<10} {:>6}  {}",
+                    "{:>5}  {:<28} {:<9} {:<10} {:>6}  {:<24}  {why}",
                     d["id"],
                     d["pipeline"].as_str().unwrap_or("-"),
                     d["status"].as_str().unwrap_or_default(),
