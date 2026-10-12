@@ -20,17 +20,21 @@ use serde_json::{Value, json};
 
 use crate::ast::{Ask, Level, Out, Src};
 
-use crate::compile::{Compiled, Context, compile};
+use crate::compile::{CompileError, Compiled, Context, compile};
 use crate::exec::{Answer, Bounds, ExecError, run as execute};
 use crate::handle::{self, Handle, HandleError, Provenance, Spec};
 use crate::measure::{self, MeasureError, Measured};
 use crate::selection::{self, Inlined, SelectionError};
-use crate::validate::{Code, Issue, Names, Scope, Validated, validate};
+use crate::validate::{Issue, Names, Scope, Validated, validate};
 use crate::{Error as AskError, prepare};
 
 #[derive(Debug)]
 pub enum RunError {
     Ask(AskError),
+    /// What only the compiler refuses of a document the validator passed, a
+    /// parameter without a value for one: a refusal at the path it names,
+    /// as a validation refusal is, never a fault of the engine (2026-10-12).
+    Compile(CompileError),
     Store(StoreError),
     Home(HomeError),
     Exec(ExecError),
@@ -48,6 +52,8 @@ impl fmt::Display for RunError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             RunError::Ask(e) => write!(f, "{e}"),
+            // read as a validation refusal reads (crate::Error::Invalid)
+            RunError::Compile(e) => write!(f, "the ask is refused:\n  {}", e.issue()),
             RunError::Store(e) => write!(f, "{e}"),
             RunError::Home(e) => write!(f, "{e}"),
             RunError::Exec(e) => write!(f, "{e}"),
@@ -77,6 +83,7 @@ macro_rules! from_error {
 
 from_error!(
     AskError => Ask,
+    CompileError => Compile,
     StoreError => Store,
     HomeError => Home,
     ExecError => Exec,
@@ -262,8 +269,7 @@ impl Runner<'_> {
             limit,
             withhold_sealed: !self.unsealed,
         };
-        let compiled =
-            compile(ask, validated, &ctx).map_err(|e| RunError::Message(e.to_string()))?;
+        let compiled = compile(ask, validated, &ctx)?;
         let answer = execute(store, &compiled, self.bounds)?;
         Ok((compiled, answer))
     }
@@ -915,7 +921,7 @@ pub fn explain(
             limit: None,
             withhold_sealed: !scope.unsealed,
         };
-        texts.push(compile(&ask, &validated, &ctx).map_err(|e| RunError::Message(e.to_string()))?);
+        texts.push(compile(&ask, &validated, &ctx)?);
     }
     let pg = texts.pop().expect("postgres");
     let lite = texts.pop().expect("sqlite");
@@ -941,19 +947,7 @@ pub fn not_compilable(
     scheme: &Scheme,
 ) -> Vec<Issue> {
     match explain(registry, ask.clone(), names, scope, scheme) {
-        Err(RunError::Message(text)) => {
-            let (path, message) = text
-                .split_once(": ")
-                .map(|(p, m)| (p.to_string(), m.to_string()))
-                .unwrap_or_else(|| ("document".to_string(), text.clone()));
-            vec![Issue {
-                code: Code::NotCompilable,
-                path,
-                message,
-                next: "change the document as the message says; validate compiles what run would"
-                    .to_string(),
-            }]
-        }
+        Err(RunError::Compile(e)) => vec![e.issue()],
         _ => Vec::new(),
     }
 }

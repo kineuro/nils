@@ -526,7 +526,18 @@ fn validate(home: &Home, args: AskValidateArgs) -> Result<(), Exit> {
                 }
                 _ => (ask_of(&mut l, &args.which)?, Vec::new()),
             };
-            let prepared = nils_ask::prepare(ask, &l.catalog, &scope).map_err(refused)?;
+            let prepared = nils_ask::prepare(ask.clone(), &l.catalog, &scope).map_err(refused)?;
+            // strict validate compiles what run would, as the door does
+            // (kineuro/nils#93), so what only the compiler refuses is
+            // refused here too (2026-10-12)
+            if !args.repair {
+                let scheme = l.scheme(&ask)?;
+                let issues =
+                    run::not_compilable(&mut l.registry, &ask, &l.catalog, &scope, &scheme);
+                if !issues.is_empty() {
+                    return Err(refused(nils_ask::Error::Invalid(issues)));
+                }
+            }
             json!({
                 "hash": prepared.hash,
                 "bound_hash": prepared.bound_hash,
@@ -582,7 +593,7 @@ fn explain(home: &Home, args: AskExplainArgs) -> Result<(), Exit> {
             let scheme = l.scheme(&ask)?;
             let scope = scope();
             let ex = run::explain(&mut l.registry, ask, &l.catalog, &scope, &scheme)
-                .map_err(|e| fail(e.to_string()))?;
+                .map_err(run_refused)?;
             serde_json::to_value(ex).unwrap_or_default()
         }
     };
@@ -1407,8 +1418,21 @@ fn ask_run(home: &Home, args: AskRunArgs) -> Result<(), Exit> {
         }
         Err(e) => {
             let _ = job::finish(registry.store(), job, State::Failed, Some(&e.to_string()));
-            Err(fail(e.to_string()))
+            Err(run_refused(e))
         }
+    }
+}
+
+/// A run's error as the command line says it: a refusal of the document,
+/// what the validator, the compiler or the post pass refuses, names its
+/// issues and exits 2, as `validate` does and as a door's 400 reads through
+/// `--server`; anything else is a failure (2026-10-12).
+fn run_refused(e: run::RunError) -> Exit {
+    match e {
+        run::RunError::Ask(a) => refused(a),
+        run::RunError::Compile(c) => refused(nils_ask::Error::Invalid(vec![c.issue()])),
+        run::RunError::Measure(m) => refused(nils_ask::Error::Invalid(vec![m.issue()])),
+        other => fail(other.to_string()),
     }
 }
 

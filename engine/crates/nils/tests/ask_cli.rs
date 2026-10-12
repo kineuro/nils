@@ -1133,3 +1133,66 @@ fn the_keyboard_reads_every_class_and_audits_each_run() {
         .unwrap();
     assert_eq!(audited[0].int(0).unwrap(), 1);
 }
+
+/// What only the compiler refuses of a document: a parameter declared
+/// without a value, read by a binding.
+const UNBOUND: &str = r#"{"ast_version": 1, "name": "visits shifted by a parameter without a value",
+  "params": {"later": {"type": "integer"}},
+  "sets": {"people": {"grain": "subject"},
+           "visits": {"grain": "session", "of": "people",
+                      "bind": {"month": ["shift", {}, ["field", {}, "first"], ["param", {}, "later"]]}}},
+  "out": {"set": "visits", "level": "record", "columns": [["field", {}, "month"]]}}"#;
+
+/// 2026-10-12: what only the compiler refuses is a refused document at the
+/// command line too, named and exit 2 as a validation refusal is, in
+/// process and through a running engine. `run` and `explain` failed with
+/// the compiler's bare words (exit 1), `validate` passed it, and through
+/// `--server` the doors' 500 was a failure.
+#[test]
+fn what_only_the_compiler_refuses_is_a_refused_document_at_the_command_line() {
+    let home = synthetic();
+    let packs = packs();
+    let p = packs.to_str().unwrap();
+    let doc = home.path().join("unbound.ask.json");
+    std::fs::write(&doc, UNBOUND).unwrap();
+    let d = doc.to_str().unwrap();
+    let issue = "not_compilable at sets.visits.bind.month: parameter later has no value";
+    for verb in ["run", "explain", "validate"] {
+        let out = run(&home, &["ask", verb, "--file", d, "--pack-dir", p], None);
+        assert_eq!(
+            out.status.code(),
+            Some(2),
+            "{verb}: {}{}",
+            out.stdout,
+            out.stderr
+        );
+        assert!(
+            out.stderr.contains("the document is refused") && out.stderr.contains(issue),
+            "{verb}: {}",
+            out.stderr
+        );
+    }
+    let server = Server::start(&home, 3);
+    for verb in ["run", "explain", "validate"] {
+        let out = run(
+            &home,
+            &["ask", verb, "--file", d, "--server", &server.url],
+            None,
+        );
+        assert_eq!(
+            out.status.code(),
+            Some(2),
+            "{verb} through the door: {}{}",
+            out.stdout,
+            out.stderr
+        );
+        assert!(
+            out.stderr
+                .contains(&format!("POST /api/ask/{verb}: the document is refused"))
+                && out.stderr.contains(issue),
+            "{verb} through the door: {}",
+            out.stderr
+        );
+    }
+    server.stop();
+}

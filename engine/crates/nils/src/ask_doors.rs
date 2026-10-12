@@ -365,6 +365,10 @@ fn ask_err(e: AskError) -> Reply {
 fn run_err(e: RunError) -> Reply {
     match e {
         RunError::Ask(a) => ask_err(a),
+        // what only the compiler refuses, a parameter without a value for
+        // one, is refused as a validation refusal is, at the path the
+        // compiler names, and no longer answers 500 (2026-10-12)
+        RunError::Compile(c) => issues_reply(400, "the document is refused", &[c.issue()]),
         RunError::Forbidden(m) => Reply::error(403, m),
         RunError::Handle(HandleError::NotFound(id)) => Reply::error(404, format!("no handle {id}")),
         RunError::Handle(
@@ -779,10 +783,34 @@ fn answer(
                     "identifiers are projected only at detail sensitive",
                 ));
             }
+            // and what only the compiler refuses, a parameter without a
+            // value for one, which the worker failed on once the door had
+            // queued it (2026-10-12)
+            let compiles = |registry: &mut Registry| -> Result<(), Reply> {
+                let scheme = scheme_of(registry, &ask)?;
+                let s = Setting {
+                    names: catalog,
+                    scope: &scope,
+                    scheme: &scheme,
+                    principal,
+                    bounds,
+                    values_cap: caps.options_values as usize,
+                };
+                let issues = affordance::compile_issues(registry, &ask, &s);
+                if issues.is_empty() {
+                    Ok(())
+                } else {
+                    Err(issues_reply(400, "the document is refused", &issues))
+                }
+            };
             let id = match id {
-                Some(id) => id,
+                Some(id) => {
+                    compiles(registry)?;
+                    id
+                }
                 None => {
                     let prepared = prepare(ask.clone(), catalog, &scope).map_err(ask_err)?;
+                    compiles(registry)?;
                     document::put(registry.store(), &ask, &prepared.hash, principal, None)
                         .map_err(|e| Reply::error(500, e.to_string()))?
                         .id

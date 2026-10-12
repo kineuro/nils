@@ -702,3 +702,40 @@ fn mcp_holds_quasi_identifying_columns_to_the_callers_detail() {
     );
     server.stop();
 }
+
+/// 2026-10-12: what only the compiler refuses of a document, a parameter
+/// declared without a value, reached a model as the bare text of a 500 from
+/// the run and preview tools, and the job tool queued it for the worker to
+/// fail on. Through the doors each now refuses it as a document: the
+/// compiler's words at the path it names, which a model reads and fixes.
+#[test]
+fn a_compile_only_refusal_reaches_a_model_as_a_refused_document() {
+    let home = synthetic();
+    let server = Server::start(&home, &packs(), &[]);
+    let unbound = json!({
+        "ast_version": 1,
+        "name": "visits shifted by a parameter without a value",
+        "params": {"later": {"type": "integer"}},
+        "sets": {
+            "people": {"grain": "subject"},
+            "visits": {"grain": "session", "of": "people", "bind": {
+                "month": ["shift", {}, ["field", {}, "first"], ["param", {}, "later"]]
+            }}
+        },
+        "out": {"set": "visits", "level": "record", "columns": [["field", {}, "month"]]}
+    });
+    for tool in ["nils_run", "nils_preview", "nils_job"] {
+        let refused = server.call(tool, json!({"document": unbound}), None);
+        assert_eq!(refused["isError"], true, "{tool}: {refused}");
+        let text = refused["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.starts_with("the document is refused"),
+            "{tool}: {text}"
+        );
+        assert!(
+            text.contains("not_compilable at sets.visits.bind.month: parameter later has no value"),
+            "{tool}: {text}"
+        );
+    }
+    server.stop();
+}
