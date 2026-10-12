@@ -821,9 +821,18 @@ pub(crate) fn route(
                     (Value::Null, _) => false,
                     _ => return Err(Reply::error(400, "alone: true or false")),
                 };
-                let claimed =
-                    campaign::claim_with(registry, c.id, principal, role, order, alone, &now)
-                        .map_err(campaign_err)?;
+                // record 55, the rulings of 2026-10-12, item 6: a check's
+                // items whose result was made from a stack of a sample sealed
+                // now are offered to no one who does not read sealed stacks
+                let withheld = crate::checks::withheld_items(
+                    registry.store(),
+                    crate::sealed::reads(&caller.access),
+                    &c,
+                )?;
+                let claimed = campaign::claim_withholding(
+                    registry, c.id, principal, role, order, alone, &withheld, &now,
+                )
+                .map_err(campaign_err)?;
                 Ok(Reply::ok(match claimed {
                     Some(cl) => {
                         let mut doc = cl.as_json();
@@ -840,6 +849,14 @@ pub(crate) fn route(
                 let c = campaign::find(registry.store(), which).map_err(campaign_err)?;
                 let a = id_of(a)?;
                 belongs(registry.store(), c.id, "campaign_assignment", a)?;
+                // record 55, the rulings of 2026-10-12, item 6: a check's item
+                // whose result is sealed now is answered by no rater who may
+                // not read it, whatever lease they held before
+                if nils_registry::check::is_check(&c)
+                    && let Some(item) = own_item(registry.store(), c.id, a, principal)?
+                {
+                    crate::checks::refuse_sealed(registry.store(), caller, &c, item)?;
+                }
                 let form = (!doc["form"].is_null()).then(|| doc["form"].clone());
                 let value = match &doc["value"] {
                     Value::Null => None,
@@ -1047,6 +1064,11 @@ pub(crate) fn route(
                 let earlier = campaign::answer_by_id(registry.store(), answer)
                     .map_err(campaign_err)?
                     .ok_or_else(|| Reply::error(404, format!("no answer {answer}")))?;
+                // record 55, the rulings of 2026-10-12, item 6: nor is an
+                // answer to it corrected
+                if earlier.principal == principal {
+                    crate::checks::refuse_sealed(registry.store(), caller, &c, earlier.item_id)?;
+                }
                 // the axes derived from the correction through the pack, the
                 // engine's own computation, kept beside it
                 let derived = match value
@@ -1182,6 +1204,7 @@ pub(crate) fn route(
                         author_kind: kind_of(caller),
                         model: acting,
                         picks: Some(&picks),
+                        sealed: Some(&crate::checks::sealed_results),
                     },
                     &now,
                 )
@@ -3426,6 +3449,34 @@ fn item_stack(store: &mut Store, item: i64) -> Result<i64, Reply> {
         })
 }
 
+/// The item of an assignment of a campaign, where the assignment is the
+/// principal's own.
+fn own_item(
+    store: &mut Store,
+    campaign: i64,
+    assignment: i64,
+    principal: &str,
+) -> Result<Option<i64>, Reply> {
+    let d = store.dialect();
+    let sql = format!(
+        "SELECT item_id FROM {} WHERE id = {} AND campaign_id = {} AND principal = {}",
+        store.qualified("campaign_assignment"),
+        d.param(1, Type::Int),
+        d.param(2, Type::Int),
+        d.param(3, Type::Text)
+    );
+    Ok(store
+        .query_opt(
+            &sql,
+            &[
+                Param::Int(assignment),
+                Param::Int(campaign),
+                Param::from(principal),
+            ],
+        )?
+        .and_then(|r| r.int(0).ok()))
+}
+
 /// The stack the item of an assignment stands on, where it is a stack's.
 fn assignment_stack(
     store: &mut Store,
@@ -4881,8 +4932,26 @@ pub(crate) fn campaign_command(home: &Home, cmd: CampaignCommand) -> Result<(), 
             };
             let principal = who();
             let order = campaign::Order::parse(&order).map_err(cerr)?;
-            let claimed = campaign::claim_in(&mut registry, c.id, &principal, role, order, &now)
-                .map_err(cerr)?;
+            // record 55, the rulings of 2026-10-12, item 6: the keyboard is
+            // offered no check's item whose result is sealed now, unless
+            // --unsealed-access says why
+            let withheld = crate::checks::withheld_items(
+                registry.store(),
+                crate::sealed::keyboard_reads(),
+                &c,
+            )
+            .map_err(rerr)?;
+            let claimed = campaign::claim_withholding(
+                &mut registry,
+                c.id,
+                &principal,
+                role,
+                order,
+                false,
+                &withheld,
+                &now,
+            )
+            .map_err(cerr)?;
             match claimed {
                 Some(cl) if json => print(&cl.as_json()),
                 Some(cl) => println!(
@@ -4927,6 +4996,22 @@ pub(crate) fn campaign_command(home: &Home, cmd: CampaignCommand) -> Result<(), 
             let suggested = match campaign_of {
                 Some(cid) => {
                     let c = campaign::find(registry.store(), &cid.to_string()).map_err(cerr)?;
+                    // record 55, the rulings of 2026-10-12, item 6: nor does
+                    // the keyboard answer a check's item whose result is
+                    // sealed now, unless --unsealed-access says why
+                    if nils_registry::check::is_check(&c)
+                        && !crate::sealed::keyboard_reads()
+                        && let Some(item) = own_item(registry.store(), c.id, assignment, &principal)
+                            .map_err(rerr)?
+                        && crate::checks::withheld_items(registry.store(), false, &c)
+                            .map_err(rerr)?
+                            .contains(&item)
+                    {
+                        return Err(fail(format!(
+                            "item {item} of check {}: its result was made from a stack of a sample sealed for certification, and a check never holds a sealed scan's result (record 55); pass --unsealed-access REASON to answer it, which is audited",
+                            c.name
+                        )));
+                    }
                     let name = c
                         .pack_version
                         .as_deref()
@@ -5077,6 +5162,7 @@ pub(crate) fn campaign_command(home: &Home, cmd: CampaignCommand) -> Result<(), 
                     author_kind,
                     model,
                     picks: Some(&picks),
+                    sealed: Some(&crate::checks::sealed_results),
                 },
                 &now,
             )
@@ -5099,6 +5185,12 @@ pub(crate) fn campaign_command(home: &Home, cmd: CampaignCommand) -> Result<(), 
             }
             for (item, why) in &closed.skipped {
                 println!("  item {item} skipped: {why}");
+            }
+            if closed.left_out_sealed > 0 {
+                println!(
+                    "  {} item(s) left out: sealed for certification",
+                    closed.left_out_sealed
+                );
             }
             println!("  agreement {}", closed.agreement);
             Ok(())

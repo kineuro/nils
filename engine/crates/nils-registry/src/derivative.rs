@@ -448,6 +448,27 @@ pub fn get(store: &mut Store, id: i64) -> Result<Option<Derivative>, Error> {
         .transpose()
 }
 
+/// The derivatives of these ids that are there, each once and in id order,
+/// read a few hundred at a time.
+pub fn of_ids(store: &mut Store, ids: &[i64]) -> Result<Vec<Derivative>, Error> {
+    let mut ids = ids.to_vec();
+    ids.sort_unstable();
+    ids.dedup();
+    let mut out = Vec::with_capacity(ids.len());
+    for chunk in ids.chunks(500) {
+        let list = chunk
+            .iter()
+            .map(i64::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!("{} WHERE id IN ({list}) ORDER BY id", select(store));
+        for r in store.query(&sql, &[])? {
+            out.push(of(&r)?);
+        }
+    }
+    Ok(out)
+}
+
 /// The live derivatives of one kind of `stacks` in one place, read a few
 /// hundred stacks at a time (record 43: a run's derivative inputs).
 pub fn of_stacks(

@@ -379,6 +379,7 @@ fn two_raters_share_the_items_and_an_expired_lease_returns_one() {
                 author_kind: "person",
                 model: None,
                 picks: None,
+                sealed: None,
             },
             &at(20),
         )
@@ -499,6 +500,7 @@ fn three_raters_who_disagree_give_one_adjudicator_and_one_decision() {
                 author_kind: "person",
                 model: None,
                 picks: None,
+                sealed: None,
             },
             &at(4),
         )
@@ -659,6 +661,7 @@ fn an_external_metric_sends_masks_to_adjudication_and_closes_into_nothing() {
                 author_kind: "person",
                 model: None,
                 picks: None,
+                sealed: None,
             },
             &at(5),
         )
@@ -751,6 +754,7 @@ fn a_campaign_adopts_review_items_and_one_campaign_asks_each() {
                 author_kind: "person",
                 model: None,
                 picks: None,
+                sealed: None,
             },
             &at(2),
         )
@@ -808,6 +812,7 @@ fn a_label_set_is_the_decisions_in_force_and_its_bytes_follow_them() {
                 author_kind: "person",
                 model: None,
                 picks: None,
+                sealed: None,
             },
             &at(9),
         )
@@ -1064,6 +1069,7 @@ fn a_commit_by_minimum_confidence_commits_only_its_part() {
                 author_kind: "person",
                 model: None,
                 picks: None,
+                sealed: None,
             },
             &at(9),
         )
@@ -1180,6 +1186,7 @@ fn a_pick_campaign_closes_into_a_persons_pick() {
                 author_kind: "person",
                 model: None,
                 picks: None,
+                sealed: None,
             },
             &at(2),
         )
@@ -1201,6 +1208,7 @@ fn a_pick_campaign_closes_into_a_persons_pick() {
                 author_kind: "agent",
                 model: None,
                 picks: Some(&never),
+                sealed: None,
             },
             &at(2),
         )
@@ -1230,6 +1238,7 @@ fn a_pick_campaign_closes_into_a_persons_pick() {
                 author_kind: "person",
                 model: None,
                 picks: Some(&writer),
+                sealed: None,
             },
             &at(2),
         )
@@ -1332,6 +1341,7 @@ fn a_model_s_answer_keeps_its_model_on_the_decision() {
                 author_kind: "person",
                 model: None,
                 picks: None,
+                sealed: None,
             },
             &at(4),
         )
@@ -1419,6 +1429,7 @@ fn a_close_stages_what_a_model_answered_and_what_an_agent_closed() {
                     author_kind: kind,
                     model: None,
                     picks: None,
+                    sealed: None,
                 },
                 &at(minute),
             )
@@ -1727,6 +1738,7 @@ fn a_second_writer_never_gets_a_stale_answer_or_a_second_close_in() {
                         author_kind: "person",
                         model: None,
                         picks: None,
+                        sealed: None,
                     },
                     &at(4),
                 )
@@ -1975,6 +1987,7 @@ fn a_close_that_died_is_run_again_by_a_person() {
             author_kind: kind,
             model: None,
             picks: None,
+            sealed: None,
         };
         let e = campaign::close(reg, &by("agent"), &at(2)).unwrap_err();
         assert!(e.to_string().contains("closing"), "{name}: {e}");
@@ -2071,6 +2084,7 @@ fn person_closes(c: i64) -> Close<'static> {
         author_kind: "person",
         model: None,
         picks: None,
+        sealed: None,
     }
 }
 
@@ -2686,6 +2700,7 @@ fn a_campaign_asks_a_grouped_review_item_stack_by_stack() {
                 author_kind: "person",
                 model: None,
                 picks: None,
+                sealed: None,
             },
             &at(5),
         )
@@ -2732,6 +2747,7 @@ fn a_campaign_asks_a_grouped_review_item_stack_by_stack() {
                 author_kind: "person",
                 model: None,
                 picks: None,
+                sealed: None,
             },
             &at(11),
         )
@@ -2831,6 +2847,7 @@ fn a_member_decided_while_the_campaign_was_open_is_skipped_at_close() {
                 author_kind: "person",
                 model: None,
                 picks: None,
+                sealed: None,
             },
             &at(5),
         )

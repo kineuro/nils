@@ -14,6 +14,13 @@
 //!   counted with why, never refused one by one; a result an open check
 //!   holds is left out and counted; one whose parts are not read yet holds
 //!   the making back (409) and its job is queued once.
+//! - **Sealed means sealed** (record 48; record 55, the rulings of
+//!   2026-10-12, item 6: a check never holds a sealed scan's result). A
+//!   result made from a stack of a sample sealed now is left out before
+//!   anything else is counted, and counted, never named. A check made
+//!   before that holds one withholds its item from every rater and
+//!   adjudicator without sealed:see: no claim offers it, the item door and
+//!   an answer refuse it, and its close writes nothing of it.
 //! - **Panels.** The scan the result was made on first, then each declared
 //!   role through the visit's main scans (the picks the run's release read,
 //!   or the pack's), skipping a role whose pick is the made-on scan and one
@@ -117,6 +124,10 @@ struct Plan {
     source: Value,
     /// The results the source named, before any was left out.
     named: usize,
+    /// Record 55, the rulings of 2026-10-12, item 6: how many of them were
+    /// made from a stack of a sample sealed now and were left out first,
+    /// never which; every count after is of the rest.
+    left_out_sealed: usize,
     checked_already: usize,
     held: usize,
     pending: Vec<Derivative>,
@@ -584,6 +595,16 @@ fn plan(
             "source: {run, output, which}, {derivatives: [ids]} or {selection, pipeline, output}",
         ));
     };
+    // record 55, the rulings of 2026-10-12, item 6: a check never holds a
+    // sealed scan's result. The results made from a stack of a sample sealed
+    // now, as the derivative doors read what each was made from, are left
+    // out first and counted, never named, so no count after (checked,
+    // breached, held, drawable) says anything of them
+    let named = results.len();
+    let sealed = crate::derivatives::sealed_among(registry.store(), &results)
+        .map_err(|e| Reply::error(500, e))?;
+    results.retain(|d| !sealed.contains(&d.id));
+    let left_out_sealed = named - results.len();
     // the part set and the grain, against what the output declares or what
     // each result is read as
     let check_set = |sets: &[(String, String)], whose: &str| -> Result<(), Reply> {
@@ -617,7 +638,6 @@ fn plan(
             }
         }
     }
-    let named = results.len();
     let checked_already = results.iter().filter(|d| d.check_status.is_some()).count();
     // which of them
     match source["which"].as_str() {
@@ -694,6 +714,7 @@ fn plan(
         roles,
         source: recorded,
         named,
+        left_out_sealed,
         checked_already,
         held,
         pending,
@@ -1026,6 +1047,7 @@ fn counts(store: &mut Store, p: &Plan, parts_jobs: &[i64]) -> Value {
         "parts": p.parts(),
         "drawable": p.chosen.len(),
         "not_drawable": p.not_drawable.iter().map(|(why, n)| json!({"why": why, "count": n})).collect::<Vec<_>>(),
+        "left_out_sealed": p.left_out_sealed,
         "checked_already": p.checked_already,
         "held": p.held,
         "parts_pending": p.pending.len(),
@@ -1126,8 +1148,13 @@ pub(crate) fn create(
         )));
     }
     if p.chosen.is_empty() {
+        let sealed = if p.left_out_sealed > 0 {
+            format!("{} left out: sealed for certification, ", p.left_out_sealed)
+        } else {
+            String::new()
+        };
         return Err(bad(format!(
-            "the source leaves no result to check: {} named, {} checked already, {} held by an open check, {} can't be drawn",
+            "the source leaves no result to check: {} named, {sealed}{} checked already, {} held by an open check, {} can't be drawn",
             p.named,
             p.checked_already,
             p.held,
@@ -1367,7 +1394,8 @@ fn warming(store: &mut Store, c: &campaign::Campaign) -> Option<i64> {
 /// `GET /api/campaigns/{id}/items/{item}/check` (section 8.4): everything
 /// the reader needs of one item in one read, for its rater or adjudicator.
 /// No subject code, no day, no time; a sealed scan's panel says its series
-/// description instead of its role.
+/// description instead of its role, and an item whose result was made from
+/// a sealed scan is refused ([`refuse_sealed`]).
 pub(crate) fn item_door(
     registry: &mut Registry,
     caller: &Caller,
@@ -1394,6 +1422,10 @@ pub(crate) fn item_door(
             ),
         ));
     }
+    // record 55, the rulings of 2026-10-12, item 6: an item whose result was
+    // made from a stack of a sample sealed now is withheld; a holder of
+    // sealed:see reads it, audited as sealed.read
+    let unsealed_read = refuse_sealed(registry.store(), caller, c, item)?;
     let it = campaign::item(registry.store(), item)
         .map_err(campaign_err)?
         .ok_or_else(|| Reply::error(404, format!("no campaign item {item}")))?;
@@ -1543,7 +1575,134 @@ pub(crate) fn item_door(
     if adjudicates {
         doc["answers"] = json!(voters);
     }
+    if unsealed_read {
+        audit_sealed_item(registry, caller, c, item, d.id)?;
+    }
     Ok(Reply::ok(doc))
+}
+
+// ------------------------------------------------------------ sealed means sealed
+
+/// What a door says of a check's item whose result was made from a stack of
+/// a sample sealed now.
+const SEALED_ITEM: &str = "its result was made from a stack of a sample sealed for certification, and a check never holds a sealed scan's result (record 55): what a system said of it is withheld until a certificate unseals it (record 48), and a holder of sealed:see reads it, audited as sealed.read";
+
+/// Record 55, the rulings of 2026-10-12, item 6: a check made before the
+/// ruling, or before its sample was sealed, may hold a result made from a
+/// stack of a sample sealed now. Such an item is withheld from every rater
+/// and adjudicator without sealed:see: each door that reads or answers it
+/// refuses it (403, `sealed: true`, saying why and nothing of the result).
+/// Answers whether the item is one, for a caller who reads sealed stacks,
+/// whose read the door audits; false for an item of another campaign.
+pub(crate) fn refuse_sealed(
+    store: &mut Store,
+    caller: &Caller,
+    c: &campaign::Campaign,
+    item: i64,
+) -> Result<bool, Reply> {
+    if !reg::is_check(c) {
+        return Ok(false);
+    }
+    let Some(it) = campaign::item(store, item).map_err(campaign_err)? else {
+        return Ok(false);
+    };
+    let Some(result) = it.derivative_id else {
+        return Ok(false);
+    };
+    let found =
+        derivative::of_ids(store, &[result]).map_err(|e| Reply::error(500, e.to_string()))?;
+    let sealed = crate::derivatives::sealed_among(store, &found)
+        .map_err(|e| Reply::error(500, e))?
+        .contains(&result);
+    if !sealed || crate::sealed::reads(&caller.access) {
+        return Ok(sealed);
+    }
+    let mut r = Reply::error(
+        403,
+        format!(
+            "item {} of check {}: {SEALED_ITEM}",
+            it.position + 1,
+            c.name
+        ),
+    );
+    r.body["sealed"] = json!(true);
+    Err(r)
+}
+
+/// Record 48, D1 of the move: the `sealed.read` row of a holder of
+/// sealed:see whom the item door showed a check's item that it withholds
+/// from everyone else.
+fn audit_sealed_item(
+    registry: &mut Registry,
+    caller: &Caller,
+    c: &campaign::Campaign,
+    item: i64,
+    result: i64,
+) -> Result<(), Reply> {
+    nils_registry::audit::record(
+        registry,
+        &nils_registry::audit::Entry {
+            principal: &caller.principal,
+            action: nils_registry::audit::Action::SealedRead,
+            scope: json!({
+                "door": "GET /api/campaigns/{id}/items/{item}/check",
+                "campaign": c.id, "item": item, "derivative": result,
+            }),
+            policy: None,
+            job_id: None,
+            details: Some(json!({"grant": crate::grants::UNSEALED})),
+        },
+    )
+    .map(|_| ())
+    .map_err(|e| Reply::error(500, e.to_string()))
+}
+
+/// Record 55, the rulings of 2026-10-12, item 6: the items of a check that
+/// a caller who does not read sealed stacks (`reads` false) is never
+/// offered: those still asked whose result was made from a stack of a
+/// sample sealed now. None for another campaign, for a reader of sealed
+/// stacks, and while no sample is sealed.
+pub(crate) fn withheld_items(
+    store: &mut Store,
+    reads: bool,
+    c: &campaign::Campaign,
+) -> Result<BTreeSet<i64>, Reply> {
+    let mut out = BTreeSet::new();
+    if reads || !reg::is_check(c) || !crate::sealed::any(store)? {
+        return Ok(out);
+    }
+    let sql = format!(
+        "SELECT id, derivative_id FROM {} WHERE campaign_id = {} AND derivative_id IS NOT NULL \
+         AND state <> 'resolved'",
+        store.qualified("campaign_item"),
+        store.dialect().param(1, Type::Int)
+    );
+    let mut by_result: BTreeMap<i64, Vec<i64>> = BTreeMap::new();
+    for r in store.query(&sql, &[Param::Int(c.id)])? {
+        by_result.entry(r.int(1)?).or_default().push(r.int(0)?);
+    }
+    let ids: Vec<i64> = by_result.keys().copied().collect();
+    let results = derivative::of_ids(store, &ids).map_err(|e| Reply::error(500, e.to_string()))?;
+    let sealed =
+        crate::derivatives::sealed_among(store, &results).map_err(|e| Reply::error(500, e))?;
+    for (result, items) in by_result {
+        if sealed.contains(&result) {
+            out.extend(items);
+        }
+    }
+    Ok(out)
+}
+
+/// Record 55, the rulings of 2026-10-12, item 6: the engine's reading a
+/// check's close takes of which of its results were made from a stack of a
+/// sample sealed now, for any caller.
+pub(crate) fn sealed_results(
+    registry: &mut Registry,
+    results: &[i64],
+) -> Result<BTreeSet<i64>, String> {
+    let store = registry.store();
+    let found = derivative::of_ids(store, results).map_err(|e| e.to_string())?;
+    crate::derivatives::sealed_among(store, &found)
 }
 
 /// The scans of the made-on scan's frame that no panel shows: what "+ scan"

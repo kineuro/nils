@@ -830,7 +830,12 @@ several readers, blind, with their agreement measured.
   declares (each lesion a connected component of a label, each structure a label of
   a label map), or at part grain one item per lesion. Every mask records its grid and
   the scan whose grid it is on, tied `same`, `world` or `none`; a result that cannot
-  be drawn is left out of a check and counted, never drawn approximately.
+  be drawn is left out of a check and counted, never drawn approximately. A check
+  never holds a sealed scan's result (the rulings of 2026-10-12, item 6): a result
+  made from a stack of a sample sealed now is left out first and counted, never
+  named, and a check made before that holds one withholds its item from every
+  rater without the audited grant to read sealed stacks, and its close writes
+  nothing of it.
   - **Panels:** the scan the result was made on, then the visit's main scans by the
     roles the check declares (T1w and FLAIR by default, at most 8), frozen when the
     check is made. The viewer draws the result as a mask layer on each scan's own
