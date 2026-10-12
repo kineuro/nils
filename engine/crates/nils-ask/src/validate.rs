@@ -447,6 +447,31 @@ impl WrittenDate {
     }
 }
 
+/// A document that reads a session scheme the registry does not keep, at
+/// `scheme` (2026-10-12): one stored before the scheme was removed
+/// (`stored`, its id) is told the scheme is gone, and each what to do. The
+/// doors and the command line refuse it so, never as their own fault.
+pub fn scheme_not_kept(name: &str, stored: Option<i64>) -> Issue {
+    let kept = "GET /api/ask/catalog and `nils session scheme list` name the schemes kept, and default is always one";
+    let (message, next) = match stored {
+        Some(id) => (
+            format!(
+                "document {id} reads the session scheme {name}, which this registry no longer keeps"
+            ),
+            format!(
+                "store the document again with a scheme the registry keeps ({kept}), or keep {name} again with `nils session scheme add {name} FILE`"
+            ),
+        ),
+        None => (
+            format!("no session scheme named {name} is kept"),
+            format!(
+                "name a scheme the registry keeps ({kept}), or keep {name} with `nils session scheme add {name} FILE`"
+            ),
+        ),
+    };
+    issue(Code::SchemeMismatch, "scheme", message, next)
+}
+
 /// How a date is written, for a refusal's next step.
 pub const DATE_FORMS: &str = "a date is written YYYY-MM-DD, or YYYY-MM-DDTHH:MM:SSZ in UTC";
 
@@ -657,12 +682,7 @@ pub fn validate(ask: &Ask, names: &dyn Names, scope: &Scope) -> Result<Validated
         Some(SchemeRef::Name(n)) if n == "default" || n == "day" => {}
         Some(SchemeRef::Name(n)) => {
             if names.scheme(n).is_none() {
-                issues.push(issue(
-                    Code::SchemeMismatch,
-                    "scheme",
-                    format!("no scheme named {n} is kept; `study` is not offered"),
-                    "GET /api/ask/catalog for the schemes kept",
-                ));
+                issues.push(scheme_not_kept(n, None));
             }
         }
         Some(SchemeRef::Inline(m)) => {

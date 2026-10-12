@@ -8413,6 +8413,19 @@ fn read_scheme(path: &Path) -> Result<session::Scheme, Exit> {
 }
 
 pub(crate) fn stored_scheme(registry: &mut Registry, name: &str) -> Result<session::Scheme, Exit> {
+    kept_scheme(registry, name)?.ok_or_else(|| {
+        fail(format!(
+            "no scheme called {name}; `nils session scheme list` says what there is"
+        ))
+    })
+}
+
+/// The session scheme the registry keeps under a name, or none where it
+/// keeps none.
+pub(crate) fn kept_scheme(
+    registry: &mut Registry,
+    name: &str,
+) -> Result<Option<session::Scheme>, Exit> {
     let store = registry.store();
     let row = store
         .query_opt(
@@ -8425,12 +8438,12 @@ pub(crate) fn stored_scheme(registry: &mut Registry, name: &str) -> Result<sessi
         )
         .map_err(|e| fail(e.to_string()))?;
     let Some(row) = row else {
-        return Err(fail(format!(
-            "no scheme called {name}; `nils session scheme list` says what there is"
-        )));
+        return Ok(None);
     };
     let text = row.text(0).map_err(|e| fail(e.to_string()))?.to_string();
-    session::Scheme::from_json(&text).map_err(|e| fail(e.to_string()))
+    session::Scheme::from_json(&text)
+        .map(Some)
+        .map_err(|e| fail(e.to_string()))
 }
 
 fn scheme_command(home: &Home, command: SchemeCommand) -> Result<(), Exit> {

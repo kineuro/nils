@@ -3984,3 +3984,130 @@ fn a_text_that_writes_no_date_is_refused_where_a_date_meets_it() {
     }
 }
 
+/// 2026-10-12: a stored document whose session scheme was removed since
+/// it was stored answered 500 at the run door, and at the jobs door once
+/// it checked what the compiler refuses. Every door that reads a stored
+/// document now refuses it with 409, naming the document, the scheme gone
+/// and what to do, and queues nothing; the same document carried in the
+/// request is refused with 400; and the command line, which runs a queued
+/// ask, refuses it with exit 2. On each backend.
+#[test]
+fn a_stored_document_whose_scheme_is_gone_is_refused_with_what_to_do() {
+    let schema = "nils_ask_serve_scheme_gone";
+    let ask = serde_json::json!({
+        "ast_version": 1,
+        "name": "visits under a kept scheme",
+        "scheme": "visits",
+        "sets": {"s": {"grain": "session"}},
+        "out": {"set": "s", "level": "count"}
+    });
+    let doors = [
+        "/api/ask/run",
+        "/api/ask/jobs",
+        "/api/ask/validate",
+        "/api/ask/explain",
+        "/api/ask/preview",
+        "/api/ask/diagnose",
+        "/api/ask/describe",
+        "/api/ask/options",
+        "/api/ask/profile",
+        "/api/ask/documents",
+    ];
+    for (backend, home, dsn) in backends(schema) {
+        let file = home.path().join("visits.yml");
+        std::fs::write(&file, "session:\n  window_days: 30\n").unwrap();
+        run(
+            &home,
+            &["session", "scheme", "add", "visits", file.to_str().unwrap()],
+            None,
+        );
+        let server = Server::start(&home, 1, &[]);
+        let (status, stored) = server.request(
+            "POST",
+            "/api/ask/documents",
+            Some(&body(serde_json::json!({"document": ask}))),
+            None,
+        );
+        assert_eq!(status, 200, "{backend}: {stored}");
+        let id = stored["document"].as_i64().unwrap();
+        server.finish();
+        run(&home, &["session", "scheme", "remove", "visits"], None);
+        let jobs = || -> usize {
+            let listed = run(&home, &["jobs", "list", "--all", "--json"], None);
+            serde_json::from_str::<serde_json::Value>(&listed)
+                .unwrap()
+                .as_array()
+                .map_or(0, Vec::len)
+        };
+        let queued = jobs();
+        let server = Server::start(&home, doors.len() + 2, &[]);
+        let gone = format!(
+            "document {id} reads the session scheme visits, which this registry no longer keeps"
+        );
+        let refused_as_gone = |door: &str, status: u16, refused: &serde_json::Value| {
+            assert_eq!(status, 409, "{backend} {door}: {refused}");
+            assert_eq!(refused["error"], "the document is refused", "{refused}");
+            let issue = &refused["issues"][0];
+            assert_eq!(issue["code"], "scheme_mismatch", "{refused}");
+            assert_eq!(issue["path"], "scheme", "{refused}");
+            assert_eq!(issue["message"], gone.as_str(), "{refused}");
+            let next = issue["next"].as_str().unwrap();
+            assert!(
+                next.starts_with("store the document again with a scheme the registry keeps")
+                    && next.contains("`nils session scheme add visits FILE`"),
+                "{refused}"
+            );
+        };
+        for door in doors {
+            let (status, refused) = server.request(
+                "POST",
+                door,
+                Some(&body(serde_json::json!({"document_id": id}))),
+                None,
+            );
+            refused_as_gone(door, status, &refused);
+        }
+        let (status, refused) = server.request(
+            "POST",
+            "/api/ask/start",
+            Some(&body(serde_json::json!({"from": {"document": id}}))),
+            None,
+        );
+        refused_as_gone("/api/ask/start", status, &refused);
+        // the same document, carried in the request
+        let (status, refused) = server.request(
+            "POST",
+            "/api/ask/run",
+            Some(&body(serde_json::json!({"document": ask}))),
+            None,
+        );
+        assert_eq!(status, 400, "{backend}: {refused}");
+        assert_eq!(refused["issues"][0]["code"], "scheme_mismatch", "{refused}");
+        assert_eq!(
+            refused["issues"][0]["message"], "no session scheme named visits is kept",
+            "{refused}"
+        );
+        server.finish();
+        assert_eq!(jobs(), queued, "{backend}: nothing is queued");
+        // the command line, as the worker runs a queued ask
+        let out = nils()
+            .arg("--registry")
+            .arg(home.path())
+            .args(["ask", "run", "--document", &id.to_string()])
+            .args(["--pack-dir", packs().to_str().unwrap()])
+            .env("USER", "anna")
+            .env("HOSTNAME", "ward-3")
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(2), "{backend}: {stderr}");
+        assert!(
+            stderr.contains(&format!("scheme_mismatch at scheme: {gone}")),
+            "{backend}: {stderr}"
+        );
+        if let Some(dsn) = &dsn {
+            drop_schema(dsn, schema);
+        }
+    }
+}

@@ -306,11 +306,24 @@ pub(crate) fn withhold_rows(
     Ok(before - rows.len())
 }
 
-fn scheme_of(registry: &mut Registry, ask: &Ask) -> Result<Scheme, Reply> {
+/// The session scheme a document reads. A name the registry keeps no
+/// scheme under is the document's to change, never a 500 (2026-10-12): a
+/// document the request carries is refused as validate refuses it (400),
+/// and a stored one (`stored`, its id) is told the scheme is gone since it
+/// was stored and what to do (409), as a handle that no longer holds is.
+fn scheme_of(registry: &mut Registry, ask: &Ask, stored: Option<i64>) -> Result<Scheme, Reply> {
     match &ask.scheme {
         None => Ok(Scheme::default()),
         Some(SchemeRef::Name(n)) if n == "default" || n == "day" => Ok(Scheme::default()),
-        Some(SchemeRef::Name(n)) => crate::stored_scheme(registry, n).map_err(Reply::from),
+        Some(SchemeRef::Name(n)) => crate::kept_scheme(registry, n)
+            .map_err(Reply::from)?
+            .ok_or_else(|| {
+                issues_reply(
+                    if stored.is_some() { 409 } else { 400 },
+                    "the document is refused",
+                    &[nils_ask::validate::scheme_not_kept(n, stored)],
+                )
+            }),
         Some(SchemeRef::Inline(m)) => {
             let text = serde_json::to_string(m).unwrap_or_default();
             Scheme::from_json(&text)
@@ -582,16 +595,25 @@ fn answer(
         }
         ["api", "ask", "validate"] if post => {
             let repair = doc["mode"].as_str() == Some("repair");
-            let (ask, repairs) = if repair {
+            let (ask, repairs, stored) = if repair {
                 let text = doc["document"].to_string();
-                parse_repaired(&text).map_err(ask_err)?
+                let (ask, repairs) = parse_repaired(&text).map_err(ask_err)?;
+                (ask, repairs, None)
             } else {
-                (document_of(registry, &doc)?.0, Vec::new())
+                let (ask, stored) = document_of(registry, &doc)?;
+                (ask, Vec::new(), stored)
+            };
+            // a stored document's scheme removed since it was stored is said
+            // to be gone before it is validated, as the other doors say it
+            // (2026-10-12)
+            let scheme = if repair {
+                None
+            } else {
+                Some(scheme_of(registry, &ask, stored)?)
             };
             let prepared = prepare(ask.clone(), catalog, &scope).map_err(ask_err)?;
             // Wave 4c: strict validate compiles what run would (kineuro/nils#93)
-            if !repair {
-                let scheme = scheme_of(registry, &ask)?;
+            if let Some(scheme) = scheme {
                 let s = Setting {
                     names: catalog,
                     scope: &scope,
@@ -615,8 +637,8 @@ fn answer(
             })))
         }
         ["api", "ask", "run"] if post => {
-            let (ask, _) = document_of(registry, &doc)?;
-            let scheme = scheme_of(registry, &ask)?;
+            let (ask, stored) = document_of(registry, &doc)?;
+            let scheme = scheme_of(registry, &ask, stored)?;
             // Wave 5 §12.8: the content hash as a cache key. A core that ran
             // at this epoch and pack answers its handle again, unless the
             // caller asks for a fresh run.
@@ -787,7 +809,7 @@ fn answer(
             // value for one, which the worker failed on once the door had
             // queued it (2026-10-12)
             let compiles = |registry: &mut Registry| -> Result<(), Reply> {
-                let scheme = scheme_of(registry, &ask)?;
+                let scheme = scheme_of(registry, &ask, id)?;
                 let s = Setting {
                     names: catalog,
                     scope: &scope,
@@ -960,14 +982,14 @@ fn answer(
             ))
         }
         ["api", "ask", "explain"] if post => {
-            let (ask, _) = document_of(registry, &doc)?;
-            let scheme = scheme_of(registry, &ask)?;
+            let (ask, stored) = document_of(registry, &doc)?;
+            let scheme = scheme_of(registry, &ask, stored)?;
             let ex = run::explain(registry, ask, catalog, &scope, &scheme).map_err(run_err)?;
             Ok(Reply::ok(serde_json::to_value(ex).unwrap_or(Value::Null)))
         }
         ["api", "ask", "options"] if post => {
-            let (ask, _) = document_of(registry, &doc)?;
-            let scheme = scheme_of(registry, &ask)?;
+            let (ask, stored) = document_of(registry, &doc)?;
+            let scheme = scheme_of(registry, &ask, stored)?;
             let s = Setting {
                 names: catalog,
                 scope: &scope,
@@ -1001,7 +1023,7 @@ fn answer(
             let d = document::get(registry.store(), id)
                 .map_err(|e| Reply::error(500, e.to_string()))?
                 .ok_or_else(|| Reply::error(404, format!("no document {id}")))?;
-            let scheme = scheme_of(registry, &d.ask)?;
+            let scheme = scheme_of(registry, &d.ask, Some(id))?;
             let s = Setting {
                 names: catalog,
                 scope: &scope,
@@ -1017,8 +1039,8 @@ fn answer(
             ))
         }
         ["api", "ask", "diagnose"] if post => {
-            let (ask, _) = document_of(registry, &doc)?;
-            let scheme = scheme_of(registry, &ask)?;
+            let (ask, stored) = document_of(registry, &doc)?;
+            let scheme = scheme_of(registry, &ask, stored)?;
             let out_set = ask.out.set.clone();
             let d = diagnose::diagnose(
                 registry,
@@ -1045,8 +1067,8 @@ fn answer(
             Ok(Reply::ok(serde_json::to_value(d).unwrap_or(Value::Null)))
         }
         ["api", "ask", "preview"] if post => {
-            let (ask, _) = document_of(registry, &doc)?;
-            let scheme = scheme_of(registry, &ask)?;
+            let (ask, stored) = document_of(registry, &doc)?;
+            let scheme = scheme_of(registry, &ask, stored)?;
             let s = Setting {
                 names: catalog,
                 scope: &scope,
@@ -1075,8 +1097,8 @@ fn answer(
             Ok(Reply::ok(v))
         }
         ["api", "ask", "profile"] if post => {
-            let (ask, _) = document_of(registry, &doc)?;
-            let scheme = scheme_of(registry, &ask)?;
+            let (ask, stored) = document_of(registry, &doc)?;
+            let scheme = scheme_of(registry, &ask, stored)?;
             let s = Setting {
                 names: catalog,
                 scope: &scope,
@@ -1097,8 +1119,8 @@ fn answer(
             Ok(Reply::ok(profile))
         }
         ["api", "ask", "describe"] if post => {
-            let (ask, _) = document_of(registry, &doc)?;
-            let scheme = scheme_of(registry, &ask)?;
+            let (ask, stored) = document_of(registry, &doc)?;
+            let scheme = scheme_of(registry, &ask, stored)?;
             let s = Setting {
                 names: catalog,
                 scope: &scope,
@@ -1135,6 +1157,7 @@ fn answer(
             let mut params = serde_json::Map::new();
             let mut values_decl = serde_json::Map::new();
             let mut whole: Option<Ask> = None;
+            let mut stored: Option<i64> = None;
             let set_name;
             let grain: Grain;
             if let Some(list) = from["cohorts"].as_array() {
@@ -1193,6 +1216,7 @@ fn answer(
                     .unwrap_or(Grain::Subject);
                 set_name = d.ask.out.set.clone();
                 whole = Some(d.ask);
+                stored = Some(id);
             } else if let Some(upload) = from["values"].as_str() {
                 caller.allowed(
                     "starting from an uploaded list",
@@ -1243,7 +1267,7 @@ fn answer(
                     })?
                 }
             };
-            let scheme = scheme_of(registry, &ask)?;
+            let scheme = scheme_of(registry, &ask, stored)?;
             let opening = ask.clone();
             let diagnosis = diagnose::diagnose(
                 registry,
@@ -1389,7 +1413,7 @@ fn answer(
             ))
         }
         ["api", "ask", "documents"] if post => {
-            let (ask, _) = document_of(registry, &doc)?;
+            let (ask, stored) = document_of(registry, &doc)?;
             // stored under another document, it is that document's next
             // version: an accepted proposal joins the line it was proposed for
             let parent = match doc.get("parent") {
@@ -1404,7 +1428,7 @@ fn answer(
                     Some(p)
                 }
             };
-            let scheme = scheme_of(registry, &ask)?;
+            let scheme = scheme_of(registry, &ask, stored)?;
             let s = Setting {
                 names: catalog,
                 scope: &scope,
