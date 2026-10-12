@@ -316,6 +316,9 @@ fn capability_base(store: &mut Store, d: &Detected) -> Value {
         "pipelines": catalog,
         "contract": nils_pipeline::CONTRACT,
         "grants": {"see": "pipelines:see", "run": "pipelines:work", "run_detail": "quasi"},
+        // 2026-10-12: the pre-flight takes a run taken up again ({resume:
+        // <run>}), and the jobs door checks one as it checks a new run
+        "preflight": {"door": crate::preflight::DOOR, "resume": true},
     })
 }
 
@@ -366,9 +369,16 @@ pub(crate) fn run_doc(store: &mut Store, r: &Run) -> Value {
                 // 2026-10-12: why a unit failed, beside what it said
                 "error": u.outcome["error"],
                 "failure": crate::failures::of_unit(&u.outcome),
+                // 2026-10-12: what a skipped unit lacked, in a few words
+                "lacks": crate::made::lacks(&u.outcome),
             }))
             .collect::<Vec<_>>()
     );
+    // 2026-10-12: what it made, from its units as they stand, a running
+    // run's too; a run that kept no units is read from its summary
+    if !units.is_empty() {
+        doc["made"] = crate::made::of_units(&units);
+    }
     doc
 }
 
@@ -408,6 +418,14 @@ pub(crate) fn runs_docs(store: &mut Store, runs: &[Run]) -> Vec<Value> {
             // 2026-10-12: a run that failed before its failure was recorded
             // is read from its error
             v["failure"] = crate::failures::of_run_doc(&v);
+            // 2026-10-12: what it made, unit by unit, its skipped units'
+            // reasons read from its units where its summary did not sum them
+            let unsummed = !r.summary["skipped_by_why"].is_array()
+                && r.summary["units"]["skipped"]
+                    .as_u64()
+                    .is_some_and(|n| n > 0);
+            let skipped = unsummed.then(|| crate::made::skipped_of_run(store, r.id));
+            v["made"] = crate::made::of_summary(&r.summary, skipped.as_ref());
             v
         })
         .collect()
@@ -583,6 +601,10 @@ pub(crate) fn summary_totals_only(s: &mut Value) {
 /// [`summary_totals_only`] says, no unit's own row, and no error text.
 pub(crate) fn run_totals_only(doc: &mut Value) {
     summary_totals_only(&mut doc["summary"]);
+    // what it made, its counts held as the summary holds them
+    if doc.get("made").is_some() {
+        doc["made"] = crate::made::held(&doc["made"], &doc["summary"]);
+    }
     if doc.get("units_run").is_some() {
         doc["units_run"] = json!([]);
     }
@@ -616,6 +638,9 @@ pub(crate) fn job_totals_only(job: &mut Value) {
     }
     if job["result"]["summary"].is_object() {
         summary_totals_only(&mut job["result"]["summary"]);
+        if job.get("made").is_some() {
+            job["made"] = crate::made::held(&job["made"], &job["result"]["summary"]);
+        }
     }
     if job["error"].is_string() {
         job["error"] = json!(WITHHELD);
@@ -1232,8 +1257,9 @@ pub(crate) struct RunArgs {
     #[arg(long, value_name = "N", conflicts_with_all = ["resume", "handle"])]
     pub(crate) chunk: Option<u64>,
     /// Run nothing: say what the run would do (record 49 A3), its units,
-    /// the units missing an input and why, the time, the GPU, and what a
-    /// unit needs against the lane's budget
+    /// the units that cannot run and what they lack, the time, the GPU, and
+    /// what a unit needs against the lane's budget; with --resume, what a
+    /// run taken up again would do, of the units it still has to run
     #[arg(long)]
     pub(crate) preflight: bool,
     /// Machine-readable output
@@ -1788,12 +1814,16 @@ pub(crate) fn command(home: &Home, command: PipelineCommand) -> Result<(), Exit>
                 "run", "pipeline", "status", "runtime", "files", "started"
             );
             for d in &docs {
-                // 2026-10-12: a failed run's kind and cause, beside it
+                // 2026-10-12: a failed run's kind and cause beside it, and a
+                // run that did not make all it was for says what it made
                 let why = match (
                     d["failure"]["kind"].as_str(),
                     d["failure"]["cause"].as_str(),
                 ) {
                     (Some(kind), Some(cause)) => format!("{kind} ({cause})"),
+                    _ if d["made"]["made"] != d["made"]["units"] => {
+                        d["made"]["line"].as_str().unwrap_or_default().to_string()
+                    }
                     _ => String::new(),
                 };
                 println!(
@@ -1812,11 +1842,16 @@ pub(crate) fn command(home: &Home, command: PipelineCommand) -> Result<(), Exit>
 }
 
 fn print_run(doc: &Value) {
+    // 2026-10-12: its units summed beside its status, never a bare done
     println!(
-        "run {} of {}: {}",
+        "run {} of {}: {}{}",
         doc["id"],
         doc["pipeline"].as_str().unwrap_or("-"),
-        doc["status"].as_str().unwrap_or_default()
+        doc["status"].as_str().unwrap_or_default(),
+        doc["made"]["line"]
+            .as_str()
+            .map(|l| format!(" · {l}"))
+            .unwrap_or_default()
     );
     println!(
         "  over             {} (handle {})",
@@ -2551,6 +2586,73 @@ fn released(
     release_id: i64,
     level: Level,
 ) -> Result<Materialised, String> {
+    let units = released_of(registry, release_id, level)?;
+    if units.is_empty() {
+        return Err(
+            "the release of the input holds no subject's images: the selection's stacks were not picked, or went to sourcedata; nils pick run picks them".into(),
+        );
+    }
+    Ok(Materialised {
+        units,
+        mounts: Vec::new(),
+        release_id: Some(release_id),
+        stopped: false,
+        scope: json!({"sources": "release"}),
+        entries: Vec::new(),
+        listed: Vec::new(),
+        context: Vec::new(),
+        converter: Value::Null,
+    })
+}
+
+/// One unit of the bids input a run released before, as a run taken up
+/// again goes on with it (2026-10-12): its name, its subject and its
+/// session's day, its stacks, and the roles it lacks as the runner judges
+/// them ([`units_missing`]).
+pub(crate) struct ReleasedUnit {
+    pub(crate) id: String,
+    pub(crate) subject_id: Option<i64>,
+    pub(crate) session_day: Option<String>,
+    pub(crate) stacks: Vec<i64>,
+    pub(crate) missing: Vec<String>,
+}
+
+/// The units of the bids input a run released, each with the roles it
+/// lacks of those the descriptor names, for the pre-flight of a run taken
+/// up again (2026-10-12): the units [`released`] reads back, judged as the
+/// runner judges them when it goes on. None where the release holds none.
+pub(crate) fn released_units(
+    registry: &mut Registry,
+    release_id: i64,
+    level: Level,
+    roles: &[String],
+    main: Option<&Value>,
+) -> Result<Vec<ReleasedUnit>, String> {
+    let units = released_of(registry, release_id, level)?;
+    let mut missing = if roles.is_empty() {
+        BTreeMap::new()
+    } else {
+        units_missing(registry.store(), Some(release_id), &units, roles, main)?
+    };
+    Ok(units
+        .into_iter()
+        .map(|u| ReleasedUnit {
+            missing: missing.remove(&u.id).unwrap_or_default(),
+            id: u.id,
+            subject_id: u.subject_id,
+            session_day: u.session_day,
+            stacks: u.stacks,
+        })
+        .collect())
+}
+
+/// The units a release placed in its subjects' folders, by the run's name
+/// for each.
+fn released_of(
+    registry: &mut Registry,
+    release_id: i64,
+    level: Level,
+) -> Result<Vec<Unit>, String> {
     let store = registry.store();
     let d = store.dialect();
     let err = |e: nils_registry::Error| e.to_string();
@@ -2601,22 +2703,7 @@ fn released(
         });
         u.stacks.push(stack);
     }
-    if units.is_empty() {
-        return Err(
-            "the release of the input holds no subject's images: the selection's stacks were not picked, or went to sourcedata; nils pick run picks them".into(),
-        );
-    }
-    Ok(Materialised {
-        units: units.into_values().collect(),
-        mounts: Vec::new(),
-        release_id: Some(release_id),
-        stopped: false,
-        scope: json!({"sources": "release"}),
-        entries: Vec::new(),
-        listed: Vec::new(),
-        context: Vec::new(),
-        converter: Value::Null,
-    })
+    Ok(units.into_values().collect())
 }
 
 /// The units of a bids input that lack a role the descriptor names, by
@@ -3371,6 +3458,7 @@ pub(crate) fn run_command(home: &Home, args: RunArgs) -> Result<(), Exit> {
             dcm2niix: &args.dcm2niix,
             units: 1,
             detected: Some(&detected),
+            releases: true,
         },
     );
     if let Some(failed) = crate::requirements::refusing(&checked) {
@@ -3471,6 +3559,7 @@ pub(crate) fn run_command(home: &Home, args: RunArgs) -> Result<(), Exit> {
         }
     };
     let count = parts.len();
+    let pack = pack_of_bids(home, &args, &d);
     for (i, (handle_id, selection)) in parts.iter().enumerate() {
         let handle_id = *handle_id;
         let ran = (|| -> Result<(), Exit> {
@@ -3486,6 +3575,21 @@ pub(crate) fn run_command(home: &Home, args: RunArgs) -> Result<(), Exit> {
                 && !c.ok
             {
                 return Err(fail(c.refusal()));
+            }
+            // 2026-10-12: a run none of whose units could run would make
+            // nothing: refused before it is made, with why, as its
+            // pre-flight says it
+            if let Some(refused) = crate::preflight::units_refusal(
+                &mut registry,
+                &d,
+                handle_id,
+                pack.as_ref(),
+                None,
+                None,
+            )
+            .map_err(fail)?
+            {
+                return Err(fail(refused.words));
             }
 
             // the job: beside every run whose stacks are not these, and
@@ -3829,6 +3933,39 @@ fn claim_run(store: &mut Store, p: &Pipeline, handle: i64, args: Value) -> Resul
     Ok(id)
 }
 
+/// The pack the release of a bids input names its stacks by, which its
+/// pre-flight plans the units with; none for any other input, which reads
+/// no pack.
+fn pack_of_bids(home: &Home, args: &RunArgs, d: &Descriptor) -> Option<nils_pack::Pack> {
+    if d.layout != Layout::Bids {
+        return None;
+    }
+    crate::pack_dir(home, args.pack_dir.clone())
+        .ok()
+        .and_then(|dir| crate::ask_cli::load_pack(&dir, &args.pack).ok())
+}
+
+/// Why a run cannot be taken up again, where it cannot (record 49 A1): one
+/// that is done or partial has nothing left to run, one that failed after
+/// its containers ended is its review items, and one that runs is running.
+pub(crate) fn resume_refused(store: &mut Store, r: &Run) -> Option<Exit> {
+    match r.status.as_str() {
+        "done" | "partial" => Some(usage(format!(
+            "run {} is {}: nothing is left to run",
+            r.id, r.status
+        ))),
+        "failed" if r.results_digest.is_some() => Some(usage(format!(
+            "run {} failed after its containers ended, and its failures are review items; start a new run",
+            r.id
+        ))),
+        "running" => r.job_id.filter(|j| job_alive(store, *j)).map(|j| Exit {
+            code: crate::BUSY,
+            message: format!("run {} is running, as job {j}", r.id),
+        }),
+        _ => None,
+    }
+}
+
 /// `nils run --resume <run>` (record 49 A1): a run that stopped, was
 /// cancelled or whose engine went away is taken up again with everything
 /// it recorded. The units it finished are kept, with their derivatives and
@@ -3837,29 +3974,8 @@ fn resume_command(home: &Home, args: &RunArgs, run_id: i64) -> Result<(), Exit> 
     let mut registry = crate::open(home)?;
     let r = rows::run(registry.store(), run_id)?
         .ok_or_else(|| usage(format!("no pipeline run {run_id}")))?;
-    match r.status.as_str() {
-        "done" | "partial" => {
-            return Err(usage(format!(
-                "run {run_id} is {}: nothing is left to run",
-                r.status
-            )));
-        }
-        "failed" if r.results_digest.is_some() => {
-            return Err(usage(format!(
-                "run {run_id} failed after its containers ended, and its failures are review items; start a new run"
-            )));
-        }
-        "running" => {
-            if let Some(j) = r.job_id
-                && job_alive(registry.store(), j)
-            {
-                return Err(Exit {
-                    code: crate::BUSY,
-                    message: format!("run {run_id} is running, as job {j}"),
-                });
-            }
-        }
-        _ => {}
+    if let Some(refused) = resume_refused(registry.store(), &r) {
+        return Err(refused);
     }
     let p = rows::get(registry.store(), r.pipeline_id)?
         .ok_or_else(|| fail(format!("run {run_id} names a pipeline the catalog lost")))?;
@@ -3938,6 +4054,52 @@ fn resume_command(home: &Home, args: &RunArgs, run_id: i64) -> Result<(), Exit> 
         .handle_id
         .ok_or_else(|| fail(format!("run {run_id} pinned no handle")))?;
     let stacks = handle_stacks(registry.store(), handle_id)?;
+    // the containers its engine left running are stopped first, as taking
+    // it up always did, so none of them goes on to its end while it is
+    // checked: their units run again either way
+    let left = rows::units(registry.store(), run_id)?;
+    stop_left(
+        &rt,
+        d.units == Units::Together,
+        &left,
+        &PathBuf::from(&place.path)
+            .join(derivative::TREE)
+            .join(&p.name)
+            .join(run_id.to_string()),
+    );
+    // 2026-10-12: taken up again only where it would run, as a new run is
+    // checked: what it needs of this machine (the converter only where its
+    // bids input is still to be released), then the units it still has to
+    // run; where it could run none of them and made nothing, it is refused
+    // before a job is claimed, with why
+    let checked = crate::requirements::checks(
+        &mut registry,
+        home.dir(),
+        &crate::requirements::Asked {
+            pipeline: &p,
+            descriptor: &d,
+            dcm2niix: &args.dcm2niix,
+            units: 1,
+            detected: Some(&detected),
+            releases: r.input_release_id.is_none(),
+        },
+    );
+    if let Some(failed) = crate::requirements::refusing(&checked) {
+        return Err(fail(failed.refusal()));
+    }
+    let pack = pack_of_bids(home, args, &d);
+    if let Some(refused) = crate::preflight::units_refusal(
+        &mut registry,
+        &d,
+        handle_id,
+        pack.as_ref(),
+        None,
+        Some(run_id),
+    )
+    .map_err(fail)?
+    {
+        return Err(fail(refused.words));
+    }
     let who = crate::actor();
     let actor = nils_registry::actor::current();
     let job_id = claim_run(
@@ -4282,7 +4444,12 @@ fn execute_run(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Resul
         }
         Some(r) => {
             let before = rows::units(registry.store(), x.run_id).map_err(err)?;
-            stop_left(x, &before, &out);
+            stop_left(
+                x.runtime,
+                x.descriptor.units == Units::Together,
+                &before,
+                &out,
+            );
             // together, the units are all in flight or all past their
             // container: the first run again from a clean folder, the second
             // taken in from what the container left
@@ -5247,11 +5414,11 @@ fn link_file(from: &Path, to: &Path) -> Result<(), String> {
 /// Stop what a run that went away left running: each unit in flight, by its
 /// container's name, and its process where it is this host's and is still
 /// the unit's (its command line names the container or the unit's folder).
-fn stop_left(x: &Execution<'_>, units: &[rows::Unit], out: &Path) {
+fn stop_left(rt: &runtime::Cli, together: bool, units: &[rows::Unit], out: &Path) {
     let host = job::hostname();
     for u in units.iter().filter(|u| u.state == "running") {
         if let Some(name) = &u.container {
-            x.runtime.stop(&Invocation {
+            rt.stop(&Invocation {
                 name: name.clone(),
                 image: String::new(),
                 argv: Vec::new(),
@@ -5276,7 +5443,7 @@ fn stop_left(x: &Execution<'_>, units: &[rows::Unit], out: &Path) {
         let folder = out.join(&u.unit).display().to_string();
         let ours = u.container.as_deref().is_some_and(|n| line.contains(n))
             || line.contains(&folder)
-            || (x.descriptor.units == Units::Together && line.contains(&out.display().to_string()));
+            || (together && line.contains(&out.display().to_string()));
         if ours {
             // the runtime's process led a group of its own
             if let Ok(leader) = u32::try_from(pid) {
@@ -6456,6 +6623,13 @@ fn finalize(
             .filter(|u| by_name.contains_key(u.unit.as_str()))
             .map(|u| &u.outcome),
     );
+    // 2026-10-12: what its skipped units lacked, in a few words, by reason
+    let skipped_by_why = crate::made::skipped_by_why(
+        unit_rows
+            .iter()
+            .filter(|u| by_name.contains_key(u.unit.as_str()))
+            .map(|u| &u.outcome),
+    );
     let first_log = unit_rows
         .first()
         .and_then(|u| u.outcome["log"].as_str().map(str::to_string));
@@ -6466,6 +6640,7 @@ fn finalize(
             "missing_input": missing_input,
         },
         "failures_by_cause": failures_by_cause,
+        "skipped_by_why": skipped_by_why,
         "derivatives": registered,
         "bytes": bytes_total,
         "embeddings": {"registered": embedded, "kept": cached},
@@ -7192,24 +7367,28 @@ pub(crate) fn derivatives_missing(
             {
                 continue;
             }
-            why.push(match (own.len(), checked) {
-                (0, _) => format!("no {kind} derivative of it for the input {}", t.id),
-                (_, "accepted") => format!(
-                    "no {kind} derivative of it for the input {} is accepted by a check, and the input takes accepted ones only",
-                    t.id
-                ),
-                (1, _) => format!(
-                    "its {kind} derivative for the input {} was rejected by a check, and the input takes no rejected one",
-                    t.id
-                ),
-                (n, _) => format!(
-                    "its {n} {kind} derivatives for the input {} were all rejected by a check, and the input takes no rejected one",
-                    t.id
-                ),
-            });
+            why.push(derivative_lack(own.len(), kind, &t.id, checked));
         }
     }
     Ok(out)
+}
+
+/// Why a unit lacks a derivative an input needs, given how many of the
+/// kind it has, none of which the input's check takes: the words the
+/// pre-flight and the run say, which [`crate::preflight::brief`] shortens.
+pub(crate) fn derivative_lack(found: usize, kind: &str, input: &str, checked: &str) -> String {
+    match (found, checked) {
+        (0, _) => format!("no {kind} derivative of it for the input {input}"),
+        (_, "accepted") => format!(
+            "no {kind} derivative of it for the input {input} is accepted by a check, and the input takes accepted ones only"
+        ),
+        (1, _) => format!(
+            "its {kind} derivative for the input {input} was rejected by a check, and the input takes no rejected one"
+        ),
+        (n, _) => format!(
+            "its {n} {kind} derivatives for the input {input} were all rejected by a check, and the input takes no rejected one"
+        ),
+    }
 }
 
 /// The sessions of these stacks, each as its subject and its day, the day

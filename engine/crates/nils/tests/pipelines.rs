@@ -1213,13 +1213,24 @@ fn a_bids_run_takes_what_an_earlier_bids_run_made_of_its_sessions() {
     }
     let lab = Lab::new("pipelines-bids-chain");
     lab.add_descriptor("bids-reader", BIDS_READER);
-    // nothing made yet: the input it needs is named, and nothing runs
+    // nothing made yet: the input it needs is named, and nothing runs;
+    // since 2026-10-12 its pre-flight refuses it, before a run is made
     let (good, _, err) = lab.run(
         &["run", "bids-reader", "--select", "selection:every@1"],
         None,
     );
     assert!(!good, "a run without its derivative input is refused");
-    assert!(err.contains("none is registered"), "{err}");
+    assert!(
+        err.contains(
+            "refused before it started: no session can run: 2 of 2 lack an input (no output yet)"
+        ),
+        "{err}"
+    );
+    assert_eq!(
+        lab.count("SELECT COUNT(*) FROM pipeline_run"),
+        0,
+        "no run is made"
+    );
     lab.add_descriptor("bids-copy", BIDS_COPY);
     let first = lab.json(&[
         "run",
@@ -4565,7 +4576,11 @@ fn a_session_whose_only_mask_was_rejected_is_neither_ready_nor_run() {
         None,
     );
     assert!(!good, "a run with no mask it takes is refused");
-    assert!(err.contains("none is registered"), "{err}");
+    // since 2026-10-12 by its pre-flight, before a run is made
+    assert!(
+        err.contains("refused before it started: no session can run: 2 of 2 lack an input (its mask was rejected)"),
+        "{err}"
+    );
     assert_eq!(lab.podman_runs().len(), 1, "no container more");
 }
 
@@ -9679,4 +9694,578 @@ fn a_sealed_stack_s_unit_says_its_failure_and_not_its_words() {
     assert!(at_door["error"].is_null(), "{at_door}");
     assert_eq!(at_door["failure"]["kind"], "resource", "{at_door}");
     drop(server);
+}
+
+// ------------------------------------------- what a run made, unit by unit
+
+/// The stacks picked as a FLAIR, in stack order.
+fn flair_stacks(lab: &Lab) -> Vec<i64> {
+    lab.store()
+        .query(
+            "SELECT DISTINCT ps.stack_id FROM pick_stack ps JOIN pick p ON p.id = ps.pick_id \
+             WHERE p.role = 'flair' AND p.withdrawn_at IS NULL ORDER BY ps.stack_id",
+            &[],
+        )
+        .unwrap()
+        .iter()
+        .map(|r| r.int(0).unwrap())
+        .collect()
+}
+
+/// A selection of every stack but `leave_out`, saved as `name` version 1.
+fn save_but(lab: &Lab, name: &str, leave_out: &[i64]) {
+    let not: Vec<Value> = leave_out
+        .iter()
+        .map(|s| json!(["<>", {}, ["field", {}, "id"], s]))
+        .collect();
+    let file = ask_file(
+        lab,
+        name,
+        &json!({"ast_version": 1, "sets": {name: {"grain": "stack", "where": not}},
+                "out": {"set": name, "level": "record"}}),
+    );
+    lab.ok(
+        &[
+            "ask",
+            "selections",
+            "save",
+            "--name",
+            name,
+            "--file",
+            &file,
+            "--pack-dir",
+            packs().to_str().unwrap(),
+        ],
+        None,
+    );
+}
+
+/// A search path whose first folder holds a dcm2niix that answers its
+/// version and converts nothing: a run passes its checks and stops at the
+/// release of its input, as one does whose converter went missing between.
+fn broken_dcm2niix_path(lab: &Lab) -> OsString {
+    let dir = lab.bin.path().join("broken-dcm2niix");
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("dcm2niix");
+    std::fs::write(
+        &file,
+        "#!/bin/sh\ncase \"$1\" in --version|-v) echo \"dcm2niiX version v0.0.0-broken\"; exit 0;; esac\necho 'converts nothing, on purpose' >&2\nexit 3\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let mut path = dir.as_os_str().to_owned();
+    path.push(":");
+    path.push(&lab.path);
+    path
+}
+
+/// A pipeline run's job once it is over, read at the door.
+fn job_over(server: &Server, id: i64) -> Value {
+    let started = std::time::Instant::now();
+    loop {
+        let (status, job) = server.call("GET", &format!("/api/jobs/{id}"), None, OPERATOR);
+        assert_eq!(status, 200, "{job}");
+        if ["done", "failed", "cancelled"].contains(&job["state"].as_str().unwrap_or_default()) {
+            return job;
+        }
+        assert!(
+            started.elapsed().as_secs() < 180,
+            "job {id} did not end: {job}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+}
+
+/// 2026-10-12 (Nima, trying the desk: "done-fail should be per unit of job
+/// not the whole thing"): a run reads as its units summed, never a bare
+/// done. A run of a pipeline that needs a T1w and a FLAIR a session, over a
+/// selection one session of which lacks its FLAIR, is done with one session
+/// made and one skipped, and says so with the skipped one's reason in a few
+/// words: at the command line, at the doors (at detail plain too, naming no
+/// session) and on its job. A run from before every unit of which was
+/// skipped, its reasons not summed, reads as having made nothing, with its
+/// reasons read from its units.
+#[test]
+fn a_run_reads_as_what_its_units_made() {
+    if !have("python3") || !have("dcm2niix") {
+        eprintln!(
+            "python3 or dcm2niix is not installed; the bids layout needs a converter, so this test is skipped"
+        );
+        return;
+    }
+    on_both("pipelines-made", "nils_pipelines_made", |lab| {
+        lab.add_descriptor("needs-flair", NEEDS_FLAIR);
+        let flairs = flair_stacks(lab);
+        assert_eq!(flairs.len(), 2, "{flairs:?}");
+        save_but(lab, "most", &flairs[..1]);
+        let v = lab.json(&[
+            "run",
+            "needs-flair",
+            "--select",
+            "selection:most@1",
+            "--json",
+        ]);
+        assert_eq!(v["status"], "done", "{v}");
+        let line = "1 of 2 made · 1 skipped: no FLAIR picked";
+        assert_eq!(v["made"]["line"], line, "{v}");
+        assert_eq!(v["made"]["nothing"], false, "{v}");
+        assert_eq!(
+            (
+                &v["made"]["made"],
+                &v["made"]["skipped"],
+                &v["made"]["failed"]
+            ),
+            (&json!(1), &json!(1), &json!(0)),
+            "{v}"
+        );
+        assert_eq!(
+            v["summary"]["skipped_by_why"],
+            json!([{"why": "no FLAIR picked", "units": 1}]),
+            "{v}"
+        );
+        let skipped: Vec<&Value> = v["units_run"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|u| u["status"] == "skipped")
+            .collect();
+        assert_eq!(skipped.len(), 1, "{v}");
+        assert_eq!(skipped[0]["lacks"], json!(["no FLAIR picked"]), "{v}");
+        let run = v["id"].as_i64().unwrap();
+        let job = v["job_id"].as_i64().unwrap();
+
+        // the command line
+        let text = lab.ok(&["pipeline", "runs", &run.to_string()], None);
+        assert!(
+            text.contains(&format!("run {run} of needs-flair@1: done · {line}")),
+            "{text}"
+        );
+        let list = lab.ok(&["pipeline", "runs"], None);
+        assert!(list.contains(line), "{list}");
+        let doc = lab.json(&["jobs", "show", &job.to_string(), "--json"]);
+        assert_eq!(doc["made"]["line"], line, "{doc}");
+        assert!(doc["taken_up"].is_null(), "{doc}");
+        let said = lab.ok(&["jobs", "show", &job.to_string()], None);
+        assert!(said.contains(&format!("made        {line}")), "{said}");
+
+        // the doors, at detail plain too, which names no session
+        let server = Server::start(lab);
+        for token in [OPERATOR, PLAIN] {
+            let (status, one) =
+                server.call("GET", &format!("/api/pipeline-runs/{run}"), None, token);
+            assert_eq!(status, 200, "{one}");
+            assert_eq!(one["made"]["line"], line, "{one}");
+            assert!(!one["made"].to_string().contains("sub-"), "{one}");
+            let (status, all) = server.call("GET", "/api/pipeline-runs", None, token);
+            assert_eq!(status, 200, "{all}");
+            let listed = all["runs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|r| r["id"] == run)
+                .unwrap_or_else(|| panic!("{all}"));
+            assert_eq!(listed["made"]["line"], line, "{listed}");
+            let (status, j) = server.call("GET", &format!("/api/jobs/{job}"), None, token);
+            assert_eq!(status, 200, "{j}");
+            assert_eq!(j["made"]["line"], line, "{j}");
+        }
+        drop(server);
+
+        // a run from before: every unit skipped, its reasons not summed in
+        // its summary, as a laptop install's engine left one on 2026-10-12
+        let mut store = lab.store();
+        let units = store
+            .query(
+                &format!("SELECT id, outcome FROM pipeline_unit WHERE run_id = {run}"),
+                &[],
+            )
+            .unwrap();
+        let outcomes: Vec<(i64, Value)> = units
+            .iter()
+            .map(|r| {
+                (
+                    r.int(0).unwrap(),
+                    serde_json::from_str(r.text(1).unwrap()).unwrap(),
+                )
+            })
+            .collect();
+        let (_, skipped) = outcomes
+            .iter()
+            .find(|(_, o)| o["status"] == "skipped")
+            .cloned()
+            .unwrap();
+        let quoted = |v: &Value| v.to_string().replace('\'', "''");
+        for (id, o) in &outcomes {
+            if o["status"] == "succeeded" {
+                store
+                    .execute(
+                        &format!(
+                            "UPDATE pipeline_unit SET outcome = '{}', attempts = 0 WHERE id = {id}",
+                            quoted(&skipped)
+                        ),
+                        &[],
+                    )
+                    .unwrap();
+            }
+        }
+        let before = json!({"units": {"total": 2, "succeeded": 0, "failed": 0, "skipped": 2,
+                                      "unreported": 0, "missing_input": 2},
+                            "failures_by_cause": [], "derivatives": 0});
+        store
+            .execute(
+                &format!(
+                    "UPDATE pipeline_run SET summary = '{}' WHERE id = {run}",
+                    quoted(&before)
+                ),
+                &[],
+            )
+            .unwrap();
+        let nothing = "nothing made · 2 of 2 skipped: no FLAIR picked";
+        let one = lab.json(&["pipeline", "runs", &run.to_string(), "--json"]);
+        assert_eq!(one["made"]["line"], nothing, "{one}");
+        assert_eq!(one["made"]["nothing"], true, "{one}");
+        let all = lab.json(&["pipeline", "runs", "--json"]);
+        let listed = all
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["id"] == run)
+            .unwrap_or_else(|| panic!("{all}"));
+        assert_eq!(listed["made"]["line"], nothing, "{listed}");
+        assert_eq!(listed["made"]["nothing"], true, "{listed}");
+        let text = lab.ok(&["pipeline", "runs", &run.to_string()], None);
+        assert!(text.contains(&format!("done · {nothing}")), "{text}");
+    });
+}
+
+/// 2026-10-12 (Nima: "if the selection does not fulfill or maybe some part
+/// of it the pipeline should say that these sessions cannot be [run] unless
+/// they have whatever"): the pre-flight names the sessions that cannot run,
+/// one line a reason with the sessions under it, and says so plainly where
+/// every one can; a run none of whose sessions could run is not ready, and
+/// `nils run` and the jobs door refuse it before anything is made or
+/// queued, saying why.
+#[test]
+fn a_run_none_of_whose_units_could_run_is_refused_and_says_why() {
+    if !have("python3") || !have("dcm2niix") {
+        eprintln!(
+            "python3 or dcm2niix is not installed; the bids layout needs a converter, so this test is skipped"
+        );
+        return;
+    }
+    on_both("pipelines-cannot", "nils_pipelines_cannot", |lab| {
+        lab.add_descriptor("needs-flair", NEEDS_FLAIR);
+        let flairs = flair_stacks(lab);
+        save_but(lab, "t1s", &flairs);
+        let over = [
+            "run",
+            "needs-flair",
+            "--select",
+            "selection:t1s@1",
+            "--preflight",
+        ];
+        let pre = lab.json(&[&over[..], &["--json"]].concat());
+        assert_eq!(
+            pre["units"],
+            json!({"total": 2, "ready": 0, "missing": 2}),
+            "{pre}"
+        );
+        assert_eq!(pre["ready"], false, "{pre}");
+        assert_eq!(pre["unit"], "session", "{pre}");
+        assert_eq!(pre["cannot"].as_array().unwrap().len(), 1, "{pre}");
+        assert_eq!(pre["cannot"][0]["why"], "no FLAIR picked", "{pre}");
+        assert_eq!(pre["cannot"][0]["units"], 2, "{pre}");
+        let named = pre["cannot"][0]["named"].as_array().unwrap();
+        assert_eq!(named.len(), 2, "{pre}");
+        assert!(
+            named
+                .iter()
+                .all(|n| n.as_str().unwrap().starts_with("sub-")),
+            "{pre}"
+        );
+        assert_eq!(
+            pre["missing"][0]["lacks"],
+            json!(["no FLAIR picked"]),
+            "{pre}"
+        );
+        let blocker = "no session can run: 2 of 2 lack an input (no FLAIR picked)";
+        assert!(
+            pre["blockers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|b| b == blocker),
+            "{pre}"
+        );
+        let text = lab.ok(&over, None);
+        assert!(
+            text.contains("cannot run       2 sessions: no FLAIR picked"),
+            "{text}"
+        );
+        assert!(text.contains(&format!("not ready: {blocker}")), "{text}");
+
+        // the run is refused before anything is made
+        let (good, _, err) = lab.run(&["run", "needs-flair", "--select", "selection:t1s@1"], None);
+        assert!(!good, "{err}");
+        assert!(
+            err.contains(&format!("refused before it started: {blocker}")),
+            "{err}"
+        );
+        assert!(err.contains("(failure: input)"), "{err}");
+        assert_eq!(lab.count("SELECT COUNT(*) FROM pipeline_run"), 0);
+        assert!(lab.podman_runs().is_empty(), "nothing ran");
+
+        // and at the jobs door, with nothing queued
+        let server = Server::start(lab);
+        let runs_queued = "SELECT COUNT(*) FROM job WHERE kind = 'pipeline'";
+        let jobs = lab.count(runs_queued);
+        let (status, refused) = server.call(
+            "POST",
+            "/api/jobs",
+            Some(json!({"command": ["run", "needs-flair", "--select", "selection:t1s@1"]})),
+            OPERATOR,
+        );
+        assert_eq!(status, 409, "{refused}");
+        assert!(
+            refused["error"].as_str().unwrap().contains(blocker),
+            "{refused}"
+        );
+        assert_eq!(refused["failure"]["kind"], "input", "{refused}");
+        assert_eq!(refused["cannot"][0]["why"], "no FLAIR picked", "{refused}");
+        assert_eq!(refused["units"]["total"], 2, "{refused}");
+        assert_eq!(refused["unit"], "session", "{refused}");
+        assert!(refused["requirements"].is_array(), "{refused}");
+        assert_eq!(lab.count(runs_queued), jobs, "nothing queued");
+        // the door's pre-flight, at detail plain naming no session
+        let (status, flat) = server.call(
+            "POST",
+            "/api/pipelines/needs-flair/preflight",
+            Some(json!({"select": "selection:t1s@1"})),
+            PLAIN,
+        );
+        assert_eq!(status, 200, "{flat}");
+        assert_eq!(flat["cannot"][0]["units"], 2, "{flat}");
+        assert_eq!(flat["cannot"][0]["named"], json!([]), "{flat}");
+        assert_eq!(
+            flat["missing"][0]["lacks"],
+            json!(["no FLAIR picked"]),
+            "{flat}"
+        );
+        assert!(flat["missing"][0].get("unit").is_none(), "{flat}");
+        drop(server);
+
+        // a selection every session of which can run says so plainly
+        let every = [
+            "run",
+            "needs-flair",
+            "--select",
+            "selection:every@1",
+            "--preflight",
+        ];
+        let text = lab.ok(&every, None);
+        assert!(
+            text.contains("can run          every session: 2 sessions"),
+            "{text}"
+        );
+        let pre = lab.json(&[&every[..], &["--json"]].concat());
+        assert_eq!(pre["cannot"], json!([]), "{pre}");
+        assert_eq!(pre["ready"], true, "{pre}");
+    });
+}
+
+/// 2026-10-12, found on a laptop install: a run that stopped at its release for want of
+/// a dependency, taken up again with Run again once the dependency was
+/// there, ran with no session able to run and read as done. A run taken up
+/// again is checked as a new run is: its pre-flight (`nils run --resume
+/// --preflight`, `{resume}` at the door) says what it needs of this machine
+/// and which of the sessions it still has to run cannot, and `nils run
+/// --resume` and the jobs door refuse it, nothing claimed or queued, where
+/// none of them could run or a check fails; once they can, the door takes
+/// it up, and the job that stopped says which job took its run up again.
+#[test]
+fn a_run_taken_up_again_is_checked_as_a_new_run_is() {
+    if !have("python3") || !have("dcm2niix") {
+        eprintln!(
+            "python3 or dcm2niix is not installed; the bids layout needs a converter, so this test is skipped"
+        );
+        return;
+    }
+    on_both("pipelines-again", "nils_pipelines_again", |lab| {
+        lab.add_descriptor("needs-flair", NEEDS_FLAIR);
+        let broken = broken_dcm2niix_path(lab);
+        let (good, _, err) = lab.run_on(
+            &broken,
+            &["run", "needs-flair", "--select", "selection:every@1"],
+            None,
+        );
+        assert!(!good, "the release stops: {err}");
+        // as the run a laptop install's engine stopped on did, its release never
+        // recorded: the release of its input is made again when it goes on
+        assert!(
+            lab.store()
+                .execute(
+                    "UPDATE pipeline_run SET input_release_id = NULL WHERE id = 1",
+                    &[]
+                )
+                .unwrap()
+                == 1
+        );
+        let run = lab.json(&["pipeline", "runs", "1", "--json"]);
+        assert_eq!(run["status"], "failed", "{run}");
+        assert!(run["input_release_id"].is_null(), "{run}");
+        let first = run["job_id"].as_i64().unwrap();
+
+        // its FLAIR picks withdrawn since: none of its sessions can run
+        let withdraw = |on: bool| {
+            let sql = if on {
+                "UPDATE pick SET withdrawn_at = '2026-10-12T12:00:00Z', withdrawn_by = 'the test' \
+                 WHERE role = 'flair' AND withdrawn_at IS NULL"
+            } else {
+                "UPDATE pick SET withdrawn_at = NULL, withdrawn_by = NULL WHERE withdrawn_by = 'the test'"
+            };
+            assert!(lab.store().execute(sql, &[]).unwrap() > 0, "{sql}");
+        };
+        withdraw(true);
+        let pre = lab.json(&["run", "--resume", "1", "--preflight", "--json"]);
+        assert_eq!(pre["resume"]["run"], 1, "{pre}");
+        assert_eq!(pre["resume"]["kept"], 0, "{pre}");
+        assert_eq!(pre["units"]["total"], 2, "{pre}");
+        assert_eq!(pre["units"]["ready"], 0, "{pre}");
+        assert_eq!(pre["ready"], false, "{pre}");
+        assert_eq!(pre["cannot"][0]["why"], "no FLAIR picked", "{pre}");
+        let blocker = "no session can run: 2 of 2 lack an input (no FLAIR picked)";
+        assert!(pre["blockers"].to_string().contains(blocker), "{pre}");
+        let text = lab.ok(&["run", "--resume", "1", "--preflight"], None);
+        assert!(text.contains("taken up again   run 1 (failed)"), "{text}");
+        assert!(
+            text.contains("cannot run       2 sessions: no FLAIR picked"),
+            "{text}"
+        );
+        let (good, _, err) = lab.run(&["run", "--resume", "1"], None);
+        assert!(!good, "{err}");
+        assert!(
+            err.contains(&format!("refused before it started: {blocker}")),
+            "{err}"
+        );
+        let kept = lab.json(&["pipeline", "runs", "1", "--json"]);
+        assert_eq!(kept["status"], "failed", "nothing was claimed: {kept}");
+        assert_eq!(kept["job_id"], first, "{kept}");
+        assert_eq!(kept["resumes"].as_i64().unwrap_or(0), 0, "{kept}");
+
+        let server = Server::start(lab);
+        let (status, door) = server.call(
+            "POST",
+            "/api/pipelines/needs-flair/preflight",
+            Some(json!({"resume": 1})),
+            OPERATOR,
+        );
+        assert_eq!(status, 200, "{door}");
+        assert_eq!(door["ready"], false, "{door}");
+        assert_eq!(door["cannot"], pre["cannot"], "{door}");
+        assert_eq!(door["resume"]["run"], 1, "{door}");
+        let (status, _) = server.call(
+            "POST",
+            "/api/pipelines/needs-flair/preflight",
+            Some(json!({"resume": 99})),
+            OPERATOR,
+        );
+        assert_eq!(status, 404, "no such run");
+        let (status, caps) = server.call("GET", "/api/capabilities", None, OPERATOR);
+        assert_eq!(status, 200, "{caps}");
+        assert_eq!(caps["pipelines"]["preflight"]["resume"], true, "{caps}");
+        let runs_queued = "SELECT COUNT(*) FROM job WHERE kind = 'pipeline'";
+        let jobs = lab.count(runs_queued);
+        let (status, refused) = server.call(
+            "POST",
+            "/api/jobs",
+            Some(json!({"command": ["run", "--resume", "1"]})),
+            OPERATOR,
+        );
+        assert_eq!(status, 409, "{refused}");
+        assert_eq!(refused["failure"]["kind"], "input", "{refused}");
+        assert_eq!(refused["cannot"][0]["why"], "no FLAIR picked", "{refused}");
+        assert_eq!(lab.count(runs_queued), jobs, "nothing queued");
+
+        // its picks back, it can run, and its pre-flight says so
+        withdraw(false);
+        let (status, door) = server.call(
+            "POST",
+            "/api/pipelines/needs-flair/preflight",
+            Some(json!({"resume": 1})),
+            OPERATOR,
+        );
+        assert_eq!(status, 200, "{door}");
+        assert_eq!(door["ready"], true, "{door}");
+        assert_eq!(door["units"]["ready"], 2, "{door}");
+        assert_eq!(door["cannot"], json!([]), "{door}");
+        // without its converter it is refused for it, as a new run is
+        let (good, _, err) =
+            lab.run_on(&path_without_dcm2niix(lab), &["run", "--resume", "1"], None);
+        assert!(!good, "{err}");
+        assert!(err.contains("refused before it started"), "{err}");
+        assert!(err.contains("nils tools install dcm2niix"), "{err}");
+
+        // taken up again at the door, and the job that stopped says which
+        // job took its run up again
+        let (status, queued) = server.call(
+            "POST",
+            "/api/jobs",
+            Some(json!({"command": ["run", "--resume", "1"]})),
+            OPERATOR,
+        );
+        assert_eq!(status, 202, "{queued}");
+        let again = queued["job"].as_i64().unwrap();
+        let done = job_over(&server, again);
+        assert_eq!(done["state"], "done", "{done}");
+        assert_eq!(done["made"]["line"], "2 of 2 made", "{done}");
+        assert!(done["taken_up"].is_null(), "{done}");
+        let (status, run) = server.call("GET", "/api/pipeline-runs/1", None, OPERATOR);
+        assert_eq!(status, 200, "{run}");
+        assert_eq!(run["status"], "done", "{run}");
+        assert_eq!(run["job_id"], again, "{run}");
+        assert_eq!(run["made"]["line"], "2 of 2 made", "{run}");
+        let (status, old) = server.call("GET", &format!("/api/jobs/{first}"), None, OPERATOR);
+        assert_eq!(status, 200, "{old}");
+        assert_eq!(
+            old["taken_up"],
+            json!({"job": again, "state": "done", "run": 1}),
+            "{old}"
+        );
+        let (status, all) = server.call("GET", "/api/jobs?all=1", None, OPERATOR);
+        assert_eq!(status, 200, "{all}");
+        let listed = all["jobs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|j| j["id"] == first)
+            .unwrap_or_else(|| panic!("{all}"));
+        assert_eq!(listed["taken_up"]["job"], again, "{listed}");
+        drop(server);
+        let said = lab.ok(&["jobs", "show", &first.to_string()], None);
+        assert!(
+            said.contains(&format!("taken up    again as job {again} (done)")),
+            "{said}"
+        );
+        // and a run that is done has nothing left to run, at the door too
+        let server = Server::start(lab);
+        let (status, done) = server.call(
+            "POST",
+            "/api/jobs",
+            Some(json!({"command": ["run", "--resume", "1"]})),
+            OPERATOR,
+        );
+        assert_eq!(status, 409, "{done}");
+        assert!(
+            done["error"]
+                .as_str()
+                .unwrap()
+                .contains("nothing is left to run"),
+            "{done}"
+        );
+        drop(server);
+    });
 }

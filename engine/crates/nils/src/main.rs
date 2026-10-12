@@ -50,6 +50,7 @@ mod grants;
 mod intake;
 mod linkage_doors;
 mod login;
+mod made;
 mod main_input;
 mod main_scans;
 mod mask;
@@ -9565,6 +9566,7 @@ fn jobs_command(home: &Home, command: JobsCommand) -> Result<(), Exit> {
             if json {
                 let mut doc: Vec<serde_json::Value> =
                     jobs.iter().map(crate::failures::job_doc).collect();
+                crate::made::jobs(store, &mut doc);
                 // record 48, D1 of the move: no unit's QC of a sealed stack,
                 // unless --unsealed-access says why
                 if !sealed::keyboard_reads() {
@@ -9614,6 +9616,7 @@ fn jobs_command(home: &Home, command: JobsCommand) -> Result<(), Exit> {
                 return Err(usage(format!("no job {id}")));
             };
             let mut doc = crate::failures::job_doc(&j);
+            crate::made::jobs(store, std::slice::from_mut(&mut doc));
             if json {
                 if !sealed::keyboard_reads() {
                     pipelines::job_unsealed(store, &mut doc).map_err(fail)?;
@@ -9643,6 +9646,18 @@ fn jobs_command(home: &Home, command: JobsCommand) -> Result<(), Exit> {
             }
             if let Some(f) = crate::failures::line(&doc["failure"]) {
                 println!("  failure     {f}");
+            }
+            // 2026-10-12: what a run's job made, and the job that took its
+            // run up again
+            if let Some(m) = doc["made"]["line"].as_str() {
+                println!("  made        {m}");
+            }
+            if doc["taken_up"].is_object() {
+                println!(
+                    "  taken up    again as job {} ({})",
+                    doc["taken_up"]["job"],
+                    doc["taken_up"]["state"].as_str().unwrap_or_default()
+                );
             }
             if let Some(p) = &j.progress {
                 println!("  progress    {p}");
