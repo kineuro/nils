@@ -129,6 +129,19 @@ nils pipeline show n4-bias-correction
 
    The pre-flight counts the units, names the units that lack an input and why (a session with no FLAIR picked, a stack with no file or no derivative its input needs), counts the stacks no unit takes, estimates the time from the pipeline's own past runs here or else from its descriptor, says whether it wants a GPU and what it would run on, and holds what a unit needs against the lane's budget. `ready` false lists the blockers. Nothing runs.
 
+   It also checks what the run needs of this machine (`requirements`), each check with what it found:
+
+   | check | what it holds |
+   |---|---|
+   | `converter` | a bids input: dcm2niix is found and answers its version (see *dcm2niix* below) |
+   | `runtime` | a container runtime is usable |
+   | `image` | the runtime holds the image already, or can take it; an image not pulled yet is information, and the run pulls it first. Rootless podman whose account has no subordinate ids in `/etc/subuid` and `/etc/subgid` cannot unpack an image, and is refused |
+   | `memory` | a unit's `memory-gb` against this machine's memory and the lane's budget |
+   | `gpu` | a pipeline that requires a GPU has one the lane leases |
+   | `disk` | where the descriptor says what a unit's outputs take (`x-nils.needs.disk-gb`), the units against the output place's free space |
+
+   A check that fails is a blocker, and `failure` says its kind and what to do. `nils run`, the jobs door and a dataset's step refuse such a run before anything is frozen or queued, with the same words; the door answers 409 with `failure` and `requirements`. No check is slow: nothing is pulled.
+
 3. Run it:
 
    ```sh
@@ -171,6 +184,32 @@ curl -X POST http://127.0.0.1:8437/api/pipelines/samseg-lesions/preflight \
 ```
 
 The pre-flight's budget check reads the lane's own budget (see *Set the lane*).
+
+## When a run fails
+
+A run that failed, and each unit that failed, says why beside its error, which is kept as it was written: `failure` {kind, cause, advice, fix}. `nils run`, `nils pipeline runs <run>` and `nils jobs show <job>` print it as a line; the doors answer it on the run, on each of `units_run`, and on the run's job. The kinds:
+
+| kind | causes | what it means |
+|---|---|---|
+| `dependency` | `dcm2niix`, `runtime`, `subuid`, `image`, `gpu_driver` | something the engine or a container needs is missing or does not start: dcm2niix, the container runtime, the subordinate ids rootless podman unpacks an image with, an image that will not pull, the GPU's driver. Install or mend it, then run again |
+| `resource` | `memory`, `disk`, `gpu_memory`, `lane`, `time` | the machine ran short: a container killed for memory (exit 137, or the kernel's OOM killer), a full disk, a card out of memory, more than the lane holds, a time limit. Give it more, or run fewer units at once, then `nils run --resume <run>` |
+| `input` | `input` | a unit's input is missing or was refused: the pre-flight names each unit and why |
+| `pipeline` | `pipeline` | the pipeline's own error, and whatever else is not known: the error and the run's log say why |
+
+`advice` is one sentence of what to do, in the engine's own words, so it is shown at any detail; the error, a tool's own words, is not below detail quasi. `fix` is the install the engine offers itself, where it has one: for dcm2niix, `nils tools install dcm2niix` and `POST /api/tools/dcm2niix/install`, an admin's (`install:work`). A run's summary counts its units' failures by cause (`failures_by_cause`), so a partial run says why its units failed. A run that failed before this was recorded is read from its error when it is shown.
+
+## dcm2niix
+
+A run with a bids input is given a release of its selection, which dcm2niix converts. The engine finds dcm2niix in this order: a path given with `--dcm2niix`; `dcm2niix` on the engine's search path; beside the running `nils`; where the setup record names one; and the registry's `tools/` folder. The run's summary says which it used (`summary.converter`: version, path, found_by).
+
+`nils setup` places the pinned build beside `nils` on an install on this machine (see the setup guide). Where none is found, an admin installs it:
+
+```sh
+nils tools install dcm2niix
+nils tools list
+```
+
+The install downloads the build this version of `nils` pins from rordenlab's releases (or the mirror `NILS_DCM2NIIX_RELEASES` names), checks its sha256, unpacks it into the registry's `tools/` folder and asks its version; it is audited as `tool.install`. One found already is left alone. Where the engine cannot reach GitHub, it says so and gives the way by hand. The desk offers the same install through `POST /api/tools/dcm2niix/install`, and `GET /api/tools` and the capabilities' `tools` say whether dcm2niix is here, where and which build.
 
 ## Run several at once
 
