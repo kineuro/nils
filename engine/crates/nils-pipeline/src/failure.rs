@@ -436,6 +436,11 @@ pub fn known(said: &Said<'_>) -> Option<Cause> {
             "for its input",
             "the selection holds no stacks",
             "no stack of the selection is picked",
+            // 2026-10-12: picked stacks the registry holds no file of, and
+            // a scope with no main scan of a role
+            "would hold no subject's images",
+            "scan to run over",
+            "scan of each of",
             "belongs to no subject",
             "the release of the input failed",
             "nothing to run",
@@ -531,6 +536,13 @@ mod tests {
             of("the release of the input failed: no stack of the selection is picked"),
             Cause::Input
         );
+        for said in [
+            "the release of the input would hold no subject's images: 4 of the selection's 4 stacks: the registry holds no file of it to read",
+            "main:t1w@dataset:alpha has no main t1w scan to run over: 0 t1w scans of 3 visits",
+            "main@dataset:alpha has no visit with a main scan of each of t1w and flair to run over",
+        ] {
+            assert_eq!(of(said), Cause::Input, "{said}");
+        }
     }
 
     /// A container the kernel or the runtime killed for memory: exit 137 as

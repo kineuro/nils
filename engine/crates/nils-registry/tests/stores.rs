@@ -4434,8 +4434,8 @@ fn migration_94_keeps_the_picks_a_release_read_on_both_backends() {
                 .unwrap();
             id
         };
-        let (before, kept) = (release("from-before"), release("kept"));
-        let frozen = pick_truth::freeze(&mut store, kept, &Of::Pack, &[(5, 2)], None).unwrap();
+        let (before, kept, listed) = (release("from-before"), release("kept"), release("listed"));
+        let frozen = pick_truth::freeze(&mut store, kept, &Of::Pack, &[(5, 2)], &[]).unwrap();
         assert_eq!(
             frozen.doc(),
             serde_json::json!({"visits": 1, "picks": 1, "stacks": 1}),
@@ -4497,6 +4497,36 @@ fn migration_94_keeps_the_picks_a_release_read_on_both_backends() {
         let row = |stack: i64| vec![(2, "2020-01-01".to_string(), "t1w".to_string(), stack)];
         assert_eq!(read(&mut store, &Picks::Frozen(kept)), row(5), "{name}");
         assert_eq!(read(&mut store, &Picks::Live(Of::Pack)), row(6), "{name}");
+        // a run's list over two roles (2026-10-12): the visit's T1w is
+        // picked live, its FLAIR (stack 7) by no pick any more; each is kept
+        // as the role the list took it for
+        let list = |role: &str, stack: i64| pick_truth::Listed {
+            role: role.to_string(),
+            stacks: vec![(stack, 2, "2020-01-01".to_string())],
+        };
+        let frozen = pick_truth::freeze(
+            &mut store,
+            listed,
+            &Of::Pack,
+            &[(6, 2), (7, 2)],
+            &[list("t1w", 6), list("flair", 7)],
+        )
+        .unwrap();
+        assert_eq!(
+            frozen.doc(),
+            serde_json::json!({"visits": 1, "picks": 2, "stacks": 2, "listed": 1}),
+            "{name}"
+        );
+        let mut kept_roles = read(&mut store, &Picks::Frozen(listed));
+        kept_roles.sort();
+        assert_eq!(
+            kept_roles,
+            vec![
+                (2, "2020-01-01".to_string(), "flair".to_string(), 7),
+                (2, "2020-01-01".to_string(), "t1w".to_string(), 6),
+            ],
+            "{name}"
+        );
         assert!(
             migrate::migrate(&mut store, Kind::Registry)
                 .unwrap()

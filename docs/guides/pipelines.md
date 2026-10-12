@@ -217,6 +217,15 @@ The pre-flight's budget check reads the lane's own budget (see *Set the lane*).
 
    `main:<role>@cohort:<name>` names a cohort instead. The role is one the pack's picks name (`t1w`, `flair` and `t2w` in the MRI pack, listed as `main_roles` among the engine's capabilities). Through the doors the same text goes where a selection does: `{"select": "main:t1w@dataset:study-anon"}` to the pre-flight door, and `"--select", "main:t1w@dataset:study-anon"` in a run queued at the jobs door. `--chunk N` splits the list as it splits a selection.
 
+3. A pipeline that needs several roles (samseg-lesions and segcsvd need a T1w and a FLAIR a session, as their descriptors' `x-nils.input.roles` say) goes over the main scans of each, written without a role:
+
+   ```sh
+   nils run samseg-lesions --select main@dataset:study-anon --preflight
+   nils run samseg-lesions --select main@dataset:study-anon
+   ```
+
+   The list holds the main scan of each role of every visit that has a main scan of each, one pick a visit a role; a visit that lacks one is no unit of the run. The pre-flight's `main` names the roles (`roles`), counts the visits with every one (`main_visits`) and the visits that lack one, by role and by why (`without.why`, each `{role, why, visits}`), names those visits at detail quasi (each with its role), and gives each role's own count (`by_role`). The handle records which role each stack was taken for, so the run's bids input names each stack by its own role. `--chunk N` splits such a list by whole visits: a part never holds one role of a visit without the other. A pipeline of one role takes its role this way too; one that names no role refuses the spec and asks for `main:<role>@...`.
+
 What the list is: the scope's scans (a dataset's, the stacks its folder holds a file of; a cohort's, every stack of its open members) that the main-scan pick of their visit names. The picks are the scope's own once a run of its saved rules finished, else the pack's, as the Main scans page shows them. One pick a visit, with every stack it names.
 
 The list is resolved when the run is made and frozen into a handle, as a selection is, and the handle records the picks it was read under: the version of the scope's rules, their digest and the pick run that made them read, or the pack's defaults. A run over the handle takes the same stacks after the rules change, since a bids input is released from the list as it was frozen, each stack the main scan of its role; the input's release records the picks and keeps them with each stack of the list (see *What a release keeps of the main scans* under the reference). `nils pipeline runs <run>` says it under `main`.
@@ -601,7 +610,7 @@ A bids input's release is marked as the run's input and left out of `nils releas
 
 ### What a release keeps of the main scans
 
-A release of picked stacks (`nils release --picked`, and every bids input) records which main scans it read: a dataset's or a cohort's rules at their version, each subject's own dataset's, or the pack's defaults. Since 2026-10-12 it also keeps the picks themselves, before it takes a stack: of each visit it took a stack of, every pick of what it read with every stack the pick names, and the scope and version of the rules each was made with. It takes its stacks by that list. A bids input released from a frozen list of a scope's main scans keeps each stack of the list as the main scan of its role as well.
+A release of picked stacks (`nils release --picked`, and every bids input) records which main scans it read: a dataset's or a cohort's rules at their version, each subject's own dataset's, or the pack's defaults. Since 2026-10-12 it also keeps the picks themselves, before it takes a stack: of each visit it took a stack of, every pick of what it read with every stack the pick names, and the scope and version of the rules each was made with. It takes its stacks by that list. A bids input released from a frozen list of a scope's main scans keeps each stack of the list as the main scan of its role as well; of a list over several roles, each stack as the role it was taken for, and the release records the roles (`picks.main` "t1w+flair", `picks.roles`).
 
 Whatever reads a release's picks after it was made reads what it kept, not the picks of today: the run's units, judged again when a run is taken up with `--resume`; a mask's grid by its output's role (`nils derivative parts`, and a layer's build); and a check's panels, the visit's main scans beside the scan a result was made on. `GET /api/releases` and `nils release --history` say what each release read and kept (`picks`, with `frozen`: its visits, picks and stacks).
 

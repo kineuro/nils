@@ -9,8 +9,9 @@
 //!
 //! The runner: `nils run <pipeline> --select selection:<name>@<v>` is one run
 //! over a frozen selection (or, record 55, over a dataset's or a cohort's
-//! main scans of a role, `--select main:<role>@dataset:<name>`, frozen the
-//! same way: `crate::main_input`), a job of kind `pipeline`, queued at `POST
+//! main scans of a role, `--select main:<role>@dataset:<name>`, or of each
+//! role the pipeline needs, `main@dataset:<name>`, frozen the same way:
+//! `crate::main_input`), a job of kind `pipeline`, queued at `POST
 //! /api/jobs` under `pipelines:work` at detail quasi, since a pipeline reads
 //! pixels. Runs whose stacks do not meet go on side by side within the
 //! lane's one budget; a run that would take a stack a running run holds is
@@ -357,7 +358,7 @@ pub(crate) fn run_doc(store: &mut Store, r: &Run) -> Value {
     doc["main"] = r
         .handle_id
         .and_then(|h| crate::main_input::entry_of(store, h))
-        .unwrap_or(Value::Null);
+        .map_or(Value::Null, |e| crate::main_input::shown(&e));
     doc["units_run"] = json!(
         units
             .iter()
@@ -1220,10 +1221,12 @@ pub(crate) struct RunArgs {
     pub(crate) resume: Option<i64>,
     /// The selection to run over, frozen now into its stacks and pinned; or
     /// a dataset's or a cohort's main scans of a role, resolved now and
-    /// frozen the same way: main:ROLE@dataset:NAME or main:ROLE@cohort:NAME
+    /// frozen the same way: main:ROLE@dataset:NAME or main:ROLE@cohort:NAME;
+    /// or, without a role, the main scans of each role the pipeline needs,
+    /// a visit taken where it has every one: main@dataset:NAME
     #[arg(
         long,
-        value_name = "selection:NAME@V|main:ROLE@dataset:NAME",
+        value_name = "selection:NAME@V|main:ROLE@dataset:NAME|main@dataset:NAME",
         conflicts_with = "handle"
     )]
     pub(crate) select: Option<String>,
@@ -2712,7 +2715,9 @@ fn released_of(
 /// judges it, so the two agree. A run over a frozen list of a dataset's or
 /// a cohort's main scans (`main`, what its handle records) takes each of
 /// its stacks as a main scan of the list's role, as it was resolved
-/// (record 55, rulings of 2026-10-12, item 6).
+/// (record 55, rulings of 2026-10-12, item 6); of a list of several roles
+/// (2026-10-12), of the role each stack was taken for, as the list records
+/// it.
 fn units_missing(
     store: &mut Store,
     release_id: Option<i64>,
@@ -2747,12 +2752,9 @@ fn units_missing(
         .flat_map(|u| u.stacks.iter().copied())
         .collect();
     let picks: BTreeMap<i64, std::collections::BTreeSet<String>> = match main {
-        Some(m) => {
-            let role = m["main"].as_str().unwrap_or_default().to_string();
-            all.iter()
-                .map(|s| (*s, std::collections::BTreeSet::from([role.clone()])))
-                .collect()
-        }
+        // each stack as the main scan of the role it was taken for: the
+        // list's one role, or of several (2026-10-12) its own
+        Some(m) => crate::main_input::stack_roles(m, &all),
         // the picks its input release froze when it was made (record 55,
         // rulings of 2026-10-12, item 6, carried to releases); of a
         // release from before, the live picks of what it recorded, and
@@ -3542,7 +3544,7 @@ pub(crate) fn run_command(home: &Home, args: RunArgs) -> Result<(), Exit> {
     let parts: Vec<(i64, Option<String>)> = match (&args.select, args.handle) {
         (Some(spec), _) => {
             drop(registry);
-            let parts = freeze_parts(home, &args, spec)?;
+            let parts = freeze_parts(home, &args, spec, &d.roles)?;
             registry = crate::open(home)?;
             parts.into_iter().map(|h| (h, Some(spec.clone()))).collect()
         }
@@ -3554,7 +3556,7 @@ pub(crate) fn run_command(home: &Home, args: RunArgs) -> Result<(), Exit> {
         (None, Some(h)) => vec![(h, None)],
         (None, None) => {
             return Err(usage(
-                "a run is over a frozen selection: --select selection:<name>@<v>, a dataset's or a cohort's main scans (--select main:<role>@dataset:<name>), or --handle <id>",
+                "a run is over a frozen selection: --select selection:<name>@<v>, a dataset's or a cohort's main scans (--select main:<role>@dataset:<name>, or main@dataset:<name> for each role the pipeline needs), or --handle <id>",
             ));
         }
     };
@@ -3707,10 +3709,16 @@ pub(crate) fn run_command(home: &Home, args: RunArgs) -> Result<(), Exit> {
 /// holds however many, or with `--chunk` one handle per part of at most
 /// that many stacks, in stack order. Each part is frozen from the saved
 /// selection as a page after the last stack of the one before.
-fn freeze_parts(home: &Home, args: &RunArgs, spec: &str) -> Result<Vec<i64>, Exit> {
+fn freeze_parts(
+    home: &Home,
+    args: &RunArgs,
+    spec: &str,
+    needs: &[String],
+) -> Result<Vec<i64>, Exit> {
     use crate::ask_cli::{Freeze, freeze};
     // record 55 (rulings of 2026-10-12, item 6): a dataset's or a cohort's
-    // main scans, resolved once and split as they are frozen
+    // main scans, resolved once and split as they are frozen; without a
+    // role, those of each role the pipeline needs (`needs`)
     if let Some(main) = crate::main_input::Spec::parse(spec) {
         let main = main.map_err(usage)?;
         return crate::main_input::freeze_parts(
@@ -3719,6 +3727,7 @@ fn freeze_parts(home: &Home, args: &RunArgs, spec: &str) -> Result<Vec<i64>, Exi
             args.pack_dir.clone(),
             &args.pack,
             args.chunk,
+            needs,
         );
     }
     let grain = nils_ask::ast::Grain::Stack;

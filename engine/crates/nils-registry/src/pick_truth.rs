@@ -614,7 +614,8 @@ impl Picks {
 /// A run's frozen list of a scope's main scans, which a release takes as it
 /// was frozen (record 55, rulings of 2026-10-12, item 6): the role its
 /// stacks are the main scans of, and each stack with its subject and its
-/// visit's first day under the default scheme, as a pick names a visit.
+/// visit's first day under the default scheme, as a pick names a visit. A
+/// list over several roles (2026-10-12) is one of these a role.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Listed {
     pub role: String,
@@ -663,7 +664,8 @@ type FrozenRow = (
 /// `of` with each stack it names, of every role, as [`Picks::Live`] reads
 /// them; and of a run's list, each of its stacks the release took that no
 /// frozen pick of the list's role names, as the main scan of the role on
-/// its visit under the version the list was read under. Written into
+/// its visit under the version the list was read under (a list over
+/// several roles is one [`Listed`] a role, each read so). Written into
 /// `release_pick` under `release`, and never changed after. Answers what it
 /// froze, counted.
 pub fn freeze(
@@ -671,7 +673,7 @@ pub fn freeze(
     release: i64,
     of: &Of,
     taken: &[(i64, i64)],
-    listed: Option<&Listed>,
+    listed: &[Listed],
 ) -> Result<Frozen, StoreError> {
     let took: BTreeSet<i64> = taken.iter().map(|(s, _)| *s).collect();
     let subjects: Vec<i64> = taken
@@ -721,7 +723,7 @@ pub fn freeze(
     // was resolved, where the picks of the version it was read under are
     // gone by now
     let mut from_list = None;
-    if let Some(l) = listed {
+    if !listed.is_empty() {
         let (kind, id, version) = match of {
             Of::Scope {
                 kind,
@@ -731,26 +733,28 @@ pub fn freeze(
             } => (Some(kind.name().to_string()), Some(*id), Some(*v)),
             _ => (None, None, Some(1)),
         };
-        let named: BTreeSet<(i64, String, i64)> = rows
-            .iter()
-            .filter(|r| r.2 == l.role)
-            .map(|r| (r.0, r.1.clone(), r.3))
-            .collect();
         let mut n = 0usize;
-        for (stack, subject, day) in &l.stacks {
-            if !took.contains(stack) || named.contains(&(*subject, day.clone(), *stack)) {
-                continue;
+        for l in listed {
+            let named: BTreeSet<(i64, String, i64)> = rows
+                .iter()
+                .filter(|r| r.2 == l.role)
+                .map(|r| (r.0, r.1.clone(), r.3))
+                .collect();
+            for (stack, subject, day) in &l.stacks {
+                if !took.contains(stack) || named.contains(&(*subject, day.clone(), *stack)) {
+                    continue;
+                }
+                rows.insert((
+                    *subject,
+                    day.clone(),
+                    l.role.clone(),
+                    *stack,
+                    kind.clone(),
+                    id,
+                    version,
+                ));
+                n += 1;
             }
-            rows.insert((
-                *subject,
-                day.clone(),
-                l.role.clone(),
-                *stack,
-                kind.clone(),
-                id,
-                version,
-            ));
-            n += 1;
         }
         from_list = Some(n);
     }

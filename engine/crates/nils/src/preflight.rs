@@ -372,12 +372,15 @@ type LeftOut = Vec<(i64, String)>;
 /// its visit, as it was resolved; what a run over it takes whatever the
 /// picks say now (a scope's newer rules replace the picks of the version
 /// before). Each with its subject and its visit's day under the default
-/// scheme, as a pick names them.
+/// scheme, as a pick names them. Of a list of several roles (2026-10-12),
+/// each stack the main scan of the role it was taken for, as the list's
+/// `entry` records it.
 pub(crate) fn frozen_picks(
     registry: &mut Registry,
     stacks: &[i64],
-    role: &str,
+    entry: &Value,
 ) -> Result<BTreeMap<i64, Picked>, String> {
+    let roles_of = crate::main_input::stack_roles(entry, stacks);
     let err = |e: nils_registry::Error| e.to_string();
     let scheme = nils_registry::session::Scheme::default();
     let anchors = nils_session::Anchors::resolve(registry, &scheme, BTreeMap::new())
@@ -397,10 +400,11 @@ pub(crate) fn frozen_picks(
         );
         for r in store.query(&sql, &[]).map_err(err)? {
             let label = labels.get(&r.int(2).map_err(err)?);
+            let stack = r.int(0).map_err(err)?;
             out.insert(
-                r.int(0).map_err(err)?,
+                stack,
                 Picked {
-                    roles: BTreeSet::from([role.to_string()]),
+                    roles: roles_of.get(&stack).cloned().unwrap_or_default(),
                     subject: label.map_or(r.int(1).map_err(err)?, |l| l.subject_id),
                     day: label.map(|l| l.first.to_string()).unwrap_or_default(),
                 },
@@ -530,6 +534,69 @@ pub(crate) fn roles_missing(
 /// says where each picked stack goes, so a session the release merges, a
 /// stack it routes to `sourcedata/` or holds, and a pick it names by
 /// another suffix are counted as the run will meet them.
+/// Why a picked stack the release would leave out: the registry holds no
+/// file of it to read.
+const NO_FILE: &str = "the registry holds no file of it to read, so the release leaves it out";
+
+/// Of picked stacks the release's plan leaves out, those of which the
+/// registry holds a file to read, and those the pack's disposition
+/// excludes: what tells why each is left out.
+fn unplanned_why(
+    store: &mut Store,
+    stacks: &[i64],
+) -> Result<(BTreeSet<i64>, BTreeSet<i64>), String> {
+    let err = |e: nils_registry::Error| e.to_string();
+    let (mut filed, mut excluded) = (BTreeSet::new(), BTreeSet::new());
+    for chunk in stacks.chunks(500) {
+        let sql = format!(
+            "SELECT DISTINCT i.stack_id FROM {} i JOIN {} sf ON sf.instance_id = i.id \
+             WHERE i.stack_id IN ({})",
+            store.qualified("instance"),
+            store.qualified("source_file"),
+            list(chunk)
+        );
+        for r in store.query(&sql, &[]).map_err(err)? {
+            filed.insert(r.int(0).map_err(err)?);
+        }
+        let sql = format!(
+            "SELECT DISTINCT a.stack_id FROM {} a WHERE a.axis = 'disposition' \
+             AND a.value = 'excluded' AND a.stack_id IN ({})",
+            store.qualified("classification_axis"),
+            list(chunk)
+        );
+        for r in store.query(&sql, &[]).map_err(err)? {
+            excluded.insert(r.int(0).map_err(err)?);
+        }
+    }
+    Ok((filed, excluded))
+}
+
+/// Why a bids input would hold no unit, from why each of its stacks is
+/// left out: none picked, as it was; else the reasons, each with its
+/// stacks counted, the most first ("4 of the selection's 4 stacks: the
+/// registry holds no file of it to read").
+fn no_units_why(stacks: usize, left: &LeftOut) -> String {
+    let unpicked = left
+        .iter()
+        .all(|(_, why)| why.starts_with("no live pick takes it"));
+    if left.is_empty() || unpicked {
+        return "no stack of the selection is picked, so the release of the input would hold no subject's images; nils pick run picks them".into();
+    }
+    let mut by: BTreeMap<&str, usize> = BTreeMap::new();
+    for (_, why) in left {
+        *by.entry(why.as_str()).or_default() += 1;
+    }
+    let mut by: Vec<(&str, usize)> = by.into_iter().collect();
+    by.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+    format!(
+        "the release of the input would hold no subject's images: {}",
+        by.iter()
+            .map(|(why, n)| format!("{n} of the selection's {stacks} stacks: {why}"))
+            .collect::<Vec<_>>()
+            .join("; ")
+    )
+}
+
 fn bids_units(
     registry: &mut Registry,
     d: &Descriptor,
@@ -546,7 +613,7 @@ fn bids_units(
     let (of, picks) = match main {
         Some(m) => (
             nils_registry::pick_truth::Of::of_record(&m["picks"]),
-            frozen_picks(registry, stacks, m["main"].as_str().unwrap_or_default())?,
+            frozen_picks(registry, stacks, m)?,
         ),
         None => {
             let of =
@@ -579,10 +646,22 @@ fn bids_units(
             )
             .map_err(|e| format!("the plan of the input's release: {e}"))?;
             let planned: BTreeSet<i64> = plan.iter().map(|p| p.stack).collect();
-            for s in picked.iter().filter(|s| !planned.contains(s)) {
+            let unplanned: Vec<i64> = picked
+                .iter()
+                .copied()
+                .filter(|s| !planned.contains(s))
+                .collect();
+            let (with_a_file, excluded) = unplanned_why(registry.store(), &unplanned)?;
+            for s in unplanned {
                 left.push((
-                    *s,
-                    "the release leaves it out: the registry holds no file of it to write, or its disposition is excluded".into(),
+                    s,
+                    if !with_a_file.contains(&s) {
+                        NO_FILE.into()
+                    } else if excluded.contains(&s) {
+                        "its disposition is excluded, so the release leaves it out".into()
+                    } else {
+                        "the release leaves it out: the registry holds no file of it to write, or its disposition is excluded".into()
+                    },
                 ));
             }
             for p in &plan {
@@ -595,7 +674,17 @@ fn bids_units(
                     ));
                     continue;
                 };
-                let Picked { roles, day, .. } = &picks[&p.stack];
+                // the plan is of the picked stacks alone; one it holds
+                // besides is no part of the input, and is said so, never a
+                // panic (2026-10-12)
+                let Some(Picked { roles, day, .. }) = picks.get(&p.stack) else {
+                    left.push((
+                        p.stack,
+                        "it is not among the stacks the run takes, so the input leaves it out"
+                            .into(),
+                    ));
+                    continue;
+                };
                 let u = units.entry(id.clone()).or_insert(Unit {
                     id: Some(id.clone()),
                     subject_id: Some(p.subject_id),
@@ -933,11 +1022,15 @@ pub(crate) fn check(registry: &mut Registry, asked: &Asked<'_>) -> Result<Value,
         crate::pipelines::handle_stacks(registry.store(), asked.handle).map_err(|e| e.message)?;
     let place_ids = places_of(registry.store(), taken.as_ref());
     // record 55: a dataset's or a cohort's main scans say what was read,
-    // and their bids input is released under those picks
+    // and their bids input is released under those picks; the handle's own
+    // entry judges its units, each stack by the role it was taken for
+    // (2026-10-12), and the answer says what was resolved, each role's own
+    // stacks left out
+    let stored = crate::main_input::entry_of(registry.store(), asked.handle);
     let main = asked
         .main
         .clone()
-        .or_else(|| crate::main_input::entry_of(registry.store(), asked.handle));
+        .or_else(|| stored.as_ref().map(crate::main_input::shown));
     let Planned {
         units,
         left,
@@ -949,7 +1042,7 @@ pub(crate) fn check(registry: &mut Registry, asked: &Asked<'_>) -> Result<Value,
         &stacks,
         asked.pack,
         &place_ids,
-        main.as_ref(),
+        stored.as_ref(),
         taken.as_ref(),
     )?;
     // a run taken up again with every unit over has none left to run, and
@@ -957,7 +1050,7 @@ pub(crate) fn check(registry: &mut Registry, asked: &Asked<'_>) -> Result<Value,
     if units.is_empty() && kept == 0 {
         blockers.push(match (&main, d.layout) {
             (Some(m), _) if stacks.is_empty() => crate::main_input::nothing(m),
-            (_, Layout::Bids) => "no stack of the selection is picked, so the release of the input would hold no subject's images; nils pick run picks them".into(),
+            (_, Layout::Bids) => no_units_why(stacks.len(), &left),
             (_, Layout::Stacks) => "the selection holds no stacks".into(),
         });
     }
@@ -1216,9 +1309,9 @@ pub(crate) fn units_refusal(
     let stacks =
         crate::pipelines::handle_stacks(registry.store(), handle).map_err(|e| e.message)?;
     let place_ids = places_of(registry.store(), taken.as_ref());
-    let main = main
-        .cloned()
-        .or_else(|| crate::main_input::entry_of(registry.store(), handle));
+    // the handle's own entry judges the units, each stack by the role it
+    // was taken for (2026-10-12)
+    let main = crate::main_input::entry_of(registry.store(), handle).or_else(|| main.cloned());
     let planned = plan_units(
         registry,
         d,
@@ -1288,6 +1381,7 @@ pub(crate) fn door_units(
             flag("--handle").and_then(|h| h.parse::<i64>().ok()),
             dir.clone(),
             &pack_name,
+            &d.roles,
         )
         .ok()
         .flatten()?,
@@ -1335,6 +1429,18 @@ pub(crate) fn plain(v: &mut Value) {
     }
 }
 
+/// The pick roles a pipeline's units need (`x-nils.input.roles`), which a
+/// scope's main scans written without a role take (2026-10-12); none where
+/// the catalog holds no such pipeline, which the pre-flight says itself.
+fn needs_of(store: &mut Store, pipeline: &str) -> Vec<String> {
+    rows::resolve(store, pipeline)
+        .ok()
+        .flatten()
+        .and_then(|p| descriptor::from_value(p.descriptor).ok())
+        .map(|d| d.roles)
+        .unwrap_or_default()
+}
+
 /// What a pre-flight is over: a dataset's or a cohort's main scans,
 /// resolved and frozen now with the visits with none named (record 55); a
 /// saved selection, frozen as a run freezes it; or a handle.
@@ -1344,6 +1450,7 @@ fn frozen_over(
     handle: Option<i64>,
     pack_dir: Option<PathBuf>,
     pack: &str,
+    needs: &[String],
 ) -> Result<Option<(i64, Option<Value>)>, crate::Exit> {
     let grain = nils_ask::ast::Grain::Stack;
     let whole = crate::ask_cli::Freeze::Whole;
@@ -1351,7 +1458,8 @@ fn frozen_over(
         (Some(spec), _) => match crate::main_input::Spec::parse(spec) {
             Some(main) => {
                 let main = main.map_err(usage)?;
-                let (f, r) = crate::main_input::freeze(home, &main, grain, pack_dir, pack, whole)?;
+                let (f, r) =
+                    crate::main_input::freeze(home, &main, grain, pack_dir, pack, whole, needs)?;
                 Some((f.handle, Some(r.preflight())))
             }
             None => Some((
@@ -1432,18 +1540,21 @@ pub(crate) fn route(
                 })?;
                 (handle, None)
             }
+            // a scope's main scans without a role take each role the
+            // pipeline needs (2026-10-12)
             None => frozen_over(
                 home,
                 selection.as_deref(),
                 doc["handle"].as_i64(),
                 pack_dir.map(PathBuf::from),
                 doc["pack"].as_str().unwrap_or("mri"),
+                &needs_of(registry.store(), name),
             )
             .map_err(|e| Reply::error(400, e.message))?
             .ok_or_else(|| {
                 Reply::error(
                     400,
-                    "a pre-flight is over a selection: {select: \"selection:<name>@<v>\"}, a dataset's or a cohort's main scans {select: \"main:<role>@dataset:<name>\"}, {handle: <id>}, or a run taken up again {resume: <run>}",
+                    "a pre-flight is over a selection: {select: \"selection:<name>@<v>\"}, a dataset's or a cohort's main scans {select: \"main:<role>@dataset:<name>\"} (or {select: \"main@dataset:<name>\"} for each role the pipeline needs), {handle: <id>}, or a run taken up again {resume: <run>}",
                 )
             })?,
         };
@@ -1500,16 +1611,21 @@ pub(crate) fn command(home: &Home, args: &crate::pipelines::RunArgs) -> Result<(
                 .pipeline
                 .as_deref()
                 .ok_or_else(|| usage("run <pipeline> --preflight: the pipeline to check"))?;
+            let needs = {
+                let mut registry = crate::open(home)?;
+                needs_of(registry.store(), pipeline)
+            };
             let (handle, main) = frozen_over(
                 home,
                 args.select.as_deref(),
                 args.handle,
                 args.pack_dir.clone(),
                 &args.pack,
+                &needs,
             )?
             .ok_or_else(|| {
                 usage(
-                    "a pre-flight is over a frozen selection: --select selection:<name>@<v>, a dataset's or a cohort's main scans (--select main:<role>@dataset:<name>), --handle <id>, or a run taken up again (--resume <run>)",
+                    "a pre-flight is over a frozen selection: --select selection:<name>@<v>, a dataset's or a cohort's main scans (--select main:<role>@dataset:<name>, or main@dataset:<name> for each role the pipeline needs), --handle <id>, or a run taken up again (--resume <run>)",
                 )
             })?;
             (pipeline, handle, main)
