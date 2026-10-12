@@ -14,7 +14,10 @@
 //! line withholds the same, unless `--unsealed-access REASON` is given; each
 //! command that then reads a sealed stack writes one `sealed.read` audit row
 //! with the reason. A verb a door queued runs under the grants of the caller
-//! that queued it, never the worker's.
+//! that queued it, never the worker's. A door that serves a derivative made
+//! from a sealed stack withholds it the same: the content door the rows of
+//! a sealed stack or the whole file, writing a `sealed.read` row when the
+//! grant reads them, and the parts and layer doors a result made from one.
 
 use std::collections::BTreeSet;
 use std::sync::OnceLock;
@@ -47,6 +50,27 @@ pub(crate) fn now(store: &mut Store, stacks: &[i64]) -> Result<BTreeSet<i64>, St
     nils_registry::labels::sealed_now(store, stacks, &[])
         .map(|(s, _)| s)
         .map_err(|e| StoreError::Message(e.to_string()))
+}
+
+/// The stacks of these, and the subjects of these with a stack, of a
+/// sample sealed now, for anyone.
+pub(crate) fn now_of(
+    store: &mut Store,
+    stacks: &[i64],
+    subjects: &[i64],
+) -> Result<(BTreeSet<i64>, BTreeSet<i64>), StoreError> {
+    nils_registry::labels::sealed_now(store, stacks, subjects)
+        .map_err(|e| StoreError::Message(e.to_string()))
+}
+
+/// Whether any sample is sealed now: while none is, nothing is withheld,
+/// and a reader that would have to read a file to say what is need not.
+pub(crate) fn any(store: &mut Store) -> Result<bool, StoreError> {
+    let sql = format!(
+        "SELECT stack_id FROM {} WHERE unsealed_at IS NULL LIMIT 1",
+        store.qualified("sealed_stack")
+    );
+    Ok(store.query_opt(&sql, &[])?.is_some())
 }
 
 /// The reason given with `--unsealed-access` at the keyboard, once a

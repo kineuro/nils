@@ -2289,6 +2289,68 @@ pub(crate) fn release_reading(
     ))
 }
 
+/// Record 48, D1 of the move: each unit of a run by the name the run gave
+/// it, with the stacks it was given, read from the registry and never from
+/// a file the run's container could reach: a stack's unit is its own stack,
+/// a subject's or a session's the stacks the run's release placed in its
+/// folder (`sub-<s>/` or `sub-<s>/ses-<t>/`), none where the release no
+/// longer says. Empty for a run from before its units were kept (record 49).
+pub(crate) fn unit_stacks(
+    store: &mut Store,
+    run_id: i64,
+) -> Result<Vec<(String, Vec<i64>)>, String> {
+    let err = |e: nils_registry::Error| e.to_string();
+    let Some(run) = rows::run(store, run_id).map_err(err)? else {
+        return Ok(Vec::new());
+    };
+    let names: Vec<String> = rows::units(store, run_id)
+        .map_err(err)?
+        .into_iter()
+        .map(|u| u.unit)
+        .collect();
+    let placed = match run.input_release_id {
+        Some(release) if names.iter().any(|n| n.starts_with("sub-")) => {
+            released_stacks(store, release).unwrap_or_default()
+        }
+        _ => Vec::new(),
+    };
+    Ok(names
+        .into_iter()
+        .map(|name| {
+            if let Some(stack) = name
+                .strip_prefix("stack-")
+                .and_then(|s| s.parse::<i64>().ok())
+            {
+                return (name, vec![stack]);
+            }
+            let folder = match name.split_once("_ses-") {
+                Some((subject, session)) => format!("{subject}/ses-{session}/"),
+                None => format!("{name}/"),
+            };
+            let stacks = placed
+                .iter()
+                .filter(|(_, dir, _)| format!("{dir}/").starts_with(&folder))
+                .map(|(s, ..)| *s)
+                .collect();
+            (name, stacks)
+        })
+        .collect())
+}
+
+/// Record 48, D1 of the move: the stacks of the list a run was frozen
+/// over, as long as its handle keeps them; none once it is withdrawn.
+pub(crate) fn frozen_stacks(store: &mut Store, run_id: i64) -> Result<Vec<i64>, String> {
+    let run = rows::run(store, run_id).map_err(|e| e.to_string())?;
+    let Some(handle) = run.and_then(|r| r.handle_id) else {
+        return Ok(Vec::new());
+    };
+    Ok(nils_ask::handle::keys(store, handle)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .map(|(k, _)| k)
+        .collect())
+}
+
 /// Record 55 H3 (section 2.2): where a mask a bids unit made is looked for
 /// its grid scan, from the stacks the run's release placed under the
 /// unit's folder (`sub-<s>/ses-<t>/`, or `sub-<s>/`), each with the NIfTI

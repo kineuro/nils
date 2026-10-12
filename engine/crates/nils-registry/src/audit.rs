@@ -145,7 +145,8 @@ pub enum Action {
     LabelsUnseal,
     /// Record 48, D1 of the move: what a system said of a stack of a sample
     /// sealed now was read at the keyboard with `--unsealed-access`, and the
-    /// reason given. It changes nothing.
+    /// reason given; or at the derivative content door under sealed:see,
+    /// naming the derivative. It changes nothing.
     SealedRead,
     /// Record 43: a descriptor added to the pipeline catalog, a pipeline
     /// run over a frozen selection (its derivatives and review items with

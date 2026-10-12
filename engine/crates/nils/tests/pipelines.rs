@@ -20,7 +20,7 @@
 //! or with `NILS_TEST_PIPELINE_RUNTIME=docker` on a machine an operator lets
 //! run docker, and says so and passes elsewhere.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
@@ -1385,6 +1385,9 @@ const PLAIN: &str = "a-plain-pipelines-token-long";
 const READER: &str = "a-reader-token-of-its-length";
 /// Record 49 R4's review: a reader of runs and of review items at plain.
 const PLAIN_REVIEW: &str = "a-plain-review-token-of-lens";
+/// Record 48, D1 of the move: the certificate's computation, an operator
+/// with the one grant no ladder set holds.
+const CERT: &str = "a-certificate-token-of-length";
 
 impl Server {
     fn start(lab: &Lab) -> Server {
@@ -1403,6 +1406,7 @@ impl Server {
             format!("{PLAIN}=pat@lab:pipelines:work,pipelines:see"),
             format!("{READER}=lou@lab:reader"),
             format!("{PLAIN_REVIEW}=rae@lab:pipelines:see,review:see"),
+            format!("{CERT}=cert@lab:operator,sealed:see"),
         ]
         .join(",");
         let child = lab
@@ -1440,6 +1444,19 @@ impl Server {
     }
 
     fn raw(&self, method: &str, path: &str, body: Option<Value>, token: &str) -> (u16, Vec<u8>) {
+        let (status, _, bytes) = self.fetch(method, path, body, token);
+        (status, bytes)
+    }
+
+    /// One request: its status, its headers by their lower-case names, and
+    /// the body's bytes.
+    fn fetch(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<Value>,
+        token: &str,
+    ) -> (u16, BTreeMap<String, String>, Vec<u8>) {
         let mut stream = TcpStream::connect(("127.0.0.1", self.port)).unwrap();
         let body = body.map(|b| b.to_string()).unwrap_or_default();
         let head = format!(
@@ -1453,7 +1470,15 @@ impl Server {
         let split = response.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
         let head = String::from_utf8_lossy(&response[..split]).to_string();
         let status: u16 = head.split_whitespace().nth(1).unwrap().parse().unwrap();
-        (status, response[split + 4..].to_vec())
+        let headers = head
+            .lines()
+            .skip(1)
+            .filter_map(|l| {
+                l.split_once(':')
+                    .map(|(k, v)| (k.trim().to_lowercase(), v.trim().to_string()))
+            })
+            .collect();
+        (status, headers, response[split + 4..].to_vec())
     }
 
     fn call(&self, method: &str, path: &str, body: Option<Value>, token: &str) -> (u16, Value) {
@@ -7681,4 +7706,681 @@ fn a_run_held_in_its_intake_past_the_freshness_is_not_taken_over() {
             2
         );
     });
+}
+
+/// Record 48, D1 of the move: a pipeline of the stacks layout that writes,
+/// for each stack, a table of its own (one row, which names no stack) and,
+/// for the run, one table of every stack's score, a row a stack's unit.
+const SCORES: &str = r#"name: scores
+schema-version: "0.5"
+tool-version: "1"
+container-image:
+  type: docker
+  image: "example.org/scores@sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+command-line: |
+  python3 -c '
+  import json, os, sys
+  m = json.load(open(sys.argv[1])); out = sys.argv[2]
+  units, rows = [], ["unit,score"]
+  for s in m["stacks"]:
+      u = s["unit"]; d = os.path.join(out, u); os.makedirs(d, exist_ok=True)
+      json.dump({"score": 1000 + s["stack_id"]}, open(os.path.join(d, "score.json"), "w"))
+      rows.append("%s,%d" % (u, 1000 + s["stack_id"]))
+      units.append({"unit_id": u, "status": "succeeded", "derivatives": [u + "/score.json"]})
+  open(os.path.join(out, "scores.csv"), "w").write("\n".join(rows) + "\n")
+  json.dump({"schema_version": "1", "units": units}, open(os.path.join(out, "results.json"), "w"))
+  ' [Manifest] [OutputLocation]
+x-nils:
+  analysis-level: stack
+  input: {layout: stacks}
+  outputs:
+    - id: score
+      kind: table
+      format: json
+      path-template: "stack-{stack}/score.json"
+      columns: [{name: score}]
+    - id: scores
+      kind: table
+      level: run
+      path-template: "scores.csv"
+      unit-column: unit
+      columns: [{name: run_score, from: score}]
+"#;
+
+/// Record 48: seal these stacks as the certification sample `name@1`.
+fn seal(lab: &Lab, name: &str, ids: &[i64]) {
+    select_stacks(lab, name, ids);
+    let packs = packs();
+    let done = lab.json(&[
+        "labels",
+        "seal",
+        "--select",
+        &format!("selection:{name}@1"),
+        "--pack-dir",
+        packs.to_str().unwrap(),
+        "--json",
+    ]);
+    assert_eq!(done["stacks"].as_i64(), Some(ids.len() as i64), "{done}");
+}
+
+/// The `sealed.read` rows of the audit: each one's principal and the
+/// derivative it names.
+fn sealed_reads(lab: &Lab) -> Vec<(String, Option<i64>)> {
+    lab.store()
+        .query(
+            "SELECT principal, scope FROM audit WHERE action = 'sealed.read' ORDER BY id",
+            &[],
+        )
+        .unwrap()
+        .iter()
+        .map(|r| {
+            let scope: Value = serde_json::from_str(r.text(1).unwrap()).unwrap();
+            (r.text(0).unwrap().to_string(), scope["derivative"].as_i64())
+        })
+        .collect()
+}
+
+/// Record 48, D1 of the move: sealed means sealed at the derivative
+/// content door. A run's table that names a stack a row loses the sealed
+/// stack's row and says how many rows went, never which; the sealed
+/// stack's own table and a mask of it are withheld whole, by what they
+/// were made from, as the mask's parts and layer are; a table registered
+/// by hand of the sealed stack's subject loses that stack's row alone; the
+/// open stacks' come as they were registered; and the certificate's grant
+/// reads every one of them, each read audited as sealed.read. A shared
+/// path reads the whole file, so it is refused where rows are withheld.
+#[test]
+fn the_content_door_withholds_a_sealed_stack_s_rows_and_its_own_results() {
+    if !have("python3") {
+        eprintln!(
+            "python3 is not installed; the stand-in podman needs it, so this test is skipped"
+        );
+        return;
+    }
+    on_both(
+        "pipelines-sealed-content",
+        "nils_pipelines_sealed_content",
+        |lab| {
+            lab.add_descriptor("scores", SCORES);
+            let v = lab.json(&["run", "scores", "--select", "selection:every@1", "--json"]);
+            assert_eq!(v["status"], "done", "{v}");
+            let run = v["id"].as_i64().unwrap();
+            let made = lab.json(&["derivative", "list", "--run", &run.to_string(), "--json"]);
+            let made = made.as_array().unwrap();
+            let table = made
+                .iter()
+                .find(|d| d["scope"] == "run")
+                .unwrap_or_else(|| panic!("no run table: {made:?}"))
+                .clone();
+            let own: BTreeMap<i64, Value> = made
+                .iter()
+                .filter(|d| d["scope"] == "stack")
+                .map(|d| (d["stack_id"].as_i64().unwrap(), d.clone()))
+                .collect();
+            assert_eq!(own.len(), 4, "{made:?}");
+            let stacks: Vec<i64> = own.keys().copied().collect();
+            let (open, sealed) = (stacks[0], stacks[1]);
+            // registered by hand: a mask of each, and a table of the sealed
+            // stack's subject whose rows name its stacks
+            let subject = lab.count(&format!(
+                "SELECT se.subject_id FROM stack st JOIN series se ON se.id = st.series_id WHERE st.id = {sealed}"
+            ));
+            let mates: Vec<i64> = lab
+                .store()
+                .query(
+                    &format!(
+                        "SELECT st.id FROM stack st JOIN series se ON se.id = st.series_id WHERE se.subject_id = {subject} ORDER BY st.id"
+                    ),
+                    &[],
+                )
+                .unwrap()
+                .iter()
+                .map(|r| r.int(0).unwrap())
+                .collect();
+            assert!(mates.len() >= 2 && mates.contains(&sealed), "{mates:?}");
+            let tsv = lab.work.path().join("by-hand.tsv");
+            let lines: Vec<String> = std::iter::once("stack_id\tvolume".to_string())
+                .chain(mates.iter().map(|s| format!("{s}\t{}", 5000 + s)))
+                .collect();
+            std::fs::write(&tsv, lines.join("\n") + "\n").unwrap();
+            let by_hand = lab.json(&[
+                "derivative",
+                "add",
+                tsv.to_str().unwrap(),
+                "--kind",
+                "table",
+                "--subject",
+                &subject.to_string(),
+                "--media-type",
+                "text/tab-separated-values",
+                "--json",
+            ]);
+            let mask_of = |stack: i64| {
+                let f = lab.work.path().join(format!("mask-{stack}.nii.gz"));
+                std::fs::write(&f, format!("a result of stack {stack}, no NIfTI")).unwrap();
+                lab.json(&[
+                    "derivative",
+                    "add",
+                    f.to_str().unwrap(),
+                    "--kind",
+                    "mask",
+                    "--stack",
+                    &stack.to_string(),
+                    "--json",
+                ])
+            };
+            let (mask, open_mask) = (mask_of(sealed), mask_of(open));
+            // the sample is sealed after the run, as a certification sample is
+            seal(lab, "sealed", &[sealed]);
+
+            let server = Server::start(lab);
+            let content = |d: &Value| format!("/api/derivatives/{}/content", d["id"]);
+            let file_of = |d: &Value| {
+                std::fs::read(lab.work.path().join(d["path"].as_str().unwrap())).unwrap()
+            };
+            let header = |h: &BTreeMap<String, String>, k: &str| h.get(k).cloned();
+
+            // the run's table: every row but the sealed stack's, and how many went
+            let (status, h, bytes) = server.fetch("GET", &content(&table), None, OPERATOR);
+            let text = String::from_utf8(bytes.clone()).unwrap();
+            assert_eq!(status, 200, "{text}");
+            assert_eq!(
+                header(&h, "x-nils-withheld-sealed").as_deref(),
+                Some("1"),
+                "{h:?}"
+            );
+            let lines: Vec<&str> = text.lines().collect();
+            assert_eq!(lines[0], "unit,score", "{text}");
+            assert_eq!(lines.len(), 4, "the header and three rows of four: {text}");
+            assert!(!text.contains(&format!("stack-{sealed},")), "{text}");
+            assert!(!text.contains(&(1000 + sealed).to_string()), "{text}");
+            for s in stacks.iter().filter(|s| **s != sealed) {
+                assert!(
+                    text.contains(&format!("stack-{s},{}\n", 1000 + s)),
+                    "{text}"
+                );
+            }
+            assert_eq!(header(&h, "x-nils-sha256"), Some(sha256(&bytes)), "{h:?}");
+            assert_ne!(table["sha256"].as_str(), Some(sha256(&bytes).as_str()));
+            // the sealed stack's own table and its mask: withheld whole,
+            // saying why and nothing of what they hold
+            for d in [&own[&sealed], &mask] {
+                let (status, doc) = server.call("GET", &content(d), None, OPERATOR);
+                assert_eq!(status, 403, "{doc}");
+                assert_eq!(doc["sealed"], true, "{doc}");
+                let why = doc["error"].as_str().unwrap();
+                assert!(why.contains("sealed for certification"), "{doc}");
+                assert!(why.contains("sealed:see"), "{doc}");
+                assert!(
+                    !doc.to_string().contains(&(1000 + sealed).to_string()),
+                    "{doc}"
+                );
+            }
+            // as are the mask's parts and its layer, to pipelines:see alone
+            for door in [
+                format!("/api/derivatives/{}/parts", mask["id"]),
+                format!(
+                    "/api/derivatives/{}/layers/{sealed}/whole/manifest",
+                    mask["id"]
+                ),
+            ] {
+                let (status, doc) = server.call("GET", &door, None, OPERATOR);
+                assert_eq!(status, 403, "{door}: {doc}");
+                assert_eq!(doc["sealed"], true, "{door}: {doc}");
+            }
+            // the open stack's: as they were registered
+            let (status, h, bytes) = server.fetch("GET", &content(&own[&open]), None, OPERATOR);
+            assert_eq!(status, 200);
+            assert_eq!(bytes, file_of(&own[&open]));
+            assert_eq!(
+                header(&h, "x-nils-sha256").as_deref(),
+                own[&open]["sha256"].as_str()
+            );
+            assert!(header(&h, "x-nils-withheld-sealed").is_none(), "{h:?}");
+            let (status, bytes) = server.raw("GET", &content(&open_mask), None, OPERATOR);
+            assert_eq!(status, 200);
+            assert_eq!(bytes, file_of(&open_mask));
+            let (status, doc) = server.call(
+                "GET",
+                &format!("/api/derivatives/{}/parts", open_mask["id"]),
+                None,
+                OPERATOR,
+            );
+            assert_ne!(status, 403, "{doc}");
+            // the table by hand: the rows of the subject's other stacks
+            let (status, h, bytes) = server.fetch("GET", &content(&by_hand), None, OPERATOR);
+            let text = String::from_utf8(bytes).unwrap();
+            assert_eq!(status, 200, "{text}");
+            assert_eq!(
+                header(&h, "x-nils-withheld-sealed").as_deref(),
+                Some("1"),
+                "{h:?}"
+            );
+            assert_eq!(text.lines().count(), mates.len(), "{text}");
+            assert!(!text.contains(&format!("{sealed}\t")), "{text}");
+            for s in mates.iter().filter(|s| **s != sealed) {
+                assert!(text.contains(&format!("{s}\t{}\n", 5000 + s)), "{text}");
+            }
+
+            // the certificate's grant reads every one as it was registered
+            for d in [&table, &own[&sealed], &mask, &by_hand, &own[&open]] {
+                let (status, h, bytes) = server.fetch("GET", &content(d), None, CERT);
+                assert_eq!(status, 200, "{d}");
+                assert_eq!(bytes, file_of(d), "{d}");
+                assert_eq!(header(&h, "x-nils-sha256").as_deref(), d["sha256"].as_str());
+                assert!(header(&h, "x-nils-withheld-sealed").is_none(), "{h:?}");
+            }
+            let (status, doc) = server.call(
+                "GET",
+                &format!("/api/derivatives/{}/parts", mask["id"]),
+                None,
+                CERT,
+            );
+            assert_ne!(status, 403, "{doc}");
+
+            // the mask's row keeps the file's facts and loses what it holds:
+            // its parts' counts and its check; nor is it listed by a check
+            let (status, row) = server.call(
+                "GET",
+                &format!("/api/derivatives/{}", mask["id"]),
+                None,
+                OPERATOR,
+            );
+            assert_eq!(status, 200, "{row}");
+            assert_eq!(row["sealed"], true, "{row}");
+            assert_eq!(row["sha256"], mask["sha256"], "{row}");
+            let sets = row["part_sets"].as_array().unwrap();
+            assert!(!sets.is_empty(), "{row}");
+            for set in sets {
+                assert!(
+                    set.get("count").is_none() && set.get("note").is_none(),
+                    "{row}"
+                );
+            }
+            let (_, row) = server.call(
+                "GET",
+                &format!("/api/derivatives/{}", mask["id"]),
+                None,
+                CERT,
+            );
+            assert!(row.get("sealed").is_none(), "{row}");
+            assert!(row["part_sets"][0]["count"].is_number(), "{row}");
+            let unchecked = |token: &str| -> BTreeSet<i64> {
+                let (status, doc) = server.call(
+                    "GET",
+                    "/api/derivatives?check=unchecked&limit=500",
+                    None,
+                    token,
+                );
+                assert_eq!(status, 200, "{doc}");
+                doc["derivatives"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter_map(|d| d["id"].as_i64())
+                    .collect()
+            };
+            let (mask_id, open_mask_id) = (
+                mask["id"].as_i64().unwrap(),
+                open_mask["id"].as_i64().unwrap(),
+            );
+            assert!(!unchecked(OPERATOR).contains(&mask_id));
+            assert!(unchecked(OPERATOR).contains(&open_mask_id));
+            assert!(unchecked(CERT).contains(&mask_id));
+            let (_, listed) = server.call(
+                "GET",
+                &format!("/api/derivatives?stack={sealed}&limit=500"),
+                None,
+                OPERATOR,
+            );
+            assert!(
+                listed["derivatives"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|d| d["id"] == mask_id && d["sealed"] == true),
+                "{listed}"
+            );
+            // the keyboard withholds the same, unless --unsealed-access says why
+            let mid = mask_id.to_string();
+            let shown = lab.json(&["derivative", "show", &mid, "--json"]);
+            assert_eq!(shown["sealed"], true, "{shown}");
+            let read = lab.json(&["derivative", "parts", &mid, "--force", "--json"]);
+            assert_eq!(read["results"][0]["withheld_sealed"], true, "{read}");
+            let why = "grading the segmenter on the sealed sample";
+            let shown = lab.json(&[
+                "derivative",
+                "show",
+                &mid,
+                "--json",
+                "--unsealed-access",
+                why,
+            ]);
+            assert!(shown.get("sealed").is_none(), "{shown}");
+            assert!(shown["part_sets"][0]["count"].is_number(), "{shown}");
+            let read = lab.json(&[
+                "derivative",
+                "parts",
+                &mid,
+                "--force",
+                "--json",
+                "--unsealed-access",
+                why,
+            ]);
+            assert!(
+                read["results"][0].get("withheld_sealed").is_none(),
+                "{read}"
+            );
+            let listed = lab.ok(&["derivative", "list", "--check", "unchecked"], None);
+            let rows: Vec<Vec<&str>> = listed
+                .lines()
+                .map(|l| l.split_whitespace().take(2).collect())
+                .collect();
+            assert!(!rows.contains(&vec![mid.as_str(), "mask"]), "{listed}");
+            let open_mid = open_mask_id.to_string();
+            assert!(rows.contains(&vec![open_mid.as_str(), "mask"]), "{listed}");
+
+            // a shared path reads the whole file
+            let places: Value =
+                serde_json::from_str(&lab.ok(&["place", "list", "--json"], None)).unwrap();
+            let place = places
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|p| p["role"] == "working")
+                .unwrap()["id"]
+                .to_string();
+            let work = lab.work.path().canonicalize().unwrap();
+            lab.ok(
+                &["place", "set", &place, "--share", work.to_str().unwrap()],
+                None,
+            );
+            let share = |d: &Value| format!("{}?transport=share", content(d));
+            let (status, doc) = server.call("GET", &share(&table), None, OPERATOR);
+            assert_eq!(status, 403, "{doc}");
+            assert_eq!(doc["withheld_sealed"], 1, "{doc}");
+            assert!(
+                doc["error"].as_str().unwrap().contains("transport=door"),
+                "{doc}"
+            );
+            let (status, doc) = server.call("GET", &share(&own[&sealed]), None, OPERATOR);
+            assert_eq!(status, 403, "{doc}");
+            let (status, doc) = server.call("GET", &share(&own[&open]), None, OPERATOR);
+            assert_eq!(status, 200, "{doc}");
+            let (status, doc) = server.call("GET", &share(&table), None, CERT);
+            assert_eq!(status, 200, "{doc}");
+            assert_eq!(doc["sha256"], table["sha256"], "{doc}");
+            drop(server);
+
+            // each read of what the seal withholds is the grant's, and audited:
+            // the door's name the derivative, the keyboard's its command
+            let reads = sealed_reads(lab);
+            let (door, keyboard): (Vec<_>, Vec<_>) = reads.iter().partition(|(_, d)| d.is_some());
+            assert!(door.iter().all(|(p, _)| p == "cert@lab"), "{reads:?}");
+            let named: BTreeSet<i64> = door.iter().filter_map(|(_, d)| *d).collect();
+            let want: BTreeSet<i64> = [&table, &own[&sealed], &mask, &by_hand]
+                .iter()
+                .map(|d| d["id"].as_i64().unwrap())
+                .collect();
+            assert_eq!(named, want, "{reads:?}");
+            assert_eq!(
+                door.len(),
+                5,
+                "four by the door, one by the share: {reads:?}"
+            );
+            assert_eq!(keyboard.len(), 2, "show and parts: {reads:?}");
+            // every download stays a derivative.read; a table less its rows says how many went
+            let left_out = lab
+                .store()
+                .query(
+                    "SELECT details FROM audit WHERE action = 'derivative.read' AND principal = 'ops@lab'",
+                    &[],
+                )
+                .unwrap()
+                .iter()
+                .filter_map(|r| r.opt_text(0).unwrap().map(str::to_string))
+                .filter_map(|t| serde_json::from_str::<Value>(&t).ok())
+                .filter(|d| d["withheld_sealed"] == 1)
+                .count();
+            assert_eq!(left_out, 2, "the run's table and the table by hand");
+        },
+    );
+}
+
+/// Record 48 with a bids session pipeline: each session's own table and a
+/// table of the run, a row a session, whose unit column names its rows.
+const SESSION_FILES: &str = r#"name: session-files
+schema-version: "0.5"
+tool-version: "1"
+container-image:
+  type: docker
+  image: "example.org/session-files@sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+command-line: |
+  python3 -c '
+  import glob, json, os, sys
+  src, out = sys.argv[1], sys.argv[2]
+  rows = ["session\tfiles"]
+  for s in sorted(glob.glob(src + "/sub-*/ses-*")):
+      rel = os.path.relpath(s, src)
+      n = len(glob.glob(s + "/*/*.nii.gz"))
+      d = os.path.join(out, rel, "anat"); os.makedirs(d, exist_ok=True)
+      json.dump({"files": n}, open(os.path.join(d, "files.json"), "w"))
+      rows.append("%s\t%d" % (rel.replace("/", "_"), n))
+  open(os.path.join(out, "sessions.tsv"), "w").write("\n".join(rows) + "\n")
+  ' [InputDataset] [OutputLocation]
+x-nils:
+  analysis-level: session
+  input: {layout: bids}
+  outputs:
+    - id: files
+      kind: table
+      path-template: "sub-{subject}/ses-{session}/anat/files.json"
+      columns: [{name: files, type: integer}]
+    - id: sessions
+      kind: table
+      level: run
+      path-template: "sessions.tsv"
+      unit-column: session
+      columns: [{name: session_files, from: files, type: integer}]
+"#;
+
+/// Record 48, D1 of the move, by a session's unit: a session's own table
+/// is withheld whole where the stacks the run's release placed in its
+/// folder hold a stack sealed now, and the other session's is served; the
+/// run's table loses that session's row; the ask reads that session's
+/// measures as nothing, unless `--unsealed-access` says why, which the
+/// audit keeps.
+#[test]
+fn a_session_is_withheld_by_the_stacks_its_unit_was_given() {
+    if !have("python3") || !have("dcm2niix") {
+        eprintln!(
+            "python3 or dcm2niix is not installed; the bids layout needs a converter, so this test is skipped"
+        );
+        return;
+    }
+    on_both(
+        "pipelines-sealed-sessions",
+        "nils_pipelines_sealed_sessions",
+        |lab| {
+            lab.add_descriptor("session-files", SESSION_FILES);
+            let v = lab.json(&[
+                "run",
+                "session-files",
+                "--select",
+                "selection:every@1",
+                "--json",
+            ]);
+            assert_eq!(v["status"], "done", "{v}");
+            assert_eq!(v["summary"]["units"]["total"], 2, "{v}");
+            let run = v["id"].as_i64().unwrap();
+            let release = v["input_release_id"].as_i64().unwrap();
+            // a stack the release placed in a session's folder
+            let placed: Vec<(i64, String)> = lab
+                .store()
+                .query(
+                    &format!(
+                        "SELECT rs.stack_id, rs.dir FROM release r JOIN release_stack rs ON rs.dataset_id = r.dataset_id WHERE r.id = {release} ORDER BY rs.stack_id"
+                    ),
+                    &[],
+                )
+                .unwrap()
+                .iter()
+                .map(|r| (r.int(0).unwrap(), r.text(1).unwrap().to_string()))
+                .collect();
+            let (sealed, dir) = placed
+                .iter()
+                .find(|(_, d)| d.starts_with("sub-") && d.contains("/ses-"))
+                .cloned()
+                .unwrap_or_else(|| panic!("{placed:?}"));
+            let folder = dir.split('/').take(2).collect::<Vec<_>>().join("/");
+            let made = lab.json(&["derivative", "list", "--run", &run.to_string(), "--json"]);
+            let made = made.as_array().unwrap();
+            let table = made
+                .iter()
+                .find(|d| d["scope"] == "run")
+                .unwrap_or_else(|| panic!("no run table: {made:?}"))
+                .clone();
+            let (mine, other): (Vec<&Value>, Vec<&Value>) = made
+                .iter()
+                .filter(|d| d["scope"] == "session")
+                .partition(|d| d["path"].as_str().unwrap().contains(&format!("{folder}/")));
+            assert_eq!((mine.len(), other.len()), (1, 1), "{made:?}");
+            seal(lab, "sealed", &[sealed]);
+
+            let server = Server::start(lab);
+            let content = |d: &Value| format!("/api/derivatives/{}/content", d["id"]);
+            let file_of = |d: &Value| {
+                std::fs::read(lab.work.path().join(d["path"].as_str().unwrap())).unwrap()
+            };
+            let (status, doc) = server.call("GET", &content(mine[0]), None, OPERATOR);
+            assert_eq!(status, 403, "{doc}");
+            assert_eq!(doc["sealed"], true, "{doc}");
+            let (status, bytes) = server.raw("GET", &content(other[0]), None, OPERATOR);
+            assert_eq!(status, 200);
+            assert_eq!(bytes, file_of(other[0]));
+            let (status, h, bytes) = server.fetch("GET", &content(&table), None, OPERATOR);
+            let text = String::from_utf8(bytes).unwrap();
+            assert_eq!(status, 200, "{text}");
+            assert_eq!(
+                h.get("x-nils-withheld-sealed").map(String::as_str),
+                Some("1"),
+                "{h:?}"
+            );
+            assert_eq!(
+                text.lines().count(),
+                2,
+                "the header and the other session's row: {text}"
+            );
+            assert!(!text.contains(&folder.replace('/', "_")), "{text}");
+            for d in [mine[0], other[0], &table] {
+                let (status, bytes) = server.raw("GET", &content(d), None, CERT);
+                assert_eq!(status, 200, "{d}");
+                assert_eq!(bytes, file_of(d), "{d}");
+            }
+            drop(server);
+            let named: BTreeSet<i64> = sealed_reads(lab).iter().filter_map(|(_, d)| *d).collect();
+            assert_eq!(
+                named,
+                [
+                    mine[0]["id"].as_i64().unwrap(),
+                    table["id"].as_i64().unwrap()
+                ]
+                .into_iter()
+                .collect(),
+            );
+
+            // the ask: a session's measures are what the run said of its stacks
+            let packs = packs();
+            let p = packs.to_str().unwrap();
+            let doc = json!({
+                "ast_version": 1,
+                "sets": {"s": {"grain": "session"}},
+                "out": {"set": "s", "level": "record", "columns": [
+                    ["field", {}, "measure.session-files.files"],
+                    ["field", {}, "measure.session-files.session_files"],
+                    ["field", {}, "measure.session-files.run"],
+                ]},
+            });
+            let file = ask_file(lab, "sessions", &doc);
+            let filled = |extra: &[&str]| -> (usize, usize) {
+                let mut args: Vec<&str> = vec![
+                    "ask",
+                    "run",
+                    "--file",
+                    file.as_str(),
+                    "--pack-dir",
+                    p,
+                    "--json",
+                ];
+                args.extend_from_slice(extra);
+                let answer = lab.json(&args);
+                let csv = lab
+                    .work
+                    .path()
+                    .join(format!("sessions-{}.csv", extra.len()));
+                let mut export = vec![
+                    "ask".to_string(),
+                    "handles".into(),
+                    "export".into(),
+                    "--handle".into(),
+                    answer["handle"].to_string(),
+                    "--out".into(),
+                    csv.to_str().unwrap().into(),
+                ];
+                export.extend(extra.iter().map(|s| s.to_string()));
+                let words: Vec<&str> = export.iter().map(String::as_str).collect();
+                lab.ok(&words, None);
+                let text = std::fs::read_to_string(&csv).unwrap();
+                let mut lines = text.lines();
+                let header: Vec<String> = lines
+                    .next()
+                    .unwrap_or_default()
+                    .split(',')
+                    .map(|c| c.trim_matches('"').to_string())
+                    .collect();
+                let rows: Vec<BTreeMap<String, String>> = lines
+                    .map(|l| {
+                        header
+                            .iter()
+                            .cloned()
+                            .zip(l.split(',').map(|c| c.trim_matches('"').to_string()))
+                            .collect()
+                    })
+                    .collect();
+                let n = |name: &str| rows.iter().filter(|r| !cell(r, name).is_empty()).count();
+                assert_eq!(
+                    n("measure.session-files.files"),
+                    n("measure.session-files.session_files"),
+                    "{rows:?}"
+                );
+                assert_eq!(
+                    n("measure.session-files.files"),
+                    n("measure.session-files.run"),
+                    "{rows:?}"
+                );
+                (rows.len(), n("measure.session-files.files"))
+            };
+            assert_eq!(
+                filled(&[]),
+                (2, 1),
+                "the sealed session's measures withheld"
+            );
+            assert_eq!(
+                filled(&[
+                    "--unsealed-access",
+                    "grading the session pipeline on the sealed sample"
+                ]),
+                (2, 2),
+                "the keyboard's audited access reads them"
+            );
+            let audit = lab.ok(
+                &["audit", "list", "--action", "sealed.read", "--json"],
+                None,
+            );
+            assert!(
+                audit.contains("grading the session pipeline on the sealed sample"),
+                "{audit}"
+            );
+        },
+    );
 }
