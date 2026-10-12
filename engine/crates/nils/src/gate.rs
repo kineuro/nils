@@ -93,6 +93,12 @@ struct Canonical {
     /// 55 K7); none at the gate's own.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     shaped: Vec<String>,
+    /// The columns with values held back at the fixture's detail, a group's
+    /// mean, spread or count of distinct values of a quasi identifying
+    /// field for a group under 5 subjects (record 55 K7, the ruling of
+    /// 2026-10-12); none at the gate's own.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    held_back: Vec<String>,
 }
 
 /// One fixture's outcome in a run.
@@ -321,6 +327,12 @@ fn run_fixture(
             .collect(),
         funnel,
         shaped: out.answer.shaped_names(),
+        held_back: out
+            .answer
+            .held_back_named()
+            .into_iter()
+            .map(|h| h.column)
+            .collect(),
     })
 }
 
@@ -354,6 +366,20 @@ fn differences(want: &Canonical, got: &Canonical) -> Vec<String> {
             } else {
                 got.shaped.join(", ")
             }
+        ));
+    }
+    if want.held_back != got.held_back {
+        let named = |c: &[String]| {
+            if c.is_empty() {
+                "none".to_string()
+            } else {
+                c.join(", ")
+            }
+        };
+        out.push(format!(
+            "the columns with values held back: {} became {}",
+            named(&want.held_back),
+            named(&got.held_back)
         ));
     }
     if want.row_count != got.row_count {

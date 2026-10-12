@@ -1378,8 +1378,10 @@ fn ask_run(home: &Home, args: AskRunArgs) -> Result<(), Exit> {
                 "truncated": out.answer.truncated,
                 "columns": out.answer.columns,
                 // record 55 K7: under a queued detail below quasi, the
-                // columns it answered as shapes; none at the keyboard
+                // columns it answered as shapes and those with values held
+                // back for a group too small; none at the keyboard
                 "shaped": out.answer.shaped_names(),
+                "held_back": out.answer.held_back_named(),
                 "kept": out.kept.iter().map(|k| k.id).collect::<Vec<_>>(),
                 "drift": out.drift,
                 "job": job,

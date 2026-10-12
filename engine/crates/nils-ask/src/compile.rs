@@ -78,6 +78,11 @@ pub struct Compiled {
     /// Record 55 K7: which answer columns read a quasi identifying field the
     /// caller may not project raw, answered as their shapes.
     pub shaped_columns: Vec<usize>,
+    /// Record 55 K7, the ruling of 2026-10-12: which answer columns read a
+    /// group's mean or count of distinct values of such a field, answered
+    /// for a group of `MEASURE_K` subjects with a value and null where it
+    /// is held back.
+    pub held_columns: Vec<usize>,
 }
 
 /// The dialect layer: the hooks (H1 to H11) and the closures (§11.2, §11.3).
@@ -376,6 +381,9 @@ struct Frame {
     has_prec: bool,
     of: Option<String>,
     picked: bool,
+    /// Record 55 K7, the ruling of 2026-10-12: a group's held bindings, each
+    /// with the column that counts the subjects whose value it reads.
+    held_counts: BTreeMap<String, String>,
 }
 
 fn column_name(binding: &str) -> String {
@@ -460,6 +468,11 @@ struct Builder<'a> {
     /// The sets whose totals show only for `MEASURE_K` scans or more
     /// (below detail quasi, over a pipeline's measures).
     small_cells: BTreeSet<String>,
+    /// Record 55 K7, the ruling of 2026-10-12: the places in `out.columns`
+    /// held to a group's subjects, with the bindings whose subjects hold
+    /// each, and the held columns' places in the answer.
+    held: BTreeMap<usize, BTreeSet<String>>,
+    held_columns: Vec<usize>,
 }
 
 const AGGREGATES: &[&str] = &["count", "distinct", "min", "max", "sum", "avg", "list"];
@@ -482,6 +495,21 @@ const PHYSICS: &[&str] = &[
 
 fn cte_name(set: &str) -> String {
     format!("s_{set}")
+}
+
+/// Record 55 K7, the ruling of 2026-10-12: how many subjects (rows, where
+/// the rows have none) have a value of `x` among the rows `ch`, the number
+/// a group's mean or count of distinct values of a quasi identifying field
+/// is held to below detail quasi. Subjects, never rows: one subject's five
+/// visits are one subject's age.
+fn subjects_with(x: &str, has_subj: bool) -> String {
+    let who = if has_subj { "ch.subj" } else { "ch.k" };
+    format!("COUNT(DISTINCT CASE WHEN ({x}) IS NOT NULL THEN {who} END)")
+}
+
+/// The column of a group's layer that counts the subjects of a held binding.
+fn held_count_col(binding: &str) -> String {
+    format!("kn_{}", binding.replace('.', "__"))
 }
 
 fn window_days(w: &crate::ast::WindowSpec, at: &str) -> R<(Option<i64>, Option<i64>)> {
@@ -2197,6 +2225,14 @@ impl<'a> Builder<'a> {
         for (label, col) in &frame.group_by {
             terms.push((label.clone(), Term::plain(col.clone())));
         }
+        // Record 55 K7, the ruling of 2026-10-12: beside each binding of the
+        // answer's group that its subjects hold, how many subjects have the
+        // value it reads, which the answer's column is held to
+        let held_here: BTreeSet<String> = if name == self.ask.out.set {
+            self.held.values().flatten().cloned().collect()
+        } else {
+            BTreeSet::new()
+        };
         let mut post: Vec<(String, String)> = Vec::new();
         for (b, c) in &set.bind.0 {
             let bp = format!("{path}.bind.{b}");
@@ -2220,6 +2256,14 @@ impl<'a> Builder<'a> {
                     "{} AS {col}",
                     held(self.aggregate(&c.op, inner.as_deref(), &bp)?)
                 ));
+                if held_here.contains(b) {
+                    let x = inner
+                        .as_deref()
+                        .ok_or_else(|| err(&bp, "a held aggregate reads a column"))?;
+                    let count = held_count_col(b);
+                    cols.push(format!("{} AS {count}", subjects_with(x, child.has_subj)));
+                    frame.held_counts.insert(b.clone(), count);
+                }
             } else {
                 post.push((b.clone(), col.clone()));
                 continue;
@@ -3609,6 +3653,7 @@ impl<'a> Builder<'a> {
         let mut names = vec!["_key".to_string(), "_subject".to_string()];
         let mut code_columns = Vec::new();
         let mut shaped_columns = Vec::new();
+        let mut held_columns = Vec::new();
         match out.level {
             crate::ast::Level::Count => {
                 let subjects = if frame.has_subj {
@@ -3656,7 +3701,8 @@ impl<'a> Builder<'a> {
             _ => {}
         }
         for (i, c) in out.columns.iter().enumerate() {
-            let e = self.expr(c, &terms, "o", &format!("out.columns[{i}]"))?;
+            let at = format!("out.columns[{i}]");
+            let e = self.expr(c, &terms, "o", &at)?;
             let name = c
                 .ref_name()
                 .map(str::to_string)
@@ -3668,7 +3714,7 @@ impl<'a> Builder<'a> {
                 || name == "last"
                 || name.ends_with(".first")
                 || name.ends_with(".last");
-            let rendered = if is_date {
+            let mut rendered = if is_date {
                 format!("CAST({} AS TEXT)", e.sql)
             } else {
                 e.sql
@@ -3678,6 +3724,24 @@ impl<'a> Builder<'a> {
             }
             if self.shaped.contains(&i) {
                 shaped_columns.push(cols.len());
+            }
+            // record 55 K7, the ruling of 2026-10-12: a column made from a
+            // group's mean or count of distinct values of a quasi
+            // identifying field shows only where the group holds MEASURE_K
+            // subjects with a value, and is null where it is held back
+            if let Some(by) = self.held.get(&i) {
+                let mut holds = Vec::new();
+                for b in by {
+                    let count = frame
+                        .held_counts
+                        .get(b)
+                        .ok_or_else(|| err(&at, format!("no count of the subjects {b} reads")))?;
+                    holds.push(format!("o.{count} >= {}", crate::validate::MEASURE_K));
+                }
+                if !holds.is_empty() {
+                    rendered = format!("CASE WHEN {} THEN {rendered} END", holds.join(" AND "));
+                }
+                held_columns.push(cols.len());
             }
             cols.push(format!("{rendered} AS c{i}"));
             names.push(name);
@@ -3719,6 +3783,7 @@ impl<'a> Builder<'a> {
         self.answer_columns = names;
         self.code_columns = code_columns;
         self.shaped_columns = shaped_columns;
+        self.held_columns = held_columns;
         Ok(sql)
     }
 }
@@ -3749,6 +3814,8 @@ pub fn compile(ask: &Ask, validated: &Validated, ctx: &Context<'_>) -> R<Compile
         shaped: validated.shaped.clone(),
         shaped_columns: Vec::new(),
         small_cells: validated.small_cells.clone(),
+        held: validated.held.clone(),
+        held_columns: Vec::new(),
     };
     for name in &validated.order {
         b.current = Some(ask.sets[name].grain);
@@ -3763,5 +3830,6 @@ pub fn compile(ask: &Ask, validated: &Validated, ctx: &Context<'_>) -> R<Compile
         columns: b.answer_columns.clone(),
         code_columns: b.code_columns.clone(),
         shaped_columns: b.shaped_columns.clone(),
+        held_columns: b.held_columns.clone(),
     })
 }

@@ -89,6 +89,12 @@ pub struct Column {
     /// column answered raw, and on every column of a handle written before.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub shaped: bool,
+    /// Record 55 K7, the ruling of 2026-10-12: why some of the column's
+    /// values were held back (null), a group's mean or count of distinct
+    /// values of a quasi identifying field where the group holds fewer
+    /// than `MEASURE_K` subjects with a value. Absent where none was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub held_back: Option<String>,
 }
 
 /// A handle as read.
@@ -148,6 +154,20 @@ impl Handle {
             .iter()
             .filter(|c| c.shaped)
             .map(|c| c.name.clone())
+            .collect()
+    }
+
+    /// The columns with values held back, and why (record 55 K7, the ruling
+    /// of 2026-10-12).
+    pub fn held_back(&self) -> Vec<crate::exec::HeldBack> {
+        self.columns
+            .iter()
+            .filter_map(|c| {
+                c.held_back.as_ref().map(|why| crate::exec::HeldBack {
+                    column: c.name.clone(),
+                    why: why.clone(),
+                })
+            })
             .collect()
     }
 }
@@ -288,8 +308,8 @@ fn cell_type(c: &Cell) -> Option<&'static str> {
     }
 }
 
-/// The columns of an answer with the type each showed, and whether it was
-/// answered as its shape.
+/// The columns of an answer with the type each showed, whether it was
+/// answered as its shape, and why values of it were held back.
 pub fn columns_of(answer: &Answer) -> Vec<Column> {
     answer
         .columns
@@ -304,6 +324,10 @@ pub fn columns_of(answer: &Answer) -> Vec<Column> {
                 .unwrap_or("null")
                 .to_string(),
             shaped: answer.shaped.contains(&i),
+            held_back: answer
+                .held_back
+                .contains(&i)
+                .then(crate::validate::held_back_why),
         })
         .collect()
 }

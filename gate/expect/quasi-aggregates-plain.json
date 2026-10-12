@@ -1,7 +1,7 @@
 {
   "name": "quasi-aggregates-plain",
   "question": "The same spread, asked at detail plain",
-  "hash": "584d041e2ad99dac464868ed70788548310690aa26d338500940efabce4919fb",
+  "hash": "4ebd75501a66eb352e765ea5a2fefd3d7e21cefd087958b567c3e45dbd211992",
   "columns": [
     "_key",
     "_subject",
@@ -19,7 +19,7 @@
       "38",
       "99",
       "99",
-      "99.999999999",
+      "40.764705882",
       "11"
     ]
   ],
@@ -31,7 +31,6 @@
   },
   "shaped": [
     "youngest",
-    "oldest",
-    "mean_age"
+    "oldest"
   ]
 }

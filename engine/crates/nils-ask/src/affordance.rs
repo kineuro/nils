@@ -220,6 +220,11 @@ pub struct Preview {
     /// chat can say which values this detail does not show (2026-10-12).
     #[serde(default)]
     pub shaped: Vec<String>,
+    /// Record 55 K7, the ruling of 2026-10-12: the columns with values held
+    /// back (null), a group's mean or count of distinct values of a quasi
+    /// identifying field where the group holds too few subjects, and why.
+    #[serde(default)]
+    pub held_back: Vec<crate::exec::HeldBack>,
 }
 
 /// A preview of the answer: `rows` rows at record or aggregate level, the
@@ -261,6 +266,7 @@ pub fn preview(
             .collect(),
         truncated: answer.truncated,
         shaped: answer.shaped_names(),
+        held_back: answer.held_back_named(),
     })
 }
 

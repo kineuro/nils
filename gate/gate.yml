@@ -74,6 +74,19 @@ gate:
       question: Per cohort demographics with no value list in the document
       file: fixtures/gold-c.ask.yml
       outcome: passes
+    - name: gold-c-demographics-plain
+      family: gold
+      question: The same demographics, asked at detail plain
+      file: fixtures/gold-c.ask.yml
+      outcome: passes
+      detail: plain
+      note: >-
+        Record 55 K7, the ruling of 2026-10-12: at detail plain each
+        cohort's mean age and its spread (stddev) are the numbers of the
+        fixture above, since each cohort holds 5 subjects or more, and its
+        youngest and oldest age are shapes. The count and the share of
+        women count a comparison of the sex, as a filter's count does, and
+        are numbers.
 
     # --- the conformance suite (section 13.3): every hook and every
     #     disputed construct, hashed on both backends
@@ -206,10 +219,33 @@ gate:
       outcome: passes
       detail: plain
       note: >-
-        The same document at detail plain: the youngest, the oldest and the
-        mean age are answered as their shapes, as the age itself is, and the
-        canonical names those three columns as shaped; the two counts read
-        no value and are the numbers of the fixture above.
+        The same document at detail plain (the ruling of 2026-10-12): the
+        youngest and the oldest age are one person's own and are answered as
+        their shapes, and the canonical names them as shaped; the mean age
+        and the count of distinct ages are numbers, the fixture above's,
+        since the group holds 5 subjects or more, and the count of subjects
+        reads no value.
+    - name: quasi-by-visit
+      family: record 55
+      question: The age at each visit number in ms-cohort-a, its mean, youngest, count of distinct values and spread
+      file: fixtures/quasi-by-visit.ask.yml
+      outcome: passes
+      note: >-
+        At the gate's own detail every group's mean, youngest, count of
+        distinct ages and spread are values, the last group's from 3
+        subjects.
+    - name: quasi-by-visit-plain
+      family: record 55
+      question: The same ages by visit number, asked at detail plain
+      file: fixtures/quasi-by-visit.ask.yml
+      outcome: passes
+      detail: plain
+      note: >-
+        At detail plain (the ruling of 2026-10-12) the youngest is a shape
+        in every group; the mean, the count of distinct ages and the spread
+        are the values above in a group of 5 subjects or more, and null in
+        the last group, which holds 3, and the canonical names those three
+        columns as held back.
 
     # --- what this wave does not answer, named rather than hidden
     - name: pair-grain-matching

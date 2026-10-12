@@ -340,6 +340,39 @@ not in others:
 returns are the ones the person's level allows, and that sequence names are
 returned at every level.
 
+**Aggregates of a quasi-identifying field (the ruling of 2026-10-12).** Below
+detail quasi, at plain, the ask answers a group's summary of such a field, an age
+for one, as follows. A group is a group set's child, keyed by the group's key;
+each limit counts the group's subjects that have a value, never its rows, so one
+subject's five visits are one subject.
+
+| Of the field, over a group | At detail plain |
+|---|---|
+| The mean (`avg`) | answered when the group holds 5 subjects or more (`MEASURE_K`, as a pipeline's measures under record 49 R4); held back below |
+| The spread (`stddev` of the group's child) | the same |
+| The count of distinct values (`distinct`) | the same |
+| The min, the max, the median, a percentile | never answered: each is one person's own value. The min and the max are shapes; the median and a percentile are refused |
+| The sum and the list | shapes |
+| A count of rows or subjects, a comparison | answered |
+
+A held-back value is null, and every answer that holds rows names its columns
+with a value held back and why, beside `shaped`: `held_back`, as
+`[{column, why}]` with why `a group under 5 subjects`, on a run and its cached
+answer, a preview, a handle and a page of it, and a job's result. A mean or a
+count of distinct values made anywhere but as a group set's own binding reads a
+row's own subject, session or stack, one person's rows, and stays a shape. What a
+group's other bindings and the answer's columns make of a mean alone (a rounded
+mean, a share of it) is held with it; made with a shaped value, it is a shape.
+
+> **Limit: plain detail still filters.** A filter, an order and a count read a
+> quasi-identifying field itself at every detail, and the ask holds each answer to
+> these rules, not a person's series of questions. So repeated questions can
+> narrow a value: asked again with a narrower filter (ages 40 to 50, then 40 to
+> 45), a count says how many people are left in the range, and a group's mean
+> moves by what the narrower filter took out. The real protection is who is given
+> plain detail (record 25): give it only to people who may see such counts and
+> summaries of the registry.
+
 ### 7.2 What a release records about itself (K9)
 
 Three items record 26 left for later join this wave's de-identification work:

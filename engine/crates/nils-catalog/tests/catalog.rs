@@ -75,15 +75,16 @@ fn the_four_fixtures_validate_against_the_real_catalog() {
     };
     for name in ["yardstick", "gold-a", "gold-b", "gold-c"] {
         let ask = parse(&fixture(name)).unwrap();
-        // record 55 K7: at detail plain each validates too, but for gold C's
-        // standard deviation of age, which the post pass would read from the
-        // ages themselves
-        match prepare(ask.clone(), &catalog, &Scope::default()) {
-            Ok(_) => assert_ne!(name, "gold-c", "the stddev of age at plain"),
-            Err(e) => assert!(
-                name == "gold-c" && e.to_string().contains("stddev of age"),
-                "{name}: {e}"
-            ),
+        // record 55 K7: at detail plain each validates too, gold C's standard
+        // deviation of age among them since the ruling of 2026-10-12: a
+        // group's spread is held to its subjects, answered for 5 or more
+        let plain = prepare(ask.clone(), &catalog, &Scope::default())
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+        let held: Vec<String> = plain.validated.held_measures.into_iter().collect();
+        if name == "gold-c" {
+            assert_eq!(held, ["stddev.age"], "{name}");
+        } else {
+            assert!(held.is_empty(), "{name}: {held:?}");
         }
         let prepared = prepare(ask, &catalog, &quasi).unwrap_or_else(|e| panic!("{name}: {e}"));
         assert!(

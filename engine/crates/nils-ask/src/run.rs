@@ -6,8 +6,8 @@
 //! function the CLI and the doors both call, so the same document leaves
 //! the same handle either way.
 
-use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use nils_registry::dialect::Dialect;
@@ -169,7 +169,11 @@ const MAX_DEPTH: usize = 4;
 /// while a document's identity missed the rows that store the label is
 /// answered again. Record 55 K7, 2026-10-12: `shaped` says the handle's
 /// columns name the ones answered as shapes, so a cached answer always says
-/// which they are.
+/// which they are; and `quasi_totals` says a group's mean, spread and count
+/// of distinct values of a quasi identifying field were answered for
+/// `MEASURE_K` subjects or more and held back below (the ruling of that
+/// day), with the columns held back named, so no answer cached while they
+/// were shapes is answered again.
 pub fn suppression_of(scope: &Scope) -> Value {
     let raw = crate::validate::may_project_raw(crate::validate::Class::QuasiIdentifying, scope);
     json!({
@@ -178,6 +182,7 @@ pub fn suppression_of(scope: &Scope) -> Value {
         "quasi": if raw { "raw" } else { "shape" },
         "axis_values": "any_name",
         "shaped": "named",
+        "quasi_totals": "held_to_k",
     })
 }
 
@@ -479,6 +484,7 @@ fn run_at(registry: &mut Registry, req: Request<'_>, depth: usize) -> Result<Out
         registry,
         &mut runner,
         &ask,
+        &validated,
         req.names,
         req.scope,
         &mut answer,
@@ -499,6 +505,19 @@ fn run_at(registry: &mut Registry, req: Request<'_>, depth: usize) -> Result<Out
         })
         .collect();
     let mut measured = measure::apply(&mut answer, &remaining, &over)?;
+    // record 55 K7: a share of a column with values held back holds them
+    // back too, in the same rows
+    let shares_held: Vec<usize> = measured
+        .columns
+        .iter()
+        .filter_map(|name| {
+            let of = name.strip_prefix("share.")?;
+            let from = answer.columns.iter().position(|c| c == of)?;
+            let at = answer.columns.iter().position(|c| c == name)?;
+            answer.held_back.contains(&from).then_some(at)
+        })
+        .collect();
+    answer.held_back.extend(shares_held);
     // the columns in the answer's order: the group's scalars, then the shares
     group_columns.append(&mut measured.columns);
     measured.columns = group_columns;
@@ -658,11 +677,17 @@ fn run_at(registry: &mut Registry, req: Request<'_>, depth: usize) -> Result<Out
 /// The scalar measures over a group answer's child (gold C's `stddev {of:
 /// age}` over `people`, per cohort): the child's rows are read with the
 /// group's by tuple, grouped in Rust, and one column per measure joins
-/// the answer by its key.
+/// the answer by its key. Record 55 K7, the ruling of 2026-10-12: the rows
+/// are read inside the engine as they are, never shaped, since the answer
+/// carries none of them, and below detail quasi a group's spread of a quasi
+/// identifying field is answered where the group holds `MEASURE_K`
+/// subjects with a value and held back (null) where it holds fewer; the
+/// validator refuses its median and percentiles there.
 fn group_scalars(
     registry: &mut Registry,
     runner: &mut Runner<'_>,
     ask: &Ask,
+    validated: &Validated,
     names: &dyn Names,
     scope: &Scope,
     answer: &mut Answer,
@@ -705,7 +730,7 @@ fn group_scalars(
         limit: None,
     };
     gv.keep = Vec::new();
-    let v = validate(&gv, names, scope).map_err(AskError::Invalid)?;
+    let v = inside(validate(&gv, names, scope).map_err(AskError::Invalid)?);
     let (_, groups) = runner.answer(registry, &gv, &v, None, None)?;
     let by_n = g.by.len();
     let key_of: BTreeMap<String, i64> = groups
@@ -733,39 +758,75 @@ fn group_scalars(
         limit: None,
     };
     cv.keep = Vec::new();
-    let v = validate(&cv, names, scope).map_err(AskError::Invalid)?;
+    let v = inside(validate(&cv, names, scope).map_err(AskError::Invalid)?);
     let (_, child) = runner.answer(registry, &cv, &v, None, None)?;
     if child.truncated {
         return Err(MeasureError::Truncated.into());
     }
-    let mut values: BTreeMap<(String, i64), Vec<f64>> = BTreeMap::new();
+    // per measured field and group: its values, and whose they are (the
+    // subject, or the row where the child has none)
+    let mut values: BTreeMap<(String, i64), (Vec<f64>, BTreeSet<String>)> = BTreeMap::new();
     for r in &child.rows {
         let Some(k) = key_of.get(&tuple(r, 2, by_n)) else {
             continue;
         };
+        let whose = match r.0.get(1) {
+            Some(Cell::Int(subject)) => format!("subject {subject}"),
+            _ => format!(
+                "row {}",
+                r.0.first().map(crate::exec::render).unwrap_or_default()
+            ),
+        };
         for (i, of) in ofs.iter().enumerate() {
             if let Some(x) = r.0.get(2 + by_n + i).and_then(measure::number) {
-                values.entry((of.clone(), *k)).or_default().push(x);
+                let (xs, who) = values.entry((of.clone(), *k)).or_default();
+                xs.push(x);
+                who.insert(whose.clone());
             }
         }
     }
+    let k_subjects = crate::validate::MEASURE_K;
     let mut added = Vec::new();
     for (kind, of, p) in &wanted {
         let name = measure::name_of(kind, of, *p);
+        // the group's spread of a quasi identifying field, held to its
+        // subjects below detail quasi (record 55 K7, 2026-10-12)
+        let held = validated.held_measures.contains(&name);
+        let mut held_back = false;
         for row in answer.rows.iter_mut() {
             let k = row.opt_int(0).ok().flatten();
             let cell = match k.and_then(|k| values.get(&(of.clone(), k)).cloned()) {
-                Some(mut xs) => {
+                Some((_, who)) if held && (who.len() as i64) < k_subjects => {
+                    held_back = true;
+                    Cell::Null
+                }
+                Some((mut xs, _)) => {
                     measure::scalar(kind, &mut xs, *p)?.map_or(Cell::Null, Cell::Double)
                 }
-                None => Cell::Null,
+                None => {
+                    held_back |= held;
+                    Cell::Null
+                }
             };
             row.0.push(cell);
+        }
+        if held_back {
+            answer.held_back.push(answer.columns.len());
         }
         answer.columns.push(name.clone());
         added.push(name);
     }
     Ok(added)
+}
+
+/// A validation for a read the engine makes for itself, whose rows never
+/// leave it (record 55 K7): nothing shaped and nothing held, so a group's
+/// keys match their rows and a measure reads the values themselves. What
+/// leaves is held where the answer's own validation says.
+fn inside(mut v: Validated) -> Validated {
+    v.shaped.clear();
+    v.held.clear();
+    v
 }
 
 /// Append one column per namespace to every row, the subject's identifier
