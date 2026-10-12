@@ -70,7 +70,12 @@ pub(crate) fn by_cause<'a>(outcomes: impl Iterator<Item = &'a Value>) -> Value {
             None => counts.push((cause, 1)),
         }
     }
-    counts.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.name().cmp(b.0.name())));
+    // the most first; of as many, a known cause before the pipeline's own
+    counts.sort_by(|a, b| {
+        b.1.cmp(&a.1)
+            .then((a.0 == Cause::Pipeline).cmp(&(b.0 == Cause::Pipeline)))
+            .then(a.0.name().cmp(b.0.name()))
+    });
     json!(
         counts
             .iter()
@@ -79,17 +84,18 @@ pub(crate) fn by_cause<'a>(outcomes: impl Iterator<Item = &'a Value>) -> Value {
     )
 }
 
-/// The failure of a run that failed: where its units failed for a cause
-/// that is known (a dependency, a resource, an input), the one most of
-/// them failed for; else what its error and its exit say, the pipeline's
-/// own where nothing is known.
+/// The failure of a run that failed: the cause most of its units failed
+/// for, where that is a known one (a dependency, a resource, an input);
+/// else what its error and its exit say, the pipeline's own where nothing
+/// is known. One unit's cause never names a run most of whose units
+/// failed on their own.
 pub(crate) fn of_run(error: &str, exit_code: Option<i64>, summary: &Value) -> Value {
     let known = summary["failures_by_cause"]
         .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|f| f["cause"].as_str().and_then(Cause::parse))
-        .find(|c| c.kind() != Kind::Pipeline);
+        .and_then(|a| a.first())
+        .and_then(|f| f["cause"].as_str())
+        .and_then(Cause::parse)
+        .filter(|c| c.kind() != Kind::Pipeline);
     known
         .unwrap_or_else(|| {
             failure::cause_of(&Said {
@@ -209,6 +215,18 @@ mod tests {
         );
         assert_eq!(
             of_run("the container exited 1", Some(1), &json!({}))["cause"],
+            "pipeline"
+        );
+        // one unit's cause does not name a run most of whose units failed
+        // on their own
+        let mostly_own = [
+            json!({"status": "failed", "failure": Cause::Memory.doc()}),
+            json!({"status": "failed", "error": "refused on purpose"}),
+            json!({"status": "failed", "error": "refused on purpose"}),
+        ];
+        let summary = json!({ "failures_by_cause": by_cause(mostly_own.iter()) });
+        assert_eq!(
+            of_run("the container exited 1", Some(1), &summary)["cause"],
             "pipeline"
         );
         // a run from before is read from its error
