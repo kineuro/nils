@@ -2110,6 +2110,11 @@ pub fn plan_picked(
     stacks: &[i64],
     picks: Option<&serde_json::Value>,
 ) -> Result<Vec<PlannedStack>, Error> {
+    // the plan of no stack is none: a selection of no stack is no filter,
+    // and would plan every picked stack of the registry
+    if stacks.is_empty() {
+        return Ok(Vec::new());
+    }
     let anchors =
         nils_session::Anchors::resolve(registry, scheme, BTreeMap::new()).map_err(session_err)?;
     nils_session::ensure(registry, scheme, &anchors, None, false).map_err(session_err)?;

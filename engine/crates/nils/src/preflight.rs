@@ -534,6 +534,69 @@ pub(crate) fn roles_missing(
 /// says where each picked stack goes, so a session the release merges, a
 /// stack it routes to `sourcedata/` or holds, and a pick it names by
 /// another suffix are counted as the run will meet them.
+/// Why a picked stack the release would leave out: the registry holds no
+/// file of it to read.
+const NO_FILE: &str = "the registry holds no file of it to read, so the release leaves it out";
+
+/// Of picked stacks the release's plan leaves out, those of which the
+/// registry holds a file to read, and those the pack's disposition
+/// excludes: what tells why each is left out.
+fn unplanned_why(
+    store: &mut Store,
+    stacks: &[i64],
+) -> Result<(BTreeSet<i64>, BTreeSet<i64>), String> {
+    let err = |e: nils_registry::Error| e.to_string();
+    let (mut filed, mut excluded) = (BTreeSet::new(), BTreeSet::new());
+    for chunk in stacks.chunks(500) {
+        let sql = format!(
+            "SELECT DISTINCT i.stack_id FROM {} i JOIN {} sf ON sf.instance_id = i.id \
+             WHERE i.stack_id IN ({})",
+            store.qualified("instance"),
+            store.qualified("source_file"),
+            list(chunk)
+        );
+        for r in store.query(&sql, &[]).map_err(err)? {
+            filed.insert(r.int(0).map_err(err)?);
+        }
+        let sql = format!(
+            "SELECT DISTINCT a.stack_id FROM {} a WHERE a.axis = 'disposition' \
+             AND a.value = 'excluded' AND a.stack_id IN ({})",
+            store.qualified("classification_axis"),
+            list(chunk)
+        );
+        for r in store.query(&sql, &[]).map_err(err)? {
+            excluded.insert(r.int(0).map_err(err)?);
+        }
+    }
+    Ok((filed, excluded))
+}
+
+/// Why a bids input would hold no unit, from why each of its stacks is
+/// left out: none picked, as it was; else the reasons, each with its
+/// stacks counted, the most first ("4 of the selection's 4 stacks: the
+/// registry holds no file of it to read").
+fn no_units_why(stacks: usize, left: &LeftOut) -> String {
+    let unpicked = left
+        .iter()
+        .all(|(_, why)| why.starts_with("no live pick takes it"));
+    if left.is_empty() || unpicked {
+        return "no stack of the selection is picked, so the release of the input would hold no subject's images; nils pick run picks them".into();
+    }
+    let mut by: BTreeMap<&str, usize> = BTreeMap::new();
+    for (_, why) in left {
+        *by.entry(why.as_str()).or_default() += 1;
+    }
+    let mut by: Vec<(&str, usize)> = by.into_iter().collect();
+    by.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+    format!(
+        "the release of the input would hold no subject's images: {}",
+        by.iter()
+            .map(|(why, n)| format!("{n} of the selection's {stacks} stacks: {why}"))
+            .collect::<Vec<_>>()
+            .join("; ")
+    )
+}
+
 fn bids_units(
     registry: &mut Registry,
     d: &Descriptor,
@@ -583,10 +646,22 @@ fn bids_units(
             )
             .map_err(|e| format!("the plan of the input's release: {e}"))?;
             let planned: BTreeSet<i64> = plan.iter().map(|p| p.stack).collect();
-            for s in picked.iter().filter(|s| !planned.contains(s)) {
+            let unplanned: Vec<i64> = picked
+                .iter()
+                .copied()
+                .filter(|s| !planned.contains(s))
+                .collect();
+            let (with_a_file, excluded) = unplanned_why(registry.store(), &unplanned)?;
+            for s in unplanned {
                 left.push((
-                    *s,
-                    "the release leaves it out: the registry holds no file of it to write, or its disposition is excluded".into(),
+                    s,
+                    if !with_a_file.contains(&s) {
+                        NO_FILE.into()
+                    } else if excluded.contains(&s) {
+                        "its disposition is excluded, so the release leaves it out".into()
+                    } else {
+                        "the release leaves it out: the registry holds no file of it to write, or its disposition is excluded".into()
+                    },
                 ));
             }
             for p in &plan {
@@ -599,7 +674,17 @@ fn bids_units(
                     ));
                     continue;
                 };
-                let Picked { roles, day, .. } = &picks[&p.stack];
+                // the plan is of the picked stacks alone; one it holds
+                // besides is no part of the input, and is said so, never a
+                // panic (2026-10-12)
+                let Some(Picked { roles, day, .. }) = picks.get(&p.stack) else {
+                    left.push((
+                        p.stack,
+                        "it is not among the stacks the run takes, so the input leaves it out"
+                            .into(),
+                    ));
+                    continue;
+                };
                 let u = units.entry(id.clone()).or_insert(Unit {
                     id: Some(id.clone()),
                     subject_id: Some(p.subject_id),
@@ -965,7 +1050,7 @@ pub(crate) fn check(registry: &mut Registry, asked: &Asked<'_>) -> Result<Value,
     if units.is_empty() && kept == 0 {
         blockers.push(match (&main, d.layout) {
             (Some(m), _) if stacks.is_empty() => crate::main_input::nothing(m),
-            (_, Layout::Bids) => "no stack of the selection is picked, so the release of the input would hold no subject's images; nils pick run picks them".into(),
+            (_, Layout::Bids) => no_units_why(stacks.len(), &left),
             (_, Layout::Stacks) => "the selection holds no stacks".into(),
         });
     }

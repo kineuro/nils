@@ -1266,6 +1266,39 @@ fn every_role(pg: Option<(String, String)>) {
         lab.frozen(&t1w_only["handle"]),
         lab.stacks_of(&[a1, a2], "MPRAGE")
     );
+    // a T1w pipeline over a list of main T1w scans of visits that hold a
+    // FLAIR as well: the input holds the list's stacks alone, and the
+    // FLAIR is no part of it (found on a laptop install, 2026-10-12: the
+    // pre-flight answered 500)
+    let t1w = lab.preflight(&["--select", "main:t1w@dataset:alpha"]);
+    assert_eq!(t1w["units"]["ready"], 3, "A1's two visits and A2's: {t1w}");
+    assert_eq!(t1w["units"]["missing"], 0, "{t1w}");
+    assert_eq!(
+        lab.frozen(&t1w["handle"]),
+        lab.stacks_of(&[a1, a2], "MPRAGE")
+    );
+    // a list of part of the scope: A2's visit lost its picks
+    {
+        let mut store = lab.store();
+        let sql = format!(
+            "DELETE FROM {ps} WHERE pick_id IN (SELECT id FROM {p} WHERE subject_id = {a2}); \
+             DELETE FROM {p} WHERE subject_id = {a2}",
+            ps = store.qualified("pick_stack"),
+            p = store.qualified("pick"),
+        );
+        store.batch(&sql).unwrap();
+    }
+    let part = lab.preflight(&["--select", "main:t1w@dataset:alpha"]);
+    assert_eq!(lab.frozen(&part["handle"]), mprage, "A1's alone: {part}");
+    assert_eq!(part["units"]["ready"], 2, "{part}");
+    assert_eq!(part["main"]["without"]["visits"], 1, "{part}");
+    let part_both = lab.preflight_of("needs-both", &["--select", "main@dataset:alpha"]);
+    assert_eq!(part_both["units"]["ready"], 2, "{part_both}");
+    {
+        // the pack's pick run gives A2 its picks back
+        lab.ok(&["pick", "run", "--pack-dir", &packs()]);
+    }
+
     // a pipeline that names no role refuses it, with the form that names one
     let (good, _, err) = lab.run(
         &[
@@ -1422,4 +1455,130 @@ fn every_role(pg: Option<(String, String)>) {
         each.extend(mine);
     }
     assert_eq!(each, both);
+}
+
+#[test]
+fn a_scope_with_nothing_to_run_over_says_why() {
+    nothing_to_run(None);
+}
+
+#[test]
+fn a_scope_with_nothing_to_run_over_says_why_on_postgres_too() {
+    on_postgres("nils_run_nothing_over", nothing_to_run);
+}
+
+/// 2026-10-12, found by the chat bench: the pre-flight over a scope's main
+/// scans that leave nothing to run says why. Picked stacks of which the
+/// registry holds no file to read are named as such, never as unpicked;
+/// and a dataset with no main scan of the role is nothing to run over,
+/// its visits counted by why, never a panic.
+fn nothing_to_run(pg: Option<(String, String)>) {
+    let lab = Lab::new(pg);
+    let who = lab.subjects();
+    let (b1, b2) = (who["B1"], who["B2"]);
+    let codes: BTreeMap<i64, String> = {
+        let mut store = lab.store();
+        let sql = format!("SELECT id, code FROM {}", store.qualified("subject"));
+        store
+            .query(&sql, &[])
+            .unwrap()
+            .iter()
+            .map(|r| (r.int(0).unwrap(), r.text(1).unwrap().to_string()))
+            .collect()
+    };
+
+    // 1. a cohort whose main scans are picked, and whose files the
+    // registry no longer holds
+    lab.ok(&["clinical", "cohort", "make", "filess"]);
+    lab.ok(&[
+        "clinical",
+        "cohort",
+        "add",
+        "filess",
+        &codes[&b1],
+        &codes[&b2],
+        "--why",
+        "a pre-flight with nothing to read",
+    ]);
+    let all = lab.stacks_of(&[b1, b2], "MPRAGE");
+    assert!(!all.is_empty());
+    {
+        let mut store = lab.store();
+        let sql = format!(
+            "DELETE FROM {} WHERE instance_id IN (SELECT id FROM {} WHERE stack_id IN ({}))",
+            store.qualified("source_file"),
+            store.qualified("instance"),
+            list(&all)
+        );
+        store.batch(&sql).unwrap();
+    }
+    let pre = lab.preflight(&["--select", "main:t1w@cohort:filess"]);
+    let listed = lab.frozen(&pre["handle"]);
+    assert!(!listed.is_empty(), "its main scans are picked: {pre}");
+    assert_eq!(pre["ready"], false, "{pre}");
+    assert_eq!(pre["units"]["total"], 0, "{pre}");
+    let said = pre["blockers"].to_string();
+    assert!(
+        said.contains(&format!(
+            "the release of the input would hold no subject's images: {n} of the selection's {n} stacks: the registry holds no file of it to read",
+            n = listed.len()
+        )),
+        "{pre}"
+    );
+    assert!(!said.contains("is picked"), "they are picked: {pre}");
+    assert!(!said.contains("nils pick run"), "{pre}");
+
+    // 2. a dataset none of whose visits has a main scan of the role
+    {
+        let mut store = lab.store();
+        let sql = format!(
+            "DELETE FROM {}; DELETE FROM {}",
+            store.qualified("pick_stack"),
+            store.qualified("pick")
+        );
+        store.batch(&sql).unwrap();
+    }
+    let (good, out, err) = lab.run(
+        &[
+            "run",
+            "needs-t1w",
+            "--select",
+            "main:t1w@dataset:alpha",
+            "--preflight",
+            "--json",
+        ],
+        None,
+    );
+    assert!(!err.contains("panicked"), "{err}");
+    assert!(good, "{err}\n{out}");
+    let pre: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(pre["stacks"], 0, "{pre}");
+    assert_eq!(pre["ready"], false, "{pre}");
+    let main = &pre["main"];
+    assert_eq!(main["main_visits"], 0, "{main}");
+    let visits = main["visits"].as_u64().unwrap();
+    assert!(visits > 0, "{main}");
+    assert_eq!(main["without"]["visits"], visits, "{main}");
+    let counted: u64 = main["without"]["why"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|w| w["visits"].as_u64().unwrap())
+        .sum();
+    assert_eq!(counted, visits, "each visit counted by why: {main}");
+    assert!(
+        pre["blockers"]
+            .to_string()
+            .contains("main:t1w@dataset:alpha has no main t1w scan to run over"),
+        "{pre}"
+    );
+    // the words a person reads say it too
+    let text = lab.ok(&[
+        "run",
+        "needs-t1w",
+        "--select",
+        "main:t1w@dataset:alpha",
+        "--preflight",
+    ]);
+    assert!(text.contains("has no main t1w scan to run over"), "{text}");
 }
