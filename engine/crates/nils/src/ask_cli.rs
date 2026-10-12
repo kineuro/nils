@@ -425,10 +425,12 @@ fn local(home: &Home, at: &Where) -> Result<Local, Exit> {
 }
 
 impl Local {
-    fn scheme(&mut self, ask: &Ask) -> Result<Scheme, Exit> {
+    /// The session scheme a document reads; `stored` is the document's id
+    /// when it is one the registry holds (2026-10-12).
+    fn scheme(&mut self, ask: &Ask, stored: Option<i64>) -> Result<Scheme, Exit> {
         match &ask.scheme {
             Some(nils_ask::ast::SchemeRef::Name(n)) if n != "default" && n != "day" => {
-                crate::stored_scheme(&mut self.registry, n)
+                kept_or_refused(&mut self.registry, n, stored)
             }
             Some(nils_ask::ast::SchemeRef::Inline(m)) => {
                 Scheme::from_json(&serde_json::to_string(m).unwrap_or_default())
@@ -531,7 +533,7 @@ fn validate(home: &Home, args: AskValidateArgs) -> Result<(), Exit> {
             // (kineuro/nils#93), so what only the compiler refuses is
             // refused here too (2026-10-12)
             if !args.repair {
-                let scheme = l.scheme(&ask)?;
+                let scheme = l.scheme(&ask, args.which.document)?;
                 let issues =
                     run::not_compilable(&mut l.registry, &ask, &l.catalog, &scope, &scheme);
                 if !issues.is_empty() {
@@ -590,7 +592,7 @@ fn explain(home: &Home, args: AskExplainArgs) -> Result<(), Exit> {
         None => {
             let mut l = local(home, &args.at)?;
             let ask = ask_of(&mut l, &args.which)?;
-            let scheme = l.scheme(&ask)?;
+            let scheme = l.scheme(&ask, args.which.document)?;
             let scope = scope();
             let ex = run::explain(&mut l.registry, ask, &l.catalog, &scope, &scheme)
                 .map_err(run_refused)?;
@@ -640,7 +642,7 @@ fn options(home: &Home, args: AskSetArgs) -> Result<(), Exit> {
         None => {
             let mut l = local(home, &args.at)?;
             let ask = ask_of(&mut l, &args.which)?;
-            let scheme = l.scheme(&ask)?;
+            let scheme = l.scheme(&ask, args.which.document)?;
             let epoch = l.registry.meta().epoch;
             let scope = scope();
             let setting = l.setting(&scheme, &scope);
@@ -721,7 +723,7 @@ fn diagnose_cmd(home: &Home, args: AskDiagnoseArgs) -> Result<(), Exit> {
         None => {
             let mut l = local(home, &args.at)?;
             let ask = ask_of(&mut l, &args.which)?;
-            let scheme = l.scheme(&ask)?;
+            let scheme = l.scheme(&ask, args.which.document)?;
             let scope = scope();
             let d = diagnose::diagnose(
                 &mut l.registry,
@@ -818,7 +820,7 @@ fn describe(home: &Home, args: AskDocArgs) -> Result<(), Exit> {
         None => {
             let mut l = local(home, &args.at)?;
             let ask = ask_of(&mut l, &args.which)?;
-            let scheme = l.scheme(&ask)?;
+            let scheme = l.scheme(&ask, args.which.document)?;
             let scope = scope();
             let setting = l.setting(&scheme, &scope);
             let d = affordance::describe(&ask, &setting).map_err(|e| usage(e.to_string()))?;
@@ -1210,6 +1212,21 @@ fn selections(home: &Home, cmd: SelectionsCommand) -> Result<(), Exit> {
     }
 }
 
+/// The session scheme kept under a name, or a refusal that names it and
+/// what to do, exit 2, as the doors refuse it (2026-10-12): a stored
+/// document whose scheme was removed failed as the engine's own fault.
+fn kept_or_refused(
+    registry: &mut Registry,
+    name: &str,
+    stored: Option<i64>,
+) -> Result<Scheme, Exit> {
+    crate::kept_scheme(registry, name)?.ok_or_else(|| {
+        refused(nils_ask::Error::Invalid(vec![
+            nils_ask::validate::scheme_not_kept(name, stored),
+        ]))
+    })
+}
+
 /// A refused document, with every issue and the call that settles it.
 fn refused(e: nils_ask::Error) -> Exit {
     match e {
@@ -1290,7 +1307,7 @@ fn ask_run(home: &Home, args: AskRunArgs) -> Result<(), Exit> {
     };
     let scheme = match &ask.scheme {
         Some(nils_ask::ast::SchemeRef::Name(n)) if n != "default" && n != "day" => {
-            crate::stored_scheme(&mut registry, n)?
+            kept_or_refused(&mut registry, n, args.document)?
         }
         Some(nils_ask::ast::SchemeRef::Inline(m)) => {
             Scheme::from_json(&serde_json::to_string(m).unwrap_or_default())

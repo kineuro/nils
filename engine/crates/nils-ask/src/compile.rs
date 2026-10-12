@@ -23,7 +23,7 @@ use nils_registry::store::Param;
 use serde_json::Value;
 
 use crate::ast::{AlgOp, Arg, Ask, Clause, Dir, Grain, IntSpec, ParamType, Set, Src};
-use crate::validate::{Code, ColumnRef, Issue, Names, Validated};
+use crate::validate::{Code, ColumnRef, Issue, Names, Validated, WrittenDate};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct CompileError {
@@ -305,6 +305,16 @@ impl Sql {
         }
     }
 
+    /// The day an instant falls on, in UTC (2026-10-12): a day and an
+    /// instant are compared by their days, the same on both backends.
+    pub fn day_of(self, x: &str) -> String {
+        if self.is_pg() {
+            format!("(({x}) AT TIME ZONE 'UTC')::date")
+        } else {
+            format!("substr({x}, 1, 10)")
+        }
+    }
+
     /// A LIKE that escapes its pattern's own wildcards.
     pub fn like(self, x: &str, pattern_placeholder: &str) -> String {
         format!("{x} LIKE {pattern_placeholder} ESCAPE '\\'")
@@ -347,6 +357,17 @@ pub fn like_escape(s: &str) -> String {
     out
 }
 
+/// A literal that writes no date where a date meets it: a number or a
+/// truth, refused there (2026-10-12).
+fn not_a_date(a: &Arg) -> Option<String> {
+    match a {
+        Arg::Int(n) => Some(n.to_string()),
+        Arg::Number(n) => Some(n.to_string()),
+        Arg::Bool(b) => Some(b.to_string()),
+        _ => None,
+    }
+}
+
 /// A text as an SQL literal, its quotes doubled: for the names of a pack's
 /// vocabulary, which are the same on every run.
 fn sql_text(s: &str) -> String {
@@ -372,6 +393,16 @@ struct Term {
     /// `not_in` and `has` ask whether a name is among them, and a group
     /// keyed by it counts a row once under each name.
     members: bool,
+    /// The value is a date, a day or an instant (2026-10-12), so a text it
+    /// meets is read as a date: Postgres compares no date with text.
+    dated: Option<Dated>,
+}
+
+/// What a date holds: a day, or an instant written `YYYY-MM-DDTHH:MM:SSZ`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Dated {
+    Day,
+    Instant,
 }
 
 impl Term {
@@ -382,7 +413,28 @@ impl Term {
             ci: None,
             param: None,
             members: false,
+            dated: None,
         }
+    }
+
+    /// The same term, a day or an instant.
+    fn dated(mut self, d: Option<Dated>) -> Term {
+        self.dated = d;
+        self
+    }
+}
+
+/// What a column holds when it is a date, from the registry's schema.
+fn dated_column(table: &str, column: &str) -> Option<Dated> {
+    let ty = nils_registry::schema::registry_tables()
+        .iter()
+        .find(|t| t.name == table)?
+        .column(column)?
+        .ty;
+    match ty {
+        Type::Date => Some(Dated::Day),
+        Type::Timestamp => Some(Dated::Instant),
+        _ => None,
     }
 }
 
@@ -929,9 +981,10 @@ impl<'a> Builder<'a> {
             return self.dataset_column(level);
         }
         if c.table == "study" && c.column == "day" {
-            return Some(Term::plain(
-                "COALESCE(sy.date_filled, sy.study_date)".into(),
-            ));
+            return Some(
+                Term::plain("COALESCE(sy.date_filled, sy.study_date)".into())
+                    .dated(Some(Dated::Day)),
+            );
         }
         let alias = alias_of(&c.table)?;
         let prec = (c.table == "event" && c.column == "event_date")
@@ -942,6 +995,7 @@ impl<'a> Builder<'a> {
             ci: c.ci.map(|ci| format!("{alias}.{ci}")),
             param: None,
             members: false,
+            dated: dated_column(&c.table, &c.column),
         })
     }
 
@@ -1480,6 +1534,7 @@ impl<'a> Builder<'a> {
                             ci: None,
                             param: None,
                             members: t.members,
+                            dated: t.dated,
                         },
                     ));
                 }
@@ -1501,6 +1556,7 @@ impl<'a> Builder<'a> {
                 projected.push(format!("{} AS {col}", t.sql));
                 let mut layered = Term::plain(col.clone());
                 layered.members = t.members;
+                layered.dated = t.dated;
                 if let Some(pc) = &t.prec {
                     let pcol = format!("{col}__prec");
                     projected.push(format!("{pc} AS {pcol}"));
@@ -1524,6 +1580,7 @@ impl<'a> Builder<'a> {
                     ci: None,
                     param: None,
                     members: false,
+                    dated: Some(Dated::Day),
                 },
             ));
         }
@@ -1612,6 +1669,7 @@ impl<'a> Builder<'a> {
                     ci: None,
                     param: None,
                     members: expr.members,
+                    dated: expr.dated,
                 },
             ));
         }
@@ -1714,6 +1772,7 @@ impl<'a> Builder<'a> {
                     ci,
                     param: None,
                     members: t.members,
+                    dated: t.dated,
                 },
             ));
         }
@@ -1731,6 +1790,7 @@ impl<'a> Builder<'a> {
                     ci: None,
                     param: None,
                     members: false,
+                    dated: (n == "date").then_some(Dated::Day),
                 },
             ));
         }
@@ -1827,6 +1887,7 @@ impl<'a> Builder<'a> {
                                 ci: None,
                                 param: None,
                                 members: t.members,
+                                dated: t.dated,
                             },
                         )
                     })
@@ -1840,10 +1901,14 @@ impl<'a> Builder<'a> {
                             ci: None,
                             param: None,
                             members: t.members,
+                            dated: t.dated,
                         },
                     ));
                 }
-                both.push((format!("{}.date", n.as_), Term::plain(p_first.clone())));
+                both.push((
+                    format!("{}.date", n.as_),
+                    Term::plain(p_first.clone()).dated(Some(Dated::Day)),
+                ));
                 both.push((
                     format!("{}.offset_days", n.as_),
                     Term::plain(offset.clone()),
@@ -2072,6 +2137,7 @@ impl<'a> Builder<'a> {
             ci: None,
             param: None,
             members: false,
+            dated: Some(Dated::Day),
         };
         terms.push((
             binding.to_string(),
@@ -2083,7 +2149,7 @@ impl<'a> Builder<'a> {
         ));
         terms.push((
             format!("{binding}.from_date"),
-            Term::plain(format!("{col}__from_date")),
+            Term::plain(format!("{col}__from_date")).dated(Some(Dated::Day)),
         ));
         terms.push((
             format!("{binding}.precision"),
@@ -2119,6 +2185,8 @@ impl<'a> Builder<'a> {
         let mut axis_cols: Vec<String> = Vec::new();
         let mut axis_joins: Vec<String> = Vec::new();
         let mut by_sql: Vec<String> = Vec::new();
+        // what each key is when it is a date (2026-10-12)
+        let mut by_dated: Vec<Option<Dated>> = Vec::new();
         // Wave 7a: the keys read by an axis, by their column's name, which
         // hold each value in the form the pack stores
         let mut axis_keys: BTreeMap<String, String> = BTreeMap::new();
@@ -2128,6 +2196,7 @@ impl<'a> Builder<'a> {
                 let key = self.expr(c, &child_terms, "ch", &at)?;
                 if !key.members {
                     by_sql.push(key.sql);
+                    by_dated.push(key.dated);
                     continue;
                 }
                 // Wave 7a: a stack, a subject or a session counts once under
@@ -2159,6 +2228,7 @@ impl<'a> Builder<'a> {
                     axis_cols.push(format!("{alias}.n AS {col}"));
                 }
                 by_sql.push(format!("ch.{col}"));
+                by_dated.push(None);
                 continue;
             }
             let child_grain = self.ask.sets.get(&g.of).map(|s| s.grain);
@@ -2189,6 +2259,7 @@ impl<'a> Builder<'a> {
             }
             axis_keys.insert(axis.to_string(), axis.to_string());
             by_sql.push(format!("ch.{col}"));
+            by_dated.push(None);
         }
         let source = if axis_cols.is_empty() {
             format!("{} ch", cte_name(&g.of))
@@ -2242,8 +2313,8 @@ impl<'a> Builder<'a> {
             ("_rows".into(), Term::plain("_rows".into())),
             ("_subjects".into(), Term::plain("_subjects".into())),
         ];
-        for (label, col) in &frame.group_by {
-            terms.push((label.clone(), Term::plain(col.clone())));
+        for ((label, col), dated) in frame.group_by.iter().zip(&by_dated) {
+            terms.push((label.clone(), Term::plain(col.clone()).dated(*dated)));
         }
         // Record 55 K7, the ruling of 2026-10-12: beside each binding of the
         // answer's group that its subjects hold, how many subjects have the
@@ -2257,7 +2328,7 @@ impl<'a> Builder<'a> {
         for (b, c) in &set.bind.0 {
             let bp = format!("{path}.bind.{b}");
             let col = column_name(b);
-            if AGGREGATES.contains(&c.op.as_str()) {
+            let dated = if AGGREGATES.contains(&c.op.as_str()) {
                 let target = c.opts.get("set").and_then(Value::as_str).unwrap_or("");
                 if target != g.of {
                     return Err(err(
@@ -2266,12 +2337,16 @@ impl<'a> Builder<'a> {
                     ));
                 }
                 let inner = match c.args.first() {
-                    Some(Arg::Clause(inner)) => {
-                        Some(self.expr(inner, &child_terms, "ch", &bp)?.sql)
-                    }
+                    Some(Arg::Clause(inner)) => Some(self.expr(inner, &child_terms, "ch", &bp)?),
                     Some(_) => return Err(err(bp, "an aggregate's argument is a clause")),
                     None => None,
                 };
+                // the earliest or the latest of dates is a date
+                let dated = inner
+                    .as_ref()
+                    .and_then(|t| t.dated)
+                    .filter(|_| matches!(c.op.as_str(), "min" | "max"));
+                let inner = inner.map(|t| t.sql);
                 cols.push(format!(
                     "{} AS {col}",
                     held(self.aggregate(&c.op, inner.as_deref(), &bp)?)
@@ -2284,12 +2359,13 @@ impl<'a> Builder<'a> {
                     cols.push(format!("{} AS {count}", subjects_with(x, child.has_subj)));
                     frame.held_counts.insert(b.clone(), count);
                 }
+                dated
             } else {
                 post.push((b.clone(), col.clone()));
                 continue;
-            }
+            };
             frame.bindings.push((b.clone(), col.clone()));
-            terms.push((b.clone(), Term::plain(col)));
+            terms.push((b.clone(), Term::plain(col).dated(dated)));
         }
         let mut layer = format!(
             "SELECT {} FROM {source} GROUP BY {}",
@@ -2301,7 +2377,7 @@ impl<'a> Builder<'a> {
             let e = self.expr(&c, &terms, "q", &format!("{path}.bind.{b}"))?;
             layer = format!("SELECT q.*, {} AS {col} FROM ({layer}) q", e.sql);
             frame.bindings.push((b.clone(), col.clone()));
-            terms.push((b, Term::plain(col)));
+            terms.push((b, Term::plain(col).dated(e.dated)));
         }
         // A null key (a stack with no value on an axis, a field nobody
         // filled) is numbered last on both backends, so a group's key is
@@ -2447,6 +2523,7 @@ impl<'a> Builder<'a> {
             ci: t.ci.as_deref().map(dot),
             param: None,
             members: t.members,
+            dated: t.dated,
         })
     }
 
@@ -2513,6 +2590,7 @@ impl<'a> Builder<'a> {
             ci: None,
             param: Some((param, ty)),
             members: false,
+            dated: (ty == Type::Date).then_some(Dated::Day),
         })
     }
 
@@ -2520,6 +2598,212 @@ impl<'a> Builder<'a> {
         match a {
             Arg::Clause(c) => self.expr(c, terms, alias, at),
             other => self.literal(other, at),
+        }
+    }
+
+    /// The text an argument writes where a date may meet it: a literal, or
+    /// a parameter that holds text or a date. None for anything else.
+    fn loose_text(&self, a: &Arg) -> Option<String> {
+        match a {
+            Arg::Text(t) => Some(t.clone()),
+            Arg::Clause(c) if c.op == "param" => {
+                let decl = self.ask.params.get(c.ref_name()?)?;
+                match (decl.type_, decl.value.as_ref()?) {
+                    (ParamType::Text | ParamType::Date, Value::String(s)) => Some(s.clone()),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// A text read as a date where it meets one (2026-10-12): Postgres
+    /// compares no date with text, and answered `first >= "2020-01-01"`
+    /// with 500. Bound as a day, or as an instant where it writes one and
+    /// meets an instant. A text that writes no date is refused here, where
+    /// validate could not tell the date it meets.
+    fn written_date(&mut self, text: &str, kind: Dated, at: &str) -> R<Term> {
+        let w = crate::validate::written_date(text).ok_or_else(|| {
+            err(
+                at,
+                format!("{text} is not a date; {}", crate::validate::DATE_FORMS),
+            )
+        })?;
+        let (v, ty, dated) = match (kind, &w) {
+            (Dated::Instant, WrittenDate::Instant(t)) => {
+                (t.clone(), Type::Timestamp, Dated::Instant)
+            }
+            _ => (w.day().to_string(), Type::Date, Dated::Day),
+        };
+        let param = Param::from(v.as_str());
+        let sql = self.p(param.clone(), ty);
+        Ok(Term {
+            sql,
+            prec: None,
+            ci: None,
+            param: Some((param, ty)),
+            members: false,
+            dated: Some(dated),
+        })
+    }
+
+    /// A date read as the day it falls on: an instant's day in UTC, a day as
+    /// it is.
+    fn as_day(&self, t: Term) -> Term {
+        match t.dated {
+            Some(Dated::Instant) => Term {
+                sql: self.sql.day_of(&t.sql),
+                prec: None,
+                ci: None,
+                param: None,
+                members: false,
+                dated: Some(Dated::Day),
+            },
+            _ => t,
+        }
+    }
+
+    /// The two sides of a comparison (2026-10-12): a text either side
+    /// writes, as a literal or a parameter, is read as a date where the
+    /// other side is one, a number there is refused, and a day and an
+    /// instant are compared by their days, on both backends alike.
+    fn operands(
+        &mut self,
+        l: &Arg,
+        r: &Arg,
+        terms: &[(String, Term)],
+        alias: &str,
+        at: &str,
+    ) -> R<(Term, Term)> {
+        let (a, b) = match (self.loose_text(l), self.loose_text(r)) {
+            (Some(text), None) => {
+                let b = self.arg(r, terms, alias, at)?;
+                let a = match b.dated {
+                    Some(k) => self.written_date(&text, k, at)?,
+                    None => self.arg(l, terms, alias, at)?,
+                };
+                (a, b)
+            }
+            (None, Some(text)) => {
+                let a = self.arg(l, terms, alias, at)?;
+                let b = match a.dated {
+                    Some(k) => self.written_date(&text, k, at)?,
+                    None => self.arg(r, terms, alias, at)?,
+                };
+                (a, b)
+            }
+            _ => {
+                let a = self.arg(l, terms, alias, at)?;
+                let b = self.arg(r, terms, alias, at)?;
+                for (t, other) in [(&a, r), (&b, l)] {
+                    if t.dated.is_some()
+                        && let Some(v) = not_a_date(other)
+                    {
+                        return Err(err(
+                            at,
+                            format!("{v} is not a date; {}", crate::validate::DATE_FORMS),
+                        ));
+                    }
+                }
+                (a, b)
+            }
+        };
+        Ok(match (a.dated, b.dated) {
+            (Some(Dated::Day), Some(Dated::Instant)) => {
+                let b = self.as_day(b);
+                (a, b)
+            }
+            (Some(Dated::Instant), Some(Dated::Day)) => (self.as_day(a), b),
+            _ => (a, b),
+        })
+    }
+
+    /// The date a function reads (2026-10-12): a text it is given, as a
+    /// literal or a parameter, is read as a day, and an instant as the day
+    /// it falls on, so `days_between`, `age_at`, `shift`, `bucket` and
+    /// `part` count days on both backends.
+    fn date_arg(&mut self, a: &Arg, terms: &[(String, Term)], alias: &str, at: &str) -> R<Term> {
+        if let Some(text) = self.loose_text(a) {
+            return self.written_date(&text, Dated::Day, at);
+        }
+        if let Some(v) = not_a_date(a) {
+            return Err(err(
+                at,
+                format!("{v} is not a date; {}", crate::validate::DATE_FORMS),
+            ));
+        }
+        let t = self.arg(a, terms, alias, at)?;
+        Ok(self.as_day(t))
+    }
+
+    /// The values one expression may yield, a coalesce's, a case's
+    /// branches, a least's or a greatest's (2026-10-12): where one is a
+    /// date, a text among them is read as a date, and all are instants
+    /// where every date among them is one, else days, so Postgres finds
+    /// one type for them. Each value's text, and what they are.
+    fn alike(
+        &mut self,
+        args: &[&Arg],
+        terms: &[(String, Term)],
+        alias: &str,
+        at: &str,
+    ) -> R<(Vec<String>, Option<Dated>)> {
+        let mut compiled: Vec<Option<Term>> = Vec::with_capacity(args.len());
+        for a in args {
+            compiled.push(match self.loose_text(a) {
+                Some(_) => None,
+                None => Some(self.arg(a, terms, alias, at)?),
+            });
+        }
+        let mut kinds: Vec<Dated> = compiled.iter().flatten().filter_map(|t| t.dated).collect();
+        if !kinds.is_empty() {
+            for a in args {
+                if let Some(w) = self
+                    .loose_text(a)
+                    .and_then(|t| crate::validate::written_date(&t))
+                {
+                    kinds.push(match w {
+                        WrittenDate::Day(_) => Dated::Day,
+                        WrittenDate::Instant(_) => Dated::Instant,
+                    });
+                }
+            }
+        }
+        let kind = match kinds.as_slice() {
+            [] => None,
+            k if k.iter().all(|d| *d == Dated::Instant) => Some(Dated::Instant),
+            _ => Some(Dated::Day),
+        };
+        let mut out = Vec::with_capacity(args.len());
+        for (a, t) in args.iter().zip(compiled) {
+            out.push(match (t, kind) {
+                (Some(t), Some(Dated::Day)) => self.as_day(t).sql,
+                (Some(t), _) => t.sql,
+                (None, Some(k)) => {
+                    let text = self.loose_text(a).unwrap_or_default();
+                    self.written_date(&text, k, at)?.sql
+                }
+                (None, None) => self.arg(a, terms, alias, at)?.sql,
+            });
+        }
+        Ok((out, kind))
+    }
+
+    /// A long list of dates, bound as one JSON array as [`Self::long_list`]
+    /// binds one, each read back as a date of the type it is compared as.
+    fn long_dates(&mut self, values: Vec<String>, ty: Type) -> String {
+        let doc = Value::Array(values.into_iter().map(Value::from).collect()).to_string();
+        let ph = self.p(Param::Text(doc), Type::Text);
+        match self.ctx.dialect {
+            Dialect::Sqlite => format!("(SELECT value FROM json_each({ph}))"),
+            _ => format!(
+                "(SELECT (e.v)::{} FROM jsonb_array_elements_text(({ph})::jsonb) AS e(v))",
+                if ty == Type::Timestamp {
+                    "timestamptz"
+                } else {
+                    "date"
+                }
+            ),
         }
     }
 
@@ -2740,6 +3024,7 @@ impl<'a> Builder<'a> {
                     ci: None,
                     param: None,
                     members: false,
+                    dated: Some(Dated::Day),
                 })
             }
             "voxel" | "voxel_max" => {
@@ -3057,15 +3342,10 @@ impl<'a> Builder<'a> {
                         exists
                     });
                 }
-                let a = self.arg(
+                let (a, b) = self.operands(
                     c.args
                         .first()
                         .ok_or_else(|| err(at, format!("{op} needs two arguments")))?,
-                    terms,
-                    alias,
-                    at,
-                )?;
-                let b = self.arg(
                     c.args
                         .get(1)
                         .ok_or_else(|| err(at, format!("{op} needs two arguments")))?,
@@ -3088,15 +3368,10 @@ impl<'a> Builder<'a> {
                 plain(self.compare(op, a, b, strict))
             }
             "~=" => {
-                let a = self.arg(
+                let (a, b) = self.operands(
                     c.args
                         .first()
                         .ok_or_else(|| err(at, "~= needs two arguments"))?,
-                    terms,
-                    alias,
-                    at,
-                )?;
-                let b = self.arg(
                     c.args
                         .get(1)
                         .ok_or_else(|| err(at, "~= needs two arguments"))?,
@@ -3114,6 +3389,15 @@ impl<'a> Builder<'a> {
                     }
                     None => return Err(err(at, "~= needs tol")),
                 };
+                // two dates are near within tol days, counted alike on both
+                // backends (2026-10-12)
+                if a.dated.is_some() || b.dated.is_some() {
+                    let (a, b) = (self.as_day(a), self.as_day(b));
+                    return plain(format!(
+                        "(ABS({}) <= {tol})",
+                        self.sql.days_between(&a.sql, &b.sql)
+                    ));
+                }
                 plain(format!("(ABS({} - {}) <= {tol})", a.sql, b.sql))
             }
             "in" | "not_in" => {
@@ -3199,6 +3483,59 @@ impl<'a> Builder<'a> {
                     } else {
                         format!("(NOT {any})")
                     });
+                }
+                if let Some(kind) = a.dated {
+                    // dates listed against a date (2026-10-12): each read as
+                    // a date, instants against an instant where every one is
+                    // an instant, else the days
+                    let mut written = Vec::new();
+                    for i in self.list_params(listed, at)? {
+                        let w = match &i {
+                            Param::Text(t) => crate::validate::written_date(t),
+                            _ => None,
+                        };
+                        written.push(w.ok_or_else(|| {
+                            let v = match i {
+                                Param::Text(t) => t,
+                                Param::Int(n) => n.to_string(),
+                                Param::Double(d) => d.to_string(),
+                                _ => "a value".to_string(),
+                            };
+                            err(
+                                at,
+                                format!("{v} is not a date; {}", crate::validate::DATE_FORMS),
+                            )
+                        })?);
+                    }
+                    let instants = kind == Dated::Instant
+                        && written.iter().all(|w| matches!(w, WrittenDate::Instant(_)));
+                    let (lhs, ty) = if instants {
+                        (a.sql, Type::Timestamp)
+                    } else {
+                        (self.as_day(a).sql, Type::Date)
+                    };
+                    let values: Vec<String> = written
+                        .iter()
+                        .map(|w| match w {
+                            WrittenDate::Instant(t) if instants => t.clone(),
+                            other => other.day().to_string(),
+                        })
+                        .collect();
+                    let list = if values.is_empty() {
+                        "(NULL)".to_string()
+                    } else if values.len() > LIST_BIND_MAX {
+                        self.long_dates(values, ty)
+                    } else {
+                        let ph: Vec<String> = values
+                            .into_iter()
+                            .map(|v| self.p(Param::from(v.as_str()), ty))
+                            .collect();
+                        format!("({})", ph.join(", "))
+                    };
+                    return plain(format!(
+                        "({lhs} {}IN {list})",
+                        if op == "not_in" { "NOT " } else { "" }
+                    ));
                 }
                 let list = self.list_placeholders(listed, at)?;
                 plain(format!(
@@ -3377,11 +3714,9 @@ impl<'a> Builder<'a> {
                 }
             }
             "coalesce" => {
-                let mut parts = Vec::new();
-                for a in &c.args {
-                    parts.push(self.arg(a, terms, alias, at)?.sql);
-                }
-                plain(format!("COALESCE({})", parts.join(", ")))
+                let args: Vec<&Arg> = c.args.iter().collect();
+                let (parts, dated) = self.alike(&args, terms, alias, at)?;
+                Ok(Term::plain(format!("COALESCE({})", parts.join(", "))).dated(dated))
             }
             "case" => {
                 let cond = self.arg(
@@ -3392,20 +3727,15 @@ impl<'a> Builder<'a> {
                     alias,
                     at,
                 )?;
-                let then = self.arg(
-                    c.args.get(1).ok_or_else(|| err(at, "case takes a then"))?,
-                    terms,
-                    alias,
-                    at,
-                )?;
-                let otherwise = match c.args.get(2) {
-                    Some(e) => self.arg(e, terms, alias, at)?.sql,
-                    None => "NULL".into(),
-                };
-                plain(format!(
+                let then = c.args.get(1).ok_or_else(|| err(at, "case takes a then"))?;
+                let branches: Vec<&Arg> = std::iter::once(then).chain(c.args.get(2)).collect();
+                let (values, dated) = self.alike(&branches, terms, alias, at)?;
+                let otherwise = values.get(1).cloned().unwrap_or_else(|| "NULL".into());
+                Ok(Term::plain(format!(
                     "CASE WHEN {} THEN {} ELSE {otherwise} END",
-                    cond.sql, then.sql
+                    cond.sql, values[0]
                 ))
+                .dated(dated))
             }
             "concat" => {
                 let mut parts = Vec::new();
@@ -3415,7 +3745,7 @@ impl<'a> Builder<'a> {
                 plain(format!("({})", parts.join(" || ")))
             }
             "days_between" => {
-                let a = self.arg(
+                let a = self.date_arg(
                     c.args
                         .first()
                         .ok_or_else(|| err(at, "days_between needs two dates"))?,
@@ -3423,7 +3753,7 @@ impl<'a> Builder<'a> {
                     alias,
                     at,
                 )?;
-                let b = self.arg(
+                let b = self.date_arg(
                     c.args
                         .get(1)
                         .ok_or_else(|| err(at, "days_between needs two dates"))?,
@@ -3434,7 +3764,7 @@ impl<'a> Builder<'a> {
                 plain(self.sql.days_between(&a.sql, &b.sql))
             }
             "shift" => {
-                let d = self.arg(
+                let d = self.date_arg(
                     c.args
                         .first()
                         .ok_or_else(|| err(at, "shift needs a date and a count"))?,
@@ -3462,10 +3792,10 @@ impl<'a> Builder<'a> {
                 } else {
                     format!("({} * {per})", n.sql)
                 };
-                plain(self.sql.shift_days(&d.sql, &days))
+                Ok(Term::plain(self.sql.shift_days(&d.sql, &days)).dated(Some(Dated::Day)))
             }
             "age_at" => {
-                let birth = self.arg(
+                let birth = self.date_arg(
                     c.args
                         .first()
                         .ok_or_else(|| err(at, "age_at needs a birth date and a day"))?,
@@ -3473,7 +3803,7 @@ impl<'a> Builder<'a> {
                     alias,
                     at,
                 )?;
-                let day = self.arg(
+                let day = self.date_arg(
                     c.args.get(1).ok_or_else(|| err(at, "age_at needs a day"))?,
                     terms,
                     alias,
@@ -3484,7 +3814,7 @@ impl<'a> Builder<'a> {
                 plain(self.sql.age_at((&birth.sql, &birth2), (&day.sql, &day2)))
             }
             "bucket" | "part" => {
-                let d = self.arg(
+                let d = self.date_arg(
                     c.args
                         .first()
                         .ok_or_else(|| err(at, format!("{op} needs a date")))?,
@@ -3509,27 +3839,21 @@ impl<'a> Builder<'a> {
                 )
             }
             "least" | "greatest" => {
-                let a = self.arg(
-                    c.args
-                        .first()
-                        .ok_or_else(|| err(at, format!("{op} needs two arguments")))?,
-                    terms,
-                    alias,
-                    at,
-                )?;
-                let b = self.arg(
-                    c.args
-                        .get(1)
-                        .ok_or_else(|| err(at, format!("{op} needs two arguments")))?,
-                    terms,
-                    alias,
-                    at,
-                )?;
-                plain(if op == "least" {
-                    self.sql.least(&a.sql, &b.sql)
+                let a = c
+                    .args
+                    .first()
+                    .ok_or_else(|| err(at, format!("{op} needs two arguments")))?;
+                let b = c
+                    .args
+                    .get(1)
+                    .ok_or_else(|| err(at, format!("{op} needs two arguments")))?;
+                let (v, dated) = self.alike(&[a, b], terms, alias, at)?;
+                Ok(Term::plain(if op == "least" {
+                    self.sql.least(&v[0], &v[1])
                 } else {
-                    self.sql.greatest(&a.sql, &b.sql)
+                    self.sql.greatest(&v[0], &v[1])
                 })
+                .dated(dated))
             }
             "json" => {
                 let a = self.arg(
@@ -3588,6 +3912,7 @@ impl<'a> Builder<'a> {
                     ci: None,
                     param: None,
                     members: false,
+                    dated: a.dated,
                 })
             }
             "share" => {
@@ -3650,15 +3975,21 @@ impl<'a> Builder<'a> {
                     format!("{} = {}", Self::link(&child, g, "ch", at)?, dot("k"))
                 };
                 let inner = match c.args.first() {
-                    Some(Arg::Clause(inner)) => Some(self.expr(inner, &child.terms, "ch", at)?.sql),
+                    Some(Arg::Clause(inner)) => Some(self.expr(inner, &child.terms, "ch", at)?),
                     Some(_) => return Err(err(at, "an aggregate's argument is a clause")),
                     None => None,
                 };
+                let dated = inner
+                    .as_ref()
+                    .and_then(|t| t.dated)
+                    .filter(|_| matches!(op, "min" | "max"));
+                let inner = inner.map(|t| t.sql);
                 let agg = self.aggregate(op, inner.as_deref(), at)?;
-                plain(format!(
+                Ok(Term::plain(format!(
                     "(SELECT {agg} FROM {} ch WHERE {link})",
                     cte_name(&target)
                 ))
+                .dated(dated))
             }
             other => Err(err(at, format!("{other} is not an op of the language"))),
         }
