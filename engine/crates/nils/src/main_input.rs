@@ -29,6 +29,16 @@
 //!   role is counted and named, with why: it holds no scan of the role; it
 //!   holds one and none is picked; a person said none stands for it; or, of
 //!   a dataset, its main scan is one only another dataset's folder holds.
+//! - **Every role a pipeline needs** (2026-10-12): written without a role,
+//!   `main@dataset:<name>` or `main@cohort:<name>`, a run takes the main
+//!   scans of each role its pipeline's descriptor names (`x-nils.input.
+//!   roles`: samseg-lesions and segcsvd need a T1w and a FLAIR), one pick a
+//!   visit a role, and a visit only where it has a main scan of every one.
+//!   The list is frozen into one handle whose entry records each role's own
+//!   (its visits, those without and why, and its stacks), so the run's
+//!   input names each stack by the role it was taken for; the visits that
+//!   lack a role are counted by role and by why, and named. `--chunk` splits
+//!   such a list by whole visits.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -53,32 +63,57 @@ pub(crate) const PREFIX: &str = "main:";
 /// are counted.
 const NAMED_MOST: usize = 200;
 
-/// `main:<role>@dataset:<name>` or `main:<role>@cohort:<name>`.
+/// `main:<role>@dataset:<name>` or `main:<role>@cohort:<name>`; since
+/// 2026-10-12 `main@dataset:<name>` or `main@cohort:<name>`, the main scans
+/// of each role the run's pipeline needs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Spec {
-    pub(crate) role: String,
+    /// The role, or none for each role the pipeline names.
+    pub(crate) role: Option<String>,
     pub(crate) kind: ScopeKind,
     pub(crate) name: String,
 }
 
+/// What a scope's main scans of every role a pipeline needs are written
+/// with.
+const EVERY: &str = "main@";
+
 impl Spec {
     /// The scope's main scans a text names; none where it does not start
-    /// with `main:`, and why where it starts so and is not one.
+    /// with `main:`, or with `main@` and a scope, and why where it starts so
+    /// and is not one. `main@2` is a selection named main at its second
+    /// version, never a scope.
     pub(crate) fn parse(text: &str) -> Option<Result<Spec, String>> {
-        let rest = text.trim().strip_prefix(PREFIX)?;
+        let t = text.trim();
+        let (role, scope) = match t.strip_prefix(PREFIX) {
+            Some(rest) => (Some(rest), None),
+            None => (
+                None,
+                Some(t.strip_prefix(EVERY).filter(|r| r.contains(':'))?),
+            ),
+        };
         let form = || {
             format!(
-                "{}: a dataset's or a cohort's main scans are main:<role>@dataset:<name> or main:<role>@cohort:<name>",
-                text.trim()
+                "{t}: a dataset's or a cohort's main scans are main:<role>@dataset:<name> or main:<role>@cohort:<name>, or main@dataset:<name> or main@cohort:<name> for each role the pipeline needs"
             )
         };
         Some((|| {
-            let (role, scope) = rest.split_once('@').ok_or_else(form)?;
+            let (role, scope) = match (role, scope) {
+                (Some(rest), _) => {
+                    let (role, scope) = rest.split_once('@').ok_or_else(form)?;
+                    let role = role.trim().to_ascii_lowercase();
+                    if role.is_empty() {
+                        return Err(form());
+                    }
+                    (Some(role), scope)
+                }
+                (None, Some(scope)) => (None, scope),
+                (None, None) => return Err(form()),
+            };
             let (kind, name) = scope.split_once(':').ok_or_else(form)?;
             let kind = ScopeKind::parse(&kind.trim().to_ascii_lowercase()).ok_or_else(form)?;
-            let role = role.trim().to_ascii_lowercase();
             let name = name.trim();
-            if role.is_empty() || name.is_empty() {
+            if name.is_empty() {
                 return Err(form());
             }
             Ok(Spec {
@@ -91,7 +126,18 @@ impl Spec {
 
     /// As it is written.
     pub(crate) fn text(&self) -> String {
-        format!("{PREFIX}{}@{}:{}", self.role, self.kind.name(), self.name)
+        match &self.role {
+            Some(role) => format!("{PREFIX}{role}@{}:{}", self.kind.name(), self.name),
+            None => format!("{EVERY}{}:{}", self.kind.name(), self.name),
+        }
+    }
+
+    /// The same scope's main scans of one role.
+    fn of_role(&self, role: &str) -> Spec {
+        Spec {
+            role: Some(role.to_string()),
+            ..self.clone()
+        }
     }
 }
 
@@ -172,6 +218,9 @@ pub(crate) struct Resolved {
     pub(crate) visits: usize,
     pub(crate) main_visits: usize,
     pub(crate) without: Vec<Without>,
+    /// Each visit with a main scan of the role, by its subject and its day,
+    /// with that scan's stacks and their subject.
+    pub(crate) by_visit: BTreeMap<(i64, String), Vec<(i64, i64)>>,
 }
 
 fn list(ids: &[i64]) -> String {
@@ -185,13 +234,17 @@ fn said(e: impl std::fmt::Display) -> Exit {
     fail(e.to_string())
 }
 
-/// Resolve a scope's main scans for a role now, as a run takes them.
+/// Resolve a scope's main scans for a role now, as a run takes them: the
+/// spec's own role.
 pub(crate) fn resolve(
     registry: &mut Registry,
     pack: &nils_pack::Pack,
     spec: &Spec,
 ) -> Result<Resolved, Exit> {
-    let role = spec.role.as_str();
+    let role = spec
+        .role
+        .as_deref()
+        .ok_or_else(|| usage(format!("{} names no role", spec.text())))?;
     let model = pack
         .picks
         .iter()
@@ -350,6 +403,7 @@ pub(crate) fn resolve(
     let empty: Vec<i64> = Vec::new();
     let mut stacks: Vec<(i64, i64)> = Vec::new();
     let mut without: Vec<Without> = Vec::new();
+    let mut by_visit: BTreeMap<(i64, String), Vec<(i64, i64)>> = BTreeMap::new();
     let mut main_visits = 0usize;
     for ((subject, day), here) in &visits {
         let picked = on
@@ -359,7 +413,9 @@ pub(crate) fn resolve(
         match judge(picked, |s| in_scope.contains(&s), holds_role) {
             Ok(mine) => {
                 main_visits += 1;
-                stacks.extend(mine.into_iter().map(|s| (s, *subject)));
+                let mine: Vec<(i64, i64)> = mine.into_iter().map(|s| (s, *subject)).collect();
+                stacks.extend(mine.iter().copied());
+                by_visit.insert((*subject, day.clone()), mine);
             }
             Err(why) => without.push(Without {
                 subject_id: *subject,
@@ -408,6 +464,7 @@ pub(crate) fn resolve(
         visits: visits.len(),
         main_visits,
         without,
+        by_visit,
     })
 }
 
@@ -422,9 +479,14 @@ impl Resolved {
         out.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
         json!(
             out.iter()
-                .map(|(why, n)| json!({"why": why.words(&self.spec.role), "visits": n}))
+                .map(|(why, n)| json!({"why": why.words(self.role()), "visits": n}))
                 .collect::<Vec<_>>()
         )
+    }
+
+    /// The role it was resolved for.
+    fn role(&self) -> &str {
+        self.spec.role.as_deref().unwrap_or_default()
     }
 
     /// What the frozen list records of where it came from, in the handle's
@@ -433,7 +495,7 @@ impl Resolved {
     /// visits and the visits with none by why. No subject, no day.
     pub(crate) fn entry(&self) -> Value {
         json!({
-            "main": self.spec.role,
+            "main": self.role(),
             "of": self.spec.text(),
             "scope": self.scope.to_json(),
             "picks": self.picks,
@@ -455,11 +517,220 @@ impl Resolved {
                 .take(NAMED_MOST)
                 .map(|w| json!({
                     "subject_id": w.subject_id, "subject": w.subject,
-                    "session_day": w.day, "why": w.why.words(&self.spec.role),
+                    "session_day": w.day, "why": w.why.words(self.role()),
                 }))
                 .collect::<Vec<_>>()
         );
         doc
+    }
+}
+
+/// A visit that lacks a role: its subject's code, and each role it lacks
+/// with why.
+type Lacking<'a> = (String, Vec<(&'a str, Why)>);
+
+/// A scope's main scans of the roles a run takes, resolved now: of one
+/// role, as #411 resolved them; or (2026-10-12) of each role a pipeline
+/// needs, a visit taken only where it has a main scan of every one.
+pub(crate) struct Main {
+    /// As written, with the scope's own name.
+    pub(crate) spec: Spec,
+    /// Each role's own resolution, in the order the pipeline names them.
+    pub(crate) roles: Vec<Resolved>,
+    /// The visits taken, each with its stacks and their subject: one role's
+    /// every visit with a main scan; of several roles the visits with a main
+    /// scan of each, in visit order.
+    visits: Vec<Vec<(i64, i64)>>,
+    /// The list, each stack once with its subject, in stack order.
+    pub(crate) stacks: Vec<(i64, i64)>,
+}
+
+impl Main {
+    /// One role's main scans, as they were resolved.
+    fn of_one(r: Resolved) -> Main {
+        let visits = r.by_visit.values().cloned().collect();
+        Main {
+            spec: r.spec.clone(),
+            stacks: r.stacks.clone(),
+            visits,
+            roles: vec![r],
+        }
+    }
+
+    /// Several roles' main scans: the visits with a main scan of each.
+    fn of_every(spec: Spec, roles: Vec<Resolved>) -> Main {
+        let mut visits: Vec<Vec<(i64, i64)>> = Vec::new();
+        if let Some((first, rest)) = roles.split_first() {
+            for (key, mine) in &first.by_visit {
+                if rest.iter().all(|r| r.by_visit.contains_key(key)) {
+                    let mut all = mine.clone();
+                    for r in rest {
+                        all.extend(r.by_visit[key].iter().copied());
+                    }
+                    all.sort_unstable();
+                    all.dedup();
+                    visits.push(all);
+                }
+            }
+        }
+        let mut stacks: Vec<(i64, i64)> = visits.iter().flatten().copied().collect();
+        stacks.sort_unstable();
+        stacks.dedup();
+        let spec = Spec {
+            name: roles
+                .first()
+                .map_or(spec.name.clone(), |r| r.spec.name.clone()),
+            ..spec
+        };
+        Main {
+            spec,
+            roles,
+            visits,
+            stacks,
+        }
+    }
+
+    fn several(&self) -> bool {
+        self.roles.len() > 1
+    }
+
+    /// The roles, in the pipeline's order.
+    fn role_names(&self) -> Vec<&str> {
+        self.roles.iter().map(Resolved::role).collect()
+    }
+
+    /// Each visit that lacks a role, by its subject and its day, with every
+    /// role it lacks and why, and its subject's code.
+    fn lacking(&self) -> BTreeMap<(i64, String), Lacking<'_>> {
+        let mut out: BTreeMap<(i64, String), Lacking<'_>> = BTreeMap::new();
+        for r in &self.roles {
+            for w in &r.without {
+                out.entry((w.subject_id, w.day.clone()))
+                    .or_insert_with(|| (w.subject.clone(), Vec::new()))
+                    .1
+                    .push((r.role(), w.why));
+            }
+        }
+        out
+    }
+
+    /// What the frozen list records of where it came from, for these of its
+    /// stacks (a part's, or all): one role's entry as #411 wrote it; of
+    /// several, the roles, the visits with a main scan of each, the visits
+    /// that lack one counted by role and by why, and each role's own entry
+    /// with the stacks it was taken for (`members`), so a run names each
+    /// stack by its role. No subject, no day.
+    fn entry_for(&self, stacks: &[(i64, i64)]) -> Value {
+        if !self.several() {
+            return self.roles[0].entry();
+        }
+        let first = &self.roles[0];
+        let held: BTreeSet<i64> = stacks.iter().map(|(s, _)| *s).collect();
+        let mut by: BTreeMap<(usize, Why), usize> = BTreeMap::new();
+        let lacking = self.lacking();
+        for (_, roles) in lacking.values() {
+            for (role, why) in roles {
+                let at = self
+                    .role_names()
+                    .iter()
+                    .position(|r| r == role)
+                    .unwrap_or(0);
+                *by.entry((at, *why)).or_default() += 1;
+            }
+        }
+        let mut why: Vec<((usize, Why), usize)> = by.into_iter().collect();
+        why.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        let names = self.role_names();
+        json!({
+            "main": names.join("+"),
+            "roles": names,
+            "of": self.spec.text(),
+            "scope": first.scope.to_json(),
+            "picks": first.picks,
+            "read": first.of.describe(),
+            "visits": first.visits,
+            "main_visits": self.visits.len(),
+            "stacks": self.stacks.len(),
+            "without": {
+                "visits": lacking.len(),
+                "why": why.iter().map(|((at, w), n)| json!({
+                    "role": names[*at], "why": w.words(names[*at]), "visits": n,
+                })).collect::<Vec<_>>(),
+            },
+            "by_role": self.roles.iter().map(|r| {
+                let members: Vec<i64> = r.stacks.iter().map(|(s, _)| *s).filter(|s| held.contains(s)).collect();
+                json!({
+                    "main": r.role(),
+                    "main_visits": r.main_visits,
+                    "stacks": members.len(),
+                    "without": {"visits": r.without.len(), "why": r.why_counts()},
+                    "members": members,
+                })
+            }).collect::<Vec<_>>(),
+        })
+    }
+
+    /// What the frozen list records, of all its stacks.
+    pub(crate) fn entry(&self) -> Value {
+        self.entry_for(&self.stacks)
+    }
+
+    /// The pre-flight's `main`: the entry, with the visits that lack a role
+    /// named (their subject and day, at most [`NAMED_MOST`]; of several
+    /// roles a visit once for each role it lacks, with the role), and no
+    /// stack of a role listed.
+    pub(crate) fn preflight(&self) -> Value {
+        if !self.several() {
+            return self.roles[0].preflight();
+        }
+        let mut doc = shown(&self.entry());
+        let mut named: Vec<Value> = Vec::new();
+        for ((subject_id, day), (subject, roles)) in self.lacking() {
+            for (role, why) in roles {
+                if named.len() < NAMED_MOST {
+                    named.push(json!({
+                        "subject_id": subject_id, "subject": subject, "session_day": day,
+                        "role": role, "why": why.words(role),
+                    }));
+                }
+            }
+        }
+        doc["without"]["named"] = json!(named);
+        doc
+    }
+
+    /// The pack version the picks were read under.
+    fn pack_version(&self) -> &str {
+        &self.roles[0].pack_version
+    }
+
+    /// The list in parts of at most `size` stacks, in stack order; of
+    /// several roles in parts of whole visits, so a visit's main scans are
+    /// never split (a visit with more stacks than a part holds is a part of
+    /// its own).
+    fn parts(&self, size: usize) -> Vec<Vec<(i64, i64)>> {
+        let size = size.max(1);
+        if !self.several() {
+            return self.stacks.chunks(size).map(<[_]>::to_vec).collect();
+        }
+        let mut visits = self.visits.clone();
+        visits.sort_by_key(|v| v.first().map(|(s, _)| *s));
+        let mut out: Vec<Vec<(i64, i64)>> = Vec::new();
+        let mut part: Vec<(i64, i64)> = Vec::new();
+        for v in visits {
+            if !part.is_empty() && part.len() + v.len() > size {
+                out.push(std::mem::take(&mut part));
+            }
+            part.extend(v);
+        }
+        if !part.is_empty() {
+            out.push(part);
+        }
+        for p in &mut out {
+            p.sort_unstable();
+            p.dedup();
+        }
+        out
     }
 }
 
@@ -478,31 +749,107 @@ pub(crate) fn entry_of(store: &mut Store, handle: i64) -> Option<Value> {
     entry_in(&h.selection_versions).cloned()
 }
 
+/// An entry as a door and the keyboard show it: each role's own stacks
+/// left out, which only the run reads (2026-10-12).
+pub(crate) fn shown(entry: &Value) -> Value {
+    let mut doc = entry.clone();
+    if let Some(parts) = doc["by_role"].as_array_mut() {
+        for p in parts {
+            if let Some(o) = p.as_object_mut() {
+                o.remove("members");
+            }
+        }
+    }
+    doc
+}
+
+/// The roles each stack of a frozen list of main scans was taken for
+/// (2026-10-12): of several roles, by each role's own stacks as the entry
+/// records them; of one, the list's role for every stack.
+pub(crate) fn stack_roles(entry: &Value, stacks: &[i64]) -> BTreeMap<i64, BTreeSet<String>> {
+    let mut out: BTreeMap<i64, BTreeSet<String>> = BTreeMap::new();
+    match entry["by_role"].as_array() {
+        Some(parts) => {
+            let wanted: BTreeSet<i64> = stacks.iter().copied().collect();
+            for p in parts {
+                let role = p["main"].as_str().unwrap_or_default();
+                for s in p["members"].as_array().into_iter().flatten() {
+                    if let Some(s) = s.as_i64().filter(|s| wanted.contains(s)) {
+                        out.entry(s).or_default().insert(role.to_string());
+                    }
+                }
+            }
+        }
+        None => {
+            let role = entry["main"].as_str().unwrap_or_default().to_string();
+            for s in stacks {
+                out.insert(*s, BTreeSet::from([role.clone()]));
+            }
+        }
+    }
+    out
+}
+
 /// The picks a handle of a scope's main scans was resolved from, as a
 /// release records them, with `main`, the role its stacks are the main
 /// scans of: what a run over it releases its input under, and what the
 /// release freezes each of its stacks as (record 55, rulings of
-/// 2026-10-12, item 6, carried to releases).
+/// 2026-10-12, item 6, carried to releases). Of a list over several roles
+/// (2026-10-12), `by_role` as well: each role with its own stacks, which
+/// the release freezes as that role's and does not record.
 pub(crate) fn reading_of(store: &mut Store, handle: i64) -> Option<Value> {
     entry_of(store, handle).map(|e| {
         let mut picks = e["picks"].clone();
         if picks.is_object() {
             picks["main"] = e["main"].clone();
+            if let Some(parts) = e["by_role"].as_array() {
+                let mut roles = serde_json::Map::new();
+                for p in parts {
+                    if let Some(role) = p["main"].as_str() {
+                        roles.insert(role.to_string(), p["members"].clone());
+                    }
+                }
+                picks["by_role"] = Value::Object(roles);
+            }
         }
         picks
     })
 }
 
+/// The roles an entry names, in words: "t1w", "t1w and flair".
+fn roles_words(doc: &Value) -> String {
+    match doc["roles"].as_array() {
+        Some(roles) => {
+            let r: Vec<&str> = roles.iter().filter_map(Value::as_str).collect();
+            match r.split_last() {
+                Some((last, rest)) if !rest.is_empty() => format!("{} and {last}", rest.join(", ")),
+                _ => r.join(""),
+            }
+        }
+        None => doc["main"].as_str().unwrap_or("main").to_string(),
+    }
+}
+
 /// A main-scans entry in a line: what was read, and the visits with none.
 pub(crate) fn line(doc: &Value) -> String {
-    let role = doc["main"].as_str().unwrap_or("main");
     let n = |v: &Value| v.as_u64().unwrap_or(0);
-    let mut out = format!(
-        "{}: {} {role} scans of {} visits",
-        doc["read"].as_str().unwrap_or_default(),
-        n(&doc["stacks"]),
-        n(&doc["main_visits"])
-    );
+    let several = doc["roles"].is_array();
+    let role = roles_words(doc);
+    let mut out = if several {
+        format!(
+            "{}: {} {role} scans of {} visits with each",
+            doc["read"].as_str().unwrap_or_default(),
+            n(&doc["stacks"]),
+            n(&doc["main_visits"])
+        )
+    } else {
+        format!(
+            "{}: {} {role} scans of {} visits",
+            doc["read"].as_str().unwrap_or_default(),
+            n(&doc["stacks"]),
+            n(&doc["main_visits"])
+        )
+    };
     let none = n(&doc["without"]["visits"]);
     if none > 0 {
         let why: Vec<String> = doc["without"]["why"]
@@ -517,26 +864,33 @@ pub(crate) fn line(doc: &Value) -> String {
                 )
             })
             .collect();
-        out.push_str(&format!(
-            "; {none} {} no main {role} ({})",
-            if none == 1 {
-                "visit has"
-            } else {
-                "visits have"
-            },
-            why.join("; ")
-        ));
+        let have = if none == 1 {
+            "visit has"
+        } else {
+            "visits have"
+        };
+        out.push_str(&if several {
+            format!("; {none} {have} no main scan of one ({})", why.join("; "))
+        } else {
+            format!("; {none} {have} no main {role} ({})", why.join("; "))
+        });
     }
     out
 }
 
 /// Why a scope's main scans hold nothing to run over.
 pub(crate) fn nothing(doc: &Value) -> String {
-    let role = doc["main"].as_str().unwrap_or("main");
+    let role = roles_words(doc);
     let visits = doc["visits"].as_u64().unwrap_or(0);
     let scope = doc["of"].as_str().unwrap_or("the scope");
     if visits == 0 {
         return format!("{scope} holds no visit, so there is no main {role} scan to run over");
+    }
+    if doc["roles"].is_array() {
+        return format!(
+            "{scope} has no visit with a main scan of each of {role} to run over: {}",
+            line(doc)
+        );
     }
     format!("{scope} has no main {role} scan to run over: {}", line(doc))
 }
@@ -545,12 +899,12 @@ pub(crate) fn nothing(doc: &Value) -> String {
 /// entry they came from.
 fn save(
     store: &mut Store,
-    r: &Resolved,
+    m: &Main,
     stacks: &[(i64, i64)],
     part: Option<(usize, usize)>,
     epoch: i64,
 ) -> Result<Frozen, Exit> {
-    let mut entry = r.entry();
+    let mut entry = m.entry_for(stacks);
     if let Some((i, of)) = part {
         entry["part"] = json!({"part": i, "of": of});
     }
@@ -566,7 +920,7 @@ fn save(
         epoch,
         &crate::operations::Pinned {
             versions: json!([entry]),
-            pack_version: Some(&r.pack_version),
+            pack_version: Some(m.pack_version()),
             scheme_digest: Some(&scheme),
         },
     )
@@ -578,26 +932,66 @@ fn save(
     })
 }
 
-/// The pack and the registry a freeze reads, and the main scans resolved.
+/// The roles a spec takes: its own, or (2026-10-12) each role the run's
+/// pipeline needs, each once in the pipeline's order; refused where it
+/// names none and the pipeline needs none.
+fn roles_of(spec: &Spec, needs: &[String]) -> Result<Vec<String>, Exit> {
+    if let Some(role) = &spec.role {
+        return Ok(vec![role.clone()]);
+    }
+    let mut out: Vec<String> = Vec::new();
+    for r in needs {
+        let r = r.trim().to_ascii_lowercase();
+        if !r.is_empty() && !out.contains(&r) {
+            out.push(r);
+        }
+    }
+    if out.is_empty() {
+        return Err(usage(format!(
+            "{} takes the main scans of each role a pipeline needs, and here none is named: write main:<role>@{}:{}",
+            spec.text(),
+            spec.kind.name(),
+            spec.name
+        )));
+    }
+    Ok(out)
+}
+
+/// The pack and the registry a freeze reads, and the main scans resolved:
+/// the spec's role, or each role `needs` names.
 fn resolve_at(
     home: &Home,
     spec: &Spec,
     pack_dir: Option<PathBuf>,
     pack_name: &str,
-) -> Result<(Resolved, Registry), Exit> {
+    needs: &[String],
+) -> Result<(Main, Registry), Exit> {
+    let roles = roles_of(spec, needs)?;
     let dir = crate::pack_dir(home, pack_dir).map_err(|_| {
         usage("no packs here: pass --pack-dir DIR to read a dataset's or a cohort's main scans")
     })?;
     let pack = crate::ask_cli::load_pack(&dir, pack_name)?;
     let mut registry = crate::open(home)?;
-    let r = resolve(&mut registry, &pack, spec)?;
-    Ok((r, registry))
+    let main = match roles.as_slice() {
+        [role] => Main::of_one(resolve(&mut registry, &pack, &spec.of_role(role))?),
+        many => {
+            let mut each = Vec::with_capacity(many.len());
+            for role in many {
+                each.push(resolve(&mut registry, &pack, &spec.of_role(role))?);
+            }
+            Main::of_every(spec.clone(), each)
+        }
+    };
+    Ok((main, registry))
 }
 
 /// `ask_cli::freeze` of a scope's main scans: resolved now and frozen into
 /// one handle, whole, or as one page in stack order (the stacks after
 /// `after`, at most `limit`). A campaign or a label set is made from a
-/// saved selection, so a freeze under the ask's caps is refused.
+/// saved selection, so a freeze under the ask's caps is refused. `needs`
+/// are the roles a run's pipeline needs, which a spec without a role takes
+/// (2026-10-12); a list of several roles is frozen whole, or by a run's
+/// `--chunk` in parts of whole visits.
 pub(crate) fn freeze(
     home: &Home,
     spec: &Spec,
@@ -605,7 +999,8 @@ pub(crate) fn freeze(
     pack_dir: Option<PathBuf>,
     pack_name: &str,
     how: Freeze,
-) -> Result<(Frozen, Resolved), Exit> {
+    needs: &[String],
+) -> Result<(Frozen, Main), Exit> {
     if want != Grain::Stack {
         return Err(usage(format!(
             "{} names stacks, the main scans of each visit; a set of {}s is not made from it",
@@ -619,54 +1014,64 @@ pub(crate) fn freeze(
             spec.text()
         )));
     }
-    let (r, mut registry) = resolve_at(home, spec, pack_dir, pack_name)?;
+    let (m, mut registry) = resolve_at(home, spec, pack_dir, pack_name, needs)?;
     let stacks: Vec<(i64, i64)> = match how {
-        Freeze::Page { after, limit } => r
+        Freeze::Page { .. } if m.several() => {
+            return Err(usage(format!(
+                "{} is frozen whole, or by a run's --chunk in parts of whole visits",
+                m.spec.text()
+            )));
+        }
+        Freeze::Page { after, limit } => m
             .stacks
             .iter()
             .filter(|(s, _)| after.is_none_or(|a| *s > a))
             .take(usize::try_from(limit).unwrap_or(usize::MAX))
             .copied()
             .collect(),
-        _ => r.stacks.clone(),
+        _ => m.stacks.clone(),
     };
     let epoch = registry.meta().epoch;
-    let frozen = save(registry.store(), &r, &stacks, None, epoch)?;
-    Ok((frozen, r))
+    let frozen = save(registry.store(), &m, &stacks, None, epoch)?;
+    Ok((frozen, m))
 }
 
 /// A run's `--select main:...`: resolved once, and frozen whole, or with
 /// `--chunk` in parts of at most that many stacks in stack order, each a
-/// handle of its own that records the same entry and its part. Refused
-/// where there is no main scan to run over, with the visits that have none.
+/// handle of its own that records the same entry and its part; of several
+/// roles in parts of whole visits, each recording its own stacks of each
+/// role. Refused where there is no main scan to run over, with the visits
+/// that have none. `needs` are the roles the run's pipeline needs.
 pub(crate) fn freeze_parts(
     home: &Home,
     spec: &Spec,
     pack_dir: Option<PathBuf>,
     pack_name: &str,
     chunk: Option<u64>,
+    needs: &[String],
 ) -> Result<Vec<i64>, Exit> {
     if chunk == Some(0) {
         return Err(usage("--chunk is a number of stacks, at least 1"));
     }
-    let (r, mut registry) = resolve_at(home, spec, pack_dir, pack_name)?;
-    if r.stacks.is_empty() {
-        return Err(usage(nothing(&r.entry())));
+    let (m, mut registry) = resolve_at(home, spec, pack_dir, pack_name, needs)?;
+    if m.stacks.is_empty() {
+        return Err(usage(nothing(&m.entry())));
     }
-    let size = chunk.map_or(r.stacks.len(), |c| usize::try_from(c).unwrap_or(usize::MAX));
-    let parts: Vec<&[(i64, i64)]> = r.stacks.chunks(size.max(1)).collect();
+    let size = chunk.map_or(m.stacks.len(), |c| usize::try_from(c).unwrap_or(usize::MAX));
+    let parts = m.parts(size);
     let epoch = registry.meta().epoch;
     let mut out = Vec::with_capacity(parts.len());
     for (i, stacks) in parts.iter().enumerate() {
         let part = (parts.len() > 1).then_some((i + 1, parts.len()));
-        out.push(save(registry.store(), &r, stacks, part, epoch)?.handle);
+        out.push(save(registry.store(), &m, stacks, part, epoch)?.handle);
     }
     if out.len() > 1 {
         eprintln!(
-            "{}: {} stack(s) in {} parts of at most {size}, handles {}",
-            r.spec.text(),
-            r.stacks.len(),
+            "{}: {} stack(s) in {} parts of at most {size}{}, handles {}",
+            m.spec.text(),
+            m.stacks.len(),
             out.len(),
+            if m.several() { ", whole visits" } else { "" },
             list(&out)
         );
     }
@@ -683,7 +1088,7 @@ mod tests {
         assert_eq!(
             s,
             Spec {
-                role: "t1w".into(),
+                role: Some("t1w".into()),
                 kind: ScopeKind::Dataset,
                 name: "study-anon".into()
             }
@@ -705,10 +1110,81 @@ mod tests {
             "main:t1w@datasets:x",
             "main:@dataset:x",
             "main:t1w@cohort:",
+            "main@datasets:x",
+            "main@cohort:",
         ] {
             let e = Spec::parse(bad).unwrap().unwrap_err();
             assert!(e.contains("main:<role>@dataset:<name>"), "{bad}: {e}");
+            assert!(
+                e.contains("main@dataset:<name> or main@cohort:<name>"),
+                "{bad}: {e}"
+            );
         }
+        // 2026-10-12: without a role, the main scans of each role the
+        // pipeline needs
+        let every = Spec::parse(" main@Dataset:study-anon ").unwrap().unwrap();
+        assert_eq!(every.role, None);
+        assert_eq!(
+            (every.kind, every.name.as_str()),
+            (ScopeKind::Dataset, "study-anon")
+        );
+        assert_eq!(every.text(), "main@dataset:study-anon");
+        assert_eq!(
+            Spec::parse("main@cohort:ms 2026").unwrap().unwrap().text(),
+            "main@cohort:ms 2026"
+        );
+        // a selection named main is no scope
+        assert!(Spec::parse("main@2").is_none());
+        let ok = |r: Result<Vec<String>, Exit>| r.unwrap_or_else(|e| panic!("{}", e.message));
+        assert_eq!(
+            ok(roles_of(
+                &every,
+                &["T1w".into(), "flair".into(), "t1w".into()]
+            )),
+            vec!["t1w", "flair"]
+        );
+        assert_eq!(ok(roles_of(&s, &["flair".into()])), vec!["t1w"]);
+        let Err(none) = roles_of(&every, &[]) else {
+            panic!("a spec without a role and no roles needed is refused");
+        };
+        let none = none.message;
+        assert!(
+            none.contains("write main:<role>@dataset:study-anon"),
+            "{none}"
+        );
+    }
+
+    /// 2026-10-12: a list of several roles names each stack by the role it
+    /// was taken for, as its entry records it; one of one role, every stack
+    /// by the list's role; and the doors never show a role's own stacks.
+    #[test]
+    fn each_stack_is_the_main_scan_of_the_role_it_was_taken_for() {
+        let several = json!({
+            "main": "t1w+flair", "roles": ["t1w", "flair"],
+            "by_role": [
+                {"main": "t1w", "members": [1, 3], "stacks": 2},
+                {"main": "flair", "members": [2, 4], "stacks": 2},
+            ],
+        });
+        let roles = stack_roles(&several, &[1, 2, 3]);
+        assert_eq!(
+            roles,
+            BTreeMap::from([
+                (1, BTreeSet::from(["t1w".to_string()])),
+                (2, BTreeSet::from(["flair".to_string()])),
+                (3, BTreeSet::from(["t1w".to_string()])),
+            ])
+        );
+        let one = json!({"main": "t1w", "picks": {}});
+        assert_eq!(
+            stack_roles(&one, &[7]),
+            BTreeMap::from([(7, BTreeSet::from(["t1w".to_string()]))])
+        );
+        let shown = shown(&several);
+        assert!(shown["by_role"][0].get("members").is_none(), "{shown}");
+        assert_eq!(shown["by_role"][0]["stacks"], 2);
+        assert_eq!(roles_words(&several), "t1w and flair");
+        assert_eq!(roles_words(&one), "t1w");
     }
 
     #[test]

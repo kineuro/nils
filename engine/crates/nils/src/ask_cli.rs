@@ -1764,7 +1764,9 @@ pub(crate) fn freeze(
 ) -> Result<Frozen, Exit> {
     if let Some(main) = crate::main_input::Spec::parse(spec) {
         let main = main.map_err(usage)?;
-        return crate::main_input::freeze(home, &main, want, pack_dir, pack_name, how)
+        // no pipeline here: a spec without a role is refused with the form
+        // that names one (2026-10-12)
+        return crate::main_input::freeze(home, &main, want, pack_dir, pack_name, how, &[])
             .map(|(f, _)| f);
     }
     let dir = crate::pack_dir(home, pack_dir)

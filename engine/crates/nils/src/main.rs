@@ -11748,8 +11748,12 @@ fn picks_line(doc: &serde_json::Value) -> String {
             _ => "the pack's defaults".to_string(),
         },
     };
+    // of a list over several roles (2026-10-12), each named
     let read = match doc["main"].as_str() {
-        Some(role) => format!("a run's list of main {role} scans, read under {read}"),
+        Some(role) => format!(
+            "a run's list of main {} scans, read under {read}",
+            role.replace('+', " and ")
+        ),
         None => read,
     };
     match doc["frozen"].as_object() {

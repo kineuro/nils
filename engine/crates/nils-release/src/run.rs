@@ -2862,7 +2862,7 @@ fn picks_read(
     // dataset's or a cohort's main scans is the picks it was resolved from,
     // which the release records as they were recorded
     if let Some(doc) = &selection.picks {
-        return Ok((Of::of_record(doc), Some(doc.clone())));
+        return Ok((Of::of_record(doc), Some(picks_recorded(doc))));
     }
     let (of, doc) = nils_registry::pick_truth::for_release(
         store,
@@ -2899,13 +2899,9 @@ fn freeze_picks(
             .map(|r| Ok((r.int(0)?, r.int(1)?)))
             .collect::<Result<_, StoreError>>()?
     };
-    let role = settings
-        .selection
-        .picks
-        .as_ref()
-        .and_then(|doc| doc["main"].as_str());
-    let listed = match role {
-        Some(role) => {
+    let roles = settings.selection.picks.as_ref().map(listed_roles);
+    let listed = match roles.filter(|r| !r.is_empty()) {
+        Some(roles) => {
             // each stack's visit as a pick names it: the first day of its
             // session under the default scheme
             let default = Scheme::default();
@@ -2921,20 +2917,73 @@ fn freeze_picks(
                     .map_err(session_err)?;
                 &other
             };
-            Some(nils_registry::pick_truth::Listed {
-                role: role.to_string(),
-                stacks: visits_of(registry.store(), &settings.selection.stacks, labels)?,
-            })
+            let visits = visits_of(registry.store(), &settings.selection.stacks, labels)?;
+            roles
+                .into_iter()
+                .map(|(role, of)| nils_registry::pick_truth::Listed {
+                    role,
+                    stacks: visits
+                        .iter()
+                        .filter(|(s, _, _)| of.as_ref().is_none_or(|of| of.contains(s)))
+                        .cloned()
+                        .collect(),
+                })
+                .collect()
         }
-        None => None,
+        None => Vec::new(),
     };
     Ok(nils_registry::pick_truth::freeze(
         registry.store(),
         release,
         reading,
         &taken,
-        listed.as_ref(),
+        &listed,
     )?)
+}
+
+/// The roles a run's list of a scope's main scans was taken for, as its
+/// picks document names them: `main`, the one role every stack of the list
+/// is the main scan of; or, of a list over several roles (2026-10-12),
+/// `by_role`, each role with its own stacks.
+fn listed_roles(doc: &serde_json::Value) -> Vec<(String, Option<std::collections::BTreeSet<i64>>)> {
+    match doc["by_role"].as_object() {
+        Some(roles) => roles
+            .iter()
+            .map(|(role, stacks)| {
+                (
+                    role.clone(),
+                    Some(
+                        stacks
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .filter_map(serde_json::Value::as_i64)
+                            .collect(),
+                    ),
+                )
+            })
+            .collect(),
+        None => doc["main"]
+            .as_str()
+            .map(|role| vec![(role.to_string(), None)])
+            .unwrap_or_default(),
+    }
+}
+
+/// A run's picks document as the release records it: each role's own
+/// stacks left out (the list is the release's stacks), its roles named.
+fn picks_recorded(doc: &serde_json::Value) -> serde_json::Value {
+    let mut out = doc.clone();
+    if let Some(o) = out.as_object_mut()
+        && let Some(roles) = o.remove("by_role")
+    {
+        let names: Vec<String> = roles
+            .as_object()
+            .map(|r| r.keys().cloned().collect())
+            .unwrap_or_default();
+        o.insert("roles".to_string(), serde_json::json!(names));
+    }
+    out
 }
 
 /// Each of `stacks` with its subject and its visit's first day under
