@@ -1316,6 +1316,12 @@ pub fn serve(home: &Home, args: ServeArgs) -> Result<(), Exit> {
     intake.stop();
     watchdog.stopping();
     let _ = taker.join();
+    // a request that came in after the last handler ended (the end of
+    // `--requests`, or a stop) is answered, never dropped: dropped, its
+    // caller read an empty 500 (2026-10-12)
+    for request in intake.drain() {
+        let _ = respond(request, stopping());
+    }
     stop_queue.store(true, Ordering::SeqCst);
     for q in queue {
         let _ = q.join();
@@ -1352,10 +1358,31 @@ struct Health {
     trouble: Arc<intake::Trouble>,
 }
 
+/// What a request is answered once the engine serves no more: never an
+/// empty 500, which is what a dropped request reads as (2026-10-12).
+fn stopping() -> Reply {
+    let mut reply = Reply::error(
+        503,
+        "the engine is stopping and serves no more requests; ask again once it is back",
+    );
+    reply
+        .headers
+        .push(("Retry-After".to_string(), "1".to_string()));
+    reply
+}
+
 /// The intake: every request from the socket into the queue, the health
 /// door answered here, an accept error counted and said. It ends when the
-/// handlers stop the intake; nothing else ends it, a panic included.
+/// handlers stop the intake; nothing else ends it, a panic included. What
+/// the socket had taken in by then is answered that the engine stops.
 fn take_requests(server: &tiny_http::Server, health: &Health) {
+    take_until_stopped(server, health);
+    while let Ok(Some(request)) = server.try_recv() {
+        let _ = respond(request, stopping());
+    }
+}
+
+fn take_until_stopped(server: &tiny_http::Server, health: &Health) {
     while !health.intake.stopped() {
         let step = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             match server.recv_timeout(Duration::from_millis(250)) {
