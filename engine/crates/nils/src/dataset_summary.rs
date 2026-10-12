@@ -620,17 +620,36 @@ pub(crate) fn document(
         )
         .map_err(failed)?;
         if let Some(window) = window {
-            sessions = Some(
-                count(
-                    store,
-                    &format!(
-                        "SELECT COUNT(DISTINCT scs.session_id) FROM {cache} scs \
-                         JOIN {study} x ON x.id = scs.study_id WHERE {studies_in_tree} \
-                         AND scs.window_days = {window}"
-                    ),
+            // 2026-10-12: and none where the cache holds not all of its
+            // dated studies yet (read since anything built it), so that a
+            // dataset read after the cache was built does not say 0 visits
+            let uncached = count(
+                store,
+                &format!(
+                    "SELECT COUNT(*) FROM {study} x WHERE {studies_in_tree} \
+                     AND COALESCE(x.date_filled, x.study_date) IS NOT NULL \
+                     AND EXISTS (SELECT 1 FROM {series} se WHERE se.study_id = x.id) \
+                     AND NOT EXISTS (SELECT 1 FROM {cache} scs WHERE scs.study_id = x.id \
+                     AND scs.window_days = {window})",
+                    series = store.qualified("series"),
+                ),
+            )
+            .map_err(failed)?;
+            sessions = if uncached > 0 {
+                None
+            } else {
+                Some(
+                    count(
+                        store,
+                        &format!(
+                            "SELECT COUNT(DISTINCT scs.session_id) FROM {cache} scs \
+                             JOIN {study} x ON x.id = scs.study_id WHERE {studies_in_tree} \
+                             AND scs.window_days = {window}"
+                        ),
+                    )
+                    .map_err(failed)?,
                 )
-                .map_err(failed)?,
-            );
+            };
         }
         read = count(
             store,

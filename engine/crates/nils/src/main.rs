@@ -9054,6 +9054,8 @@ fn pick_run(home: &Home, args: PickArgs) -> Result<(), Exit> {
     if let (Some(only), Some(n)) = (&report.only, report.subjects) {
         println!("  for              {only} ({n} subject(s))");
     }
+    // 2026-10-12: what was written, or why nothing was
+    println!("  {}", report.said);
     println!("  occasions        {:>12}", report.sessions);
     println!("  picked           {:>12}", report.written);
     println!("  nothing eligible {:>12}", report.empty);
@@ -9651,6 +9653,10 @@ fn jobs_command(home: &Home, command: JobsCommand) -> Result<(), Exit> {
             // run up again
             if let Some(m) = doc["made"]["line"].as_str() {
                 println!("  made        {m}");
+            }
+            // 2026-10-12: a pick run's words, what it wrote or why nothing
+            if let Some(said) = doc["result"]["said"].as_str() {
+                println!("  said        {said}");
             }
             if doc["taken_up"].is_object() {
                 println!(

@@ -94,6 +94,106 @@ pub struct Picked {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub failed: Vec<serde_json::Value>,
     pub seconds: f64,
+    /// 2026-10-12 (Nima, on a dataset whose run "picked for 10 subjects"
+    /// and wrote nothing): the visits the run decided, a subject's day with
+    /// every role together, of the first scope as the counts above.
+    pub visits: i64,
+    /// The visits a pick was written on, and the subjects they are of.
+    pub visits_picked: i64,
+    pub subjects_picked: i64,
+    /// Where nothing was written, why, in a person's words: "none of its 10
+    /// subjects has a scan of a main role", "no visits found for its 10
+    /// subjects, whose studies carry no date".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nothing: Option<String>,
+    /// The run in one line, as a log and the job say it: "Main scans
+    /// picked for 3 visits of 2 subjects", or "No main scans picked: " and
+    /// why.
+    pub said: String,
+    /// The visits decided and those picked on, by subject and day.
+    #[serde(skip)]
+    decided_visits: BTreeSet<(i64, String)>,
+    #[serde(skip)]
+    picked_visits: BTreeSet<(i64, String)>,
+}
+
+/// `n` of a noun, its plural after any count but one.
+fn counted(n: usize, one: &str, many: &str) -> String {
+    format!("{n} {}", if n == 1 { one } else { many })
+}
+
+impl Picked {
+    /// The words of a run that wrote `written` picks on `visits_picked`
+    /// visits of `subjects_picked` subjects, or nothing, and why.
+    fn say(&mut self) {
+        self.said = if self.written > 0 {
+            format!(
+                "Main scans picked for {} of {}",
+                counted(self.visits_picked as usize, "visit", "visits"),
+                counted(self.subjects_picked as usize, "subject", "subjects")
+            )
+        } else {
+            format!(
+                "No main scans picked: {}",
+                self.nothing
+                    .as_deref()
+                    .unwrap_or("the rules allow no scan on any visit")
+            )
+        };
+    }
+}
+
+/// Why a run wrote nothing for the subjects it decided (`covered`, none for
+/// every subject), read from what it read: none of them holds a stack of a
+/// role the pack picks, their stacks of one are on no visit (their studies
+/// carry no date, since the cache was brought up to date first), or the
+/// rules allow none of the scans on their `visits` visits.
+fn nothing_why(
+    pack: &Pack,
+    rows_of: &[Vec<Row>],
+    labels: &HashMap<i64, nils_session::Labelled>,
+    covered: Option<&BTreeSet<i64>>,
+    visits: i64,
+) -> String {
+    if covered.is_some_and(BTreeSet::is_empty) {
+        return "there are no subjects to decide".to_string();
+    }
+    let mut holding: BTreeSet<i64> = BTreeSet::new();
+    let mut on_a_visit = false;
+    for (model, rows) in pack.picks.iter().zip(rows_of) {
+        for role in &model.roles {
+            for r in of_role(model, role, rows) {
+                if covered.is_some_and(|c| !c.contains(&r.subject)) {
+                    continue;
+                }
+                holding.insert(r.subject);
+                on_a_visit |= labels.contains_key(&r.study);
+            }
+        }
+    }
+    if holding.is_empty() {
+        return match covered {
+            Some(c) if c.len() == 1 => "its one subject has no scan of a main role".to_string(),
+            Some(c) => format!("none of its {} subjects has a scan of a main role", c.len()),
+            None => "no subject has a scan of a main role".to_string(),
+        };
+    }
+    if !on_a_visit {
+        return match covered {
+            Some(c) if c.len() == 1 => {
+                "no visits found for its one subject, whose studies carry no date".to_string()
+            }
+            Some(c) => format!(
+                "no visits found for its {} subjects, whose studies carry no date",
+                c.len()
+            ),
+            None => "no visits found for the subjects with a scan of a main role, whose studies carry no date".to_string(),
+        };
+    }
+    format!(
+        "the rules allow no scan on its {}",
+        counted(visits as usize, "visit", "visits")
+    )
 }
 
 /// What a run did for one scope (record 55, decision 6).
@@ -444,6 +544,8 @@ fn run_pick(
         report.datasets = o.datasets.clone();
     }
     if pack.picks.is_empty() {
+        report.nothing = Some(format!("{} declares no picks", pack.id()));
+        report.say();
         return Ok(report);
     }
     report.reference = match subject {
@@ -485,6 +587,8 @@ fn run_pick(
     }
     let scheme_digest = scheme.digest();
     let mut done: Vec<Picked> = Vec::with_capacity(scopes.len());
+    // the first scope's subjects, which the report's words are of
+    let mut first_covered: Option<Option<BTreeSet<i64>>> = None;
     for run in scopes {
         let mut part = Picked {
             reference: report.reference.clone(),
@@ -495,6 +599,9 @@ fn run_pick(
             (Some(s), None) => Some(s.clone()),
             (None, o) => o.clone(),
         };
+        if first_covered.is_none() {
+            first_covered = Some(covered.clone());
+        }
         let version = run.saved.as_ref().map_or(1, |s| s.version);
         // a scope's rules are the first pick's, whose roles they name; the
         // pack's scope runs every pick with its defaults
@@ -574,11 +681,29 @@ fn run_pick(
         report.roles = first.roles;
         report.settled = first.settled;
         report.removed = first.removed;
+        report.visits = first.decided_visits.len() as i64;
+        report.visits_picked = first.picked_visits.len() as i64;
+        report.subjects_picked = first
+            .picked_visits
+            .iter()
+            .map(|(s, _)| *s)
+            .collect::<BTreeSet<_>>()
+            .len() as i64;
     }
     for p in parts {
         report.settled += p.settled;
         report.removed += p.removed;
     }
+    if report.written == 0 {
+        report.nothing = Some(nothing_why(
+            pack,
+            &rows_of,
+            &labels,
+            first_covered.flatten().as_ref(),
+            report.visits,
+        ));
+    }
+    report.say();
     report.seconds = started.elapsed().as_secs_f64();
     Ok(report)
 }
@@ -820,6 +945,7 @@ fn run_one(
             let chosen = chooser.choose(role, &candidates, Some(&reference));
             for ((first, _), c) in visits.iter().zip(&chosen) {
                 report.sessions += 1;
+                report.decided_visits.insert((*subject, first.to_string()));
                 report.roles.entry(role.clone()).or_default().sessions += 1;
                 decided.insert((role.clone(), *subject, first.to_string()));
                 let tied = c.winner.is_some()
@@ -861,6 +987,7 @@ fn run_one(
                         },
                     )?;
                     report.written += 1;
+                    report.picked_visits.insert((*subject, first.to_string()));
                     let r = report.roles.entry(role.clone()).or_default();
                     r.picked += 1;
                     if !tied && standing.is_none() {

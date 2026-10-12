@@ -110,6 +110,26 @@ fn failed(e: impl std::fmt::Display) -> Reply {
     Reply::error(500, e.to_string())
 }
 
+/// The visits of these subjects in the session cache under the scheme
+/// before a door reads them (2026-10-12): a dataset read and sorted with no
+/// pick run since, its picks off or its run not yet over, had no visits on
+/// its map, since nothing had built the cache for its subjects. Only the
+/// timelines that changed are rebuilt.
+pub(crate) fn visits_cached(
+    registry: &mut Registry,
+    scheme: &nils_registry::session::Scheme,
+    subjects: &BTreeSet<i64>,
+) -> Result<(), Reply> {
+    if subjects.is_empty() {
+        return Ok(());
+    }
+    let anchors =
+        nils_session::Anchors::resolve(registry, scheme, std::collections::BTreeMap::new())
+            .map_err(failed)?;
+    nils_session::ensure_for(registry, scheme, &anchors, subjects).map_err(failed)?;
+    Ok(())
+}
+
 /// The scope a door names: in the body's `scope`, at the top of the body,
 /// or in the query.
 pub(crate) fn scope_of(
@@ -215,6 +235,12 @@ pub(crate) fn occasion_of(
     let subject = doc["subject_id"].as_i64();
     if session_id.is_none() && (subject.is_none() || day.is_none()) {
         return Ok(None);
+    }
+    // a visit named by its subject and day is read from the cache brought
+    // up to date for that subject; one named by the map's id was there when
+    // the map was read
+    if let Some(s) = subject {
+        visits_cached(registry, scheme, &BTreeSet::from([s]))?;
     }
     let labels = nils_session::labels_by_study(registry.store(), scheme).map_err(failed)?;
     let found = labels.values().find(|l| match session_id {
@@ -546,6 +572,8 @@ pub(crate) fn map(
             .filter_map(|r| r.int(0).ok())
             .collect()
     };
+    // the scope's visits, in the cache before the map reads them
+    visits_cached(registry, &scheme, &subjects)?;
     let read = main_scans::read(
         registry,
         &Ask {
