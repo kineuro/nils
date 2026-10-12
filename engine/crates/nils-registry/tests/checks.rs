@@ -280,6 +280,12 @@ fn at(minute: u32) -> String {
     format!("2026-10-11T11:{minute:02}:00Z")
 }
 
+/// The engine's reading of which results were made from a stack of a
+/// sample sealed now, where no sample is: none.
+fn none_sealed(_: &mut Registry, _: &[i64]) -> Result<std::collections::BTreeSet<i64>, String> {
+    Ok(std::collections::BTreeSet::new())
+}
+
 /// Claim the next item and answer it.
 #[allow(clippy::too_many_arguments)]
 fn read(
@@ -626,6 +632,7 @@ fn a_check_closes_into_a_status_on_its_results_and_their_parts() {
                 author_kind: "agent",
                 model: None,
                 picks: None,
+                sealed: Some(&none_sealed),
             },
             &at(30),
         )
@@ -699,6 +706,7 @@ fn a_check_closes_into_a_status_on_its_results_and_their_parts() {
                 author_kind: "person",
                 model: None,
                 picks: None,
+                sealed: Some(&none_sealed),
             },
             &at(40),
         )
@@ -876,6 +884,7 @@ fn a_check_closes_into_a_status_on_its_results_and_their_parts() {
                 author_kind: "person",
                 model: None,
                 picks: None,
+                sealed: Some(&none_sealed),
             },
             &at(52),
         )
@@ -1002,6 +1011,7 @@ fn close_as_person(reg: &mut Registry, c: i64, minute: u32) -> campaign::Closed 
             author_kind: "person",
             model: None,
             picks: None,
+            sealed: Some(&none_sealed),
         },
         &at(minute),
     )
@@ -1273,6 +1283,7 @@ fn closed_check(
             author_kind: "person",
             model: None,
             picks: None,
+            sealed: Some(&none_sealed),
         },
         &at(start + 20),
     )
@@ -1819,6 +1830,7 @@ fn a_refused_check_item_stays_refused_until_a_later_close_writes_it() {
                 author_kind: "agent",
                 model: None,
                 picks: None,
+                sealed: Some(&none_sealed),
             },
             &at(26),
         )
@@ -1886,6 +1898,7 @@ fn a_refused_check_item_stays_refused_until_a_later_close_writes_it() {
                 author_kind: "person",
                 model: None,
                 picks: None,
+                sealed: Some(&none_sealed),
             },
             &at(40),
         )
@@ -2036,5 +2049,168 @@ fn a_later_close_leaves_a_newer_check_of_the_result_standing() {
             "{name}"
         );
         assert_eq!(review_status(reg, question2).0, "superseded", "{name}");
+    }
+}
+
+/// The engine's reading where one result was made from a stack of a sample
+/// sealed now: the result whose sha256 the test names below.
+fn sealed_one(
+    reg: &mut Registry,
+    results: &[i64],
+) -> Result<std::collections::BTreeSet<i64>, String> {
+    let mut out = std::collections::BTreeSet::new();
+    for d in results {
+        let row = derivative::get(reg.store(), *d)
+            .map_err(|e| e.to_string())?
+            .ok_or("no such result")?;
+        if row.sha256 == format!("{:064x}", 2) {
+            out.insert(*d);
+        }
+    }
+    Ok(out)
+}
+
+/// Record 55, the rulings of 2026-10-12, item 6: a check never holds a
+/// sealed scan's result. A check made before the seal holds two results,
+/// one of them made from a stack sealed now, as the engine reads it. A
+/// rater is never offered what the engine withholds from them, nor handed
+/// back a lease on it; the close writes the other result and leaves the
+/// sealed one's item as it was, counted in `left_out_sealed` and never
+/// named, with no decision and no status on its result, whoever closes; a
+/// close without the engine's reading writes no item of a check and says
+/// why.
+#[test]
+fn a_check_s_close_writes_nothing_of_a_result_made_from_a_sealed_stack() {
+    for mut l in labs() {
+        let name = l.name;
+        let reg = &mut l.registry;
+        let (s0, s1, _) = scans(reg);
+        let (open, sealed) = (mask(reg, s0, 1), mask(reg, s0, 2));
+        let q = question("result");
+        let c = campaign::create(
+            reg,
+            &new(
+                "sealed-before",
+                &q,
+                vec![item(sealed, None, s0, s1), item(open, None, s0, s1)],
+                1,
+                vec![],
+            ),
+        )
+        .unwrap();
+        let items = campaign::items(reg.store(), c.id).unwrap();
+        let (i_sealed, i_open) = (items[0].id, items[1].id);
+        let withheld: std::collections::BTreeSet<i64> = [i_sealed].into();
+        let claim = |reg: &mut Registry, withheld: &std::collections::BTreeSet<i64>, minute| {
+            campaign::claim_withholding(
+                reg,
+                c.id,
+                "anna@lab",
+                Role::Rater,
+                campaign::Order::Position,
+                false,
+                withheld,
+                &at(minute),
+            )
+            .unwrap()
+        };
+        let answer = |reg: &mut Registry, assignment: i64, minute| {
+            campaign::answer(
+                reg,
+                &Given {
+                    assignment,
+                    principal: "anna@lab",
+                    author_kind: "person",
+                    model: None,
+                    value: Some("accepted"),
+                    form: Some(&json!({"seen": [1]})),
+                    derivative_id: None,
+                    why: None,
+                    unsure: false,
+                },
+                &at(minute),
+            )
+            .unwrap()
+        };
+        // first by position, the sealed one is passed over, and nothing is
+        // said to come after
+        let first = claim(reg, &withheld, 1).expect("the open one");
+        assert_eq!(first.item.id, i_open, "{name}");
+        assert!(first.ahead.is_empty(), "{name}: {:?}", first.ahead);
+        answer(reg, first.assignment.id, 2);
+        assert!(claim(reg, &withheld, 3).is_none(), "{name}");
+        // a lease on it from before is not handed back, nor a second item
+        let before = claim(reg, &Default::default(), 4).expect("the sealed one");
+        assert_eq!(before.item.id, i_sealed, "{name}");
+        assert!(claim(reg, &withheld, 5).is_none(), "{name}");
+        assert!(
+            claim(reg, &Default::default(), 6)
+                .expect("handed back")
+                .held,
+            "{name}"
+        );
+        answer(reg, before.assignment.id, 7);
+
+        // a close without the engine's reading writes no item of a check
+        let close = |reg: &mut Registry, sealed: Option<campaign::SealedResults<'_>>, minute| {
+            campaign::close(
+                reg,
+                &Close {
+                    campaign: c.id,
+                    who: "cleo@lab",
+                    author_kind: "person",
+                    model: None,
+                    picks: None,
+                    sealed,
+                },
+                &at(minute),
+            )
+            .unwrap()
+        };
+        let blind = close(reg, None, 10);
+        assert_eq!(blind.resolved, 0, "{name}: {blind:?}");
+        assert_eq!(blind.refused.len(), 2, "{name}: {blind:?}");
+        assert!(
+            blind.refused[0].1.contains("engine's reading"),
+            "{name}: {blind:?}"
+        );
+        assert!(
+            decision_ids(reg.store(), "derivative", &open.to_string(), true).is_empty(),
+            "{name}"
+        );
+        // with it, a person's later close writes the open one and leaves the
+        // sealed one as it was, counted and never named
+        let closed = close(reg, Some(&sealed_one), 12);
+        assert_eq!(closed.resolved, 1, "{name}: {closed:?}");
+        assert_eq!(closed.left_out_sealed, 1, "{name}: {closed:?}");
+        assert!(closed.refused.is_empty(), "{name}: {closed:?}");
+        let st = reg.store();
+        assert_eq!(
+            derivative::get(st, open)
+                .unwrap()
+                .unwrap()
+                .check_status
+                .as_deref(),
+            Some("accepted"),
+            "{name}"
+        );
+        let row = derivative::get(st, sealed).unwrap().unwrap();
+        assert!(
+            row.check_status.is_none() && row.check_decision_id.is_none(),
+            "{name}"
+        );
+        assert!(
+            decision_ids(st, "derivative", &sealed.to_string(), false).is_empty(),
+            "{name}"
+        );
+        assert!(
+            decision_ids(st, "derivative_part", &format!("{sealed}:lesions:1"), false).is_empty(),
+            "{name}"
+        );
+        assert_eq!(
+            campaign::item(st, i_sealed).unwrap().unwrap().state,
+            "refused",
+            "{name}: left as it was"
+        );
     }
 }

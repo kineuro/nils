@@ -3245,14 +3245,15 @@ fn by_value(w: Option<&Worth>, position: i64) -> (u8, i64, i64) {
 
 /// The items a rater's claim takes in the order asked, the first offered
 /// first: open items of the first round that still want raters and that
-/// this principal was never given, in any role or state. By position only
-/// the first `1 + AHEAD` are read.
+/// this principal was never given, in any role or state, and that are not
+/// `withheld` from it. By position only the first `1 + AHEAD` are read.
 fn rater_order(
     store: &mut Store,
     c: &Campaign,
     principal: &str,
     order: Order,
     alone: bool,
+    withheld: &BTreeSet<i64>,
 ) -> Result<Vec<(i64, Option<i64>)>, Error> {
     let campaign = c.id;
     let d = store.dialect();
@@ -3267,8 +3268,9 @@ fn rater_order(
         d.param(1, Type::Int),
         d.param(2, Type::Int),
         d.param(3, Type::Text),
-        // by position, the one offered and the ones after it
-        if order == Order::Position && !alone {
+        // by position, the one offered and the ones after it; every one
+        // where some are withheld, which are left out below
+        if order == Order::Position && !alone && withheld.is_empty() {
             format!(" LIMIT {}", 1 + AHEAD)
         } else {
             String::new()
@@ -3285,6 +3287,9 @@ fn rater_order(
         ],
     )? {
         let id = r.int(0)?;
+        if withheld.contains(&id) {
+            continue;
+        }
         if r.opt_int(3)?.unwrap_or(0) != 0 {
             flagged.insert(id);
         }
@@ -3380,6 +3385,35 @@ pub fn claim_with(
     alone: bool,
     now: &str,
 ) -> Result<Option<Claimed>, Error> {
+    claim_withholding(
+        registry,
+        campaign,
+        principal,
+        role,
+        order,
+        alone,
+        &BTreeSet::new(),
+        now,
+    )
+}
+
+/// [`claim_with`], never offering the items `withheld` names, to a rater or
+/// an adjudicator: record 55, the rulings of 2026-10-12, item 6, a check's
+/// items whose result was made from a stack of a sample sealed now, for a
+/// principal who does not read sealed stacks. What a result was made from
+/// is the engine's reading, so the engine names them. A live lease on such
+/// an item is not handed back; it runs out as any lease does.
+#[allow(clippy::too_many_arguments)]
+pub fn claim_withholding(
+    registry: &mut Registry,
+    campaign: i64,
+    principal: &str,
+    role: Role,
+    order: Order,
+    alone: bool,
+    withheld: &BTreeSet<i64>,
+    now: &str,
+) -> Result<Option<Claimed>, Error> {
     let c = get(registry.store(), campaign)?
         .ok_or_else(|| Error::NotFound(format!("no campaign {campaign}")))?;
     if c.status != "open" {
@@ -3403,15 +3437,18 @@ pub fn claim_with(
     let done = (|| -> Result<Option<(i64, bool)>, Error> {
         lock(store, campaign)?;
         expire_in(store, campaign, now)?;
-        // a live lease is handed back, never a second
+        // a live lease is handed back, never a second; one on an item
+        // withheld from the principal is not, and runs out
         let sql = format!(
-            "SELECT id FROM {} WHERE campaign_id = {} AND principal = {} AND role = {} AND state = 'leased' ORDER BY id LIMIT 1",
+            "SELECT id, item_id FROM {} WHERE campaign_id = {} AND principal = {} AND role = {} AND state = 'leased' ORDER BY id{}",
             store.qualified("campaign_assignment"),
             d.param(1, Type::Int),
             d.param(2, Type::Text),
-            d.param(3, Type::Text)
+            d.param(3, Type::Text),
+            if withheld.is_empty() { " LIMIT 1" } else { "" }
         );
-        if let Some(r) = store.query_opt(
+        let mut held = None;
+        for r in store.query(
             &sql,
             &[
                 Param::Int(campaign),
@@ -3419,13 +3456,19 @@ pub fn claim_with(
                 Param::from(role.name()),
             ],
         )? {
+            if !withheld.contains(&r.int(1)?) {
+                held = Some(r.int(0)?);
+                break;
+            }
+        }
+        if let Some(id) = held {
             // what comes after the item held: the same order, which never
             // offers an item the principal was given, this one included
             if role == Role::Rater {
-                ahead = rater_order(store, &c, principal, order, alone)?;
+                ahead = rater_order(store, &c, principal, order, alone, withheld)?;
                 ahead.truncate(AHEAD);
             }
-            return Ok(Some((r.int(0)?, true)));
+            return Ok(Some((id, true)));
         }
         let until = plus_seconds(now, c.lease_seconds);
         let leased_ms = crate::time::millis_at(now);
@@ -3433,7 +3476,7 @@ pub fn claim_with(
         let i = store.qualified("campaign_item");
         match role {
             Role::Rater => {
-                let mut ranked = rater_order(store, &c, principal, order, alone)?;
+                let mut ranked = rater_order(store, &c, principal, order, alone, withheld)?;
                 if ranked.is_empty() {
                     return Ok(None);
                 }
@@ -3480,28 +3523,34 @@ pub fn claim_with(
             }
             Role::Adjudicator => {
                 let sql = format!(
-                    "SELECT a.id FROM {a} a JOIN {i} i ON i.id = a.item_id \
+                    "SELECT a.id, i.id FROM {a} a JOIN {i} i ON i.id = a.item_id \
                      WHERE a.campaign_id = {} AND a.role = 'adjudicator' AND a.state = 'offered' \
                      AND i.state = 'needs_adjudication' \
                      AND (a.principal IS NULL OR a.principal = {}) \
                      AND NOT EXISTS (SELECT 1 FROM {a} b WHERE b.item_id = i.id AND b.principal = {} AND b.id <> a.id) \
-                     ORDER BY i.position, a.id LIMIT 1",
+                     ORDER BY i.position, a.id{}",
                     d.param(1, Type::Int),
                     d.param(2, Type::Text),
-                    d.param(3, Type::Text)
+                    d.param(3, Type::Text),
+                    if withheld.is_empty() { " LIMIT 1" } else { "" }
                 );
-                let Some(r) = store.query_opt(
+                let mut offered = None;
+                for r in store.query(
                     &sql,
                     &[
                         Param::Int(campaign),
                         Param::from(principal),
                         Param::from(principal),
                     ],
-                )?
-                else {
+                )? {
+                    if !withheld.contains(&r.int(1)?) {
+                        offered = Some(r.int(0)?);
+                        break;
+                    }
+                }
+                let Some(id) = offered else {
                     return Ok(None);
                 };
-                let id = r.int(0)?;
                 store.update_by_id(
                     table("campaign_assignment"),
                     &[
@@ -6271,6 +6320,13 @@ pub struct PickAsk<'a> {
 /// scheme, which this crate does not read, so the engine passes it in.
 pub type PickWriter<'a> = &'a dyn Fn(&mut Registry, &PickAsk<'_>) -> Result<i64, String>;
 
+/// Of these results, the ones made from a stack of a sample sealed now
+/// (record 48; record 55, the rulings of 2026-10-12, item 6: a check never
+/// holds a sealed scan's result). What a result was made from is the
+/// engine's reading (the stacks a run gave its unit, the list it was frozen
+/// over), which this crate does not make, so the engine passes it in.
+pub type SealedResults<'a> = &'a dyn Fn(&mut Registry, &[i64]) -> Result<BTreeSet<i64>, String>;
+
 /// Who closes, and what.
 #[derive(Clone)]
 pub struct Close<'a> {
@@ -6284,6 +6340,12 @@ pub struct Close<'a> {
     /// The person's pick writer a pick campaign closes through; a pick
     /// campaign closed without one leaves its items unresolved and says so.
     pub picks: Option<PickWriter<'a>>,
+    /// The engine's reading of which of a check's results were made from a
+    /// stack of a sample sealed now: their items are left as they were,
+    /// nothing is written of them, and they are counted
+    /// (`left_out_sealed`), never named. A check closed without one writes
+    /// none of its items and says so.
+    pub sealed: Option<SealedResults<'a>>,
 }
 
 impl std::fmt::Debug for Close<'_> {
@@ -6294,6 +6356,7 @@ impl std::fmt::Debug for Close<'_> {
             .field("author_kind", &self.author_kind)
             .field("model", &self.model)
             .field("picks", &self.picks.is_some())
+            .field("sealed", &self.sealed.is_some())
             .finish()
     }
 }
@@ -6321,7 +6384,9 @@ pub struct Closed {
     pub agreement: Value,
     /// Record 48, D1 of the move: items of a stack of a sample sealed now,
     /// which close into no decision and no pick until a certificate
-    /// unseals it.
+    /// unseals it; and (record 55, the rulings of 2026-10-12, item 6) a
+    /// check's items whose result was made from one, which close into
+    /// nothing.
     pub left_out_sealed: i64,
 }
 
@@ -6448,6 +6513,24 @@ fn close_items(
     let mut out = Closed::default();
     let mut staged_ones: Vec<i64> = Vec::new();
     let all = items(registry.store(), c.id)?;
+    // record 55, the rulings of 2026-10-12, item 6: a check never holds a
+    // sealed scan's result. Of the results its items still to be written
+    // are about, those made from a stack of a sample sealed now, as the
+    // engine reads it; without the engine's reading, none is known
+    let sealed_results: Option<BTreeSet<i64>> = match (question, cl.sealed) {
+        (Question::Check { .. }, Some(read)) => {
+            let ids: Vec<i64> = all
+                .iter()
+                .filter(|i| i.state != "resolved")
+                .filter_map(|i| i.derivative_id)
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect();
+            Some(read(registry, &ids).map_err(StoreError::Message)?)
+        }
+        (Question::Check { .. }, None) => None,
+        _ => Some(BTreeSet::new()),
+    };
     // the items this close resolved, for a group asked member by member
     let mut resolved_here: BTreeSet<i64> = BTreeSet::new();
     for it in &all {
@@ -6572,6 +6655,27 @@ fn close_items(
             let sealed = crate::labels::sealed_for_writes(registry.store(), &touches)
                 .map_err(|e| invalid(e.to_string()))?;
             if !sealed.is_empty() {
+                out.left_out_sealed += 1;
+                out.unresolved += 1;
+                continue;
+            }
+        }
+        // record 55, the rulings of 2026-10-12, item 6: a check's item whose
+        // result was made from a stack of a sample sealed now closes into
+        // nothing, whoever closes and whatever the check closes into: it is
+        // left as it was and counted, never named
+        if matches!(question, Question::Check { .. }) {
+            let Some(sealed) = &sealed_results else {
+                refuse(
+                    registry.store(),
+                    &mut out,
+                    it,
+                    "a check closes through the engine's reading of which of its results were made from a stack of a sample sealed now, and none was given".into(),
+                    now,
+                )?;
+                continue;
+            };
+            if it.derivative_id.is_some_and(|d| sealed.contains(&d)) {
                 out.left_out_sealed += 1;
                 out.unresolved += 1;
                 continue;
@@ -6758,8 +6862,9 @@ fn close_items(
             }
             // record 55 H3: a check closes into a status on its result and
             // the parts it judged, as decisions a person made, each item in
-            // one transaction; it is never staged, and never held back by a
-            // sealed sample (a result's status decides nothing of its scan)
+            // one transaction; it is never staged. A result made from a
+            // sealed stack was left out above; a sealed scan shown beside it
+            // holds nothing back (a result's status decides nothing of a scan)
             "check" => {
                 if kind != "person" || !persons_only {
                     refuse(

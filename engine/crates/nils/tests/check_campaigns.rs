@@ -107,6 +107,7 @@ impl Home {
             "decision",
             "derivative",
             "campaign_item",
+            "audit",
         ] {
             sql = sql.replace(&format!("{{{t}}}"), &store.qualified(t));
         }
@@ -1827,6 +1828,289 @@ fn a_mask_too_large_to_read_is_never_registered() {
     let up: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(status, 201, "{up}");
     assert_eq!(up["grid_link"], "none", "{up}");
+}
+
+/// Record 55, the rulings of 2026-10-12, item 6: a check never holds a
+/// sealed scan's result. A run's two results, one on each scan of a visit;
+/// a check is made of the second, then its scan is sealed. The preview of
+/// a check of the run leaves the sealed one out first and says how many,
+/// for every caller, the holder of sealed:see too; the make leaves it out
+/// and keeps how many; a source of nothing else is refused saying so. The
+/// check made before the seal withholds its item from its rater: no claim
+/// offers it, the item door, an answer and the result's parts and layer
+/// refuse it; the rater with sealed:see claims and reads it, audited as
+/// sealed.read as the content door's read is; and its close writes nothing
+/// of it and counts it. On SQLite and on Postgres.
+#[test]
+fn a_check_leaves_out_a_sealed_result() {
+    sealed_results(None);
+}
+
+#[test]
+fn a_check_leaves_out_a_sealed_result_on_postgres() {
+    let Some(dsn) = std::env::var("NILS_TEST_POSTGRES_DSN")
+        .ok()
+        .filter(|d| !d.is_empty())
+    else {
+        return;
+    };
+    let schema = "nils_check_sealed";
+    let drop = || {
+        let mut store = Store::connect_postgres(&dsn, schema).expect("connect");
+        store
+            .batch(&format!(
+                "DROP SCHEMA IF EXISTS {schema} CASCADE; DROP SCHEMA IF EXISTS {schema}_linkage CASCADE"
+            ))
+            .expect("drop");
+    };
+    drop();
+    sealed_results(Some((dsn.clone(), schema.to_string())));
+    drop();
+}
+
+/// The `sealed.read` rows of the audit: each one's principal and scope.
+fn sealed_reads(home: &Home) -> Vec<(String, Value)> {
+    let sql =
+        home.sql("SELECT principal, scope FROM {audit} WHERE action = 'sealed.read' ORDER BY id");
+    home.store()
+        .query(&sql, &[])
+        .unwrap()
+        .iter()
+        .map(|r| {
+            (
+                r.text(0).unwrap().to_string(),
+                serde_json::from_str(r.text(1).unwrap()).unwrap(),
+            )
+        })
+        .collect()
+}
+
+fn sealed_results(pg: Option<(String, String)>) {
+    let (home, work, a, b, _pipeline, run, place) = small_on("checks-sealed", pg);
+    // the second scan's picture too, so a mask on it ties voxel for voxel
+    home.ok(&["pyramid", "build", "--stack", &b.to_string()]);
+    let on_a = mask_of(&home, work.path(), run, place, a, "", &lesions(0));
+    let on_b = mask_of(&home, work.path(), run, place, b, "", &lesions(1));
+    let server = Server::start(&home);
+    let ops = ops_token();
+    let anna = token("anna", &["campaigns:see", "campaigns:work"], "quasi");
+    // anna as the certificate's computation would hold her, and the
+    // certificate's own grant beside the making of a check
+    let anna_unsealed = token(
+        "anna",
+        &["campaigns:see", "campaigns:work", "sealed:see"],
+        "quasi",
+    );
+    let cert = token(
+        "cert",
+        &[
+            "pipelines:see",
+            "campaigns:see",
+            "campaigns:work",
+            "review:work",
+            "sealed:see",
+        ],
+        "quasi",
+    );
+    let all = json!({"run": run, "output": "labels", "which": "all"});
+    let before = read_preview(&server, &check_body("x", all.clone()), &ops);
+    assert_eq!(before["left_out_sealed"], 0, "{before}");
+    assert_eq!(before["drawable"], 2, "{before}");
+    // a check of the result on b, made before b is sealed
+    let earlier = server.ok(
+        "POST",
+        "/api/campaigns",
+        Some(check_body(
+            "made before the seal",
+            json!({"derivatives": [on_b]}),
+        )),
+        &ops,
+    );
+    let old = earlier["id"].as_i64().unwrap();
+    let old_item = earlier["items"][0]["id"].as_i64().unwrap();
+    assert_eq!(earlier["items"][0]["derivative_id"], on_b, "{earlier}");
+
+    // b is of a sample sealed now
+    let sealed = json!({"document": {
+        "ast_version": 1,
+        "params": {"ids": {"type": "list", "value": [b]}},
+        "sets": {"s": {"grain": "stack", "where": [["in", {}, ["field", {}, "id"], ["param", {}, "ids"]]]}},
+        "out": {"set": "s", "level": "record"},
+    }});
+    server.ok("PUT", "/api/ask/selections/sealed-b", Some(sealed), &ops);
+    home.ok(&[
+        "labels",
+        "seal",
+        "--select",
+        "selection:sealed-b@1",
+        "--pack-dir",
+        packs().to_str().unwrap(),
+    ]);
+
+    // the preview leaves it out first, says how many and never which, and
+    // every other count is of the rest: the check made before holds it, and
+    // it is not counted as held
+    for who in [&ops, &cert] {
+        let p = server.ok(
+            "POST",
+            "/api/campaigns/preview",
+            Some(check_body("x", all.clone())),
+            who,
+        );
+        assert_eq!(p["results"], 2, "{p}");
+        assert_eq!(p["left_out_sealed"], 1, "{p}");
+        assert_eq!(p["held"], 0, "{p}");
+        assert_eq!(p["drawable"], 1, "{p}");
+        assert_eq!(p["items"], 1, "{p}");
+        assert_eq!(p["parts"], 2, "the result on a alone: {p}");
+    }
+    let unchecked = server.ok(
+        "POST",
+        "/api/campaigns/preview",
+        Some(check_body(
+            "x",
+            json!({"run": run, "output": "labels", "which": "unchecked"}),
+        )),
+        &ops,
+    );
+    assert_eq!(unchecked["left_out_sealed"], 1, "{unchecked}");
+    assert_eq!(unchecked["checked_already"], 0, "{unchecked}");
+    // the make leaves it out too, and the check keeps how many
+    let made = server.ok(
+        "POST",
+        "/api/campaigns",
+        Some(check_body("after the seal", all.clone())),
+        &ops,
+    );
+    let held: Vec<i64> = made["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["derivative_id"].as_i64().unwrap())
+        .collect();
+    assert_eq!(held, vec![on_a], "{made}");
+    assert_eq!(made["source"]["counts"]["left_out_sealed"], 1, "{made}");
+    // a source of nothing but the sealed result is refused, saying how many
+    let (status, refused) = server.call(
+        "POST",
+        "/api/campaigns",
+        Some(check_body("sealed only", json!({"derivatives": [on_b]}))),
+        &cert,
+    );
+    assert_eq!(status, 400, "{refused}");
+    let why = refused["error"].as_str().unwrap();
+    assert!(
+        why.contains("1 left out: sealed for certification"),
+        "{why}"
+    );
+
+    // the check made before: its item is withheld from its rater
+    let claimed = server.ok(
+        "POST",
+        &format!("/api/campaigns/{old}/claim"),
+        Some(json!({})),
+        &anna,
+    );
+    assert!(claimed["item"].is_null(), "{claimed}");
+    let item_door = format!("/api/campaigns/{old}/items/{old_item}/check");
+    let (status, doc) = server.call("GET", &item_door, None, &anna);
+    assert_eq!(status, 403, "{doc}");
+    assert_eq!(doc["sealed"], true, "{doc}");
+    let said = doc["error"].as_str().unwrap();
+    assert!(
+        said.contains("sealed for certification") && said.contains("sealed:see"),
+        "{said}"
+    );
+    // and so are the result's parts and its layer on the scan, to its rater
+    // as to anyone without sealed:see
+    let parts = format!("/api/derivatives/{on_b}/parts");
+    let layer = format!("/api/derivatives/{on_b}/layers/{b}/lesions/manifest");
+    for door in [&parts, &layer] {
+        for who in [&anna, &ops] {
+            let (status, doc) = server.call("GET", door, None, who);
+            assert_eq!(status, 403, "{door}: {doc}");
+            assert_eq!(doc["sealed"], true, "{door}: {doc}");
+        }
+    }
+
+    // a holder of sealed:see reads all of it, the item door's read and the
+    // content door's audited as sealed.read
+    let reads = sealed_reads(&home).len();
+    let claimed = server.ok(
+        "POST",
+        &format!("/api/campaigns/{old}/claim"),
+        Some(json!({})),
+        &anna_unsealed,
+    );
+    assert_eq!(claimed["item"]["id"], old_item, "{claimed}");
+    let assignment = claimed["assignment"]["id"].as_i64().unwrap();
+    let doc = server.ok("GET", &item_door, None, &anna_unsealed);
+    assert_eq!(doc["result"]["id"], on_b, "{doc}");
+    assert_eq!(doc["parts"].as_array().unwrap().len(), 3, "{doc}");
+    let (status, _) = server.call("GET", &parts, None, &anna_unsealed);
+    assert_eq!(status, 200);
+    let (status, _) = server.raw(
+        "GET",
+        &format!("/api/derivatives/{on_b}/content"),
+        None,
+        &cert,
+    );
+    assert_eq!(status, 200);
+    let after = sealed_reads(&home);
+    assert_eq!(after.len(), reads + 2, "{after:?}");
+    let (who, scope) = &after[reads];
+    assert!(who.starts_with("anna@"), "{who}");
+    assert_eq!(
+        scope["door"], "GET /api/campaigns/{id}/items/{item}/check",
+        "{scope}"
+    );
+    assert_eq!(
+        (&scope["campaign"], &scope["item"], &scope["derivative"]),
+        (&json!(old), &json!(old_item), &json!(on_b)),
+        "{scope}"
+    );
+    let (who, scope) = &after[reads + 1];
+    assert!(who.starts_with("cert@"), "{who}");
+    assert_eq!(
+        scope["door"], "GET /api/derivatives/{id}/content",
+        "{scope}"
+    );
+    assert_eq!(scope["derivative"], on_b, "{scope}");
+    // her lease answers nothing without the grant, and with it the item is
+    // answered all the same
+    let answer = format!("/api/campaigns/{old}/assignments/{assignment}/answer");
+    let body = json!({"value": "accepted", "form": {"seen": [1]}});
+    let (status, doc) = server.call("POST", &answer, Some(body.clone()), &anna);
+    assert_eq!(status, 403, "{doc}");
+    assert_eq!(doc["sealed"], true, "{doc}");
+    server.ok("POST", &answer, Some(body), &anna_unsealed);
+
+    // the close writes nothing of it, whoever closes, and counts it
+    let closed = server.ok("POST", &format!("/api/campaigns/{old}/close"), None, &cert);
+    assert_eq!(closed["resolved"], 0, "{closed}");
+    assert_eq!(closed["left_out_sealed"], 1, "{closed}");
+    assert_eq!(closed["refused"], json!([]), "{closed}");
+    assert_eq!(
+        home.int(&format!(
+            "SELECT COUNT(*) FROM {{decision}} WHERE axis = 'check' AND (ref = '{on_b}' OR ref LIKE '{on_b}:%')"
+        )),
+        0
+    );
+    let row = server.ok("GET", &format!("/api/derivatives/{on_b}"), None, &cert);
+    assert!(row["check"].is_null(), "{row}");
+    // the jobs that warm the checks' layers end before their registry goes
+    for check in [&earlier, &made] {
+        let Some(job) = check["layers"]["job"].as_i64() else {
+            continue;
+        };
+        for _ in 0..600 {
+            let (_, j) = server.call("GET", &format!("/api/jobs/{job}"), None, &ops);
+            if matches!(j["state"].as_str(), Some("done" | "failed" | "cancelled")) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    }
 }
 
 fn walk(dir: &Path) -> Vec<std::path::PathBuf> {

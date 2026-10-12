@@ -827,6 +827,52 @@ pub(crate) struct MadeFrom {
     pub(crate) known: bool,
 }
 
+impl MadeFrom {
+    /// Whether it was made from a stack of a sample sealed now, given the
+    /// stacks and the subjects sealed now among its own (or more): a stack
+    /// it was made from, a subject any of whose stacks it may have been made
+    /// from, or what can no longer be told while a sample is sealed.
+    pub(crate) fn sealed_by(
+        &self,
+        stacks: &std::collections::BTreeSet<i64>,
+        subjects: &std::collections::BTreeSet<i64>,
+    ) -> bool {
+        !self.known
+            || self.stacks.iter().any(|s| stacks.contains(s))
+            || self.subjects.iter().any(|s| subjects.contains(s))
+    }
+}
+
+/// The units each run gave its stacks and the list each was frozen over,
+/// read once a run, for what many derivatives were made from at once.
+#[derive(Debug, Default)]
+pub(crate) struct Runs {
+    units: std::collections::BTreeMap<i64, Vec<(String, Vec<i64>)>>,
+    frozen: std::collections::BTreeMap<i64, Vec<i64>>,
+}
+
+impl Runs {
+    fn units(&mut self, store: &mut Store, run: i64) -> Result<&[(String, Vec<i64>)], String> {
+        use std::collections::btree_map::Entry;
+        Ok(match self.units.entry(run) {
+            Entry::Occupied(e) => e.into_mut().as_slice(),
+            Entry::Vacant(e) => e
+                .insert(crate::pipelines::unit_stacks(store, run)?)
+                .as_slice(),
+        })
+    }
+
+    fn frozen(&mut self, store: &mut Store, run: i64) -> Result<&[i64], String> {
+        use std::collections::btree_map::Entry;
+        Ok(match self.frozen.entry(run) {
+            Entry::Occupied(e) => e.into_mut().as_slice(),
+            Entry::Vacant(e) => e
+                .insert(crate::pipelines::frozen_stacks(store, run)?)
+                .as_slice(),
+        })
+    }
+}
+
 /// The unit folder a run's file of a subject or a session lies under:
 /// `sub-<s>`, and `ses-<t>` below it, as the bids units name their files.
 fn unit_folder(path: &str) -> Option<(String, Option<String>)> {
@@ -852,6 +898,16 @@ fn unit_folder(path: &str) -> Option<(String, Option<String>)> {
 /// stack of its subject. Nothing is read of the run's folder, which its
 /// container could write.
 pub(crate) fn made_of(store: &mut Store, d: &Derivative) -> Result<MadeFrom, String> {
+    made_of_with(store, d, &mut Runs::default())
+}
+
+/// [`made_of`], reading each run's units and frozen list once through
+/// `runs`, for many derivatives at once.
+pub(crate) fn made_of_with(
+    store: &mut Store,
+    d: &Derivative,
+    runs: &mut Runs,
+) -> Result<MadeFrom, String> {
     let mut m = MadeFrom {
         known: true,
         ..MadeFrom::default()
@@ -876,11 +932,11 @@ pub(crate) fn made_of(store: &mut Store, d: &Derivative) -> Result<MadeFrom, Str
             }
         }
         ("run", Some(run)) => {
-            let units = crate::pipelines::unit_stacks(store, run)?;
+            let units = runs.units(store, run)?.to_vec();
             if units.is_empty() || units.iter().any(|(_, s)| s.is_empty()) {
-                let frozen = crate::pipelines::frozen_stacks(store, run)?;
+                let frozen = runs.frozen(store, run)?;
                 m.known = !frozen.is_empty();
-                m.stacks.extend(frozen);
+                m.stacks.extend(frozen.iter().copied());
             }
             for (_, s) in &units {
                 m.stacks.extend(s.iter().copied());
@@ -894,9 +950,9 @@ pub(crate) fn made_of(store: &mut Store, d: &Derivative) -> Result<MadeFrom, Str
                 None => Vec::new(),
             };
             let units = if names.is_empty() {
-                Vec::new()
+                &[][..]
             } else {
-                crate::pipelines::unit_stacks(store, run)?
+                runs.units(store, run)?
             };
             let given = names.iter().find_map(|n| {
                 units
@@ -951,7 +1007,7 @@ pub(crate) fn withheld(store: &mut Store, d: &Derivative) -> Result<Withheld, Re
     }
     let made = made_of(store, d).map_err(|e| Reply::error(500, e))?;
     let (stacks, subjects) = crate::sealed::now_of(store, &made.stacks, &made.subjects)?;
-    let sealed = !stacks.is_empty() || !subjects.is_empty() || !made.known;
+    let sealed = made.sealed_by(&stacks, &subjects);
     let own = d.scope == "stack" && d.stack_id.is_some_and(|s| stacks.contains(&s));
     if !own
         && d.kind == "table"
@@ -989,6 +1045,48 @@ pub(crate) fn withheld(store: &mut Store, d: &Derivative) -> Result<Withheld, Re
         )
     };
     Ok(Withheld::Whole(why))
+}
+
+/// Record 55, the rulings of 2026-10-12, item 6: a check never holds a
+/// sealed scan's result. Of these results, the ones made from a stack of a
+/// sample sealed now, by what each was made from as the derivative doors
+/// read it ([`made_of`], [`withheld`]): a stack it was made from, its
+/// subject where the registry keeps no finer word, and one whose making can
+/// no longer be told while a sample is sealed. For any caller: a check is
+/// read by people, and no person holds the grant that reads sealed stacks.
+/// None while no sample is sealed; each run's units are read once.
+pub(crate) fn sealed_among(
+    store: &mut Store,
+    results: &[Derivative],
+) -> Result<std::collections::BTreeSet<i64>, String> {
+    let mut out = std::collections::BTreeSet::new();
+    if results.is_empty() || !crate::sealed::any(store).map_err(|e| e.to_string())? {
+        return Ok(out);
+    }
+    let mut runs = Runs::default();
+    let mut made: Vec<(i64, MadeFrom)> = Vec::with_capacity(results.len());
+    let mut stacks = std::collections::BTreeSet::new();
+    let mut subjects = std::collections::BTreeSet::new();
+    for d in results {
+        // a stack's pictures and a model's artifact are never withheld
+        if matches!(d.kind.as_str(), "pyramid" | "model") {
+            continue;
+        }
+        let m = made_of_with(store, d, &mut runs)?;
+        stacks.extend(m.stacks.iter().copied());
+        subjects.extend(m.subjects.iter().copied());
+        made.push((d.id, m));
+    }
+    let stacks: Vec<i64> = stacks.into_iter().collect();
+    let subjects: Vec<i64> = subjects.into_iter().collect();
+    let (stacks, subjects) =
+        crate::sealed::now_of(store, &stacks, &subjects).map_err(|e| e.to_string())?;
+    for (id, m) in made {
+        if m.sealed_by(&stacks, &subjects) {
+            out.insert(id);
+        }
+    }
+    Ok(out)
 }
 
 /// A table's format and the column that names each row's unit, as the run
@@ -1773,9 +1871,11 @@ pub(crate) fn route(
 /// one that is not a mask and one they do not rate are one answer, 404, so
 /// the door says nothing of what it holds (the review of E1, item 16).
 /// Record 48, D1 of the move: a result made from a stack of a sample sealed
-/// now is what a system said of it, and pipelines:see alone does not read
-/// it (403, saying why); sealed:see does, and so does a rater of a campaign
-/// that holds it, which reads its results as a check is made to.
+/// now is what a system said of it, and neither pipelines:see nor a rater's
+/// campaign reads it (403, saying why); sealed:see does. Record 55, the
+/// rulings of 2026-10-12, item 6: a check never holds a sealed scan's
+/// result, so a rater of a campaign that holds one, made before the ruling
+/// or before the seal, reads it no more than anyone else.
 fn reader_of(
     registry: &mut Registry,
     caller: &Caller,
@@ -1784,7 +1884,7 @@ fn reader_of(
 ) -> Result<(Derivative, Option<i64>), Reply> {
     let found =
         derivative::get(registry.store(), id).map_err(|e| Reply::error(500, e.to_string()))?;
-    if caller.access.holds("pipelines:see") {
+    let (d, through) = if caller.access.holds("pipelines:see") {
         let d = found.ok_or_else(|| Reply::error(404, format!("no derivative {id}")))?;
         if d.kind != "mask" {
             return Err(Reply::error(
@@ -1796,36 +1896,33 @@ fn reader_of(
                 ),
             ));
         }
-        if !crate::sealed::reads(&caller.access)
-            && let Some(why) = withheld_whole(registry.store(), &d)?
-        {
-            return match crate::campaigns::results_through(registry.store(), caller, d.id, stack)? {
-                Some(c) => Ok((d, Some(c))),
-                None => {
-                    let mut r = Reply::error(403, why);
-                    r.body["sealed"] = json!(true);
-                    Err(r)
-                }
-            };
+        (d, None)
+    } else {
+        let not_yours = || {
+            Reply::error(
+                404,
+                format!(
+                    "no result {id} that {} reads: a result opens with pipelines:see, or to a rater of an open campaign that holds it",
+                    caller.principal
+                ),
+            )
+        };
+        let Some(d) = found.filter(|d| d.kind == "mask") else {
+            return Err(not_yours());
+        };
+        match crate::campaigns::results_through(registry.store(), caller, d.id, stack)? {
+            Some(c) => (d, Some(c)),
+            None => return Err(not_yours()),
         }
-        return Ok((d, None));
-    }
-    let not_yours = || {
-        Reply::error(
-            404,
-            format!(
-                "no result {id} that {} reads: a result opens with pipelines:see, or to a rater of an open campaign that holds it",
-                caller.principal
-            ),
-        )
     };
-    let Some(d) = found.filter(|d| d.kind == "mask") else {
-        return Err(not_yours());
-    };
-    match crate::campaigns::results_through(registry.store(), caller, d.id, stack)? {
-        Some(c) => Ok((d, Some(c))),
-        None => Err(not_yours()),
+    if !crate::sealed::reads(&caller.access)
+        && let Some(why) = withheld_whole(registry.store(), &d)?
+    {
+        let mut r = Reply::error(403, why);
+        r.body["sealed"] = json!(true);
+        return Err(r);
     }
+    Ok((d, through))
 }
 
 /// The job a door queued for a result, while it is not over, and when the
