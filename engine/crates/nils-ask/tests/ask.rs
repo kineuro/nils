@@ -1932,3 +1932,132 @@ fn picked_refuses_a_role_the_pack_does_not_pick() {
     by_param["params"] = json!({"role": {"type": "text", "value": "t1w"}});
     accepted(by_param);
 }
+
+/// 2026-10-12: a date a document writes as text is a day, `YYYY-MM-DD`, or
+/// an instant in UTC, `YYYY-MM-DDTHH:MM:SSZ`, and only a day the calendar
+/// has.
+#[test]
+fn a_written_date_is_a_day_or_an_instant_of_a_day_the_calendar_has() {
+    use nils_ask::validate::{WrittenDate, written_date};
+    assert_eq!(
+        written_date("2020-01-31"),
+        Some(WrittenDate::Day("2020-01-31".into()))
+    );
+    assert_eq!(
+        written_date("2024-02-29"),
+        Some(WrittenDate::Day("2024-02-29".into()))
+    );
+    let instant = written_date("2020-01-31T23:59:59Z").unwrap();
+    assert_eq!(instant, WrittenDate::Instant("2020-01-31T23:59:59Z".into()));
+    assert_eq!(instant.day(), "2020-01-31");
+    for bad in [
+        "2021-02-29",
+        "2100-02-29",
+        "2020-02-30",
+        "2020-04-31",
+        "2020-13-01",
+        "2020-00-10",
+        "0000-01-01",
+        "2020/01/31",
+        "2020-1-31",
+        "20200131",
+        "2020-01-31 10:00:00",
+        "2020-01-31T10:00:00",
+        "2020-01-31T24:00:00Z",
+        "2020-01-31T10:60:00Z",
+        "2020-01-31T10:00:00+01:00",
+        "2020-01-31T10:00:00.5Z",
+        "",
+        "soon",
+    ] {
+        assert_eq!(written_date(bad), None, "{bad}");
+    }
+}
+
+/// 2026-10-12: Postgres compares no date with text, and `first >=
+/// "2020-01-01"` answered 500 there. A text a date field is compared with,
+/// or a date function reads, is read as a date, so validate refuses one
+/// that writes none, and a number, at the clause, with the forms to write;
+/// a date parameter holds a date.
+#[test]
+fn a_date_compared_with_text_is_written_as_a_date() {
+    let sessions = |clause: Value| {
+        doc(
+            json!({"s": {"grain": "session", "where": [clause]}}),
+            json!({"set": "s", "level": "count"}),
+        )
+    };
+    for clause in [
+        json!([">=", {}, ["field", {}, "first"], "2020-01-01"]),
+        json!(["<", {}, ["field", {}, "first"], "2020-01-01T00:00:00Z"]),
+        json!(["<=", {}, "2020-01-01", ["field", {}, "first"]]),
+        json!([
+            "in",
+            {},
+            ["field", {}, "first"],
+            ["2020-01-01", "2021-06-15T08:30:00Z"]
+        ]),
+        json!(["=", {}, ["field", {}, "first"], ["field", {}, "last"]]),
+        json!([
+            "<",
+            {},
+            ["days_between", {}, ["field", {}, "first"], "2020-01-01"],
+            30
+        ]),
+    ] {
+        accepted(sessions(clause));
+    }
+    let forms = "a date is written YYYY-MM-DD, or YYYY-MM-DDTHH:MM:SSZ in UTC, as 2020-01-31";
+    for (clause, written) in [
+        (
+            json!([">=", {}, ["field", {}, "first"], "2020/01/01"]),
+            "2020/01/01",
+        ),
+        (
+            json!([">=", {}, "01.01.2020", ["field", {}, "first"]]),
+            "01.01.2020",
+        ),
+        (json!([">", {}, ["field", {}, "first"], 2020]), "2020"),
+        (
+            json!([
+                "in",
+                {},
+                ["field", {}, "first"],
+                ["2020-01-01", "2020-02-30"]
+            ]),
+            "2020-02-30",
+        ),
+        (
+            json!([
+                "<",
+                {},
+                ["days_between", {}, ["field", {}, "first"], "last week"],
+                30
+            ]),
+            "last week",
+        ),
+    ] {
+        let issues = refused(sessions(clause.clone()));
+        assert_eq!(issues.len(), 1, "{clause}: {issues:?}");
+        let i = &issues[0];
+        assert_eq!(i.code, Code::UnknownValue, "{clause}");
+        assert_eq!(i.path, "sets.s.where[0]", "{clause}");
+        assert_eq!(i.message, format!("{written} is not a date"), "{clause}");
+        assert_eq!(i.next, forms, "{clause}");
+    }
+    // a date parameter holds a date
+    let mut by_param = sessions(json!([
+        ">=",
+        {},
+        ["field", {}, "first"],
+        ["param", {}, "since"]
+    ]));
+    by_param["params"] = json!({"since": {"type": "date", "value": "2020-01-01"}});
+    accepted(by_param.clone());
+    by_param["params"]["since"]["value"] = json!("2020-02-30");
+    let issues = refused(by_param);
+    assert_eq!(issues.len(), 1, "{issues:?}");
+    assert_eq!(issues[0].code, Code::UnknownValue);
+    assert_eq!(issues[0].path, "params.since");
+    assert_eq!(issues[0].message, "2020-02-30 is not a date");
+}

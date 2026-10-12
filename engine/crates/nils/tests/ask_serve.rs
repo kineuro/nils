@@ -3746,3 +3746,241 @@ fn the_catalog_door_says_when_each_cohort_was_made() {
         }
     }
 }
+
+/// The backends a door test runs on, the Postgres half in a schema of its
+/// own when a DSN is set.
+fn backends(schema: &str) -> Vec<(&'static str, TempDir, Option<String>)> {
+    let dsn = std::env::var("NILS_TEST_POSTGRES_DSN")
+        .ok()
+        .filter(|d| !d.is_empty());
+    let mut out = vec![("sqlite", synthetic(), None)];
+    match dsn {
+        Some(dsn) => out.push(("postgres", synthetic_postgres(&dsn, schema), Some(dsn))),
+        None => eprintln!("NILS_TEST_POSTGRES_DSN is not set; the Postgres half is skipped"),
+    }
+    out
+}
+
+/// One count a run answers, at the run door.
+fn counted(server: &Server, backend: &str, document: serde_json::Value) -> i64 {
+    let (status, ran) = server.request(
+        "POST",
+        "/api/ask/run",
+        Some(&body(serde_json::json!({"document": document}))),
+        None,
+    );
+    assert_eq!(status, 200, "{backend}: {ran}");
+    ran["rows"][0][0]
+        .as_i64()
+        .unwrap_or_else(|| panic!("{ran}"))
+}
+
+/// 2026-10-12: Postgres compares no date with text, and the run door
+/// answered `first >= "2020-01-01"` with 500 there, the kind of filter the
+/// chat writes. A date written as text, a day or an instant, is read as a
+/// date wherever it meets one: a comparison, a list, a date function, an
+/// instant of a cohort's. Each answers what a date parameter answers, the
+/// same on both backends.
+#[test]
+fn the_run_door_reads_a_date_written_as_text_as_a_date() {
+    let schema = "nils_ask_serve_dates_as_text";
+    let sessions = |clauses: serde_json::Value| {
+        serde_json::json!({
+            "ast_version": 1,
+            "name": "sessions against a date written as text",
+            "sets": {"s": {"grain": "session", "where": clauses}},
+            "out": {"set": "s", "level": "count"}
+        })
+    };
+    let mut answers: Vec<(&str, Vec<i64>)> = Vec::new();
+    for (backend, home, dsn) in backends(schema) {
+        let server = Server::start(&home, 9, &[]);
+        let mut by_param = sessions(serde_json::json!([[
+            ">=",
+            {},
+            ["field", {}, "first"],
+            ["param", {}, "since"]
+        ]]));
+        by_param["params"] = serde_json::json!({"since": {"type": "date", "value": "2010-01-01"}});
+        let want = counted(&server, backend, by_param);
+        assert!(want > 0, "{backend}: some session is since 2010");
+        let day = counted(
+            &server,
+            backend,
+            sessions(serde_json::json!([[
+                ">=",
+                {},
+                ["field", {}, "first"],
+                "2010-01-01"
+            ]])),
+        );
+        let instant = counted(
+            &server,
+            backend,
+            sessions(serde_json::json!([[
+                ">=",
+                {},
+                ["field", {}, "first"],
+                "2010-01-01T00:00:00Z"
+            ]])),
+        );
+        let flipped = counted(
+            &server,
+            backend,
+            sessions(serde_json::json!([[
+                "<=",
+                {},
+                "2010-01-01",
+                ["field", {}, "first"]
+            ]])),
+        );
+        assert_eq!((day, instant, flipped), (want, want, want), "{backend}");
+        let between = counted(
+            &server,
+            backend,
+            sessions(serde_json::json!([
+                [">=", {}, ["field", {}, "first"], "2010-01-01"],
+                ["<", {}, ["field", {}, "first"], "2015-01-01T00:00:00Z"]
+            ])),
+        );
+        let listed = counted(
+            &server,
+            backend,
+            sessions(serde_json::json!([[
+                "not_in",
+                {},
+                ["field", {}, "first"],
+                ["1990-01-01", "1991-02-02T10:00:00Z"]
+            ]])),
+        );
+        let since = counted(
+            &server,
+            backend,
+            sessions(serde_json::json!([[
+                ">=",
+                {},
+                ["days_between", {}, ["field", {}, "first"], "2010-01-01"],
+                0
+            ]])),
+        );
+        assert_eq!(since, want, "{backend}");
+        // a cohort's instant of making against a day and an instant
+        let cohorts = |clause: serde_json::Value| {
+            serde_json::json!({
+                "ast_version": 1,
+                "sets": {"c": {"grain": "cohort", "where": [clause]}},
+                "out": {"set": "c", "level": "count"}
+            })
+        };
+        let made = counted(
+            &server,
+            backend,
+            cohorts(serde_json::json!([
+                ">=",
+                {},
+                ["field", {}, "created_at"],
+                "2020-01-01"
+            ])),
+        );
+        let before = counted(
+            &server,
+            backend,
+            cohorts(serde_json::json!([
+                "<",
+                {},
+                ["field", {}, "created_at"],
+                "2020-01-01T00:00:00Z"
+            ])),
+        );
+        assert_eq!((made, before), (2, 0), "{backend}");
+        server.finish();
+        answers.push((backend, vec![want, between, listed]));
+        if let Some(dsn) = &dsn {
+            drop_schema(dsn, schema);
+        }
+    }
+    let first = &answers[0].1;
+    for (backend, seen) in &answers {
+        assert_eq!(seen, first, "{backend} answers as {}", answers[0].0);
+    }
+}
+
+/// 2026-10-12: a text that writes no date, met by a date, is refused as a
+/// document at every door, on both backends, where SQLite compared it as
+/// text and Postgres answered 500: at the clause by validate, and where
+/// only the compiler can tell the date it meets (a binding), at the
+/// clause by the compiler; a date parameter holds a date.
+#[test]
+fn a_text_that_writes_no_date_is_refused_where_a_date_meets_it() {
+    let schema = "nils_ask_serve_no_date";
+    let forms = "a date is written YYYY-MM-DD, or YYYY-MM-DDTHH:MM:SSZ in UTC";
+    for (backend, home, dsn) in backends(schema) {
+        let server = Server::start(&home, 4, &[]);
+        let slashed = serde_json::json!({
+            "ast_version": 1,
+            "sets": {"s": {"grain": "session", "where": [[">=", {}, ["field", {}, "first"], "2020/01/01"]]}},
+            "out": {"set": "s", "level": "count"}
+        });
+        for door in ["/api/ask/validate", "/api/ask/run"] {
+            let (status, refused) = server.request(
+                "POST",
+                door,
+                Some(&body(serde_json::json!({"document": slashed}))),
+                None,
+            );
+            assert_eq!(status, 400, "{backend} {door}: {refused}");
+            let issue = &refused["issues"][0];
+            assert_eq!(issue["code"], "unknown_value", "{refused}");
+            assert_eq!(issue["path"], "sets.s.where[0]", "{refused}");
+            assert_eq!(issue["message"], "2020/01/01 is not a date", "{refused}");
+            assert!(
+                issue["next"].as_str().unwrap().starts_with(forms),
+                "{refused}"
+            );
+        }
+        // a binding the validator cannot read as a date, which the compiler can
+        let bound = serde_json::json!({
+            "ast_version": 1,
+            "sets": {"s": {"grain": "session",
+                           "bind": {"due": ["shift", {}, ["field", {}, "first"], 30]},
+                           "where": [[">", {}, ["field", {}, "due"], "soon"]]}},
+            "out": {"set": "s", "level": "count"}
+        });
+        let (status, refused) = server.request(
+            "POST",
+            "/api/ask/run",
+            Some(&body(serde_json::json!({"document": bound}))),
+            None,
+        );
+        assert_eq!(status, 400, "{backend}: {refused}");
+        assert_eq!(refused["issues"][0]["code"], "not_compilable", "{refused}");
+        assert_eq!(refused["issues"][0]["path"], "sets.s.where[0]", "{refused}");
+        assert_eq!(
+            refused["issues"][0]["message"],
+            format!("soon is not a date; {forms}"),
+            "{refused}"
+        );
+        // a date parameter holds a date
+        let mut by_param = slashed.clone();
+        by_param["sets"]["s"]["where"] =
+            serde_json::json!([[">=", {}, ["field", {}, "first"], ["param", {}, "since"]]]);
+        by_param["params"] = serde_json::json!({"since": {"type": "date", "value": "2020-02-30"}});
+        let (status, refused) = server.request(
+            "POST",
+            "/api/ask/run",
+            Some(&body(serde_json::json!({"document": by_param}))),
+            None,
+        );
+        assert_eq!(status, 400, "{backend}: {refused}");
+        assert_eq!(refused["issues"][0]["path"], "params.since", "{refused}");
+        assert_eq!(
+            refused["issues"][0]["message"], "2020-02-30 is not a date",
+            "{refused}"
+        );
+        server.finish();
+        if let Some(dsn) = &dsn {
+            drop_schema(dsn, schema);
+        }
+    }
+}
+

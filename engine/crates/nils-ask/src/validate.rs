@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::ast::{Arg, Ask, Clause, Grain, Level, Policy, SchemeRef, Set, Src};
+use crate::ast::{Arg, Ask, Clause, Grain, Level, ParamType, Policy, SchemeRef, Set, Src};
 
 /// The class of a field (§4.4, rule 15).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -427,6 +427,66 @@ pub fn may_project_raw(class: Class, scope: &Scope) -> bool {
     }
 }
 
+/// A date a document writes as text where it meets a date (2026-10-12): a
+/// day, `YYYY-MM-DD`, or an instant in UTC, `YYYY-MM-DDTHH:MM:SSZ`, each a
+/// day the calendar has. Postgres compares no date with text, so the
+/// compiler reads such a text as a date, and validate refuses any other.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WrittenDate {
+    Day(String),
+    Instant(String),
+}
+
+impl WrittenDate {
+    /// The day it falls on, `YYYY-MM-DD`.
+    pub fn day(&self) -> &str {
+        match self {
+            WrittenDate::Day(d) => d,
+            WrittenDate::Instant(t) => &t[..10],
+        }
+    }
+}
+
+/// How a date is written, for a refusal's next step.
+pub const DATE_FORMS: &str = "a date is written YYYY-MM-DD, or YYYY-MM-DDTHH:MM:SSZ in UTC";
+
+/// The date a text writes, or none where it writes none: only the two
+/// forms of [`WrittenDate`], and only a day the calendar has.
+pub fn written_date(text: &str) -> Option<WrittenDate> {
+    let b = text.as_bytes();
+    let num = |from: usize, to: usize| -> Option<u32> {
+        let part = b.get(from..to)?;
+        if part.iter().all(u8::is_ascii_digit) {
+            std::str::from_utf8(part).ok()?.parse().ok()
+        } else {
+            None
+        }
+    };
+    if b.len() < 10 || b[4] != b'-' || b[7] != b'-' {
+        return None;
+    }
+    let (year, month, day) = (num(0, 4)?, num(5, 7)?, num(8, 10)?);
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let days = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => return None,
+    };
+    if year == 0 || day == 0 || day > days {
+        return None;
+    }
+    match b.len() {
+        10 => Some(WrittenDate::Day(text.to_string())),
+        20 if b[10] == b'T' && b[13] == b':' && b[16] == b':' && b[19] == b'Z' => {
+            let (h, m, s) = (num(11, 13)?, num(14, 16)?, num(17, 19)?);
+            (h < 24 && m < 60 && s < 60).then(|| WrittenDate::Instant(text.to_string()))
+        }
+        _ => None,
+    }
+}
+
 /// A value's shape, as the values sampler shows a field no caller may
 /// project raw: digits as 9, letters as a or A, everything else kept, the
 /// first 40 characters and a `~` when there were more.
@@ -615,6 +675,22 @@ pub fn validate(ask: &Ask, names: &dyn Names, scope: &Scope) -> Result<Validated
                     "fix the scheme",
                 ));
             }
+        }
+    }
+
+    // a date parameter holds a date (2026-10-12): the compiler binds it as
+    // one, and any other text reached Postgres as a date and failed there
+    for (name, decl) in &ask.params {
+        if matches!(decl.type_, ParamType::Date)
+            && let Some(v) = decl.value.as_ref().filter(|v| !v.is_null())
+            && !v.as_str().is_some_and(|s| written_date(s).is_some())
+        {
+            issues.push(issue(
+                Code::UnknownValue,
+                format!("params.{name}"),
+                format!("{} is not a date", option_text(v)),
+                format!("{DATE_FORMS}, as 2020-01-31"),
+            ));
         }
     }
 
@@ -1598,6 +1674,48 @@ fn check_clause(
                     ));
                 }
             }
+        }
+    }
+    // a literal a date field is compared with, and one in a date function's
+    // date, is a date (2026-10-12): the compiler reads it as one, since
+    // Postgres compares no date with text and answered 500, so any other
+    // text, or a number, is refused here at the clause
+    for cl in &all {
+        let dated = |a: &Arg| {
+            matches!(a, Arg::Clause(f) if f.op == "field"
+            && f.ref_name().is_some_and(|p| matches!(
+                resolve_field(p, set, set_name, ask, so_far, exposed, names, 0),
+                Ok(Some(FieldInfo { dated: true, .. }))
+            )))
+        };
+        fn one_or_list(a: &Arg) -> Vec<&Arg> {
+            match a {
+                Arg::List(items) => items.iter().collect(),
+                other => vec![other],
+            }
+        }
+        let written: Vec<&Arg> = match (cl.op.as_str(), cl.args.first(), cl.args.get(1)) {
+            (op, Some(l), Some(r)) if COMPARISONS.contains(&op) && dated(l) => one_or_list(r),
+            (op, Some(l), Some(r)) if COMPARISONS.contains(&op) && dated(r) => one_or_list(l),
+            ("days_between", ..) => cl.args.iter().take(2).collect(),
+            ("age_at", ..) => cl.args.get(1).into_iter().collect(),
+            ("shift" | "bucket" | "part", ..) => cl.args.first().into_iter().collect(),
+            _ => Vec::new(),
+        };
+        for a in written {
+            let text = match a {
+                Arg::Text(t) if written_date(t).is_none() => t.clone(),
+                Arg::Int(n) => n.to_string(),
+                Arg::Number(n) => n.to_string(),
+                Arg::Bool(b) => b.to_string(),
+                _ => continue,
+            };
+            issues.push(issue(
+                Code::UnknownValue,
+                path,
+                format!("{text} is not a date"),
+                format!("{DATE_FORMS}, as 2020-01-31"),
+            ));
         }
     }
     // Wave 7a: a dataset named by its literal is one the registry holds, so

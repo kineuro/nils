@@ -810,3 +810,109 @@ fn a_cohorts_dates_are_in_the_catalog_and_at_the_cohort_grain() {
         );
     }
 }
+
+/// 2026-10-12: Postgres compares no date with text, and a field of the
+/// catalog that is a date or an instant answered `>= "2020-01-01"` with
+/// 500 there. Every one of them is now compared with a day and an instant
+/// written as text, as a range and in a list, at detail plain, and both
+/// backends answer each the same count.
+#[test]
+fn every_date_field_compares_with_a_date_written_as_text_on_both_backends() {
+    let mut counts: BTreeMap<String, Vec<(String, i64)>> = BTreeMap::new();
+    let mut failed: Vec<String> = Vec::new();
+    for mut l in labs() {
+        let column_is_a_date = |table: &str, column: &str| {
+            nils_registry::schema::registry_tables()
+                .iter()
+                .find(|t| t.name == table)
+                .and_then(|t| t.column(column))
+                .is_some_and(|c| {
+                    matches!(
+                        c.ty,
+                        nils_registry::schema::Type::Date | nils_registry::schema::Type::Timestamp
+                    )
+                })
+        };
+        let fields: Vec<(String, String)> = l
+            .catalog
+            .fields
+            .values()
+            .filter(|f| f.dated || column_is_a_date(&f.table, &f.column))
+            .map(|f| (f.level.clone(), f.path.clone()))
+            .collect();
+        assert!(fields.len() >= 8, "{}: {fields:?}", l.name);
+        for (level, path) in &fields {
+            let (grain, field) = match level.as_str() {
+                "study" | "series" => ("stack".to_string(), format!("{level}.{path}")),
+                g => (g.to_string(), path.clone()),
+            };
+            let doc = json!({
+                "ast_version": 1,
+                "sets": {"s": {"grain": grain, "where": [
+                    [">=", {}, ["field", {}, &field], "1900-01-01"],
+                    ["<", {}, ["field", {}, &field], "2100-01-01T00:00:00Z"],
+                    ["not_in", {}, ["field", {}, &field], ["1901-01-01", "1902-02-02T02:02:02Z"]]
+                ]}},
+                "out": {"set": "s", "level": "count"}
+            });
+            let name = format!("{level}.{path}");
+            let ask = parse(&doc.to_string()).unwrap();
+            let prepared = match prepare(ask, &l.catalog, &Scope::default()) {
+                Ok(p) => p,
+                Err(e) => {
+                    failed.push(format!("{} {name}: refused: {e}", l.name));
+                    continue;
+                }
+            };
+            let store = l.registry.store();
+            let ctx = Context {
+                names: &l.catalog,
+                dialect: store.dialect(),
+                schema: store.schema().map(str::to_string),
+                window_days: 0,
+                scheme_digest: Scheme::default().digest(),
+                after: None,
+                limit: None,
+                withhold_sealed: true,
+            };
+            let compiled = match compile(&prepared.ask, &prepared.validated, &ctx) {
+                Ok(c) => c,
+                Err(e) => {
+                    failed.push(format!("{} {name}: not compiled: {e}", l.name));
+                    continue;
+                }
+            };
+            match run(
+                store,
+                &compiled,
+                Bounds {
+                    timeout_ms: 20_000,
+                    max_rows: 10,
+                    max_bytes: 64 * 1024,
+                },
+            ) {
+                Ok(answer) => {
+                    let n = answer.rows[0].int(0).unwrap();
+                    counts
+                        .entry(name)
+                        .or_default()
+                        .push((l.name.to_string(), n));
+                }
+                Err(e) => failed.push(format!("{} {name}: {e}", l.name)),
+            }
+        }
+        common::refresh(&mut l);
+    }
+    assert!(failed.is_empty(), "{}", failed.join("\n"));
+    for (name, seen) in &counts {
+        let first = seen[0].1;
+        assert!(
+            seen.iter().all(|(_, n)| *n == first),
+            "{name} answers differently: {seen:?}"
+        );
+    }
+    assert!(
+        counts.values().any(|seen| seen[0].1 > 0),
+        "some date field holds a value: {counts:?}"
+    );
+}

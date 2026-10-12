@@ -74,6 +74,17 @@ distinct ages and its spread are held back while the other groups answer
 them. `gold-c-demographics-plain` answers gold C's mean and spread of age
 per cohort at plain.
 
+## Dates written as text
+
+A document writes a date as text, `2020-01-31` or `2020-01-31T08:30:00Z`,
+and the engine reads it as a date wherever a date meets it: Postgres
+compares no date with text. `dates-written-as-text` bounds the sessions
+by a day and an instant, leaves two out by a list, reads a day in a date
+function and compares a group's earliest date with a day;
+`cohorts-made-before-a-date` compares a cohort's instant of making with a
+day and an instant. Both failed on Postgres before 2026-10-12, and both
+backends answer them with one canonical.
+
 ## The Wave 4c fixtures
 
 Wave 4c (`docs/specs/wave4c-the-assistant.md` §6.8) adds eight fixtures, each of

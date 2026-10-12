@@ -1,0 +1,26 @@
+{
+  "name": "cohorts-made-before-a-date",
+  "question": "The cohorts made since a day and before an instant, both written as text",
+  "hash": "e2db614d18131e7b5def32c9d5daefe8bbb521291a0cbc680763ec98b3afa0ba",
+  "columns": [
+    "_key",
+    "_subject",
+    "name"
+  ],
+  "row_count": 2,
+  "rows": [
+    [
+      "1",
+      "",
+      "ms-cohort-a"
+    ],
+    [
+      "2",
+      "",
+      "ms-cohort-b"
+    ]
+  ],
+  "funnel": {
+    "made": 2
+  }
+}

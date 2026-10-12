@@ -163,6 +163,26 @@ gate:
       outcome: passes
       note: The sequences over one subject, ordered by day then precision then key.
 
+    # --- 2026-10-12: a date written as text, which Postgres refused
+    - name: dates-written-as-text
+      family: conformance
+      question: Sessions between two dates written as text, a day and an instant, by year
+      file: fixtures/dates-written-as-text.ask.json
+      outcome: passes
+      note: >-
+        A text a date meets is read as a date: a day and an instant bound
+        the range, a list leaves two out, a date function reads a day, and a
+        group's earliest date is compared with a day. Postgres compares no
+        date with text and refused every one of them before 2026-10-12.
+    - name: cohorts-made-before-a-date
+      family: conformance
+      question: The cohorts made since a day and before an instant, both written as text
+      file: fixtures/cohorts-made-before-a-date.ask.json
+      outcome: passes
+      note: >-
+        A cohort's instant of making against a day, compared by its day, and
+        against an instant; both cohorts the generator makes are in use.
+
     # --- record 38 S4: a group keyed by an axis of the pack
     - name: axis-group-single
       family: record 38
