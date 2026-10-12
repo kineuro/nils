@@ -189,7 +189,11 @@ x-nils:
         - {name: deferral_digest, type: text, description: The cascade's deferral model}
   needs:
     gpu: none
-    memory-gb: 8
+    # measured (2026-10-12): the cascade over 19,275 stacks at 32 workers,
+    # twice the cores below, peaked at 10.4 GiB (the PSS of all the run's
+    # processes): the main process 2.2 GiB with stage 1 streamed, a worker
+    # at most 3.3 GiB on its largest stack; 12 holds it with a margin
+    memory-gb: 12
     cores: 16
     cores-input: threads
   proposals:

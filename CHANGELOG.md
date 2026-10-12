@@ -90,6 +90,7 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ### Fixed
 
+- `bodypart-infer-fusion` declares 12 GB of memory, where it declared 8: the cascade over 19,275 stacks at 32 workers peaked at 10.4 GiB for all its processes, the main process 2.2 GiB with stage 1 streamed and a worker at most 3.3 GiB.
 - nils-bodypart's cascade with its student on the card decodes on the card with one worker by default, not two, so the card holds two processes, as the card's lease allows; `--gpu-workers` still sets it, and without the cascade the default stays 2.
 - nils-bodypart's CPU build on a machine with a card: `infer-fusion --device cuda` (or `auto`) ran the cascade's student, and `--encoder-device cuda` the encoder, on a card this torch cannot use, and the run crashed. Each now runs on the card only where torch can use one, and on the CPU otherwise with a warning; the student is loaded before any slice is read.
 - nils-bodypart refuses a cascade whose card names no threshold, or not its head's: the engine stages each `body_part` decision at the threshold of the card that names it, the cascade's, so another would stage what the run said abstains, or the reverse.
