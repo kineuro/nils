@@ -106,6 +106,7 @@ impl Home {
             "pick_stack",
             "decision",
             "derivative",
+            "campaign_item",
         ] {
             sql = sql.replace(&format!("{{{t}}}"), &store.qualified(t));
         }
@@ -1404,9 +1405,14 @@ fn a_preview_of_five_thousand_results_is_quick() {
 /// the home, the working place, the scans, the pipeline's and the run's
 /// ids and the place's.
 fn small(name: &str) -> (Home, TempDir, i64, i64, i64, i64, i64) {
+    small_on(name, None)
+}
+
+/// [`small`] on a backend: SQLite, or the Postgres schema named.
+fn small_on(name: &str, pg: Option<(String, String)>) -> (Home, TempDir, i64, i64, i64, i64, i64) {
     let home = Home {
         dir: TempDir::new(name),
-        pg: None,
+        pg,
     };
     let src = TempDir::new(&format!("{name}-src"));
     series(
@@ -1555,6 +1561,171 @@ fn a_mask_that_cannot_be_read_is_counted_and_left_out() {
             422,
             "not queued again"
         );
+    }
+}
+
+/// After the T33 pipe test: an item whose outcome cannot be read
+/// is refused at the close and says so at the campaign and item doors
+/// (state `refused`, `refused` with why and when) rather than looking
+/// agreed; the check says a person may close it again (`close_again`), and
+/// once the outcome reads, a person's later close writes it as any close
+/// does. With nothing left to write, a close is refused. On SQLite and on
+/// Postgres.
+#[test]
+fn a_refused_item_says_so_and_a_person_closes_the_check_again() {
+    refused_items(None);
+}
+
+#[test]
+fn a_refused_item_says_so_and_a_person_closes_the_check_again_on_postgres() {
+    let Some(dsn) = std::env::var("NILS_TEST_POSTGRES_DSN")
+        .ok()
+        .filter(|d| !d.is_empty())
+    else {
+        return;
+    };
+    let schema = "nils_check_refused";
+    let drop = || {
+        let mut store = Store::connect_postgres(&dsn, schema).expect("connect");
+        store
+            .batch(&format!(
+                "DROP SCHEMA IF EXISTS {schema} CASCADE; DROP SCHEMA IF EXISTS {schema}_linkage CASCADE"
+            ))
+            .expect("drop");
+    };
+    drop();
+    refused_items(Some((dsn.clone(), schema.to_string())));
+    drop();
+}
+
+fn refused_items(pg: Option<(String, String)>) {
+    let (home, work, a, _b, _pipeline, run, place) = small_on("checks-refused", pg);
+    let m1 = mask_of(&home, work.path(), run, place, a, "", &lesions(0));
+    let m2 = mask_of(&home, work.path(), run, place, a, "two/", &lesions(1));
+    let server = Server::start(&home);
+    let ops = ops_token();
+    let anna = token("anna", &["campaigns:see", "campaigns:work"], "quasi");
+    let body = check_body("refused at the close", json!({"derivatives": [m1, m2]}));
+    read_preview(&server, &body, &ops);
+    let made = server.ok("POST", "/api/campaigns", Some(body), &ops);
+    let check = made["id"].as_i64().unwrap();
+    for _ in 0..2 {
+        let claimed = server.ok(
+            "POST",
+            &format!("/api/campaigns/{check}/claim"),
+            Some(json!({})),
+            &anna,
+        );
+        let assignment = claimed["assignment"]["id"].as_i64().unwrap();
+        server.ok(
+            "POST",
+            &format!("/api/campaigns/{check}/assignments/{assignment}/answer"),
+            Some(json!({"value": "accepted", "form": {"seen": [1]}})),
+            &anna,
+        );
+    }
+    let campaign = |token: &str| server.ok("GET", &format!("/api/campaigns/{check}"), None, token);
+    let item_of = |doc: &Value, d: i64| -> Value {
+        doc["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["derivative_id"] == d)
+            .unwrap()
+            .clone()
+    };
+    let doc = campaign(&ops);
+    let (one, two) = (item_of(&doc, m1), item_of(&doc, m2));
+    assert_eq!(two["state"], "agreed", "{doc}");
+    assert!(two["refused"].is_null(), "{doc}");
+    let i2 = two["id"].as_i64().unwrap();
+    // m2's outcome is spoiled as the pipe test spoiled it: its parts are no
+    // list
+    let outcome = two["outcome"].clone();
+    let set_outcome = |o: &Value| {
+        home.exec(&format!(
+            "UPDATE {{campaign_item}} SET outcome = '{}' WHERE id = {i2}",
+            o
+        ));
+    };
+    let mut spoiled = outcome.clone();
+    spoiled["form"]["parts"] = json!("x");
+    set_outcome(&spoiled);
+
+    // the close writes m1, refuses m2 and says why
+    let closed = server.ok("POST", &format!("/api/campaigns/{check}/close"), None, &ops);
+    assert_eq!(
+        (closed["resolved"].as_i64(), closed["unresolved"].as_i64()),
+        (Some(1), Some(1)),
+        "{closed}"
+    );
+    assert_eq!(closed["refused"][0]["item"], i2, "{closed}");
+    let why = closed["refused"][0]["why"].as_str().unwrap().to_string();
+    assert!(
+        why.contains("cannot be read") && why.contains("form.parts is a list"),
+        "{why}"
+    );
+    // the campaign door: the item is refused, with why and when, counted as
+    // refused, and the check may be closed again
+    let doc = campaign(&ops);
+    assert_eq!(doc["status"], "closed", "{doc}");
+    assert_eq!(doc["close_again"], true, "{doc}");
+    assert_eq!(doc["counts"]["items"]["refused"], 1, "{doc}");
+    assert!(doc["counts"]["items"]["agreed"].is_null(), "{doc}");
+    let two = item_of(&doc, m2);
+    assert_eq!(two["state"], "refused", "{doc}");
+    assert_eq!(two["refused"]["why"], why.as_str(), "{doc}");
+    assert!(two["refused"]["at"].is_string(), "{doc}");
+    assert_eq!(item_of(&doc, m1)["state"], "resolved", "{doc}");
+    assert!(item_of(&doc, m1)["refused"].is_null(), "{doc}");
+    assert_eq!(one["id"], item_of(&doc, m1)["id"]);
+    // and so does the item door, for its rater
+    let read = server.ok(
+        "GET",
+        &format!("/api/campaigns/{check}/items/{i2}/check"),
+        None,
+        &anna,
+    );
+    assert_eq!(read["state"], "refused", "{read}");
+    assert_eq!(read["refused"]["why"], why.as_str(), "{read}");
+    // nothing was written for m2
+    let by = |c: &str| -> Vec<i64> {
+        server.ok("GET", &format!("/api/derivatives?check={c}"), None, &ops)["derivatives"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| d["id"].as_i64().unwrap())
+            .collect()
+    };
+    assert_eq!(by("unchecked"), vec![m2]);
+    assert_eq!(by("accepted"), vec![m1]);
+
+    // once the outcome reads, a person's later close writes it as usual
+    set_outcome(&outcome);
+    let later = server.ok("POST", &format!("/api/campaigns/{check}/close"), None, &ops);
+    assert_eq!(later["resolved"], 2, "{later}");
+    assert_eq!(later["refused"], json!([]), "{later}");
+    let doc = campaign(&ops);
+    assert_eq!(doc["status"], "closed", "{doc}");
+    assert_eq!(doc["close_again"], false, "{doc}");
+    let two = item_of(&doc, m2);
+    assert_eq!(two["state"], "resolved", "{doc}");
+    assert!(two["refused"].is_null(), "{doc}");
+    let mut accepted = by("accepted");
+    accepted.sort_unstable();
+    assert_eq!(accepted, vec![m1, m2]);
+    // nothing is left to write: a close is refused
+    let (status, said) = server.call("POST", &format!("/api/campaigns/{check}/close"), None, &ops);
+    assert_eq!(status, 409, "{said}");
+    // the job that warms the check's layers ends before its registry goes
+    if let Some(job) = made["layers"]["job"].as_i64() {
+        for _ in 0..600 {
+            let (_, j) = server.call("GET", &format!("/api/jobs/{job}"), None, &ops);
+            if matches!(j["state"].as_str(), Some("done" | "failed" | "cancelled")) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
     }
 }
 

@@ -389,6 +389,77 @@ pub fn held_by_open(store: &mut Store, derivative: i64) -> Result<Option<(i64, S
     )
 }
 
+/// The open (or closing) check campaign other than `campaign` that holds a
+/// result, by id and name: a later close of `campaign` leaves the result to
+/// it.
+pub fn held_by_another(
+    store: &mut Store,
+    derivative: i64,
+    campaign: i64,
+) -> Result<Option<(i64, String)>, Error> {
+    let d = store.dialect();
+    let sql = format!(
+        "SELECT c.id, c.name FROM {} i JOIN {} c ON c.id = i.campaign_id \
+         WHERE c.status IN ('open', 'closing') AND i.derivative_id = {} AND c.id <> {} ORDER BY c.id",
+        store.qualified("campaign_item"),
+        store.qualified("campaign"),
+        d.param(1, Type::Int),
+        d.param(2, Type::Int),
+    );
+    Ok(
+        match store
+            .query(&sql, &[Param::Int(derivative), Param::Int(campaign)])?
+            .first()
+        {
+            Some(r) => Some((r.int(0)?, r.text(1)?.to_string())),
+            None => None,
+        },
+    )
+}
+
+/// A check in force on a result or one of its parts, written at or after
+/// `since` by anyone but `campaign` (another check's close, or a direct
+/// check): the newest such decision. A later close of `campaign` leaves it
+/// standing rather than write an older judgement over it.
+pub fn checked_since(
+    store: &mut Store,
+    derivative: i64,
+    campaign: i64,
+    since: &str,
+) -> Result<Option<i64>, Error> {
+    let d = store.dialect();
+    let sql = format!(
+        "SELECT id FROM {} WHERE axis = {} AND withdrawn_at IS NULL \
+         AND ((scope = 'derivative' AND ref = {}) OR (scope = 'derivative_part' AND ref LIKE {})) \
+         AND (campaign_id IS NULL OR campaign_id <> {}) AND decided_at >= {} \
+         ORDER BY id DESC",
+        store.qualified("decision"),
+        d.param(1, Type::Text),
+        d.param(2, Type::Text),
+        d.param(3, Type::Text),
+        d.param(4, Type::Int),
+        d.param(5, Type::Timestamp),
+    );
+    Ok(
+        match store
+            .query(
+                &sql,
+                &[
+                    Param::from(CHECK_AXIS),
+                    Param::from(derivative.to_string()),
+                    Param::from(format!("{derivative}:%")),
+                    Param::Int(campaign),
+                    Param::from(since),
+                ],
+            )?
+            .first()
+        {
+            Some(r) => Some(r.int(0)?),
+            None => None,
+        },
+    )
+}
+
 /// Of these results, the ones an open (or closing) check campaign holds,
 /// read inside the caller's transaction with the results' rows locked
 /// (Postgres; SQLite's immediate transaction holds the whole database), so
@@ -1350,6 +1421,9 @@ pub fn close_item(
             ("decision_id", Param::Int(decisions[0])),
             ("outcome", Param::from(outcome.to_string())),
             ("resolved_at", Param::from(now)),
+            // an earlier close's refusal of the item ends as it is written
+            ("refused_at", Param::Null),
+            ("refused_why", Param::Null),
         ],
         "id",
         it.id,

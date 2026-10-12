@@ -172,11 +172,26 @@ fn review_about(store: &mut Store, row: &serde_json::Value) -> Result<Vec<i64>, 
     Ok(stacks)
 }
 
+/// The run and the unit of a run's QC item that names no stack: a
+/// session's or a subject's unit.
+fn qc_unit(row: &serde_json::Value) -> Option<(i64, String)> {
+    if row["kind"] != nils_registry::review::PIPELINE_QC_KIND || !row["ref"]["stack_id"].is_null() {
+        return None;
+    }
+    Some((
+        row["ref"]["run_id"].as_i64()?,
+        row["ref"]["unit"].as_str()?.to_string(),
+    ))
+}
+
 /// Review rows as a caller who does not read sealed stacks reads them: an
 /// item about a stack sealed now, or a group whose members are all sealed
 /// now, is left out, as if it were not there; a group that holds some keeps
-/// the others, its member count and member list without the sealed ones.
-/// Answers how many items were left out. `reads` is the caller's grant.
+/// the others, its member count and member list without the sealed ones. A
+/// run's QC item of a session's or a subject's unit is about the stacks the
+/// run gave the unit, as the run's summary takes its breaches
+/// ([`crate::pipelines::sealed_units`]). Answers how many items were left
+/// out. `reads` is the caller's grant.
 pub(crate) fn withhold_review(
     store: &mut Store,
     rows: &mut Vec<serde_json::Value>,
@@ -191,12 +206,27 @@ pub(crate) fn withhold_review(
     }
     let all: Vec<i64> = about.iter().flatten().copied().collect();
     let sealed = now(store, &all)?;
-    if sealed.is_empty() {
+    let mut units: std::collections::BTreeMap<i64, Vec<String>> = Default::default();
+    for (run, unit) in rows.iter().filter_map(qc_unit) {
+        units.entry(run).or_default().push(unit);
+    }
+    let mut sealed_units: BTreeSet<(i64, String)> = BTreeSet::new();
+    for (run, names) in units {
+        for unit in
+            crate::pipelines::sealed_units(store, run, &names).map_err(StoreError::Message)?
+        {
+            sealed_units.insert((run, unit));
+        }
+    }
+    if sealed.is_empty() && sealed_units.is_empty() {
         return Ok(0);
     }
     let before = rows.len();
     let mut kept = Vec::with_capacity(rows.len());
     for (mut r, stacks) in rows.drain(..).zip(about) {
+        if qc_unit(&r).is_some_and(|u| sealed_units.contains(&u)) {
+            continue;
+        }
         let hidden = stacks.iter().filter(|s| sealed.contains(s)).count();
         if hidden == 0 {
             kept.push(r);

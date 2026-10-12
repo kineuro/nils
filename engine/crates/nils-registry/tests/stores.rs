@@ -4100,6 +4100,63 @@ fn migration_91_lets_a_check_be_a_campaign() {
     }
 }
 
+/// After type 3's first end-to-end test, on both backends: a registry of the
+/// schema before gains when and why a close refused an item; every item it
+/// held is kept as it was, refused by nothing.
+#[test]
+fn migration_92_lets_a_refused_item_say_why() {
+    for (name, _guard, mut store) in stores() {
+        migrate::migrate(&mut store, Kind::Registry).unwrap();
+        let (i, meta) = (
+            store.qualified("campaign_item"),
+            store.qualified("registry_meta"),
+        );
+        store
+            .batch(&format!(
+                "ALTER TABLE {i} DROP COLUMN refused_at;
+                 ALTER TABLE {i} DROP COLUMN refused_why;
+                 UPDATE {meta} SET value = '91' WHERE key = 'schema_version';
+                 INSERT INTO {i} (campaign_id, position, review_item_id, stack_id, key, state, round)
+                   VALUES (1, 0, 5, 12, 'stack:12', 'agreed', 1)"
+            ))
+            .unwrap();
+        assert_eq!(
+            migrate::standing(&mut store, Kind::Registry).unwrap(),
+            Standing::Behind(91),
+            "{name}"
+        );
+        assert_eq!(
+            migrate::migrate(&mut store, Kind::Registry).unwrap(),
+            (92..=migrate::SCHEMA_VERSION).collect::<Vec<i64>>(),
+            "{name}"
+        );
+        for c in ["refused_at", "refused_why"] {
+            assert!(
+                migrate::column_exists(&mut store, "campaign_item", c).unwrap(),
+                "{name}: campaign_item.{c}"
+            );
+        }
+        let it = nils_registry::campaign::items(&mut store, 1).unwrap();
+        assert_eq!(it.len(), 1, "{name}");
+        assert_eq!(
+            (it[0].state.as_str(), &it[0].refused_at, &it[0].refused_why),
+            ("agreed", &None, &None),
+            "{name}"
+        );
+        assert_eq!(
+            it[0].as_json()["refused"],
+            serde_json::Value::Null,
+            "{name}"
+        );
+        assert!(
+            migrate::migrate(&mut store, Kind::Registry)
+                .unwrap()
+                .is_empty(),
+            "{name}"
+        );
+    }
+}
+
 /// The review of E1, item 6, on both backends: a registry at schema 59, from
 /// before a derivative had a check and a grid scan, migrates to the newest:
 /// migration 60 makes the derivative's indexes it has columns for, and

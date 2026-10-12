@@ -2416,6 +2416,11 @@ pub struct Item {
     pub derivative_id: Option<i64>,
     pub part_set: Option<String>,
     pub part_label: Option<i64>,
+    /// An item its close could not write (state `refused`): when the close
+    /// refused it, and why in the close's words. Cleared once a later close
+    /// writes it.
+    pub refused_at: Option<String>,
+    pub refused_why: Option<String>,
 }
 
 impl Item {
@@ -2429,12 +2434,20 @@ impl Item {
             "outcome": self.outcome, "decision_id": self.decision_id, "pick_id": self.pick_id,
             "resolved_at": self.resolved_at, "held_back": self.held_back,
             "derivative_id": self.derivative_id, "part_set": self.part_set,
-            "part_label": self.part_label,
+            "part_label": self.part_label, "refused": self.refused_json(),
         })
+    }
+
+    /// Why and when its close refused it, or null.
+    pub fn refused_json(&self) -> Value {
+        match (&self.refused_why, &self.refused_at) {
+            (None, None) => Value::Null,
+            (why, at) => json!({"why": why, "at": at}),
+        }
     }
 }
 
-const ITEM_COLUMNS: [&str; 21] = [
+const ITEM_COLUMNS: [&str; 23] = [
     "id",
     "campaign_id",
     "position",
@@ -2456,6 +2469,8 @@ const ITEM_COLUMNS: [&str; 21] = [
     "derivative_id",
     "part_set",
     "part_label",
+    "refused_at",
+    "refused_why",
 ];
 
 fn item_of(r: &Row) -> Result<Item, StoreError> {
@@ -2481,6 +2496,8 @@ fn item_of(r: &Row) -> Result<Item, StoreError> {
         derivative_id: r.opt_int(18)?,
         part_set: r.opt_text(19)?.map(str::to_string),
         part_label: r.opt_int(20)?,
+        refused_at: r.opt_text(21)?.map(str::to_string),
+        refused_why: r.opt_text(22)?.map(str::to_string),
     })
 }
 
@@ -6339,8 +6356,12 @@ pub fn close(registry: &mut Registry, cl: &Close<'_>, now: &str) -> Result<Close
     let c = get(registry.store(), cl.campaign)?
         .ok_or_else(|| Error::NotFound(format!("no campaign {}", cl.campaign)))?;
     // A close that died part way left the campaign closing; a person runs
-    // it again, and it writes what the first did not.
-    let again = c.status == "closing" && cl.author_kind == "person";
+    // it again, and it writes what the first did not. After type 3's pipe
+    // test (record 55 H3): a check closed with items it refused, whose
+    // questions are still open, is closed again by a person, which writes
+    // those it can now and leaves the rest refused.
+    let refused_left = closes_again(registry.store(), &c)?;
+    let again = (c.status == "closing" || refused_left) && cl.author_kind == "person";
     if c.status != "open" && !again {
         return Err(refused(format!(
             "campaign {} is {}{}",
@@ -6348,6 +6369,8 @@ pub fn close(registry: &mut Registry, cl: &Close<'_>, now: &str) -> Result<Close
             c.status,
             if c.status == "closing" {
                 "; a person runs its close again"
+            } else if refused_left {
+                "; a person closes it again to write the items its close refused"
             } else {
                 ""
             }
@@ -6391,11 +6414,18 @@ pub fn close(registry: &mut Registry, cl: &Close<'_>, now: &str) -> Result<Close
     match close_items(registry, cl, &c, &question, now) {
         Ok(out) => Ok(out),
         Err(e) => {
+            // a close that fails part way opens the campaign again; a later
+            // close of a closed check leaves it closed
+            let back = if c.status == "closed" {
+                "closed"
+            } else {
+                "open"
+            };
             let store = registry.store();
             store
                 .execute(
                     &format!(
-                        "UPDATE {} SET status = 'open' WHERE id = {} AND status = 'closing'",
+                        "UPDATE {} SET status = '{back}' WHERE id = {} AND status = 'closing'",
                         store.qualified("campaign"),
                         store.dialect().param(1, Type::Int)
                     ),
@@ -6426,7 +6456,13 @@ fn close_items(
             out.resolved += 1;
             continue;
         }
-        if !matches!(it.state.as_str(), "agreed" | "adjudicated") {
+        // an item an earlier close refused is tried again, while its
+        // question is open: a check of its result made since, which took its
+        // place, closed it (after type 3's pipe test, record 55 H3)
+        let retried = it.state == "refused";
+        if !matches!(it.state.as_str(), "agreed" | "adjudicated" | "refused")
+            || (retried && !question_open(registry.store(), it.review_item_id)?)
+        {
             out.unresolved += 1;
             continue;
         }
@@ -6553,19 +6589,27 @@ fn close_items(
                     .as_str()
                     .map(|v| stored_joint_of(axes, constraints, v));
                 let Some(Ok(joint)) = joint else {
-                    out.refused
-                        .push((it.id, "the item came to no joint answer".into()));
-                    out.unresolved += 1;
+                    refuse(
+                        registry.store(),
+                        &mut out,
+                        it,
+                        "the item came to no joint answer".into(),
+                        now,
+                    )?;
                     continue;
                 };
                 // an answer kept across a repack that the pack now forbids
                 // wants a second look, never a decision
                 if let Err(why) = legal(constraints, &joint) {
-                    out.refused.push((
-                        it.id,
-                        format!("the item's answer is refused by the pack the campaign is under now: {why}"),
-                    ));
-                    out.unresolved += 1;
+                    refuse(
+                        registry.store(),
+                        &mut out,
+                        it,
+                        format!(
+                            "the item's answer is refused by the pack the campaign is under now: {why}"
+                        ),
+                        now,
+                    )?;
                     continue;
                 }
                 // Every decision of the item, its review items and the
@@ -6611,8 +6655,7 @@ fn close_items(
                     Ok(Err(why)) => {
                         registry.store().rollback().ok();
                         registry.refresh_meta().ok();
-                        out.refused.push((it.id, why));
-                        out.unresolved += 1;
+                        refuse(registry.store(), &mut out, it, why, now)?;
                     }
                     Err(e) => {
                         registry.store().rollback().ok();
@@ -6624,9 +6667,13 @@ fn close_items(
             "decision" | "stage" => {
                 let value = it.outcome["value"].as_str().map(str::to_string);
                 let Some(value) = value else {
-                    out.refused
-                        .push((it.id, "the item came to no value".into()));
-                    out.unresolved += 1;
+                    refuse(
+                        registry.store(),
+                        &mut out,
+                        it,
+                        "the item came to no value".into(),
+                        now,
+                    )?;
                     continue;
                 };
                 // The decision, its review item and the item's link to it
@@ -6680,6 +6727,8 @@ fn close_items(
                             ("state", Param::from("resolved")),
                             ("decision_id", Param::Int(applied.decision)),
                             ("resolved_at", Param::from(now)),
+                            NOT_REFUSED[0].clone(),
+                            NOT_REFUSED[1].clone(),
                         ],
                         "id",
                         it.id,
@@ -6698,8 +6747,7 @@ fn close_items(
                     Ok(Err(why)) => {
                         registry.store().rollback().ok();
                         registry.refresh_meta().ok();
-                        out.refused.push((it.id, why));
-                        out.unresolved += 1;
+                        refuse(registry.store(), &mut out, it, why, now)?;
                     }
                     Err(e) => {
                         registry.store().rollback().ok();
@@ -6714,17 +6762,66 @@ fn close_items(
             // sealed sample (a result's status decides nothing of its scan)
             "check" => {
                 if kind != "person" || !persons_only {
-                    out.refused.push((
-                        it.id,
+                    refuse(
+                        registry.store(),
+                        &mut out,
+                        it,
                         format!(
                             "a check is a person's decision and is written in force; a model or an agent answered item {}, or {} closes as {}: a person adjudicates it or closes the campaign",
                             it.position + 1,
                             cl.who,
                             crate::a_or_an(cl.author_kind)
                         ),
-                    ));
-                    out.unresolved += 1;
+                        now,
+                    )?;
                     continue;
+                }
+                // A later close never writes over a newer judgement: a
+                // result another open check holds is that check's to decide,
+                // and one checked since this item was refused keeps that
+                // check, which closes this item's question.
+                if let Some(d) = it.derivative_id {
+                    if let Some((other, name)) =
+                        crate::check::held_by_another(registry.store(), d, c.id)?
+                    {
+                        refuse(
+                            registry.store(),
+                            &mut out,
+                            it,
+                            format!(
+                                "result {d} is held by the open check {name} (campaign {other}), which decides it"
+                            ),
+                            now,
+                        )?;
+                        continue;
+                    }
+                    if retried
+                        && let Some(at) = it.refused_at.as_deref()
+                        && let Some(newer) =
+                            crate::check::checked_since(registry.store(), d, c.id, at)?
+                    {
+                        let store = registry.store();
+                        refuse(
+                            store,
+                            &mut out,
+                            it,
+                            format!(
+                                "result {d} was checked again (decision {newer}) after this campaign's close refused item {}; that check stands",
+                                it.position + 1
+                            ),
+                            now,
+                        )?;
+                        finish_review_item(
+                            store,
+                            it.review_item_id,
+                            review::RESOLVED,
+                            cl.who,
+                            &json!({"campaign": c.id, "closed_into": "check", "checked_since": newer}),
+                            None,
+                            now,
+                        )?;
+                        continue;
+                    }
                 }
                 registry.store().begin()?;
                 let written = (|| -> Result<Result<Vec<i64>, String>, Error> {
@@ -6754,8 +6851,7 @@ fn close_items(
                     Ok(Err(why)) => {
                         registry.store().rollback().ok();
                         registry.refresh_meta().ok();
-                        out.refused.push((it.id, why));
-                        out.unresolved += 1;
+                        refuse(registry.store(), &mut out, it, why, now)?;
                     }
                     Err(e) => {
                         registry.store().rollback().ok();
@@ -6774,43 +6870,49 @@ fn close_items(
                     .transpose()?
                     .unwrap_or_default();
                 let (Some(subject), Some(day)) = (it.subject_id, it.session_day.as_deref()) else {
-                    out.refused
-                        .push((it.id, "the item names no session".into()));
-                    out.unresolved += 1;
+                    refuse(
+                        registry.store(),
+                        &mut out,
+                        it,
+                        "the item names no session".into(),
+                        now,
+                    )?;
                     continue;
                 };
                 // a pick is a person's (record 42 S3): an agent's or a
                 // model's answer is evidence, never a pick, and a pick is
                 // written in force, so it is never staged (R6)
                 if kind != "person" {
-                    out.refused.push((
-                        it.id,
+                    refuse(
+                        registry.store(),
+                        &mut out,
+                        it,
                         format!(
                             "a pick is a person's; {who} answered as {}",
                             crate::a_or_an(&kind)
                         ),
-                    ));
-                    out.unresolved += 1;
+                        now,
+                    )?;
                     continue;
                 }
                 if !persons_only {
-                    out.refused.push((
-                        it.id,
+                    refuse(
+                        registry.store(),
+                        &mut out,
+                        it,
                         format!(
                             "a pick is a person's and is written in force; a model answered item {}, or {} closes as {}: a person adjudicates it or closes the campaign",
-                            it.position, cl.who, crate::a_or_an(cl.author_kind)
+                            it.position,
+                            cl.who,
+                            crate::a_or_an(cl.author_kind)
                         ),
-                    ));
-                    out.unresolved += 1;
+                        now,
+                    )?;
                     continue;
                 }
                 let Some(write) = cl.picks else {
-                    out.refused.push((
-                        it.id,
-                        "a pick campaign closes through the person's pick writer, and none was given"
-                            .into(),
-                    ));
-                    out.unresolved += 1;
+                    let why = "a pick campaign closes through the person's pick writer, and none was given";
+                    refuse(registry.store(), &mut out, it, why.into(), now)?;
                     continue;
                 };
                 let pick = match write(
@@ -6828,8 +6930,7 @@ fn close_items(
                 ) {
                     Ok(pick) => pick,
                     Err(why) => {
-                        out.refused.push((it.id, why));
-                        out.unresolved += 1;
+                        refuse(registry.store(), &mut out, it, why, now)?;
                         continue;
                     }
                 };
@@ -6850,6 +6951,8 @@ fn close_items(
                         ("state", Param::from("resolved")),
                         ("pick_id", Param::Int(pick)),
                         ("resolved_at", Param::from(now)),
+                        NOT_REFUSED[0].clone(),
+                        NOT_REFUSED[1].clone(),
                     ],
                     "id",
                     it.id,
@@ -6908,6 +7011,8 @@ fn close_items(
                 let mut sets = vec![
                     ("state", Param::from("resolved")),
                     ("resolved_at", Param::from(now)),
+                    NOT_REFUSED[0].clone(),
+                    NOT_REFUSED[1].clone(),
                 ];
                 if outcome != it.outcome {
                     sets.push(("outcome", Param::from(outcome.to_string())));
@@ -6924,16 +7029,22 @@ fn close_items(
     // closing looked at is the campaign, so every one carries the epoch
     // the close left.
     // record 55 H3 (the review of E2, item 7): a check's item the close
-    // did not resolve (unanswered, waiting, refused) asks nothing any more:
-    // the result is asked again by a later check, which raises its own
-    // item, so this one's review item is closed as superseded, with no
-    // decision, rather than left open where nothing could close it
+    // did not resolve and did not refuse (unanswered, waiting) asks nothing
+    // any more: the result is asked again by a later check, which raises
+    // its own item, so this one's review item is closed as superseded, with
+    // no decision, rather than left open where nothing could close it.
+    // After type 3's pipe test: a refused item's question stays open, said
+    // to be refused, and a person's later close writes it once it can.
     if matches!(question, Question::Check { .. }) {
         let store = registry.store();
         for it in items(store, c.id)?
             .into_iter()
             .filter(|i| i.state != "resolved")
         {
+            if it.state == "refused" {
+                mark_review_item(store, it.review_item_id, "refused")?;
+                continue;
+            }
             finish_review_item(
                 store,
                 it.review_item_id,
@@ -7163,11 +7274,68 @@ fn close_axes(
             ("decision_id", first.map_or(Param::Null, Param::Int)),
             ("outcome", Param::from(outcome.to_string())),
             ("resolved_at", Param::from(now)),
+            NOT_REFUSED[0].clone(),
+            NOT_REFUSED[1].clone(),
         ],
         "id",
         it.id,
     )?;
     Ok(Ok((decided, skipped)))
+}
+
+/// After type 3's pipe test (record 55 H3): an item its close cannot write
+/// is kept `refused`, with when and why in the close's words, and named in
+/// the close's answer, rather than left looking agreed. Nothing is written
+/// for it, and its question stays open for a later close.
+fn refuse(
+    store: &mut Store,
+    out: &mut Closed,
+    it: &Item,
+    why: String,
+    now: &str,
+) -> Result<(), Error> {
+    store.update_by_id(
+        table("campaign_item"),
+        &[
+            ("state", Param::from("refused")),
+            ("refused_at", Param::from(now)),
+            ("refused_why", Param::from(why.as_str())),
+        ],
+        "id",
+        it.id,
+    )?;
+    out.refused.push((it.id, why));
+    out.unresolved += 1;
+    Ok(())
+}
+
+/// What a close clears on an item it writes, which an earlier close may
+/// have refused.
+const NOT_REFUSED: [(&str, Param); 2] = [("refused_at", Param::Null), ("refused_why", Param::Null)];
+
+/// Whether a review item still asks: open, or staged for a person.
+fn question_open(store: &mut Store, review_item: i64) -> Result<bool, Error> {
+    Ok(review::item(store, review_item)
+        .map_err(|e| invalid(e.to_string()))?
+        .is_some_and(|r| matches!(r.status.as_str(), "open" | "staged")))
+}
+
+/// Whether a closed check holds an item its close refused whose question is
+/// still open: a person's later close writes it once it can (after type 3's
+/// pipe test, record 55 H3). Only a check: another campaign's refused item
+/// is decided in the queue, where its question stays open.
+pub fn closes_again(store: &mut Store, c: &Campaign) -> Result<bool, Error> {
+    if c.status != "closed" || !crate::check::is_check(c) {
+        return Ok(false);
+    }
+    let sql = format!(
+        "SELECT i.id FROM {} i JOIN {} r ON r.id = i.review_item_id \
+         WHERE i.campaign_id = {} AND i.state = 'refused' AND r.status IN ('open', 'staged')",
+        store.qualified("campaign_item"),
+        store.qualified("review_item"),
+        store.dialect().param(1, Type::Int),
+    );
+    Ok(!store.query(&sql, &[Param::Int(c.id)])?.is_empty())
 }
 
 /// Close a review item with what the campaign made of it, when `apply` did

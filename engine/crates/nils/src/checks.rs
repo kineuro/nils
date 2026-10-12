@@ -1519,6 +1519,7 @@ pub(crate) fn item_door(
         "position": it.position + 1,
         "of": total,
         "state": it.state,
+        "refused": it.refused_json(),
         "result": {
             "id": d.id, "pipeline": pipeline, "version": version, "output": output,
             "run": d.run_id, "sha256": d.sha256, "check": d.check_status,

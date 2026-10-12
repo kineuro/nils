@@ -2248,7 +2248,7 @@ fn build_registry() -> Vec<Table> {
                 // Seeds and pre-segmentations an annotator starts from.
                 col("input_derivative_ids", Type::Json),
                 // open | awaiting_metric | needs_adjudication | agreed |
-                // adjudicated | disagreed | resolved | unresolved
+                // adjudicated | disagreed | refused | resolved
                 req("state", Type::Text),
                 req("round", Type::Int),
                 // The share of the raters whose answer is the item's outcome.
@@ -2271,6 +2271,12 @@ fn build_registry() -> Vec<Table> {
                 col("derivative_id", Type::Int),
                 col("part_set", Type::Text),
                 col("part_label", Type::Int),
+                // An item its close could not write (state `refused`): when
+                // the close refused it and why, in the close's own words.
+                // Nothing was written for it; a later close tries it again
+                // and clears both once it writes it.
+                col("refused_at", Type::Timestamp),
+                col("refused_why", Type::Text),
             ],
         )
         .unique(&["campaign_id", "position"])

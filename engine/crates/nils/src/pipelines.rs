@@ -54,7 +54,7 @@ use nils_registry::store::Store;
 use nils_registry::{Param, Registry};
 use serde_json::{Value, json};
 
-use crate::serve::Reply;
+use crate::serve::{Caller, Reply};
 use crate::{Exit, fail, usage};
 
 /// The doors, as the capabilities list them.
@@ -480,6 +480,14 @@ pub(crate) fn summary_totals_only(s: &mut Value) {
         s["numbers"]["checks"]["breaches"] = Value::Null;
         withheld.push("numbers.checks.breaches");
     }
+    // record 48: how many units' breaches a seal left out, a count of scans
+    // held as any is
+    if let Some(n) = s["breaches_withheld_sealed"].as_u64()
+        && held("n", n as usize)["withheld"] == true
+    {
+        s["breaches_withheld_sealed"] = Value::Null;
+        withheld.push("breaches_withheld_sealed");
+    }
     // a cell a table could not read is said as its value: counted by column
     if let Some(list) = s["numbers"]["tables"]["refused_values"].as_array() {
         let mut by_column: BTreeMap<String, usize> = BTreeMap::new();
@@ -668,11 +676,174 @@ pub(crate) fn hold_count(map: &mut Value, key: &str) {
     }
 }
 
+// ------------------------------------------------------- sealed means sealed
+
+/// Record 48, D1 of the move: of the units of a run named, those holding a
+/// stack of a sample sealed now, by the stacks the run gave each
+/// ([`unit_stacks`], read from the registry, never from a file the run's
+/// container could reach). A unit whose stacks can no longer be told holds
+/// one while a stack of the list the run was frozen over is sealed now, or
+/// while that list is gone as well, as a run's own file does at the
+/// derivative doors. None while no sample is sealed.
+pub(crate) fn sealed_units(
+    store: &mut Store,
+    run_id: i64,
+    names: &[String],
+) -> Result<std::collections::BTreeSet<String>, String> {
+    let mut out = std::collections::BTreeSet::new();
+    if names.is_empty() || !crate::sealed::any(store).map_err(|e| e.to_string())? {
+        return Ok(out);
+    }
+    let units: BTreeMap<String, Vec<i64>> = unit_stacks(store, run_id)?
+        .into_iter()
+        .filter(|(_, stacks)| !stacks.is_empty())
+        .collect();
+    let named: Vec<i64> = names
+        .iter()
+        .filter_map(|n| units.get(n))
+        .flatten()
+        .copied()
+        .collect();
+    let sealed = crate::sealed::now(store, &named).map_err(|e| e.to_string())?;
+    let mut untold = Vec::new();
+    for n in names {
+        match units.get(n) {
+            Some(stacks) if stacks.iter().any(|s| sealed.contains(s)) => {
+                out.insert(n.clone());
+            }
+            Some(_) => {}
+            None => untold.push(n.clone()),
+        }
+    }
+    if !untold.is_empty() {
+        let frozen = frozen_stacks(store, run_id)?;
+        if frozen.is_empty()
+            || !crate::sealed::now(store, &frozen)
+                .map_err(|e| e.to_string())?
+                .is_empty()
+        {
+            out.extend(untold);
+        }
+    }
+    Ok(out)
+}
+
+/// The units a run's summary names in its breaches, each once.
+fn breach_units(s: &Value) -> Vec<String> {
+    let mut out: Vec<String> = s["breaches"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|b| b["unit"].as_str().map(str::to_string))
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// Record 48, D1 of the move: a run's summary as a reader who does not read
+/// what a system said of a stack of a sample sealed now reads it. A unit's
+/// breaches are its checks' values on its stacks, so those of each unit
+/// holding such a stack are left out, and `breaches_withheld_sealed` says
+/// how many units went, never which; the run's counts stay as they are.
+/// Answers how many units went.
+pub(crate) fn summary_unsealed(
+    store: &mut Store,
+    run_id: i64,
+    s: &mut Value,
+) -> Result<usize, String> {
+    let sealed = sealed_units(store, run_id, &breach_units(s))?;
+    if sealed.is_empty() {
+        return Ok(0);
+    }
+    if let Some(list) = s["breaches"].as_array_mut() {
+        list.retain(|b| !b["unit"].as_str().is_some_and(|u| sealed.contains(u)));
+    }
+    s["breaches_withheld_sealed"] = json!(sealed.len());
+    Ok(sealed.len())
+}
+
+/// A job's document as [`summary_unsealed`] leaves a run's summary: the
+/// result of a pipeline run. Answers how many units went.
+pub(crate) fn job_unsealed(store: &mut Store, job: &mut Value) -> Result<usize, String> {
+    match job["result"]["run"].as_i64() {
+        Some(run) if job["result"]["summary"].is_object() => {
+            summary_unsealed(store, run, &mut job["result"]["summary"])
+        }
+        _ => Ok(0),
+    }
+}
+
+/// What a run's QC summary shows a door's caller of the units holding a
+/// sealed stack: nothing, unless it holds sealed:see, whose read of them
+/// is audited as `sealed.read`, naming the door, the run and how many
+/// units, never which.
+fn shown_unsealed(
+    registry: &mut Registry,
+    caller: &Caller,
+    door: &str,
+    run_id: i64,
+    s: &mut Value,
+) -> Result<(), Reply> {
+    let gone = |e: String| Reply::error(500, e);
+    if !crate::sealed::reads(&caller.access) {
+        summary_unsealed(registry.store(), run_id, s).map_err(gone)?;
+        return Ok(());
+    }
+    let read = sealed_units(registry.store(), run_id, &breach_units(s)).map_err(gone)?;
+    if read.is_empty() {
+        return Ok(());
+    }
+    audit_sealed_run(registry, &caller.principal, door, run_id, read.len())
+}
+
+/// The `sealed.read` row of a reader holding sealed:see shown the QC of
+/// units holding a sealed stack.
+fn audit_sealed_run(
+    registry: &mut Registry,
+    principal: &str,
+    door: &str,
+    run_id: i64,
+    units: usize,
+) -> Result<(), Reply> {
+    nils_registry::audit::record(
+        registry,
+        &nils_registry::audit::Entry {
+            principal,
+            action: nils_registry::audit::Action::SealedRead,
+            scope: json!({"door": door, "run": run_id, "breaches_of_units": units}),
+            policy: None,
+            job_id: None,
+            details: Some(json!({"grant": crate::grants::UNSEALED})),
+        },
+    )
+    .map(|_| ())
+    .map_err(|e| Reply::error(500, e.to_string()))
+}
+
+/// A job's document as the jobs doors show it to `caller`: a pipeline
+/// run's result as [`shown_unsealed`] leaves its summary.
+pub(crate) fn job_shown_unsealed(
+    registry: &mut Registry,
+    caller: &Caller,
+    door: &str,
+    job: &mut Value,
+) -> Result<(), Reply> {
+    let Some(run) = job["result"]["run"].as_i64() else {
+        return Ok(());
+    };
+    if !job["result"]["summary"].is_object() {
+        return Ok(());
+    }
+    shown_unsealed(registry, caller, door, run, &mut job["result"]["summary"])
+}
+
 // ---------------------------------------------------------------- the doors
 
 /// The reading doors: the catalog and the runs.
 pub(crate) fn route(
     registry: &mut Registry,
+    caller: &Caller,
     quasi: bool,
     get: bool,
     segs: &[&str],
@@ -715,6 +886,16 @@ pub(crate) fn route(
                 .clamp(1, RUNS_PAGE_MAX);
             let list = rows::runs(registry.store(), pipeline, limit).map_err(err)?;
             let mut docs = runs_docs(registry.store(), &list);
+            // record 48, D1 of the move: no unit's QC of a sealed stack
+            for (doc, r) in docs.iter_mut().zip(&list) {
+                shown_unsealed(
+                    registry,
+                    caller,
+                    "GET /api/pipeline-runs",
+                    r.id,
+                    &mut doc["summary"],
+                )?;
+            }
             if !quasi {
                 docs.iter_mut().for_each(run_totals_only);
             }
@@ -726,6 +907,13 @@ pub(crate) fn route(
                 .map_err(err)?
                 .ok_or_else(|| Reply::error(404, format!("no pipeline run {id}")))?;
             let mut doc = run_doc(registry.store(), &r);
+            shown_unsealed(
+                registry,
+                caller,
+                "GET /api/pipeline-runs/{id}",
+                r.id,
+                &mut doc["summary"],
+            )?;
             if !quasi {
                 run_totals_only(&mut doc);
             }
@@ -1493,10 +1681,16 @@ pub(crate) fn command(home: &Home, command: PipelineCommand) -> Result<(), Exit>
             limit,
             json,
         } => {
+            // record 48, D1 of the move: no unit's QC of a sealed stack,
+            // unless --unsealed-access says why
+            let unsealed = crate::sealed::keyboard_reads();
             if let Some(id) = id {
                 let r = rows::run(registry.store(), id)?
                     .ok_or_else(|| usage(format!("no pipeline run {id}")))?;
-                let doc = run_doc(registry.store(), &r);
+                let mut doc = run_doc(registry.store(), &r);
+                if !unsealed {
+                    summary_unsealed(registry.store(), r.id, &mut doc["summary"]).map_err(fail)?;
+                }
                 if json {
                     return print(&doc);
                 }
@@ -1512,7 +1706,12 @@ pub(crate) fn command(home: &Home, command: PipelineCommand) -> Result<(), Exit>
                 ),
             };
             let list = rows::runs(registry.store(), pid, limit)?;
-            let docs = runs_docs(registry.store(), &list);
+            let mut docs = runs_docs(registry.store(), &list);
+            if !unsealed {
+                for (doc, r) in docs.iter_mut().zip(&list) {
+                    summary_unsealed(registry.store(), r.id, &mut doc["summary"]).map_err(fail)?;
+                }
+            }
             if json {
                 return print(&json!(docs));
             }

@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 91;
+pub const SCHEMA_VERSION: i64 = 92;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -418,7 +418,21 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 91,
         apply: a_check_is_a_campaign,
     },
+    Migration {
+        version: 92,
+        apply: a_refused_item_says_why,
+    },
 ];
+
+/// After type 3's pipe test (record 55 H3): an item its close could not
+/// write is kept as refused, with when and why, rather than left looking
+/// agreed. Only columns are added; no row is touched.
+fn a_refused_item_says_why(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_columns(store, "campaign_item", &["refused_at", "refused_why"])
+}
 
 /// Job type 3, check a result (record 55 H3, the build spec's section 7,
 /// the campaign's half): a campaign item names the one result it asks
