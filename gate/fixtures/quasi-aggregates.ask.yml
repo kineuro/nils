@@ -1,0 +1,40 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Record 55 K7 on aggregates: the spread of each subject's age at the first
+# visit, the grouped question a chat bench asked at detail plain.
+ast_version: 1
+name: the spread of the age at the first visit in ms-cohort-a
+scheme: default
+params:
+  all: {type: text, value: all}
+sets:
+  scope:  {grain: cohort, where: [["=", {}, ["field", {}, "name"], "ms-cohort-a"]]}
+  people: {grain: subject, of: scope}
+  visits:
+    grain: session
+    of: people
+    bind:
+      n:   ["ordinal", {}]
+      age: ["age_at", {}, ["field", {}, "subject.birth_date"], ["field", {}, "first"]]
+  firsts:
+    grain: session
+    from: visits
+    where: [["=", {}, ["field", {}, "n"], 1]]
+  spread:
+    grain: group
+    group: {of: firsts, by: [["param", {}, "all"]]}
+    bind:
+      n_subjects: ["count", {set: firsts}]
+      youngest:   ["min", {set: firsts}, ["field", {}, "age"]]
+      oldest:     ["max", {set: firsts}, ["field", {}, "age"]]
+      mean_age:   ["avg", {set: firsts}, ["field", {}, "age"]]
+      n_ages:     ["distinct", {set: firsts}, ["field", {}, "age"]]
+keep: [spread]
+out:
+  set: spread
+  level: aggregate
+  columns:
+    - ["field", {}, "n_subjects"]
+    - ["field", {}, "youngest"]
+    - ["field", {}, "oldest"]
+    - ["field", {}, "mean_age"]
+    - ["field", {}, "n_ages"]

@@ -1,0 +1,37 @@
+{
+  "name": "quasi-aggregates-plain",
+  "question": "The same spread, asked at detail plain",
+  "hash": "584d041e2ad99dac464868ed70788548310690aa26d338500940efabce4919fb",
+  "columns": [
+    "_key",
+    "_subject",
+    "n_subjects",
+    "youngest",
+    "oldest",
+    "mean_age",
+    "n_ages"
+  ],
+  "row_count": 1,
+  "rows": [
+    [
+      "1",
+      "",
+      "38",
+      "99",
+      "99",
+      "99.999999999",
+      "11"
+    ]
+  ],
+  "funnel": {
+    "firsts": 38,
+    "people": 38,
+    "scope": 1,
+    "visits": 38
+  },
+  "shaped": [
+    "youngest",
+    "oldest",
+    "mean_age"
+  ]
+}

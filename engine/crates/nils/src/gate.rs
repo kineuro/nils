@@ -68,6 +68,10 @@ struct Fixture {
     limit: Option<String>,
     #[serde(default)]
     note: Option<String>,
+    /// The detail a fixture runs at (record 25: plain, quasi or sensitive);
+    /// without one, the gate's own, which reads every class an ask may.
+    #[serde(default)]
+    detail: Option<String>,
 }
 
 /// What a fixture left the last time the canonicals were written.
@@ -85,6 +89,10 @@ struct Canonical {
     /// subjects went and not only how many came back.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     funnel: BTreeMap<String, i64>,
+    /// The columns answered as their shapes at the fixture's detail (record
+    /// 55 K7); none at the gate's own.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    shaped: Vec<String>,
 }
 
 /// One fixture's outcome in a run.
@@ -110,6 +118,22 @@ fn scope() -> Scope {
             .into_iter()
             .collect(),
         unsealed: false,
+    }
+}
+
+/// The scope a fixture runs under: the detail it names, as a door gives
+/// it, or the gate's own.
+fn scope_of(f: &Fixture) -> Result<Scope, Exit> {
+    match f.detail.as_deref() {
+        None => Ok(scope()),
+        Some(d) => crate::grants::Detail::parse(d)
+            .map(crate::ask_doors::scope_of_detail)
+            .ok_or_else(|| {
+                usage(format!(
+                    "{}: {d} is not a detail; those are plain, quasi and sensitive",
+                    f.name
+                ))
+            }),
     }
 }
 
@@ -235,7 +259,7 @@ fn run_fixture(
     let text =
         std::fs::read_to_string(&path).map_err(|e| usage(format!("{}: {e}", path.display())))?;
     let ask = parse(&text).map_err(|e| usage(format!("{}: {e}", path.display())))?;
-    let scope = scope();
+    let scope = scope_of(f)?;
     let scheme = Scheme::default();
     let node = "gate".to_string();
     let out = run::run(
@@ -296,6 +320,7 @@ fn run_fixture(
             .map(|r| r.0.iter().map(nils_ask::exec::render).collect())
             .collect(),
         funnel,
+        shaped: out.answer.shaped_names(),
     })
 }
 
@@ -314,6 +339,21 @@ fn differences(want: &Canonical, got: &Canonical) -> Vec<String> {
             "the columns: {} became {}",
             want.columns.join(", "),
             got.columns.join(", ")
+        ));
+    }
+    if want.shaped != got.shaped {
+        out.push(format!(
+            "the columns answered as shapes: {} became {}",
+            if want.shaped.is_empty() {
+                "none".to_string()
+            } else {
+                want.shaped.join(", ")
+            },
+            if got.shaped.is_empty() {
+                "none".to_string()
+            } else {
+                got.shaped.join(", ")
+            }
         ));
     }
     if want.row_count != got.row_count {

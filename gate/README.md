@@ -54,6 +54,18 @@ the funnel's last stage per named set, so a fixture that drifts says both
 what came back and where the subjects went. A hash alone is not an oracle,
 which is why the rows are here.
 
+## The detail a fixture runs at
+
+A fixture runs at the gate's own detail, which reads every class an ask
+may read, unless it names one with `detail` (record 25: `plain`, `quasi`
+or `sensitive`), as a door gives a person of that detail. Below detail
+quasi a column that reads a quasi-identifying field is answered as its
+shape (record 55 K7), and the canonical lists those columns under
+`shaped`, so both backends must answer the same shapes for the same
+columns. `quasi-aggregates-plain` holds the rule for aggregates: the
+youngest, the oldest and the mean age of a group are shapes at plain,
+and the counts are numbers.
+
 ## The Wave 4c fixtures
 
 Wave 4c (`docs/specs/wave4c-the-assistant.md` §6.8) adds eight fixtures, each of
