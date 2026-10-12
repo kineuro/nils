@@ -6160,6 +6160,9 @@ fn a_stacks_input_carries_each_file_s_geometry_when_it_asks() {
             // the geometry of each stack and each file
             let strip = |doc: &Value| -> Value {
                 let mut doc = doc.clone();
+                // P1b: a run of whole sessions lists no context
+                let context = doc.as_object_mut().unwrap().remove("context");
+                assert_eq!(context, Some(json!([])), "{doc}");
                 for e in doc["stacks"].as_array_mut().unwrap() {
                     let e = e.as_object_mut().unwrap();
                     assert!(e.remove("geometry").is_some(), "{e:?}");
@@ -6173,6 +6176,7 @@ fn a_stacks_input_carries_each_file_s_geometry_when_it_asks() {
                 doc
             };
             assert_eq!(strip(&on), off, "the geometry is all the flag adds");
+            assert!(off.get("context").is_none(), "{off}");
             for e in off["stacks"].as_array().unwrap() {
                 assert!(e.get("geometry").is_none(), "{e}");
                 for f in e["files"].as_array().unwrap() {
@@ -6368,6 +6372,70 @@ fn a_stacks_input_carries_each_file_s_geometry_when_it_asks() {
                 assert_eq!(a["files"], b["files"]);
             }
 
+            // P1b: a run that holds part of a session lists the rest of it
+            // as context, each MR stack with the geometry and the files'
+            // geometry a run of the whole session gives it, and no path; a
+            // page of --chunk 1 holds one stack of its session
+            let context_of = |doc: &Value, sealed: Option<i64>| {
+                let held = &doc["stacks"][0];
+                let study = &held["geometry"]["study"];
+                let want: Vec<Value> = entries
+                    .iter()
+                    .filter(|e| &e["geometry"]["study"] == study && e["stack_id"] != held["stack_id"])
+                    .filter(|e| e["stack_id"].as_i64() != sealed)
+                    .map(|e| {
+                        let files: Vec<Value> = e["files"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .map(|f| json!({"geometry": f["geometry"]}))
+                            .collect();
+                        json!({"stack_id": e["stack_id"], "modality": e["modality"],
+                               "geometry": e["geometry"], "files": files})
+                    })
+                    .collect();
+                assert_eq!(doc["context"], json!(want), "{doc}");
+                want.len()
+            };
+            let paged = |sealed: Option<i64>| -> usize {
+                let before: std::collections::BTreeSet<i64> = lab
+                    .json(&["pipeline", "runs", "--limit", "100", "--json"])
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|r| r["id"].as_i64().unwrap())
+                    .collect();
+                let (good, _out, err) = lab.run(
+                    &["run", "stack-geo", "--select", "selection:every@1", "--chunk", "1", "--json"],
+                    None,
+                );
+                assert!(good, "{err}");
+                let mut listed = 0;
+                let mut pages = 0;
+                for r in lab
+                    .json(&["pipeline", "runs", "--limit", "100", "--json"])
+                    .as_array()
+                    .unwrap()
+                {
+                    let id = r["id"].as_i64().unwrap();
+                    if before.contains(&id) {
+                        continue;
+                    }
+                    let doc = stacks_json(lab, id, None);
+                    assert_eq!(doc["stacks"].as_array().unwrap().len(), 1, "{doc}");
+                    if doc["stacks"][0]["stack_id"].as_i64() == sealed {
+                        assert_eq!(doc["context"], json!([]), "a sealed stack's session is not read: {doc}");
+                    } else {
+                        listed += context_of(&doc, sealed);
+                    }
+                    pages += 1;
+                }
+                assert_eq!(pages, entries.len());
+                listed
+            };
+            let listed = paged(None);
+            assert!(listed >= 2, "the file of frames' two stacks, each the other's context");
+
             // P1b: a stack of a sample sealed now says so, and only it; one
             // unsealed again does not
             let sealed = entries[0]["stack_id"].as_i64().unwrap();
@@ -6397,6 +6465,8 @@ fn a_stacks_input_carries_each_file_s_geometry_when_it_asks() {
                 let is = e["stack_id"].as_i64() == Some(sealed);
                 assert_eq!(e["geometry"]["sealed"], json!(is), "{e}");
             }
+            // and it is no part of its session's context
+            paged(Some(sealed));
             store
                 .execute(
                     &format!(

@@ -18,6 +18,28 @@
         }
       }
     },
+    "context": {
+      "type": "array",
+      "description": "Record 55 E2, P1b: present only when the descriptor sets x-nils.input.geometry. The other stacks of each session the run holds part of, read and never scored, so a pipeline that reads a stack against its session (the few-slice student's height against the session's top) reads the same input whether the run holds the whole session or a part of it (a --chunk page, a selection that is not whole studies). Each is MR (its own modality, else its fingerprint's) and not sealed now; empty when the run holds whole sessions. No path is given: a context stack is not mounted",
+      "items": {
+        "type": "object",
+        "required": ["stack_id", "modality", "geometry", "files"],
+        "properties": {
+          "stack_id": {"type": "integer"},
+          "modality": {"type": "string", "description": "The stack's modality, else its fingerprint's"},
+          "geometry": {"$ref": "#/properties/stacks/items/properties/geometry"},
+          "files": {
+            "type": "array",
+            "description": "Each of its files once, in the order a stack's files are listed, with only its geometry",
+            "items": {
+              "type": "object",
+              "required": ["geometry"],
+              "properties": {"geometry": {"$ref": "#/properties/stacks/items/properties/files/items/properties/geometry"}}
+            }
+          }
+        }
+      }
+    },
     "stacks": {
       "type": "array",
       "items": {

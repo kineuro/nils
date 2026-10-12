@@ -27,7 +27,10 @@ the stack's ``body_part`` and ``technique`` as the registry holds them now
 and ``slices``, how many slices its files hold. A descriptor that opts in
 with ``x-nils.input.header`` (record 50) has each stack carry ``header``:
 the stack's fingerprint, its classification per axis, its first ingest
-batch and its subject's open cohorts, which stay in ``extra``.
+batch and its subject's open cohorts, which stay in ``extra``. With
+``x-nils.input.geometry`` the manifest also lists, under ``context``, the
+other MR stacks of each session the run holds part of (record 55 E2, P1b),
+never to be scored (``context``).
 """
 
 from __future__ import annotations
@@ -236,9 +239,38 @@ def parse(
     return out
 
 
-def load(path: Path, *, source_root: Path | None = None) -> list[Stack]:
+def context(doc: dict, *, skip=()) -> list[Stack]:
+    """The manifest's context stacks (``context``, record 55 E2, P1b): the
+    other stacks of each session the run holds part of, which the engine
+    lists with their geometry and their files' geometry and no path, so a
+    stack is read against its whole session in any run. They are never
+    scored; a stack the run itself holds (``skip``) is left out."""
+    out: list[Stack] = []
+    seen = set(skip)
+    for s in doc.get("context") or [] if isinstance(doc, dict) else []:
+        try:
+            sid = int(s["stack_id"])
+        except (KeyError, TypeError, ValueError) as e:
+            raise ManifestError("a context stack without an integer stack_id") from e
+        if sid in seen:
+            continue
+        seen.add(sid)
+        files = [f for f in s.get("files") or [] if isinstance(f, dict)]
+        extra = {"modality": s.get("modality")}
+        sg = stack_geometry(s)
+        if sg is not None:
+            extra["geometry"] = sg
+        out.append(Stack(stack_id=sid, slices=[], unit=f"stack-{sid}", extra=extra, files=[("", None) for _ in files],
+                         file_geo=[file_geometry(f.get("geometry")) for f in files]))
+    return out
+
+
+def read(path: Path) -> dict:
     try:
-        doc = json.loads(Path(path).read_text(encoding="utf-8"))
+        return json.loads(Path(path).read_text(encoding="utf-8"))
     except json.JSONDecodeError as e:
         raise ManifestError(f"stacks.json is not JSON: {e}") from e
-    return parse(doc, source_root=source_root)
+
+
+def load(path: Path, *, source_root: Path | None = None) -> list[Stack]:
+    return parse(read(path), source_root=source_root)

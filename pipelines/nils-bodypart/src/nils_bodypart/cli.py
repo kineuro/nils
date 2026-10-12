@@ -771,14 +771,18 @@ def _infer_cascade(a: argparse.Namespace, model, cas, device: str) -> Run:
         # of the planes stages' workers, how many decode on the card
         params.update({"decode_device": device, "gpu_workers": min(a.gpu_workers, a.threads)})
     run = Run("bodypart-infer-fusion", a.output, params, device)
-    stacks = manifest.load(a.stacks, source_root=a.source_root)
+    doc = manifest.read(a.stacks)
+    stacks = manifest.parse(doc, source_root=a.source_root)
+    # the rest of each session the run holds part of, for the session's top
+    context = manifest.context(doc, skip={st.stack_id for st in stacks})
+    del doc
     writer = None
     if a.cache is not None:
         writer = slicecache.Writer(a.cache, {"image": "nils-bodypart", "version": __version__, **{k: v["digest"] for k, v in params["models"].items()}})
     stats: dict = {}
     outcomes = cascade_mod.score(model, cas, a.inputs, stacks, workers=a.threads, device=device, chunk=a.chunk, depth=a.readahead,
                                  student_batch=a.student_batch, fill=a.cache_fill == "touched", keep_inputs=writer is not None, stats=stats,
-                                 gpu_workers=a.gpu_workers)
+                                 gpu_workers=a.gpu_workers, context=context)
     counts = {"answered_fine": 0, "answered_coarse": 0, "failed": 0, "cohort_calibrated": 0}
     stages = {"s1": 0, cas.b24: 0, "touched": 0}
     reasons = {k: 0 for k in cascade_mod.REASONS}
@@ -836,7 +840,7 @@ def _infer_cascade(a: argparse.Namespace, model, cas, device: str) -> Run:
         writer.flush()
     run.metrics = {"stacks": len(stacks), **counts, "per_value": per_value, "stages": stages, "reasons": reasons,
                    "files_read": files_total, "files_per_scored_stack": round(files_total / max(1, sum(stages.values())), 3),
-                   "stage1": {k: v for k, v in stats.items() if k.startswith("stage1") or k == "straight_to_planes"}}
+                   "stage1": {k: v for k, v in stats.items() if k.startswith("stage1") or k in ("straight_to_planes", "context_stacks")}}
     if writer is not None:
         run.metrics["cache"] = writer.counts
     return run

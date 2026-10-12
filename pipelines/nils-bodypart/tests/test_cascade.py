@@ -152,6 +152,78 @@ def test_the_session_top_is_the_highest_unsealed_mr_box_of_the_study(world):
     assert g[31]["z_hi_rel_top"] == 0.0
 
 
+def _partial(world, tmp_path: Path, drop: int, as_context: bool) -> Path:
+    """The run's manifest without stack ``drop``, as a ``--chunk`` page or a
+    selection that is not whole studies holds it; with ``as_context`` the
+    engine lists it under ``context`` (its modality, geometry and files'
+    geometry, no path), as it does for the rest of a session the run holds
+    part of."""
+    doc = json.loads(world["stacks"].read_text())
+    gone = next(s for s in doc["stacks"] if s["stack_id"] == drop)
+    doc["stacks"] = [s for s in doc["stacks"] if s["stack_id"] != drop]
+    if as_context:
+        doc["context"] = [{"stack_id": gone["stack_id"], "modality": gone["modality"], "geometry": gone["geometry"],
+                           "files": [{"geometry": f["geometry"]} for f in gone["files"]]}]
+    path = tmp_path / f"stacks-without-{drop}-{'context' if as_context else 'alone'}.json"
+    path.write_text(json.dumps(doc))
+    return path
+
+
+def _student_input(path: Path, source_root: Path, sid: int):
+    doc = manifest.read(path)
+    sts = manifest.parse(doc, source_root=source_root)
+    out = {s.stack_id: fewslice.row_of(s) for s in sts}
+    fewslice.session_tops(list(out.values()) + [fewslice.row_of(c) for c in manifest.context(doc, skip=set(out))])
+    g = out[sid]
+    return fewslice.stack_tokens(g).tolist(), fewslice.slot0(g)[1].tolist()
+
+
+def test_a_stack_reads_its_whole_session_in_a_run_of_part_of_it(world, tmp_path):
+    """A run holding part of a session (a --chunk page, a selection that is
+    not whole studies) gives a stack the input a run of the whole session
+    gives it: the engine lists the rest of the session as context. Without
+    it, a page that lacks the session's top (stack 22) moved stack 21's
+    height tokens and its slice's height (the review's partial_session.py)."""
+    whole = _student_input(world["stacks"], world["source_root"], 21)
+    assert _student_input(_partial(world, tmp_path, 22, True), world["source_root"], 21) == whole
+    alone = _student_input(_partial(world, tmp_path, 22, False), world["source_root"], 21)
+    assert alone != whole  # what the context is for
+    # a context stack the run itself holds, a sealed one or another
+    # session's leaves the top as it was
+    doc = json.loads(world["stacks"].read_text())
+    by = {s["stack_id"]: s for s in doc["stacks"]}
+    doc["context"] = [{"stack_id": 21, "modality": "MR", "geometry": dict(by[22]["geometry"], study=100),
+                       "files": [{"geometry": f["geometry"]} for f in by[22]["files"]]},
+                      {"stack_id": 90, "modality": "MR", "geometry": dict(by[26]["geometry"]), "files": [{"geometry": f["geometry"]} for f in by[26]["files"]]},
+                      {"stack_id": 91, "modality": "MR", "geometry": dict(by[27]["geometry"], study=300),
+                       "files": [{"geometry": f["geometry"]} for f in by[27]["files"]]}]
+    mixed = tmp_path / "stacks-mixed-context.json"
+    mixed.write_text(json.dumps(doc))
+    assert _student_input(mixed, world["source_root"], 21) == whole
+
+
+def test_a_stack_gets_the_same_answer_in_a_run_of_part_of_its_session(world, tmp_path):
+    """The same stack, the same tokens and the same answer, with the
+    student's real network (random weights), in the run of the whole
+    session and in a run without the session's top that the engine gave
+    the rest of the session as context."""
+    stu = cd.write_student(tmp_path / "student.safetensors")
+    inp = inputs(world, tmp_path, deferral="all", student=stu)
+    out = {}
+    for name, path in (("whole", world["stacks"]), ("page", _partial(world, tmp_path, 22, True)), ("alone", _partial(world, tmp_path, 22, False))):
+        code = cli.main(["infer-fusion", "--stacks", str(path), "--source-root", str(world["source_root"]), "--inputs", str(inp["inputs"]),
+                         "--output", str(tmp_path / name), "--device", "cpu", "--threads", "2"])
+        assert code == 0, name
+        out[name] = tables(tmp_path / name)
+    keys = ("stage", "fine_value", "fine_confidence", "coarse_value", "coarse_confidence", "deferral", "fine", "coarse", "image")
+    for sid in (21, 23, 24, 25):
+        assert {k: out["page"][sid].get(k) for k in keys} == {k: out["whole"][sid].get(k) for k in keys}, sid
+    # without the context, stack 21's student read another input
+    assert out["alone"][21]["image"] != out["whole"][21]["image"]
+    r = json.loads((tmp_path / "page" / "results.json").read_text())
+    assert r["metrics"]["stage1"]["context_stacks"] == 1
+
+
 def test_the_stack_tokens_are_the_research_tokens(world):
     g = rows(world)
     t = fewslice.stack_tokens(g[21])

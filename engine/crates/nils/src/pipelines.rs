@@ -1802,21 +1802,8 @@ fn materialise_stacks(
     type Info = (i64, i64, String, Option<String>);
     let mut info: BTreeMap<i64, Info> = BTreeMap::new();
     let mut axes: BTreeMap<i64, BTreeMap<String, String>> = BTreeMap::new();
-    // per stack: (source id, source root, path, frames and their count,
-    // the file's geometry where it was asked for)
-    type File = (i64, String, String, Option<(String, i64)>, Option<Value>);
-    let mut files_of: BTreeMap<i64, Vec<File>> = BTreeMap::new();
+    let mut files_of: BTreeMap<i64, Vec<StackFile>> = BTreeMap::new();
     let mut geometry_of: BTreeMap<i64, Value> = BTreeMap::new();
-    // the instance's columns a file's geometry is made of, after the ones
-    // each query reads anyway
-    let geo_columns = if geometry {
-        FILE_GEOMETRY
-            .iter()
-            .map(|c| format!(", i.{c}"))
-            .collect::<String>()
-    } else {
-        String::new()
-    };
     for chunk in stacks.chunks(500) {
         let list = chunk
             .iter()
@@ -1845,20 +1832,7 @@ fn materialise_stacks(
                 ),
             );
             if geometry {
-                let mut g = stack_geometry(
-                    r.opt_text(5).map_err(err)?,
-                    r.opt_double(6).map_err(err)?,
-                    r.opt_double(7).map_err(err)?,
-                );
-                // what the few-slice student reads of the stack beside its
-                // geometry (record 55 E2, P1b): the session it is part of,
-                // what its images are, how many there are; sealed below
-                g["study"] = json!(r.int(8).map_err(err)?);
-                g["image_type"] = json!(r.opt_text(9).map_err(err)?);
-                g["sop_class_uid"] = json!(r.opt_text(10).map_err(err)?);
-                g["n_instances"] = json!(r.opt_int(11).map_err(err)?);
-                g["sealed"] = json!(false);
-                geometry_of.insert(id, g);
+                geometry_of.insert(id, stack_facts(&r, 5).map_err(err)?);
             }
         }
         // the axes an image reads, as the registry holds them now
@@ -1874,54 +1848,7 @@ fn materialise_stacks(
                 .entry(r.text(1).map_err(err)?.to_string())
                 .or_insert(r.text(2).map_err(err)?.to_string());
         }
-        // a multi-frame file's frames first, then the files whose every
-        // frame is the stack's
-        let framed = format!(
-            "SELECT fr.stack_id, so.id, so.root, f.path, fr.frames, fr.n_frames{geo_columns} FROM {} fr \
-             JOIN {} i ON i.id = fr.instance_id JOIN {} f ON f.id = i.source_file_id \
-             JOIN {} so ON so.id = f.source_id WHERE fr.stack_id IN ({list}) \
-             ORDER BY fr.stack_id, f.path",
-            store.qualified("instance_frame"),
-            store.qualified("instance"),
-            store.qualified("source_file"),
-            store.qualified("source"),
-        );
-        for r in store.query(&framed, &[]).map_err(err)? {
-            let geo = if geometry {
-                Some(file_geometry(&r, 6).map_err(err)?)
-            } else {
-                None
-            };
-            files_of.entry(r.int(0).map_err(err)?).or_default().push((
-                r.int(1).map_err(err)?,
-                r.text(2).map_err(err)?.to_string(),
-                r.text(3).map_err(err)?.to_string(),
-                Some((r.text(4).map_err(err)?.to_string(), r.int(5).map_err(err)?)),
-                geo,
-            ));
-        }
-        let whole = format!(
-            "SELECT i.stack_id, so.id, so.root, f.path{geo_columns} FROM {} i \
-             JOIN {} f ON f.id = i.source_file_id JOIN {} so ON so.id = f.source_id \
-             WHERE i.stack_id IN ({list}) ORDER BY i.stack_id, f.path",
-            store.qualified("instance"),
-            store.qualified("source_file"),
-            store.qualified("source"),
-        );
-        for r in store.query(&whole, &[]).map_err(err)? {
-            let geo = if geometry {
-                Some(file_geometry(&r, 4).map_err(err)?)
-            } else {
-                None
-            };
-            files_of.entry(r.int(0).map_err(err)?).or_default().push((
-                r.int(1).map_err(err)?,
-                r.text(2).map_err(err)?.to_string(),
-                r.text(3).map_err(err)?.to_string(),
-                None,
-                geo,
-            ));
-        }
+        stack_files(store, &list, geometry, &mut files_of)?;
     }
     let _ = d;
     // a stack of a sample sealed now says so, so an image leaves it out of
@@ -1935,6 +1862,12 @@ fn materialise_stacks(
             }
         }
     }
+    // the sessions the run's unsealed stacks are part of
+    let geometry_of_studies: std::collections::BTreeSet<i64> = geometry_of
+        .values()
+        .filter(|g| g["sealed"] != true)
+        .filter_map(|g| g["study"].as_i64())
+        .collect();
     let mut headers = if header {
         let subjects: BTreeMap<i64, i64> = info.iter().map(|(k, v)| (*k, v.1)).collect();
         stack_headers(store, &subjects)?
@@ -2065,8 +1998,13 @@ fn materialise_stacks(
             stacks: vec![stack],
         });
     }
-    let manifest =
+    let mut manifest =
         json!({"contract": nils_pipeline::CONTRACT, "sources": listed, "stacks": entries});
+    // the rest of each session the run holds part of, for the student's
+    // session top (record 55 E2, P1b): read, never scored
+    if geometry {
+        manifest["context"] = Value::Array(session_context(store, stacks, &geometry_of_studies)?);
+    }
     std::fs::write(
         input.join("stacks.json"),
         serde_json::to_vec_pretty(&manifest).unwrap_or_default(),
@@ -6112,6 +6050,175 @@ const HEADER_FINGERPRINT: [(&str, char); 22] = [
     ("text_series_comments_ci", 't'),
     ("text_body_part_ci", 't'),
 ];
+
+/// A stack's file as the stacks queries read it: its source's id and root,
+/// its path, the frames of a multi-frame file that are the stack's and
+/// how many, and the file's geometry where it was asked for.
+type StackFile = (i64, String, String, Option<(String, i64)>, Option<Value>);
+
+/// The files of the stacks `list` names (a few hundred ids, comma
+/// separated) into `files_of`, in the order a manifest lists them: a
+/// multi-frame file's frames first, then the files whose every frame is the
+/// stack's, each by path, with its [`file_geometry`] where `geometry` asks.
+fn stack_files(
+    store: &mut Store,
+    list: &str,
+    geometry: bool,
+    files_of: &mut BTreeMap<i64, Vec<StackFile>>,
+) -> Result<(), String> {
+    let err = |e: nils_registry::Error| e.to_string();
+    // the instance's columns a file's geometry is made of, after the ones
+    // each query reads anyway
+    let geo_columns = if geometry {
+        FILE_GEOMETRY
+            .iter()
+            .map(|c| format!(", i.{c}"))
+            .collect::<String>()
+    } else {
+        String::new()
+    };
+    let framed = format!(
+        "SELECT fr.stack_id, so.id, so.root, f.path, fr.frames, fr.n_frames{geo_columns} FROM {} fr \
+         JOIN {} i ON i.id = fr.instance_id JOIN {} f ON f.id = i.source_file_id \
+         JOIN {} so ON so.id = f.source_id WHERE fr.stack_id IN ({list}) \
+         ORDER BY fr.stack_id, f.path",
+        store.qualified("instance_frame"),
+        store.qualified("instance"),
+        store.qualified("source_file"),
+        store.qualified("source"),
+    );
+    for r in store.query(&framed, &[]).map_err(err)? {
+        let geo = if geometry {
+            Some(file_geometry(&r, 6).map_err(err)?)
+        } else {
+            None
+        };
+        files_of.entry(r.int(0).map_err(err)?).or_default().push((
+            r.int(1).map_err(err)?,
+            r.text(2).map_err(err)?.to_string(),
+            r.text(3).map_err(err)?.to_string(),
+            Some((r.text(4).map_err(err)?.to_string(), r.int(5).map_err(err)?)),
+            geo,
+        ));
+    }
+    let whole = format!(
+        "SELECT i.stack_id, so.id, so.root, f.path{geo_columns} FROM {} i \
+         JOIN {} f ON f.id = i.source_file_id JOIN {} so ON so.id = f.source_id \
+         WHERE i.stack_id IN ({list}) ORDER BY i.stack_id, f.path",
+        store.qualified("instance"),
+        store.qualified("source_file"),
+        store.qualified("source"),
+    );
+    for r in store.query(&whole, &[]).map_err(err)? {
+        let geo = if geometry {
+            Some(file_geometry(&r, 4).map_err(err)?)
+        } else {
+            None
+        };
+        files_of.entry(r.int(0).map_err(err)?).or_default().push((
+            r.int(1).map_err(err)?,
+            r.text(2).map_err(err)?.to_string(),
+            r.text(3).map_err(err)?.to_string(),
+            None,
+            geo,
+        ));
+    }
+    Ok(())
+}
+
+/// A stack's [`stack_geometry`] and the facts the few-slice student reads
+/// beside it (record 55 E2, P1b), from the stacks query's row at `at`:
+/// the orientation, thickness and spacing, then the session it is part of,
+/// what its images are and how many there are; `sealed` is false until the
+/// caller marks it.
+fn stack_facts(r: &nils_registry::store::Row, at: usize) -> Result<Value, nils_registry::Error> {
+    let mut g = stack_geometry(r.opt_text(at)?, r.opt_double(at + 1)?, r.opt_double(at + 2)?);
+    g["study"] = json!(r.int(at + 3)?);
+    g["image_type"] = json!(r.opt_text(at + 4)?);
+    g["sop_class_uid"] = json!(r.opt_text(at + 5)?);
+    g["n_instances"] = json!(r.opt_int(at + 6)?);
+    g["sealed"] = json!(false);
+    Ok(g)
+}
+
+/// The rest of each session the run holds part of (record 55 E2, P1b),
+/// for `stacks.json`'s `context`: the few-slice student reads a stack's
+/// height against its session's top, the highest box among the study's
+/// unsealed MR stacks, and a run may hold part of a study (a `--chunk`
+/// page, a selection that is not whole studies). So each other stack of
+/// the `studies` that is MR (its own modality, else its fingerprint's) and
+/// not sealed now is listed with its modality, its geometry and its files'
+/// geometry, in the order and shape the run's own stacks have, and no path:
+/// a pipeline computes the top from them and never scores them.
+fn session_context(
+    store: &mut Store,
+    run: &[i64],
+    studies: &std::collections::BTreeSet<i64>,
+) -> Result<Vec<Value>, String> {
+    let err = |e: nils_registry::Error| e.to_string();
+    let own: std::collections::BTreeSet<i64> = run.iter().copied().collect();
+    let studies: Vec<i64> = studies.iter().copied().collect();
+    let mut modality: BTreeMap<i64, String> = BTreeMap::new();
+    for chunk in studies.chunks(500) {
+        let list = chunk.iter().map(i64::to_string).collect::<Vec<_>>().join(", ");
+        // the image's modality: the stack's own, else its fingerprint's
+        let sql = format!(
+            "SELECT st.id, COALESCE(NULLIF(st.modality, ''), fp.modality) FROM {} st \
+             JOIN {} se ON se.id = st.series_id LEFT JOIN {} fp ON fp.stack_id = st.id \
+             WHERE se.study_id IN ({list}) \
+             AND UPPER(COALESCE(NULLIF(st.modality, ''), fp.modality, '')) = 'MR' ORDER BY st.id",
+            store.qualified("stack"),
+            store.qualified("series"),
+            store.qualified("stack_fingerprint"),
+        );
+        for r in store.query(&sql, &[]).map_err(err)? {
+            let id = r.int(0).map_err(err)?;
+            if !own.contains(&id) {
+                modality.insert(id, r.opt_text(1).map_err(err)?.unwrap_or_default().to_string());
+            }
+        }
+    }
+    let ids: Vec<i64> = modality.keys().copied().collect();
+    let (sealed, _) =
+        nils_registry::labels::sealed_now(store, &ids, &[]).map_err(|e| e.to_string())?;
+    let ids: Vec<i64> = ids.into_iter().filter(|id| !sealed.contains(id)).collect();
+    let mut geometry_of: BTreeMap<i64, Value> = BTreeMap::new();
+    let mut files_of: BTreeMap<i64, Vec<StackFile>> = BTreeMap::new();
+    for chunk in ids.chunks(500) {
+        let list = chunk.iter().map(i64::to_string).collect::<Vec<_>>().join(", ");
+        let sql = format!(
+            "SELECT st.id, st.image_orientation_patient, fp.slice_thickness, fp.spacing_between_slices, \
+             se.study_id, st.image_type, fp.sop_class_uid, st.n_instances FROM {} st \
+             JOIN {} se ON se.id = st.series_id LEFT JOIN {} fp ON fp.stack_id = st.id \
+             WHERE st.id IN ({list})",
+            store.qualified("stack"),
+            store.qualified("series"),
+            store.qualified("stack_fingerprint"),
+        );
+        for r in store.query(&sql, &[]).map_err(err)? {
+            geometry_of.insert(r.int(0).map_err(err)?, stack_facts(&r, 1).map_err(err)?);
+        }
+        stack_files(store, &list, true, &mut files_of)?;
+    }
+    let mut out = Vec::with_capacity(ids.len());
+    for id in ids {
+        let mut seen: std::collections::BTreeSet<(i64, String)> = Default::default();
+        let files: Vec<Value> = files_of
+            .remove(&id)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|(so, _, path, _, _)| seen.insert((*so, path.clone())))
+            .map(|(_, _, _, _, geo)| json!({"geometry": geo.unwrap_or(Value::Null)}))
+            .collect();
+        out.push(json!({
+            "stack_id": id,
+            "modality": modality.remove(&id),
+            "geometry": geometry_of.remove(&id).unwrap_or(Value::Null),
+            "files": files,
+        }));
+    }
+    Ok(out)
+}
 
 /// The columns of `instance` a file's geometry object carries (record 55
 /// E2), in the order the stacks queries read them: where its image sits,

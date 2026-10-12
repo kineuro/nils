@@ -225,15 +225,17 @@ class Outcome:
 
 def score(model: fusion.Model, cas: Cascade, inputs: Path, stacks: list, *, workers: int = 1, device: str = "cpu", chunk: int = 4,
           depth: int = 1, student_batch: int = 64, fill: bool = False, keep_inputs: bool = False, student_factory=None,
-          stats: dict | None = None, gpu_workers: int = 2) -> list[Outcome]:
+          stats: dict | None = None, gpu_workers: int = 2, context: list | None = None) -> list[Outcome]:
     """Every stack's outcome, in the manifest's order.
 
     First the reasons that need no read: a stack sealed now (``sealed``),
     one whose modality is known and not MR (``not-mr``), one without a
     fingerprint row (``no-geometry``). Then stage 1 over the stacks the
     student can read (registry geometry for every file, one frame a file, a
-    slot-0 file that decodes), the session's top computed over the run's
-    unsealed MR stacks of each study; then the planes stages over the rest,
+    slot-0 file that decodes), the session's top computed over each study's
+    unsealed MR stacks, the run's and the manifest's ``context`` (the rest
+    of the session, never scored), so a stack's input is the same in any
+    run that holds it; then the planes stages over the rest,
     in worker processes. ``student_factory`` stands in for the student in
     tests (a callable taking the tiles, slice geometry and tokens)."""
     from . import fewslice, scoring
@@ -241,7 +243,7 @@ def score(model: fusion.Model, cas: Cascade, inputs: Path, stacks: list, *, work
 
     stats = stats if stats is not None else {}
     rows = {st.stack_id: fewslice.row_of(st) for st in stacks}
-    fewslice.session_tops(list(rows.values()))
+    fewslice.session_tops(list(rows.values()) + [fewslice.row_of(c) for c in context or [] if c.stack_id not in rows])
     out: dict[int, Outcome] = {}
     cands: list[tuple] = []  # (stack, row, registry inputs, slot-0 file index, slice geometry)
     rest: list = []
@@ -266,7 +268,7 @@ def score(model: fusion.Model, cas: Cascade, inputs: Path, stacks: list, *, work
             rest.append(st)
             continue
         cands.append((st, g, reg, s0[0], s0[1]))
-    stats.update(stage1_candidates=len(cands), straight_to_planes=len(rest))
+    stats.update(stage1_candidates=len(cands), straight_to_planes=len(rest), context_stacks=len(context or []))
 
     # stage 1: the slot-0 slices, the student, the head, D3
     read = scoring.tiles([c[0].files[c[3]][0] for c in cands], workers)

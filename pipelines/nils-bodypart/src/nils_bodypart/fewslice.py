@@ -348,7 +348,9 @@ def is_mr(g: dict) -> bool:
 
 def session_tops(rows: list[dict]) -> None:
     """The heights relative to the session's top, in place: within each
-    study, over its unsealed MR stacks with a box (the research's frame)."""
+    study, over its unsealed MR stacks with a box (the research's frame).
+    ``rows`` holds the run's stacks and the manifest's context (the rest of
+    each session), so the top is the whole study's in any run."""
     by_study = defaultdict(list)
     for g in rows:
         if "z_lo" in g and is_mr(g) and not g.get("sealed") and g.get("study_id") is not None:
