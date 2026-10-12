@@ -5561,6 +5561,16 @@ fn a_model_is_registered_by_digest_and_named_where_it_answered() {
     ]));
     assert_eq!(promoted["model"]["state"], "promoted", "{promoted}");
     assert_eq!(promoted["retired"]["version"], "1", "{promoted}");
+    assert_eq!(
+        promoted["retired_models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["version"].clone())
+            .collect::<Vec<_>>(),
+        ["1"],
+        "{promoted}"
+    );
     let task = format!("axis:{asked_axis}");
     let listed = doc(ok(&[
         "model", "list", "--task", &task, "--state", "promoted", "--json",

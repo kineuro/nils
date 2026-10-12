@@ -6448,6 +6448,7 @@ fn the_model_doors_register_admit_promote_and_a_model_answers_through_apply() {
     );
     assert_eq!(status, 200, "{doc}");
     assert_eq!(doc["retired"], serde_json::Value::Null, "{doc}");
+    assert_eq!(doc["retired_models"], serde_json::json!([]), "{doc}");
     let (status, doc) = server.request("GET", &format!("/api/models/{id}"), None, Some(&reviewer));
     assert_eq!(status, 200, "{doc}");
     assert_eq!(doc["state"], "promoted", "{doc}");

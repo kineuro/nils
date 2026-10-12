@@ -30,15 +30,41 @@
 # A stack's time is reading its files and decoding its frames, not the
 # network: the tool scores stacks in worker processes, one BLAS thread each,
 # and reads the next stack's files ahead, so a run is held by how fast its
-# files can be read. Sixteen workers reach that on a network file system;
-# more add nothing there. The answers are the same whatever the workers.
+# files can be read. The answers are the same whatever the workers.
+#
+# Since 0.4.0 it reads, by default, only the frames the encoder's six planes
+# interpolate from (reader reduced:touched, about 39 files a stack where the
+# full reader reads about 78), chosen from each file's geometry in the
+# manifest (x-nils.input.geometry), which the one-hour study found gives the
+# certified answers within its equivalence bar. A file the manifest gives no
+# geometry for, a multi-frame file and a stack of mixed orientations have
+# their headers read as before. On a card the decoded files' headers are
+# read too, so the card's answers are the CPU's.
+#
+# Since 0.5.0 (record 55 E2, P1b) it runs body part's cascade where the run
+# is given one (ruling R1 (a): one model, bodypart-fusion@r7-fast, whose
+# file names its parts by digest): the inputs student, deferral and cascade
+# beside the three above. Each stack is answered by the first stage that
+# may: s1, the few-slice student over one native slice (the slot-0 rule,
+# 192 x 192 at 1.5 mm, chosen and described from the manifest alone, the
+# session's top over the study's unsealed MR stacks), accepted where the
+# deferral model D3 is at least 0.99; then the planes of at most 24 frames,
+# accepted at a log-odds margin of 0.5 from both thresholds; then the
+# touched frames, reusing what the 24-frame stage read. Each table names
+# the stage, the files read, every part's digest and, where the stack has
+# no body region, the reason: sealed, not-mr, no-geometry, not-sure or
+# unreadable. Each body_part decision names the cascade. The weights are
+# registered model inputs, never part of the image. A stack's height is
+# read against its session's top, and a run need not take whole sessions:
+# the engine lists the rest of each session the run holds part of under
+# stacks.json's context, so a stack's input is the same in any run.
 #
 # The image runs offline and never reaches the network; the runner runs it
 # with --network none. The image is pinned as bodypart-embed/nils.job.yml
 # says.
 name: bodypart-infer-fusion
 schema-version: "0.5"
-tool-version: "0.3.0"
+tool-version: "0.5.0"
 description: >-
   Propose body_part (fine) and body_region (coarse) per stack with the
   certified body-part model: an image encoder and a LightGBM head over its
@@ -60,8 +86,33 @@ inputs:
     command-line-flag: --threads
     default-value: 16
     optional: true
+  - id: reader
+    name: Reader
+    type: String
+    description: >-
+      Which frames are read: reduced:touched decodes only the frames the
+      encoder's six planes interpolate from, chosen from each file's
+      geometry in the manifest, and gives the certified answers within the
+      one-hour study's equivalence bar; full reads every file as the model
+      was certified.
+    value-key: "[READER]"
+    command-line-flag: --reader
+    value-choices: [reduced:touched, full]
+    default-value: reduced:touched
+    optional: true
+  - id: readahead
+    name: Read-ahead
+    type: Number
+    integer: true
+    minimum: 1
+    maximum: 16
+    description: With the reduced reader, how many stacks ahead a worker asks the kernel to read.
+    value-key: "[READAHEAD]"
+    command-line-flag: --readahead
+    default-value: 4
+    optional: true
 
-command-line: "nils-bodypart infer-fusion --stacks [Manifest] --inputs [Inputs] --output [OutputLocation] [THREADS]"
+command-line: "nils-bodypart infer-fusion --stacks [Manifest] --inputs [Inputs] --output [OutputLocation] [THREADS] [READER] [READAHEAD]"
 
 output-files:
   - id: scores
@@ -79,6 +130,7 @@ x-nils:
   input:
     layout: stacks
     header: true
+    geometry: true
   inputs:
     - id: encoder
       type: model
@@ -89,7 +141,19 @@ x-nils:
     - id: coarse
       type: model
       optional: true
-      description: The coarse mode file (task axis:body_region), which names the head; without it only fine mode runs
+      description: The coarse mode file (task axis:body_region), which names the head; with a cascade, the coarse part the cascade names; without it only fine mode runs
+    - id: student
+      type: model
+      optional: true
+      description: The cascade's few-slice student (safetensors, three seeds), which the cascade names; only with a cascade
+    - id: deferral
+      type: model
+      optional: true
+      description: The cascade's deferral model D3 (LightGBM text, 62 features), which the cascade names; only with a cascade
+    - id: cascade
+      type: model
+      optional: true
+      description: The cascade (task axis:body_part), its file naming every part by digest, the stages and the thresholds; without it the certified reader alone answers
   outputs:
     - id: scores
       kind: table
@@ -116,13 +180,24 @@ x-nils:
         - {name: head_digest, type: text, description: The head that scored the stack}
         - {name: coarse_digest, type: text, description: The coarse mode file, when the run had one}
         - {name: encoder_digest, type: text, description: The image encoder}
+        - {name: stage, type: text, description: "The stage that answered: s1, b24 or touched with a cascade; the reader alone (reduced:touched, full) without one; null for a stack with a reason"}
+        - {name: files_read, type: integer, description: The files the stack's reads opened, a stack with no answer's too}
+        - {name: stage1, type: text, description: "How the cascade's first stage ended for the stack: answered, deferred (D3 below its threshold), no-study, no-file-geometry, multi-frame, no-slice, slice-unreadable; null where it was never a candidate (sealed, not-mr, no-geometry) or without a cascade"}
+        - {name: reason, type: text, description: "Why the stack carries no body region: sealed, not-mr, no-geometry, not-sure (scored, the coarse mode abstains) or unreadable; null where it carries one"}
+        - {name: cascade_digest, type: text, description: The cascade, when the run had one}
+        - {name: student_digest, type: text, description: The cascade's student}
+        - {name: deferral_digest, type: text, description: The cascade's deferral model}
   needs:
     gpu: none
-    memory-gb: 8
+    # measured (2026-10-12): the cascade over 19,275 stacks at 32 workers,
+    # twice the cores below, peaked at 10.4 GiB (the PSS of all the run's
+    # processes): the main process 2.2 GiB with stage 1 streamed, a worker
+    # at most 3.3 GiB on its largest stack; 12 holds it with a margin
+    memory-gb: 12
     cores: 16
     cores-input: threads
   proposals:
     - axis: body_part
-      description: Fine mode, a value of the pack's body_part per stack with the six calibrated probabilities, by the head's digest
+      description: Fine mode, a value of the pack's body_part per stack with the six calibrated probabilities, by the head's digest (by the cascade's, when the run had one)
     - axis: body_region
       description: Coarse mode, a value of the pack's body_region per stack with the four calibrated probabilities, by the coarse mode file's digest

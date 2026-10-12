@@ -179,6 +179,9 @@ def load(inputs: Path) -> Model:
             raise ModelError("the coarse mode file is not JSON") from e
         if not isinstance(mode, dict) or mode.get("mode") != "coarse":
             raise ModelError("the coarse model is not a coarse mode file")
+        # a coarse mode names the head it sums; a cascade (record 55 E2)
+        # answers body_region with the coarse part its file names, which
+        # names the head
         if (mode.get("head") or {}).get("digest") != head.digest:
             raise ModelError("the coarse mode file names another head than the one the run was given")
         if list(mode.get("classes") or []) != COARSE:
@@ -265,6 +268,17 @@ class StackResult:
     matched_from: str | None
     meta: dict
     rules: dict | None
+    reader: dict | None = None  # the reduced reader's counts, when it read the stack
+    # the cascade (record 55 E2, P1b): the stage that answered, the six
+    # planes of the encoder's input (for the slice cache), and each read
+    # file's identity by path
+    stage: str | None = None
+    planes: np.ndarray | None = None
+    idents: dict | None = None
+    read_files: list | None = None
+    kept: list | None = None  # the (file, frame from zero) the planes were made of
+    filled: StackResult | None = None  # the touched planes built for the cache where an earlier stage answered
+    opened: set | None = None  # the files the stack's reads opened (never written out)
 
 
 class NoFingerprint(Exception):
@@ -290,6 +304,28 @@ def prepare(files: list[tuple[str, list[int] | None]], header: dict | None, deco
     return Prepared(volume.build(files, fp.get("orientation"), decode=decode), header)
 
 
+def prepare_reduced(stack, policy: str, decode=None, memo: dict | None = None) -> Prepared:
+    """One stack's six planes and geometry by the reduced reader
+    (``reduced.build``), from the manifest's geometry of its files; ``memo``
+    carries one stack's reads from one policy to the next. Raises as
+    :func:`prepare`."""
+    from . import reduced
+
+    header = stack.extra.get("header")
+    header = header if isinstance(header, dict) else {}
+    fp = header.get("fingerprint")
+    if not isinstance(fp, dict):
+        raise NoFingerprint("the stack has no fingerprint row")
+    built = reduced.build(stack.files, stack.file_geo, stack.extra.get("geometry"), fp.get("orientation"), policy, decode=decode, memo=memo)
+    return Prepared(built, header)
+
+
+def planes_of(vol: np.ndarray) -> np.ndarray:
+    """The six planes the encoder reads, (6, 64, 64) uint8, in the plane
+    cache's order (the speed study's ``planes_bp.vol_of`` puts them back)."""
+    return np.stack([vol[31], vol[32], vol[:, 31], vol[:, 32], vol[:, :, 31], vol[:, :, 32]]).astype(np.uint8)
+
+
 def finish(model: Model, prep: Prepared, P: np.ndarray) -> StackResult:
     """The head and both modes from the encoder's six probabilities ``P``."""
     header, built = prep.header, prep.built
@@ -297,7 +333,7 @@ def finish(model: Model, prep: Prepared, P: np.ndarray) -> StackResult:
     h44 = header_features.features(header["fingerprint"], cls, built.meta)
     LP = head_logp(model, P, h44)
     cohort, where = resolve_cohort(header, model)
-    return StackResult(P, h44, LP, calibrate(model, LP, cohort), cohort, where, built.meta, header_features.rules_row(cls))
+    return StackResult(P, h44, LP, calibrate(model, LP, cohort), cohort, where, built.meta, header_features.rules_row(cls), getattr(built, "stats", None))
 
 
 def predict(model: Model, files: list[tuple[str, list[int] | None]], header: dict | None, decode=None) -> StackResult:

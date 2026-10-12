@@ -233,11 +233,12 @@ pub(crate) fn model_command(home: &Home, cmd: ModelCommand) -> Result<(), Exit> 
             if json {
                 print_json(&serde_json::json!({
                     "model": done.model.to_json(),
-                    "retired": done.retired.as_ref().map(Model::to_json),
+                    "retired": done.retired.first().map(Model::to_json),
+                    "retired_models": done.retired.iter().map(Model::to_json).collect::<Vec<_>>(),
                 }));
             } else {
                 println!("promoted {}", line(&done.model));
-                if let Some(old) = &done.retired {
+                for old in &done.retired {
                     println!("retired {}", line(old));
                 }
             }

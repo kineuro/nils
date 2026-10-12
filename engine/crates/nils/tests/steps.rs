@@ -562,7 +562,7 @@ fn round(pg: Option<(String, String)>) {
                "encoder": {"digest": encoder_digest}, "threshold": 0.5}),
         b"a head",
     );
-    let (coarse, _) = register(
+    let (coarse, coarse_digest) = register(
         &home,
         &files,
         json!({"name": "bp-coarse", "version": "t1", "kind": "head", "task": "axis:body_region",
@@ -790,6 +790,248 @@ fn round(pg: Option<(String, String)>) {
     assert_eq!(bp["job"], failed_job, "{s}");
     assert!(bp["refusal"].is_null(), "{s}");
     assert_eq!(bp["answered"], 3, "what ran before stays: {s}");
+    drop(server);
+
+    // record 55 E2: a cascade served, one model naming its parts: the
+    // step gives each input its part, the coarse mode among them, and the
+    // cascade itself, in the descriptor's order
+    let cascade_descriptor = work.file(
+        "bodypart-infer-fusion-2.yml",
+        stand_in()
+            .replace(
+                "    - {id: coarse, type: model, optional: true}\n",
+                "    - {id: coarse, type: model, optional: true}\n    - {id: student, type: model, optional: true}\n    - {id: deferral, type: model, optional: true}\n    - {id: cascade, type: model, optional: true}\n",
+            )
+            .replace(
+                r#"assert list(ids) == ["encoder", "head", "coarse"], ids"#,
+                r#"assert list(ids)[:3] == ["encoder", "head", "coarse"], ids"#,
+            )
+            .as_bytes(),
+    );
+    let added = home.json(&[
+        "pipeline",
+        "add",
+        cascade_descriptor.to_str().unwrap(),
+        "--json",
+    ]);
+    std::fs::remove_file(&cascade_descriptor).unwrap();
+    let pipeline2 = added["label"].as_str().unwrap().to_string();
+    assert_eq!(pipeline2, "bodypart-infer-fusion@2", "{added}");
+    let (student, student_digest) = register(
+        &home,
+        &files,
+        json!({"name": "bp-student", "version": "t1", "kind": "encoder", "task": "features:bodypart_slice"}),
+        b"a student's weights",
+    );
+    let (deferral, deferral_digest) = register(
+        &home,
+        &files,
+        json!({"name": "bp-deferral", "version": "t1", "kind": "head", "task": "cascade:body_part",
+               "encoder": {"digest": student_digest}}),
+        b"a deferral model",
+    );
+    let (cascade, cascade_digest) = register(
+        &home,
+        &files,
+        json!({"name": "bp-cascade", "version": "t1", "kind": "head", "task": "axis:body_part",
+               "encoders": [{"digest": encoder_digest}, {"digest": student_digest}], "threshold": 0.5,
+               "parts": {"encoder": encoder_digest, "head": head_digest, "coarse": coarse_digest,
+                         "student": student_digest, "deferral": deferral_digest}}),
+        b"a cascade",
+    );
+    // a coarse mode naming the cascade, newer and served, is never given:
+    // the cascade answers body_region with the coarse part its file names
+    let (named_coarse, _) = register(
+        &home,
+        &files,
+        json!({"name": "bp-cascade-coarse", "version": "t1", "kind": "head", "task": "axis:body_region",
+               "encoder": {"digest": encoder_digest}, "threshold": 0.5,
+               "params": {"head": {"digest": cascade_digest}}}),
+        b"a coarse mode naming the cascade",
+    );
+    // a cascade naming no coarse part is refused when it is served
+    let (no_coarse, _) = register(
+        &home,
+        &files,
+        json!({"name": "bp-cascade-fine", "version": "t1", "kind": "head", "task": "axis:body_part",
+               "encoders": [{"digest": encoder_digest}, {"digest": student_digest}], "threshold": 0.5,
+               "parts": {"encoder": encoder_digest, "head": head_digest, "student": student_digest,
+                         "deferral": deferral_digest}}),
+        b"a cascade of the fine mode alone",
+    );
+    // and so is one naming no head part: it is never its own head
+    let (no_head, _) = register(
+        &home,
+        &files,
+        json!({"name": "bp-cascade-headless", "version": "t1", "kind": "head", "task": "axis:body_part",
+               "encoders": [{"digest": encoder_digest}, {"digest": student_digest}], "threshold": 0.5,
+               "parts": {"encoder": encoder_digest, "coarse": coarse_digest, "student": student_digest,
+                         "deferral": deferral_digest}}),
+        b"a cascade without its head",
+    );
+    for m in [cascade, named_coarse, no_coarse, no_head] {
+        home.ok(&[
+            "model",
+            "admit",
+            &m.to_string(),
+            "--check",
+            check.to_str().unwrap(),
+        ]);
+    }
+    let server = Served::start(&home, &path, false, &logged);
+    let models_of = |started: &Value| -> Vec<String> {
+        let words: Vec<String> = started["command"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|w| w.as_str().unwrap().to_string())
+            .collect();
+        words
+            .windows(2)
+            .filter(|w| w[0] == "--model")
+            .map(|w| w[1].clone())
+            .collect()
+    };
+    // admitted, a cascade waits: the step keeps the admitted single model
+    // until a person promotes the cascade (the plan's 4.3)
+    let (status, started) = server.run("datasets/ds", "body_part", OPS);
+    assert_eq!(status, 202, "{started}");
+    assert_eq!(
+        models_of(&started),
+        [encoder, head, coarse].map(|m| m.to_string()),
+        "an admitted cascade is not the step's model: {started}"
+    );
+    let waiting_job = started["job"].as_i64().unwrap();
+    let (status, dropped) = server.call(
+        "POST",
+        &format!("/api/jobs/{waiting_job}/cancel"),
+        None,
+        OPS,
+    );
+    assert_eq!(status, 200, "{dropped}");
+    // promoted, a cascade is refused at plan time while a part is merely
+    // registered, then for the part it does not name
+    let refusal_of = |server: &Served| -> Value {
+        let s = server.get("/api/datasets/ds/summary", READS);
+        let refusal = step(&s, "body_part")["refusal"].clone();
+        assert_eq!(refusal["reason"], "no_model", "{s}");
+        refusal
+    };
+    home.ok(&["model", "promote", &no_head.to_string()]);
+    let refusal = refusal_of(&server);
+    assert!(
+        refusal["error"]
+            .as_str()
+            .unwrap()
+            .contains("which is registered and neither admitted nor promoted"),
+        "{refusal}"
+    );
+    for m in [encoder, student, deferral] {
+        home.ok(&[
+            "model",
+            "admit",
+            &m.to_string(),
+            "--check",
+            check.to_str().unwrap(),
+        ]);
+    }
+    let refusal = refusal_of(&server);
+    assert!(
+        refusal["error"]
+            .as_str()
+            .unwrap()
+            .contains("names no part head"),
+        "{refusal}"
+    );
+    home.ok(&["model", "promote", &no_coarse.to_string()]);
+    let refusal = refusal_of(&server);
+    assert!(
+        refusal["error"]
+            .as_str()
+            .unwrap()
+            .contains("names no coarse part"),
+        "{refusal}"
+    );
+    home.ok(&["model", "promote", &cascade.to_string()]);
+    let (status, started) = server.run("datasets/ds", "body_part", OPS);
+    assert_eq!(status, 202, "{started}");
+    let words: Vec<String> = started["command"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|w| w.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(words[1], pipeline2, "{started}");
+    let models: Vec<String> = words
+        .windows(2)
+        .filter(|w| w[0] == "--model")
+        .map(|w| w[1].clone())
+        .collect();
+    assert_eq!(
+        models,
+        [encoder, head, coarse, student, deferral, cascade].map(|m| m.to_string()),
+        "a cascade's parts, its coarse part among them, and itself: {started}"
+    );
+    let cascade_job = started["job"].as_i64().unwrap();
+    let (status, dropped) = server.call(
+        "POST",
+        &format!("/api/jobs/{cascade_job}/cancel"),
+        None,
+        OPS,
+    );
+    assert_eq!(status, 200, "{dropped}");
+    // a newer descriptor that takes no cascade (as one from before it
+    // did) is refused for the cascade, never run on its parts alone
+    let older = work.file(
+        "bodypart-infer-fusion-3.yml",
+        stand_in()
+            .replace("tool-version: \"1\"", "tool-version: \"3\"")
+            .as_bytes(),
+    );
+    let added = home.json(&["pipeline", "add", older.to_str().unwrap(), "--json"]);
+    std::fs::remove_file(&older).unwrap();
+    assert_eq!(added["label"], "bodypart-infer-fusion@3", "{added}");
+    let s = server.get("/api/datasets/ds/summary", READS);
+    let refusal = &step(&s, "body_part")["refusal"];
+    assert_eq!(refusal["reason"], "no_pipeline", "{s}");
+    assert!(
+        refusal["error"]
+            .as_str()
+            .unwrap()
+            .contains("takes no model input cascade, student, deferral"),
+        "{s}"
+    );
+    // the plain head keeps its run on the first descriptor's inputs: a
+    // cascade's inputs are optional and left out without one
+    home.ok(&[
+        "model",
+        "retire",
+        &cascade.to_string(),
+        "--why",
+        "back to the certified path",
+    ]);
+    let (status, started) = server.run("datasets/ds", "body_part", OPS);
+    assert_eq!(status, 202, "{started}");
+    let words: Vec<String> = started["command"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|w| w.as_str().unwrap().to_string())
+        .collect();
+    let models: Vec<String> = words
+        .windows(2)
+        .filter(|w| w[0] == "--model")
+        .map(|w| w[1].clone())
+        .collect();
+    assert_eq!(
+        models,
+        [encoder, head, coarse].map(|m| m.to_string()),
+        "without a cascade, the head's own parts: {started}"
+    );
+    let plain_job = started["job"].as_i64().unwrap();
+    let (status, dropped) =
+        server.call("POST", &format!("/api/jobs/{plain_job}/cancel"), None, OPS);
+    assert_eq!(status, 200, "{dropped}");
     drop(server);
 
     // a machine with no container runtime: the door still answers, and says why

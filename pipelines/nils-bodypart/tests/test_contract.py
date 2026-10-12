@@ -177,28 +177,37 @@ def test_the_fusion_descriptor_declares_its_models_table_and_axes():
     yaml = pytest.importorskip("yaml")
     doc = yaml.safe_load((HERE / "bodypart-infer-fusion" / "nils.job.yml").read_text())
     x = doc["x-nils"]
-    assert x["input"] == {"layout": "stacks", "header": True}
+    assert x["input"] == {"layout": "stacks", "header": True, "geometry": True}
     assert [(t["id"], t["type"], t.get("optional", False)) for t in x["inputs"]] == [
-        ("encoder", "model", False), ("head", "model", False), ("coarse", "model", True)
+        ("encoder", "model", False), ("head", "model", False), ("coarse", "model", True),
+        # P1b: the cascade's parts and the cascade, in the order the body-part step fills them
+        ("student", "model", True), ("deferral", "model", True), ("cascade", "model", True),
     ]
     assert {p["axis"] for p in x["proposals"]} == {"body_part", "body_region"}
-    assert x["needs"] == {"gpu": "none", "memory-gb": 8, "cores": 16, "cores-input": "threads"}
+    assert x["needs"] == {"gpu": "none", "memory-gb": 12, "cores": 16, "cores-input": "threads"}
     (table,) = x["outputs"]
     assert (table["kind"], table["format"], table["path-template"]) == ("table", "json", "bodypart-fusion/{stack}.json")
     cols = {c["name"]: c.get("type", "number") for c in table["columns"]}
     fine = [f"fine_{v}" for v in ("brain", "brain_neck", "neck", "spine", "chest", "other")]
     coarse = [f"coarse_{v}" for v in ("head", "spine", "chest", "other")]
     assert list(cols) == fine + ["fine_value", "fine_confidence", "fine_answers"] + coarse + [
-        "coarse_value", "coarse_confidence", "coarse_answers", "head_digest", "coarse_digest", "encoder_digest"
+        "coarse_value", "coarse_confidence", "coarse_answers", "head_digest", "coarse_digest", "encoder_digest",
+        "stage", "files_read", "stage1", "reason", "cascade_digest", "student_digest", "deferral_digest",
     ]
     assert all(cols[c] == "number" for c in fine + coarse + ["fine_confidence", "coarse_confidence"])
-    assert cols["fine_answers"] == cols["coarse_answers"] == "integer"
-    assert all(cols[c] == "text" for c in ("fine_value", "coarse_value", "head_digest", "coarse_digest", "encoder_digest"))
-    assert doc["tool-version"] == "0.3.0"
+    assert cols["fine_answers"] == cols["coarse_answers"] == cols["files_read"] == "integer"
+    text = ("fine_value", "coarse_value", "head_digest", "coarse_digest", "encoder_digest", "stage", "reason", "cascade_digest", "student_digest",
+            "deferral_digest")
+    assert all(cols[c] == "text" for c in text)
+    assert doc["tool-version"] == "0.5.0"
     # the image offline: the command names no host, and the entry point
-    # parses what the engine writes
+    # parses what the engine writes: since 0.4.0 the reduced reader, from
+    # each file's geometry, four stacks ahead
     a = cli.parser().parse_args(container_argv(doc)[1:])
     assert (a.entry, str(a.inputs), a.threads) == ("infer-fusion", "/inputs", 16)
+    assert (a.reader, a.readahead) == ("reduced:touched", 4)
+    reader = next(p for p in doc["inputs"] if p["id"] == "reader")
+    assert set(reader["value-choices"]) == {"reduced:touched", "full"}
 
 
 def test_the_fusion_results_and_its_tables_are_the_contracts(tmp_path):
@@ -234,6 +243,12 @@ def test_the_fusion_results_and_its_tables_are_the_contracts(tmp_path):
         found = {fold(k): v for k, v in row.items()}
         for name, ty in declared.items():
             v = found[name]
+            if name in ("reason", "stage1", "cascade_digest", "student_digest", "deferral_digest"):
+                assert v is None or (isinstance(v, str) and v)  # null without a cascade, or where the stack has a region
+                continue
+            if name == "files_read":
+                assert isinstance(v, int) and v > 0
+                continue
             if ty == "text":
                 assert isinstance(v, str) and v
             elif ty == "integer":

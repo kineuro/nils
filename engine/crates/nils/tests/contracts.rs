@@ -270,6 +270,10 @@ fn the_model_contract_is_the_engine_s_registry() {
         ["name", "version", "kind", "digest", "task"]
     );
     assert_eq!(card["$defs"]["digest"]["pattern"], "^sha256:[0-9a-f]{64}$");
+    // record 55 E2: a cascade names its parts by the input each fills
+    let parts = &card["properties"]["parts"];
+    assert_eq!(parts["additionalProperties"]["$ref"], "#/$defs/digest");
+    assert_eq!(parts["propertyNames"]["pattern"], "^[a-z][a-z0-9_]*$");
     let slot = card["$defs"]["slot"]["pattern"].as_str().unwrap();
     assert!(slot.contains("site") && slot.contains("cohort"), "{slot}");
     assert_eq!(
@@ -414,6 +418,66 @@ fn the_job_contract_is_the_runner_s() {
     for key in ["orientation", "body_part", "technique", "slices"] {
         assert!(stack.get(key).is_some(), "stacks.json names {key}");
     }
+    // record 55 E2: the geometry a descriptor may ask for, of each stack
+    // and of each file, as the runner writes it
+    assert_eq!(
+        x["input"]["properties"]["geometry"]["type"], "boolean",
+        "x-nils.input.geometry"
+    );
+    assert_eq!(
+        strings(&stack["geometry"]["required"]),
+        [
+            "image_orientation_patient",
+            "slice_thickness",
+            "spacing_between_slices",
+            "study",
+            "image_type",
+            "sop_class_uid",
+            "n_instances",
+            "sealed"
+        ]
+    );
+    // P1b: the stack's facts a few-slice model reads, as the runner
+    // writes them
+    let facts = &stack["geometry"]["properties"];
+    assert_eq!(facts["study"]["type"], "integer");
+    assert_eq!(facts["sealed"]["type"], "boolean");
+    for key in ["image_type", "sop_class_uid"] {
+        assert_eq!(
+            facts[key]["type"],
+            serde_json::json!(["string", "null"]),
+            "{key}"
+        );
+    }
+    assert_eq!(
+        facts["n_instances"]["type"],
+        serde_json::json!(["integer", "null"])
+    );
+    let file = &stack["files"]["items"]["properties"];
+    assert_eq!(
+        strings(&file["geometry"]["required"]),
+        [
+            "image_position_patient",
+            "pixel_spacing",
+            "rows",
+            "columns",
+            "instance_number",
+            "number_of_frames"
+        ]
+    );
+    for (key, n) in [("image_position_patient", 3), ("pixel_spacing", 2)] {
+        let p = &file["geometry"]["properties"][key];
+        assert_eq!(
+            (p["minItems"].as_u64(), p["maxItems"].as_u64()),
+            (Some(n), Some(n)),
+            "{key}"
+        );
+    }
+    let iop = &stack["geometry"]["properties"]["image_orientation_patient"];
+    assert_eq!(
+        (iop["minItems"].as_u64(), iop["maxItems"].as_u64()),
+        (Some(6), Some(6))
+    );
     assert_eq!(
         results["properties"]["proposals"]["$ref"],
         "proposals.schema.json"

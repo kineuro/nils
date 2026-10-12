@@ -537,9 +537,44 @@ def cmd_infer(a: argparse.Namespace) -> Run:
 # ------------------------------------------------------------ infer-fusion
 
 
-def _fusion_table(sid: int, r, model) -> dict:
+def _digests(model, cas=None) -> dict:
+    """Every part's digest, as the scores table's columns name them."""
+    doc = {"head_digest": model.head_part.digest}
+    if model.coarse_part is not None:
+        doc["coarse_digest"] = model.coarse_part.digest
+    doc["encoder_digest"] = model.enc.digest
+    doc.update(cascade_digest=None, student_digest=None, deferral_digest=None)
+    if cas is not None:
+        doc.update(cascade_digest=cas.digest, student_digest=cas.student.digest, deferral_digest=cas.deferral.digest)
+    return doc
+
+
+def _reason_table(sid: int, reason: str, model, cas=None, files_read: int = 0) -> dict:
+    """The scores table of a stack with no answer: why, and the parts of
+    the run (record 55 E2, T24: every scan carries a body region or a stated
+    reason)."""
+    from .fusion import COARSE, FINE, column
+
+    doc: dict = {}
+    for mode, values in (("fine", FINE), ("coarse", COARSE)):
+        for v in values:
+            doc[f"{mode}_{column(v)}"] = None
+        doc.update({f"{mode}_value": None, f"{mode}_confidence": None, f"{mode}_answers": None})
+    return {**doc, "stage": None, "files_read": files_read, "reason": reason, **_digests(model, cas), "stack_id": sid}
+
+
+def _no_region(r) -> str | None:
+    """``not-sure`` where a scored stack carries no body region: the coarse
+    mode abstains (or, without one, the fine mode)."""
+    a = r.answers.get("coarse") or r.answers.get("fine")
+    return None if a is not None and a["answers"] else "not-sure"
+
+
+def _fusion_table(sid: int, r, model, cas=None, stage: str | None = None, files_read: int | None = None) -> dict:
     """A stack's scores as one JSON object: the declared columns flat, the
-    detail nested beside them (record 50)."""
+    detail nested beside them (record 50); since P1b with the stage that
+    answered, the files its reads opened, the reason it carries no body
+    region (``not-sure``) and every part's digest."""
     from .fusion import column, rounded
 
     doc: dict = {}
@@ -552,10 +587,11 @@ def _fusion_table(sid: int, r, model) -> dict:
         doc[f"{mode}_value"] = a["value"]
         doc[f"{mode}_confidence"] = round(a["confidence"], 6)
         doc[f"{mode}_answers"] = int(a["answers"])
-    doc["head_digest"] = model.head_part.digest
-    if model.coarse_part is not None:
-        doc["coarse_digest"] = model.coarse_part.digest
-    doc["encoder_digest"] = model.enc.digest
+    doc["stage"] = stage
+    doc["files_read"] = files_read
+    doc["stage1"] = None  # the cascade's says how its first stage ended
+    doc["reason"] = _no_region(r)
+    doc.update(_digests(model, cas))
     doc["stack_id"] = sid
     for mode, a in r.answers.items():
         doc[mode] = {**a, "probabilities": rounded(a["probabilities"], 6), "confidence": round(a["confidence"], 6)}
@@ -564,7 +600,31 @@ def _fusion_table(sid: int, r, model) -> dict:
     doc["models"] = model.refs()
     doc["geometry"] = {k: r.meta[k] for k in ("modality", "K", "n_unique", "thick", "spacing", "nx", "ny", "nz", "oblique_deg", "ext_x", "ext_y", "ext_z", "fov_r", "fov_c", "span")}
     doc["rules"] = r.rules
+    if r.reader:
+        doc["reader"] = {k: v for k, v in r.reader.items() if isinstance(v, (int, float, str))}
     return doc
+
+
+def _files_read(st, r) -> int:
+    """The files a stack's reads opened: the reduced reader's count, else
+    every file of the stack (the full reader)."""
+    n = (r.reader or {}).get("files_read")
+    return int(n) if isinstance(n, int) else len({p for p, _ in st.files})
+
+
+def _read_hashes(st, r) -> list[dict]:
+    """The sha256 of each file the stack's reads took whole, by its place
+    in the manifest's list (record 55 E5, R3): never a path."""
+    idents = dict(r.idents or {})
+    filled = getattr(r, "filled", None)
+    if filled is not None:
+        idents.update(filled.idents or {})
+    out = []
+    for i, (path, _) in enumerate(st.files):
+        h = (idents.get(path) or {}).get("sha256")
+        if h:
+            out.append({"file": i, "sha256": "sha256:" + h})
+    return out
 
 
 def _fusion_device(asked: str) -> str:
@@ -588,19 +648,54 @@ def cmd_infer_fusion(a: argparse.Namespace) -> Run:
 
     model = fusion.load(a.inputs)
     device = _fusion_device(a.device)
-    encoder_device = "cuda" if device == "cuda" and a.encoder_device == "cuda" else "cpu"
+    gpu_workers_asked = a.gpu_workers
+    encoder_device = "cpu"
+    if device == "cuda" and a.encoder_device == "cuda":
+        from .gpu import torch_cuda_available
+
+        if torch_cuda_available():
+            encoder_device = "cuda"
+        else:
+            logger.warning("this torch cannot use the card: the encoder runs on the CPU")
     params = {"threads": a.threads, "models": model.refs(), "preprocessing": volume.PREPROCESSING}
+    if a.reader != "full":
+        from . import reduced
+
+        if not a.reader.startswith("reduced:"):
+            raise RunError(f"--reader is full or reduced:<policy>, not {a.reader!r}")
+        try:
+            reduced.check_policy(a.reader.split(":", 1)[1])
+        except reduced.PolicyError as e:
+            raise RunError(str(e)) from e
+        params.update({"reader": a.reader, "readahead": a.readahead, "chunk": a.chunk})
+    if a.gpu_workers is None:
+        a.gpu_workers = 2
     if device != "cpu":
         params.update({"decode_device": device, "encoder_device": encoder_device})
         params["gpu_workers"] = min(a.gpu_workers, a.threads)
         if encoder_device != "cpu":
             params["batch"] = a.batch
+    from . import cascade as cascade_mod
+
+    cas = None
+    if a.cascade != "off":
+        try:
+            cas = cascade_mod.load(a.inputs, model)
+        except cascade_mod.CascadeError as e:
+            raise RunError(str(e)) from e
+        if cas is None and a.cascade == "on":
+            raise RunError("--cascade on, and the run was given no cascade model")
+    if cas is not None:
+        a.gpu_workers = gpu_workers_asked  # the cascade's default depends on where its student runs
+        return _infer_cascade(a, model, cas, device)
     run = Run("bodypart-infer-fusion", a.output, params, device)
     stacks = manifest.load(a.stacks, source_root=a.source_root)
     decoded: dict = {}
     done = scoring.score(
-        model, a.inputs, stacks, workers=a.threads, device=device, encoder_device=encoder_device, batch=a.batch, stats=decoded, gpu_workers=a.gpu_workers
+        model, a.inputs, stacks, workers=a.threads, device=device, encoder_device=encoder_device, batch=a.batch, stats=decoded, gpu_workers=a.gpu_workers,
+        reader=a.reader, depth=a.readahead, chunk=a.chunk,
     )
+    read_counts: dict[str, int] = {}
     counts = {"answered_fine": 0, "answered_coarse": 0, "no_fingerprint": 0, "no_geometry": 0, "failed": 0, "cohort_calibrated": 0}
     per_value: dict[str, dict[str, int]] = {"fine": {}, "coarse": {}}
     for st, r, why in done:
@@ -609,7 +704,8 @@ def cmd_infer_fusion(a: argparse.Namespace) -> Run:
             run.units.append(Unit(st.unit, status=status, error=error))
             counts["failed" if status == FAILED else ("no_fingerprint" if "fingerprint" in error else "no_geometry")] += 1
             continue
-        doc = _fusion_table(st.stack_id, r, model)
+        policy = (r.reader or {}).get("policy")
+        doc = _fusion_table(st.stack_id, r, model, stage=f"reduced:{policy}" if policy else "full", files_read=_files_read(st, r))
         metrics = {}
         for mode, a_ in r.answers.items():
             metrics[f"{mode}_value"] = a_["value"]
@@ -619,6 +715,9 @@ def cmd_infer_fusion(a: argparse.Namespace) -> Run:
             pv = per_value[mode]
             pv[a_["value"]] = pv.get(a_["value"], 0) + 1
         counts["cohort_calibrated"] += int(r.cohort is not None)
+        for k, v in (r.reader or {}).items():
+            if isinstance(v, int):
+                read_counts[k] = read_counts.get(k, 0) + v
         u = Unit(st.unit, metrics=metrics)
         body = (json.dumps(doc, indent=2, sort_keys=False) + "\n").encode()
         u.outputs.append(run.output_file(f"bodypart-fusion/{st.stack_id}.json", body, "table", "application/json"))
@@ -638,6 +737,143 @@ def cmd_infer_fusion(a: argparse.Namespace) -> Run:
     run.metrics = {"stacks": len(stacks), **counts, "per_value": per_value}
     if decoded:
         run.metrics["decoded_frames"] = decoded
+    if read_counts:
+        run.metrics["reader"] = read_counts
+    return run
+
+
+def _cache_entries(writer, o, r, model) -> None:
+    """The slice cache's entries of one stack (A17b): the student's slice
+    where it read one, and the planes of the stage that answered (and the
+    touched planes filled beside an earlier answer)."""
+    from . import slicecache, volume
+
+    # each entry is keyed by its files, the stack's frames of each, and the
+    # frames it was made of, so two stacks of one enhanced file are two
+    frames_of = {path: which for path, which in o.stack.files}
+    if o.tile is not None and o.tile_ident:
+        i = o.tile_ident
+        own = {o.tile_path: i}
+        writer.add(slicecache.SLICE, i.get("study_instance_uid"), slicecache.identities([o.tile_path], own, frames_of),
+                   {"tile": o.tile}, {"slot": 0}, kept=slicecache.kept_digest([(o.tile_path, 0)], own))
+    for res in (r, getattr(r, "filled", None)):
+        if res is None or res.planes is None or res.stage not in slicecache.PLANES:
+            continue
+        idents = dict(r.idents or {}, **(res.idents or {}))
+        files = res.read_files or []
+        writer.add(
+            slicecache.PLANES[res.stage],
+            slicecache.study_of(files, idents),
+            slicecache.identities(files, idents, frames_of),
+            {"planes": res.planes, "geo": volume.Built(None, res.meta).geo(), "image": np.asarray(res.image, np.float32),
+             "header44": np.asarray(res.header44, np.float32)},
+            {"cohort": res.cohort, "encoder": model.enc.digest},
+            kept=slicecache.kept_digest(res.kept, idents),
+        )
+
+
+def _infer_cascade(a: argparse.Namespace, model, cas, device: str) -> Run:
+    """infer-fusion with a cascade (record 55 E2, P1b): every stack answered
+    by the first stage that may, or given a reason."""
+    from . import cascade as cascade_mod
+    from . import fusion, slicecache, volume
+
+    from .gpu import torch_cuda_available
+
+    # the student on the card only where this torch can use one: the CPU
+    # build's torch cannot, even where the decoders see a card
+    student_device = "cuda" if device == "cuda" and torch_cuda_available() else "cpu"
+    if device == "cuda" and student_device == "cpu":
+        logger.warning("this torch cannot use the card: the cascade's student runs on the CPU")
+    if a.gpu_workers is None:
+        # the student on the card is a process on it: one decoder beside it
+        a.gpu_workers = 1 if student_device == "cuda" else 2
+    params = {"threads": a.threads, "models": {**model.refs(), **cas.refs()}, "preprocessing": volume.PREPROCESSING,
+              "cascade": {"stages": [s["stage"] for s in cas.doc["stages"]], "deferral_at_least": cas.d3_threshold,
+                          "margin_logit_at_least": cas.m3, "student_device": student_device, "student_threads": a.student_threads,
+                          "student_batch": a.student_batch, "readahead": a.readahead,
+                          "chunk": a.chunk}}
+    if a.cache_fill != "none":
+        params["cascade"]["cache_fill"] = a.cache_fill
+    if device != "cpu":
+        # of the planes stages' workers, how many decode on the card
+        params.update({"decode_device": device, "gpu_workers": min(a.gpu_workers, a.threads)})
+    run = Run("bodypart-infer-fusion", a.output, params, device)
+    doc = manifest.read(a.stacks)
+    stacks = manifest.parse(doc, source_root=a.source_root)
+    # the rest of each session the run holds part of, for the session's top
+    context = manifest.context(doc, skip={st.stack_id for st in stacks})
+    del doc
+    writer = None
+    if a.cache is not None:
+        writer = slicecache.Writer(a.cache, {"image": "nils-bodypart", "version": __version__, **{k: v["digest"] for k, v in params["models"].items()}})
+    stats: dict = {}
+    outcomes = cascade_mod.score(model, cas, a.inputs, stacks, workers=a.threads, device=device, chunk=a.chunk, depth=a.readahead,
+                                 student_batch=a.student_batch, fill=a.cache_fill == "touched", keep_inputs=writer is not None, stats=stats,
+                                 gpu_workers=a.gpu_workers, context=context, student_device=student_device, student_threads=a.student_threads)
+    counts = {"answered_fine": 0, "answered_coarse": 0, "failed": 0, "cohort_calibrated": 0}
+    stages = {"s1": 0, cas.b24: 0, "touched": 0}
+    reasons = {k: 0 for k in cascade_mod.REASONS}
+    per_value: dict[str, dict[str, int]] = {"fine": {}, "coarse": {}}
+    files_total = 0
+    for o in outcomes:
+        st, r = o.stack, o.result
+        if r is None:
+            reason = o.reason or "unreadable"
+            reasons[reason] += 1
+            status, error = o.why or (FAILED, "the stack could not be scored")
+            counts["failed"] += int(status == FAILED)
+            u = Unit(st.unit, status=status, error=error)
+            table = _reason_table(st.stack_id, reason, model, cas, files_read=len(o.opened or ()))
+            table["stage1"] = o.stage1
+            body = (json.dumps(table, indent=2) + "\n").encode()
+            u.outputs.append(run.output_file(f"bodypart-fusion/{st.stack_id}.json", body, "table", "application/json"))
+            run.units.append(u)
+            continue
+        files = _files_read(st, r)
+        files_total += files
+        stages[r.stage] = stages.get(r.stage, 0) + 1
+        doc = _fusion_table(st.stack_id, r, model, cas, stage=r.stage, files_read=files)
+        doc["stage1"] = o.stage1
+        if o.d3 is not None:
+            doc["deferral"] = round(o.d3, 6)
+        if doc["reason"]:
+            reasons[doc["reason"]] += 1
+        metrics = {"stage": r.stage, "files_read": files}
+        for mode, a_ in r.answers.items():
+            metrics[f"{mode}_value"] = a_["value"]
+            metrics[f"{mode}_confidence"] = round(a_["confidence"], 4)
+            metrics[f"{mode}_answers"] = bool(a_["answers"])
+            counts[f"answered_{mode}"] += int(a_["answers"])
+            pv = per_value[mode]
+            pv[a_["value"]] = pv.get(a_["value"], 0) + 1
+        counts["cohort_calibrated"] += int(r.cohort is not None)
+        u = Unit(st.unit, metrics=metrics)
+        hashes = _read_hashes(st, r)
+        if hashes:
+            u.extra["read"] = hashes
+        body = (json.dumps(doc, indent=2, sort_keys=False) + "\n").encode()
+        u.outputs.append(run.output_file(f"bodypart-fusion/{st.stack_id}.json", body, "table", "application/json"))
+        run.units.append(u)
+        # each body_part decision names the cascade that made it (ruling R1
+        # (a)); each body_region decision the coarse part the run used, the
+        # one the cascade's file names
+        f = r.answers["fine"]
+        run.proposals.append({"stack_id": st.stack_id, "axis": fusion.FINE_AXIS, "value": f["value"], "probabilities": fusion.proposed(f),
+                              "model_digest": cas.digest})
+        c = r.answers.get("coarse")
+        if c is not None:
+            run.proposals.append({"stack_id": st.stack_id, "axis": fusion.COARSE_AXIS, "value": c["value"], "probabilities": fusion.proposed(c),
+                                  "model_digest": model.coarse_part.digest})
+        if writer is not None:
+            _cache_entries(writer, o, r, model)
+    run.metrics = {"stacks": len(stacks), **counts, "per_value": per_value, "stages": stages, "reasons": reasons,
+                   "files_read": files_total, "files_per_scored_stack": round(files_total / max(1, sum(stages.values())), 3),
+                   "stage1": {k: v for k, v in stats.items() if k.startswith("stage1") or k in ("straight_to_planes", "context_stacks")}}
+    if writer is not None:
+        # the answers are written first; the cache after them, best-effort
+        run.metrics["cache"] = writer.counts
+        run.after_write = writer.flush
     return run
 
 
@@ -713,7 +949,15 @@ def parser() -> argparse.ArgumentParser:
     f.add_argument("--device", default=os.environ.get("NILS_BODYPART_FUSION_DEVICE", "cpu"), help="cpu (the default), cuda, or auto (cuda where a card is found): where lossless JPEG 2000 is decoded")
     f.add_argument("--encoder-device", choices=("cpu", "cuda"), default="cpu", help="cuda runs the image encoder on the card in batches (not bit for bit the CPU's)")
     f.add_argument("--batch", type=int, default=64, help="stacks a batch of the encoder on the card")
-    f.add_argument("--gpu-workers", type=int, default=2, help="of the workers, how many decode on the card; the others decode on the CPU")
+    f.add_argument("--gpu-workers", type=int, default=None, help="of the workers, how many decode on the card; the others decode on the CPU (2, or 1 where the cascade's student is on the card, so the card holds at most two processes)")
+    f.add_argument("--reader", default="full", help="full (every file, as the model was certified) or reduced:<policy> (full, touched or b<N>): only the frames the encoder's planes need, chosen from the manifest's geometry")
+    f.add_argument("--readahead", type=int, default=1, help="with the reduced reader, how many stacks ahead a worker asks the kernel to read")
+    f.add_argument("--chunk", type=int, default=4, help="stacks a worker takes at a time")
+    f.add_argument("--cascade", choices=("auto", "on", "off"), default="auto", help="auto runs the cascade where the run was given one (record 55 E2); off runs the certified reader alone")
+    f.add_argument("--student-batch", type=int, default=64, help="stacks a batch of the cascade's student")
+    f.add_argument("--student-threads", type=int, default=32, help="the cascade's student's threads on the CPU, its own and not --threads, so its numbers do not depend on the workers: 32, as the graded CPU answers were made")
+    f.add_argument("--cache", type=Path, default=None, help="the slice cache's folder, read-write: the inputs the cascade read are kept there per session")
+    f.add_argument("--cache-fill", choices=("none", "touched"), default="none", help="touched also builds the touched planes of stacks an earlier stage answered, for the cache (scoring at arrival, R5)")
     return p
 
 
@@ -732,6 +976,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"nils-bodypart {a.entry}: {e}", file=sys.stderr)
         return 1
     path = run.write()
+    if run.after_write is not None:
+        try:
+            run.after_write()
+        except Exception as e:  # noqa: BLE001 - the answers stand without it
+            logger.warning("the run's writes after its answers failed (%s); its answers are written", type(e).__name__)
+        path = run.write()
     c = run.counts()
     print(f"nils-bodypart {a.entry}: {c['succeeded']} succeeded, {c['skipped']} skipped, {c['failed']} failed; {path}")
     return 0

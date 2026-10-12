@@ -27,7 +27,10 @@ the stack's ``body_part`` and ``technique`` as the registry holds them now
 and ``slices``, how many slices its files hold. A descriptor that opts in
 with ``x-nils.input.header`` (record 50) has each stack carry ``header``:
 the stack's fingerprint, its classification per axis, its first ingest
-batch and its subject's open cohorts, which stay in ``extra``.
+batch and its subject's open cohorts, which stay in ``extra``. With
+``x-nils.input.geometry`` the manifest also lists, under ``context``, the
+other MR stacks of each session the run holds part of (record 55 E2, P1b),
+never to be scored (``context``).
 """
 
 from __future__ import annotations
@@ -57,6 +60,16 @@ class Stack:
     # The files as the manifest lists them, each with the frames that are
     # the stack's (from 0), or None for every frame the file holds.
     files: list[tuple[str, list[int] | None]] = field(default_factory=list)
+    # Each file's geometry as the registry holds it, where the manifest
+    # gives it (``geometry`` on a file, which the engine writes when the
+    # descriptor sets ``x-nils.input.geometry``), in the reader's names
+    # (``ipp``, ``ps``, ``rows``, ``cols``, ``inum``, ``frames``), else
+    # None; the reduced reader chooses frames from it without reading
+    # headers. The stack's own is ``extra["geometry"]`` (``iop``,
+    # ``thick``, ``modality``, and since P1b ``study``, ``image_type``,
+    # ``sop_class``, ``n_instances`` and ``sealed`` where the engine gives
+    # them).
+    file_geo: list[dict | None] = field(default_factory=list)
 
     @property
     def num_slices(self) -> int:
@@ -104,6 +117,59 @@ def _safe_join(mount: Path, rel: str) -> str:
 
 KNOWN = {"unit", "stack_id", "files", "orientation", "body_part", "technique", "slices"}
 
+# A file's geometry as the engine names it (stacks.schema.json, record 55
+# E2), and the reader's name for each.
+_FILE_GEOMETRY = {
+    "image_position_patient": "ipp",
+    "pixel_spacing": "ps",
+    "rows": "rows",
+    "columns": "cols",
+    "instance_number": "inum",
+    "number_of_frames": "frames",
+}
+
+
+# The stack's facts beside its geometry (P1b), and the reader's names.
+_STACK_FACTS = {
+    "study": "study",
+    "image_type": "image_type",
+    "sop_class_uid": "sop_class",
+    "n_instances": "n_instances",
+    "sealed": "sealed",
+}
+
+
+def file_geometry(g) -> dict | None:
+    """A file's geometry in the reader's names: the engine's geometry
+    object mapped, or one already in the reader's names (as the one-hour
+    study's manifests wrote it) as it is; None without one."""
+    if not isinstance(g, dict):
+        return None
+    if "image_position_patient" in g:
+        return {short: g.get(name) for name, short in _FILE_GEOMETRY.items()}
+    return g
+
+
+def stack_geometry(s: dict) -> dict | None:
+    """A stack's geometry in the reader's names (``iop``, ``thick``,
+    ``modality``): the engine's (the stack's orientation and its
+    fingerprint's slice thickness, beside the entry's modality, and the
+    stack's facts of P1b) mapped, or one already in the reader's names as it
+    is; None without one."""
+    g = s.get("geometry")
+    if not isinstance(g, dict):
+        return None
+    if "image_orientation_patient" in g:
+        out = {"iop": g.get("image_orientation_patient"), "thick": g.get("slice_thickness"), "modality": s.get("modality")}
+        # the stack's facts the few-slice student reads beside its geometry
+        # (P1b): its session's id to group by, what its images are, how many,
+        # and whether it is sealed now
+        for name, short in _STACK_FACTS.items():
+            if name in g:
+                out[short] = g[name]
+        return out
+    return g
+
 
 def parse(
     doc: dict,
@@ -137,12 +203,14 @@ def parse(
         counted = counted if isinstance(counted, int) and not isinstance(counted, bool) and counted > 0 else None
         slices: list[Slice] = []
         listed: list[tuple[str, list[int] | None]] = []
+        geos: list[dict | None] = []
         for f in files:
             src = int(f.get("source", 0))
             if src not in mounts:
                 raise ManifestError(f"stack {sid}: a file names source {src}, which the manifest does not mount")
             path = _safe_join(mounts[src], f["path"])
             frames = f.get("frames")
+            geos.append(file_geometry(f.get("geometry")))
             if frames is None:
                 n = (counted or frames_of(path)) if len(files) == 1 else 1
                 slices.extend(Slice(path, i) for i in range(n))
@@ -151,6 +219,10 @@ def parse(
                 chosen = parse_frames(str(frames))
                 slices.extend(Slice(path, i) for i in chosen)
                 listed.append((path, chosen))
+        extra = {k: v for k, v in s.items() if k not in KNOWN}
+        sg = stack_geometry(s)
+        if sg is not None:
+            extra["geometry"] = sg
         out.append(
             Stack(
                 stack_id=sid,
@@ -159,16 +231,46 @@ def parse(
                 orientation=s.get("orientation"),
                 body_part=s.get("body_part") or None,
                 technique=s.get("technique"),
-                extra={k: v for k, v in s.items() if k not in KNOWN},
+                extra=extra,
                 files=listed,
+                file_geo=geos,
             )
         )
     return out
 
 
-def load(path: Path, *, source_root: Path | None = None) -> list[Stack]:
+def context(doc: dict, *, skip=()) -> list[Stack]:
+    """The manifest's context stacks (``context``, record 55 E2, P1b): the
+    other stacks of each session the run holds part of, which the engine
+    lists with their geometry and their files' geometry and no path, so a
+    stack is read against its whole session in any run. They are never
+    scored; a stack the run itself holds (``skip``) is left out."""
+    out: list[Stack] = []
+    seen = set(skip)
+    for s in doc.get("context") or [] if isinstance(doc, dict) else []:
+        try:
+            sid = int(s["stack_id"])
+        except (KeyError, TypeError, ValueError) as e:
+            raise ManifestError("a context stack without an integer stack_id") from e
+        if sid in seen:
+            continue
+        seen.add(sid)
+        files = [f for f in s.get("files") or [] if isinstance(f, dict)]
+        extra = {"modality": s.get("modality")}
+        sg = stack_geometry(s)
+        if sg is not None:
+            extra["geometry"] = sg
+        out.append(Stack(stack_id=sid, slices=[], unit=f"stack-{sid}", extra=extra, files=[("", None) for _ in files],
+                         file_geo=[file_geometry(f.get("geometry")) for f in files]))
+    return out
+
+
+def read(path: Path) -> dict:
     try:
-        doc = json.loads(Path(path).read_text(encoding="utf-8"))
+        return json.loads(Path(path).read_text(encoding="utf-8"))
     except json.JSONDecodeError as e:
         raise ManifestError(f"stacks.json is not JSON: {e}") from e
-    return parse(doc, source_root=source_root)
+
+
+def load(path: Path, *, source_root: Path | None = None) -> list[Stack]:
+    return parse(read(path), source_root=source_root)

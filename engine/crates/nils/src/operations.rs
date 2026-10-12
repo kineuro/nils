@@ -236,12 +236,27 @@ fn served(store: &mut Store, task: &str, reads: Option<i64>) -> Result<Vec<Model
     Ok(all)
 }
 
+/// Whether a model is a cascade (record 55 E2): its card names parts.
+fn is_cascade(m: &Model) -> bool {
+    m.card
+        .get("parts")
+        .and_then(Value::as_object)
+        .is_some_and(|p| !p.is_empty())
+}
+
 /// Body part's run: the newest active `bodypart-infer-fusion` and the
 /// certified model's three parts, each the one served, in the order the
 /// descriptor declares them: the encoder the head names, the head that
 /// answers `body_part`, and the coarse mode that answers `body_region`
 /// from the same encoder, its card naming the head where one does, which
-/// the run goes without where none is served.
+/// the run goes without where none is served. Where the served model is a
+/// cascade (record 55 E2), and it is one only once a person has promoted
+/// it (an admitted cascade waits, and the promoted or admitted single
+/// model answers), each input its card names a part for gets that
+/// part, the input `cascade` gets the cascade, and the coarse mode is the
+/// cascade's own part `coarse` and no other, since the image refuses a
+/// coarse mode its cascade file does not name; a cascade naming none is
+/// refused here. An optional input nothing fills is left out.
 fn body_part(store: &mut Store) -> Result<Result<Plan, Refused>, StoreError> {
     let refused =
         |reason: &'static str, error: String| -> Result<Result<Plan, Refused>, StoreError> {
@@ -262,8 +277,89 @@ fn body_part(store: &mut Store) -> Result<Result<Plan, Refused>, StoreError> {
             );
         }
     };
-    let Some(head) = served(store, "axis:body_part", None)?.into_iter().next() else {
-        return refused("no_model", "no body-part model is installed".into());
+    // record 55 E2: a cascade answers the step only once it is promoted,
+    // since choosing and promoting the body-part model is a person's (the
+    // fast-path plan's 4.3); until then the single model served answers
+    let candidates = served(store, "axis:body_part", None)?;
+    let waiting = candidates
+        .iter()
+        .find(|m| is_cascade(m) && m.state != "promoted")
+        .map(Model::label);
+    let Some(head) = candidates
+        .into_iter()
+        .find(|m| m.state == "promoted" || !is_cascade(m))
+    else {
+        return refused(
+            "no_model",
+            match waiting {
+                Some(c) => format!(
+                    "no body-part model is served: the cascade {c} is admitted, and answers the step once it is promoted"
+                ),
+                None => "no body-part model is installed".into(),
+            },
+        );
+    };
+    // record 55 E2: a cascade names its parts, each by the input it fills,
+    // and fills the input `cascade` itself; each part it names must be
+    // registered, not retired, and admitted or promoted, as the model it
+    // stands for would have to be
+    let parts = model::parts(store, &head)?;
+    let cascade = is_cascade(&head);
+    if cascade {
+        for (name, digest) in head.card["parts"].as_object().into_iter().flatten() {
+            let why = match parts.iter().find(|(n, _)| n == name) {
+                None => format!(
+                    "{} names a part {name}, {}, that is not registered",
+                    head.label(),
+                    digest.as_str().unwrap_or("?")
+                ),
+                Some((_, m)) if m.state == "retired" => format!(
+                    "{} reads its part {name}, {}, which is retired",
+                    head.label(),
+                    m.label()
+                ),
+                Some((_, m)) if !m.answers() => format!(
+                    "{} reads its part {name}, {}, which is {} and neither admitted nor promoted",
+                    head.label(),
+                    m.label(),
+                    m.state
+                ),
+                Some(_) => continue,
+            };
+            return refused("no_model", why);
+        }
+    }
+    // a descriptor that takes no cascade (one older than it), or not each
+    // of its parts, would run the plain path from the parts, or a cascade
+    // without one: refused, so the run is never another model's
+    if cascade {
+        let takes: BTreeSet<&str> = d
+            .inputs
+            .iter()
+            .filter(|t| t.ty == "model")
+            .map(|t| t.id.as_str())
+            .collect();
+        let missing: Vec<&str> = std::iter::once("cascade")
+            .chain(parts.iter().map(|(n, _)| n.as_str()))
+            .filter(|n| !takes.contains(n))
+            .collect();
+        if !missing.is_empty() {
+            return refused(
+                "no_pipeline",
+                format!(
+                    "{} takes no model input {}, which the cascade {} is run with; add a descriptor version that takes it",
+                    p.label(),
+                    missing.join(", "),
+                    head.label()
+                ),
+            );
+        }
+    }
+    let part = |input: &str| {
+        parts
+            .iter()
+            .find(|(name, _)| name == input)
+            .map(|(_, m)| m.id)
     };
     let encoder = match head.encoder_model_id {
         Some(id) => model::get(store, id)?.filter(|m| m.state != "retired"),
@@ -277,28 +373,63 @@ fn body_part(store: &mut Store) -> Result<Result<Plan, Refused>, StoreError> {
     };
     // the coarse mode names the head it sums: one whose card names this
     // head first, else one of the same encoder (the image refuses a mode
-    // file of another head)
-    let modes = served(store, "axis:body_region", Some(encoder.id))?;
-    let coarse = modes
-        .iter()
-        .find(|m| m.card.to_string().contains(&head.digest))
-        .or(modes.first());
+    // file of another head). A cascade answers both modes with the coarse
+    // part its file names, so it is given that part and no other: a mode
+    // naming the cascade could never pass, since the cascade's file would
+    // have to hold that mode's digest and the mode the cascade's
+    let coarse = if !cascade {
+        let modes = served(store, "axis:body_region", Some(encoder.id))?;
+        let named = modes
+            .iter()
+            .find(|m| m.card.to_string().contains(&head.digest))
+            .map(|m| m.id);
+        named.or(modes.first().map(|m| m.id))
+    } else {
+        let Some(id) = part("coarse") else {
+            return refused(
+                "no_model",
+                format!(
+                    "{} names no coarse part: a cascade answers body_region with the coarse mode its file names",
+                    head.label()
+                ),
+            );
+        };
+        Some(id)
+    };
     let mut models = Vec::new();
     let mut skipped: Option<&str> = None;
     for t in d.inputs.iter().filter(|t| t.ty == "model") {
+        // a cascade fills every input but its own from its parts: the
+        // cascade is never its own head, nor its encoder the encoder
+        if cascade && t.id != "cascade" && t.id != "coarse" && part(&t.id).is_none() {
+            return refused(
+                "no_model",
+                format!(
+                    "{} names no part {}, which {} reads",
+                    head.label(),
+                    t.id,
+                    p.label()
+                ),
+            );
+        }
         let given = match t.id.as_str() {
-            "encoder" => Some(encoder.id),
-            "head" => Some(head.id),
-            "coarse" => coarse.map(|m| m.id),
-            other => {
-                return refused(
-                    "no_pipeline",
-                    format!(
-                        "{} reads a model input {other} the body-part step does not fill",
-                        p.label()
-                    ),
-                );
-            }
+            "encoder" => part("encoder").or(Some(encoder.id)),
+            "head" => part("head").or(Some(head.id)),
+            "coarse" => coarse,
+            "cascade" => cascade.then_some(head.id),
+            other => match part(other) {
+                Some(id) => Some(id),
+                None if t.optional => None,
+                None => {
+                    return refused(
+                        "no_pipeline",
+                        format!(
+                            "{} reads a model input {other} the body-part step does not fill",
+                            p.label()
+                        ),
+                    );
+                }
+            },
         };
         // models are given in the order of the inputs, so one left out
         // can only be the last
