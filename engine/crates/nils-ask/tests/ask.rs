@@ -2061,3 +2061,92 @@ fn a_date_compared_with_text_is_written_as_a_date() {
     assert_eq!(issues[0].path, "params.since");
     assert_eq!(issues[0].message, "2020-02-30 is not a date");
 }
+
+/// Record 55 K7, small counts at plain (the ruling of 2026-10-12): below
+/// detail quasi the validation says which sets a quasi identifying field
+/// chose or grouped, and which of the answer's group counts are held, by
+/// which sizes; at detail quasi it says none.
+#[test]
+fn the_sets_a_quasi_field_chose_and_the_counts_held_are_traced() {
+    let v = doc(
+        json!({
+            "people": {"grain": "subject"},
+            "visits": {"grain": "session", "of": "people", "bind": {
+                "age": ["age_at", {}, ["field", {}, "subject.birth_date"], ["field", {}, "first"]],
+                "older": ["case", {}, [">=", {}, ["field", {}, "age"], 45], 1, 0]
+            }},
+            "labelled": {"grain": "session", "from": "visits",
+                "where": [["=", {}, ["field", {}, "label"], "baseline"]]},
+            "recent": {"grain": "session", "from": "visits",
+                "where": [[">=", {}, ["field", {}, "first"], "2020-01-01"]]},
+            "flagged": {"grain": "session", "from": "visits",
+                "where": [["=", {}, ["field", {}, "older"], 1]]},
+            "firsts": {"grain": "session", "from": "visits",
+                "pick": {"per": "subject", "n": 1, "ties": "report", "by": [[["field", {}, "first"], "asc"]]}},
+            "stacks": {"grain": "stack", "of": "recent"},
+            "near_events": {"grain": "session", "from": "visits",
+                "near": [{"as": "x", "set": "events", "window": {"from": -1, "to": 1, "unit": "day"}, "policy": "nearest"}]},
+            "events": {"grain": "event"},
+            "by_age": {"grain": "group", "group": {"of": "visits", "by": [["field", {}, "age"]]},
+                "bind": {
+                    "n": ["count", {"set": "visits"}],
+                    "labels": ["distinct", {"set": "visits"}, ["field", {}, "label"]],
+                    "studies": ["sum", {"set": "visits"}, ["field", {}, "n_studies"]],
+                    "twice": ["*", {}, ["field", {}, "n"], 2]
+                }}
+        }),
+        json!({"set": "by_age", "level": "aggregate", "columns": [
+            ["field", {}, "age"], ["field", {}, "_subjects"], ["field", {}, "n"],
+            ["field", {}, "labels"], ["field", {}, "studies"], ["field", {}, "twice"]
+        ]}),
+    );
+    let at_plain = accepted(v.clone()).validated;
+    let quasi: BTreeSet<&str> = at_plain.quasi_sets.iter().map(String::as_str).collect();
+    assert_eq!(
+        quasi,
+        ["recent", "flagged", "stacks", "near_events", "by_age"].into(),
+        "a label and a pick choose by no quasi field; a date, a comparison of an age, a set under one, a near and a group by age do"
+    );
+    use nils_ask::validate::CountSize;
+    assert_eq!(at_plain.counts.sizes, vec![CountSize::Group]);
+    let held: BTreeMap<usize, BTreeSet<usize>> =
+        [1, 2, 3, 5].into_iter().map(|i| (i, [0].into())).collect();
+    assert_eq!(
+        at_plain.counts.columns, held,
+        "the counts and twice a count; not the age, not a sum"
+    );
+
+    // a group's own count of a comparison of an age: the subjects it counts
+    let own = doc(
+        json!({
+            "people": {"grain": "subject", "bind": {
+                "old": ["case", {}, [">=", {}, ["age_at", {}, ["field", {}, "birth_date"], "2026-01-01"], 45], 1, 0]
+            }},
+            "by_cohort": {"grain": "group", "group": {"of": "people", "by": [["field", {}, "cohort.id"]]},
+                "bind": {"n_old": ["sum", {"set": "people"}, ["field", {}, "old"]]}}
+        }),
+        json!({"set": "by_cohort", "level": "aggregate", "columns": [
+            ["field", {}, "cohort.id"], ["field", {}, "_subjects"], ["field", {}, "n_old"]
+        ]}),
+    );
+    let at_plain = accepted(own.clone()).validated;
+    assert!(at_plain.quasi_sets.is_empty(), "{:?}", at_plain.quasi_sets);
+    assert_eq!(
+        at_plain.counts.sizes,
+        vec![CountSize::Own {
+            binding: "n_old".into(),
+            nonzero: true
+        }]
+    );
+    assert_eq!(
+        at_plain.counts.columns,
+        [(2, [0].into())].into_iter().collect::<BTreeMap<_, _>>()
+    );
+
+    // detail quasi holds none
+    for v in [v, own] {
+        let ask = serde_json::from_value(v).expect("a document");
+        let at_quasi = prepare(ask, &Fixture, &quasi_scope()).unwrap().validated;
+        assert!(at_quasi.quasi_sets.is_empty() && at_quasi.counts.is_empty());
+    }
+}

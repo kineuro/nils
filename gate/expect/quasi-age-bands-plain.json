@@ -1,0 +1,53 @@
+{
+  "name": "quasi-age-bands-plain",
+  "question": "The same bands, asked at detail plain",
+  "hash": "2ef179c6ec2c00dc5bcf9eca73ee59950184d252465646f076a8dcab1e98efcd",
+  "columns": [
+    "_key",
+    "_subject",
+    "band",
+    "_subjects",
+    "sessions",
+    "share._subjects"
+  ],
+  "row_count": 3,
+  "rows": [
+    [
+      "1",
+      "",
+      "99",
+      "",
+      "",
+      ""
+    ],
+    [
+      "2",
+      "",
+      "99",
+      "34",
+      "34",
+      "0.708333333"
+    ],
+    [
+      "3",
+      "",
+      "99",
+      "",
+      "",
+      ""
+    ]
+  ],
+  "funnel": {
+    "firsts": null,
+    "people": 48,
+    "visits": 48
+  },
+  "shaped": [
+    "band"
+  ],
+  "held_back": [
+    "_subjects",
+    "sessions",
+    "share._subjects"
+  ]
+}

@@ -180,7 +180,11 @@ const MAX_DEPTH: usize = 4;
 /// of distinct values of a quasi identifying field were answered for
 /// `MEASURE_K` subjects or more and held back below (the ruling of that
 /// day), with the columns held back named, so no answer cached while they
-/// were shapes is answered again.
+/// were shapes is answered again. `quasi_counts` says a count of rows a
+/// quasi identifying field chose or grouped was answered for none or
+/// `MEASURE_K` subjects and more, and held back between and beside (small
+/// counts at plain, the ruling of that day), so no answer cached while such
+/// counts were numbers is answered again.
 pub fn suppression_of(scope: &Scope) -> Value {
     let raw = crate::validate::may_project_raw(crate::validate::Class::QuasiIdentifying, scope);
     json!({
@@ -190,6 +194,7 @@ pub fn suppression_of(scope: &Scope) -> Value {
         "axis_values": "any_name",
         "shaped": "named",
         "quasi_totals": "held_to_k",
+        "quasi_counts": "held_below_k",
     })
 }
 
@@ -470,6 +475,11 @@ fn run_at(registry: &mut Registry, req: Request<'_>, depth: usize) -> Result<Out
     let (compiled, mut answer) = runner.answer(registry, &ask, &validated, req.after, req.limit)?;
     // the post pass
     let mut over: BTreeMap<String, f64> = BTreeMap::new();
+    // record 55 K7, small counts at plain (the ruling of 2026-10-12): a
+    // share's denominator is read as it is, and where it is a count of
+    // fewer than MEASURE_K subjects a quasi identifying field chose, every
+    // share over it is held back, since a share shown and its count say it
+    let mut small_over: BTreeSet<String> = BTreeSet::new();
     for m in &ask.out.measures {
         for (kind, spec) in &m.0 {
             if kind == "share"
@@ -478,9 +488,15 @@ fn run_at(registry: &mut Registry, req: Request<'_>, depth: usize) -> Result<Out
             {
                 let counted = count_level(&ask, set);
                 let v = validate(&counted, req.names, req.scope).map_err(AskError::Invalid)?;
-                let (_, a) = runner.answer(registry, &counted, &v, None, None)?;
+                let small = v.quasi_sets.contains(set);
+                let (_, a) = runner.answer(registry, &counted, &v.counting_all(), None, None)?;
                 let subjects = a.rows.first().map(|r| r.int(1)).transpose()?.unwrap_or(0);
-                over.insert(set.to_string(), subjects as f64);
+                if small && subjects > 0 && subjects < crate::validate::MEASURE_K {
+                    small_over.insert(set.to_string());
+                    over.insert(set.to_string(), 0.0);
+                } else {
+                    over.insert(set.to_string(), subjects as f64);
+                }
             }
         }
     }
@@ -512,18 +528,41 @@ fn run_at(registry: &mut Registry, req: Request<'_>, depth: usize) -> Result<Out
         .collect();
     let mut measured = measure::apply(&mut answer, &remaining, &over)?;
     // record 55 K7: a share of a column with values held back holds them
-    // back too, in the same rows
-    let shares_held: Vec<usize> = measured
-        .columns
-        .iter()
-        .filter_map(|name| {
-            let of = name.strip_prefix("share.")?;
-            let from = answer.columns.iter().position(|c| c == of)?;
-            let at = answer.columns.iter().position(|c| c == name)?;
-            answer.held_back.contains(&from).then_some(at)
+    // back too, in the same rows; a share of a count is held as the count
+    // is, and a share over a small count of rows a quasi identifying field
+    // chose is held in every row (null, as a share over none is)
+    let over_of = |of: &str| -> Option<&str> {
+        ask.out.measures.iter().find_map(|m| {
+            let spec = m.0.get("share")?;
+            (spec.get("of").and_then(Value::as_str) == Some(of))
+                .then(|| spec.get("over").and_then(Value::as_str))
+                .flatten()
         })
-        .collect();
-    answer.held_back.extend(shares_held);
+    };
+    let mut shares_held: Vec<(usize, bool)> = Vec::new();
+    for name in &measured.columns {
+        let Some(of) = name.strip_prefix("share.") else {
+            continue;
+        };
+        let Some(at) = answer.columns.iter().position(|c| c == name) else {
+            continue;
+        };
+        let from = answer.columns.iter().position(|c| c == of);
+        let small = over_of(of).is_some_and(|s| small_over.contains(s));
+        if small && !answer.rows.is_empty() {
+            shares_held.push((at, true));
+        } else if let Some(from) = from
+            && answer.held_back.contains(&from)
+        {
+            shares_held.push((at, answer.held_counts.contains(&from)));
+        }
+    }
+    for (at, count) in shares_held {
+        answer.held_back.push(at);
+        if count {
+            answer.held_counts.push(at);
+        }
+    }
     // the columns in the answer's order: the group's scalars, then the shares
     group_columns.append(&mut measured.columns);
     measured.columns = group_columns;
@@ -832,7 +871,7 @@ fn group_scalars(
 fn inside(mut v: Validated) -> Validated {
     v.shaped.clear();
     v.held.clear();
-    v
+    v.counting_all()
 }
 
 /// Append one column per namespace to every row, the subject's identifier

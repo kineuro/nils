@@ -67,8 +67,14 @@ pub struct Answer {
     /// Record 55 K7, the ruling of 2026-10-12: the places of the columns
     /// with a value held back, a group's mean, spread or count of distinct
     /// values of such a field where the group holds fewer than
-    /// `MEASURE_K` subjects with a value; the value is null.
+    /// `MEASURE_K` subjects with a value; the value is null. Also, small
+    /// counts at plain (the same day's ruling), the counts held back.
     pub held_back: Vec<usize>,
+    /// Record 55 K7, small counts at plain (the ruling of 2026-10-12): the
+    /// places among `held_back` that are counts of rows a quasi identifying
+    /// field chose or grouped, held for fewer than `MEASURE_K` subjects or
+    /// beside such a count, so the chat says which.
+    pub held_counts: Vec<usize>,
 }
 
 /// A column of an answer with values held back, and why (record 55 K7, the
@@ -90,15 +96,25 @@ impl Answer {
 
     /// The columns with a value held back, in order, each with why.
     pub fn held_back_named(&self) -> Vec<HeldBack> {
-        let why = crate::validate::held_back_why();
         self.held_back
             .iter()
-            .filter_map(|&i| self.columns.get(i))
-            .map(|c| HeldBack {
-                column: c.clone(),
-                why: why.clone(),
+            .filter_map(|&i| {
+                self.columns.get(i).map(|c| HeldBack {
+                    column: c.clone(),
+                    why: self.why_held(i),
+                })
             })
             .collect()
+    }
+
+    /// Why the values of a column were held back: a small count's why for
+    /// a count (record 55 K7, small counts at plain), a group's otherwise.
+    pub fn why_held(&self, i: usize) -> String {
+        if self.held_counts.contains(&i) {
+            crate::validate::held_count_why()
+        } else {
+            crate::validate::held_back_why()
+        }
     }
 }
 
@@ -258,7 +274,14 @@ pub fn run(store: &mut Store, compiled: &Compiled, bounds: Bounds) -> Result<Ans
     ended?;
     shape_columns(compiled, &mut rows);
     let content_hash = (!truncated).then(|| content_hash(compiled, &rows));
-    let held_back = held_back_in(&compiled.held_columns, &rows);
+    let mut held_back = held_back_in(&compiled.held_columns, &rows);
+    let held_counts = held_back_in(&compiled.count_columns, &rows);
+    for &i in &held_counts {
+        if !held_back.contains(&i) {
+            held_back.push(i);
+        }
+    }
+    held_back.sort_unstable();
     Ok(Answer {
         columns: compiled.columns.clone(),
         rows,
@@ -267,5 +290,6 @@ pub fn run(store: &mut Store, compiled: &Compiled, bounds: Bounds) -> Result<Ans
         elapsed_ms: started.elapsed().as_millis() as u64,
         shaped: compiled.shaped_columns.clone(),
         held_back,
+        held_counts,
     })
 }

@@ -86,9 +86,11 @@ struct Canonical {
     /// Every row, rendered: the declared normalisation.
     rows: Vec<Vec<String>>,
     /// The funnel's last stage per named set, so a fixture says where its
-    /// subjects went and not only how many came back.
+    /// subjects went and not only how many came back. Null where the
+    /// fixture's detail holds the stage's count back (record 55 K7, small
+    /// counts at plain).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    funnel: BTreeMap<String, i64>,
+    funnel: BTreeMap<String, Option<i64>>,
     /// The columns answered as their shapes at the fixture's detail (record
     /// 55 K7); none at the gate's own.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -309,7 +311,7 @@ fn run_fixture(
         None,
     )
     .map_err(|e| fail(format!("{}: {e}", f.name)))?;
-    let mut funnel: BTreeMap<String, i64> = BTreeMap::new();
+    let mut funnel: BTreeMap<String, Option<i64>> = BTreeMap::new();
     for stage in &d.funnel {
         funnel.insert(stage.set.clone(), stage.subjects);
     }
@@ -401,13 +403,15 @@ fn differences(want: &Canonical, got: &Canonical) -> Vec<String> {
             break;
         }
     }
+    let said = |n: &Option<i64>| n.map_or_else(|| "held back".to_string(), |n| n.to_string());
     for (set, subjects) in &want.funnel {
         if got.funnel.get(set) != Some(subjects) {
             out.push(format!(
-                "the funnel at {set}: {subjects} subjects became {}",
+                "the funnel at {set}: {} subjects became {}",
+                said(subjects),
                 got.funnel
                     .get(set)
-                    .map(i64::to_string)
+                    .map(said)
                     .unwrap_or_else(|| "no stage".into())
             ));
         }

@@ -1291,11 +1291,12 @@ fn answer(
                     .rfind(|s| s.set == name)
                     .map(|s| (s.rows, s.subjects))
             };
-            let (count, subjects) = stage_of(&set_name).unwrap_or((0, 0));
+            // record 55 K7, small counts at plain: a count held back is null
+            let (count, subjects) = stage_of(&set_name).unwrap_or((Some(0), Some(0)));
             let sessions = if under {
-                stage_of("sessions_under").map(|(rows, _)| rows)
+                stage_of("sessions_under").and_then(|(rows, _)| rows)
             } else if grain == Grain::Session {
-                Some(count)
+                count
             } else {
                 None
             };

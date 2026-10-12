@@ -9,7 +9,8 @@
 //! group's mean, its count of distinct ages and its spread are the values
 //! detail quasi sees, since the group holds 5 subjects or more, and are held
 //! back (null, and named with why) in a group under 5; the counts are
-//! answered at both; a group keyed by the age follows the field; the median
+//! answered at both; a group keyed by the age follows the field, and its
+//! counts are held below 5 subjects (small counts); the median
 //! of the age is refused below quasi; a share of the age is a shape below
 //! quasi; and the document as the bench wrote it, its column as an option,
 //! is refused at both details with the form to write. The ages by visit
@@ -372,6 +373,8 @@ fn an_aggregate_of_a_quasi_field_follows_the_field_on_both_backends() {
         assert_eq!(flagged.as_deref(), Some("a group under 5 subjects"));
 
         // a group keyed by the age: the key a shape, the counts answered
+        // for 5 subjects or more and held back below, with one more beside
+        // them (small counts, the ruling of 2026-10-12)
         let by_age = document(
             r#"  by_age:
     grain: group
@@ -394,7 +397,30 @@ fn an_aggregate_of_a_quasi_field_follows_the_field_on_both_backends() {
                 .collect::<Vec<_>>(),
             keys
         );
-        assert_eq!(column(&key_plain, "n"), column(&key_raw, "n"));
+        let mut shown = 0;
+        for (p, r) in column(&key_plain, "n")
+            .into_iter()
+            .zip(column(&key_raw, "n"))
+        {
+            match (p, r) {
+                (Cell::Null, _) => {}
+                (p, Cell::Int(n)) if *n >= MEASURE_K => {
+                    assert_eq!(p, r);
+                    shown += 1;
+                }
+                (p, r) => panic!("{}: {p:?} shown for {r:?}", l.name),
+            }
+        }
+        assert!(shown > 0, "{}", l.name);
+        assert_eq!(
+            key_plain
+                .answer
+                .held_back_named()
+                .into_iter()
+                .map(|h| h.column)
+                .collect::<Vec<_>>(),
+            vec!["n"]
+        );
 
         // the median of the age per group, which is one person's: refused
         // below quasi with the reason, answered at quasi

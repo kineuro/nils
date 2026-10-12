@@ -324,10 +324,7 @@ pub fn columns_of(answer: &Answer) -> Vec<Column> {
                 .unwrap_or("null")
                 .to_string(),
             shaped: answer.shaped.contains(&i),
-            held_back: answer
-                .held_back
-                .contains(&i)
-                .then(crate::validate::held_back_why),
+            held_back: answer.held_back.contains(&i).then(|| answer.why_held(i)),
         })
         .collect()
 }

@@ -468,7 +468,10 @@ fn document_count(registry: &mut nils_registry::Registry) -> i64 {
 #[test]
 fn the_funnel_names_the_set_where_each_planted_negative_falls_out() {
     for mut l in labs() {
-        let scope = Scope::default();
+        // the author's detail: the yardstick finds its partners by windows
+        // of days, so below detail quasi its small stages are held back
+        // (record 55 K7, small counts at plain)
+        let scope = common::quasi();
         let scheme = Scheme::default();
         let ask = fixture("yardstick");
         let d = diagnose::diagnose(
@@ -509,7 +512,7 @@ fn the_funnel_names_the_set_where_each_planted_negative_falls_out() {
                 .funnel
                 .iter()
                 .filter(|s| s.set == set)
-                .map(|s| s.subjects)
+                .filter_map(|s| s.subjects)
                 .collect();
             assert!(
                 counts.windows(2).all(|w| w[0] >= w[1]),
@@ -518,7 +521,7 @@ fn the_funnel_names_the_set_where_each_planted_negative_falls_out() {
             );
         }
         let last = d.funnel.iter().rfind(|s| s.set == "answer").unwrap();
-        assert_eq!(last.subjects, 14, "{}", l.name);
+        assert_eq!(last.subjects, Some(14), "{}", l.name);
         let cases = l.manifest.cases.clone();
         for c in &cases {
             let id = subject_id(&mut l, &c.code);
@@ -555,7 +558,8 @@ fn the_funnel_names_the_set_where_each_planted_negative_falls_out() {
         assert_eq!(d.drops.len(), 1);
         assert!(d.drops[0].before >= d.drops[0].after, "{:?}", d.drops);
         assert!(d.drops[0].clause.starts_with("where comparable.largest"));
-        let ties: BTreeMap<&str, i64> = d.ties.iter().map(|(s, n)| (s.as_str(), *n)).collect();
+        let ties: BTreeMap<&str, Option<i64>> =
+            d.ties.iter().map(|(s, n)| (s.as_str(), *n)).collect();
         assert!(
             ties.contains_key("t1") && ties.contains_key("flair"),
             "{ties:?}"
