@@ -8,7 +8,9 @@
 //! digest; `list` and `show` read it back.
 //!
 //! The runner: `nils run <pipeline> --select selection:<name>@<v>` is one run
-//! over a frozen selection, a job of kind `pipeline`, queued at `POST
+//! over a frozen selection (or, record 55, over a dataset's or a cohort's
+//! main scans of a role, `--select main:<role>@dataset:<name>`, frozen the
+//! same way: `crate::main_input`), a job of kind `pipeline`, queued at `POST
 //! /api/jobs` under `pipelines:work` at detail quasi, since a pipeline reads
 //! pixels. Runs whose stacks do not meet go on side by side within the
 //! lane's one budget; a run that would take a stack a running run holds is
@@ -347,6 +349,12 @@ pub(crate) fn run_doc(store: &mut Store, r: &Run) -> Value {
         *by_state.entry(u.state.clone()).or_default() += 1;
     }
     doc["unit_states"] = json!(by_state);
+    // record 55 (rulings of 2026-10-12, item 6): a run over a dataset's or a
+    // cohort's main scans says which, and under which rules they were read
+    doc["main"] = r
+        .handle_id
+        .and_then(|h| crate::main_input::entry_of(store, h))
+        .unwrap_or(Value::Null);
     doc["units_run"] = json!(
         units
             .iter()
@@ -1185,8 +1193,14 @@ pub(crate) struct RunArgs {
         conflicts_with_all = ["pipeline", "select", "handle", "params", "models", "labels", "threshold"]
     )]
     pub(crate) resume: Option<i64>,
-    /// The selection to run over, frozen now into its stacks and pinned
-    #[arg(long, value_name = "selection:NAME@V", conflicts_with = "handle")]
+    /// The selection to run over, frozen now into its stacks and pinned; or
+    /// a dataset's or a cohort's main scans of a role, resolved now and
+    /// frozen the same way: main:ROLE@dataset:NAME or main:ROLE@cohort:NAME
+    #[arg(
+        long,
+        value_name = "selection:NAME@V|main:ROLE@dataset:NAME",
+        conflicts_with = "handle"
+    )]
     pub(crate) select: Option<String>,
     /// A frozen list of stacks to run over, by handle id, pinned
     #[arg(long, value_name = "ID")]
@@ -1809,6 +1823,13 @@ fn print_run(doc: &Value) {
         doc["selection"].as_str().unwrap_or("a handle"),
         doc["handle_id"]
     );
+    // record 55: a dataset's or a cohort's main scans, and what was read
+    if doc["main"].is_object() {
+        println!(
+            "  main scans       {}",
+            crate::main_input::line(&doc["main"])
+        );
+    }
     println!("  parameters       {}", doc["params"]);
     println!(
         "  runtime          {} {} on {}, {}",
@@ -2424,6 +2445,18 @@ fn materialise_bids(
     let chosen = run_dir.join("selection.txt");
     let list: String = stacks.iter().map(|s| format!("{s}\n")).collect();
     std::fs::write(&chosen, list).map_err(|e| format!("the run's folder: {e}"))?;
+    // record 55 (rulings of 2026-10-12, item 6): a frozen list of a
+    // dataset's or a cohort's main scans is released under the picks it was
+    // resolved from, whatever the scope's rules say now, so the run
+    // reproduces; any other, as a release of picked stacks reads them
+    let reading = rows::run(registry.store(), run_id)
+        .map_err(|e| e.to_string())?
+        .and_then(|r| r.handle_id)
+        .and_then(|h| crate::main_input::reading_of(registry.store(), h));
+    let picks = run_dir.join("picks.json");
+    if let Some(doc) = &reading {
+        std::fs::write(&picks, doc.to_string()).map_err(|e| format!("the run's folder: {e}"))?;
+    }
     let exe = std::env::current_exe().map_err(|e| format!("this binary: {e}"))?;
     let log = std::fs::File::create(run_dir.join("release.log"))
         .map_err(|e| format!("the run's folder: {e}"))?;
@@ -2450,6 +2483,9 @@ fn materialise_bids(
         .stderr(std::process::Stdio::from(log));
     if let Some(dir) = &args.pack_dir {
         cmd.arg("--pack-dir").arg(dir);
+    }
+    if reading.is_some() {
+        cmd.arg("--picks-read").arg(&picks);
     }
     let mut child = cmd.spawn().map_err(|e| format!("the release: {e}"))?;
     let stdout = child.stdout.take();
@@ -2586,12 +2622,16 @@ fn released(
 /// The units of a bids input that lack a role the descriptor names, by
 /// the unit's id, with why (record 49 A3): what the release wrote of the
 /// stacks picked for each role in the unit, judged as the pre-flight
-/// judges it, so the two agree.
+/// judges it, so the two agree. A run over a frozen list of a dataset's or
+/// a cohort's main scans (`main`, what its handle records) takes each of
+/// its stacks as a main scan of the list's role, as it was resolved
+/// (record 55, rulings of 2026-10-12, item 6).
 fn units_missing(
     store: &mut Store,
     release_id: Option<i64>,
     units: &[Unit],
     roles: &[String],
+    main: Option<&Value>,
 ) -> Result<BTreeMap<String, Vec<String>>, String> {
     let Some(release_id) = release_id else {
         return Ok(BTreeMap::new());
@@ -2619,16 +2659,29 @@ fn units_missing(
         .iter()
         .flat_map(|u| u.stacks.iter().copied())
         .collect();
-    let of = release_reading(store, release_id)?;
-    let picks = crate::preflight::pick_roles(store, &all, &of)?;
+    let picks: BTreeMap<i64, std::collections::BTreeSet<String>> = match main {
+        Some(m) => {
+            let role = m["main"].as_str().unwrap_or_default().to_string();
+            all.iter()
+                .map(|s| (*s, std::collections::BTreeSet::from([role.clone()])))
+                .collect()
+        }
+        None => {
+            let of = release_reading(store, release_id)?;
+            crate::preflight::pick_roles(store, &all, &of)?
+                .into_iter()
+                .map(|(s, p)| (s, p.roles))
+                .collect()
+        }
+    };
     let mut out = BTreeMap::new();
     for u in units {
         let mut held: BTreeMap<String, Vec<Option<String>>> = BTreeMap::new();
         for s in &u.stacks {
-            let Some(picked) = picks.get(s) else {
+            let Some(roles_of) = picks.get(s) else {
                 continue;
             };
-            for role in &picked.roles {
+            for role in roles_of {
                 held.entry(role.clone())
                     .or_default()
                     .push(stems.get(s).cloned().flatten());
@@ -3396,7 +3449,7 @@ pub(crate) fn run_command(home: &Home, args: RunArgs) -> Result<(), Exit> {
         (None, Some(h)) => vec![(h, None)],
         (None, None) => {
             return Err(usage(
-                "a run is over a frozen selection: --select selection:<name>@<v>, or --handle <id>",
+                "a run is over a frozen selection: --select selection:<name>@<v>, a dataset's or a cohort's main scans (--select main:<role>@dataset:<name>), or --handle <id>",
             ));
         }
     };
@@ -3535,6 +3588,18 @@ pub(crate) fn run_command(home: &Home, args: RunArgs) -> Result<(), Exit> {
 /// selection as a page after the last stack of the one before.
 fn freeze_parts(home: &Home, args: &RunArgs, spec: &str) -> Result<Vec<i64>, Exit> {
     use crate::ask_cli::{Freeze, freeze};
+    // record 55 (rulings of 2026-10-12, item 6): a dataset's or a cohort's
+    // main scans, resolved once and split as they are frozen
+    if let Some(main) = crate::main_input::Spec::parse(spec) {
+        let main = main.map_err(usage)?;
+        return crate::main_input::freeze_parts(
+            home,
+            &main,
+            args.pack_dir.clone(),
+            &args.pack,
+            args.chunk,
+        );
+    }
     let grain = nils_ask::ast::Grain::Stack;
     let Some(chunk) = args.chunk else {
         let f = freeze(
@@ -4410,7 +4475,17 @@ fn execute_run(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Resul
     // as the release wrote it, is not run: it is over as skipped, missing
     // an input, as the pre-flight said it would be, and no review item
     let mut missing = if d.layout == Layout::Bids && !d.roles.is_empty() {
-        units_missing(registry.store(), m.release_id, &m.units, &d.roles)?
+        let main = rows::run(registry.store(), x.run_id)
+            .map_err(err)?
+            .and_then(|r| r.handle_id)
+            .and_then(|h| crate::main_input::entry_of(registry.store(), h));
+        units_missing(
+            registry.store(),
+            m.release_id,
+            &m.units,
+            &d.roles,
+            main.as_ref(),
+        )?
     } else {
         BTreeMap::new()
     };

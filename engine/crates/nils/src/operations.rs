@@ -975,6 +975,30 @@ fn freeze(
         })
         .collect::<Result<_, StoreError>>()
         .map_err(|e| e.to_string())?;
+    save_stacks(store, rows, principal, epoch, &Pinned::default())
+}
+
+/// What a handle of stacks frozen by the engine records of where they came
+/// from: its pins (a scope's main scans name the version of the rules they
+/// were read under), the pack and the scheme. None of these for a step's
+/// scans, which are every scan in scope.
+#[derive(Debug, Default)]
+pub(crate) struct Pinned<'a> {
+    pub(crate) versions: Value,
+    pub(crate) pack_version: Option<&'a str>,
+    pub(crate) scheme_digest: Option<&'a str>,
+}
+
+/// Save rows of a stack and its subject, in the order given, as a handle a
+/// run pins, under the hash the ask gives an answer. Answers the handle and
+/// how many stacks it holds.
+pub(crate) fn save_stacks(
+    store: &mut Store,
+    rows: Vec<Row>,
+    principal: &str,
+    epoch: i64,
+    pinned: &Pinned<'_>,
+) -> Result<(i64, usize), String> {
     // the hash the ask gives an answer: each row's cells as text
     let hash = {
         use blake2::Digest as _;
@@ -1000,14 +1024,17 @@ fn freeze(
         grain: nils_ask::Grain::Stack,
         ask: None,
         params: json!({}),
-        selection_versions: json!([]),
+        selection_versions: match &pinned.versions {
+            Value::Null => json!([]),
+            v => v.clone(),
+        },
         values_unresolved: json!({}),
         provenance: nils_ask::handle::Provenance {
             principal,
             node: &node,
-            pack_version: None,
+            pack_version: pinned.pack_version,
             epoch,
-            scheme_digest: None,
+            scheme_digest: pinned.scheme_digest,
             disclosure: "local",
             suppression: json!({"classes": ["technical"], "sealed": "read", "quasi": "shape"}),
         },

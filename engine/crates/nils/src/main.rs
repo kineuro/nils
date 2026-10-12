@@ -50,6 +50,7 @@ mod grants;
 mod intake;
 mod linkage_doors;
 mod login;
+mod main_input;
 mod main_scans;
 mod mask;
 mod mcp;
@@ -508,6 +509,18 @@ struct ReleaseArgs {
     /// folder under its working place, which the runner alone asks for
     #[arg(long = "into-run", value_name = "RUN", hide = true)]
     into_run: Option<i64>,
+    /// Record 55 (rulings of 2026-10-12, item 6): the selection is a run's
+    /// frozen list of a dataset's or a cohort's main scans, and this file
+    /// (JSON) the picks it was resolved from, which the runner alone passes:
+    /// the list is released as it was frozen, whatever the picks say now,
+    /// and the release records these picks
+    #[arg(
+        long = "picks-read",
+        value_name = "FILE",
+        hide = true,
+        requires = "picked"
+    )]
+    picks_read: Option<PathBuf>,
 }
 
 #[derive(Debug, Parser)]
@@ -11156,6 +11169,20 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
     // domain of the same key so that neither can be used to reason about the
     // other.
     let key = registry.pseudonym_key().map_err(|e| fail(e.to_string()))?;
+    // record 55: the picks a run's frozen list of main scans was resolved
+    // from, the list taken as it was frozen
+    let picks = match &args.picks_read {
+        Some(file) => Some(
+            std::fs::read_to_string(file)
+                .map_err(|e| usage(format!("--picks-read {}: {e}", file.display())))
+                .and_then(|text| {
+                    serde_json::from_str::<serde_json::Value>(&text).map_err(|e| {
+                        usage(format!("--picks-read {}: not JSON: {e}", file.display()))
+                    })
+                })?,
+        ),
+        None => None,
+    };
 
     let name = args
         .name
@@ -11178,6 +11205,7 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
             axes: chosen.axes,
             cohorts: chosen.cohorts,
             datasets: args.dataset.clone(),
+            picks,
         },
         scheme: &scheme,
         // §8.4: dropped by default, and back only by name. The pack declares
