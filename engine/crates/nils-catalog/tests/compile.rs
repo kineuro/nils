@@ -661,3 +661,152 @@ fn gold_c_produces_its_columns() {
     }
     agree(&hashes);
 }
+
+/// 2026-10-12, found by the chat bench: the catalog listed cohorts by name
+/// and size only, so "which cohort was made third" had no answer. Each
+/// cohort the catalog lists says when it was made, and the cohort grain
+/// reads when a cohort was made and when it was retired: the cohort's own
+/// dates, never a subject's, answered as values at every detail, in one
+/// form on either backend. A retired cohort leaves the list (record 26)
+/// and keeps its row at the cohort grain.
+#[test]
+fn a_cohorts_dates_are_in_the_catalog_and_at_the_cohort_grain() {
+    let made = [
+        ("made-first", "2026-01-05T09:00:00Z"),
+        ("made-second", "2026-02-10T10:30:00Z"),
+        ("made-third", "2026-03-15T11:45:00Z"),
+    ];
+    let retired = "2026-04-01T08:00:00Z";
+    for mut l in labs() {
+        {
+            let store = l.registry.store();
+            for (name, at) in made {
+                store
+                    .insert(
+                        &nils_registry::Insert::new(
+                            table("cohort"),
+                            &["name", "owner", "description", "created_at"],
+                        ),
+                        &[vec![
+                            nils_registry::Param::from(name),
+                            nils_registry::Param::from("anna"),
+                            nils_registry::Param::Null,
+                            nils_registry::Param::from(at),
+                        ]],
+                    )
+                    .unwrap_or_else(|e| panic!("{}: {e}", l.name));
+            }
+            let d = store.dialect();
+            let sql = format!(
+                "UPDATE {} SET retired_at = {} WHERE name = {}",
+                store.qualified("cohort"),
+                d.param(1, nils_registry::schema::Type::Timestamp),
+                d.param(2, nils_registry::schema::Type::Text)
+            );
+            store
+                .execute(
+                    &sql,
+                    &[
+                        nils_registry::Param::from(retired),
+                        nils_registry::Param::from("made-second"),
+                    ],
+                )
+                .unwrap_or_else(|e| panic!("{}: {e}", l.name));
+        }
+        common::refresh(&mut l);
+        // the catalog's list: each cohort in use with when it was made
+        let listed: BTreeMap<String, String> = l
+            .catalog
+            .cohorts
+            .iter()
+            .map(|c| (c.name.clone(), c.created_at.clone()))
+            .collect();
+        assert_eq!(listed["made-first"], made[0].1, "{}", l.name);
+        assert_eq!(listed["made-third"], made[2].1, "{}", l.name);
+        assert!(
+            !listed.contains_key("made-second"),
+            "{}: {listed:?}",
+            l.name
+        );
+        let doc = l.catalog.document(&Scope::default());
+        for c in doc["cohorts"].as_array().unwrap() {
+            let at = c["created_at"].as_str().unwrap_or_default();
+            assert!(
+                at.len() == 20 && at.as_bytes()[10] == b'T' && at.ends_with('Z'),
+                "{}: {c}",
+                l.name
+            );
+        }
+        // the cohort level's own dates are technical
+        for path in ["created_at", "retired_at"] {
+            let f = &l.catalog.fields[&("cohort".to_string(), path.to_string())];
+            assert_eq!(f.class, nils_ask::validate::Class::Technical, "{path}");
+        }
+        // and a question at detail plain reads them as values, in the
+        // order the cohorts were made
+        let ask = parse(
+            &json!({
+                "ast_version": 1,
+                "sets": {"c": {"grain": "cohort", "where": [["in", {}, ["field", {}, "name"],
+                    ["made-first", "made-second", "made-third"]]]}},
+                "out": {"set": "c", "level": "record",
+                        "columns": [["field", {}, "name"], ["field", {}, "created_at"], ["field", {}, "retired_at"]],
+                        "order": [[["field", {}, "created_at"], "asc"]]}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let prepared = prepare(ask, &l.catalog, &Scope::default())
+            .unwrap_or_else(|e| panic!("{}: {e}", l.name));
+        let store = l.registry.store();
+        let ctx = Context {
+            names: &l.catalog,
+            dialect: store.dialect(),
+            schema: store.schema().map(str::to_string),
+            window_days: 0,
+            scheme_digest: Scheme::default().digest(),
+            after: None,
+            limit: None,
+            withhold_sealed: true,
+        };
+        let compiled = compile(&prepared.ask, &prepared.validated, &ctx)
+            .unwrap_or_else(|e| panic!("{}: {e}", l.name));
+        assert!(compiled.shaped_columns.is_empty(), "{}", l.name);
+        let answer = run(
+            store,
+            &compiled,
+            Bounds {
+                timeout_ms: 20_000,
+                max_rows: 100,
+                max_bytes: 1024 * 1024,
+            },
+        )
+        .unwrap_or_else(|e| panic!("{}: {e}\n{}", l.name, compiled.sql));
+        let at = |name: &str| answer.columns.iter().position(|c| c == name).unwrap();
+        let rows: Vec<(String, String, Option<String>)> = answer
+            .rows
+            .iter()
+            .map(|r| {
+                (
+                    r.text(at("name")).unwrap().to_string(),
+                    r.text(at("created_at")).unwrap().to_string(),
+                    r.opt_text(at("retired_at")).unwrap().map(str::to_string),
+                )
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                (made[0].0.to_string(), made[0].1.to_string(), None),
+                (
+                    made[1].0.to_string(),
+                    made[1].1.to_string(),
+                    Some(retired.to_string())
+                ),
+                (made[2].0.to_string(), made[2].1.to_string(), None),
+            ],
+            "{}",
+            l.name
+        );
+    }
+}

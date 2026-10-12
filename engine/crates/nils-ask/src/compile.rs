@@ -23,7 +23,7 @@ use nils_registry::store::Param;
 use serde_json::Value;
 
 use crate::ast::{AlgOp, Arg, Ask, Clause, Dir, Grain, IntSpec, ParamType, Set, Src};
-use crate::validate::{ColumnRef, Names, Validated};
+use crate::validate::{Code, ColumnRef, Issue, Names, Validated};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct CompileError {
@@ -38,6 +38,26 @@ impl std::fmt::Display for CompileError {
 }
 
 impl std::error::Error for CompileError {}
+
+impl CompileError {
+    /// The refusal as an issue of the taxonomy, at the path the compiler
+    /// names: what only the compiler refuses of a document, a parameter
+    /// without a value for one, is the document's to change, as what the
+    /// validator refuses is (2026-10-12).
+    pub fn issue(&self) -> Issue {
+        Issue {
+            code: Code::NotCompilable,
+            path: if self.path.is_empty() {
+                "document".to_string()
+            } else {
+                self.path.clone()
+            },
+            message: self.message.clone(),
+            next: "change the document as the message says; validate compiles what run would"
+                .to_string(),
+        }
+    }
+}
 
 type R<T> = Result<T, CompileError>;
 

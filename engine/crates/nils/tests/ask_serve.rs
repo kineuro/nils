@@ -3511,3 +3511,238 @@ fn the_draft_door_refuses_a_bucket_without_its_unit_with_its_form() {
         }
     }
 }
+
+/// What only the compiler refuses of a document the validator passes: a
+/// parameter declared without a value, read by a binding.
+fn unbound() -> serde_json::Value {
+    serde_json::json!({
+        "ast_version": 1,
+        "name": "visits shifted by a parameter without a value",
+        "params": {"later": {"type": "integer"}},
+        "sets": {
+            "people": {"grain": "subject"},
+            "visits": {"grain": "session", "of": "people", "bind": {
+                "month": ["shift", {}, ["field", {}, "first"], ["param", {}, "later"]]
+            }}
+        },
+        "out": {"set": "visits", "level": "record", "columns": [["field", {}, "month"]]}
+    })
+}
+
+/// The compiler's refusal of [`unbound`], as every door that runs a
+/// question answers it: 400, as a validation refusal is, with the
+/// compiler's words at the path it names.
+fn refused_as_a_document(backend: &str, door: &str, status: u16, refused: &serde_json::Value) {
+    assert_eq!(status, 400, "{backend} {door}: {refused}");
+    assert_eq!(refused["error"], "the document is refused", "{refused}");
+    assert_eq!(refused["disclosure"], "safe", "{refused}");
+    let issues = refused["issues"].as_array().unwrap();
+    assert_eq!(issues.len(), 1, "{refused}");
+    assert_eq!(issues[0]["code"], "not_compilable", "{refused}");
+    assert_eq!(issues[0]["path"], "sets.visits.bind.month", "{refused}");
+    assert_eq!(
+        issues[0]["message"], "parameter later has no value",
+        "{refused}"
+    );
+    assert_eq!(
+        refused["next"],
+        serde_json::json!([
+            "change the document as the message says; validate compiles what run would"
+        ]),
+        "{refused}"
+    );
+}
+
+/// One door that runs a question, sent [`unbound`] on each backend, the
+/// Postgres half in a schema of its own. The jobs door also queues
+/// nothing.
+fn compile_refusal_at(door: &str, schema: &str, request: serde_json::Value) {
+    let dsn = std::env::var("NILS_TEST_POSTGRES_DSN")
+        .ok()
+        .filter(|d| !d.is_empty());
+    if dsn.is_none() {
+        eprintln!("NILS_TEST_POSTGRES_DSN is not set; the Postgres half is skipped");
+    }
+    for (backend, dsn) in [("sqlite", None), ("postgres", dsn)] {
+        let home = match (backend, &dsn) {
+            ("sqlite", _) => synthetic(),
+            (_, Some(dsn)) => synthetic_postgres(dsn, schema),
+            _ => continue,
+        };
+        let jobs = || -> usize {
+            let listed = run(&home, &["jobs", "list", "--all", "--json"], None);
+            serde_json::from_str::<serde_json::Value>(&listed)
+                .unwrap()
+                .as_array()
+                .map_or(0, Vec::len)
+        };
+        let before = jobs();
+        let server = Server::start(&home, 1, &[]);
+        let (status, refused) = server.request("POST", door, Some(&body(request.clone())), None);
+        refused_as_a_document(backend, door, status, &refused);
+        server.finish();
+        assert_eq!(jobs(), before, "{backend} {door}: nothing is queued");
+        if let Some(dsn) = &dsn
+            && backend == "postgres"
+        {
+            drop_schema(dsn, schema);
+        }
+    }
+}
+
+/// 2026-10-12: what only the compiler refuses, a parameter without a
+/// value, was a bare 500 at the run door; it is refused as a document.
+#[test]
+fn the_run_door_refuses_what_only_the_compiler_refuses() {
+    compile_refusal_at(
+        "/api/ask/run",
+        "nils_ask_serve_compile_run",
+        serde_json::json!({"document": unbound()}),
+    );
+}
+
+/// The same at the preview door, whose answer compiles the document.
+#[test]
+fn the_preview_door_refuses_what_only_the_compiler_refuses() {
+    compile_refusal_at(
+        "/api/ask/preview",
+        "nils_ask_serve_compile_preview",
+        serde_json::json!({"document": unbound()}),
+    );
+}
+
+/// The same at the explain door, which compiles for both backends.
+#[test]
+fn the_explain_door_refuses_what_only_the_compiler_refuses() {
+    compile_refusal_at(
+        "/api/ask/explain",
+        "nils_ask_serve_compile_explain",
+        serde_json::json!({"document": unbound()}),
+    );
+}
+
+/// The jobs door queued such a document, and the worker failed on it; it
+/// refuses it before anything is queued, as it refuses what the validator
+/// refuses (Wave 4c section 6.1).
+#[test]
+fn the_jobs_door_refuses_what_only_the_compiler_refuses_before_it_queues() {
+    compile_refusal_at(
+        "/api/ask/jobs",
+        "nils_ask_serve_compile_jobs",
+        serde_json::json!({"document": unbound(), "name": "never-queued"}),
+    );
+}
+
+/// 2026-10-12: a `picked` whose role the served pack does not pick read no
+/// rows, and the run door answered 200 with none. It is refused as a
+/// document, naming the roles the pack picks, on each backend; a role the
+/// pack picks runs.
+#[test]
+fn the_run_door_refuses_a_picked_role_the_pack_does_not_pick() {
+    let dsn = std::env::var("NILS_TEST_POSTGRES_DSN")
+        .ok()
+        .filter(|d| !d.is_empty());
+    if dsn.is_none() {
+        eprintln!("NILS_TEST_POSTGRES_DSN is not set; the Postgres half is skipped");
+    }
+    let schema = "nils_ask_serve_picked_role";
+    let main_scans = |role: &str| {
+        serde_json::json!({"document": {
+            "ast_version": 1,
+            "name": "main scans of a role",
+            "sets": {"t": {"grain": "stack", "where": [["picked", {"role": role}]]}},
+            "out": {"set": "t", "level": "count"}
+        }})
+    };
+    for (backend, dsn) in [("sqlite", None), ("postgres", dsn)] {
+        let home = match (backend, &dsn) {
+            ("sqlite", _) => synthetic(),
+            (_, Some(dsn)) => synthetic_postgres(dsn, schema),
+            _ => continue,
+        };
+        let server = Server::start(&home, 2, &[]);
+        let (status, refused) =
+            server.request("POST", "/api/ask/run", Some(&body(main_scans("t2"))), None);
+        assert_eq!(status, 400, "{backend}: {refused}");
+        assert_eq!(refused["error"], "the document is refused", "{refused}");
+        let issue = &refused["issues"][0];
+        assert_eq!(issue["code"], "unknown_value", "{refused}");
+        assert_eq!(issue["path"], "sets.t.where[0]", "{refused}");
+        assert_eq!(
+            issue["message"], "picked reads no role named t2; the pack's roles are t1w, flair, t2w",
+            "{refused}"
+        );
+        let (status, ran) =
+            server.request("POST", "/api/ask/run", Some(&body(main_scans("t2w"))), None);
+        assert_eq!(status, 200, "{backend}: {ran}");
+        server.finish();
+        if let Some(dsn) = &dsn
+            && backend == "postgres"
+        {
+            drop_schema(dsn, schema);
+        }
+    }
+}
+
+/// 2026-10-12, found by the chat bench: the catalog door listed cohorts by
+/// name and size only, so the chat could not say which cohort was made
+/// third. Each cohort it lists says when it was made, as the cohorts door
+/// says it, and the cohort level carries the cohort's own dates, made and
+/// retired, as technical fields, on each backend.
+#[test]
+fn the_catalog_door_says_when_each_cohort_was_made() {
+    let dsn = std::env::var("NILS_TEST_POSTGRES_DSN")
+        .ok()
+        .filter(|d| !d.is_empty());
+    if dsn.is_none() {
+        eprintln!("NILS_TEST_POSTGRES_DSN is not set; the Postgres half is skipped");
+    }
+    let schema = "nils_ask_serve_cohort_dates";
+    for (backend, dsn) in [("sqlite", None), ("postgres", dsn)] {
+        let home = match (backend, &dsn) {
+            ("sqlite", _) => synthetic(),
+            (_, Some(dsn)) => synthetic_postgres(dsn, schema),
+            _ => continue,
+        };
+        let server = Server::start(&home, 3, &[]);
+        let (status, catalog) = server.request("GET", "/api/ask/catalog", None, None);
+        assert_eq!(status, 200, "{backend}: {catalog}");
+        let (status, cohorts) = server.request("GET", "/api/cohorts", None, None);
+        assert_eq!(status, 200, "{backend}: {cohorts}");
+        let made: std::collections::BTreeMap<String, String> = cohorts
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| {
+                (
+                    c["name"].as_str().unwrap().to_string(),
+                    c["created_at"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect();
+        let listed = catalog["cohorts"].as_array().unwrap();
+        assert!(!listed.is_empty(), "{backend}: {catalog}");
+        for c in listed {
+            let name = c["name"].as_str().unwrap();
+            assert_eq!(c["created_at"], made[name], "{backend}: {c}");
+        }
+        let (status, level) = server.request("GET", "/api/ask/catalog/cohort", None, None);
+        assert_eq!(status, 200, "{backend}: {level}");
+        for path in ["created_at", "retired_at"] {
+            let f = level["fields"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|f| f["path"] == path)
+                .unwrap_or_else(|| panic!("{backend}: no cohort.{path} in {level}"));
+            assert_eq!(f["class"], "technical", "{backend}: {f}");
+            assert_eq!(f["type"], "timestamp", "{backend}: {f}");
+        }
+        server.finish();
+        if let Some(dsn) = &dsn
+            && backend == "postgres"
+        {
+            drop_schema(dsn, schema);
+        }
+    }
+}
