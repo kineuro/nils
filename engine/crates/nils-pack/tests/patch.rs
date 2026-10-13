@@ -443,7 +443,7 @@ fn the_pick_file_is_reached_by_four_operations() {
     // And a patched pack is written, its pick file where it changed.
     let out = std::env::temp_dir().join(format!("nils-patch-pick-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&out);
-    p.docs.write(&out, Some("1.0.3")).unwrap();
+    p.docs.write(&out, Some("1.1.1")).unwrap();
     let (written, _) = nils_pack::load_patched(&out, &Default::default(), &[]).unwrap();
     assert_eq!(main_pick(&written).candidates, m.candidates);
     assert_eq!(main_pick(&written).near_tie, m.near_tie);

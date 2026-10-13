@@ -1786,7 +1786,7 @@ fn pack_list_and_show_read_the_pack_directory() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|p| p["pack"] == "mri@1.0.3"),
+            .any(|p| p["pack"] == "mri@1.1.0"),
         "{listed}"
     );
 
