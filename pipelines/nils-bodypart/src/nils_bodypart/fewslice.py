@@ -353,13 +353,23 @@ def session_tops(rows: list[dict]) -> None:
     each session), so the top is the whole study's in any run."""
     by_study = defaultdict(list)
     for g in rows:
-        if "z_lo" in g and is_mr(g) and not g.get("sealed") and g.get("study_id") is not None:
+        if in_top(g):
             by_study[g.get("study_id")].append(g)
     for gs in by_study.values():
         top = max(x["z_hi"] for x in gs)
         for x in gs:
-            x["z_lo_rel_top"] = round(x["z_lo"] - top, 2)
-            x["z_hi_rel_top"] = round(x["z_hi"] - top, 2)
+            place(x, top)
+
+
+def in_top(g: dict) -> bool:
+    """Whether a row is one of those its session's top is taken over."""
+    return "z_lo" in g and is_mr(g) and not g.get("sealed") and g.get("study_id") is not None
+
+
+def place(g: dict, top: float) -> None:
+    """A row's heights relative to its session's top, in place."""
+    g["z_lo_rel_top"] = round(g["z_lo"] - top, 2)
+    g["z_hi_rel_top"] = round(g["z_hi"] - top, 2)
 
 
 # --- cache.py: the tokens and the tile --------------------------------------------------------------------------------
@@ -398,6 +408,15 @@ def slot0(g: dict) -> tuple[int, np.ndarray] | None:
     """The slot-0 file (its index in the manifest's list) and its four
     geometry tokens, as ``cache.plan`` chose and placed it; None for a stack
     the student never reads (no files, or a multi-frame file)."""
+    choice = slot0_choice(g)
+    return None if choice is None else slot0_geo(g, choice)
+
+
+def slot0_choice(g: dict) -> tuple | None:
+    """``slot0``'s choice, which needs no other stack of the session: the
+    chosen file (its ``ipp``, ``inum`` and ``index``), the slot of the
+    inferior slice, the count of positions and the file's place among them;
+    None where ``slot0`` is."""
     fl = g.get("files") or []
     if not fl or (g.get("max_frames") or 1) > 1:
         return None
@@ -405,13 +424,20 @@ def slot0(g: dict) -> tuple[int, np.ndarray] | None:
     if not chosen:
         return None
     x = chosen[0]
-    top = (g["z_hi"] - g["z_hi_rel_top"]) if "z_hi_rel_top" in g else None
     f_ = frame_of(g.get("iop"))
     ds_ = sorted({round(float(vec(y["ipp"], 3) @ f_[2]), 1) for y in fl if vec(y.get("ipp"), 3) is not None}) if f_ is not None else []
     m = len(ds_) or len(fl)
     pi = 0
     if f_ is not None and vec(x.get("ipp"), 3) is not None and ds_:
         pi = int(np.searchsorted(ds_, round(float(vec(x["ipp"], 3) @ f_[2]), 1)))
+    return x, inf_at, m, pi
+
+
+def slot0_geo(g: dict, choice: tuple) -> tuple[int, np.ndarray]:
+    """``slot0`` from its choice, once the row holds its height relative to
+    the session's top (``session_tops``)."""
+    x, inf_at, m, pi = choice
+    top = (g["z_hi"] - g["z_hi_rel_top"]) if "z_hi_rel_top" in g else None
     return x["index"], slice_geo(g, x, inf_at, 0, m, pi, top)
 
 
@@ -483,7 +509,9 @@ def registry_inputs(stack, model):
             if f is None:
                 return None
             frames.append(f)
-        p = reduced.plan(frames, fp.get("orientation"), "touched")
+        # the touched reader's plan, as the full one gives it, without the
+        # plane points: the stack's geometry is all this reads of it
+        p = reduced.geometry(frames, fp.get("orientation"))
         g0 = p.geo[0]
         meta0 = dict(modality=g0.modality, n_files=len(p.seen), n_frames=p.n_frames_all, n_unique=p.n_unique, rows0=g0.shape[0], cols0=g0.shape[1],
                      ps_r=round(g0.ps[0], 4), ps_c=round(g0.ps[1], 4))
