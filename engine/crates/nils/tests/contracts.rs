@@ -287,7 +287,9 @@ fn the_model_contract_is_the_engine_s_registry() {
             "admitted",
             "admission_failed",
             "promoted",
-            "retired"
+            "retired",
+            "chosen",
+            "unchosen"
         ]
     );
     assert_eq!(

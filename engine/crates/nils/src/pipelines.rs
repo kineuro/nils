@@ -3727,8 +3727,14 @@ pub(crate) fn run_command(home: &Home, args: RunArgs) -> Result<(), Exit> {
     for reference in &args.models {
         let m = nils_registry::model::resolve(registry.store(), reference)?
             .ok_or_else(|| usage(format!("no registered model answers to {reference}")))?;
+        // record 55 D4: a retired model's files stay where its card says,
+        // so a past result can be run again; its answers are review items,
+        // never staged, since only an admitted or promoted model's are
         if m.state == "retired" {
-            return Err(usage(format!("model {} is retired", m.label())));
+            eprintln!(
+                "model {} is retired: it runs again to reproduce a past result, and what it proposes is asked, never staged",
+                m.label()
+            );
         }
         // record 43: a run may raise a model's threshold, never lower it
         if let Some(t) = args.threshold {

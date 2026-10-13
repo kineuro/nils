@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://nils.kineuro.se/contracts/model/v1/lifecycle.schema.json",
   "title": "NILS model lifecycle",
-  "description": "Record 42 (D15): the four states a registered model passes through and the record of each passage, the same in the engine and in Kvasir. A model is registered with its card; admitted by a check that passed, which is kept; promoted, which is refused unless it was admitted, and which retires the model promoted before it in the same task and slot, so one model is promoted per slot; and retired. A check that failed is kept too and leaves the state where it was. Every transition is an event with who and when, and an audit row. Nothing is deleted: a retired model still names what it decided.",
+  "description": "Record 42 (D15): the four states a registered model passes through and the record of each passage, the same in the engine and in Kvasir. A model is registered with its card; admitted by a check that passed, which is kept; promoted, which is refused unless it was admitted, and since record 55 D4 retires nothing, so several admitted or promoted models answer one task and slot; and retired. The site chooses the one model of each task and slot that answers (chosen), by default the one a recorded certificate names. A check that failed is kept too and leaves the state where it was. Every transition is an event with who and when, and an audit row. Nothing is deleted: a retired model still names what it decided.",
   "$defs": {
     "state": {
       "type": "string",
@@ -10,7 +10,7 @@
     },
     "transition": {
       "type": "string",
-      "enum": ["registered", "admitted", "admission_failed", "promoted", "retired"]
+      "enum": ["registered", "admitted", "admission_failed", "promoted", "retired", "chosen", "unchosen"]
     },
     "check": {
       "type": "object",
@@ -53,9 +53,33 @@
             "build": { "type": "string" }
           }
         },
-        "at": { "type": "string", "description": "ISO 8601, UTC" }
+        "at": { "type": "string", "description": "ISO 8601, UTC" },
+        "equivalence": {
+          "oneOf": [{ "$ref": "#/$defs/equivalence" }, { "type": "null" }],
+          "description": "Record 55 A5: the class of the difference between the model's CPU and GPU answers, measured on a fixed set by the admission suite"
+        }
       },
       "description": "A check's result as it is recorded: the one that admitted a model stays on it"
+    },
+    "equivalence": {
+      "type": "object",
+      "required": ["class", "n"],
+      "properties": {
+        "class": {
+          "type": ["string", "null"],
+          "enum": ["I", "II", "III", null],
+          "description": "The best class whose bar the two runs meet, read at the card's tolerance; null where a stack's value changed between two answers"
+        },
+        "tolerance": { "type": ["number", "null"] },
+        "n": { "type": "integer", "minimum": 0, "description": "The stacks and axes compared" },
+        "changes": { "type": "integer", "minimum": 0, "description": "Answers that changed between a value and not sure" },
+        "flips": { "type": "integer", "minimum": 0, "description": "Answers that changed from one value to another" },
+        "top_changed": { "type": "integer", "minimum": 0, "description": "Stacks whose most probable value changed" },
+        "max_difference": { "type": "number", "minimum": 0, "description": "The largest calibrated probability difference" },
+        "set": { "type": ["string", "null"] },
+        "cpu": { "type": "object", "description": "The CPU run: a run id or a file, and its device" },
+        "gpu": { "type": "object", "description": "The GPU run" }
+      }
     },
     "event": {
       "type": "object",
@@ -101,6 +125,13 @@
     "retired_by": { "type": ["string", "null"] },
     "retired_at": { "type": ["string", "null"] },
     "review_item": { "type": ["integer", "null"], "description": "The review item a person accepted to promote it, when one did" },
+    "chosen": { "type": "boolean", "description": "Record 55 D4: whether it is the model chosen for its task and slot now" },
+    "complete": { "type": "boolean", "description": "Record 55 D4: whether its card states everything a served model's card does: the label set it was trained on, its tested claims, its speed on CPU and on GPU, its GPU need, its equivalence, its intended use and its limits" },
+    "missing": { "type": "array", "items": { "type": "string" }, "description": "What its card lacks for that" },
+    "equivalence_measured": {
+      "oneOf": [{ "$ref": "#/$defs/equivalence" }, { "type": "null" }],
+      "description": "The equivalence its admitting check measured"
+    },
     "events": {
       "type": "array",
       "items": { "$ref": "#/$defs/event" }

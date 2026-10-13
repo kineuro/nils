@@ -1014,6 +1014,15 @@ fn round(pg: Option<(String, String)>) {
         "--why",
         "back to the certified path",
     ]);
+    // record 55 D4: a promotion retires none, so the cascades promoted
+    // before stay; the site chooses the plain head
+    home.ok(&[
+        "model",
+        "choose",
+        &head.to_string(),
+        "--why",
+        "the certified path",
+    ]);
     let (status, started) = server.run("datasets/ds", "body_part", OPS);
     assert_eq!(status, 202, "{started}");
     let words: Vec<String> = started["command"]

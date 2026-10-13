@@ -1318,7 +1318,8 @@ fn build_registry() -> Vec<Table> {
         // Record 42 S2 (D15): a model whose answers become registry facts,
         // identified by the digest of its canonical artifact and described
         // by its card (`contracts/model/v1`). Registered, admitted by a check
-        // that passed, promoted (one per task and slot), retired; nothing is
+        // that passed, promoted, retired (record 55 D4: several per task and
+        // slot, one of them chosen, `model_choice`); nothing is
         // deleted, because a retired model still names what it decided.
         Table::new(
             "model",
@@ -1370,7 +1371,8 @@ fn build_registry() -> Vec<Table> {
             vec![
                 col("id", Type::Id),
                 req("model_id", Type::Int),
-                // registered, admitted, admission_failed, promoted, retired
+                // registered, admitted, admission_failed, promoted, retired,
+                // chosen, unchosen (record 55 D4)
                 req("transition", Type::Text),
                 req("principal", Type::Text),
                 req("at", Type::Timestamp),
@@ -1378,6 +1380,24 @@ fn build_registry() -> Vec<Table> {
             ],
         )
         .index(&["model_id"]),
+        // Record 55 D4: the model a site chose for a task and slot, as a
+        // history: the newest row of a task and slot is the choice in force,
+        // and a row with no model sends it back to the default (the model a
+        // recorded certificate names). Nothing is deleted.
+        Table::new(
+            "model_choice",
+            vec![
+                col("id", Type::Id),
+                req("task", Type::Text),
+                req("slot", Type::Text),
+                // none: back to the default
+                col("model_id", Type::Int),
+                req("chosen_by", Type::Text),
+                req("chosen_at", Type::Timestamp),
+                col("why", Type::Text),
+            ],
+        )
+        .index(&["task", "slot"]),
         // Record 43: every encoder a head reads, in the order it
         // concatenates their features. A small table rather than a list
         // in the model row, so that the heads a new encoder makes stale are

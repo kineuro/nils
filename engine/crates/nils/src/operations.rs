@@ -247,27 +247,24 @@ fn served(store: &mut Store, task: &str, reads: Option<i64>) -> Result<Vec<Model
     Ok(all)
 }
 
-/// Whether a model is a cascade (record 55 E2): its card names parts.
-fn is_cascade(m: &Model) -> bool {
-    m.card
-        .get("parts")
-        .and_then(Value::as_object)
-        .is_some_and(|p| !p.is_empty())
-}
+use nils_registry::model::is_cascade;
 
 /// Body part's run: the newest active `bodypart-infer-fusion` and the
-/// certified model's three parts, each the one served, in the order the
-/// descriptor declares them: the encoder the head names, the head that
-/// answers `body_part`, and the coarse mode that answers `body_region`
-/// from the same encoder, its card naming the head where one does, which
-/// the run goes without where none is served. Where the served model is a
-/// cascade (record 55 E2), and it is one only once a person has promoted
-/// it (an admitted cascade waits, and the promoted or admitted single
-/// model answers), each input its card names a part for gets that
-/// part, the input `cascade` gets the cascade, and the coarse mode is the
-/// cascade's own part `coarse` and no other, since the image refuses a
-/// coarse mode its cascade file does not name; a cascade naming none is
-/// refused here. An optional input nothing fills is left out.
+/// chosen model's parts (record 55 D4: the model the site chose for
+/// `axis:body_part` in slot site, by default the one a recorded certificate
+/// names, then the one promoted last, then the newest admitted single model),
+/// in the order the descriptor declares them: the encoder the head names,
+/// the head that answers `body_part`, and the coarse mode that answers
+/// `body_region` from the same encoder (the one chosen for it where that
+/// reads this encoder, its card naming the head where one does), which the
+/// run goes without where none is served. Where the chosen model is a
+/// cascade (record 55 E2), and it is one only once a person chose,
+/// certified or promoted it (an admitted cascade waits), each input its
+/// card names a part for gets that part, the input `cascade` gets the
+/// cascade, and the coarse mode is the cascade's own part `coarse` and no
+/// other, since the image refuses a coarse mode its cascade file does not
+/// name; a cascade naming none is refused here. An optional input nothing
+/// fills is left out.
 fn body_part(store: &mut Store) -> Result<Result<Plan, Refused>, StoreError> {
     let refused =
         |reason: &'static str, error: String| -> Result<Result<Plan, Refused>, StoreError> {
@@ -288,23 +285,19 @@ fn body_part(store: &mut Store) -> Result<Result<Plan, Refused>, StoreError> {
             );
         }
     };
-    // record 55 E2: a cascade answers the step only once it is promoted,
-    // since choosing and promoting the body-part model is a person's (the
-    // fast-path plan's 4.3); until then the single model served answers
-    let candidates = served(store, "axis:body_part", None)?;
-    let waiting = candidates
-        .iter()
-        .find(|m| is_cascade(m) && m.state != "promoted")
-        .map(Model::label);
-    let Some(head) = candidates
-        .into_iter()
-        .find(|m| m.state == "promoted" || !is_cascade(m))
-    else {
+    // record 55 D4: the chosen model answers; a cascade only once a person
+    // chose, certified or promoted it, since choosing the body-part model
+    // is a person's (the fast-path plan's 4.3)
+    let Some(head) = model::chosen(store, "axis:body_part", "site")?.map(|c| c.model) else {
+        let waiting = served(store, "axis:body_part", None)?
+            .into_iter()
+            .find(is_cascade)
+            .map(|m| m.label());
         return refused(
             "no_model",
             match waiting {
                 Some(c) => format!(
-                    "no body-part model is served: the cascade {c} is admitted, and answers the step once it is promoted"
+                    "no body-part model is served: the cascade {c} is admitted, and answers the step once it is chosen or promoted"
                 ),
                 None => "no body-part model is installed".into(),
             },
@@ -390,11 +383,17 @@ fn body_part(store: &mut Store) -> Result<Result<Plan, Refused>, StoreError> {
     // have to hold that mode's digest and the mode the cascade's
     let coarse = if !cascade {
         let modes = served(store, "axis:body_region", Some(encoder.id))?;
-        let named = modes
-            .iter()
-            .find(|m| m.card.to_string().contains(&head.digest))
-            .map(|m| m.id);
-        named.or(modes.first().map(|m| m.id))
+        // the chosen coarse mode where it names this head, since the image
+        // takes only a mode of the head it sums; else as before
+        let names_head = |m: &Model| m.card.to_string().contains(&head.digest);
+        let chosen = model::chosen(store, "axis:body_region", "site")?
+            .map(|c| c.model)
+            .filter(|m| m.encoder_model_ids.contains(&encoder.id) && names_head(m));
+        let named = modes.iter().find(|m| names_head(m)).map(|m| m.id);
+        chosen
+            .map(|m| m.id)
+            .or(named)
+            .or(modes.first().map(|m| m.id))
     } else {
         let Some(id) = part("coarse") else {
             return refused(
@@ -472,8 +471,9 @@ fn body_part(store: &mut Store) -> Result<Result<Plan, Refused>, StoreError> {
 }
 
 /// Post-contrast's run (record 55 E3): `pipeline` (the cascade's, or the
-/// full pipeline's) given the promoted post-contrast cascade and its
-/// parts. The cascade answers the step only once a person has promoted it
+/// full pipeline's) given the chosen post-contrast cascade and its parts
+/// (record 55 D4). The cascade answers the step only once a person chose,
+/// certified or promoted it
 /// (the speed plan's choice, as body part's); each part its card names
 /// must be registered, not retired, and admitted or promoted; each model
 /// input of the descriptor is filled by the part of its name, and the input
@@ -502,18 +502,19 @@ fn post_contrast(store: &mut Store, pipeline: &str) -> Result<Result<Plan, Refus
             );
         }
     };
-    let candidates = served(store, "axis:post_contrast", None)?;
-    let cascade = candidates
-        .iter()
-        .find(|m| is_cascade(m) && m.state == "promoted")
-        .cloned();
+    // record 55 D4: the chosen model, a cascade, answers; an admitted
+    // cascade only once a person chose, certified or promoted it
+    let cascade = model::chosen(store, "axis:post_contrast", "site")?
+        .map(|c| c.model)
+        .filter(is_cascade);
     let Some(head) = cascade else {
+        let candidates = served(store, "axis:post_contrast", None)?;
         let waiting = candidates.iter().find(|m| is_cascade(m)).map(Model::label);
         return refused(
             "no_model",
             match waiting {
                 Some(c) => format!(
-                    "no post-contrast model is served: the cascade {c} is admitted, and answers the step once it is promoted"
+                    "no post-contrast model is served: the cascade {c} is admitted, and answers the step once it is chosen or promoted"
                 ),
                 None => "no post-contrast model is installed".into(),
             },

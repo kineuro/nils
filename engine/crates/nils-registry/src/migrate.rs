@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 95;
+pub const SCHEMA_VERSION: i64 = 96;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -434,6 +434,10 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 95,
         apply: a_stack_carries_its_contrast_label,
     },
+    Migration {
+        version: 96,
+        apply: a_site_chooses_a_model_per_task,
+    },
 ];
 
 /// Record 55 F2 and F5 (spec §12.3): the post-contrast label of each stack,
@@ -445,6 +449,16 @@ fn a_stack_carries_its_contrast_label(store: &mut Store, kind: Kind) -> Result<(
         return Ok(());
     }
     add_tables(store, kind, &["contrast_label"])
+}
+
+/// Record 55 D4: several admitted models per task and slot, and the one a
+/// site chose (`model_choice`). Only a table is added; a registry from
+/// before has no choice, and each task answers with its default.
+fn a_site_chooses_a_model_per_task(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_tables(store, kind, &["model_choice"])
 }
 
 /// After type 3's pipe test (record 55 H3): an item its close could not

@@ -650,7 +650,7 @@ fn round(pg: Option<(String, String)>) {
         refusal["error"]
             .as_str()
             .unwrap()
-            .contains("answers the step once it is promoted"),
+            .contains("answers the step once it is chosen or promoted"),
         "{refusal}"
     );
     drop(server);

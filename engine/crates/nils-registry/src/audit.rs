@@ -90,6 +90,9 @@ pub enum Action {
     ModelAdmit,
     ModelPromote,
     ModelRetire,
+    /// Record 55 D4: a site chose the model that answers a task and slot,
+    /// or sent the task back to its default.
+    ModelChoose,
     /// Record 42 S3: a person picked the stack that stands for a session's
     /// role, or withdrew a person's pick. The ask reads picks, so both
     /// move the epoch.
@@ -137,6 +140,10 @@ pub enum Action {
     /// from v0 imported as person decisions.
     LabelsExport,
     LabelsImport,
+    /// Record 55 E6: a label set made outside the engine, registered with
+    /// its provenance and the sha256 of every file, its rows keyed by
+    /// DICOM identity.
+    LabelsRegister,
     /// Record 40 R3: a sample sealed for certification, never training data.
     LabelsSeal,
     /// Record 48 R2: a certificate recorded for a sealed sample, and the
@@ -208,6 +215,7 @@ impl Action {
             Action::ModelAdmit => "model.admit",
             Action::ModelPromote => "model.promote",
             Action::ModelRetire => "model.retire",
+            Action::ModelChoose => "model.choose",
             Action::PickSet => "pick.set",
             Action::PickWithdraw => "pick.withdraw",
             Action::DerivativeRegister => "derivative.register",
@@ -229,6 +237,7 @@ impl Action {
             Action::CampaignAnchored => "campaign.anchored",
             Action::LabelsExport => "labels.export",
             Action::LabelsImport => "labels.import",
+            Action::LabelsRegister => "labels.register",
             Action::LabelsSeal => "labels.seal",
             Action::LabelsCertificate => "labels.certificate",
             Action::LabelsUnseal => "labels.unseal",
@@ -260,6 +269,7 @@ impl Action {
                 | Action::ModelAdmit
                 | Action::ModelPromote
                 | Action::ModelRetire
+                | Action::ModelChoose
                 | Action::DerivativeRegister
                 | Action::DerivativeRead
                 | Action::CampaignCreate
@@ -278,6 +288,7 @@ impl Action {
                 | Action::CampaignPair
                 | Action::CampaignAnchored
                 | Action::LabelsExport
+                | Action::LabelsRegister
                 | Action::LabelsSeal
                 | Action::LabelsCertificate
                 | Action::LabelsUnseal
