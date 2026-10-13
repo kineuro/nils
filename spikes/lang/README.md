@@ -36,9 +36,9 @@ Toolchains on the host: rustc 1.98.0 (stable, 2026-08-18), go 1.26.8, pydicom 3.
 
 ## Corpora
 
-**nmosd** (2026-09-02): the raw DICOM tree of one study copied from the storage server to the working pool: 44 subject folders, 508,045 files, 64.1 GB as the sum of file sizes (about 32 GB on disk after lz4). Every DICOM file in it is Part 10, explicit VR little endian, from one vendor and one decade; 124 files are Finder metadata (`.DS_Store`), 10 are DICOM files without a SOP Instance UID. Clean and homogeneous, so it measures throughput, not vendor tolerance.
+**Study D** (2026-09-02): the raw DICOM tree of one study copied from the storage server to the working pool: 44 subject folders, 508,045 files, 64.1 GB as the sum of file sizes (about 32 GB on disk after lz4). Every DICOM file in it is Part 10, explicit VR little endian, from one vendor and one decade; 124 files are Finder metadata (`.DS_Store`), 10 are DICOM files without a SOP Instance UID. Clean and homogeneous, so it measures throughput, not vendor tolerance.
 
-**mix** (planned 2026-09-02, Nima's suggestion): a small, deliberately diverse sample of the live v0 archive in production, which holds 37.5 million instances from 16 manufacturer labels and 86 scanner models, study years 2001 to 2026, four transfer syntaxes (JPEG 2000 lossless for 85 percent of the instances, explicit VR little endian, JPEG lossless in two flavours), 1,567 enhanced multi-frame MR series and a handful of CT series. The selection is made in SQL against the v0 metadata database, read-only, whole series only: up to two series per (manufacturer, model, study year, SOP class, transfer syntax, multi-frame or not, implementation version) stratum, every series of the manufacturers with fewer than 200 series in total, every CT series, three multi-stack series per manufacturer, and the three largest series of the archive (the selection script lives with the private record). It travels from production over the usual transfer path like every other dataset and lands beside nmosd with a `MANIFEST.tsv` of strata and counts. Together with nmosd, and another cohort from the storage server when the one-million-instance run is due, it gives criterion 2 the vendor spread nmosd lacks.
+**mix** (planned 2026-09-02, Nima's suggestion): a small, deliberately diverse sample of the live v0 archive in production, which holds 37.5 million instances from 16 manufacturer labels and 86 scanner models, study years 2001 to 2026, four transfer syntaxes (JPEG 2000 lossless for 85 percent of the instances, explicit VR little endian, JPEG lossless in two flavours), 1,567 enhanced multi-frame MR series and a handful of CT series. The selection is made in SQL against the v0 metadata database, read-only, whole series only: up to two series per (manufacturer, model, study year, SOP class, transfer syntax, multi-frame or not, implementation version) stratum, every series of the manufacturers with fewer than 200 series in total, every CT series, three multi-stack series per manufacturer, and the three largest series of the archive (the selection script lives with the private record). It travels from production over the usual transfer path like every other dataset and lands beside study D with a `MANIFEST.tsv` of strata and counts. Together with study D, and another cohort from the storage server when the one-million-instance run is due, it gives criterion 2 the vendor spread study D lacks.
 
 ## A finding, 2026-09-11
 
@@ -51,7 +51,7 @@ serves was answered in September and the answer does not turn on this.
 
 ## Results so far
 
-### nmosd, the development container, 2026-09-02
+### Study D, the development container, 2026-09-02
 
 Warm cache (the corpus had been written an hour earlier, so the page cache was warm), 8 workers, two runs per side:
 
@@ -93,11 +93,11 @@ Every binary that built ran its query on SQLite 3.53 and DuckDB 1.5.5 from insid
 
 ## Findings about the libraries
 
-- `suyashkumar/dicom` cannot stop in front of Pixel Data: `SkipPixelData()` skips the element by reading and discarding its bytes, so every file is read to the end. On nmosd that is 64 GB of reads for headers that add up to a few hundred megabytes. There is no public API to end the parse at a tag.
+- `suyashkumar/dicom` cannot stop in front of Pixel Data: `SkipPixelData()` skips the element by reading and discarding its bytes, so every file is read to the end. On study D that is 64 GB of reads for headers that add up to a few hundred megabytes. There is no public API to end the parse at a tag.
 - `suyashkumar/dicom` requires `DICM` at offset 128; a Part 10 file without the preamble is misread (its "compatibility mode" rewinds to offset 0 and guesses the transfer syntax from the next 100 bytes), which the synthetic corpus shows as `missing_sop`. `dicom-object` handles both with `ReadPreamble::Auto`.
-- `suyashkumar/dicom` returns an error for the character set `ISO IR 100` (1,771 files in nmosd); pydicom and dicom-object accept it.
+- `suyashkumar/dicom` returns an error for the character set `ISO IR 100` (1,771 files in study D); pydicom and dicom-object accept it.
 - `dicom-object` reads raw data sets without a meta group through `DicomCollectorOptions` with an expected transfer syntax; the Go side needs `SkipMetadataReadOnNewParserInit()` and infers the syntax.
-- `dicom-object`'s errors are `snafu` enums that capture a backtrace on every failure; on a corpus with many bad files that is a per-file cost worth measuring (it did not show on nmosd, where 134 files fail).
+- `dicom-object`'s errors are `snafu` enums that capture a backtrace on every failure; on a corpus with many bad files that is a per-file cost worth measuring (it did not show on study D, where 134 files fail).
 - The DuckDB amalgamation compiled by `libduckdb-sys` needs the per-package profile override in `rust/Cargo.toml` (`debug = false`), otherwise every translation unit carries debug info and a 16 GB machine runs out of memory during the build. `duckdb-go` ships prebuilt static libraries and needs cgo; a Windows arm64 library is not among them, and the CI matrix showed the build failing there before it got that far, in Go's own cgo runtime.
 - Both `dbcheck` binaries link only the C and C++ runtimes on Linux (`ldd`: libstdc++, libgcc_s, libm, libc); Rust's is 68 MB, Go's about the same order.
 

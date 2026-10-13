@@ -32,7 +32,7 @@ pretending the fact was never there.
 | Where the viewer study's corpus lives and which workstations run it | 20 §7 | "the group's own largest scans, on the group's own machines" |
 | The paths of the checkouts read, the site's stylesheet path, the pool named in Q22, and the group's chat channel by name | 20 §2, §3, §5, §10 | "the Metabase checkout", "the 0.5.0 checkout", "the group's site stylesheet", "the group's data", "the group's chat channel" |
 | The group's machines in the cited records (26 to 56): the production host, the storage and compute servers, the laptops, the containers by number, their addresses, ports, users, paths and update commands, the backup NAS, and the public names of the group's own services | every cited record | by role: "the production host" (v0's), "the NILS server" (the group's install), "the research container", "the model server", "the development laptop", "the compute server", "the storage server", "the source pool", "the backup NAS"; a paragraph that was only deployment detail says the private record keeps it (55 B1 "What the NILS server is today", 40's update and clean-up steps, 54 step 4) |
-| The names of the cohorts and studies | 26, 34, 39, 40, 48, 50, 54, 55 | a letter per study, the same letter in every record (study A to study M; the multicentre study's site in the protocol list as site B1; the photon-counting CT study by its two sites). The key is in the private scrub script. Other sites of the multicentre study keep their country codes (DE1, IT3), which name a site, not a person |
+| The names of the cohorts and studies | 09, 11, 17, 20, 26, 34, 39, 40, 48, 50, 54, 55, and the specifications and spike notes outside this directory | a letter per study, the same letter in every record (study A to study M; the multicentre study's site in the protocol list as site B1; the photon-counting CT study by its two sites). The key is in the private scrub script. Other sites of the multicentre study keep their country codes (DE1, IT3), which name a site, not a person. File names that carried a cohort's name became generic (11's script and adjudication file). A disease name that means the disease stays (15's "ALS onsets"); the abbreviation of photon-counting CT is spelled out |
 | 54's survey per study: the PatientID shapes and counts of each identified and de-identified tree, the registry's subjects per source tree, the inventory of everything that carried a code, and the step-5 check's study-level detail (folder and series names, the code file's history) | 54 | a summary in counts: four studies carry the personnummer in their identified tree, six carry it nowhere; the check's result (388 of 388 by map import, 10 of 10 by the pseudonymiser, under a lab key) is kept |
 | How v0 protected its pseudonym map | 26 | "how that map was protected is not part of this copy", as in 16 |
 | The teacher of the writing course | 55 | "a course on scientific English". Russell Ouellette and Adithya Raju Ganeshan keep their names (55, ruling 15); the readers stay R, D and N |
@@ -52,11 +52,10 @@ and the "private by design" paragraph became the pointer to this file.
   decisions and they identify nobody.
 - The group's partners (Vienna, Amsterdam), the names of the private repositories, and the v0 commit that code
   references point to.
-- The names of the two development corpora (nmosd, mix) with their file, series
-  and subject counts and the results of running the engine over them (11, Wave 1,
-  from slice 2 on). A corpus name labels a diagnosis group or a sampling scheme,
-  never a person, and the spike's own README in this repository uses the same
-  names with the same counts. Where the corpora live is still removed.
+- The two development corpora by what they are, study D's corpus (by its letter, as
+  every cohort is from 2026-10-13, decision 55 ruling 15) and the mix sample, with
+  their file, series and subject counts and the results of running the engine over
+  them (11, Wave 1, from slice 2 on). Where the corpora live is still removed.
 - Facts about v0's code: its schema, its stages, where it mounts the Docker socket,
   what its agent's connection string looks like. v0's code is public in
   `kineuro/nils-legacy`; describing it discloses nothing new.

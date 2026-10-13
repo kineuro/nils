@@ -245,7 +245,7 @@ hash `signature` and the reason `split_reason`, and a pack author cannot
 confuse them.
 
 The reason itself is derived from the stacks rather than copied from v0, and
-the two agree on all 2,165 series of the nmosd corpus. On the mix corpus they
+the two agree on all 2,165 series of the study D corpus. On the mix corpus they
 agree on 2,559 of 2,567, and the eight are v0's, with a named cause: v0 writes
 the key in its **sort** step and not in extraction, so a series that was
 extracted and never sorted has none. Across the whole live corpus that is 19
@@ -1007,7 +1007,7 @@ value accumulates.
 Written after the wave. `series_classification_cache` is what v0 said the last
 time it sorted each cohort, and v0's code has moved since, so a run against it
 reports v0 disagreeing with itself as though v1 had caused it. Two of the
-nmosd gate's four difference groups were exactly that.
+study D gate's four difference groups were exactly that.
 
 `tools/pack-check/resort.py` runs v0's own classification over the same stacks
 from current v0 code, plus the two step 4 phases that change an axis, and writes
@@ -1078,7 +1078,7 @@ quoted by file and line, and one sentence saying which is right and why. A group
 whose cause is "walk order" or "v0 bug" and nothing more is not adjudicated; it
 is an open item, and the gate does not pass with open items.
 
-This is the bar that Wave 1's nmosd gate was actually held to, written down:
+This is the bar that Wave 1's study D gate was actually held to, written down:
 there, four mismatched studies looked like a classification difference and were
 two unrelated causes: an import reading the wrong identifier table, and a
 session duplicated on disk by an export that read a subject number out of a

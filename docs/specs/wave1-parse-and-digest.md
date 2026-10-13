@@ -456,7 +456,7 @@ in the registry (another path, another batch). The row keeps `instance_id` so th
 second path is provenance too. `skipped` (symlink) is neither.
 
 The first four classes are the reader's, decided before any policy applies; the
-spike's harness counted exactly these, and the dry run of slice 2 over the nmosd
+spike's harness counted exactly these, and the dry run of slice 2 over the study D
 corpus refused the same 134 files (124 `not_dicom`, 10 `missing_uid`). The other
 three are the batch's knobs at work.
 
@@ -1005,7 +1005,7 @@ Settled while building stacks (slice 5):
   and the confidence to two decimals.
 - The dry run counts `stacks` (distinct series and key pairs) beside `series`
   and `subjects`, and the report's `written` block counts `stacks_created`.
-- On the nmosd corpus (508,045 files; 493,708 instances ingested, 10,539
+- On the study D corpus (508,045 files; 493,708 instances ingested, 10,539
   duplicate SOP instances, 3,798 quarantined: 124 not DICOM, 10 without a
   StudyInstanceUID, 3,664 of the non-image SOP classes §5.3 refuses, of which
   3,530 Secondary Capture, 102 Enhanced SR, 17 Encapsulated PDF, 13 Grayscale
@@ -1296,7 +1296,7 @@ weigh more than they do on localhost.
 Measured while building identity (slice 4), same host and knobs: the million on
 SQLite takes 35.3 s (28,600 files/s) against 32.3 s before, the resolution
 through the linkage store costing a tenth, with identical counts and a linkage
-store of 212 KB for 862 identities. The nmosd corpus (508,045 files, 44
+store of 212 KB for 862 identities. The study D corpus (508,045 files, 44
 subjects, 82 studies) under `blake2b-8` with a throwaway key digests in 32 s and
 again with `--restart` in 26 s, with 44 identifiers matched, none created and
 none attached: every returning identifier lands on its subject.
@@ -1309,7 +1309,7 @@ say: a real digest walks NFS from a cold cache, and there the reader, not the
 writer, is expected to be the wall, which is the budget's measurement (§12.5).
 
 Measured while building jobs and custody (slice 6), same host and knobs: the
-touch was never the wall. The second pass over nmosd took 25 s with 32 workers
+touch was never the wall. The second pass over study D took 25 s with 32 workers
 and 5 s with one, and on a copy of the registry the pieces of the SQLite side
 add up to four seconds (the lookup of 508,045 records in 3,178 directory
 queries 2.2 s, the touch of every row 2.0 s, a bare `find` with a stat of
@@ -1317,11 +1317,11 @@ every file 1.7 s). The rest was the parsers' queue: half a million unchanged
 files sent through it one by one, each waking a worker with nothing to do,
 and the workers' contention for the next slowing the stage that fed them. With
 the unchanged files batched by the resume stage (§5.2) the second pass over
-nmosd takes 4.7 s (108,000 files/s) on 32 workers and the same on one, against
+study D takes 4.7 s (108,000 files/s) on 32 workers and the same on one, against
 25.8 s before; the million's second pass takes 5.4 s on SQLite and 18.2 s on
 Postgres, against 66 s and 37 s, with identical counts on both (862 subjects,
 1,711 studies, 7,622 series and stacks, 1,000,000 instances). The first pass
-is what it was: 33.1 s on nmosd, 35.5 s for the million on SQLite and 75.5 s
+is what it was: 33.1 s on study D, 35.5 s for the million on SQLite and 75.5 s
 on Postgres `COPY`, whose second pass is now the round trips of the lookup
 and the touch, a number for the baseline host (§14, 8).
 
@@ -1383,7 +1383,7 @@ Settled while building jobs and custody (slice 6):
   interrupted by a real SIGINT resumes to the same subjects, studies, series,
   stacks, instances, source-file statuses and identity rows as an uninterrupted
   run, on SQLite and on Postgres.
-- On the development container the same holds over nmosd (508,045 files, 32 workers, SQLite):
+- On the development container the same holds over study D (508,045 files, 32 workers, SQLite):
   a run killed after 40 commits (5 s in), one killed inside the 61st
   transaction (8 s), one stopped by SIGINT after 80 commits (18 s, exit 130)
   and one aborted after 20 (3 s) each resume to the uninterrupted run's 44
@@ -1834,22 +1834,22 @@ they share the schema.
    with a test key lands every returning identifier on one subject.
 5. **Stacks.** The signature, the key, the index, the orientation. *Done when:*
    the partitions on the spike's corpora equal v0's for those series. Landed
-   with the nmosd half of the check equal on every series (§8); the mix corpus
+   with the study D half of the check equal on every series (§8); the mix corpus
    is checked the same way when its copy completes, and the pack-format
    prototype (C11) may start.
 6. **Jobs, resume, status, custody.** *Done when:* a digest killed at any point
    resumes to the same counts as an uninterrupted one, and `nils custody` lists
    every file the tests created. Landed: the kill-and-resume tests of §10 hold
-   on SQLite and Postgres and over nmosd on the development container, the
+   on SQLite and Postgres and over study D on the development container, the
    file under the home in `custody --json`, and the second pass over an
-   unchanged tree went from 25.8 s to 4.7 s on nmosd (§9.2).
+   unchanged tree went from 25.8 s to 4.7 s on study D (§9.2).
 7. **The compare tool and the gate runs** on the baseline host: the spike's
    corpora first, then the live corpus study by study, each run's report in the
    record; the session check of §12.4 is part of the tool. *Done when:* §12.2 to
    §12.4 hold and every divergence is classified. Landed so far: the tool
    (`tools/v0-compare/`, §12.1 to §12.4 as amended) with its synthetic gate in
    CI (§12.7) and the walker's union filter (§5.2); the runs on the baseline
-   host follow as v0's export and the cohorts' trees arrive there, nmosd first,
+   host follow as v0's export and the cohorts' trees arrive there, study D first,
    and the slice closes with their reports in the record.
 8. **The budget.** v0 measured on the baseline host (C6); v1 tuned against it;
    the CI benchmark's baseline recorded. *Done when:* §12.5 and §12.6 hold and

@@ -35,7 +35,7 @@ host as built, and where the v0 key comes from. Order of work in the spec's §14
 slices, skeleton to budget, C11 beside slices 6 to 8. Slice 1, the skeleton, merged
 2026-09-02 (`kineuro/nils` pull request 3; Rust 1.98.0 pinned, 02); main now
 requires the engine checks and the six builds. Slice 2, the reader and the walker,
-merged 2026-09-02 (pull request 4): `nils digest --dry-run` over nmosd on a development container on the compute server
+merged 2026-09-02 (pull request 4): `nils digest --dry-run` over study D on a development container on the compute server
 sees 508,045 files, parses 504,247 and quarantines 3,798, of which 3,664 are SOP
 classes outside v0's nine (secondary capture above all) and the reader's own
 classes refuse exactly the spike's 134 (124 `not_dicom`, 10 `missing_uid`), with
@@ -58,7 +58,7 @@ suggest a block-level cut, the copy on the scratch is byte-identical to what the
 bridge delivered (compared file by file with checksums), and v0's registry holds
 an instance for every one of the 1,996, so they were whole when v0 read them and
 lost their tail afterwards, where they came from. It is the same shape as the
-nmosd files a later writer rewrote, and the same lesson: v0's rows describe
+study D files a later writer rewrote, and the same lesson: v0's rows describe
 files that have since changed, and only v1 describes them as they are. Slice 3, the
 schema and the writer, merged 2026-09-02 (pull request 5): the schema declared
 once and rendered for both dialects, the registry home (`nils.toml`, the key
@@ -94,7 +94,7 @@ store that belongs to another registry; three collision reasons (`identity`,
 `identity.collision` and failing the job with the code and the item and never an
 identifier; the operating-system user as the actor until Wave 4's doors; the
 schema version held at 1 through the alpha; `serde-saphyr` in place of the
-archived `serde_yaml`. On the same development container: nmosd under `blake2b-8` with a throwaway key
+archived `serde_yaml`. On the same development container: study D under `blake2b-8` with a throwaway key
 gives 44 subjects and 82 studies in 32 s, and the same tree again with
 `--restart` matches all 44 and creates none in 26 s; the million on SQLite takes
 35 s against 32 s with identical counts and 212 KB of linkage store. Not in slice
@@ -116,7 +116,7 @@ catalogue rather than listed, because the series row holds the first instance's
 value as in v0 and the stacks hold every value the series has; `orientation_oblique`
 once per stack created, for a known class under 0.9, never for the unknown one;
 the stack cache keyed by series id and stack key, with one keyed select per batch
-on a miss. On the same development container: v0's partition of nmosd, recomputed with v0's own two
+on a miss. On the same development container: v0's partition of study D, recomputed with v0's own two
 modules (`spikes/stacks/`; the modules sit beside the script and are not
 committed), equals v1's on every one of the 2,165 series both hold, 2,534 stacks
 against 2,534 v0 groups over 493,708 instances, and the 3,180 instances only v0
@@ -151,12 +151,12 @@ itself as a `linkage-purge` job that `status` lists, and is not undone by a
 digest that finds the file unchanged; custody omits nothing (C38) and redacts
 a DSN password everywhere; `review apply` is Wave 4's and `doctor` waits.
 The number slice 3 left it: the second pass over an unchanged tree was never
-the writer's touch (two seconds of twenty-five on nmosd) but the parsers'
+the writer's touch (two seconds of twenty-five on study D) but the parsers'
 queue, half a million unchanged files sent through it one at a time (25 s on
 32 workers, 5 s on one); the resume stage now batches them for the writer
-itself, and the second pass takes 4.7 s on nmosd against 25.8 s and, for the
+itself, and the second pass takes 4.7 s on study D against 25.8 s and, for the
 million, 5.4 s on SQLite and 18.2 s on Postgres against 66 s and 37 s. On the
-same development container over nmosd: a run killed after 40 commits, one killed inside a
+same development container over study D: a run killed after 40 commits, one killed inside a
 transaction, one stopped by SIGINT and one aborted each resume to the
 uninterrupted run's 44 subjects, 82 studies, 2,165 series, 2,534 stacks,
 493,708 instances, 508,045 file rows in the same statuses and 44 identities,
@@ -205,7 +205,7 @@ instances above those row counts, because a value holding a newline spans
 several lines of a CSV; the script says "lines" now, and the numbers above are
 the extract's.
 
-The first gate run, nmosd on a development container on the compute server, ran
+The first gate run, study D on a development container on the compute server, ran
 2026-09-03. v1 digested the tree in
 `dcm,no-ext` at 32 workers: 508,045 files in 30 s, 504,247 parsed and 3,798
 quarantined, 43 subjects, 82 studies, 2,165 series (all MR), 2,534 stacks and
@@ -240,11 +240,11 @@ and its resume never re-read anything. Nima settled the anatomy by eye, the
 project's session list agreed, and the two subjects have different personnummer
 in the project's own list, so it was never an identity collision.
 
-A script on the archive host (`scripts/fix-nmosd-duplicate-session.py` beside
+A script on the archive host (`scripts/fix-duplicate-session.py` beside
 the cohort's own maps) checks that the two directories hold the same instances
 and the identifiers they should, and then moves the wrong copy beside the study
 root rather than deleting it. It ran on 2026-09-03, on the archive and on the
-gate's copy. **With the duplicate gone the nmosd gate passes every bar**: 82 of
+gate's copy. **With the duplicate gone the study D gate passes every bar**: 82 of
 82 studies on the same code, 44 of 44 sessions, every field at or above its
 floor, 212 of 212 multi-stack partitions identical, every divergence
 classified. The first gate run of the rewrite is green, and it took a reader
@@ -310,7 +310,7 @@ And the second, from Nima's account of how v0's codes were really made: the
 anonymization step mapped a personnummer to a subject code with the key, wrote
 a project identifier into `PatientID`, and passed v0 a CSV of identifier to
 code, so the key never entered v0. That is why the key reproduces none of the
-nmosd codes: the personnummer is not in this data at all, and 42 of the 43
+study D codes: the personnummer is not in this data at all, and 42 of the 43
 subjects' identifiers are exactly the `PatientID` the files carry today. Two
 things follow. A person may hold **many** identifiers of one type, not one: a
 personnummer is not for life, since a temporary number becomes a permanent one
@@ -336,7 +336,7 @@ from the compared root is reported apart when its subject is in several
 cohorts; and `--fs-cap` bounds the on-disk check at a million paths instead of
 stopping silently at a hundred thousand, which is what left 28,880 of the
 128,880 unchecked the first time. The adjudication of the run lives with it on
-the host (`adjudication-nmosd.toml`), one rule per group with the probe that
+the host (`adjudication.toml`), one rule per group with the probe that
 settled it. The run was repeated on the engine as it now stands, with the
 decided fields and the repaired reader and with Nima's own key in place: the
 same eight bars pass, every divergence is still classified by the same rules,
@@ -407,7 +407,7 @@ of yours shape it beyond the Wave 1 pattern:
   and every difference is then investigated to a **named cause** (a line of v0
   or a line of v1) before it is classified. A group whose cause is "walk order"
   or "v0 bug" and nothing more is an open item, and the gate does not pass with
-  open items (spec §11.5). This is the bar the nmosd gate was actually held to,
+  open items (spec §11.5). This is the bar the study D gate was actually held to,
   written down: there, four studies that looked like one classification problem
   were two unrelated causes upstream.
 
@@ -435,7 +435,7 @@ rather than claimed:
   **0.24 percent** (1,236 of 518,365), after two measurements changed the pack:
   a stack the pack rules out raises nothing, and a rule that fires on a sixth of
   the archive is one question about the rule rather than 80,752 about stacks.
-* **The gate.** The nmosd cohort passes all fourteen bars, the three new ones
+* **The gate.** The study D cohort passes all fourteen bars, the three new ones
   included: no axis v1 leaves unresolved that v0 resolved, no stack v1 excludes
   that v0 kept, and every difference carrying a cause the adjudication file
   refuses to accept without. Four groups, all four caused: two where v0's stored
@@ -807,7 +807,7 @@ Standing items that must not silently drop off between waves: check at every gat
   the corpus is the moat.
 - **Which instance is "first"** for a series-level column its instances disagree
   on is decided today by the walk order and by which batch commits first, as it
-  was in v0, so two digests of one tree can write different rows. The nmosd gate
+  was in v0, so two digests of one tree can write different rows. The study D gate
   run shows how often that is real: `sequence_name` in series carrying up to 26
   spellings, `spacing_between_slices`, `acquisition_matrix`, the orientation, and
   the thirteen stack-signature columns wherever a series has several stacks.

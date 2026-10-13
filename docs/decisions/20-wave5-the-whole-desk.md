@@ -18,7 +18,7 @@ Ids continue 19: decisions D53 onward, amendments C49 onward, rulings R12 to R14
 | | Ruling | What it changes |
 |---|---|---|
 | R12 | The desk is a workbench designed toward one scene (§4), not a directory of doors. "Make desk something extraordinary and take it to the next level." | The shell is rebuilt around Home, objects with pages and one conversation rail; Operations is retired. |
-| R13 | The five answers. (1) The ladder, yes; the identity provider decides what a person may do, the grant is the person's consent. (2) The supervisor: "do it instead of showing how to, but showing is also good to add as a guide." (3) The viewer: "we absolutely need to benchmark and find the best; we handle very big CT scans; it should be smooth; we have PCCT data in source; in the right order." (4) The sections liked; database management and places in Settings, with every path given a role, on any machine. (5) Teaching: yes. | D68, D76, D78, D74, D75, D72. |
+| R13 | The five answers. (1) The ladder, yes; the identity provider decides what a person may do, the grant is the person's consent. (2) The supervisor: "do it instead of showing how to, but showing is also good to add as a guide." (3) The viewer: "we absolutely need to benchmark and find the best; we handle very big CT scans; it should be smooth; we have photon-counting CT data in source; in the right order." (4) The sections liked; database management and places in Settings, with every path given a role, on any machine. (5) Teaching: yes. | D68, D76, D78, D74, D75, D72. |
 | R14 | The look follows the website's design DNA and the mark of the family (Bifrost's, with the naudiz rune); the group's deployment goes on the website now so the wave is seen as it is built; and "nils is an application everyone should be able to use, not something specific to our setup or website: if I install nils on my laptop I should see the same thing and I shouldn't need an the compute server-like system." | The theme as a file (D53), the mark (D54), the site rule and the laptop rule (spec §4), and every slice's gate carrying the laptop test. |
 
 ## 2. What the Metabase reading settled
@@ -198,7 +198,7 @@ the public specification carries the as-built paragraphs and what the bars found
 6. The viewer study's report is in §7 with its numbers; Review is built on what
    it chose. Passed, with the corpus caveat: no photon-counting CT was found
    under the source place (all MR); the scale was measured on a 5 GB resampled
-   volume. Where the PCCT data lives is a question for Nima (§10, Q28 below).
+   volume. Where the photon-counting CT data lives is a question for Nima (§10, Q28 below).
 7. Teaching ran the loop on the bench with a dry fine-tune: torch and peft are
    not on the guest, so the recipe is recorded and no adapter is made; admission
    and the bench sit beside each other and promotion is refused until both are

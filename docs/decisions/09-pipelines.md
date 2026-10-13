@@ -5,7 +5,7 @@
 The foundation is sound and carries over: declarative descriptors, containers as
 the execution unit, selection → materialized BIDS tree → work units → derivatives +
 `results.json`, content-addressed descriptor versions, docker/apptainer runtimes.
-Real N4 ran on real ALS data in development (the live application database holds
+Real N4 ran on real study E data in development (the live application database holds
 zero pipeline runs); segment's prep consumes the contract. Output registration was
 deferred in v0 (`INGEST_DB_WRITE_ENABLED = False`, and intentionally no result
 cache), so v1 has to build it, not strengthen it: every derivative is a registry
