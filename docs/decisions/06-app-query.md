@@ -1,16 +1,16 @@
-# 06 — nils-query: the selection notebook
+# 06 · nils-query: the selection notebook
 
 ## What it is
 
 The human face of the query AST: a Metabase-style notebook where a researcher
 composes a question step by step (filter → join-implied expansion → summarize),
-sees the result live, and saves it as a named **selection** — which is, per D4,
+sees the result live, and saves it as a named **selection**, which is, per D4,
 what a cohort now is. Its second half is the **send-to bar**: a result becomes an
 export run, a pipeline run on the selection, a segment work subset, or an agent
 conversation seed.
 
 The v0 suite-plan's design (`docs/nils/suite-plan.md` §2) carries over nearly
-intact — AST as data, catalog-driven chips, saved questions — with one amendment:
+intact (AST as data, catalog-driven chips, saved questions) with one amendment:
 **execution moved into the engine** (D5). nils-query renders and edits ASTs; it
 never compiles SQL. That keeps it in the product plane (TypeScript, `@nils/ast`,
 the shared UI kit) with no schema knowledge of its own beyond what the catalog
@@ -18,8 +18,8 @@ serves.
 
 ## Contracts consumed
 
-- Semantic catalog (entities, fields, value chips) — read.
-- AST execution + selection CRUD — the core loop.
+- Semantic catalog (entities, fields, value chips): read.
+- AST execution + selection CRUD: the core loop.
 - Jobs (send-to export/pipeline) and, later, review items (a selection of
   "everything flagged X" is a natural review workflow).
 - Auth: whatever mode the engine runs; the app adds nothing.
@@ -77,7 +77,7 @@ there is no chip.
 ## Independence (D1)
 
 - **Absent**: the engine still executes ASTs (CLI `nils query`, MCP, API); saved
-  selections still exist and remain addressable — users simply author them without
+  selections still exist and remain addressable: users simply author them without
   a notebook. Segment falls back to accepting a selection id or explicit list.
 - **Present**: no other app changes behaviour; they gain a "pick a selection"
   affordance that resolves through the engine either way.
@@ -86,7 +86,7 @@ there is no chip.
 
 Natural-language-to-AST ("show me all 3T FLAIR sessions of subjects with two or
 more timepoints") is deliberately **not** an MVP feature of this app. It arrives as
-the agent pilot ([08-app-agent.md](08-app-agent.md)) producing ASTs through MCP —
+the agent pilot ([08-app-agent.md](08-app-agent.md)) producing ASTs through MCP:
 the notebook then renders the agent's AST for the human to inspect and refine,
 which is the honest division of labor: the agent drafts, the human sees exactly
 what will run, the engine governs execution.

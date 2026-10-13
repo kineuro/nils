@@ -1,4 +1,4 @@
-# 17 — Wave 4 reframed: the engine completes, then the two apps
+# 17 · Wave 4 reframed: the engine completes, then the two apps
 
 Written 2026-09-06, after Wave 3 closed and after an eighteen-agent analysis of
 v0's server, its clinical importers, its QC surfaces, the Metabase and Flue
@@ -36,7 +36,7 @@ The record's Wave 4 becomes three, and the record's Wave 5 (nils-query MVP) is a
 
 Names are open (§8). Until they are settled the record keeps `nils-query` and `nils-agent`.
 
-## 3. Wave 4a — the engine completes
+## 3. Wave 4a · the engine completes
 
 Ordered by R3 first, then by dependency. Each slice is one merged pull request with its own tests, the granularity Wave 3 proved over thirteen.
 

@@ -1,4 +1,4 @@
-# 18 — Wave 4b, the ask: the study's rulings, the amendments, and Nima's answers
+# 18 · Wave 4b, the ask: the study's rulings, the amendments, and Nima's answers
 
 Written 2026-09-07 from the study that 17 §4 required before Wave 4b could open
 (`studies/2026-09-06-wave4b-ask-study/`: eleven readers, three designs, three

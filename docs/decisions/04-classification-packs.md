@@ -1,9 +1,9 @@
-# 04 — Classification as modality packs (D12)
+# 04 · Classification as modality packs (D12)
 
 ## What is preserved
 
-The axis system — base, technique, modifier, construct, provenance, acceleration,
-plus the persisted contrast-agent and body-part axes — is the scientific core of
+The axis system (base, technique, modifier, construct, provenance, acceleration,
+plus the persisted contrast-agent and body-part axes) is the scientific core of
 NILS and the part of v0 that must survive byte-for-byte in meaning. What v0 actually
 runs is a *tiered* model, not a weighted one: each axis is a first-match ordered
 scan (exclusive flag, then keywords, then combination, then fallback) with a fixed
@@ -55,7 +55,7 @@ from a user, who tunes detection through knobs (C37).
   3,412 stacks, here they are") instead of a blind overwrite.
 - Packs are **plugins**: the engine loads packs by manifest; third parties can ship
   one. This is the extension surface that makes the classifier a standard rather
-  than a feature — other groups contribute packs and corpus cases upstream instead
+  than a feature: other groups contribute packs and corpus cases upstream instead
   of forking.
 - The pack is the **common data model** across sites ([14](14-federation.md),
   D26). Two registries classified by the same pack version answer "3D FLAIR
@@ -83,7 +83,7 @@ from a user, who tunes detection through knobs (C37).
 The engine routes each stack to packs by modality. MRI ships at v1.0 as the carried
 v0 pack. **CT** (including photon-counting) and **PET** are new packs with their own
 axes (for CT: kernel, kVp/spectral, contrast phase, gating; for PET: tracer,
-reconstruction) — designed with the same evidence model, on the roadmap after the
+reconstruction): designed with the same evidence model, on the roadmap after the
 MRI pack passes its regression gate. Nothing in the engine changes to add a
 modality; that is the test of the design, and it only passes once the C11
 prototype has decided the format. Where the axes differ, CT having no base
@@ -96,7 +96,7 @@ outcome instead, never a review item.
 ## Execution
 
 Rules compile to vectorized columnar expressions where their structure allows
-(keyword/regex/threshold predicates over fingerprint fields — most of the corpus),
+(keyword/regex/threshold predicates over fingerprint fields: most of the corpus),
 with the remainder evaluated in parallel batches in the compiled core. The port is
 interpreter-first: Wave 2 reproduces v0's semantics one to one (pinned by the
 138-flag contract test) before anything is vectorized. Evidence is stored, not just
@@ -114,4 +114,4 @@ replaced by review items (C14).
 Model-based detectors (body-part today; more later) join through the sidecar
 pattern: an optional service the engine calls, whose *outputs* enter the same
 evidence stream with a model+version stamp. A pack may declare "this axis prefers
-the sidecar when present" — absence degrades to rules-only, per D1.
+the sidecar when present": absence degrades to rules-only, per D1.

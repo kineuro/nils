@@ -1,9 +1,9 @@
-# 02 — The engine core
+# 02 · The engine core
 
 ## Language: a compiled Rust core (D2)
 
-The stated targets — one dependency-free installable binary, and the fastest
-anon→digest→classify→bidsify there is — describe a compiled language. v0's process
+The stated targets (one dependency-free installable binary, and the fastest
+anon→digest→classify→bidsify there is) describe a compiled language. v0's process
 pools, pickled per-subject batches, and adaptive batching are all machinery built to
 work around per-file parsing in interpreted Python; v1 removes the cause instead of
 managing the symptom.
@@ -43,7 +43,7 @@ managing the symptom.
   request 3, merged the same day): the four crates, CI on both registry backends
   and the six targets, releases in Bifrost's form.
 - **Risk, honestly**: `dicom-rs` has met fewer cursed vendor files than pydicom. The
-  mitigation is our own corpus — 37.5M live instances become the parser regression
+  mitigation is our own corpus: 37.5M live instances become the parser regression
   suite (parse-and-compare against v0's extracted values before anything else is
   built on top). Files the parser cannot handle are *recorded* per file (a review
   item, D7), never silently skipped, with a quarantine list as output.
@@ -54,12 +54,12 @@ managing the symptom.
 
 ## Storage: one schema, two backends (D3)
 
-- **Standalone**: an embedded registry — SQLite (WAL) as the system of record,
+- **Standalone**: an embedded registry: SQLite (WAL) as the system of record,
   DuckDB attached for the columnar passes (it reads SQLite natively and spills to
   disk, which is what makes the memory budget honest). A registry is a directory:
   `registry.db`, config, outputs. Backup is copying a file.
 - **Server**: the same schema on Postgres 16, for real multi-writer concurrency
-  (review sessions, imports, jobs) — but tuned normally, not survival-tuned: v0 ran
+  (review sessions, imports, jobs), but tuned normally, not survival-tuned: v0 ran
   with parallel query disabled and a 48 GB cap to survive extraction; v1's writer
   discipline (below) removes the reason.
 - **The cost is real and accepted**: the dialect layer stays thin, the schema is
@@ -72,7 +72,7 @@ DuckDB was named for are window functions and materialised CTEs that both backen
 "Expressible on both" is now a contract with a fixture: one ask exercising every hook
 executes on both backends and its content hashes agree.
 
-This is per-registry, not per-cohort — see [03-registry.md](03-registry.md) for why
+This is per-registry, not per-cohort: see [03-registry.md](03-registry.md) for why
 cohorts stopped being containers.
 
 ## The pipeline model: predicates, not handovers
@@ -80,7 +80,7 @@ cohorts stopped being containers.
 The single most important architectural change from v0:
 
 - A stage's input is a **predicate** (`fingerprinted AND NOT classified`), evaluated
-  as a query — never an ID list in memory or in a JSONB handover. v0's largest
+  as a query, never an ID list in memory or in a JSONB handover. v0's largest
   handover row today is 3.1 MB of compressed JSONB holding two lists of 458k ids;
   at 10M stacks that is ~180 MB of JSON text per step row, materialized as Python
   lists on every read, written best-effort, and rewritten on every boot. v1's grow
@@ -89,7 +89,7 @@ The single most important architectural change from v0:
   evidence ref), so every stage is resumable and re-runnable by construction, and
   "what state is this registry in" is a query, not a ledger reconstruction.
 - Ingest streams: parser workers emit Arrow batches → bulk appends in transactions
-  of thousands of rows (v0 committed every 100 rows through one writer — a 50M-file
+  of thousands of rows (v0 committed every 100 rows through one writer: a 50M-file
   cohort was ~500k transactions). Backpressure end to end; no unbounded queues; no
   per-subject materialization (v0 pickled a whole subject's instances in one shot).
 - Classification compiles the YAML packs ([04](04-classification-packs.md)) to
@@ -104,7 +104,7 @@ The single most important architectural change from v0:
 Every heavy verb is a **job**: recorded in the registry, resumable, cancellable,
 progress-reporting. The CLI runs jobs in-process; the server *enqueues the same
 jobs* onto worker processes and streams progress out of the job record. Nothing
-heavy ever executes inside an HTTP handler again — v0 ran 12-hour extractions inside
+heavy ever executes inside an HTTP handler again: v0 ran 12-hour extractions inside
 a request and the whole sort pipeline inside one SSE generator, and both died with
 their connection.
 
@@ -139,7 +139,7 @@ Wave 0 deliverable ([12](12-review-devils-advocate.md), C6).
 ## What carries over from v0, by name
 
 The stack-signature field set (`extract/stack_utils.py`), the fingerprint
-normalization semantics (`sort/fingerprint.py` — the Polars/COPY design is the
+normalization semantics (`sort/fingerprint.py`: the Polars/COPY design is the
 blueprint for every v1 columnar pass), DWI enrichment, gap-filling physics, the QC
 weighting files, the anonymization strategies and audit shape, BIDS naming and
 cross-cohort resolution rules. These are specifications to preserve, whatever the

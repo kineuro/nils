@@ -1,4 +1,4 @@
-# 08 — nils-agent v1: a Flue app on the engine's contracts (D11)
+# 08 · nils-agent v1: a Flue app on the engine's contracts (D11)
 
 ## The lesson of v0
 
@@ -7,7 +7,7 @@ schema-aware DB guru, skills, sandboxes, even a self-improvement loop. It also
 proved the cost of owning a ~23k-line fork of somebody else's harness inside a
 ~116k-line app, most of it our own gateway, per-user model proxy, optimization loop
 and Next.js frontend. v1 keeps the ideas and returns the harness to people whose
-job it is: **Flue** (Astro's Apache-2.0 TypeScript agent framework — sessions,
+job it is: **Flue** (Astro's Apache-2.0 TypeScript agent framework: sessions,
 tools, skills on the open Agent Skills spec, sandboxes, deploy-anywhere). Our
 existing `SKILL.md` files drop in; local vLLM serving is first-class; the chat UI
 starts from their demo. Flue is young, and reading its source
@@ -33,12 +33,12 @@ in the harness.
 ## The architecture rule
 
 The agent is **a client**. It reaches NILS exclusively through the MCP surface
-([05-contracts.md](05-contracts.md) §4) — catalog, AST queries, selections, jobs,
+([05-contracts.md](05-contracts.md) §4): catalog, AST queries, selections, jobs,
 review items under policy, pipelines. No database access of any kind, no private
 endpoints, no engine knowledge baked into tools. Consequences:
 
 - Any MCP client is an equal citizen: Claude pointed at the engine gets the same
-  governed powers — the agent app adds the *product* (chat UI, memory, skills,
+  governed powers: the agent app adds the *product* (chat UI, memory, skills,
   channels, per-user model auth), not the access.
 - Field-awareness lives in **skills + the catalog**, not in code: the `nils-data`
   knowledge and `db_guru`'s table lore become catalog descriptions (served by the
@@ -70,13 +70,13 @@ endpoints, no engine knowledge baked into tools. Consequences:
 ## What carries over from v0, deliberately
 
 - **Per-user model authentication** (users OAuth to their own providers; the system
-  holds no shared API keys) — reimplemented against Flue's provider registry, which
+  holds no shared API keys): reimplemented against Flue's provider registry, which
   has no notion of a user: one provider id per user, registered with a resolver
   closure over that user's credential, is the pattern.
 - **Skills machinery discipline** (validation, a security pass on third-party
   skills). Flue packages `SKILL.md` at build time with real progressive disclosure;
   `name` must match the directory.
-- **The sandbox seam** — Flue's `SandboxDriver` contract is nine verbs with no
+- **The sandbox seam**: Flue's `SandboxDriver` contract is nine verbs with no
   teardown, limits or network policy; the Docker adapter we own supplies those.
 - The fine-tune/optimization experiments stay exploratory and out of the product
   until they earn their way in. Their gate is `nils-evals` (C25): the 28 gold
@@ -105,11 +105,11 @@ log.
 First build is **Ask-query**: one Flue agent, read-only MCP tools, producing query
 ASTs the notebook renders for human inspection. Small blast radius, real Flue
 mileage, immediately useful. Full agent v1 grows from there in parallel with the
-waves — it consumes everything and blocks nothing.
+waves: it consumes everything and blocks nothing.
 
 ## Independence (D1)
 
 - **Absent**: NILS is fully usable manually; review queues are worked by humans;
   no endpoint anywhere references the agent.
 - **Present**: adds conversation, drafting, and policy-bounded automation.
-- **Private for now** (its own repo), public when it stabilizes — per D10.
+- **Private for now** (its own repo), public when it stabilizes: per D10.

@@ -1,4 +1,4 @@
-# 11 — Build order, gates, and the do-not-forget list
+# 11 · Build order, gates, and the do-not-forget list
 
 ## Standing rules
 
@@ -12,17 +12,17 @@
 
 ## Waves
 
-**Wave 0 — ground.** v0 feature work frozen (F1, since 2026-09-02). The public repo
+**Wave 0: ground.** v0 feature work frozen (F1, since 2026-09-02). The public repo
 restarted as `kineuro/nils` on 2026-09-02 (15 §11; R1 to R8; AGPL-3.0-only, 10). CI skeleton:
 multi-platform binary builds, the two-backend test matrix, the scaled performance benchmark harness (D6). Accepted 2026-09-02 from
 [12](12-review-devils-advocate.md): the language spike (C1, judged on speed and
 maintainability together), the baseline host with v0 measured on it (C6), and the
-pack-format prototype (C11) before Wave 2 opens — done 2026-09-03, see Wave 2
+pack-format prototype (C11) before Wave 2 opens: done 2026-09-03, see Wave 2
 below and 15 §3.
 
-**Wave 1 — parse and digest.** The Rust core: walk, parse, extract, stack
+**Wave 1: parse and digest.** The Rust core: walk, parse, extract, stack
 signatures, registry schema (both backends), ingest batches, `nils digest` with
-resume. *Gate:* parse-and-compare on the production corpus — field-level agreement with
+resume. *Gate:* parse-and-compare on the production corpus: field-level agreement with
 v0's extraction on 37.5M instances, with every divergence classified (v0 bug, v1
 bug, or accepted change); the performance budget met on the 8-core/64 GB baseline
 host (C6). Identity linkage, the pseudonym scheme with the v0 key, and the identity
@@ -35,7 +35,7 @@ host as built, and where the v0 key comes from. Order of work in the spec's §14
 slices, skeleton to budget, C11 beside slices 6 to 8. Slice 1, the skeleton, merged
 2026-09-02 (`kineuro/nils` pull request 3; Rust 1.98.0 pinned, 02); main now
 requires the engine checks and the six builds. Slice 2, the reader and the walker,
-merged 2026-09-02 (pull request 4): `nils digest --dry-run` over nmosd on a development container on Asgard
+merged 2026-09-02 (pull request 4): `nils digest --dry-run` over nmosd on a development container on the compute server
 sees 508,045 files, parses 504,247 and quarantines 3,798, of which 3,664 are SOP
 classes outside v0's nine (secondary capture above all) and the reader's own
 classes refuse exactly the spike's 134 (124 `not_dicom`, 10 `missing_uid`), with
@@ -205,7 +205,7 @@ instances above those row counts, because a value holding a newline spans
 several lines of a CSV; the script says "lines" now, and the numbers above are
 the extract's.
 
-The first gate run, nmosd on a development container on Asgard, ran
+The first gate run, nmosd on a development container on the compute server, ran
 2026-09-03. v1 digested the tree in
 `dcm,no-ext` at 32 workers: 508,045 files in 30 s, 504,247 parsed and 3,798
 quarantined, 43 subjects, 82 studies, 2,165 series (all MR), 2,534 stacks and
@@ -348,7 +348,7 @@ slice 8 built: the same ten bars pass there, with the digest taking
 each report summarized here in counts and shapes.
 
 Slice 8, the budget, done 2026-09-03. The baseline host is what C6 asked for
-and no longer a container: a virtual machine on Asgard, 8 vCPU, 64 GB,
+and no longer a container: a virtual machine on the compute server, 8 vCPU, 64 GB,
 Debian 13, reading the corpus from the storage server over NFS 4.2 read-only,
 exactly as the hypervisor mounts it, and writing its registry to its own
 disk. A machine rather than a container so that the page cache and the
@@ -382,7 +382,7 @@ there to catch a regression rather than to measure the machine. The corpus is
 200,000 instances rather than a million so that it costs three minutes on every
 pull request; the million-instance run belongs on the baseline host.
 
-**Wave 2 — fingerprint and classify.** The columnar fingerprint pass, the pack
+**Wave 2: fingerprint and classify.** The columnar fingerprint pass, the pack
 loader, the MRI pack carried over, evidence storage, `nils classify`. *Gate:*
 diff against the 518k-stack classification cache (the v0-parity corpus, machine
 output); disagreements individually adjudicated and either fixed or recorded as
@@ -397,15 +397,15 @@ written the way Wave 1's was and ratified before slice 1 begins. Two decisions
 of yours shape it beyond the Wave 1 pattern:
 
 * **The CT and PET packs are in the wave, not after it** (slice 8), each with
-  the axes its own modality needs rather than MRI's. v0 has neither — it pushes
-  every CT and PET stack through the MRI classifier — so they are the first work
+  the axes its own modality needs rather than MRI's. v0 has neither (it pushes
+  every CT and PET stack through the MRI classifier) so they are the first work
   in the rewrite with no v0 to reproduce, judged against the verified corpus
   alone, and they carry a bar of their own: no line of engine code is written
   for either. That is the honest test of the pack format, and it is last on
   purpose, because it is cheap only if everything before it is right.
 * **v0's bugs are fixed and its structure is improved where we can see further**,
-  and every difference is then investigated to a **named cause** — a line of v0
-  or a line of v1 — before it is classified. A group whose cause is "walk order"
+  and every difference is then investigated to a **named cause** (a line of v0
+  or a line of v1) before it is classified. A group whose cause is "walk order"
   or "v0 bug" and nothing more is an open item, and the gate does not pass with
   open items (spec §11.5). This is the bar the nmosd gate was actually held to,
   written down: there, four studies that looked like one classification problem
@@ -542,7 +542,7 @@ reported shapes are not ours, but the same compiler builds `tokio-postgres`
 under the registry and a miscompilation is a property of the compiler. Pinned
 forward; the suite passes unchanged.
 
-**Wave 3 — anonymize and BIDS.** Strategies, audit, `dcm2niix` orchestration,
+**Wave 3: anonymize and BIDS.** Strategies, audit, `dcm2niix` orchestration,
 naming/collision rules, and the release. *Gate:* BIDS validator
 clean on hand-verified reference selections, with the main acquisition per session
 and contrast taken from the registry (C8, D16). v0 exports are compared for
@@ -676,7 +676,7 @@ session that fits no schedule; under a diagnosis anchor 9.9 percent of sessions
 precede their anchor and for a quarter of those subjects label order runs
 backwards against date order. Wave 3 carries all of it.
 
-**Wave 4 — reframed 2026-09-06 into 4a, 4b and 4c; see
+**Wave 4: reframed 2026-09-06 into 4a, 4b and 4c; see
 [17-wave4-reframed.md](17-wave4-reframed.md), which supersedes this paragraph and
 absorbs Wave 5.** In one line: 4a is the engine completing (versioning at stack
 grain, private tags ingested, the faults, the clinical layer, simple selection,
@@ -687,7 +687,7 @@ agent service, providers, specialised agents, knobs, MCP wherever the talk puts
 it), opened likewise. Query before agent, so the engine and the question work
 with no AI at all. What follows is the paragraph as it stood.
 
-**Wave 4 — server and contracts.** The thin server: jobs, API, semantic catalog,
+**Wave 4: server and contracts.** The thin server: jobs, API, semantic catalog,
 AST execution, selections, review items, auth modes, MCP, events
 ([05-contracts.md](05-contracts.md)). The web UI rebuilt on the job/queue model.
 *Gate:* the CLI and the UI drive every stage through the same doors (contract
@@ -705,23 +705,23 @@ principals and peer-key verification (C26 to C30). No daemon yet; the contract
 test proves a projection suppresses and a `local` field never validates for a
 federated principal.
 
-**Wave 5 — absorbed into Wave 4b (17-wave4-reframed.md, 2026-09-06).** The
+**Wave 5: absorbed into Wave 4b (17-wave4-reframed.md, 2026-09-06).** The
 paragraph stands as the description of 4b's gate.
 
-**Wave 4b — opened 2026-09-07** ([18](18-wave4b-the-ask.md); spec
+**Wave 4b: opened 2026-09-07** ([18](18-wave4b-the-ask.md); spec
 `docs/specs/wave4b-the-ask.md` in the public repository, thirteen slices in its §15).
 *Gate:* the ten bars of the spec's §13.4 on the synthetic registry and on both backends,
 and the yardstick of 18 §1 returning its planted rows.
 
-**Wave 5 — nils-query MVP.** Notebook, saved selections, send-to. *Gate:* a real
+**Wave 5: nils-query MVP.** Notebook, saved selections, send-to. *Gate:* a real
 study's cohort defined as a selection and exported end to end without a hand-written
 manifest. Addition (C16): every gold task expressed in the notebook
 reproduces its v0 result hash on the migrated registry, and the ten families are
 expressible without an escape hatch, roles and picks included (C19).
 
-**Wave 6 — segment rebased, and the curation loop.** Port nils-segment onto
-contracts only (07). *Gate:* a full annotation work — subset by selection, prep via
-seeded pipelines, rating, adjudication, export — with zero database-level
+**Wave 6: segment rebased, and the curation loop.** Port nils-segment onto
+contracts only (07). *Gate:* a full annotation work (subset by selection, prep via
+seeded pipelines, rating, adjudication, export) with zero database-level
 integration. This wave is the proof of D1 and the contracts; treat its friction as
 contract bugs.
 
@@ -748,7 +748,17 @@ measured: 4,692 body parts in the live archive are an image model's predictions
 sitting in the keyword classifier's own column with nothing to mark them, and they
 are discoverable only because the classifier disagrees.
 
-**Parallel track — agent.** From Wave 4's MCP: the Ask-query Flue pilot, then agent
+**Amended 2026-09-23 ([40](40-the-road-through-wave-6.md)).** Wave 5 is the desk
+([20](20-wave5-the-whole-desk.md)); the query MVP above was absorbed into 4b. Wave 6 is both this
+paragraph's half and record [39](39-two-ways-of-knowing-a-stack.md)'s: System 1 built into the
+engine with its certificate, on the same foundation (a model's answer is a decision with a
+registered author; a person's review is a campaign). It is carried by waves 41 to 46 of record
+31's kind. A minimal pipeline runner moves forward from Wave 7, because this gate needs seeded
+prep. "The binary never decodes pixel data" is read as never *judging* from pixels: Wave 5's
+viewing doors stay, and every judgement from pixels is a pipeline. Record 39's Phases 2 to 4 run
+past the gate beside Wave 7.
+
+**Parallel track: agent.** From Wave 4's MCP: the Ask-query Flue pilot, then agent
 v1 growing alongside (08). Never on the critical path; review-item policies for
 agents open only after the human workflows are trusted. The pilot is time-boxed
 with its exit criteria written first (C23, 08): the ten families through the
@@ -756,14 +766,16 @@ draft-selection loop on a local and a hosted model, gold hashes reproduced, fewe
 turns per resolved question than v0, no harness upgrade costing more than a day.
 `nils-evals` (C25) is built before the pilot so that it can be judged.
 
-**Wave 7 — pipelines and packs widen.** BIDS-Apps runner hardened, starter catalog
+**Wave 7: pipelines and packs widen.** BIDS-Apps runner hardened, starter catalog
 seeded at boot, GPU leasing, descriptor tunables + QC hooks (09). CT pack designed
 against real photon-counting data (04). v0 decommission plan executed. Added
 (C31): the SLURM and Apptainer executor, with the Amsterdam cluster as its first
 target if that is what their cluster is; *gate:* the starter pipeline runs on a
 selection through their scheduler with full parameter provenance and rootless.
 
-**Wave 8 — federation** ([14](14-federation.md), D25 to D29, ratified 2026-09-02). The
+**Amended 2026-10-08 ([55](55-ready-for-production-and-the-paper.md)).** Wave 7 is split. **7a** (record 55) finishes Wave 6's two unbuilt pieces, System 1 beside the rules in the engine and the elements of v0 on one review mechanism, and ends with NILS ready for production and for the paper: production NILS on a new registry is its last step, beta is cut there, and its gate is record 55's tests T1 to T36. **7b** keeps this paragraph's work: the runner hardened, the cluster executor, CT rules, and v0's decommission plan. v0 stays on until 7b.
+
+**Wave 8: federation** ([14](14-federation.md), D25 to D29, ratified 2026-09-02). The
 node daemon, manifests and pinned peers, the federated catalog and node profiles,
 fan-out and merge, the daemon's MCP server, the scope chip (06), the agreement
 template. *Gate:* the Stockholm–Vienna pilot: two nodes over a mesh, the
@@ -774,21 +786,21 @@ of registries nobody can query locally is a federation of nothing.
 
 ## The do-not-forget list
 
-Standing items that must not silently drop off between waves — check at every gate:
+Standing items that must not silently drop off between waves: check at every gate:
 
 - The **license** (decided 2026-09-02, 10): AGPL-3.0-only with an SPDX header in
   every source file, Apache-2.0 in `contracts/` and the SDKs, `CONTRIBUTING` with
   the CLA and the DCO, all from commit one (15, R6).
-- **Identity linkage** lands with the registry schema (Wave 1), not "later" —
+- **Identity linkage** lands with the registry schema (Wave 1), not "later":
   retrofitting merge semantics is misery.
 - **CT/PET readiness** is a schema and pack-router concern from Wave 1 even though
-  the packs come in Wave 7 — nothing may assume MRI.
-- **Small-machine CI** from Wave 1 — the budget is a gate, not a note.
+  the packs come in Wave 7: nothing may assume MRI.
+- **Small-machine CI** from Wave 1: the budget is a gate, not a note.
 - **The custody page** (C38) ships with the first store that persists anything a
   user would ask about, which is Wave 1's registry; every later store is added to
   it in the wave that creates it.
 - **The one generic CSV importer** replaces the six copies when clinical imports
-  port (Wave 4) — do not port the copies.
+  port (Wave 4): do not port the copies.
 - **Absence stories** written per app as each ships (D1) and tested: a
   contracts-only deployment must render no dead links and raise no errors.
 - **Corpus hygiene**: every adjudicated disagreement in Waves 1-3 becomes a fixture;
@@ -804,7 +816,7 @@ Standing items that must not silently drop off between waves — check at every 
   make them deterministic by a rule the writer applies (the value of the instance
   whose path sorts first, say), which costs a comparison per file and an update.
 - Migration of the live registry itself (v0 Postgres → v1 schema) is Wave 4's
-  hidden deliverable — spec it there, with the production data as the rehearsal.
+  hidden deliverable: spec it there, with the production data as the rehearsal.
 - **Federation stays optional at every gate** (14, D25): a deployment without
   `nils node` must show no scope chip, no federation tool, no endpoint, no error.
   The absence test of D1 applies to the daemon like to any app.

@@ -1,4 +1,4 @@
-# 13 — nils-query and nils-agent, checked against Metabase, Flue and what actually ran
+# 13 · nils-query and nils-agent, checked against Metabase, Flue and what actually ran
 
 The second verification pass, 2026-09-02, focused on the two apps whose design the
 folder had borrowed from elsewhere: nils-query (D5, doc 06) is "Metabase-style"

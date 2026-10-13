@@ -1,4 +1,4 @@
-# 12 — Devil's advocate review of the v1 folder (2026-09-01)
+# 12 · Devil's advocate review of the v1 folder (2026-09-01)
 
 I wrote 00 to 11 from a reading of the code. This document is the second pass Nima
 asked for: I took the opposite side of every decision and checked each one against
@@ -185,7 +185,7 @@ working day" on eight cores means roughly 1,000 files/s sustained, three to seve
 times v0's measured rate on a much larger machine. Plausible for a compiled
 header parser, but the wall will be storage: on the new platform the sources sit on
 the storage server over NFS, and 30M header reads are 30M metadata operations.
-Challenge C6: Wave 0 builds the baseline host (an 8 vCPU / 64 GB VM on Asgard
+Challenge C6: Wave 0 builds the baseline host (an 8 vCPU / 64 GB VM on the compute server
 reading from the storage server over NFS, doubling as the CI benchmark runner),
 measures v0 on it first, and
 restates the budget in files/s and peak RSS.
@@ -344,7 +344,7 @@ C16 onward, from the query and agent study, continue in
 | C3 | D4, D13 | Registry-wide pseudonym key held outside the DB; existing subject codes and CSV linkage maps imported as linkage records in Wave 1 | accepted 2026-09-02 (15 §9) |
 | C4 | D5 | The ten `nils-data` query patterns become AST fixtures in the Wave 4 gate | accepted 2026-09-02 (15 §9) |
 | C5 | D7 → D14 | Staged result versions with commit; grouped items; bulk decisions; emission thresholds per kind | accepted 2026-09-02 (15 §9) |
-| C6 | D6 | Baseline host (8 vCPU / 64 GB VM on Asgard over NFS) built in Wave 0; v0 measured on it; budget restated in files/s and RSS | accepted 2026-09-02 |
+| C6 | D6 | Baseline host (8 vCPU / 64 GB VM on the compute server over NFS) built in Wave 0; v0 measured on it; budget restated in files/s and RSS | accepted 2026-09-02 |
 | C7 | D7 → D15 | Decisions exportable as labelled datasets; models registered with training provenance | accepted 2026-09-02 (15 §9) |
 | C8 | D9 → D16 | Wave 3 gate = validator-clean + reference selections; main acquisition per session/contrast becomes a registry fact | accepted 2026-09-02 (15 §9) |
 | C9 | D9 → D18 | Rootless runtime by default; Docker socket opt-in | accepted 2026-09-02 (15 §9) |

@@ -1,4 +1,4 @@
-# 01 — Architecture: one core, optional apps
+# 01 · Architecture: one core, optional apps
 
 ## The map
 
@@ -38,14 +38,14 @@ it exists ([14](14-federation.md) §3.2, D25).
 These are the constitution of the suite. Each is testable, and the build order in
 [11-order.md](11-order.md) keeps them true from day one:
 
-1. **The engine imports nothing from any app** — not code, not schemas, not compose
+1. **The engine imports nothing from any app**, not code, not schemas, not compose
    fragments. It can be built, tested and released from its repo alone.
 2. **Apps consume only the engine's public contracts** ([05-contracts.md](05-contracts.md)):
    the HTTP API, the query AST, review items, MCP, events. Never the database
    directly, never internal modules. (v0's read-only DB roles were the honest
    version of a shortcut; v1 removes the need for the shortcut.)
 3. **Apps do not talk to each other.** If two apps need the same thing, that thing
-   is an engine contract. (v0 already proved this doctrine — "data, not code" — the
+   is an engine contract. (v0 already proved this doctrine ("data, not code") the
    difference is that v1's engine offers rich enough doors that nobody is tempted
    around them.)
 4. **Every app has an absence story written down.** What does the user see when the
@@ -62,10 +62,10 @@ These are the constitution of the suite. Each is testable, and the build order i
 |---|---|---|
 | `nils` binary alone | full pipeline via CLI, embedded registry, local review via CLI | web UI, multi-user, agents |
 | + engine server | web UI, jobs, multi-user registry, review queues, contracts live | selections notebook, segmentation, agents |
-| + nils-query | the notebook, saved selections, send-to | — |
-| + nils-segment | annotation works, adjudication | — |
-| + nils-agent | conversational access, agent-assisted review under policy | — |
-| + any MCP client (Claude, etc.) | the same tools the agent uses, ad hoc | — |
+| + nils-query | the notebook, saved selections, send-to | none |
+| + nils-segment | annotation works, adjudication | none |
+| + nils-agent | conversational access, agent-assisted review under policy | none |
+| + any MCP client (Claude, etc.) | the same tools the agent uses, ad hoc | none |
 | + `nils node` and at least one trusted peer | federated counts and aggregates, compute-to-data runs at peers, per-node availability in the catalog (14, D25) | individual-level data from anywhere else; nothing changes for local users |
 
 ## How apps find the engine
@@ -88,7 +88,7 @@ in the deployment's own repo), not a product.
 - **Laptop**: the binary, a directory, done. Auth `off`.
 - **Single server** (the 8-core/64 GB case): engine server + Postgres, auth `token`
   or OIDC, apps added as needed behind one reverse proxy with forward-auth.
-- **Our deployment**: the above with Authentik, Traefik, and GPU sidecars — but
+- **Our deployment**: the above with Authentik, Traefik, and GPU sidecars, but
   nothing in the products knows our names.
 - **A node in a federation** ([14](14-federation.md), D25): any of the server
   shapes plus `nils node serve` and a trust line per peer. The node is usually
