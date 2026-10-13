@@ -625,7 +625,7 @@ curl -o out.nii.gz http://127.0.0.1:8437/api/derivatives/<id>/content
 Where a client shares the working place's volume, the place declares where that client reaches it, and the door answers with a path there instead of the bytes:
 
 ```sh
-nils place set <place id> --share /mnt/nils-working
+nils place set <place id> --share /volumes/nils-working
 curl 'http://127.0.0.1:8437/api/derivatives/<id>/content?transport=share'
 ```
 

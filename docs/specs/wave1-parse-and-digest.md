@@ -1636,7 +1636,7 @@ series) are the development runs on the way there, and every run's numbers are
 recorded with the binary's version.
 
 Settled in slice 8, on the baseline host built for it: an 8 vCPU / 64 GB VM on
-Asgard, Debian 13, reading the corpus from the storage server over NFS 4.2
+the compute server, Debian 13, reading the corpus from the storage server over NFS 4.2
 (`nconnect=16`, read-only) exactly as the hypervisor mounts it, and writing its
 registry to its own disk. A virtual machine and not a container, so that the
 page cache and the kernel are the guest's own and the numbers are the guest's
