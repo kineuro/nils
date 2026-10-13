@@ -285,9 +285,11 @@ federation.request:
   policy, audit review cadence, incident process, and exit. Exit is revoking a key;
   nothing individual-level was shared, so nothing needs recalling beyond aggregate
   results and logs.
-- **Versions.** Packs use semantic versions and a vocabulary change is a major. A
-  request declares the pack version it was written for; a peer on an incompatible
-  version answers `incompatible` with a diff, never an approximation. Contract
+- **Versions.** Packs use semantic versions: adding to a vocabulary is a minor,
+  removing or renaming any of it a major (amended 2026-10-10: it first said every
+  vocabulary change was a major). A request declares the pack version it was
+  written for; a peer on another major, or on an earlier minor than the
+  request's, answers `incompatible` with a diff, never an approximation. Contract
   versions likewise (D26).
 - **Monitoring.** Node liveness, request latency, approval backlog. Nothing else
   leaves a node.

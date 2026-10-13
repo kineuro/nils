@@ -1,0 +1,59 @@
+name: rules-release
+# On a pack's own tag (`pack-mri-v1.0.2`, record 55 B5): the pack alone, published as a
+# release of its own beside the engine's, so a rules fix reaches an install with no
+# engine release. The tag goes on a commit main's ci passed, as an engine tag does, and
+# the pack's pack.yml must state the tag's version. The release carries
+# pack-<name>.tar.gz, holding packs/<name>/ in the shape of the engine's packs.tar.gz,
+# pack-<name>.VERSION, and SHA256SUMS naming both, in the form release.yml uses. It is
+# never the repository's latest release and carries no file named VERSION, so the
+# engine's own lookups never take it for an engine; the engine finds it in the listing
+# by its tag, and checks what it works with from its pack.yml before it installs it.
+on:
+  push:
+    tags: ['pack-*-v*']
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: main's ci passed on this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          run=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$GITHUB_SHA&branch=main&event=push&status=success" --jq '.workflow_runs[0].id // empty')
+          [ -n "$run" ] || { echo "no ci run on main passed for $GITHUB_SHA: a rules release is tagged on a commit main's checks passed"; exit 1; }
+          echo "ci run $run passed on main for this commit"
+      - name: the pack states the tag's version, and is packed alone
+        run: |
+          rest=${GITHUB_REF_NAME#pack-}
+          name=${rest%-v*}
+          version=${rest##*-v}
+          manifest="packs/$name/pack.yml"
+          [ -f "$manifest" ] || { echo "the tag names the pack $name, and $manifest is not there"; exit 1; }
+          stated=$(grep -m1 '^version:' "$manifest" | cut -d: -f2 | cut -d'#' -f1 | tr -d " \"'")
+          [ "$stated" = "$version" ] || { echo "the tag says $version and $manifest says '$stated': raise the pack's version first"; exit 1; }
+          mkdir -p out
+          tar -czf "out/pack-$name.tar.gz" "packs/$name"
+          echo "$version" > "out/pack-$name.VERSION"
+          (cd out && sha256sum "pack-$name.tar.gz" "pack-$name.VERSION" > SHA256SUMS && ls -la && cat SHA256SUMS)
+          echo "PACK=$name" >> "$GITHUB_ENV"
+          echo "PACK_VERSION=$version" >> "$GITHUB_ENV"
+      - name: release notes from the changelog
+        run: |
+          awk -v t="$GITHUB_REF_NAME" '/^## \[/{p = index($0, "[" t "]") > 0} p' CHANGELOG.md | sed '1d' > notes.md
+          [ -s notes.md ] || echo "The $PACK pack $PACK_VERSION, released on its own." > notes.md
+      - uses: softprops/action-gh-release@v3
+        with:
+          name: Rules ${{ env.PACK }} ${{ env.PACK_VERSION }}
+          body_path: notes.md
+          prerelease: false
+          make_latest: false
+          files: |
+            out/pack-*.tar.gz
+            out/pack-*.VERSION
+            out/SHA256SUMS

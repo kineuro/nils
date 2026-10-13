@@ -53,8 +53,13 @@ use crate::yaml::{self, File};
 /// pick may say which stacks holding a role compete for it (`candidates`)
 /// and how a near tie is decided (`near_tie`), each refused in a pack that
 /// declares less, so an engine at 8 refuses such a pack instead of picking
-/// without them.
-pub const CONTRACT: u32 = 9;
+/// without them. Version 10 (record 55 B5, rules releases) adds the optional
+/// `engine` key: the range of engine versions the pack works with
+/// (`">=1.0.0-alpha.80, <2.0.0"`, [`crate::engines`]). An engine outside it
+/// refuses the pack, and the update path never installs one it would refuse.
+/// It is refused in a pack that declares less, so an engine at 9, which
+/// would load the pack without reading the range, refuses it by its contract.
+pub const CONTRACT: u32 = 10;
 
 /// What a field may be shown to (Wave 4a §11.2, C27): `local` (this node
 /// only: free text, paths, exact dates, identifiers), `federated` (on the
@@ -104,6 +109,9 @@ pub struct Pack {
     pub name: String,
     pub version: Version,
     pub contract: u32,
+    /// The engines the pack works with, where it names them (pack contract
+    /// 10); the running engine is inside it, or the pack did not load.
+    pub engine: Option<crate::engines::Range>,
     pub modality: String,
     pub dir: PathBuf,
     /// The editable lists, after any overlay.
@@ -376,6 +384,31 @@ fn build_unjudged(dir: &Path, overlay: Option<&Overlay>) -> R<Pack> {
         )
         .in_file(&manifest.path, Some(&manifest.source)));
     }
+    // Pack contract 10: the engines the pack works with, refused in a pack
+    // that declares less, and this engine outside them refuses the pack.
+    let engine = match m.get("engine") {
+        None => None,
+        Some(v) => {
+            let text = manifest.blame(yaml::text(v, "engine"))?;
+            let refuse = |why: String| {
+                Error::at("engine", why).in_file(&manifest.path, Some(&manifest.source))
+            };
+            if contract < 10 {
+                return Err(refuse(format!(
+                    "engine is pack contract 10's; this pack declares contract {contract}, and \
+                     an engine of {contract} would load it without reading the range"
+                )));
+            }
+            let range = crate::engines::Range::parse(&text).map_err(refuse)?;
+            if !range.admits(crate::engines::ENGINE_VERSION) {
+                return Err(refuse(format!(
+                    "the pack works with engines {range}, and this engine is {}",
+                    crate::engines::ENGINE_VERSION
+                )));
+            }
+            Some(range)
+        }
+    };
     let modality = manifest.blame(yaml::text(yaml::get(m, "modality", at)?, "modality"))?;
 
     // --- buckets, then the overlay on top of them
@@ -959,6 +992,7 @@ fn build_unjudged(dir: &Path, overlay: Option<&Overlay>) -> R<Pack> {
         name,
         version,
         contract,
+        engine,
         modality,
         dir: dir.to_path_buf(),
         buckets,

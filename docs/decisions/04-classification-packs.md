@@ -61,11 +61,13 @@ from a user, who tunes detection through knobs (C37).
   D26). Two registries classified by the same pack version answer "3D FLAIR
   at 7T" identically, which is what lets a count from Vienna sit beside a count
   from Stockholm without anyone seeing anyone's rows. The rule that follows: packs
-  use semantic versions, any change to a vocabulary (axis values, image-type
-  tokens, observation types, identifier namespaces, roles) is a **major**, a
-  federated request declares the pack version it was written for, and a peer on
-  an incompatible major answers `incompatible` with the vocabulary diff, never
-  an approximation. The verified corpus is what makes a pack version mean the
+  use semantic versions, adding to a vocabulary (axis values, image-type
+  tokens, observation types, identifier namespaces, roles) is a **minor** and
+  removing or renaming any of it a **major** (amended 2026-10-10: it first said
+  every vocabulary change was a major), a federated request declares the pack
+  version it was written for, and a peer on another major, or on an earlier
+  minor than the request's, answers `incompatible` with the vocabulary diff,
+  never an approximation. The verified corpus is what makes a pack version mean the
   same thing at every site.
 - The **corpus is the contract**: a pack ships expectation fixtures, and the engine
   refuses to load a pack whose own corpus fails. There are two corpora, named

@@ -335,10 +335,12 @@ that evaluated it**. That single column is what turns re-classification from a
 blind overwrite into a diff: "pack 2.1 changes 3,412 stacks, here they are".
 
 The engine refuses to load a pack whose own corpus fails, and refuses a pack
-whose contract version it does not implement. A vocabulary change (an axis
-value, a directory type, an identifier namespace) is a **major** version bump,
-because a federated question asked for pack 2 must not be answered by pack 3's
-vocabulary (D26).
+whose contract version it does not implement. Adding to the vocabulary (an
+axis value, a directory type, an identifier namespace) is a **minor** version
+bump and removing or renaming any of it a **major** one (amended 2026-10-10: it
+was first that every vocabulary change is a major), so a federated question
+written for pack 2.1 is answered alike by every later 2.x and never by pack
+3's vocabulary (D26).
 
 ### 5.3 Overlays (C2)
 
@@ -585,8 +587,9 @@ cheap. To classify an experimental sequence that needs its own logic:
 
 1. write `rules/<name>.yml` with an `enter_when`, the axes it `decides`, and
    its rules in the order that matters;
-2. add whatever vocabulary it needs to the axis files, which is a major
-   version bump (§5.2) because a vocabulary is a contract;
+2. add whatever vocabulary it needs to the axis files, which is a minor
+   version bump (§5.2): adding keeps every earlier question's meaning, and
+   only removing or renaming a value is a major one;
 3. add its cases to the pack's corpus, which the engine checks at load.
 
 No Rust, no release of the engine, no pipeline stage to insert, no skip flag to

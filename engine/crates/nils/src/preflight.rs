@@ -542,14 +542,15 @@ pub(crate) fn roles_missing(
 const NO_FILE: &str = "the registry holds no file of it to read, so the release leaves it out";
 
 /// Of picked stacks the release's plan leaves out, those of which the
-/// registry holds a file to read, and those the pack's disposition
-/// excludes: what tells why each is left out.
+/// registry holds a file to read, and those whose disposition a release
+/// takes only when asked (excluded, display_composite), with that
+/// disposition: what tells why each is left out.
 fn unplanned_why(
     store: &mut Store,
     stacks: &[i64],
-) -> Result<(BTreeSet<i64>, BTreeSet<i64>), String> {
+) -> Result<(BTreeSet<i64>, BTreeMap<i64, String>), String> {
     let err = |e: nils_registry::Error| e.to_string();
-    let (mut filed, mut excluded) = (BTreeSet::new(), BTreeSet::new());
+    let (mut filed, mut excluded) = (BTreeSet::new(), BTreeMap::new());
     for chunk in stacks.chunks(500) {
         let sql = format!(
             "SELECT DISTINCT i.stack_id FROM {} i JOIN {} sf ON sf.instance_id = i.id \
@@ -562,13 +563,13 @@ fn unplanned_why(
             filed.insert(r.int(0).map_err(err)?);
         }
         let sql = format!(
-            "SELECT DISTINCT a.stack_id FROM {} a WHERE a.axis = 'disposition' \
-             AND a.value = 'excluded' AND a.stack_id IN ({})",
+            "SELECT DISTINCT a.stack_id, a.value FROM {} a WHERE a.axis = 'disposition' \
+             AND a.value IN ('excluded', 'display_composite') AND a.stack_id IN ({})",
             store.qualified("classification_axis"),
             list(chunk)
         );
         for r in store.query(&sql, &[]).map_err(err)? {
-            excluded.insert(r.int(0).map_err(err)?);
+            excluded.insert(r.int(0).map_err(err)?, r.text(1).map_err(err)?.to_string());
         }
     }
     Ok((filed, excluded))
@@ -660,10 +661,10 @@ fn bids_units(
                     s,
                     if !with_a_file.contains(&s) {
                         NO_FILE.into()
-                    } else if excluded.contains(&s) {
-                        "its disposition is excluded, so the release leaves it out".into()
+                    } else if let Some(value) = excluded.get(&s) {
+                        format!("its disposition is {value}, which a release takes only when asked, so the release leaves it out")
                     } else {
-                        "the release leaves it out: the registry holds no file of it to write, or its disposition is excluded".into()
+                        "the release leaves it out: the registry holds no file of it to write, or its disposition is one a release takes only when asked (excluded, display_composite)".into()
                     },
                 ));
             }

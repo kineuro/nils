@@ -17,6 +17,7 @@ mod cache;
 pub mod contrast;
 pub mod corpus;
 pub mod derive;
+pub mod engines;
 pub mod error;
 pub mod eval;
 pub mod expr;
