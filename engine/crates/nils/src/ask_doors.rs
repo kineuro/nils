@@ -555,16 +555,19 @@ fn answer(
     };
     // A catalog is built at an epoch and a run moves no epoch, so a handle
     // written since is unknown to it until the next build. The resolver of
-    // Wave 5 §12.1 starts from the handle a person just ran, so it reads the
-    // handle itself and tells the catalog before it validates.
-    if matches!(segs, ["api", "ask", "start"])
-        && let Some(id) = doc["from"]["handle"].as_i64()
-        && let Some((_, c)) = catalog.as_mut()
-        && !c.handles.contains_key(&id.to_string())
-        && let Ok(Some(h)) = handle::get(registry.store(), id)
-        && h.withdrawn_at.is_none()
-    {
-        c.handles.insert(id.to_string(), h.grain);
+    // Wave 5 §12.1 starts from the handle a person just ran, and a document
+    // may read a set from one (`handle:N`), so each handle a body names is
+    // read and told to the catalog before it validates; otherwise whether a
+    // handle just made is known would hang on when the catalog was built.
+    if let Some((_, c)) = catalog.as_mut() {
+        for id in handles_named(&doc) {
+            if !c.handles.contains_key(&id.to_string())
+                && let Ok(Some(h)) = handle::get(registry.store(), id)
+                && h.withdrawn_at.is_none()
+            {
+                c.handles.insert(id.to_string(), h.grain);
+            }
+        }
     }
     let catalog: &Catalog = &catalog.as_ref().expect("the catalog is built").1;
     let reader: &mut Store = reader.as_mut().expect("the reader is open");
@@ -1923,5 +1926,53 @@ mod sized_tests {
             sized_rows(&mut store, &handle(true), &unsealed),
             Ok(Some(3))
         ));
+    }
+}
+
+/// The handles a door's body names: the start's `from.handle`, and each set
+/// of a document (the body's `document`, or the body itself) read from
+/// `handle:N`.
+fn handles_named(doc: &Value) -> Vec<i64> {
+    let mut out = Vec::new();
+    if let Some(id) = doc["from"]["handle"].as_i64() {
+        out.push(id);
+    }
+    for d in [&doc["document"], doc] {
+        if let Some(sets) = d["sets"].as_object() {
+            for set in sets.values() {
+                if let Some(id) = set["from"]
+                    .as_str()
+                    .and_then(|f| f.strip_prefix("handle:"))
+                    .and_then(|h| h.parse::<i64>().ok())
+                {
+                    out.push(id);
+                }
+            }
+        }
+    }
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+#[cfg(test)]
+mod handles_named_tests {
+    use super::handles_named;
+    use serde_json::json;
+
+    #[test]
+    fn a_body_names_its_handles_by_start_and_by_set() {
+        assert_eq!(handles_named(&json!({"from": {"handle": 7}})), vec![7]);
+        let doc = json!({"document": {"sets": {
+            "a": {"grain": "session", "from": "handle:3"},
+            "b": {"grain": "session", "from": "a"},
+            "c": {"grain": "stack", "from": "handle:x"}
+        }}});
+        assert_eq!(handles_named(&doc), vec![3]);
+        assert_eq!(
+            handles_named(&json!({"sets": {"t": {"from": "handle:12"}}})),
+            vec![12]
+        );
+        assert!(handles_named(&json!({})).is_empty());
     }
 }

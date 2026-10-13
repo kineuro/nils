@@ -61,11 +61,13 @@ use crate::serve::{Caller, Reply};
 use crate::{Exit, fail, usage};
 
 /// The doors, as the capabilities list them.
-pub(crate) const DOORS: [&str; 4] = [
+pub(crate) const DOORS: [&str; 6] = [
     "GET /api/pipelines",
     "GET /api/pipelines/{id}",
     "GET /api/pipeline-runs",
     "GET /api/pipeline-runs/{id}",
+    "GET /api/pipeline-runs/{id}/log",
+    "GET /api/pipeline-runs/{id}/units/{unit}/log",
 ];
 
 /// Where the registry keeps the operator's choice of runtime.
@@ -1035,8 +1037,129 @@ pub(crate) fn route(
             }
             Ok(Reply::ok(doc))
         })(),
+        // record 55 H2, round 5 (A23): what a run's containers printed
+        ["api", "pipeline-runs", id, "log"] => (|| {
+            let id = id_of(id, "run")?;
+            run_log(registry, caller, id, None, query)
+        })(),
+        ["api", "pipeline-runs", id, "units", unit, "log"] => (|| {
+            let id = id_of(id, "run")?;
+            run_log(registry, caller, id, Some(unit), query)
+        })(),
         _ => return None,
     })
+}
+
+/// A run's log, or one unit's, as `GET /api/pipeline-runs/{id}/log` and
+/// `GET /api/pipeline-runs/{id}/units/{unit}/log` read it (record 55 H2,
+/// round 5): a slice of the `log.txt` its containers wrote in its scratch
+/// place. A unit of a run whose units ran together reads the run's one log,
+/// `shared`; a run whose units ran apart keeps one a unit and none of its
+/// own. A log that holds the words of a unit with a stack of a sample sealed
+/// now is read only with sealed:see, and that read is audited as the run's
+/// QC of such units is.
+fn run_log(
+    registry: &mut Registry,
+    caller: &Caller,
+    run_id: i64,
+    unit: Option<&str>,
+    query: &std::collections::HashMap<String, String>,
+) -> Result<Reply, Reply> {
+    let gone = |e: String| Reply::error(500, e);
+    let r = rows::run(registry.store(), run_id)
+        .map_err(|e| gone(e.to_string()))?
+        .ok_or_else(|| Reply::error(404, format!("no pipeline run {run_id}")))?;
+    let units = rows::units(registry.store(), run_id).map_err(|e| gone(e.to_string()))?;
+    let names: Vec<String> = units.iter().map(|u| u.unit.clone()).collect();
+    let apart = r.units.as_deref() == Some("apart");
+    let (rel, shared, read): (PathBuf, bool, Vec<String>) = match unit {
+        None if apart => {
+            return Err(Reply::error(
+                404,
+                format!(
+                    "run {run_id}'s units ran apart, each with a log of its own: read a unit's at /api/pipeline-runs/{run_id}/units/<unit>/log"
+                ),
+            ));
+        }
+        None => (PathBuf::from("log.txt"), false, names),
+        Some(u) => {
+            if !names.iter().any(|n| n == u) {
+                return Err(Reply::error(404, format!("run {run_id} has no unit {u}")));
+            }
+            folder_word(u).map_err(|e| Reply::error(404, e))?;
+            if apart {
+                (
+                    Path::new("units").join(u).join("log.txt"),
+                    false,
+                    vec![u.to_string()],
+                )
+            } else {
+                (PathBuf::from("log.txt"), true, names)
+            }
+        }
+    };
+    let door = match unit {
+        None => "GET /api/pipeline-runs/{id}/log",
+        Some(_) => "GET /api/pipeline-runs/{id}/units/{unit}/log",
+    };
+    // record 48, D1 of the move: no unit's words of a sealed stack
+    let sealed = sealed_units(registry.store(), run_id, &read).map_err(gone)?;
+    if !sealed.is_empty() {
+        if !crate::sealed::reads(&caller.access) {
+            return Err(Reply::error(
+                403,
+                format!(
+                    "this log holds the words of a unit with a stack of a sample sealed for certification; it is read only with {}",
+                    crate::grants::UNSEALED
+                ),
+            ));
+        }
+        audit_sealed_run(registry, &caller.principal, door, run_id, sealed.len())?;
+    }
+    // its scratch where it kept it, as a run taken up again finds it
+    let place = r
+        .scratch_place_id
+        .or(r.place_id)
+        .and_then(|id| {
+            nils_registry::place::show(registry.store(), id)
+                .ok()
+                .flatten()
+        })
+        .ok_or_else(|| {
+            Reply::error(
+                404,
+                format!("run {run_id}'s working place is gone, and its log with it"),
+            )
+        })?;
+    let file = Path::new(&place.path)
+        .join(RUNS)
+        .join(run_id.to_string())
+        .join(&rel);
+    let (from, limit) = crate::logs::asked(query).map_err(|e| Reply::error(400, e))?;
+    match crate::logs::read(&file, from, limit) {
+        Ok(mut doc) => {
+            doc["run"] = json!(run_id);
+            doc["unit"] = json!(unit);
+            doc["shared"] = json!(shared);
+            doc["over"] = json!(r.status != "running");
+            Ok(Reply::ok(doc))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(Reply::error(
+            404,
+            match unit {
+                Some(u) if r.status == "running" => {
+                    format!("unit {u} of run {run_id} has written no log yet: it has not started")
+                }
+                Some(u) => format!(
+                    "unit {u} of run {run_id} kept no log: it never ran, or its log was cleared with the run's scratch"
+                ),
+                None => format!(
+                    "run {run_id} kept no log: it never started its container, or its log was cleared with its scratch"
+                ),
+            },
+        )),
+        Err(e) => Err(gone(format!("run {run_id}'s log could not be read: {e}"))),
+    }
 }
 
 /// A `run` a door queues: the pipeline and the flags a caller may give,

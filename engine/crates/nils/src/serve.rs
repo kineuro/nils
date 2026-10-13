@@ -3820,6 +3820,37 @@ fn routed(
                 None => Err(Reply::error(404, format!("no job {id}"))),
             }
         }
+        ["api", "jobs", _, "log"] if get => {
+            // record 55 H2, round 5 (A23): what a job printed, read by
+            // whoever may run its verb, at the verb's detail and never
+            // below quasi, since a verb prints what it reads
+            let id = id_at(2)?;
+            let Some(job) = nils_registry::job::show(registry.store(), id).map_err(job_err)? else {
+                return Err(Reply::error(404, format!("no job {id}")));
+            };
+            let (grant, detail) = job
+                .queued()
+                .as_deref()
+                .and_then(verb_needs)
+                .unwrap_or((cancel_needs(&job), Detail::Plain));
+            caller.allowed(path, Need::One(grant), detail.max(Detail::Quasi))?;
+            let (from, limit) = crate::logs::asked(query).map_err(|e| Reply::error(400, e))?;
+            match crate::logs::read(&crate::logs::job_path(doors.home.dir(), id), from, limit) {
+                Ok(mut doc) => {
+                    doc["job"] = serde_json::json!(id);
+                    doc["state"] = serde_json::json!(job.state.name());
+                    doc["over"] = serde_json::json!(job.state.is_over());
+                    Ok(Reply::ok(doc))
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    Err(Reply::error(404, job_log_missing(&job)))
+                }
+                Err(e) => Err(Reply::error(
+                    500,
+                    format!("job {id}'s log could not be read: {e}"),
+                )),
+            }
+        }
         ["api", "jobs", _, "cancel"] if post => {
             let id = id_at(2)?;
             // a cancel needs the grant of the job's verb
@@ -5072,6 +5103,15 @@ pub(crate) fn door(method: &str, segs: &[&str]) -> (Need, Detail) {
         ("GET", ["api", "jobs"]) | ("GET", ["api", "jobs", _]) => {
             (Need::One("pipelines:see"), Plain)
         }
+        // record 55 H2, round 5: a job's log, read by whoever may run its
+        // verb, at that verb's detail and never below quasi (the door's own
+        // check names the verb)
+        ("GET", ["api", "jobs", _, "log"]) => (Need::AnyOf(JOB_GRANTS), Quasi),
+        // a pipeline run's logs: its units' words, at quasi as its units are
+        ("GET", ["api", "pipeline-runs", _, "log"])
+        | ("GET", ["api", "pipeline-runs", _, "units", _, "log"]) => {
+            (Need::One("pipelines:see"), Quasi)
+        }
         ("POST", ["api", "sessions", "rebuild"]) => (Need::One("pipelines:work"), Plain),
         // record 42 S4: what pipelines make; the bytes are drawn from the
         // pixels, so they open at detail quasi like the viewer's
@@ -5171,6 +5211,24 @@ pub(crate) fn verb_needs(command: &[String]) -> Option<(&'static str, Detail)> {
         ("backup" | "verify", _) => ("database:work", Detail::Plain),
         _ => return None,
     })
+}
+
+/// Why a job has no log to read, in plain words: it has not started, it
+/// ran on another machine whose disk keeps it, or it ran before the engine
+/// kept jobs' logs or from a command line whose output went to its terminal.
+fn job_log_missing(job: &nils_registry::job::Job) -> String {
+    let id = job.id;
+    if job.state == nils_registry::job::State::Queued {
+        return format!("job {id} has not started; its log begins when a worker takes it");
+    }
+    match job.host.as_deref() {
+        Some(h) if h != nils_registry::job::hostname() => {
+            format!("job {id} ran on another machine, {h}, whose disk keeps its log")
+        }
+        _ => format!(
+            "job {id} kept no log: it ran before the engine kept jobs' logs, or from a command line whose output went to its terminal"
+        ),
+    }
 }
 
 /// The grant a cancel needs: the grant of the job's verb. A job a door
@@ -5614,6 +5672,7 @@ pub(crate) fn doors_list() -> Vec<String> {
         "GET /api/jobs",
         "POST /api/jobs",
         "GET /api/jobs/{id}",
+        "GET /api/jobs/{id}/log",
         "POST /api/jobs/{id}/cancel",
         "GET /api/releases",
         "POST /api/releases",
@@ -6239,6 +6298,16 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
             "Reading a job",
             "Read a job",
         ),
+        // record 55 H2, round 5: what a job printed
+        row(
+            "GET /api/jobs/{id}/log",
+            false,
+            false,
+            "bounded",
+            "1 MiB of text",
+            "Reading a job's log",
+            "Read a job's log",
+        ),
         row(
             "POST /api/jobs/{id}/cancel",
             true,
@@ -6564,6 +6633,25 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
             "one run",
             "Reading a pipeline run",
             "Read a pipeline run",
+        ),
+        // record 55 H2, round 5: what a run's containers printed
+        row(
+            "GET /api/pipeline-runs/{id}/log",
+            false,
+            false,
+            "bounded",
+            "1 MiB of text",
+            "Reading a pipeline run's log",
+            "Read a pipeline run's log",
+        ),
+        row(
+            "GET /api/pipeline-runs/{id}/units/{unit}/log",
+            false,
+            false,
+            "bounded",
+            "1 MiB of text",
+            "Reading a unit's log",
+            "Read a unit's log",
         ),
         // 2026-10-12: the tools the engine runs beside itself
         row(
