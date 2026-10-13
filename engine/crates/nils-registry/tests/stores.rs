@@ -1786,7 +1786,8 @@ fn registries() -> Vec<(
 /// Record 55 E2 on both backends (the ruling of 2026-10-10): a cascade
 /// is one model whose card names its parts by the input each fills; a part
 /// must be registered and not retired; promoting the cascade retires none
-/// of its parts, while a plain head promoted after it retires the slot's.
+/// of its parts, and since record 55 D4 a plain head promoted after it
+/// retires nothing either.
 #[test]
 fn a_cascade_names_its_parts_and_promoting_it_retires_none_on_both_backends() {
     use nils_registry::model::{self, Error};
@@ -1846,9 +1847,7 @@ fn a_cascade_names_its_parts_and_promoting_it_retires_none_on_both_backends() {
         }
         // promoting the cascade retires none of its parts
         model::admit(&mut reg, cascade.id, &passed, "anna@ward-3").unwrap();
-        let promoted =
-            model::promote(&mut reg, cascade.id, "anna@ward-3", None, Some("faster")).unwrap();
-        assert!(promoted.retired.is_empty(), "{name}");
+        model::promote(&mut reg, cascade.id, "anna@ward-3", None, Some("faster")).unwrap();
         assert_eq!(
             model::get(reg.store(), head.id).unwrap().unwrap().state,
             "promoted",
@@ -1857,14 +1856,17 @@ fn a_cascade_names_its_parts_and_promoting_it_retires_none_on_both_backends() {
         // a retired model is no part
         let other = add(&mut reg, serde_json::json!({"name": "fusion", "version": "2", "kind": "head", "digest": digest('2'), "task": "axis:body_part", "encoders": [{"digest": digest('e')}]})).unwrap();
         model::admit(&mut reg, other.id, &passed, "anna@ward-3").unwrap();
-        let plain = model::promote(&mut reg, other.id, "anna@ward-3", None, None).unwrap();
-        let mut gone: Vec<i64> = plain.retired.iter().map(|m| m.id).collect();
-        gone.sort_unstable();
-        assert_eq!(
-            gone,
-            [head.id, cascade.id],
-            "{name}: a plain head retires the slot's, the cascade and the head it reads, and says both"
-        );
+        model::promote(&mut reg, other.id, "anna@ward-3", None, None).unwrap();
+        // record 55 D4: a promotion retires nothing; the cascade goes first,
+        // then the head it read
+        for id in [cascade.id, head.id] {
+            assert_eq!(
+                model::get(reg.store(), id).unwrap().unwrap().state,
+                "promoted",
+                "{name}: {id}"
+            );
+            model::retire(&mut reg, id, "anna@ward-3", None).unwrap();
+        }
         for id in [head.id, cascade.id] {
             assert_eq!(
                 model::get(reg.store(), id).unwrap().unwrap().state,
@@ -1887,10 +1889,9 @@ fn a_cascade_names_its_parts_and_promoting_it_retires_none_on_both_backends() {
 }
 
 /// Record 55 E2 on both backends: a served cascade keeps its parts. A
-/// part's promotion retires no cascade that reads it; a promotion that
-/// would retire a part of a served cascade is refused, and so is retiring
-/// one, each naming the cascade; a cascade with a retired part is neither
-/// admitted nor promoted.
+/// promotion retires nothing (record 55 D4), and retiring a part of a
+/// served cascade is refused, naming the cascade; a cascade with a retired
+/// part is neither admitted nor promoted.
 #[test]
 fn a_served_cascade_keeps_its_parts_on_both_backends() {
     use nils_registry::model::{self, Error};
@@ -1940,25 +1941,19 @@ fn a_served_cascade_keeps_its_parts_on_both_backends() {
         model::promote(&mut reg, coarse.id, who, None, None).unwrap();
         model::promote(&mut reg, cascade.id, who, None, None).unwrap();
         // promoting the cascade's own head retires no cascade that reads it
-        let p = model::promote(&mut reg, head.id, who, None, None).unwrap();
-        assert!(p.retired.is_empty(), "{name}");
+        model::promote(&mut reg, head.id, who, None, None).unwrap();
         assert_eq!(state(&mut reg, cascade.id), "promoted", "{name}");
-        // a new coarse mode would retire the cascade's coarse part: refused,
-        // naming the cascade, and nothing moves
+        // a new coarse mode is promoted beside the cascade's coarse part,
+        // which stays (record 55 D4)
         let coarse2 = add(
             &mut reg,
             serde_json::json!({"name": "coarse", "version": "2", "kind": "head", "digest": digest('6'), "task": "axis:body_region", "encoders": [{"digest": digest('e')}], "threshold": 0.9}),
         );
         model::admit(&mut reg, coarse2.id, &passed, who).unwrap();
-        let m = refused(model::promote(&mut reg, coarse2.id, who, None, None));
-        assert!(
-            m.contains("the part coarse of cascade")
-                && m.contains(&format!("cascade {}", cascade.id)),
-            "{name}: {m}"
-        );
+        model::promote(&mut reg, coarse2.id, who, None, None).unwrap();
         assert_eq!(
             (state(&mut reg, coarse.id), state(&mut reg, coarse2.id)),
-            ("promoted".into(), "admitted".into()),
+            ("promoted".into(), "promoted".into()),
             "{name}"
         );
         // retiring a part of a served cascade is refused, a registered part's too
@@ -1969,19 +1964,17 @@ fn a_served_cascade_keeps_its_parts_on_both_backends() {
                 "{name}: {e:?}"
             );
         }
-        // a plain head promoted over the slot retires the cascade and the
-        // head it reads together, and then a part may go
+        // a plain head promoted in the slot retires nothing; the cascade
+        // retired first, its parts may go
         let other = add(
             &mut reg,
             serde_json::json!({"name": "fusion", "version": "2", "kind": "head", "digest": digest('2'), "task": "axis:body_part", "encoders": [{"digest": digest('e')}], "threshold": 0.9}),
         );
         model::admit(&mut reg, other.id, &passed, who).unwrap();
         model::promote(&mut reg, other.id, who, None, None).unwrap();
-        assert_eq!(
-            (state(&mut reg, cascade.id), state(&mut reg, head.id)),
-            ("retired".into(), "retired".into()),
-            "{name}"
-        );
+        assert_eq!(state(&mut reg, cascade.id), "promoted", "{name}");
+        model::retire(&mut reg, cascade.id, who, None).unwrap();
+        model::retire(&mut reg, head.id, who, None).unwrap();
         model::retire(&mut reg, student.id, who, Some("no cascade reads it")).unwrap();
         // a cascade with a retired part is neither admitted nor promoted
         let late = add(
@@ -2025,8 +2018,8 @@ fn a_served_cascade_keeps_its_parts_on_both_backends() {
 }
 
 /// Record 42 S2 on both backends: register by digest, promotion refused
-/// before admission, a failed check moving nothing, one promoted model per
-/// slot, a cohort slot only for a cohort that exists; and a model's answer
+/// before admission, a failed check moving nothing, several promoted models
+/// in a slot (record 55 D4), a cohort slot only for a cohort that exists; and a model's answer
 /// refused for an unknown model, staged for an admitted one, and committed
 /// by a person and never by an agent.
 #[test]
@@ -2114,9 +2107,8 @@ fn the_model_registry_keeps_its_rules_on_both_backends() {
             "{name}"
         );
         model::admit(&mut reg, one.id, &passed, "anna@ward-3").unwrap();
-        let first = model::promote(&mut reg, one.id, "anna@ward-3", None, None).unwrap();
-        assert!(first.retired.is_empty(), "{name}");
-        // the second promotion in the slot retires the first
+        model::promote(&mut reg, one.id, "anna@ward-3", None, None).unwrap();
+        // record 55 D4: the second promotion in the slot retires none
         let two = model::register(
             &mut reg,
             &card("head", "2", "head", &digest('2'), with_encoder.clone()),
@@ -2124,13 +2116,7 @@ fn the_model_registry_keeps_its_rules_on_both_backends() {
         )
         .unwrap();
         model::admit(&mut reg, two.id, &passed, "anna@ward-3").unwrap();
-        let second = model::promote(&mut reg, two.id, "anna@ward-3", None, Some("better")).unwrap();
-        assert_eq!(
-            second.retired.iter().map(|m| m.id).collect::<Vec<_>>(),
-            [one.id],
-            "{name}"
-        );
-        assert_eq!(second.retired[0].state, "retired", "{name}");
+        model::promote(&mut reg, two.id, "anna@ward-3", None, Some("better")).unwrap();
         let promoted = model::list(
             reg.store(),
             &model::Filter {
@@ -2140,7 +2126,17 @@ fn the_model_registry_keeps_its_rules_on_both_backends() {
             },
         )
         .unwrap();
-        assert_eq!(promoted.len(), 1, "{name}: one promoted model per slot");
+        assert_eq!(
+            promoted.len(),
+            2,
+            "{name}: several promoted models in a slot"
+        );
+        // the newest promoted answers by default; then the first is retired
+        let chosen = model::chosen(reg.store(), "axis:body_part", "site")
+            .unwrap()
+            .unwrap();
+        assert_eq!((chosen.model.id, chosen.by), (two.id, "promoted"), "{name}");
+        model::retire(&mut reg, one.id, "anna@ward-3", Some("replaced")).unwrap();
         assert_eq!(
             model::events(reg.store(), one.id).unwrap().len(),
             5,
@@ -4570,5 +4566,231 @@ fn migration_95_adds_the_contrast_label_on_both_backends() {
         };
         insert(&mut store).unwrap();
         assert!(insert(&mut store).is_err(), "one row a stack: {name}");
+    }
+}
+
+/// Record 55 D4 and A5 on both backends (T22, T23): a card's tested
+/// claims, speeds, GPU need and equivalence are checked as the contract has
+/// them and a card lacking one is not complete; several admitted models
+/// answer a task, the chosen one by the site's choice, else the one a
+/// recorded certificate names, else the one promoted last, else the newest
+/// admitted, and a choice goes back to the default; the CPU and GPU
+/// equivalence is measured in its classes, and a model that takes a GPU is
+/// admitted only with a class no worse than its card's.
+#[test]
+fn several_models_answer_a_task_and_the_site_chooses_on_both_backends() {
+    use nils_registry::model::{self, Error};
+    use nils_registry::proposals::Proposal;
+    for (name, _guard, _dir, mut reg) in registries() {
+        let digest = |c: char| format!("sha256:{}", c.to_string().repeat(64));
+        let who = "anna@ward-3";
+        let full = |v: &str, d: &str, class: &str| {
+            serde_json::json!({
+                "name": "fusion", "version": v, "kind": "head", "digest": d, "task": "axis:body_part",
+                "encoders": [{"digest": digest('e')}], "threshold": 0.9,
+                "tested": [{"claim": "E1", "value": 0.997, "bound": 0.996, "n": 100, "evidence": "run-1"}],
+                "speed": {"cpu": {"stacks_per_second": 20.0, "hardware": "64 cores", "evidence": "run-2"},
+                          "gpu": {"stacks_per_second": 100.0, "hardware": "a card", "evidence": "run-2"}},
+                "gpu": "optional",
+                "equivalence": {"class": class, "tolerance": null, "set": "blocks", "evidence": "run-2"},
+                "intended_use": "body part", "limits": ["MR only"],
+            })
+        };
+        model::register(
+            &mut reg,
+            &serde_json::json!({"name": "tiny", "version": "1", "kind": "encoder", "digest": digest('e'), "task": "features:image"}),
+            who,
+        )
+        .unwrap();
+        // the card's new fields, as the contract has them
+        for (field, bad, what) in [
+            ("gpu", serde_json::json!("maybe"), "gpu is none"),
+            (
+                "equivalence",
+                serde_json::json!({"class": "IV", "set": "s", "evidence": "e"}),
+                "equivalence.class",
+            ),
+            (
+                "tested",
+                serde_json::json!([{"claim": "E1", "value": 1}]),
+                "evidence run",
+            ),
+            (
+                "speed",
+                serde_json::json!({"gpu": {"stacks_per_second": 1, "hardware": "h", "evidence": "e"}}),
+                "speed.cpu",
+            ),
+            (
+                "speed",
+                serde_json::json!({"cpu": {"stacks_per_second": 0, "hardware": "h", "evidence": "e"}}),
+                "above 0",
+            ),
+        ] {
+            let mut c = full("x", &digest('8'), "I");
+            c[field] = bad.clone();
+            let e = model::register(&mut reg, &c, who).unwrap_err();
+            assert!(
+                matches!(&e, Error::Invalid(m) if m.contains(what)),
+                "{name}: {field} {bad}: {e:?}"
+            );
+        }
+        let one = model::register(&mut reg, &full("1", &digest('1'), "I"), who).unwrap();
+        // no label set named: the one thing the card lacks
+        assert_eq!(one.missing(), ["trained_on"], "{name}");
+        let two = model::register(&mut reg, &full("2", &digest('2'), "III"), who).unwrap();
+        assert_eq!(
+            model::chosen(reg.store(), "axis:body_part", "site").unwrap(),
+            None,
+            "{name}: nothing answers before a check"
+        );
+        // the equivalence classes, each answer read at its model's threshold
+        let p = |stack: i64, value: &str, conf: f64| Proposal {
+            stack_id: stack,
+            axis: "body_part".into(),
+            value: value.into(),
+            probabilities: [(value.to_string(), conf), ("other".to_string(), 1.0 - conf)]
+                .into_iter()
+                .collect(),
+            model_id: Some(one.id),
+            model_digest: None,
+            note: None,
+        };
+        let cpu = [p(1, "brain", 0.97), p(2, "spine", 0.93)];
+        let class = |reg: &mut nils_registry::Registry, m: &model::Model, gpu: &[Proposal]| {
+            model::equivalence(reg.store(), m, &cpu, gpu).unwrap()
+        };
+        let same = class(
+            &mut reg,
+            &one,
+            &[p(1, "brain", 0.9704), p(2, "spine", 0.93)],
+        );
+        assert_eq!(same["class"], "I", "{name}: {same}");
+        let unsure = class(&mut reg, &one, &[p(1, "brain", 0.97), p(2, "spine", 0.85)]);
+        assert_eq!(
+            (unsure["class"].as_str(), unsure["changes"].as_i64()),
+            (Some("III"), Some(1)),
+            "{name}: {unsure}"
+        );
+        let flipped = class(&mut reg, &one, &[p(1, "spine", 0.97), p(2, "spine", 0.93)]);
+        assert_eq!(
+            (flipped["class"].clone(), flipped["flips"].as_i64()),
+            (serde_json::Value::Null, Some(1)),
+            "{name}: {flipped}"
+        );
+        let apart = model::equivalence(reg.store(), &one, &cpu, &[p(9, "brain", 0.97)]);
+        assert!(matches!(apart, Err(Error::Invalid(_))), "{name}: {apart:?}");
+        // admission: a class worse than the card's is a failed check
+        let check = |eq: serde_json::Value| serde_json::json!({"suite": "s", "passed": true, "checks": [{"name": "c", "passed": true}], "equivalence": eq});
+        let refused = model::admit(&mut reg, one.id, &check(unsure.clone()), who).unwrap();
+        assert_eq!(refused.state, "registered", "{name}");
+        let failed: Vec<&serde_json::Value> = refused.check.as_ref().unwrap()["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|c| c["passed"] == false)
+            .collect();
+        assert_eq!(failed.len(), 1, "{name}: {failed:?}");
+        assert_eq!(failed[0]["name"], "cpu_gpu_equivalence", "{name}");
+        let mut other_file = same.clone();
+        other_file["digest"] = serde_json::json!(digest('9'));
+        assert!(
+            matches!(model::admit(&mut reg, one.id, &check(other_file), who), Err(Error::Invalid(m)) if m.contains("the file that ships")),
+            "{name}"
+        );
+        let one = model::admit(&mut reg, one.id, &check(same), who).unwrap();
+        assert_eq!(one.state, "admitted", "{name}");
+        let two = model::admit(&mut reg, two.id, &check(unsure), who).unwrap();
+        assert_eq!(
+            two.state, "admitted",
+            "{name}: class III on a class III card"
+        );
+        // the default: the newest admitted, then the newest promoted
+        let by = |reg: &mut nils_registry::Registry| {
+            let c = model::chosen(reg.store(), "axis:body_part", "site")
+                .unwrap()
+                .unwrap();
+            (c.model.id, c.by)
+        };
+        assert_eq!(by(&mut reg), (two.id, "admitted"), "{name}");
+        model::promote(&mut reg, one.id, who, None, None).unwrap();
+        assert_eq!(by(&mut reg), (one.id, "promoted"), "{name}");
+        model::promote(&mut reg, two.id, who, None, None).unwrap();
+        assert_eq!(
+            by(&mut reg),
+            (two.id, "promoted"),
+            "{name}: none retired, the newest answers"
+        );
+        // a certificate names the first: it is the default
+        let store = reg.store();
+        let cert = store
+            .insert(
+                &Insert::new(
+                    table("certificate"),
+                    &["sample", "model_ids", "result", "created_by", "created_at"],
+                )
+                .returning(&["id"]),
+                &[vec![
+                    Param::from("selection:s@1"),
+                    Param::from(format!("[{}]", one.id)),
+                    Param::from("{}"),
+                    Param::from(who),
+                    Param::from("2026-10-13T00:00:00Z"),
+                ]],
+            )
+            .unwrap()[0]
+            .int(0)
+            .unwrap();
+        let c = model::chosen(reg.store(), "axis:body_part", "site")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (c.model.id, c.by, c.certificate_id),
+            (one.id, "certificate", Some(cert)),
+            "{name}"
+        );
+        // the site chooses the second, audited; then back to the default
+        let chose = model::choose(&mut reg, two.id, who, Some("faster")).unwrap();
+        assert_eq!(
+            (chose.model.id, chose.by, chose.why.as_deref()),
+            (two.id, "site", Some("faster")),
+            "{name}"
+        );
+        assert_eq!(
+            model::chosen_ids(reg.store())
+                .unwrap()
+                .into_iter()
+                .collect::<Vec<_>>(),
+            [two.id],
+            "{name}"
+        );
+        let back = model::unchoose(&mut reg, "axis:body_part", "site", who, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!((back.model.id, back.by), (one.id, "certificate"), "{name}");
+        let moves: Vec<String> = model::events(reg.store(), two.id)
+            .unwrap()
+            .iter()
+            .filter_map(|e| e["transition"].as_str().map(str::to_string))
+            .collect();
+        assert!(
+            moves.ends_with(&["chosen".to_string(), "unchosen".to_string()]),
+            "{name}: {moves:?}"
+        );
+        // a chosen model that is retired since answers no more
+        model::choose(&mut reg, two.id, who, None).unwrap();
+        model::retire(&mut reg, two.id, who, None).unwrap();
+        assert_eq!(by(&mut reg), (one.id, "certificate"), "{name}");
+        let e = model::choose(&mut reg, two.id, who, None).unwrap_err();
+        assert!(
+            matches!(&e, Error::Refused(m) if m.contains("retired")),
+            "{name}: {e:?}"
+        );
+        assert!(
+            matches!(
+                model::unchoose(&mut reg, "axis:nothing", "site", who, None),
+                Err(Error::Unknown(_))
+            ),
+            "{name}"
+        );
     }
 }

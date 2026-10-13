@@ -4418,10 +4418,63 @@ fn routed(
                 state: query.get("state").map(String::as_str),
             };
             let models = nils_registry::model::list(registry.store(), &filter)?;
+            // record 55 D4: which of them answers its task and slot now
+            let chosen = nils_registry::model::chosen_ids(registry.store())?;
             Ok(Reply::ok(serde_json::json!({
                 "count": models.len(),
-                "models": models.iter().map(nils_registry::model::Model::to_json).collect::<Vec<_>>(),
+                "models": models
+                    .iter()
+                    .map(|m| nils_registry::model::to_json_with(m, &chosen))
+                    .collect::<Vec<_>>(),
             })))
+        }
+        // Record 55 D4: each task and slot, its models and the one chosen.
+        ["api", "models", "tasks"] if get => Ok(Reply::ok(nils_registry::model::tasks_json(
+            registry.store(),
+            query.get("task").map(String::as_str),
+        )?)),
+        ["api", "models", "choose"] if post => {
+            let doc = json_body(body)?;
+            let why = doc["why"].as_str().filter(|w| !w.trim().is_empty());
+            let (task, slot) = match &doc["model"] {
+                serde_json::Value::Null => {
+                    let task = doc["task"].as_str().ok_or_else(|| {
+                        Reply::error(
+                            400,
+                            "model: the model to choose, or null with task (and slot) to send a task back to its default",
+                        )
+                    })?;
+                    let slot = doc["slot"].as_str().unwrap_or("site");
+                    nils_registry::model::unchoose(registry, task, slot, principal, why)
+                        .map_err(model_err)?;
+                    (task.to_string(), slot.to_string())
+                }
+                reference => {
+                    let reference = reference
+                        .as_i64()
+                        .map(|i| i.to_string())
+                        .or_else(|| reference.as_str().map(str::to_string))
+                        .ok_or_else(|| {
+                            Reply::error(400, "model: an id, a digest or name@version")
+                        })?;
+                    let Some(m) = nils_registry::model::resolve(registry.store(), &reference)?
+                    else {
+                        return Err(Reply::error(404, format!("no model {reference}")));
+                    };
+                    let done = nils_registry::model::choose(registry, m.id, principal, why)
+                        .map_err(model_err)?;
+                    (done.model.task, done.model.slot)
+                }
+            };
+            let doc = nils_registry::model::tasks_json(registry.store(), Some(&task))?;
+            let entry = doc["tasks"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find(|t| t["slot"] == slot.as_str())
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            Ok(Reply::ok(entry))
         }
         ["api", "models"] if post => {
             let doc = json_body(body)?;
@@ -4456,15 +4509,12 @@ fn routed(
                 doc["why"].as_str(),
             )
             .map_err(model_err)?;
+            // record 55 D4: a promotion retires none; the two members stay
+            // for a reader of version 7, always empty
             Ok(Reply::ok(serde_json::json!({
                 "model": done.model.to_json(),
-                // the first, as before, and since record 55 E2 every one
-                "retired": done.retired.first().map(nils_registry::model::Model::to_json),
-                "retired_models": done
-                    .retired
-                    .iter()
-                    .map(nils_registry::model::Model::to_json)
-                    .collect::<Vec<_>>(),
+                "retired": null,
+                "retired_models": [],
             })))
         }
         ["api", "models", _, "retire"] if post => {
@@ -5182,9 +5232,9 @@ pub(crate) fn door(method: &str, segs: &[&str]) -> (Need, Detail) {
         ("GET", ["api", "models"]) | ("GET", ["api", "models", _]) => {
             (Need::One("models:see"), Plain)
         }
-        ("POST", ["api", "models"]) | ("POST", ["api", "models", _, _]) => {
-            (Need::One("models:work"), Plain)
-        }
+        ("POST", ["api", "models"])
+        | ("POST", ["api", "models", "choose"])
+        | ("POST", ["api", "models", _, _]) => (Need::One("models:work"), Plain),
         // record 42: the campaigns, the label sets and the commit by filter
         (m, s) if crate::campaigns::door(m, s).is_some() => {
             crate::campaigns::door(m, s).unwrap_or((Need::Any, Plain))
@@ -5702,6 +5752,8 @@ pub(crate) fn doors_list() -> Vec<String> {
         "POST /api/decisions/{id}/withdraw",
         "GET /api/models",
         "POST /api/models",
+        "GET /api/models/tasks",
+        "POST /api/models/choose",
         "GET /api/models/{id}",
         "POST /api/models/{id}/admit",
         "POST /api/models/{id}/promote",
@@ -6448,6 +6500,24 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
             "one model",
             "Registering a model",
             "Registered a model",
+        ),
+        row(
+            "GET /api/models/tasks",
+            false,
+            false,
+            "bounded",
+            "every model",
+            "Reading each task's models",
+            "Read each task's models",
+        ),
+        row(
+            "POST /api/models/choose",
+            true,
+            false,
+            "free",
+            "one task",
+            "Choosing a task's model",
+            "Chose a task's model",
         ),
         row(
             "GET /api/models/{id}",

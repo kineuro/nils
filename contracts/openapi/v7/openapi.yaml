@@ -6,9 +6,11 @@
 # The model registry (S2, D15). A model whose answers become registry facts
 # is registered by the digest of its canonical artifact with its card
 # (contracts/model/v1), admitted by a check that passed, promoted, which is
-# refused unless it was admitted and retires the model promoted before it in
-# the same task and slot, and retired; every transition is an event and an
-# audit row. GET /api/models and GET /api/models/{id} under models:see, and
+# refused unless it was admitted (and, until record 55 D4, retired the model
+# promoted before it in the same task and slot), and retired; every
+# transition is an event and an audit row. Record 55 D4, added in place:
+# several admitted or promoted models answer a task and slot, and the site
+# chooses the one that does (GET /api/models/tasks, POST /api/models/choose). GET /api/models and GET /api/models/{id} under models:see, and
 # POST /api/models, POST /api/models/{id}/admit, /promote and /retire under
 # models:work, two grants of suite contract version 3. A model's answer
 # applied to a review item names the registered model in X-Nils-Actor and is
@@ -638,7 +640,7 @@ paths:
   /api/models:
     get:
       summary: The registered models, oldest first (nils model list), since version 7 (record 42 S2)
-      description: "Each model as GET /api/models/{id} answers it, without its events. Under models:see."
+      description: "Each model as GET /api/models/{id} answers it, without its events, and `chosen` (record 55 D4, added in place): whether it is the model chosen for its task and slot now. Under models:see."
       parameters:
         - {name: task, in: query, schema: {type: string}, description: "Only this task, such as axis:body_part"}
         - {name: slot, in: query, schema: {type: string}, description: "Only this slot: site or cohort:<name>"}
@@ -657,10 +659,31 @@ paths:
         "400": {description: "Not a card: a field missing, malformed, or a head without its encoder"}
         "404": {description: "The encoder or the cohort the card names is not registered"}
         "409": {description: "The digest is registered already, or the name and version are taken, or the kind is served"}
+  /api/models/tasks:
+    get:
+      summary: Each task and slot, its models and the one chosen (nils model chosen --json), since record 55 D4
+      description: "Added in place. `{tasks: [{task, slot, chosen, models}]}`: every task and slot a model is registered for; `chosen` is the model that answers it now, `{model_id, name, version, by, certificate_id, chosen_by, chosen_at, why}`, or null where none may answer: `by` is `site` where a site's admin chose it (while it is admitted or promoted, and a cascade's parts stand), else `certificate` where the newest recorded certificate names one of the task's admitted or promoted models, else `promoted`, the one promoted last, else `admitted`, the newest admitted that is no cascade. `models` is every model registered there, newest first, retired included, each as GET /api/models answers it. `task` narrows it to one task. Under models:see."
+      parameters:
+        - {name: task, in: query, schema: {type: string}}
+      responses:
+        "200": {description: "{tasks: [{task, slot, chosen, models}]}"}
+  /api/models/choose:
+    post:
+      summary: Choose the model that answers its task and slot, or send a task back to its default (nils model choose), since record 55 D4
+      description: "Added in place. `{model, why}` chooses a model, by id, digest or name@version: refused (409) unless it is admitted or promoted, and for a cascade with a retired part. `{task, slot, model: null, why}` sends the task and slot (site by default) back to its default, the model a recorded certificate names, else the one promoted last, else the newest admitted. Choosing is audited (model.choose) and kept on the models' history as `chosen` and `unchosen` events; a run takes the chosen model (body part's step among them). Answers the task's entry as GET /api/models/tasks does. Under models:work."
+      requestBody:
+        content:
+          application/json:
+            schema: {type: object, properties: {model: {type: [integer, string, "null"]}, task: {type: string}, slot: {type: string}, why: {type: string}}}
+      responses:
+        "200": {description: "{task, slot, chosen, models}"}
+        "400": {description: "Neither a model nor a task"}
+        "404": {description: "No such model, or no model registered for the task and slot"}
+        "409": {description: "Neither admitted nor promoted, or a cascade with a retired part"}
   /api/models/{id}:
     get:
       summary: One registered model, with its card and its events (nils model show)
-      description: "The model of contracts/model/v1/lifecycle.schema.json: identity, card, state, the check that admitted it, who moved it and when, the review item a promotion named, and every transition as an event. Under models:see."
+      description: "The model of contracts/model/v1/lifecycle.schema.json: identity, card, state, the check that admitted it, who moved it and when, the review item a promotion named, and every transition as an event. Record 55 D4 and A5, added in place: `complete` and `missing`, whether its card states everything a served model's does (the label set it was trained on, its tested claims, its speed on a CPU and, unless its gpu is none, on a GPU, its gpu need, its equivalence unless its gpu is none, its intended use and its limits) and what it lacks; and `equivalence_measured`, the CPU and GPU equivalence its admitting check measured. Under models:see."
       parameters: [{name: id, in: path, required: true, schema: {type: integer}}]
       responses:
         "200": {description: "The model with its events"}
@@ -668,7 +691,7 @@ paths:
   /api/models/{id}/admit:
     post:
       summary: Record a check on a model (nils model admit)
-      description: "The body is a check (contracts/model/v1/lifecycle.schema.json#/$defs/check): suite, passed and checks, each a name and whether it passed, with value and threshold where there are; passed must agree with the checks. One that passed admits a registered model and stays on it as the check that admitted it; one that failed is kept as an event and moves nothing. A promoted or retired model is not checked again. Under models:work; an audit row."
+      description: "The body is a check (contracts/model/v1/lifecycle.schema.json#/$defs/check): suite, passed and checks, each a name and whether it passed, with value and threshold where there are; passed must agree with the checks. One that passed admits a registered model and stays on it as the check that admitted it; one that failed is kept as an event and moves nothing. A promoted or retired model is not checked again. Record 55 A5, added in place: for a model whose card's gpu is optional or required, the check carries `equivalence`, the class of the difference between its CPU and GPU answers measured on a fixed set (nils model equivalence, or nils model admit --cpu --gpu); the engine adds the check `cpu_gpu_equivalence`, which fails where none is measured, where the card states no class, or where the measured class is worse than the card's (I better than II better than III), and the check then admits nothing. An equivalence measured on another file than the model's (`digest`) is refused (400). Under models:work; an audit row."
       parameters: [{name: id, in: path, required: true, schema: {type: integer}}]
       requestBody:
         content:
@@ -682,16 +705,16 @@ paths:
   /api/models/{id}/promote:
     post:
       summary: Promote a model in its task and slot (nils model promote)
-      description: "Refused unless the model was admitted by a check that passed. The model promoted before it in the same task and slot is retired, so a slot holds at most one promoted model; since record 55 E2 a cascade retires none of its parts and a part none of the cascades that read it. review_item names the item a person accepted to promote it, when one did. Under models:work; an audit row."
+      description: "Refused unless the model was admitted by a check that passed. Since record 55 D4 (changed in place) a promotion retires nothing: several models are promoted in a task and slot, and the site chooses the one that answers (POST /api/models/choose). review_item names the item a person accepted to promote it, when one did. Under models:work; an audit row."
       parameters: [{name: id, in: path, required: true, schema: {type: integer}}]
       requestBody:
         content:
           application/json:
             schema: {type: object, properties: {review_item: {type: integer}, why: {type: string}}}
       responses:
-        "200": {description: "{model, retired: model | null, retired_models: [model]}: retired_models (record 55 E2, added in place) names every model the promotion retired, by id, since a cascade and the head it reads are retired together; retired is the first of them, or null, as before"}
+        "200": {description: "{model, retired: null, retired_models: []}: since record 55 D4 a promotion retires none, and the two members stay for a reader of this version"}
         "404": {description: No such model}
-        "409": {description: "Not admitted, or promoted or retired already; since record 55 E2 also a cascade with a retired part, and a promotion that would retire a part of an admitted or promoted cascade, which is named"}
+        "409": {description: "Not admitted, or promoted or retired already; since record 55 E2 also a cascade with a retired part"}
   /api/models/{id}/retire:
     post:
       summary: Retire a model (nils model retire)
@@ -2262,6 +2285,27 @@ paths:
         "201": {description: "{id, name, version, kind, what, source, campaign_id, handle_id, epoch, pack_version, scheme_digest, sealed, training, rows, digest, place_id, path, created_by, created_at}, and left_out_sealed with for_training"}
         "400": {description: "No axis without for_training, sealed in the body, or staged beside for_training"}
         "409": {description: No export place is declared}
+  /api/label-sets/register:
+    post:
+      summary: Register a label set made outside the engine (record 55 E6; nils labels register; models:work)
+      description: "Added in place. `{name, what?, labels_tsv, provenance_json, sha256, place?}`: the set's labels.tsv and provenance.json as text, and `sha256`, the sha256 of every file of the set by its plain name, labels.tsv and provenance.json among them, which must be theirs. labels.tsv's header is study_instance_uid, series_instance_uid, stack_key, sop_instance_uid, what, value, author_kind and author, tab separated: its rows are keyed by DICOM identity, never by registry ids, so the set means the same in any registry. A row names a stack by its study, series and stack key, and may name one SOP Instance UID of it; a row with no stack key is the whole series, one with no series the whole study; what, author_kind and author are required and an empty value is not sure. The rows are put in canonical order (the header, then the rows sorted bytewise, each line ended by a line feed) and the set's digest is the sha256 of that canonical labels.tsv, which a model's card names in trained_on. A set any row of which is of a sample sealed now, compared by DICOM identity (the study, the series, the series and stack key, or a SOP Instance UID of a sealed stack), is refused (409). Written into `labels/<name>/v<version>` of the export place, as POST /api/label-sets writes (labels.tsv canonical, provenance.json as given, SHA256SUMS of the files given), and recorded as kind `outside`; `what` is the rows' one `what` unless given. Its `training` is read under the seals in force by DICOM identity, and GET /api/label-sets/{id} withholds the rows of a sample sealed since. Audited as labels.register."
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, labels_tsv, provenance_json, sha256]
+              properties:
+                name: {type: string}
+                what: {type: string}
+                labels_tsv: {type: string}
+                provenance_json: {type: string}
+                sha256: {type: object, additionalProperties: {type: string}}
+                place: {type: string}
+      responses:
+        "201": {description: "The label set, as GET /api/label-sets/{id} names it without its files"}
+        "400": {description: "A sha256 that is not its file's, provenance that is not a JSON object, or a labels.tsv that does not read"}
+        "409": {description: "A row of a sample sealed now, or no export place is declared"}
   /api/label-sets/{id}:
     get:
       summary: One label set, with its files (record 42 S7; campaigns:see or review:see)

@@ -5543,7 +5543,8 @@ fn a_model_is_registered_by_digest_and_named_where_it_answered() {
     assert_eq!(admitted["check"]["passed"], true, "{admitted}");
     ok(&["model", "promote", "base-head@1"]);
 
-    // a second head in the slot: its promotion retires the first
+    // a second head in the slot: since record 55 D4 its promotion retires
+    // none, and the first is retired by hand
     ok(&[
         "model",
         "register",
@@ -5560,17 +5561,12 @@ fn a_model_is_registered_by_digest_and_named_where_it_answered() {
         "--json",
     ]));
     assert_eq!(promoted["model"]["state"], "promoted", "{promoted}");
-    assert_eq!(promoted["retired"]["version"], "1", "{promoted}");
     assert_eq!(
-        promoted["retired_models"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|m| m["version"].clone())
-            .collect::<Vec<_>>(),
-        ["1"],
+        promoted["retired_models"],
+        serde_json::json!([]),
         "{promoted}"
     );
+    ok(&["model", "retire", "base-head@1", "--why", "replaced"]);
     let task = format!("axis:{asked_axis}");
     let listed = doc(ok(&[
         "model", "list", "--task", &task, "--state", "promoted", "--json",

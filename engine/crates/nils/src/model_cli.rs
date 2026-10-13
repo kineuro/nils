@@ -3,11 +3,17 @@
 //! `nils model` (record 42 S2, D15): the model registry at the keyboard.
 //! `register` takes a card (`contracts/model/v1/card.schema.json`) and, with
 //! `--artifact`, checks the card's digest against the file or fills it in;
-//! `admit` records a check; `promote` puts a model in its task and slot and
-//! retires the one before it; `retire`; `list` and `show`. Each writes the
-//! same rows and audit rows as the doors under `/api/models`. `keep`
-//! (record 50) copies a registered model's artifact into the working place
-//! a run reads models from, so a pipeline's model input finds it.
+//! `admit` records a check; `promote` promotes a model in its task and slot
+//! (since record 55 D4 retiring none); `retire`; `list` and `show`. Each
+//! writes the same rows and audit rows as the doors under `/api/models`.
+//! `keep` (record 50) copies a registered model's artifact into the working
+//! place a run reads models from, so a pipeline's model input finds it.
+//!
+//! Record 55 D4 and A5: `choose` sets the model that answers a task and
+//! slot, or sends it back to its default, and `chosen` lists each task's;
+//! `equivalence` measures the class of the difference between a model's
+//! answers on a CPU and on a GPU from two runs over one fixed set, and
+//! `admit --cpu --gpu` records it with the check.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -42,12 +48,72 @@ pub(crate) enum ModelCommand {
         /// The check, a JSON file (suite, passed, checks), or - for standard input
         #[arg(long, value_name = "FILE")]
         check: PathBuf,
+        /// The CPU run of the equivalence set, run:<id> or a results.json;
+        /// with --gpu, the measured class joins the check (record 55 A5)
+        #[arg(long, value_name = "RUN", requires = "gpu")]
+        cpu: Option<String>,
+        /// The GPU run of the same set
+        #[arg(long, value_name = "RUN", requires = "cpu")]
+        gpu: Option<String>,
+        /// The equivalence set's name, kept with the measure
+        #[arg(long, value_name = "NAME")]
+        set: Option<String>,
         /// Machine-readable output
         #[arg(long)]
         json: bool,
     },
-    /// Promote an admitted model in its task and slot; the model promoted
-    /// there before is retired
+    /// Measure the class of the difference between a model's answers on a
+    /// CPU and on a GPU, from two runs over one fixed set (record 55 A5)
+    Equivalence {
+        /// The model: its id, its digest (sha256:...) or name@version
+        model: String,
+        /// The CPU run: run:<id>, or a results.json
+        #[arg(long, value_name = "RUN")]
+        cpu: String,
+        /// The GPU run: run:<id>, or a results.json
+        #[arg(long, value_name = "RUN")]
+        gpu: String,
+        /// The equivalence set's name, kept with the measure
+        #[arg(long, value_name = "NAME")]
+        set: Option<String>,
+        /// Machine-readable output
+        #[arg(long)]
+        json: bool,
+    },
+    /// Choose the model that answers its task and slot, or with --default
+    /// send a task back to its default: the model a recorded certificate
+    /// names, else the one promoted last, else the newest admitted
+    Choose {
+        /// The model: its id, its digest (sha256:...) or name@version
+        #[arg(required_unless_present = "default", conflicts_with = "default")]
+        model: Option<String>,
+        /// Send this task back to its default
+        #[arg(long, requires = "task")]
+        default: bool,
+        /// The task, with --default
+        #[arg(long, value_name = "TASK")]
+        task: Option<String>,
+        /// The slot, with --default: site or cohort:<name>
+        #[arg(long, value_name = "SLOT", default_value = "site")]
+        slot: String,
+        /// Why, in the person's own words
+        #[arg(long, value_name = "TEXT")]
+        why: Option<String>,
+        /// Machine-readable output
+        #[arg(long)]
+        json: bool,
+    },
+    /// Every task and slot, the model that answers it and why
+    Chosen {
+        /// Only this task
+        #[arg(long, value_name = "TASK")]
+        task: Option<String>,
+        /// Machine-readable output
+        #[arg(long)]
+        json: bool,
+    },
+    /// Promote an admitted model in its task and slot; since record 55 D4 it
+    /// retires none, and the site chooses which model answers
     Promote {
         /// The model: its id, its digest (sha256:...) or name@version
         model: String,
@@ -208,16 +274,128 @@ pub(crate) fn model_command(home: &Home, cmd: ModelCommand) -> Result<(), Exit> 
             }
             Ok(())
         }
-        ModelCommand::Admit { model, check, json } => {
-            let check = read_json(&check, "check")?;
+        ModelCommand::Admit {
+            model,
+            check,
+            cpu,
+            gpu,
+            set,
+            json,
+        } => {
+            let mut check = read_json(&check, "check")?;
             let m = resolved(&mut registry, &model)?;
+            if let (Some(cpu), Some(gpu)) = (cpu, gpu) {
+                let measured = measure(&mut registry, &m, &cpu, &gpu, set.as_deref())?;
+                if !check.is_object() {
+                    return Err(usage(
+                        "the check is a JSON object: suite, passed and checks",
+                    ));
+                }
+                check["equivalence"] = measured;
+            }
             let m = model::admit(&mut registry, m.id, &check, &who).map_err(model_err)?;
+            let recorded = m.check.clone().unwrap_or_default();
             if json {
                 print_json(&m.to_json());
-            } else if m.state == "admitted" && check["passed"] == true {
+            } else if m.state == "admitted" && recorded["passed"] == true {
                 println!("admitted {}", line(&m));
             } else {
                 println!("the check did not pass; {} stays {}", m.label(), m.state);
+                for c in recorded["checks"].as_array().into_iter().flatten() {
+                    if c["passed"] == false {
+                        println!(
+                            "  {} failed{}",
+                            c["name"].as_str().unwrap_or("?"),
+                            c["why"]
+                                .as_str()
+                                .map(|w| format!(": {w}"))
+                                .unwrap_or_default()
+                        );
+                    }
+                }
+            }
+            Ok(())
+        }
+        ModelCommand::Equivalence {
+            model,
+            cpu,
+            gpu,
+            set,
+            json,
+        } => {
+            let m = resolved(&mut registry, &model)?;
+            let measured = measure(&mut registry, &m, &cpu, &gpu, set.as_deref())?;
+            if json {
+                print_json(&measured);
+            } else {
+                println!(
+                    "{}: class {} on {} answers ({} changed between a value and not sure, {} from one value to another; probabilities at most {} apart); its card states {}",
+                    m.label(),
+                    measured["class"].as_str().unwrap_or("none"),
+                    measured["n"],
+                    measured["changes"],
+                    measured["flips"],
+                    measured["max_difference"],
+                    m.card["equivalence"]["class"]
+                        .as_str()
+                        .unwrap_or("no class"),
+                );
+            }
+            Ok(())
+        }
+        ModelCommand::Choose {
+            model,
+            default,
+            task,
+            slot,
+            why,
+            json,
+        } => {
+            let done = if default {
+                let task = task.unwrap_or_default();
+                model::unchoose(&mut registry, &task, &slot, &who, why.as_deref())
+                    .map_err(model_err)?
+            } else {
+                let m = resolved(&mut registry, model.as_deref().unwrap_or_default())?;
+                Some(model::choose(&mut registry, m.id, &who, why.as_deref()).map_err(model_err)?)
+            };
+            if json {
+                print_json(&serde_json::json!({
+                    "chosen": done.as_ref().map(model::Chosen::as_json),
+                }));
+            } else {
+                match &done {
+                    Some(c) => println!(
+                        "{} answers {} {} ({})",
+                        c.model.label(),
+                        c.model.task,
+                        c.model.slot,
+                        chosen_words(c)
+                    ),
+                    None => println!("no model answers now"),
+                }
+            }
+            Ok(())
+        }
+        ModelCommand::Chosen { task, json } => {
+            let doc = model::tasks_json(registry.store(), task.as_deref())?;
+            if json {
+                print_json(&doc);
+                return Ok(());
+            }
+            let tasks = doc["tasks"].as_array().cloned().unwrap_or_default();
+            if tasks.is_empty() {
+                println!("no model is registered");
+            }
+            for t in &tasks {
+                let task = t["task"].as_str().unwrap_or("");
+                let slot = t["slot"].as_str().unwrap_or("");
+                match model::chosen(registry.store(), task, slot)? {
+                    Some(c) => {
+                        println!("{task} {slot}  {}  ({})", c.model.label(), chosen_words(&c))
+                    }
+                    None => println!("{task} {slot}  no model answers"),
+                }
             }
             Ok(())
         }
@@ -233,14 +411,11 @@ pub(crate) fn model_command(home: &Home, cmd: ModelCommand) -> Result<(), Exit> 
             if json {
                 print_json(&serde_json::json!({
                     "model": done.model.to_json(),
-                    "retired": done.retired.first().map(Model::to_json),
-                    "retired_models": done.retired.iter().map(Model::to_json).collect::<Vec<_>>(),
+                    "retired": null,
+                    "retired_models": [],
                 }));
             } else {
                 println!("promoted {}", line(&done.model));
-                for old in &done.retired {
-                    println!("retired {}", line(old));
-                }
             }
             Ok(())
         }
@@ -350,6 +525,152 @@ pub(crate) fn model_command(home: &Home, cmd: ModelCommand) -> Result<(), Exit> 
             Ok(())
         }
     }
+}
+
+/// Why a chosen model answers, in words.
+fn chosen_words(c: &model::Chosen) -> String {
+    match c.by {
+        "site" => format!(
+            "chosen by {}{}",
+            c.chosen_by.as_deref().unwrap_or("the site"),
+            c.why
+                .as_deref()
+                .map(|w| format!(": {w}"))
+                .unwrap_or_default()
+        ),
+        "certificate" => format!(
+            "the default: certificate {} names it",
+            c.certificate_id.unwrap_or_default()
+        ),
+        "promoted" => "the default: the one promoted last, as no certificate names one".into(),
+        _ => "the default: the newest admitted, as none is certified or promoted".into(),
+    }
+}
+
+/// The proposals a run said, by `run:<id>` (read again from its output
+/// folder, and its units' folders) or a `results.json`; with the run's
+/// device, and the models it was given.
+/// What a run said, the run it was, and the models it was given.
+type Said = (
+    Vec<nils_registry::proposals::Proposal>,
+    serde_json::Value,
+    Option<Vec<i64>>,
+);
+
+fn answers_of(registry: &mut nils_registry::Registry, source: &str) -> Result<Said, Exit> {
+    let read = |path: &Path| -> Result<Vec<nils_registry::proposals::Proposal>, Exit> {
+        let text =
+            std::fs::read_to_string(path).map_err(|e| usage(format!("{}: {e}", path.display())))?;
+        let doc: serde_json::Value = serde_json::from_str(&text)
+            .map_err(|e| usage(format!("{} is not JSON: {e}", path.display())))?;
+        nils_registry::proposals::parse(&doc).map_err(|e| usage(e.to_string()))
+    };
+    let Some(id) = source.strip_prefix("run:") else {
+        let path = Path::new(source);
+        return Ok((
+            read(path)?,
+            serde_json::json!({ "file": path.file_name().map(|n| n.to_string_lossy().to_string()) }),
+            None,
+        ));
+    };
+    let id: i64 = id
+        .parse()
+        .map_err(|_| usage(format!("{source}: a run is run:<id>")))?;
+    let store = registry.store();
+    let d = store.dialect();
+    let t = nils_registry::schema::table("pipeline_run");
+    let sql = format!(
+        "SELECT r.device, {}, r.output, p.path, r.status FROM {} r LEFT JOIN {} p ON p.id = r.place_id WHERE r.id = {}",
+        d.text_of(t.column("model_ids").expect("model_ids")),
+        store.qualified("pipeline_run"),
+        store.qualified("place"),
+        d.param(1, nils_registry::schema::Type::Int),
+    );
+    let row = store
+        .query_opt(&sql, &[nils_registry::store::Param::Int(id)])?
+        .ok_or_else(|| usage(format!("no run {id}")))?;
+    let device = row.text(0)?.to_string();
+    let models: Vec<i64> = row
+        .opt_text(1)?
+        .and_then(|t| serde_json::from_str(t).ok())
+        .unwrap_or_default();
+    let (Some(output), Some(place)) = (row.opt_text(2)?, row.opt_text(3)?) else {
+        return Err(usage(format!("run {id} names no output folder")));
+    };
+    let status = row.text(4)?.to_string();
+    let out = Path::new(place).join(output);
+    let mut found = Vec::new();
+    let mut folders = vec![out.clone()];
+    if let Ok(entries) = std::fs::read_dir(&out) {
+        for e in entries.flatten() {
+            if e.file_type().is_ok_and(|f| f.is_dir()) {
+                folders.push(e.path());
+            }
+        }
+    }
+    folders.sort();
+    let mut any = false;
+    for f in folders {
+        let results = f.join("results.json");
+        if std::fs::symlink_metadata(&results).is_ok_and(|m| m.is_file()) {
+            any = true;
+            found.extend(read(&results)?);
+        }
+    }
+    if !any {
+        return Err(usage(format!(
+            "run {id} ({status}) left no results.json in its output folder"
+        )));
+    }
+    Ok((
+        found,
+        serde_json::json!({ "run": id, "device": device, "status": status }),
+        Some(models),
+    ))
+}
+
+/// Measure a model's CPU and GPU equivalence from two runs (record 55 A5):
+/// both runs must have been given the model where they are runs of the
+/// engine, the first on a CPU and the second on a GPU.
+fn measure(
+    registry: &mut nils_registry::Registry,
+    m: &Model,
+    cpu: &str,
+    gpu: &str,
+    set: Option<&str>,
+) -> Result<serde_json::Value, Exit> {
+    let (a, a_from, a_models) = answers_of(registry, cpu)?;
+    let (b, b_from, b_models) = answers_of(registry, gpu)?;
+    for (side, models, from, want_gpu) in [
+        ("--cpu", &a_models, &a_from, false),
+        ("--gpu", &b_models, &b_from, true),
+    ] {
+        if let Some(models) = models
+            && !models.contains(&m.id)
+        {
+            return Err(usage(format!(
+                "{side}: run {} was not given {} (model {})",
+                from["run"],
+                m.label(),
+                m.id
+            )));
+        }
+        if let Some(device) = from["device"].as_str() {
+            let on_gpu = device != "cpu";
+            if on_gpu != want_gpu {
+                return Err(usage(format!(
+                    "{side}: run {} ran on {device}; the CPU run is given as --cpu and the GPU run as --gpu",
+                    from["run"]
+                )));
+            }
+        }
+    }
+    let mut measured = model::equivalence(registry.store(), m, &a, &b).map_err(model_err)?;
+    measured["set"] = serde_json::json!(set);
+    measured["cpu"] = a_from;
+    measured["gpu"] = b_from;
+    measured["digest"] = serde_json::json!(m.digest);
+    Ok(measured)
 }
 
 /// A name as one path component a runtime's mount syntax takes: letters,

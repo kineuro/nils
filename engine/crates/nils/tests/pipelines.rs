@@ -7016,6 +7016,25 @@ x-nils:
         );
         assert!(!good);
         assert!(err.contains("is retired"), "{err}");
+
+        // record 55 D4 (T22): a retired model stays runnable, from the file
+        // kept while it served, so a past result can be run again
+        let again = lab.json(&[
+            "run",
+            "reads-coarse",
+            "--select",
+            "selection:every@1",
+            "--model",
+            "bp-coarse@r7",
+            "--json",
+        ]);
+        assert_eq!(again["status"], "done", "{again}");
+        assert_ne!(again["id"], run_id, "{again}");
+        let words = lab.podman_runs().pop().unwrap();
+        assert!(
+            pair(&words, "--volume", &format!("{folder}:/inputs/coarse:ro")),
+            "{words:?}"
+        );
     });
 }
 
