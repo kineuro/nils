@@ -1,0 +1,43 @@
+{
+ "run": "pack-0250-go",
+ "purpose": "p-go's wrong stacks and the full bad lists for pack 0.25.0 stored under both records, with the converted answers, parties and pack-stands records; sealed apart and unread until certificate 2's go decision",
+ "study": "studies/2026-10-04-pack-0250-go/grade.md",
+ "created": "2026-10-03T23:02:01Z",
+ "sealed": "2026-10-03T23:02:14Z",
+ "files": 25,
+ "bytes": 10067940,
+ "by_folder": {
+  ".": 1,
+  "rules": 3,
+  "scoring": 21
+ },
+ "manifest_sha256": "9a8d422c2805188a509c1be381b12e7a3bcf232ca7777944ac65eccf68548e66",
+ "per_stack_files_by_folder": {
+  "scoring/grade/g-primary/private/": 1,
+  "scoring/grade/g-sweep/private/": 1,
+  "scoring/parties/": 2
+ },
+ "sha256": {
+  "RUN.json": "511fe1435fac30f07689c0918efe7ebd0aa45b0c5aaaead103b6ecc601934eee",
+  "rules/views/fetch.out": "8a970bae7402ca6ba33d384978ba1bbd7c3b37b4283a7f8fba0dba906bce767d",
+  "rules/views/stack-ids.txt": "d694c9ae46a77338962a6baff3ea7b50819276dd70a76d27417cc4eead7313fa",
+  "rules/views/votes.tsv": "82266958967e7dfbaf8339624986250b8a64a27e3c6e725ce59e80adf6f1214c",
+  "scoring/grade/g-primary/grade.err": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "scoring/grade/g-primary/grade.log": "28a72397b7471cff67257c6cc5caae5b7a26a152ea975269fc7713f66e5418f4",
+  "scoring/grade/g-primary/grade7.json": "c8ca31cf61ffc0fc1b6ba5119737b87c8665b21d807e41dab1e11b3d59345314",
+  "scoring/grade/g-primary/private/bad-protocol-sweep-combined.tsv": "391ecfcab48f7fbc8bb44521f5023e49a815bbc338e515c888ee28adb62afb3e",
+  "scoring/grade/g-sweep/grade.err": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "scoring/grade/g-sweep/grade.log": "33fec40ab510fcce5a8e97b7577166b506c668e879fdb673a53fd1467f8cf191",
+  "scoring/grade/g-sweep/grade7.json": "7d09b9262fd4d58f70ee67b5cd3332e181dfeaeb7c92971bb0bb3f6f0d5781bc",
+  "scoring/grade/g-sweep/private/bad-protocol-sweep-combined.tsv": "ccc6afc1b7de9624b6b33c6c0a4f2670bad6ed079742c38c20fb071c129fac82",
+  "scoring/lines-primary-private/bad-localizers.tsv": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "scoring/lines-primary-private/bad-outside-p-go.tsv": "b156cac13cfaf53ed9b6d67444c7df4645f461e746e18739a5589a1293f585e8",
+  "scoring/lines-sweep-private/bad-localizers.tsv": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "scoring/lines-sweep-private/bad-outside-p-go.tsv": "8c9e6210ab1a08ca3fc9e0a1fdaa853e1a82a2f41877b395332949404a23c62e",
+  "scoring/p-go.stacks": "50bc24033377f0c377c8f3b514af8146c634cd15c213567707bf0e8016e770c7",
+  "scoring/primary/p-go-bad.tsv": "2000b39faee7dd1549302e9a685c167b1ad8e0af77849e59002c308f2016bc1a",
+  "scoring/stands-primary/scoring/corrections.jsonl": "6498f35d482aecb4496d35ac96c6f623beaba8ff221a0350421c28bfc4fafbf1",
+  "scoring/stands-sweep/scoring/corrections.jsonl": "6498f35d482aecb4496d35ac96c6f623beaba8ff221a0350421c28bfc4fafbf1",
+  "scoring/sweep/p-go-bad.tsv": "6d2dcf5fd7c484334e453c841fe418303bb7d8174c014c869b938d45507051fa"
+ }
+}

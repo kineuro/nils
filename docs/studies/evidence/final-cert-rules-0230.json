@@ -1,0 +1,42 @@
+{
+ "run": "final-cert-rules-0230",
+ "purpose": "Supplement to final-cert-read (never written): MRI pack 0.23.0's stored rules answers (the ask with all 13 axes) and stored votes on the final certificate's 3,750 sealed stacks (selection:final-cert@1), fetched on the NILS server as nils by Nima on 2026-10-02 (13:11:46Z to 13:11:53Z) with --unsealed-access; engine alpha.72 at the fetch (installed pack 0.23.0; the stored answers are job pack-0230, made by alpha.71); every stack's stored classification is job pack-0230, unchanged across the fetch; fetched after grade.md part 1 (35a70a8) and final-cert-read-corrections (8e408c1e) were committed and sealed",
+ "study": "studies/2026-10-01-final-certificate-read/grade.md",
+ "created": "2026-10-02T13:15:02Z",
+ "sealed": "2026-10-02T13:15:02Z",
+ "files": 25,
+ "bytes": 3614094,
+ "by_folder": {
+  ".": 3,
+  "rules": 22
+ },
+ "manifest_sha256": "a12345511251ee553c14a1e8941d6ae55f2e58c8673944944303259018afa91e",
+ "per_stack_files_by_folder": {},
+ "sha256": {
+  "RUN.json": "1f7f08653f547722a5b3c22a02ed285e51ad40922f905fe4168ca27e1813fc2c",
+  "SHA256SUMS": "2e4279694fecc0ece7d9f39d5176276ff0163a3a239902939df6b22cb2f1af06",
+  "fetch-server-final.sh": "c92947314ea8a2235fa634595a38d9f34e6addd3bb0e944687edeeb3c5664e15",
+  "rules/ask-run.json": "8847bb335a3cac0c79bbcac6c3b74571a54959828e87750fae64ec7576f890c2",
+  "rules/ask-validate.txt": "38c1bb73da5258bed4d3987782b601db93554e57e7d11804972fe289efee31e4",
+  "rules/engine.txt": "d1fb4ed04f9e368e3297f32f35e0bffb22c91ee6ba594811df6471f4f00c16f4",
+  "rules/explain.err": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "rules/explain.jsonl": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "rules/fetch.end": "722f8c43f97401e73d040dd82e1949f3bf2cb9011c852cf429a3c21d04148184",
+  "rules/fetch.err": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "rules/fetch.out": "2caa5b9f561217ff2dcc48923e436c03a8c151edbfae809b23aff3d2fbb30982",
+  "rules/fetch.start": "c32fdf7672fe58fea71750860b4452571afbc1911be5e9b7628123ad88cdacf7",
+  "rules/jobs-after.txt": "eb8e5e5dbf5b5c571e3d81780000f31f7bf897d53a14cd51c4b9e4e5b8032999",
+  "rules/jobs.txt": "eb8e5e5dbf5b5c571e3d81780000f31f7bf897d53a14cd51c4b9e4e5b8032999",
+  "rules/missing.txt": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+  "rules/pack-installed.txt": "27d3ab195fa9d16bfe7f02bd9f9eacc24c0a1b147cb47530ef7b873bd58c4d76",
+  "rules/purpose.txt": "a4816517d75d197a51723fcc1ceb7745a687f9a09465886663f3aadaa803067d",
+  "rules/reason.txt": "a4816517d75d197a51723fcc1ceb7745a687f9a09465886663f3aadaa803067d",
+  "rules/sealed-final.txt": "604b9a689a4f773d1385d4b33d701752ec0bb606b21fe9658b8023756c538d40",
+  "rules/sealed.txt": "604b9a689a4f773d1385d4b33d701752ec0bb606b21fe9658b8023756c538d40",
+  "rules/stack-ids.txt": "6e6b62434672404d6a82654fdcd8aa50f44ffc1d579290edaca149cd5c23ad29",
+  "rules/unfinished-jobs.txt": "ee6f70abca9bcb9768513e8323dcfc0d68cf580ce4b998fee3f9e0d935665d9d",
+  "rules/votes.err": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "rules/votes.json": "32fccf1db54e9a23069a01a6e25c7cf599f2b580fdedda52730dd1b62ad48e08",
+  "rules/votes.tsv": "8b5a0552e066c178a16b915a7a01dc8b0a001484efc5485c35938b130c29269f"
+ }
+}
