@@ -86,9 +86,21 @@ pub(crate) enum Scope {
         sources: Vec<i64>,
     },
     Cohort(Cohort),
+    /// The whole registry (record 55 H3, Browse): every stack, the main
+    /// scans each subject's own dataset's once read, else the pack's, as a
+    /// reader about no scope reads them.
+    Registry {
+        picks: nils_registry::pick_truth::Of,
+    },
 }
 
 impl Scope {
+    /// The whole registry, for Browse.
+    pub(crate) fn registry(registry: &mut Registry) -> Result<Scope, Reply> {
+        let picks = nils_registry::pick_truth::Of::own(registry.store()).map_err(failed)?;
+        Ok(Scope::Registry { picks })
+    }
+
     /// The dataset a door names, by its name or its id.
     pub(crate) fn dataset(registry: &mut Registry, name: &str) -> Result<Scope, Reply> {
         let place = crate::scans::dataset_named(registry, name)?;
@@ -109,6 +121,7 @@ impl Scope {
                 Of::dataset(place.id, &place.name, sources.clone())
             }
             Scope::Cohort(c) => Of::cohort(c.id, &c.name),
+            Scope::Registry { picks } => picks.clone(),
         }
     }
 
@@ -124,6 +137,7 @@ impl Scope {
         match self {
             Scope::Dataset { .. } => "dataset",
             Scope::Cohort(_) => "cohort",
+            Scope::Registry { .. } => "registry",
         }
     }
 
@@ -131,6 +145,7 @@ impl Scope {
         match self {
             Scope::Dataset { place, .. } => &place.name,
             Scope::Cohort(c) => &c.name,
+            Scope::Registry { .. } => "the registry",
         }
     }
 
@@ -138,11 +153,15 @@ impl Scope {
         match self {
             Scope::Dataset { place, .. } => place.id,
             Scope::Cohort(c) => c.id,
+            Scope::Registry { .. } => 0,
         }
     }
 
     pub(crate) fn as_json(&self) -> Value {
-        json!({"kind": self.kind(), "name": self.name(), "id": self.id()})
+        match self {
+            Scope::Registry { .. } => json!({"kind": "registry"}),
+            _ => json!({"kind": self.kind(), "name": self.name(), "id": self.id()}),
+        }
     }
 
     /// The condition that keeps the scope's stacks, over a stack aliased
@@ -171,6 +190,8 @@ impl Scope {
                 store.qualified("cohort_member"),
                 c.id
             ),
+            // every stack of the registry
+            Scope::Registry { .. } => "1 = 1".to_string(),
         };
         if !crate::sealed::reads(access) {
             out.push_str(&format!(
@@ -188,7 +209,7 @@ impl Scope {
     /// the scans its tree holds a file of.
     fn members(&self, store: &mut Store) -> Result<Option<Vec<i64>>, StoreError> {
         match self {
-            Scope::Dataset { .. } => Ok(None),
+            Scope::Dataset { .. } | Scope::Registry { .. } => Ok(None),
             Scope::Cohort(c) => Ok(Some(
                 nils_registry::cohort::open_members(store, c.id)?
                     .into_iter()
@@ -211,7 +232,7 @@ fn stacks_from(store: &Store) -> String {
 
 /// A study's day as text on either backend: the measured date, else the
 /// one the date vote filled in.
-fn study_day(store: &Store, alias: &str) -> String {
+pub(crate) fn study_day(store: &Store, alias: &str) -> String {
     let d = store.dialect();
     let t = nils_registry::schema::table("study");
     let column = |c: &str| d.text_of_qualified(Some(alias), t.column(c).expect("study column"));
@@ -224,7 +245,7 @@ fn study_day(store: &Store, alias: &str) -> String {
 
 /// The window every visit is of: the one the session cache was built
 /// under, the default scheme's where it holds nothing.
-fn window(store: &mut Store) -> Result<i64, StoreError> {
+pub(crate) fn window(store: &mut Store) -> Result<i64, StoreError> {
     Ok(nils_registry::cohort::built_window(store)?.unwrap_or(Scheme::default().window_days))
 }
 
@@ -1047,7 +1068,10 @@ pub(crate) fn visits(
     let missing = || {
         Reply::error(
             404,
-            format!("no subject {subject} in {} {}", scope.kind(), scope.name()),
+            match scope {
+                Scope::Registry { .. } => format!("no subject {subject} in the registry"),
+                _ => format!("no subject {subject} in {} {}", scope.kind(), scope.name()),
+            },
         )
     };
 

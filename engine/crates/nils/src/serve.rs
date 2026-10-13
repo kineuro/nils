@@ -2639,6 +2639,72 @@ fn routed(
                 query,
             )?))
         }
+        // record 55 H3: each member's sessions and roles, picked, doubted
+        // or missing, for the cohort's heatmap
+        ["api", "cohorts", _, "picks"] if get => {
+            let pack = crate::reader::served_pack(doors.pack_dir.as_deref(), &doors.ask_pack);
+            Ok(Reply::ok(crate::cohort_picks::door(
+                registry,
+                caller,
+                pack.as_deref(),
+                &decoded(segs[2]),
+                query,
+            )?))
+        }
+        // record 55 H3, Browse: the whole registry's subjects, one
+        // subject's sessions and one session's stacks, as the dataset
+        // viewer's doors answer a dataset's
+        ["api", "subjects"] if get => {
+            let scope = crate::viewer::Scope::registry(registry)?;
+            Ok(Reply::ok(crate::viewer::subjects(
+                registry, caller, &scope, query,
+            )?))
+        }
+        ["api", "subjects", subject, "sessions"] if get => {
+            let scope = crate::viewer::Scope::registry(registry)?;
+            let subject = subject
+                .parse::<i64>()
+                .map_err(|_| Reply::error(400, "a subject is named by its id"))?;
+            let pack = crate::reader::served_pack(doors.pack_dir.as_deref(), &doors.ask_pack);
+            Ok(Reply::ok(crate::viewer::visits(
+                registry,
+                caller,
+                pack.as_deref(),
+                &scope,
+                subject,
+                query,
+            )?))
+        }
+        // a visit the cache holds under no session is `none`, named by its
+        // studies as the sessions door gave them
+        ["api", "sessions", session, "stacks"] if get => {
+            let scope = crate::viewer::Scope::registry(registry)?;
+            let mut query = query.clone();
+            if *session == "none" {
+                if !query.contains_key("studies") {
+                    return Err(Reply::error(
+                        400,
+                        "studies: the visit's studies, as the sessions door gave them",
+                    ));
+                }
+                query.remove("session");
+            } else {
+                let session = session.parse::<i64>().map_err(|_| {
+                    Reply::error(
+                        400,
+                        "a session is named by its id, as the sessions door gave it, or none with studies",
+                    )
+                })?;
+                query.remove("studies");
+                query.insert("session".into(), session.to_string());
+            }
+            scans_door(doors, registry, caller, &scope, &query)
+        }
+        // and every scan of the registry a page at a time, as a dataset's
+        ["api", "scans"] if get => {
+            let scope = crate::viewer::Scope::registry(registry)?;
+            scans_door(doors, registry, caller, &scope, query)
+        }
         ["api", "datasets", _, "summary"] if get => {
             // Wave 7a, the Data page (2026-10-09): what a dataset holds and
             // where it is, step by step, in counts
@@ -5083,7 +5149,15 @@ pub(crate) fn door(method: &str, segs: &[&str]) -> (Need, Detail) {
         // dataset's scans are, quasi-identifying fields shaped below quasi
         ("GET", ["api", "datasets" | "cohorts", _, "subjects"])
         | ("GET", ["api", "datasets" | "cohorts", _, "subjects", _, "visits"])
-        | ("GET", ["api", "cohorts", _, "scans"]) => (Need::One("data:see"), Plain),
+        | ("GET", ["api", "cohorts", _, "scans"])
+        // record 55 H3, Browse: the whole registry's, read as a dataset's
+        | ("GET", ["api", "subjects"])
+        | ("GET", ["api", "subjects", _, "sessions"])
+        | ("GET", ["api", "sessions", _, "stacks"])
+        | ("GET", ["api", "scans"]) => (Need::One("data:see"), Plain),
+        // record 55 H3: a cohort's picks for its heatmap, read on the
+        // cohort's page and in Review
+        ("GET", ["api", "cohorts", _, "picks"]) => (Need::AnyOf(&["data:see", "review:see"]), Plain),
         // record 26 §1: what becomes of a dataset's originals. What an act
         // would do is Data reading; the acts themselves move and delete
         // identified files, so they are Data work at detail sensitive.
@@ -5795,6 +5869,11 @@ pub(crate) fn doors_list() -> Vec<String> {
         "GET /api/cohorts/{name}/scans",
         "GET /api/cohorts/{name}/subjects",
         "GET /api/cohorts/{name}/subjects/{subject}/visits",
+        "GET /api/subjects",
+        "GET /api/subjects/{id}/sessions",
+        "GET /api/sessions/{id}/stacks",
+        "GET /api/scans",
+        "GET /api/cohorts/{name}/picks",
         "GET /api/datasets/{name}/summary",
         "POST /api/datasets/{name}/steps/{step}/run",
         "POST /api/cohorts/{name}/steps/{step}/run",
@@ -7044,6 +7123,51 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
             "one subject's visits",
             "Reading a member's visits",
             "Read a member's visits",
+        ),
+        row(
+            "GET /api/subjects",
+            false,
+            false,
+            "bounded",
+            "a page of at most 200 subjects",
+            "Reading the registry's subjects",
+            "Read the registry's subjects",
+        ),
+        row(
+            "GET /api/subjects/{id}/sessions",
+            false,
+            false,
+            "bounded",
+            "one subject's sessions",
+            "Reading a subject's sessions",
+            "Read a subject's sessions",
+        ),
+        row(
+            "GET /api/sessions/{id}/stacks",
+            false,
+            false,
+            "bounded",
+            "a page of at most 200 stacks",
+            "Reading a session's stacks",
+            "Read a session's stacks",
+        ),
+        row(
+            "GET /api/scans",
+            false,
+            false,
+            "bounded",
+            "a page of at most 200 scans",
+            "Reading the registry's scans",
+            "Read the registry's scans",
+        ),
+        row(
+            "GET /api/cohorts/{name}/picks",
+            false,
+            false,
+            "bounded",
+            "a page of at most 200 members",
+            "Reading a cohort's picks",
+            "Read a cohort's picks",
         ),
         row(
             "GET /api/datasets/{name}/summary",

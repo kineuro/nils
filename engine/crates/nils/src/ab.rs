@@ -37,6 +37,7 @@ use crate::campaigns::{
     campaign_err, cerr, complete_axes, content_hash, handle_keys, pictures_of, print, rerr, shown,
     who,
 };
+use crate::drawn::Refused;
 use crate::serve::{Caller, Reply};
 use crate::{Exit, usage};
 
@@ -120,7 +121,7 @@ pub(crate) struct AbArgs {
 }
 
 /// Read one voter's value of an axis by any name the pack gives it.
-fn named(names: &BTreeMap<String, String>, raw: &Value) -> Value {
+fn named_value(names: &BTreeMap<String, String>, raw: &Value) -> Value {
     let one = |s: &str| {
         names
             .get(s.trim())
@@ -150,7 +151,7 @@ fn named(names: &BTreeMap<String, String>, raw: &Value) -> Value {
 
 /// What reading a voter found beside its readings.
 #[derive(Debug, Default)]
-struct Read {
+pub(crate) struct Read {
     files: usize,
     not_a_stack: usize,
     no_answer: usize,
@@ -158,7 +159,7 @@ struct Read {
 }
 
 impl Read {
-    fn as_json(&self) -> Value {
+    pub(crate) fn as_json(&self) -> Value {
         json!({"files": self.files, "not_a_stack": self.not_a_stack,
             "no_answer": self.no_answer, "refused": self.refused})
     }
@@ -178,6 +179,32 @@ fn voter_of(
         .filter(|p| p.extension().is_some_and(|x| x == "json"))
         .collect();
     files.sort();
+    let mut docs = Vec::new();
+    for f in files {
+        let text =
+            std::fs::read_to_string(&f).map_err(|e| usage(format!("{}: {e}", f.display())))?;
+        let doc: Value = serde_json::from_str(&text)
+            .map_err(|e| usage(format!("{}: not JSON: {e}", f.display())))?;
+        let named = f
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .and_then(|s| s.parse::<i64>().ok());
+        docs.push((named, doc));
+    }
+    Ok(voter_from(name, docs, axes, constraints, pack))
+}
+
+/// One voter's readings, one document per stack, each with the stack its
+/// name gives (a file's stem, a key of the door's body): the answer itself
+/// or a record with the answer under `answer` and the stack under `stack`,
+/// as the header judge writes it.
+pub(crate) fn voter_from(
+    name: &str,
+    docs: impl IntoIterator<Item = (Option<i64>, Value)>,
+    axes: &[String],
+    constraints: &Value,
+    pack: Option<&nils_pack::Pack>,
+) -> (Voter, Read) {
     let names: BTreeMap<&str, BTreeMap<String, String>> = axes
         .iter()
         .map(|a| (a.as_str(), crate::campaigns::value_names(pack, Some(a))))
@@ -187,17 +214,9 @@ fn voter_of(
         ..Voter::default()
     };
     let mut read = Read::default();
-    for f in files {
+    for (named, doc) in docs {
         read.files += 1;
-        let text =
-            std::fs::read_to_string(&f).map_err(|e| usage(format!("{}: {e}", f.display())))?;
-        let doc: Value = serde_json::from_str(&text)
-            .map_err(|e| usage(format!("{}: not JSON: {e}", f.display())))?;
-        let stack = doc["stack"].as_i64().or_else(|| {
-            f.file_stem()
-                .and_then(|s| s.to_str())
-                .and_then(|s| s.parse::<i64>().ok())
-        });
+        let stack = doc["stack"].as_i64().or(named);
         let Some(stack) = stack else {
             read.not_a_stack += 1;
             continue;
@@ -220,7 +239,7 @@ fn voter_of(
             } else {
                 (e.clone(), "")
             };
-            let raw = named(&names[axis.as_str()], &raw);
+            let raw = named_value(&names[axis.as_str()], &raw);
             match ab::said_value(axes, constraints, axis, &raw) {
                 Ok(value) => {
                     said.insert(
@@ -238,7 +257,7 @@ fn voter_of(
             v.stacks.insert(stack, said);
         }
     }
-    Ok((v, read))
+    (v, read)
 }
 
 /// A header field as a reason names it.
@@ -297,22 +316,16 @@ fn rules_reason(entry: &Value) -> String {
 }
 
 /// The rules as a voter: the values in force of every stack classified,
-/// each axis with its reason.
-fn rules_voter(
+/// each axis with its reason. Whoever calls it has checked the stacks of a
+/// sample sealed now: the keyboard with `--unsealed-access`, a door with
+/// sealed:see.
+pub(crate) fn rules_voter(
     store: &mut Store,
     stacks: &[i64],
     axes: &[String],
     constraints: &Value,
     pack: Option<&nils_pack::Pack>,
-) -> Result<(Voter, Read), Exit> {
-    let withheld =
-        crate::sealed::keyboard_withheld(store, stacks).map_err(|e| crate::fail(e.to_string()))?;
-    if !withheld.is_empty() {
-        return Err(usage(crate::sealed::refusal(&format!(
-            "{} of the stacks the rules would vote on",
-            withheld.len()
-        ))));
-    }
+) -> Result<(Voter, Read), nils_registry::store::Error> {
     let mut v = Voter {
         name: "rules".to_string(),
         ..Voter::default()
@@ -320,9 +333,7 @@ fn rules_voter(
     let mut read = Read::default();
     for &stack in stacks {
         read.files += 1;
-        let Some(doc) = crate::reader::why(store, stack, pack, true, false)
-            .map_err(|e| crate::fail(e.to_string()))?
-        else {
+        let Some(doc) = crate::reader::why(store, stack, pack, true, false)? else {
             read.no_answer += 1;
             continue;
         };
@@ -358,6 +369,94 @@ fn sha256_hex(s: &str) -> String {
     crate::campaigns::sha256(s.as_bytes())
 }
 
+/// What an A/B campaign is drawn from: the axes asked, its localizers,
+/// the audit and the seed, as the keyboard and the door give them.
+pub(crate) struct Drawing {
+    pub question: Value,
+    pub seed: String,
+    pub audit_share: f64,
+    pub audit_cells: usize,
+    pub localizers: Localizers,
+    pub localizer: Localizer,
+}
+
+/// The question, its localizer and their checks, from the axes asked (the
+/// reference read's when none), the axes derived and the localizer.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn drawing(
+    axes: Option<Vec<String>>,
+    derive: Option<Vec<String>>,
+    seed: &str,
+    audit_share: f64,
+    audit_cells: usize,
+    localizers: &str,
+    localizer: &str,
+    localizer_asks: Vec<String>,
+    served: Option<&nils_pack::Pack>,
+) -> Result<Drawing, Refused> {
+    if seed.trim().is_empty() {
+        return Err((
+            400,
+            "seed: the audit's seed, written down before the draw".into(),
+        ));
+    }
+    if !(0.0..=1.0).contains(&audit_share) {
+        return Err((400, "audit_share is from 0 to 1".into()));
+    }
+    let localizers = Localizers::parse(localizers).map_err(|e| (400, e.to_string()))?;
+    let (laxis, lvalue) = localizer
+        .split_once('=')
+        .ok_or_else(|| (400, "localizer: AXIS=VALUE".to_string()))?;
+    let axes: Vec<String> = axes.unwrap_or_else(|| ASKED.iter().map(|s| s.to_string()).collect());
+    let mut question = json!({"kind": "axes", "axes": axes});
+    if let Some(d) = &derive {
+        question["derive"] = json!(d);
+    }
+    complete_axes(&mut question, served)?;
+    campaign::Question::parse(&question).map_err(|e| (400, e.to_string()))?;
+    let loc = Localizer {
+        axis: laxis.to_string(),
+        value: lvalue.to_string(),
+        asks: localizer_asks,
+    };
+    if !axes.contains(&loc.axis) {
+        return Err((
+            400,
+            format!("localizer names {}, which is not asked", loc.axis),
+        ));
+    }
+    if let Some(x) = loc.asks.iter().find(|x| !axes.contains(x)) {
+        return Err((400, format!("localizer_asks names {x}, which is not asked")));
+    }
+    Ok(Drawing {
+        question,
+        seed: seed.to_string(),
+        audit_share,
+        audit_cells,
+        localizers,
+        localizer: loc,
+    })
+}
+
+impl Drawing {
+    pub(crate) fn axes(&self) -> Vec<String> {
+        strings_of(&self.question["axes"])
+    }
+
+    pub(crate) fn constraints(&self) -> Value {
+        self.question["constraints"].clone()
+    }
+}
+
+fn strings_of(v: &Value) -> Vec<String> {
+    v.as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_string)
+        .collect()
+}
+
 /// `nils campaign ab`: read the voters, draw the items and the audit, and
 /// make the campaign.
 pub(crate) fn make(home: &Home, a: AbArgs) -> Result<(), Exit> {
@@ -366,49 +465,22 @@ pub(crate) fn make(home: &Home, a: AbArgs) -> Result<(), Exit> {
             "an A/B campaign needs voters: --voter NAME=DIR, --rules",
         ));
     }
-    if a.seed.trim().is_empty() {
-        return Err(usage(
-            "--seed: the audit's seed, written down before the draw",
-        ));
-    }
-    if !(0.0..=1.0).contains(&a.audit_share) {
-        return Err(usage("--audit-share is from 0 to 1"));
-    }
-    let localizers = Localizers::parse(&a.localizers).map_err(cerr)?;
-    let (laxis, lvalue) = a
-        .localizer
-        .split_once('=')
-        .ok_or_else(|| usage("--localizer AXIS=VALUE"))?;
-    let axes: Vec<String> = a
-        .axes
-        .clone()
-        .unwrap_or_else(|| ASKED.iter().map(|s| s.to_string()).collect());
-    let mut question = json!({"kind": "axes", "axes": axes});
-    if let Some(d) = &a.derive {
-        question["derive"] = json!(d);
-    }
     let served = crate::pack_dir(home, a.pack_dir.clone())
         .ok()
         .and_then(|d| nils_pack::load(&d.join(&a.pack), None).ok());
-    complete_axes(&mut question, served.as_ref()).map_err(|(_, m)| usage(m))?;
-    let q = campaign::Question::parse(&question).map_err(cerr)?;
-    let constraints = question["constraints"].clone();
-    let loc = Localizer {
-        axis: laxis.to_string(),
-        value: lvalue.to_string(),
-        asks: a.localizer_asks.clone(),
-    };
-    if !axes.contains(&loc.axis) {
-        return Err(usage(format!(
-            "--localizer names {}, which is not asked",
-            loc.axis
-        )));
-    }
-    if let Some(x) = loc.asks.iter().find(|x| !axes.contains(x)) {
-        return Err(usage(format!(
-            "--localizer-asks names {x}, which is not asked"
-        )));
-    }
+    let d = drawing(
+        a.axes.clone(),
+        a.derive.clone(),
+        &a.seed,
+        a.audit_share,
+        a.audit_cells,
+        &a.localizers,
+        &a.localizer,
+        a.localizer_asks.clone(),
+        served.as_ref(),
+    )
+    .map_err(crate::drawn::exit)?;
+    let (axes, constraints) = (d.axes(), d.constraints());
     // the stacks: the selection, frozen now
     let h = crate::ask_cli::freeze_selection(
         home,
@@ -440,70 +512,141 @@ pub(crate) fn make(home: &Home, a: AbArgs) -> Result<(), Exit> {
         voters.push(v);
     }
     if a.rules {
+        let withheld = crate::sealed::keyboard_withheld(registry.store(), &stacks)
+            .map_err(|e| crate::fail(e.to_string()))?;
+        if !withheld.is_empty() {
+            return Err(usage(crate::sealed::refusal(&format!(
+                "{} of the stacks the rules would vote on",
+                withheld.len()
+            ))));
+        }
         let (v, read) = rules_voter(
             registry.store(),
             &stacks,
             &axes,
             &constraints,
             served.as_ref(),
-        )?;
+        )
+        .map_err(|e| crate::fail(e.to_string()))?;
         reads.insert("rules".into(), read.as_json());
         voters.push(v);
     }
+    let principal = who();
+    let (out, made) = make_ab(
+        &mut registry,
+        &Ab {
+            name: &a.name,
+            owner: &principal,
+            selection: &a.select,
+            handle: h,
+            stacks: &stacks,
+            voters: &voters,
+            reads,
+            drawing: &d,
+            served: served.as_ref(),
+            raters: a.raters.clone(),
+            closes_into: &a.closes_into,
+            lease_seconds: a.lease_seconds,
+            dry_run: a.dry_run,
+        },
+    )
+    .map_err(crate::drawn::exit)?;
+    match made {
+        Some(made) if a.json => {
+            let mut v = shown(registry.store(), &made).map_err(rerr)?;
+            v["ab"] = out;
+            print(&v);
+            Ok(())
+        }
+        _ => report(&out, a.json),
+    }
+}
+
+/// An A/B campaign to make, its voters read.
+pub(crate) struct Ab<'a> {
+    pub name: &'a str,
+    pub owner: &'a str,
+    pub selection: &'a str,
+    pub handle: i64,
+    pub stacks: &'a [i64],
+    pub voters: &'a [Voter],
+    pub reads: serde_json::Map<String, Value>,
+    pub drawing: &'a Drawing,
+    pub served: Option<&'a nils_pack::Pack>,
+    pub raters: Vec<String>,
+    pub closes_into: &'a str,
+    pub lease_seconds: i64,
+    pub dry_run: bool,
+}
+
+/// Draw the items and the audit and make the campaign, at the keyboard or
+/// the door; with `dry_run`, the counts alone. A plan that draws no item
+/// makes nothing and says why.
+pub(crate) fn make_ab(
+    registry: &mut Registry,
+    a: &Ab<'_>,
+) -> Result<(Value, Option<campaign::Campaign>), Refused> {
+    if a.voters.is_empty() {
+        return Err((
+            400,
+            "an A/B campaign needs a voter: the rules or readings".into(),
+        ));
+    }
+    let d = a.drawing;
+    let axes = d.axes();
     let plan = ab::plan(
-        &stacks,
-        &voters,
+        a.stacks,
+        a.voters,
         &Options {
             axes: &axes,
-            localizer: Some(&loc),
-            localizers,
-            audit_share: a.audit_share,
-            audit_cells: a.audit_cells,
-            seed: &a.seed,
+            localizer: Some(&d.localizer),
+            localizers: d.localizers,
+            audit_share: d.audit_share,
+            audit_cells: d.audit_cells,
+            seed: &d.seed,
         },
     );
-    let seed_sha256 = sha256_hex(&a.seed);
+    let seed_sha256 = sha256_hex(&d.seed);
     let mut out = json!({
-        "name": a.name, "selection": a.select, "counts": plan.counts(),
-        "voters": reads, "seed_sha256": seed_sha256, "dry_run": a.dry_run,
+        "name": a.name, "selection": a.selection, "counts": plan.counts(),
+        "voters": a.reads, "seed_sha256": seed_sha256, "dry_run": a.dry_run,
     });
     if a.dry_run || plan.items.is_empty() {
         if !a.dry_run {
             out["made"] = json!(false);
             out["why"] = json!("no stack is split or drawn for the audit");
         }
-        return report(&out, a.json);
+        return Ok((out, None));
     }
-    let names: Vec<&str> = voters.iter().map(|v| v.name.as_str()).collect();
+    let names: Vec<&str> = a.voters.iter().map(|v| v.name.as_str()).collect();
     let source = json!({
-        "selection": a.select, "handle": h,
+        "selection": a.selection, "handle": a.handle,
         "ab": {
             "voters": names,
             "seed_sha256": seed_sha256,
-            "audit": {"share": a.audit_share, "cells": a.audit_cells},
-            "localizers": localizers.name(),
-            "localizer": loc.to_json(),
+            "audit": {"share": d.audit_share, "cells": d.audit_cells},
+            "localizers": d.localizers.name(),
+            "localizer": d.localizer.to_json(),
         },
     });
-    let hash = content_hash(registry.store(), h).map_err(rerr)?;
-    let pack_version = served.as_ref().map(|p| format!("{}@{}", p.name, p.version));
-    let principal = who();
+    let hash = content_hash(registry.store(), a.handle).map_err(crate::drawn::refused)?;
+    let pack_version = a.served.map(|p| format!("{}@{}", p.name, p.version));
     let made = campaign::create(
-        &mut registry,
+        registry,
         &New {
-            name: &a.name,
-            owner: &principal,
-            question: &question,
+            name: a.name,
+            owner: a.owner,
+            question: &d.question,
             source,
             items: Items::Stacks(plan.items.iter().map(|p| p.stack).collect()),
-            handle_id: Some(h),
+            handle_id: Some(a.handle),
             content_hash: hash.as_deref(),
             pack_version: pack_version.as_deref(),
             raters_per_item: 1,
             raters: a.raters.clone(),
             adjudicators: Vec::new(),
             adjudication: &json!({"when": "never", "metric": "exact"}),
-            closes_into: &a.closes_into,
+            closes_into: a.closes_into,
             lease_seconds: a.lease_seconds,
             inputs: BTreeMap::new(),
             hold_back: None,
@@ -513,28 +656,26 @@ pub(crate) fn make(home: &Home, a: AbArgs) -> Result<(), Exit> {
             hide_header: false,
         },
     )
-    .map_err(cerr)?;
+    .map_err(|e| crate::drawn::refused(campaign_err(e)))?;
     let item_of: BTreeMap<i64, i64> = campaign::items(registry.store(), made.id)
-        .map_err(cerr)?
+        .map_err(|e| crate::drawn::refused(campaign_err(e)))?
         .into_iter()
         .filter_map(|i| i.stack_id.map(|s| (s, i.id)))
         .collect();
     // the letters and the reason shown are drawn with a key nothing keeps
     let key = ab::fresh_key();
-    ab::write(registry.store(), made.id, &plan, &item_of, &key).map_err(cerr)?;
-    ab::record_made(&mut registry, &principal, &made, &plan)
-        .map_err(|e| crate::fail(e.to_string()))?;
-    let pictures = pictures_of(registry.store(), &made).map_err(rerr)?;
+    ab::write(registry.store(), made.id, &plan, &item_of, &key)
+        .map_err(|e| crate::drawn::refused(campaign_err(e)))?;
+    ab::record_made(registry, a.owner, &made, &plan).map_err(|e| (500, e.to_string()))?;
+    let pictures = pictures_of(registry.store(), &made).map_err(crate::drawn::refused)?;
     out["campaign"] = json!(made.id);
-    out["question"] = json!(q.kind());
+    out["question"] = json!(
+        campaign::Question::parse(&d.question)
+            .map(|q| q.kind())
+            .unwrap_or("axes")
+    );
     out["pictures"] = pictures;
-    if a.json {
-        let mut v = shown(registry.store(), &made).map_err(rerr)?;
-        v["ab"] = out;
-        print(&v);
-        return Ok(());
-    }
-    report(&out, false)
+    Ok((out, Some(made)))
 }
 
 fn report(out: &Value, json: bool) -> Result<(), Exit> {

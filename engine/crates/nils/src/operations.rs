@@ -1328,6 +1328,10 @@ pub(crate) fn run_door(
             Scope::Sources(&ids)
         }
         crate::viewer::Scope::Cohort(c) => Scope::Cohort(c.id),
+        // a step door names a dataset or a cohort, never the registry
+        crate::viewer::Scope::Registry { .. } => {
+            return Err(Reply::error(400, "a step runs over a dataset or a cohort"));
+        }
     };
     let store = registry.store();
     let scans = count(

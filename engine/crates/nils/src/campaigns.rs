@@ -716,6 +716,11 @@ pub(crate) fn route(
             // record 55 H3: what a check would make, written nowhere
             ["api", "campaigns", "preview"] if post => {
                 let doc = json_body(body)?;
+                // record 55 H3: what a drawn source would make, its counts
+                if crate::drawn::drawn_kind(&doc).is_some() {
+                    return crate::drawn::door(doors, registry, ask, caller, &doc, true)
+                        .map(Reply::ok);
+                }
                 crate::checks::preview(doors, registry, ask, caller, &doc)
             }
             ["api", "campaigns", which] if get => {
@@ -3275,6 +3280,11 @@ fn create_at_door(
     if doc["question"]["kind"] == "check" {
         return crate::checks::create(doors, registry, ask, caller, doc);
     }
+    // and a pair, an anchored or an A/B campaign from the stacks of saved
+    // selections, drawn at the door (nothing typed by hand)
+    if crate::drawn::drawn_kind(doc).is_some() {
+        return crate::drawn::door(doors, registry, ask, caller, doc, false);
+    }
     let name = doc["name"]
         .as_str()
         .ok_or_else(|| Reply::error(400, "name: what the campaign is called"))?;
@@ -3336,7 +3346,7 @@ fn create_at_door(
     } else {
         return Err(Reply::error(
             400,
-            "source: {selection: name@v}, {handle: id} or {review: {kind | kind_prefix, job_id?, limit?}}",
+            "source: {selection: name@v}, {handle: id}, {review: {kind | kind_prefix, job_id?, limit?}}, {pair: ...}, {anchored: ...} or {ab: ...}",
         ));
     };
     let hash = match handle_id {

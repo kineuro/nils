@@ -107,12 +107,15 @@ pub(crate) fn page(
             "scans": [],
             "next": null,
         });
-        let (name, id) = match scope {
-            crate::viewer::Scope::Dataset { .. } => ("dataset", "dataset_id"),
-            crate::viewer::Scope::Cohort(_) => ("cohort", "cohort_id"),
+        let named = match scope {
+            crate::viewer::Scope::Dataset { .. } => Some(("dataset", "dataset_id")),
+            crate::viewer::Scope::Cohort(_) => Some(("cohort", "cohort_id")),
+            crate::viewer::Scope::Registry { .. } => None,
         };
-        doc[name] = json!(scope.name());
-        doc[id] = json!(scope.id());
+        if let Some((name, id)) = named {
+            doc[name] = json!(scope.name());
+            doc[id] = json!(scope.id());
+        }
         doc
     };
     let store = registry.store();
