@@ -7,7 +7,7 @@ name = "nils-postcontrast"
 version = "0.1.0"
 description = "The certified post-contrast model served through its three-slice student, as a NILS pipeline image"
 license = "AGPL-3.0-only"
-requires-python = ">=3.11"
+requires-python = ">=3.10"
 # torch and timm (the student) are the `student` extra, so the tests of the
 # rules, the evidence and the fusion run without them. The image pins every
 # version in requirements.txt.
@@ -23,6 +23,9 @@ dependencies = [
 
 [project.optional-dependencies]
 student = ["torch", "timm>=1.0"]
+# the full pipeline's features (model r1's: nibabel, SciPy, scikit-image,
+# SimpleITK); its tools are FreeSurfer's, in the full image
+full = ["nibabel>=5", "scipy>=1.11", "scikit-image>=0.22", "SimpleITK>=2.3"]
 test = ["pytest>=8", "pyyaml>=6", "jsonschema>=4"]
 
 [project.scripts]
@@ -30,6 +33,10 @@ nils-postcontrast = "nils_postcontrast.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+# the card's helpers, run by path in other Python environments
+nils_postcontrast = ["synth_batch.py", "tfcap/sitecustomize.py"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

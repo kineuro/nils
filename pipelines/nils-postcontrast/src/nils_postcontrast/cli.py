@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 """``nils-postcontrast cascade``: the certified post-contrast model (model
 r1) served through its three-slice student (record 55 E3, spec 12.2).
+``nils-postcontrast full`` is model r1's full pipeline on the stacks the
+cascade defers (``full.py``).
 
 What a container meets (``contracts/job/v1``): ``/input/stacks.json``, the
 source places read-only under ``/source/<n>``, the typed inputs read-only
@@ -194,6 +196,9 @@ def parser() -> argparse.ArgumentParser:
     c.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto")
     c.add_argument("--student-threads", type=int, default=None, help="torch's threads for the student on a CPU")
     c.set_defaults(fn=cmd_cascade)
+    from .full import add_parser
+
+    add_parser(sub)
     return p
 
 

@@ -30,6 +30,8 @@ AGENT_NONE = re.compile(r"^\s*(none|no|nej|ingen|0|-+|n/?a|no contrast|non)\s*$"
 ANGIO = re.compile(r"(angio|\bmra\b|ce.?mra|care.?bolus|bolus.?track|\btricks\b|\btwist\b|contrast.?enhanced.?mr.?a|fl3d.?ce|keyhole|\bmip\b)", re.IGNORECASE)
 TOFPC = re.compile(r"(\btof\b|time.?of.?flight|inflow|\bpca?\b|phase.?contrast|qflow)", re.IGNORECASE)
 GRE = {"FLASH", "GRE", "VIBE", "FISP", "TurboFLASH", "Unknown"}
+# arm T's domain (model r1's m_table.py): 3D gradient-echo T1 by technique
+T_DOMAIN = {"MPRAGE", "MEMPRAGE", "MP2RAGE", "FLASH", "TurboFLASH", "VIBE", "GRE"}
 
 
 def _values(e, axis: str) -> list:
@@ -243,6 +245,7 @@ def rows_for(stacks: list, context: list, fusion) -> dict:
             "family": family(e),
             "acquired": acquired(e),
             "acq3d": float(str(contrast(e).get("mr_acquisition_type") or "") == "3D"),
+            "t_domain": bool(str(contrast(e).get("mr_acquisition_type") or "") == "3D" and axis_max(e, "technique") in T_DOMAIN),
             "thick": (e.header.get("fingerprint") or {}).get("slice_thickness"),
         }
     return out
