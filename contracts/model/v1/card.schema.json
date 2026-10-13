@@ -66,7 +66,7 @@
       "maxProperties": 16,
       "propertyNames": { "pattern": "^[a-z][a-z0-9_]*$" },
       "additionalProperties": { "$ref": "#/$defs/digest" },
-      "description": "Record 55 E2: a cascade, one model that names its parts, each a registered model that is not retired, by digest, under the name of the pipeline input it fills (encoder, head, coarse, student, deferral); a run of the cascade is given each part, and the cascade itself as its input cascade. Promoting the cascade retires none of its parts"
+      "description": "Record 55 E2: a cascade, one model that names its parts, each a registered model that is not retired, by digest, under the name of the pipeline input it fills (body part's encoder, head, coarse, student, deferral; post-contrast's student, fusion and arms, record 55 E3); a run of the cascade is given each part, and the cascade itself as its input cascade. Promoting the cascade retires none of its parts"
     },
     "encoders": {
       "type": "array",

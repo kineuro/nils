@@ -1894,6 +1894,55 @@ fn build_registry() -> Vec<Table> {
         .index(&["release_id"])
         .index(&["stack_id"])
         .index(&["subject_id"]),
+        // Record 55 F2 and F5 (spec §12.3): the post-contrast label of a
+        // stack, which the time rule's session pass and the subject step
+        // after it write (`nils_pack::contrast`, `nils_classify::contrast`).
+        // One row a stack, written again whole for a subject each time its
+        // sessions are labelled: the state, the minutes since injection and
+        // what they are counted from, where the label came from, the 72-hour
+        // flag, ASL after contrast, and the reason and every check that
+        // fired, with the session's bracket and the rule's version.
+        Table::new(
+            "contrast_label",
+            vec![
+                col("id", Type::Id),
+                req("stack_id", Type::Int),
+                req("study_id", Type::Int),
+                req("subject_id", Type::Int),
+                // pre, post, by_definition, undetermined
+                req("contrast_state", Type::Text),
+                col("minutes_since_injection", Type::Double),
+                // bolus_start or first_post_t1
+                col("injection_ref", Type::Text),
+                // instance or stack_time
+                col("minutes_basis", Type::Text),
+                // t1_anchor_time_rule, header, image, reader
+                req("contrast_source", Type::Text),
+                // own_answer, bracket, bolus, family, none
+                req("basis", Type::Text),
+                // yes, no, unknown
+                req("contrast_prior_72h", Type::Text),
+                // yes, no, unknown on an ASL stack; null on any other
+                col("asl_after_contrast", Type::Text),
+                // the check or the rule's reason, on undetermined
+                col("reason", Type::Text),
+                // a JSON array of every check that fired, flags included
+                req("checks", Type::Json),
+                req("weak_f", Type::Int),
+                req("family", Type::Text),
+                req("t1_family", Type::Int),
+                req("use_level", Type::Text),
+                // whether the session holds a certified T1 answer
+                req("anchored", Type::Int),
+                col("first_post_stack", Type::Int),
+                col("last_pre_stack", Type::Int),
+                req("rule", Type::Text),
+                req("labelled_at", Type::Timestamp),
+            ],
+        )
+        .unique(&["stack_id"])
+        .index(&["subject_id"])
+        .index(&["study_id"]),
         Table::new(
             "diagnostic",
             vec![

@@ -1714,6 +1714,13 @@ fn run(
         report.disposed = dispose(store, pack, settings, cancel, job_id, &sql, voters.as_ref())?;
     }
 
+    // Record 55 F2 and F5: the post-contrast label, the time rule's session
+    // pass and the subject step after it, from what the rules and the
+    // passes decided and the certified T1 answers in the registry.
+    if !report.cancelled {
+        report.contrast = Some(crate::contrast::label(store, pack, None)?.to_json());
+    }
+
     report.seconds = started.elapsed().as_secs_f64();
     report.peak_rss = nils_digest::rss::peak_rss();
     Ok(report)

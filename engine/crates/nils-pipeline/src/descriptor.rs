@@ -516,6 +516,13 @@ pub struct Descriptor {
     /// the headers, so an image chooses which frames to read without
     /// reading a header first. Off unless asked for.
     pub geometry: bool,
+    /// For a stacks input with the header and the geometry, whether each
+    /// stack's entry of `stacks.json`, and each entry of its `context`,
+    /// carries the facts the post-contrast model reads of a session
+    /// (`x-nils.input.contrast`, record 55 E3): its series' contrast tags,
+    /// its clock, its physics and the post-contrast rules that fired, and
+    /// the header the datasets that hold a file of it. Off unless asked for.
+    pub contrast: bool,
     /// Typical minutes a unit takes on the CPU (`x-nils.needs.unit-minutes`),
     /// which the pre-flight estimates from until the pipeline has run here.
     pub unit_minutes: Option<f64>,
@@ -1206,6 +1213,12 @@ pub fn from_value(document: Value) -> Result<Descriptor, String> {
             "x-nils.input.geometry puts each file's geometry in stacks.json; a bids input has no stacks.json, so it is for a stacks input only".into(),
         );
     }
+    let contrast = opt_bool(&x["input"], "contrast", "x-nils.input.")?.unwrap_or(false);
+    if contrast && !(layout == Layout::Stacks && header && geometry) {
+        return Err(
+            "x-nils.input.contrast puts each stack's session facts beside its header and its session's context in stacks.json, so it is for a stacks input with header: true and geometry: true only".into(),
+        );
+    }
     let unit_minutes = match opt_number(&x["needs"], "unit-minutes", "x-nils.needs.")? {
         None => None,
         Some(m) if m > 0.0 && m.is_finite() => Some(m),
@@ -1236,6 +1249,7 @@ pub fn from_value(document: Value) -> Result<Descriptor, String> {
         roles,
         header,
         geometry,
+        contrast,
         unit_minutes,
         disk_gb,
         replaces,
@@ -2252,6 +2266,44 @@ x-nils:
         ))
         .unwrap_err();
         assert!(e.contains("for a stacks input only"), "{e}");
+    }
+
+    /// Record 55 E3: a stacks input with the header and the geometry may
+    /// ask for the session facts the post-contrast model reads; off unless
+    /// asked for, and refused without either.
+    #[test]
+    fn a_stacks_input_with_header_and_geometry_may_ask_for_the_contrast_facts() {
+        let base = doc(&format!("antsx/ants@sha256:{HEX}"));
+        let stacks = |input: &str| {
+            base.replace("analysis-level: session", "analysis-level: stack")
+                .replace("  input: {layout: bids}\n", &format!("  input: {input}\n"))
+                .replace(
+                    "sub-{subject}/ses-{session}/anat/*_desc-n4_T1w.nii.gz",
+                    "stack-{stack}/n4.nii.gz",
+                )
+        };
+        assert!(
+            !parse(&stacks("{layout: stacks, header: true, geometry: true}"))
+                .unwrap()
+                .contrast
+        );
+        let d = parse(&stacks(
+            "{layout: stacks, header: true, geometry: true, contrast: true}",
+        ))
+        .unwrap();
+        assert!(d.contrast && d.header && d.geometry);
+        for without in [
+            "{layout: stacks, geometry: true, contrast: true}",
+            "{layout: stacks, header: true, contrast: true}",
+        ] {
+            let e = parse(&stacks(without)).unwrap_err();
+            assert!(e.contains("header: true and geometry: true"), "{e}");
+        }
+        let e = parse(&stacks(
+            "{layout: stacks, header: true, geometry: true, contrast: 1}",
+        ))
+        .unwrap_err();
+        assert!(e.contains("x-nils.input.contrast is true or false"), "{e}");
     }
 
     #[test]

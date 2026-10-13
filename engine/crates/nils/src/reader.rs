@@ -676,6 +676,9 @@ pub(crate) fn why(
         // `axes`
         "unresolved": notes["unresolved"].as_array().cloned().unwrap_or_default(),
         "overridden": overridden,
+        // record 55 F5: the post-contrast label the time rule gave the
+        // stack, where it has one
+        "contrast_label": crate::contrast::of_stack(store, stack)?,
     })))
 }
 

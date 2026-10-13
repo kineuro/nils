@@ -4288,11 +4288,26 @@ fn routed(
                 },
             )
             .map_err(review_err)?;
+            // record 55 F5: a person's read of post-contrast is a T1 anchor
+            let label = if applied.axis == "post_contrast" {
+                let pack = doors
+                    .pack_dir
+                    .as_ref()
+                    .and_then(|dir| nils_pack::load(&dir.join(&doors.ask_pack), None).ok());
+                crate::contrast::after_decisions(
+                    registry.store(),
+                    pack.as_ref(),
+                    &[applied.decision],
+                )
+            } else {
+                None
+            };
             Ok(Reply::ok(serde_json::json!({
                 "decision": applied.decision, "axis": applied.axis, "scope": applied.scope,
                 "ref": applied.reference, "closed": applied.closed, "members": applied.members,
                 "staged": applied.staged,
                 "model": applied.model.as_ref().map(nils_registry::model::Model::named),
+                "contrast_label": label,
             })))
         }
         ["api", "review", _, "accept"] if post => {

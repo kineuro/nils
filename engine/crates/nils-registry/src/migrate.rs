@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 94;
+pub const SCHEMA_VERSION: i64 = 95;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -430,7 +430,22 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 94,
         apply: a_release_keeps_the_picks_it_read,
     },
+    Migration {
+        version: 95,
+        apply: a_stack_carries_its_contrast_label,
+    },
 ];
+
+/// Record 55 F2 and F5 (spec §12.3): the post-contrast label of each stack,
+/// the time rule's and the subject step's (`contrast_label`). Only a table
+/// is added; a registry from before has no labels until its sessions are
+/// labelled (`nils contrast label`, or the next classification).
+fn a_stack_carries_its_contrast_label(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_tables(store, kind, &["contrast_label"])
+}
 
 /// After type 3's pipe test (record 55 H3): an item its close could not
 /// write is kept as refused, with when and why, rather than left looking

@@ -27,6 +27,9 @@
         "properties": {
           "stack_id": {"type": "integer"},
           "modality": {"type": "string", "description": "The stack's modality, else its fingerprint's"},
+          "series_id": {"type": ["integer", "null"], "description": "Record 55 E3: present only when the descriptor sets x-nils.input.contrast. The stack's series, so a pipeline counts a session's series"},
+          "header": {"$ref": "#/properties/stacks/items/properties/header", "description": "Record 55 E3: present only when the descriptor sets x-nils.input.contrast, as a stack of the run carries it"},
+          "contrast": {"$ref": "#/properties/stacks/items/properties/contrast", "description": "Record 55 E3: present only when the descriptor sets x-nils.input.contrast, as a stack of the run carries it"},
           "geometry": {"$ref": "#/properties/stacks/items/properties/geometry"},
           "files": {
             "type": "array",
@@ -105,7 +108,29 @@
                 }
               },
               "batch": {"type": ["string", "null"], "description": "The name of the ingest batch that first brought the stack in, or null"},
-              "cohorts": {"type": "array", "items": {"type": "string"}, "description": "The names of the cohorts the stack's subject is an open member of, sorted"}
+              "cohorts": {"type": "array", "items": {"type": "string"}, "description": "The names of the cohorts the stack's subject is an open member of, sorted"},
+              "datasets": {"type": "array", "items": {"type": "string"}, "description": "Record 55 E3: present only when the descriptor sets x-nils.input.contrast. The names of the datasets (the source places) that hold a file of the stack, sorted"}
+            }
+          },
+          "contrast": {
+            "type": ["object", "null"],
+            "description": "Record 55 E3: present on every stack and every context entry only when the descriptor sets x-nils.input.contrast: the session facts the post-contrast model reads of the stack, from its series and its fingerprint, each null where the registry holds none. The date and time stay in the run's input and are never written out",
+            "required": ["contrast_bolus_agent", "other_tag", "acquisition_date", "acquisition_time", "series_number", "repetition_time", "echo_time", "inversion_time", "flip_angle", "mr_acquisition_type", "derived", "angio_flag", "text_all_ci", "post_contrast_rules"],
+            "properties": {
+              "contrast_bolus_agent": {"type": ["string", "null"], "description": "ContrastBolusAgent of the stack's series, as written"},
+              "other_tag": {"type": "boolean", "description": "Whether another contrast field of the series is filled: the route, a volume, a total dose or a flow rate above zero, or a start time"},
+              "acquisition_date": {"type": ["string", "null"], "description": "The stack's earliest acquisition date (the fingerprint's), else its series' date, YYYY-MM-DD"},
+              "acquisition_time": {"type": ["string", "null"], "description": "The stack's earliest acquisition time (the fingerprint's), else its series' time, HH:MM:SS with a fraction or none"},
+              "series_number": {"type": ["integer", "null"]},
+              "repetition_time": {"type": ["number", "null"]},
+              "echo_time": {"type": ["number", "null"]},
+              "inversion_time": {"type": ["number", "null"]},
+              "flip_angle": {"type": ["number", "null"]},
+              "mr_acquisition_type": {"type": ["string", "null"], "description": "2D or 3D, as the fingerprint holds it"},
+              "derived": {"type": "boolean", "description": "Whether the fingerprint's ImageType says DERIVED"},
+              "angio_flag": {"type": ["string", "null"], "description": "AngioFlag as the fingerprint holds it"},
+              "text_all_ci": {"type": ["string", "null"], "description": "The fingerprint's folded, lower-cased text of the series' names"},
+              "post_contrast_rules": {"type": "array", "items": {"type": "string"}, "description": "The post_contrast rules whose evidence the stack's classification holds, sorted"}
             }
           },
           "geometry": {

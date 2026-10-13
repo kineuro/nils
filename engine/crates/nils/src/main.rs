@@ -35,6 +35,7 @@ mod campaigns;
 mod certainty;
 mod chain;
 mod checks;
+mod contrast;
 mod dataset;
 mod dataset_summary;
 mod depends;
@@ -303,6 +304,12 @@ enum Command {
     Derivative {
         #[command(subcommand)]
         command: derivatives::DerivativeCommand,
+    },
+    /// The post-contrast label (record 55 F5): the time rule's session pass
+    /// and the subject step, and one stack's label
+    Contrast {
+        #[command(subcommand)]
+        command: contrast::ContrastCommand,
     },
     /// The pipeline catalog: descriptors (nils.job.yml) with their images pinned by digest, the runtime, the runs (record 43)
     Pipeline {
@@ -2277,6 +2284,7 @@ fn main() -> ExitCode {
         Command::Pyramid { command } => pyramid_command(&home, command),
         Command::Preview { command } => preview_command(&home, command),
         Command::Derivative { command } => derivatives::command(&home, command),
+        Command::Contrast { command } => contrast::command(&home, command),
         Command::Pipeline { command } => pipelines::command(&home, command),
         Command::Run(args) => pipelines::run_command(&home, *args),
         Command::Tools { command } => tools::command(&home, command),
@@ -6793,7 +6801,7 @@ fn review_command(home: &Home, command: ReviewCommand) -> Result<(), Exit> {
             drop(columns);
             keyboard_item(&mut registry, args.id)?;
             keyboard_not_held(&mut registry, args.id)?;
-            review_decide(&mut registry, args)
+            review_decide(home, &mut registry, args)
         }
         ReviewCommand::Commit {
             id,
@@ -7221,7 +7229,7 @@ pub(crate) fn review_accept_as(
     Ok(Accepted { id, who, pick })
 }
 
-fn review_decide(registry: &mut Registry, args: DecideArgs) -> Result<(), Exit> {
+fn review_decide(home: &Home, registry: &mut Registry, args: DecideArgs) -> Result<(), Exit> {
     let DecideArgs {
         id,
         member,
@@ -7280,6 +7288,13 @@ fn review_decide(registry: &mut Registry, args: DecideArgs) -> Result<(), Exit> 
         nils_registry::review::Error::Refused(m) => usage(m),
         other => fail(other.to_string()),
     })?;
+    // record 55 F5: a person's read of post-contrast is a T1 anchor
+    let label = (applied.axis == "post_contrast").then(|| {
+        let pack = pack_dir(home, None)
+            .ok()
+            .and_then(|dir| ask_cli::load_pack(&dir, "mri").ok());
+        contrast::after_decisions(registry.store(), pack.as_ref(), &[applied.decision])
+    });
     let store = registry.store();
     let open_sql = format!(
         "SELECT COUNT(*) FROM {} WHERE status = 'open'",
@@ -7298,6 +7313,7 @@ fn review_decide(registry: &mut Registry, args: DecideArgs) -> Result<(), Exit> 
                 "value": value, "scope": applied.scope, "ref": applied.reference,
                 "closed": applied.closed, "members": applied.members,
                 "staged": applied.staged, "actor": who, "open_review_items": open,
+                "contrast_label": label.flatten(),
             }))
             .unwrap_or_default()
         );

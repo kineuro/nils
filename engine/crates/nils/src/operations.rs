@@ -28,10 +28,13 @@
 //! `bodypart-infer-fusion` given its registered parts (the encoder the head
 //! names, the head that answers `body_part`, and the coarse mode that
 //! answers `body_region` from the same encoder where one is served).
-//! Post-contrast's own label (record 55 F2 and F5, the time rule as a
-//! session pass) is not in the engine yet, and no model answers it (E3):
-//! its run is refused, and until a model for its axis is served its step
-//! is not available.
+//! Post-contrast (record 55 E3) is the certified model r1 served through
+//! its cascade, `postcontrast-cascade` given the promoted cascade's parts
+//! (the few-slice student and r1's fusion): it answers on T1-type brain
+//! and says "not sure" elsewhere, and what it defers goes to the full
+//! pipeline, `postcontrast-full`, queued over those stacks when it is
+//! installed. Its own label (record 55 F2 and F5, the time rule) is
+//! `crate::contrast`'s, and its counts are on its step.
 
 use std::collections::BTreeSet;
 
@@ -53,6 +56,14 @@ pub(crate) const OPERATIONS: [(&str, &[&str]); 2] = [
 /// The pipeline body part's step runs: the certified model of record 50,
 /// one frozen model with two modes, given its registered parts.
 pub(crate) const BODY_PART_PIPELINE: &str = "bodypart-infer-fusion";
+
+/// The pipeline post-contrast's step runs (record 55 E3): the certified
+/// model r1 through its cascade, the few-slice student first.
+pub(crate) const POST_CONTRAST_PIPELINE: &str = "postcontrast-cascade";
+
+/// The full pipeline that answers what the cascade defers (record 55 E3,
+/// spec §12.2), queued over the deferred stacks when it is installed.
+pub(crate) const POST_CONTRAST_FULL: &str = "postcontrast-full";
 
 /// How many of an operation's newest runs over the scans are looked
 /// through for the one that runs and the jobs of its log.
@@ -460,6 +471,222 @@ fn body_part(store: &mut Store) -> Result<Result<Plan, Refused>, StoreError> {
     }))
 }
 
+/// Post-contrast's run (record 55 E3): `pipeline` (the cascade's, or the
+/// full pipeline's) given the promoted post-contrast cascade and its
+/// parts. The cascade answers the step only once a person has promoted it
+/// (the speed plan's choice, as body part's); each part its card names
+/// must be registered, not retired, and admitted or promoted; each model
+/// input of the descriptor is filled by the part of its name, and the input
+/// `cascade` by the cascade itself; an optional input nothing fills is left
+/// out, and a required one refuses the run.
+fn post_contrast(store: &mut Store, pipeline: &str) -> Result<Result<Plan, Refused>, StoreError> {
+    let refused =
+        |reason: &'static str, error: String| -> Result<Result<Plan, Refused>, StoreError> {
+            Ok(Err(Refused::new(409, reason, error)))
+        };
+    let Some(p) = nils_registry::pipeline::resolve(store, pipeline)? else {
+        return refused(
+            "no_pipeline",
+            format!("no post-contrast pipeline {pipeline} is installed"),
+        );
+    };
+    let d = match nils_pipeline::descriptor::from_value(p.descriptor.clone()) {
+        Ok(d) => d,
+        Err(e) => {
+            return refused(
+                "no_pipeline",
+                format!(
+                    "{}: the catalog's descriptor no longer checks: {e}",
+                    p.label()
+                ),
+            );
+        }
+    };
+    let candidates = served(store, "axis:post_contrast", None)?;
+    let cascade = candidates
+        .iter()
+        .find(|m| is_cascade(m) && m.state == "promoted")
+        .cloned();
+    let Some(head) = cascade else {
+        let waiting = candidates.iter().find(|m| is_cascade(m)).map(Model::label);
+        return refused(
+            "no_model",
+            match waiting {
+                Some(c) => format!(
+                    "no post-contrast model is served: the cascade {c} is admitted, and answers the step once it is promoted"
+                ),
+                None => "no post-contrast model is installed".into(),
+            },
+        );
+    };
+    let parts = model::parts(store, &head)?;
+    for (name, digest) in head.card["parts"].as_object().into_iter().flatten() {
+        let why = match parts.iter().find(|(n, _)| n == name) {
+            None => format!(
+                "{} names a part {name}, {}, that is not registered",
+                head.label(),
+                digest.as_str().unwrap_or("?")
+            ),
+            Some((_, m)) if m.state == "retired" => format!(
+                "{} reads its part {name}, {}, which is retired",
+                head.label(),
+                m.label()
+            ),
+            Some((_, m)) if !m.answers() => format!(
+                "{} reads its part {name}, {}, which is {} and neither admitted nor promoted",
+                head.label(),
+                m.label(),
+                m.state
+            ),
+            Some(_) => continue,
+        };
+        return refused("no_model", why);
+    }
+    let mut models = Vec::new();
+    let mut skipped: Option<&str> = None;
+    for t in d.inputs.iter().filter(|t| t.ty == "model") {
+        let given = match t.id.as_str() {
+            "cascade" => Some(head.id),
+            other => parts.iter().find(|(n, _)| n == other).map(|(_, m)| m.id),
+        };
+        match (given, skipped) {
+            (Some(_), Some(gone)) => {
+                return refused(
+                    "no_model",
+                    format!(
+                        "{} reads {} after {gone}, which {} names no part for",
+                        p.label(),
+                        t.id,
+                        head.label()
+                    ),
+                );
+            }
+            (Some(id), None) => models.push(id),
+            (None, _) if t.optional => skipped = Some(t.id.as_str()),
+            (None, _) => {
+                return refused(
+                    "no_model",
+                    format!(
+                        "{} names no part {}, which {} reads",
+                        head.label(),
+                        t.id,
+                        p.label()
+                    ),
+                );
+            }
+        }
+    }
+    Ok(Ok(Plan {
+        pipeline: p.label(),
+        models,
+    }))
+}
+
+/// After a run of the post-contrast cascade (record 55 E3): the stacks
+/// whose table says `deferred` go to the full pipeline, frozen into a
+/// handle and queued as a job of the same step and for the same scope as
+/// the cascade's own job, where the full pipeline is installed and its
+/// plan holds; otherwise they stay "not sure" and the summary says why.
+pub(crate) fn fallback(
+    registry: &mut Registry,
+    run_id: i64,
+    job_id: i64,
+    principal: &str,
+) -> Value {
+    let result = (|| -> Result<Value, String> {
+        let epoch = registry.meta().epoch;
+        let store = registry.store();
+        let d = store.dialect();
+        let sql = format!(
+            "SELECT DISTINCT m.stack_id, se.subject_id FROM {} m JOIN {} x ON x.id = m.stack_id \
+             JOIN {} se ON se.id = x.series_id WHERE m.run_id = {} AND m.name = 'reason' \
+             AND m.text = 'deferred' ORDER BY m.stack_id",
+            store.qualified("measure"),
+            store.qualified("stack"),
+            store.qualified("series"),
+            d.param(1, nils_registry::schema::Type::Int)
+        );
+        let rows: Vec<Row> = store
+            .query(&sql, &[nils_registry::store::Param::Int(run_id)])
+            .map_err(|e| e.to_string())?
+            .iter()
+            .map(|r| {
+                Ok(Row(vec![
+                    Cell::Int(r.int(0)?),
+                    r.opt_int(1)?.map_or(Cell::Null, Cell::Int),
+                ]))
+            })
+            .collect::<Result<_, StoreError>>()
+            .map_err(|e| e.to_string())?;
+        if rows.is_empty() {
+            return Ok(json!({"deferred": 0}));
+        }
+        let deferred = rows.len();
+        let plan = match post_contrast(store, POST_CONTRAST_FULL).map_err(|e| e.to_string())? {
+            Ok(plan) => plan,
+            Err(refused) => {
+                return Ok(json!({
+                    "deferred": deferred, "queued": false, "why": refused.error,
+                }));
+            }
+        };
+        let (handle, frozen) = save_stacks(store, rows, principal, epoch, &Pinned::default())?;
+        let mut command = vec![
+            "run".to_string(),
+            plan.pipeline,
+            "--handle".to_string(),
+            handle.to_string(),
+        ];
+        for m in &plan.models {
+            command.extend(["--model".to_string(), m.to_string()]);
+        }
+        // the cascade's job says which step and scope it ran for
+        let sql = format!(
+            "SELECT {}, name FROM {} WHERE id = {}",
+            crate::text_of(store, "job", "args"),
+            store.qualified("job"),
+            d.param(1, nils_registry::schema::Type::Int)
+        );
+        let (args, target) = match store
+            .query_opt(&sql, &[nils_registry::store::Param::Int(job_id)])
+            .map_err(|e| e.to_string())?
+        {
+            Some(r) => (
+                r.opt_text(0)
+                    .ok()
+                    .flatten()
+                    .and_then(|t| serde_json::from_str::<Value>(t).ok())
+                    .unwrap_or(Value::Null),
+                r.opt_text(1).ok().flatten().map(str::to_string),
+            ),
+            None => (Value::Null, None),
+        };
+        // under the grants, detail and principal the cascade's job ran with
+        let mut extra = match args {
+            Value::Object(mut m) => {
+                m.remove("argv");
+                m.remove("queued");
+                Value::Object(m)
+            }
+            _ => json!({}),
+        };
+        extra["step"] = json!("post_contrast");
+        extra["fallback_of"] = json!(run_id);
+        let id = nils_registry::job::enqueue_with(
+            store,
+            &command,
+            target.as_deref(),
+            Some(principal),
+            extra,
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(json!({
+            "deferred": deferred, "queued": true, "job": id, "handle": handle, "stacks": frozen,
+        }))
+    })();
+    result.unwrap_or_else(|e| json!({"error": e}))
+}
+
 /// What an operation's run would be here, or why it is refused: a pipeline
 /// in the catalog runs it, the models it reads are served, and pipelines
 /// run here, with a container runtime and a working place.
@@ -469,12 +696,8 @@ pub(crate) fn plan(
 ) -> Result<Result<Plan, Refused>, StoreError> {
     let planned = match step {
         "body_part" => body_part(registry.store())?,
-        // record 55 F5 and E3: no model answers post-contrast yet
-        "post_contrast" => Err(Refused::new(
-            409,
-            "no_model",
-            "no post-contrast model is installed",
-        )),
+        // record 55 E3: model r1 through its cascade
+        "post_contrast" => post_contrast(registry.store(), POST_CONTRAST_PIPELINE)?,
         other => Err(Refused::new(
             404,
             "no_step",
@@ -872,6 +1095,13 @@ pub(crate) fn steps(
                 ))
             });
         let refused = refusal(name, at.busy(), &planned, scans);
+        // record 55 F5: post-contrast's own label, the time rule's, on the
+        // scans in scope
+        let label = if name == "post_contrast" {
+            Some(crate::contrast::counts(store, &holds)?)
+        } else {
+            None
+        };
         out.push(json!({
             "step": name,
             "state": state,
@@ -886,6 +1116,7 @@ pub(crate) fn steps(
             "of": scans,
             "jobs": at.jobs(),
             "refusal": refused.map(|r| r.doc()),
+            "label": label,
         }));
     }
     Ok(out)
