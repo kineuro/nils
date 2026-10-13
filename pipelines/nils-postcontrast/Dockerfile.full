@@ -1,0 +1,80 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# nils-postcontrast-full: model r1's full post-contrast pipeline, the
+# fallback behind the cascade (`postcontrast-full`, record 55 E3, spec
+# 12.2). One entry point, `nils-postcontrast full`; its descriptor is
+# postcontrast-full/nils.job.yml.
+#
+#   docker build -f pipelines/nils-postcontrast/Dockerfile.full \
+#       -t nils-postcontrast-full pipelines/nils-postcontrast
+#
+# The base is FreeSurfer 8.2.0's own image, pinned by digest: dcm2niix
+# aside, every tool and every weight the pipeline runs is FreeSurfer's
+# (SynthMorph, SynthSeg, SynthStrip, the MNI template). On the CPU each runs
+# as FreeSurfer runs it. For a card, three environments beside it carry the
+# runtimes the speed study ran the same scripts and weights in: the CUDA
+# 11.8 libraries for SynthMorph in FreeSurfer's own TensorFlow, a current
+# TensorFlow for SynthSeg (its script with one line changed for NumPy 2),
+# and PyTorch with CUDA 12.8 for SynthStrip.
+#
+# Licences: FreeSurfer's image carries FreeSurfer's software licence
+# agreement and the third-party components FreeSurfer distributes (among
+# them FSL's and MATLAB runtime's, whose terms are not ours to pass on).
+# This image is therefore built by each site and never published; its
+# descriptor's digest names the image a site built. The model's weights
+# and the atlases are the site's model inputs, never part of the image.
+
+ARG BASE=docker.io/freesurfer/freesurfer@sha256:5648104ca75a24f6ee5a8786146f99b405c2bda1da12bff723a15056da8ddf6b
+FROM ${BASE}
+
+ARG DCM2NIIX_URL=https://github.com/rordenlab/dcm2niix/releases/download/v1.0.20241211/dcm2niix_lnx.zip
+ARG DCM2NIIX_SHA256=974805f80e9d91fa9a40e7edbc2c25bdc7c96b60d09a0f16067a13c6d767aab3
+ARG UV_VERSION=0.12.15
+
+ENV PIP_NO_CACHE_DIR=1 PIP_DISABLE_PIP_VERSION_CHECK=1 PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 \
+    UV_PYTHON_INSTALL_DIR=/opt/python UV_NO_CACHE=1
+
+# dcm2niix, the release the study's conversions ran (v1.0.20241211)
+RUN set -eux; dnf -y install unzip gcc gcc-c++ && dnf clean all; \
+    curl -fsSL -o /tmp/d.zip "${DCM2NIIX_URL}"; \
+    echo "${DCM2NIIX_SHA256}  /tmp/d.zip" | sha256sum -c -; \
+    unzip -o /tmp/d.zip -d /usr/local/bin && chmod 755 /usr/local/bin/dcm2niix && rm /tmp/d.zip; \
+    dcm2niix -v | grep -q v1.0.20241211
+
+# Python 3.12 and the three environments
+RUN set -eux; curl -fsSL "https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/uv-x86_64-unknown-linux-gnu.tar.gz" \
+      | tar -xz -C /usr/local/bin --strip-components=1; \
+    uv python install 3.12.11 3.10.21; \
+    uv venv -p 3.10.21 /opt/feat; for e in tf st; do uv venv -p 3.12.11 /opt/$e; done
+COPY requirements-full.txt requirements-card.txt requirements-tf.txt requirements-st.txt /tmp/req/
+RUN set -eux; \
+    VIRTUAL_ENV=/opt/tf uv pip install -r /tmp/req/requirements-tf.txt; \
+    VIRTUAL_ENV=/opt/st uv pip install --index-url https://download.pytorch.org/whl/cu128 torch==2.8.0; \
+    VIRTUAL_ENV=/opt/st uv pip install -r /tmp/req/requirements-st.txt; \
+    mkdir -p /opt/cu118 && fspython -m pip install --target /opt/cu118 --no-deps \
+      nvidia-cublas-cu11==11.11.3.6 nvidia-cuda-cupti-cu11==11.8.87 nvidia-cuda-nvrtc-cu11==11.8.89 \
+      nvidia-cuda-runtime-cu11==11.8.89 nvidia-cudnn-cu11==8.6.0.163 nvidia-cufft-cu11==10.9.0.58 \
+      nvidia-curand-cu11==10.3.0.86 nvidia-cusolver-cu11==11.4.1.48 nvidia-cusparse-cu11==11.7.5.86; \
+    mkdir -p /opt/nils-postcontrast/fs-scripts; \
+    sed 's/lr_indices\[i, j\] = np.where(labels_segmentation == lab)\[0\]$/lr_indices[i, j] = np.where(labels_segmentation == lab)[0][0]/' \
+      "$FREESURFER_HOME/python/scripts/mri_synthseg" > /opt/nils-postcontrast/fs-scripts/mri_synthseg.py; \
+    grep -q 'labels_segmentation == lab)\[0\]\[0\]' /opt/nils-postcontrast/fs-scripts/mri_synthseg.py
+
+COPY pyproject.toml /src/pyproject.toml
+COPY src /src/src
+RUN set -eux; VIRTUAL_ENV=/opt/feat uv pip install -r /tmp/req/requirements-full.txt; \
+    VIRTUAL_ENV=/opt/feat uv pip install --no-deps -r /tmp/req/requirements-card.txt; \
+    VIRTUAL_ENV=/opt/feat uv pip install --no-deps /src; rm -rf /src /tmp/req; \
+    /opt/feat/bin/pip freeze 2>/dev/null > /opt/nils-postcontrast/pip-freeze.txt || VIRTUAL_ENV=/opt/feat uv pip freeze > /opt/nils-postcontrast/pip-freeze.txt; \
+    ln -s /opt/feat/bin/nils-postcontrast /usr/local/bin/nils-postcontrast; \
+    nils-postcontrast --version
+
+ENV NILS_PC_FS_HOME=/usr/local/freesurfer/8.2.0-1 \
+    NILS_PC_CU118=/opt/cu118/nvidia \
+    NILS_PC_TF_PYTHON=/opt/tf/bin/python \
+    NILS_PC_SYNTHSEG_SCRIPT=/opt/nils-postcontrast/fs-scripts/mri_synthseg.py \
+    NILS_PC_ST_PYTHON=/opt/st/bin/python
+
+USER 65534:65534
+WORKDIR /tmp
+CMD ["nils-postcontrast", "--help"]
