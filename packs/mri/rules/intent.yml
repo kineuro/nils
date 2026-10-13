@@ -142,6 +142,8 @@ rules:
   base_perf:
     clauses:
       - {when: {axis: base, is: PWI}, cite: PWI, source: base}
+      # MRI pack 1.2.0: an ASL label or control image (ruling 17, Q4).
+      - {when: {axis: base, is: ASL}, cite: ASL, source: base}
     set: {directory_type: perf}
 
   # v0 guards this with `not (modifiers & {DSC, DCE, ASL})`, and none of those

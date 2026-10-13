@@ -16,7 +16,18 @@ stores: label
 
 values:
   'DWI': {terms: ['diffusion weighted', 'DWI', 'DTI']}
-  'PWI': {terms: ['perfusion weighted', 'PWI', 'DSC', 'DCE', 'ASL']}
+  # MRI pack 1.2.0: `ASL` is no longer a word for PWI. An ASL label or
+  # control image is base ASL (below); only the label minus control
+  # difference and the maps computed from it are perfusion-weighted.
+  'PWI': {terms: ['perfusion weighted', 'PWI', 'DSC', 'DCE', 'ASL difference']}
+  # MRI pack 1.2.0 (record 55, ruling 17, Q4): the label and control images
+  # of an arterial spin labelling acquisition, as acquired. Neither is
+  # perfusion-weighted on its own: the perfusion weighting is their
+  # difference (construct DeltaM, base PWI), and the M0 scan beside them is
+  # its proton-density reference (construct M0, base PDw).
+  'ASL':
+    terms: ['arterial spin labelling label', 'arterial spin labelling control', 'ASL label', 'ASL control', 'label and control']
+    description: 'an arterial spin labelling label or control image as acquired; the difference of the two is PWI, the M0 scan PDw'
   'SWI': {terms: ['susceptibility weighted', 'SWI', 'SWAN']}
   'T1rho': {terms: ['T1 rho', 'spin lock']}
   'T2rho': {terms: ['T2 rho']}

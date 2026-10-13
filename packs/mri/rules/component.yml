@@ -1,0 +1,102 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# MRI pack 1.2.0: the stored image component, record 55's ruling 17 (Nima,
+# 2026-10-13, Q1 to Q6) within the scope ruling 18 gave it (2026-10-14).
+# For six researched cases the construct records the component the image
+# was stored as (Magnitude, Phase, Real, Imaginary), even where the image is
+# the raw input of a quantitative method; for every other plain acquisition
+# N7 stands and no Magnitude is written (the design repository's
+# `studies/2026-10-13-agent-reference-protocol-truth/`).
+#
+# Runs after the construct axis and adds to what it collected, as the Dixon
+# modifier does after the modifier axis: an ND the axis read stays beside
+# the component. A route decides the construct whole, so the SyMRI route
+# writes its own (rules/symri.yml); the rule below for an MDME or QALAS
+# image reaches the ones no route took, and writes what the route would.
+
+rule_set: component
+decides: [construct]
+adds: [construct]
+tiers: {stated: 0.9}
+
+order: [medic, swi_off_epi, asl_label_control, symri_acquired]
+
+rules:
+
+  # Q1: MEDIC combines its echoes into one magnitude image, which is what
+  # the scanner stores: base T2*w (the base rules), construct Magnitude. The
+  # acquisition's own image only, not a reformat or a localizer made with it.
+  medic:
+    clauses:
+      - when:
+          all:
+            - {axis: technique, is: MEDIC}
+            # (the provenance RawRecon is a default, filled after the rules)
+            - {not: {axis: provenance, is: Localizer}}
+            - {not: {axis: provenance, is: ProjectionDerived}}
+            - r17_acquired
+            - has_magnitude
+            - {not: is_mean}
+        cite: 'a MEDIC image stored as its magnitude'
+        source: flags
+    set: {construct: [Magnitude]}
+    confidence: 0.9
+    why: 'a MEDIC image as acquired is stored as its magnitude (ruling 17, Q1)'
+
+  # Q3: an SWI-type EPI with its SWI processing off is the acquisition's
+  # magnitude, as the SWI route says of the ones it routes; a stored phase
+  # series is Phase there, with no base.
+  swi_off_epi:
+    clauses:
+      - {flag: r17_swi_off_epi_magnitude, tier: stated}
+    set: {construct: [Magnitude]}
+    confidence: 0.9
+    why: 'an SWI-type EPI with SWI processing off is stored as its magnitude (ruling 17, Q3)'
+
+  # Q4: an ASL label or control image is stored as a magnitude image,
+  # whether or not its image type names the component: base ASL (the base
+  # rules). The difference image (DeltaM), the maps, the t-test and the M0
+  # scan are other constructs and keep them.
+  asl_label_control:
+    clauses:
+      - when:
+          all:
+            - {axis: technique, is: ASL}
+            - r17_asl_raw
+            - not:
+                any:
+                  - {axis: construct, is: M0}
+                  - {axis: construct, is: DeltaM}
+                  - {axis: construct, is: CBF}
+                  - {axis: construct, is: CBV}
+                  - {axis: construct, is: MTT}
+                  - {axis: construct, is: Tmax}
+                  - {axis: construct, is: TTP}
+                  - {axis: construct, is: TTestMap}
+                  - {axis: construct, is: MIP}
+                  - {axis: construct, is: MPR}
+                  - {axis: construct, is: Composed}
+        cite: 'an ASL label or control image'
+        source: flags
+    set: {construct: [Magnitude]}
+    confidence: 0.9
+    why: 'an ASL label or control image is stored as a magnitude image (ruling 17, Q4)'
+
+  # Q2 and Q6: an MDME or QALAS image as acquired is stored as its
+  # magnitude unless its image type names another component (ruling 18: a
+  # MAGiC proton-density image with no component token is Magnitude). An ND
+  # is written with it, so that the set agrees with the SyMRI route's own
+  # answer on a stack the route decided.
+  symri_acquired:
+    clauses:
+      - when:
+          all:
+            - {any: [{axis: technique, is: MDME}, {axis: technique, is: QALAS}]}
+            - r17_acquired
+            - {not: r17_states_other_component}
+            - {not: {axis: construct, is: DisplayComposite}}
+        cite: 'an MDME or QALAS image as acquired'
+        source: flags
+    set: {construct: [Magnitude, {value: ND, when: has_nd}]}
+    confidence: 0.9
+    why: 'an MDME or QALAS image as acquired is stored as its magnitude (ruling 17, Q2 and Q6)'

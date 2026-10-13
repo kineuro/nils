@@ -689,7 +689,8 @@ fn symri_is_anatomical_in_its_own_folder_and_its_dicom_is_exported() {
         .filter(|f| {
             f.starts_with("sourcedata/dicom/")
                 && f.contains("/anat/SyMRI/")
-                && f.contains("MDMEND/")
+                // MRI pack 1.2.0 (ruling 17): its stored component, Magnitude
+                && f.contains("MDMEMagnitudeND/")
         })
         .collect();
     assert_eq!(acquisition.len(), 4, "{written:?}");
@@ -782,7 +783,7 @@ fn symri_is_anatomical_in_its_own_folder_and_its_dicom_is_exported() {
     assert!(
         now.iter()
             .filter(|f| f.starts_with("sourcedata/"))
-            .all(|f| f.contains("MDMEND/")),
+            .all(|f| f.contains("MDMEMagnitudeND/")),
         "{now:?}"
     );
     assert_eq!(

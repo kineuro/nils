@@ -1786,7 +1786,7 @@ fn pack_list_and_show_read_the_pack_directory() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|p| p["pack"] == "mri@1.1.0"),
+            .any(|p| p["pack"] == "mri@1.2.0"),
         "{listed}"
     );
 
@@ -1798,7 +1798,7 @@ fn pack_list_and_show_read_the_pack_directory() {
     assert!(out.status.success(), "{}", stderr(&out));
     let shown: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(shown["modality"], "MR");
-    assert_eq!(shown["flags"], 584);
+    assert_eq!(shown["flags"], 588);
     assert_eq!(
         shown["contract"], 10,
         "pack 1.1.0: the engines it works with (contract 10), after review.by_model (contract 9), after record 53's session pass, fallback \
