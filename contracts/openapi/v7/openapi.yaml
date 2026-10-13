@@ -1929,6 +1929,63 @@ paths:
         "400": {description: "The subject is no id, or a name, a filter or a `show` the door does not know"}
         "403": {description: No data:see}
         "404": {description: "No dataset of that name or id, or the subject has no scan in it this caller is answered (amended in place on 2026-10-12: also a subject whose files there were all set aside)"}
+  /api/subjects:
+    get:
+      summary: The registry's subjects a page at a time, for Browse (record 55 H3, added in place additively on 2026-10-13; data:see)
+      description: "As GET /api/datasets/{name}/subjects answers a dataset's, over the whole registry: every subject with a scan this caller is answered, a stack of a sample sealed now in no number but to a holder of sealed:see. The same query (`q`, `show`, `order`, `filter`, `after`, `limit`), the same subjects, facets, totals and shaping below detail quasi (record 55 K7), and `main` the roles of each subject's live picks as a reader about no scope reads them (each subject's own dataset's once read, else the pack's). `scope` is {kind: registry}."
+      parameters:
+        - {name: q, in: query, required: false, schema: {type: string}}
+        - {name: show, in: query, required: false, schema: {type: string, default: code}}
+        - {name: order, in: query, required: false, schema: {type: string, enum: [look, code, visits, scans], default: look}}
+        - {name: filter, in: query, required: false, schema: {type: string}}
+        - {name: after, in: query, required: false, schema: {type: integer}}
+        - {name: limit, in: query, required: false, schema: {type: integer, minimum: 1, maximum: 200, default: 60}}
+      responses:
+        "200": {description: "{scope: {kind: registry}, detail, show, order, totals, matched, count, subjects, next, facets}, as GET /api/datasets/{name}/subjects"}
+        "400": {description: "As GET /api/datasets/{name}/subjects"}
+        "403": {description: No data:see}
+  /api/subjects/{id}/sessions:
+    get:
+      summary: One subject's sessions, with their scan kinds and main scans, for Browse (record 55 H3, added in place additively on 2026-10-13; data:see)
+      description: "As GET /api/datasets/{name}/subjects/{subject}/visits answers a subject's visits in a dataset, over every scan of the subject's this caller is answered: each visit `session` (null for one the cache holds under no session yet, named by its `studies`), label, first, day, number, scans, look, regions, kinds, contrast, symri and main, with the same `name`, `show` and `filter` and the same shaping. `scope` is {kind: registry}."
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: integer}}
+        - {name: name, in: query, required: false, schema: {type: string, enum: [date, number, days], default: date}}
+        - {name: show, in: query, required: false, schema: {type: string, default: code}}
+        - {name: filter, in: query, required: false, schema: {type: string}}
+      responses:
+        "200": {description: "As GET /api/datasets/{name}/subjects/{subject}/visits, `scope` {kind: registry}"}
+        "400": {description: "The subject is no id, or a name, a filter or a `show` the door does not know"}
+        "403": {description: No data:see}
+        "404": {description: "No such subject with a scan this caller is answered"}
+  /api/sessions/{id}/stacks:
+    get:
+      summary: One session's stacks, for Browse (record 55 H3, added in place additively on 2026-10-13; data:see)
+      description: "The scans of one visit, as GET /api/datasets/{name}/scans narrowed to it describes them (names, datatype, axes, the viewer's facts, open questions, `pictures` with its picture), over every stack of the registry this caller is answered: `id` is a session the cache holds, as the sessions door gave it, or `none` with `studies`, the studies of a visit the cache holds under no session. Keyset paged by `after`. A stack of a sample sealed now is never listed but to a holder of sealed:see. The answer carries no dataset; `scope` is {kind: registry}."
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}, description: "A session's id, or none"}
+        - {name: studies, in: query, required: false, schema: {type: string}, description: "With none: a comma list of study ids"}
+        - {name: limit, in: query, required: false, schema: {type: integer, minimum: 1, maximum: 200, default: 50}}
+        - {name: after, in: query, required: false, schema: {type: integer}}
+        - {name: pictures, in: query, required: false, schema: {type: boolean}}
+      responses:
+        "200": {description: "{scope: {kind: registry}, detail, total, count, scans: [as GET /api/datasets/{name}/scans], next, pictures?}"}
+        "400": {description: "The id is no session and not none, none without studies, or as GET /api/datasets/{name}/scans"}
+        "403": {description: No data:see}
+  /api/scans:
+    get:
+      summary: The registry's scans a page at a time, for Browse (record 55 H3, added in place additively on 2026-10-13; data:see)
+      description: "Every stack of the registry this caller is answered, paged, narrowed to one visit (`session` or `studies`) and described as GET /api/datasets/{name}/scans pages and describes a dataset's: the same query and the same scans, the answer carrying no dataset and `scope` {kind: registry}. A stack of a sample sealed now is never listed but to a holder of sealed:see."
+      parameters:
+        - {name: limit, in: query, required: false, schema: {type: integer, minimum: 1, maximum: 200, default: 50}}
+        - {name: after, in: query, required: false, schema: {type: integer}}
+        - {name: pictures, in: query, required: false, schema: {type: boolean}}
+        - {name: session, in: query, required: false, schema: {type: integer}}
+        - {name: studies, in: query, required: false, schema: {type: string}}
+      responses:
+        "200": {description: "{scope: {kind: registry}, detail, total, count, scans: [as GET /api/datasets/{name}/scans], next, pictures?}"}
+        "400": {description: "As GET /api/datasets/{name}/scans"}
+        "403": {description: No data:see}
   /api/datasets/{name}/summary:
     get:
       summary: What a dataset holds and where it is, step by step (Wave 7a, the Data page, added in place additively on 2026-10-09; data:see)
