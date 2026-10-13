@@ -56,6 +56,20 @@ listed in [SCRUB.md](SCRUB.md). Nothing that was left out changes a decision.
 | [17-wave4-reframed.md](17-wave4-reframed.md) | The 2026-09-06 reframing of Wave 4 into three waves: the engine completes (4a), the question (4b), the assistant (4c); Nima's rulings R1 to R8 |
 | [18-wave4b-the-ask.md](18-wave4b-the-ask.md) | The 2026-09-07 record of the Wave 4b study: nine rulings D32 to D40, amendments C39 to C42, Nima's eighteen answers, and the C17/C18 clause walk |
 | [19-wave4c-the-assistant.md](19-wave4c-the-assistant.md) | The 2026-09-08 record of the Wave 4c study: Nima's rulings R9 to R11, the twenty open questions answered, decisions D41 to D51, amendments C43 to C47, the design in one page and the wave of four sections; ratified 2026-09-08 |
+| [20-wave5-the-whole-desk.md](20-wave5-the-whole-desk.md) | Wave 5, the whole desk: rulings, two studies, the design and the wave; ratified and closed 2026-09-10 |
+| [26-datasets-and-pseudonyms.md](26-datasets-and-pseudonyms.md) | Datasets, pseudonymisation as a real step, the identifier map (alpha.29) |
+| [34-a-corpus-that-argues-back.md](34-a-corpus-that-argues-back.md) | A corpus of 1,003 real stacks that every wave runs against |
+| [36-how-sure-a-rule-is.md](36-how-sure-a-rule-is.md) | How sure a rule is; retired into 39 on 2026-09-23 |
+| [39-two-ways-of-knowing-a-stack.md](39-two-ways-of-knowing-a-stack.md) | System 1: a label model over the rules, a learned model, a certified automation rate; the research; accepted 2026-09-23 |
+| [40-the-road-through-wave-6.md](40-the-road-through-wave-6.md) | The stock taken on 2026-09-23 and the road from alpha.37 to the end of Wave 6: waves 41 to 46 and Phase 0 |
+| [41-what-the-protocols-said.md](41-what-the-protocols-said.md) | What the protocols said: the scanner printouts as a truth table for the rules |
+| [47-kvasir-serves-the-group.md](47-kvasir-serves-the-group.md) | Kvasir serves the group: the model server and its keys |
+| [48-the-reader-and-two-learners.md](48-the-reader-and-two-learners.md) | The reader, and two learners: sealed means sealed, agent reads of the reference |
+| [50-body-part-from-the-image.md](50-body-part-from-the-image.md) | Body part from the image: the certified model and its modes |
+| [53-what-the-header-could-not-say.md](53-what-the-header-could-not-say.md) | What the header could not say: the fingerprint's mechanism, the session pass, private elements |
+| [54-one-key-for-every-code.md](54-one-key-for-every-code.md) | One key for every subject code: the subject code generator; parked for production |
+| [55-ready-for-production-and-the-paper.md](55-ready-for-production-and-the-paper.md) | Wave 7a: ready for production and for the paper; its decisions, its road and its gate (T1 to T36) |
+| [56-the-rules-decide.md](56-the-rules-decide.md) | The rules decide; Review only where they cannot or cannot be trusted; System 1 knows when not to trust them; the loop that improves the rules |
 
 ## Decision register
 
@@ -74,7 +88,7 @@ docs carry it in place.
 | D2 | The engine's volume path is a compiled Rust core shipped as a single static binary; ML stays in optional Python sidecars | 02 | decided 2026-09-02: Rust, on the C1 spike's evidence (02, 15 §7); prior-art premise corrected |
 | D3 | One schema, two storage backends: embedded SQLite for standalone, Postgres for the multi-user server | 02 | amended 2026-09-07: DuckDB struck (18 §3) |
 | D4 | The registry is subject-centric and global; "cohort" splits into ingest batch (provenance) and saved selection (membership) | 03 | holds, strengthened; C2, C3, C32 (identity node-local; registry epoch); C36 (the KI registry keeps v0's subject-code scheme and key), D30 (the clinical timeline is core) |
-| D5 | The query AST executes in the engine — one governed query door for UI, agent, and CLI alike | 05, 06 | holds; C4, C16, C17, C18, C20, C22, C27, C28; D20, D27 (a peer's request is the same door, answered as a projection); D32 to D40 (18, 2026-09-07) |
+| D5 | The query AST executes in the engine: one governed query door for UI, agent, and CLI alike | 05, 06 | holds; C4, C16, C17, C18, C20, C22, C27, C28; D20, D27 (a peer's request is the same door, answered as a projection); D32 to D40 (18, 2026-09-07) |
 | D6 | Performance is a budgeted requirement: a 30M-instance digest must fit 8 cores / 64 GB, enforced by a scaled CI benchmark | 02 | principle holds, numbers unanchored; C6 accepted 2026-09-02 |
 | D7 | Every automated judgement emits a review item with evidence into one queue; humans and agents consume the same queue under per-type policies | 05 | holds as spine; C5, C7, C15, C21, C25, C29, D14, D15, D22, D28 |
 | D8 | Authentication is delegated (OIDC, Authentik in our deployment) with `off` and `token` modes; NILS never mints identities again | 05 | holds; C13, C22 (OAuth resource metadata on the MCP endpoint), C30 (node keys, peer claims, no fourth mode) |
@@ -82,7 +96,7 @@ docs carry it in place.
 | D10 | Public products develop in the open, one repo per product; the private-superset/public-mirror pattern is retired | 10 | holds; C10 accepted 2026-09-02; license decided 2026-09-02 (AGPL-3.0-only engine and apps, Apache-2.0 contracts and SDKs, CLA and DCO, 10); `nils node` lives in the engine repo (14) |
 | D11 | The agent is built on Flue and talks to the engine only through the public contracts (MCP first) | 08 | holds, facts from source; C23, C24 accepted and D23, D24 ratified 2026-09-02; C34 |
 | D12 | Classification rules ship as versioned modality packs (manifest + rules + corpus tests); the v0 MRI rules carry over in meaning (vocabulary verbatim, grammar re-expressed) | 04 | holds as direction; three premises corrected; C2, C12, C14, C19; C11 accepted 2026-09-02; C37; D21, D26 (the pack is the common data model across nodes) |
-| D13 | PHI custody and the pseudonymization domain: direct identifiers live only in the linkage store; quasi-identifying and clinical fields stay in the registry under sensitivity classes; the pseudonym scheme is declared per registry; the anonymizer remaps UIDs, shifts dates per subject, drops private tags by default and audits away from the originals; the domain is per node | 03, 12 §5, 15 §1 and §8 | C3, C32, C35, C36 |
+| D13 | PHI custody and the pseudonymization domain: direct identifiers live only in the linkage store; quasi-identifying and clinical fields stay in the registry under sensitivity classes; the pseudonym scheme is declared per registry; the anonymizer remaps UIDs, keeps the real date (per-subject shifting was removed by 38: a release is pseudonymous, and a date that must not show is labelled by months, `M00`, `M06`), drops private tags by default and audits away from the originals; the domain is per node | 03, 12 §5, 15 §1 and §8 | C3, C32, C35, C36 |
 | D14 | Staged results and bulk decisions | 05, 12 §5 | C5, C21 |
 | D15 | Labels and models registered with provenance | 05, 12 §5 | C7, C25 |
 | D16 | The BIDS oracle is the validator plus reference selections | 04, 09, 12 §5 | C8 |
@@ -131,7 +145,7 @@ amended by C35 and C36. Ratified with them: the license (10), the repository res
 R1 to R9 and the freeze F1 (15 §5), the six-week agent pilot and the 90-day
 transcript default (15 §1), and D27's defaults of k = 5 and 10. Two questions for
 Vienna and Amsterdam are listed in 14 §7 and gate nothing before Wave 7. D31, the
-name, was decided by Nima later the same day (15 §10). D41 to D51 and C43 to C47 were proposed by the Wave 4c record ([19](19-wave4c-the-assistant.md), 2026-09-08) and ratified the same day. Next ids: C48 and D52.
+name, was decided by Nima later the same day (15 §10). D41 to D51 and C43 to C47 were proposed by the Wave 4c record ([19](19-wave4c-the-assistant.md), 2026-09-08) and ratified the same day. Next ids: C48 and D52. Records 20 onward number their own decisions and rulings in place; the register above stops at D51.
 
 ## Where this came from
 

@@ -1,6 +1,6 @@
-# 05 — The engine's public contracts
+# 05 · The engine's public contracts
 
-Everything outside the engine — our apps, other people's tools, agents — meets NILS
+Everything outside the engine (our apps, other people's tools, agents) meets NILS
 here and only here. Contracts are versioned independently of the engine build and
 declared by `GET /api/capabilities`. This doc records what each contract is *for*;
 each gets a real spec in its build wave.
@@ -8,7 +8,7 @@ each gets a real spec in its build wave.
 ## 1. The HTTP API
 
 Principles over routes: resource-shaped, versioned, and **job-based for anything
-heavy** — a POST answers 202 with a job id; progress and results are read from the
+heavy**: a POST answers 202 with a job id; progress and results are read from the
 job. There is exactly one door per operation (v0's parallel camelCase UI door and
 snake_case CLI door, with their two behaviours, are the anti-pattern this replaces).
 Server-sent events exist for progress display, never as the execution context.
@@ -31,7 +31,7 @@ teaching session, an external reader) and the only thing a peer ever receives.
 
 ## 2. The query AST and semantic catalog (D5)
 
-The Metabase lesson, kept: **a query is data** — a JSON AST of predicates, joins
+The Metabase lesson, kept: **a query is data**: a JSON AST of predicates, joins
 implied by the catalog, no SQL from clients, parameterized by construction.
 
 - The **engine executes the AST**. One implementation of "what does this question
@@ -41,7 +41,7 @@ implied by the catalog, no SQL from clients, parameterized by construction.
   value sets (for filter chips), and the human descriptions that v0 scattered across
   `db_guru` and the `nils-data` skill. The catalog is *the* schema knowledge; nothing
   else re-documents the schema.
-- A **saved selection** is a named, versioned AST (see [03-registry.md](03-registry.md)) —
+- A **saved selection** is a named, versioned AST (see [03-registry.md](03-registry.md)):
   the v1 cohort. Selections are addressable everywhere data is chosen: export,
   pipelines, segment works, review scopes.
 - The TS `@nils/ast` package (zod types + manipulation helpers) exists for the
@@ -100,7 +100,7 @@ review_item: id, kind, scope (stack/series/subject/run), evidence (structured,
 ```
 
 - **Emitters**: classification uncertainty, body-part disagreement, parse failures,
-  identity-linkage proposals, pipeline QC metrics, BIDS collisions — any stage with
+  identity-linkage proposals, pipeline QC metrics, BIDS collisions: any stage with
   a judgement it is not certain of. Under D28 and C29 (ratified 2026-09-02):
   a request from another node is an emitter too, as kinds `federation.request`
   (an AST at a disclosure level) and `federation.run` (a pipeline on a selection),
@@ -109,7 +109,7 @@ review_item: id, kind, scope (stack/series/subject/run), evidence (structured,
   and entity: counts above the floor from a trusted node may auto-approve;
   `record` always waits for a human. No second approval machinery exists.
 - **Consumers**: the web UI review queues, `nils review` in the CLI, and agents via
-  MCP — the same queue, the same evidence, the same apply call.
+  MCP: the same queue, the same evidence, the same apply call.
 - **Policies** make it safe: per kind, a policy says what may be auto-resolved, by
   whom, above what confidence, with what audit. "Agent may confirm classifications
   above 0.95 and must only *propose* identity links" is configuration, not code.
@@ -130,7 +130,7 @@ built without those rules is unusable.
 
 The engine ships an MCP server exposing, at minimum: catalog browse, AST query
 execution, selection CRUD, job submit/status/cancel, review-item list/get/apply
-(policy-checked), pipeline list/run. Every tool is a thin veneer over the API — MCP
+(policy-checked), pipeline list/run. Every tool is a thin veneer over the API: MCP
 adds *no* capability, only reach: nils-agent, Claude, or any future client gets the
 same governed surface. Agent-specific knowledge (schema guidance, query recipes)
 ships as skills alongside, not as divergent tools.
@@ -163,12 +163,12 @@ deployment without a node sees nothing.
 
 Three modes, engine-enforced:
 
-- `off` — the laptop mode. No middleware, like v0.
-- `token` — static API tokens for service callers and simple deployments.
-- `oidc` — the server mode: the engine validates OIDC (our deployment: Authentik
+- `off`: the laptop mode. No middleware, like v0.
+- `token`: static API tokens for service callers and simple deployments.
+- `oidc`: the server mode: the engine validates OIDC (our deployment: Authentik
   behind Traefik forward-auth); groups map to roles; review-item policies can name
   roles. NILS stores no passwords, mints no sessions, and owns no user table beyond
-  a cache of subject claims. nils-identity is retired with honors — its API-token
+  a cache of subject claims. nils-identity is retired with honors: its API-token
   and thin-claims designs inform the `token` mode.
 
 In `oidc` mode the MCP endpoint also publishes OAuth 2.0 protected-resource

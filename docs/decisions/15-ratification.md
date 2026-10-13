@@ -1,4 +1,4 @@
-# 15 — Ratification: every open item, with a recommendation
+# 15 · Ratification: every open item, with a recommendation
 
 Nima is the decision owner for NILS; I advise. This sheet lists every open item
 in the register chain ([12](12-review-devils-advocate.md) §5 and §6,
@@ -74,6 +74,8 @@ builds them and not an interpretation:**
 - **Sensitivity classes** on every catalog field (identifying, quasi-identifying,
   clinical, technical), enforced in query results, review-item evidence and MCP
   responses alike, which is the same mechanism C27 and C28 build on.
+> **Amended 2026-09-22 by 38:** per-subject date shifting is removed. Nima: the date is the date; a release is pseudonymous, not anonymous, and where a date must not show a session is labelled by months (`M00`, `M06`).
+
 - The anonymizer does **keyed UID remapping**, **per-subject date shifting**
   (one offset per subject, drawn uniformly within ±180 days, held in the linkage
   store; ages computed before the shift), a **private-tag policy** that drops by
@@ -146,12 +148,12 @@ class.
 ### C6, the baseline host
 
 **Recommendation: accept, built in Wave 0; the budget number is restated after
-the measurement.** An 8 vCPU / 64 GB VM on Asgard over NFS, v0 deployed as it runs
+the measurement.** An 8 vCPU / 64 GB VM on the compute server over NFS, v0 deployed as it runs
 on the production host, a defined sample corpus digested and timed. The only dependency is a raw
 DICOM sample on the storage server, which follows the migration. Nothing in v1 may
 claim "a
 small machine" before this number exists. **Accepted 2026-09-02 (section 7).**
-**Built and measured 2026-09-03**: an 8 vCPU / 64 GB VM on Asgard reading the
+**Built and measured 2026-09-03**: an 8 vCPU / 64 GB VM on the compute server reading the
 corpus over NFS, v0 0.5.3 deployed on it and measured first (507 files/s,
 5.78 GiB), then v1 (5,713 files/s, 0.83 GiB) and the gate of §12, which passes
 there. The numbers and their caveats are in 11 under slice 8 and in the wave
@@ -255,7 +257,7 @@ evidence lands, and the report says what it found.
 | Id | Waits for | Owner | By |
 |---|---|---|---|
 | C1 | the language spike report | me | Wave 0, ten working days from the repo restart |
-| C6 | the baseline measurement on the Asgard VM | me | Wave 0, after a sample corpus is on the storage server |
+| C6 | the baseline measurement on the the compute server VM | me | Wave 0, after a sample corpus is on the storage server |
 | C11 | ~~the pack-format prototype on the three hardest v0 pieces~~ **done 2026-09-03; the format is data, no code hatch (section 3, C11)** | me | second half of Wave 1 |
 | C31 | Amsterdam's answer on what their cluster is | you | an email, any time before Wave 7 |
 | Federation pilot | Vienna's answers of 14 §7 | you | before Wave 8 |

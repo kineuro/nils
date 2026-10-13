@@ -1,4 +1,4 @@
-# 14 — Federation: nodes, and data that stays where it is
+# 14 · Federation: nodes, and data that stays where it is
 
 Two conversations put this on the table. A PI from Vienna spent time with the group
 to see how we work, and the question came up whether NILS could be federated: each
@@ -142,7 +142,7 @@ server in a hospital basement.
   (principle 7).
 - **Outbound-only nodes are the normal case.** Hospital networks accept no inbound
   connection; Stockholm's own node sits behind one today and we reach it over a
-  tailnet. Two patterns cover it: a self-hosted WireGuard mesh (Headscale with a
+  tailnet. Two patterns cover it: a self-hosted WireGuard mesh (an open-source coordination server with a
   DERP relay on 443, which is what we already run), or a **blind store-and-forward
   relay** that holds signed, encrypted envelopes and sees only metadata. The mesh is
   the recommendation for two or three nodes; the relay is for a member that cannot

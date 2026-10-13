@@ -1,11 +1,11 @@
-# 09 — Pipelines as plugins (D9)
+# 09 · Pipelines as plugins (D9)
 
 ## What v0 got right
 
 The foundation is sound and carries over: declarative descriptors, containers as
 the execution unit, selection → materialized BIDS tree → work units → derivatives +
 `results.json`, content-addressed descriptor versions, docker/apptainer runtimes.
-Real N4 ran on real ALS data in development (the live application database holds
+Real N4 ran on real study E data in development (the live application database holds
 zero pipeline runs); segment's prep consumes the contract. Output registration was
 deferred in v0 (`INGEST_DB_WRITE_ENABLED = False`, and intentionally no result
 cache), so v1 has to build it, not strengthen it: every derivative is a registry
@@ -21,7 +21,7 @@ FreeSurfer wrappers and the whole existing ecosystem are NILS pipelines on day o
 and our own starter catalog (dcm2niix → N4 → brain-extraction → pre-segmentation)
 ships as ordinary well-behaved citizens of the same contract.
 
-`nils.job.yml` remains — as the **metadata layer**: image + pinned digest, the
+`nils.job.yml` remains: as the **metadata layer**: image + pinned digest, the
 BIDS-Apps invocation shape, resource needs (GPU class, memory), and everything the
 raw contract cannot say (below). A plain BIDS App with no descriptor still runs
 with defaults; a descriptor makes it a first-class, tunable, QC-aware plugin.
@@ -30,7 +30,7 @@ with defaults; a descriptor makes it a first-class, tunable, QC-aware plugin.
 
 The descriptor declares each parameter: name, type, range/enum, default, unit,
 human description. From that single declaration the engine derives the UI form, the
-JSON Schema agents read through MCP, CLI flags, and — non-negotiable — **full
+JSON Schema agents read through MCP, CLI flags, and (non-negotiable) **full
 parameter provenance on every run**. A run you cannot reproduce from its record is
 a bug in the contract, not in the pipeline.
 
@@ -38,10 +38,10 @@ a bug in the contract, not in the pipeline.
 
 The descriptor may declare QC outputs: named metrics the pipeline emits per unit in
 `results.json` (SNR, registration cost, mask volume, custom scores) with optional
-thresholds. The engine turns threshold breaches — and unit failures — into **review
+thresholds. The engine turns threshold breaches (and unit failures) into **review
 items** (D7) carrying the metrics and artifact refs as evidence. That is the
 whole "agentic decision point" story for pipelines: a registration-QC agent is a
-policy on `pipeline-qc` items plus a skill for reading the evidence — zero new
+policy on `pipeline-qc` items plus a skill for reading the evidence: zero new
 machinery per pipeline, which is the test that the base was envisioned correctly.
 
 ## Scheduling, honestly scoped
@@ -49,7 +49,7 @@ machinery per pipeline, which is the test that the base was envisioned correctly
 v1.0 runs pipelines through the engine's job system on the local runtime
 (docker/apptainer), with GPU allocation as a first-class resource lease in the job
 scheduler (v0's known debt). Remote executors (SLURM and friends) are a declared
-seam on the same job model — designed for, not built, until a real deployment needs
+seam on the same job model: designed for, not built, until a real deployment needs
 one. A real deployment now may: the Amsterdam collaboration described its setup as
 a cluster, and in the compute reading of that word the seam gets its first
 implementation, a **SLURM executor over Apptainer** (C31 in
@@ -79,4 +79,4 @@ this spine; the hook is the run id, and nothing is built for them now.
 Pipelines are optional twice over: the engine core pipeline (digest→bids) never
 requires the analysis-pipeline subsystem, and each pipeline is a plugin the
 deployment chooses. Absence of a container runtime disables the subsystem with a
-capability flag, not an error — per D1.
+capability flag, not an error: per D1.

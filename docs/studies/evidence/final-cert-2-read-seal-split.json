@@ -1,0 +1,33 @@
+{
+ "run": "final-cert-2-read-seal-split",
+ "purpose": "certificate 2's seal kit in two parts (plan.md, deviation 16; nils-design 5989954, code run final-cert-2-code-8): the 6,245 drawn stacks of final-cert-2-read as selections final-cert-2-a (3,122) and final-cert-2-b (3,123); a supplement to the sealed run final-cert-2-read, whose single-selection kit the engine's 5,000-row cap refused",
+ "study": "studies/2026-10-02-final-certificate-2/plan.md",
+ "created": "2026-10-04T11:12:35Z",
+ "sealed": "2026-10-04T11:12:35Z",
+ "files": 17,
+ "bytes": 149165,
+ "by_folder": {
+  ".": 17
+ },
+ "manifest_sha256": "3fe0398164b05c2d9c9ef0e96db4ba9e4b25e2aba313f0ca284add72f16c2f93",
+ "per_stack_files_by_folder": {},
+ "sha256": {
+  "KIT.sha256": "f2ffbea80f28042d85b30c6973411b8743c4c840f5b27d486ea35e10ce75c949",
+  "RUN.json": "d4f935b96ae059ff0f105896d9d227c40a05fb9619663eb9a29e8c8bdb11da45",
+  "SHA256SUMS": "c7720f60464544704c5412536689e81b9d36156961fef906fc4f679bafb48ae0",
+  "code-commit.txt": "e352c5f518c850e4c3cb29ae08a276924176881c0448315dcd5e2bfac7c13b6f",
+  "final-cert-2-a.select.json": "abcfd2a0bbc1cc16bba63d363a6f3f75703c364d17a3485b2b53a04187660e8e",
+  "final-cert-2-b.select.json": "b08790e388ea353c87c95e2f455a1e4d6180964d72f652e7c23bb925f7c15362",
+  "frozen-engine.txt": "605a15c68e5685a5d14229f96f0b7083e253d012e2c49c8cfe179611dce0197e",
+  "frozen-job.txt": "450507fbd89cc0af9702cc687e66b149843f7315189dbfb05122b85e67d0a724",
+  "frozen-pack.txt": "4b67cac8ce2a6e82a4e11ba210c84b4adfc72db7f4629785f7d3d09d6147795d",
+  "leftover.txt": "0ace8d846dd1e2cc903579b0274c1ea79e267b10d260404e294475f58d5e6043",
+  "names.txt": "0a3e22af85340900e57b405731c2791dd1a9b9402b8775e25007ed7e791dd30e",
+  "part-max.txt": "1880a4e62eb46acc4153f0cd2a5331b303904318de4143b3c80b4a45ab9031c4",
+  "seal-split-server.sh": "6e3846af3013357d155c69ec978e3df6a41961d2cdf84646a504b1e072ba4146",
+  "stack-ids-a.txt": "d4d8ed3fabb39e321d2f6af453bd19c8322ef7e9d3c16c876c5878f4922e50bd",
+  "stack-ids-b.txt": "c75facb72daca17ff4419fad81ceaa31f570b29d0c01243ba1409f5e8d46cb49",
+  "stack-ids.txt": "a58dd2e3d8a547831c9b82d1b1c751591ba61cc6be002d9bcf1b5d8c5611b7d2",
+  "summary.json": "9fb3e1f75623ea9a324b5570012f1ed9eba580fff22cb323a2d7db105ade16b5"
+ }
+}

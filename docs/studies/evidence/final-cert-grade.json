@@ -1,0 +1,47 @@
+{
+ "run": "final-cert-grade",
+ "purpose": "The final header certificate's grade (grade.md part 2): MRI pack 0.23.0's stored answers (job pack-0230, alpha.71; fetched on alpha.72 with the same pack tree) on final-cert-read's 3,750 sealed stacks, scored by grade7.py against the reference with final-cert-read-corrections and the pack-stands record, the lines of lines_final.py (main at 1 %, each make at 3 %, the supplement, kept-uncertain, void-kept and the localizers apart), and every wrong stack read and put in one kind (errors.py, readout.py, kinds-0230.tsv)",
+ "study": "studies/2026-10-01-final-certificate-read/grade.md",
+ "created": "2026-10-02T13:21:59Z",
+ "sealed": "2026-10-02T13:22:04Z",
+ "files": 32,
+ "bytes": 1107319,
+ "by_folder": {
+  ".": 1,
+  "code": 12,
+  "logs": 3,
+  "scoring": 16
+ },
+ "manifest_sha256": "68db229eaa677231177b41591ca853ce7e362f932bbaa8e76c2a4449d4fb65e9",
+ "per_stack_files_by_folder": {
+  "scoring/errors/": 1,
+  "scoring/errors/private/": 3,
+  "scoring/grade/g-#/": 3,
+  "scoring/grade/g-#/private/": 2,
+  "scoring/lines/private/": 1,
+  "scoring/": 1,
+  "scoring/parties/": 1
+ },
+ "sha256": {
+  "RUN.json": "fe845624495097061109be367f1bb1fd5842aa70dcf5cebdf99fa973f4158a84",
+  "code/COMMIT": "a11dd1e02009f77f9b284c0f0b79540959bd34f58dea7ef0830c987db1215975",
+  "code/release-binaries.sha256": "b1a9ab369629aae8d425ac1146df99bca77f428a158d924599181ced44e921d4",
+  "code/scorer.sha256": "c67d48f3e385d673d687b8e8701dcba567caa6deb653299e466a3074f30fab3f",
+  "code/tools/dryparty.py": "c1751e2eef0f6dd4089faba3dc90b560e680d53f6f0ff080c5ae622f8bd98bb4",
+  "code/tools/errors.py": "9e9ed725a1ffd156589afdbaf563f5b2c80a4b893771ef8d806d10808c5b8af7",
+  "code/tools/fetch-server-final.sh": "c92947314ea8a2235fa634595a38d9f34e6addd3bb0e944687edeeb3c5664e15",
+  "code/tools/lines_final.py": "ae8e1553fdf06d239a06e7cdcb49e5c8b0c3a5e83df582a60abc25c173654138",
+  "code/tools/locbad.py": "d4bcbc04d58cb32b32515b5b4dd676468a13bdad42cb9ccf66933791da728b42",
+  "code/tools/readout.py": "4ea321dce5c8da304bf49019124c65e097d5aded6588f6a06f8f7bc5153dcb5d",
+  "code/tools/run.sh": "44c3b9440251c5204042edfb3723ccc3c6ff485d1b7c1f36815062d79defe357",
+  "code/tools/stats_kg.py": "d5e146025ef7df9d56dc7614861776fac95c10032e3a477e8669bf828b3df4ec",
+  "code/tools/stored-dev5.py": "17496d632f8c00d2ff63f43bfee646cac96e5b13f47fb8db2c2d5692894b0ec4",
+  "logs/fetch-checks.txt": "b6c60b903e18cb4fc194a32bcdf90357a41e320377850b0bb41e204f376d821a",
+  "logs/lines.log": "e7557cc53f012c23f3c5502a7166ff5b7e8f91924bee29a9fe3a364897635432",
+  "logs/run.log": "802d1c2a73595e0ec101075ef9f2817f449eb459ecc600bb8313d32e5e70fb8f",
+  "scoring/errors/private/readout.md": "c2f6f9b114185d601f42a661ebd59731127b3a6ce180f13b2770dfe39d4ab2cf",
+  "scoring/lines/private/wrong.tsv": "51a8a246b4cc991f36ed4ce1e2fe8f9d62f5f6d567755abb6fe25b6039294272",
+  "scoring/lines/summary.json": "1e1127ecd3351f4516637cf471aed1d6e4cb0b2e13dfa5c47eb8133dc29c60f7",
+  "scoring/lines/summary.md": "e7557cc53f012c23f3c5502a7166ff5b7e8f91924bee29a9fe3a364897635432"
+ }
+}
