@@ -1209,7 +1209,20 @@ pub(crate) fn route(
                     &now,
                 )
                 .map_err(campaign_err)?;
-                Ok(Reply::ok(closed.as_json()))
+                let mut doc = closed.as_json();
+                // record 55 F5: a settled read of post-contrast is a T1 anchor
+                let pack = doors
+                    .pack_dir
+                    .as_ref()
+                    .and_then(|dir| nils_pack::load(&dir.join(&doors.ask_pack), None).ok());
+                if let Some(label) = crate::contrast::after_decisions(
+                    registry.store(),
+                    pack.as_ref(),
+                    &closed.decisions,
+                ) {
+                    doc["contrast_label"] = label;
+                }
+                Ok(Reply::ok(doc))
             }
             ["api", "campaigns", which, "export"] if post => {
                 let doc = json_body(body)?;
@@ -1318,6 +1331,11 @@ pub(crate) fn route(
                     rules_hidden,
                 )?
                 .unwrap_or_else(|| json!({"stack": stack, "axes": [], "blind": false}));
+                // record 55 F5: a rater is shown what the campaign suggests
+                // and no post-contrast label, which may rest on a read
+                if let Some(m) = doc.as_object_mut() {
+                    m.remove("contrast_label");
+                }
                 doc["blind"] = json!(blind);
                 doc["suggest"] = json!(c.suggest.name());
                 let suggested = if blind {
@@ -5152,6 +5170,7 @@ pub(crate) fn campaign_command(home: &Home, cmd: CampaignCommand) -> Result<(), 
             let pack = crate::pack_dir(home, pack_dir)
                 .ok()
                 .and_then(|d| nils_pack::load(&d.join(&pack), None).ok());
+            let pack_for_label = pack.clone();
             let picks = pick_writer(pack);
             let (author_kind, model) = keyboard_author(&mut registry)?;
             let closed = campaign::close(
@@ -5167,8 +5186,18 @@ pub(crate) fn campaign_command(home: &Home, cmd: CampaignCommand) -> Result<(), 
                 &now,
             )
             .map_err(cerr)?;
+            // record 55 F5: a settled read of post-contrast is a T1 anchor
+            let label = crate::contrast::after_decisions(
+                registry.store(),
+                pack_for_label.as_ref(),
+                &closed.decisions,
+            );
             if json {
-                print(&closed.as_json());
+                let mut doc = closed.as_json();
+                if let Some(label) = label {
+                    doc["contrast_label"] = label;
+                }
+                print(&doc);
                 return Ok(());
             }
             println!(

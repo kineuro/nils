@@ -8,7 +8,8 @@
 //! the summary and on the cohort's document goes queued, running, then done
 //! or failed, and says why a run of it would be refused now: no pipeline or
 //! no model for it, no container runtime, a run of it already queued, and
-//! post-contrast always, since no model answers it yet.
+//! post-contrast here, since no post-contrast pipeline is installed (its
+//! own run is `post_contrast.rs`'s).
 //!
 //! No container runtime is needed and no real image is run: a stand-in for
 //! podman on the server's search path runs the stand-in pipeline's command
@@ -475,21 +476,24 @@ fn round(pg: Option<(String, String)>) {
     assert_eq!(bp["refusal"]["reason"], "no_pipeline", "{s}");
     let pc = step(&s, "post_contrast");
     assert_eq!(pc["state"], "off", "{s}");
-    assert_eq!(pc["refusal"]["reason"], "no_model", "{s}");
+    assert_eq!(pc["refusal"]["reason"], "no_pipeline", "{s}");
     assert_eq!(
-        pc["refusal"]["error"], "no post-contrast model is installed",
+        pc["refusal"]["error"], "no post-contrast pipeline postcontrast-cascade is installed",
         "{s}"
     );
     // the door says the same
     let (status, doc) = server.run("datasets/ds", "post_contrast", OPS);
     assert_eq!(status, 409, "{doc}");
-    assert_eq!(doc["error"], "no post-contrast model is installed", "{doc}");
-    assert_eq!(doc["reason"], "no_model", "{doc}");
+    assert_eq!(
+        doc["error"], "no post-contrast pipeline postcontrast-cascade is installed",
+        "{doc}"
+    );
+    assert_eq!(doc["reason"], "no_pipeline", "{doc}");
     assert_eq!(doc["step"], "post_contrast", "{doc}");
     assert_eq!(doc["disclosure"], "safe", "{doc}");
     let (status, doc) = server.run("cohorts/fed", "post_contrast", OPS);
     assert_eq!(status, 409, "{doc}");
-    assert_eq!(doc["reason"], "no_model", "{doc}");
+    assert_eq!(doc["reason"], "no_pipeline", "{doc}");
     let (status, doc) = server.run("datasets/ds", "body_part", OPS);
     assert_eq!(status, 409, "{doc}");
     assert_eq!(doc["reason"], "no_pipeline", "{doc}");
@@ -755,7 +759,7 @@ fn round(pg: Option<(String, String)>) {
     assert!(bp["refusal"].is_null(), "{fed}");
     assert_eq!(
         step(&fed, "post_contrast")["refusal"]["reason"],
-        "no_model",
+        "no_pipeline",
         "{fed}"
     );
     let (status, started) = server.run("cohorts/fed", "body_part", OPS);
@@ -1052,7 +1056,7 @@ fn round(pg: Option<(String, String)>) {
     assert_eq!(doc["reason"], "no_runtime", "{doc}");
     let (status, doc) = server.run("cohorts/fed", "post_contrast", OPS);
     assert_eq!(status, 409, "{doc}");
-    assert_eq!(doc["reason"], "no_model", "{doc}");
+    assert_eq!(doc["reason"], "no_pipeline", "{doc}");
 
     // a door's job that a worker took and that has written no run yet runs;
     // one that ended before its run began is the step's newest attempt

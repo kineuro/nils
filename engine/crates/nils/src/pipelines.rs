@@ -2333,6 +2333,7 @@ fn materialise_stacks(
     input: &Path,
     header: bool,
     geometry: bool,
+    contrast: bool,
 ) -> Result<Materialised, String> {
     let d = store.dialect();
     let err = |e: nils_registry::Error| e.to_string();
@@ -2408,6 +2409,15 @@ fn materialise_stacks(
     let mut headers = if header {
         let subjects: BTreeMap<i64, i64> = info.iter().map(|(k, v)| (*k, v.1)).collect();
         stack_headers(store, &subjects)?
+    } else {
+        BTreeMap::new()
+    };
+    // record 55 E3: the session facts the post-contrast model reads, and
+    // the datasets that hold a file of each stack
+    let mut contrast_of = if contrast {
+        let ids: Vec<i64> = info.keys().copied().collect();
+        crate::contrast::with_datasets(store, &ids, &mut headers)?;
+        crate::contrast::facts(store, &ids)?
     } else {
         BTreeMap::new()
     };
@@ -2524,6 +2534,9 @@ fn materialise_stacks(
         if geometry && let Some(entry) = entries.last_mut() {
             entry["geometry"] = geometry_of.remove(&stack).unwrap_or(Value::Null);
         }
+        if contrast && let Some(entry) = entries.last_mut() {
+            entry["contrast"] = contrast_of.remove(&stack).unwrap_or(Value::Null);
+        }
         units.push(Unit {
             id: unit,
             subject: None,
@@ -2537,11 +2550,16 @@ fn materialise_stacks(
     }
     // the rest of each session the run holds part of, for the student's
     // session top (record 55 E2, P1b): read, never scored
-    let context = if geometry {
+    let mut context = if geometry {
         session_context(store, stacks, &geometry_of_studies)?
     } else {
         Vec::new()
     };
+    // record 55 E3: each context entry with its series, header and session
+    // facts, as the run's own stacks carry them
+    if contrast && !context.is_empty() {
+        crate::contrast::context(store, &mut context)?;
+    }
     write_stacks_json(
         &input.join("stacks.json"),
         &listed,
@@ -2647,7 +2665,14 @@ fn unit_context(m: &Materialised, i: usize) -> Option<Vec<Value>> {
                 .map(|f| json!({"geometry": f["geometry"]}))
                 .collect();
             modality.eq_ignore_ascii_case("MR").then(|| {
-                json!({"stack_id": e["stack_id"], "modality": modality, "geometry": e["geometry"], "files": files})
+                let mut c = json!({"stack_id": e["stack_id"], "modality": modality, "geometry": e["geometry"], "files": files});
+                // record 55 E3: with the session facts, as the context has them
+                if e.get("contrast").is_some() {
+                    c["series_id"] = e["series_id"].clone();
+                    c["header"] = e["header"].clone();
+                    c["contrast"] = e["contrast"].clone();
+                }
+                c
             })
         })
         .collect();
@@ -4692,9 +4717,14 @@ fn execute_run(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Resul
 
     let released_before = x.resume.and_then(|r| r.input_release_id);
     let m = match (d.layout, released_before) {
-        (Layout::Stacks, _) => {
-            materialise_stacks(registry.store(), x.stacks, &input, d.header, d.geometry)?
-        }
+        (Layout::Stacks, _) => materialise_stacks(
+            registry.store(),
+            x.stacks,
+            &input,
+            d.header,
+            d.geometry,
+            d.contrast,
+        )?,
         (Layout::Bids, Some(release)) => released(registry, release, d.level)?,
         (Layout::Bids, None) => {
             // a release is a job of its own kind, one at a time: the runs
@@ -5069,7 +5099,19 @@ fn execute_run(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Resul
         }
         Scheduled::Done => {}
     }
-    finalize(registry, x, &m, &working, &out, &rel_out, &mut taken_files)
+    let mut ended = finalize(registry, x, &m, &working, &out, &rel_out, &mut taken_files)?;
+    // record 55 F2 and F5: a run that proposes the post-contrast axis gives
+    // T1 answers the time rule anchors on, so its subjects are labelled again
+    if x.descriptor.proposals.iter().any(|a| a == "post_contrast") {
+        ended.1["contrast_label"] = crate::contrast::after_answers(home, registry, x.stacks);
+    }
+    // record 55 E3: what the cascade deferred goes to the full pipeline
+    if x.pipeline.name == crate::operations::POST_CONTRAST_PIPELINE
+        && matches!(ended.0, "done" | "partial")
+    {
+        ended.1["fallback"] = crate::operations::fallback(registry, x.run_id, x.job_id, x.who);
+    }
+    Ok(ended)
 }
 
 /// How the schedule ended.
@@ -7273,7 +7315,7 @@ fn stack_geometry(
 /// row by axis, the name of its first ingest batch, and the cohorts its
 /// subject is an open member of. `stacks` maps each stack to its subject.
 /// The registry is read a few hundred stacks at a time.
-fn stack_headers(
+pub(crate) fn stack_headers(
     store: &mut Store,
     stacks: &BTreeMap<i64, i64>,
 ) -> Result<BTreeMap<i64, Value>, String> {

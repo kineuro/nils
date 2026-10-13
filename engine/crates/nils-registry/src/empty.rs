@@ -80,6 +80,8 @@ pub const STACK_TABLES: &[(&str, Row)] = &[
     ("release_move", Row::Keeps("a release moved it")),
     // the main scans a release read, frozen when it was made
     ("release_pick", Row::Keeps("a release read a pick of it")),
+    // record 55 F5: the post-contrast label, worked out from the session
+    ("contrast_label", Row::Goes),
 ];
 
 /// Every table with a `series_id` column, and what a sweep does to it.

@@ -4534,3 +4534,41 @@ fn migration_94_keeps_the_picks_a_release_read_on_both_backends() {
         );
     }
 }
+
+/// Record 55 F2 and F5, migration 95, on both backends: a registry of
+/// schema 94 gains `contrast_label` empty, with one row a stack.
+#[test]
+fn migration_95_adds_the_contrast_label_on_both_backends() {
+    for (name, _guard, mut store) in stores() {
+        migrate::migrate(&mut store, Kind::Registry).unwrap();
+        let (cl, meta) = (
+            store.qualified("contrast_label"),
+            store.qualified("registry_meta"),
+        );
+        store
+            .batch(&format!(
+                "DROP TABLE {cl};\n\
+                 UPDATE {meta} SET value = '94' WHERE key = 'schema_version'"
+            ))
+            .unwrap();
+        assert_eq!(
+            migrate::migrate(&mut store, Kind::Registry).unwrap(),
+            (95..=migrate::SCHEMA_VERSION).collect::<Vec<i64>>(),
+            "{name}"
+        );
+        assert!(
+            migrate::table_exists(&mut store, "contrast_label").unwrap(),
+            "{name}"
+        );
+        let insert = |store: &mut Store| {
+            store.batch(&format!(
+                "INSERT INTO {cl} (stack_id, study_id, subject_id, contrast_state, contrast_source, basis, \
+                 contrast_prior_72h, checks, weak_f, family, t1_family, use_level, anchored, rule, labelled_at) \
+                 VALUES (7, 3, 2, 'post', 't1_anchor_time_rule', 'bracket', 'no', '[]', 0, 'FLAIR', 0, \
+                 '1 %', 1, 'time-rule-1', '2026-10-13T10:00:00Z')"
+            ))
+        };
+        insert(&mut store).unwrap();
+        assert!(insert(&mut store).is_err(), "one row a stack: {name}");
+    }
+}

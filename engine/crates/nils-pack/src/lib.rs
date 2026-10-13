@@ -14,6 +14,7 @@
 
 pub mod bids;
 mod cache;
+pub mod contrast;
 pub mod corpus;
 pub mod derive;
 pub mod error;
