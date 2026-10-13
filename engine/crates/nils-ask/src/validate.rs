@@ -475,6 +475,16 @@ pub fn held_count_why() -> String {
     )
 }
 
+/// Why a list's rows are held back below detail quasi (record 55 K7, the
+/// ruling of 2026-10-13 that completes small counts at plain): the rows a
+/// quasi identifying field chose are 1 to 4 subjects, and a list's length
+/// is a count, so no row is shown and the length is not given.
+pub fn held_list_why() -> String {
+    format!(
+        "a list of fewer than {MEASURE_K} subjects that a quasi identifying field chose; its length is a count, so no row is shown"
+    )
+}
+
 /// Record 55 K7, the one place the quasi-identifier rule is decided:
 /// whether a scope projects a field of this class raw. An identifier never
 /// (it enters through values and leaves through `out.identifiers`); a

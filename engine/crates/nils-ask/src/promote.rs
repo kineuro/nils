@@ -184,6 +184,12 @@ pub fn promote(
     if !h.has_rows() {
         return Err(HandleError::Expired(handle_id).into());
     }
+    // record 55 K7, small lists at plain (the ruling of 2026-10-13): a list
+    // held back whole holds no subject, and a cohort made of it would say
+    // none where there were some
+    if h.rows_held() {
+        return Err(HandleError::Held(handle_id).into());
+    }
     // a subject handle's keys are its subjects; a session's or a stack's
     // rows each name their subject
     let subjects: Vec<i64> = handle::keys(registry.store(), handle_id)?

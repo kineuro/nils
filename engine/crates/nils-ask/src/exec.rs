@@ -75,6 +75,12 @@ pub struct Answer {
     /// field chose or grouped, held for fewer than `MEASURE_K` subjects or
     /// beside such a count, so the chat says which.
     pub held_counts: Vec<usize>,
+    /// Record 55 K7, small lists at plain (the ruling of 2026-10-13): the
+    /// answer lists the rows of a set a quasi identifying field chose, and
+    /// they are 1 to 4 subjects, so no row is answered and every column is
+    /// held back with [`crate::validate::held_list_why`]. A list's length
+    /// is a count, so it is not given either.
+    pub rows_held: bool,
 }
 
 /// A column of an answer with values held back, and why (record 55 K7, the
@@ -94,11 +100,12 @@ impl Answer {
             .collect()
     }
 
-    /// The columns with a value held back, in order, each with why.
+    /// The columns with a value held back, in order, each with why: every
+    /// column of a list held back whole.
     pub fn held_back_named(&self) -> Vec<HeldBack> {
-        self.held_back
-            .iter()
-            .filter_map(|&i| {
+        (0..self.columns.len())
+            .filter(|&i| self.is_held(i))
+            .filter_map(|i| {
                 self.columns.get(i).map(|c| HeldBack {
                     column: c.clone(),
                     why: self.why_held(i),
@@ -107,10 +114,26 @@ impl Answer {
             .collect()
     }
 
-    /// Why the values of a column were held back: a small count's why for
-    /// a count (record 55 K7, small counts at plain), a group's otherwise.
+    /// Whether values of a column were held back: some of its values, or
+    /// all of them where the list is held (record 55 K7).
+    pub fn is_held(&self, i: usize) -> bool {
+        self.rows_held || self.held_back.contains(&i)
+    }
+
+    /// The row count a door may give: none where the list is held back,
+    /// since a list's length is a count (record 55 K7, small lists at
+    /// plain, the ruling of 2026-10-13).
+    pub fn row_count(&self) -> Option<usize> {
+        (!self.rows_held).then_some(self.rows.len())
+    }
+
+    /// Why the values of a column were held back: a held list's why where
+    /// the rows are (record 55 K7, small lists at plain), a small count's
+    /// why for a count (small counts at plain), a group's otherwise.
     pub fn why_held(&self, i: usize) -> String {
-        if self.held_counts.contains(&i) {
+        if self.rows_held {
+            crate::validate::held_list_why()
+        } else if self.held_counts.contains(&i) {
             crate::validate::held_count_why()
         } else {
             crate::validate::held_back_why()
@@ -239,18 +262,38 @@ pub fn run(store: &mut Store, compiled: &Compiled, bounds: Bounds) -> Result<Ans
     let mut rows: Vec<Row> = Vec::new();
     let mut bytes = 0usize;
     let mut truncated = false;
-    let result = store.query_stream(&compiled.sql, &compiled.params, |row| {
-        if rows.len() as u64 >= bounds.max_rows {
-            truncated = true;
-            return Ok(false);
+    // record 55 K7, small lists at plain (the ruling of 2026-10-13): a list
+    // of 1 to 4 subjects a quasi identifying field chose is held back
+    // whole, decided over the whole set inside the same read, so its rows
+    // are never read and no page, handle or door can hold them
+    let mut rows_held = false;
+    let guarded = match &compiled.list_guard {
+        Some(guard) => {
+            let bound = &compiled.params[..compiled.list_guard_params.min(compiled.params.len())];
+            store.query_stream(guard, bound, |row| {
+                rows_held = row.opt_int(0)?.unwrap_or(0) == 1;
+                Ok(false)
+            })
         }
-        bytes += row.0.iter().map(cell_bytes).sum::<usize>();
-        if bytes as u64 > bounds.max_bytes {
-            truncated = true;
-            return Ok(false);
+        None => Ok(0),
+    };
+    let result = guarded.and_then(|_| {
+        if rows_held {
+            return Ok(0);
         }
-        rows.push(row);
-        Ok(true)
+        store.query_stream(&compiled.sql, &compiled.params, |row| {
+            if rows.len() as u64 >= bounds.max_rows {
+                truncated = true;
+                return Ok(false);
+            }
+            bytes += row.0.iter().map(cell_bytes).sum::<usize>();
+            if bytes as u64 > bounds.max_bytes {
+                truncated = true;
+                return Ok(false);
+            }
+            rows.push(row);
+            Ok(true)
+        })
     });
     let _ = stop_tx.send(());
     if let Some(w) = watchdog {
@@ -291,5 +334,6 @@ pub fn run(store: &mut Store, compiled: &Compiled, bounds: Bounds) -> Result<Ans
         shaped: compiled.shaped_columns.clone(),
         held_back,
         held_counts,
+        rows_held,
     })
 }

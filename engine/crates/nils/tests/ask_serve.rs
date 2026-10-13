@@ -4366,3 +4366,226 @@ fn every_door_holds_a_count_under_five_that_an_age_chose() {
 
 /// The schema the Postgres half of the small counts door test registers in.
 const SMALL_SCHEMA: &str = "nils_ask_serve_small_test";
+
+/// Record 55 K7, small lists at plain (the ruling of 2026-10-13), at every
+/// door on both backends: a list of the first visits of the 2 subjects 45
+/// or older answers no row at plain, names every column as held back and
+/// gives no row count, at a run, its cached answer, the preview, the handle,
+/// the list of handles, a page, a queued job and the CSV export; the handle
+/// is no source, neither for a run nor for a start; the diagnosis with keys
+/// holds the stage. A list of 36 subjects is answered at plain, and the
+/// reviewer at detail quasi lists the 2.
+#[test]
+fn every_door_holds_a_list_of_fewer_than_five_that_an_age_chose() {
+    let dsn = std::env::var("NILS_TEST_POSTGRES_DSN")
+        .ok()
+        .filter(|d| !d.is_empty());
+    if dsn.is_none() {
+        eprintln!("NILS_TEST_POSTGRES_DSN is not set; the Postgres half is skipped");
+    }
+    let reader = Some("a-reader-token-of-length");
+    let reviewer = Some("a-reviewer-token-of-leng");
+    let list = |from: i64| {
+        serde_json::json!({
+            "ast_version": 1,
+            "name": format!("the first visits of the subjects {from} or older"),
+            "sets": {
+                "people": {"grain": "subject"},
+                "visits": {"grain": "session", "of": "people", "bind": {
+                    "n": ["ordinal", {}],
+                    "age": ["age_at", {}, ["field", {}, "subject.birth_date"], ["field", {}, "first"]]
+                }},
+                "older": {"grain": "session", "from": "visits", "where": [
+                    ["=", {}, ["field", {}, "n"], 1],
+                    [">=", {}, ["field", {}, "age"], from]
+                ]}
+            },
+            "out": {"set": "older", "level": "record", "columns": [["field", {}, "n"]]}
+        })
+    };
+    let (few, many) = (list(45), list(35));
+    let why = nils_ask::validate::held_list_why();
+    let held = serde_json::json!([
+        {"column": "_key", "why": why},
+        {"column": "_subject", "why": why},
+        {"column": "n", "why": why}
+    ]);
+    for (backend, dsn) in [("sqlite", None), ("postgres", dsn.clone())] {
+        let home = match (backend, &dsn) {
+            ("sqlite", _) => synthetic(),
+            (_, Some(dsn)) => synthetic_postgres(dsn, LIST_SCHEMA),
+            _ => continue,
+        };
+        let server = Server::start(
+            &home,
+            12,
+            &[
+                "--auth",
+                "token",
+                "--token",
+                "a-reader-token-of-length=reader@lab:reader",
+                "--token",
+                "a-reviewer-token-of-leng=rev@lab:reviewer",
+            ],
+        );
+        let post = |path: &str, b: serde_json::Value, token: Option<&str>, want: u16| {
+            let (status, answer) = server.request("POST", path, Some(&body(b)), token);
+            assert_eq!(status, want, "{backend} {path}: {answer}");
+            answer
+        };
+        let get = |path: &str, want: u16| {
+            let (status, answer) = server.request("GET", path, None, reader);
+            assert_eq!(status, want, "{backend} {path}: {answer}");
+            answer
+        };
+
+        // at detail quasi: the 2 subjects' first visits
+        let quasi = post(
+            "/api/ask/run",
+            serde_json::json!({"document": few, "fresh": true}),
+            reviewer,
+            200,
+        );
+        assert_eq!(quasi["row_count"], 2, "{backend}: {quasi}");
+        assert_eq!(quasi["held_back"], serde_json::json!([]));
+
+        // at detail plain: no row, every column held, no length
+        let plain = post(
+            "/api/ask/run",
+            serde_json::json!({"document": few, "fresh": true}),
+            reader,
+            200,
+        );
+        assert_eq!(plain["rows"], serde_json::json!([]), "{backend}: {plain}");
+        assert_eq!(plain["row_count"], serde_json::Value::Null, "{backend}");
+        assert_eq!(plain["pages"], 0);
+        assert_eq!(plain["truncated"], false);
+        assert_eq!(plain["held_back"], held, "{backend}: {plain}");
+        let cached = post(
+            "/api/ask/run",
+            serde_json::json!({"document": few}),
+            reader,
+            200,
+        );
+        assert_eq!(cached["cached"], true, "{backend}: {cached}");
+        assert_eq!(cached["rows"], serde_json::json!([]));
+        assert_eq!(cached["row_count"], serde_json::Value::Null);
+        assert_eq!(cached["held_back"], held, "{backend}: {cached}");
+        let previewed = post(
+            "/api/ask/preview",
+            serde_json::json!({"document": few, "rows": 50}),
+            reader,
+            200,
+        );
+        assert_eq!(previewed["rows"], serde_json::json!([]), "{backend}");
+        assert_eq!(previewed["held_back"], held, "{backend}: {previewed}");
+
+        // the handle: no length, no page, every column held
+        let h = plain["handle"].as_i64().unwrap();
+        let one = get(&format!("/api/ask/handles/{h}"), 200);
+        assert_eq!(
+            one["row_count"],
+            serde_json::Value::Null,
+            "{backend}: {one}"
+        );
+        assert_eq!(one["pages"], 0);
+        assert_eq!(one["held_back"], held);
+        let all = get("/api/ask/handles?limit=50", 200);
+        let listed = all["handles"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["id"] == h)
+            .unwrap_or_else(|| panic!("{backend}: no handle {h} in {all}"))
+            .clone();
+        assert_eq!(listed["row_count"], serde_json::Value::Null, "{backend}");
+        get(&format!("/api/ask/handles/{h}/rows?page=0"), 404);
+
+        // no source: a start from it, and a set read from it
+        let start = post(
+            "/api/ask/start",
+            serde_json::json!({"from": {"handle": h}}),
+            reader,
+            409,
+        );
+        assert!(
+            start["error"]
+                .as_str()
+                .is_some_and(|e| e.contains("holds no rows")),
+            "{backend}: {start}"
+        );
+        post(
+            "/api/ask/run",
+            serde_json::json!({"document": {
+                "ast_version": 1,
+                "sets": {"t": {"grain": "session", "from": format!("handle:{h}")}},
+                "out": {"set": "t", "level": "count"}
+            }}),
+            reader,
+            409,
+        );
+
+        // the diagnosis with keys holds the stage
+        let d = post(
+            "/api/ask/diagnose",
+            serde_json::json!({"document": few, "keys": true}),
+            reader,
+            200,
+        );
+        let last = d["funnel"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .rfind(|s| s["set"] == "older")
+            .unwrap()
+            .clone();
+        assert_eq!(last["subjects"], serde_json::Value::Null, "{backend}: {d}");
+        assert!(last.get("keys").is_none(), "{backend}: {last}");
+
+        // 36 subjects: listed at plain
+        let listed = post(
+            "/api/ask/run",
+            serde_json::json!({"document": many, "fresh": true}),
+            reader,
+            200,
+        );
+        assert_eq!(listed["row_count"], 36, "{backend}: {listed}");
+        assert_eq!(listed["held_back"], serde_json::json!([]));
+
+        // a queued job says the same in its result
+        let q = post(
+            "/api/ask/jobs",
+            serde_json::json!({"document": few, "name": "small-list"}),
+            reader,
+            202,
+        );
+        let job = q["job"].as_i64().unwrap();
+        server.finish();
+        run(&home, &["jobs", "work", "--once"], None);
+        let jobs: serde_json::Value =
+            serde_json::from_str(&run(&home, &["jobs", "list", "--all", "--json"], None)).unwrap();
+        let done = jobs
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|j| j["id"] == job)
+            .unwrap_or_else(|| panic!("no job {job}: {jobs}"));
+        assert_eq!(done["state"], "done", "{backend}: {done}");
+        assert_eq!(done["result"]["held_back"], held, "{backend}: {done}");
+        assert_eq!(done["result"]["row_count"], serde_json::Value::Null);
+
+        // the CSV export: the header alone
+        let csv = run(
+            &home,
+            &["ask", "handles", "export", "--handle", &h.to_string()],
+            None,
+        );
+        assert_eq!(csv.trim_end(), "_key,_subject,n", "{backend}: {csv}");
+        if let Some(dsn) = &dsn {
+            drop_schema(dsn, LIST_SCHEMA);
+        }
+    }
+}
+
+/// The schema the Postgres half of the small lists door test registers in.
+const LIST_SCHEMA: &str = "nils_ask_serve_list_test";

@@ -108,6 +108,13 @@ pub struct Compiled {
     /// grouped, held back (null) for fewer than `MEASURE_K` subjects and
     /// beside such a count.
     pub count_columns: Vec<usize>,
+    /// Record 55 K7, the ruling of 2026-10-13 (small lists at plain): where
+    /// the answer lists the rows of a set a quasi identifying field chose,
+    /// below detail quasi, one statement over the same sets that answers 1
+    /// where the set holds 1 to 4 subjects, so the list is held back whole;
+    /// it binds the first `list_guard_params` of `params`.
+    pub list_guard: Option<String>,
+    pub list_guard_params: usize,
 }
 
 /// The dialect layer: the hooks (H1 to H11) and the closures (§11.2, §11.3).
@@ -559,6 +566,11 @@ struct Builder<'a> {
     quasi_sets: BTreeSet<String>,
     counts: crate::validate::CountRule,
     count_columns: Vec<usize>,
+    /// Record 55 K7, small lists at plain (the ruling of 2026-10-13): the
+    /// select that says the answer's list is held back, and how many of
+    /// the parameters the sets bind.
+    list_guard: Option<String>,
+    list_guard_params: usize,
 }
 
 const AGGREGATES: &[&str] = &["count", "distinct", "min", "max", "sum", "avg", "list"];
@@ -4178,6 +4190,28 @@ impl<'a> Builder<'a> {
         })
     }
 
+    /// Record 55 K7, small lists at plain (the ruling of 2026-10-13): how
+    /// many subjects a list of the answer's set would show, as one value
+    /// read apart from the list, where a quasi identifying field chose or
+    /// grouped its rows; none where none did. A group set's rows are its
+    /// keys' values, so its list is held by the subjects under it.
+    fn list_subjects(&self, frame: &Frame) -> Option<String> {
+        let out = &self.ask.out;
+        if !self.quasi_sets.contains(&out.set) {
+            return None;
+        }
+        let set = self.ask.sets.get(&out.set)?;
+        if set.group.is_some() {
+            return self.quasi_subjects(frame);
+        }
+        let who = if frame.has_subj {
+            "COUNT(DISTINCT x.subj)"
+        } else {
+            "COUNT(*)"
+        };
+        Some(format!("(SELECT {who} FROM {} x)", cte_name(&out.set)))
+    }
+
     /// The final SELECT over the answer's set.
     fn answer(&mut self) -> R<String> {
         let out = &self.ask.out;
@@ -4269,6 +4303,18 @@ impl<'a> Builder<'a> {
                 return Ok(sql);
             }
             _ => {}
+        }
+        // record 55 K7, small lists at plain (the ruling of 2026-10-13): a
+        // list of the rows a quasi identifying field chose is a count by
+        // its length, so where the set holds 1 to 4 subjects no row of it
+        // is answered. The guard reads the whole set, before a page, an
+        // `after` or a limit, and binds only the sets' own parameters.
+        if let Some(n) = self.list_subjects(&frame) {
+            self.list_guard_params = self.params.len();
+            self.list_guard = Some(format!(
+                "SELECT CASE WHEN {n} BETWEEN 1 AND {} THEN 1 ELSE 0 END AS held_",
+                crate::validate::MEASURE_K - 1
+            ));
         }
         for (i, c) in out.columns.iter().enumerate() {
             let at = format!("out.columns[{i}]");
@@ -4406,6 +4452,8 @@ pub fn compile(ask: &Ask, validated: &Validated, ctx: &Context<'_>) -> R<Compile
         quasi_sets: validated.quasi_sets.clone(),
         counts: validated.counts.clone(),
         count_columns: Vec::new(),
+        list_guard: None,
+        list_guard_params: 0,
     };
     for name in &validated.order {
         b.current = Some(ask.sets[name].grain);
@@ -4422,5 +4470,10 @@ pub fn compile(ask: &Ask, validated: &Validated, ctx: &Context<'_>) -> R<Compile
         shaped_columns: b.shaped_columns.clone(),
         held_columns: b.held_columns.clone(),
         count_columns: b.count_columns.clone(),
+        list_guard: b
+            .list_guard
+            .as_ref()
+            .map(|g| format!("WITH {} {g}", b.ctes.join(", "))),
+        list_guard_params: b.list_guard_params,
     })
 }

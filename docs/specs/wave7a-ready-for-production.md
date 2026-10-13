@@ -422,17 +422,44 @@ diagnosis's stages carry `held_back` too, with null `rows` and `subjects`. A
 handle records `quasi_counts` in its suppression, so no answer cached while such
 counts were numbers is served again.
 
+**Small lists (the ruling of 2026-10-13).** A list's length is a count, so the
+rule for counts holds for lists too. Below detail quasi, at plain, an answer that
+lists the rows of a set a quasi-identifying field chose (by the table above) is
+answered only where the set holds none or 5 subjects and more; where it holds 1
+to 4, no row is answered at all. That covers every level that returns one row
+per member, `level: record` and `aggregate`, and a group set over such rows,
+whose number of groups says something of the few subjects under it (the subjects
+under the group set decide). The subjects are counted over the whole set, before
+an `after`, a limit or a page, in the same read as the list, so a page never
+decides it and the rows are never read.
+
+| What the answer says | Where |
+|---|---|
+| no row, and every column named in `held_back` with why `a list of fewer than 5 subjects that a quasi identifying field chose; its length is a count, so no row is shown` | a run and its cached answer, a preview, a handle (which has no page: page 0 answers 404 as an empty handle's does), a job's result, MCP |
+| `row_count` null (never 0, which would say none), `pages` 0, `truncated` false | a run, its cached answer, a handle, the list of handles, a kept set, a job's result |
+| the stage's `rows` and `subjects` null, no keys, `held_back` | the diagnosis's funnel with keys; a pick's ties are null |
+
+A handle frozen from such an answer holds no row and no key, so no later page,
+export or reader can read one. It is no source either: a set read from it, a start
+from it and a promotion of it into a cohort are refused (409, `handle N holds no rows`), since
+either would answer none where there were some. The CSV export of it writes the
+header alone and says why. A list of the rows that technical and clinical fields
+alone chose (the visits numbered 6, a scanner's sessions) is answered at plain
+whatever its length, and detail quasi and above see every list. A handle records
+`quasi_lists` in its suppression, so no answer cached while such a list held its
+rows is served again. Only the ask's own reads for itself are not held: a share's
+denominator, a group's spread, the values sampler and a selection frozen for a
+pipeline, a campaign or a seal, whose rows never reach the reader.
+
 > **Limit: plain detail still filters.** A filter, an order and a count read a
 > quasi-identifying field itself at every detail, and the ask holds each answer to
 > these rules, not a person's series of questions. So repeated questions can
 > narrow a value: asked again with a narrower filter (ages 40 to 50, then 40 to
 > 45), a count of 5 or more says how many people are left in the range, a
 > count of the ages outside the range less the whole says the ones inside, and a
-> group's mean moves by what the narrower filter took out. A list of the rows a
-> quasi-identifying field chose (`level: record` or `aggregate` over a set that is
-> not a group) is still answered at plain, and its length is a count; a row's own
-> count of its subject's rows (a subject's visits in a year) is one person's and
-> is answered too. The real protection is who is given plain detail (record 25):
+> group's mean moves by what the narrower filter took out. A row's own count of
+> its subject's rows (a subject's visits in a year) is one person's and is
+> answered. The real protection is who is given plain detail (record 25):
 > give it only to people who may see such counts and summaries of the registry.
 
 ### 7.2 What a release records about itself (K9)

@@ -505,6 +505,17 @@ fn text_of(v: &serde_json::Value) -> String {
         .unwrap_or_else(|| v.to_string())
 }
 
+/// A handle's row count as the terminal says it: `held` where the list was
+/// held back whole and gives no length (record 55 K7, small lists at plain,
+/// the ruling of 2026-10-13).
+fn rows_or_held(v: &serde_json::Value) -> String {
+    if v.is_null() {
+        "held".to_string()
+    } else {
+        v.to_string()
+    }
+}
+
 // ------------------------------------------------------------------ validate
 
 fn validate(home: &Home, args: AskValidateArgs) -> Result<(), Exit> {
@@ -887,7 +898,8 @@ fn handles(home: &Home, cmd: HandlesCommand) -> Result<(), Exit> {
                     h.id,
                     h.name.clone().unwrap_or_else(|| "-".into()),
                     h.grain.name(),
-                    h.row_count,
+                    h.row_count_shown()
+                        .map_or_else(|| "held".to_string(), |n| n.to_string()),
                     if h.has_rows() { "kept   " } else { "dropped" },
                     h.created_at
                 );
@@ -909,6 +921,8 @@ fn handles(home: &Home, cmd: HandlesCommand) -> Result<(), Exit> {
                     let reads = handle::read_count(registry.store(), args.handle)
                         .map_err(|e| fail(e.to_string()))?;
                     let mut v = serde_json::to_value(&h).unwrap_or_default();
+                    v["row_count"] = json!(h.row_count_shown());
+                    v["held_back"] = json!(h.held_back());
                     v["pinned_by"] = json!(pins);
                     v["pages"] = json!(pages);
                     v["reads"] = json!(reads);
@@ -923,7 +937,7 @@ fn handles(home: &Home, cmd: HandlesCommand) -> Result<(), Exit> {
                 "handle {}   {}   {} rows   {} pages   {}",
                 doc["id"],
                 text_of(&doc["grain"]),
-                doc["row_count"],
+                rows_or_held(&doc["row_count"]),
                 doc["pages"],
                 doc["name"]
                     .as_str()
@@ -993,9 +1007,13 @@ fn handles(home: &Home, cmd: HandlesCommand) -> Result<(), Exit> {
 /// A handle's rows as CSV, read from its stored pages: no compiler, no
 /// statement, no database driver (§15, slice 10).
 fn export(home: &Home, args: ExportArgs) -> Result<(), Exit> {
+    // record 55 K7, small lists at plain (the ruling of 2026-10-13): a
+    // handle whose list was held back whole holds no row, and says so
+    let held: bool;
     let (columns, pages): (Vec<String>, Vec<Vec<Vec<serde_json::Value>>>) = match args.at.door()? {
         Some(door) => {
             let head = door.get(&format!("/api/ask/handles/{}", args.handle))?;
+            held = head["row_count"].is_null();
             let columns = head["columns"]
                 .as_array()
                 .map(|a| a.iter().map(|c| text_of(&c["name"])).collect())
@@ -1033,6 +1051,7 @@ fn export(home: &Home, args: ExportArgs) -> Result<(), Exit> {
                     args.handle
                 ))));
             }
+            held = h.rows_held();
             let n = handle::page_count(registry.store(), args.handle)
                 .map_err(|e| fail(e.to_string()))?;
             let mut pages = Vec::new();
@@ -1089,7 +1108,13 @@ fn export(home: &Home, args: ExportArgs) -> Result<(), Exit> {
     }
     csv.flush().map_err(|e| fail(e.to_string()))?;
     drop(csv);
-    if let Some(path) = &args.out {
+    if held {
+        eprintln!(
+            "handle {} holds no rows: its answer was {}",
+            args.handle,
+            nils_ask::validate::held_list_why()
+        );
+    } else if let Some(path) = &args.out {
         println!("{rows} rows to {}", path.display());
     }
     Ok(())
@@ -1274,7 +1299,7 @@ fn ask_run(home: &Home, args: AskRunArgs) -> Result<(), Exit> {
             println!(
                 "nils ask run   handle {}   {} rows   hash {}   {}",
                 doc["handle"],
-                doc["row_count"],
+                rows_or_held(&doc["row_count"]),
                 text_of(&doc["hash"]),
                 if doc["truncated"].as_bool().unwrap_or(false) {
                     "truncated"
@@ -1401,7 +1426,9 @@ fn ask_run(home: &Home, args: AskRunArgs) -> Result<(), Exit> {
                 "handle": out.handle.id,
                 "hash": out.hash,
                 "grain": out.handle.grain,
-                "row_count": out.handle.row_count,
+                // record 55 K7, small lists at plain (the ruling of
+                // 2026-10-13): a list held back whole gives no length
+                "row_count": out.answer.row_count(),
                 "content_hash": out.handle.content_hash,
                 "truncated": out.answer.truncated,
                 "columns": out.answer.columns,
@@ -1422,7 +1449,9 @@ fn ask_run(home: &Home, args: AskRunArgs) -> Result<(), Exit> {
                 println!(
                     "nils ask run   handle {}   {} rows   hash {}   {}",
                     out.handle.id,
-                    out.handle.row_count,
+                    out.answer
+                        .row_count()
+                        .map_or_else(|| "held".to_string(), |n| n.to_string()),
                     out.hash,
                     if out.answer.truncated {
                         "truncated"

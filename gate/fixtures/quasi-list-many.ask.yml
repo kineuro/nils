@@ -1,0 +1,26 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Record 55 K7, small lists at plain (the ruling of 2026-10-13): the first
+# visits of the subjects 35 or older at that visit, one row per subject. A
+# filter on an age chose them, and they are 36, 5 or more, so at detail
+# plain the list is answered as at any detail.
+ast_version: 1
+name: the first visits of subjects 35 or older
+scheme: default
+sets:
+  people: {grain: subject}
+  visits:
+    grain: session
+    of: people
+    bind:
+      n:   ["ordinal", {}]
+      age: ["age_at", {}, ["field", {}, "subject.birth_date"], ["field", {}, "first"]]
+  older:
+    grain: session
+    from: visits
+    where:
+      - ["=", {}, ["field", {}, "n"], 1]
+      - [">=", {}, ["field", {}, "age"], 35]
+out:
+  set: older
+  level: record
+  columns: [["field", {}, "n"]]

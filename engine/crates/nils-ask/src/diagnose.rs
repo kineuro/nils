@@ -404,7 +404,9 @@ impl Counter<'_> {
         keys.sort_unstable();
         keys.dedup();
         let (rows, subjects) = (a.rows.len() as i64, keys.len() as i64);
-        if quasi && subjects > 0 && subjects < crate::validate::MEASURE_K {
+        // a list held back whole (small lists at plain, the ruling of
+        // 2026-10-13) read no row: its count is held, never none
+        if a.rows_held || (quasi && subjects > 0 && subjects < crate::validate::MEASURE_K) {
             return Ok((
                 Count {
                     rows: None,
@@ -603,7 +605,7 @@ pub fn diagnose(
             .count() as i64;
         // record 55 K7, small counts at plain: a count of the rows a quasi
         // identifying field chose
-        let small = quasi && tied > 0 && tied < crate::validate::MEASURE_K;
+        let small = a.rows_held || (quasi && tied > 0 && tied < crate::validate::MEASURE_K);
         ties.push((name.clone(), (!small).then_some(tied)));
     }
     // rows coarser than a day, per dated set with a precision
