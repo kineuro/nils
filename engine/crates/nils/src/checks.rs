@@ -65,6 +65,10 @@ pub(crate) fn capability() -> Value {
     json!({
         "questions": campaign::KINDS,
         "closes_into": campaign::CLOSES_INTO,
+        // record 55 H3: the sources the create door draws beyond a
+        // selection, a handle and review items, and their bounds
+        "draws": crate::drawn::capability()["draws"],
+        "drawn": crate::drawn::capability(),
         "check": {
             "grains": reg::GRAINS,
             "verdicts": reg::VERDICTS,

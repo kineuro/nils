@@ -42,6 +42,7 @@ mod depends;
 mod derivatives;
 mod disagreements;
 mod door_client;
+mod drawn;
 mod explain;
 mod failures;
 mod file_header;

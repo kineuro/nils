@@ -211,7 +211,7 @@ fn stacks_from(store: &Store) -> String {
 
 /// A study's day as text on either backend: the measured date, else the
 /// one the date vote filled in.
-fn study_day(store: &Store, alias: &str) -> String {
+pub(crate) fn study_day(store: &Store, alias: &str) -> String {
     let d = store.dialect();
     let t = nils_registry::schema::table("study");
     let column = |c: &str| d.text_of_qualified(Some(alias), t.column(c).expect("study column"));
@@ -224,7 +224,7 @@ fn study_day(store: &Store, alias: &str) -> String {
 
 /// The window every visit is of: the one the session cache was built
 /// under, the default scheme's where it holds nothing.
-fn window(store: &mut Store) -> Result<i64, StoreError> {
+pub(crate) fn window(store: &mut Store) -> Result<i64, StoreError> {
     Ok(nils_registry::cohort::built_window(store)?.unwrap_or(Scheme::default().window_days))
 }
 
