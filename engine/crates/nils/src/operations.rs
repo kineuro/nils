@@ -1019,6 +1019,7 @@ pub(crate) fn save_stacks(
         shaped: Vec::new(),
         held_back: Vec::new(),
         held_counts: Vec::new(),
+        rows_held: false,
     };
     let node = nils_registry::job::hostname();
     let spec = nils_ask::handle::Spec {

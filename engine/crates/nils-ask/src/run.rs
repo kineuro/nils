@@ -184,7 +184,11 @@ const MAX_DEPTH: usize = 4;
 /// quasi identifying field chose or grouped was answered for none or
 /// `MEASURE_K` subjects and more, and held back between and beside (small
 /// counts at plain, the ruling of that day), so no answer cached while such
-/// counts were numbers is answered again.
+/// counts were numbers is answered again. `quasi_lists` says a list of the
+/// rows such a field chose was answered for none or `MEASURE_K` subjects
+/// and more, and held back whole between (small lists at plain, the ruling
+/// of 2026-10-13), so no answer cached while such a list held its rows is
+/// answered again.
 pub fn suppression_of(scope: &Scope) -> Value {
     let raw = crate::validate::may_project_raw(crate::validate::Class::QuasiIdentifying, scope);
     json!({
@@ -195,6 +199,7 @@ pub fn suppression_of(scope: &Scope) -> Value {
         "shaped": "named",
         "quasi_totals": "held_to_k",
         "quasi_counts": "held_below_k",
+        "quasi_lists": "held_below_k",
     })
 }
 
@@ -260,6 +265,17 @@ impl Runner<'_> {
         after: Option<i64>,
         limit: Option<u64>,
     ) -> Result<(Compiled, Answer), RunError> {
+        // record 55 K7, small lists at plain (the ruling of 2026-10-13): a
+        // handle whose list was held back holds no row, and a set read from
+        // it would answer none where there were some, on every door
+        for s in ask.sets.values() {
+            if let Some(Src::Handle { id, .. }) = &s.from
+                && let Ok(hid) = id.parse::<i64>()
+                && handle::get(registry.store(), hid)?.is_some_and(|h| h.rows_held())
+            {
+                return Err(HandleError::Held(hid).into());
+            }
+        }
         let store: &mut Store = match self.reader.as_deref_mut() {
             Some(r) => r,
             None => registry.store(),
@@ -321,7 +337,7 @@ pub fn cached(
                 .parse()
                 .map_err(|_| RunError::Message(format!("handle {id} is not a number")))?;
             let h = handle::get(registry.store(), hid)?.ok_or(HandleError::NotFound(hid))?;
-            if h.withdrawn_at.is_some() || !h.has_rows() || h.epoch != epoch_now {
+            if h.withdrawn_at.is_some() || !h.has_rows() || h.rows_held() || h.epoch != epoch_now {
                 return Ok(None);
             }
         }
@@ -402,6 +418,12 @@ fn run_at(registry: &mut Registry, req: Request<'_>, depth: usize) -> Result<Out
             return Err(HandleError::Expired(hid).into());
         }
         if pin || (!stale && !expired) {
+            // record 55 K7, small lists at plain (the ruling of 2026-10-13):
+            // a handle whose list was held back holds no row, and a set read
+            // from it would answer none as if it were empty
+            if h.rows_held() {
+                return Err(HandleError::Held(hid).into());
+            }
             handle::touch(registry.store(), hid)?;
             continue;
         }
@@ -430,6 +452,11 @@ fn run_at(registry: &mut Registry, req: Request<'_>, depth: usize) -> Result<Out
             },
             depth + 1,
         )?;
+        // a fresh answer held back whole is no source either, and its keys
+        // compared with the handle's would say how many it holds
+        if fresh.answer.rows_held {
+            return Err(HandleError::Held(hid).into());
+        }
         let (added, removed) = if expired {
             (0, 0)
         } else {

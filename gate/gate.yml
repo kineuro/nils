@@ -309,6 +309,33 @@ gate:
         At detail plain (small counts, the ruling of 2026-10-12) a filter on
         an age chose the rows, and they are 2 subjects, under 5: the count
         of rows and of subjects is held back.
+    - name: quasi-list-few
+      family: record 55
+      question: The first visits of the subjects 45 or older at that visit
+      file: fixtures/quasi-list-few.ask.yml
+      outcome: passes
+      note: At the gate's own detail, a list of 2 rows, one per subject.
+    - name: quasi-list-few-plain
+      family: record 55
+      question: The same list, asked at detail plain
+      file: fixtures/quasi-list-few.ask.yml
+      outcome: passes
+      detail: plain
+      note: >-
+        At detail plain (small lists, the ruling of 2026-10-13) a filter on
+        an age chose the rows, and they are 2 subjects, under 5: a list's
+        length is a count, so no row is answered, and every column is named
+        as held back.
+    - name: quasi-list-many-plain
+      family: record 55
+      question: The first visits of the subjects 35 or older, asked at detail plain
+      file: fixtures/quasi-list-many.ask.yml
+      outcome: passes
+      detail: plain
+      note: >-
+        At detail plain an age chose the rows, and they are 36 subjects, 5
+        or more: the list is answered, one row per subject, and nothing is
+        held back.
 
     # --- what this wave does not answer, named rather than hidden
     - name: pair-grain-matching

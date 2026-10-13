@@ -1,0 +1,22 @@
+{
+  "name": "quasi-list-few-plain",
+  "question": "The same list, asked at detail plain",
+  "hash": "0e5751c026e543b2e8ab2eb06099daa1d1e5df47778f7787faab45cdf12fe3a8",
+  "columns": [
+    "_key",
+    "_subject",
+    "n"
+  ],
+  "row_count": 0,
+  "rows": [],
+  "funnel": {
+    "older": null,
+    "people": 48,
+    "visits": 48
+  },
+  "held_back": [
+    "_key",
+    "_subject",
+    "n"
+  ]
+}

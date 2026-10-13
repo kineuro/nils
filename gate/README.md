@@ -85,6 +85,13 @@ band of 45 and over, 2 subjects, and the band of 25 to 34 beside it, while
 the band of 35 to 44 answers 34; `quasi-count-few-plain` holds a count of 2
 subjects an age chose.
 
+A list's length is a count, so a list of the rows a quasi-identifying field
+chose is answered at plain for none or 5 subjects and more, and held back
+whole between: no row, and every column under `held_back` (small lists, the
+ruling of 2026-10-13). `quasi-list-few-plain` holds the first visits of the
+2 subjects 45 or older, which `quasi-list-few` lists at the gate's own
+detail, and `quasi-list-many-plain` lists the 36 subjects 35 or older.
+
 ## Dates written as text
 
 A document writes a date as text, `2020-01-31` or `2020-01-31T08:30:00Z`,

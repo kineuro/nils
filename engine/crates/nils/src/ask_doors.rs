@@ -385,7 +385,10 @@ fn run_err(e: RunError) -> Reply {
         RunError::Forbidden(m) => Reply::error(403, m),
         RunError::Handle(HandleError::NotFound(id)) => Reply::error(404, format!("no handle {id}")),
         RunError::Handle(
-            e @ (HandleError::Expired(_) | HandleError::Withdrawn(_) | HandleError::Truncated(_)),
+            e @ (HandleError::Expired(_)
+            | HandleError::Withdrawn(_)
+            | HandleError::Truncated(_)
+            | HandleError::Held(_)),
         ) => Reply::error(409, e.to_string()),
         e @ RunError::NameTaken(_) => Reply::error(409, e.to_string()),
         RunError::Exec(ExecError::Timeout(ms)) => Reply::error(
@@ -695,7 +698,9 @@ fn answer(
                     "handle": h.id,
                     "hash": hash,
                     "grain": h.grain,
-                    "row_count": h.row_count,
+                    // record 55 K7, small lists at plain (2026-10-13): a
+                    // list held back whole gives no length
+                    "row_count": h.row_count_shown(),
                     "declaration": declaration,
                     "content_hash": h.content_hash,
                     "truncated": h.truncated,
@@ -775,7 +780,9 @@ fn answer(
                 "handle": out.handle.id,
                 "hash": out.hash,
                 "grain": out.handle.grain,
-                "row_count": n,
+                // record 55 K7, small lists at plain (the ruling of
+                // 2026-10-13): a list held back whole gives no length
+                "row_count": out.answer.row_count(),
                 "declaration": declaration,
                 "content_hash": out.handle.content_hash,
                 "truncated": out.answer.truncated,
@@ -789,7 +796,7 @@ fn answer(
                 "pages": n.div_ceil(page_rows),
                 "measures": out.measured,
                 "drift": out.drift,
-                "kept": out.kept.iter().map(|k| json!({"handle": k.id, "name": k.name, "grain": k.grain, "row_count": k.row_count})).collect::<Vec<_>>(),
+                "kept": out.kept.iter().map(|k| json!({"handle": k.id, "name": k.name, "grain": k.grain, "row_count": k.row_count_shown()})).collect::<Vec<_>>(),
                 "identifiers": out.identifiers,
                 "inlined": out.inlined,
                 "epoch": epoch,
@@ -1633,7 +1640,7 @@ fn answer(
                     json!({
                         "invalidated": out.contains(&h.id),
                         "stale": out.contains(&h.id) || h.epoch != epoch,
-                        "id": h.id, "name": h.name, "grain": h.grain, "row_count": h.row_count,
+                        "id": h.id, "name": h.name, "grain": h.grain, "row_count": h.row_count_shown(),
                         "content_hash": h.content_hash, "principal": h.principal, "actor": h.actor,
                         "created_at": h.created_at, "epoch": h.epoch, "pack_version": h.pack_version,
                         "disclosure": h.disclosure, "truncated": h.truncated,
@@ -1657,6 +1664,7 @@ fn answer(
             let mut v = serde_json::to_value(&h).unwrap_or(Value::Null);
             v["shaped"] = json!(h.shaped());
             v["held_back"] = json!(h.held_back());
+            v["row_count"] = json!(h.row_count_shown());
             v["pinned_by"] = json!(pins);
             // Wave 5 §12.8: the invalidation, when there is one, and what
             // it means for the answer
@@ -1732,6 +1740,11 @@ fn answer(
             // comes in the desk's order
             if let Some(why) = not_reproducible(registry, &h, "promoted")? {
                 return Err(Reply::error(409, why));
+            }
+            // record 55 K7, small lists at plain (the ruling of 2026-10-13):
+            // a list held back whole holds no subject to promote
+            if h.rows_held() {
+                return Err(Reply::error(409, HandleError::Held(id).to_string()));
             }
             let mut command = vec![
                 "ask".to_string(),

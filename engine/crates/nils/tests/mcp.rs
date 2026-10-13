@@ -739,3 +739,61 @@ fn a_compile_only_refusal_reaches_a_model_as_a_refused_document() {
     }
     server.stop();
 }
+
+/// Record 55 K7, small lists at plain (the ruling of 2026-10-13): through
+/// the tools a model calls, a list of the first visits of the 2 subjects 45
+/// or older answers no row at plain, names every column as held back and
+/// gives no row count, at a run and a preview; at detail quasi it lists 2.
+#[test]
+fn mcp_holds_a_list_of_fewer_than_five_that_an_age_chose() {
+    let home = synthetic();
+    let server = Server::start(
+        &home,
+        &packs(),
+        &[
+            "--auth",
+            "token",
+            "--token",
+            "a-reader-token-of-length=reader@lab:reader",
+            "--token",
+            "a-reviewer-token-of-leng=rev@lab:reviewer",
+        ],
+    );
+    let reader = Some("a-reader-token-of-length");
+    let reviewer = Some("a-reviewer-token-of-leng");
+    let doc = json!({
+        "ast_version": 1,
+        "name": "the first visits of the subjects 45 or older",
+        "sets": {
+            "people": {"grain": "subject"},
+            "visits": {"grain": "session", "of": "people", "bind": {
+                "n": ["ordinal", {}],
+                "age": ["age_at", {}, ["field", {}, "subject.birth_date"], ["field", {}, "first"]]
+            }},
+            "older": {"grain": "session", "from": "visits", "where": [
+                ["=", {}, ["field", {}, "n"], 1],
+                [">=", {}, ["field", {}, "age"], 45]
+            ]}
+        },
+        "out": {"set": "older", "level": "record", "columns": [["field", {}, "n"]]}
+    });
+    let why = nils_ask::validate::held_list_why();
+    let held = json!([
+        {"column": "_key", "why": why},
+        {"column": "_subject", "why": why},
+        {"column": "n", "why": why}
+    ]);
+    for tool in ["nils_run", "nils_preview"] {
+        let r = server.call(tool, json!({"document": doc, "rows": 20}), reader);
+        assert_eq!(r["isError"], false, "{tool}: {r}");
+        let a = &r["structuredContent"];
+        assert_eq!(a["rows"], json!([]), "{tool}: {a}");
+        assert_eq!(a["held_back"], held, "{tool}: {a}");
+        assert!(a["row_count"].is_null(), "{tool}: {a}");
+        let r = server.call(tool, json!({"document": doc, "rows": 20}), reviewer);
+        let a = &r["structuredContent"];
+        assert_eq!(a["rows"].as_array().map(Vec::len), Some(2), "{tool}: {a}");
+        assert_eq!(a["held_back"], json!([]), "{tool}: {a}");
+    }
+    server.stop();
+}
