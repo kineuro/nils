@@ -1,0 +1,123 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# postcontrast-cascade: the certified post-contrast model (model r1, record
+# 42's round 1: 0 of 650 wrong on T1-type brain, bound 0.46 %) served
+# through its three-slice student (record 55 E3; the speed study's round 4
+# chose the cascade c1-fs3-m, which passed class III against model r1 on a
+# sealed draw). It answers only where model r1 is certified, T1-type brain,
+# and says "not sure" everywhere else.
+#
+# Per stack it reads three native slices, chosen from each file's geometry
+# in the manifest (x-nils.input.geometry), and the stack's header and
+# contrast facts (x-nils.input.header and x-nils.input.contrast: the
+# contrast tag, the clock, the series number, the rules' answer and words),
+# with those of the session's other stacks (the manifest's context). The
+# student's three seeds predict model r1's three image arms; each seed and
+# their mean go through model r1's frozen fusion with the stack's header
+# evidence, calibrated per site. A stack is answered where the three seeds
+# give the mean's answer and its log-odds margin from the nearer threshold
+# is at least 4; every other T1-type brain stack is deferred to the full
+# pipeline (postcontrast-full), which the engine runs over the stacks this
+# run's tables mark deferred.
+#
+# The weights are the run's model inputs (student, fusion, cascade), never
+# part of the image; the image checks each against the digest the run's
+# model manifest names, and that the cascade names the other two. The image
+# runs offline; the runner runs it with --network none.
+name: postcontrast-cascade
+schema-version: "0.5"
+tool-version: "0.1.0"
+description: >-
+  Propose post_contrast per stack on T1-type brain with the certified
+  post-contrast model, through its three-slice student; defer the rest of
+  T1-type brain to the full pipeline and say "not sure" elsewhere.
+
+# Pinned to the image built from this folder (CPU build, torch 2.8.0); the
+# release that publishes the image replaces it with the published digest.
+container-image:
+  type: docker
+  image: "ghcr.io/kineuro/nils-postcontrast@sha256:cbafd715a69c8e2c571ea1ce5f9ea7d2349d3e109300cd84d2d7d1e1fada5a7c"
+
+inputs:
+  - id: threads
+    name: Workers
+    type: Number
+    integer: true
+    minimum: 1
+    maximum: 64
+    description: Stacks whose slices are read at once, each in a worker process of its own.
+    value-key: "[THREADS]"
+    command-line-flag: --threads
+    default-value: 8
+    optional: true
+  - id: batch
+    name: Batch
+    type: Number
+    integer: true
+    minimum: 1
+    maximum: 512
+    description: Stacks the student scores at once.
+    value-key: "[BATCH]"
+    command-line-flag: --batch
+    default-value: 64
+    optional: true
+
+command-line: "nils-postcontrast cascade --stacks [Manifest] --inputs [Inputs] --output [OutputLocation] [THREADS] [BATCH]"
+
+output-files:
+  - id: scores
+    name: The stack's post-contrast answer or why it has none
+    path-template: "postcontrast/{stack}.json"
+
+suggested-resources:
+  cpu-cores: 8
+  ram: 8
+  walltime-estimate: 0.1
+
+x-nils:
+  contract: 1
+  analysis-level: stack
+  input:
+    layout: stacks
+    header: true
+    geometry: true
+    contrast: true
+  inputs:
+    - id: student
+      type: model
+      description: The three-slice student (kind student, safetensors, three seeds), which the cascade names
+    - id: fusion
+      type: model
+      description: Model r1's frozen fusion (kind head, task axis:post_contrast, JSON) with its per-site calibration and threshold, which the cascade names
+    - id: cascade
+      type: model
+      description: The cascade (task axis:post_contrast), its file naming the student and the fusion by digest and its margin rule
+  outputs:
+    - id: scores
+      kind: table
+      format: json
+      path-template: "postcontrast/{stack}.json"
+      media-type: application/json
+      columns:
+        - {name: p_given, description: "The fused, calibrated probability that contrast was given; null where the stack was not scored"}
+        - {name: value, type: text, description: "given or not_given where the stack is answered, else null"}
+        - {name: confidence, description: "The answer's probability, max(p, 1 - p)"}
+        - {name: answers, type: integer, description: 1 when the stack is answered, else 0}
+        - {name: stage, type: text, description: "fs3 when the student's stage answered; null otherwise"}
+        - {name: stage1, type: text, description: "How stage 1 ended: answered, deferred, no-geometry, multi-frame, no-slice; null where the stack was never a candidate"}
+        - {name: reason, type: text, description: "Why the stack has no answer: sealed, not-mr, not-t1-brain, no-calibration or deferred (to the full pipeline); null when answered"}
+        - {name: margin, description: "The mean seed's log-odds distance from the nearer threshold"}
+        - {name: seeds_agree, type: integer, description: 1 when the three seeds give the mean's answer}
+        - {name: files_read, type: integer, description: The files the stack's reads opened}
+        - {name: cascade_digest, type: text, description: The cascade}
+        - {name: student_digest, type: text, description: The cascade's student}
+        - {name: fusion_digest, type: text, description: The cascade's fusion}
+  needs:
+    gpu: optional
+    memory-gb: 8
+    gpu-memory-gb: 4
+    cores: 8
+    cores-input: threads
+  proposals:
+    - axis: post_contrast
+      description: given or not_given per answered T1-type brain stack, with the calibrated probabilities, by the cascade's digest
