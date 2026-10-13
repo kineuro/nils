@@ -652,6 +652,9 @@ fn sweep(dsn: Option<&str>) {
         "/api/capabilities",
         "/api/overlays",
         "/api/pipelines",
+        // a cohort's picks name the pack's roles as its keys; a sealed
+        // stack it would name is checked by its id below
+        "/api/cohorts/a/picks",
     ];
     let mut knocked = BTreeMap::new();
     for door in caps["doors"].as_array().unwrap() {
@@ -722,6 +725,13 @@ fn sweep(dsn: Option<&str>) {
         }
     }
     assert!(knocked.len() > 60, "{knocked:?}");
+    let (_, picks) = server.call("GET", "/api/cohorts/a/picks", None, ADMIN);
+    for s in &sealed {
+        assert!(
+            !picks.to_string().contains(&format!("\"stack\":{s}")),
+            "the picks door names sealed stack {s}: {picks}"
+        );
+    }
     // the sweep would have seen a leak: the certificate's grant reads the
     // canaries where the admin read none
     let told: String = sealed

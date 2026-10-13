@@ -2639,6 +2639,18 @@ fn routed(
                 query,
             )?))
         }
+        // record 55 H3: each member's sessions and roles, picked, doubted
+        // or missing, for the cohort's heatmap
+        ["api", "cohorts", _, "picks"] if get => {
+            let pack = crate::reader::served_pack(doors.pack_dir.as_deref(), &doors.ask_pack);
+            Ok(Reply::ok(crate::cohort_picks::door(
+                registry,
+                caller,
+                pack.as_deref(),
+                &decoded(segs[2]),
+                query,
+            )?))
+        }
         // record 55 H3, Browse: the whole registry's subjects, one
         // subject's sessions and one session's stacks, as the dataset
         // viewer's doors answer a dataset's
@@ -5143,6 +5155,9 @@ pub(crate) fn door(method: &str, segs: &[&str]) -> (Need, Detail) {
         | ("GET", ["api", "subjects", _, "sessions"])
         | ("GET", ["api", "sessions", _, "stacks"])
         | ("GET", ["api", "scans"]) => (Need::One("data:see"), Plain),
+        // record 55 H3: a cohort's picks for its heatmap, read on the
+        // cohort's page and in Review
+        ("GET", ["api", "cohorts", _, "picks"]) => (Need::AnyOf(&["data:see", "review:see"]), Plain),
         // record 26 §1: what becomes of a dataset's originals. What an act
         // would do is Data reading; the acts themselves move and delete
         // identified files, so they are Data work at detail sensitive.
@@ -5858,6 +5873,7 @@ pub(crate) fn doors_list() -> Vec<String> {
         "GET /api/subjects/{id}/sessions",
         "GET /api/sessions/{id}/stacks",
         "GET /api/scans",
+        "GET /api/cohorts/{name}/picks",
         "GET /api/datasets/{name}/summary",
         "POST /api/datasets/{name}/steps/{step}/run",
         "POST /api/cohorts/{name}/steps/{step}/run",
@@ -7143,6 +7159,15 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
             "a page of at most 200 scans",
             "Reading the registry's scans",
             "Read the registry's scans",
+        ),
+        row(
+            "GET /api/cohorts/{name}/picks",
+            false,
+            false,
+            "bounded",
+            "a page of at most 200 members",
+            "Reading a cohort's picks",
+            "Read a cohort's picks",
         ),
         row(
             "GET /api/datasets/{name}/summary",

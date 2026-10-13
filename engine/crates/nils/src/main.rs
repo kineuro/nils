@@ -35,6 +35,7 @@ mod campaigns;
 mod certainty;
 mod chain;
 mod checks;
+mod cohort_picks;
 mod contrast;
 mod dataset;
 mod dataset_summary;

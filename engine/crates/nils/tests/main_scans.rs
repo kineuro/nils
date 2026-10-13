@@ -5,8 +5,11 @@
 //! run; the run writes the cohort's own picks beside the pack's; the map,
 //! subjects and strips doors answer from the axes; a person's pick of
 //! nothing on a visit stands in the cohort's scope through a rerun; and a
-//! release of the cohort's picked stacks records the rules it read. On
-//! SQLite always, and on Postgres where a test DSN is set.
+//! release of the cohort's picked stacks records the rules it read. Record
+//! 55 H3: Browse's doors read the whole registry as the dataset viewer's
+//! read a dataset, and a cohort's picks door answers each member's sessions
+//! with each role picked, doubted or missing. On SQLite always, and on
+//! Postgres where a test DSN is set.
 
 use std::io::Write as _;
 use std::process::{Command, Stdio};
@@ -117,6 +120,8 @@ impl Home {
 const OPS: &str = "an-operator-token-of-length";
 const CURATOR: &str = "a-curator-token-of-its-length";
 const PLAIN: &str = "a-plain-token-of-its-length";
+const READER: &str = "a-reader-token-of-its-length";
+const SEALED: &str = "a-sealed-token-of-its-length";
 
 /// A `nils serve` with its worker, killed when dropped.
 struct Served {
@@ -138,6 +143,8 @@ impl Served {
             format!("{OPS}=ops@lab:operator"),
             format!("{CURATOR}=cleo@lab:reviewer,data:see"),
             format!("{PLAIN}=pat@lab:campaigns:see"),
+            format!("{READER}=rita@lab:reader"),
+            format!("{SEALED}=sid@lab:operator,sealed:see"),
         ]
         .join(",");
         let child = nils()
@@ -1307,4 +1314,244 @@ fn uncached(pg: Option<(String, String)>) {
     assert_eq!(summary["sessions"], 2, "{summary}");
     let (_, summary) = server.call("GET", "/api/datasets/fresh/summary", None, OPS);
     assert_eq!(summary["sessions"], 3, "{summary}");
+}
+
+#[test]
+fn browse_reads_the_registry_and_a_cohort_s_picks_each_session() {
+    browse_and_picks(None);
+}
+
+#[test]
+fn browse_reads_the_registry_and_a_cohort_s_picks_each_session_on_postgres_too() {
+    on_postgres("nils_main_scans_browse", browse_and_picks);
+}
+
+/// Whether a text is a shape: digits as 9, letters as a or A.
+fn shaped(text: &str) -> bool {
+    text.chars()
+        .all(|c| !c.is_ascii_alphanumeric() || matches!(c, '9' | 'a' | 'A'))
+}
+
+fn browse_and_picks(pg: Option<(String, String)>) {
+    let home = registry(pg);
+    let ingest = TempDir::new("main-scans-browse-ingest");
+    let server = Served::start(&home, ingest.path());
+    let ok = |path: &str, token: &str| {
+        let (status, doc) = server.call("GET", path, None, token);
+        assert_eq!(status, 200, "{path}: {doc}");
+        doc
+    };
+    let mut store = home.store();
+    let stacks = store
+        .query(
+            &format!("SELECT COUNT(*) FROM {}", store.qualified("stack")),
+            &[],
+        )
+        .unwrap()[0]
+        .int(0)
+        .unwrap();
+    let subjects = store
+        .query(
+            &format!(
+                "SELECT COUNT(DISTINCT subject_id) FROM {}",
+                store.qualified("series")
+            ),
+            &[],
+        )
+        .unwrap()[0]
+        .int(0)
+        .unwrap();
+    drop(store);
+
+    // ------------------------------------------------ Browse
+    let all = ok("/api/subjects", OPS);
+    assert_eq!(all["scope"], json!({"kind": "registry"}), "{all}");
+    assert_eq!(all["totals"]["subjects"], subjects, "{}", all["totals"]);
+    assert_eq!(all["totals"]["scans"], stacks, "{all}");
+    let first = ok("/api/subjects?limit=5&order=code", OPS);
+    assert_eq!(first["count"], 5, "{first}");
+    let next = first["next"].as_i64().unwrap();
+    let second = ok(
+        &format!("/api/subjects?limit=5&order=code&after={next}"),
+        OPS,
+    );
+    assert_ne!(first["subjects"][0]["id"], second["subjects"][0]["id"]);
+    // a reader is at plain: the codes are their shapes
+    let plain = ok("/api/subjects", READER);
+    assert_eq!(plain["detail"], "plain", "{plain}");
+    for s in plain["subjects"].as_array().unwrap() {
+        assert!(shaped(s["code"].as_str().unwrap()), "{s}");
+    }
+    let (status, _) = server.call("GET", "/api/subjects", None, PLAIN);
+    assert_eq!(status, 403, "Browse is data:see's");
+    // one subject's sessions and one session's stacks
+    let subject = all["subjects"][0]["id"].as_i64().unwrap();
+    let scans = all["subjects"][0]["scans"].as_i64().unwrap();
+    let visits = ok(&format!("/api/subjects/{subject}/sessions"), OPS);
+    assert_eq!(visits["scope"], json!({"kind": "registry"}), "{visits}");
+    let listed: i64 = visits["visits"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v["scans"].as_i64().unwrap())
+        .sum();
+    assert_eq!(listed, scans, "{visits}");
+    let mut seen = 0;
+    for v in visits["visits"].as_array().unwrap() {
+        let page = match v["session"].as_i64() {
+            Some(id) => ok(&format!("/api/sessions/{id}/stacks?limit=200"), OPS),
+            None => {
+                let studies: Vec<String> = v["studies"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect();
+                ok(
+                    &format!("/api/sessions/none/stacks?studies={}", studies.join(",")),
+                    OPS,
+                )
+            }
+        };
+        assert_eq!(page["scope"], json!({"kind": "registry"}), "{page}");
+        assert_eq!(page["count"], v["scans"], "{v} {page}");
+        seen += page["count"].as_i64().unwrap();
+    }
+    assert_eq!(seen, scans);
+    let (status, _) = server.call("GET", "/api/sessions/none/stacks", None, OPS);
+    assert_eq!(status, 400);
+    let (status, _) = server.call("GET", "/api/subjects/999999/sessions", None, OPS);
+    assert_eq!(status, 404);
+    // every scan a page at a time
+    let page = ok("/api/scans?limit=7", OPS);
+    assert_eq!(page["total"], stacks, "{page}");
+    assert_eq!(page["count"], 7, "{page}");
+    let after = page["next"].as_i64().unwrap();
+    let more = ok(&format!("/api/scans?limit=7&after={after}"), OPS);
+    assert!(
+        more["scans"][0]["stack"].as_i64().unwrap() != page["scans"][0]["stack"].as_i64().unwrap()
+    );
+    // a stack of a sample sealed now is in no number but to sealed:see
+    let sealed = page["scans"][0]["stack"].as_i64().unwrap();
+    let mut store = home.store();
+    let owner = store
+        .query(
+            &format!(
+                "SELECT se.subject_id FROM {} st JOIN {} se ON se.id = st.series_id WHERE st.id = {sealed}",
+                store.qualified("stack"),
+                store.qualified("series")
+            ),
+            &[],
+        )
+        .unwrap()[0]
+        .int(0)
+        .unwrap();
+    store
+        .execute(
+            &format!(
+                "INSERT INTO {} (sample, stack_id, subject_id, sealed_by, sealed_at) \
+                 VALUES ('a browse test', {sealed}, {owner}, 'anna@ward-3', '2026-10-13T00:00:00Z')",
+                store.qualified("sealed_stack")
+            ),
+            &[],
+        )
+        .unwrap();
+    drop(store);
+    assert_eq!(ok("/api/scans?limit=1", OPS)["total"], stacks - 1);
+    assert_eq!(ok("/api/scans?limit=1", SEALED)["total"], stacks);
+    assert_eq!(ok("/api/subjects", OPS)["totals"]["scans"], stacks - 1);
+
+    // ------------------------------------------------ a cohort's picks
+    let doc = ok("/api/cohorts/quad/picks", CURATOR);
+    assert_eq!(doc["cohort"]["name"], "quad", "{doc}");
+    assert_eq!(doc["total"], 4, "{doc}");
+    assert!(
+        doc["roles"].as_array().unwrap().iter().any(|r| r == "t1w"),
+        "{doc}"
+    );
+    let picked = doc["totals"]["t1w"]["picked"].as_i64().unwrap();
+    assert!(picked > 0, "{doc}");
+    // every picked role names its stack and the rules, every missing one nothing
+    let mut counted = 0;
+    let mut a_pick: Option<(i64, String, i64)> = None;
+    for s in doc["subjects"].as_array().unwrap() {
+        for (i, ses) in s["sessions"].as_array().unwrap().iter().enumerate() {
+            assert_eq!(ses["number"], i + 1, "{ses}");
+            assert!(ses["label"].as_str().unwrap().starts_with("ses-"), "{ses}");
+            let t1 = &ses["roles"]["t1w"];
+            match t1["state"].as_str().unwrap() {
+                "picked" => {
+                    counted += 1;
+                    assert!(t1["stack"].is_i64() || t1["withheld"] == true, "{t1}");
+                    assert_eq!(t1["by"], "rules", "{t1}");
+                    if a_pick.is_none() {
+                        let day = ses["label"].as_str().unwrap()[4..].to_string();
+                        a_pick = Some((
+                            s["id"].as_i64().unwrap(),
+                            day,
+                            ses["session"].as_i64().unwrap(),
+                        ));
+                    }
+                }
+                "missing" => assert!(t1["stack"].is_null() && t1["by"].is_null(), "{t1}"),
+                other => panic!("{other}"),
+            }
+        }
+    }
+    assert_eq!(counted, picked, "the page holds the whole cohort: {doc}");
+    // agrees with the picks summary, which counts the same picks
+    let summary = ok("/api/picks/summary?cohort=quad", OPS);
+    assert_eq!(summary["roles"]["t1w"]["picked"], picked, "{summary}");
+    // paged by subject id
+    let one = ok("/api/cohorts/quad/picks?limit=3", CURATOR);
+    assert_eq!(one["count"], 3, "{one}");
+    let next = one["next"].as_i64().unwrap();
+    let two = ok(
+        &format!("/api/cohorts/quad/picks?limit=3&after={next}"),
+        CURATOR,
+    );
+    assert_eq!(two["count"], 1, "{two}");
+    assert!(two["next"].is_null(), "{two}");
+    // an open border doubts the role on that session
+    let (subject, day, _) = a_pick.unwrap();
+    let day = format!("{}-{}-{}", &day[..4], &day[4..6], &day[6..8]);
+    let mut store = home.store();
+    nils_registry::review::raise_pick_border(
+        &mut store,
+        &nils_registry::review::PickBorder {
+            model: "mri-default",
+            role: "t1w",
+            subject_id: subject,
+            day: &day,
+            borders: &["too_close"],
+            pick_id: None,
+            score: None,
+            margin: None,
+            runner_up_score: None,
+            considered: &json!([]),
+            notes: &json!({}),
+            job_id: None,
+            scheme: &json!({}),
+            pack: "mri",
+            pack_version: "1",
+        },
+        "2026-10-13T00:00:00Z",
+    )
+    .unwrap();
+    drop(store);
+    let doc = ok("/api/cohorts/quad/picks", CURATOR);
+    assert_eq!(doc["totals"]["t1w"]["doubted"], 1, "{doc}");
+    assert_eq!(doc["totals"]["t1w"]["picked"], picked - 1, "{doc}");
+    // a reader at plain: shapes; no grant: refused; no cohort: 404
+    let plain = ok("/api/cohorts/quad/picks", READER);
+    for s in plain["subjects"].as_array().unwrap() {
+        assert!(shaped(s["code"].as_str().unwrap()), "{s}");
+        for ses in s["sessions"].as_array().unwrap() {
+            assert!(shaped(ses["label"].as_str().unwrap()), "{ses}");
+        }
+    }
+    let (status, _) = server.call("GET", "/api/cohorts/quad/picks", None, PLAIN);
+    assert_eq!(status, 403);
+    let (status, _) = server.call("GET", "/api/cohorts/nobody/picks", None, CURATOR);
+    assert_eq!(status, 404);
 }

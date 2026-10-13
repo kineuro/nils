@@ -1986,6 +1986,19 @@ paths:
         "200": {description: "{scope: {kind: registry}, detail, total, count, scans: [as GET /api/datasets/{name}/scans], next, pictures?}"}
         "400": {description: "As GET /api/datasets/{name}/scans"}
         "403": {description: No data:see}
+  /api/cohorts/{name}/picks:
+    get:
+      summary: A cohort's sessions and roles, picked, doubted or missing, for its heatmap (record 55 H3, added in place additively on 2026-10-13; data:see or review:see)
+      description: "A page of the cohort's open members by subject id (24 by default), each {id, code, sessions}: every session the cache holds of the member, oldest first, {session, studies, label, number, roles}, `label` ses- and the day it opened as YYYYMMDD, `number` its place among the member's sessions, and `roles` {role: {state, stack, by}} for each role the served pack's picks declare. `state` is `doubted` where an open `pick.border` review item names the subject, the session's day and the role; `picked` where a live pick names them, read through the one resolver (the cohort's own picks once its main-scan rules are read, else the pack's), so the answer agrees with the Main scans map; else `missing`. `stack` is the pick's stack (its lowest where it names several), `by` `person` or `rules`, both null where nothing is picked. `totals` {role: {picked, doubted, missing}} count every member's sessions, not only the page's. `total` counts the members. Record 55 K7: below detail quasi `code` and `label` are answered as their shapes. Record 48: a pick of a stack of a sample sealed now keeps its state and names no stack (`withheld` true) to a caller without sealed:see."
+      parameters:
+        - {name: name, in: path, required: true, schema: {type: string}}
+        - {name: after, in: query, required: false, schema: {type: integer}}
+        - {name: limit, in: query, required: false, schema: {type: integer, minimum: 1, maximum: 200, default: 24}}
+      responses:
+        "200": {description: "{cohort: {name, id}, detail, roles [role], total, sessions, totals: {role: {picked, doubted, missing}}, count, subjects: [{id, code, sessions: [{session, studies [id], label, number, roles: {role: {state, stack, by, withheld?}}}]}], next}"}
+        "400": {description: "The limit is out of range, or `after` names no member"}
+        "403": {description: Neither data:see nor review:see}
+        "404": {description: No cohort so named}
   /api/datasets/{name}/summary:
     get:
       summary: What a dataset holds and where it is, step by step (Wave 7a, the Data page, added in place additively on 2026-10-09; data:see)
