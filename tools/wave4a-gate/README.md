@@ -19,7 +19,7 @@ what the scripts print is counts and timings.
 
 ```sh
 tools/wave4a-gate/cohort.sh --nils BIN --source RAW --csv CSVS --maps MAPS \
-    --packs PACKS --work WORK [--v0-counts FILE] [--workers N]
+    --packs PACKS --work WORK --cohort NAME [--v0-counts FILE] [--workers N]
 tools/wave4a-gate/budget.sh --nils BIN --source RAW --packs PACKS --work WORK [--workers N]
 ```
 

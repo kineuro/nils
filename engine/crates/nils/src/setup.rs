@@ -29932,7 +29932,7 @@ mod tests {
         assert!(place_argv(registry).contains(&"--role".to_string()));
     }
 
-    /// The places of the deployment this was written for: twelve of them
+    /// The places of a deployment like the one this was written for: twelve of them
     /// across several mounted filesystems, with a mix of roles, one archive
     /// that is the backup target, and paths that are not under the install
     /// directory at all. Ten are read.
@@ -29947,9 +29947,9 @@ mod tests {
             "exchange=/data/exchange,role=exchange,snapshots,protected,read",
             "shared=/data/shared,role=share,protected,fast,read",
             "work=/work,role=working,protected,fast,read",
-            "scratch=/scratch/nils,role=working,fast,read",
-            "homes=/fast/home,role=working,snapshots,protected,fast,read",
-            "scratches=/fast/scratch,role=working,fast,read",
+            "scratch=/scratch/site,role=working,fast,read",
+            "homes=/home,role=working,snapshots,protected,fast,read",
+            "scratches=/scratch/users,role=working,fast,read",
         ]
         .iter()
         .map(|word| (*word).to_string())
@@ -29996,7 +29996,7 @@ mod tests {
         let scratch = specs.iter().find(|s| s.name == "scratch").unwrap();
         assert_eq!(
             place_argv(scratch).join(" "),
-            "nils place add scratch /scratch/nils --role working --fast",
+            "nils place add scratch /scratch/site --role working --fast",
             "and nothing it did not declare"
         );
         let roles: Vec<&str> = specs.iter().map(|s| s.role.as_str()).collect();
@@ -30038,7 +30038,7 @@ mod tests {
             .into_iter()
             .map(|(_, path)| path.display().to_string())
             .collect();
-        assert!(paths.contains(&"/fast/home".to_string()), "{paths:?}");
+        assert!(paths.contains(&"/home".to_string()), "{paths:?}");
     }
 
     #[test]

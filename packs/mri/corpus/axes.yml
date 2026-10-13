@@ -77,7 +77,7 @@ cases:
       # FLAIR and STIR are both in IR_CONTRAST; the lower priority wins.
       modifier: FLAIR
 
-  # --- from the nmosd gate (spec section 11.2). Each of these is a case the
+  # --- from study D's gate (spec section 11.2). Each of these is a case the
   # parity diff produced: v0's stored verdict disagreed, v0's own code agreed,
   # and the case is what keeps the answer once nobody remembers the argument.
 
