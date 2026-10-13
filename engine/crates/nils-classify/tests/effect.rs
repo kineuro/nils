@@ -775,7 +775,7 @@ fn a_change_to_the_pick_file_is_scored_by_the_patched_pick_and_equals_two_pick_r
     )
     .unwrap();
     let patched = patch::apply(&mri(), &p, &|_| true).unwrap();
-    assert_eq!(patched.pack.contract, 9);
+    assert_eq!(patched.pack.contract, pack.contract);
     for lab in labs() {
         let name = lab.name;
         let dir = dated_tree();

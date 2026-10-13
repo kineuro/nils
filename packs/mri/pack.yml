@@ -10,7 +10,12 @@
 
 pack: mri
 version: 1.1.0
-contract: 9
+contract: 10
+# The engines this pack works with (pack contract 10, record 55 B5): from the
+# first engine that reads rules releases on. An engine before it speaks pack
+# contract 9 at most and refuses the pack by its contract already; the range
+# is what a later rules release narrows when it relies on an engine fix.
+engine: ">=1.0.0-alpha.79, <2.0.0"
 modality: MR
 
 parsers:

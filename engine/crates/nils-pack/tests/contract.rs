@@ -208,6 +208,10 @@ fn mri_at_contract_5() -> std::path::PathBuf {
             continue;
         }
         skipping = false;
+        // the engines a pack works with are pack contract 10's
+        if line.starts_with("engine:") {
+            continue;
+        }
         if line.starts_with("contract:") {
             out.push_str("contract: 5\n");
         } else {
@@ -360,6 +364,29 @@ fn a_pack_names_the_engines_it_works_with_from_contract_10() {
     let pack = nils_pack::load(&dir, None).expect("a contract-10 pack without a range loads");
     assert!(pack.engine.is_none());
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// T9 (record 55 B5): the MRI pack is the first rules release that ships on
+/// its own (1.1.0), so it declares this engine's pack contract and names the
+/// engines it works with. This engine is inside the range, an engine of the
+/// next major version is not, and a version below the floor is not either,
+/// so an engine outside it refuses the pack rather than reading it.
+#[test]
+fn the_mri_pack_names_the_engines_it_works_with() {
+    let mri = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packs/mri");
+    let pack = nils_pack::load(&mri, None).expect("the MRI pack loads in this engine");
+    assert_eq!(pack.contract, nils_pack::CONTRACT);
+    let range = pack
+        .engine
+        .as_ref()
+        .expect("the MRI pack names the engines it works with");
+    assert!(
+        range.admits(nils_pack::engines::ENGINE_VERSION),
+        "{}",
+        range.text()
+    );
+    assert!(!range.admits("2.0.0"), "{}", range.text());
+    assert!(!range.admits("1.0.0-alpha.78"), "{}", range.text());
 }
 
 #[test]

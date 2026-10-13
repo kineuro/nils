@@ -420,8 +420,8 @@ fn the_pick_file_is_reached_by_four_operations() {
     assert_eq!(m.near_tie[2].rank, Rank::Avoid(vec!["1".into()]));
     assert_eq!(m.near_tie[3].rank, Rank::Lowest);
     // The keys are contract 9's, which the shipped pack declares since
-    // 1.0.2, so nothing had to raise it.
-    assert_eq!(p.pack.contract, 9);
+    // 1.0.2 (10 since 1.1.0), so nothing had to raise it.
+    assert_eq!(p.pack.contract, nils_pack::CONTRACT);
     let candidacy = p.applied[3].changes.join("; ");
     assert!(
         candidacy.contains("unless body_part is spine or neck or chest or other"),
@@ -628,12 +628,17 @@ fn an_operation_that_writes_a_later_contract_s_key_raises_the_pack_s_contract() 
     let _ = std::fs::remove_dir_all(&at_8);
     copy(&mri(), &at_8);
     let manifest = std::fs::read_to_string(at_8.join("pack.yml")).unwrap();
-    assert!(manifest.contains("\ncontract: 9\n"));
-    std::fs::write(
-        at_8.join("pack.yml"),
-        manifest.replace("\ncontract: 9\n", "\ncontract: 8\n"),
-    )
-    .unwrap();
+    assert!(manifest.contains(&format!("\ncontract: {}\n", nils_pack::CONTRACT)));
+    // at contract 8, without the `engine` key a pack below 10 may not carry
+    let at_contract_8: String = manifest
+        .lines()
+        .filter(|l| !l.starts_with("engine:"))
+        .map(|l| match l.starts_with("contract:") {
+            true => "contract: 8\n".to_string(),
+            false => format!("{l}\n"),
+        })
+        .collect();
+    std::fs::write(at_8.join("pack.yml"), at_contract_8).unwrap();
     let p = patch::apply(
         &at_8,
         &patch_of(concat!(
