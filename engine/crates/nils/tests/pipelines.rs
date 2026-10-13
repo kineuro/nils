@@ -4038,9 +4038,10 @@ fn a_run_s_table_answers_in_the_ask_and_a_planted_breach_raises_its_item() {
     }
     let lab = Lab::new("pipelines-numbers");
     lab.add_descriptor("volumes", VOLUMES);
-    let stacks: Vec<i64> = lab
-        .store()
-        .query("SELECT id FROM stack ORDER BY id", &[])
+    let mut store = lab.store();
+    let stack_t = store.qualified("stack");
+    let stacks: Vec<i64> = store
+        .query(&format!("SELECT id FROM {stack_t} ORDER BY id"), &[])
         .unwrap()
         .iter()
         .map(|r| r.int(0).unwrap())
@@ -10751,5 +10752,306 @@ fn the_starters_that_fix_their_older_versions_replace_them_and_n4_leaves_its_own
     assert!(
         !good && err.contains("is replaced by samseg-lesions@2"),
         "{err}"
+    );
+}
+
+/// Record 55 H2, round 5 (A23): the logs at the doors. A job's log is what
+/// its verb printed, written by the worker beside the registry and read in
+/// slices, by whoever may run its verb at detail quasi; a run's units ran
+/// together keep one log, which each unit answers as shared, and units that
+/// ran apart keep one each, read at pipelines:see and detail quasi. A unit
+/// holding a stack of a sample sealed now is read only with sealed:see,
+/// audited, and a shared log with such a unit in it the same.
+#[test]
+fn the_logs_of_a_job_a_run_and_its_units_are_read_at_their_doors() {
+    if !have("python3") {
+        eprintln!(
+            "python3 is not installed; the stand-in podman needs it, so this test is skipped"
+        );
+        return;
+    }
+    let lab = Lab::new("pipelines-logs");
+    lab.add_descriptor(
+        "stack-echo",
+        &stack_echo(&format!("example.org/stack-echo@sha256:{}", "a".repeat(64))),
+    );
+    lab.add_descriptor("slow", &stack_slow("slow", "{cores: 1, memory-gb: 1}", ""));
+    let server = Server::start(&lab);
+    let (_, caps) = server.call("GET", "/api/capabilities", None, OPERATOR);
+    for door in [
+        "GET /api/jobs/{id}/log",
+        "GET /api/pipeline-runs/{id}/log",
+        "GET /api/pipeline-runs/{id}/units/{unit}/log",
+    ] {
+        assert!(
+            caps["doors"].as_array().unwrap().iter().any(|d| d == door),
+            "{door}"
+        );
+        assert!(
+            caps["policy"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|p| p["door"] == door && p["detail"] == "quasi"),
+            "{door} at quasi"
+        );
+    }
+    let wait = |job: i64| {
+        for _ in 0..600 {
+            let (_, j) = server.call("GET", &format!("/api/jobs/{job}"), None, OPERATOR);
+            if matches!(j["state"].as_str(), Some("done" | "failed" | "cancelled")) {
+                return j;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        panic!("job {job} did not end");
+    };
+    let queue = |command: Value| {
+        let (status, doc) = server.call(
+            "POST",
+            "/api/jobs",
+            Some(json!({ "command": command })),
+            OPERATOR,
+        );
+        assert_eq!(status, 202, "{doc}");
+        doc["job"].as_i64().unwrap()
+    };
+    let together = queue(json!([
+        "run",
+        "stack-echo",
+        "--select",
+        "selection:every@1"
+    ]));
+    assert_eq!(wait(together)["state"], "done");
+    let apart = queue(json!([
+        "run",
+        "slow",
+        "--select",
+        "selection:every@1",
+        "--param",
+        "sleep=0"
+    ]));
+    assert_eq!(wait(apart)["state"], "done");
+
+    // the job's log: what the verb printed, read whole by pages that end
+    // after a line, and the end of it by default
+    let file = lab
+        .home
+        .path()
+        .join("logs/jobs")
+        .join(format!("{together}.log"));
+    let kept = std::fs::read_to_string(&file).expect("the worker wrote the job's log");
+    assert!(!kept.is_empty(), "the run said something");
+    let door = format!("/api/jobs/{together}/log");
+    let (status, tail) = server.call("GET", &door, None, OPERATOR);
+    assert_eq!(status, 200, "{tail}");
+    assert_eq!(tail["job"], together);
+    assert_eq!(tail["state"], "done");
+    assert_eq!(tail["over"], true);
+    assert_eq!(tail["size"], kept.len());
+    assert_eq!(tail["to"], kept.len());
+    assert!(kept.ends_with(tail["text"].as_str().unwrap()), "{tail}");
+    let mut read = String::new();
+    let mut from = 0;
+    loop {
+        let (status, page) = server.call(
+            "GET",
+            &format!("{door}?from={from}&limit=40"),
+            None,
+            OPERATOR,
+        );
+        assert_eq!(status, 200, "{page}");
+        assert_eq!(page["from"], from);
+        assert_eq!(page["earlier"], from > 0);
+        read.push_str(page["text"].as_str().unwrap());
+        let to = page["to"].as_u64().unwrap();
+        if to == kept.len() as u64 {
+            break;
+        }
+        assert!(to > from, "a page moves on: {page}");
+        from = to;
+    }
+    assert_eq!(read, kept, "the pages put together are the log");
+    // whoever may run the verb, at quasi: a run's verb is pipelines:work
+    let (status, _) = server.call("GET", &door, None, PLAIN);
+    assert_eq!(status, 403, "pipelines:work at plain detail");
+    let (status, _) = server.call("GET", &door, None, READER);
+    assert_eq!(status, 403);
+    let (status, doc) = server.call("GET", &format!("{door}?from=start"), None, OPERATOR);
+    assert_eq!(status, 400, "{doc}");
+    let (status, _) = server.call("GET", "/api/jobs/99999/log", None, OPERATOR);
+    assert_eq!(status, 404);
+    // a job that kept no log says why
+    std::fs::remove_file(&file).unwrap();
+    let (status, doc) = server.call("GET", &door, None, OPERATOR);
+    assert_eq!(status, 404, "{doc}");
+    assert!(
+        doc["error"].as_str().unwrap().contains("kept no log"),
+        "{doc}"
+    );
+
+    // the runs: one together, one apart
+    let (_, runs) = server.call("GET", "/api/pipeline-runs", None, OPERATOR);
+    let run_of = |job: i64| {
+        runs["runs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["job_id"] == job)
+            .unwrap_or_else(|| panic!("{runs}"))["id"]
+            .as_i64()
+            .unwrap()
+    };
+    let (run_t, run_a) = (run_of(together), run_of(apart));
+    let units_of = |run: i64| -> Vec<String> {
+        let (_, r) = server.call("GET", &format!("/api/pipeline-runs/{run}"), None, OPERATOR);
+        r["units_run"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|u| u["unit"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let (units_t, units_a) = (units_of(run_t), units_of(run_a));
+    assert_eq!(units_t.len(), 4, "{units_t:?}");
+    assert_eq!(units_a.len(), 4, "{units_a:?}");
+
+    let (status, whole) = server.call(
+        "GET",
+        &format!("/api/pipeline-runs/{run_t}/log"),
+        None,
+        OPERATOR,
+    );
+    assert_eq!(status, 200, "{whole}");
+    assert_eq!(whole["run"], run_t);
+    assert_eq!(whole["shared"], false);
+    assert_eq!(whole["over"], true);
+    let (status, unit) = server.call(
+        "GET",
+        &format!("/api/pipeline-runs/{run_t}/units/{}/log", units_t[0]),
+        None,
+        OPERATOR,
+    );
+    assert_eq!(status, 200, "{unit}");
+    assert_eq!(
+        unit["shared"], true,
+        "units that ran together share the run's log"
+    );
+    assert_eq!(unit["unit"], units_t[0].as_str());
+    assert_eq!(unit["text"], whole["text"]);
+    let (status, doc) = server.call(
+        "GET",
+        &format!("/api/pipeline-runs/{run_a}/log"),
+        None,
+        OPERATOR,
+    );
+    assert_eq!(status, 404, "{doc}");
+    assert!(
+        doc["error"].as_str().unwrap().contains("ran apart"),
+        "{doc}"
+    );
+    for u in &units_a {
+        let (status, doc) = server.call(
+            "GET",
+            &format!("/api/pipeline-runs/{run_a}/units/{u}/log"),
+            None,
+            OPERATOR,
+        );
+        assert_eq!(status, 200, "{doc}");
+        assert_eq!(doc["shared"], false);
+        let on_disk = std::fs::read_to_string(
+            lab.work
+                .path()
+                .join(format!("runs/{run_a}/units/{u}/log.txt")),
+        )
+        .unwrap();
+        assert_eq!(doc["size"], on_disk.len(), "{doc}");
+    }
+    for (path, want) in [
+        (format!("/api/pipeline-runs/{run_a}/units/nobody/log"), 404),
+        (
+            format!("/api/pipeline-runs/{run_a}/units/..%2F..%2Fx/log"),
+            404,
+        ),
+        ("/api/pipeline-runs/99999/log".to_string(), 404),
+        (
+            format!("/api/pipeline-runs/{run_a}/units/{}/log", units_a[0]),
+            403,
+        ),
+    ] {
+        let token = if want == 403 { PLAIN } else { OPERATOR };
+        let (status, doc) = server.call("GET", &path, None, token);
+        assert_eq!(status, want, "{path}: {doc}");
+    }
+
+    // a sealed stack's unit: refused but with sealed:see, which is audited;
+    // the shared log of the run that held it, the same
+    let mut store = lab.store();
+    let stack_t = store.qualified("stack");
+    let stacks: Vec<i64> = store
+        .query(&format!("SELECT id FROM {stack_t} ORDER BY id"), &[])
+        .unwrap()
+        .iter()
+        .map(|r| r.int(0).unwrap())
+        .collect();
+    seal(&lab, "cert_logs", &stacks[..1]);
+    let refused: Vec<&String> = units_a
+        .iter()
+        .filter(|u| {
+            let (status, _) = server.call(
+                "GET",
+                &format!("/api/pipeline-runs/{run_a}/units/{u}/log"),
+                None,
+                OPERATOR,
+            );
+            status == 403
+        })
+        .collect();
+    assert_eq!(
+        refused.len(),
+        1,
+        "the sealed stack's unit alone: {refused:?}"
+    );
+    let (status, _) = server.call(
+        "GET",
+        &format!("/api/pipeline-runs/{run_a}/units/{}/log", refused[0]),
+        None,
+        CERT,
+    );
+    assert_eq!(status, 200);
+    let (status, _) = server.call(
+        "GET",
+        &format!("/api/pipeline-runs/{run_t}/log"),
+        None,
+        OPERATOR,
+    );
+    assert_eq!(status, 403, "a shared log holds the sealed unit's words");
+    let (status, _) = server.call(
+        "GET",
+        &format!("/api/pipeline-runs/{run_t}/log"),
+        None,
+        CERT,
+    );
+    assert_eq!(status, 200);
+    let doors: Vec<String> = lab
+        .store()
+        .query(
+            "SELECT scope FROM audit WHERE action = 'sealed.read' ORDER BY id",
+            &[],
+        )
+        .unwrap()
+        .iter()
+        .map(|r| {
+            let scope: Value = serde_json::from_str(r.text(0).unwrap()).unwrap();
+            scope["door"].as_str().unwrap_or_default().to_string()
+        })
+        .collect();
+    assert_eq!(
+        doors,
+        [
+            "GET /api/pipeline-runs/{id}/units/{unit}/log",
+            "GET /api/pipeline-runs/{id}/log"
+        ],
+        "each sealed read audited"
     );
 }

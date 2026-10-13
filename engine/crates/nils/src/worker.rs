@@ -21,6 +21,7 @@
 use std::collections::VecDeque;
 use std::io::{BufRead as _, Write as _};
 use std::process::Stdio;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use nils_registry::home::Home;
@@ -43,13 +44,28 @@ const TAIL_BYTES: usize = 2_000;
 
 /// What the verb printed last: read line by line as the child runs, so a
 /// verb that says a great deal never fills a pipe and stalls, echoed to
-/// this process's stderr unless the worker is quiet.
-fn tail_of(stderr: std::process::ChildStderr, quiet: bool) -> std::thread::JoinHandle<String> {
+/// this process's stderr unless the worker is quiet, and written to the
+/// job's log (record 55 H2, round 5). A line that is not UTF-8 is read as
+/// far as it can be, and never stops the reading.
+fn tail_of(
+    stderr: std::process::ChildStderr,
+    quiet: bool,
+    log: Arc<Mutex<crate::logs::Writer>>,
+) -> std::thread::JoinHandle<String> {
     std::thread::spawn(move || {
         let mut kept: VecDeque<String> = VecDeque::new();
         let mut bytes = 0usize;
-        for line in std::io::BufReader::new(stderr).lines() {
-            let Ok(line) = line else { break };
+        let mut reader = std::io::BufReader::new(stderr);
+        let mut raw = Vec::new();
+        loop {
+            raw.clear();
+            match reader.read_until(b'\n', &mut raw) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {}
+            }
+            log.lock().unwrap_or_else(|e| e.into_inner()).line(&raw);
+            let line = String::from_utf8_lossy(&raw);
+            let line = line.trim_end_matches(['\n', '\r']);
             if !quiet {
                 let _ = writeln!(std::io::stderr(), "{line}");
             }
@@ -69,6 +85,34 @@ fn tail_of(stderr: std::process::ChildStderr, quiet: bool) -> std::thread::JoinH
             .map(|l| l.strip_prefix("nils: ").unwrap_or(&l).to_string())
             .collect::<Vec<_>>()
             .join("\n")
+    })
+}
+
+/// What the verb printed on stdout, written to the job's log and echoed to
+/// this process's stdout unless the worker is quiet (record 55 H2, round 5).
+fn echo_of(
+    stdout: std::process::ChildStdout,
+    quiet: bool,
+    log: Arc<Mutex<crate::logs::Writer>>,
+) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        let mut reader = std::io::BufReader::new(stdout);
+        let mut raw = Vec::new();
+        loop {
+            raw.clear();
+            match reader.read_until(b'\n', &mut raw) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {}
+            }
+            log.lock().unwrap_or_else(|e| e.into_inner()).line(&raw);
+            if !quiet {
+                let mut out = std::io::stdout().lock();
+                let _ = out.write_all(&raw);
+                if !raw.ends_with(b"\n") {
+                    let _ = out.write_all(b"\n");
+                }
+            }
+        }
     })
 }
 
@@ -422,11 +466,8 @@ pub(crate) fn run(
                     nils_registry::actor::absent().to_string()
                 },
             )
-            .stdout(if opts.quiet {
-                Stdio::null()
-            } else {
-                Stdio::inherit()
-            })
+            // record 55 H2, round 5: both streams go to the job's log
+            .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn();
         // The worker says it is alive while the job runs; a cancel of the
@@ -434,8 +475,17 @@ pub(crate) fn run(
         // last is kept for the job's error.
         let mut asked_to_stop = false;
         let mut tail: Option<std::thread::JoinHandle<String>> = None;
+        let mut echo: Option<std::thread::JoinHandle<()>> = None;
+        let log = Arc::new(Mutex::new(crate::logs::Writer::open(home.dir(), next.id)));
         let status = spawned.and_then(|mut child| {
-            tail = child.stderr.take().map(|e| tail_of(e, opts.quiet));
+            tail = child
+                .stderr
+                .take()
+                .map(|e| tail_of(e, opts.quiet, Arc::clone(&log)));
+            echo = child
+                .stdout
+                .take()
+                .map(|o| echo_of(o, opts.quiet, Arc::clone(&log)));
             let mut beaten = Instant::now();
             loop {
                 if let Some(status) = child.try_wait()? {
@@ -460,6 +510,10 @@ pub(crate) fn run(
         // the outcome only when the verb did not, and then the error is what
         // the verb printed last, or its exit status when it printed nothing.
         let printed = tail.and_then(|t| t.join().ok()).unwrap_or_default();
+        if let Some(e) = echo {
+            let _ = e.join();
+        }
+        drop(log);
         let (state, error) = match status {
             Ok(s) => outcome(s.code(), printed, format!("exit status {s}")),
             Err(e) => (State::Failed, Some(e.to_string())),

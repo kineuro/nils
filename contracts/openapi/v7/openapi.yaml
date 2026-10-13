@@ -423,6 +423,19 @@ paths:
       responses:
         "200": {description: "The job, with its args (the queuing principal, the caller's detail, actor and grants, and may_project_raw of an ask job), its `then` (the command lines still to queue after it) and `chain {before, after}` (the job ids on either side of it in its chain, null where there is none), and, once done, its result: for an ask run the handle, hash, grain, row_count, content_hash and truncated; for a pseudonymise run the report {files {seen, written, unchanged, held, refused, skipped}, subjects {new, seen, provisional}, tags_removed {tag: count}, private_removed, refused_by, held_by_shape, bytes, seconds, files_per_s, batch_id}; for a release run the report the command line prints, which since version 5 carries `left_out`, the stacks the layout had no place for, beside `routes` and `nowhere`; and `chain_stopped {step, why}` when a step of its chain could not be queued, and (since 2026-10-10) a digest's `chain_ended {why, skipped}` when it read nothing new and its chain's sorting steps were left; added in place on 2026-10-12 by record 48, a pipeline run's result `summary` as GET /api/pipeline-runs/{id} shows it, the breaches of a unit holding a stack of a sample sealed now left out and counted in `breaches_withheld_sealed` Added in place, additively, on 2026-10-12: `failure`, for a job that failed: a pipeline run's as its run recorded it, else read from its error (the pipeline's own where nothing is known); for a job of any other kind only a cause that is known, a missing dcm2niix of a BIDS release among them; null where none is. `failure` {kind, cause, advice, fix}: `kind` one of dependency (something the engine or a container needs is missing or does not start: dcm2niix, the container runtime, the subordinate ids rootless podman unpacks an image with, an image that will not pull, the GPU driver), resource (memory, a container killed with 137 or by the kernel; disk; a card's memory; the lane's budget or its card; time), input (a unit's input missing or refused) or pipeline (the pipeline's own error, and whatever is not known); `cause` one of dcm2niix, runtime, subuid, image, gpu_driver, memory, disk, gpu_memory, lane, time, input or pipeline; `advice` one plain sentence of what to do, the engine's own words and never a tool's, so it is answered at every detail; and `fix`, the install the engine offers where it has one ({tool, door, command, grant}: dcm2niix, POST /api/tools/dcm2niix/install, nils tools install dcm2niix, install:work), null otherwise. Added in place, additively, on 2026-10-12 (what a run made, unit by unit): a pipeline run's job answers `made`, what its run made as its result says it, as GET /api/pipeline-runs/{id} says it of a run (null until its run counted units), and `taken_up` {job, state, run}, the later job that took its run up again where one did, by its state as it stands (`queued` for one not yet claimed), null otherwise; below detail quasi `made` is held as a run's is."}
         "404": {description: No such job}
+  /api/jobs/{id}/log:
+    get:
+      summary: What a job's verb printed, a slice of its log (record 55 H2, round 5; added in place, additively, on 2026-10-13)
+      description: "The worker writes what a job's verb prints, both streams, to the job's log beside the registry, cut past 32 MiB with a line saying so; `nils jobs prune` removes the logs of the jobs it prunes. The door answers a slice of it, {size, from, to, text, earlier}: `size` the bytes the log holds now, `text` the bytes from `from` to `to` read as UTF-8 (a byte that is not is replaced), `earlier` true where bytes come before `from`; with no `from` the last `limit` bytes from the start of a line, and a slice that stops short of the end ends after a whole line where it holds one, so a page that follows a log asks from its last `to`. Read by whoever may run the job's verb (the grant a cancel needs), at the verb's detail and never below quasi, since a verb prints what it reads."
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: integer}}
+        - {name: from, in: query, schema: {type: integer, minimum: 0}, description: "The byte to start at; absent, the end of the log is answered"}
+        - {name: limit, in: query, schema: {type: integer, default: 65536, maximum: 1048576}, description: "The most bytes answered, 64 KiB by default and 1 MiB at most"}
+      responses:
+        "200": {description: "{job, state, over (the job is over), size, from, to, text, earlier}"}
+        "400": {description: "from or limit is not a count of bytes"}
+        "403": {description: "The caller does not hold the grant of the job's verb, or the detail it needs (quasi at the least)"}
+        "404": {description: "No such job, or no log, the error saying why: the job has not started, it ran on another machine whose disk keeps its log, or it ran before the engine kept jobs' logs or from a command line whose output went to its terminal"}
   /api/jobs/{id}/cancel:
     post:
       summary: Ask a running job to stop at its next heartbeat, or drop a queued one (nils jobs cancel)
@@ -1685,6 +1698,33 @@ paths:
       responses:
         "200": {description: The run}
         "404": {description: No such run}
+  /api/pipeline-runs/{id}/log:
+    get:
+      summary: What a run's containers printed, where its units ran together (record 55 H2, round 5; added in place, additively, on 2026-10-13)
+      description: "The run's one log.txt in its scratch place, as a slice of it, {size, from, to, text, earlier}: `size` the bytes the log holds now, `text` the bytes from `from` to `to` read as UTF-8 (a byte that is not is replaced), `earlier` true where bytes come before `from`; with no `from` the last `limit` bytes from the start of a line, and a slice that stops short of the end ends after a whole line where it holds one, so a page that follows a log asks from its last `to`. A run whose units ran apart keeps one log a unit and none of its own (404, naming the unit door). pipelines:see at detail quasi; a log with the words of a unit holding a stack of a sample sealed now is read only with sealed:see, and that read is audited as sealed.read."
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: integer}}
+        - {name: from, in: query, schema: {type: integer, minimum: 0}, description: "The byte to start at; absent, the end of the log is answered"}
+        - {name: limit, in: query, schema: {type: integer, default: 65536, maximum: 1048576}, description: "The most bytes answered, 64 KiB by default and 1 MiB at most"}
+      responses:
+        "200": {description: "{run, unit: null, shared: false, over (the run is not running), size, from, to, text, earlier}"}
+        "400": {description: "from or limit is not a count of bytes"}
+        "403": {description: "Not pipelines:see at detail quasi, or a sealed unit's words without sealed:see"}
+        "404": {description: "No such run, its units ran apart, its working place is gone, or it kept no log, the error saying why"}
+  /api/pipeline-runs/{id}/units/{unit}/log:
+    get:
+      summary: What one unit's container printed (record 55 H2, round 5; added in place, additively, on 2026-10-13)
+      description: "A unit of a run whose units ran apart reads its own units/<unit>/log.txt in the run's scratch place; a unit of a run whose units ran together reads the run's one log, `shared` true. Answered as a slice of it, {size, from, to, text, earlier}: `size` the bytes the log holds now, `text` the bytes from `from` to `to` read as UTF-8 (a byte that is not is replaced), `earlier` true where bytes come before `from`; with no `from` the last `limit` bytes from the start of a line, and a slice that stops short of the end ends after a whole line where it holds one, so a page that follows a log asks from its last `to`. pipelines:see at detail quasi; the log of a unit holding a stack of a sample sealed now (for a shared log, of any of the run's units) is read only with sealed:see, and that read is audited as sealed.read. The unit is named as the run's units_run names it."
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: integer}}
+        - {name: unit, in: path, required: true, schema: {type: string}}
+        - {name: from, in: query, schema: {type: integer, minimum: 0}, description: "The byte to start at; absent, the end of the log is answered"}
+        - {name: limit, in: query, schema: {type: integer, default: 65536, maximum: 1048576}, description: "The most bytes answered, 64 KiB by default and 1 MiB at most"}
+      responses:
+        "200": {description: "{run, unit, shared, over (the run is not running), size, from, to, text, earlier}"}
+        "400": {description: "from or limit is not a count of bytes"}
+        "403": {description: "Not pipelines:see at detail quasi, or a sealed unit's words without sealed:see"}
+        "404": {description: "No such run, no such unit of it, its working place is gone, or the unit kept no log, the error saying why"}
   /api/tools:
     get:
       summary: The tools the engine runs beside itself, and whether each is here (nils tools list; added in place, additively, on 2026-10-12)

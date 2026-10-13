@@ -50,6 +50,7 @@ mod grants;
 mod intake;
 mod linkage_doors;
 mod login;
+mod logs;
 mod made;
 mod main_input;
 mod main_scans;
@@ -9738,10 +9739,14 @@ fn jobs_command(home: &Home, command: JobsCommand) -> Result<(), Exit> {
         }
         JobsCommand::Prune { keep_days } => {
             let gone = job::prune(store, keep_days).map_err(err)?;
+            // record 55 H2, round 5: a pruned job's log goes with it
+            let mut kept = |id: i64| !matches!(job::show(store, id), Ok(None));
+            let logs = crate::logs::prune(home.dir(), &mut kept)
+                .map_err(|e| fail(format!("could not prune the jobs' logs: {e}")))?;
             audit(
                 &mut registry,
                 nils_registry::audit::Action::JobsPrune,
-                serde_json::json!({ "pruned": gone, "keep_days": keep_days }),
+                serde_json::json!({ "pruned": gone, "logs": logs, "keep_days": keep_days }),
                 None,
             )?;
             println!("pruned {gone} finished job(s) older than {keep_days} day(s)");
