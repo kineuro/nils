@@ -1060,8 +1060,13 @@ fn read_run(dir: &Path, id: &str) -> Option<Value> {
 /// nothing to read: the door answered 404 "no run by that id" for a run it
 /// had just started.
 fn write_run(dir: &Path, id: &str, doc: &Value) -> std::io::Result<()> {
-    // the service and the recorder are two processes, so each has its own
-    let fresh = dir.join(format!(".{id}.json.{}", std::process::id()));
+    // a file of this write's own: the service and the recorder are two
+    // processes, and two threads of one may write the same run at once (the
+    // start and the end of a short run), so the process's id alone is not
+    // enough: one write would truncate the file the other is renaming
+    static WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let fresh = dir.join(format!(".{id}.json.{}.{n}", std::process::id()));
     let written = std::fs::write(&fresh, serde_json::to_vec_pretty(doc).unwrap_or_default())
         .and_then(|()| std::fs::rename(&fresh, dir.join(format!("{id}.json"))));
     if written.is_err() {
@@ -1947,6 +1952,66 @@ mod tests {
         assert!(reads > 0 && writes > 0, "{reads} reads, {writes} writes");
         assert_eq!(read_run(&dir, "r1").unwrap()["pid"], writes);
         // and the writers leave no file of their own beside it
+        let names: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, ["r1.json"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Two writers of one run at once, as the start and the end of a short
+    /// run can be from two threads of one process, and a reader: every read
+    /// finds a whole document, every write lands, and no writer's file is
+    /// left behind. With one file name per process, one write truncated the
+    /// file the other was renaming.
+    #[test]
+    fn two_writers_of_one_run_and_a_reader_find_it_whole_every_time() {
+        let dir = std::env::temp_dir().join(format!("nils-runs-two-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        write_run(&dir, "r1", &run_doc(0)).unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let writers: Vec<_> = (0..2)
+            .map(|w| {
+                let (dir, stop) = (dir.clone(), Arc::clone(&stop));
+                std::thread::spawn(move || {
+                    let (mut n, mut failed) = (0usize, 0usize);
+                    while !stop.load(Ordering::SeqCst) {
+                        n += 1;
+                        if write_run(&dir, "r1", &run_doc(w * 1_000_000 + n)).is_err() {
+                            failed += 1;
+                        }
+                    }
+                    (n, failed)
+                })
+            })
+            .collect();
+        let until = Instant::now() + Duration::from_secs(2);
+        let mut reads = 0usize;
+        let mut broken = None;
+        while Instant::now() < until {
+            let whole = read_run(&dir, "r1").is_some_and(|d| {
+                d["id"] == "r1" && d["command"].as_array().is_some_and(|c| c.len() == 1000)
+            });
+            if !whole {
+                broken = Some(reads);
+                break;
+            }
+            reads += 1;
+        }
+        stop.store(true, Ordering::SeqCst);
+        let done: Vec<(usize, usize)> = writers.into_iter().map(|h| h.join().unwrap()).collect();
+        assert_eq!(
+            broken, None,
+            "read {reads} found no whole document ({done:?})"
+        );
+        assert!(done.iter().all(|(n, _)| *n > 0), "{done:?}");
+        assert!(
+            done.iter().all(|(_, failed)| *failed == 0),
+            "writes failed: {done:?}"
+        );
         let names: Vec<String> = std::fs::read_dir(&dir)
             .unwrap()
             .flatten()
