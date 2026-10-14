@@ -37,6 +37,10 @@
       "$ref": "proposals.schema.json",
       "description": "Values a model proposes, each on an axis the descriptor declares (proposals.schema.json); the review spine takes them as the model's evidence (record 43 S6)"
     },
+    "opinions": {
+      "$ref": "opinions.schema.json",
+      "description": "Record 55 D3: System 1's answers, each on an axis the descriptor declares in x-nils.opinions (opinions.schema.json); kept as a second opinion beside the rules' and never a decision or a review item by themselves"
+    },
     "models": {
       "type": "array",
       "items": {"type": "object"},

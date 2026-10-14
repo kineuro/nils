@@ -109,7 +109,10 @@ pub(crate) fn asker(kind: &str, by_model: bool) -> Asker {
         return Asker::Operation(step);
     }
     match why {
+        // record 56 section 3: the gate's questions on a flagged dataset
+        // are the sort's own
         "missing" | "low_confidence" | "conflict" => Asker::Sort,
+        "disagree" | "unsure" if axis != "system1" => Asker::Sort,
         "decision" if by_model => Asker::Model,
         "decision" => Asker::Sort,
         "vote" | "session" => Asker::Pass,
@@ -234,6 +237,46 @@ impl Asks {
             cond: Some(cond),
             single,
         })
+    }
+
+    /// The scans of a scope these questions ask about, by id: `holds` is
+    /// the condition a stack aliased `x` meets to be in it (record 55 D7:
+    /// the audit's frame leaves them out).
+    pub(crate) fn stacks(&self, store: &mut Store, holds: &str) -> Result<Vec<i64>, StoreError> {
+        let mut out: BTreeSet<i64> = BTreeSet::new();
+        let Some(cond) = &self.cond else {
+            return Ok(Vec::new());
+        };
+        let sql = format!(
+            "SELECT DISTINCT rm.stack_id FROM {} rm JOIN {} ri ON ri.id = rm.item_id \
+             JOIN {} x ON x.id = rm.stack_id WHERE {cond} AND {holds}",
+            store.qualified("review_member"),
+            store.qualified("review_item"),
+            store.qualified("stack"),
+        );
+        for r in store.query(&sql, &[])? {
+            out.insert(r.int(0)?);
+        }
+        let named: Vec<i64> = self
+            .single
+            .iter()
+            .map(|(_, s)| *s)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        for chunk in named.chunks(500) {
+            for r in store.query(
+                &format!(
+                    "SELECT x.id FROM {} x WHERE x.id IN ({}) AND {holds}",
+                    store.qualified("stack"),
+                    ids_in(chunk)
+                ),
+                &[],
+            )? {
+                out.insert(r.int(0)?);
+            }
+        }
+        Ok(out.into_iter().collect())
     }
 
     /// The scans of a scope these questions ask about, and how many by
@@ -721,6 +764,9 @@ mod tests {
             "classify.asked",
             "classify.excluded",
             "classify.implied",
+            // record 56 section 3: the gate's questions on a flagged dataset
+            "base:disagree",
+            "technique:unsure",
         ] {
             assert_eq!(asker(kind, false), Asker::Sort, "{kind}");
         }

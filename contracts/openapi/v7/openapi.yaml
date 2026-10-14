@@ -617,6 +617,135 @@ paths:
         "400": {description: "keep that is not a boolean, or no why"}
         "404": {description: "No such item"}
         "409": {description: "An item of another kind, one no longer open, or one whose two subjects differ (a merge answers it)"}
+  /api/review/{id}/suggestions:
+    get:
+      summary: Both suggestions and both reasons for a review question (record 55 D3 and D6, spec 11.3; review:see)
+      description: "Added in place, additively, by record 55 (Wave 7a, slice A24). For the stacks the question asks about (one `member`, or the first `limit` of a group, 20 by default), per axis the rules' answer and reason (the value, who set it, the rule, the clause, the fields it read and their values, the text it matched at detail quasi, the other rules that voted, the line) and System 1's opinion (its value, its calibrated probability, the rules' reliability on the header, the fields that mattered with each one's effect, and up to five similar settled stacks, never of a sealed sample, shown for display and never as votes). Whether System 1 agrees (`agrees`) is the gate's own comparison: its answer against the rules' answer as the model read it, in its own vocabulary (`rules_compared`, from the opinion's `rules_read`), else against the stored value. `system1.status` is confirmed where a recorded certificate names the chosen System 1 model, not_confirmed where none does (its opinion is a research model's), no_model where none is chosen. On a blind_first question it is refused (409) until the caller gave a provisional answer; reading it marks the suggestions shown to the caller. A stack of a sample sealed now is left out and counted."
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: integer}}
+        - {name: member, in: query, schema: {type: integer}, description: One member stack of a grouped question}
+        - {name: limit, in: query, schema: {type: integer, default: 20}}
+      responses:
+        "200": {description: "{item, kind, mode, provisional, system1: {status, model, certificate_id, why}, stacks: [{stack_id, header, axes: [{axis, rules, system1}]}], total_stacks, sealed_left_out}"}
+        "404": {description: "No such item, or a stack that is not a member"}
+        "409": {description: A blind-first question the caller has not answered provisionally}
+  /api/review/{id}/provisional:
+    post:
+      summary: A blind-first question's provisional answer (record 55 D6, spec 11.4; review:work)
+      description: "Added in place, additively, by record 55. Every review question about an axis carries a mode, routine or blind_first, drawn once from a site share (one in five by default, the setting review.blind_share) and kept; the list and item doors answer it as `mode` and show a blind_first question the caller has not answered without NILS's own answers (evidence {blind_first, axes}). The person answers from the evidence, here, before the suggestions show: one provisional answer per person, kept as given and timed from when they first opened the question. A later apply records whether its value is the provisional one: only then is the decision marked blind, and only a blind answer becomes a training label. Refused (409) on a routine question."
+      parameters: [{name: id, in: path, required: true, schema: {type: integer}}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                value: {description: "A value, or a list of values"}
+                nothing: {type: boolean}
+                values: {type: object, description: "{axis: value | [values] | null} for a question that asks several axes"}
+      responses:
+        "200": {description: "{item, mode, answer, seconds, answered_at, suggestions}"}
+        "400": {description: No answer in the body}
+        "404": {description: No such item}
+        "409": {description: A routine question}
+  /api/review/rounds:
+    get:
+      summary: The review rounds and what each accepted and sent to Review (record 55 D3, T20; review:see)
+      description: "Added in place, additively, by record 55. A round is a pair of a rules version and the System 1 model chosen (spec 11.2); each is reported with its scans, the ones accepted and the ones a sort question waits on, by kind, the zeros of what is never asked (a rule conflict, a low confidence, body part, post-contrast), the gate's outcomes on datasets flagged as having damaged headers, System 1's coverage, the answers given blind and not, and its audit draws with their grades. `current` is the round of the served rules and the chosen model as it would be; reading begins none."
+      responses:
+        "200": {description: "{current, rounds: [{round, scans, accepted, reviewed, gate_held, shares, review_by_kind, waiting_by_kind, never_asked, gate, system1, answers, audits}]}"}
+  /api/review/rounds/{id}:
+    get:
+      summary: One review round's report (review:see)
+      parameters: [{name: id, in: path, required: true, schema: {type: integer}}]
+      responses:
+        "200": {description: "The round's report, as in the list"}
+        "404": {description: No such round}
+  /api/review/gate:
+    post:
+      summary: Run the gate over the datasets flagged as having damaged headers (record 56 section 3, spec 11.2; review:work)
+      description: "Added in place, additively, by record 55. On a flagged dataset the rules' answer on an axis System 1's card gives thresholds for is accepted where System 1's answer equals it, its probability is at least lambda1 and the rules' reliability is at least lambda2; every other stack and axis is a question, `<axis>:disagree` or `<axis>:unsure`. The gate also runs after every System 1 run. Nothing is gated while no recorded certificate names the chosen model, and the answer says why. Elsewhere the rules decide."
+      requestBody:
+        content:
+          application/json:
+            schema: {type: object, properties: {dataset: {type: string, description: One flagged dataset only}}}
+      responses:
+        "200": {description: "{rounds: [{round, gated: {outcomes, accepted_stacks, stacks, raised, closed, skipped, waiting}}]}"}
+  /api/review/system1/run:
+    post:
+      summary: System 1 over every MR scan of the registry, on request (record 55 D3, spec 11.1; pipelines:work at quasi)
+      description: "Added in place, additively, by record 55. The chosen System 1 model (task system1) through its pipeline, system1-score, as one pipeline job over every MR stack, answered 202 with the job. A dataset's or a cohort's scans are run through the steps door with the step system1. Refused (409) with its reason where no model or no pipeline is installed, or pipelines do not run here."
+      responses:
+        "202": {description: "{job, state, step, for, scans, handle, command}"}
+        "409": {description: "{error, reason, step}"}
+  /api/review/settings:
+    get:
+      summary: The review settings (review:see)
+      responses:
+        "200": {description: "{blind_share, default_blind_share, system1: {task, chosen, confirmed, certificate_id}, audit_share}"}
+  /api/datasets/{name}/headers:
+    get:
+      summary: A dataset's damaged-header flag (record 56 section 3; data:see or review:see)
+      description: "Added in place, additively, by record 55. A dataset whose headers are damaged or foreign is held to the full gate. The flag is a person's where one set it, else its signs': at least half of its MR scans carry neither a series description nor a protocol name."
+      parameters: [{name: name, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: "{dataset, damaged, by: person | signs, flag, signs: {scans, no_names, share, damaged, rule}, gate}"}
+        "404": {description: No such dataset}
+    put:
+      summary: Set or clear a dataset's damaged-header flag (data:work)
+      parameters: [{name: name, in: path, required: true, schema: {type: string}}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object, properties: {damaged: {type: [boolean, "null"], description: "null lets the signs decide again"}, why: {type: string}}}
+      responses:
+        "200": {description: The flag as GET answers it}
+        "400": {description: "A flag with no why"}
+  /api/audit/draws:
+    get:
+      summary: The audit draws (record 55 D7, spec 11.5; review:see or campaigns:see)
+      parameters: [{name: round, in: query, schema: {type: integer}}]
+      responses:
+        "200": {description: "{draws: [{id, round_id, seed, share, frame: {stacks, digest}, drawn, campaign_id, grade, trains: false}]}"}
+    post:
+      summary: Draw a round's blind audit and make the campaign that reads it (review:work and campaigns:work)
+      description: "Added in place, additively, by record 55. A seeded share of a round's accepted stacks (1 % by default), drawn by the sha256 of the seed and each stack's DICOM identity (study and series instance UIDs and the stack key), so a seed over a frame draws the same stacks in any registry. The frame is the round's stacks sorted under its rules version, MR, not of a sample sealed now, with no sort question waiting and not held back by the gate; the draw records its round, seed, frame size and digest, and the rules' answer each drawn stack was accepted with. The audit campaign asks the header certificate's axes (provenance, technique, modifier, construct, base, with what the pack derives), suggests nothing, closes into nothing and has purpose audit: its reads are blind and never train. Its raters are agents outside the engine, through the campaign doors, and their disagreements go to the adjudicator."
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                round: {type: integer}
+                seed: {type: string}
+                share: {type: number, default: 0.01}
+                axes: {type: array, items: {type: string}}
+                raters: {type: array, items: {type: string}}
+                adjudicators: {type: array, items: {type: string}}
+                raters_per_item: {type: integer, default: 2}
+                name: {type: string}
+      responses:
+        "200": {description: "{draw, round, campaign: {id, name, purpose, suggest, closes_into, raters_per_item, trains}, axes}"}
+        "404": {description: No such round}
+        "409": {description: "No accepted stacks to draw from, or no pack served"}
+  /api/audit/draws/{id}:
+    get:
+      summary: One audit draw, with its drawn stacks for a holder of review:see
+      parameters: [{name: id, in: path, required: true, schema: {type: integer}}]
+      responses:
+        "200": {description: "The draw, and stacks: [{stack_id, study_uid, series_uid, stack_key, accepted}]"}
+        "404": {description: No such draw}
+  /api/audit/draws/{id}/grade:
+    post:
+      summary: The accepted error of a draw's round and its exact bound (review:work)
+      description: "From the audit campaign's settled answers: a stack is wrong where any axis its settled answer names differs from the rules' accepted answer; one settled as cannot tell, or not settled yet, is counted apart. The bound is the exact one-sided Clopper-Pearson upper bound at 95 %. Kept on the draw beside its round."
+      parameters: [{name: id, in: path, required: true, schema: {type: integer}}]
+      responses:
+        "200": {description: "{draw, round_id, grade: {read, wrong, error, bound, confidence, method, wrong_by_axis, not_settled, cant_tell, drawn, campaign_closed, trains: false}}"}
+        "404": {description: No such draw}
+        "409": {description: A draw with no campaign}
   /api/decisions/{id}/commit:
     post:
       summary: Put a staged decision in force (nils review commit)
@@ -2178,6 +2307,7 @@ paths:
                 hold_back: {type: number, minimum: 0.1, maximum: 1, default: 0.1}
                 suggest: {type: string, enum: [none, rules, imported], default: none}
                 hide_header: {type: boolean, default: false}
+                purpose: {type: string, enum: [decide, train, measure, audit], default: decide, description: "Added in place by record 55 D6 and D7 (spec 11.4, 11.5): what the campaign's answers are for. train and measure are read blind first always: a rater is shown an item's suggestion only after answering it, batches and the gallery are refused (409), and an answer given after the suggestion showed is marked not blind. audit suggests none and closes into none (400 otherwise), and its answers never train. Every answer records `blind`; only blind answers become training labels: a label set of a campaign with an answer that was not blind, or of an audit, is not training data. The campaign says its `purpose`"}
                 inputs: {type: object}
                 panels: {type: array, items: {type: string}, maxItems: 8, description: "Record 55 H3: a check's panels by role, made_on first"}
       responses:

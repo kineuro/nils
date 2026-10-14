@@ -4736,6 +4736,22 @@ pub fn answer_with(
     if replayed {
         return Ok(answered);
     }
+    // record 55 D6 (spec §11.4): whether the answer was given blind, before
+    // the rater was shown any of NILS's suggestions of the item; an answer
+    // to a batch was given beside one
+    let purpose = crate::blind::purpose(store, c.id)?;
+    let blind = if t.batch {
+        false
+    } else {
+        crate::blind::campaign_answer_blind(
+            store,
+            c.suggest != Suggest::None,
+            a.item_id,
+            g.principal,
+            &purpose,
+        )?
+    };
+    crate::blind::mark_answer(store, answered.answer, blind)?;
     // the value of an axis or a pick is a word of the pack or stack ids; a
     // form's text and a free answer stay out of the audit row
     let shown = matches!(

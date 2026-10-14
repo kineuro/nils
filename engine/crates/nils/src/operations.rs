@@ -206,7 +206,7 @@ impl Refused {
     }
 
     /// As the door answers it: the words, the reason and the step.
-    fn reply(&self, step: &str) -> Reply {
+    pub(crate) fn reply(&self, step: &str) -> Reply {
         let mut r = Reply::error(self.status, self.error.clone());
         r.body["reason"] = json!(self.reason);
         r.body["step"] = json!(step);
@@ -583,6 +583,69 @@ fn post_contrast(store: &mut Store, pipeline: &str) -> Result<Result<Plan, Refus
     }))
 }
 
+/// System 1's run (record 55 D3, spec §11.1): the newest active
+/// `system1-score` given the model chosen for the task `system1` (record
+/// 55 D4), a site model; refused where none is registered, admitted or
+/// chosen, and where the pipeline is not in the catalog.
+fn system1(store: &mut Store) -> Result<Result<Plan, Refused>, StoreError> {
+    let refused =
+        |reason: &'static str, error: String| -> Result<Result<Plan, Refused>, StoreError> {
+            Ok(Err(Refused::new(409, reason, error)))
+        };
+    let Some(p) = nils_registry::pipeline::resolve(store, crate::system1::PIPELINE)? else {
+        return refused(
+            "no_pipeline",
+            format!(
+                "no System 1 pipeline is installed: {} is added from the engine's pipelines folder",
+                crate::system1::PIPELINE
+            ),
+        );
+    };
+    let d = match nils_pipeline::descriptor::from_value(p.descriptor.clone()) {
+        Ok(d) => d,
+        Err(e) => {
+            return refused(
+                "no_pipeline",
+                format!(
+                    "{}: the catalog's descriptor no longer checks: {e}",
+                    p.label()
+                ),
+            );
+        }
+    };
+    let Some(chosen) = nils_registry::opinion::chosen(store)? else {
+        let any = model::list(
+            store,
+            &model::Filter {
+                task: Some(nils_registry::opinion::TASK),
+                ..Default::default()
+            },
+        )?;
+        return refused(
+            "no_model",
+            if any.is_empty() {
+                "no System 1 model is installed: it is a site model, registered for the task system1 and admitted before it runs".to_string()
+            } else {
+                "no System 1 model is admitted, promoted or chosen: a registered one answers once it is admitted".to_string()
+            },
+        );
+    };
+    if d.inputs.iter().filter(|t| t.ty == "model").count() != 1 {
+        return refused(
+            "no_pipeline",
+            format!(
+                "{} reads {} models; System 1's pipeline reads one, the chosen model",
+                p.label(),
+                d.inputs.iter().filter(|t| t.ty == "model").count()
+            ),
+        );
+    }
+    Ok(Ok(Plan {
+        pipeline: p.label(),
+        models: vec![chosen.model.id],
+    }))
+}
+
 /// After a run of the post-contrast cascade (record 55 E3): the stacks
 /// whose table says `deferred` go to the full pipeline, frozen into a
 /// handle and queued as a job of the same step and for the same scope as
@@ -699,10 +762,12 @@ pub(crate) fn plan(
         "body_part" => body_part(registry.store())?,
         // record 55 E3: model r1 through its cascade
         "post_contrast" => post_contrast(registry.store(), POST_CONTRAST_PIPELINE)?,
+        // record 55 D3: System 1, the chosen site model of its task
+        crate::system1::STEP => system1(registry.store())?,
         other => Err(Refused::new(
             404,
             "no_step",
-            format!("{other} is not a step a door runs; body_part and post_contrast are"),
+            format!("{other} is not a step a door runs; body_part, post_contrast and system1 are"),
         )),
     };
     let plan = match planned {
@@ -1310,11 +1375,18 @@ pub(crate) fn run_door(
         "cohorts" => crate::viewer::Scope::cohort(registry, name)?,
         _ => crate::viewer::Scope::dataset(registry, name)?,
     };
-    let Some((step, axes)) = OPERATIONS.iter().find(|(n, _)| *n == step).copied() else {
+    // record 55 D3: System 1 is a step a door runs too, owning no axis
+    let system1: (&str, &[&str]) = (crate::system1::STEP, &[]);
+    let Some((step, axes)) = OPERATIONS
+        .iter()
+        .chain(std::iter::once(&system1))
+        .find(|(n, _)| *n == step)
+        .copied()
+    else {
         return Err(Refused::new(
             404,
             "no_step",
-            format!("{step} is not a step a door runs; body_part and post_contrast are"),
+            format!("{step} is not a step a door runs; body_part, post_contrast and system1 are"),
         )
         .reply(step));
     };

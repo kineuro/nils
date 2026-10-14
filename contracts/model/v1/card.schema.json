@@ -225,6 +225,27 @@
         "evidence": { "type": "string", "minLength": 1 }
       },
       "description": "Record 55 A5: the class of the difference between its CPU and GPU answers its study measured. The admission suite measures it again, and a model whose measured class is worse than this is not admitted. Not needed where gpu is none"
+    },
+    "gate": {
+      "type": "object",
+      "required": ["axes"],
+      "properties": {
+        "axes": {
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": { "pattern": "^[a-z_]+$" },
+          "additionalProperties": {
+            "type": "object",
+            "required": ["lambda1", "lambda2"],
+            "properties": {
+              "lambda1": { "type": "number", "minimum": 0, "maximum": 1, "description": "The least calibrated probability of System 1's answer" },
+              "lambda2": { "type": "number", "minimum": 0, "maximum": 1, "description": "The least reliability of the rules on the header" }
+            }
+          }
+        },
+        "evidence": { "type": "string", "minLength": 1, "description": "The run that chose them by Learn then Test" }
+      },
+      "description": "Record 55 D3 (spec 11.2), a System 1 model's card (task system1): the review gate's thresholds per axis, chosen by Learn then Test on training-family damage and frozen with the model. On a dataset flagged as having damaged headers, the rules' answer is accepted where System 1's answer equals it, its probability is at least lambda1 and the rules' reliability is at least lambda2; the thresholds belong to the round of this model and a rules version"
     }
   }
 }

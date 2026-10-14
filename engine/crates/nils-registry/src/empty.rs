@@ -82,6 +82,12 @@ pub const STACK_TABLES: &[(&str, Row)] = &[
     ("release_pick", Row::Keeps("a release read a pick of it")),
     // record 55 F5: the post-contrast label, worked out from the session
     ("contrast_label", Row::Goes),
+    // record 55 D3: System 1's opinions, worked out from the stack, and the
+    // gate's outcomes on it
+    ("opinion", Row::Goes),
+    ("gate_outcome", Row::Goes),
+    // record 55 D7: an audit drew it
+    ("audit_draw_stack", Row::Keeps("an audit drew it")),
 ];
 
 /// Every table with a `series_id` column, and what a sweep does to it.

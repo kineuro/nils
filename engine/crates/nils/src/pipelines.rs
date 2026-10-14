@@ -2304,6 +2304,9 @@ struct Materialised {
     /// With the geometry, the rest of each session the run holds part of
     /// (record 55 E2, P1b), `stacks.json`'s `context`.
     context: Vec<Value>,
+    /// With `x-nils.input.rows`, `stacks.json`'s `rows` (record 55 D3);
+    /// null otherwise.
+    rows: Value,
     /// For the bids layout, the converter its release ran with, where it
     /// was found and how (2026-10-12); null otherwise.
     converter: Value,
@@ -2332,6 +2335,7 @@ pub(crate) const MAX_BINDS: usize = 2000;
 /// `x-nils.input.geometry`) each entry carries the stack's geometry and
 /// each of its files their own, [`stack_geometry`] and [`file_geometry`];
 /// without either the file is as it was.
+#[allow(clippy::too_many_arguments)]
 fn materialise_stacks(
     store: &mut Store,
     stacks: &[i64],
@@ -2340,6 +2344,7 @@ fn materialise_stacks(
     geometry: bool,
     contrast: bool,
     identity: bool,
+    rows: bool,
 ) -> Result<Materialised, String> {
     let d = store.dialect();
     let err = |e: nils_registry::Error| e.to_string();
@@ -2606,11 +2611,18 @@ fn materialise_stacks(
     if contrast && !context.is_empty() {
         crate::contrast::context(store, &mut context)?;
     }
+    // record 55 D3: the registry's rows a header model reads
+    let rows_doc = if rows {
+        Some(crate::system1::header_rows(store, stacks)?)
+    } else {
+        None
+    };
     write_stacks_json(
         &input.join("stacks.json"),
         &listed,
         &entries,
         geometry.then_some(context.as_slice()),
+        rows_doc.as_ref(),
     )
     .map_err(|e| format!("the run's input: {e}"))?;
     let scope = if by_folder {
@@ -2643,6 +2655,7 @@ fn materialise_stacks(
         entries,
         listed,
         context,
+        rows: rows_doc.unwrap_or(Value::Null),
         converter: Value::Null,
         files: entry_files,
     })
@@ -2657,6 +2670,7 @@ fn write_stacks_json(
     sources: &[Value],
     stacks: &[Value],
     context: Option<&[Value]>,
+    rows: Option<&Value>,
 ) -> std::io::Result<()> {
     #[derive(serde::Serialize)]
     struct Doc<'a> {
@@ -2665,15 +2679,18 @@ fn write_stacks_json(
         stacks: &'a [Value],
         #[serde(skip_serializing_if = "Option::is_none")]
         context: Option<&'a [Value]>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        rows: Option<&'a Value>,
     }
     let doc = Doc {
         contract: nils_pipeline::CONTRACT,
         sources,
         stacks,
         context,
+        rows,
     };
     let mut w = std::io::BufWriter::new(std::fs::File::create(path)?);
-    if context.is_some() {
+    if context.is_some() || rows.is_some() {
         serde_json::to_writer(&mut w, &doc)?;
     } else {
         serde_json::to_writer_pretty(&mut w, &doc)?;
@@ -2819,6 +2836,7 @@ fn materialise_bids(
             entries: Vec::new(),
             listed: Vec::new(),
             context: Vec::new(),
+            rows: Value::Null,
             converter: Value::Null,
             files: Vec::new(),
         });
@@ -2873,6 +2891,7 @@ fn released(
         entries: Vec::new(),
         listed: Vec::new(),
         context: Vec::new(),
+        rows: Value::Null,
         converter: Value::Null,
         files: Vec::new(),
     })
@@ -4780,6 +4799,7 @@ fn execute_run(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Resul
             d.geometry,
             d.contrast,
             !d.cache.is_empty(),
+            d.rows,
         )?,
         (Layout::Bids, Some(release)) => released(registry, release, d.level)?,
         (Layout::Bids, None) => {
@@ -4795,6 +4815,7 @@ fn execute_run(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Resul
                     entries: Vec::new(),
                     listed: Vec::new(),
                     context: Vec::new(),
+                    rows: Value::Null,
                     converter: Value::Null,
                     files: Vec::new(),
                 },
@@ -5166,6 +5187,11 @@ fn execute_run(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Resul
     // are dropped once they have gone unread 30 days (ruling R4)
     if !d.cache.is_empty() {
         ended.1["slice_cache"] = crate::slice_cache::after_run(registry.store(), &working);
+    }
+    // record 56 section 3: a run that gave System 1's opinions runs the
+    // gate over its stacks of datasets flagged as having damaged headers
+    if !x.descriptor.opinions.is_empty() && matches!(ended.0, "done" | "partial") {
+        ended.1["gate"] = crate::review_rule::after_opinions(home, registry, x.stacks, x.who);
     }
     // record 55 E3: what the cascade deferred goes to the full pipeline
     if x.pipeline.name == crate::operations::POST_CONTRAST_PIPELINE
@@ -5571,6 +5597,7 @@ fn invocation_of(
                         &listed,
                         std::slice::from_ref(&entry),
                         context.as_deref(),
+                        (!m.rows.is_null()).then_some(&m.rows),
                     )
                     .map_err(|e| format!("the unit's input: {e}"))?;
                     sources = m
@@ -6768,12 +6795,19 @@ fn finalize(
             .iter()
             .flat_map(|r| r.proposals.iter().cloned())
             .collect();
-        let results_digest = nils_pipeline::sha256(
-            nils_pipeline::canonical(&json!({
-                "units": digest_units, "proposals": proposals, "run": run_files, "seeds": seeds_digest,
-            }))
-            .as_bytes(),
-        );
+        let opinions: Vec<Value> = reports
+            .iter()
+            .flat_map(|r| r.opinions.iter().cloned())
+            .collect();
+        let mut digested = json!({
+            "units": digest_units, "proposals": proposals, "run": run_files, "seeds": seeds_digest,
+        });
+        // record 55 D3: a run's opinions are its results too; a run with
+        // none digests as before
+        if !opinions.is_empty() {
+            digested["opinions"] = json!(opinions);
+        }
+        let results_digest = nils_pipeline::sha256(nils_pipeline::canonical(&digested).as_bytes());
 
         // the units no one can vouch for become review items; a container
         // that failed as a whole, with no results.json to say more, is one
@@ -6988,6 +7022,41 @@ fn finalize(
                 }
                 Err(e) => proposed["refused"] = json!(e.to_string()),
             }
+        }
+        // record 55 D3: System 1's opinions on the axes it declares, kept
+        // as a second opinion beside the rules' and never a decision
+        if !opinions.is_empty() {
+            let (declared, undeclared): (Vec<Value>, Vec<Value>) =
+                opinions.iter().cloned().partition(|o| {
+                    o["axis"]
+                        .as_str()
+                        .is_some_and(|a| d.opinions.iter().any(|x| x == a))
+                });
+            let mut said = json!({
+                "given": opinions.len(), "declared": declared.len(),
+                "undeclared": undeclared.len(), "written": 0,
+            });
+            let taken = nils_registry::opinion::parse(&json!({ "opinions": declared })).and_then(
+                |parsed| {
+                    nils_registry::opinion::ingest(
+                        registry.store(),
+                        &nils_registry::opinion::Run {
+                            id: Some(x.run_id),
+                            stacks: Some(&ours),
+                            models: Some(&speaks_for),
+                        },
+                        &parsed,
+                    )
+                },
+            );
+            match taken {
+                Ok(done) => {
+                    said["written"] = json!(done.written);
+                    said["ingested"] = done.to_json();
+                }
+                Err(e) => said["refused"] = json!(e.to_string()),
+            }
+            proposed["opinions"] = said;
         }
         Ok((
             run_files,

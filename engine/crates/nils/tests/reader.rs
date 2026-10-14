@@ -762,7 +762,14 @@ fn the_reader_reads_batches_orders_and_times_and_a_certificate_unseals() {
     // unsealed, it is read as usual again
     let (why, ..) = seen(RITA);
     assert_eq!(why["blind"], false, "{why}");
-    assert!(training_of(&server).starts_with("allowed"));
+    // unsealed, its set still trains nothing: the campaign showed the
+    // rules' answer beside its items, so its answers were not given blind,
+    // and only blind answers become training labels (record 55 D6)
+    let after = training_of(&server);
+    assert!(
+        after.starts_with("refused") && after.contains("only blind answers train"),
+        "{after}"
+    );
     // the development labels at the keyboard: every person's decision in
     // force, nothing sealed now
     let (ok, stdout, err) = cli(

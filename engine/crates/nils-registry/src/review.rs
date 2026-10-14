@@ -2260,7 +2260,7 @@ pub fn provisional_key(subject_id: i64) -> String {
 
 /// The open item of a kind under a group key, if there is one: its id and
 /// its evidence as written.
-fn open_item(
+pub(crate) fn open_item(
     store: &mut Store,
     kind: &str,
     key: &str,
@@ -2287,7 +2287,7 @@ fn open_item(
 
 /// Bring an open item up to date: its evidence, its members and the job
 /// that last asked.
-fn refresh_item(
+pub(crate) fn refresh_item(
     store: &mut Store,
     id: i64,
     evidence: &serde_json::Value,
@@ -2309,7 +2309,7 @@ fn refresh_item(
 
 /// Open one item of a kind under a group key. Answers its id.
 #[allow(clippy::too_many_arguments)]
-fn open_new(
+pub(crate) fn open_new(
     store: &mut Store,
     kind: &str,
     scope: &str,

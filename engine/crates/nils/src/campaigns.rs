@@ -704,6 +704,8 @@ pub(crate) fn route(
                     }
                     let mut v = c.as_json();
                     v["counts"] = campaign::counts(registry.store(), c.id).map_err(campaign_err)?;
+                    // record 55 D6 and D7: what its answers are for
+                    v["purpose"] = json!(nils_registry::blind::purpose(registry.store(), c.id)?);
                     out.push(v);
                 }
                 Ok(Reply::ok(json!({"count": out.len(), "campaigns": out})))
@@ -1339,8 +1341,11 @@ pub(crate) fn route(
                 // candidates are the only answers shown, and never as a
                 // system's, whatever the campaign says it suggests
                 let ab = nils_registry::ab::is_ab(&c);
-                let blind = sealed || ab || c.suggest == campaign::Suggest::None;
-                let rules_hidden = sealed || ab || hides_rules(&c);
+                // record 55 D6: a campaign that trains or measures shows a
+                // rater an item's suggestion only after their answer
+                let first = !revealed_to(registry.store(), &c, item, principal)?;
+                let blind = sealed || ab || first || c.suggest == campaign::Suggest::None;
+                let rules_hidden = sealed || ab || first || hides_rules(&c);
                 let mut doc = crate::reader::why(
                     registry.store(),
                     stack,
@@ -1518,6 +1523,7 @@ pub(crate) fn route(
             ["api", "campaigns", which, "batches"] if get => {
                 let c = campaign::find(registry.store(), which).map_err(campaign_err)?;
                 ab_one_by_one(&c)?;
+                blind_one_by_one(registry.store(), &c)?;
                 let pack = crate::reader::served_pack(doors.pack_dir.as_deref(), &doors.ask_pack);
                 let found =
                     crate::reader::batches(registry.store(), &c, principal, pack.as_deref(), None)
@@ -1549,6 +1555,7 @@ pub(crate) fn route(
                     }
                 }
                 let c = campaign::find(registry.store(), which).map_err(campaign_err)?;
+                blind_one_by_one(registry.store(), &c)?;
                 let named: Option<Vec<i64>> = match &doc["items"] {
                     Value::Null => None,
                     Value::Array(list) => {
@@ -1737,6 +1744,7 @@ pub(crate) fn route(
             ["api", "campaigns", which, "gallery"] if get => {
                 let c = campaign::find(registry.store(), which).map_err(campaign_err)?;
                 ab_one_by_one(&c)?;
+                blind_one_by_one(registry.store(), &c)?;
                 let listed = c.raters();
                 if !listed.is_empty() && !listed.iter().any(|p| p == principal) {
                     return Err(Reply::error(
@@ -1782,6 +1790,7 @@ pub(crate) fn route(
                     }
                 }
                 let c = campaign::find(registry.store(), which).map_err(campaign_err)?;
+                blind_one_by_one(registry.store(), &c)?;
                 let q = c.question().map_err(campaign_err)?;
                 if campaign::single_axis(&q).is_none() {
                     return Err(Reply::error(
@@ -2451,6 +2460,46 @@ fn ab_one_by_one(c: &campaign::Campaign) -> Result<(), Reply> {
     Ok(())
 }
 
+/// Record 55 D6 (spec §11.4): a campaign whose answers train or measure is
+/// read blind first, one item at a time; a batch or a gallery would show
+/// many items' suggestions before any answer, so neither is served.
+fn blind_one_by_one(store: &mut Store, c: &campaign::Campaign) -> Result<(), Reply> {
+    let purpose = nils_registry::blind::purpose(store, c.id)?;
+    if nils_registry::blind::blind_purpose(&purpose) && c.suggest != campaign::Suggest::None {
+        return Err(Reply::error(
+            409,
+            format!(
+                "campaign {} is for {purpose}, so it is read blind first: each item is answered before its suggestion shows, never in a batch or a gallery",
+                c.name
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// Record 55 D6: whether a rater of a blind-first campaign is shown an
+/// item's suggestion now, which is only once they answered it; the reveal
+/// is kept, so an answer after it is not blind.
+fn revealed_to(
+    store: &mut Store,
+    c: &campaign::Campaign,
+    item: i64,
+    principal: &str,
+) -> Result<bool, Reply> {
+    let purpose = nils_registry::blind::purpose(store, c.id)?;
+    if !nils_registry::blind::blind_purpose(&purpose) || c.suggest == campaign::Suggest::None {
+        return Ok(true);
+    }
+    let answered = campaign::mine(store, c.id, principal)
+        .map_err(campaign_err)?
+        .iter()
+        .any(|a| a.item_id == item);
+    if answered {
+        nils_registry::blind::campaign_reveal(store, c.id, item, principal)?;
+    }
+    Ok(answered)
+}
+
 pub(crate) fn blind_to(store: &mut Store, caller: &Caller, stack: i64) -> Result<bool, Reply> {
     Ok(!blind_among(store, caller, &[stack])?.is_empty())
 }
@@ -2504,8 +2553,10 @@ fn training_now(store: &mut Store, set: &LabelSet, v: &mut Value) {
     if set.sealed && labels::usable_for_training(store, set.id).is_ok() {
         v["training"] = json!("allowed: its sample was unsealed by a certificate (record 48 R2)");
     }
-    // record 55 E6: a set from outside is read again by DICOM identity
-    if set.kind == labels::OUTSIDE
+    // record 55 E6: a set from outside is read again by DICOM identity;
+    // record 55 D6 and D7: a campaign's set trains only where every answer
+    // was given blind and the campaign is no audit
+    if (set.kind == labels::OUTSIDE || set.campaign_id.is_some())
         && let Err(e) = labels::usable_for_training(store, set.id)
     {
         v["training"] = json!(format!("refused: {e}"));
@@ -2996,6 +3047,8 @@ fn axes_value(question: &Value, value: &mut Value) {
 
 pub(crate) fn shown(store: &mut Store, c: &campaign::Campaign) -> Result<Value, Reply> {
     let mut v = c.as_json();
+    // record 55 D6 and D7: what its answers are for
+    v["purpose"] = json!(nils_registry::blind::purpose(store, c.id)?);
     v["counts"] = campaign::counts(store, c.id).map_err(campaign_err)?;
     v["items"] = json!(
         campaign::items(store, c.id)
@@ -3353,6 +3406,27 @@ fn create_at_door(
         Some(h) => content_hash(registry.store(), h)?,
         None => None,
     };
+    let purpose = doc["purpose"].as_str().unwrap_or("decide");
+    if !nils_registry::blind::PURPOSES.contains(&purpose) {
+        return Err(Reply::error(
+            400,
+            format!(
+                "purpose: {}, not {purpose}",
+                nils_registry::blind::PURPOSES.join(", ")
+            ),
+        ));
+    }
+    // an audit reads blind and closes into nothing: its answers measure the
+    // accepted error and never become a decision or a label
+    if purpose == "audit"
+        && (doc["closes_into"].as_str().unwrap_or("none") != "none"
+            || suggest_of(&doc["suggest"])?.is_some_and(|s| s != campaign::Suggest::None))
+    {
+        return Err(Reply::error(
+            400,
+            "an audit campaign suggests none and closes into none: its reads are blind and never train",
+        ));
+    }
     let pack_version = pack_version_of(doors);
     let adjudication = if doc["adjudication"].is_null() {
         json!({})
@@ -3383,6 +3457,13 @@ fn create_at_door(
         },
     )
     .map_err(campaign_err)?;
+    // record 55 D6 and D7: what its answers are for, said once when it is
+    // made: a read that trains or measures is blind first, an audit's
+    // answers never train
+    if purpose != "decide" {
+        nils_registry::blind::set_purpose(registry.store(), made.id, purpose)
+            .map_err(|e| Reply::error(500, e))?;
+    }
     let mut v = shown(registry.store(), &made)?;
     v["pictures"] = pictures_of(registry.store(), &made)?;
     Ok(v)
@@ -4069,7 +4150,11 @@ pub(crate) fn pictures_of(store: &mut Store, c: &campaign::Campaign) -> Result<V
     Ok(v)
 }
 
-fn items_of(store: &mut Store, want: Grain, keys: &[(i64, Option<i64>)]) -> Result<Items, Reply> {
+pub(crate) fn items_of(
+    store: &mut Store,
+    want: Grain,
+    keys: &[(i64, Option<i64>)],
+) -> Result<Items, Reply> {
     Ok(match want {
         Grain::Session => Items::Sessions(sessions_of(store, keys)?),
         _ => Items::Stacks(keys.iter().map(|(k, _)| *k).collect()),

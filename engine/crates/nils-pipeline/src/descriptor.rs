@@ -529,6 +529,18 @@ pub struct Descriptor {
     /// its clock, its physics and the post-contrast rules that fired, and
     /// the header the datasets that hold a file of it. Off unless asked for.
     pub contrast: bool,
+    /// For a stacks input with the header, whether `stacks.json` carries
+    /// the registry's rows a header model reads (`x-nils.input.rows`,
+    /// record 55 D3, spec §11.1): each stack's whole fingerprint row, its
+    /// classification votes and its series' private elements and frame of
+    /// reference (as a digest), for the run's stacks and the other MR
+    /// stacks of their sessions, which are read and never scored. Off
+    /// unless asked for.
+    pub rows: bool,
+    /// The axes its results may give an opinion on (`x-nils.opinions`,
+    /// record 55 D3): System 1's answers, kept as a second opinion beside
+    /// the rules' and never a decision.
+    pub opinions: Vec<String>,
     /// Typical minutes a unit takes on the CPU (`x-nils.needs.unit-minutes`),
     /// which the pre-flight estimates from until the pipeline has run here.
     pub unit_minutes: Option<f64>,
@@ -1240,6 +1252,22 @@ pub fn from_value(document: Value) -> Result<Descriptor, String> {
             "x-nils.input.contrast puts each stack's session facts beside its header and its session's context in stacks.json, so it is for a stacks input with header: true and geometry: true only".into(),
         );
     }
+    let rows = opt_bool(&x["input"], "rows", "x-nils.input.")?.unwrap_or(false);
+    if rows && !(layout == Layout::Stacks && header) {
+        return Err(
+            "x-nils.input.rows puts the registry's rows a header model reads in stacks.json, so it is for a stacks input with header: true only".into(),
+        );
+    }
+    let mut opinions: Vec<String> = Vec::new();
+    for (i, p) in array(x, "opinions", "x-nils.")?.iter().enumerate() {
+        let axis = text(p, "axis", &format!("x-nils.opinions[{i}]."))?;
+        if !axis.chars().all(|c| c.is_ascii_lowercase() || c == '_') {
+            return Err(format!("x-nils.opinions[{i}].axis {axis} is a pack axis"));
+        }
+        if !opinions.iter().any(|o| o == axis) {
+            opinions.push(axis.to_string());
+        }
+    }
     let unit_minutes = match opt_number(&x["needs"], "unit-minutes", "x-nils.needs.")? {
         None => None,
         Some(m) if m > 0.0 && m.is_finite() => Some(m),
@@ -1287,6 +1315,8 @@ pub fn from_value(document: Value) -> Result<Descriptor, String> {
         header,
         geometry,
         contrast,
+        rows,
+        opinions,
         unit_minutes,
         disk_gb,
         replaces,

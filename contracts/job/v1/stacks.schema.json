@@ -18,6 +18,16 @@
         }
       }
     },
+    "rows": {
+      "type": "object",
+      "description": "Record 55 D3: present only when the descriptor sets x-nils.input.rows. The registry's rows a header model reads, for the run's stacks (scored true) and the other MR stacks of their sessions (scored false, read and never scored; a stack of a sample sealed now is listed only where it is the run's own)",
+      "required": ["votes", "stacks", "series"],
+      "properties": {
+        "votes": {"type": "array", "items": {"type": "string"}, "description": "The names of a vote's fields, in order: axis, rule_set, rule, clause, value, tier, restates, as nils classify votes writes them"},
+        "stacks": {"type": "object", "description": "By stack id: whether it is scored, its whole fingerprint row (less its keys, its bookkeeping and the acquisition's date and time) and its votes", "additionalProperties": {"type": "object", "required": ["scored", "fingerprint", "votes"], "properties": {"scored": {"type": "boolean"}, "fingerprint": {"type": "object"}, "votes": {"type": "array", "items": {"type": "array"}}}}},
+        "series": {"type": "object", "description": "By series id: the sha256 of its frame of reference UID, so stacks of one frame are known as such and no UID is given, and its private elements as the digest read them", "additionalProperties": {"type": "object", "properties": {"frame_of_reference": {"type": ["string", "null"]}, "private": {}}}}
+      }
+    },
     "context": {
       "type": "array",
       "description": "Record 55 E2, P1b: present only when the descriptor sets x-nils.input.geometry. The other stacks of each session the run holds part of, read and never scored, so a pipeline that reads a stack against its session (the few-slice student's height against the session's top) reads the same input whether the run holds the whole session or a part of it (a --chunk page, a selection that is not whole studies). Each is MR (its own modality, else its fingerprint's) and not sealed now; empty when the run holds whole sessions. No path is given: a context stack is not mounted",
