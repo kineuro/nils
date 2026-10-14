@@ -21,6 +21,13 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 - `POST /api/linkage/resolve` (record 55, ruling 24): one ID of a known type, as a person names a subject by it (a study's own ID), turned into the subject code it stands for with one lookup: `{id_type, known: true, subject_code, scans, datasets}`, or `{id_type, known: false}` when no subject of a scan the caller may see holds it. It is open to whoever may use the data (`data:see` or `query:see`) at detail quasi, since a subject code is quasi-identifying. The value is looked up by its keyed hash as the digest and a map filed it, so no stored identifier is opened, and the answer holds no identifier it was not given, not even the value back. A merged subject answers the subject it was merged into, a scan of a sample sealed now is not counted without `sealed:see`, and each match writes one read audit row under the caller. Tested on both backends with a ctrl-id map (`tests/resolve_id.rs`).
 
+## [pack-mri-v1.2.1] - 2026-10-15
+
+The MRI pack 1.2.1, a rules fix released on its own: an install on engine 1.0.0-alpha.80 or later takes it with `nils update --part rules`, or with Update on the MRI rules row of the desk's Settings › Parts, with no engine release and nothing started again. It works with engines `>=1.0.0-alpha.80, <2.0.0` and pack contract 10. `nils update --pin mri@1.2.0` goes back to the version before.
+
+### Fixed
+
+- The Dixon modifier is no longer read on an image the scanner typed LOCALIZER or SCOUT on a plain gradient echo, whose name is that of the series it plans: a Philips survey named for the mDixon TSE it plans was given Dixon (record 55, ruling 12 (c), an error System 1 had learnt from the rules). Dixon now requires that the image is no such localizer, as DWI-EPI has since pack 0.22.0. Replayed before release over a production archive of 546,440 MR stacks against 1.2.0, with engine 1.0.0-alpha.81: 6 stacks move, every one a Philips gradient-echo survey of that kind, from `Dixon,FlowComp` to `FlowComp`, and nothing else moves; none newly breaks a pack constraint. Two corpus cases (`packs/mri/corpus/axes-121.yml`).
 ## [pack-mri-v1.2.0] - 2026-10-14
 
 The MRI pack 1.2.0 on a tag of its own, the first rules release (record 55 B5, spec section 9.2): from now on a rules fix reaches an install with no engine release beside it. It is the pack 1.0.0-alpha.80 carries, file for file, so an install on that engine has it already and an update takes nothing. It works with engines `>=1.0.0-alpha.80, <2.0.0` and pack contract 10.

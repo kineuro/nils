@@ -226,6 +226,12 @@ values:
   Dixon:
     # WFS is Canon's, WFOP and FatSep Hitachi's, FLEX GE's [V1, V2]
     terms: ['Dixon', 'mDIXON', 'IDEAL', 'LAVA-Flex', 'Flex', 'VIBE-Dixon', 'two-point Dixon', 'WFS', 'WFOP', 'FatSep', 'FLEX']
+    # Never an image the scanner typed LOCALIZER or SCOUT on a plain gradient
+    # echo, whose name is that of the series it plans (flags.yml,
+    # `typed_localizer_gre`; System 1's copied errors, 2026-10-13: a Philips
+    # survey named `cs1.8_T2_mDixon_TSE_cor` read Dixon), as DWI-EPI since
+    # pack 0.22.0.
+    requires: {not: typed_localizer_gre}
     keywords:
       - dixon
       - ideal

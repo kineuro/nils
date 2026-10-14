@@ -1,0 +1,45 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# MRI pack 1.2.1: the Dixon modifier is never read on an image the scanner
+# typed LOCALIZER or SCOUT on a plain gradient echo (`typed_localizer_gre`),
+# whose name is that of the series it plans (record 55, ruling 12 (c): an
+# error System 1 copied from the pack). A Dixon acquisition itself keeps it.
+# Every stack here is invented from the pattern; none is a real header.
+
+cases:
+
+  - name: a Philips survey typed LOCALIZER on a gradient echo, named for the mDixon TSE it plans, is no Dixon
+    stack:
+      image_type: 'LOCALIZER'
+      scanning_sequence: GR
+      sequence_variant: MP
+      scan_options: FC
+      mr_acquisition_type: 2D
+      manufacturer: Philips Medical Systems
+      text_series_description: 'cs1.8_T2_mDixon_TSE_cor_2.5mm'
+      n_slices: 1
+      repetition_time: 3.1
+      echo_time: 1.4
+      flip_angle: 8
+    flags:
+      typed_localizer_gre: true
+    axes:
+      modifier: FlowComp
+
+  - name: a Philips mDixon TSE image as acquired keeps its Dixon
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\W\W\DIXON'
+      scanning_sequence: SE
+      sequence_variant: SK
+      scan_options: FC
+      mr_acquisition_type: 2D
+      manufacturer: Philips Medical Systems
+      text_series_description: 'T2_mDixon_TSE_cor'
+      n_slices: 30
+      repetition_time: 3000
+      echo_time: 100
+      flip_angle: 90
+    flags:
+      typed_localizer_gre: false
+    axes:
+      modifier: 'Dixon,FlowComp'
