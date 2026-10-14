@@ -10,7 +10,7 @@
 //! | the raw tree | everything with a valid datatype, suffix and entity set |
 //! | `sourcedata/dicom/` | working scans and, by default, scouts, kept as DICOM |
 //! | `derivatives/nils/` | what is derived and BIDS has no word for |
-//! | `anat/<folder>/` | a folder of its own the pack names: SyMRI's images |
+//! | `anat/<folder>/` | a folder of its own the pack names: SyMRI's images, its acquisition as DICOM |
 //! | nowhere | an acquisition BIDS cannot name, **reported, never silently dropped** |
 //!
 //! Beside the four, a release writes a DICOM export (record 55 C4,
@@ -105,7 +105,10 @@ impl Dicom {
     }
 
     /// Whether a stack on this route gets its slices in the export. A stack
-    /// in `sourcedata/` is DICOM already, and one nowhere is not written.
+    /// in `sourcedata/` is DICOM already, and one nowhere is not written. So
+    /// is a folder's working scan ([`Route::FolderSource`], named `folder`
+    /// as the folder's converted stacks are): a release asks this only of a
+    /// stack it converts, one whose place is a file stem.
     pub fn carries(self, route: &str) -> bool {
         match self {
             Dicom::All => matches!(
@@ -187,6 +190,15 @@ pub enum Route {
     /// `.bidsignore` line, because a datatype directory holds no folders in
     /// the standard.
     Folder(String),
+    /// The working scan of a folder of its own: SyMRI's multi-dynamic
+    /// multi-echo or QALAS acquisition (record 55 C4, 2026-10-09: SyMRI
+    /// stays together, its acquisition included). It is in the folder, and
+    /// kept as DICOM, because it is not an image to convert and it is what
+    /// SyMRI's pipeline reads. Its slices are in the folder's place of the
+    /// DICOM export, `sourcedata/dicom/sub-*/ses-*/anat/<folder>/`, beside
+    /// the slices of the folder's other stacks, since every DICOM a release
+    /// writes is under `sourcedata/dicom/`.
+    FolderSource(String),
     /// Its own directory beside the datatypes, under a name of ours, with a
     /// `.bidsignore` line to say the standard does not know it.
     Beside(&'static str),
@@ -203,7 +215,9 @@ impl Route {
             Route::Raw => "raw",
             Route::SourceData => "sourcedata",
             Route::Derivatives => "derivatives",
-            Route::Folder(_) => "folder",
+            // in the folder either way; its place, a directory of its own
+            // rather than a file stem, says it is DICOM
+            Route::Folder(_) | Route::FolderSource(_) => "folder",
             Route::Beside(_) => "beside",
             Route::Unofficial(_) => "unofficial",
             Route::Nowhere(_) => "nowhere",
@@ -217,10 +231,11 @@ impl Route {
 
     /// Whether it is written as DICOM rather than converted.
     ///
-    /// `sourcedata` is DICOM by definition: it is the source. Everything else
-    /// follows the release's output setting.
+    /// `sourcedata` is DICOM by definition: it is the source, and so is the
+    /// working scan of a folder of its own. Everything else follows the
+    /// release's output setting.
     pub fn is_source(&self) -> bool {
-        matches!(self, Route::SourceData)
+        matches!(self, Route::SourceData | Route::FolderSource(_))
     }
 }
 
@@ -256,8 +271,15 @@ pub fn route(
             Localizers::Drop => Route::Nowhere(Why::NoDatatype("localizer".into())),
         };
     }
+    // A working scan is the source, and stays DICOM. The one a folder of its
+    // own claims, SyMRI's acquisition, stays with the folder (record 55 C4,
+    // 2026-10-09), where the release keeps the folder; the earlier choices
+    // use none.
     if disposition == Some("working_scan") {
-        return Route::SourceData;
+        return match (folder, options.synthetic) {
+            (Some(folder), Synthetic::Folder) => Route::FolderSource(folder.to_string()),
+            _ => Route::SourceData,
+        };
     }
     if synthetic && options.synthetic == Synthetic::Derivatives {
         return Route::Derivatives;
@@ -340,6 +362,71 @@ mod tests {
         );
         assert_eq!(r, Route::SourceData);
         assert!(r.is_source());
+    }
+
+    #[test]
+    fn symri_s_acquisition_stays_in_its_folder_and_stays_dicom() {
+        // Record 55 C4 (2026-10-09): SyMRI is anatomical and stays together,
+        // its acquisition included. The pack makes the multi-dynamic
+        // multi-echo or QALAS acquisition a working scan, which went to
+        // sourcedata before the folder was asked (2026-10-14): it is in the
+        // folder now, still DICOM, named or not.
+        for named in [named(), unnamed()] {
+            let r = route(
+                Some("working_scan"),
+                false,
+                false,
+                Some("SyMRI"),
+                &named,
+                Options::default(),
+            );
+            assert_eq!(r, Route::FolderSource("SyMRI".into()));
+            assert_eq!(r.name(), "folder");
+            assert!(r.is_source() && r.is_written());
+        }
+        // A working scan no folder claims keeps sourcedata.
+        assert_eq!(
+            route(
+                Some("working_scan"),
+                false,
+                false,
+                None,
+                &unnamed(),
+                Options::default()
+            ),
+            Route::SourceData
+        );
+        // The earlier choices use no folder, for the acquisition either.
+        for synthetic in [Synthetic::Anat, Synthetic::Derivatives] {
+            let o = Options {
+                synthetic,
+                ..Options::default()
+            };
+            assert_eq!(
+                route(
+                    Some("working_scan"),
+                    false,
+                    false,
+                    Some("SyMRI"),
+                    &named(),
+                    o
+                ),
+                Route::SourceData,
+                "{synthetic:?}"
+            );
+        }
+        // A folder's own images are converted as before; only its working
+        // scan is the source.
+        let product = route(
+            Some("scanner_derived"),
+            true,
+            false,
+            Some("SyMRI"),
+            &named(),
+            Options::default(),
+        );
+        assert_eq!(product, Route::Folder("SyMRI".into()));
+        assert!(!product.is_source());
     }
 
     #[test]
@@ -519,6 +606,18 @@ mod tests {
                 Options::default()
             ),
             Route::Folder("SyMRI".into())
+        );
+        // and the acquisition the pack calls a working scan (2026-10-14)
+        assert_eq!(
+            route(
+                Some("working_scan"),
+                false,
+                false,
+                Some("SyMRI"),
+                &unnamed(),
+                Options::default()
+            ),
+            Route::FolderSource("SyMRI".into())
         );
         // A projection of one is still a derivative, and a scout a scout.
         assert_eq!(

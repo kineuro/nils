@@ -4,6 +4,10 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Fixed
+
+- SyMRI's multi-dynamic multi-echo or QALAS acquisition stays with the rest of SyMRI (record 55 C4). The MRI pack makes it a working scan, which a BIDS release routed to `sourcedata` before it asked for SyMRI's folder: it now takes the folder's route, still DICOM and never converted, its slices in SyMRI's folder of the DICOM export (`sourcedata/dicom/sub-*/ses-*/anat/SyMRI/<name>/`) as before, so a release's record and a pipeline's plan say it is in the folder. The scans doors showed it under other: its datatype is `anat` and its folder `anat/SyMRI`. The descriptive layout keeps it in `anat/SyMRI` with SyMRI's other images, as v0 did, where it had been in `anat` since the pack called what the scanner acquired RawRecon (MRI pack 0.9.0); a re-run of a descriptive release moves it there. A BIDS release made before writes nothing again, and its record names the folder. Under `--synthetic anat` or `derivatives` it stays in `sourcedata/` under its datatype, in no folder, as SyMRI's other stacks use none there.
+
 ### Changed
 
 - The five body-part descriptors pin `nils-bodypart` 0.6.0, the image the 1.0.0-alpha.80 release published (`sha256:06b7ab6b141e3b56e0a26c5d6cfb65a0e8797c76e70b3d70519f37c2e8183a7c`), where they pinned 1.0.0-alpha.71's. Its two encoders bake the same weights as before (`nils_bodypart.bake verify`, offline), so `bodypart-embed`'s encoder digests stand.
