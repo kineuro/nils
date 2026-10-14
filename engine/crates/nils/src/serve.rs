@@ -2009,6 +2009,17 @@ fn routed(
     // here, as the query is
     let decoded_segs: Vec<String> = segs.iter().map(|s| decoded(s)).collect();
     let pipeline_segs: Vec<&str> = decoded_segs.iter().map(String::as_str).collect();
+    // record 55 H2: a pipeline added, the lane and the secrets, before the
+    // catalog's own words take `lane` or `secrets` for a pipeline's id
+    if let Some(r) =
+        crate::pipelines::setup_route(doors.home.dir(), registry, method.as_str(), &segs, body)
+    {
+        return r;
+    }
+    // record 55 H2: the kept session schemes
+    if let Some(r) = crate::session_schemes::route(registry, method.as_str(), &segs, body) {
+        return r;
+    }
     if let Some(r) = crate::pipelines::route(registry, caller, quasi, get, &pipeline_segs, query) {
         return r;
     }
@@ -5334,6 +5345,19 @@ pub(crate) fn door(method: &str, segs: &[&str]) -> (Need, Detail) {
         | ("POST", ["api", "derivatives", _, "check", "withdraw"]) => {
             (Need::One("review:work"), Plain)
         }
+        // record 55 H2: the lane and the secrets are read on the Pipelines
+        // page; adding a pipeline, setting the lane or a secret brings an
+        // image or a site's file into what runs, an admin's
+        ("GET", ["api", "pipelines", "lane" | "secrets"]) => (Need::One("pipelines:see"), Plain),
+        ("POST", ["api", "pipelines"])
+        | ("PUT", ["api", "pipelines", "lane"])
+        | ("PUT" | "DELETE", ["api", "pipelines", "secrets", _]) => {
+            (Need::One(nils_pipeline::failure::INSTALL_GRANT), Plain)
+        }
+        // record 55 H2: the kept session schemes, read and kept from the
+        // release form
+        ("GET", ["api", "session-schemes"]) => (Need::One("release:see"), Plain),
+        ("POST", ["api", "session-schemes"]) => (Need::One("release:work"), Plain),
         // record 43: the catalog and the runs are the Pipelines page's
         ("GET", ["api", "pipelines" | "pipeline-runs"])
         | ("GET", ["api", "pipelines" | "pipeline-runs", _]) => (Need::One("pipelines:see"), Plain),
@@ -5964,6 +5988,8 @@ pub(crate) fn doors_list() -> Vec<String> {
     .chain(crate::pipelines::DOORS.iter())
     .chain(std::iter::once(&crate::preflight::DOOR))
     .chain(crate::tools::DOORS.iter())
+    .chain(crate::pipelines::SETUP_DOORS.iter())
+    .chain(crate::session_schemes::DOORS.iter())
     .chain(crate::linkage_doors::DOORS.iter())
     .chain(crate::campaigns::DOORS.iter())
     .chain(crate::ask_doors::DOORS.iter())
@@ -6926,6 +6952,80 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
             "1 MiB of text",
             "Reading a unit's log",
             "Read a unit's log",
+        ),
+        // record 55 H2: a pipeline added, the lane and the secrets
+        row(
+            "POST /api/pipelines",
+            true,
+            true,
+            "free",
+            "one descriptor",
+            "Adding a pipeline",
+            "Added a pipeline",
+        ),
+        row(
+            "GET /api/pipelines/lane",
+            false,
+            false,
+            "free",
+            "one document",
+            "Reading the pipeline lane",
+            "Read the pipeline lane",
+        ),
+        row(
+            "PUT /api/pipelines/lane",
+            true,
+            true,
+            "free",
+            "one document",
+            "Setting the pipeline lane",
+            "Set the pipeline lane",
+        ),
+        row(
+            "GET /api/pipelines/secrets",
+            false,
+            false,
+            "free",
+            "the secrets",
+            "Reading the pipelines' secrets",
+            "Read the pipelines' secrets",
+        ),
+        row(
+            "PUT /api/pipelines/secrets/{id}",
+            true,
+            true,
+            "free",
+            "one secret",
+            "Setting a secret",
+            "Set a secret",
+        ),
+        row(
+            "DELETE /api/pipelines/secrets/{id}",
+            true,
+            true,
+            "free",
+            "one secret",
+            "Forgetting a secret",
+            "Forgot a secret",
+        ),
+        // record 55 H2: the kept session schemes
+        row(
+            "GET /api/session-schemes",
+            false,
+            false,
+            "free",
+            "the schemes",
+            "Listing session schemes",
+            "Listed session schemes",
+        ),
+        row(
+            "POST /api/session-schemes",
+            true,
+            false,
+            "free",
+            "one scheme",
+            "Keeping a session scheme",
+            "Kept a session scheme",
         ),
         // 2026-10-12: the tools the engine runs beside itself
         row(

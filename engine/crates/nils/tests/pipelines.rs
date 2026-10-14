@@ -1399,6 +1399,8 @@ const PLAIN_REVIEW: &str = "a-plain-review-token-of-lens";
 /// Record 48, D1 of the move: the certificate's computation, an operator
 /// with the one grant no ladder set holds.
 const CERT: &str = "a-certificate-token-of-length";
+/// Record 55 H2: an admin, who adds a pipeline, sets the lane and a secret.
+const ADMIN: &str = "an-admin-token-of-its-length";
 
 impl Server {
     fn start(lab: &Lab) -> Server {
@@ -1418,6 +1420,7 @@ impl Server {
             format!("{READER}=lou@lab:reader"),
             format!("{PLAIN_REVIEW}=rae@lab:pipelines:see,review:see"),
             format!("{CERT}=cert@lab:operator,sealed:see"),
+            format!("{ADMIN}=ada@lab:admin"),
         ]
         .join(",");
         let child = lab
@@ -11073,4 +11076,284 @@ fn the_logs_of_a_job_a_run_and_its_units_are_read_at_their_doors() {
         ],
         "each sealed read audited"
     );
+}
+
+/// Record 55 H2 (no command line inside a desk flow): a pipeline added at
+/// its door as `nils pipeline add` adds it, the lane read and set, and a
+/// secret kept as a file of the engine's own, set and forgotten, each under
+/// its grant. On SQLite and on Postgres.
+#[test]
+fn the_setup_doors_add_a_pipeline_set_the_lane_and_keep_a_secret() {
+    if !have("python3") {
+        eprintln!(
+            "python3 is not installed; the stand-in podman needs it, so this test is skipped"
+        );
+        return;
+    }
+    on_both("pipelines-setup-doors", "pipelines_setup_doors", |lab| {
+        let server = Server::start(lab);
+        let pinned = stack_slow(
+            "slow",
+            "{cores: 1, memory-gb: 1}",
+            "  secrets:\n    - id: freesurfer_license\n      env: FS_LICENSE\n",
+        );
+        let body = json!({ "descriptor": pinned });
+        // adding brings an image onto the site: an admin's alone
+        for token in [READER, PLAIN, OPERATOR] {
+            let (status, v) = server.call("POST", "/api/pipelines", Some(body.clone()), token);
+            assert_eq!(status, 403, "{v}");
+        }
+        // an image named by a tag is refused in words
+        let tagged = json!({ "descriptor": stack_echo("ghcr.io/example/tagged:v1") });
+        let (status, v) = server.call("POST", "/api/pipelines", Some(tagged), ADMIN);
+        assert_eq!(status, 400, "{v}");
+        assert!(
+            v["error"]
+                .as_str()
+                .unwrap()
+                .contains("not pinned by its registry manifest digest"),
+            "{v}"
+        );
+        let (status, v) = server.call("POST", "/api/pipelines", Some(json!({})), ADMIN);
+        assert_eq!(status, 400, "{v}");
+        let (status, added) = server.call("POST", "/api/pipelines", Some(body.clone()), ADMIN);
+        assert_eq!(status, 201, "{added}");
+        assert_eq!(added["label"], "slow@1", "{added}");
+        assert_eq!(added["added"], true);
+        assert_eq!(added["replaces"], json!([]));
+        // the same descriptor again is the version it is, and no new row
+        let (status, again) = server.call("POST", "/api/pipelines", Some(body), ADMIN);
+        assert_eq!(status, 200, "{again}");
+        assert_eq!(again["id"], added["id"]);
+        assert_eq!(again["added"], false);
+        let n = lab
+            .store()
+            .query("SELECT scope FROM audit WHERE action = 'pipeline.add'", &[])
+            .unwrap()
+            .iter()
+            .filter(|r| {
+                serde_json::from_str::<Value>(r.text(0).unwrap()).unwrap()["name"] == "slow"
+            })
+            .count();
+        assert_eq!(n, 1);
+        let (status, listed) = server.call("GET", "/api/pipelines", None, PLAIN);
+        assert_eq!(status, 200);
+        assert!(
+            listed["pipelines"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|p| p["label"] == "slow@1"),
+            "{listed}"
+        );
+
+        // the lane: read on the Pipelines page, set by an admin
+        let (status, lane) = server.call("GET", "/api/pipelines/lane", None, PLAIN);
+        assert_eq!(status, 200, "{lane}");
+        assert!(lane["cores"].as_u64().is_some(), "{lane}");
+        assert_eq!(lane["places"]["output"], "scratch", "{lane}");
+        let (status, _) = server.call("GET", "/api/pipelines/lane", None, READER);
+        assert_eq!(status, 403);
+        let change = json!({"cores": 2, "memory_gb": 3, "gpu_card": "none"});
+        let (status, _) = server.call("PUT", "/api/pipelines/lane", Some(change.clone()), PLAIN);
+        assert_eq!(status, 403);
+        let (status, lane) = server.call("PUT", "/api/pipelines/lane", Some(change), ADMIN);
+        assert_eq!(status, 200, "{lane}");
+        assert_eq!(lane["set"], json!({"cores": 2, "memory_gb": 3}), "{lane}");
+        assert!(lane["gpu_card"].is_null(), "{lane}");
+        for bad in [
+            json!({"output_place": "nowhere"}),
+            json!({"cores": 0}),
+            json!({"gpu_card": "first"}),
+            json!({"lanes": 1}),
+        ] {
+            let (status, v) = server.call("PUT", "/api/pipelines/lane", Some(bad.clone()), ADMIN);
+            assert_eq!(status, 400, "{bad}: {v}");
+        }
+        let (_, lane) = server.call("GET", "/api/pipelines/lane", None, PLAIN);
+        assert_eq!(lane["set"], json!({"cores": 2, "memory_gb": 3}), "{lane}");
+
+        // the secrets: what the pipelines declare, never a byte of them
+        let (status, secrets) = server.call("GET", "/api/pipelines/secrets", None, PLAIN);
+        assert_eq!(status, 200, "{secrets}");
+        let licence_row = |v: &Value| {
+            v["secrets"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|s| s["id"] == "freesurfer_license")
+                .cloned()
+                .unwrap_or_else(|| panic!("no freesurfer_license in {v}"))
+        };
+        let row = licence_row(&secrets);
+        assert!(
+            row["declared_by"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("slow@1")),
+            "{row}"
+        );
+        assert_eq!(row["optional"], false, "{row}");
+        assert_eq!(row["set"], false, "{row}");
+        assert_eq!(row["readable"], false, "{row}");
+        const LICENCE: &str = "NILS-PLANTED-LICENCE-4e1d\nline two\n";
+        let put = json!({ "content": LICENCE });
+        let path = "/api/pipelines/secrets/freesurfer_license";
+        let (status, _) = server.call("PUT", path, Some(put.clone()), PLAIN);
+        assert_eq!(status, 403);
+        let (status, v) = server.call(
+            "PUT",
+            "/api/pipelines/secrets/Bad-Id",
+            Some(put.clone()),
+            ADMIN,
+        );
+        assert_eq!(status, 400, "{v}");
+        let (status, v) = server.call("PUT", path, Some(json!({"content": "  "})), ADMIN);
+        assert_eq!(status, 400, "{v}");
+        let (status, one) = server.call("PUT", path, Some(put), ADMIN);
+        assert_eq!(status, 200, "{one}");
+        assert_eq!(one["set"], true, "{one}");
+        assert_eq!(one["readable"], true, "{one}");
+        assert!(!one.to_string().contains("PLANTED"), "{one}");
+        let file = lab.home.path().join("secrets/freesurfer_license");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), LICENCE);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&file).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+            let dir = std::fs::metadata(file.parent().unwrap())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(dir, 0o700);
+        }
+        let (_, secrets) = server.call("GET", "/api/pipelines/secrets", None, PLAIN);
+        assert!(!secrets.to_string().contains("PLANTED"), "{secrets}");
+        assert!(!secrets.to_string().contains("secrets/"), "{secrets}");
+        // the command line sees the same secret set
+        let listed = lab.json(&["pipeline", "secret", "list", "--json"]);
+        assert_eq!(
+            listed,
+            json!([{"id": "freesurfer_license", "readable": true}])
+        );
+        // nothing of it in the audit
+        let rows = lab
+            .store()
+            .query(
+                "SELECT scope FROM audit WHERE action = 'pipeline.runtime'",
+                &[],
+            )
+            .unwrap();
+        assert!(!rows.is_empty());
+        for r in &rows {
+            assert!(!r.text(0).unwrap_or_default().contains("PLANTED"));
+        }
+        let (status, _) = server.call("DELETE", path, None, PLAIN);
+        assert_eq!(status, 403);
+        let (status, one) = server.call("DELETE", path, None, ADMIN);
+        assert_eq!(status, 200, "{one}");
+        assert_eq!(one["set"], false, "{one}");
+        assert!(!file.exists());
+        drop(server);
+    });
+}
+
+/// Record 55 H2: the session schemes kept at their door, from the release
+/// form, as `nils session scheme add` keeps them, never replaced there. On
+/// SQLite and on Postgres.
+#[test]
+fn a_session_scheme_is_kept_at_its_door_and_never_replaced_there() {
+    if !have("python3") {
+        eprintln!(
+            "python3 is not installed; the stand-in podman needs it, so this test is skipped"
+        );
+        return;
+    }
+    on_both("session-scheme-doors", "session_scheme_doors", |lab| {
+        let server = Server::start(lab);
+        // a reader holds no release:see
+        let (status, _) = server.call("GET", "/api/session-schemes", None, READER);
+        assert_eq!(status, 403);
+        let (status, v) = server.call("GET", "/api/session-schemes", None, OPERATOR);
+        assert_eq!(status, 200, "{v}");
+        assert_eq!(v["schemes"], json!([]), "{v}");
+        assert_eq!(v["default"]["naming"], "date", "{v}");
+        let yearly = json!({
+            "name": "yearly",
+            "scheme": {"window_days": 30, "naming": {"months": {"cadence": [0, 12, 24], "tolerance": 2.0}}},
+            "note": "the cohort's yearly visits",
+        });
+        // keeping one is release:work
+        let (status, _) = server.call("POST", "/api/session-schemes", Some(yearly.clone()), PLAIN);
+        assert_eq!(status, 403);
+        let (status, kept) = server.call(
+            "POST",
+            "/api/session-schemes",
+            Some(yearly.clone()),
+            OPERATOR,
+        );
+        assert_eq!(status, 201, "{kept}");
+        assert_eq!(kept["name"], "yearly");
+        assert_eq!(kept["scheme"]["window_days"], 30, "{kept}");
+        assert_eq!(kept["note"], "the cohort's yearly visits");
+        assert!(kept["digest"].as_str().is_some(), "{kept}");
+        // the same name again is refused, never replaced
+        let (status, v) = server.call("POST", "/api/session-schemes", Some(yearly), OPERATOR);
+        assert_eq!(status, 409, "{v}");
+        // a scheme's own error, in its words
+        let (status, v) = server.call(
+            "POST",
+            "/api/session-schemes",
+            Some(json!({"name": "onset", "scheme": {"anchor": "event"}})),
+            OPERATOR,
+        );
+        assert_eq!(status, 400, "{v}");
+        assert!(
+            v["error"].as_str().unwrap().contains("session.event"),
+            "{v}"
+        );
+        for bad in [
+            json!({"name": "a b", "scheme": {}}),
+            json!({"name": "", "scheme": {}}),
+            json!({"name": "x", "scheme": {"window": 3}}),
+            json!({"name": "x", "scheme": 3}),
+        ] {
+            let (status, v) =
+                server.call("POST", "/api/session-schemes", Some(bad.clone()), OPERATOR);
+            assert_eq!(status, 400, "{bad}: {v}");
+        }
+        // the text of a scheme file, as the command line reads it
+        let (status, kept) = server.call(
+            "POST",
+            "/api/session-schemes",
+            Some(json!({"name": "visits", "scheme": "session:\n  naming: ordinal\n"})),
+            OPERATOR,
+        );
+        assert_eq!(status, 201, "{kept}");
+        assert_eq!(kept["scheme"]["naming"], "ordinal", "{kept}");
+        let (_, v) = server.call("GET", "/api/session-schemes", None, OPERATOR);
+        let names: Vec<&str> = v["schemes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, ["visits", "yearly"], "{v}");
+        // the command line keeps the same rows
+        let shown = lab.ok(&["session", "scheme", "show", "yearly", "--json"], None);
+        assert!(shown.contains("\"window_days\": 30"), "{shown}");
+        let n = lab
+            .store()
+            .query(
+                "SELECT COUNT(*) FROM audit WHERE action = 'session.scheme'",
+                &[],
+            )
+            .unwrap()[0]
+            .int(0)
+            .unwrap();
+        assert_eq!(n, 2);
+        drop(server);
+    });
 }

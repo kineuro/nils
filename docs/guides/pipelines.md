@@ -67,7 +67,7 @@ Pipeline runs have a lane of their own: `nils serve --worker` runs them in a wor
    nils pipeline lane --output-place results --scratch-place scratch
    ```
 
-   The outputs are the derivatives and tables a run registers, under `derivatives/<pipeline>/<run>/` in the output place. The scratch is the run's input, each unit's folder, its log and apptainer's images, under `runs/<run>/` and `images/` in the scratch place. Each must be an active working place (`nils place add <name> <path> --role working`). Unset, or set to `default`, each is the first working place, as before. A run records both, so a run taken up again goes on in the places it started in, and a run reads derivative and model inputs from the output place first and the scratch place next.
+   The outputs are the derivatives and tables a run registers, under `derivatives/<pipeline>/<run>/` in the output place. The scratch is the run's input, each unit's folder, its log and apptainer's images, under `runs/<run>/` and `images/` in the scratch place. Each must be an active working place (`nils place add <name> <path> --role working`). Unset, or set to `default`, each is the first working place, as before. The desk reads and sets the lane through `GET` and `PUT /api/pipelines/lane`, the change an admin's (`install:work`). A run records both, so a run taken up again goes on in the places it started in, and a run reads derivative and model inputs from the output place first and the scratch place next.
 
 > **Warning:** the budget is the engine's own bookkeeping. Keep the container's own memory cap below the host's memory, so that what the lane is allowed is really there.
 
@@ -115,6 +115,8 @@ nils pipeline add pipelines/n4-bias-correction/nils.job.yml
 ```
 
 The descriptor is checked and kept whole with its digest. The image must be pinned by its registry manifest digest, `repository@sha256:<hex>`; a tag or an image id is refused. Adding the same descriptor again changes nothing; one that differs becomes the name's next version.
+
+The desk adds one the same way, under Pipelines, through `POST /api/pipelines` with the descriptor's text; it is an admin's (`install:work`), since it brings a container image onto the site.
 
 A descriptor of the bids layout finds each pick's image by the name the release gives it. The suffix is the base contrast and FLAIR is always a modifier, so the T1w is `*_T1w.nii.gz` and the FLAIR is a T2w with `FLAIR` among the `+` tokens of its `acq-` (`sub-01_ses-01_acq-Ax+2D+FLAIR+IRTSE_T2w.nii.gz`), never `*_FLAIR.nii.gz`, which only older releases wrote. A T2w without the token is the `t2w` pick. The segcsvd and SAMSEG starters find their FLAIR this way.
 
@@ -376,6 +378,8 @@ A pipeline that needs a licence, such as FreeSurfer, declares it under `x-nils.s
    ```sh
    nils pipeline secret list
    ```
+
+The desk lists the secrets the pipelines declare and whether each is set (`GET /api/pipelines/secrets`), and an admin pastes a licence's text there (`PUT /api/pipelines/secrets/{id}`): the engine writes it as `secrets/<id>` under its home, mode 0600, and keeps that path. `DELETE /api/pipelines/secrets/{id}` forgets it and removes that file; a file set at the command line is the site's own and stays.
 
 The file is read when a run starts and mounted read-only into that pipeline's containers alone, at the path its descriptor names (`/secrets/<id>` by default), with the variable it names (such as `FS_LICENSE`) pointing there. A run that needs a secret the site has not set is refused before anything runs.
 

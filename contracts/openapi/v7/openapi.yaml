@@ -1213,6 +1213,26 @@ paths:
       requestBody: {content: {application/json: {schema: {type: object, required: [namespace, values], properties: {namespace: {type: string}, values: {type: array, items: {type: string}}}}}}}
       responses:
         "200": {description: "{upload_id, namespace, n, unresolved, subjects}"}
+  /api/session-schemes:
+    get:
+      summary: The kept session schemes (nils session scheme list and show; added in place, additively, on 2026-10-14, record 55 H2)
+      description: "release:see. {schemes: [{name, scheme (the definition as the registry keeps it: window_days, anchor, naming, collision, unmatched, said, event), added_at, note, digest}], default}, by name; `default` is the scheme a release, a pick or a question uses when it names none."
+      responses:
+        "200": {description: "{schemes: [...], default}"}
+        "403": {description: No release:see}
+    post:
+      summary: Keep a session scheme under a name (nils session scheme add NAME FILE; added in place, additively, on 2026-10-14, record 55 H2)
+      description: "release:work, audited as `session.scheme`. Body {name, scheme, note?}: name of letters, digits, '-', '_' and '.', at most 64; scheme the definition as an object (as GET answers it) or the text of a scheme file (`session:` and its fields), checked as the command line checks it. A name kept already is refused, never replaced here, since every label made with the old scheme would change (the command line's --force replaces one). Answers the kept row as GET lists it."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object, required: [name, scheme], properties: {name: {type: string}, scheme: {oneOf: [{type: object}, {type: string}]}, note: {type: string}}}
+      responses:
+        "201": {description: "{name, scheme, added_at, note, digest}"}
+        "400": {description: "A name that is not one, or a scheme that does not parse or check, in its own words: {error}"}
+        "403": {description: No release:work}
+        "409": {description: "A scheme of this name is kept already"}
   /api/sessions/rebuild:
     post:
       summary: Rebuild the session cache for a scheme, as a job under the writer (pipelines:work; Wave 4b section 7)
@@ -1815,6 +1835,69 @@ paths:
       responses:
         "200": {description: "{pipelines: [...], capability}"}
         "403": {description: No pipelines:see}
+    post:
+      summary: Add a pipeline to the catalog from its descriptor's text (nils pipeline add FILE --json; added in place, additively, on 2026-10-14, record 55 H2)
+      description: "An admin's (install:work), since it brings a container image onto the site; audited as `pipeline.add` when the descriptor is new. Body {descriptor}, the text of a nils.job.yml (contracts/job/v1). The descriptor is parsed and checked as the command line checks it: an image not pinned by its registry manifest digest is refused. The same descriptor again is the version it is, and a changed one its name's next version. The answer is the catalog entry as GET /api/pipelines/{id} answers it, with `added` (false where the catalog held this descriptor already), `replaces` (the earlier active versions, name@version, a new run no longer takes because this one says it replaces them) and `replaces_why`."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object, required: [descriptor], properties: {descriptor: {type: string}}}
+      responses:
+        "201": {description: "The entry, added: {id, name, version, label, ..., added: true, replaces, replaces_why}"}
+        "200": {description: "The entry the catalog held already: {..., added: false, replaces: [], replaces_why}"}
+        "400": {description: "No descriptor, or one that does not parse or check, in plain words: {error}"}
+        "403": {description: No install:work}
+  /api/pipelines/lane:
+    get:
+      summary: The pipeline lane (nils pipeline lane --json; added in place, additively, on 2026-10-14, record 55 H2)
+      description: "pipelines:see. {cores, memory_gb (what the lane's units hold together, within what this machine or its container offers), set: {cores, memory_gb} (as the site set them, or the defaults), why (where the machine bounds what was set, else null), gpu_card (the card a GPU unit leases, by index, null for none), places: {output, scratch, output_set, scratch_set} (the working places a run writes, by name, each true where the lane names it) or {error} where none can be found}."
+      responses:
+        "200": {description: "The lane"}
+        "403": {description: No pipelines:see}
+    put:
+      summary: Set the pipeline lane (nils pipeline lane --cores --memory-gb --gpu-card --output-place --scratch-place; added in place, additively, on 2026-10-14, record 55 H2)
+      description: "An admin's (install:work), audited as `pipeline.runtime`. Any of {cores (one or more), memory_gb (one or more), gpu_card (a card's index as text, or none), output_place, scratch_place (an active working place by name, or default for the first working place)}; a field left out is kept, and another field is refused. Answers the lane as GET does."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object, additionalProperties: false, properties: {cores: {type: integer, minimum: 1}, memory_gb: {type: integer, minimum: 1}, gpu_card: {type: string}, output_place: {type: string}, scratch_place: {type: string}}}
+      responses:
+        "200": {description: "The lane, as GET answers it"}
+        "400": {description: "A field the lane does not take, a zero, a card that is not an index or none, or a place that is not an active working place: {error}"}
+        "403": {description: No install:work}
+  /api/pipelines/secrets:
+    get:
+      summary: The secrets the pipelines read, and whether each is set (nils pipeline secret list --json; added in place, additively, on 2026-10-14, record 55 H2)
+      description: "pipelines:see. {secrets: [{id, declared_by (the active pipelines that declare it, name@version), optional (true where every declaration is optional), set, readable (its file can be read now)}]}, each secret an active pipeline declares or the site has set. Never its path or its bytes."
+      responses:
+        "200": {description: "{secrets: [...]}"}
+        "403": {description: No pipelines:see}
+  /api/pipelines/secrets/{id}:
+    put:
+      summary: Keep a secret's text, such as a licence (nils pipeline secret set ID --file; added in place, additively, on 2026-10-14, record 55 H2)
+      description: "An admin's (install:work), audited as `pipeline.runtime` with the id alone. Body {content}, the file's text, at most 64 KiB. It is written as a file of the engine's own, `secrets/<id>` under the engine's home (mode 0600, its folder 0700), and set as the command line sets a file: the registry keeps its path, never its bytes. Answers the secret's row as GET /api/pipelines/secrets lists it."
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string, pattern: "^[a-z0-9_]+$"}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object, required: [content], properties: {content: {type: string}}}
+      responses:
+        "200": {description: "{id, declared_by, optional, set: true, readable}"}
+        "400": {description: "An id that is not lowercase letters, digits and _, no content, an empty one or one over 64 KiB: {error}"}
+        "403": {description: No install:work}
+    delete:
+      summary: Forget a secret (nils pipeline secret unset ID; added in place, additively, on 2026-10-14, record 55 H2)
+      description: "An admin's (install:work), audited as `pipeline.runtime`. The file this door kept for it is removed; a file the command line named is the site's own and stays. Answers the secret's row, set false."
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string, pattern: "^[a-z0-9_]+$"}}
+      responses:
+        "200": {description: "{id, declared_by, optional, set: false, readable: false}"}
+        "400": {description: "An id that is not lowercase letters, digits and _"}
+        "403": {description: No install:work}
   /api/pipelines/{id}:
     get:
       summary: One catalog entry (record 43 S1; nils pipeline show)

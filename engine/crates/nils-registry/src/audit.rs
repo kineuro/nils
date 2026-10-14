@@ -169,6 +169,9 @@ pub enum Action {
     /// 2026-10-12: a tool the engine runs beside itself installed by an
     /// admin, dcm2niix, from its pinned release. It changes no judgement.
     ToolInstall,
+    /// Record 55 H2: a session scheme kept under a name at its door, as
+    /// `nils session scheme add` keeps one. A new name relabels nothing.
+    SessionScheme,
 }
 
 impl Action {
@@ -247,6 +250,7 @@ impl Action {
             Action::PipelineRuntime => "pipeline.runtime",
             Action::RegistryRepair => "registry.repair",
             Action::ToolInstall => "tool.install",
+            Action::SessionScheme => "session.scheme",
         }
     }
 
@@ -297,6 +301,7 @@ impl Action {
                 | Action::PipelineRun
                 | Action::PipelineRuntime
                 | Action::ToolInstall
+                | Action::SessionScheme
         )
     }
 }
