@@ -829,15 +829,20 @@ fn the_install_door_offers_a_rules_release_and_its_update_takes_only_the_rules()
     );
     assert_eq!(status, 202, "{run}");
     let id = run["id"].as_str().unwrap().to_string();
-    let mut ended = serde_json::Value::Null;
+    // followed until it ends, done, failed or ended: any other answer is no
+    // end, and is kept to be shown should the run never end
+    let mut last = serde_json::Value::Null;
+    let mut ended = None;
     for _ in 0..300 {
-        let (_, doc) = s.call("GET", &format!("/api/supervise/runs/{id}"), None, token);
-        if doc["state"] != "running" {
-            ended = doc;
+        let (status, doc) = s.call("GET", &format!("/api/supervise/runs/{id}"), None, token);
+        if status == 200 && matches!(doc["state"].as_str(), Some("done" | "failed" | "ended")) {
+            ended = Some(doc);
             break;
         }
+        last = doc;
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
+    let ended = ended.unwrap_or_else(|| panic!("the run did not end in 30 s: {last}"));
     assert_eq!(ended["state"], "done", "{ended}");
     assert_eq!(
         std::fs::read_to_string(packs.join("mri/pack.yml")).unwrap(),
@@ -870,6 +875,79 @@ fn the_install_door_offers_a_rules_release_and_its_update_takes_only_the_rules()
     let (_, doc) = s.call("GET", "/api/supervise/install", None, token);
     assert_eq!(doc["release"]["behind"], serde_json::json!([]), "{doc}");
     assert_eq!(doc["release"]["newer"], serde_json::Value::Null, "{doc}");
+}
+
+/// A run the door starts is read back by its id at once, and on every read
+/// after it while its recorder rewrites it as the run starts and as it ends:
+/// the desk asks for the run right after the 202 and then polls it. CI once
+/// found the first read answered 404, "no run by that id" (2026-10-14).
+#[test]
+fn a_run_the_door_starts_is_read_back_by_its_id_at_once_and_on_every_read() {
+    let c = Channel::new();
+    let install = c.dir.path().join("install");
+    std::fs::create_dir_all(&install).unwrap();
+    std::fs::write(install.join("VERSION"), "1.0.0\n").unwrap();
+    let config = c.config("engine", &install, "true");
+    // no setup is recorded here, so each run (`nils update --part rules`)
+    // refuses at once: many runs, each read from its first moment to its end
+    let home = TempDir::new("supervise-runs-read");
+    let settings = home.path().join("config");
+    std::fs::create_dir_all(&settings).unwrap();
+    let s = Service::start_with(
+        &config,
+        &[
+            ("XDG_CONFIG_HOME", settings.to_str().unwrap()),
+            ("HOME", home.path().to_str().unwrap()),
+        ],
+    );
+    let token = Some("a-supervisor-token-of-length");
+    let mut reads = 0;
+    for round in 0..20 {
+        // the run before has ended, though its recorder may still be exiting
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let run = loop {
+            let (status, run) = s.call(
+                "POST",
+                "/api/supervise/update-all",
+                Some(r#"{"part":"rules"}"#),
+                token,
+            );
+            if status == 202 {
+                break run;
+            }
+            assert_eq!(status, 409, "round {round}: {run}");
+            assert!(std::time::Instant::now() < deadline, "round {round}: {run}");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
+        let id = run["id"].as_str().unwrap().to_string();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let ended = loop {
+            let (status, doc) = s.call("GET", &format!("/api/supervise/runs/{id}"), None, token);
+            reads += 1;
+            assert_eq!(status, 200, "round {round}, read {reads}: {doc}");
+            assert_eq!(doc["id"], id.as_str(), "round {round}: {doc}");
+            match doc["state"].as_str() {
+                Some("running") => {
+                    assert!(std::time::Instant::now() < deadline, "round {round}: {doc}");
+                }
+                Some("done" | "failed" | "ended") => break doc,
+                _ => panic!("round {round}: a state no run has: {doc}"),
+            }
+        };
+        assert_eq!(
+            ended["state"], "failed",
+            "with no setup recorded the update refuses: {ended}"
+        );
+        assert!(
+            ended["tail"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|l| l.as_str().unwrap_or("").contains("no setup is recorded")),
+            "{ended}"
+        );
+    }
+    assert!(reads >= 20, "{reads}");
 }
 
 /// The install door (the desk's Settings read it): an install nils setup

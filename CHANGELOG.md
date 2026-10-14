@@ -4,6 +4,18 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Fixed
+
+- A run the supervisor starts (a restart, a reapply, an update, and the Update of a part's row on the desk's Parts page, the rules' among them) is read back by its id from the moment its 202 is answered (1.0.0-alpha.80). The run's recorder rewrites its document as the run starts and as it ends, and wrote it in place, so a read between the truncation and the write found an empty file and `GET /api/supervise/runs/{id}` answered 404 `no run by that id`, which a desk polling the run showed as an error and which failed a supervisor test once in CI. Every write of a run's document now goes to a file of the writer's own beside it, renamed over it, so a read finds the document before or the one after; and a run that cannot be put on record is refused with 500 rather than answered with an id the door cannot read back.
+
+## [pack-mri-v1.2.0] - 2026-10-14
+
+The MRI pack 1.2.0 on a tag of its own, the first rules release (record 55 B5, spec section 9.2): from now on a rules fix reaches an install with no engine release beside it. It is the pack 1.0.0-alpha.80 carries, file for file, so an install on that engine has it already and an update takes nothing. It works with engines `>=1.0.0-alpha.80, <2.0.0` and pack contract 10.
+
+- An install takes a rules release with `nils update --part rules`, with `nils update --all`, or with Update on the pack's row of the desk's Settings › Parts, and `nils update --check` names it first. The engine's binary stays as it is and nothing is started again: the engine reads a pack again once its files change. A plain `nils update` takes no rules, and an engine in a container gets its rules with the engine's next image.
+- A rules release whose pack contract or engine range leaves the running engine out waits, says why in the check, the update and the pack's row, and is never put in place. `nils update --pin mri@<version>` keeps one version through every update until `nils update --unpin mri`; pinning the version before is also how an install goes back.
+- What 1.2.0 holds over 1.0.1, and how each step was replayed before release over a production archive of 546,440 MR stacks, is in the notes of engine 1.0.0-alpha.80. In short: 1.0.2, 1.0.3 and 1.1.0 move 7,967 stacks, each explained by the rule meant to move it, and 1.1.0's 1,234 colour SyMRI stacks miss its estimate of about 1,117, reported as a miss; 1.2.0 moves 20,483 stacks, of which the registered check explained 20,145 and missed 338, each read from its header and found right, recorded as a miss of the check and not as a pass. None newly breaks a pack constraint, and the protocol truth table (version 5) follows every ruling to this release.
+
 ## [1.0.0-alpha.81] - 2026-10-14
 
 Fixes found on the first dataset read on a site after the beta. A dataset's Main scans page works on a registry on Postgres again: builds of the session cache take turns, and a read that changes nothing writes nothing. SyMRI's acquisition stays in SyMRI's folder; each scan carries the acquisition family its route recognised, so an acquisition's own images are grouped together; a visit's kinds count SyMRI's acquisition with SyMRI; and a dataset's file count says when it stopped short. It goes with desk 1.0.0-alpha.64. The installs it sets up take Kvasir 1.0.0-alpha.10 and the assistant 1.0.0-alpha.28, as before.
@@ -24,14 +36,6 @@ Fixes found on the first dataset read on a site after the beta. A dataset's Main
 
 
 - A dataset's Main scans page in Review no longer fails on a registry on Postgres with `duplicate key value violates unique constraint "uq_session_label_session_id_scheme_digest"` (1.0.0-alpha.80). Each of the page's requests brings the session cache up to date for the dataset's subjects before it reads their visits, and the page sends several at once. Each build deleted every label row of those subjects and wrote it again, so under read committed the second of two builds side by side, whose delete could not see the rows the first had just written, failed on them. A build of the cache now holds a transaction lock (`pg_advisory_xact_lock` on a key of the registry's schema; nothing on SQLite, whose writers already take turns), reads the timelines under it, and writes only the labels that changed, as an insert that updates the row its unique key finds: a read whose timelines and labels did not change writes nothing, not even the open review item of an empty study it raised before. Builds that found the cache cold or a span moved at the same time failed the same way, on the session rows' unique key as well as the labels'. A merge of two subjects, which drops their sessions for the next build to make again, takes the same lock from its first write, so a build beside it no longer leaves a label of a session the merge dropped.
-
-## [pack-mri-v1.2.0] - 2026-10-14
-
-The MRI pack 1.2.0 on a tag of its own, the first rules release (record 55 B5, spec section 9.2): from now on a rules fix reaches an install with no engine release beside it. It is the pack 1.0.0-alpha.80 carries, file for file, so an install on that engine has it already and an update takes nothing. It works with engines `>=1.0.0-alpha.80, <2.0.0` and pack contract 10.
-
-- An install takes a rules release with `nils update --part rules`, with `nils update --all`, or with Update on the pack's row of the desk's Settings › Parts, and `nils update --check` names it first. The engine's binary stays as it is and nothing is started again: the engine reads a pack again once its files change. A plain `nils update` takes no rules, and an engine in a container gets its rules with the engine's next image.
-- A rules release whose pack contract or engine range leaves the running engine out waits, says why in the check, the update and the pack's row, and is never put in place. `nils update --pin mri@<version>` keeps one version through every update until `nils update --unpin mri`; pinning the version before is also how an install goes back.
-- What 1.2.0 holds over 1.0.1, and how each step was replayed before release over a production archive of 546,440 MR stacks, is in the notes of engine 1.0.0-alpha.80. In short: 1.0.2, 1.0.3 and 1.1.0 move 7,967 stacks, each explained by the rule meant to move it, and 1.1.0's 1,234 colour SyMRI stacks miss its estimate of about 1,117, reported as a miss; 1.2.0 moves 20,483 stacks, of which the registered check explained 20,145 and missed 338, each read from its header and found right, recorded as a miss of the check and not as a pass. None newly breaks a pack constraint, and the protocol truth table (version 5) follows every ruling to this release.
 
 ## [1.0.0-alpha.80] - 2026-10-14
 
