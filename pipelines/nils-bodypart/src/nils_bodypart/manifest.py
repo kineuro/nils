@@ -70,6 +70,12 @@ class Stack:
     # ``sop_class``, ``n_instances`` and ``sealed`` where the engine gives
     # them).
     file_geo: list[dict | None] = field(default_factory=list)
+    # Each file's identity where the manifest gives it (``identity`` on a
+    # file, which the engine writes when the descriptor declares the slice
+    # cache, record 55 E5): ``sop_instance_uid`` and ``sha256`` (the hex of
+    # the file's bytes, where the engine knows it, else None); the stack's
+    # session is ``extra["identity"]["study_instance_uid"]``.
+    file_ident: list[dict | None] = field(default_factory=list)
 
     @property
     def num_slices(self) -> int:
@@ -164,6 +170,17 @@ def file_geometry(g) -> dict | None:
     return g
 
 
+def file_identity(i) -> dict | None:
+    """A file's identity for the slice cache (record 55 E5): its SOP
+    Instance UID and the hex of its sha256 where the engine knows it (the
+    manifest writes it ``sha256:<hex>``); None without a UID."""
+    if not isinstance(i, dict) or not isinstance(i.get("sop_instance_uid"), str) or not i["sop_instance_uid"]:
+        return None
+    h = i.get("sha256")
+    h = h.removeprefix("sha256:") if isinstance(h, str) and h.startswith("sha256:") and len(h) == 71 else None
+    return {"sop_instance_uid": i["sop_instance_uid"], "sha256": h}
+
+
 def stack_geometry(s: dict) -> dict | None:
     """A stack's geometry in the reader's names (``iop``, ``thick``,
     ``modality``): the engine's (the stack's orientation and its
@@ -207,6 +224,7 @@ def _stack(s: dict, mounts: dict[int, Path], bases: dict[int, str], frames_of: C
     slices: list[Slice] = []
     listed: list[tuple[str, list[int] | None]] = []
     geos: list[dict | None] = []
+    idents: list[dict | None] = []
     for f in files:
         src = int(f.get("source", 0))
         if src not in mounts:
@@ -214,6 +232,7 @@ def _stack(s: dict, mounts: dict[int, Path], bases: dict[int, str], frames_of: C
         path = _safe_join(mounts[src], f["path"], bases[src])
         frames = f.get("frames")
         geos.append(file_geometry(f.get("geometry")))
+        idents.append(file_identity(f.get("identity")))
         if frames is None:
             n = (counted or frames_of(path)) if len(files) == 1 else 1
             slices.extend(Slice(path, i) for i in range(n))
@@ -236,6 +255,7 @@ def _stack(s: dict, mounts: dict[int, Path], bases: dict[int, str], frames_of: C
         extra=extra,
         files=listed,
         file_geo=geos,
+        file_ident=idents if any(i is not None for i in idents) else [],
     )
 
 

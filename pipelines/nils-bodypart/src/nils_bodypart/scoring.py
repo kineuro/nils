@@ -123,6 +123,7 @@ def climb(model, st: manifest.Stack, ladder: dict, decode=None, memo: dict | Non
 
     memo = memo if memo is not None else {}  # the caller's, to count what a failed stack opened
     answer = None
+    passed = []  # the stages climbed past, whose planes the slice cache keeps too
     for policy, need in ladder["stages"]:
         prep = fusion.prepare_reduced(st, policy, decode, memo)
         r = fusion.finish(model, prep, model.encoder.probabilities(prep.built.vol, prep.built.geo()))
@@ -132,6 +133,8 @@ def climb(model, st: manifest.Stack, ladder: dict, decode=None, memo: dict | Non
         if need is None or cascade.margin(r.answers, ladder["thresholds"]) >= need:
             answer = r
             break
+        if ladder.get("planes"):
+            passed.append(r)
     if answer is None:  # a ladder whose last stage asks a margin
         answer = r
     # what answering cost, before any planes built only for the cache
@@ -146,6 +149,7 @@ def climb(model, st: manifest.Stack, ladder: dict, decode=None, memo: dict | Non
         except Exception:  # noqa: BLE001 - the answer stands; the cache goes without
             filled = None
     answer.idents = dict(memo.get("ident") or {})
+    answer.passed = [p for p in passed if p is not answer] or None
     answer.opened = opened
     answer.reader = dict(answer.reader or {}, files_read=len(opened))
     answer.filled = filled

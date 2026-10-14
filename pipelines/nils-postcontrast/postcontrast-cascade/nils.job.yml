@@ -20,6 +20,10 @@
 # pipeline (postcontrast-full), which the engine runs over the stacks this
 # run's tables mark deferred.
 #
+# A dataset's bring-in runs it over its new stacks without a manual run
+# (x-nils.on-arrival, record 55 E5), once the body part's run over them has
+# ended, since it answers only on brain.
+#
 # The weights are the run's model inputs (student, fusion, cascade), never
 # part of the image; the image checks each against the digest the run's
 # model manifest names, and that the cascade names the other two. The image
@@ -77,6 +81,7 @@ suggested-resources:
 x-nils:
   contract: 1
   analysis-level: stack
+  on-arrival: true
   input:
     layout: stacks
     header: true
