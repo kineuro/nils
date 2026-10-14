@@ -611,6 +611,142 @@ def test_the_cache_keeps_each_input_by_its_files_identity(world, tmp_path, stand
         assert np.allclose(model.encoder.probabilities(v, ta[f"{key}.geo"]), ta[f"{key}.image"], atol=1e-6)
 
 
+def _with_identity(world, source_root: Path, results: dict, dest: Path) -> Path:
+    """The manifest as the engine writes it for a pipeline that declares
+    the slice cache (record 55 E5): each file's SOP Instance UID, and the
+    sha256 of its bytes where a run reported reading it whole (the engine
+    keeps what ``read`` says), and each stack's StudyInstanceUID."""
+    import pydicom
+
+    by = {s.stack_id: s for s in manifest.load(world["stacks"], source_root=source_root)}
+    learnt: dict[str, str] = {}
+    for u in results["units"]:
+        sid = int(u["unit_id"].split("-")[1])
+        for x in u.get("read") or []:
+            learnt[by[sid].files[x["file"]][0]] = x["sha256"]
+    doc = json.loads(world["stacks"].read_text())
+    for e in doc["stacks"]:
+        st = by[e["stack_id"]]
+        e["identity"] = {"study_instance_uid": cd.study_uid(e["geometry"]["study"])}
+        for f, (path, _) in zip(e["files"], st.files):
+            uid = str(pydicom.dcmread(path, stop_before_pixels=True).SOPInstanceUID) if Path(path).is_file() else f"2.25.{abs(hash(path))}"
+            f["identity"] = {"sop_instance_uid": uid, "sha256": learnt.get(path)}
+    dest.write_text(json.dumps(doc))
+    return dest
+
+
+def _rerun(manifest_path: Path, source_root: Path, inp: dict, out: Path, *more: str) -> dict:
+    code = cli.main(["infer-fusion", "--stacks", str(manifest_path), "--source-root", str(source_root), "--inputs", str(inp["inputs"]),
+                     "--output", str(out), "--device", "cpu", "--threads", "2", *more])
+    assert code == 0
+    return json.loads((out / "results.json").read_text())
+
+
+def _answers(out: Path) -> dict[int, tuple]:
+    return {sid: (t["stage"], t["fine_value"], t["fine_confidence"], t["coarse_value"], t["coarse_confidence"], t["reason"])
+            for sid, t in tables(out).items()}
+
+
+def test_a_rescore_after_a_head_update_reads_the_slice_cache_and_no_file(world, tmp_path, stand_in, monkeypatch):
+    """Record 55 E5 (A17b, gate T26): a run at arrival fills the slice
+    cache; once the engine names each file's identity, a re-score reads
+    the stack's inputs from the cache and opens no file, and its answers
+    are a read of the files' answers, with the same head and after a head
+    update alike. The files are emptied before the re-scores, so a read
+    would show."""
+    import shutil
+
+    source = tmp_path / "source"
+    shutil.copytree(world["source_root"], source)
+    inp = inputs(world, tmp_path / "m1", deferral="mixed")
+    cache = tmp_path / "slice-cache"
+    # at arrival the engine knows each file's UID and none of its content
+    arriving = _with_identity(world, source, {"units": []}, tmp_path / "stacks-arriving.json")
+    first = _rerun(arriving, source, inp, tmp_path / "arrival", "--cache", str(cache), "--cache-fill", "touched")
+    assert first["metrics"]["cache_read"]["stacks_from_cache"] == 0
+    named = _with_identity(world, source, first, tmp_path / "stacks-identity.json")
+    # the answers a read of the files gives, with this head and with an
+    # updated one (another head and its cascade), before the files go
+    fresh = _answers(tmp_path / "arrival")
+    real_head = fd.write_head
+    monkeypatch.setattr(fd, "write_head", lambda path, seed=3: real_head(path, seed=11))
+    updated = inputs(world, tmp_path / "m2", deferral="mixed")
+    assert updated["head"] != inp["head"]
+    _rerun(named, source, updated, tmp_path / "updated-read")
+    fresh_updated = _answers(tmp_path / "updated-read")
+    for p in source.rglob("*.dcm"):
+        p.write_bytes(b"")  # any read now fails
+
+    # the same model: every stack the arrival scored from manifest alone
+    # comes back from the cache, with no file read and the same answer
+    again = _rerun(named, source, inp, tmp_path / "again", "--cache", str(cache))
+    got = _answers(tmp_path / "again")
+    units = {int(u["unit_id"].split("-")[1]): u for u in again["units"]}
+    from_cache = [sid for sid, u in units.items() if u["metrics"].get("files_read") == 0 and u["status"] == "succeeded"]
+    assert set(from_cache) >= {21, 22, 23, 24, 25, 31}, (from_cache, again["metrics"].get("cache_read"))
+    for sid in from_cache:
+        assert got[sid] == fresh[sid], sid
+        assert not units[sid].get("read"), sid
+    assert again["metrics"]["cache_read"]["stacks_from_cache"] >= 6
+    assert again["metrics"]["cache_read"]["hits"], again["metrics"]["cache_read"]
+
+    # after a head update: the stacks the cache holds every input of are
+    # answered from it as a read of the files answers them (class I)
+    after = _rerun(named, source, updated, tmp_path / "after", "--cache", str(cache))
+    got = _answers(tmp_path / "after")
+    units = {int(u["unit_id"].split("-")[1]): u for u in after["units"]}
+    cached = [sid for sid, u in units.items() if u["metrics"].get("files_read") == 0 and u["status"] == "succeeded"]
+    assert len(cached) >= 4, (cached, after["metrics"].get("cache_read"))
+    for sid in cached:
+        assert got[sid] == fresh_updated[sid], (sid, got[sid], fresh_updated[sid])
+    # the head's digest in each table is the updated one
+    assert {tables(tmp_path / "after")[sid]["head_digest"] for sid in cached} == {updated["head"]}
+
+
+def test_a_file_whose_content_is_not_known_is_read(world, tmp_path, stand_in):
+    """A manifest that names a file's UID but no sha256 (the engine does
+    not know its content, or the file changed) is never a cache hit: the
+    files are read as before, with the same answers."""
+    inp = inputs(world, tmp_path / "m", deferral="mixed")
+    cache = tmp_path / "slice-cache"
+    named = _with_identity(world, world["source_root"], {"units": []}, tmp_path / "no-hashes.json")
+    first = _rerun(named, world["source_root"], inp, tmp_path / "one", "--cache", str(cache), "--cache-fill", "touched")
+    again = _rerun(named, world["source_root"], inp, tmp_path / "two", "--cache", str(cache))
+    assert again["metrics"]["cache_read"]["stacks_from_cache"] == 0
+    assert not again["metrics"]["cache_read"]["hits"]
+    assert _answers(tmp_path / "two") == _answers(tmp_path / "one")
+    assert first["metrics"]["files_read"] == again["metrics"]["files_read"]
+
+
+def test_a_planes_entry_holds_only_for_its_own_stack(world, tmp_path):
+    """The stack's key: its files' UIDs, frames and geometry and its own
+    geometry; a stack that gained a file, or whose file moved, keys
+    another entry; a file without a UID has none."""
+    import copy
+
+    st = next(s for s in stacks(world) if s.stack_id == 21)
+    st.extra["identity"] = {"study_instance_uid": cd.study_uid(100)}
+    st.file_ident = [{"sop_instance_uid": f"1.2.{i}", "sha256": "ab" * 32} for i in range(len(st.files))]
+    v = slicecache.PLANES["b24"]
+    key = slicecache.stack_key(v, st)
+    assert key is not None and key == slicecache.stack_key(v, copy.deepcopy(st))
+    assert slicecache.stack_key(slicecache.PLANES["touched"], st) != key
+    moved = copy.deepcopy(st)
+    moved.file_geo[3] = dict(moved.file_geo[3], ipp=[0.0, 0.0, 0.0])
+    assert slicecache.stack_key(v, moved) != key
+    fewer = copy.deepcopy(st)
+    fewer.files, fewer.file_geo, fewer.file_ident = fewer.files[:-1], fewer.file_geo[:-1], fewer.file_ident[:-1]
+    assert slicecache.stack_key(v, fewer) != key
+    blind = copy.deepcopy(st)
+    blind.file_ident[0] = None
+    assert slicecache.stack_key(v, blind) is None
+    # the volume rebuilt from its six planes gives the encoder the same planes
+    rng = np.random.default_rng(0)
+    vol = rng.integers(0, 255, (64, 64, 64), dtype=np.uint8)
+    planes = fusion.planes_of(vol)
+    assert np.array_equal(fusion.planes_of(slicecache.vol_of(planes)), planes)
+
+
 def test_stage_one_streams_in_the_students_own_batches(world, tmp_path, monkeypatch):
     """Stage 1 reads its slices a block at a time and frees them, and gives
     the student whole batches in the run's order, so every batch is the one

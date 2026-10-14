@@ -242,6 +242,7 @@ class Outcome:
     stage1: str | None = None  # how stage 1 ended for it (``STAGE1``); None where it was never a candidate
     tried: str | None = None  # a slot-0 file opened whose slice did not decode
     opened: set | None = None  # the files a stack with no answer had its reads open
+    tile_cached: bool = False  # the student's slice came from the slice cache (A17b), no file read
 
 
 # a stack stage 1 never scores and the planes never read: its reason and its unit's error
@@ -327,7 +328,8 @@ def _tokens(c: tuple) -> np.ndarray:
     return np.concatenate([fewslice.stack_tokens(c[1]), fewslice.geo_feats(c[2][0][None, :])[0]]).astype(np.float32)
 
 
-def _stage1_fns(model, cas, out: dict, rest: list, deferred_to: list, net, student_factory, batch: int, keep_inputs: bool, fill: bool):
+def _stage1_fns(model, cas, out: dict, rest: list, deferred_to: list, net, student_factory, batch: int, keep_inputs: bool, fill: bool,
+                cached: set | None = None):
     """Stage 1's two steps over a batch of read candidates, ``(candidate,
     read)``: ``predict``, the student's probabilities, and ``decide``, the
     head, the calibration and D3, and each stack's outcome."""
@@ -351,15 +353,19 @@ def _stage1_fns(model, cas, out: dict, rest: list, deferred_to: list, net, stude
         for (c, t), row, q in zip(take, table, d3):
             st = c[0]
             path = st.files[c[3]][0]
-            o = Outcome(st, tile=t[0][0] if keep_inputs or fill else None, tile_ident=t[0][1], tile_path=path, d3=float(q), stage1="answered")
+            hit = cached is not None and st.stack_id in cached
+            o = Outcome(st, tile=t[0][0] if keep_inputs or fill else None, tile_ident=t[0][1], tile_path=path, d3=float(q), stage1="answered",
+                        tile_cached=hit)
             if q >= cas.d3_threshold:
                 header = st.extra.get("header") or {}
                 cls = header.get("classification")
                 from . import header_features
 
+                # a slice the cache gave read no file (A17b)
                 o.result = fusion.StackResult(row["P"], c[2][1], row["LP"], row["ans"], c[2][2] or None, c[2][3], c[2][4],
-                                              header_features.rules_row(cls), {"files_read": 1}, stage="s1", idents={path: t[0][1]},
-                                              read_files=[path], opened={path})
+                                              header_features.rules_row(cls), {"files_read": 0 if hit else 1}, stage="s1",
+                                              idents={} if hit else {path: t[0][1]}, read_files=[] if hit else [path],
+                                              opened=set() if hit else {path})
             else:
                 o.stage1 = "deferred"
                 rest.append(st)
@@ -374,7 +380,7 @@ def _stage1_fns(model, cas, out: dict, rest: list, deferred_to: list, net, stude
 def score(model: fusion.Model, cas: Cascade, inputs: Path, stacks: list, *, workers: int = 1, device: str = "cpu", chunk: int = 4,
           depth: int = 1, student_batch: int = 64, fill: bool = False, keep_inputs: bool = False, student_factory=None,
           stats: dict | None = None, gpu_workers: int = 2, context: list | None = None, student_device: str | None = None,
-          student_threads: int = STUDENT_THREADS, overlap: bool = False) -> list[Outcome]:
+          student_threads: int = STUDENT_THREADS, overlap: bool = False, cache=None) -> list[Outcome]:
     """Every stack's outcome, in the manifest's order.
 
     First the reasons that need no read: a stack sealed now (``sealed``),
@@ -397,7 +403,7 @@ def score(model: fusion.Model, cas: Cascade, inputs: Path, stacks: list, *, work
     from . import fewslice, scoring
 
     stats = stats if stats is not None else {}
-    if overlap and workers > 1:
+    if overlap and workers > 1 and cache is None:
         return score_stream(model, cas, inputs, [("stack", st) for st in stacks] + [("context", c) for c in context or []], workers=workers,
                             device=device, chunk=chunk, depth=depth, student_batch=student_batch, fill=fill, keep_inputs=keep_inputs,
                             student_factory=student_factory, stats=stats, gpu_workers=gpu_workers, student_device=student_device,
@@ -433,7 +439,8 @@ def score(model: fusion.Model, cas: Cascade, inputs: Path, stacks: list, *, work
         # fails the run before its reads
         net = _student(cas, device, student_device, student_threads)
     pending: list = []  # (candidate, read) decoded, waiting for the student
-    predict, decide = _stage1_fns(model, cas, out, rest, [], net, student_factory, batch, keep_inputs, fill)
+    cached: set = set()  # the stacks whose slice the cache gave
+    predict, decide = _stage1_fns(model, cas, out, rest, [], net, student_factory, batch, keep_inputs, fill, cached)
 
     def stage1(take: list) -> None:
         decide(take, predict(take))
@@ -442,7 +449,16 @@ def score(model: fusion.Model, cas: Cascade, inputs: Path, stacks: list, *, work
     block = batch * max(1, STAGE1_BLOCK // batch)  # slices read at a time, whole batches
     for i in range(0, len(cands), block):
         part = cands[i : i + block]
-        read = scoring.tiles([c[0].files[c[3]][0] for c in part], workers)
+        # the slot-0 slices the cache holds are not read (A17b)
+        from_cache = {}
+        if cache is not None:
+            for c in part:
+                hit = cache.tile(c[0], c[3])
+                if hit is not None:
+                    from_cache[c[0].stack_id] = (hit, None)
+                    cached.add(c[0].stack_id)
+        reads = iter(scoring.tiles([c[0].files[c[3]][0] for c in part if c[0].stack_id not in from_cache], workers))
+        read = [from_cache.get(c[0].stack_id) or next(reads) for c in part]
         for c, t in zip(part, read):
             if t[0] is None:
                 rest.append(c[0])
@@ -466,11 +482,77 @@ def score(model: fusion.Model, cas: Cascade, inputs: Path, stacks: list, *, work
     order = {st.stack_id: i for i, st in enumerate(stacks)}
     rest.sort(key=lambda st: order[st.stack_id])
     ladder = {"stages": [(cas.b24, cas.m3), ("touched", None)], "thresholds": cas.thresholds, "fill": fill, "planes": keep_inputs or fill}
+    if cache is not None:
+        # the planes the cache holds answer without a read (A17b)
+        to_read = []
+        for st in rest:
+            r = cached_climb(model, st, ladder, cache)
+            if r is None:
+                to_read.append(st)
+            else:
+                _planes_answer(out, st, r, None)
+        stats["planes_from_cache"] = len(rest) - len(to_read)
+        rest = to_read
     for st, r, why in scoring.score(model, inputs, rest, workers=workers, device=device, chunk=chunk, depth=depth, ladder=ladder, stats=stats,
                                     gpu_workers=gpu_workers):
         _planes_answer(out, st, r, why)
-    _fill(model, cas, inputs, out, order, fill, workers=workers, device=device, chunk=chunk, depth=depth, gpu_workers=gpu_workers)
+    _fill(model, cas, inputs, out, order, fill, workers=workers, device=device, chunk=chunk, depth=depth, gpu_workers=gpu_workers, cache=cache)
     return [out[st.stack_id] for st in stacks]
+
+
+def _from_cache(model, st, version: str, cache):
+    """One planes stage's answer from the slice cache (A17b), or None: the
+    planes and the geometry the cache kept, the encoder's six probabilities
+    as it kept them where the run's encoder made them (else the encoder
+    reads the planes again), and the head, the calibration and the header
+    features from the manifest, as a read of the files would give them."""
+    from . import slicecache, volume
+
+    hit = cache.planes(st, version)
+    if hit is None:
+        return None
+    arrays, rec = hit
+    header = st.extra.get("header") if isinstance(st.extra.get("header"), dict) else {}
+    if not isinstance(header.get("fingerprint"), dict):
+        return None
+    built = volume.Built(slicecache.vol_of(arrays["planes"]), dict(rec["meta"]))
+    if rec.get("encoder") == model.enc.digest:
+        P = np.asarray(arrays["image"], np.float32)
+    else:
+        P = model.encoder.probabilities(built.vol, built.geo())
+    r = fusion.finish(model, fusion.Prepared(built, header), P)
+    r.planes = np.asarray(arrays["planes"], np.uint8)
+    r.read_files, r.kept, r.idents, r.opened = [], None, {}, set()
+    r.reader = {"files_read": 0, "cache": version}
+    r.cached = True
+    return r
+
+
+def cached_climb(model, st, ladder: dict, cache):
+    """``scoring.climb`` from the slice cache (A17b): each stage's planes as
+    the cache holds them, the same stages, margins and answer; None where a
+    stage the climb reaches is not in the cache, and then the files are
+    read as before. With ``fill`` the touched planes must be there too."""
+    from . import slicecache
+
+    answer = None
+    for policy, need in ladder["stages"]:
+        r = _from_cache(model, st, slicecache.PLANES[policy], cache)
+        if r is None:
+            return None
+        r.stage = policy
+        if need is None or margin(r.answers, ladder["thresholds"]) >= need:
+            answer = r
+            break
+    if answer is None:
+        answer = r
+    if ladder.get("fill") and answer.stage != "touched":
+        filled = _from_cache(model, st, slicecache.PLANES["touched"], cache)
+        if filled is None:
+            return None
+        filled.stage = "touched"
+        answer.filled = filled
+    return answer
 
 
 def _planes_answer(out: dict, st, r, why) -> None:
@@ -484,7 +566,9 @@ def _planes_answer(out: dict, st, r, why) -> None:
         # what its reads opened before they failed, its slice's file too
         o.opened = set(why[2] if why and len(why) > 2 else ()) | {p for p in (o.tile_path, o.tried) if p}
     else:
-        if o.tile_path is not None:  # the student read its slice first
+        if o.tile_path is not None and o.tile_cached:  # the cache gave its slice: no file read
+            pass
+        elif o.tile_path is not None:  # the student read its slice first
             r.idents = dict(r.idents or {})
             r.idents[o.tile_path] = o.tile_ident
             r.opened = set(r.opened or ()) | {o.tile_path}
@@ -496,12 +580,15 @@ def _planes_answer(out: dict, st, r, why) -> None:
     out[st.stack_id] = o
 
 
-def _fill(model, cas, inputs, out: dict, order: dict, fill: bool, *, workers, device, chunk, depth, gpu_workers) -> None:
-    """The touched planes of stage 1's answers, for the cache (R5)."""
-    from . import scoring
+def _fill(model, cas, inputs, out: dict, order: dict, fill: bool, *, workers, device, chunk, depth, gpu_workers, cache=None) -> None:
+    """The touched planes of stage 1's answers, for the cache (R5): read
+    only for a stack whose touched planes the cache does not hold yet."""
+    from . import scoring, slicecache
 
     if fill:
         accepted = [o.stack for o in out.values() if o.result is not None and o.result.stage == "s1"]
+        if cache is not None:
+            accepted = [st for st in accepted if cache.planes(st, slicecache.PLANES["touched"]) is None]
         accepted.sort(key=lambda st: order[st.stack_id])
         fill_ladder = {"stages": [("touched", None)], "thresholds": cas.thresholds, "planes": True}
         for st, r, _why in scoring.score(model, inputs, accepted, workers=workers, device=device, chunk=chunk, depth=depth, ladder=fill_ladder,

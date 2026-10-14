@@ -279,6 +279,10 @@ class StackResult:
     kept: list | None = None  # the (file, frame from zero) the planes were made of
     filled: StackResult | None = None  # the touched planes built for the cache where an earlier stage answered
     opened: set | None = None  # the files the stack's reads opened (never written out)
+    cached: bool = False  # its input came from the slice cache, no file read (record 55 E5, A17b)
+    # the earlier planes stages the cascade climbed past, kept for the slice
+    # cache so a re-score can climb them again (record 55 E5, A17b)
+    passed: list | None = None
 
 
 class NoFingerprint(Exception):

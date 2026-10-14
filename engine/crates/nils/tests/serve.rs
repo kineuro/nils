@@ -5428,7 +5428,13 @@ fn a_chain_runs_through_the_jobs_door_and_a_refused_step_ends_it() {
     assert_eq!(queued["command"][0], "pseudonymize", "{queued}");
     assert_eq!(queued["command"][1], "@ds", "{queued}");
     let then = queued["then"].as_array().unwrap();
-    assert_eq!(then.len(), 3, "{queued}");
+    // record 55 E5: the image models score the batch, last
+    assert_eq!(then.len(), 4, "{queued}");
+    assert_eq!(
+        then[3],
+        serde_json::json!(["score", "@ds", "--name", "chain-1", "--pack-dir", packs()]),
+        "{queued}"
+    );
     assert_eq!(then[0][0], "digest", "{queued}");
     assert!(
         then[0][1]
@@ -5450,7 +5456,7 @@ fn a_chain_runs_through_the_jobs_door_and_a_refused_step_ends_it() {
     assert_eq!(job["state"], "done", "{job}");
     assert_eq!(job["kind"], "pseudonymize", "{job}");
     assert_eq!(job["result"]["files"]["written"], 6, "{job}");
-    assert_eq!(job["then"].as_array().unwrap().len(), 3, "{job}");
+    assert_eq!(job["then"].as_array().unwrap().len(), 4, "{job}");
     assert_eq!(job["chain"]["before"], serde_json::Value::Null, "{job}");
     // the chain, step by step, each job naming the one before
     for expected in ["digest", "fingerprint", "classify"] {
@@ -5469,11 +5475,13 @@ fn a_chain_runs_through_the_jobs_door_and_a_refused_step_ends_it() {
         assert_eq!(job["args"]["detail"], "sensitive", "{job}");
         ids.push(next);
     }
-    // the chain the door queued ends with the sort; record 55 H2 (round 4):
-    // a sort that judged stacks is followed by picking main scans for the
-    // subjects it judged, which the worker queues and links once the sort
-    // is over, and nothing comes after the pick run
-    assert_eq!(job["then"], serde_json::json!([]), "{job}");
+    // record 55 H2 (round 4): a sort that judged stacks is followed by
+    // picking main scans for the subjects it judged, which the worker
+    // queues and links once the sort is over; record 55 E5: the score
+    // comes after the pick run, last
+    let score_step =
+        serde_json::json!([["score", "@ds", "--name", "chain-1", "--pack-dir", packs()]]);
+    assert_eq!(job["then"], score_step, "{job}");
     let sort = *ids.last().unwrap();
     let pick = marked(sort, after)
         .as_i64()
@@ -5496,11 +5504,28 @@ fn a_chain_runs_through_the_jobs_door_and_a_refused_step_ends_it() {
     assert_eq!(picked["chain"]["before"], sort, "{picked}");
     assert_eq!(picked["args"]["principal"], "ops@lab", "{picked}");
     assert_eq!(picked["args"]["detail"], "sensitive", "{picked}");
-    assert_eq!(picked["then"], serde_json::json!([]), "{picked}");
+    assert_eq!(picked["then"], score_step, "{picked}");
+    let score = marked(pick, after)
+        .as_i64()
+        .unwrap_or_else(|| panic!("no score queued after the pick run {picked}"));
+    let scored = wait(score);
+    assert_eq!(scored["state"], "done", "{scored}");
+    assert_eq!(scored["kind"], "score", "{scored}");
+    assert_eq!(scored["result"]["new_stacks"], 2, "{scored}");
+    // no pipeline answers either step here: each is skipped, and says why
     assert_eq!(
-        picked["chain"]["after"],
+        scored["result"]["queued"],
+        serde_json::json!([]),
+        "{scored}"
+    );
+    assert_eq!(
+        scored["result"]["skipped"][0]["reason"], "no_pipeline",
+        "{scored}"
+    );
+    assert_eq!(
+        scored["chain"]["after"],
         serde_json::Value::Null,
-        "{picked}"
+        "{scored}"
     );
 
     // the batch is the thread: the two batches of one name, the stages

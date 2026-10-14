@@ -751,23 +751,32 @@ def _cache_entries(writer, o, r, model) -> None:
     # each entry is keyed by its files, the stack's frames of each, and the
     # frames it was made of, so two stacks of one enhanced file are two
     frames_of = {path: which for path, which in o.stack.files}
-    if o.tile is not None and o.tile_ident:
+    if o.tile is not None and o.tile_ident and not o.tile_cached:
         i = o.tile_ident
         own = {o.tile_path: i}
         writer.add(slicecache.SLICE, i.get("study_instance_uid"), slicecache.identities([o.tile_path], own, frames_of),
                    {"tile": o.tile}, {"slot": 0}, kept=slicecache.kept_digest([(o.tile_path, 0)], own))
-    for res in (r, getattr(r, "filled", None)):
-        if res is None or res.planes is None or res.stage not in slicecache.PLANES:
+    # a planes entry is found again by its stack's key (A17b) where the
+    # reader chose its frames from the manifest alone and every file the
+    # stack's reads opened was read whole, so its files' hashes vouch for it
+    whole = set(r.opened or ()) <= {p for p, i in (r.idents or {}).items() if i and i.get("sha256")}
+    for res in (r, getattr(r, "filled", None), *(getattr(r, "passed", None) or ())):
+        if res is None or res.planes is None or res.stage not in slicecache.PLANES or res.cached:
             continue
         idents = dict(r.idents or {}, **(res.idents or {}))
         files = res.read_files or []
+        version = slicecache.PLANES[res.stage]
+        meta = {"cohort": res.cohort, "encoder": model.enc.digest, "meta": slicecache.plain(res.meta)}
+        key = slicecache.stack_key(version, o.stack) if whole else None
+        if key is not None:
+            meta["stack_key"] = key
         writer.add(
-            slicecache.PLANES[res.stage],
+            version,
             slicecache.study_of(files, idents),
             slicecache.identities(files, idents, frames_of),
             {"planes": res.planes, "geo": volume.Built(None, res.meta).geo(), "image": np.asarray(res.image, np.float32),
              "header44": np.asarray(res.header44, np.float32)},
-            {"cohort": res.cohort, "encoder": model.enc.digest},
+            meta,
             kept=slicecache.kept_digest(res.kept, idents),
         )
 
@@ -842,14 +851,16 @@ def _infer_cascade(a: argparse.Namespace, model, cas, device: str) -> Run:
         # of the planes stages' workers, how many decode on the card
         params.update({"decode_device": device, "gpu_workers": min(a.gpu_workers, a.threads)})
     run = Run("bodypart-infer-fusion", a.output, params, device)
-    writer = None
+    writer = reader = None
     if a.cache is not None:
         writer = slicecache.Writer(a.cache, {"image": "nils-bodypart", "version": __version__, **{k: v["digest"] for k, v in params["models"].items()}})
+        # the cache is read before a file is (record 55 E5, A17b)
+        reader = slicecache.Reader(a.cache)
     stats: dict = {}
     common = dict(device=device, chunk=a.chunk, depth=a.readahead, student_batch=a.student_batch, fill=a.cache_fill == "touched",
                   keep_inputs=writer is not None, stats=stats, gpu_workers=a.gpu_workers, student_device=student_device, student_threads=a.student_threads)
     written: dict = {}  # each stack's unit and proposals, its table written
-    if a.overlap == "on" and a.threads > 1:
+    if a.overlap == "on" and a.threads > 1 and reader is None:
         # the manifest read as it is used, its stacks planned in the pool,
         # and each table written once its stack's outcome is final (the
         # speed study's A5.2.3e); with the slice cache, after the run
@@ -865,7 +876,8 @@ def _infer_cascade(a: argparse.Namespace, model, cas, device: str) -> Run:
         # the rest of each session the run holds part of, for the session's top
         context = manifest.context(doc, skip={st.stack_id for st in stacks})
         del doc
-        outcomes = cascade_mod.score(model, cas, a.inputs, stacks, workers=a.threads, context=context, overlap=a.overlap == "on", **common)
+        outcomes = cascade_mod.score(model, cas, a.inputs, stacks, workers=a.threads, context=context, overlap=a.overlap == "on", cache=reader,
+                                     **common)
     counts = {"answered_fine": 0, "answered_coarse": 0, "failed": 0, "cohort_calibrated": 0}
     stages = {"s1": 0, cas.b24: 0, "touched": 0}
     reasons = {k: 0 for k in cascade_mod.REASONS}
@@ -896,6 +908,9 @@ def _infer_cascade(a: argparse.Namespace, model, cas, device: str) -> Run:
     run.metrics = {"stacks": len(outcomes), **counts, "per_value": per_value, "stages": stages, "reasons": reasons,
                    "files_read": files_total, "files_per_scored_stack": round(files_total / max(1, sum(stages.values())), 3),
                    "stage1": {k: v for k, v in stats.items() if k.startswith("stage1") or k in ("straight_to_planes", "context_stacks")}}
+    if reader is not None:
+        cached = sum(1 for o in outcomes if o.result is not None and (o.result.cached or (o.result.stage == "s1" and o.tile_cached)))
+        run.metrics["cache_read"] = {**reader.counts, "stacks_from_cache": cached, "planes_from_cache": stats.get("planes_from_cache", 0)}
     if writer is not None:
         # the answers are written first; the cache after them, best-effort
         run.metrics["cache"] = writer.counts

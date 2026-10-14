@@ -17,7 +17,19 @@
           "status": {"enum": ["succeeded", "failed", "skipped"]},
           "derivatives": {"type": "array", "items": {"type": "string", "pattern": "^[^/]"}, "description": "Files under /output, relative to it"},
           "metrics": {"type": "object"},
-          "error": {"type": ["string", "null"]}
+          "error": {"type": ["string", "null"]},
+          "read": {
+            "type": "array",
+            "description": "Record 55 E5, a stacks unit: the files its image read whole, each by its place in the unit's list of files in stacks.json (from 0), with the sha256 of its bytes. The engine keeps it as that file's content while the file keeps its size and time, so a later run's stacks.json names it and the slice cache is read instead of the file",
+            "items": {
+              "type": "object",
+              "required": ["file", "sha256"],
+              "properties": {
+                "file": {"type": "integer", "minimum": 0},
+                "sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+              }
+            }
+          }
         }
       }
     },

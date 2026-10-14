@@ -24,6 +24,18 @@ model or calibration scores them again in minutes.
   features and the cohort) and its index record (the version, the files'
   identities, the image's version and the parts that read it).
 
+- **Reading (A17b, the re-score):** a run given the cache looks there
+  before it reads a file. The engine's manifest names each file's SOP
+  Instance UID and, where a run learnt it, the sha256 of its bytes. The
+  student's slice is found by its exact key. A planes entry is found by
+  its stack's key (``stack_key``: the input version, the stack's
+  orientation and geometry, and each of its files' UID, frames and
+  geometry as the manifest lists them, which is all the reader chooses
+  frames from), written only where every file the reads opened was read
+  whole, and it is used only where each of its files' sha256 equals the
+  manifest's. So a hit is the input the files would give, and a miss
+  reads the files as before.
+
 Only the run's main process writes, a session at a time, under a lock on
 the session's file, so runs side by side merge their entries: an entry of
 the same key is replaced. A file is written whole, synced to the disk and
@@ -48,6 +60,70 @@ import numpy as np
 
 SLICE = "bodypart-slice-192:v1"
 PLANES = {"b24": "bodypart-planes-b24:v1", "touched": "bodypart-planes-touched:v1"}
+VERSIONS = (SLICE, *PLANES.values())
+
+
+def stack_key(version: str, st) -> str | None:
+    """A planes entry's key by its stack (A17b): the input version, the
+    stack's orientation and geometry, and each file's SOP Instance UID,
+    frames and geometry in the manifest's order, which is everything the
+    reader chooses the frames from; None where a file has no UID."""
+    idents = getattr(st, "file_ident", None) or []
+    if not st.files or len(idents) != len(st.files) or any(i is None for i in idents) or not manifest_alone(st):
+        return None
+    header = st.extra.get("header") if isinstance(st.extra.get("header"), dict) else {}
+    fp = header.get("fingerprint") if isinstance(header.get("fingerprint"), dict) else {}
+    sg = st.extra.get("geometry") if isinstance(st.extra.get("geometry"), dict) else {}
+    geo = getattr(st, "file_geo", None) or [None] * len(st.files)
+    doc = {
+        "version": version,
+        "orientation": fp.get("orientation"),
+        "stack": {k: sg.get(k) for k in ("iop", "thick", "modality")},
+        "files": [[i["sop_instance_uid"], frames_text(which), g] for (_, which), i, g in zip(st.files, idents, geo)],
+    }
+    return hashlib.sha256(json.dumps(doc, sort_keys=True, default=_plain).encode()).hexdigest()
+
+
+def manifest_alone(st) -> bool:
+    """Whether the reduced reader chooses the stack's frames from the
+    manifest alone, reading no header first: every file one frame with
+    the registry's geometry (``reduced.files_to_read``'s test). Only such a
+    stack's planes are found by its key, since the frames read are then a
+    matter of the manifest and the bytes of the files read."""
+    from . import reduced
+
+    sg = st.extra.get("geometry") if isinstance(st.extra.get("geometry"), dict) else {}
+    geo = getattr(st, "file_geo", None) or []
+    if not st.files or len(geo) != len(st.files):
+        return False
+    return all(w is None and reduced.registry_frame(p, g, sg) is not None for (p, w), g in zip(st.files, geo))
+
+
+def _plain(x):
+    """A number numpy made, as JSON writes a Python one."""
+    if isinstance(x, np.generic):
+        return x.item()
+    if isinstance(x, np.ndarray):
+        return x.tolist()
+    raise TypeError(type(x).__name__)
+
+
+def plain(doc):
+    """A document with numpy's numbers made Python's, so JSON writes it."""
+    return json.loads(json.dumps(doc, default=_plain))
+
+
+def vol_of(planes: np.ndarray) -> np.ndarray:
+    """The volume the encoder reads, rebuilt from its six planes (the
+    speed study's ``planes_bp.vol_of``): the encoder reads only these
+    planes of it (``tiny.planes``), so its answers from this volume are its
+    answers from the whole one."""
+    p = np.asarray(planes, np.uint8)
+    v = np.zeros((64, 64, 64), np.uint8)
+    v[31], v[32] = p[0], p[1]
+    v[:, 31], v[:, 32] = p[2], p[3]
+    v[:, :, 31], v[:, :, 32] = p[4], p[5]
+    return v
 
 
 def entry_key(version: str, files: list[tuple], kept: str | None = None) -> str:
@@ -100,6 +176,93 @@ def study_of(paths, idents: dict | None) -> str | None:
     uids.discard(None)
     uids.discard("")
     return uids.pop() if len(uids) == 1 else None
+
+
+class Reader:
+    """The cache's entries as a re-score reads them (A17b): a session's
+    file loaded once, and each hit and miss counted by input version."""
+
+    def __init__(self, root: Path):
+        self.root = Path(root)
+        self.sessions: dict[tuple[str, str], tuple[dict, dict]] = {}
+        self.counts = {"hits": {}, "misses": {}, "no_identity": 0, "unreadable_sessions": 0}
+
+    def _session(self, version: str, study_uid: str) -> tuple[dict, dict]:
+        k = (version, study_uid)
+        if k not in self.sessions:
+            try:
+                self.sessions[k] = read(self.root, version, study_uid)
+            except Exception:  # noqa: BLE001 - a damaged file is a miss, never a failed run
+                self.counts["unreadable_sessions"] += 1
+                self.sessions[k] = ({}, {})
+        return self.sessions[k]
+
+    def _count(self, kind: str, version: str) -> None:
+        c = self.counts[kind]
+        c[version] = c.get(version, 0) + 1
+
+    @staticmethod
+    def study(st) -> str | None:
+        i = st.extra.get("identity")
+        uid = i.get("study_instance_uid") if isinstance(i, dict) else None
+        return uid if isinstance(uid, str) and uid else None
+
+    def _arrays(self, arrays: dict, key: str, names) -> dict | None:
+        out = {}
+        for n in names:
+            a = arrays.get(f"{key}.{n}")
+            if a is None:
+                return None
+            out[n] = a
+        return out
+
+    def tile(self, st, index: int):
+        """The student's slice of the stack's file ``index`` (its slot-0
+        file), as ``fewslice.read_tile`` gives it, ``(tile, identity)``;
+        None where the cache holds none or the file's content is not
+        known."""
+        study = self.study(st)
+        idents = getattr(st, "file_ident", None) or []
+        i = idents[index] if index < len(idents) else None
+        if study is None or i is None or not i.get("sha256"):
+            self.counts["no_identity"] += 1
+            return None
+        path, which = st.files[index]
+        files = [(i["sop_instance_uid"], i["sha256"], frames_text(which))]
+        kept = kept_digest([(path, 0)], {path: i})
+        index_doc, arrays = self._session(SLICE, study)
+        key = entry_key(SLICE, files, kept)
+        got = self._arrays(arrays, key, ("tile",)) if key in index_doc else None
+        if got is None:
+            self._count("misses", SLICE)
+            return None
+        self._count("hits", SLICE)
+        return got["tile"], {"sop_instance_uid": i["sop_instance_uid"], "sha256": i["sha256"], "study_instance_uid": study}
+
+    def planes(self, st, version: str) -> tuple[dict, dict] | None:
+        """A planes entry of the stack, ``(arrays, record)``, where its
+        stack's key matches and each of its files' sha256 is the
+        manifest's; None otherwise."""
+        study = self.study(st)
+        key = stack_key(version, st)
+        if study is None or key is None:
+            self.counts["no_identity"] += 1
+            return None
+        index_doc, arrays = self._session(version, study)
+        known = {}
+        for (path, which), i in zip(st.files, st.file_ident):
+            if i and i.get("sha256"):
+                known[(i["sop_instance_uid"], frames_text(which))] = i["sha256"]
+        for k, rec in index_doc.items():
+            if rec.get("stack_key") != key:
+                continue
+            if all(known.get((f[0], f[2])) == f[1] for f in rec.get("files") or []) and rec.get("files"):
+                got = self._arrays(arrays, k, ("planes", "image", "header44"))
+                if got is not None and isinstance(rec.get("meta"), dict):
+                    self._count("hits", version)
+                    return got, rec
+        self._count("misses", version)
+        return None
 
 
 def _load(path: Path) -> tuple[dict, dict[str, np.ndarray]]:

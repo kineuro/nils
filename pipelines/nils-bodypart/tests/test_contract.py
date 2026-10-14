@@ -49,6 +49,9 @@ def test_each_descriptor_is_the_contracts(entry):
     # Every value-key the command line uses is a parameter's or the engine's.
     own = {p["value-key"] for p in doc.get("inputs", [])}
     engine = {"[Manifest]", "[Inputs]", "[OutputLocation]", "[InputDataset]"}
+    # record 55 E5: the slice cache, only for a descriptor that declares it
+    if doc["x-nils"].get("cache"):
+        engine.add("[Cache]")
     import re
 
     used = set(re.findall(r"\[[A-Za-z0-9_]+\]", doc["command-line"]))
@@ -72,7 +75,7 @@ def container_argv(doc: dict) -> list[str]:
     import shlex
 
     line = doc["command-line"]
-    for key, at in {"[Manifest]": "/input/stacks.json", "[Inputs]": "/inputs", "[OutputLocation]": "/output"}.items():
+    for key, at in {"[Manifest]": "/input/stacks.json", "[Inputs]": "/inputs", "[OutputLocation]": "/output", "[Cache]": "/cache"}.items():
         line = line.replace(key, at)
     for p in doc.get("inputs", []):
         given = p.get("default-value")
@@ -199,13 +202,21 @@ def test_the_fusion_descriptor_declares_its_models_table_and_axes():
     text = ("fine_value", "coarse_value", "head_digest", "coarse_digest", "encoder_digest", "stage", "reason", "cascade_digest", "student_digest",
             "deferral_digest")
     assert all(cols[c] == "text" for c in text)
-    assert doc["tool-version"] == "0.5.0"
+    assert doc["tool-version"] == "0.6.0"
+    # record 55 E5: scored at arrival with the touched planes filled, and
+    # the slice cache's three input versions, read and written at /cache
+    assert x["on-arrival"] == {"params": {"cache_fill": "touched"}}
+    assert x["cache"] == {"inputs": ["bodypart-slice-192:v1", "bodypart-planes-b24:v1", "bodypart-planes-touched:v1"]}
+    from nils_bodypart import slicecache
+
+    assert tuple(x["cache"]["inputs"]) == slicecache.VERSIONS
     # the image offline: the command names no host, and the entry point
     # parses what the engine writes: since 0.4.0 the reduced reader, from
     # each file's geometry, four stacks ahead
     a = cli.parser().parse_args(container_argv(doc)[1:])
     assert (a.entry, str(a.inputs), a.threads) == ("infer-fusion", "/inputs", 16)
     assert (a.reader, a.readahead) == ("reduced:touched", 4)
+    assert (str(a.cache), a.cache_fill) == ("/cache", "none")
     reader = next(p for p in doc["inputs"] if p["id"] == "reader")
     assert set(reader["value-choices"]) == {"reduced:touched", "full"}
 

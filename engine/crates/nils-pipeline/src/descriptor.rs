@@ -35,7 +35,7 @@ pub const DEFAULT_GPU_MEMORY_GB: f64 = 8.0;
 
 /// The container paths a secret may not be mounted at or under: the
 /// runner's own.
-pub const RUNNER_PATHS: [&str; 4] = ["/input", "/inputs", "/output", "/source"];
+pub const RUNNER_PATHS: [&str; 5] = ["/input", "/inputs", "/output", "/source", "/cache"];
 
 /// The parameter types (the Boutiques inputs a runner takes).
 pub const PARAM_TYPES: [&str; 3] = ["Number", "String", "Flag"];
@@ -83,14 +83,20 @@ pub const WHOLE: &str = "whole";
 pub const OUTPUT_LEVELS: [&str; 2] = ["unit", "run"];
 
 /// The value-keys the engine fills, which no parameter may take.
-pub const RESERVED_KEYS: [&str; 6] = [
+pub const RESERVED_KEYS: [&str; 7] = [
     "[InputDataset]",
     "[OutputLocation]",
     "[AnalysisLevel]",
     "[ParticipantLabels]",
     "[Manifest]",
     "[Inputs]",
+    "[Cache]",
 ];
+
+/// Where a run that declares the slice cache (`x-nils.cache`, record 55
+/// E5) finds it in its container, read-write: the site's working place's
+/// `slice-cache/` folder, which `[Cache]` names on the command line.
+pub const CACHE_PATH: &str = "/cache";
 
 /// The command a descriptor without one runs: the BIDS-Apps shape (D9).
 pub const BIDS_APP_COMMAND: &str =
@@ -534,6 +540,21 @@ pub struct Descriptor {
     /// The earlier versions of its name it replaces because it fixes them
     /// (`x-nils.replaces`, 2026-10-12); none where it replaces none.
     pub replaces: Option<Replaces>,
+    /// Record 55 E5 (spec section 10.4): whether a dataset's bring-in runs
+    /// it over its new stacks without a manual run, when it is the chosen
+    /// model's pipeline of a step (`x-nils.on-arrival`: `true`, or
+    /// `{params: {id: value}}` for the parameters such a run is given);
+    /// none where it is not. The parameters, as `--param id=value` words.
+    pub on_arrival: Option<Vec<(String, String)>>,
+    /// Record 55 E5: the model input versions it keeps in the slice cache
+    /// and reads from it (`x-nils.cache.inputs`, such as
+    /// `bodypart-slice-192:v1`). A run of a pipeline that declares one is
+    /// given the site's working place's `slice-cache/` read-write at
+    /// [`CACHE_PATH`] (`[Cache]` on its command line), and its
+    /// `stacks.json` names each file's SOP Instance UID and, where the
+    /// engine knows it, the sha256 of its content, so the image can look
+    /// in the cache before it reads a file. Empty where it declares none.
+    pub cache: Vec<String>,
     /// The document as it parsed, kept whole.
     pub document: Value,
 }
@@ -1230,6 +1251,22 @@ pub fn from_value(document: Value) -> Result<Descriptor, String> {
         Some(g) => return Err(format!("x-nils.needs.disk-gb is above 0, not {g}")),
     };
     let replaces = replaces(x)?;
+    let cache = cache_of(x)?;
+    if !cache.is_empty() && layout != Layout::Stacks {
+        return Err(
+            "x-nils.cache keeps what a model reads of a scan's files, which a stacks input names; a bids input has none".into(),
+        );
+    }
+    if command_line
+        .as_deref()
+        .is_some_and(|c| c.contains("[Cache]"))
+        && cache.is_empty()
+    {
+        return Err(
+            "command-line names [Cache], and x-nils.cache declares no input version the run keeps there".into(),
+        );
+    }
+    let on_arrival = on_arrival_of(x, &params)?;
     Ok(Descriptor {
         name,
         tool_version,
@@ -1253,8 +1290,101 @@ pub fn from_value(document: Value) -> Result<Descriptor, String> {
         unit_minutes,
         disk_gb,
         replaces,
+        on_arrival,
+        cache,
         document,
     })
+}
+
+/// `x-nils.cache` (record 55 E5): `{inputs: [version, ...]}`, each a model
+/// input's name and version as `<name>:v<n>`, lowercase letters, digits
+/// and dashes before the colon.
+fn cache_of(x: &Value) -> Result<Vec<String>, String> {
+    let c = &x["cache"];
+    if c.is_null() {
+        return Ok(Vec::new());
+    }
+    if !c.is_object() {
+        return Err("x-nils.cache is {inputs: [<name>:v<n>, ...]}".into());
+    }
+    let mut out: Vec<String> = Vec::new();
+    for (i, v) in array(c, "inputs", "x-nils.cache.")?.iter().enumerate() {
+        let version = v
+            .as_str()
+            .filter(|v| is_cache_version(v))
+            .ok_or_else(|| {
+                format!(
+                    "x-nils.cache.inputs[{i}] is a model input's version, as <name>:v<n>, such as bodypart-slice-192:v1"
+                )
+            })?;
+        if !out.iter().any(|o| o == version) {
+            out.push(version.to_string());
+        }
+    }
+    if out.is_empty() {
+        return Err("x-nils.cache names no input version (inputs)".into());
+    }
+    Ok(out)
+}
+
+/// A slice cache input version: `<name>:v<n>`, the name lowercase letters,
+/// digits and dashes, starting with a letter, the version a whole number.
+pub fn is_cache_version(v: &str) -> bool {
+    let Some((name, version)) = v.split_once(':') else {
+        return false;
+    };
+    let name_ok = name.len() <= 63
+        && name.chars().next().is_some_and(|c| c.is_ascii_lowercase())
+        && name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+    let version_ok = version
+        .strip_prefix('v')
+        .is_some_and(|n| !n.is_empty() && n.len() <= 9 && n.bytes().all(|b| b.is_ascii_digit()));
+    name_ok && version_ok
+}
+
+/// `x-nils.on-arrival` (record 55 E5): `true`, `false`, or `{params: {id:
+/// value}}`, each a declared parameter and a value it takes; the words a
+/// run at arrival is given, `id=value`.
+fn on_arrival_of(x: &Value, params: &[Param]) -> Result<Option<Vec<(String, String)>>, String> {
+    let given = match &x["on-arrival"] {
+        Value::Null | Value::Bool(false) => return Ok(None),
+        Value::Bool(true) => return Ok(Some(Vec::new())),
+        Value::Object(o) => o,
+        _ => {
+            return Err("x-nils.on-arrival is true, false or {params: {id: value}}".into());
+        }
+    };
+    if let Some(k) = given.keys().find(|k| *k != "params") {
+        return Err(format!("x-nils.on-arrival takes params only, not {k}"));
+    }
+    let mut out = Vec::new();
+    match given.get("params") {
+        None | Some(Value::Null) => {}
+        Some(Value::Object(m)) => {
+            for (id, v) in m {
+                let Some(p) = params.iter().find(|p| &p.id == id) else {
+                    return Err(format!(
+                        "x-nils.on-arrival.params.{id} is not a parameter of the descriptor"
+                    ));
+                };
+                let value = match v {
+                    Value::String(s) => Value::String(s.clone()),
+                    Value::Number(_) | Value::Bool(_) => v.clone(),
+                    _ => {
+                        return Err(format!("x-nils.on-arrival.params.{id} is a value, not {v}"));
+                    }
+                };
+                check_value(p, &value).map_err(|e| format!("x-nils.on-arrival.params: {e}"))?;
+                out.push((id.clone(), value_text(&value)));
+            }
+        }
+        Some(_) => {
+            return Err("x-nils.on-arrival.params is a mapping of id to value".into());
+        }
+    }
+    Ok(Some(out))
 }
 
 /// A mask output's part sets (record 55 H3, section 3): each a key, the
@@ -1795,6 +1925,7 @@ impl Descriptor {
             ("[ParticipantLabels]".into(), participants.to_vec()),
             ("[Manifest]".into(), vec!["/input/stacks.json".into()]),
             ("[Inputs]".into(), vec!["/inputs".into()]),
+            ("[Cache]".into(), vec![CACHE_PATH.into()]),
         ];
         for p in &self.params {
             let Some(key) = &p.value_key else { continue };
@@ -2266,6 +2397,84 @@ x-nils:
         ))
         .unwrap_err();
         assert!(e.contains("for a stacks input only"), "{e}");
+    }
+
+    /// Record 55 E5: a pipeline may score at arrival, with parameters of
+    /// its own for such a run, and may keep model inputs in the slice
+    /// cache, which a stacks input only can and `[Cache]` names.
+    #[test]
+    fn a_pipeline_may_score_at_arrival_and_keep_its_inputs_in_the_slice_cache() {
+        let base = doc(&format!("antsx/ants@sha256:{HEX}"));
+        let d = parse(&base).unwrap();
+        assert_eq!(d.on_arrival, None);
+        assert!(d.cache.is_empty());
+        let stacks = |x: &str| {
+            base.replace("analysis-level: session", "analysis-level: stack")
+                .replace(
+                    "  input: {layout: bids}\n",
+                    &format!("  input: {{layout: stacks}}\n{x}"),
+                )
+                .replace(
+                    "sub-{subject}/ses-{session}/anat/*_desc-n4_T1w.nii.gz",
+                    "stack-{stack}/n4.nii.gz",
+                )
+        };
+        let d = parse(&stacks("  on-arrival: true\n")).unwrap();
+        assert_eq!(d.on_arrival, Some(Vec::new()));
+        assert_eq!(
+            parse(&stacks("  on-arrival: false\n")).unwrap().on_arrival,
+            None
+        );
+        let d = parse(&stacks(
+            "  on-arrival: {params: {shrink: 4, verbose: true}}\n",
+        ))
+        .unwrap();
+        assert_eq!(
+            d.on_arrival,
+            Some(vec![
+                ("shrink".to_string(), "4".to_string()),
+                ("verbose".to_string(), "true".to_string())
+            ])
+        );
+        for (bad, says) in [
+            ("  on-arrival: yes-please\n", "true, false or {params"),
+            ("  on-arrival: {when: always}\n", "takes params only"),
+            ("  on-arrival: {params: {threads: 2}}\n", "not a parameter"),
+            ("  on-arrival: {params: {dimension: 9}}\n", "at most 4"),
+        ] {
+            let e = parse(&stacks(bad)).unwrap_err();
+            assert!(e.contains(says), "{bad}: {e}");
+        }
+        let cached = stacks("  cache: {inputs: [bodypart-slice-192:v1, bodypart-planes-b24:v1, bodypart-slice-192:v1]}\n")
+            .replace("--labels [ParticipantLabels]", "--cache [Cache]");
+        let d = parse(&cached).unwrap();
+        assert_eq!(d.cache, ["bodypart-slice-192:v1", "bodypart-planes-b24:v1"]);
+        let argv = d.argv(&d.resolve(&[]).unwrap(), &[]).unwrap();
+        assert!(
+            argv.windows(2).any(|w| w == ["--cache", CACHE_PATH]),
+            "{argv:?}"
+        );
+        for (bad, says) in [
+            ("  cache: {inputs: [Slices]}\n", "<name>:v<n>"),
+            ("  cache: {inputs: [slices:1]}\n", "<name>:v<n>"),
+            ("  cache: {inputs: []}\n", "names no input version"),
+            ("  cache: [slices:v1]\n", "x-nils.cache is {inputs"),
+        ] {
+            let e = parse(&stacks(bad)).unwrap_err();
+            assert!(e.contains(says), "{bad}: {e}");
+        }
+        let e = parse(&stacks("").replace("--labels [ParticipantLabels]", "--cache [Cache]"))
+            .unwrap_err();
+        assert!(e.contains("names [Cache]"), "{e}");
+        let e = parse(&base.replace(
+            "  input: {layout: bids}\n",
+            "  input: {layout: bids}\n  cache: {inputs: [slices:v1]}\n",
+        ))
+        .unwrap_err();
+        assert!(e.contains("a bids input has none"), "{e}");
+        assert!(is_cache_version("bodypart-planes-touched:v12"));
+        assert!(!is_cache_version("bodypart:v"));
+        assert!(!is_cache_version("../x:v1"));
     }
 
     /// Record 55 E3: a stacks input with the header and the geometry may

@@ -2307,6 +2307,11 @@ struct Materialised {
     /// For the bids layout, the converter its release ran with, where it
     /// was found and how (2026-10-12); null otherwise.
     converter: Value,
+    /// Record 55 E5: for a run that declares the slice cache, each entry's
+    /// files in the order `stacks.json` lists them, as `source_file` names
+    /// them with the size and time it holds, so a unit's `read` hashes are
+    /// kept for the right files; empty otherwise.
+    files: Vec<Vec<(i64, String, i64, i64)>>,
 }
 
 /// At most this many folders are bound one by one for a stacks input; a
@@ -2334,6 +2339,7 @@ fn materialise_stacks(
     header: bool,
     geometry: bool,
     contrast: bool,
+    identity: bool,
 ) -> Result<Materialised, String> {
     let d = store.dialect();
     let err = |e: nils_registry::Error| e.to_string();
@@ -2342,6 +2348,7 @@ fn materialise_stacks(
     let mut axes: BTreeMap<i64, BTreeMap<String, String>> = BTreeMap::new();
     let mut files_of: BTreeMap<i64, Vec<StackFile>> = BTreeMap::new();
     let mut geometry_of: BTreeMap<i64, Value> = BTreeMap::new();
+    let mut study_uid_of: BTreeMap<i64, String> = BTreeMap::new();
     for chunk in stacks.chunks(500) {
         let list = chunk
             .iter()
@@ -2386,7 +2393,21 @@ fn materialise_stacks(
                 .entry(r.text(1).map_err(err)?.to_string())
                 .or_insert(r.text(2).map_err(err)?.to_string());
         }
-        stack_files(store, &list, geometry, &mut files_of)?;
+        stack_files(store, &list, geometry, identity, &mut files_of)?;
+        // record 55 E5: the session a stack is part of, by its DICOM
+        // identity, which the slice cache names its files by
+        if identity {
+            let sql = format!(
+                "SELECT st.id, stu.study_instance_uid FROM {} st JOIN {} se ON se.id = st.series_id \
+                 JOIN {} stu ON stu.id = se.study_id WHERE st.id IN ({list})",
+                store.qualified("stack"),
+                store.qualified("series"),
+                store.qualified("study"),
+            );
+            for r in store.query(&sql, &[]).map_err(err)? {
+                study_uid_of.insert(r.int(0).map_err(err)?, r.text(1).map_err(err)?.to_string());
+            }
+        }
     }
     let _ = d;
     // a stack of a sample sealed now says so, so an image leaves it out of
@@ -2433,7 +2454,7 @@ fn materialise_stacks(
     let mut roots: BTreeMap<i64, String> = BTreeMap::new();
     let (mut widened, mut at_root) = (0usize, 0usize);
     for files in files_of.values() {
-        for (so, root, path, _, _) in files {
+        for (so, root, path, _, _, _) in files {
             roots.entry(*so).or_insert_with(|| root.clone());
             let dir = folder(root, path)?;
             if let std::collections::btree_map::Entry::Vacant(e) = folders.entry((*so, dir.clone()))
@@ -2479,6 +2500,7 @@ fn materialise_stacks(
         }
     }
     let mut entries: Vec<Value> = Vec::new();
+    let mut entry_files: Vec<Vec<(i64, String, i64, i64)>> = Vec::new();
     let mut units: Vec<Unit> = Vec::new();
     for &stack in stacks {
         let Some((series_id, subject_id, modality, orientation)) = info.remove(&stack) else {
@@ -2488,11 +2510,28 @@ fn materialise_stacks(
         };
         let mut seen: std::collections::BTreeSet<(i64, String)> = Default::default();
         let mut files: Vec<Value> = Vec::new();
+        let mut named: Vec<(i64, String, i64, i64)> = Vec::new();
         let mut slices: i64 = 0;
-        for (so, _, path, frames, geo) in files_of.remove(&stack).unwrap_or_default() {
+        for (so, root, path, frames, geo, ident) in files_of.remove(&stack).unwrap_or_default() {
             if !seen.insert((so, path.clone())) {
                 continue;
             }
+            // record 55 E5: the file's SOP Instance UID, and the sha256 of
+            // its bytes where it is known and the file on the disk still
+            // has the size and time it was learnt at: a stale hash would
+            // read another file's pictures from the cache
+            let identity = ident.map(|i| {
+                let holds = i.sha256.is_some()
+                    && std::fs::metadata(Path::new(&root).join(&path)).is_ok_and(|m| {
+                        i64::try_from(m.len()).ok() == Some(i.size)
+                            && nils_digest::walk::mtime_ns_of(&m) == i.mtime_ns
+                    });
+                named.push((so, path.clone(), i.size, i.mtime_ns));
+                json!({
+                    "sop_instance_uid": i.sop_instance_uid,
+                    "sha256": if holds { i.sha256 } else { None },
+                })
+            });
             let (n, rel) = if by_folder {
                 let root = &roots[&so];
                 let dir = folder(root, &path)?;
@@ -2515,6 +2554,9 @@ fn materialise_stacks(
             if let Some(geo) = geo {
                 file["geometry"] = geo;
             }
+            if let Some(identity) = identity {
+                file["identity"] = identity;
+            }
             files.push(file);
         }
         if files.is_empty() {
@@ -2536,6 +2578,10 @@ fn materialise_stacks(
         }
         if contrast && let Some(entry) = entries.last_mut() {
             entry["contrast"] = contrast_of.remove(&stack).unwrap_or(Value::Null);
+        }
+        if identity && let Some(entry) = entries.last_mut() {
+            entry["identity"] = json!({"study_instance_uid": study_uid_of.remove(&stack)});
+            entry_files.push(named);
         }
         units.push(Unit {
             id: unit,
@@ -2598,6 +2644,7 @@ fn materialise_stacks(
         listed,
         context,
         converter: Value::Null,
+        files: entry_files,
     })
 }
 
@@ -2773,6 +2820,7 @@ fn materialise_bids(
             listed: Vec::new(),
             context: Vec::new(),
             converter: Value::Null,
+            files: Vec::new(),
         });
     }
     if !status.success() {
@@ -2826,6 +2874,7 @@ fn released(
         listed: Vec::new(),
         context: Vec::new(),
         converter: Value::Null,
+        files: Vec::new(),
     })
 }
 
@@ -4730,6 +4779,7 @@ fn execute_run(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Resul
             d.header,
             d.geometry,
             d.contrast,
+            !d.cache.is_empty(),
         )?,
         (Layout::Bids, Some(release)) => released(registry, release, d.level)?,
         (Layout::Bids, None) => {
@@ -4746,6 +4796,7 @@ fn execute_run(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Resul
                     listed: Vec::new(),
                     context: Vec::new(),
                     converter: Value::Null,
+                    files: Vec::new(),
                 },
                 Some(lock) => {
                     let m = materialise_bids(
@@ -5110,6 +5161,11 @@ fn execute_run(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Resul
     // T1 answers the time rule anchors on, so its subjects are labelled again
     if x.descriptor.proposals.iter().any(|a| a == "post_contrast") {
         ended.1["contrast_label"] = crate::contrast::after_answers(home, registry, x.stacks);
+    }
+    // record 55 E5: the slice cache's versions no answering model reads
+    // are dropped once they have gone unread 30 days (ruling R4)
+    if !d.cache.is_empty() {
+        ended.1["slice_cache"] = crate::slice_cache::after_run(registry.store(), &working);
     }
     // record 55 E3: what the cascade deferred goes to the full pipeline
     if x.pipeline.name == crate::operations::POST_CONTRAST_PIPELINE
@@ -5568,6 +5624,18 @@ fn invocation_of(
             participants = u.subject.iter().cloned().collect();
             env.push(("NILS_UNIT".into(), u.id.clone()));
         }
+    }
+    // record 55 E5: the slice cache, read-write, for a pipeline that
+    // declares the model inputs it keeps there; in the site's working
+    // place, since the pictures are clinical
+    if !d.cache.is_empty() {
+        let dir = crate::slice_cache::folder(Path::new(&x.output.path));
+        std::fs::create_dir_all(&dir).map_err(|e| format!("the slice cache's folder: {e}"))?;
+        mounts.push(Mount {
+            host: dir,
+            container: descriptor::CACHE_PATH.into(),
+            read_only: false,
+        });
     }
     // a secret, read-only, in this pipeline's containers alone
     for g in x.secrets {
@@ -6028,6 +6096,20 @@ fn take_in(
             .entry(nils_pipeline::results::normalise(&e.unit_id))
             .or_insert(i);
     }
+    // record 55 E5: what the image read whole is kept as each file's
+    // content, so the next run reads the slice cache instead of the file
+    if !m.files.is_empty()
+        && shut.is_empty()
+        && let Some(r) = &reported
+    {
+        let learnt = learnt_of(x.run_id, m, &b.units, r, &by_unit);
+        if let Err(e) = nils_registry::content::learn(registry.store(), &learnt) {
+            eprintln!(
+                "nils: run {}: what its image read could not be kept: {e}",
+                x.run_id
+            );
+        }
+    }
     let unit_outputs: Vec<descriptor::Output> =
         d.outputs.iter().filter(|o| !o.run_level).cloned().collect();
     let run_outputs: Vec<descriptor::Output> =
@@ -6115,6 +6197,44 @@ fn take_in(
             .map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+/// Record 55 E5: the files each unit of a batch says its image read whole,
+/// by their place in the unit's list in `stacks.json`, with the sha256 it
+/// gave and the size and time `source_file` held when the run began. A
+/// place past the unit's list is left out.
+fn learnt_of(
+    run_id: i64,
+    m: &Materialised,
+    units: &[usize],
+    reported: &nils_pipeline::Results,
+    by_unit: &HashMap<String, usize>,
+) -> Vec<nils_registry::content::Learnt> {
+    let mut out = Vec::new();
+    for &i in units {
+        let (Some(u), Some(files)) = (m.units.get(i), m.files.get(i)) else {
+            continue;
+        };
+        let Some(e) = by_unit
+            .get(&nils_pipeline::results::normalise(&u.id))
+            .and_then(|k| reported.units.get(*k))
+        else {
+            continue;
+        };
+        for (at, sha) in &e.read {
+            if let Some((source_id, path, size, mtime_ns)) = files.get(*at) {
+                out.push(nils_registry::content::Learnt {
+                    source_id: *source_id,
+                    path: path.clone(),
+                    size: *size,
+                    mtime_ns: *mtime_ns,
+                    sha256: sha.clone(),
+                    run_id: Some(run_id),
+                });
+            }
+        }
+    }
+    out
 }
 
 /// Whether the run registered a file at this path already: a resume that
@@ -7070,22 +7190,43 @@ const HEADER_FINGERPRINT: [(&str, char); 22] = [
 
 /// A stack's file as the stacks queries read it: its source's id and root,
 /// its path, the frames of a multi-frame file that are the stack's and
-/// how many, and the file's geometry where it was asked for.
-type StackFile = (i64, String, String, Option<(String, i64)>, Option<Value>);
+/// how many, the file's geometry where it was asked for, and its identity
+/// where the slice cache was (record 55 E5).
+type StackFile = (
+    i64,
+    String,
+    String,
+    Option<(String, i64)>,
+    Option<Value>,
+    Option<FileIdentity>,
+);
+
+/// A file's identity for the slice cache (record 55 E5): its SOP Instance
+/// UID, the size and time `source_file` holds, and the sha256 of its bytes
+/// where a run learnt it while the file had that size and time.
+#[derive(Debug, Clone, PartialEq)]
+struct FileIdentity {
+    sop_instance_uid: String,
+    size: i64,
+    mtime_ns: i64,
+    sha256: Option<String>,
+}
 
 /// The files of the stacks `list` names (a few hundred ids, comma
 /// separated) into `files_of`, in the order a manifest lists them: a
 /// multi-frame file's frames first, then the files whose every frame is the
-/// stack's, each by path, with its [`file_geometry`] where `geometry` asks.
+/// stack's, each by path, with its [`file_geometry`] where `geometry` asks
+/// and its [`FileIdentity`] where `identity` does.
 fn stack_files(
     store: &mut Store,
     list: &str,
     geometry: bool,
+    identity: bool,
     files_of: &mut BTreeMap<i64, Vec<StackFile>>,
 ) -> Result<(), String> {
     let err = |e: nils_registry::Error| e.to_string();
     // the instance's columns a file's geometry is made of, after the ones
-    // each query reads anyway
+    // each query reads anyway, then the file's identity
     let geo_columns = if geometry {
         FILE_GEOMETRY
             .iter()
@@ -7094,10 +7235,32 @@ fn stack_files(
     } else {
         String::new()
     };
+    let (id_columns, id_join) = if identity {
+        (
+            ", i.sop_instance_uid, f.size, f.mtime_ns, fc.sha256".to_string(),
+            nils_registry::content::join(store, "f", "fc"),
+        )
+    } else {
+        (String::new(), String::new())
+    };
+    let identity_at = |r: &nils_registry::store::Row,
+                       at: usize|
+     -> Result<Option<FileIdentity>, nils_registry::Error> {
+        if !identity {
+            return Ok(None);
+        }
+        Ok(Some(FileIdentity {
+            sop_instance_uid: r.text(at)?.to_string(),
+            size: r.int(at + 1)?,
+            mtime_ns: r.int(at + 2)?,
+            sha256: r.opt_text(at + 3)?.map(str::to_string),
+        }))
+    };
+    let geo_n = if geometry { FILE_GEOMETRY.len() } else { 0 };
     let framed = format!(
-        "SELECT fr.stack_id, so.id, so.root, f.path, fr.frames, fr.n_frames{geo_columns} FROM {} fr \
+        "SELECT fr.stack_id, so.id, so.root, f.path, fr.frames, fr.n_frames{geo_columns}{id_columns} FROM {} fr \
          JOIN {} i ON i.id = fr.instance_id JOIN {} f ON f.id = i.source_file_id \
-         JOIN {} so ON so.id = f.source_id WHERE fr.stack_id IN ({list}) \
+         JOIN {} so ON so.id = f.source_id {id_join} WHERE fr.stack_id IN ({list}) \
          ORDER BY fr.stack_id, f.path",
         store.qualified("instance_frame"),
         store.qualified("instance"),
@@ -7116,11 +7279,12 @@ fn stack_files(
             r.text(3).map_err(err)?.to_string(),
             Some((r.text(4).map_err(err)?.to_string(), r.int(5).map_err(err)?)),
             geo,
+            identity_at(&r, 6 + geo_n).map_err(err)?,
         ));
     }
     let whole = format!(
-        "SELECT i.stack_id, so.id, so.root, f.path{geo_columns} FROM {} i \
-         JOIN {} f ON f.id = i.source_file_id JOIN {} so ON so.id = f.source_id \
+        "SELECT i.stack_id, so.id, so.root, f.path{geo_columns}{id_columns} FROM {} i \
+         JOIN {} f ON f.id = i.source_file_id JOIN {} so ON so.id = f.source_id {id_join} \
          WHERE i.stack_id IN ({list}) ORDER BY i.stack_id, f.path",
         store.qualified("instance"),
         store.qualified("source_file"),
@@ -7138,6 +7302,7 @@ fn stack_files(
             r.text(3).map_err(err)?.to_string(),
             None,
             geo,
+            identity_at(&r, 4 + geo_n).map_err(err)?,
         ));
     }
     Ok(())
@@ -7230,7 +7395,7 @@ fn session_context(
         for r in store.query(&sql, &[]).map_err(err)? {
             geometry_of.insert(r.int(0).map_err(err)?, stack_facts(&r, 1).map_err(err)?);
         }
-        stack_files(store, &list, true, &mut files_of)?;
+        stack_files(store, &list, true, false, &mut files_of)?;
     }
     let mut out = Vec::with_capacity(ids.len());
     for id in ids {
@@ -7239,8 +7404,8 @@ fn session_context(
             .remove(&id)
             .unwrap_or_default()
             .into_iter()
-            .filter(|(so, _, path, _, _)| seen.insert((*so, path.clone())))
-            .map(|(_, _, _, _, geo)| json!({"geometry": geo.unwrap_or(Value::Null)}))
+            .filter(|(so, _, path, _, _, _)| seen.insert((*so, path.clone())))
+            .map(|(_, _, _, _, geo, _)| json!({"geometry": geo.unwrap_or(Value::Null)}))
             .collect();
         out.push(json!({
             "stack_id": id,

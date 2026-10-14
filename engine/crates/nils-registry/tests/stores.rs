@@ -4794,3 +4794,80 @@ fn several_models_answer_a_task_and_the_site_chooses_on_both_backends() {
         );
     }
 }
+
+/// Record 55 E5, migration 97, on both backends: a registry of schema 96
+/// gains `file_content`; a hash learnt for a file holds while the file has
+/// the size and time it was learnt at, a newer hash replaces it, and one
+/// that is not `sha256:<hex>` is never kept.
+#[test]
+fn migration_97_adds_what_a_file_holds_and_a_hash_holds_while_the_file_is_unchanged() {
+    use nils_registry::content::{self, Learnt};
+    for (name, _guard, mut store) in stores() {
+        migrate::migrate(&mut store, Kind::Registry).unwrap();
+        let (fc, meta) = (
+            store.qualified("file_content"),
+            store.qualified("registry_meta"),
+        );
+        store
+            .batch(&format!(
+                "DROP TABLE {fc};\n\
+                 UPDATE {meta} SET value = '96' WHERE key = 'schema_version'"
+            ))
+            .unwrap();
+        assert_eq!(
+            migrate::migrate(&mut store, Kind::Registry).unwrap(),
+            (97..=migrate::SCHEMA_VERSION).collect::<Vec<i64>>(),
+            "{name}"
+        );
+        let sf = store.qualified("source_file");
+        store
+            .batch(&format!(
+                "INSERT INTO {sf} (source_id, batch_id, dir, path, size, mtime_ns, status, seen_at) \
+                 VALUES (1, 1, 'a', 'a/IM1', 100, 5, 'ingested', '2026-10-14T10:00:00Z'), \
+                 (1, 1, 'a', 'a/IM2', 200, 6, 'ingested', '2026-10-14T10:00:00Z')"
+            ))
+            .unwrap();
+        let hash = |c: char| format!("sha256:{}", c.to_string().repeat(64));
+        let learnt = |path: &str, size: i64, sha: String| Learnt {
+            source_id: 1,
+            path: path.to_string(),
+            size,
+            mtime_ns: if path.ends_with('1') { 5 } else { 6 },
+            sha256: sha,
+            run_id: Some(3),
+        };
+        assert_eq!(
+            content::learn(
+                &mut store,
+                &[
+                    learnt("a/IM1", 100, hash('a')),
+                    learnt("a/IM2", 999, hash('b')),
+                    learnt("a/IM3", 1, "not a hash".into()),
+                ],
+            )
+            .unwrap(),
+            2,
+            "{name}"
+        );
+        // IM2 was learnt at another size than the registry holds: no hash
+        assert_eq!(content::known(&mut store).unwrap(), 1, "{name}");
+        content::learn(&mut store, &[learnt("a/IM2", 200, hash('c'))]).unwrap();
+        assert_eq!(content::known(&mut store).unwrap(), 2, "{name}");
+        let read = format!(
+            "SELECT fc.sha256 FROM {sf} f {} WHERE f.path = 'a/IM2'",
+            content::join(&store, "f", "fc")
+        );
+        assert_eq!(
+            store.query(&read, &[]).unwrap()[0].text(0).unwrap(),
+            hash('c'),
+            "{name}"
+        );
+        // the digest saw the file change: its hash no longer holds
+        store
+            .batch(&format!(
+                "UPDATE {sf} SET mtime_ns = 7 WHERE path = 'a/IM1'"
+            ))
+            .unwrap();
+        assert_eq!(content::known(&mut store).unwrap(), 1, "{name}");
+    }
+}

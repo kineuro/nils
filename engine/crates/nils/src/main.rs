@@ -81,9 +81,11 @@ mod requirements;
 mod rules;
 mod scans;
 mod schedule;
+mod score;
 mod sealed;
 mod serve;
 mod setup;
+mod slice_cache;
 mod sources;
 mod starter;
 mod summary;
@@ -148,6 +150,15 @@ enum Command {
     /// Bring in what is new: pseudonymise a dataset, then digest, fingerprint
     /// and classify it, as one chain of queued jobs (record 26)
     BringIn(BringInArgs),
+    /// Score a batch's new stacks with the image models that score at
+    /// arrival: the last step of a bring-in (record 55 E5)
+    Score(score::ScoreArgs),
+    /// The slice cache: what it keeps, and the versions no model reads any
+    /// more (record 55 E5)
+    Cache {
+        #[command(subcommand)]
+        command: CacheCommand,
+    },
     /// Derive the per-stack values a classifier reads, once, and store them
     Fingerprint(FingerprintArgs),
     /// Judge every stack with a pack, and write the verdict with its evidence
@@ -2087,6 +2098,23 @@ struct BringInArgs {
     pack: Option<String>,
 }
 
+/// `nils cache`: the slice cache of each working place (record 55 E5).
+#[derive(Debug, Subcommand)]
+enum CacheCommand {
+    /// What it keeps, version by version, and whether a model reads each
+    Show {
+        /// Machine-readable output
+        #[arg(long)]
+        json: bool,
+    },
+    /// Drop the versions no admitted model has read for 30 days
+    Prune {
+        /// Machine-readable output
+        #[arg(long)]
+        json: bool,
+    },
+}
+
 #[derive(Debug, Subcommand)]
 enum LinkageCommand {
     /// File the identifier map of a CSV, in any shape, creating the subjects it names
@@ -2261,6 +2289,11 @@ fn main() -> ExitCode {
         Command::Digest(args) => digest(&home, args),
         Command::Pseudonymize(args) => pseudonymize(&home, args),
         Command::BringIn(args) => bring_in(&home, args),
+        Command::Score(args) => score::command(&home, args),
+        Command::Cache { command } => match command {
+            CacheCommand::Show { json } => slice_cache::command(&home, false, json),
+            CacheCommand::Prune { json } => slice_cache::command(&home, true, json),
+        },
         Command::Fingerprint(args) => fingerprint(&home, args),
         Command::Classify(args) => classify(&home, args),
         Command::Explain {
