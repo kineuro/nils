@@ -578,11 +578,14 @@ fn round(pg: Option<(String, String)>) {
     assert_eq!(queued_runs.len(), 1, "{score}");
     assert_eq!(queued_runs[0]["step"], "body_part", "{score}");
     assert_eq!(queued_runs[0]["stacks"], 6, "{score}");
-    // post-contrast is not installed: skipped, and why
+    // post-contrast and System 1 (record 55 D3) are not installed: each
+    // skipped, and why
     let skipped = result["skipped"].as_array().unwrap();
-    assert_eq!(skipped.len(), 1, "{score}");
+    assert_eq!(skipped.len(), 2, "{score}");
     assert_eq!(skipped[0]["step"], "post_contrast", "{score}");
     assert_eq!(skipped[0]["reason"], "no_pipeline", "{score}");
+    assert_eq!(skipped[1]["step"], "system1", "{score}");
+    assert_eq!(skipped[1]["reason"], "no_pipeline", "{score}");
     // the run with the chosen model, for the dataset, under the chain's
     // principal, and it ran
     let run = server.over(queued_runs[0]["job"].as_i64().unwrap());

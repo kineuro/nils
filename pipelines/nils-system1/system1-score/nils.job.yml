@@ -72,6 +72,9 @@ suggested-resources:
 x-nils:
   contract: 1
   analysis-level: stack
+  # spec 11.1: System 1 runs over every stack at arrival, where its model
+  # is the one chosen for the task system1 (record 55 E5)
+  on-arrival: true
   input:
     layout: stacks
     header: true

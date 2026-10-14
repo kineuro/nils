@@ -40,7 +40,7 @@ pub(crate) struct ScoreArgs {
     /// The batch whose new stacks are scored: the name its digest was given
     #[arg(long)]
     name: String,
-    /// Only this step (body_part or post_contrast); every step by default
+    /// Only this step (body_part, post_contrast or system1); every step by default
     #[arg(long = "step", value_name = "STEP")]
     steps: Vec<String>,
     /// Where the packs are, for the runs the step queues
@@ -88,6 +88,17 @@ pub(crate) fn new_stacks(
 struct Planned {
     step: &'static str,
     command: Vec<String>,
+}
+
+/// The steps scored at arrival: the operations of their own, then System 1
+/// (record 55 D3, spec §11.1: it runs over every stack at arrival), each
+/// where its chosen model's pipeline declares `x-nils.on-arrival`.
+fn arrival_steps() -> Vec<&'static str> {
+    OPERATIONS
+        .iter()
+        .map(|(n, _)| *n)
+        .chain(std::iter::once(crate::system1::STEP))
+        .collect()
 }
 
 /// A step skipped, as the result says it.
@@ -161,16 +172,16 @@ pub(crate) fn command(home: &Home, args: ScoreArgs) -> Result<(), Exit> {
     let mut registry = crate::open(home)?;
     let place = crate::dataset_named(&mut registry, &args.dataset)?;
     let wanted: Vec<&'static str> = if args.steps.is_empty() {
-        OPERATIONS.iter().map(|(n, _)| *n).collect()
+        arrival_steps()
     } else {
         let mut out = Vec::new();
         for s in &args.steps {
-            let Some((n, _)) = OPERATIONS.iter().find(|(n, _)| n == s) else {
+            let Some(n) = arrival_steps().into_iter().find(|n| n == s) else {
                 return Err(crate::usage(format!(
-                    "--step is body_part or post_contrast, not {s}"
+                    "--step is body_part, post_contrast or system1, not {s}"
                 )));
             };
-            out.push(*n);
+            out.push(n);
         }
         out
     };
