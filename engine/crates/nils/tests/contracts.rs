@@ -608,6 +608,29 @@ fn body_part_s_pass_and_its_arrival_run_differently() {
     );
 }
 
+/// Record 55 T23: post-contrast's cascade runs as its speed was graded, 32
+/// readers (pcs-speed), on a lane that has them, and every core of a
+/// smaller lane.
+#[test]
+fn post_contrast_s_cascade_reads_with_the_graded_workers() {
+    use nils_pipeline::descriptor;
+    let text = std::fs::read_to_string(
+        contracts().join("../pipelines/nils-postcontrast/postcontrast-cascade/nils.job.yml"),
+    )
+    .unwrap();
+    let d = descriptor::parse(&text).unwrap();
+    assert!(d.needs.lane_cores, "a lane's every core");
+    let argv = |d: &descriptor::Descriptor| -> Vec<String> {
+        d.argv(&d.resolve(&[]).unwrap(), &[]).unwrap()
+    };
+    let has = |a: &[String], w: &[&str]| a.windows(w.len()).any(|x| x == w);
+    for (lane, workers) in [(48, "32"), (32, "32"), (8, "8")] {
+        let s = d.sized_to(lane);
+        assert_eq!(s.needs.cores.to_string(), workers);
+        assert!(has(&argv(&s), &["--threads", workers]), "{lane}");
+    }
+}
+
 /// Record 55 H3 (job type 3, check a result): the descriptor keys a mask
 /// output and a derivative input gain are the runner's words as the schema
 /// names them, and a descriptor that uses them checks against both the

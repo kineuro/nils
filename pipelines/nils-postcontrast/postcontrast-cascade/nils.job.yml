@@ -52,8 +52,8 @@ inputs:
     type: Number
     integer: true
     minimum: 1
-    maximum: 64
-    description: Stacks whose slices are read at once, each in a worker process of its own.
+    maximum: 32
+    description: Stacks whose slices are read at once, each in a worker process of its own; the lane's cores, at most 32, as the speed was graded.
     value-key: "[THREADS]"
     command-line-flag: --threads
     default-value: 8
@@ -125,9 +125,11 @@ x-nils:
     # the student on a card where the lane leases one (bfloat16, as the
     # study ran it), else on the CPU in float32; the same image either way
     gpu: optional
-    memory-gb: 8
+    # every core of the lane, at most the 32 readers the speed was graded
+    # with (pcs-speed, T23's mi-t23: 9.8 GB at 32 on the CPU, 7.3 on a card)
+    memory-gb: 12
     gpu-memory-gb: 4
-    cores: 8
+    cores: lane
     cores-input: threads
   proposals:
     - axis: post_contrast
