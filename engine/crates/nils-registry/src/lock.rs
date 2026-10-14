@@ -41,6 +41,11 @@ use std::path::PathBuf;
 use crate::schema::Type;
 use crate::store::{Error, Param, Store};
 
+/// The lock of the session cache, held for its transaction by a build of
+/// the cache and by a merge of two subjects, which drops their sessions for
+/// the next build to make again (2026-10-14).
+pub const SESSION_CACHE: &str = "session-cache";
+
 /// A lock this process holds. Give it back with [`release`]; a guard that
 /// is dropped instead lets a file lock go with its file, and leaves an
 /// advisory lock held until the connection ends.

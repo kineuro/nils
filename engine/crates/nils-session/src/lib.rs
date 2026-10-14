@@ -38,10 +38,6 @@ pub use nils_registry::session::{Collision, Naming, Reason, Said, Unmatched};
 /// The review item kind a moved or vanished span raises.
 pub const MOVED_KIND: &str = "session.moved";
 
-/// The lock a build of the cache holds for its transaction, so that builds
-/// take turns (2026-10-14).
-const CACHE_LOCK: &str = "session-cache";
-
 /// The columns of a label row, and those an insert that meets the row of
 /// its key writes over.
 const LABEL_COLUMNS: [&str; 8] = [
@@ -495,8 +491,9 @@ fn ensure_of(
         // wrote the rows the other was writing, and the second failed on a
         // unique key. The second now waits here until the first commits,
         // then reads the timelines and the cache as the first left them,
-        // and finds nothing to do. SQLite's writers take turns already.
-        lock::take_for_transaction(store, CACHE_LOCK)?;
+        // and finds nothing to do. SQLite's writers take turns already. A
+        // merge of two subjects takes the same lock.
+        lock::take_for_transaction(store, lock::SESSION_CACHE)?;
         let mut by_subject: BTreeMap<i64, (String, Vec<Study>)> = BTreeMap::new();
         for p in points(store, scheme, whose)? {
             let e = by_subject

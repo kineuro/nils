@@ -6,13 +6,14 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::env;
 use std::sync::{Barrier, Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 
 use nils_dicom::synth::TempDir;
 use nils_registry::day::Day;
 use nils_registry::home::{Home, InitOptions};
 use nils_registry::schema::{Type, table};
 use nils_registry::session::{self, Anchor, Naming, Scheme};
-use nils_registry::{Backend, Insert, Param, Registry, Row, Store};
+use nils_registry::{Backend, Insert, Param, Registry, Row, Store, Subkeys, lock, merge};
 use nils_session::{
     Anchors, MOVED_KIND, Rebuilt, ensure, ensure_for, labels_by_study, sessions_of,
 };
@@ -1168,4 +1169,114 @@ fn a_changed_label_is_updated_in_place_and_nothing_else_is_written() {
             None => assert_eq!(rewritten, rows_of_theirs, "{name}"),
         }
     }
+}
+
+/// Label rows whose session is gone.
+fn orphan_labels(registry: &mut Registry) -> i64 {
+    let store = registry.store();
+    let sql = format!(
+        "SELECT COUNT(*) FROM {} l WHERE NOT EXISTS (SELECT 1 FROM {} c WHERE c.id = l.session_id)",
+        store.qualified("session_label"),
+        store.qualified("session_cache")
+    );
+    store.query(&sql, &[]).unwrap()[0].int(0).unwrap()
+}
+
+/// A merge of two subjects drops their sessions for the next build to make
+/// again, and a build that went on beside it could write a label of a
+/// session the merge had just dropped (2026-10-14). The merge takes the
+/// cache's lock: it waits for a build that holds it, and what the build
+/// wrote goes with the sessions. On Postgres, where the two run side by
+/// side.
+#[test]
+fn a_merge_waits_for_a_build_and_leaves_no_label_of_a_dropped_session() {
+    let Some(mut l) = postgres_lab() else {
+        return;
+    };
+    let scheme = months_scheme();
+    let anchors = Anchors::resolve(&mut l.registry, &scheme, BTreeMap::new()).unwrap();
+    let subjects = subject_ids(&mut l.registry);
+    ensure_for(&mut l.registry, &scheme, &anchors, &subjects).unwrap();
+    let cached = sessions_of(l.registry.store(), &scheme, None).unwrap();
+    let mut ids = subjects.iter().copied();
+    let (canonical, alias) = (ids.next().unwrap(), ids.next().unwrap());
+    let studies = |cached: &[nils_session::Cached], s: i64| -> usize {
+        cached
+            .iter()
+            .filter(|c| c.subject_id == s)
+            .map(|c| c.studies.len())
+            .sum()
+    };
+    let both = studies(&cached, canonical) + studies(&cached, alias);
+    let session = cached
+        .iter()
+        .find(|c| c.subject_id == canonical)
+        .expect("a session of the canonical subject")
+        .id;
+    assert_eq!(orphan_labels(&mut l.registry), 0);
+
+    // a build under way, its transaction holding the lock
+    let mut build = connections(&l, 1).pop().unwrap();
+    build.store().begin().unwrap();
+    lock::take_for_transaction(build.store(), lock::SESSION_CACHE).unwrap();
+
+    let mut merger = connections(&l, 1).pop().unwrap();
+    let mut linkage = merger.open_linkage().unwrap();
+    let keys = Subkeys::derive(&merger.pseudonym_key().unwrap());
+    let started = Instant::now();
+    let (waited, merged) = std::thread::scope(|s| {
+        let merging = s.spawn(|| {
+            let merged = merge::merge(
+                merger.store(),
+                &mut linkage,
+                &keys,
+                &merge::Ask {
+                    canonical,
+                    alias,
+                    why: "one person",
+                    actor: "test",
+                    job_id: None,
+                    place_id: None,
+                },
+            );
+            (started.elapsed(), merged)
+        });
+        std::thread::sleep(Duration::from_millis(300));
+        // the build labels the canonical subject's session under another
+        // scheme, and ends
+        let store = build.store();
+        store
+            .insert(
+                &Insert::new(
+                    table("session_label"),
+                    &["session_id", "scheme_digest", "flagged"],
+                ),
+                &[vec![
+                    Param::Int(session),
+                    Param::from("another scheme"),
+                    Param::Int(0),
+                ]],
+            )
+            .unwrap();
+        store.commit().unwrap();
+        merging.join().unwrap()
+    });
+    merged.unwrap();
+    assert_eq!(
+        orphan_labels(&mut l.registry),
+        0,
+        "a label of a dropped session"
+    );
+    assert!(
+        waited >= Duration::from_millis(300),
+        "the merge went on beside the build, done after {waited:?}"
+    );
+
+    // the next build makes the merged subject's sessions again, every study
+    // of both on them
+    ensure_for(&mut l.registry, &scheme, &anchors, &subjects).unwrap();
+    let cached = sessions_of(l.registry.store(), &scheme, None).unwrap();
+    assert_eq!(studies(&cached, canonical), both);
+    assert_eq!(studies(&cached, alias), 0);
+    assert_eq!(orphan_labels(&mut l.registry), 0);
 }

@@ -1271,7 +1271,7 @@ fn a_transaction_lock_is_held_until_the_transaction_ends() {
     use std::time::{Duration, Instant};
     let mut alone = Store::sqlite_in_memory().unwrap();
     alone.begin().unwrap();
-    lock::take_for_transaction(&mut alone, "session-cache").unwrap();
+    lock::take_for_transaction(&mut alone, lock::SESSION_CACHE).unwrap();
     alone.commit().unwrap();
     let Some((_guard, mut a)) = postgres_store(SCHEMA) else {
         return;
@@ -1280,9 +1280,11 @@ fn a_transaction_lock_is_held_until_the_transaction_ends() {
     let mut b = Store::connect_postgres(&dsn, SCHEMA).unwrap();
     for end in ["commit", "rollback"] {
         a.begin().unwrap();
-        lock::take_for_transaction(&mut a, "session-cache").unwrap();
+        lock::take_for_transaction(&mut a, lock::SESSION_CACHE).unwrap();
         assert!(
-            lock::try_take(&mut b, "session-cache").unwrap().is_none(),
+            lock::try_take(&mut b, lock::SESSION_CACHE)
+                .unwrap()
+                .is_none(),
             "{end}: the name's lock is the same key"
         );
         let other = lock::try_take(&mut b, "pipeline-intake")
@@ -1293,7 +1295,7 @@ fn a_transaction_lock_is_held_until_the_transaction_ends() {
         let waited = std::thread::scope(|s| {
             let waiter = s.spawn(|| {
                 b.begin().unwrap();
-                lock::take_for_transaction(&mut b, "session-cache").unwrap();
+                lock::take_for_transaction(&mut b, lock::SESSION_CACHE).unwrap();
                 let at = started.elapsed();
                 b.commit().unwrap();
                 at
@@ -1311,7 +1313,7 @@ fn a_transaction_lock_is_held_until_the_transaction_ends() {
         );
     }
     // with both transactions over, nothing holds it
-    let held = lock::try_take(&mut a, "session-cache")
+    let held = lock::try_take(&mut a, lock::SESSION_CACHE)
         .unwrap()
         .expect("a transaction lock outlived its transaction");
     lock::release(&mut a, held).unwrap();
