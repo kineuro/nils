@@ -147,8 +147,8 @@ x-nils:
 }
 
 /// The full pipeline as it ships (`pipelines/nils-postcontrast/postcontrast-full`),
-/// its descriptor unchanged but for the memory it asks, which a test
-/// machine may not have (the runner refuses a unit that asks more memory
+/// its descriptor unchanged but for the memory and cores it asks, which a
+/// test machine may not have (the runner refuses a unit that asks more
 /// than the machine holds); the image's program is the stand-in
 /// `nils-postcontrast` on the search path ([`FULL_PROGRAM`]).
 fn full_shipped() -> String {
@@ -161,7 +161,10 @@ fn full_shipped() -> String {
         text.contains("    memory-gb: 96\n"),
         "the shipped need moved"
     );
+    assert!(text.contains("    cores: 16\n"), "the shipped need moved");
     text.replace("    memory-gb: 96\n", "    memory-gb: 1\n")
+        .replace("    cores: 16\n", "    cores: 1\n")
+        .replace("  cpu-cores: 16\n", "  cpu-cores: 1\n")
 }
 
 /// A stand-in for the full image's program: it takes the shipped command
