@@ -3602,8 +3602,7 @@ fn write_bids(
             std::fs::remove_file(into.join(f)).ok();
         }
         Err(format!(
-            "BIDS requires of a {} {} what its headers do not give: {}",
-            datatype,
+            "BIDS requires of {datatype}/{} what its headers do not give: {}",
             stem_suffix(&stem),
             lacks.join(", ")
         ))
