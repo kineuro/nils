@@ -2620,6 +2620,154 @@ fn a_site_declares_the_places_it_has_and_an_update_reverts_none_of_them() {
     );
 }
 
+/// T4 for `nils setup` (Wave 7a §5.3 and §17): the source place a site
+/// declares is read by nothing before a person answers. Its folder holds
+/// loose DICOM beside a study whose identified files sit in
+/// `derivatives/dcm-original`; after setup has made the registry and the
+/// place, a digest of the folder, of the loose entries, of the study and of
+/// its originals is each refused, and the registry holds 0 files and no
+/// batch. Nothing in the folder moved.
+#[test]
+fn setup_s_source_place_is_never_read_before_the_person_s_answer() {
+    use nils_dicom::synth::{self, MetaFields};
+    let releases = Releases::new("1.0.0-alpha.1");
+    let nils = Installed::new("nils-setup-t4");
+    let config = TempDir::new("nils-setup-t4-config");
+    let base = TempDir::new("nils-setup-t4-base");
+    let dir = base.path().join("nils");
+    let data = base.path().join("dicom");
+    let files = [
+        "loose/sub-1/IM_0001",
+        "loose/sub-1/IM_0002",
+        "study/derivatives/dcm-original/p1/IM_0003",
+    ];
+    for (n, rel) in files.iter().enumerate() {
+        let sop = format!("1.2.8.{n}.1.1");
+        let mr = synth::minimal_mr(&format!("1.2.8.{n}"), &format!("1.2.8.{n}.1"), &sop);
+        let at = data.join(rel);
+        std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+        std::fs::write(&at, synth::part10(&MetaFields::mr(&sop), &mr, true)).unwrap();
+    }
+    let registry = dir.join("registry").display().to_string();
+    let (url, dir_s, packs) = (
+        releases.url(),
+        dir.display().to_string(),
+        base.path().join("packs").display().to_string(),
+    );
+    let source = format!("source={},role=source", data.display());
+    let held = format!("registry={registry},role=registry,backup=archives");
+    let archives = format!(
+        "archives={},role=backup",
+        base.path().join("archives").display()
+    );
+    let o = setup(
+        &nils.path(),
+        config.path(),
+        &[
+            "--yes",
+            "--parts",
+            "engine",
+            "--dir",
+            &dir_s,
+            "--channel",
+            &url,
+            "--pack-dir",
+            &packs,
+            "--place",
+            &archives,
+            "--place",
+            &held,
+            "--place",
+            &source,
+            "--no-service",
+        ],
+    );
+    assert!(o.ok, "{}\n{}", o.stdout, o.stderr);
+    let nils_at = |args: &[&str]| {
+        output(
+            Command::new(env!("CARGO_BIN_EXE_nils"))
+                .arg("--registry")
+                .arg(&registry)
+                .args(args),
+        )
+    };
+    let places = nils_at(&["place", "list", "--json"]);
+    assert!(places.status.success());
+    let doc: serde_json::Value = serde_json::from_slice(&places.stdout).unwrap();
+    let src = doc
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["name"] == "source")
+        .unwrap_or_else(|| panic!("{doc}"))
+        .clone();
+    assert_eq!(src["dataset"]["kind"], "root", "{src}");
+    // 0 files digested, whichever way the folder or a part of it is named
+    for target in [
+        "@source".to_string(),
+        data.display().to_string(),
+        base.path().display().to_string(),
+        data.join("loose").display().to_string(),
+        data.join("loose/sub-1").display().to_string(),
+        data.join("study").display().to_string(),
+        data.join("study/derivatives/dcm-original")
+            .display()
+            .to_string(),
+    ] {
+        let refused = nils_at(&["digest", &target]);
+        assert!(!refused.status.success(), "{target} was read");
+    }
+    let refused = nils_at(&["bring-in", "@source"]);
+    assert!(
+        !refused.status.success(),
+        "a bring-in of the root was queued"
+    );
+    let status = nils_at(&["status", "--json"]);
+    assert!(status.status.success());
+    let status: serde_json::Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert_eq!(
+        status["batches"].as_array().map(Vec::len),
+        Some(0),
+        "{status}"
+    );
+    assert_eq!(status["jobs"].as_array().map(Vec::len), Some(0), "{status}");
+    let listed = nils_at(&["jobs", "list", "--all", "--json"]);
+    assert!(listed.status.success());
+    let listed: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
+    assert_eq!(listed, serde_json::json!([]), "a job was queued: {listed}");
+    let read = instances_held(&registry);
+    assert_eq!(read, 0, "{read} file(s) digested");
+    for rel in files {
+        assert!(data.join(rel).is_file(), "{rel} moved");
+    }
+    assert!(!data.join("loose/derivatives").exists());
+}
+
+/// How many files a registry holds, by its custody page: the instances
+/// counted in every store that counts them.
+fn instances_held(registry: &str) -> i64 {
+    let out = output(
+        Command::new(env!("CARGO_BIN_EXE_nils"))
+            .arg("--registry")
+            .arg(registry)
+            .args(["custody", "--json"]),
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let counted: Vec<i64> = doc["stores"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{doc}"))
+        .iter()
+        .filter_map(|s| s["counts"]["instances"].as_i64())
+        .collect();
+    assert!(!counted.is_empty(), "no store counts instances: {doc}");
+    counted.iter().sum()
+}
+
 /// Places that cannot be the places of this install are refused with the fix
 /// in the same sentence, and nothing is written: no registry, no record.
 #[test]

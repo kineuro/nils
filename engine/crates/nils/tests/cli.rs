@@ -5395,6 +5395,119 @@ fn a_dataset_is_pseudonymised_at_the_keyboard_and_brought_in_as_a_chain() {
         "{listed}"
     );
     assert!(ran[1]["result"]["chain_ended"].is_null(), "{listed}");
+
+    // T7 (Wave 7a §6.3): every file of the pseudonymised dataset, and every
+    // file of a release of it, carries the four marks, with the options its
+    // writer's policy names: the pseudonymiser keeps the UIDs (113110), and a
+    // release that remaps them does not say so
+    let anon_files = dicom_files(&anon);
+    assert_eq!(anon_files.len(), 7, "{anon_files:?}");
+    for f in &anon_files {
+        let (removed, method, longitudinal, codes) = marks_of(f);
+        assert_eq!(removed, "YES", "{}", f.display());
+        assert_eq!(
+            method,
+            format!("NILS {} pseudonymise", env!("CARGO_PKG_VERSION")),
+            "{}",
+            f.display()
+        );
+        assert_eq!(longitudinal, "UNMODIFIED", "{}", f.display());
+        assert!(
+            codes.contains(&"113100".to_string()) && codes.contains(&"113110".to_string()),
+            "{}: {codes:?}",
+            f.display()
+        );
+    }
+    let out = TempDir::new("cli-pseudonymize-release");
+    let tree = out.path().join("t7");
+    run(&[
+        "place",
+        "add",
+        "out",
+        out.path().to_str().unwrap(),
+        "--role",
+        "export",
+    ]);
+    run(&[
+        "release",
+        "--out",
+        tree.to_str().unwrap(),
+        "--name",
+        "t7",
+        "--layout",
+        "descriptive",
+        "--json",
+    ]);
+    let released = dicom_files(&tree);
+    assert_eq!(released.len(), 7, "{released:?}");
+    let mut options = std::collections::BTreeSet::new();
+    for f in &released {
+        let (removed, method, longitudinal, codes) = marks_of(f);
+        assert_eq!(removed, "YES", "{}", f.display());
+        assert_eq!(
+            method,
+            format!("NILS {} release", env!("CARGO_PKG_VERSION")),
+            "{}",
+            f.display()
+        );
+        assert_eq!(longitudinal, "UNMODIFIED", "{}", f.display());
+        assert!(codes.contains(&"113100".to_string()), "{codes:?}");
+        assert!(!codes.contains(&"113110".to_string()), "{codes:?}");
+        options.insert(codes);
+    }
+    assert_eq!(options.len(), 1, "one policy, one option list: {options:?}");
+}
+
+/// Every DICOM file under a tree, by its preamble.
+fn dicom_files(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for e in std::fs::read_dir(&dir).unwrap().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if std::fs::read(&p)
+                .map(|b| b.len() > 132 && &b[128..132] == b"DICM")
+                .unwrap_or(false)
+            {
+                out.push(p);
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// The four marks of Wave 7a §6.1 a file carries: PatientIdentityRemoved,
+/// DeidentificationMethod, LongitudinalTemporalInformationModified and the
+/// code values of DeidentificationMethodCodeSequence.
+fn marks_of(path: &std::path::Path) -> (String, String, String, Vec<String>) {
+    use dicom_dictionary_std::tags;
+    let object = dicom_object::open_file(path).unwrap();
+    let text = |o: &dicom_object::InMemDicomObject, tag| {
+        o.element(tag)
+            .unwrap_or_else(|_| panic!("{} has no {tag}", path.display()))
+            .value()
+            .to_str()
+            .unwrap()
+            .trim()
+            .to_string()
+    };
+    let codes = object
+        .element(tags::DEIDENTIFICATION_METHOD_CODE_SEQUENCE)
+        .unwrap_or_else(|_| panic!("{} has no code sequence", path.display()))
+        .items()
+        .unwrap()
+        .iter()
+        .map(|i| text(i, tags::CODE_VALUE))
+        .collect();
+    (
+        text(&object, tags::PATIENT_IDENTITY_REMOVED),
+        text(&object, tags::DEIDENTIFICATION_METHOD),
+        text(&object, tags::LONGITUDINAL_TEMPORAL_INFORMATION_MODIFIED),
+        codes,
+    )
 }
 
 fn packs_dir() -> std::path::PathBuf {

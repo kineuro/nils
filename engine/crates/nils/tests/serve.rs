@@ -3255,6 +3255,9 @@ fn a_dataset_is_declared_on_a_source_place_and_named_by_its_name() {
     };
     let ends = |v: &serde_json::Value, tail: &str| v.as_str().is_some_and(|s| s.ends_with(tail));
 
+    // what the registry held before any source was added (T4 below)
+    let (_, before) = ask("GET", "/api/status", None, ops);
+    let (_, jobs_before) = ask("GET", "/api/jobs?all=1", None, ops);
     // before anything is declared, a look says what the folder holds
     let (status, look) = ask("POST", "/api/ingest/look", Some(r#"{"at": "@old"}"#), ops);
     assert_eq!(status, 200, "{look}");
@@ -3641,6 +3644,15 @@ fn a_dataset_is_declared_on_a_source_place_and_named_by_its_name() {
             "{command}: {refused}"
         );
     }
+    // T4 (Wave 7a §17): every source added through the door so far, the
+    // root and the folders of unknown structure under it among them, and 0
+    // files digested: no batch, and no job queued, since the first look
+    let (status, now) = ask("GET", "/api/status", None, ops);
+    assert_eq!(status, 200, "{now}");
+    assert_eq!(now["batches"], before["batches"], "{now}");
+    let (status, jobs) = ask("GET", "/api/jobs?all=1", None, ops);
+    assert_eq!(status, 200, "{jobs}");
+    assert_eq!(jobs, jobs_before, "a job was queued");
     let (_, listed) = ask("GET", "/api/places", None, ops);
     let row = listed["places"]
         .as_array()
