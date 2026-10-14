@@ -17,7 +17,7 @@
 # With a card the tools run in waves on it (several SynthSeg processes,
 # each held to a share of the card) while worker processes convert before
 # and compute the features after; without one, every tool runs on the CPU,
-# one SynthSeg process per 32 GB of the memory given.
+# one SynthSeg process per 96 GB of the memory given.
 #
 # The image is FreeSurfer 8.2.0's with the card's runtimes beside it
 # (Dockerfile.full). It carries third-party components FreeSurfer
@@ -35,7 +35,7 @@ description: >-
 
 container-image:
   type: docker
-  image: "ghcr.io/kineuro/nils-postcontrast-full@sha256:830c28e8930f58f9083132982ea4647cc9de1a6a75c4798282b9e004dbd12622"
+  image: "ghcr.io/kineuro/nils-postcontrast-full@sha256:591f596ec1f43accf338a64222f02da3e6c7e6a7a3fbae59790d4e8162f6dde1"
 
 inputs:
   - id: threads
@@ -53,12 +53,12 @@ inputs:
     name: Memory
     type: Number
     integer: true
-    minimum: 32
+    minimum: 96
     maximum: 1024
-    description: The memory in GB the run may use; SynthSeg on the CPU runs at most one process per 32 GB of it.
+    description: The memory in GB the run may use; SynthSeg on the CPU runs at most one process per 96 GB of it (one large volume held 85 GB).
     value-key: "[MEMORY]"
     command-line-flag: --memory-gb
-    default-value: 64
+    default-value: 96
     optional: true
   - id: synthseg_procs
     name: SynthSeg processes
@@ -81,7 +81,7 @@ output-files:
 
 suggested-resources:
   cpu-cores: 16
-  ram: 64
+  ram: 96
   walltime-estimate: 1.0
 
 x-nils:
@@ -122,7 +122,7 @@ x-nils:
         - {name: arms_digest, type: text, description: The arms}
   needs:
     gpu: optional
-    memory-gb: 64
+    memory-gb: 96
     gpu-memory-gb: 48
     cores: 16
     cores-input: threads

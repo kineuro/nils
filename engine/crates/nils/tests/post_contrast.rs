@@ -157,8 +157,8 @@ fn full_shipped() -> String {
             .join("../../../pipelines/nils-postcontrast/postcontrast-full/nils.job.yml"),
     )
     .unwrap();
-    assert!(text.contains("    memory-gb: 64\n"), "the shipped need moved");
-    text.replace("    memory-gb: 64\n", "    memory-gb: 1\n")
+    assert!(text.contains("    memory-gb: 96\n"), "the shipped need moved");
+    text.replace("    memory-gb: 96\n", "    memory-gb: 1\n")
 }
 
 /// A stand-in for the full image's program: it takes the shipped command

@@ -19,7 +19,7 @@ tools fail keeps the arms it has, as model r1 does.
 **Where it runs.** With a card, the tools run in waves on it (``tools.wave``)
 while worker processes convert the stacks before and compute the features
 after; without one, every tool runs on the CPU, at most as many SynthSeg
-processes at once as the memory holds. A worker that dies (its memory,
+processes at once as the memory holds (one per 96 GB). A worker that dies (its memory,
 a signal) takes its pool with it: the pool is made again and the stacks
 it held are tried again, so one stack never ends the run.
 """
@@ -51,7 +51,7 @@ from .results import FAILED, SKIPPED, Run, Unit
 
 logger = logging.getLogger("nils_postcontrast.full")
 VALUE = {"given": GIVEN, "not given": NOT_GIVEN}
-CPU_SYNTHSEG_GB = 32  # the most one CPU SynthSeg process was seen to hold (the speed study's OOM records)
+CPU_SYNTHSEG_GB = 96  # the most one CPU SynthSeg process was seen to hold: 85 GB on a large deferred volume
 
 
 class FullParts:
@@ -554,13 +554,13 @@ def add_parser(sub) -> None:
     c.add_argument("--card-waves", type=int, default=2, help="waves on each card at once")
     c.add_argument("--synthseg-procs", type=int, default=2, help="SynthSeg processes a wave runs")
     c.add_argument("--synthseg-mib", type=int, default=20000, help="each SynthSeg process's share of its card")
-    c.add_argument("--synthseg-retry-mib", type=int, default=40000)
+    c.add_argument("--synthseg-retry-mib", type=int, default=50000, help="the share of the card a failed segmentation's second try takes")
     c.add_argument("--other-mib", type=int, default=20000, help="a wave's SynthMorph and SynthStrip on the card, at most")
     c.add_argument("--keep-free-mib", type=int, default=0, help="a wave starts only when its card keeps this much free after it (a shared card's lease)")
     c.add_argument("--cards", default="auto", help="auto, none, or a comma list of the card ids to use")
     c.add_argument("--card-share", type=float, default=0.75, help="the share of each card's memory the run may hold")
     c.add_argument("--card-budget-mib", type=int, default=0, help="the memory the run may hold of each card (overrides the share)")
-    c.add_argument("--memory-gb", type=int, default=64, help="the memory the run may use; CPU SynthSeg runs at most one per 32 GB of it")
+    c.add_argument("--memory-gb", type=int, default=64, help="the memory the run may use; CPU SynthSeg runs at most one per 96 GB of it")
     c.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto")
     c.add_argument("--frangi", choices=["auto", "cpu", "card"], default="auto")
     c.add_argument("--stall-s", type=float, default=7200.0, help="seconds without progress before the run gives up on the rest")
