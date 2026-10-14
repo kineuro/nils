@@ -6901,3 +6901,127 @@ fn an_unresolved_file_in_an_identified_dataset_s_tree_is_held() {
         .unwrap();
     assert_eq!(subjects, 0);
 }
+
+/// Wave 7a §5.4 and §18 (an unknown subject's files are held), found on the
+/// development install: a de-identified dataset declared to hold subject codes
+/// in PatientID, whose files held another identifier, had every file filed
+/// under its study UID, one subject per study, so one person with four
+/// studies held four codes. A pseudonymised tree read by its declaration never
+/// files a PatientID it cannot read under the study: the file is held and
+/// asked about. A personnummer is never read as a subject code. Once the
+/// dataset says what PatientID holds, the next read files the held files by
+/// person and answers the question.
+#[test]
+fn a_pseudonymised_tree_holds_what_its_declaration_cannot_read() {
+    let home = generator_home();
+    let registry = ["--registry", home.path().to_str().unwrap()];
+    let run = |args: &[&str]| nils().args(registry).args(args).output().unwrap();
+    let dir = TempDir::new("cli-unread");
+    // a subject code, as the declaration says
+    dir.file(
+        "derivatives/dcm-anon/a/IM_1",
+        &mr_of("1.2.12.1", "1.2.12.1.1.1", patient("k7m2p9x4q8r3", None)),
+    );
+    // one person's site ID in two studies, which no code alphabet spells
+    dir.file(
+        "derivatives/dcm-anon/b/IM_1",
+        &mr_of("1.2.12.2", "1.2.12.2.1.1", patient("SITE-0042", None)),
+    );
+    dir.file(
+        "derivatives/dcm-anon/b/IM_2",
+        &mr_of("1.2.12.3", "1.2.12.3.1.1", patient("SITE-0042", None)),
+    );
+    // a personnummer (the tax agency's published test number), which the
+    // code alphabet does spell
+    dir.file(
+        "derivatives/dcm-anon/c/IM_1",
+        &mr_of("1.2.12.4", "1.2.12.4.1.1", patient("201501012395", None)),
+    );
+    let added = run(&[
+        "place",
+        "add",
+        "ds",
+        dir.path().to_str().unwrap(),
+        "--role",
+        "source",
+        "--json",
+    ]);
+    assert!(added.status.success(), "{}", stderr(&added));
+    let ds: serde_json::Value = serde_json::from_slice(&added.stdout).unwrap();
+    assert_eq!(ds["dataset"]["state"], "anonymised", "{ds}");
+    let id = ds["id"].as_i64().unwrap().to_string();
+    let set = run(&[
+        "place",
+        "set",
+        &id,
+        "--patient-id",
+        "subject-code",
+        "--subjects",
+        "generated",
+    ]);
+    assert!(set.status.success(), "{}", stderr(&set));
+    let done = run(&["digest", "@ds", "--json"]);
+    assert!(done.status.success(), "{}", stderr(&done));
+
+    let db = home.path().join("registry.db");
+    let count = |sql: &str| -> i64 {
+        let mut store = nils_registry::Store::open_sqlite(&db).unwrap();
+        store.query(sql, &[]).unwrap()[0].int(0).unwrap()
+    };
+    // the code is a subject; nothing is filed under a study, and no
+    // personnummer is a code
+    assert_eq!(count("SELECT COUNT(*) FROM subject"), 1);
+    assert_eq!(
+        count("SELECT COUNT(*) FROM subject WHERE code = 'k7m2p9x4q8r3'"),
+        1
+    );
+    assert_eq!(count("SELECT COUNT(*) FROM study"), 1);
+    assert_eq!(
+        count(
+            "SELECT COUNT(*) FROM source_file WHERE status = 'quarantined' \
+             AND reason = 'identity.unmapped'"
+        ),
+        3
+    );
+    // asked about by the shape of what PatientID holds, never its value
+    assert_eq!(
+        count(
+            "SELECT COUNT(*) FROM review_item WHERE kind = 'identity.unmapped' \
+             AND status = 'open'"
+        ),
+        2
+    );
+    let mut store = nils_registry::Store::open_sqlite(&db).unwrap();
+    let shapes: Vec<String> = store
+        .query(
+            "SELECT detail FROM source_file WHERE status = 'quarantined' ORDER BY detail",
+            &[],
+        )
+        .unwrap()
+        .iter()
+        .map(|r| r.text(0).unwrap().to_string())
+        .collect();
+    assert_eq!(shapes, ["999999999999", "AAAA-9999", "AAAA-9999"]);
+    drop(store);
+
+    // the dataset says what PatientID holds: the next read files the held
+    // files by person, the two studies of the site ID under one subject, and
+    // answers the question
+    let set = run(&["place", "set", &id, "--patient-id", "id-type:patient-id"]);
+    assert!(set.status.success(), "{}", stderr(&set));
+    let again = run(&["digest", "@ds", "--json"]);
+    assert!(again.status.success(), "{}", stderr(&again));
+    assert_eq!(count("SELECT COUNT(*) FROM study"), 4);
+    assert_eq!(count("SELECT COUNT(*) FROM subject"), 3);
+    assert_eq!(
+        count("SELECT COUNT(*) FROM subject WHERE code = '201501012395'"),
+        0
+    );
+    assert_eq!(
+        count(
+            "SELECT COUNT(*) FROM review_item WHERE kind = 'identity.unmapped' \
+             AND status = 'open'"
+        ),
+        0
+    );
+}

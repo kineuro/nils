@@ -151,6 +151,9 @@ pub struct Resolver {
     /// value read verbatim there is one of this registry's codes, or no
     /// code at all.
     own_codes: bool,
+    /// A file whose PatientID held a value the rule could not read is held,
+    /// never made a subject under its study UID ([`Rule::holds_unread`]).
+    holds_unread: bool,
     batch_id: i64,
     /// Lookup → subject, for the identities met (§7.4 step 3).
     identities: LruCache<Vec<u8>, i64>,
@@ -197,6 +200,7 @@ impl Resolver {
             verbatim: rule.verbatim,
             personnummer: rule.normalises(),
             own_codes: rule.own_codes,
+            holds_unread: rule.holds_unread,
             batch_id,
             identities: LruCache::new(cap),
             pending: Vec::new(),
@@ -228,6 +232,13 @@ impl Resolver {
                     && value.chars().all(|c| CODE_ALPHABET.contains(c))
             }
         }
+    }
+
+    /// Whether a file waits, held, rather than being filed under its study
+    /// UID ([`Rule::holds_unread`]): its PatientID held a value the rule
+    /// could not read. One with nothing to read falls back as before.
+    pub fn holds(&self, ident: &Ident) -> bool {
+        self.holds_unread && ident.fell_back && ident.probe.is_some()
     }
 
     /// Whether the value a file carries stands as its subject's code: the

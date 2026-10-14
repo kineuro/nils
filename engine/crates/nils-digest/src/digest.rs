@@ -739,7 +739,9 @@ fn feed_cohort(
 /// the dataset holds files under, opened or brought up to date by every run
 /// and closed by a run that holds nothing under a shape any more, exactly as
 /// the pseudonymiser raises them for the files it holds. Only a dataset that
-/// says `hold` opens one; the shape and the count are all the item carries.
+/// says `hold` opens one, or one whose declaration could not read a file's
+/// PatientID (Wave 7a §5.4); the shape and the count are all the item
+/// carries.
 ///
 /// A run under any other word still closes what is open, since a dataset set
 /// to code its unmapped identifiers holds nothing at all any more, and an
@@ -761,7 +763,9 @@ fn ask_about_held(
         return Ok(());
     }
     let mut holding: Vec<(String, i64, String)> = Vec::new();
-    if settings.unmapped == Unmapped::Hold {
+    // a dataset that codes what no map names still holds, and asks about, a
+    // file its declaration cannot read (Wave 7a §5.4)
+    if settings.unmapped == Unmapped::Hold || settings.identity.holds_unread {
         let d = store.dialect();
         let seen = d.text_of(table("source_file").column("seen_at").expect("seen_at"));
         let sql = format!(

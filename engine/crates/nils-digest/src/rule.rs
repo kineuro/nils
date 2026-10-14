@@ -79,6 +79,17 @@ pub struct Rule {
     /// rule file cannot, and its `code: verbatim` files what it reads as
     /// the code as it always did.
     pub own_codes: bool,
+    /// The tree is a dataset's pseudonymised tree, read by what the dataset
+    /// declares PatientID holds (Wave 7a §5.4): a file whose PatientID holds
+    /// a value the declaration cannot read (another identifier where it
+    /// declares subject codes, or a personnummer) is held until a map or a
+    /// person decides (§18), never filed under its study UID. The fallback
+    /// made one person with four studies four subjects where a dataset
+    /// declared subject codes and its files held another identifier. A file
+    /// whose PatientID is empty says nothing to read, and still falls back
+    /// to its study, as v0 filed it. The engine sets it on the rules it
+    /// writes for a declaration; a rule file cannot, and keeps the fallback.
+    pub holds_unread: bool,
     /// Where the rule came from, for `--describe`: a path, or none for the
     /// default.
     pub source: Option<String>,
@@ -198,6 +209,7 @@ impl Default for Rule {
             }],
             verbatim: false,
             own_codes: false,
+            holds_unread: false,
             source: None,
             fields: IdentityFields::default(),
             today: personnummer::today(),
@@ -322,6 +334,7 @@ impl Rule {
             from,
             verbatim,
             own_codes: false,
+            holds_unread: false,
             source: None,
             fields,
             today: personnummer::today(),
@@ -345,10 +358,15 @@ impl Rule {
     }
 
     /// What a source's answer becomes: the value as read, or under a
-    /// personnummer rule its twelve digits, or nothing when it is none.
+    /// personnummer rule its twelve digits, or nothing when it is none. A
+    /// rule that reads subject codes takes no personnummer as one: an ID
+    /// that is the same everywhere is never a subject code (record 54), and
+    /// the code alphabet spells its digits.
     fn taken(&self, id: &str) -> Option<String> {
         if self.normalises() {
             personnummer::normalise_on(id, self.today).ok()
+        } else if self.verbatim && personnummer::normalise_on(id, self.today).is_ok() {
+            None
         } else {
             Some(id.to_string())
         }
@@ -395,7 +413,12 @@ impl Rule {
         if self.normalises() {
             out.push_str(" (as twelve digits)");
         }
-        out.push_str(&format!(", then {FALLBACK_FIELD}"));
+        match self.holds_unread {
+            true => out.push_str(&format!(
+                "; a value it cannot read is held, an empty one falls back to {FALLBACK_FIELD}"
+            )),
+            false => out.push_str(&format!(", then {FALLBACK_FIELD}")),
+        }
         if self.verbatim {
             out.push_str("; the value read is the subject code itself");
             if self.own_codes {
@@ -433,6 +456,9 @@ impl Rule {
         });
         if self.normalises() {
             out["normalise"] = json!("personnummer-12");
+        }
+        if self.holds_unread {
+            out["unread"] = json!("held");
         }
         out
     }
@@ -812,6 +838,52 @@ identity:
         // the default rule derives
         assert!(!Rule::default().verbatim);
         assert_eq!(Rule::default().to_json()["code"], "derived");
+    }
+
+    /// Wave 7a §5.4: a rule that reads subject codes never reads a
+    /// personnummer as one, although the code alphabet spells its digits; and
+    /// a rule the engine writes for a dataset's declaration says that a file
+    /// it cannot read is held, not filed under its study.
+    #[test]
+    fn a_rule_that_reads_codes_takes_no_personnummer_and_says_what_it_holds() {
+        let mut rule = Rule::parse(
+            "identity:\n  id_type: subject-code\n  from:\n    - field: PatientID\n      pattern: '^(?<id>[0-9a-hjkmnp-tv-z]+)$'\n  code: verbatim\n",
+        )
+        .unwrap();
+        // the tax agency's published test numbers, twelve and ten digits
+        for number in ["201501012395", "1501012395"] {
+            let mut x = extracted(vec![Some(number)]);
+            let ident = rule.apply(&mut x, "s/1.dcm");
+            assert!(ident.fell_back, "{number}");
+            assert!(
+                x.diagnostics
+                    .iter()
+                    .any(|d| d.kind == DiagnosticKind::IdentityUnparsed),
+                "{number}"
+            );
+        }
+        // a code of digits that is no personnummer is still a code
+        let mut x = extracted(vec![Some("123456789012")]);
+        let ident = rule.apply(&mut x, "s/1.dcm");
+        assert!(!ident.fell_back);
+        assert_eq!(ident.value, "123456789012");
+        // the default rule derives a code from a personnummer as from any ID
+        let mut x = extracted(vec![Some("201501012395")]);
+        assert!(!Rule::default().apply(&mut x, "s/1.dcm").fell_back);
+
+        assert!(!rule.holds_unread);
+        assert!(rule.describe().contains(", then StudyInstanceUID"));
+        assert!(rule.to_json().get("unread").is_none());
+        rule.holds_unread = true;
+        assert!(
+            rule.describe().contains(
+                "; a value it cannot read is held, an empty one falls back to StudyInstanceUID"
+            ),
+            "{}",
+            rule.describe()
+        );
+        assert!(!rule.describe().contains(", then StudyInstanceUID"));
+        assert_eq!(rule.to_json()["unread"], "held");
     }
 
     #[test]
