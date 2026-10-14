@@ -151,6 +151,11 @@ pub fn pseudonymize_with(
             error,
         })?;
     }
+    // the tree's scheme for its series folders, before the job records
+    // what the run was asked to do (record 55 K9)
+    let mut settings = settings.clone();
+    settings.series_folders = series_folders_of(registry, &settings)?;
+    let settings = &settings;
     let run = if settings.dry_run {
         None
     } else {
@@ -161,6 +166,58 @@ pub fn pseudonymize_with(
         mark_failed(registry, r, &e.to_string());
     }
     result
+}
+
+/// How a run names its tree's series folders (record 55 K9, ruling 18): a
+/// tree that holds nothing yet, on disk or in the registry's rows of this
+/// dataset, is begun by number and description; a tree that holds files
+/// keeps the scheme the latest run that recorded one wrote in, and a tree no
+/// run recorded a scheme for was begun before the scheme existed, by number
+/// alone. Existing trees are never renamed.
+fn series_folders_of(
+    registry: &mut Registry,
+    settings: &Settings,
+) -> Result<layout::SeriesFolders, PseudonymizeError> {
+    let on_disk = std::fs::read_dir(&settings.anon).is_ok_and(|mut d| d.next().is_some());
+    let store = registry.store();
+    let d = store.dialect();
+    let written = format!(
+        "SELECT 1 FROM {} WHERE place_id = {} AND out_path IS NOT NULL LIMIT 1",
+        store.qualified("pseudonym_file"),
+        d.param(1, Type::Int)
+    );
+    let in_registry = store
+        .query_opt(&written, &[Param::Int(settings.place_id)])?
+        .is_some();
+    if !on_disk && !in_registry {
+        return Ok(layout::SeriesFolders::Description);
+    }
+    let args = d.text_of(table("job").column("args").expect("job.args"));
+    let sql = format!(
+        "SELECT {args} FROM {} WHERE kind = {} ORDER BY id DESC",
+        store.qualified("job"),
+        d.param(1, Type::Text)
+    );
+    for row in store.query(&sql, &[Param::from("pseudonymize")])? {
+        let Some(text) = row.opt_text(0)? else {
+            continue;
+        };
+        let Ok(args) = serde_json::from_str::<serde_json::Value>(text) else {
+            continue;
+        };
+        if args["place_id"].as_i64() != Some(settings.place_id)
+            || args["dry_run"].as_bool() == Some(true)
+        {
+            continue;
+        }
+        if let Some(scheme) = args["series_folders"]
+            .as_str()
+            .and_then(layout::SeriesFolders::of)
+        {
+            return Ok(scheme);
+        }
+    }
+    Ok(layout::SeriesFolders::Number)
 }
 
 /// The rows a run holds while it goes on.
@@ -490,6 +547,9 @@ struct Ctx<'a> {
     claimed: Mutex<HashSet<String>>,
     /// The directories made this run: `create_dir_all` once per directory.
     dirs: Mutex<HashSet<PathBuf>>,
+    /// Whether the copy keeps SeriesDescription, which a dataset may name
+    /// to remove; a series folder never names what its files do not hold.
+    description_kept: bool,
 }
 
 /// The pipeline, then the batch's record.
@@ -517,17 +577,21 @@ fn execute(
     } else {
         None
     };
+    let scrub = Scrub::new(
+        &settings.private,
+        &settings.tags.keep,
+        &settings.tags.remove,
+    );
+    let description_kept = !nils_release::scrub::removals(&scrub.plan(""))
+        .contains(&dicom_dictionary_std::tags::SERIES_DESCRIPTION);
     let ctx = Ctx {
         settings,
-        scrub: Scrub::new(
-            &settings.private,
-            &settings.tags.keep,
-            &settings.tags.remove,
-        ),
+        scrub,
         progress: &progress,
         cancel,
         claimed: Mutex::new(HashSet::new()),
         dirs: Mutex::new(HashSet::new()),
+        description_kept,
     };
 
     let (walk_tx, walk_rx) = crossbeam_channel::bounded(WALK_BOUND);
@@ -1153,7 +1217,15 @@ pub(crate) fn folder_of(value: &str) -> String {
 }
 
 fn place(ctx: &Ctx<'_>, code: &str, facts: &Facts, prior: Option<&Prior>) -> String {
-    let base = layout::relative(code, facts);
+    let base = if ctx.description_kept || facts.series_description.is_none() {
+        layout::relative(code, facts, ctx.settings.series_folders)
+    } else {
+        let bare = Facts {
+            series_description: None,
+            ..facts.clone()
+        };
+        layout::relative(code, &bare, ctx.settings.series_folders)
+    };
     let own = prior.and_then(|p| p.out_path.as_deref());
     let mut rel = base.clone();
     let mut n = 1;

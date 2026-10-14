@@ -9,7 +9,7 @@
 //! never overwrites what a person said.
 //!
 //! What is measured first (§10.1) is why: at the pack's thresholds the
-//! nmosd corpus asks nothing and the mixed corpus asks 77 items in 9
+//! corpus of study D asks nothing and the mixed corpus asks 77 items in 9
 //! groups; with every axis at 0.95 the two ask 10,791 and 10,725 items,
 //! which are 34 and 108 questions.
 

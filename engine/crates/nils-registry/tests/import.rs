@@ -357,7 +357,7 @@ fn cohorts_members_diseases_and_their_types_go_through_the_same_door() {
         let r = import::apply(
             &mut l.registry,
             &cohort,
-            "cohort,about\nnmosd,the NMOSD cohort\n",
+            "cohort,about\nd,the cohort of study D\n",
             "tester",
         )
         .unwrap();
@@ -365,14 +365,14 @@ fn cohorts_members_diseases_and_their_types_go_through_the_same_door() {
         let r = import::apply(
             &mut l.registry,
             &cohort,
-            "cohort,about\nnmosd,the NMOSD cohort\n",
+            "cohort,about\nd,the cohort of study D\n",
             "tester",
         )
         .unwrap();
         assert_eq!(r.skipped, 1, "{name}");
 
         let member = Mapping::parse(
-            "import:\n  target: cohort_member\n  subject: {column: code}\n  cohort: nmosd\n",
+            "import:\n  target: cohort_member\n  subject: {column: code}\n  cohort: d\n",
         )
         .unwrap();
         let r = import::apply(

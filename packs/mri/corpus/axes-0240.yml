@@ -391,7 +391,9 @@ cases:
     flags:
       ge_mdme_real: false
     axes:
-      construct: ''
+      # MRI pack 1.2.0 (ruling 17, Q6): an acquired MDME image is its
+      # stored component, a magnitude here.
+      construct: Magnitude
 
   - name: the SWI image of GE's SWI research sequence, named for the protocol and then SWI, is SWIRecon
     stack:

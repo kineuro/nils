@@ -1,0 +1,254 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# MRI pack 1.2.0: the stored image component (record 55, ruling 17, Q1 to
+# Q6, within ruling 18's scope; rules/component.yml and rules/symri.yml).
+# For six researched cases the construct records the component the image
+# was stored as; the guards after them keep the rule from reaching a plain
+# acquisition (N7), a difference image or an M0 scan. Every stack here is
+# invented from the pattern; none is a real header.
+
+cases:
+
+  # --- Q1: MEDIC
+
+  - name: a MEDIC image as acquired is its stored magnitude, base T2 star
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\NORM'
+      scanning_sequence: 'GR'
+      sequence_variant: 'SP\OSP'
+      manufacturer: SIEMENS
+      text_sequence_name: '*me2d1r3'
+      text_series_description: 'ax t2 medic'
+      echo_time: 20
+      repetition_time: 700
+      flip_angle: 20
+    axes:
+      technique: MEDIC
+      construct: Magnitude
+      base: 'T2*w'
+
+  - name: a MEDIC image marked ND keeps the ND beside its magnitude
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      scanning_sequence: 'GR'
+      sequence_variant: 'SP\OSP'
+      manufacturer: SIEMENS
+      text_sequence_name: '*me2d1r3'
+      text_series_description: 'ax t2 medic'
+      echo_time: 20
+      repetition_time: 700
+      flip_angle: 20
+    axes:
+      technique: MEDIC
+      construct: 'Magnitude,ND'
+      base: 'T2*w'
+
+  # --- Q2: QALAS
+
+  - name: a QALAS image as acquired is its stored magnitude, with no base and no modifier
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\DIS2D'
+      scanning_sequence: 'GR\IR'
+      sequence_variant: 'SK\SP\MP'
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      text_sequence_name: 'qalas3d'
+      text_series_description: 'SyMRI 3D QALAS'
+    axes:
+      technique: QALAS
+      construct: Magnitude
+      base: ''
+      modifier: ''
+
+  # --- Q3: an SWI-type EPI with SWI processing off
+
+  - name: an SWI-type EPI with SWI off, stored as its magnitude, is Magnitude and T2 star
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\NORM'
+      scanning_sequence: EP
+      sequence_variant: SK
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      text_sequence_name: '*epfid3d1_15'
+      text_series_description: 'swi_epi3d'
+    axes:
+      technique: GRE-EPI
+      construct: Magnitude
+      base: 'T2*w'
+
+  - name: the phase series of an SWI-type EPI is Phase and has no base
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\P\DIS2D'
+      scanning_sequence: EP
+      sequence_variant: SK
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      text_sequence_name: '*epfid3d1_15'
+      text_series_description: 'swi_epi3d'
+    axes:
+      construct: Phase
+      base: ''
+
+  # --- Q4: ASL label and control
+
+  - name: an ASL label or control image with no component token is base ASL and Magnitude
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\ASL\NONE'
+      scanning_sequence: EP
+      sequence_variant: SK
+      manufacturer: SIEMENS
+      text_sequence_name: '*tgse3d1_7680'
+      text_series_description: 'tgse_pcasl'
+    axes:
+      technique: ASL
+      construct: Magnitude
+      base: ASL
+      directory_type: perf
+
+  - name: a motion-corrected ASL label or control image stored as M is base ASL and Magnitude
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND\MOCO'
+      scanning_sequence: EP
+      sequence_variant: SK
+      manufacturer: SIEMENS
+      text_sequence_name: '*tgse3d1_7680'
+      text_series_description: 'tgse_pcasl_moco'
+    axes:
+      technique: ASL
+      construct: 'Magnitude,ND'
+      base: ASL
+
+  - name: guard, the ASL difference image stays DeltaM and PWI
+    stack:
+      image_type: 'DERIVED\PRIMARY\ASL\SUBTRACTION'
+      scanning_sequence: EP
+      sequence_variant: SK
+      manufacturer: SIEMENS
+      text_sequence_name: '*tgse3d1_7680'
+      text_series_description: 'tgse_pcasl'
+    axes:
+      technique: ASL
+      construct: DeltaM
+      base: PWI
+
+  - name: guard, GE's proton-density ASL pass stays the M0 scan, PDw
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\ASL'
+      scanning_sequence: 'RM\IR'
+      mr_acquisition_type: 3D
+      manufacturer: GE MEDICAL SYSTEMS
+      ge_asl_contrast_technique: CONTINUOUS
+      text_series_description: 'Ax 3D ASL'
+    axes:
+      technique: ASL
+      construct: M0
+      base: PDw
+
+  # --- Q5 and Q6: SyMRI (MDME) as acquired
+
+  - name: a Siemens MDME phase image as acquired stays Phase with no base
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\P\DIS2D'
+      scanning_sequence: 'SE\IR'
+      sequence_variant: 'SK\SP\MP'
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_sequence_name: 'tir2d2_5'
+      text_series_description: 'SyMRI'
+      split_reason: multi_echo
+      stacks_in_series: 2
+    axes:
+      technique: MDME
+      construct: Phase
+      base: ''
+      modifier: ''
+
+  - name: a Philips MDME magnitude as acquired is Magnitude
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M_SE\M\SE'
+      scanning_sequence: SE
+      mr_acquisition_type: 2D
+      manufacturer: Philips Medical Systems
+      text_series_description: 'SyntAc'
+      split_reason: multi_echo
+      stacks_in_series: 2
+    axes:
+      technique: MDME
+      construct: Magnitude
+      base: ''
+
+  - name: a Philips MDME proton-density pass that names no component is Magnitude
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\PROTON_DENSITY\MIXED'
+      scanning_sequence: SE
+      mr_acquisition_type: 2D
+      manufacturer: Philips Medical Systems
+      text_series_description: 'SyntAc'
+    axes:
+      technique: MDME
+      construct: Magnitude
+
+  - name: a GE MAGiC image as acquired with flow compensation takes no modifier
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\MAGIC\NONE'
+      scanning_sequence: 'SE\IR'
+      sequence_variant: SK
+      scan_options: 'FC_SLICE_AX_GEMS\EDR_GEMS\SEQ_GEMS\IR_GEMS'
+      mr_acquisition_type: 2D
+      manufacturer: GE MEDICAL SYSTEMS
+      ge_pulse_sequence_name: MAGiC
+      ge_internal_pulse_sequence_name: FSE
+      ge_private_image_type: '0'
+      text_series_description: 'Ax MAGiC'
+      split_reason: multi_echo
+      stacks_in_series: 2
+      n_slices: 30
+      repetition_time: 4000
+      echo_time: 18
+      inversion_time: 11
+      flip_angle: 90
+      echo_train_length: 12
+    axes:
+      technique: MDME
+      construct: Magnitude
+      modifier: ''
+
+  - name: guard, a GE flow-compensated spin echo that is no MAGiC keeps FlowComp
+    stack:
+      manufacturer: 'GE MEDICAL SYSTEMS'
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: SE
+      sequence_variant: 'SK\OSP'
+      scan_options: 'FC_SLICE_AX_GEMS\FAST_GEMS\EDR_GEMS\FILTERED_GEMS'
+      text_sequence_name: 'fse-xl'
+      text_series_description: 'Ax T2 FSE'
+    axes:
+      modifier: FlowComp
+
+  # --- N7 stands for plain acquisitions (ruling 18)
+
+  - name: guard, a plain acquired TSE stored as M takes no Magnitude
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\NORM'
+      scanning_sequence: SE
+      sequence_variant: 'SK\SP\OSP'
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_sequence_name: '*tse2d1_15'
+      text_series_description: 't2_tse_tra'
+      echo_time: 100
+      repetition_time: 5000
+    axes:
+      construct: ''
+      base: T2w
+
+  - name: guard, a plain acquired diffusion image stored as M takes no Magnitude
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\DIFFUSION\NONE\ND'
+      scanning_sequence: EP
+      sequence_variant: SK
+      manufacturer: SIEMENS
+      text_sequence_name: '*ep_b1000t'
+      text_series_description: 'ep2d_diff_tra'
+    axes:
+      base: DWI

@@ -3,4 +3,4 @@
 import:
   target: cohort_member
   subject: {column: code}
-  cohort: nmosd
+  cohort: d

@@ -1003,7 +1003,7 @@ mod tests {
             if x["when"].to_string().contains("INV2") {
                 assert_eq!(x["id"], "mp2rage-inversion-no-base");
                 assert_eq!(x["axis"], "base");
-                assert_eq!(x["values"].as_array().unwrap().len(), 11, "{x}");
+                assert_eq!(x["values"].as_array().unwrap().len(), 12, "{x}");
             }
         }
         let rules: Vec<&str> = q["implications"]

@@ -357,7 +357,12 @@ fn a_dataset_is_pseudonymised_held_resumed_and_the_held_coded_anyway() {
         );
         assert_eq!(parts[1].len(), 8 + 1 + 8, "{rel:?}");
         assert!(parts[1].starts_with("2024010"), "{rel:?}");
-        assert_eq!(parts[2].len(), 3);
+        // a new tree's series folder: the number and the description
+        // (record 55 K9)
+        assert!(
+            parts[2] == "001-t1-mprage" || parts[2] == "002-t1-mprage",
+            "{rel:?}"
+        );
         assert!(parts[3].ends_with(".dcm") && parts[3].len() == 9, "{rel:?}");
         assert!(!path.with_extension("dcm.part").exists());
     }
@@ -1921,4 +1926,129 @@ fn a_changed_setting_has_the_held_files_read_again() {
         "the held files were read again under the new setting: {again}"
     );
     assert_eq!(written, held_files, "{again}");
+}
+
+/// The series folders under the anon tree, as `<study>/<series>` sorted.
+fn series_folders(anon: &Path) -> Vec<String> {
+    let mut out: Vec<String> = outputs(anon)
+        .iter()
+        .map(|p| {
+            let rel = p.strip_prefix(anon).unwrap();
+            let parts: Vec<String> = rel
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                .collect();
+            parts[2].clone()
+        })
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+fn add_original(dir: &TempDir, name: &str, series: u32, description: &str) {
+    dir.file(
+        &Path::new("derivatives/dcm-original")
+            .join(name)
+            .display()
+            .to_string(),
+        &original(MAPPED[0].0, 1, series, 1, description),
+    );
+}
+
+/// Record 55 K9 (ruling 18): a new tree's series folders carry the
+/// description, a resumed run keeps its tree's scheme, an empty description
+/// leaves the number alone, and unicode and over-long descriptions reduce.
+#[test]
+fn k9_a_new_tree_names_its_series_by_description_and_a_resumed_run_keeps_the_scheme() {
+    let lab = lab();
+    let dir = TempDir::new("pseudonymize-k9");
+    std::fs::create_dir_all(dir.path().join("derivatives/dcm-anon")).unwrap();
+    add_original(&dir, "a/IM_0001", 3, "Ax T2* FLAIR (+C)");
+    add_original(&dir, "a/IM_0002", 4, "");
+    add_original(&dir, "a/IM_0003", 5, "Före kontrast ÅÄÖ");
+    add_original(&dir, "a/IM_0004", 6, &"sag t1 mprage isotropic ".repeat(4));
+    let anon = dir.path().join("derivatives/dcm-anon");
+    let mut registry = lab.home.open().unwrap();
+    import_map(&mut registry);
+    let place = declare(&mut registry, dir.path(), json!({}));
+    let s = settings(&place);
+    let report = pseudonymize(&s, &mut registry).unwrap();
+    assert_eq!(report.files.written, 4, "{report}");
+    assert_eq!(
+        series_folders(&anon),
+        vec![
+            "003-Ax-T2-FLAIR-C",
+            "004",
+            "005-Fore-kontrast-AAO",
+            "006-sag-t1-mprage-isotropic-sag-t1-mprage-is",
+        ]
+    );
+    let args = rows(&mut registry, "SELECT args FROM job ORDER BY id DESC");
+    assert!(
+        args[0]
+            .text(0)
+            .unwrap()
+            .contains("\"series_folders\":\"description\"")
+    );
+
+    // resumed: a new series of the same tree is named the same way, and
+    // nothing written before moves
+    let before = outputs(&anon);
+    add_original(&dir, "a/IM_0005", 7, "dwi b1000");
+    let report = pseudonymize(&s, &mut registry).unwrap();
+    assert_eq!(report.files.written, 1, "{report}");
+    let after = outputs(&anon);
+    assert!(before.iter().all(|p| after.contains(p)));
+    assert!(series_folders(&anon).contains(&"007-dwi-b1000".to_string()));
+}
+
+#[test]
+fn k9_a_tree_begun_before_keeps_its_numbered_folders() {
+    let lab = lab();
+    let dir = TempDir::new("pseudonymize-k9-old");
+    let anon = dir.path().join("derivatives/dcm-anon");
+    // a tree an earlier engine wrote: numbered folders, and no run that
+    // recorded a scheme
+    std::fs::create_dir_all(anon.join("subj0001a/20240101-00000000/002")).unwrap();
+    std::fs::write(
+        anon.join("subj0001a/20240101-00000000/002/00001.dcm"),
+        b"an earlier copy",
+    )
+    .unwrap();
+    add_original(&dir, "a/IM_0001", 3, "t1_mprage");
+    let mut registry = lab.home.open().unwrap();
+    import_map(&mut registry);
+    let place = declare(&mut registry, dir.path(), json!({}));
+    let s = settings(&place);
+    let report = pseudonymize(&s, &mut registry).unwrap();
+    assert_eq!(report.files.written, 1, "{report}");
+    assert_eq!(series_folders(&anon), vec!["002", "003"]);
+    let args = rows(&mut registry, "SELECT args FROM job ORDER BY id DESC");
+    assert!(
+        args[0]
+            .text(0)
+            .unwrap()
+            .contains("\"series_folders\":\"number\"")
+    );
+
+    // and a later run keeps the number, whatever the description
+    add_original(&dir, "a/IM_0002", 8, "flair");
+    pseudonymize(&s, &mut registry).unwrap();
+    assert_eq!(series_folders(&anon), vec!["002", "003", "008"]);
+}
+
+#[test]
+fn k9_a_dataset_that_removes_the_description_names_the_number_alone() {
+    let lab = lab();
+    let dir = TempDir::new("pseudonymize-k9-removed");
+    std::fs::create_dir_all(dir.path().join("derivatives/dcm-anon")).unwrap();
+    add_original(&dir, "a/IM_0001", 3, "t1_mprage");
+    let anon = dir.path().join("derivatives/dcm-anon");
+    let mut registry = lab.home.open().unwrap();
+    import_map(&mut registry);
+    let place = declare(&mut registry, dir.path(), json!({"remove": ["0008,103E"]}));
+    let s = settings(&place);
+    pseudonymize(&s, &mut registry).unwrap();
+    assert_eq!(series_folders(&anon), vec!["003"]);
 }
