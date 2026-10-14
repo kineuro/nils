@@ -148,6 +148,12 @@ pub fn convert(
     std::fs::remove_file(&list).ok();
     let run = run.map_err(|e| format!("dcm2niix could not be run ({e})"))?;
     if !run.status.success() {
+        // What it wrote before it failed is no output either (Wave 7a §8.2:
+        // a failure that converted 26 of 32 files left letter-suffixed images
+        // the validator found in the tree)
+        for f in listing(into).difference(&before) {
+            std::fs::remove_file(into.join(f)).ok();
+        }
         let text = String::from_utf8_lossy(&run.stderr);
         let text = match text.trim().is_empty() {
             true => String::from_utf8_lossy(&run.stdout).trim().to_string(),
@@ -259,6 +265,48 @@ mod tests {
         // And compression is not a guess.
         assert!(!is_expected("sub-x_T1w.nii", "sub-x_T1w", true));
         assert!(is_expected("sub-x_T1w.nii", "sub-x_T1w", false));
+    }
+
+    /// Wave 7a §8.2: a converter that writes part of a stack and then fails
+    /// leaves nothing of it in the tree, beside what was there before.
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_conversion_leaves_nothing_it_wrote() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = nils_dicom::synth::TempDir::new("convert-failed");
+        let fake = dir.path().join("dcm2niix");
+        // writes two letter-suffixed images where it was told to, then fails
+        std::fs::write(
+            &fake,
+            "#!/bin/sh\nwhile [ \"$1\" != -o ]; do shift; done\ntouch \"$2/s_angioa.nii.gz\" \"$2/s_angiob.nii.gz\"\necho 'Error: Converted 26 of 32 files' >&2\nexit 1\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let c = Converter {
+            path: fake,
+            version: "stand-in".into(),
+        };
+        let into = dir.path().join("out");
+        std::fs::create_dir_all(&into).unwrap();
+        std::fs::write(into.join("kept_T1w.nii.gz"), b"0").unwrap();
+        let work = dir.path().join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let e = convert(
+            &c,
+            &[dir.path().join("1.dcm")],
+            &work,
+            &into,
+            "s_angio",
+            true,
+        )
+        .unwrap_err();
+        assert!(e.contains("Converted 26 of 32"), "{e}");
+        let left: Vec<String> = std::fs::read_dir(&into)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(left, ["kept_T1w.nii.gz"]);
     }
 
     #[test]

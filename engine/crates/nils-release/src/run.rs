@@ -3586,6 +3586,28 @@ fn write_bids(
         &stem,
         settings.compress,
     );
+    // Wave 7a §8.2: an image BIDS cannot admit from its headers alone is no
+    // BIDS image; it goes under `sourcedata/` as one that did not convert
+    let made = made.and_then(|made| {
+        let datatype = job.place.dir.rsplit('/').next().unwrap_or("");
+        let raw = job.place.dir.starts_with("sub-") && job.place.dir.split('/').count() == 3;
+        let lacks = match raw {
+            true => crate::bids::sidecar::gaps(datatype, &stem, &into, &made.files),
+            false => Vec::new(),
+        };
+        if lacks.is_empty() {
+            return Ok(made);
+        }
+        for f in &made.files {
+            std::fs::remove_file(into.join(f)).ok();
+        }
+        Err(format!(
+            "BIDS requires of a {} {} what its headers do not give: {}",
+            datatype,
+            stem_suffix(&stem),
+            lacks.join(", ")
+        ))
+    });
     match made {
         Ok(made) => {
             // Record 55 C4 (2026-10-09), after v0's `bids-dcm` tree: the
@@ -3627,6 +3649,19 @@ fn write_bids(
             // or an ADC map carrying them is an error, so a file whose
             // extension the suffix's group does not admit is not kept.
             let datatype = job.place.dir.rsplit('/').next().unwrap_or("");
+            // and with no group to ask, a gradient table stays beside a
+            // `dwi` image alone (a trace's was found by the validator)
+            if crate::bids::schema::group_of(datatype, stem_suffix(&stem)).is_none()
+                && stem_suffix(&stem) != "dwi"
+            {
+                files.retain(|file| {
+                    let table = file.ends_with(".bval") || file.ends_with(".bvec");
+                    if table {
+                        std::fs::remove_file(into.join(file)).ok();
+                    }
+                    !table
+                });
+            }
             if let Some(group) = crate::bids::schema::group_of(datatype, stem_suffix(&stem)) {
                 files.retain(|file| {
                     let admitted = group

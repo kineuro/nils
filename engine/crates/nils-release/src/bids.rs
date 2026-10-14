@@ -17,3 +17,4 @@ pub mod place;
 pub mod repeat;
 pub mod schema;
 pub mod separate;
+pub mod sidecar;
