@@ -348,6 +348,92 @@ fn count(store: &mut Store, sql: &str) -> Result<i64, StoreError> {
     store.query(sql, &[])?[0].int(0)
 }
 
+/// What a dataset's found tree holds, as the step and the card count it
+/// (2026-10-14): the files, their bytes where counted, whether the count
+/// stopped short, and what counted them.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Found {
+    pub(crate) files: Option<i64>,
+    pub(crate) bytes: Option<i64>,
+    /// The probe's count stopped short of a large tree (it reads a page's
+    /// worth of entries, never a walk of the archive): at least `files`.
+    pub(crate) partial: bool,
+    /// `read` (a read of the tree), `pseudonymise` (a pseudonymise run of
+    /// the originals) or `probe`.
+    pub(crate) counted_by: &'static str,
+}
+
+/// The newest finished walk of a dataset's found tree, which counts every
+/// file of it where the probe is bounded: a read (a digest) for the tree
+/// NILS reads, a pseudonymise run for an identified dataset's originals.
+/// Both are filed under the tree NILS reads (`anon_root`, canonical); a read
+/// of a folder under it walked less than the tree and is not one. The files
+/// the walk saw (seen, unchanged ones too), and their bytes where it
+/// measured every one (a read that found none unchanged; a pseudonymise run
+/// measures none).
+pub(crate) fn walked(
+    store: &mut Store,
+    sources: &str,
+    anon_root: &str,
+    tree: &str,
+) -> Result<Option<(i64, Option<i64>)>, StoreError> {
+    let originals = tree == "originals";
+    let kind = match originals {
+        true => "b.kind = 'pseudonymize'",
+        false => "(b.kind IS NULL OR b.kind = 'digest')",
+    };
+    let d = store.dialect();
+    let sql = format!(
+        "SELECT {} FROM {} b JOIN {} s ON s.id = b.source_id \
+         WHERE b.source_id IN ({sources}) AND s.root_canonical = {} AND {kind} \
+         AND b.state = 'done' ORDER BY b.id DESC LIMIT 1",
+        crate::text_of(store, "ingest_batch", "counts"),
+        store.qualified("ingest_batch"),
+        store.qualified("source"),
+        d.param(1, nils_registry::schema::Type::Text),
+    );
+    let rows = store.query(&sql, &[nils_registry::store::Param::from(anon_root)])?;
+    let Some(r) = rows.first() else {
+        return Ok(None);
+    };
+    let counts: Value = r
+        .opt_text(0)?
+        .and_then(|t| serde_json::from_str(t).ok())
+        .unwrap_or(Value::Null);
+    Ok(match originals {
+        true => counts["files"]["seen"].as_i64().map(|seen| (seen, None)),
+        false => counts["seen"].as_i64().map(|seen| {
+            let every = counts["unchanged"].as_i64().unwrap_or(0) == 0;
+            (seen, counts["bytes"].as_i64().filter(|_| every))
+        }),
+    })
+}
+
+/// The found tree's count: the newest finished walk of it once one has
+/// run, else the probe's, which says where it stopped short. A walk that
+/// measured not every file's bytes takes the probe's where the probe
+/// counted the tree whole, and none where it stopped short.
+pub(crate) fn found_of(
+    probed: (Option<i64>, Option<i64>, bool),
+    walk: Option<(i64, Option<i64>)>,
+    originals: bool,
+) -> Found {
+    match walk {
+        Some((files, bytes)) => Found {
+            files: Some(files),
+            bytes: bytes.or(probed.1.filter(|_| !probed.2)),
+            partial: false,
+            counted_by: if originals { "pseudonymise" } else { "read" },
+        },
+        None => Found {
+            files: probed.0,
+            bytes: probed.1,
+            partial: probed.2 && probed.0.is_some(),
+            counted_by: "probe",
+        },
+    }
+}
+
 /// `(label, scans)` by value of an axis over the dataset's stacks, most
 /// first; for the kind axis a FLAIR is named as one whatever its base.
 fn by_axis(
@@ -828,9 +914,30 @@ pub(crate) fn document(
     };
 
     let mut steps = Vec::new();
-    // found: the tree NILS reads, or the originals of an identified dataset
+    // found: the tree NILS reads, or the originals of an identified dataset,
+    // counted by the newest walk of it once one has run (2026-10-14): the
+    // probe reads a page's worth of entries and says where it stopped short
     let found_tree = if has_originals { "originals" } else { "anon" };
-    let found_files = tree(found_tree, "files");
+    let walk = match (ids.is_empty(), dataset.tree_path("anon")) {
+        (false, Some(anon)) => {
+            let root = std::fs::canonicalize(&anon)
+                .unwrap_or(anon)
+                .display()
+                .to_string();
+            walked(store, &sources, &root, found_tree).map_err(failed)?
+        }
+        _ => None,
+    };
+    let counted = found_of(
+        (
+            tree(found_tree, "files"),
+            tree(found_tree, "bytes"),
+            doc["trees"][found_tree]["partial"].as_bool() == Some(true),
+        ),
+        walk,
+        has_originals,
+    );
+    let found_files = counted.files;
     let found_state = if state == "unknown" {
         "waiting"
     } else if found_files.unwrap_or(0) > 0 || reads > 0 {
@@ -846,7 +953,9 @@ pub(crate) fn document(
         "finished_at": dataset.probed_at.clone().unwrap_or_else(|| dataset.created_at.clone()),
         "progress": null,
         "files": found_files,
-        "bytes": tree(found_tree, "bytes"),
+        "bytes": counted.bytes,
+        "partial": counted.partial,
+        "counted_by": counted.counted_by,
     });
     found["tree"] = json!(found_tree);
     steps.push(found);
@@ -1020,7 +1129,8 @@ pub(crate) fn document(
         "body_regions": pairs(regions, "region"),
         "files": {
             "found": found_files,
-            "bytes": tree(found_tree, "bytes"),
+            "bytes": counted.bytes,
+            "found_partial": counted.partial,
             "read": read,
             "new": new,
             "known": known,
@@ -1048,7 +1158,48 @@ pub(crate) fn document(
 
 #[cfg(test)]
 mod tests {
-    use super::{Light, chain_state, flag_id, named_for, names};
+    use super::{Found, Light, chain_state, flag_id, found_of, named_for, names};
+
+    #[test]
+    fn a_found_count_is_the_newest_walk_s_once_one_ran_and_says_where_a_probe_stopped_short() {
+        // 2026-10-14: a production card said 49,836 files where its read
+        // saw 1,112,026; the probe reads a page's worth of entries
+        let probe = (Some(49_836), Some(16_000_000_000), true);
+        assert_eq!(
+            found_of(probe, None, false),
+            Found {
+                files: Some(49_836),
+                bytes: Some(16_000_000_000),
+                partial: true,
+                counted_by: "probe"
+            }
+        );
+        assert_eq!(
+            found_of(probe, Some((1_112_026, Some(9))), false),
+            Found {
+                files: Some(1_112_026),
+                bytes: Some(9),
+                partial: false,
+                counted_by: "read"
+            }
+        );
+        // a walk that measured not every file takes no bytes from a probe
+        // that stopped short, and a whole probe's where there is one
+        assert_eq!(found_of(probe, Some((1_112_026, None)), false).bytes, None);
+        assert_eq!(
+            found_of((Some(4), Some(9), false), Some((4, None)), false).bytes,
+            Some(9)
+        );
+        // an identified dataset's originals, walked by a pseudonymise run
+        assert_eq!(
+            found_of(probe, Some((7, None)), true).counted_by,
+            "pseudonymise"
+        );
+        // a probe that counted the tree whole, or counted nothing, stopped
+        // short of nothing
+        assert!(!found_of((Some(4), Some(9), false), None, false).partial);
+        assert!(!found_of((None, None, true), None, false).partial);
+    }
 
     fn w(line: &str) -> Vec<String> {
         line.split_whitespace().map(str::to_string).collect()
