@@ -75,8 +75,11 @@ RUN pip install --index-url "${TORCH_INDEX}" "torch==${TORCH_VERSION}" "torchvis
 
 # The weights, in a layer of their own that a code change does not rebuild.
 COPY src/nils_bodypart/__init__.py src/nils_bodypart/encoders.py src/nils_bodypart/bake.py /opt/bake/nils_bodypart/
+# The hub client's download cache and log (xet) go: the log names the
+# building machine's memory, and nothing reads either offline.
 RUN PYTHONPATH=/opt/bake python -m nils_bodypart.bake download \
-    && rm -rf /opt/bake \
+    && rm -rf /opt/bake "$HF_HOME/xet" \
+    && test ! -e "$HF_HOME/xet" \
     && chmod -R a+rX /opt/nils-bodypart
 
 # From here on the hub clients never touch the network.
