@@ -71,6 +71,9 @@ pub struct Seed {
 pub struct Results {
     pub units: Vec<Unit>,
     pub proposals: Vec<Value>,
+    /// Record 55 D3: System 1's opinions (`contracts/job/v1/opinions.schema.json`),
+    /// a second opinion beside the rules', never a decision.
+    pub opinions: Vec<Value>,
     /// Model cards (`contracts/model/v1`) the run used or made.
     pub models: Vec<Value>,
     pub seeds: Vec<Seed>,
@@ -97,6 +100,7 @@ pub fn parse(text: &str) -> Result<Results, String> {
         }
     };
     let (mut models, mut seeds, mut selection) = (Vec::new(), Vec::new(), None);
+    let mut opinions = Vec::new();
     let (units, proposals) = match &value {
         Value::Array(a) => (a.clone(), Vec::new()),
         Value::Object(o) => {
@@ -112,6 +116,7 @@ pub fn parse(text: &str) -> Result<Results, String> {
                 Some(_) => return Err("results.json units is a list".into()),
             };
             let proposals = list(o, "proposals")?;
+            opinions = list(o, "opinions")?;
             models = list(o, "models")?;
             if models.iter().any(|m| !m.is_object()) {
                 return Err("results.json models are model cards, objects".into());
@@ -171,6 +176,7 @@ pub fn parse(text: &str) -> Result<Results, String> {
     let mut out = Results {
         units: Vec::with_capacity(units.len()),
         proposals,
+        opinions,
         models,
         seeds,
         selection,

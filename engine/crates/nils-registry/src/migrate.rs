@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 97;
+pub const SCHEMA_VERSION: i64 = 98;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -442,6 +442,10 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 97,
         apply: a_file_s_content_is_learnt_when_it_is_read,
     },
+    Migration {
+        version: 98,
+        apply: system_one_beside_the_rules,
+    },
 ];
 
 /// Record 55 F2 and F5 (spec §12.3): the post-contrast label of each stack,
@@ -458,6 +462,39 @@ fn a_stack_carries_its_contrast_label(store: &mut Store, kind: Kind) -> Result<(
 /// Record 55 D4: several admitted models per task and slot, and the one a
 /// site chose (`model_choice`). Only a table is added; a registry from
 /// before has no choice, and each task answers with its default.
+/// Record 55 D3, D6 and D7 with record 56 (spec §11): System 1's answers
+/// as a second opinion (`opinion`), the rounds of a rules version and a
+/// System 1 version and the gate's outcomes on flagged datasets, a
+/// question's mode and the provisional answers and reads of blind-first
+/// review, the blind mark and the seconds on a decision and on a
+/// campaign's answer, a campaign's purpose and its reveals, a dataset's
+/// damaged-header flag, and the audit draws. Only tables and columns are
+/// added; no row is touched.
+fn system_one_beside_the_rules(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_tables(
+        store,
+        kind,
+        &[
+            "opinion",
+            "review_round",
+            "gate_outcome",
+            "review_provisional",
+            "review_read",
+            "campaign_reveal",
+            "audit_draw",
+            "audit_draw_stack",
+        ],
+    )?;
+    add_columns(store, "review_item", &["mode"])?;
+    add_columns(store, "decision", &["blind", "seconds", "mode"])?;
+    add_columns(store, "campaign", &["purpose"])?;
+    add_columns(store, "campaign_answer", &["blind"])?;
+    add_columns(store, "place", &["headers"])
+}
+
 fn a_site_chooses_a_model_per_task(store: &mut Store, kind: Kind) -> Result<(), Error> {
     if kind != Kind::Registry {
         return Ok(());

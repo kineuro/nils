@@ -2036,6 +2036,20 @@ fn routed(
     ) {
         return r;
     }
+    // record 55 D3, D6, D7: System 1 in the review rule, blind first, and
+    // the audit stream
+    if let Some(r) = crate::review_rule::route(
+        doors,
+        registry,
+        caller,
+        method.as_str(),
+        &segs,
+        query,
+        body,
+        quasi,
+    ) {
+        return r;
+    }
     // record 42: the campaigns and the label sets
     if let Some(r) = crate::campaigns::route(
         doors,
@@ -2546,7 +2560,10 @@ fn routed(
             registry
                 .refresh_meta()
                 .map_err(|e| Reply::error(500, e.to_string()))?;
-            Ok(Reply::ok(crate::schedule::calendar(registry)))
+            let mut doc = crate::schedule::calendar(registry);
+            // record 55 D6: the share of review questions read blind first
+            doc["review"] = crate::review_rule::settings_doc(registry)?;
+            Ok(Reply::ok(doc))
         }
         ["api", "settings"] if put => {
             // Wave 5 §10.3: the registry's calendar, which every dated
@@ -2566,7 +2583,16 @@ fn routed(
             };
             crate::schedule::set_calendar(registry, &locale, principal)
                 .map_err(|(code, m)| Reply::error(code, m))?;
-            Ok(Reply::ok(crate::schedule::calendar(registry)))
+            // record 55 D6: a site's share of blind-first review questions
+            if let Some(share) = doc["review"].get("blind_share").filter(|v| !v.is_null()) {
+                let share = share.as_f64().ok_or_else(|| {
+                    Reply::error(400, "review.blind_share is a share from 0 to 1")
+                })?;
+                crate::review_rule::set_share(registry, share, principal)?;
+            }
+            let mut out = crate::schedule::calendar(registry);
+            out["review"] = crate::review_rule::settings_doc(registry)?;
+            Ok(Reply::ok(out))
         }
         // Record 28: the pseudonymiser's own tag policy, the constants of
         // this binary and nothing of the registry, so any grant opens it.
@@ -4165,6 +4191,9 @@ fn routed(
             if !quasi {
                 rows = crate::pipelines::qc_items_grouped(rows);
             }
+            // record 55 D6: each question's mode, and a blind-first one
+            // read without NILS's answers until the caller answers it
+            crate::review_rule::blind_rows(registry, caller, &mut rows)?;
             Ok(Reply::ok(
                 serde_json::json!({ "count": rows.len(), "items": rows }),
             ))
@@ -4239,14 +4268,19 @@ fn routed(
                 &mut one,
                 crate::sealed::reads(&caller.access),
             )?;
-            let doc = one
-                .pop()
-                .ok_or_else(|| Reply::error(404, format!("no review item {id}")))?;
             // record 49 R4b: below detail quasi a pipeline's item is not read
             // one by one, and answers as an item that is not there
             if !quasi && item.kind == nils_registry::review::PIPELINE_QC_KIND {
                 return Err(Reply::error(404, format!("no review item {id}")));
             }
+            // record 55 D6: the first time a person opens a question is when
+            // the time their answer takes starts; a blind-first question is
+            // read without NILS's answers until they answer it
+            nils_registry::blind::read(registry.store(), id, principal)?;
+            crate::review_rule::blind_rows(registry, caller, &mut one)?;
+            let doc = one
+                .pop()
+                .ok_or_else(|| Reply::error(404, format!("no review item {id}")))?;
             Ok(Reply::ok(doc))
         }
         ["api", "review", _, "apply"] if post && json_body(body)?["values"].is_object() => {
@@ -4316,12 +4350,16 @@ fn routed(
                 &values,
             )
             .map_err(review_err)?;
+            let ids: Vec<i64> = applied.iter().map(|a| a.decision).collect();
+            let marked =
+                crate::review_rule::mark_applied(registry, caller, id, &item.kind, &doc, &ids)?;
             Ok(Reply::ok(serde_json::json!({
                 "decisions": applied.iter().map(|a| serde_json::json!({
                     "decision": a.decision, "axis": a.axis, "scope": a.scope,
                     "ref": a.reference, "closed": a.closed, "staged": a.staged,
                 })).collect::<Vec<_>>(),
                 "staged": applied.iter().any(|a| a.staged),
+                "answer": marked,
             })))
         }
         ["api", "review", _, "apply"] if post => {
@@ -4334,6 +4372,10 @@ fn routed(
             }
             unsealed_item(registry, caller, id)?;
             not_held(registry, id)?;
+            let asked_kind = nils_registry::review::item(registry.store(), id)
+                .map_err(review_err)?
+                .map(|i| i.kind)
+                .unwrap_or_default();
             let (kind, version, model) = author_at_apply(registry, caller, &doc)?;
             let applied = nils_registry::review::apply(
                 registry,
@@ -4368,12 +4410,21 @@ fn routed(
             } else {
                 None
             };
+            let marked = crate::review_rule::mark_applied(
+                registry,
+                caller,
+                id,
+                &asked_kind,
+                &doc,
+                &[applied.decision],
+            )?;
             Ok(Reply::ok(serde_json::json!({
                 "decision": applied.decision, "axis": applied.axis, "scope": applied.scope,
                 "ref": applied.reference, "closed": applied.closed, "members": applied.members,
                 "staged": applied.staged,
                 "model": applied.model.as_ref().map(nils_registry::model::Model::named),
                 "contrast_label": label,
+                "answer": marked,
             })))
         }
         ["api", "review", _, "accept"] if post => {
@@ -5101,6 +5152,11 @@ fn scans_door(
 /// from it.
 pub(crate) fn door(method: &str, segs: &[&str]) -> (Need, Detail) {
     use Detail::{Plain, Quasi};
+    // record 55 D3, D6, D7: the review rule's doors, before the table's
+    // wider patterns
+    if let Some(n) = crate::review_rule::door(method, segs) {
+        return n;
+    }
     match (method, segs) {
         // the Query page: reading and running questions
         (
@@ -5912,6 +5968,7 @@ pub(crate) fn doors_list() -> Vec<String> {
     .chain(crate::campaigns::DOORS.iter())
     .chain(crate::ask_doors::DOORS.iter())
     .chain(crate::main_scans::DOORS.iter())
+    .chain(crate::review_rule::DOORS.iter())
     .map(|d| (*d).to_string())
     .collect()
 }
@@ -7798,6 +7855,7 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
         crate::campaigns::POLICY
             .iter()
             .chain(crate::main_scans::POLICY.iter())
+            .chain(crate::review_rule::POLICY.iter())
             .map(|(door, writes, idem, cost, cap, now, then)| {
                 row(door, *writes, *idem, cost, cap, now, then)
             }),

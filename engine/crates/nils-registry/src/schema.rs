@@ -1022,6 +1022,11 @@ fn build_registry() -> Vec<Table> {
                 // lists and what becomes of the originals. Null on any other
                 // role; `place::dataset_of` reads it whole.
                 col("dataset", Type::Json),
+                // Record 56 section 3: a dataset whose headers are damaged
+                // or foreign (stripped names, another site's anonymised
+                // export, another language), as a person flagged it:
+                // {damaged, why, by, at}. Null reads the signs instead.
+                col("headers", Type::Json),
             ],
         )
         .unique(&["name"])
@@ -1263,6 +1268,15 @@ fn build_registry() -> Vec<Table> {
                 col("model_id", Type::Int),
                 col("campaign_id", Type::Int),
                 col("committed_by", Type::Text),
+                // Record 55 D6 (spec §11.4): 1 where the value was given
+                // blind (before any suggestion showed), 0 where it was
+                // not; null for a decision from before the mark, or one no
+                // person answered. Only a blind answer becomes a training
+                // label. The seconds the answer took, where measured, and
+                // the question's mode.
+                col("blind", Type::Int),
+                col("seconds", Type::Double),
+                col("mode", Type::Text),
             ],
         )
         .index(&["scope", "ref", "axis"]),
@@ -1422,6 +1436,162 @@ fn build_registry() -> Vec<Table> {
             ],
         )
         .index(&["task", "slot"]),
+        // Record 55 D3 and record 56 (spec §11.1): System 1's answer on a
+        // stack and axis, a second opinion beside the rules' and never a
+        // decision: its value, its calibrated probability, the rules'
+        // reliability on that header, and the fields that mattered most.
+        // A newer run of a model writes newer rows; the newest is read.
+        Table::new(
+            "opinion",
+            vec![
+                col("id", Type::Id),
+                req("stack_id", Type::Int),
+                req("axis", Type::Text),
+                req("model_id", Type::Int),
+                col("run_id", Type::Int),
+                // a value, values joined by a comma for a multi-valued axis,
+                // or null for "no value here"
+                col("value", Type::Text),
+                req("p", Type::Double),
+                col("reliability", Type::Double),
+                // [{field, effect}], each field's effect measured by
+                // leaving it out, largest first
+                col("fields", Type::Json),
+                col("probabilities", Type::Json),
+                col("note", Type::Text),
+                req("created_at", Type::Timestamp),
+            ],
+        )
+        .index(&["stack_id", "axis"])
+        .index(&["model_id"]),
+        // Record 55 D3 (spec §11.2): a round is a pair of a rules version
+        // and a System 1 version (none until one is chosen); a new rules
+        // release or a new chosen model starts a new one, and the gate's
+        // thresholds, as the model's card set them, belong to the pair.
+        Table::new(
+            "review_round",
+            vec![
+                col("id", Type::Id),
+                req("pack", Type::Text),
+                req("pack_version", Type::Text),
+                col("model_id", Type::Int),
+                // {axis: {lambda1, lambda2}} from the card, frozen here
+                col("gate", Type::Json),
+                // whether a recorded certificate named the model when the
+                // round began (record 56: its gate waits for D2)
+                col("confirmed", Type::Int),
+                req("started_at", Type::Timestamp),
+                req("started_by", Type::Text),
+            ],
+        )
+        .index(&["pack", "pack_version"]),
+        // Record 56 section 3 (spec §11.2): the gate's outcome on a stack
+        // and axis of a dataset flagged as having damaged headers: accepted
+        // (both authors recorded: the round names the rules' version and
+        // System 1's model), disagree or unsure (a review question).
+        Table::new(
+            "gate_outcome",
+            vec![
+                col("id", Type::Id),
+                req("round_id", Type::Int),
+                req("stack_id", Type::Int),
+                req("axis", Type::Text),
+                req("outcome", Type::Text),
+                col("rules_value", Type::Text),
+                col("model_value", Type::Text),
+                col("p", Type::Double),
+                col("reliability", Type::Double),
+                col("review_item", Type::Int),
+                req("at", Type::Timestamp),
+            ],
+        )
+        .unique(&["round_id", "stack_id", "axis"])
+        .index(&["stack_id"]),
+        // Record 55 D6 (spec §11.4): a blind-first question's provisional
+        // answer, given before the suggestions showed, with the time it
+        // took; the suggestions show to that person only after one.
+        Table::new(
+            "review_provisional",
+            vec![
+                col("id", Type::Id),
+                req("item_id", Type::Int),
+                req("principal", Type::Text),
+                // {value} or {values: {axis: value}}, as the apply door
+                // takes it
+                req("answer", Type::Json),
+                col("seconds", Type::Double),
+                req("answered_at", Type::Timestamp),
+            ],
+        )
+        .unique(&["item_id", "principal"]),
+        // Record 55 D6: when a person first opened a review question, so
+        // the time an answer took is measured by the engine.
+        Table::new(
+            "review_read",
+            vec![
+                col("id", Type::Id),
+                req("item_id", Type::Int),
+                req("principal", Type::Text),
+                req("first_read_at", Type::Timestamp),
+                // when the suggestions were first shown to the person
+                col("revealed_at", Type::Timestamp),
+            ],
+        )
+        .unique(&["item_id", "principal"]),
+        // Record 55 D6 (spec §11.4): when a rater of a blind-first
+        // campaign was first shown an item's suggestion, after their answer.
+        Table::new(
+            "campaign_reveal",
+            vec![
+                col("id", Type::Id),
+                req("campaign_id", Type::Int),
+                req("item_id", Type::Int),
+                req("principal", Type::Text),
+                req("revealed_at", Type::Timestamp),
+            ],
+        )
+        .unique(&["item_id", "principal"]),
+        // Record 55 D7 (spec §11.5): a round's blind audit draw, a seeded
+        // share of its accepted stacks keyed by DICOM identity, the frame
+        // it was drawn from (its size and the digest of its identities),
+        // the audit campaign it is read in, and the grade of its settled
+        // answers (the accepted error and its exact bound).
+        Table::new(
+            "audit_draw",
+            vec![
+                col("id", Type::Id),
+                req("round_id", Type::Int),
+                req("seed", Type::Text),
+                req("share", Type::Double),
+                req("frame_count", Type::Int),
+                req("frame_digest", Type::Text),
+                req("drawn", Type::Int),
+                col("campaign_id", Type::Int),
+                req("created_by", Type::Text),
+                req("created_at", Type::Timestamp),
+                col("grade", Type::Json),
+                col("graded_at", Type::Timestamp),
+                col("graded_by", Type::Text),
+            ],
+        )
+        .index(&["round_id"]),
+        // One stack of a draw, by its DICOM identity (the study and series
+        // instance UIDs and the stack key in its series) and its id now, with
+        // the rules' answer it was accepted with, frozen at the draw.
+        Table::new(
+            "audit_draw_stack",
+            vec![
+                col("id", Type::Id),
+                req("draw_id", Type::Int),
+                req("stack_id", Type::Int),
+                req("study_uid", Type::Text),
+                req("series_uid", Type::Text),
+                req("stack_key", Type::Text),
+                // {axis: value} the rules gave it when it was drawn
+                req("accepted", Type::Json),
+            ],
+        )
+        .unique(&["draw_id", "stack_id"]),
         // Record 43: every encoder a head reads, in the order it
         // concatenates their features. A small table rather than a list
         // in the model row, so that the heads a new encoder makes stale are
@@ -2028,6 +2198,9 @@ fn build_registry() -> Vec<Table> {
                 // withdrawal finds its items by a number and not by
                 // matching JSON text, which the two backends spell apart.
                 col("decision_id", Type::Int),
+                // Record 55 D6 (spec §11.4): routine or blind_first, drawn
+                // once when the question is first read and kept.
+                col("mode", Type::Text),
             ],
         )
         .index(&["status", "kind"])
@@ -2350,6 +2523,10 @@ fn build_registry() -> Vec<Table> {
                 // of the file's header beside them, as pair mode does; said
                 // when it is made. Null or 0 shows the header.
                 col("hide_header", Type::Int),
+                // Record 55 D6 and D7 (spec §11.4, §11.5): what its answers
+                // are for: decide (null), train or measure, read blind
+                // first always, or audit, read blind and never training.
+                col("purpose", Type::Text),
             ],
         )
         .unique(&["name"]),
@@ -2494,6 +2671,10 @@ fn build_registry() -> Vec<Table> {
                 // value the voters agreed on), `neither`, `cant_tell` or
                 // `not_asked`. Null on any other campaign's answer.
                 col("choices", Type::Json),
+                // Record 55 D6 (spec §11.4): 1 where the answer was given
+                // blind, before the rater was shown any suggestion of the
+                // item; 0 where after; null from before the mark.
+                col("blind", Type::Int),
             ],
         )
         // one first answer per item, rater and round: a repeat is the same

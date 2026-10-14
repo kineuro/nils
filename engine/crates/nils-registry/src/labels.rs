@@ -1097,6 +1097,21 @@ pub fn usable_for_training(store: &mut Store, id: i64) -> Result<LabelSet, Error
             "label set {id} {why}, and is not training data (records 40 R3 and 48 R2)"
         )))
     };
+    // record 55 D6 and D7 (spec §11.4, §11.5): an audit's reads never
+    // train, and only blind answers become training labels
+    if let Some(c) = set.campaign_id {
+        if crate::blind::purpose(store, c)? == "audit" {
+            return Err(Error::Refused(format!(
+                "label set {id} is of an audit campaign, whose reads never train (record 55 D7)"
+            )));
+        }
+        let seen = crate::blind::answers_not_blind(store, c)?;
+        if seen > 0 {
+            return Err(Error::Refused(format!(
+                "label set {id} is of a campaign {seen} of whose answers were given after the suggestions showed; only blind answers train (record 55 D6)"
+            )));
+        }
+    }
     let text = set
         .path
         .as_deref()
@@ -1768,7 +1783,36 @@ pub fn training_labels(
             },
         )?);
     }
-    drop_sealed(store, rows)
+    // record 55 D6 (spec §11.4): only a blind answer trains; a decision
+    // marked as given after the suggestions showed is a decision and no
+    // label, and is counted with the sealed ones left out
+    let (rows, not_blind) = drop_not_blind(store, rows)?;
+    let (rows, sealed) = drop_sealed(store, rows)?;
+    Ok((rows, sealed + not_blind))
+}
+
+/// The labels of decisions marked as not given blind (record 55 D6), left
+/// out, and how many.
+pub fn drop_not_blind(store: &mut Store, labels: Vec<Label>) -> Result<(Vec<Label>, usize), Error> {
+    let ids: Vec<i64> = labels.iter().filter_map(|l| l.decision_id).collect();
+    let mut seen: BTreeSet<i64> = BTreeSet::new();
+    for chunk in ids.chunks(500) {
+        let sql = format!(
+            "SELECT id FROM {} WHERE id IN ({}) AND blind = 0",
+            store.qualified("decision"),
+            join_ids(chunk)
+        );
+        for r in store.query(&sql, &[])? {
+            seen.insert(r.int(0)?);
+        }
+    }
+    let before = labels.len();
+    let kept: Vec<Label> = labels
+        .into_iter()
+        .filter(|l| !l.decision_id.is_some_and(|d| seen.contains(&d)))
+        .collect();
+    let dropped = before - kept.len();
+    Ok((kept, dropped))
 }
 
 // ------------------------------------------------------ the certificates
