@@ -4,6 +4,10 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Changed
+
+- The five body-part descriptors pin `nils-bodypart` 0.6.0, the image the 1.0.0-alpha.80 release published (`sha256:06b7ab6b141e3b56e0a26c5d6cfb65a0e8797c76e70b3d70519f37c2e8183a7c`), where they pinned 1.0.0-alpha.71's. Its two encoders bake the same weights as before (`nils_bodypart.bake verify`, offline), so `bodypart-embed`'s encoder digests stand.
+
 ## [1.0.0-alpha.80] - 2026-10-14
 
 Wave 7a's beta candidate. Rules ship on their own tag from now on, models are parts a site chooses per task, System 1 stands beside the rules in Review, post-contrast is served through its cascade, and a dataset is scored as it arrives. The installs it sets up take Kvasir 1.0.0-alpha.10 and the assistant 1.0.0-alpha.28. The `system1-score` and `postcontrast-cascade` images, like `postcontrast-full`'s, are built by each site from their folders, which pins its own digest; no release publishes them.
