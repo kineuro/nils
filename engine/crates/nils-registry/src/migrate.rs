@@ -791,15 +791,27 @@ fn a_root_s_folder_is_a_dataset_only_when_added(
         ),
         &[],
     )?;
+    // Each root a digest read, as it was given and as it was resolved, each
+    // also resolved again now: a folder or tree behind a symbolic link has
+    // its resolved root outside the place's path (#457).
     let read: Vec<std::path::PathBuf> = if table_exists(store, "source")? {
-        store
-            .query(
-                &format!("SELECT root_canonical FROM {}", store.qualified("source")),
-                &[],
-            )?
-            .iter()
-            .filter_map(|r| r.opt_text(0).ok().flatten().map(std::path::PathBuf::from))
-            .collect()
+        let mut out = Vec::new();
+        for r in store.query(
+            &format!(
+                "SELECT root, root_canonical FROM {}",
+                store.qualified("source")
+            ),
+            &[],
+        )? {
+            for i in 0..2 {
+                if let Some(t) = r.opt_text(i)? {
+                    let p = std::path::PathBuf::from(t);
+                    out.push(crate::place::canonical_prefix(&p));
+                    out.push(p);
+                }
+            }
+        }
+        out
     } else {
         Vec::new()
     };
@@ -814,7 +826,7 @@ fn a_root_s_folder_is_a_dataset_only_when_added(
         }
         let id = r.int(0)?;
         let path = std::path::Path::new(r.text(2)?);
-        if read.iter().any(|s| s.starts_with(path)) {
+        if was_read(path, &doc, &read) {
             continue;
         }
         if held {
@@ -845,6 +857,43 @@ fn a_root_s_folder_is_a_dataset_only_when_added(
         )?;
     }
     Ok(())
+}
+
+/// Whether a digest read a dataset's folder (schema 84's step): a root it
+/// read lies under the folder, or under one of its trees (those its
+/// declaration names, and the two a dataset's structure gives), each side
+/// compared as stored and resolved, as [`crate::place::Place::holds_path`]
+/// resolves both. A folder or a tree that is a symbolic link whose target
+/// cannot be resolved now (storage not mounted) cannot be shown unread, and
+/// counts as read: a migration never removes what may have been read.
+fn was_read(path: &std::path::Path, doc: &serde_json::Value, read: &[std::path::PathBuf]) -> bool {
+    let mut mine = vec![path.to_path_buf()];
+    let mut rels: Vec<String> = vec![
+        crate::place::ORIGINALS_TREE.to_string(),
+        crate::place::ANON_TREE.to_string(),
+    ];
+    if let Some(trees) = doc["trees"].as_object() {
+        rels.extend(trees.values().filter_map(|v| v.as_str()).map(String::from));
+    }
+    for rel in rels {
+        if rel != "." && !rel.is_empty() {
+            mine.push(path.join(rel));
+        }
+    }
+    let mut prefixes = Vec::new();
+    for m in &mine {
+        let dangling = m.ancestors().any(|a| {
+            std::fs::symlink_metadata(a).is_ok_and(|md| md.file_type().is_symlink())
+                && std::fs::canonicalize(a).is_err()
+        });
+        if dangling {
+            return true;
+        }
+        prefixes.push(crate::place::canonical_prefix(m));
+        prefixes.push(m.clone());
+    }
+    read.iter()
+        .any(|s| prefixes.iter().any(|p| s.starts_with(p)))
 }
 
 /// Wave 7a: schema 80's step again, for a store a development build
@@ -3582,6 +3631,161 @@ mod column_migration {
             .collect();
         names.sort();
         assert_eq!(names, ["alone", "digested", "src", "written"]);
+    }
+
+    /// #457: a dataset whose tree, or whose folder, is a symbolic link was
+    /// read when a digest's resolved root lies behind that link; schema 84
+    /// keeps it, as it keeps one whose link cannot be resolved now. A real
+    /// folder nothing read still goes, links or not.
+    #[cfg(unix)]
+    #[test]
+    fn a_dataset_read_through_a_symbolic_link_stays() {
+        use crate::schema::table;
+        use crate::store::Insert;
+        use std::os::unix::fs::symlink;
+        let dir = nils_dicom::synth::TempDir::new("migrate-84-links");
+        let base = dir.path();
+        let src = base.join("src");
+        let elsewhere = base.join("elsewhere");
+        for d in [
+            "src",
+            "elsewhere/anon",
+            "elsewhere/original",
+            "elsewhere/folder/derivatives/dcm-anon",
+            "elsewhere/repointed",
+            "elsewhere/unread-anon",
+            "src/linked-tree/derivatives",
+            "src/linked-original/derivatives",
+            "src/dangling/derivatives",
+            "src/repointed/derivatives",
+            "src/unread/derivatives",
+            "src/near",
+            "src/near-other/derivatives/dcm-anon",
+        ] {
+            std::fs::create_dir_all(base.join(d)).unwrap();
+        }
+        symlink(
+            elsewhere.join("anon"),
+            src.join("linked-tree/derivatives/dcm-anon"),
+        )
+        .unwrap();
+        symlink(
+            elsewhere.join("original"),
+            src.join("linked-original/derivatives/dcm-original"),
+        )
+        .unwrap();
+        symlink(elsewhere.join("folder"), src.join("linked-folder")).unwrap();
+        symlink(base.join("gone"), src.join("dangling/derivatives/dcm-anon")).unwrap();
+        symlink(
+            elsewhere.join("repointed"),
+            src.join("repointed/derivatives/dcm-anon"),
+        )
+        .unwrap();
+        symlink(
+            elsewhere.join("unread-anon"),
+            src.join("unread/derivatives/dcm-anon"),
+        )
+        .unwrap();
+        let resolved = |p: std::path::PathBuf| {
+            std::fs::canonicalize(p)
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()
+        };
+
+        let mut store = Store::sqlite_in_memory().unwrap();
+        for m in MIGRATIONS.iter().take_while(|m| m.version <= 83) {
+            (m.apply)(&mut store, Kind::Registry).unwrap();
+        }
+        let under = r#"{"kind": "dataset", "root": "src", "arrives": "deidentified", "state": "anonymised", "trees": {"originals": null, "anon": "derivatives/dcm-anon"}}"#;
+        let root = r#"{"kind": "root", "arrives": "undeclared"}"#;
+        let spec = Insert::new(
+            table("place"),
+            &[
+                "name",
+                "role",
+                "path",
+                "guarantees",
+                "created_at",
+                "dataset",
+            ],
+        );
+        let at = |name: &str| src.join(name).to_string_lossy().into_owned();
+        let row = |name: &str, path: String, dataset: &str| {
+            vec![
+                Param::from(name),
+                Param::from("source"),
+                Param::from(path.as_str()),
+                Param::from("{}"),
+                Param::from("2026-10-08T00:00:00Z"),
+                Param::from(dataset),
+            ]
+        };
+        let names = [
+            "linked-tree",
+            "linked-original",
+            "linked-folder",
+            "dangling",
+            "repointed",
+            "unread",
+            "near",
+        ];
+        let mut rows = vec![row("src", src.to_string_lossy().into_owned(), root)];
+        rows.extend(names.iter().map(|n| row(n, at(n), under)));
+        store.insert(&spec, &rows).unwrap();
+        // What the digests kept: the resolved roots (each given as the link,
+        // or as its target), one root since repointed (its old target gone),
+        // and a root of a sibling folder whose name starts like `near`.
+        let read = [
+            (
+                at("linked-tree/derivatives/dcm-anon"),
+                resolved(elsewhere.join("anon")),
+            ),
+            (
+                resolved(elsewhere.join("original")),
+                resolved(elsewhere.join("original")),
+            ),
+            (
+                at("linked-folder/derivatives/dcm-anon"),
+                resolved(elsewhere.join("folder/derivatives/dcm-anon")),
+            ),
+            (
+                at("repointed/derivatives/dcm-anon"),
+                base.join("old-target").to_string_lossy().into_owned(),
+            ),
+            (
+                at("near-other/derivatives/dcm-anon"),
+                resolved(src.join("near-other/derivatives/dcm-anon")),
+            ),
+        ];
+        for (given, canonical) in &read {
+            store
+                .execute(
+                    "INSERT INTO source (root, root_canonical, first_seen_at) VALUES (?1, ?2, '2026-10-08T00:00:00Z')",
+                    &[Param::from(given.as_str()), Param::from(canonical.as_str())],
+                )
+                .unwrap();
+        }
+        for _ in 0..2 {
+            a_root_s_folder_is_a_dataset_only_when_added(&mut store, Kind::Registry).unwrap();
+        }
+        let mut kept: Vec<String> = crate::place::list(&mut store)
+            .unwrap()
+            .into_iter()
+            .map(|p| p.name)
+            .collect();
+        kept.sort();
+        assert_eq!(
+            kept,
+            [
+                "dangling",
+                "linked-folder",
+                "linked-original",
+                "linked-tree",
+                "repointed",
+                "src"
+            ]
+        );
     }
 
     /// Wave 7a: what a store from before sealed of a personnummer is

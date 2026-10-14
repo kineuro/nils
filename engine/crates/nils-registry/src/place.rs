@@ -301,7 +301,7 @@ pub fn dataset_stamp(store: &mut Store) -> Result<String, Error> {
 /// The longest existing prefix of a path, canonicalised, with the rest
 /// appended: a release target that does not exist yet is still compared
 /// under its real parent.
-fn canonical_prefix(path: &Path) -> std::path::PathBuf {
+pub(crate) fn canonical_prefix(path: &Path) -> std::path::PathBuf {
     let mut rest = Vec::new();
     let mut cur = path.to_path_buf();
     loop {
