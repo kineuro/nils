@@ -85,6 +85,7 @@ mod schedule;
 mod score;
 mod sealed;
 mod serve;
+mod session_schemes;
 mod setup;
 mod slice_cache;
 mod sources;
@@ -109,7 +110,7 @@ use nils_registry::keys::strip_newline;
 use nils_registry::linkage::{self, Subkeys};
 use nils_registry::schema::{Type, table};
 use nils_registry::session;
-use nils_registry::{Backend, Insert, Param, Registry, Scheme, Store};
+use nils_registry::{Backend, Param, Registry, Scheme, Store};
 
 const FAILED: u8 = 1;
 const USAGE: u8 = 2;
@@ -8517,71 +8518,16 @@ fn scheme_command(home: &Home, command: SchemeCommand) -> Result<(), Exit> {
             force,
         } => {
             let scheme = read_scheme(&file)?;
-            let json = serde_json::to_string(&scheme)
-                .map_err(|e| fail(format!("the scheme will not serialize: {e}")))?;
-            let store = registry.store();
-            let exists = store
-                .query_opt(
-                    &format!(
-                        "SELECT id FROM {} WHERE name = {}",
-                        store.qualified("session_scheme"),
-                        store.dialect().param(1, Type::Text)
-                    ),
-                    &[Param::Text(name.clone())],
-                )
-                .map_err(|e| fail(e.to_string()))?;
-            if exists.is_some() {
-                if !force {
-                    return Err(fail(format!(
-                        "a scheme called {name} is already kept; --force replaces it, and every \
-                         label derived with the old one changes"
-                    )));
-                }
-                store
-                    .execute(
-                        &format!(
-                            "UPDATE {} SET definition = {}, note = {}, created_at = {}, digest = {} WHERE name = {}",
-                            store.qualified("session_scheme"),
-                            store.dialect().param(1, Type::Json),
-                            store.dialect().param(2, Type::Text),
-                            store.dialect().param(3, Type::Timestamp),
-                            store.dialect().param(4, Type::Text),
-                            store.dialect().param(5, Type::Text),
-                        ),
-                        &[
-                            Param::Text(json),
-                            match &note {
-                                Some(n) => Param::Text(n.clone()),
-                                None => Param::Null,
-                            },
-                            Param::Text(nils_registry::time::now_iso()),
-                            Param::Text(scheme.digest()),
-                            Param::Text(name.clone()),
-                        ],
-                    )
-                    .map_err(|e| fail(e.to_string()))?;
-                println!("scheme {name} replaced");
-                return Ok(());
+            match crate::session_schemes::keep(
+                &mut registry,
+                &name,
+                &scheme,
+                note.as_deref(),
+                force,
+            )? {
+                crate::session_schemes::Kept::Replaced => println!("scheme {name} replaced"),
+                crate::session_schemes::Kept::New => println!("scheme {name} kept"),
             }
-            store
-                .insert(
-                    &Insert::new(
-                        table("session_scheme"),
-                        &["name", "definition", "created_at", "note", "digest"],
-                    ),
-                    &[vec![
-                        Param::Text(name.clone()),
-                        Param::Text(json),
-                        Param::Text(nils_registry::time::now_iso()),
-                        match &note {
-                            Some(n) => Param::Text(n.clone()),
-                            None => Param::Null,
-                        },
-                        Param::Text(scheme.digest()),
-                    ]],
-                )
-                .map_err(|e| fail(e.to_string()))?;
-            println!("scheme {name} kept");
             Ok(())
         }
         SchemeCommand::List => {

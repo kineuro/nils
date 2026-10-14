@@ -325,6 +325,404 @@ fn capability_base(store: &mut Store, d: &Detected) -> Value {
     })
 }
 
+/// Add a descriptor's text to the catalog, as `nils pipeline add --json`
+/// and `POST /api/pipelines` do (record 55 H2): parsed and its image's pin
+/// checked, kept as its name's next version unless the catalog holds the
+/// same descriptor, and audited when it is new. The answer is the catalog
+/// entry with `added`, `replaces` (the earlier versions a new run no longer
+/// takes) and `replaces_why`. A descriptor that does not parse, or names an
+/// image not pinned by digest, is a usage error in plain words.
+pub(crate) fn add_descriptor(registry: &mut Registry, text: &str) -> Result<Value, Exit> {
+    let d = descriptor::parse(text).map_err(|e| usage(e.to_string()))?;
+    let digest = d.digest();
+    let who = crate::actor();
+    let now = nils_registry::time::now_iso();
+    let (p, fresh) = rows::add(
+        registry.store(),
+        &rows::New {
+            name: &d.name,
+            tool_version: &d.tool_version,
+            descriptor: &d.document,
+            descriptor_digest: &digest,
+            image: &d.image.reference,
+            image_digest: &d.image.digest,
+            layout: d.layout.name(),
+            level: d.level.name(),
+            added_by: &who,
+            added_at: &now,
+        },
+    )?;
+    if fresh {
+        crate::audit(
+            registry,
+            nils_registry::audit::Action::PipelineAdd,
+            json!({"pipeline": p.id, "name": p.name, "version": p.version}),
+            Some(json!({"descriptor": p.descriptor_digest, "image": p.image_digest})),
+        )?;
+    }
+    // 2026-10-12: the earlier versions it replaces, which a new run no
+    // longer takes
+    let replaced: Vec<String> = rows::versions(registry.store(), &p.name)?
+        .iter()
+        .filter(|q| q.version < p.version && q.state == "active")
+        .filter(|q| d.replaces.as_ref().is_some_and(|r| r.covers(q.version)))
+        .map(Pipeline::label)
+        .collect();
+    let mut v = pipeline_doc_of(registry.store(), &p);
+    v["added"] = json!(fresh);
+    v["replaces"] = json!(replaced);
+    v["replaces_why"] = json!(d.replaces.as_ref().map(|r| r.why.clone()));
+    Ok(v)
+}
+
+/// A change to the lane, as `nils pipeline lane` and `PUT
+/// /api/pipelines/lane` take it: each field left out is kept.
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LaneChange {
+    pub(crate) cores: Option<u32>,
+    pub(crate) memory_gb: Option<u64>,
+    pub(crate) gpu_card: Option<String>,
+    pub(crate) output_place: Option<String>,
+    pub(crate) scratch_place: Option<String>,
+}
+
+/// Set the lane (record 49): its cores and memory, the card a GPU unit
+/// leases, and its output and scratch places, each checked as the command
+/// line checks it, and the change audited. A place is an active working
+/// place by name, or `default` for the first working place.
+pub(crate) fn set_lane(registry: &mut Registry, change: &LaneChange) -> Result<(), Exit> {
+    let mut changed = serde_json::Map::new();
+    if let Some(c) = change.cores {
+        if c == 0 {
+            return Err(usage("the lane's cores are one or more"));
+        }
+        registry.set_meta(LANE_CORES_KEY, &c.to_string())?;
+        changed.insert("cores".into(), json!(c));
+    }
+    if let Some(m) = change.memory_gb {
+        if m == 0 {
+            return Err(usage("the lane's memory is one GB or more"));
+        }
+        registry.set_meta(LANE_MEMORY_KEY, &m.to_string())?;
+        changed.insert("memory_gb".into(), json!(m));
+    }
+    if let Some(card) = &change.gpu_card {
+        let word = card.trim();
+        if word != "none" && word.parse::<u32>().is_err() {
+            return Err(usage(format!(
+                "the GPU card is a card's index, or none, not {word}"
+            )));
+        }
+        registry.set_meta(GPU_CARD_KEY, word)?;
+        changed.insert("gpu_card".into(), json!(word));
+    }
+    for (given, key, flag) in [
+        (&change.output_place, OUTPUT_PLACE_KEY, "output"),
+        (&change.scratch_place, SCRATCH_PLACE_KEY, "scratch"),
+    ] {
+        let Some(name) = given.as_ref().map(|n| n.trim().to_string()) else {
+            continue;
+        };
+        let value = if name == "default" {
+            String::new()
+        } else {
+            let working = nils_registry::place::active(registry.store())
+                .map_err(|e| fail(e.to_string()))?
+                .into_iter()
+                .any(|p| p.name == name && p.role == nils_registry::place::Role::Working);
+            if !working {
+                return Err(usage(format!(
+                    "the {flag} place {name}: no active working place is named so; add one with the working role under Places"
+                )));
+            }
+            name
+        };
+        registry.set_meta(key, &value)?;
+        changed.insert(
+            format!("{flag}_place"),
+            json!(if value.is_empty() {
+                "default"
+            } else {
+                value.as_str()
+            }),
+        );
+    }
+    if !changed.is_empty() {
+        crate::audit(
+            registry,
+            nils_registry::audit::Action::PipelineRuntime,
+            json!({"lane": Value::Object(changed)}),
+            None,
+        )?;
+    }
+    Ok(())
+}
+
+/// The lane as `nils pipeline lane --json` prints it and `GET
+/// /api/pipelines/lane` answers it: cores, memory_gb, set, why, gpu_card,
+/// and its places (or the error that turns pipelines off).
+pub(crate) fn lane_answer(registry: &mut Registry) -> Value {
+    let lane = lane_of(registry);
+    let places = run_places(registry.store());
+    let mut doc = lane.doc();
+    doc["places"] = match &places {
+        Ok(p) => p.doc(),
+        Err(e) => json!({"error": e}),
+    };
+    doc
+}
+
+/// Whether a word is a secret's id: lowercase letters, digits and `_`.
+fn secret_id_ok(id: &str) -> bool {
+    !id.is_empty()
+        && id
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+}
+
+/// Set the file a secret is read from (record 49 R3), as `nils pipeline
+/// secret set` does: the path is kept, never the bytes, and the file is read
+/// now so a file the engine cannot read is said now.
+pub(crate) fn set_secret_file(registry: &mut Registry, id: &str, file: &Path) -> Result<(), Exit> {
+    if !secret_id_ok(id) {
+        return Err(usage(format!(
+            "a secret's id is lowercase letters, digits and _, not {id}"
+        )));
+    }
+    if !file.is_absolute() {
+        return Err(usage(format!(
+            "{} is not an absolute path; the engine reads the file where it runs",
+            file.display()
+        )));
+    }
+    secrets::read(id, file).map_err(usage)?;
+    let path = file.display().to_string();
+    if path.contains(':') || path.contains(',') {
+        return Err(usage(format!(
+            "{path} holds a ':' or a ',', which a runtime's mount syntax splits on"
+        )));
+    }
+    registry.set_meta(&format!("{SECRET_PREFIX}{id}"), &path)?;
+    crate::audit(
+        registry,
+        nils_registry::audit::Action::PipelineRuntime,
+        json!({"secret": id, "set": true}),
+        None,
+    )?;
+    Ok(())
+}
+
+/// Forget a secret's file, as `nils pipeline secret unset` does.
+pub(crate) fn unset_secret(registry: &mut Registry, id: &str) -> Result<(), Exit> {
+    if !secret_id_ok(id) {
+        return Err(usage(format!(
+            "a secret's id is lowercase letters, digits and _, not {id}"
+        )));
+    }
+    registry.set_meta(&format!("{SECRET_PREFIX}{id}"), "")?;
+    crate::audit(
+        registry,
+        nils_registry::audit::Action::PipelineRuntime,
+        json!({"secret": id, "set": false}),
+        None,
+    )?;
+    Ok(())
+}
+
+/// Where a secret given at `PUT /api/pipelines/secrets/{id}` is kept: under
+/// the engine's home, in `secrets/`, readable by the engine alone.
+pub(crate) const SECRETS_DIR: &str = "secrets";
+
+/// Keep a secret's text, given at the door, as a file of the engine's own
+/// (record 55 H2): written to `secrets/<id>` under the engine's home with
+/// mode 0600 in a folder of mode 0700, then set as `nils pipeline secret
+/// set` sets a file. The bytes never enter the registry, the audit or the
+/// answer.
+pub(crate) fn keep_secret_text(
+    registry: &mut Registry,
+    home: &Path,
+    id: &str,
+    content: &str,
+) -> Result<(), Exit> {
+    if !secret_id_ok(id) {
+        return Err(usage(format!(
+            "a secret's id is lowercase letters, digits and _, not {id}"
+        )));
+    }
+    if content.trim().is_empty() {
+        return Err(usage(format!("the secret {id} is empty")));
+    }
+    if content.len() as u64 > secrets::MAX_BYTES {
+        return Err(usage(format!(
+            "the secret {id} is {} bytes, more than a secret file's {}",
+            content.len(),
+            secrets::MAX_BYTES
+        )));
+    }
+    let dir = home.join(SECRETS_DIR);
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| fail(format!("the secrets folder cannot be made: {e}")))?;
+    let file = dir.join(id);
+    let write = || -> std::io::Result<()> {
+        use std::io::Write;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
+            let tmp = dir.join(format!(".{id}.new"));
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&tmp)?;
+            f.write_all(content.as_bytes())?;
+            f.sync_all()?;
+            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
+            std::fs::rename(&tmp, &file)
+        }
+        #[cfg(not(unix))]
+        {
+            std::fs::write(&file, content.as_bytes())
+        }
+    };
+    write().map_err(|e| fail(format!("the secret {id} cannot be written: {e}")))?;
+    set_secret_file(registry, id, &file)
+}
+
+/// The secrets, as `GET /api/pipelines/secrets` answers them: each one an
+/// active pipeline declares or the site has set, with the pipelines that
+/// declare it, whether every declaration is optional, whether it is set and
+/// whether its file can be read now. Never its path or its bytes.
+pub(crate) fn secrets_answer(registry: &mut Registry) -> Result<Value, Exit> {
+    let mut declared: std::collections::BTreeMap<String, (Vec<String>, bool)> =
+        std::collections::BTreeMap::new();
+    for p in rows::list(registry.store())?
+        .iter()
+        .filter(|p| p.state == "active")
+    {
+        for s in p.descriptor["x-nils"]["secrets"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+        {
+            let Some(id) = s["id"].as_str() else { continue };
+            let e = declared
+                .entry(id.to_string())
+                .or_insert_with(|| (Vec::new(), true));
+            e.0.push(p.label());
+            e.1 &= s["optional"] == true;
+        }
+    }
+    for id in secret_ids(registry.store()) {
+        declared.entry(id).or_insert_with(|| (Vec::new(), true));
+    }
+    let mut out = Vec::new();
+    for (id, (by, optional)) in declared {
+        let path = secret_path(registry, &id).filter(|p| !p.trim().is_empty());
+        let readable = path
+            .as_deref()
+            .is_some_and(|p| secrets::read(&id, Path::new(p)).is_ok());
+        out.push(json!({
+            "id": id,
+            "declared_by": by,
+            "optional": optional,
+            "set": path.is_some(),
+            "readable": readable,
+        }));
+    }
+    Ok(json!({ "secrets": out }))
+}
+
+/// The doors that change the catalog and the lane (record 55 H2: no
+/// command line inside a desk flow), as the capabilities list them.
+pub(crate) const SETUP_DOORS: [&str; 6] = [
+    "POST /api/pipelines",
+    "GET /api/pipelines/lane",
+    "PUT /api/pipelines/lane",
+    "GET /api/pipelines/secrets",
+    "PUT /api/pipelines/secrets/{id}",
+    "DELETE /api/pipelines/secrets/{id}",
+];
+
+/// `POST /api/pipelines` (a descriptor's text added to the catalog), `GET`
+/// and `PUT /api/pipelines/lane`, `GET /api/pipelines/secrets`, and `PUT`
+/// and `DELETE /api/pipelines/secrets/{id}`. The grants are the door
+/// table's: pipelines:see to read, install:work to change, since each
+/// brings a container image or a site's file into what runs.
+pub(crate) fn setup_route(
+    home: &Path,
+    registry: &mut Registry,
+    method: &str,
+    segs: &[&str],
+    body: &str,
+) -> Option<Result<Reply, Reply>> {
+    let parsed = |body: &str| -> Result<Value, Reply> {
+        serde_json::from_str(body)
+            .map_err(|e| Reply::error(400, format!("the body is not JSON: {e}")))
+    };
+    Some(match (method, segs) {
+        ("POST", ["api", "pipelines"]) => (|| {
+            let v = parsed(body)?;
+            let Some(text) = v["descriptor"].as_str().filter(|t| !t.trim().is_empty()) else {
+                return Err(Reply::error(
+                    400,
+                    "descriptor is the text of a nils.job.yml",
+                ));
+            };
+            let doc = add_descriptor(registry, text)?;
+            Ok(if doc["added"] == true {
+                Reply::created(doc)
+            } else {
+                Reply::ok(doc)
+            })
+        })(),
+        ("GET", ["api", "pipelines", "lane"]) => Ok(Reply::ok(lane_answer(registry))),
+        ("PUT", ["api", "pipelines", "lane"]) => (|| {
+            let change: LaneChange = serde_json::from_str(body).map_err(|e| {
+                Reply::error(
+                    400,
+                    format!(
+                        "the lane takes cores, memory_gb, gpu_card, output_place and scratch_place: {e}"
+                    ),
+                )
+            })?;
+            set_lane(registry, &change)?;
+            Ok(Reply::ok(lane_answer(registry)))
+        })(),
+        ("GET", ["api", "pipelines", "secrets"]) => {
+            secrets_answer(registry).map(Reply::ok).map_err(Reply::from)
+        }
+        ("PUT", ["api", "pipelines", "secrets", id]) => (|| {
+            let v = parsed(body)?;
+            let Some(content) = v["content"].as_str() else {
+                return Err(Reply::error(400, "content is the secret file's text"));
+            };
+            keep_secret_text(registry, home, id, content)?;
+            let all = secrets_answer(registry)?;
+            Ok(Reply::ok(one_secret(&all, id)))
+        })(),
+        ("DELETE", ["api", "pipelines", "secrets", id]) => (|| {
+            unset_secret(registry, id)?;
+            // the file the door kept goes with it; a file the command line
+            // named is the site's own and stays
+            let _ = std::fs::remove_file(home.join(SECRETS_DIR).join(id));
+            let all = secrets_answer(registry)?;
+            Ok(Reply::ok(one_secret(&all, id)))
+        })(),
+        _ => return None,
+    })
+}
+
+/// One secret's row of the list, or a row that says it is not set.
+fn one_secret(all: &Value, id: &str) -> Value {
+    all["secrets"]
+        .as_array()
+        .and_then(|a| a.iter().find(|s| s["id"] == id).cloned())
+        .unwrap_or_else(|| json!({"id": id, "declared_by": [], "optional": true, "set": false, "readable": false}))
+}
+
 /// A catalog entry as the doors and `--json` answer it.
 pub(crate) fn pipeline_doc(p: &Pipeline) -> Value {
     let x = &p.descriptor["x-nils"];
@@ -1441,65 +1839,32 @@ pub(crate) fn command(home: &Home, command: PipelineCommand) -> Result<(), Exit>
         PipelineCommand::Add { file, json } => {
             let text = std::fs::read_to_string(&file)
                 .map_err(|e| usage(format!("{}: {e}", file.display())))?;
-            let d =
-                descriptor::parse(&text).map_err(|e| usage(format!("{}: {e}", file.display())))?;
-            let digest = d.digest();
-            let who = crate::actor();
-            let now = nils_registry::time::now_iso();
-            let (p, fresh) = rows::add(
-                registry.store(),
-                &rows::New {
-                    name: &d.name,
-                    tool_version: &d.tool_version,
-                    descriptor: &d.document,
-                    descriptor_digest: &digest,
-                    image: &d.image.reference,
-                    image_digest: &d.image.digest,
-                    layout: d.layout.name(),
-                    level: d.level.name(),
-                    added_by: &who,
-                    added_at: &now,
-                },
-            )?;
-            if fresh {
-                crate::audit(
-                    &mut registry,
-                    nils_registry::audit::Action::PipelineAdd,
-                    json!({"pipeline": p.id, "name": p.name, "version": p.version}),
-                    Some(json!({"descriptor": p.descriptor_digest, "image": p.image_digest})),
-                )?;
-            }
-            // 2026-10-12: the earlier versions it replaces, which a new
-            // run no longer takes
-            let replaced: Vec<String> = rows::versions(registry.store(), &p.name)?
-                .iter()
-                .filter(|q| q.version < p.version && q.state == "active")
-                .filter(|q| d.replaces.as_ref().is_some_and(|r| r.covers(q.version)))
-                .map(Pipeline::label)
-                .collect();
+            let v = add_descriptor(&mut registry, &text)
+                .map_err(|e| usage(format!("{}: {}", file.display(), e.message)))?;
             if json {
-                let mut v = pipeline_doc_of(registry.store(), &p);
-                v["added"] = json!(fresh);
-                v["replaces"] = json!(replaced);
                 return print(&v);
             }
             println!(
                 "pipeline {}: {} ({}), image {}{}",
-                p.id,
-                p.label(),
-                p.descriptor_digest,
-                p.image,
-                if fresh {
+                v["id"],
+                v["label"].as_str().unwrap_or_default(),
+                v["descriptor_digest"].as_str().unwrap_or_default(),
+                v["image"].as_str().unwrap_or_default(),
+                if v["added"] == true {
                     ""
                 } else {
                     "; the catalog already held this descriptor"
                 }
             );
+            let replaced: Vec<&str> = v["replaces"]
+                .as_array()
+                .map(|a| a.iter().filter_map(Value::as_str).collect())
+                .unwrap_or_default();
             if !replaced.is_empty() {
                 println!(
                     "it replaces {}, which a new run no longer takes: {}",
                     replaced.join(", "),
-                    d.replaces.as_ref().map_or("", |r| r.why.as_str())
+                    v["replaces_why"].as_str().unwrap_or_default()
                 );
             }
             Ok(())
@@ -1680,70 +2045,16 @@ pub(crate) fn command(home: &Home, command: PipelineCommand) -> Result<(), Exit>
             scratch_place,
             json,
         } => {
-            let mut changed = serde_json::Map::new();
-            if let Some(c) = cores {
-                if c == 0 {
-                    return Err(usage("--cores is one or more"));
-                }
-                registry.set_meta(LANE_CORES_KEY, &c.to_string())?;
-                changed.insert("cores".into(), json!(c));
-            }
-            if let Some(m) = memory_gb {
-                if m == 0 {
-                    return Err(usage("--memory-gb is one or more"));
-                }
-                registry.set_meta(LANE_MEMORY_KEY, &m.to_string())?;
-                changed.insert("memory_gb".into(), json!(m));
-            }
-            if let Some(card) = gpu_card {
-                let word = card.trim();
-                if word != "none" && word.parse::<u32>().is_err() {
-                    return Err(usage(format!(
-                        "--gpu-card is a card's index, or none, not {word}"
-                    )));
-                }
-                registry.set_meta(GPU_CARD_KEY, word)?;
-                changed.insert("gpu_card".into(), json!(word));
-            }
-            for (given, key, flag) in [
-                (output_place, OUTPUT_PLACE_KEY, "output"),
-                (scratch_place, SCRATCH_PLACE_KEY, "scratch"),
-            ] {
-                let Some(name) = given.map(|n| n.trim().to_string()) else {
-                    continue;
-                };
-                let value = if name == "default" {
-                    String::new()
-                } else {
-                    let working = nils_registry::place::active(registry.store())
-                        .map_err(|e| fail(e.to_string()))?
-                        .into_iter()
-                        .any(|p| p.name == name && p.role == nils_registry::place::Role::Working);
-                    if !working {
-                        return Err(usage(format!(
-                            "--{flag}-place {name}: no active working place is named so; nils place add {name} <path> --role working adds one, and nils place list shows them"
-                        )));
-                    }
-                    name
-                };
-                registry.set_meta(key, &value)?;
-                changed.insert(
-                    format!("{flag}_place"),
-                    json!(if value.is_empty() {
-                        "default"
-                    } else {
-                        value.as_str()
-                    }),
-                );
-            }
-            if !changed.is_empty() {
-                crate::audit(
-                    &mut registry,
-                    nils_registry::audit::Action::PipelineRuntime,
-                    json!({"lane": Value::Object(changed)}),
-                    None,
-                )?;
-            }
+            set_lane(
+                &mut registry,
+                &LaneChange {
+                    cores,
+                    memory_gb,
+                    gpu_card,
+                    output_place,
+                    scratch_place,
+                },
+            )?;
             let lane = lane_of(&mut registry);
             let places = run_places(registry.store());
             if json {
@@ -1782,47 +2093,12 @@ pub(crate) fn command(home: &Home, command: PipelineCommand) -> Result<(), Exit>
         }
         PipelineCommand::Secret { command } => match command {
             SecretCommand::Set { id, file } => {
-                if !id
-                    .chars()
-                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
-                    || id.is_empty()
-                {
-                    return Err(usage(format!(
-                        "a secret's id is lowercase letters, digits and _, not {id}"
-                    )));
-                }
-                if !file.is_absolute() {
-                    return Err(usage(format!(
-                        "{} is not an absolute path; the engine reads the file where it runs",
-                        file.display()
-                    )));
-                }
-                // read now, so a file the engine cannot read is said now
-                secrets::read(&id, &file).map_err(usage)?;
-                let path = file.display().to_string();
-                if path.contains(':') || path.contains(',') {
-                    return Err(usage(format!(
-                        "{path} holds a ':' or a ',', which a runtime's mount syntax splits on"
-                    )));
-                }
-                registry.set_meta(&format!("{SECRET_PREFIX}{id}"), &path)?;
-                crate::audit(
-                    &mut registry,
-                    nils_registry::audit::Action::PipelineRuntime,
-                    json!({"secret": id, "set": true}),
-                    None,
-                )?;
+                set_secret_file(&mut registry, &id, &file)?;
                 println!("secret {id} is read from its file at each run that declares it");
                 Ok(())
             }
             SecretCommand::Unset { id } => {
-                registry.set_meta(&format!("{SECRET_PREFIX}{id}"), "")?;
-                crate::audit(
-                    &mut registry,
-                    nils_registry::audit::Action::PipelineRuntime,
-                    json!({"secret": id, "set": false}),
-                    None,
-                )?;
+                unset_secret(&mut registry, &id)?;
                 println!("secret {id} is no longer set");
                 Ok(())
             }
