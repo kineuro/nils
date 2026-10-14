@@ -98,7 +98,7 @@ fn folded(c: char) -> Option<&'static str> {
 /// hyphen. Empty where nothing is left.
 pub fn reduced(description: &str) -> String {
     let mut out = String::new();
-    let mut push = |c: char, out: &mut String| {
+    let push = |c: char, out: &mut String| {
         if c == '-' {
             if !out.is_empty() && !out.ends_with('-') {
                 out.push('-');
