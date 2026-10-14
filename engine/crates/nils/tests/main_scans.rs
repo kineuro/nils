@@ -754,8 +754,10 @@ fn under_a_root(pg: Option<(String, String)>) {
     );
     assert_eq!(status, 202, "{queued}");
     let mut job = server.over(queued["job"].as_i64().unwrap());
+    let mut kinds = Vec::new();
     loop {
         assert_eq!(job["state"], "done", "{job}");
+        kinds.push(job["kind"].as_str().unwrap_or("").to_string());
         let mut next = job["chain"]["after"].as_i64();
         for _ in 0..50 {
             if next.is_some() {
@@ -770,7 +772,8 @@ fn under_a_root(pg: Option<(String, String)>) {
             None => break,
         }
     }
-    assert_eq!(job["kind"], "pick", "{job}");
+    // record 55 E5: the score comes after the pick run, last
+    assert_eq!(kinds[kinds.len() - 2..], ["pick", "score"], "{job}");
     assert!(
         home.count("SELECT COUNT(*) FROM {pick} WHERE withdrawn_at IS NULL") > 0,
         "the bring-in picked"

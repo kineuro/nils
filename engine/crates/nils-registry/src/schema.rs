@@ -383,6 +383,30 @@ fn build_registry() -> Vec<Table> {
         )
         .unique(&["source_id", "stack_id"])
         .index(&["stack_id"]),
+        // Record 55 E5 (spec section 10.4, ruling R3 of 2026-10-10): the
+        // sha256 of a source file's bytes, learnt when a pipeline read the
+        // file whole and said so, never by a pass over the archive. A file
+        // is named as `source_file` names it, by its source and path, with
+        // the size and time it had when its content was hashed: the hash
+        // holds only while `source_file` still says that size and time, so
+        // a file that changed is never given its old content's hash. The
+        // slice cache is keyed by it beside the SOP Instance UID.
+        Table::new(
+            "file_content",
+            vec![
+                col("id", Type::Id),
+                req("source_id", Type::Int),
+                req("path", Type::Text),
+                req("size", Type::Int),
+                req("mtime_ns", Type::Int),
+                // sha256:<hex>
+                req("sha256", Type::Text),
+                req("learnt_at", Type::Timestamp),
+                // the pipeline run whose image read it whole
+                col("run_id", Type::Int),
+            ],
+        )
+        .unique(&["source_id", "path"]),
         // `code_digest` and `first_batch_id` are null for a subject that
         // `nils linkage import` created: its code came from outside, not from
         // the scheme, and no batch made it (§7.4).

@@ -169,8 +169,25 @@
                     "instance_number": {"type": ["integer", "null"]},
                     "number_of_frames": {"type": ["integer", "null"], "description": "NumberOfFrames of the whole file; null for a file that does not say, which is one frame"}
                   }
+                },
+                "identity": {
+                  "type": "object",
+                  "description": "Record 55 E5: present on every file only when the descriptor declares the slice cache (x-nils.cache). The file's DICOM identity, by which the slice cache keys what a model read of it, never a registry id",
+                  "required": ["sop_instance_uid", "sha256"],
+                  "properties": {
+                    "sop_instance_uid": {"type": "string", "description": "The file's SOPInstanceUID"},
+                    "sha256": {"type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}$", "description": "The sha256 of the file's bytes, where a run reported reading it whole (results.json read) and the file still has the size and time it had then, on the disk and in the registry; null otherwise, and then the file is read"}
+                  }
                 }
               }
+            }
+          },
+          "identity": {
+            "type": "object",
+            "description": "Record 55 E5: present on every stack only when the descriptor declares the slice cache (x-nils.cache)",
+            "required": ["study_instance_uid"],
+            "properties": {
+              "study_instance_uid": {"type": ["string", "null"], "description": "The StudyInstanceUID of the stack's session, by which the slice cache groups its entries per session"}
             }
           }
         }

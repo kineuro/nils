@@ -1631,7 +1631,9 @@ fn a_pick_run_is_part_of_the_bring_in_and_has_a_door() {
     assert_eq!(status, 202, "{queued}");
     assert_eq!(queued["command"][0], "digest", "{queued}");
     let then = queued["then"].as_array().unwrap();
-    assert_eq!(then.len(), 3, "{queued}");
+    // record 55 E5: the score after the pick run, last
+    assert_eq!(then.len(), 4, "{queued}");
+    assert_eq!(then[3][0], "score", "{queued}");
     let pick: Vec<&str> = then[2]
         .as_array()
         .unwrap()
@@ -1821,8 +1823,10 @@ fn after_sort_round(pg: Option<(String, String)>) {
         OPS,
     );
     assert_eq!(status, 202, "{queued}");
-    // no cohort: the bring-in names no pick run of its own
-    assert_eq!(queued["then"].as_array().unwrap().len(), 2, "{queued}");
+    // no cohort: the bring-in names no pick run of its own; record 55
+    // E5: the score, last
+    assert_eq!(queued["then"].as_array().unwrap().len(), 3, "{queued}");
+    assert_eq!(queued["then"][2][0], "score", "{queued}");
     assert_eq!(
         queued["then"][1],
         serde_json::json!(["classify", "--pack-dir", packs()]),

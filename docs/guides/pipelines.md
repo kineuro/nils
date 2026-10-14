@@ -471,6 +471,51 @@ The post-contrast step of a dataset or a cohort runs `postcontrast-cascade`, giv
 
 The post-contrast label is the engine's own and not a pipeline's (record 55 F2 and F5). Every MR stack carries a state (`pre`, `post`, `by_definition`, `undetermined`), the minutes since injection, where the label came from and the 72-hour flag, set by the time rule over its session's clock between the last pre and the first post T1 whose answer is certified (the image model at or above its threshold, or a person's read), with the checks against the eight failure modes each giving its reason code; `nils contrast show <stack>` reads one and `nils contrast label` labels again. Each label also carries its error level by use, the bar the label is held to where it is used: at most 1 % where it decides inclusion in pooled quantitative analysis (FLAIR segmentation sets, ASL blood flow, quantitative maps), 2 % for ADC, QSM and TOF, and 5 % where it is descriptive (T2, PD, DWI, SWI). A level is a bar for a use, not a claim: the label is certified for a use only where its audit's bound meets it.
 
+## Score a dataset as it arrives
+
+A dataset's bring-in ends with `score` (record 55 E5): the image models answer its new scans without anyone starting a run.
+
+1. Bring the dataset in, as ever:
+
+   ```sh
+   nils bring-in @scans
+   ```
+
+   After the digest, the fingerprints, the sort and any pick run, `nils score @scans --name <batch>` runs as the last step. For body part, then post-contrast, it queues the step's run over the stacks the batch brought (those whose first batch is the bring-in's), with the model the site chose for the task, where the step's pipeline declares `x-nils.on-arrival`. The run goes to the pipeline lane, so it never holds up the next digest, and the dataset's step shows it queued, running and done. Post-contrast reads the body part's answers, so where both run it is queued once the body part's run ends done.
+
+2. Read what it queued and what it skipped:
+
+   ```sh
+   nils jobs show <score job>
+   ```
+
+   The result names each queued run, and each step it skipped with its reason: its pipeline does not score at arrival (`not_on_arrival`), nothing here runs it (`no_pipeline`, `no_model`, `no_runtime`, `no_place`), the machine lacks what it needs (`requirements`), or the person who brought the dataset in may not run a pipeline (`no_grant`: a run reads pixels, so it needs Pipelines work at detail quasi). The bring-in itself never fails because of it, and a bring-in that read nothing new queues no score.
+
+A pipeline scores at arrival with `x-nils.on-arrival: true`, or with the parameters such a run is given, `x-nils.on-arrival: {params: {cache_fill: touched}}`.
+
+## Re-score from the slice cache
+
+The slice cache keeps the small pictures a model reads of each scan (record 55 E5), so a re-score after a model update reads them instead of the files.
+
+1. Choose the new model for its task:
+
+   ```sh
+   nils model choose bodypart-fusion@r8 --why "the new calibration"
+   ```
+
+2. Run the step over the dataset again, from the desk's dataset page or its door (`POST /api/datasets/{name}/steps/body_part/run`). The run reads each scan's inputs from the cache where it holds them and reads the files of the rest.
+
+3. See what the cache holds:
+
+   ```sh
+   nils cache show
+   nils cache prune
+   ```
+
+   A version no admitted or promoted model reads is dropped 30 days after it went unread; `prune` drops what is due now, and every run that used the cache does so when it ends.
+
+A pipeline keeps model inputs in the cache by declaring their versions, `x-nils.cache: {inputs: [bodypart-planes-b24:v1]}`, stacks layout only. Its run is given the working place's `slice-cache/` read-write at `/cache`, which `[Cache]` names on its command line; the pixels are clinical, so the cache stays in the site's working place. Each file of `stacks.json` then carries an `identity`: its `sop_instance_uid`, and its `sha256` where a run reported reading the file whole and the file still has the size and time it had then, on the disk and in the registry (`null` otherwise). Each stack carries the `study_instance_uid` of its session. An image keys what it keeps by those identities and the input's version, never a registry id, so the cache outlives a new registry, and names the files it read whole in `results.json` (`read`, each file by its place in the unit's list with its sha256), which the engine keeps as that file's content. A miss reads the files; a file whose content the engine does not know is always read.
+
 ## Curate a run's seeds
 
 1. Read the seeds a run suggested and save the stacks as a selection:

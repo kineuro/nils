@@ -5321,7 +5321,7 @@ fn a_dataset_is_pseudonymised_at_the_keyboard_and_brought_in_as_a_chain() {
     let (ran, listed) = chain_of("second");
     assert_eq!(kinds(&ran), ["pseudonymize", "digest"], "{listed}");
     assert!(ran.iter().all(|j| j["state"] == "done"), "{listed}");
-    assert_eq!(ran[0]["then"].as_array().unwrap().len(), 3, "{listed}");
+    assert_eq!(ran[0]["then"].as_array().unwrap().len(), 4, "{listed}");
     let ended = &ran[1]["result"]["chain_ended"];
     // the sort names the packs the keyboard's nils found (the T33 pipe
     // test): the worker that runs it knows none of its own
@@ -5329,7 +5329,15 @@ fn a_dataset_is_pseudonymised_at_the_keyboard_and_brought_in_as_a_chain() {
         ended["skipped"],
         serde_json::json!([
             ["fingerprint"],
-            ["classify", "--pack", "mri", "--pack-dir", packs_dir()]
+            ["classify", "--pack", "mri", "--pack-dir", packs_dir()],
+            [
+                "score",
+                "@ds",
+                "--name",
+                "second",
+                "--pack-dir",
+                packs_dir()
+            ]
         ]),
         "{listed}"
     );
@@ -5355,7 +5363,14 @@ fn a_dataset_is_pseudonymised_at_the_keyboard_and_brought_in_as_a_chain() {
     // step of its own that the chain did not name
     assert_eq!(
         kinds(&ran),
-        ["pseudonymize", "digest", "fingerprint", "classify", "pick"],
+        [
+            "pseudonymize",
+            "digest",
+            "fingerprint",
+            "classify",
+            "pick",
+            "score"
+        ],
         "{listed}"
     );
     assert!(ran.iter().all(|j| j["state"] == "done"), "{listed}");
@@ -5365,7 +5380,18 @@ fn a_dataset_is_pseudonymised_at_the_keyboard_and_brought_in_as_a_chain() {
         "{listed}"
     );
     assert!(
-        ran[4]["chain"]["before"].is_i64() && ran[4]["chain"]["after"].is_null(),
+        ran[4]["chain"]["before"].is_i64() && ran[4]["chain"]["after"].is_i64(),
+        "{listed}"
+    );
+    // record 55 E5: the score, last; the new file joined a stack read
+    // before, so the batch brought no new stack to score
+    assert!(ran[5]["chain"]["after"].is_null(), "{listed}");
+    assert_eq!(ran[5]["result"]["new_stacks"], 0, "{listed}");
+    assert!(
+        ran[5]["result"]["why"]
+            .as_str()
+            .unwrap()
+            .contains("no new stack"),
         "{listed}"
     );
     assert!(ran[1]["result"]["chain_ended"].is_null(), "{listed}");

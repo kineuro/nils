@@ -4886,6 +4886,8 @@ const QUEUEABLE: &[&str] = &[
     // whole thread of one as a chain.
     "pseudonymize",
     "bring-in",
+    // Record 55 E5: scoring at arrival, a bring-in's last step.
+    "score",
     // Record 26 §1: `place originals`, the acts on a dataset's originals;
     // no other place verb is a job.
     "place",
@@ -5269,6 +5271,9 @@ pub(crate) fn verb_needs(command: &[String]) -> Option<(&'static str, Detail)> {
         ("fingerprint" | "classify" | "pick" | "session" | "pyramid", _) => {
             ("pipelines:work", Detail::Plain)
         }
+        // record 55 E5: scoring at arrival queues runs, each held to what a
+        // run needs when it is queued
+        ("score", _) => ("pipelines:work", Detail::Plain),
         // record 55 H3: a result's parts and its layer on a scan
         ("derivative", Some("parts" | "layer")) => ("pipelines:work", Detail::Plain),
         // record 43 S2: a pipeline reads pixels, which open at quasi
@@ -6141,6 +6146,9 @@ fn located(doors: &Doors, store: &mut Store, command: Vec<String>) -> Result<Vec
         // record 45 E1: a pyramid names a stack, a selection or a handle, and
         // the deployment's packs where a selection is frozen; never a path
         "pyramid" => return crate::pyramid::located(doors.pack_dir.as_deref(), command),
+        // record 55 E5: a score names its dataset as @name, and the
+        // deployment's packs
+        "score" => return score_located(doors.pack_dir.as_deref(), command),
         // record 55 H2: a pick run reads the deployment's packs and names a
         // cohort or a dataset by name; never a path a caller composes
         "pick" if command.get(1).is_some_and(|w| w == "run") => {
@@ -6230,6 +6238,51 @@ fn located(doors: &Doors, store: &mut Store, command: Vec<String>) -> Result<Vec
     }
     if sorts && let Some(dir) = &doors.pack_dir {
         out.extend(["--pack-dir".to_string(), dir.display().to_string()]);
+    }
+    Ok(out)
+}
+
+/// A score as the jobs door queues it (record 55 E5): the dataset as
+/// `@name`, the batch and the steps, and the deployment's packs; a path a
+/// caller composes is refused.
+fn score_located(
+    pack_dir: Option<&std::path::Path>,
+    command: Vec<String>,
+) -> Result<Vec<String>, Reply> {
+    let mut out = vec!["score".to_string()];
+    let mut it = command.into_iter().skip(1);
+    let mut dataset = false;
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--name" | "--step" => {
+                let value = it
+                    .next()
+                    .ok_or_else(|| Reply::error(400, format!("score {arg} takes a value")))?;
+                out.push(arg);
+                out.push(value);
+            }
+            // the deployment's own packs are named below, never a caller's
+            "--pack-dir" => {
+                it.next();
+            }
+            a if a.starts_with('@') && !dataset && !a.contains('/') => {
+                dataset = true;
+                out.push(arg);
+            }
+            other => {
+                return Err(Reply::error(
+                    400,
+                    format!("score takes @dataset, --name and --step, not {other}"),
+                ));
+            }
+        }
+    }
+    if !dataset {
+        return Err(Reply::error(400, "score names a dataset as @name"));
+    }
+    if let Some(d) = pack_dir {
+        out.push("--pack-dir".into());
+        out.push(d.display().to_string());
     }
     Ok(out)
 }
