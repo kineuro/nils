@@ -16,10 +16,13 @@ the rest of T1-type brain is deferred to the full pipeline.
 - Descriptor: `postcontrast-cascade/nils.job.yml` (stacks layout with
   `x-nils.input.header`, `geometry` and `contrast`; model inputs `student`,
   `fusion`, `cascade`).
-- Build: `docker build -t nils-postcontrast pipelines/nils-postcontrast`, or
-  with `--build-arg TORCH_INDEX=https://download.pytorch.org/whl/cu128` for a
-  card. Each site builds it and repins the descriptor; no release publishes
-  it.
+- Build: `docker build -t nils-postcontrast pipelines/nils-postcontrast`.
+  One image runs on the CPU and on a card: torch 2.8.0 from its CUDA 12.8
+  wheels, which run on the CPU where the container is given no card
+  (`--build-arg TORCH_INDEX=https://download.pytorch.org/whl/cpu` builds a
+  smaller CPU-only image). The release publishes it, and ships the
+  descriptor with the digest of the image it pushed in its
+  `pipelines.tar.gz` (`nils pipeline add --release postcontrast-cascade`).
 - Tests: `pip install -e .[student,test] && pytest` (the student's tests are
   skipped without torch).
 

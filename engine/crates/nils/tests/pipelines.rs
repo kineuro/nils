@@ -2811,12 +2811,14 @@ sys.exit(subprocess.call(argv, env=dict(os.environ, **env)))
 
 /// A stand-in for `nvidia-smi` (no card is touched on a laptop that has
 /// one): it names a card, answers a card's free memory from a file the test
-/// writes, and keeps each question it was asked.
+/// writes, and its whole memory from the file `FAKE_GPU_TOTAL` names (not
+/// known where none is named), and keeps each question it was asked.
 const FAKE_SMI: &str = r#"#!/bin/sh
 echo "$*" >> "$FAKE_GPU_ASKED"
 case "$1" in
   --query-gpu=name) echo "Stand-in Card"; exit 0 ;;
   --query-gpu=memory.free) echo "$(cat "$FAKE_GPU_FREE") MiB"; exit 0 ;;
+  --query-gpu=memory.total) [ -n "$FAKE_GPU_TOTAL" ] && { echo "$(cat "$FAKE_GPU_TOTAL") MiB"; exit 0; } ;;
 esac
 exit 1
 "#;
@@ -3587,6 +3589,303 @@ fn apptainer_runs_a_built_image_and_a_gpu_unit_waits_for_its_lease() {
 /// pipeline prints it, writes it into a file and reports it. A grep of every
 /// file under the working place, the registry and what the engine printed
 /// finds none of it.
+/// Record 55 A5: one image runs a model on the CPU and on a card, so an
+/// optional need takes the lane's card where the runtime offers one, and
+/// the CPU otherwise. Under apptainer the leased card comes with `--nv` and
+/// the card's number; with no card in the lane, no card on the machine, or
+/// a card smaller than a unit's need (whose lease would never come), the
+/// run is the CPU's and no `--nv` is given. A required need is refused on
+/// a card that small.
+#[test]
+fn an_optional_gpu_need_takes_the_leased_card_under_apptainer_and_else_the_cpu() {
+    if !have("python3") {
+        eprintln!("python3 is not installed; the stand-ins need it, so this test is skipped");
+        return;
+    }
+    let lab = Lab::new("pipelines-optional-gpu");
+    let fake = lab.bin.file("apptainer", FAKE_APPTAINER.as_bytes());
+    let smi = lab.bin.file("nvidia-smi", FAKE_SMI.as_bytes());
+    #[cfg(unix)]
+    let executable = |f: &Path| {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(f, std::fs::Permissions::from_mode(0o755)).unwrap();
+    };
+    #[cfg(not(unix))]
+    let executable = |_: &Path| {};
+    executable(&fake);
+    executable(&smi);
+    let free = lab.work.path().join("gpu-free");
+    std::fs::write(&free, "90000").unwrap();
+    let total = lab.work.path().join("gpu-total");
+    std::fs::write(&total, "98304").unwrap();
+    let asked = lab.work.path().join("gpu-asked");
+    let calls = lab.bin.path().join("apptainer.log");
+    lab.add_descriptor(
+        "gpu-optional",
+        &stack_slow(
+            "gpu-optional",
+            "{gpu: optional, gpu-memory-gb: 4, cores: 1, memory-gb: 1}",
+            "",
+        ),
+    );
+    lab.ok(&["pipeline", "runtime", "--set", "apptainer"], None);
+    let lane = |card: &str| {
+        lab.ok(
+            &[
+                "pipeline",
+                "lane",
+                "--cores",
+                "8",
+                "--memory-gb",
+                "100",
+                "--gpu-card",
+                card,
+            ],
+            None,
+        );
+    };
+    let env: [(&str, &Path); 4] = [
+        ("FAKE_APPTAINER_ARGS", &calls),
+        ("FAKE_GPU_FREE", &free),
+        ("FAKE_GPU_TOTAL", &total),
+        ("FAKE_GPU_ASKED", &asked),
+    ];
+    // a run, and the containers it started: the `run` calls since the last
+    let seen = std::cell::Cell::new(0usize);
+    let run = |name: &str, args: &[&str]| -> (bool, Value, String, Vec<Vec<String>>) {
+        let mut c = lab.command(&lab.path);
+        c.args(["run", name, "--select", "selection:every@1"])
+            .args(args)
+            .args(["--param", "sleep=0", "--json"]);
+        for (k, v) in env {
+            c.env(k, v);
+        }
+        let out = c.output().unwrap();
+        let all: Vec<Vec<String>> = std::fs::read_to_string(&calls)
+            .unwrap_or_default()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .filter(|c: &Vec<String>| c[0] == "run")
+            .collect();
+        let new = all[seen.get()..].to_vec();
+        seen.set(all.len());
+        let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+        (
+            out.status.success(),
+            serde_json::from_str(&stdout).unwrap_or(Value::Null),
+            String::from_utf8_lossy(&out.stderr).to_string(),
+            new,
+        )
+    };
+    let preflight = |name: &str| -> Value {
+        let mut c = lab.command(&lab.path);
+        c.args([
+            "run",
+            name,
+            "--select",
+            "selection:every@1",
+            "--preflight",
+            "--json",
+        ]);
+        for (k, v) in env {
+            c.env(k, v);
+        }
+        let out = c.output().unwrap();
+        serde_json::from_slice(&out.stdout).unwrap_or(Value::Null)
+    };
+
+    // the lane leases card 1, the card holds the need: the card, with --nv
+    lane("1");
+    assert_eq!(
+        preflight("gpu-optional")["gpu"]["device"],
+        "cuda:Stand-in Card"
+    );
+    let (ok, r, err, execs) = run("gpu-optional", &[]);
+    assert!(ok, "{err}");
+    assert_eq!(r["device"], "cuda:Stand-in Card", "{r}");
+    assert_eq!(execs.len(), 4, "{execs:?}");
+    for e in &execs {
+        assert!(e.iter().any(|w| w == "--nv"), "{e:?}");
+        assert!(pair(e, "--env", "CUDA_VISIBLE_DEVICES=1"), "{e:?}");
+    }
+    for u in r["units_run"].as_array().unwrap() {
+        assert_eq!(u["gpu_card"], 1, "{u}");
+    }
+
+    // the lane names no card: the CPU, and no card is passed
+    lane("none");
+    assert_eq!(preflight("gpu-optional")["gpu"]["device"], "cpu");
+    let (ok, r, err, execs) = run("gpu-optional", &[]);
+    assert!(ok, "{err}");
+    assert_eq!(r["device"], "cpu", "{r}");
+    assert_eq!(execs.len(), 4, "{execs:?}");
+    for e in &execs {
+        assert!(!e.iter().any(|w| w == "--nv"), "{e:?}");
+        assert!(
+            !e.iter().any(|w| w.starts_with("CUDA_VISIBLE_DEVICES")),
+            "{e:?}"
+        );
+    }
+
+    // a card smaller than a unit's need: the CPU, and the preflight says why
+    lane("1");
+    std::fs::write(&total, "2048").unwrap();
+    let pre = preflight("gpu-optional");
+    assert_eq!(pre["gpu"]["device"], "cpu", "{pre}");
+    assert_eq!(
+        pre["gpu"]["why"], "card 1 holds 2 GB, and a unit needs 4 GB of a card",
+        "{pre}"
+    );
+    let (ok, r, err, execs) = run("gpu-optional", &[]);
+    assert!(ok, "{err}");
+    assert_eq!(r["device"], "cpu", "{r}");
+    assert!(
+        execs.iter().all(|e| !e.iter().any(|w| w == "--nv")),
+        "{execs:?}"
+    );
+    // a required need on that card is refused, not left waiting
+    lab.add_descriptor(
+        "gpu-required",
+        &stack_slow(
+            "gpu-required",
+            "{gpu: required, gpu-memory-gb: 4, cores: 1, memory-gb: 1}",
+            "",
+        ),
+    );
+    let (ok, _, err, execs) = run("gpu-required", &[]);
+    assert!(!ok);
+    assert!(
+        err.contains("needs a GPU, and card 1 holds 2 GB, and a unit needs 4 GB of a card"),
+        "{err}"
+    );
+    assert!(execs.is_empty(), "{execs:?}");
+    let pre = preflight("gpu-required");
+    assert!(
+        pre["blockers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|b| b.as_str().unwrap().contains("card 1 holds 2 GB")),
+        "{pre}"
+    );
+
+    // no card on the machine: the CPU
+    std::fs::write(&total, "98304").unwrap();
+    std::fs::write(&smi, "#!/bin/sh\nexit 1\n").unwrap();
+    let (ok, r, err, execs) = run("gpu-optional", &[]);
+    assert!(ok, "{err}");
+    assert_eq!(r["device"], "cpu", "{r}");
+    assert!(
+        execs.iter().all(|e| !e.iter().any(|w| w == "--nv")),
+        "{execs:?}"
+    );
+}
+
+/// Record 55 A5: a release ships the descriptors of its model pipelines,
+/// each naming the image that release built (`pipelines.tar.gz`, checked
+/// by its SHA256SUMS), and `nils pipeline add --release <name>` takes one
+/// from this engine's release, or `--release=<version>` from another.
+#[test]
+fn a_release_s_descriptor_is_added_by_name_and_checked_by_its_sums() {
+    let lab = Lab::new("pipelines-release");
+    let releases = TempDir::new("pipelines-release-channel");
+    let version = env!("CARGO_PKG_VERSION");
+    let image = format!("ghcr.io/kineuro/stack-echo@sha256:{}", "d".repeat(64));
+    let misnamed = stack_echo(&image).replace("name: stack-echo", "name: other-echo");
+    let tarball = {
+        let src = releases.path().join("src");
+        for (folder, text) in [
+            ("stack-echo", stack_echo(&image)),
+            ("named-wrong", misnamed),
+        ] {
+            let dir = src.join("pipelines").join("nils-echo").join(folder);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("nils.job.yml"), text).unwrap();
+        }
+        let mut tar = tar::Builder::new(flate2::write::GzEncoder::new(
+            Vec::new(),
+            flate2::Compression::fast(),
+        ));
+        tar.append_dir_all("pipelines", src.join("pipelines"))
+            .unwrap();
+        tar.into_inner().unwrap().finish().unwrap()
+    };
+    let at = releases.path().join("download").join(format!("v{version}"));
+    std::fs::create_dir_all(&at).unwrap();
+    std::fs::write(at.join("pipelines.tar.gz"), &tarball).unwrap();
+    std::fs::write(
+        at.join("SHA256SUMS"),
+        format!("{}  pipelines.tar.gz\n", sha256(&tarball)),
+    )
+    .unwrap();
+    let channel = format!("file://{}", releases.path().display());
+    let add = |args: &[&str]| -> (bool, String, String) {
+        let mut c = lab.command(&lab.path);
+        c.args(["pipeline", "add"]).args(args);
+        c.env("NILS_RELEASES", &channel);
+        let out = c.output().unwrap();
+        (
+            out.status.success(),
+            String::from_utf8_lossy(&out.stdout).to_string(),
+            String::from_utf8_lossy(&out.stderr).to_string(),
+        )
+    };
+
+    // by name, from this engine's own release
+    let (ok, out, err) = add(&["--release", "stack-echo", "--json"]);
+    assert!(ok, "{err}");
+    let v: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["label"], "stack-echo@1", "{v}");
+    assert_eq!(v["image"], image.as_str(), "{v}");
+    assert_eq!(v["added"], true, "{v}");
+    // the same descriptor from the release named, through --channel
+    let (ok, out, err) = add(&[
+        &format!("--release=v{version}"),
+        "stack-echo",
+        "--channel",
+        &channel,
+    ]);
+    assert!(ok, "{err}");
+    assert!(
+        out.contains("the catalog already held this descriptor"),
+        "{out}"
+    );
+    // a name the release does not ship, and one whose folder is not its name
+    let (ok, _, err) = add(&["--release", "bodypart-embed"]);
+    assert!(!ok);
+    assert!(
+        err.contains(&format!(
+            "the release {version} ships no descriptor of bodypart-embed; it ships named-wrong, stack-echo"
+        )),
+        "{err}"
+    );
+    let (ok, _, err) = add(&["--release", "named-wrong"]);
+    assert!(!ok);
+    assert!(err.contains("names the pipeline other-echo"), "{err}");
+    // a release that ships none, and a tarball that is not what its sums say
+    let (ok, _, err) = add(&["--release=9.9.9", "stack-echo"]);
+    assert!(!ok);
+    assert!(
+        err.contains("the release 9.9.9 ships no descriptors that can be read here"),
+        "{err}"
+    );
+    std::fs::write(at.join("pipelines.tar.gz"), b"not what the sums say").unwrap();
+    let (ok, _, err) = add(&["--release", "stack-echo"]);
+    assert!(!ok);
+    assert!(
+        err.contains("does not match the release's checksum"),
+        "{err}"
+    );
+    // --channel speaks of a release only
+    let (ok, _, err) = add(&["--channel", &channel, "x.yml"]);
+    assert!(!ok);
+    assert!(err.contains("--release"), "{err}");
+    assert_eq!(
+        lab.count("SELECT COUNT(*) FROM pipeline WHERE name = 'stack-echo'"),
+        1
+    );
+}
+
 #[test]
 fn a_secret_is_mounted_for_its_run_alone_and_found_nowhere_after() {
     if !have("python3") {

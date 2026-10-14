@@ -36,9 +36,12 @@ description: >-
   post-contrast model, through its three-slice student; defer the rest of
   T1-type brain to the full pipeline and say "not sure" elsewhere.
 
-# The image is built by each site from this folder; no release publishes
-# it. The digest below is the image built from this folder (CPU build,
-# torch 2.8.0), and a site that builds its own pins its own.
+# A release builds this folder's image (torch 2.8.0's CUDA 12.8 wheels, one
+# image for the CPU and a card) and ships this descriptor in its
+# pipelines.tar.gz with the digest of the image it pushed; a site takes it
+# from the release it runs (nils pipeline add --release postcontrast-cascade).
+# The digest below is the development pin, the image built from this folder
+# before a release published one.
 container-image:
   type: docker
   image: "ghcr.io/kineuro/nils-postcontrast@sha256:cbafd715a69c8e2c571ea1ce5f9ea7d2349d3e109300cd84d2d7d1e1fada5a7c"
@@ -119,6 +122,8 @@ x-nils:
         - {name: student_digest, type: text, description: The cascade's student}
         - {name: fusion_digest, type: text, description: The cascade's fusion}
   needs:
+    # the student on a card where the lane leases one (bfloat16, as the
+    # study ran it), else on the CPU in float32; the same image either way
     gpu: optional
     memory-gb: 8
     gpu-memory-gb: 4

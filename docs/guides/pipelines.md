@@ -116,6 +116,18 @@ nils pipeline add pipelines/n4-bias-correction/nils.job.yml
 
 The descriptor is checked and kept whole with its digest. The image must be pinned by its registry manifest digest, `repository@sha256:<hex>`; a tag or an image id is refused. Adding the same descriptor again changes nothing; one that differs becomes the name's next version.
 
+The models' pipelines (body part, post-contrast's cascade and System 1) come from the engine's release, not from a checkout. Each release builds every model's image from its tag and ships the descriptors that name those images by the digests it pushed, in `pipelines.tar.gz` beside the binaries, listed in `IMAGES` and checked by `SHA256SUMS`. Take one by its name from the release this engine is:
+
+```sh
+nils pipeline add --release bodypart-infer-fusion
+nils pipeline add --release postcontrast-cascade
+nils pipeline add --release system1-score
+```
+
+`--release=<version>` takes the descriptor of another release, and `--channel <url>` (or `NILS_RELEASES`) another place releases come from. A release's tarball that is not what its sums say is refused. A descriptor in a checkout pins the image of an earlier release, for development; a build that is not a release adds from there as above. Post-contrast's fallback, `postcontrast-full`, is not in a release: each site builds its image from `pipelines/nils-postcontrast/Dockerfile.full` and repins the descriptor (see *Run a model registered by its card*).
+
+> **Warning:** the models' images run on the CPU and on a card. A pipeline that declares the card optional (`x-nils.needs.gpu: optional`) takes the lane's card where the runtime offers one (`nils pipeline lane --gpu-card <n>`; card 0 where the lane names none), under the lease its `gpu-memory-gb` asks, and the CPU where the lane names `none`, the machine has no card, or the card is smaller than a unit's need. Check the lane's card before you add a model's pipeline on a machine whose cards other work uses.
+
 The desk adds one the same way, under Pipelines, through `POST /api/pipelines` with the descriptor's text; it is an admin's (`install:work`), since it brings a container image onto the site.
 
 A descriptor of the bids layout finds each pick's image by the name the release gives it. The suffix is the base contrast and FLAIR is always a modifier, so the T1w is `*_T1w.nii.gz` and the FLAIR is a T2w with `FLAIR` among the `+` tokens of its `acq-` (`sub-01_ses-01_acq-Ax+2D+FLAIR+IRTSE_T2w.nii.gz`), never `*_FLAIR.nii.gz`, which only older releases wrote. A T2w without the token is the `t2w` pick. The segcsvd and SAMSEG starters find their FLAIR this way.

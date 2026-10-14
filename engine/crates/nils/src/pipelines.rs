@@ -375,6 +375,83 @@ pub(crate) fn add_descriptor(registry: &mut Registry, text: &str) -> Result<Valu
     Ok(v)
 }
 
+/// The file an engine release ships its model pipelines' descriptors in
+/// (record 55 A5, 2026-10-14): `pipelines/<package>/<name>/nils.job.yml`
+/// for each descriptor whose image the release built, naming that image by
+/// the digest the release pushed, so a tag's descriptors never name an
+/// older image than its own.
+pub(crate) const RELEASE_DESCRIPTORS: &str = "pipelines.tar.gz";
+
+/// The descriptors a release's `pipelines.tar.gz` holds, by the folder each
+/// is in (the pipeline's name), read without unpacking it.
+pub(crate) fn descriptors_in(bytes: &[u8]) -> Result<BTreeMap<String, String>, String> {
+    use std::io::Read;
+    let e = |e: std::io::Error| format!("reading the release's descriptors: {e}");
+    let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(bytes));
+    let mut out = BTreeMap::new();
+    for entry in archive.entries().map_err(e)? {
+        let mut entry = entry.map_err(e)?;
+        if !entry.header().entry_type().is_file() {
+            continue;
+        }
+        let path = entry
+            .path()
+            .map_err(e)?
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .filter(|c| c != ".")
+            .collect::<Vec<_>>();
+        // pipelines/<package>/<name>/nils.job.yml, and nothing else
+        let [top, _package, name, file] = path.as_slice() else {
+            continue;
+        };
+        if top != "pipelines" || file != "nils.job.yml" || name.starts_with('.') {
+            continue;
+        }
+        let mut text = String::new();
+        entry.read_to_string(&mut text).map_err(e)?;
+        out.insert(name.clone(), text);
+    }
+    if out.is_empty() {
+        return Err(format!(
+            "the release's {RELEASE_DESCRIPTORS} holds no descriptor"
+        ));
+    }
+    Ok(out)
+}
+
+/// The descriptor of the pipeline `name` that the engine release `version`
+/// ships, from `base`, checked against the release's sums, and named as
+/// its folder says.
+pub(crate) fn release_descriptor(base: &str, version: &str, name: &str) -> Result<String, Exit> {
+    let bytes =
+        crate::update::fetch_checked(base, version, RELEASE_DESCRIPTORS).map_err(|e| {
+            usage(format!(
+                "the release {version} ships no descriptors that can be read here ({}); a build that is not a release adds a descriptor from its checkout: nils pipeline add <nils.job.yml>",
+                e.message
+            ))
+        })?;
+    let mut all = descriptors_in(&bytes).map_err(usage)?;
+    let Some(text) = all.remove(name) else {
+        return Err(usage(format!(
+            "the release {version} ships no descriptor of {name}; it ships {}",
+            all.into_keys().collect::<Vec<_>>().join(", ")
+        )));
+    };
+    let d = descriptor::parse(&text).map_err(|e| {
+        usage(format!(
+            "the release {version}'s descriptor of {name} does not check: {e}"
+        ))
+    })?;
+    if d.name != name {
+        return Err(usage(format!(
+            "the release {version}'s descriptor in {name}/ names the pipeline {}",
+            d.name
+        )));
+    }
+    Ok(text)
+}
+
 /// A change to the lane, as `nils pipeline lane` and `PUT
 /// /api/pipelines/lane` take it: each field left out is kept.
 #[derive(Debug, Default, serde::Deserialize)]
@@ -1614,8 +1691,20 @@ pub(crate) enum PipelineCommand {
     /// its name's next version; an image not pinned by its registry
     /// manifest digest is refused
     Add {
-        /// The descriptor
+        /// The descriptor; with --release, the name of a pipeline the
+        /// release ships
+        #[arg(value_name = "FILE|NAME")]
         file: PathBuf,
+        /// Take the descriptor from an engine release's pipelines.tar.gz,
+        /// checked against the release's SHA256SUMS: this engine's own
+        /// release, or --release=<version>. A release's descriptors name
+        /// the images it built, by the digests it pushed
+        #[arg(long, value_name = "VERSION", num_args = 0..=1, require_equals = true, default_missing_value = "")]
+        release: Option<String>,
+        /// Where releases come from, with --release; NILS_RELEASES sets
+        /// the same thing
+        #[arg(long, value_name = "URL", requires = "release")]
+        channel: Option<String>,
         /// Machine-readable output
         #[arg(long)]
         json: bool,
@@ -1836,11 +1925,35 @@ fn print(v: &Value) -> Result<(), Exit> {
 pub(crate) fn command(home: &Home, command: PipelineCommand) -> Result<(), Exit> {
     let mut registry = crate::open(home)?;
     match command {
-        PipelineCommand::Add { file, json } => {
-            let text = std::fs::read_to_string(&file)
-                .map_err(|e| usage(format!("{}: {e}", file.display())))?;
+        PipelineCommand::Add {
+            file,
+            release,
+            channel,
+            json,
+        } => {
+            let (text, from) = match release.as_deref().map(str::trim) {
+                None => (
+                    std::fs::read_to_string(&file)
+                        .map_err(|e| usage(format!("{}: {e}", file.display())))?,
+                    file.display().to_string(),
+                ),
+                // record 55 A5: the descriptor a release ships, which names
+                // the image that release built
+                Some(asked) => {
+                    let version = match asked.trim_start_matches('v') {
+                        "" => crate::update::VERSION,
+                        v => v,
+                    };
+                    let name = file.to_string_lossy().into_owned();
+                    let base = crate::update::engine_base(channel.as_deref());
+                    (
+                        release_descriptor(&base, version, &name)?,
+                        format!("{name} of the release {version}"),
+                    )
+                }
+            };
             let v = add_descriptor(&mut registry, &text)
-                .map_err(|e| usage(format!("{}: {}", file.display(), e.message)))?;
+                .map_err(|e| usage(format!("{from}: {}", e.message)))?;
             if json {
                 return print(&v);
             }
@@ -3782,8 +3895,31 @@ pub(crate) fn lane_refusal(d: &Descriptor, p: &Pipeline, lane: &Lane) -> Option<
     ))
 }
 
+/// The lane's card where it is smaller than a unit's need, with its size in
+/// MiB, as `nvidia-smi` says it (record 55 A5); none where it holds the
+/// need, or its size is not known.
+pub(crate) fn card_too_small(d: &Descriptor, lane: &Lane) -> Option<(u32, u64)> {
+    let card = lane.card?;
+    let smi = runtime::which("nvidia-smi", std::env::var_os("PATH").as_deref())?;
+    let total = lane::gpu_total_mib(&smi, card).ok();
+    (!lane::card_holds(total, lane::mib_of_gb(d.needs.gpu_memory_gb)))
+        .then(|| (card, total.unwrap_or(0)))
+}
+
+/// Why a unit runs on the CPU though a card is offered: the lane's card is
+/// smaller than the unit's need, so a lease on it would never come.
+pub(crate) fn too_small_words(d: &Descriptor, card: u32, total_mib: u64) -> String {
+    format!(
+        "card {card} holds {} GB, and a unit needs {} GB of a card",
+        descriptor::number_text(total_mib as f64 / 1024.0),
+        descriptor::number_text(d.needs.gpu_memory_gb)
+    )
+}
+
 /// The device a run takes and whether it takes the GPU: a GPU where the
-/// pipeline asks, the runtime offers one and the lane names a card.
+/// pipeline asks, the runtime offers one and the lane names a card that
+/// can hold a unit's need. An optional need runs on the CPU where the card
+/// is smaller than that (record 55 A5), and a required one is refused.
 fn device_for(
     d: &Descriptor,
     p: &Pipeline,
@@ -3791,8 +3927,21 @@ fn device_for(
     lane: &Lane,
 ) -> Result<(String, bool), Exit> {
     let offered = rt.gpu().filter(|_| lane.card.is_some());
+    let small = match (d.gpu, offered) {
+        (Gpu::Optional | Gpu::Required, Some(_)) => card_too_small(d, lane),
+        _ => None,
+    };
     match (d.gpu, offered) {
         (Gpu::None, _) | (Gpu::Optional, None) => Ok(("cpu".to_string(), false)),
+        (Gpu::Optional, Some(_)) if small.is_some() => Ok(("cpu".to_string(), false)),
+        (Gpu::Required, Some(_)) if small.is_some() => {
+            let (card, total) = small.unwrap_or_default();
+            Err(usage(format!(
+                "{} needs a GPU, and {}; nils pipeline lane --gpu-card <n> names a larger one",
+                p.label(),
+                too_small_words(d, card, total)
+            )))
+        }
         (Gpu::Optional | Gpu::Required, Some(g)) => Ok((g.to_string(), true)),
         (Gpu::Required, None) if rt.gpu().is_some() => Err(usage(format!(
             "{} needs a GPU, and the pipeline lane uses no card here; nils pipeline lane --gpu-card <n> names the one it leases",

@@ -176,9 +176,28 @@ pub fn budget(cores: u32, memory_gb: u64, host: (u32, u64)) -> (Ledger, Option<S
 /// The free memory of one card, in MiB, as `nvidia-smi --query-gpu=
 /// memory.free --format=csv,noheader -i <card>` says it.
 pub fn gpu_free_mib(smi: &Path, card: u32) -> Result<u64, String> {
+    gpu_memory_mib(smi, card, "memory.free")
+}
+
+/// The whole memory of one card, in MiB, as `nvidia-smi --query-gpu=
+/// memory.total --format=csv,noheader -i <card>` says it: what a unit's
+/// need is held against before it waits for a lease it could never get.
+pub fn gpu_total_mib(smi: &Path, card: u32) -> Result<u64, String> {
+    gpu_memory_mib(smi, card, "memory.total")
+}
+
+/// Whether a card of `total_mib` could ever hold a unit that needs
+/// `need_mib` of it (record 55 A5): a unit of an optional GPU need whose
+/// card is smaller runs on the CPU rather than wait for a lease that never
+/// comes. A card whose size is not known is taken to hold it.
+pub fn card_holds(total_mib: Option<u64>, need_mib: u64) -> bool {
+    total_mib.is_none_or(|t| t >= need_mib)
+}
+
+fn gpu_memory_mib(smi: &Path, card: u32, field: &str) -> Result<u64, String> {
     let mut child = Command::new(smi)
         .args([
-            "--query-gpu=memory.free",
+            &format!("--query-gpu={field}"),
             "--format=csv,noheader",
             "-i",
             &card.to_string(),
@@ -331,7 +350,7 @@ mod tests {
         let smi = dir.join("nvidia-smi");
         std::fs::write(
             &smi,
-            "#!/bin/sh\n[ \"$1\" = --query-gpu=memory.free ] || exit 9\n[ \"$4\" = 1 ] && { echo '4096 MiB'; exit 0; }\nexit 6\n",
+            "#!/bin/sh\n[ \"$4\" = 1 ] || exit 6\n[ \"$1\" = --query-gpu=memory.free ] && { echo '4096 MiB'; exit 0; }\n[ \"$1\" = --query-gpu=memory.total ] && { echo '16376 MiB'; exit 0; }\nexit 9\n",
         )
         .unwrap();
         #[cfg(unix)]
@@ -340,7 +359,19 @@ mod tests {
             std::fs::set_permissions(&smi, std::fs::Permissions::from_mode(0o755)).unwrap();
             assert_eq!(gpu_free_mib(&smi, 1), Ok(4096));
             assert!(gpu_free_mib(&smi, 0).is_err());
+            assert_eq!(gpu_total_mib(&smi, 1), Ok(16376));
+            assert!(gpu_total_mib(&smi, 0).is_err());
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Record 55 A5: a card smaller than a unit's need never holds it, so
+    /// the unit is not made to wait for it; a card of unknown size might.
+    #[test]
+    fn a_card_holds_a_unit_only_where_it_is_large_enough() {
+        assert!(card_holds(Some(98_304), 49_152));
+        assert!(card_holds(Some(49_152), 49_152));
+        assert!(!card_holds(Some(16_376), 49_152));
+        assert!(card_holds(None, 49_152));
     }
 }

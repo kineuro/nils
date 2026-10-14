@@ -5,6 +5,12 @@ name: release
 # (docs/decisions/15, R4). A tag goes on a commit once ci passed on main, and that
 # run built the six binaries with engine-build.yml, so the release takes them from
 # it; where no run on main kept them, they are built here the same way.
+#
+# Every model's image is built from the tag and pushed first (record 55 A5), and
+# the release ships the descriptors of its model pipelines, each naming the image
+# this run built by the digest it pushed (pipelines.tar.gz, with IMAGES), checked
+# by the tag's own binary as a catalog takes them. The release waits for both, so a
+# tag's descriptors never name an older image than its own.
 on:
   push:
     tags: ['v*']
@@ -38,9 +44,110 @@ jobs:
     if: needs.built.outputs.run == ''
     uses: ./.github/workflows/engine-build.yml
 
+  model-images:
+    # Record 55 A5: each model's image, one image that runs on the CPU and on a
+    # card (CUDA torch wheels, which run on the CPU where the runner gives the
+    # container no card), for linux/amd64, pushed by the tag. bodypart-embed's
+    # encoder pins go to the body-part build, which fails where the weights it
+    # bakes are other ones. The post-contrast fallback's image (Dockerfile.full)
+    # is not here: it is FreeSurfer's image, which carries the MATLAB Runtime,
+    # FSL's binaries and the CorTechs tools, whose terms do not let us
+    # redistribute them, and each site builds it (record 55, ruling 20).
+    name: model image ${{ matrix.image }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [nils-bodypart, nils-postcontrast, nils-system1]
+    steps:
+      - uses: actions/checkout@v7
+      - name: room for an image of CUDA wheels
+        # a CUDA image is about 12 GB unpacked; the runner's toolchains this
+        # job does not use make the room
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          docker image prune --all --force > /dev/null
+          df -h /
+      - name: what the build checks
+        id: args
+        run: |
+          if [ "${{ matrix.image }}" = nils-bodypart ]; then
+            pins=$(python3 scripts/release-descriptors.py encoders pipelines/nils-bodypart/bodypart-embed/nils.job.yml)
+            echo "build-args=ENCODER_DIGESTS=$pins" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: push
+        uses: docker/build-push-action@v6
+        with:
+          context: pipelines/${{ matrix.image }}
+          platforms: linux/amd64
+          push: true
+          build-args: ${{ steps.args.outputs.build-args }}
+          tags: ghcr.io/kineuro/${{ matrix.image }}:${{ github.ref_name }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ github.ref_name }}
+      - name: the reference the release's descriptors pin
+        run: |
+          mkdir -p refs
+          echo "ghcr.io/kineuro/${{ matrix.image }}@${{ steps.push.outputs.digest }}" | tee "refs/${{ matrix.image }}.ref" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: image-${{ matrix.image }}
+          path: refs/${{ matrix.image }}.ref
+
+  descriptors:
+    # The descriptors the release ships: every one of this tree that names a
+    # model image this run built, pinned to the digest the run pushed, then
+    # taken into a catalog by the tag's own binary, which must keep that image.
+    needs: [built, build, model-images]
+    if: ${{ !cancelled() && needs.built.result == 'success' && (needs.build.result == 'success' || needs.build.result == 'skipped') && needs.model-images.result == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: image-*
+          path: refs
+          merge-multiple: true
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: nils-linux-x86_64
+          path: bin
+          merge-multiple: true
+          run-id: ${{ needs.built.outputs.run || github.run_id }}
+          github-token: ${{ github.token }}
+      - name: the descriptors, pinned to the images this release built
+        run: python3 scripts/release-descriptors.py write --refs refs --out out --tag "$GITHUB_REF_NAME"
+      - name: taken by the tag's binary as a catalog takes them
+        run: |
+          chmod +x bin/nils-linux-x86_64
+          nils() { HOME="$RUNNER_TEMP/home" XDG_CONFIG_HOME="$RUNNER_TEMP/config" bin/nils-linux-x86_64 --registry "$RUNNER_TEMP/reg" "$@"; }
+          mkdir -p "$RUNNER_TEMP/home" "$RUNNER_TEMP/config"
+          head -c 32 /dev/urandom | base64 -w0 | nils key add release
+          nils init --key release
+          for f in $(find out/pipelines -name nils.job.yml | sort); do
+            nils pipeline add "$f" --json | python3 scripts/release-descriptors.py added out/IMAGES
+          done
+          tar -czf pipelines.tar.gz -C out pipelines
+          cp out/IMAGES IMAGES
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-descriptors
+          path: |
+            pipelines.tar.gz
+            IMAGES
+
   release:
-    needs: [built, build]
-    if: ${{ !cancelled() && needs.built.result == 'success' && (needs.build.result == 'success' || needs.build.result == 'skipped') }}
+    needs: [built, build, descriptors]
+    if: ${{ !cancelled() && needs.built.result == 'success' && (needs.build.result == 'success' || needs.build.result == 'skipped') && needs.descriptors.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -51,7 +158,11 @@ jobs:
           merge-multiple: true
           run-id: ${{ needs.built.outputs.run || github.run_id }}
           github-token: ${{ github.token }}
-      - name: the binaries carry the tag's version, and the packs go with them
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-descriptors
+          path: bin
+      - name: the binaries carry the tag's version, and the packs and the descriptors go with them
         run: |
           v=${GITHUB_REF_NAME#v}
           chmod +x bin/nils-*
@@ -60,7 +171,9 @@ jobs:
           # the rule sets travel with the binary: one tarball holding `packs/`,
           # which is what the installer unpacks and `nils update` swaps.
           tar -czf bin/packs.tar.gz packs
-          (cd bin && sha256sum nils-* packs.tar.gz > SHA256SUMS && echo "$v" > VERSION && ls -la)
+          # the model pipelines' descriptors, pinned to this release's images,
+          # which `nils pipeline add --release <name>` reads
+          (cd bin && sha256sum nils-* packs.tar.gz pipelines.tar.gz IMAGES > SHA256SUMS && echo "$v" > VERSION && ls -la)
       - name: release notes from the changelog
         run: |
           v=${GITHUB_REF_NAME#v}
@@ -74,6 +187,8 @@ jobs:
           files: |
             bin/nils-*
             bin/packs.tar.gz
+            bin/pipelines.tar.gz
+            bin/IMAGES
             bin/SHA256SUMS
             bin/VERSION
 
@@ -113,27 +228,3 @@ jobs:
           tags: |
             ghcr.io/kineuro/nils:${{ github.ref_name }}
             ghcr.io/kineuro/nils:latest
-
-  bodypart-image:
-    # The body-part pipeline's image (record 43 S5), on the CPU base for
-    # linux/amd64, with its weights baked in at pinned revisions. Its four
-    # descriptors pin it by the registry manifest digest this job prints
-    # (record 43 R3), never by the tag.
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - id: push
-        uses: docker/build-push-action@v6
-        with:
-          context: pipelines/nils-bodypart
-          platforms: linux/amd64
-          push: true
-          tags: ghcr.io/kineuro/nils-bodypart:${{ github.ref_name }}
-      - name: the reference the descriptors pin
-        run: echo "ghcr.io/kineuro/nils-bodypart@${{ steps.push.outputs.digest }}" | tee -a "$GITHUB_STEP_SUMMARY"

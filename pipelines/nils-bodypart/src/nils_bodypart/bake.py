@@ -14,7 +14,11 @@ the sha256 of its weights file (its identity as a registered encoder), and
 its width.
 
 ``verify`` loads both encoders with the network off, embeds one blank image
-and one prompt, and checks each width against ``encoders.json``.
+and one prompt, and checks each width against ``encoders.json``. Where
+``NILS_BODYPART_EXPECT_ENCODERS`` names digests (a comma list, as
+bodypart-embed's descriptor pins them), the encoders baked must be exactly
+those, or it fails: the image's build passes them in a release, so a release
+never ships a descriptor whose encoder pins its image does not bake.
 """
 
 from __future__ import annotations
@@ -67,12 +71,28 @@ def download() -> None:
     print(json.dumps(out, indent=2, sort_keys=True))
 
 
+def expected(text: str | None) -> list[str]:
+    """The encoder digests a build was asked to bake, from a comma list."""
+    return sorted({d.strip() for d in (text or "").split(",") if d.strip()})
+
+
+def check_expected(baked: list[str], want: list[str]) -> str | None:
+    """Why the baked encoders are not the ones asked for, or None. Nothing
+    asked for is nothing to check."""
+    if want and sorted(baked) != sorted(want):
+        return f"the image bakes the encoders {', '.join(sorted(baked))}, and the build was asked for {', '.join(sorted(want))}"
+    return None
+
+
 def verify() -> None:
     import numpy as np
 
     if os.environ.get("HF_HUB_OFFLINE") != "1":
         sys.exit("verify runs with HF_HUB_OFFLINE=1, or it proves nothing")
     enc = Encoders(device="cpu")
+    why = check_expected([i.digest for i in enc.infos().values()], expected(os.environ.get("NILS_BODYPART_EXPECT_ENCODERS")))
+    if why:
+        sys.exit(why)
     blank = np.zeros((224, 224, 3), dtype=np.uint8)
     for name, info in enc.infos().items():
         e = enc.get(name)

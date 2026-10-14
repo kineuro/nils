@@ -13,9 +13,16 @@
 # The selection is the eligible stacks, as v0 chose them: anatomical, not a
 # localizer, and not SyMRI, projection- or subtraction-derived.
 #
-# The image is pinned by its registry manifest digest (record 43 R3): the
-# image the release workflow published as v1.0.0-alpha.80, by the digest it
-# printed. A release that publishes a new image repins all five descriptors.
+# The image is pinned by its registry manifest digest (record 43 R3). The
+# digest below is the development pin, the image the 1.0.0-alpha.80 release
+# published. A release builds the image from this folder, and the five
+# descriptors it ships (pipelines.tar.gz, beside the binaries) name that
+# image by the digest it pushed; its build checks that the encoder digests
+# below are the weights it bakes. A site takes them from the release it runs
+# (nils pipeline add --release <name>), never from a checkout.
+#
+# One image runs on the CPU and on a card (record 55 A5): the encoders take
+# the card where the lane leases one, and the CPU where it has none.
 name: bodypart-embed
 schema-version: "0.5"
 tool-version: "0.1.0"
@@ -102,5 +109,7 @@ x-nils:
       encoders: ["sha256:612923381c76ec5a9bed335d1c48827e3f2e506ac31b044b63b2031fadee6a0b"]
   needs:
     gpu: optional
+    # both encoders' weights in float32 (about 2.3 GB) and a batch of 32
+    gpu-memory-gb: 6
     memory-gb: 6
     cores: 4

@@ -1100,8 +1100,24 @@ pub(crate) fn check(registry: &mut Registry, asked: &Asked<'_>) -> Result<Value,
     let (lane, mut budget) = budget(registry);
     let card = detected.runtime.as_ref().and_then(|r| r.gpu.clone());
     let offered = card.clone().filter(|_| lane.card.is_some());
+    // record 55 A5: a card smaller than a unit's need is never leased, so
+    // an optional need runs on the CPU and a required one cannot run
+    let small = match (d.gpu, &offered) {
+        (Gpu::Optional | Gpu::Required, Some(_)) => crate::pipelines::card_too_small(&d, &lane),
+        _ => None,
+    };
+    let small_why = small.map(|(n, total)| crate::pipelines::too_small_words(&d, n, total));
     let device = match (d.gpu, &offered) {
         (Gpu::None, _) | (Gpu::Optional, None) => Some("cpu".to_string()),
+        (Gpu::Optional, Some(_)) if small.is_some() => Some("cpu".to_string()),
+        (Gpu::Required, Some(_)) if small.is_some() => {
+            blockers.push(format!(
+                "{} needs a GPU, and {}",
+                p.label(),
+                small_why.clone().unwrap_or_default()
+            ));
+            None
+        }
         (_, Some(g)) => Some(g.clone()),
         (Gpu::Required, None) => {
             blockers.push(if card.is_some() {
@@ -1237,6 +1253,8 @@ pub(crate) fn check(registry: &mut Registry, asked: &Asked<'_>) -> Result<Value,
         "gpu": {
             "need": d.gpu.name(), "available": card, "device": device, "card": lane.card,
             "gpu_memory_gb": (device.as_deref().is_some_and(|d| d != "cpu")).then_some(d.needs.gpu_memory_gb),
+            // why the run takes no card that is there: it is smaller than a unit's need
+            "why": small_why,
         },
         "needs": {"cores": cores, "memory_gb": memory},
         "budget": budget,
@@ -1770,10 +1788,14 @@ pub(crate) fn command(home: &Home, args: &crate::pipelines::RunArgs) -> Result<(
         ),
     }
     println!(
-        "  GPU              needs {}, this engine has {}, it would run on {}",
+        "  GPU              needs {}, this engine has {}, it would run on {}{}",
         v["gpu"]["need"].as_str().unwrap_or_default(),
         v["gpu"]["available"].as_str().unwrap_or("none"),
-        v["gpu"]["device"].as_str().unwrap_or("nothing")
+        v["gpu"]["device"].as_str().unwrap_or("nothing"),
+        v["gpu"]["why"]
+            .as_str()
+            .map(|w| format!(" ({w})"))
+            .unwrap_or_default()
     );
     println!(
         "  a unit needs     {} cores, {} GB; the lane has {} cores, {} GB{}",

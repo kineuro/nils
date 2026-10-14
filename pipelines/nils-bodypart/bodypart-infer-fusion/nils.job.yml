@@ -72,6 +72,13 @@
 # manual run (x-nils.on-arrival), with the touched planes filled for the
 # cache (cache_fill touched, ruling R5).
 #
+# One image runs it on the CPU and on a card (record 55 A5). Where the lane
+# leases a card (x-nils.needs.gpu optional) the runner gives the container
+# that card, and --device auto takes it: the cascade's student and the
+# lossless JPEG 2000 decoding run on it, and the card's answers are the
+# CPU's (class I, A5.2.3a). Where the lane has none, or the machine none,
+# the container sees no card and the same image runs on the CPU.
+#
 # The image runs offline and never reaches the network; the runner runs it
 # with --network none. The image is pinned as bodypart-embed/nils.job.yml
 # says.
@@ -138,7 +145,7 @@ inputs:
     default-value: 4
     optional: true
 
-command-line: "nils-bodypart infer-fusion --stacks [Manifest] --inputs [Inputs] --output [OutputLocation] --cache [Cache] [THREADS] [READER] [READAHEAD] [CACHE_FILL]"
+command-line: "nils-bodypart infer-fusion --stacks [Manifest] --inputs [Inputs] --output [OutputLocation] --cache [Cache] --device auto [THREADS] [READER] [READAHEAD] [CACHE_FILL]"
 
 output-files:
   - id: scores
@@ -224,7 +231,11 @@ x-nils:
         - {name: student_digest, type: text, description: The cascade's student}
         - {name: deferral_digest, type: text, description: The cascade's deferral model}
   needs:
-    gpu: none
+    # a card where the lane leases one, else the CPU; on a card the run
+    # held at most 1.45 GB of it (A5.2.3d, every sample of every card run),
+    # and 4 holds it with a margin
+    gpu: optional
+    gpu-memory-gb: 4
     # measured (2026-10-12): the cascade over 19,275 stacks at 32 workers,
     # twice the cores below, peaked at 10.4 GiB (the PSS of all the run's
     # processes): the main process 2.2 GiB with stage 1 streamed, a worker

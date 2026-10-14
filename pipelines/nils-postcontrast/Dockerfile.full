@@ -18,11 +18,16 @@
 # and PyTorch with CUDA 12.8 for SynthStrip.
 #
 # Licences: FreeSurfer's image carries FreeSurfer's software licence
-# agreement and the third-party components FreeSurfer distributes (among
-# them FSL's and MATLAB runtime's, whose terms are not ours to pass on).
-# This image is therefore built by each site and never published; its
-# descriptor's digest names the image a site built. The model's weights
-# and the atlases are the site's model inputs, never part of the image.
+# agreement and the third-party components FreeSurfer distributes, three of
+# whose terms do not let us pass them on: the MATLAB Runtime (a personal,
+# non-transferable licence), FSL's binaries (non-commercial, and only with
+# all their source) and the CorTechs tools tkmedit, tksurfer and tkregister2
+# (internal research by not-for-profits). This image is therefore built by
+# each site and never published; its descriptor's digest names the image a
+# site built. The Synth tools' own code and weights and the MNI template
+# would allow a public image without those parts, which is another build.
+# The model's weights and the atlases are the site's model inputs, never
+# part of the image.
 
 ARG BASE=docker.io/freesurfer/freesurfer@sha256:5648104ca75a24f6ee5a8786146f99b405c2bda1da12bff723a15056da8ddf6b
 FROM ${BASE}

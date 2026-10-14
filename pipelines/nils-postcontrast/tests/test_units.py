@@ -313,3 +313,24 @@ def test_manifest_reads_stacks_and_context(tmp_path):
     p.write_text(json.dumps(doc))
     with pytest.raises(manifest.ManifestError):
         manifest.read(p)
+
+
+def test_the_image_is_one_build_for_the_cpu_and_a_card_without_triton():
+    """Record 55 A5: the image takes torch's CUDA wheels, which run on the
+    CPU where the container is given no card, and removes Triton in the
+    layer that installed it: Triton bundles NVIDIA tools that no NVIDIA
+    licence names as redistributable, and the image compiles no kernel."""
+    text = (Path(__file__).resolve().parent.parent / "Dockerfile").read_text()
+    assert "ARG TORCH_INDEX=https://download.pytorch.org/whl/cu" in text
+    # each instruction whole, its continued lines joined
+    instructions, line = [], ""
+    for raw in text.splitlines():
+        if raw.lstrip().startswith("#") and not line:
+            continue
+        line += raw.rstrip("\\").strip() + " "
+        if not raw.rstrip().endswith("\\"):
+            instructions.append(line.strip())
+            line = ""
+    runs = [i for i in instructions if i.startswith("RUN ") and "torch==" in i]
+    assert len(runs) == 1 and "pip uninstall -y triton" in runs[0], runs
+    assert "find_spec('triton') is not None" in runs[0]

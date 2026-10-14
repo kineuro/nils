@@ -140,6 +140,8 @@ x-nils:
       path-template: "head/head.*"
       card: head/card.json
   needs:
+    # CPU by design: scikit-learn fits a small head on embeddings already
+    # made, and runs no network
     gpu: none
     memory-gb: 4
     cores: 4
