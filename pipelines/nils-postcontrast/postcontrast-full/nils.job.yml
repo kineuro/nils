@@ -23,6 +23,16 @@
 # and compute the features after; without one, every tool runs on the CPU,
 # one SynthSeg process per 96 GB of the memory given.
 #
+# gpu-memory-gb is one full wave, measured in T25 (record 55): two
+# SynthSeg processes of 20,000 MiB beside 20,000 for SynthMorph and
+# SynthStrip hold 60,000 MiB, so the run takes one wave at a time, as T25's
+# did. The engine tells the unit what it leased (NILS_GPU_MEMORY_GB) and
+# the tool holds no more: a site that declares less gets fewer SynthSeg
+# processes a wave, then SynthSeg alone after each wave, then the CPU; a
+# card smaller than the need runs the unit on the CPU. The Frangi filter
+# goes on the card only where every worker's share (2,200 MiB) fits beside
+# a full wave; at 60 GB it runs on the CPU, as model r1 itself ran it.
+#
 # The image is FreeSurfer 8.2.0's with the card's runtimes beside it
 # (Dockerfile.full). It carries third-party components FreeSurfer
 # distributes whose terms are not ours to pass on, so it is built by each
@@ -127,7 +137,7 @@ x-nils:
   needs:
     gpu: optional
     memory-gb: 96
-    gpu-memory-gb: 48
+    gpu-memory-gb: 60
     cores: 16
     cores-input: threads
   proposals:

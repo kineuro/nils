@@ -5974,6 +5974,14 @@ fn invocation_of(
         ("NILS_CORES".into(), d.needs.cores.to_string()),
         ("NILS_MEMORY_GB".into(), format!("{}", d.needs.memory_gb)),
     ];
+    if x.gpu {
+        // record 55 T25: the card memory the unit is leased, which its tool
+        // plans within (the post-contrast fallback sizes its waves to it)
+        env.push((
+            "NILS_GPU_MEMORY_GB".into(),
+            descriptor::number_text(d.needs.gpu_memory_gb),
+        ));
+    }
     match &b.key {
         None => {
             mounts = vec![

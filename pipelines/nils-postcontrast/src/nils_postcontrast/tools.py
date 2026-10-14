@@ -192,6 +192,11 @@ def _site_nvidia(python: str) -> str:
     return str(hits[0]) if hits else ""
 
 
+# the least share of a card a SynthSeg process is started with on its own
+# (a wave's processes take --synthseg-mib each, 20,000 by default)
+RETRY_LEAST_MIB = 20000
+
+
 @dataclass
 class Card:
     """One card and what this run may hold of it."""
@@ -201,12 +206,22 @@ class Card:
     reserved: int = 0
 
 
+def ss_procs_for(budget_mib: int, ss_procs: int, ss_mem_mib: int, other_mib: int) -> int:
+    """The SynthSeg processes a wave on a card of ``budget_mib`` runs: as
+    many as were asked that fit beside SynthMorph and SynthStrip (record 55
+    T25: a full wave of two holds 60,000 MiB); none where not even one fits,
+    and SynthSeg then runs once in the card's whole budget after the wave,
+    or on the CPU (``synthseg_retry``)."""
+    return max(0, min(ss_procs, (budget_mib - other_mib) // max(1, ss_mem_mib)))
+
+
 def _take(card: Card, need: int, lock, keep_free: int) -> None:
     """Wait until the run's share of the card holds ``need`` more MiB and,
-    on a shared card, the card keeps ``keep_free`` MiB free after it."""
+    on a shared card, the card keeps ``keep_free`` MiB free after it. A
+    need is never above the share (``ss_procs_for``, ``synthseg_retry``)."""
     while True:
         with lock:
-            fits = card.reserved + need <= card.budget_mib or card.reserved == 0
+            fits = card.reserved + need <= card.budget_mib
             if fits and keep_free > 0:
                 free = card_free_mib(card.device)
                 fits = free is not None and free - need >= keep_free
@@ -223,7 +238,7 @@ def wave(env: Env, card: Card, sids: list, work: str, atlas: dict, logdir: str, 
     SynthStrip run beside them, each one process over the wave. Returns the
     seconds each took; what a card step leaves undone is the CPU's."""
     sids = [s for s in sids if missing(f"{work}/stacks/{s}")]
-    if not sids:
+    if not sids or other_mib > card.budget_mib:
         return {}
     tag = f"w{sids[0]}"
     jm, js, ss = [], [], []
@@ -239,8 +254,9 @@ def wave(env: Env, card: Card, sids: list, work: str, atlas: dict, logdir: str, 
             js.append({"id": sid, "tool": "synthstrip", "argv": ["-i", p["nat"], "-o", p["strip"], "-m", p["mask"], "-g"]})
         if "synthseg" in m:
             ss.append((p["nat"], p["ss"]))
-    # the run's share of the card: a wave starts when its processes fit
-    n_ss = min(ss_procs, len(ss)) if ss else 0
+    # the run's share of the card: a wave starts when its processes fit, as
+    # many SynthSeg processes as the share holds beside the other two
+    n_ss = min(ss_procs_for(card.budget_mib, ss_procs, ss_mem_mib, other_mib), len(ss))
     need = other_mib + n_ss * ss_mem_mib
     _take(card, need, lock, keep_free)
     res: dict = {}
@@ -310,11 +326,14 @@ def wave(env: Env, card: Card, sids: list, work: str, atlas: dict, logdir: str, 
 
 def synthseg_retry(env: Env, card: Card, sids: list, work: str, logdir: str, mem_mib: int, lock, keep_free: int = 0) -> int:
     """The stacks a wave's SynthSeg did not segment (a card's scratch space
-    that was not there, a process's share too small), once more on the
-    card in one process with a larger share; what is still missing goes to
-    the CPU. Returns how many it segmented."""
+    that was not there, a process's share too small, a share too small for
+    any SynthSeg process beside the other tools), once more on the card in
+    one process with a larger share, at most the run's whole share of the
+    card; what is still missing goes to the CPU. Returns how many it
+    segmented."""
     miss = [s for s in sids if os.path.exists(f"{work}/stacks/{s}/nat.nii.gz") and not os.path.exists(paths(f"{work}/stacks/{s}")["ss"])]
-    if not miss:
+    mem_mib = min(mem_mib, card.budget_mib)
+    if not miss or mem_mib < RETRY_LEAST_MIB:
         return 0
     tag = f"r{miss[0]}"
     fi, fo = f"{logdir}/{tag}.ss.in.txt", f"{logdir}/{tag}.ss.out.txt"

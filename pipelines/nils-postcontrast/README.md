@@ -36,7 +36,11 @@ SynthSeg and SynthStrip, the regions', structures' and tail features, the
 three frozen arms (model input `arms`, with their atlases) and the fusion. A
 stack left with no image arm because it has no usable volume or no
 segmentation is "not sure" (`no-usable-volume`, `no-segmentation`), where
-model r1 would answer from its header evidence alone.
+model r1 would answer from its header evidence alone. On a card it holds
+at most the memory the engine leases it (`gpu-memory-gb`, 60 GB: one full
+wave of two SynthSeg processes beside SynthMorph and SynthStrip); a smaller
+budget runs fewer SynthSeg processes, then the CPU, and the Frangi filter
+goes on the card only where every worker's share fits beside a full wave.
 Its image is `Dockerfile.full`, FreeSurfer 8.2.0's image with the card's
 runtimes beside it. FreeSurfer's image carries third-party components whose
 terms are not ours to pass on, so each site builds it and repins the

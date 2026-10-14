@@ -3708,6 +3708,8 @@ fn an_optional_gpu_need_takes_the_leased_card_under_apptainer_and_else_the_cpu()
     for e in &execs {
         assert!(e.iter().any(|w| w == "--nv"), "{e:?}");
         assert!(pair(e, "--env", "CUDA_VISIBLE_DEVICES=1"), "{e:?}");
+        // the card memory it is leased, which the tool plans within
+        assert!(pair(e, "--env", "NILS_GPU_MEMORY_GB=4"), "{e:?}");
         // the container's /tmp on disk in the unit's folder, gone after it
         let w = e
             .windows(2)
@@ -3735,7 +3737,9 @@ fn an_optional_gpu_need_takes_the_leased_card_under_apptainer_and_else_the_cpu()
     for e in &execs {
         assert!(!e.iter().any(|w| w == "--nv"), "{e:?}");
         assert!(
-            !e.iter().any(|w| w.starts_with("CUDA_VISIBLE_DEVICES")),
+            !e.iter()
+                .any(|w| w.starts_with("CUDA_VISIBLE_DEVICES")
+                    || w.starts_with("NILS_GPU_MEMORY_GB")),
             "{e:?}"
         );
     }

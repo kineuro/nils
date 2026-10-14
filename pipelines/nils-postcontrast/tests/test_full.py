@@ -379,6 +379,53 @@ def test_a_stack_with_no_image_arm_is_not_sure_and_says_why(standin_env, monkeyp
     assert res["metrics"]["by_outcome"] == {"no-segmentation": 1, "no-usable-volume": 1, "not-t1-brain": 1, "sealed": 1, "no-calibration": 1}
 
 
+def test_a_card_s_budget_sizes_its_waves_and_places_the_frangi_filter(tmp_path):
+    """Record 55 T25: a full wave, two SynthSeg processes of 20,000 MiB beside
+    20,000 for SynthMorph and SynthStrip, holds 60,000 MiB; the run holds no
+    more of a card than its budget, and a smaller one runs fewer processes,
+    then SynthSeg alone, then the CPU."""
+    assert [tools.ss_procs_for(b, 2, 20000, 20000) for b in (61440, 40960, 30000, 16384)] == [2, 1, 0, 0]
+    # the descriptor's 60 GB: a full wave, and the Frangi filter on the CPU (twelve workers' shares do not fit beside it)
+    fr, kept = full.card_plan([tools.Card("0", 61440)], 12, "auto", 2, 20000, 20000)
+    assert fr == "cpu" and [c.budget_mib for c in kept] == [61440]
+    # room for every worker's share beside a full wave: the filter on the card, its share out of the tools' budget
+    fr, kept = full.card_plan([tools.Card("0", 90000)], 12, "auto", 2, 20000, 20000)
+    assert fr == "card" and kept[0].budget_mib == 90000 - 12 * full.FRANGI_CARD_MIB
+    assert tools.ss_procs_for(kept[0].budget_mib, 2, 20000, 20000) == 2
+    # asked for on the card, as the research runs did: the tools keep the budget
+    fr, kept = full.card_plan([tools.Card("0", 48000)], 12, "card", 1, 20000, 20000)
+    assert fr == "card" and kept[0].budget_mib == 48000
+    # a card that holds not even SynthMorph and SynthStrip is left out: everything on the CPU
+    fr, kept = full.card_plan([tools.Card("0", 16384), tools.Card("1", 61440)], 12, "auto", 2, 20000, 20000)
+    assert fr == "cpu" and [c.device for c in kept] == ["1"]
+    # nothing is started on a card too small for it
+    work = tmp_path / "work"
+    (work / "stacks" / "7").mkdir(parents=True)
+    (work / "stacks" / "7" / "nat.nii.gz").write_bytes(b"")
+    small = tools.Card("0", 16384)
+    assert tools.wave(None, small, [7], str(work), {}, str(tmp_path), 2, 20000, 20000, None, {}) == {}
+    assert tools.synthseg_retry(None, small, [7], str(work), str(tmp_path), 50000, None) == 0
+    assert small.reserved == 0 and not list(tmp_path.glob("*.log"))
+
+
+def test_the_card_budget_is_what_the_engine_leased(monkeypatch):
+    """The engine tells a unit on a card the memory it leased it
+    (NILS_GPU_MEMORY_GB); the run plans within it unless told otherwise."""
+    import argparse
+
+    def budget(*args):
+        p = argparse.ArgumentParser()
+        full.add_parser(p.add_subparsers())
+        return p.parse_args(["full", *args]).card_budget_mib
+
+    monkeypatch.setenv("NILS_GPU_MEMORY_GB", "60")
+    assert budget() == 61440 and budget("--card-budget-mib", "48000") == 48000
+    monkeypatch.setenv("NILS_GPU_MEMORY_GB", "7.5")
+    assert budget() == 7680
+    monkeypatch.delenv("NILS_GPU_MEMORY_GB")
+    assert budget() == 0  # no lease: the card's share (--card-share)
+
+
 def test_the_parts_must_belong_together(standin_env):
     stacks, I = setup_run(standin_env)
     m = json.loads((I / "manifest.json").read_text())

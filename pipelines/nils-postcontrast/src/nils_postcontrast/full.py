@@ -25,7 +25,13 @@ with a reference, and the model answers only where it is certified
 **Where it runs.** With a card, the tools run in waves on it (``tools.wave``)
 while worker processes convert the stacks before and compute the features
 after; without one, every tool runs on the CPU, at most as many SynthSeg
-processes at once as the memory holds (one per 96 GB). A worker that dies (its memory,
+processes at once as the memory holds (one per 96 GB). On a card the run
+holds at most its budget, which is the memory the engine leased the unit
+(``NILS_GPU_MEMORY_GB``) unless one is given: a wave runs as many SynthSeg
+processes as fit beside SynthMorph and SynthStrip, and the Frangi filter
+goes on the card only where every worker's share fits beside a full wave
+(``card_plan``). A smaller card runs fewer SynthSeg processes, then
+SynthSeg alone after each wave, then the CPU. A worker that dies (its memory,
 a signal) takes its pool with it: the pool is made again and the stacks
 it held are tried again, so one stack never ends the run.
 """
@@ -448,6 +454,35 @@ def manifest_files(e) -> list:
     return [(t[0], None, None) for t in manifest.ordered_files(e)]
 
 
+# a feature worker's Frangi filter on the card: its CUDA context (559 MiB
+# measured on 2026-10-14) under its memory pool's cap (1,536 MiB,
+# features.frangi_on_card)
+FRANGI_CARD_MIB = 2200
+
+
+def card_plan(cards: list, workers: int, frangi: str, ss_procs: int, ss_mib: int, other_mib: int) -> tuple[str, list]:
+    """How the cards' budgets are spent (record 55 T25: a full wave, two
+    SynthSeg processes of 20,000 MiB beside 20,000 for SynthMorph and
+    SynthStrip, holds 60,000 MiB). The tools come first: a wave runs as many
+    SynthSeg processes as its card's budget holds (``tools.ss_procs_for``),
+    and a card whose budget does not hold SynthMorph and SynthStrip is left
+    out, its stacks' tools run on the CPU. With ``auto`` the Frangi filter
+    goes on the first card only where every feature worker's share fits
+    there beside a full wave, which that card's budget then gives up; else
+    it runs on the CPU, as model r1 itself ran it. ``card`` puts it there
+    regardless, as research runs did. Returns the Frangi filter's place and
+    the cards kept."""
+    kept = [c for c in cards if c.budget_mib >= other_mib]
+    if not kept:
+        return ("cpu" if frangi == "auto" else frangi), kept
+    if frangi == "auto":
+        share = workers * FRANGI_CARD_MIB
+        frangi = "card" if kept[0].budget_mib - (other_mib + ss_procs * ss_mib) >= share else "cpu"
+        if frangi == "card":
+            kept[0].budget_mib -= share
+    return frangi, kept
+
+
 def _cards(asked: str, budget_frac: float, budget_mib: int) -> list:
     if asked == "none":
         return []
@@ -488,6 +523,12 @@ def cmd_full(a) -> int:
                 cards = []
         elif a.device == "cuda":
             raise RuntimeError("a card was asked for and none is usable")
+        frangi = a.frangi
+        if cards:
+            frangi, cards = card_plan(cards, a.threads, a.frangi, a.synthseg_procs, a.synthseg_mib, a.other_mib)
+            run.extra["card_plan"] = {"frangi": frangi, "cards": [{"card": c.device, "budget_mib": c.budget_mib,
+                                      "synthseg_procs": tools.ss_procs_for(c.budget_mib, a.synthseg_procs, a.synthseg_mib, a.other_mib)}
+                                     for c in cards]}
         run.device = "cuda" if cards else "cpu"
     except (parts.PartsError, FusionError, ArmsError, manifest.ManifestError, RuntimeError) as e:
         run.extra["error"] = str(e)
@@ -499,7 +540,7 @@ def cmd_full(a) -> int:
     atlas, hpn, vxn = P.write_atlas(work / "atlas")
     opts = {"workers": a.threads, "convert_workers": a.convert_workers, "wave": a.wave, "card_waves": a.card_waves,
             "synthseg_procs": a.synthseg_procs, "synthseg_mib": a.synthseg_mib, "synthseg_retry_mib": a.synthseg_retry_mib,
-            "other_mib": a.other_mib, "keep_free_mib": a.keep_free_mib, "memory_gb": a.memory_gb, "frangi": a.frangi, "stall_s": a.stall_s}
+            "other_mib": a.other_mib, "keep_free_mib": a.keep_free_mib, "memory_gb": a.memory_gb, "frangi": frangi, "stall_s": a.stall_s}
     rec, stats = features_of(todo, work, atlas, hpn, vxn, tools.Env.from_environ(), cards, opts) if todo else ({}, {})
     # the arms and model r1's fusion, as the cascade's first stage fuses
     ids = [e.stack_id for e in todo]
@@ -566,6 +607,15 @@ def cmd_full(a) -> int:
     return 0
 
 
+def _leased_mib() -> int:
+    """The card memory the engine leased a unit on a card (NILS_GPU_MEMORY_GB,
+    record 55 T25), in MiB; 0 where it leased none."""
+    try:
+        return max(0, int(float(os.environ.get("NILS_GPU_MEMORY_GB") or 0) * 1024))
+    except ValueError:
+        return 0
+
+
 def add_parser(sub) -> None:
     c = sub.add_parser("full", help="model r1's full pipeline on the stacks the cascade defers")
     c.add_argument("--stacks", type=Path, default=Path("/input/stacks.json"))
@@ -585,10 +635,13 @@ def add_parser(sub) -> None:
     c.add_argument("--keep-free-mib", type=int, default=0, help="a wave starts only when its card keeps this much free after it (a shared card's lease)")
     c.add_argument("--cards", default="auto", help="auto, none, or a comma list of the card ids to use")
     c.add_argument("--card-share", type=float, default=0.75, help="the share of each card's memory the run may hold")
-    c.add_argument("--card-budget-mib", type=int, default=0, help="the memory the run may hold of each card (overrides the share)")
+    c.add_argument("--card-budget-mib", type=int, default=_leased_mib(),
+                   help="the memory the run may hold of each card, at once (overrides the share); default: what the engine leased "
+                        "the unit (NILS_GPU_MEMORY_GB)")
     c.add_argument("--memory-gb", type=int, default=64, help="the memory the run may use; CPU SynthSeg runs at most one per 96 GB of it")
     c.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto")
-    c.add_argument("--frangi", choices=["auto", "cpu", "card"], default="auto")
+    c.add_argument("--frangi", choices=["auto", "cpu", "card"], default="auto",
+                   help="where the Frangi filter runs; auto: on the card where every worker's share fits beside a full wave")
     c.add_argument("--stall-s", type=float, default=7200.0, help="seconds without progress before the run gives up on the rest")
     c.add_argument("--features-for", choices=["candidates", "all"], default="candidates",
                    help="all: every unsealed MR stack's features too (a research check's); the answers still follow the rule")
