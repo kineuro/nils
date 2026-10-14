@@ -96,6 +96,23 @@ pub struct Given {
     pub model_digest: Option<String>,
     #[serde(default)]
     pub note: Option<String>,
+    /// The rules' answer on the axis as the model reads it, in the model's
+    /// own vocabulary (`{value}`, the value a word, a list or null), the
+    /// reading the model's certificate measured its agreement with. The gate
+    /// and the suggestions compare the model's answer with this, never with
+    /// the stored value, whose words are the pack's (a vendor's `SPACE`
+    /// where the model says `3D-TSE`). Absent, they compare with the stored
+    /// value.
+    #[serde(default)]
+    pub rules_read: Option<RulesRead>,
+}
+
+/// The rules' answer as a model reads it.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RulesRead {
+    #[serde(default)]
+    pub value: Value,
 }
 
 /// A value as the registry keeps an axis's answer: one value, values joined
@@ -141,6 +158,9 @@ fn check(o: &Given) -> Result<(), String> {
         return Err(format!("{:?} is not an axis", o.axis));
     }
     canonical(&o.value)?;
+    if let Some(r) = &o.rules_read {
+        canonical(&r.value).map_err(|e| format!("rules_read.{e}"))?;
+    }
     if !(0.0..=1.0).contains(&o.p) || !o.p.is_finite() {
         return Err(format!(
             "stack {} {}: p is a probability",
@@ -307,6 +327,11 @@ pub fn ingest(store: &mut Store, run: &Run<'_>, given: &[Given]) -> Result<Inges
                 .as_ref()
                 .map_or(Param::Null, |p| Param::Text(json!(p).to_string())),
             o.note.clone().map_or(Param::Null, Param::Text),
+            Param::Int(i64::from(o.rules_read.is_some())),
+            o.rules_read
+                .as_ref()
+                .and_then(|r| canonical(&r.value).ok().flatten())
+                .map_or(Param::Null, Param::Text),
             Param::from(now.as_str()),
         ]);
     }
@@ -325,6 +350,8 @@ pub fn ingest(store: &mut Store, run: &Run<'_>, given: &[Given]) -> Result<Inges
                     "fields",
                     "probabilities",
                     "note",
+                    "rules_read",
+                    "rules_value",
                     "created_at",
                 ],
             ),
@@ -351,6 +378,9 @@ pub struct Opinion {
     pub fields: Value,
     pub probabilities: Value,
     pub note: Option<String>,
+    /// The rules' answer as the model read it, where it said: `Some(None)`
+    /// for "the rules gave no value" in the model's reading.
+    pub rules_read: Option<Option<String>>,
     pub created_at: String,
 }
 
@@ -361,7 +391,27 @@ impl Opinion {
             "reliability": self.reliability, "fields": self.fields,
             "probabilities": self.probabilities, "note": self.note,
             "model_id": self.model_id, "run_id": self.run_id, "at": self.created_at,
+            "rules_read": self.rules_read.as_ref().map(|v| json!({"value": v})),
         })
+    }
+
+    /// Whether the model agrees with the rules on its axis: its answer
+    /// against the rules' answer as it read them, where it said, else
+    /// against `stored`, the rules' value as the registry keeps it.
+    pub fn agrees(&self, stored: Option<&str>) -> bool {
+        match &self.rules_read {
+            Some(read) => self.value.as_deref() == read.as_deref(),
+            None => self.value.as_deref() == stored,
+        }
+    }
+
+    /// The rules' answer the model compares with: its reading, else the
+    /// stored value.
+    pub fn rules_compared<'a>(&'a self, stored: Option<&'a str>) -> Option<&'a str> {
+        match &self.rules_read {
+            Some(read) => read.as_deref(),
+            None => stored,
+        }
     }
 }
 
@@ -389,7 +439,7 @@ pub fn newest(
             None => String::new(),
         };
         let sql = format!(
-            "SELECT id, stack_id, axis, model_id, run_id, value, p, reliability, {}, {}, note, {} \
+            "SELECT id, stack_id, axis, model_id, run_id, value, p, reliability, {}, {}, note, {}, rules_read, rules_value \
              FROM {} WHERE stack_id IN ({list}){by} ORDER BY id",
             d.text_of(t.column("fields").expect("fields")),
             d.text_of(t.column("probabilities").expect("probabilities")),
@@ -414,6 +464,9 @@ pub fn newest(
                 probabilities: json_of(r.opt_text(9)?),
                 note: r.opt_text(10)?.map(str::to_string),
                 created_at: r.text(11)?.to_string(),
+                rules_read: (r.opt_int(12)?.unwrap_or(0) != 0)
+                    .then(|| r.opt_text(13).map(|v| v.map(str::to_string)))
+                    .transpose()?,
             };
             // ordered by id, so a later row replaces an earlier one
             out.entry(o.stack_id).or_default().insert(o.axis.clone(), o);

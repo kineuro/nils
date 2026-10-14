@@ -141,7 +141,8 @@ def test_a_module_predictor_runs_when_trusted(tmp_path):
         "    axes = ['base']\n"
         "    def predict(self, records, rows):\n"
         "        assert rows['series']\n"
-        "        return [{'axes': {'base': {'value': 'PDw', 'p': 0.8, 'probabilities': {'PDw': 0.8, 'T2w': 0.2}}},"
+        "        return [{'axes': {'base': {'value': 'PDw', 'p': 0.8, 'probabilities': {'PDw': 0.8, 'T2w': 0.2},"
+        " 'rules_value': 'PDw'}},"
         " 'reliability': 0.9} for r in records]\n"
         "def load(folder, manifest):\n"
         "    return P()\n"
@@ -154,6 +155,8 @@ def test_a_module_predictor_runs_when_trusted(tmp_path):
     res = json.loads((out / "results.json").read_text())
     base = [o for o in res["opinions"] if o["axis"] == "base"]
     assert len(base) == 3 and base[0]["probabilities"]["T2w"] == pytest.approx(0.2)
+    # the rules as the model read them travel with each opinion
+    assert base[0]["rules_read"] == {"value": "PDw"}
 
 
 def test_the_results_and_the_descriptor_hold_to_the_contract(tmp_path):

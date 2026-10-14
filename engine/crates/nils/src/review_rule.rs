@@ -564,6 +564,7 @@ fn suggestions(
     };
     let said = opinion::newest(store, &stacks, model.as_ref().map(|m| m.id)).map_err(failed)?;
     let pack = crate::reader::served_pack(doors.pack_dir.as_deref(), &doors.ask_pack);
+    let stored = round::rules_answers(store, &stacks).map_err(failed)?;
     let mut out = Vec::new();
     for &stack in &stacks {
         let why = crate::reader::why(store, stack, pack.as_deref(), quasi, false)
@@ -578,22 +579,15 @@ fn suggestions(
                     let mut v = o.as_json();
                     v["model"] = model.as_ref().map_or(Value::Null, |m| m.named());
                     v["similar"] = json!(similar(store, stack, axis).map_err(failed)?);
-                    v["agrees"] = json!(
-                        rules_reason(&why, axis)["value"]
-                            .as_str()
-                            .map(str::to_string)
-                            .or_else(|| {
-                                rules_reason(&why, axis)["value"].as_array().map(|l| {
-                                    let mut w: Vec<String> = l
-                                        .iter()
-                                        .filter_map(|x| x.as_str().map(str::to_string))
-                                        .collect();
-                                    w.sort();
-                                    w.join(",")
-                                })
-                            })
-                            == o.value
-                    );
+                    // the model's answer against the rules' as it read them,
+                    // in its own words, else against the stored value: the
+                    // gate's own comparison
+                    let stored = stored
+                        .get(&stack)
+                        .and_then(|a| a.get(axis))
+                        .and_then(|(v, _)| v.clone());
+                    v["agrees"] = json!(o.agrees(stored.as_deref()));
+                    v["rules_compared"] = json!(o.rules_compared(stored.as_deref()));
                     v
                 }
             };

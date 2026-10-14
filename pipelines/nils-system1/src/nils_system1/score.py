@@ -13,7 +13,9 @@ Each scored stack becomes a record the predictor reads::
      "series": {"frame_of_reference", "private"}}
 
 and the predictor answers, per record, ``{"axes": {axis: {"value", "p",
-"probabilities"?}}, "reliability"}``. The fields that mattered are measured
+"probabilities"?, "rules_value"?}}, "reliability"}``; ``rules_value`` is the
+rules' answer as the model reads it, in its own vocabulary, which the engine
+compares its answer with. The fields that mattered are measured
 by leaving each of a stated list out of every scored stack at once
 (``--explain``) and predicting again: a field's effect on an axis is the
 fall in the probability of the answer given; the largest come first.
@@ -179,6 +181,10 @@ def run(stacks_json: Path, inputs: Path, output: Path, trust_code: bool, explain
                 "p": float(a.get("p", 0.0)), "reliability": None if rel is None else float(rel),
                 "fields": fields[i].get(axis, []) if fields else [], "model_id": int(model["model_id"]),
             }
+            # the rules' answer as the model read it, in its own words: what
+            # the engine compares the model's answer with
+            if "rules_value" in a:
+                op["rules_read"] = {"value": a["rules_value"]}
             if a.get("probabilities"):
                 op["probabilities"] = {str(k): float(v) for k, v in a["probabilities"].items()}
             opinions.append(op)

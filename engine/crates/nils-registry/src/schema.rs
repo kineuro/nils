@@ -1459,6 +1459,11 @@ fn build_registry() -> Vec<Table> {
                 col("fields", Type::Json),
                 col("probabilities", Type::Json),
                 col("note", Type::Text),
+                // 1 where the model said how it read the rules' answer, and
+                // that reading (record 55 D3, after D2): what the gate and
+                // the suggestions compare its answer with
+                col("rules_read", Type::Int),
+                col("rules_value", Type::Text),
                 req("created_at", Type::Timestamp),
             ],
         )

@@ -375,9 +375,12 @@ fn stack_of(home: &Home, number: i64) -> i64 {
     store.query(&sql, &[]).unwrap()[0].int(0).unwrap()
 }
 
-/// System 1's stand-in: it checks the rows it is given, and answers base as
-/// the rules did, except on series 5, where it says T2w, and on series 1,
-/// where it agrees below the threshold.
+/// System 1's stand-in: it checks the rows it is given and answers in its
+/// own vocabulary, saying how it read the rules (after D2): technique 3D-TSE
+/// where the pack stores a vendor's name, base T2starw on series 2 where the
+/// pack stores another word, modifier null read as null; base as the rules
+/// did on series 1, below the threshold, and T2w against the rules on
+/// series 5.
 fn system1_stand_in() -> String {
     format!(
         r#"# SPDX-License-Identifier: AGPL-3.0-only
@@ -403,7 +406,9 @@ command-line: |
       assert "earliest_acquisition_date" not in r["fingerprint"], r
       sn = r["fingerprint"]["series_number"]
       rule = (s["header"]["classification"].get("base") or [{{}}])[0].get("value")
-      value, p = rule, 0.99
+      value, read, p = rule, rule, 0.99
+      if sn == 2:
+          value, read = "T2starw", "T2starw"
       if sn == 5:
           value = "T2w"
       if sn == 1:
@@ -412,7 +417,12 @@ command-line: |
       json.dump({{"value": value}}, open(os.path.join(d, "%d.json" % s["stack_id"]), "w"))
       units.append({{"unit_id": s["unit"], "status": "succeeded", "derivatives": ["system1/%d.json" % s["stack_id"]]}})
       opinions.append({{"stack_id": s["stack_id"], "axis": "base", "value": value, "p": p, "reliability": 0.995,
-                        "fields": [{{"field": "text_series_description", "effect": 0.4}}], "model_id": ids[0]}})
+                        "fields": [{{"field": "text_series_description", "effect": 0.4}}], "model_id": ids[0],
+                        "rules_read": {{"value": read}}}})
+      opinions.append({{"stack_id": s["stack_id"], "axis": "technique", "value": "3D-TSE", "p": 0.99, "reliability": 0.995,
+                        "model_id": ids[0], "rules_read": {{"value": "3D-TSE"}}}})
+      opinions.append({{"stack_id": s["stack_id"], "axis": "modifier", "value": None, "p": 0.99, "reliability": 0.995,
+                        "model_id": ids[0], "rules_read": {{"value": None}}}})
       opinions.append({{"stack_id": s["stack_id"], "axis": "flavour", "value": "x", "p": 0.9, "model_id": ids[0]}})
   json.dump({{"schema_version": "1", "units": units, "opinions": opinions}}, open(os.path.join(out, "results.json"), "w"))
   ' [Manifest] [OutputLocation] [Inputs]
@@ -427,7 +437,7 @@ x-nils:
       path-template: "system1/{{stack}}.json"
       media-type: application/json
   needs: {{gpu: none}}
-  opinions: [{{axis: base}}]
+  opinions: [{{axis: base}}, {{axis: technique}}, {{axis: modifier}}]
 "#,
         "e".repeat(64)
     )
@@ -522,7 +532,9 @@ fn system1_runs_beside_the_rules_the_gate_waits_for_a_certificate_and_the_audit_
     assert_eq!(added["label"], "system1-score@1", "{added}");
     // two System 1 models; the one the site chooses runs
     let files = TempDir::new("s1-models");
-    let gate = json!({"axes": {"base": {"lambda1": 0.9, "lambda2": 0.99}}, "evidence": "run:test"});
+    let gate = json!({"axes": {"base": {"lambda1": 0.9, "lambda2": 0.99},
+                               "technique": {"lambda1": 0.9, "lambda2": 0.99},
+                               "modifier": {"lambda1": 0.9, "lambda2": 0.99}}, "evidence": "run:test"});
     let (first, _) = register(
         &home,
         &files,
@@ -705,10 +717,29 @@ fn system1_runs_beside_the_rules_the_gate_waits_for_a_certificate_and_the_audit_
     let (status, gated) = server.call("POST", "/api/review/gate", Some(json!({})), OPS);
     assert_eq!(status, 200, "{gated}");
     let g = &gated["rounds"][0]["gated"];
-    assert_eq!(g["outcomes"]["accepted"], 1, "{gated}");
+    // vendor names count as agreement where the model read the rules so:
+    // a technique the pack names by its vendor (3D-TSE), base T2starw where
+    // the pack stores another word, and no modifier read as null
+    assert_eq!(g["outcomes"]["accepted"], 7, "{gated}");
     assert_eq!(g["outcomes"]["disagree"], 1, "{gated}");
     assert_eq!(g["outcomes"]["unsure"], 1, "{gated}");
     assert_eq!(g["accepted_stacks"], 1, "{gated}");
+    {
+        // the pack never stores the model's word: the agreement is its reading
+        let mut store = home.store();
+        let n = store
+            .query(
+                &format!(
+                    "SELECT COUNT(*) FROM {} WHERE value IN ('3D-TSE', 'T2starw')",
+                    store.qualified("classification_axis")
+                ),
+                &[],
+            )
+            .unwrap()[0]
+            .int(0)
+            .unwrap();
+        assert_eq!(n, 0);
+    }
     let disagree = open_items(&server, "base:disagree");
     assert_eq!(disagree.len(), 1, "{disagree:?}");
     let unsure = open_items(&server, "base:unsure");

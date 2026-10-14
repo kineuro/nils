@@ -116,6 +116,32 @@
         "note": {
           "type": "string",
           "description": "Words a person reads beside the numbers. Never a name, a code or a date of a person"
+        },
+        "rules_read": {
+          "type": "object",
+          "required": [
+            "value"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "value": {
+              "oneOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "description": "The rules' answer on the axis as the model reads it, in the model's own vocabulary (the reading its certificate measured agreement with): the gate and the suggestions compare the model's answer with this, never with the stored value, whose words are the pack's (a vendor's SPACE where the model says 3D-TSE). Absent, they compare with the stored value"
         }
       }
     }
@@ -138,7 +164,10 @@
             "effect": 0.12
           }
         ],
-        "model_id": 7
+        "model_id": 7,
+        "rules_read": {
+          "value": "T1w"
+        }
       },
       {
         "stack_id": 41,

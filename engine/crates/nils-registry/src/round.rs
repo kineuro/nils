@@ -301,10 +301,7 @@ pub type RulesAnswers = BTreeMap<i64, BTreeMap<String, (Option<String>, bool)>>;
 /// The rules' answer on each axis of each stack: its value (values joined
 /// in order for a multi-valued axis, none for "no value"), and whether a
 /// person's or an agent's decision set it.
-pub fn rules_answers(
-    store: &mut Store,
-    stacks: &[i64],
-) -> Result<RulesAnswers, StoreError> {
+pub fn rules_answers(store: &mut Store, stacks: &[i64]) -> Result<RulesAnswers, StoreError> {
     let mut rows: BTreeMap<i64, BTreeMap<String, (BTreeSet<String>, bool)>> = BTreeMap::new();
     for chunk in stacks.chunks(500) {
         if chunk.is_empty() {
@@ -485,7 +482,9 @@ pub fn outcome_of(
     let Some(o) = o else {
         return UNSURE;
     };
-    if o.value.as_deref() != rule {
+    // the model's answer against the rules' as it read them (its own
+    // vocabulary), else against the stored value
+    if !o.agrees(rule) {
         return DISAGREE;
     }
     let reliable = o.reliability.is_some_and(|r| r >= lambda2);
@@ -515,7 +514,7 @@ fn raise(
         "gate": {"round_id": round.id, "rules": format!("{}@{}", round.pack, round.pack_version),
                  "model_id": round.model_id, "lambda1": lambda1, "lambda2": lambda2},
         "axis": axis,
-        "rules": {"value": rule},
+        "rules": {"value": rule, "as_read": o.and_then(|o| o.rules_read.clone())},
         "system1": o.map(Opinion::as_json),
         "value": rule,
         "confidence": o.map(|o| o.p),
@@ -698,8 +697,60 @@ mod tests {
             fields: Value::Null,
             probabilities: Value::Null,
             note: None,
+            rules_read: None,
             created_at: String::new(),
         }
+    }
+
+    fn read_as(value: Option<&str>, read: Option<&str>) -> Opinion {
+        Opinion {
+            rules_read: Some(read.map(str::to_string)),
+            ..said(value, 0.97, Some(0.99))
+        }
+    }
+
+    /// After D2: the model answers in its own vocabulary and says how it
+    /// read the rules; a vendor's name the pack stores is the same answer
+    /// where the model read it so.
+    #[test]
+    fn the_gate_compares_the_model_with_the_rules_as_it_read_them() {
+        let (l1, l2) = (0.5, 0.9);
+        // the pack stores SPACE, the model says 3D-TSE and read the rules so
+        let space = read_as(Some("3D-TSE"), Some("3D-TSE"));
+        assert_eq!(
+            outcome_of(Some("SPACE"), false, Some(&space), l1, l2),
+            "accepted"
+        );
+        // T2*w stored, T2starw in the model's words
+        let star = read_as(Some("T2starw"), Some("T2starw"));
+        assert_eq!(
+            outcome_of(Some("T2*w"), false, Some(&star), l1, l2),
+            "accepted"
+        );
+        // the rules decided no base, the model says null and read it so
+        let none = read_as(None, None);
+        assert_eq!(
+            outcome_of(Some("none"), false, Some(&none), l1, l2),
+            "accepted"
+        );
+        assert_eq!(outcome_of(None, false, Some(&none), l1, l2), "accepted");
+        // its own reading differs: a disagreement, whatever is stored
+        let other = read_as(Some("SS-TSE"), Some("3D-TSE"));
+        assert_eq!(
+            outcome_of(Some("SPACE"), false, Some(&other), l1, l2),
+            DISAGREE
+        );
+        // with no reading, the stored value is compared, as before
+        assert_eq!(
+            outcome_of(
+                Some("SPACE"),
+                false,
+                Some(&said(Some("3D-TSE"), 0.97, Some(0.99))),
+                l1,
+                l2
+            ),
+            DISAGREE
+        );
     }
 
     #[test]
