@@ -18,7 +18,8 @@ the rest of T1-type brain is deferred to the full pipeline.
   `fusion`, `cascade`).
 - Build: `docker build -t nils-postcontrast pipelines/nils-postcontrast`, or
   with `--build-arg TORCH_INDEX=https://download.pytorch.org/whl/cu128` for a
-  card.
+  card. Each site builds it and repins the descriptor; no release publishes
+  it.
 - Tests: `pip install -e .[student,test] && pytest` (the student's tests are
   skipped without torch).
 
