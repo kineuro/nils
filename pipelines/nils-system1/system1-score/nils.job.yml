@@ -32,7 +32,7 @@ description: >-
 # the image replaces it with the published digest.
 container-image:
   type: docker
-  image: "ghcr.io/kineuro/nils-system1@sha256:fcd6a4b6b83e7ed8c1e477e3f6aa3d91da6866c735c63c23363db4d753bd9c1c"
+  image: "ghcr.io/kineuro/nils-system1@sha256:53171a3a2e107840dc4319a0f5b79e3d1e377b498cef507c9b21ec76b407de81"
 
 inputs:
   - id: trust_code
