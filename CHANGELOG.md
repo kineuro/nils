@@ -4,6 +4,10 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Added
+
+- Each scan of the scans doors (a dataset's, a cohort's, Browse's and a session's stacks) carries `acquisition_family`: the family of the acquisition the pack's routes recognised in it, `symri`, `swi`, `mix` (EPIMix or NeuroMix) or `stage`, from the route whose rules decided one of its axes, as its evidence names the rule set, else from the provenance a route enters on; null where none entered. `family` takes it first, so an acquisition's own images are grouped with what was made of them: SyMRI's acquisition with its maps and synthetic contrasts, an SWI's magnitude, phase and minIP with its processed image, and a projection or a reformat of SyMRI, an SWI or STAGE with its acquisition rather than among the derived images. Nothing is classified again: the evidence a registry holds already says it. Contract v7 amended in place, additively.
+
 ### Fixed
 
 - SyMRI's multi-dynamic multi-echo or QALAS acquisition stays with the rest of SyMRI (record 55 C4). The MRI pack makes it a working scan, which a BIDS release routed to `sourcedata` before it asked for SyMRI's folder: it now takes the folder's route, still DICOM and never converted, its slices in SyMRI's folder of the DICOM export (`sourcedata/dicom/sub-*/ses-*/anat/SyMRI/<name>/`) as before, so a release's record and a pipeline's plan say it is in the folder. The scans doors showed it under other: its datatype is `anat` and its folder `anat/SyMRI`. The descriptive layout keeps it in `anat/SyMRI` with SyMRI's other images, as v0 did, where it had been in `anat` since the pack called what the scanner acquired RawRecon (MRI pack 0.9.0); a re-run of a descriptive release moves it there. A BIDS release made before writes nothing again, and its record names the folder. Under `--synthetic anat` or `derivatives` it stays in `sourcedata/` under its datatype, in no folder, as SyMRI's other stacks use none there.
