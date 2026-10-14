@@ -36,12 +36,18 @@ pub enum Row {
     /// Checked on its own before anything is swept (the instance rows,
     /// the stack rows of a series).
     Holds,
+    /// Follows the stack's instances: an echo fold gives it to the stack
+    /// that stays with them, and a sweep removes it with an empty stack,
+    /// which holds no file.
+    Follows,
 }
 
 /// Every table with a `stack_id` column, and what a sweep does to it.
 pub const STACK_TABLES: &[(&str, Row)] = &[
     ("instance", Row::Holds),
     ("instance_frame", Row::Holds),
+    // which sources hold a file of the stack (record 55, 2026-10-10)
+    ("source_stack", Row::Follows),
     ("stack_fingerprint", Row::Goes),
     ("classification", Row::Goes),
     ("classification_axis", Row::Goes),
@@ -60,6 +66,8 @@ pub const STACK_TABLES: &[(&str, Row)] = &[
         "campaign_anchor_panel",
         Row::Keeps("an anchored campaign shows it"),
     ),
+    // record 55 H3: a check's panel
+    ("campaign_check_panel", Row::Keeps("a check shows it")),
     (
         "review_member",
         Row::Keeps("a grouped review item holds it"),
@@ -70,6 +78,16 @@ pub const STACK_TABLES: &[(&str, Row)] = &[
     ("release_plan", Row::Keeps("a release planned it")),
     ("release_absent", Row::Keeps("a release names it")),
     ("release_move", Row::Keeps("a release moved it")),
+    // the main scans a release read, frozen when it was made
+    ("release_pick", Row::Keeps("a release read a pick of it")),
+    // record 55 F5: the post-contrast label, worked out from the session
+    ("contrast_label", Row::Goes),
+    // record 55 D3: System 1's opinions, worked out from the stack, and the
+    // gate's outcomes on it
+    ("opinion", Row::Goes),
+    ("gate_outcome", Row::Goes),
+    // record 55 D7: an audit drew it
+    ("audit_draw_stack", Row::Keeps("an audit drew it")),
 ];
 
 /// Every table with a `series_id` column, and what a sweep does to it.
@@ -241,7 +259,7 @@ pub fn remove_stacks(
         .collect();
     delete_where(store, "review_item", "id", &open_items)?;
     for (t, row) in STACK_TABLES {
-        if *row == Row::Goes {
+        if matches!(row, Row::Goes | Row::Follows) {
             delete_where(store, t, "stack_id", gone)?;
         }
     }

@@ -1,0 +1,25 @@
+{
+  "name": "quasi-count-few-plain",
+  "question": "The same count, asked at detail plain",
+  "hash": "276c3c94b0c729edb34eb39b95071e09ea01489998863199aad28a6159d15676",
+  "columns": [
+    "rows",
+    "subjects"
+  ],
+  "row_count": 1,
+  "rows": [
+    [
+      "",
+      ""
+    ]
+  ],
+  "funnel": {
+    "older": null,
+    "people": 48,
+    "visits": 48
+  },
+  "held_back": [
+    "rows",
+    "subjects"
+  ]
+}

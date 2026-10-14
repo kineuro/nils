@@ -31,6 +31,7 @@ use nils_registry::{Registry, Store};
 use serde_json::{Value, json};
 
 use crate::campaigns::{campaign_err, cerr, print, rerr, shown, who};
+use crate::drawn::Refused;
 use crate::serve::{Caller, Reply};
 use crate::{Exit, usage};
 
@@ -107,8 +108,12 @@ fn pairs_in(text: &str) -> Result<Vec<(i64, i64)>, String> {
     Ok(out)
 }
 
-/// Each stack's subject and study, where the registry has the stack.
-pub(crate) fn whose(store: &mut Store, stacks: &[i64]) -> Result<BTreeMap<i64, (i64, i64)>, Exit> {
+/// Each stack's subject and study, where the registry has the stack, for
+/// a door or the keyboard alike.
+pub(crate) fn whose_of(
+    store: &mut Store,
+    stacks: &[i64],
+) -> Result<BTreeMap<i64, (i64, i64)>, nils_registry::store::Error> {
     let mut out = BTreeMap::new();
     for chunk in stacks.chunks(500) {
         let list = chunk
@@ -123,16 +128,8 @@ pub(crate) fn whose(store: &mut Store, stacks: &[i64]) -> Result<BTreeMap<i64, (
             store.qualified("series"),
             store.qualified("study"),
         );
-        for r in store
-            .query(&sql, &[])
-            .map_err(|e| crate::fail(e.to_string()))?
-        {
-            let (k, subject, study) = (
-                r.int(0).map_err(|e| crate::fail(e.to_string()))?,
-                r.int(1).map_err(|e| crate::fail(e.to_string()))?,
-                r.int(2).map_err(|e| crate::fail(e.to_string()))?,
-            );
-            out.insert(k, (subject, study));
+        for r in store.query(&sql, &[])? {
+            out.insert(r.int(0)?, (r.int(1)?, r.int(2)?));
         }
     }
     Ok(out)
@@ -141,11 +138,6 @@ pub(crate) fn whose(store: &mut Store, stacks: &[i64]) -> Result<BTreeMap<i64, (
 /// `nils campaign pair`: check the pairs, draw their sides and order, and
 /// make the campaign.
 pub(crate) fn make(home: &Home, a: PairArgs) -> Result<(), Exit> {
-    if a.seed.trim().is_empty() {
-        return Err(usage(
-            "--seed: the seed that draws the sides, written down before the draw",
-        ));
-    }
     let mut named: Vec<(i64, i64)> = Vec::new();
     if let Some(f) = &a.pairs {
         let text =
@@ -161,34 +153,95 @@ pub(crate) fn make(home: &Home, a: PairArgs) -> Result<(), Exit> {
         ));
     }
     let question = json!({"kind": "pair", "axis": a.axis, "post": a.post, "pre": a.pre});
-    campaign::Question::parse(&question).map_err(cerr)?;
-    // the axis and its two values are the served pack's, where one is served
     let served = crate::pack_dir(home, a.pack_dir.clone())
         .ok()
         .and_then(|d| nils_pack::load(&d.join(&a.pack), None).ok());
-    if let Some(p) = &served {
-        let axis = p
-            .axes
-            .iter()
-            .find(|x| x.name == a.axis)
-            .ok_or_else(|| usage(format!("--axis {}: the pack has no such axis", a.axis)))?;
-        for v in [&a.post, &a.pre] {
-            if !axis.values.iter().any(|x| &x.id == v) {
-                return Err(usage(format!("{v} is not a value of {}", a.axis)));
-            }
+    let mut registry = crate::open(home)?;
+    let principal = who();
+    let (out, made) = make_pairs(
+        &mut registry,
+        &crate::drawn::Making {
+            name: &a.name,
+            owner: &principal,
+            question,
+            seed: &a.seed,
+            raters: a.raters.clone(),
+            raters_per_item: a.raters_per_item,
+            lease_seconds: a.lease_seconds,
+            served: served.as_ref(),
+            dry_run: a.dry_run,
+            counts: serde_json::Map::new(),
+        },
+        &named,
+    )
+    .map_err(crate::drawn::exit)?;
+    match made {
+        Some(made) if a.json => {
+            let mut v = shown(registry.store(), &made).map_err(rerr)?;
+            v["pair"] = out;
+            print(&v);
+            Ok(())
+        }
+        _ => report(&out, a.json),
+    }
+}
+
+/// The axis and its two values of a pair or an anchored question, checked
+/// against the served pack where one is served.
+pub(crate) fn check_axis(
+    question: &Value,
+    served: Option<&nils_pack::Pack>,
+) -> Result<(), Refused> {
+    campaign::Question::parse(question).map_err(|e| (400, e.to_string()))?;
+    let Some(p) = served else {
+        return Ok(());
+    };
+    let name = question["axis"].as_str().unwrap_or(pair::AXIS);
+    let axis = p
+        .axes
+        .iter()
+        .find(|x| x.name == name)
+        .ok_or_else(|| (400, format!("axis {name}: the pack has no such axis")))?;
+    for key in ["post", "pre"] {
+        if let Some(v) = question[key].as_str()
+            && !axis.values.iter().any(|x| x.id == v)
+        {
+            return Err((400, format!("{key}: {v} is not a value of {name}")));
         }
     }
-    let drawn = pair::draw(&named, &a.seed).map_err(cerr)?;
-    let mut registry = crate::open(home)?;
+    Ok(())
+}
+
+/// A pair campaign made from the pairs named, at the keyboard or the door:
+/// the sides and the order drawn by the seed, the two stacks of a pair one
+/// person's, the campaign suggesting nothing, and the make audited. With
+/// `dry_run`, the counts alone. Answers what was made, with its counts and
+/// its pictures, and the campaign.
+pub(crate) fn make_pairs(
+    registry: &mut Registry,
+    m: &crate::drawn::Making<'_>,
+    named: &[(i64, i64)],
+) -> Result<(Value, Option<campaign::Campaign>), Refused> {
+    if m.seed.trim().is_empty() {
+        return Err((
+            400,
+            "seed: the seed that draws the sides, written down before the draw".into(),
+        ));
+    }
+    if named.is_empty() {
+        return Err((400, "a pair campaign needs pairs".into()));
+    }
+    check_axis(&m.question, m.served)?;
+    let drawn = pair::draw(named, m.seed).map_err(|e| (400, e.to_string()))?;
     let stacks: Vec<i64> = drawn
         .iter()
         .flat_map(|&(l, r)| [l, r])
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
-    let of = whose(registry.store(), &stacks)?;
+    let of = whose_of(registry.store(), &stacks).map_err(|e| (500, e.to_string()))?;
     if let Some(s) = stacks.iter().find(|s| !of.contains_key(s)) {
-        return Err(usage(format!("stack {s} is not in the registry")));
+        return Err((400, format!("stack {s} is not in the registry")));
     }
     // the two stacks of a pair are one person's; one session's, as the pair
     // step found them, and most often one study's
@@ -196,11 +249,14 @@ pub(crate) fn make(home: &Home, a: PairArgs) -> Result<(), Exit> {
     for &(l, r) in &drawn {
         let ((sl, tl), (sr, tr)) = (of[&l], of[&r]);
         if sl != sr {
-            return Err(usage(format!(
-                "stacks {} and {} are two people's; a pair is of one session",
-                l.min(r),
-                l.max(r)
-            )));
+            return Err((
+                400,
+                format!(
+                    "stacks {} and {} are two people's; a pair is of one session",
+                    l.min(r),
+                    l.max(r)
+                ),
+            ));
         }
         if tl != tr {
             across_studies += 1;
@@ -214,39 +270,41 @@ pub(crate) fn make(home: &Home, a: PairArgs) -> Result<(), Exit> {
         }
         seen.values().filter(|n| **n > 1).count()
     };
-    let seed_sha256 = crate::campaigns::sha256(a.seed.as_bytes());
-    let counts = json!({
+    let seed_sha256 = crate::campaigns::sha256(m.seed.as_bytes());
+    let mut counts = json!({
         "pairs": drawn.len(), "stacks": stacks.len(),
         "stacks_in_two_or_more_pairs": shared, "pairs_across_studies": across_studies,
     });
+    for (k, v) in &m.counts {
+        counts[k.as_str()] = v.clone();
+    }
     let mut out = json!({
-        "name": a.name, "counts": counts, "seed_sha256": seed_sha256, "dry_run": a.dry_run,
+        "name": m.name, "counts": counts, "seed_sha256": seed_sha256, "dry_run": m.dry_run,
     });
-    if a.dry_run {
-        return report(&out, a.json);
+    if m.dry_run {
+        return Ok((out, None));
     }
     let source = json!({
         "pair": {"seed_sha256": seed_sha256, "pairs": drawn.len()},
     });
-    let pack_version = served.as_ref().map(|p| format!("{}@{}", p.name, p.version));
-    let principal = who();
+    let pack_version = m.served.map(|p| format!("{}@{}", p.name, p.version));
     let made = campaign::create(
-        &mut registry,
+        registry,
         &New {
-            name: &a.name,
-            owner: &principal,
-            question: &question,
+            name: m.name,
+            owner: m.owner,
+            question: &m.question,
             source,
             items: Items::Pairs(drawn),
             handle_id: None,
             content_hash: None,
             pack_version: pack_version.as_deref(),
-            raters_per_item: a.raters_per_item,
-            raters: a.raters.clone(),
+            raters_per_item: m.raters_per_item,
+            raters: m.raters.clone(),
             adjudicators: Vec::new(),
             adjudication: &json!({"when": "never", "metric": "exact"}),
             closes_into: "none",
-            lease_seconds: a.lease_seconds,
+            lease_seconds: m.lease_seconds,
             inputs: BTreeMap::new(),
             hold_back: None,
             // the two pictures are all there is: nothing is suggested
@@ -254,29 +312,22 @@ pub(crate) fn make(home: &Home, a: PairArgs) -> Result<(), Exit> {
             hide_header: false,
         },
     )
-    .map_err(cerr)?;
+    .map_err(|e| crate::drawn::refused(campaign_err(e)))?;
     nils_registry::audit::record(
-        &mut registry,
+        registry,
         &nils_registry::audit::Entry {
-            principal: &principal,
+            principal: m.owner,
             action: nils_registry::audit::Action::CampaignPair,
             scope: json!({"campaign": made.id, "name": made.name}),
             policy: None,
             job_id: None,
-            details: Some(json!({"counts": counts, "seed_sha256": seed_sha256})),
+            details: Some(json!({"counts": out["counts"], "seed_sha256": seed_sha256})),
         },
     )
-    .map_err(|e| crate::fail(e.to_string()))?;
-    let pictures = crate::pyramid::pictures(registry.store(), &stacks);
+    .map_err(|e| (500, e.to_string()))?;
     out["campaign"] = json!(made.id);
-    out["pictures"] = pictures;
-    if a.json {
-        let mut v = shown(registry.store(), &made).map_err(rerr)?;
-        v["pair"] = out;
-        print(&v);
-        return Ok(());
-    }
-    report(&out, false)
+    out["pictures"] = crate::pyramid::pictures(registry.store(), &stacks);
+    Ok((out, Some(made)))
 }
 
 fn report(out: &Value, json: bool) -> Result<(), Exit> {

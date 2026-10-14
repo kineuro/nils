@@ -303,8 +303,9 @@ impl Rule {
         }
         if verbatim && personnummer::is_type(&spec.id_type) {
             return Err(RuleError(format!(
-                "identity.code: verbatim reads codes, and a {} is no code; a personnummer rule \
-                 derives the code from the number",
+                "identity.code: verbatim reads subject codes, and an ID that is the same \
+                 everywhere ({}) is no subject code; a rule for such an ID derives the subject \
+                 code from it",
                 personnummer::ID_TYPE
             )));
         }
@@ -383,15 +384,20 @@ impl Rule {
             .collect();
         let mut out = String::new();
         if self.id_type != DEFAULT_ID_TYPE {
-            out.push_str(&format!("as {}: ", self.id_type));
+            // the generator's type by the words a person reads
+            if self.id_type == nils_registry::schema::GENERATOR_ID_TYPE {
+                out.push_str("as an ID that is the same everywhere: ");
+            } else {
+                out.push_str(&format!("as {}: ", self.id_type));
+            }
         }
         out.push_str(&fields.join(", "));
         if self.normalises() {
-            out.push_str(" (a personnummer, as twelve digits)");
+            out.push_str(" (as twelve digits)");
         }
         out.push_str(&format!(", then {FALLBACK_FIELD}"));
         if self.verbatim {
-            out.push_str("; the value read is the code itself");
+            out.push_str("; the value read is the subject code itself");
             if self.own_codes {
                 out.push_str(", a code this registry holds or a value of its own shape");
             }
@@ -712,8 +718,8 @@ identity:
         assert!(rule.normalises());
         assert_eq!(
             rule.describe(),
-            "as personnummer: PatientID, OtherPatientIDs (a personnummer, as twelve digits), \
-             then StudyInstanceUID"
+            "as an ID that is the same everywhere: PatientID, OtherPatientIDs (as twelve \
+             digits), then StudyInstanceUID"
         );
         assert_eq!(rule.to_json()["normalise"], "personnummer-12");
         // every written form is the one number
@@ -773,7 +779,7 @@ identity:
             Rule::parse(yaml)
                 .unwrap_err()
                 .0
-                .contains("a personnummer is no code")
+                .contains("is no subject code")
         );
     }
 
@@ -791,7 +797,7 @@ identity:
         assert!(rule.verbatim);
         assert!(
             rule.describe()
-                .ends_with("; the value read is the code itself")
+                .ends_with("; the value read is the subject code itself")
         );
         assert_eq!(rule.to_json()["code"], "verbatim");
         let mut x = extracted(vec![Some("771c4326c89c082c")]);

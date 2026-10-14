@@ -151,6 +151,11 @@ pub fn pseudonymize_with(
             error,
         })?;
     }
+    // the tree's scheme for its series folders, before the job records
+    // what the run was asked to do (record 55 K9)
+    let mut settings = settings.clone();
+    settings.series_folders = series_folders_of(registry, &settings)?;
+    let settings = &settings;
     let run = if settings.dry_run {
         None
     } else {
@@ -161,6 +166,58 @@ pub fn pseudonymize_with(
         mark_failed(registry, r, &e.to_string());
     }
     result
+}
+
+/// How a run names its tree's series folders (record 55 K9, ruling 18): a
+/// tree that holds nothing yet, on disk or in the registry's rows of this
+/// dataset, is begun by number and description; a tree that holds files
+/// keeps the scheme the latest run that recorded one wrote in, and a tree no
+/// run recorded a scheme for was begun before the scheme existed, by number
+/// alone. Existing trees are never renamed.
+fn series_folders_of(
+    registry: &mut Registry,
+    settings: &Settings,
+) -> Result<layout::SeriesFolders, PseudonymizeError> {
+    let on_disk = std::fs::read_dir(&settings.anon).is_ok_and(|mut d| d.next().is_some());
+    let store = registry.store();
+    let d = store.dialect();
+    let written = format!(
+        "SELECT 1 FROM {} WHERE place_id = {} AND out_path IS NOT NULL LIMIT 1",
+        store.qualified("pseudonym_file"),
+        d.param(1, Type::Int)
+    );
+    let in_registry = store
+        .query_opt(&written, &[Param::Int(settings.place_id)])?
+        .is_some();
+    if !on_disk && !in_registry {
+        return Ok(layout::SeriesFolders::Description);
+    }
+    let args = d.text_of(table("job").column("args").expect("job.args"));
+    let sql = format!(
+        "SELECT {args} FROM {} WHERE kind = {} ORDER BY id DESC",
+        store.qualified("job"),
+        d.param(1, Type::Text)
+    );
+    for row in store.query(&sql, &[Param::from("pseudonymize")])? {
+        let Some(text) = row.opt_text(0)? else {
+            continue;
+        };
+        let Ok(args) = serde_json::from_str::<serde_json::Value>(text) else {
+            continue;
+        };
+        if args["place_id"].as_i64() != Some(settings.place_id)
+            || args["dry_run"].as_bool() == Some(true)
+        {
+            continue;
+        }
+        if let Some(scheme) = args["series_folders"]
+            .as_str()
+            .and_then(layout::SeriesFolders::of)
+        {
+            return Ok(scheme);
+        }
+    }
+    Ok(layout::SeriesFolders::Number)
 }
 
 /// The rows a run holds while it goes on.
@@ -490,6 +547,9 @@ struct Ctx<'a> {
     claimed: Mutex<HashSet<String>>,
     /// The directories made this run: `create_dir_all` once per directory.
     dirs: Mutex<HashSet<PathBuf>>,
+    /// Whether the copy keeps SeriesDescription, which a dataset may name
+    /// to remove; a series folder never names what its files do not hold.
+    description_kept: bool,
 }
 
 /// The pipeline, then the batch's record.
@@ -517,17 +577,21 @@ fn execute(
     } else {
         None
     };
+    let scrub = Scrub::new(
+        &settings.private,
+        &settings.tags.keep,
+        &settings.tags.remove,
+    );
+    let description_kept = !nils_release::scrub::removals(&scrub.plan(""))
+        .contains(&dicom_dictionary_std::tags::SERIES_DESCRIPTION);
     let ctx = Ctx {
         settings,
-        scrub: Scrub::new(
-            &settings.private,
-            &settings.tags.keep,
-            &settings.tags.remove,
-        ),
+        scrub,
         progress: &progress,
         cancel,
         claimed: Mutex::new(HashSet::new()),
         dirs: Mutex::new(HashSet::new()),
+        description_kept,
     };
 
     let (walk_tx, walk_rx) = crossbeam_channel::bounded(WALK_BOUND);
@@ -914,16 +978,16 @@ fn worker(ctx: &Ctx<'_>, rx: &Receiver<Task>, asks: &Sender<Ask>, items: &Sender
             }
         };
         // who the file is about: made when the dataset codes unmapped
-        // identifiers or a person asked for this one; never in a dry run
+        // identifiers or a person asked for this one; never in a dry run.
+        // A subject code made from the ID is final, as one a personnummer
+        // gives (record 54, D4): the same ID gives the same subject code
+        // wherever it is read, so no question is asked about it (Nima,
+        // 2026-10-10: "the subject code should be created from their ID")
         let anyway = prior.as_ref().is_some_and(|p| p.code_anyway);
-        // a personnummer is its own map (record 54, D4): the subject code
-        // generator codes it whatever the dataset does with what no map named
         let by_generator = ctx.settings.identity.derives_by_generator(&prepared.ident);
         let make = if dry {
             Make::Nothing
-        } else if anyway || ctx.settings.unmapped == Unmapped::Code {
-            Make::Provisional
-        } else if by_generator {
+        } else if anyway || ctx.settings.unmapped == Unmapped::Code || by_generator {
             Make::Subject
         } else {
             Make::Nothing
@@ -1153,7 +1217,15 @@ pub(crate) fn folder_of(value: &str) -> String {
 }
 
 fn place(ctx: &Ctx<'_>, code: &str, facts: &Facts, prior: Option<&Prior>) -> String {
-    let base = layout::relative(code, facts);
+    let base = if ctx.description_kept || facts.series_description.is_none() {
+        layout::relative(code, facts, ctx.settings.series_folders)
+    } else {
+        let bare = Facts {
+            series_description: None,
+            ..facts.clone()
+        };
+        layout::relative(code, &bare, ctx.settings.series_folders)
+    };
     let own = prior.and_then(|p| p.out_path.as_deref());
     let mut rel = base.clone();
     let mut n = 1;
@@ -1373,7 +1445,6 @@ impl<'a> Recorder<'a> {
             let key = match ask.make {
                 Make::Nothing => 0,
                 Make::Subject => 1,
-                Make::Provisional => 2,
             };
             by_make.entry(key).or_default().push(ask);
         }
@@ -2003,7 +2074,7 @@ impl<'a> Recorder<'a> {
             subjects: Subjects {
                 new: self.made.len() as u64 + self.would_make.len() as u64,
                 seen: self.subjects_seen.len() as u64 + self.would_make.len() as u64,
-                provisional: self.provisional_seen.len() as u64 + self.would_make.len() as u64,
+                provisional: self.provisional_seen.len() as u64,
             },
             tags_removed: tally.removed,
             private_removed: tally.private_removed,
@@ -2041,7 +2112,13 @@ impl<'a> Recorder<'a> {
         registry.store().begin()?;
         let result = (|| -> Result<(), PseudonymizeError> {
             let store = registry.store();
-            for (subject, (code, files)) in &made {
+            // only a subject still marked provisional (made by an engine
+            // from before 2026-10-10) counts its files on its open item; a
+            // subject code made from the ID now is final and asks nothing
+            for (subject, (code, files)) in made
+                .iter()
+                .filter(|(s, _)| self.codes.get(*s).is_some_and(|(_, p)| *p))
+            {
                 review::raise_provisional(
                     store,
                     &review::Provisional {

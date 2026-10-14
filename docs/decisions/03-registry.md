@@ -1,9 +1,9 @@
-# 03 — The registry: subjects are global, cohorts are two things (D4)
+# 03 · The registry: subjects are global, cohorts are two things (D4)
 
 ## The problem v0 half-solved
 
 v0's metadata DB already keeps subjects global (`subject.subject_code` unique,
-`subject_cohorts` many-to-many) — but the engine's *operational* unit is the cohort
+`subject_cohorts` many-to-many), but the engine's *operational* unit is the cohort
 as an ingest container with its own stage ledger, and the word "cohort" covers both.
 The consequences are familiar: session 1 of a subject digested under one cohort and
 session 2 under another look like an integration problem instead of two rows under
@@ -23,7 +23,7 @@ One **registry** is the system of record. Inside it:
   ([05-contracts.md](05-contracts.md)) whose result is a set of subjects or stacks.
   A CSV membership import is one kind of selection (materialized membership rows a
   selection can reference); a metadata predicate is another; both are "the cohort".
-  Anything that consumed a cohort in v0 — export, pipelines, segment works —
+  Anything that consumed a cohort in v0 (export, pipelines, segment works)
   consumes a selection in v1, which is strictly more expressive.
 
 The agent question resolves by construction: sessions-per-subject is a registry
@@ -34,7 +34,7 @@ query; per-cohort views are the same query intersected with a selection.
 The real world delivers the same person under different pseudonyms from different
 sources. v0's `subject_other_identifiers`/id-types is the seed; v1 adds explicit
 **linkage records**: two subject records asserted same-person, with evidence, actor
-(human or agent — it is a review item, D7), and reversibility. Merges are logical
+(human or agent: it is a review item, D7), and reversibility. Merges are logical
 (a canonical subject with linked aliases), never destructive row surgery.
 
 ## Subject codes: the pseudonym scheme and the identity rule
@@ -75,7 +75,7 @@ handle re-read after any of these reports a different epoch.
 ## Clinical timeline
 
 The event/disease/observation model (events keyed by subject+type+date, diseases,
-EAV measures) carries over conceptually — it is sound and registry-shaped already.
+EAV measures) carries over conceptually: it is sound and registry-shaped already.
 It is core, not an extra (D30, stated by Nima 2026-09-02): demographics, identifiers
 by type, diseases and subtypes, typed and dated events and measures are what
 makes everything after sorting possible, and queries, cohorts, pipeline inputs and
@@ -101,7 +101,7 @@ through the MRI table. Nothing in the core schema or the passes may assume MRI.
 
 v0's session-timepoint schemes (labeling sessions for BIDS) carry over as selection-
 scoped configuration: a scheme belongs to a selection (a project's view of the data),
-not to the registry — two projects can label the same subject's sessions differently
+not to the registry: two projects can label the same subject's sessions differently
 without conflict, which is exactly the multi-cohort reality that motivated this doc.
 
 *Sharpened 2026-09-02, from Nima's review of the Wave 1 spec.* The words: a

@@ -199,9 +199,9 @@ pub(crate) fn dataset_at(store: &mut Store, id: i64) -> Result<Place, Refused> {
     match place::show(store, id).map_err(store_failed)? {
         Some(p) if p.role == Role::Source && p.retired_at.is_none() => Ok(p),
         Some(p) if p.role != Role::Source => Err(bad(format!(
-            "the originals are a dataset's; {} is a {} place",
+            "the originals are a dataset's; {} is {} place",
             p.name,
-            p.role.name()
+            nils_registry::a_or_an(p.role.name())
         ))),
         Some(p) => Err(conflict(format!("the dataset {} is retired", p.name))),
         None => Err(Refused {
@@ -1074,9 +1074,9 @@ pub(crate) fn check(
     }
     if target.role != VAULT_ROLE {
         return Err(conflict(format!(
-            "the originals go to a {} place, which the engine never reads for data; {name} is a {} place",
-            VAULT_ROLE.name(),
-            target.role.name()
+            "the originals go to {} place, which the engine never reads for data; {name} is {} place",
+            nils_registry::a_or_an(VAULT_ROLE.name()),
+            nils_registry::a_or_an(target.role.name())
         )));
     }
     let path = Path::new(&target.path).join(VAULT_UNDER).join(&place.name);

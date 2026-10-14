@@ -121,7 +121,7 @@ def test_the_torch_encoder_is_the_numpy_encoder_within_float32(world):
     vols = [rng.integers(0, 256, (64, 64, 64), dtype=np.uint8) for _ in range(3)]
     geos = [np.abs(rng.normal(100, 50, 15)).astype(np.float32) for _ in range(3)]
     want = np.stack([model.encoder.probabilities(v, g) for v, g in zip(vols, geos)])
-    got = gpu.TorchEncoder(model.encoder, device="cuda" if gpu.cuda_available() else "cpu").probabilities(vols, geos)
+    got = gpu.TorchEncoder(model.encoder, device="cuda" if gpu.torch_cuda_available() else "cpu").probabilities(vols, geos)
     assert got.shape == (3, 6) and np.abs(got - want).max() < 1e-5
 
 

@@ -1,0 +1,15 @@
+{
+  "ast_version": 1,
+  "name": "The cohorts made since a day and before an instant, both written as text",
+  "sets": {
+    "made": {
+      "grain": "cohort",
+      "where": [
+        [">=", {}, ["field", {}, "created_at"], "2000-01-01"],
+        ["<", {}, ["field", {}, "created_at"], "2100-01-01T00:00:00Z"],
+        ["is_null", {}, ["field", {}, "retired_at"]]
+      ]
+    }
+  },
+  "out": {"set": "made", "level": "record", "columns": [["field", {}, "name"]], "order": [[["field", {}, "name"], "asc"]]}
+}

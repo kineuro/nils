@@ -139,6 +139,8 @@ pub fn rows_sql(reg: &mut Registry, sql: &str) -> String {
     let mut text = sql.to_string();
     for t in [
         "source_file",
+        // record 55 (2026-10-10): which sources hold a file of each stack
+        "source_stack",
         "instance_frame",
         "instance",
         "series_mr",

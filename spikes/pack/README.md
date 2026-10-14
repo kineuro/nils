@@ -45,7 +45,7 @@ re-ratified before the wave begins.
 **Rules.** The corpus never leaves the private hosts, and this report publishes
 counts and rates, never a description, a path or an identifier. v0 is private
 and is never copied into this repository: `referee.py` imports it from wherever
-it is on the host. v0 on `fg` runs untouched; the export is read-only
+it is on the host. v0 on its production host runs untouched; the export is read-only
 (`export.sh` forces `default_transaction_read_only` for the session) and its
 intermediate copies are deleted when the run is done.
 

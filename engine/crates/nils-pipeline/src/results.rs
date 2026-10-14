@@ -46,6 +46,12 @@ pub struct Unit {
     pub derivatives: Vec<String>,
     pub metrics: Value,
     pub error: Option<String>,
+    /// Record 55 E5: the files of a stacks unit its image read whole, by
+    /// their place in the unit's list of files in `stacks.json` (from 0),
+    /// each with the sha256 of its bytes (`sha256:<hex>`), which the engine
+    /// keeps as that file's content so the slice cache can be read without
+    /// reading the file. Empty where the unit says none.
+    pub read: Vec<(usize, String)>,
 }
 
 /// One seed: a value suggested for a stack, for a person to curate
@@ -65,6 +71,9 @@ pub struct Seed {
 pub struct Results {
     pub units: Vec<Unit>,
     pub proposals: Vec<Value>,
+    /// Record 55 D3: System 1's opinions (`contracts/job/v1/opinions.schema.json`),
+    /// a second opinion beside the rules', never a decision.
+    pub opinions: Vec<Value>,
     /// Model cards (`contracts/model/v1`) the run used or made.
     pub models: Vec<Value>,
     pub seeds: Vec<Seed>,
@@ -91,6 +100,7 @@ pub fn parse(text: &str) -> Result<Results, String> {
         }
     };
     let (mut models, mut seeds, mut selection) = (Vec::new(), Vec::new(), None);
+    let mut opinions = Vec::new();
     let (units, proposals) = match &value {
         Value::Array(a) => (a.clone(), Vec::new()),
         Value::Object(o) => {
@@ -106,6 +116,7 @@ pub fn parse(text: &str) -> Result<Results, String> {
                 Some(_) => return Err("results.json units is a list".into()),
             };
             let proposals = list(o, "proposals")?;
+            opinions = list(o, "opinions")?;
             models = list(o, "models")?;
             if models.iter().any(|m| !m.is_object()) {
                 return Err("results.json models are model cards, objects".into());
@@ -165,6 +176,7 @@ pub fn parse(text: &str) -> Result<Results, String> {
     let mut out = Results {
         units: Vec::with_capacity(units.len()),
         proposals,
+        opinions,
         models,
         seeds,
         selection,
@@ -207,9 +219,39 @@ pub fn parse(text: &str) -> Result<Results, String> {
                 m => m.clone(),
             },
             error: u["error"].as_str().map(str::to_string),
+            read: read_of(&u["read"]).map_err(|e| format!("results.json units[{i}].read {e}"))?,
         });
     }
     Ok(out)
+}
+
+/// A unit's `read`: a list of `{file, sha256}`, the file by its place in
+/// the unit's list of files from 0, the hash as `sha256:<hex>`.
+fn read_of(v: &Value) -> Result<Vec<(usize, String)>, String> {
+    let list = match v {
+        Value::Null => return Ok(Vec::new()),
+        Value::Array(a) => a,
+        _ => return Err("is a list of {file, sha256}".into()),
+    };
+    list.iter()
+        .map(|e| {
+            let file = e["file"]
+                .as_u64()
+                .and_then(|n| usize::try_from(n).ok())
+                .ok_or("names each file by its place in the unit's files, from 0")?;
+            let sha = e["sha256"]
+                .as_str()
+                .filter(|h| {
+                    h.strip_prefix("sha256:").is_some_and(|x| {
+                        x.len() == 64
+                            && x.bytes()
+                                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                    })
+                })
+                .ok_or("gives each file's sha256 as sha256:<64 lowercase hex digits>")?;
+            Ok((file, sha.to_string()))
+        })
+        .collect()
 }
 
 /// The unit a results entry names, in the runner's own spelling: `sub-a`,

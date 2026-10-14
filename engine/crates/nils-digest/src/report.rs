@@ -512,8 +512,22 @@ pub struct Written {
     pub writes: u64,
     /// Files filed as their instance's own (§5.3).
     pub ingested: u64,
-    /// Files whose instance another file holds.
+    /// Files whose instance another file holds: copies, whose subject,
+    /// study and series are the instance's (record 55, 2026-10-10), filed as
+    /// another location of it. `known` plus `twice`.
     pub duplicate: u64,
+    /// Copies of an instance no other file of this source holds: another
+    /// source read it first.
+    #[serde(default)]
+    pub known: u64,
+    /// Copies of an instance another file of this source holds too.
+    #[serde(default)]
+    pub twice: u64,
+    /// Record 55: files held because the registry holds their instance UID
+    /// under another subject, study or series, quarantined under
+    /// `identity.same_instance` and read again by every run.
+    #[serde(default)]
+    pub same_instance: u64,
     /// Files read again because their size or time differed from their record.
     pub changed: u64,
     /// Files an earlier run quarantined, left as they were.
@@ -843,6 +857,15 @@ impl fmt::Display for Report {
                     n => format!("   frame groups {}", thousands(n)),
                 },
             )?;
+            if w.duplicate + w.same_instance > 0 {
+                writeln!(
+                    f,
+                    "  copies           known {}   twice {}   held {}   (held: the registry holds the instance under another subject, study or series)",
+                    thousands(w.known),
+                    thousands(w.twice),
+                    thousands(w.same_instance),
+                )?;
+            }
             if w.empty_stacks_removed + w.empty_series_removed > 0 {
                 writeln!(
                     f,

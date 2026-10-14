@@ -1,0 +1,100 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# system1-score: System 1, the rules' learned partner (record 55 D3, spec
+# 11.1), over a run's stacks. For each stack and axis it writes System 1's
+# answer, its calibrated probability and a reliability score for the rules
+# on that header, with the fields that mattered most (each measured by
+# leaving it out). The engine keeps them as a second opinion beside the
+# rules' answers (results.json opinions, contracts/job/v1/opinions.schema.json),
+# never as a decision: Review shows them beside its questions, and on a
+# dataset flagged as having damaged headers they feed the gate once a
+# recorded certificate confirms the model.
+#
+# The model is a site model, never part of the image: the model chosen for
+# the task system1 (the Models page), kept as one bundle file whose
+# system1.json names every file it holds by sha256 (src/nils_system1/bundle.py).
+# A bundle that brings its own code runs only with trust_code true, after
+# its bytes match.
+#
+# It reads the registry's rows a header model needs (x-nils.input.rows):
+# each stack's whole fingerprint row and votes, and each series's frame of
+# reference as a digest and private elements, for the run's stacks and the
+# other MR stacks of their sessions. The image runs offline.
+name: system1-score
+schema-version: "0.5"
+tool-version: "0.1.0"
+description: >-
+  System 1's opinion on each stack: its answer per axis, its calibrated
+  probability, the rules' reliability on the header and the fields that
+  mattered, as a second opinion beside the rules'.
+
+# Pinned to the image built from this folder; the release that publishes
+# the image replaces it with the published digest.
+container-image:
+  type: docker
+  image: "ghcr.io/kineuro/nils-system1@sha256:53171a3a2e107840dc4319a0f5b79e3d1e377b498cef507c9b21ec76b407de81"
+
+inputs:
+  - id: trust_code
+    name: Trust the model's code
+    type: String
+    description: >-
+      A site's System 1 bundle may bring its own predictor as code, which
+      runs when it is loaded. true runs it, and only after its bytes match
+      the digest the bundle's system1.json names, whose own digest is the
+      model's; false (the default) refuses it.
+    value-key: "[TRUSTCODE]"
+    command-line-flag: --trust-code
+    value-choices: ["true", "false"]
+    default-value: "false"
+    optional: true
+  - id: explain
+    name: Fields left out
+    type: String
+    description: The fields left out one at a time to measure which mattered, comma separated; none measures none.
+    value-key: "[EXPLAIN]"
+    command-line-flag: --explain
+    default-value: "default"
+    optional: true
+
+command-line: "nils-system1 score --stacks [Manifest] --inputs [Inputs] --output [OutputLocation] [TRUSTCODE] [EXPLAIN]"
+
+output-files:
+  - id: opinion
+    name: The stack's opinion
+    path-template: "system1/{stack}.json"
+
+suggested-resources:
+  cpu-cores: 4
+  ram: 4
+  walltime-estimate: 0.1
+
+x-nils:
+  contract: 1
+  analysis-level: stack
+  # spec 11.1: System 1 runs over every stack at arrival, where its model
+  # is the one chosen for the task system1 (record 55 E5)
+  on-arrival: true
+  input:
+    layout: stacks
+    header: true
+    rows: true
+  inputs:
+    - id: model
+      type: model
+      description: The System 1 model chosen for the task system1, a site model kept as one bundle file
+  outputs:
+    - id: opinion
+      kind: output
+      path-template: "system1/{stack}.json"
+      media-type: application/json
+  needs:
+    gpu: none
+    memory-gb: 4
+    cores: 4
+  opinions:
+    - axis: provenance
+    - axis: technique
+    - axis: modifier
+    - axis: construct
+    - axis: base

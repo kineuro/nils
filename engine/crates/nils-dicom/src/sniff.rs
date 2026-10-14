@@ -8,7 +8,7 @@
 //! starts with its first element, which in every image is in group 0008, so its
 //! first two bytes are `08 00` in little endian. Anything else is not tried
 //! further: the spike's harness and pydicom agreed on every such file of the
-//! nmosd corpus.
+//! corpus of study D.
 
 use std::fs::File;
 use std::io::{self, Read};

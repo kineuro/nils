@@ -6,8 +6,8 @@
 //! function the CLI and the doors both call, so the same document leaves
 //! the same handle either way.
 
-use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use nils_registry::dialect::Dialect;
@@ -20,17 +20,21 @@ use serde_json::{Value, json};
 
 use crate::ast::{Ask, Level, Out, Src};
 
-use crate::compile::{Compiled, Context, compile};
+use crate::compile::{CompileError, Compiled, Context, compile};
 use crate::exec::{Answer, Bounds, ExecError, run as execute};
 use crate::handle::{self, Handle, HandleError, Provenance, Spec};
 use crate::measure::{self, MeasureError, Measured};
 use crate::selection::{self, Inlined, SelectionError};
-use crate::validate::{Names, Scope, Validated, validate};
+use crate::validate::{Issue, Names, Scope, Validated, validate};
 use crate::{Error as AskError, prepare};
 
 #[derive(Debug)]
 pub enum RunError {
     Ask(AskError),
+    /// What only the compiler refuses of a document the validator passed, a
+    /// parameter without a value for one: a refusal at the path it names,
+    /// as a validation refusal is, never a fault of the engine (2026-10-12).
+    Compile(CompileError),
     Store(StoreError),
     Home(HomeError),
     Exec(ExecError),
@@ -48,6 +52,8 @@ impl fmt::Display for RunError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             RunError::Ask(e) => write!(f, "{e}"),
+            // read as a validation refusal reads (crate::Error::Invalid)
+            RunError::Compile(e) => write!(f, "the ask is refused:\n  {}", e.issue()),
             RunError::Store(e) => write!(f, "{e}"),
             RunError::Home(e) => write!(f, "{e}"),
             RunError::Exec(e) => write!(f, "{e}"),
@@ -77,6 +83,7 @@ macro_rules! from_error {
 
 from_error!(
     AskError => Ask,
+    CompileError => Compile,
     StoreError => Store,
     HomeError => Home,
     ExecError => Exec,
@@ -167,6 +174,20 @@ const MAX_DEPTH: usize = 4;
 /// again below detail quasi. Wave 7a: `axis_values` says a value of an axis
 /// was found by every name a row may hold it under, so no answer cached
 /// while a document's identity missed the rows that store the label is
+/// answered again. Record 55 K7, 2026-10-12: `shaped` says the handle's
+/// columns name the ones answered as shapes, so a cached answer always says
+/// which they are; and `quasi_totals` says a group's mean, spread and count
+/// of distinct values of a quasi identifying field were answered for
+/// `MEASURE_K` subjects or more and held back below (the ruling of that
+/// day), with the columns held back named, so no answer cached while they
+/// were shapes is answered again. `quasi_counts` says a count of rows a
+/// quasi identifying field chose or grouped was answered for none or
+/// `MEASURE_K` subjects and more, and held back between and beside (small
+/// counts at plain, the ruling of that day), so no answer cached while such
+/// counts were numbers is answered again. `quasi_lists` says a list of the
+/// rows such a field chose was answered for none or `MEASURE_K` subjects
+/// and more, and held back whole between (small lists at plain, the ruling
+/// of 2026-10-13), so no answer cached while such a list held its rows is
 /// answered again.
 pub fn suppression_of(scope: &Scope) -> Value {
     let raw = crate::validate::may_project_raw(crate::validate::Class::QuasiIdentifying, scope);
@@ -175,6 +196,10 @@ pub fn suppression_of(scope: &Scope) -> Value {
         "sealed": if scope.unsealed { "read" } else { "withheld" },
         "quasi": if raw { "raw" } else { "shape" },
         "axis_values": "any_name",
+        "shaped": "named",
+        "quasi_totals": "held_to_k",
+        "quasi_counts": "held_below_k",
+        "quasi_lists": "held_below_k",
     })
 }
 
@@ -240,6 +265,17 @@ impl Runner<'_> {
         after: Option<i64>,
         limit: Option<u64>,
     ) -> Result<(Compiled, Answer), RunError> {
+        // record 55 K7, small lists at plain (the ruling of 2026-10-13): a
+        // handle whose list was held back holds no row, and a set read from
+        // it would answer none where there were some, on every door
+        for s in ask.sets.values() {
+            if let Some(Src::Handle { id, .. }) = &s.from
+                && let Ok(hid) = id.parse::<i64>()
+                && handle::get(registry.store(), hid)?.is_some_and(|h| h.rows_held())
+            {
+                return Err(HandleError::Held(hid).into());
+            }
+        }
         let store: &mut Store = match self.reader.as_deref_mut() {
             Some(r) => r,
             None => registry.store(),
@@ -254,8 +290,7 @@ impl Runner<'_> {
             limit,
             withhold_sealed: !self.unsealed,
         };
-        let compiled =
-            compile(ask, validated, &ctx).map_err(|e| RunError::Message(e.to_string()))?;
+        let compiled = compile(ask, validated, &ctx)?;
         let answer = execute(store, &compiled, self.bounds)?;
         Ok((compiled, answer))
     }
@@ -290,6 +325,11 @@ pub fn cached(
     let hash = prepared.hash.clone();
     let mut ask = prepared.ask;
     inline_selections(registry, &mut ask)?;
+    // one place of truth for the main scans (2026-10-11): a pick run moves
+    // no epoch, so an answer that reads picks is never the cache's
+    if reads_picks(&ask) {
+        return Ok(None);
+    }
     let epoch_now = registry.meta().epoch;
     for s in ask.sets.values() {
         if let Some(Src::Handle { id, .. }) = &s.from {
@@ -297,7 +337,7 @@ pub fn cached(
                 .parse()
                 .map_err(|_| RunError::Message(format!("handle {id} is not a number")))?;
             let h = handle::get(registry.store(), hid)?.ok_or(HandleError::NotFound(hid))?;
-            if h.withdrawn_at.is_some() || !h.has_rows() || h.epoch != epoch_now {
+            if h.withdrawn_at.is_some() || !h.has_rows() || h.rows_held() || h.epoch != epoch_now {
                 return Ok(None);
             }
         }
@@ -318,6 +358,23 @@ pub fn cached(
         &suppression,
     )?
     .map(|h| (h, hash)))
+}
+
+/// Whether an ask reads the main scans: a `picked` clause, or a set from a
+/// role (`from: role:t1w`), anywhere in it.
+fn reads_picks(ask: &Ask) -> bool {
+    fn walk(v: &Value) -> bool {
+        match v {
+            Value::Array(items) => {
+                items.first().and_then(Value::as_str) == Some("picked") || items.iter().any(walk)
+            }
+            Value::Object(m) => m.iter().any(|(k, v)| {
+                (k == "from" && v.as_str().is_some_and(|f| f.starts_with("role:"))) || walk(v)
+            }),
+            _ => false,
+        }
+    }
+    serde_json::to_value(ask).is_ok_and(|v| walk(&v))
 }
 
 fn run_at(registry: &mut Registry, req: Request<'_>, depth: usize) -> Result<Outcome, RunError> {
@@ -361,6 +418,12 @@ fn run_at(registry: &mut Registry, req: Request<'_>, depth: usize) -> Result<Out
             return Err(HandleError::Expired(hid).into());
         }
         if pin || (!stale && !expired) {
+            // record 55 K7, small lists at plain (the ruling of 2026-10-13):
+            // a handle whose list was held back holds no row, and a set read
+            // from it would answer none as if it were empty
+            if h.rows_held() {
+                return Err(HandleError::Held(hid).into());
+            }
             handle::touch(registry.store(), hid)?;
             continue;
         }
@@ -389,6 +452,11 @@ fn run_at(registry: &mut Registry, req: Request<'_>, depth: usize) -> Result<Out
             },
             depth + 1,
         )?;
+        // a fresh answer held back whole is no source either, and its keys
+        // compared with the handle's would say how many it holds
+        if fresh.answer.rows_held {
+            return Err(HandleError::Held(hid).into());
+        }
         let (added, removed) = if expired {
             (0, 0)
         } else {
@@ -434,6 +502,11 @@ fn run_at(registry: &mut Registry, req: Request<'_>, depth: usize) -> Result<Out
     let (compiled, mut answer) = runner.answer(registry, &ask, &validated, req.after, req.limit)?;
     // the post pass
     let mut over: BTreeMap<String, f64> = BTreeMap::new();
+    // record 55 K7, small counts at plain (the ruling of 2026-10-12): a
+    // share's denominator is read as it is, and where it is a count of
+    // fewer than MEASURE_K subjects a quasi identifying field chose, every
+    // share over it is held back, since a share shown and its count say it
+    let mut small_over: BTreeSet<String> = BTreeSet::new();
     for m in &ask.out.measures {
         for (kind, spec) in &m.0 {
             if kind == "share"
@@ -442,9 +515,15 @@ fn run_at(registry: &mut Registry, req: Request<'_>, depth: usize) -> Result<Out
             {
                 let counted = count_level(&ask, set);
                 let v = validate(&counted, req.names, req.scope).map_err(AskError::Invalid)?;
-                let (_, a) = runner.answer(registry, &counted, &v, None, None)?;
+                let small = v.quasi_sets.contains(set);
+                let (_, a) = runner.answer(registry, &counted, &v.counting_all(), None, None)?;
                 let subjects = a.rows.first().map(|r| r.int(1)).transpose()?.unwrap_or(0);
-                over.insert(set.to_string(), subjects as f64);
+                if small && subjects > 0 && subjects < crate::validate::MEASURE_K {
+                    small_over.insert(set.to_string());
+                    over.insert(set.to_string(), 0.0);
+                } else {
+                    over.insert(set.to_string(), subjects as f64);
+                }
             }
         }
     }
@@ -454,6 +533,7 @@ fn run_at(registry: &mut Registry, req: Request<'_>, depth: usize) -> Result<Out
         registry,
         &mut runner,
         &ask,
+        &validated,
         req.names,
         req.scope,
         &mut answer,
@@ -474,6 +554,42 @@ fn run_at(registry: &mut Registry, req: Request<'_>, depth: usize) -> Result<Out
         })
         .collect();
     let mut measured = measure::apply(&mut answer, &remaining, &over)?;
+    // record 55 K7: a share of a column with values held back holds them
+    // back too, in the same rows; a share of a count is held as the count
+    // is, and a share over a small count of rows a quasi identifying field
+    // chose is held in every row (null, as a share over none is)
+    let over_of = |of: &str| -> Option<&str> {
+        ask.out.measures.iter().find_map(|m| {
+            let spec = m.0.get("share")?;
+            (spec.get("of").and_then(Value::as_str) == Some(of))
+                .then(|| spec.get("over").and_then(Value::as_str))
+                .flatten()
+        })
+    };
+    let mut shares_held: Vec<(usize, bool)> = Vec::new();
+    for name in &measured.columns {
+        let Some(of) = name.strip_prefix("share.") else {
+            continue;
+        };
+        let Some(at) = answer.columns.iter().position(|c| c == name) else {
+            continue;
+        };
+        let from = answer.columns.iter().position(|c| c == of);
+        let small = over_of(of).is_some_and(|s| small_over.contains(s));
+        if small && !answer.rows.is_empty() {
+            shares_held.push((at, true));
+        } else if let Some(from) = from
+            && answer.held_back.contains(&from)
+        {
+            shares_held.push((at, answer.held_counts.contains(&from)));
+        }
+    }
+    for (at, count) in shares_held {
+        answer.held_back.push(at);
+        if count {
+            answer.held_counts.push(at);
+        }
+    }
     // the columns in the answer's order: the group's scalars, then the shares
     group_columns.append(&mut measured.columns);
     measured.columns = group_columns;
@@ -633,11 +749,17 @@ fn run_at(registry: &mut Registry, req: Request<'_>, depth: usize) -> Result<Out
 /// The scalar measures over a group answer's child (gold C's `stddev {of:
 /// age}` over `people`, per cohort): the child's rows are read with the
 /// group's by tuple, grouped in Rust, and one column per measure joins
-/// the answer by its key.
+/// the answer by its key. Record 55 K7, the ruling of 2026-10-12: the rows
+/// are read inside the engine as they are, never shaped, since the answer
+/// carries none of them, and below detail quasi a group's spread of a quasi
+/// identifying field is answered where the group holds `MEASURE_K`
+/// subjects with a value and held back (null) where it holds fewer; the
+/// validator refuses its median and percentiles there.
 fn group_scalars(
     registry: &mut Registry,
     runner: &mut Runner<'_>,
     ask: &Ask,
+    validated: &Validated,
     names: &dyn Names,
     scope: &Scope,
     answer: &mut Answer,
@@ -680,7 +802,7 @@ fn group_scalars(
         limit: None,
     };
     gv.keep = Vec::new();
-    let v = validate(&gv, names, scope).map_err(AskError::Invalid)?;
+    let v = inside(validate(&gv, names, scope).map_err(AskError::Invalid)?);
     let (_, groups) = runner.answer(registry, &gv, &v, None, None)?;
     let by_n = g.by.len();
     let key_of: BTreeMap<String, i64> = groups
@@ -708,39 +830,75 @@ fn group_scalars(
         limit: None,
     };
     cv.keep = Vec::new();
-    let v = validate(&cv, names, scope).map_err(AskError::Invalid)?;
+    let v = inside(validate(&cv, names, scope).map_err(AskError::Invalid)?);
     let (_, child) = runner.answer(registry, &cv, &v, None, None)?;
     if child.truncated {
         return Err(MeasureError::Truncated.into());
     }
-    let mut values: BTreeMap<(String, i64), Vec<f64>> = BTreeMap::new();
+    // per measured field and group: its values, and whose they are (the
+    // subject, or the row where the child has none)
+    let mut values: BTreeMap<(String, i64), (Vec<f64>, BTreeSet<String>)> = BTreeMap::new();
     for r in &child.rows {
         let Some(k) = key_of.get(&tuple(r, 2, by_n)) else {
             continue;
         };
+        let whose = match r.0.get(1) {
+            Some(Cell::Int(subject)) => format!("subject {subject}"),
+            _ => format!(
+                "row {}",
+                r.0.first().map(crate::exec::render).unwrap_or_default()
+            ),
+        };
         for (i, of) in ofs.iter().enumerate() {
             if let Some(x) = r.0.get(2 + by_n + i).and_then(measure::number) {
-                values.entry((of.clone(), *k)).or_default().push(x);
+                let (xs, who) = values.entry((of.clone(), *k)).or_default();
+                xs.push(x);
+                who.insert(whose.clone());
             }
         }
     }
+    let k_subjects = crate::validate::MEASURE_K;
     let mut added = Vec::new();
     for (kind, of, p) in &wanted {
         let name = measure::name_of(kind, of, *p);
+        // the group's spread of a quasi identifying field, held to its
+        // subjects below detail quasi (record 55 K7, 2026-10-12)
+        let held = validated.held_measures.contains(&name);
+        let mut held_back = false;
         for row in answer.rows.iter_mut() {
             let k = row.opt_int(0).ok().flatten();
             let cell = match k.and_then(|k| values.get(&(of.clone(), k)).cloned()) {
-                Some(mut xs) => {
+                Some((_, who)) if held && (who.len() as i64) < k_subjects => {
+                    held_back = true;
+                    Cell::Null
+                }
+                Some((mut xs, _)) => {
                     measure::scalar(kind, &mut xs, *p)?.map_or(Cell::Null, Cell::Double)
                 }
-                None => Cell::Null,
+                None => {
+                    held_back |= held;
+                    Cell::Null
+                }
             };
             row.0.push(cell);
+        }
+        if held_back {
+            answer.held_back.push(answer.columns.len());
         }
         answer.columns.push(name.clone());
         added.push(name);
     }
     Ok(added)
+}
+
+/// A validation for a read the engine makes for itself, whose rows never
+/// leave it (record 55 K7): nothing shaped and nothing held, so a group's
+/// keys match their rows and a measure reads the values themselves. What
+/// leaves is held where the answer's own validation says.
+fn inside(mut v: Validated) -> Validated {
+    v.shaped.clear();
+    v.held.clear();
+    v.counting_all()
 }
 
 /// Append one column per namespace to every row, the subject's identifier
@@ -829,7 +987,7 @@ pub fn explain(
             limit: None,
             withhold_sealed: !scope.unsealed,
         };
-        texts.push(compile(&ask, &validated, &ctx).map_err(|e| RunError::Message(e.to_string()))?);
+        texts.push(compile(&ask, &validated, &ctx)?);
     }
     let pg = texts.pop().expect("postgres");
     let lite = texts.pop().expect("sqlite");
@@ -841,6 +999,23 @@ pub fn explain(
         postgres: pg.sql,
         inlined,
     })
+}
+
+/// What the compiler refuses of a document, as issues at its paths, no
+/// statement run (Wave 4c, kineuro/nils#93: validate compiles what run
+/// would). None where it compiles, and none where it is refused before it
+/// is compiled, which its validation says.
+pub fn not_compilable(
+    registry: &mut Registry,
+    ask: &Ask,
+    names: &dyn Names,
+    scope: &Scope,
+    scheme: &Scheme,
+) -> Vec<Issue> {
+    match explain(registry, ask.clone(), names, scope, scheme) {
+        Err(RunError::Compile(e)) => vec![e.issue()],
+        _ => Vec::new(),
+    }
 }
 
 /// The first cell of a count level answer, for callers reading a count.

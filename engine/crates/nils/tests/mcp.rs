@@ -505,7 +505,7 @@ fn model_content_ships_with_the_pack() {
     let caps: Value = serde_json::from_str(&body).unwrap();
     assert_eq!(caps["mcp"]["content_version"], "2");
     assert_eq!(
-        caps["contracts"]["pack"], "9",
+        caps["contracts"]["pack"], "10",
         "the pack contract carries the model content"
     );
     server.stop();
@@ -667,6 +667,12 @@ fn mcp_holds_quasi_identifying_columns_to_the_callers_detail() {
             !quasi["rows"].as_array().unwrap().is_empty(),
             "{tool}: no rows: {quasi}"
         );
+        // the answer says which columns this detail sees as shapes, and that
+        // it holds nothing back, reading no group's mean
+        assert_eq!(plain["shaped"], json!(["station_name", "day"]), "{tool}");
+        assert_eq!(quasi["shaped"], json!([]), "{tool}");
+        assert_eq!(plain["held_back"], json!([]), "{tool}");
+        assert_eq!(quasi["held_back"], json!([]), "{tool}");
         for name in ["station_name", "day"] {
             let raw = column(quasi, name);
             let shaped: Vec<Value> = raw.iter().map(shape).collect();
@@ -694,5 +700,100 @@ fn mcp_holds_quasi_identifying_columns_to_the_callers_detail() {
             .is_some_and(|m| m.contains("does not reach")),
         "{refused}"
     );
+    server.stop();
+}
+
+/// 2026-10-12: what only the compiler refuses of a document, a parameter
+/// declared without a value, reached a model as the bare text of a 500 from
+/// the run and preview tools, and the job tool queued it for the worker to
+/// fail on. Through the doors each now refuses it as a document: the
+/// compiler's words at the path it names, which a model reads and fixes.
+#[test]
+fn a_compile_only_refusal_reaches_a_model_as_a_refused_document() {
+    let home = synthetic();
+    let server = Server::start(&home, &packs(), &[]);
+    let unbound = json!({
+        "ast_version": 1,
+        "name": "visits shifted by a parameter without a value",
+        "params": {"later": {"type": "integer"}},
+        "sets": {
+            "people": {"grain": "subject"},
+            "visits": {"grain": "session", "of": "people", "bind": {
+                "month": ["shift", {}, ["field", {}, "first"], ["param", {}, "later"]]
+            }}
+        },
+        "out": {"set": "visits", "level": "record", "columns": [["field", {}, "month"]]}
+    });
+    for tool in ["nils_run", "nils_preview", "nils_job"] {
+        let refused = server.call(tool, json!({"document": unbound}), None);
+        assert_eq!(refused["isError"], true, "{tool}: {refused}");
+        let text = refused["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.starts_with("the document is refused"),
+            "{tool}: {text}"
+        );
+        assert!(
+            text.contains("not_compilable at sets.visits.bind.month: parameter later has no value"),
+            "{tool}: {text}"
+        );
+    }
+    server.stop();
+}
+
+/// Record 55 K7, small lists at plain (the ruling of 2026-10-13): through
+/// the tools a model calls, a list of the first visits of the 2 subjects 45
+/// or older answers no row at plain, names every column as held back and
+/// gives no row count, at a run and a preview; at detail quasi it lists 2.
+#[test]
+fn mcp_holds_a_list_of_fewer_than_five_that_an_age_chose() {
+    let home = synthetic();
+    let server = Server::start(
+        &home,
+        &packs(),
+        &[
+            "--auth",
+            "token",
+            "--token",
+            "a-reader-token-of-length=reader@lab:reader",
+            "--token",
+            "a-reviewer-token-of-leng=rev@lab:reviewer",
+        ],
+    );
+    let reader = Some("a-reader-token-of-length");
+    let reviewer = Some("a-reviewer-token-of-leng");
+    let doc = json!({
+        "ast_version": 1,
+        "name": "the first visits of the subjects 45 or older",
+        "sets": {
+            "people": {"grain": "subject"},
+            "visits": {"grain": "session", "of": "people", "bind": {
+                "n": ["ordinal", {}],
+                "age": ["age_at", {}, ["field", {}, "subject.birth_date"], ["field", {}, "first"]]
+            }},
+            "older": {"grain": "session", "from": "visits", "where": [
+                ["=", {}, ["field", {}, "n"], 1],
+                [">=", {}, ["field", {}, "age"], 45]
+            ]}
+        },
+        "out": {"set": "older", "level": "record", "columns": [["field", {}, "n"]]}
+    });
+    let why = nils_ask::validate::held_list_why();
+    let held = json!([
+        {"column": "_key", "why": why},
+        {"column": "_subject", "why": why},
+        {"column": "n", "why": why}
+    ]);
+    for tool in ["nils_run", "nils_preview"] {
+        let r = server.call(tool, json!({"document": doc, "rows": 20}), reader);
+        assert_eq!(r["isError"], false, "{tool}: {r}");
+        let a = &r["structuredContent"];
+        assert_eq!(a["rows"], json!([]), "{tool}: {a}");
+        assert_eq!(a["held_back"], held, "{tool}: {a}");
+        assert!(a["row_count"].is_null(), "{tool}: {a}");
+        let r = server.call(tool, json!({"document": doc, "rows": 20}), reviewer);
+        let a = &r["structuredContent"];
+        assert_eq!(a["rows"].as_array().map(Vec::len), Some(2), "{tool}: {a}");
+        assert_eq!(a["held_back"], json!([]), "{tool}: {a}");
+    }
     server.stop();
 }

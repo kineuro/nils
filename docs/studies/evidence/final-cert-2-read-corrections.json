@@ -1,0 +1,27 @@
+{
+ "run": "final-cert-2-read-corrections",
+ "purpose": "Supplement to final-cert-2-read: the correction record final-32 (rulings.py build --record final, sha256 83d220db92bf6cbd1936193e2dd5edf734a4ded18f111ce294b1dc47bc46be18, as registered in plan.md section 8 at c75f44a) over the read's settled reference (manifest 4fa1b974...) and its packets, with the localizers' record and the audit re-scored; built and sealed before final-cert-2-rules is opened",
+ "study": "studies/2026-10-02-final-certificate-2/plan.md",
+ "created": "2026-10-04T18:11:30Z",
+ "sealed": "2026-10-04T18:12:36Z",
+ "files": 9,
+ "bytes": 139233,
+ "by_folder": {
+  ".": 1,
+  "code": 4,
+  "scoring": 4
+ },
+ "manifest_sha256": "da9169214291546c928e186c4b84b87a3ad7de5bb3af5b12a40059c8fc5dc50d",
+ "per_stack_files_by_folder": {},
+ "sha256": {
+  "RUN.json": "207250d2f9ff4bf71f1c9bff4161773908e41ade19f7f9f74dc43bbd4f74b33a",
+  "code/COMMIT": "3c760a9166200ba813f77a2d53b3fb3db169c96587ab511323d85492833de4c2",
+  "code/audit_rescore.py": "38ba190f6af0d172c2cb843d6094e9375e80b507da8bafd1d5d6c111962b0354",
+  "code/rulings.py": "83d220db92bf6cbd1936193e2dd5edf734a4ded18f111ce294b1dc47bc46be18",
+  "code/rulings.sha256": "5b1e030fc8ef97027cb9f973e3d70896335ec744eac32a5ea0dd3ff693ce21a5",
+  "scoring/audit-rescored.txt": "ec04e68f115ca836b1e83acba5fd61db3671615ee9c8502bc6c29a4b7ea94067",
+  "scoring/corrections-localizers.jsonl": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "scoring/corrections-summary.json": "a29cd303b0fc8abb8f5821b5953b7260b7be1acb256d36c6b2a8256c305bdaf4",
+  "scoring/corrections.jsonl": "630944b8eca9fb80f0bd82840790df6a5b4f733fd800fa9d1a9177148c3bf1fe"
+ }
+}

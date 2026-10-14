@@ -1,0 +1,157 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# LST-AI: the white-matter lesions of multiple sclerosis from a
+# T1-weighted image and a FLAIR, a deep-learning ensemble (Wiltgen,
+# McGinnis et al., NeuroImage: Clinical 42, 2024), the segmentation
+# Neuroverify had people check lesion by lesion. A starting point for job
+# type 3, check a result (record 55 H3), not a starter the engine seeds:
+# it does not run as it is pinned (below).
+#
+# One session's T1w and FLAIR in; a binary lesion mask, the same lesions
+# labelled by where they lie (1 periventricular, 2 juxtacortical, 3
+# subcortical, 4 infratentorial, McDonald's regions), and a table of the
+# lesion count, voxels and volume out. LST-AI registers both images to
+# MNI space itself (greedy), strips the skull there (HD-BET), segments,
+# and warps the masks back onto the FLAIR, so both masks are on the
+# FLAIR's grid and tied to the FLAIR the unit was given (`grid: flair`). A
+# check reads each mask's lesions as its 26-connected components, as
+# Neuroverify clustered them; LST-AI's own count in its table joins
+# voxels through a face only, so the two counts may differ. The FLAIR is
+# the session's T2w with FLAIR among the `+` tokens of its `acq-`, or the
+# `_FLAIR` of a tree an older release wrote, as SAMSEG's starter finds
+# it; the outputs are named for the FLAIR's stem without its suffix, as
+# segcsvd names its WMH. A session without a FLAIR picked is named by the
+# pre-flight and skipped by the run; one that reaches this without its
+# FLAIR writes nothing here, so the run makes it a pipeline:qc item.
+#
+# The image is jqmcginnis/lst-ai v1.2.0 by LST-AI's authors, the one
+# Neuroverify ran, pinned by its registry manifest digest, resolved
+# 2026-10-11 by a registry manifest request, not pulled: a single-platform
+# linux/amd64 image manifest of 11.1 GB (CUDA 12.1, TensorFlow 2.13,
+# PyTorch 2.1), run here on the CPU (--device cpu). It is built from
+# CompImg/LST-AI's branch jqm/old_hd_bet, with the model weights and atlas
+# of that project's release v1.1.0. LST-AI is MIT (its LICENSE, Copyright
+# 2023 Julian McGinnis; the weights come with no other licence); the image
+# carries HD-BET (Apache-2.0) with HD-BET's parameters (CC-BY-4.0, Zenodo
+# record 2540695) and greedy (Apache-2.0). Its authors say it is for
+# research only and not validated for clinical use. It needs no licence
+# file.
+#
+# Two facts of the image, read from its manifest, its configuration and
+# one 125-byte layer, keep it from running under job contract v1 as it
+# is pinned:
+# - its ENTRYPOINT is `lst`, which the contract runs before the command
+#   line, so the words below reach lst as its own arguments and it refuses
+#   them; lst takes a T1w and a FLAIR by their file names, which no word of
+#   the contract names for a session;
+# - HD-BET reads its parameters from ~/hd-bet_params, and they are in
+#   /root/hd-bet_params under a /root of mode 700, which the account a
+#   run's container has (never root) cannot read; without them HD-BET
+#   downloads them, and a run has no network.
+# The command line is what runs once both are lifted: an image built from
+# this digest with no ENTRYPOINT and the parameters where any account
+# reads them, pinned by its own digest, or a contract that lets a
+# descriptor set an image's ENTRYPOINT aside. A unit's time and memory
+# were not measured here; the needs are a starting point.
+name: lst-ai
+schema-version: "0.5"
+tool-version: "1.2.0"
+description: >-
+  Segment each session's multiple sclerosis lesions with LST-AI from its
+  T1w and FLAIR: a lesion mask, the lesions labelled periventricular,
+  juxtacortical, subcortical or infratentorial, and their count and
+  volume. One session is one unit; CPU. Not runnable from this image as
+  it is: see the descriptor's notes.
+
+container-image:
+  type: docker
+  image: "docker.io/jqmcginnis/lst-ai@sha256:2b2a0d6454e6efff60a350df3c650ae9584f1926338dec7842f9e71912cc6c85"
+
+inputs:
+  - id: threshold
+    name: Threshold
+    type: Number
+    description: The probability at which a voxel of the ensemble's map is counted a lesion.
+    value-key: "[THRESHOLD]"
+    default-value: 0.5
+    minimum: 0.05
+    maximum: 0.95
+  - id: fast
+    name: Fast skull strip
+    type: Flag
+    description: Strip the skull with one HD-BET model instead of five.
+    value-key: "[FAST]"
+    command-line-flag: "--fast-mode"
+    default-value: false
+  - id: threads
+    name: Threads
+    type: Number
+    description: The threads LST-AI's registration uses for one session.
+    value-key: "[THREADS]"
+    default-value: 4
+    integer: true
+    minimum: 1
+    maximum: 32
+
+command-line: >-
+  bash -c 'set -u; shopt -s nullglob; cd [InputDataset];
+  export OMP_NUM_THREADS=[THREADS] ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS=[THREADS];
+  flair() { local g s q; for g in "$1"/*_T2w.nii.gz "$1"/*_FLAIR.nii.gz; do s=$(basename "$g" .nii.gz);
+  case "$s" in *_FLAIR) echo "$g"; return;; *_acq-*) q=${s#*_acq-};; *) continue;; esac;
+  case "+${q%%_*}+" in *+FLAIR+*) echo "$g"; return;; esac; done; };
+  for f in sub-*/ses-*/anat/*_T1w.nii.gz; do
+  a=$(dirname "$f"); d=[OutputLocation]/$a; mkdir -p "$d";
+  fl=$(flair "$a");
+  if [ -z "$fl" ]; then echo "$a holds no FLAIR, so no lesions"; continue; fi;
+  c=$(basename "$fl" .nii.gz); c=${c%_*}; w=$(mktemp -d [OutputLocation]/.work-XXXXXX);
+  lst --t1 "$f" --flair "$fl" --output "$w/out" --temp "$w/temp" --device cpu
+  --threads [THREADS] --threshold [THRESHOLD] [FAST] || { rm -rf "$w"; continue; };
+  [ -s "$w/out/space-flair_seg-lst.nii.gz" ] || { echo "$a: lst wrote no mask"; rm -rf "$w"; continue; };
+  mv "$w/out/space-flair_seg-lst.nii.gz" "$d/${c}_label-lesion_desc-lstai_mask.nii.gz";
+  [ -s "$w/out/space-flair_desc-annotated_seg-lst.nii.gz" ] && mv "$w/out/space-flair_desc-annotated_seg-lst.nii.gz" "$d/${c}_desc-lstai_dseg.nii.gz";
+  [ -s "$w/out/lesion_stats.csv" ] && mv "$w/out/lesion_stats.csv" "$d/${c}_desc-lstai_lesions.csv";
+  rm -rf "$w"; done'
+
+x-nils:
+  contract: 1
+  analysis-level: session
+  input:
+    layout: bids
+    roles: [t1w, flair]
+  units: apart
+  outputs:
+    - id: lesions
+      kind: mask
+      path-template: "sub-{subject}/ses-{session}/anat/*_label-lesion_desc-lstai_mask.nii.gz"
+      media-type: application/x-nifti+gzip
+      grid: flair
+      parts:
+        - {key: lesions, words: Lesions, kind: components, labels: nonzero}
+    - id: regions
+      kind: mask
+      path-template: "sub-{subject}/ses-{session}/anat/*_desc-lstai_dseg.nii.gz"
+      media-type: application/x-nifti+gzip
+      grid: flair
+      parts:
+        - {key: lesions, words: Lesions, kind: components, labels: nonzero}
+        - key: regions
+          words: Regions
+          kind: labels
+          names:
+            1: Periventricular
+            2: Juxtacortical
+            3: Subcortical
+            4: Infratentorial
+    - id: volumes
+      kind: table
+      format: csv
+      path-template: "sub-{subject}/ses-{session}/anat/*_desc-lstai_lesions.csv"
+      columns:
+        - {name: lesion_count, from: "Num_Lesions", type: integer, description: "Lesions as LST-AI counts them, voxels joined through a face"}
+        - {name: lesion_voxels, from: "Num_Vox", type: integer}
+        - {name: lesion_volume, from: "Lesion_Volume", unit: mm3, description: "The lesion mask's volume on the FLAIR's grid"}
+  needs:
+    cores-input: threads
+    gpu: none
+    cores: 4
+    memory-gb: 16

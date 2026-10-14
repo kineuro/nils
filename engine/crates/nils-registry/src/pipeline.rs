@@ -292,6 +292,9 @@ pub struct Run {
     /// Record 49 R7: the working place of its scratch, where it is not
     /// `place_id`'s; none on a run from before, which kept both there.
     pub scratch_place_id: Option<i64>,
+    /// 2026-10-12: what its failure was, `{kind, cause, advice, fix}`;
+    /// null where it did not fail, or failed before this was recorded.
+    pub failure: Value,
 }
 
 /// A run to start.
@@ -316,7 +319,7 @@ pub struct NewRun<'a> {
     pub started_at: &'a str,
 }
 
-const RUN_COLUMNS: [&str; 28] = [
+const RUN_COLUMNS: [&str; 29] = [
     "id",
     "pipeline_id",
     "job_id",
@@ -345,6 +348,7 @@ const RUN_COLUMNS: [&str; 28] = [
     "resumes",
     "threshold",
     "scratch_place_id",
+    "failure",
 ];
 
 fn select_runs(store: &mut Store) -> String {
@@ -391,6 +395,7 @@ fn run_of(r: &Row) -> Result<Run, Error> {
         resumes: r.opt_int(25)?,
         threshold: r.opt_double(26)?,
         scratch_place_id: r.opt_int(27)?,
+        failure: json(r.opt_text(28)?),
     })
 }
 
@@ -487,6 +492,8 @@ pub struct Finish<'a> {
     pub results_digest: Option<&'a str>,
     pub summary: &'a Value,
     pub error: Option<&'a str>,
+    /// What the failure was, where it failed.
+    pub failure: Option<&'a Value>,
 }
 
 /// Close a run.
@@ -509,6 +516,12 @@ pub fn finish(store: &mut Store, id: i64, f: &Finish<'_>) -> Result<(), Error> {
             ),
             ("summary", Param::from(f.summary.to_string())),
             ("error", f.error.map_or(Param::Null, Param::from)),
+            (
+                "failure",
+                f.failure
+                    .filter(|v| !v.is_null())
+                    .map_or(Param::Null, |v| Param::from(v.to_string())),
+            ),
         ],
         "id",
         id,
@@ -570,7 +583,7 @@ pub fn resume(store: &mut Store, id: i64, job_id: i64) -> Result<(), Error> {
     let d = store.dialect();
     let sql = format!(
         "UPDATE {} SET status = 'running', job_id = {}, finished_at = NULL, error = NULL, \
-         resumes = COALESCE(resumes, 0) + 1 WHERE id = {}",
+         failure = NULL, resumes = COALESCE(resumes, 0) + 1 WHERE id = {}",
         store.qualified("pipeline_run"),
         d.param(1, Type::Int),
         d.param(2, Type::Int)
@@ -942,7 +955,8 @@ mod tests {
                     exit_code: None,
                     results_digest: None,
                     summary: &Value::Null,
-                    error: None
+                    error: None,
+                    failure: None,
                 }
             )
             .is_err()
@@ -958,12 +972,14 @@ mod tests {
                 results_digest: Some("sha256:ab"),
                 summary: &summary,
                 error: None,
+                failure: None,
             },
         )
         .unwrap();
         let r = run(&mut store, id).unwrap().unwrap();
         assert_eq!(r.status, "done");
         assert_eq!(r.exit_code, Some(0));
+        assert_eq!(r.failure, Value::Null, "a run that did not fail has none");
         assert_eq!(r.output.as_deref(), Some("derivatives/n4/1"));
         assert_eq!(r.input_release_id, Some(5));
         assert_eq!(r.summary, summary);

@@ -185,7 +185,10 @@ fn inline_window(
         if *ty != ParamType::Window {
             return Err(SugarError {
                 path: path.into(),
-                message: format!("{name} is a {} parameter, not a window", ty_name(*ty)),
+                message: format!(
+                    "{name} is {} parameter, not a window",
+                    nils_registry::a_or_an(ty_name(*ty))
+                ),
             });
         }
         let Some(value) = value else {

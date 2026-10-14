@@ -129,8 +129,9 @@ impl fmt::Display for Error {
                 since,
             } => write!(
                 f,
-                "a {kind} job (id {job_id}) holds this registry, last heard from at {since}; \
-                 wait, or `nils jobs cancel {job_id}` if it is not running anywhere"
+                "{} job (id {job_id}) holds this registry, last heard from at {since}; \
+                 wait, or `nils jobs cancel {job_id}` if it is not running anywhere",
+                crate::a_or_an(kind)
             ),
             Error::Held { why, .. } => f.write_str(why),
             Error::Store(e) => write!(f, "{e}"),

@@ -53,9 +53,17 @@ def outcome(exc: BaseException) -> tuple[str, str]:
     return FAILED, f"the stack could not be scored ({type(exc).__name__})"
 
 
-def readahead(st: manifest.Stack) -> None:
-    """Ask the kernel to read a stack's files ahead (it returns at once)."""
-    for path, _ in st.files:
+def readahead(st: manifest.Stack, reader: str = "full") -> None:
+    """Ask the kernel to read a stack's files ahead (it returns at once):
+    every file, or with the reduced reader only those it will open."""
+    paths = [p for p, _ in st.files]
+    if reader != "full":
+        from . import reduced
+
+        header = st.extra.get("header") if isinstance(st.extra.get("header"), dict) else {}
+        orientation = (header.get("fingerprint") or {}).get("orientation") if isinstance(header.get("fingerprint"), dict) else None
+        paths = reduced.files_to_read(st.files, st.file_geo, st.extra.get("geometry"), orientation, reader.split(":", 1)[1])
+    for path in paths:
         try:
             fd = os.open(path, os.O_RDONLY)
         except OSError:
@@ -78,10 +86,15 @@ def one_thread():
     return threadpool_limits(limits=1)
 
 
-def _init(inputs: str, gpu_decode: bool, prepare_only: bool, prefetch: bool, started=None, gpu_workers: int = 0) -> None:
+def _init(
+    inputs: str, gpu_decode: bool, prepare_only: bool, prefetch: bool, started=None, gpu_workers: int = 0, reader: str = "full", depth: int = 1,
+    ladder=None,
+) -> None:
     one_thread()
     _W["model"] = None if prepare_only else fusion.load(Path(inputs))
     _W["prepare_only"], _W["prefetch"] = prepare_only, prefetch
+    _W["reader"], _W["depth"] = reader, max(1, depth)
+    _W["ladder"] = ladder
     _W["decode"] = None
     if gpu_decode and started is not None:
         # only the first gpu_workers workers decode on the card: a card is
@@ -98,13 +111,69 @@ def _init(inputs: str, gpu_decode: bool, prepare_only: bool, prefetch: bool, sta
             logger.warning("the GPU decoder did not start (%s); decoding on the CPU", type(e).__name__)
 
 
+def climb(model, st: manifest.Stack, ladder: dict, decode=None, memo: dict | None = None):
+    """The cascade's planes stages on one stack (record 55 E2, P1b): each
+    policy of ``ladder["stages"]`` in turn, ``(policy, margin)``, until one
+    answers with at least its margin from both thresholds (None: always),
+    reusing the frames the earlier stages decoded. With ``ladder["fill"]``
+    (the plane cache at arrival) the stack's ``touched`` planes are built
+    as well where an earlier stage answered, and kept beside its answer;
+    the answer never changes for it."""
+    from . import cascade
+
+    memo = memo if memo is not None else {}  # the caller's, to count what a failed stack opened
+    answer = None
+    passed = []  # the stages climbed past, whose planes the slice cache keeps too
+    for policy, need in ladder["stages"]:
+        prep = fusion.prepare_reduced(st, policy, decode, memo)
+        r = fusion.finish(model, prep, model.encoder.probabilities(prep.built.vol, prep.built.geo()))
+        r.stage, r.read_files, r.kept = policy, prep.built.read_files, getattr(prep.built, "kept", None)
+        if ladder.get("planes"):
+            r.planes = fusion.planes_of(prep.built.vol)
+        if need is None or cascade.margin(r.answers, ladder["thresholds"]) >= need:
+            answer = r
+            break
+        if ladder.get("planes"):
+            passed.append(r)
+    if answer is None:  # a ladder whose last stage asks a margin
+        answer = r
+    # what answering cost, before any planes built only for the cache
+    opened = set(memo.get("opened") or ())
+    filled = None
+    if ladder.get("fill") and answer.stage != "touched":
+        try:
+            prep = fusion.prepare_reduced(st, "touched", decode, memo)
+            filled = fusion.finish(model, prep, model.encoder.probabilities(prep.built.vol, prep.built.geo()))
+            filled.stage, filled.read_files, filled.planes = "touched", prep.built.read_files, fusion.planes_of(prep.built.vol)
+            filled.kept = getattr(prep.built, "kept", None)
+        except Exception:  # noqa: BLE001 - the answer stands; the cache goes without
+            filled = None
+    answer.idents = dict(memo.get("ident") or {})
+    answer.passed = [p for p in passed if p is not answer] or None
+    answer.opened = opened
+    answer.reader = dict(answer.reader or {}, files_read=len(opened))
+    answer.filled = filled
+    return answer
+
+
 def _one(st: manifest.Stack):
+    memo: dict = {}
     try:
+        if _W.get("ladder"):
+            return climb(_W["model"], st, _W["ladder"], _W["decode"], memo), None
+        if _W.get("reader", "full") != "full":
+            prep = fusion.prepare_reduced(st, _W["reader"].split(":", 1)[1], _W["decode"])
+            if _W["prepare_only"]:
+                return prep, None
+            return fusion.finish(_W["model"], prep, _W["model"].encoder.probabilities(prep.built.vol, prep.built.geo())), None
         if _W["prepare_only"]:
             return fusion.prepare(st.files, st.extra.get("header"), _W["decode"]), None
         return fusion.predict(_W["model"], st.files, st.extra.get("header"), _W["decode"]), None
     except Exception as e:  # noqa: BLE001 - a unit fails, the run goes on
-        return None, outcome(e)
+        why = outcome(e)
+        if _W.get("ladder"):  # the cascade counts the files a failed stack's reads opened
+            why = (*why, sorted(memo.get("opened") or ()))
+        return None, why
 
 
 def _chunk(stacks: list[manifest.Stack]):
@@ -112,9 +181,16 @@ def _chunk(stacks: list[manifest.Stack]):
 
     before = J2KDecoder.stats()
     out = []
+    depth, reader = _W.get("depth", 1), _W.get("reader", "full")
+    if _W["prefetch"] and reader != "full":
+        for j in range(0, min(depth, len(stacks) - 1) + 1):
+            readahead(stacks[j], reader)
     for i, st in enumerate(stacks):
-        if _W["prefetch"] and i + 1 < len(stacks):
-            readahead(stacks[i + 1])
+        if _W["prefetch"]:
+            if reader == "full" and i + 1 < len(stacks):
+                readahead(stacks[i + 1])
+            elif reader != "full" and i + depth < len(stacks) and i > 0:
+                readahead(stacks[i + depth], reader)
         out.append(_one(st))
     after = J2KDecoder.stats()
     return out, {k: after[k] - before[k] for k in after}
@@ -142,17 +218,27 @@ def score(
     prefetch: bool | None = None,
     stats: dict | None = None,
     gpu_workers: int = 2,
+    reader: str = "full",
+    depth: int = 1,
+    ladder: dict | None = None,
 ) -> Iterator[tuple[manifest.Stack, fusion.StackResult | None, tuple[str, str] | None]]:
-    """Every stack's answer, in the manifest's order."""
+    """Every stack's answer, in the manifest's order. With ``ladder`` each
+    stack climbs the cascade's planes stages (:func:`climb`), the encoder in
+    the worker."""
     if prefetch is None:
         prefetch = os.environ.get("NILS_BODYPART_PREFETCH", "1") != "0"
     gpu_decode = device == "cuda"
     torch_encoder = None
+    if ladder is not None:
+        # a stage decides from its own answer, so the encoder runs where
+        # the stack is read; read-ahead asks for the first stage's files
+        encoder_device = "cpu"
+        reader = "reduced:" + ladder["stages"][0][0]
     if encoder_device == "cuda":
         from .gpu import TorchEncoder
 
         torch_encoder = TorchEncoder(model.encoder)
-    if workers <= 1 and torch_encoder is None:
+    if workers <= 1 and torch_encoder is None and reader == "full" and ladder is None:
         decode = None
         if gpu_decode:
             try:
@@ -171,7 +257,7 @@ def score(
     saved = {k: os.environ.get(k) for k in ONE_THREAD}
     os.environ.update(ONE_THREAD)
     try:
-        yield from _pooled(model, inputs, stacks, workers, gpu_decode, torch_encoder, batch, chunk, prefetch, stats, gpu_workers)
+        yield from _pooled(model, inputs, stacks, workers, gpu_decode, torch_encoder, batch, chunk, prefetch, stats, gpu_workers, reader, depth, ladder)
     finally:
         for k, v in saved.items():
             if v is None:
@@ -180,13 +266,13 @@ def score(
                 os.environ[k] = v
 
 
-def _pooled(model, inputs, stacks, workers, gpu_decode, torch_encoder, batch, chunk, prefetch, stats, gpu_workers):
+def _pooled(model, inputs, stacks, workers, gpu_decode, torch_encoder, batch, chunk, prefetch, stats, gpu_workers, reader="full", depth=1, ladder=None):
     ctx = mp.get_context("spawn")
     pool = ProcessPoolExecutor(
         max_workers=max(1, workers),
         mp_context=ctx,
         initializer=_init,
-        initargs=(str(inputs), gpu_decode, torch_encoder is not None, prefetch, ctx.Value("i", 0), gpu_workers),
+        initargs=(str(inputs), gpu_decode, torch_encoder is not None, prefetch, ctx.Value("i", 0), gpu_workers, reader, depth, ladder),
     )
     chunks = [stacks[i : i + chunk] for i in range(0, len(stacks), chunk)]
     window = max(2, workers) * 2
@@ -229,3 +315,209 @@ def _pooled(model, inputs, stacks, workers, gpu_decode, torch_encoder, batch, ch
         yield from flush()
     if stats is not None and gpu_decode:
         stats.update(decoded)
+
+
+class Lane:
+    """One pool of worker processes for the whole cascade (the overlap,
+    A5.2.3b and A5.2.3e): started before the student loads, it plans the
+    stacks (``first``), reads stage 1's slot-0 slices (``read``) and climbs
+    the planes stages of each stack the moment it is known to need them
+    (``submit``), so the fallbacks decode while the student scores the next
+    batch. Each stack is read and scored as ``score`` does with the same
+    ladder; only the order of the work changes.
+
+    The work waits in three queues, taken in that order of priority, and at
+    most ``window`` pieces are in the pool at once, so the planning and the
+    student's slices are never queued behind the planes. With
+    ``hold_reads`` nothing that reads a file goes to the pool before
+    ``open_reads``."""
+
+    FIRST, READ, PLANES = 0, 1, 2
+
+    def __init__(self, model, inputs, *, workers: int, device: str, chunk: int, depth: int, ladder: dict, gpu_workers: int,
+                 prefetch: bool | None = None, hold_reads: bool = False, window: int | None = None) -> None:
+        import threading
+
+        if prefetch is None:
+            prefetch = os.environ.get("NILS_BODYPART_PREFETCH", "1") != "0"
+        self.chunk = max(1, chunk)
+        self.workers = max(1, workers)
+        self.jobs: list = []
+        self.lock = threading.Lock()
+        self.decoded = {"gpu_frames": 0, "cpu_frames": 0}
+        self.gpu_decode = device == "cuda"
+        # the workers are spawned as work arrives, so the environment they
+        # start with stays set for the pool's life, as in _pooled
+        self._saved = {k: os.environ.get(k) for k in ONE_THREAD}
+        os.environ.update(ONE_THREAD)
+        ctx = mp.get_context("spawn")
+        self.pool = ProcessPoolExecutor(
+            max_workers=max(1, workers),
+            mp_context=ctx,
+            initializer=_init,
+            initargs=(str(inputs), self.gpu_decode, False, prefetch, ctx.Value("i", 0), gpu_workers, "reduced:" + ladder["stages"][0][0], depth, ladder),
+        )
+        self.window = max(2, int(window or 2 * max(1, workers)))
+        self.queues: tuple[deque, deque, deque] = (deque(), deque(), deque())
+        self.cond = threading.Condition()
+        self.inflight = 0
+        self.reads_open = not hold_reads
+        self.closed = False
+        self.feeder = threading.Thread(target=self._feed, name="nils-bodypart-lane", daemon=True)
+        self.feeder.start()
+
+    def _put(self, prio: int, fn, arg):
+        from concurrent.futures import Future
+
+        fut: Future = Future()
+        with self.cond:
+            if self.closed:
+                fut.cancel()
+                return fut
+            self.queues[prio].append((fn, arg, fut))
+            self.cond.notify_all()
+        return fut
+
+    def _next(self):
+        """The next piece of work that may go to the pool now, or None."""
+        if self.inflight >= self.window:
+            return None
+        if self.queues[self.FIRST]:
+            return self.queues[self.FIRST].popleft()
+        if self.reads_open:
+            for q in self.queues[self.READ :]:
+                if q:
+                    return q.popleft()
+        return None
+
+    def _feed(self) -> None:
+        while True:
+            with self.cond:
+                job = self._next()
+                while job is None and not self.closed:
+                    self.cond.wait()
+                    job = self._next()
+                if self.closed:
+                    return
+                self.inflight += 1
+            fn, arg, fut = job
+            if not fut.set_running_or_notify_cancel():
+                self._done(None, None)
+                continue
+            try:
+                pf = self.pool.submit(fn, arg)
+            except BaseException as e:  # noqa: BLE001 - the waiting caller raises it
+                fut.set_exception(e)
+                self._done(None, None)
+                continue
+            pf.add_done_callback(lambda pf, fut=fut: self._done(fut, pf))
+
+    def _done(self, fut, pf) -> None:
+        with self.cond:
+            self.inflight -= 1
+            self.cond.notify_all()
+        if fut is None:
+            return
+        try:
+            fut.set_result(pf.result())
+        except BaseException as e:  # noqa: BLE001
+            fut.set_exception(e)
+
+    def warm(self) -> None:
+        """Start every worker now (each loads the model as it starts), not
+        as the first work comes."""
+        for _ in range(self.workers):
+            self.first(abs, 0)
+
+    def open_reads(self) -> None:
+        with self.cond:
+            self.reads_open = True
+            self.cond.notify_all()
+
+    def first(self, fn, arg):
+        """A future of ``fn(arg)`` in a worker, before any read: work that opens no file."""
+        return self._put(self.FIRST, fn, arg)
+
+    def read(self, fn, arg):
+        """A future of ``fn(arg)`` in a worker, before the planes stages: stage 1's reads."""
+        return self._put(self.READ, fn, arg)
+
+    def submit(self, stacks: list) -> None:
+        """The planes stages for these stacks, in chunks as ``_pooled`` sends them."""
+        with self.lock:
+            for i in range(0, len(stacks), self.chunk):
+                c = stacks[i : i + self.chunk]
+                # a worker reads a stack's files and its geometry; its
+                # list of slices stays here
+                self.jobs.append((c, self._put(self.PLANES, _chunk, [_bare(st) for st in c])))
+
+    def results(self) -> Iterator[tuple[manifest.Stack, fusion.StackResult | None, tuple[str, str] | None]]:
+        with self.lock:
+            jobs = list(self.jobs)
+        for c, fut in jobs:
+            got, st_stats = fut.result()
+            for k in self.decoded:
+                self.decoded[k] += st_stats.get(k, 0)
+            for st, (r, why) in zip(c, got):
+                yield st, r, why
+
+    def close(self) -> None:
+        with self.cond:
+            self.closed = True
+            waiting = [job for q in self.queues for job in q]
+            for q in self.queues:
+                q.clear()
+            self.cond.notify_all()
+        for _, _, fut in waiting:
+            fut.cancel()
+        self.feeder.join()
+        self.pool.shutdown(wait=True, cancel_futures=True)
+        for k, v in self._saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
+def _bare(st: manifest.Stack) -> manifest.Stack:
+    """A stack as a worker reads it: its files, their geometry and its
+    facts, without the list of its slices, which only the results name."""
+    import dataclasses
+
+    return dataclasses.replace(st, slices=[]) if st.slices else st
+
+
+def tiles_of(paths: list[str]) -> list:
+    """Stage 1's slot-0 slices in a worker of the overlap, as ``tiles`` reads them."""
+    return [_tile(p) for p in paths]
+
+
+def _tile(path: str):
+    try:
+        from .fewslice import read_tile
+
+        return read_tile(path), None
+    except Exception as e:  # noqa: BLE001 - the stack goes to the planes
+        return None, type(e).__name__
+
+
+def tiles(paths: list[str], workers: int = 1) -> list[tuple]:
+    """The slot-0 slices of the cascade's first stage, read and tiled in
+    worker processes of one thread each: per path ``((tile, identity),
+    None)``, or ``(None, why)`` where the file does not decode."""
+    if not paths:
+        return []
+    if workers <= 1:
+        with one_thread():
+            return [_tile(p) for p in paths]
+    saved = {k: os.environ.get(k) for k in ONE_THREAD}
+    os.environ.update(ONE_THREAD)
+    try:
+        with ProcessPoolExecutor(max_workers=workers, mp_context=mp.get_context("spawn")) as pool:
+            return list(pool.map(_tile, paths, chunksize=8))
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v

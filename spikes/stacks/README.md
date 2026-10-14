@@ -22,7 +22,7 @@ prints counts. The two v0 modules the first script imports (`stack_utils.py`,
 `dicom_mappings.py` of v0 0.5.0, MIT) are placed beside it as `v0/` and are not
 part of this repository.
 
-**Verdict, nmosd (2026-09-02).** Equal. The two hold 2,165 series in common
+**Verdict, study D (2026-09-02).** Equal. The two hold 2,165 series in common
 and v1's partition equals v0's on every one of them, over the 493,708 instances
 both hold: 2,534 v0 groups, 2,534 v1 stacks, 212 series with more than one
 stack (at most five), no label. v1 holds no instance v0 does not. v0's reader

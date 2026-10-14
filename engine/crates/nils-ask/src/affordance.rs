@@ -216,6 +216,15 @@ pub struct Preview {
     pub columns: Vec<String>,
     pub rows: Vec<Vec<Value>>,
     pub truncated: bool,
+    /// Record 55 K7: the columns answered as their shapes, by name, so the
+    /// chat can say which values this detail does not show (2026-10-12).
+    #[serde(default)]
+    pub shaped: Vec<String>,
+    /// Record 55 K7, the ruling of 2026-10-12: the columns with values held
+    /// back (null), a group's mean or count of distinct values of a quasi
+    /// identifying field where the group holds too few subjects, and why.
+    #[serde(default)]
+    pub held_back: Vec<crate::exec::HeldBack>,
 }
 
 /// A preview of the answer: `rows` rows at record or aggregate level, the
@@ -256,6 +265,8 @@ pub fn preview(
             .map(|r| r.0.iter().map(cell_json).collect())
             .collect(),
         truncated: answer.truncated,
+        shaped: answer.shaped_names(),
+        held_back: answer.held_back_named(),
     })
 }
 
@@ -272,22 +283,7 @@ pub struct Drafted {
 /// What the compiler would refuse, as issues, before a document is stored
 /// or called valid (Wave 4c, kineuro/nils#93): validate and run agree.
 pub fn compile_issues(registry: &mut Registry, ask: &Ask, s: &Setting<'_>) -> Vec<Issue> {
-    match crate::run::explain(registry, ask.clone(), s.names, s.scope, s.scheme) {
-        Err(RunError::Message(text)) => {
-            let (path, message) = text
-                .split_once(": ")
-                .map(|(p, m)| (p.to_string(), m.to_string()))
-                .unwrap_or_else(|| ("document".to_string(), text.clone()));
-            vec![Issue {
-                code: Code::NotCompilable,
-                path,
-                message,
-                next: "change the document as the message says; validate compiles what run would"
-                    .to_string(),
-            }]
-        }
-        _ => Vec::new(),
-    }
+    crate::run::not_compilable(registry, ask, s.names, s.scope, s.scheme)
 }
 
 /// Parse an authored text with add only repair, diagnose it, and store it
@@ -299,6 +295,8 @@ pub fn draft(
     reader: Option<&mut Store>,
 ) -> Result<Drafted, AffordanceError> {
     let (ask, repairs) = parse_repaired(text)?;
+    // the diagnosis refuses what the validator and the compiler refuse
+    // before it counts anything, and stores nothing then
     let diagnosis = diagnose(
         registry,
         ask.clone(),
@@ -310,14 +308,6 @@ pub fn draft(
         false,
         reader,
     )?;
-    let mut diagnosis = diagnosis;
-    if diagnosis.valid {
-        let issues = compile_issues(registry, &ask, s);
-        if !issues.is_empty() {
-            diagnosis.valid = false;
-            diagnosis.issues.extend(issues);
-        }
-    }
     let (document, hash) = if diagnosis.valid {
         let prepared = prepare(ask.clone(), s.names, s.scope)?;
         let d = document::put(registry.store(), &ask, &prepared.hash, s.principal, None)?;
@@ -428,8 +418,13 @@ pub fn values(
         "out": {"set": "g", "level": "count"}
     });
     let distinct_ask: Ask = crate::parse(&distinct_text.to_string())?;
-    let prepared = prepare(ask, s.names, s.scope)?;
-    let counted = prepare(distinct_ask, s.names, s.scope)?;
+    let mut prepared = prepare(ask, s.names, s.scope)?;
+    let mut counted = prepare(distinct_ask, s.names, s.scope)?;
+    // the sampler's own rule: a quasi identifying field's values are merged
+    // into their shapes before they are counted, so its counts are the
+    // shapes', read whole (record 55 K7's small counts are the ask's)
+    prepared.validated = prepared.validated.counting_all();
+    counted.validated = counted.validated.counting_all();
     let mut runner = Runner {
         names: s.names,
         scheme: s.scheme,

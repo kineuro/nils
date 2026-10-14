@@ -23,7 +23,7 @@ use nils_registry::store::Param;
 use serde_json::Value;
 
 use crate::ast::{AlgOp, Arg, Ask, Clause, Dir, Grain, IntSpec, ParamType, Set, Src};
-use crate::validate::{ColumnRef, Names, Validated};
+use crate::validate::{Code, ColumnRef, Issue, Names, Validated, WrittenDate};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct CompileError {
@@ -38,6 +38,26 @@ impl std::fmt::Display for CompileError {
 }
 
 impl std::error::Error for CompileError {}
+
+impl CompileError {
+    /// The refusal as an issue of the taxonomy, at the path the compiler
+    /// names: what only the compiler refuses of a document, a parameter
+    /// without a value for one, is the document's to change, as what the
+    /// validator refuses is (2026-10-12).
+    pub fn issue(&self) -> Issue {
+        Issue {
+            code: Code::NotCompilable,
+            path: if self.path.is_empty() {
+                "document".to_string()
+            } else {
+                self.path.clone()
+            },
+            message: self.message.clone(),
+            next: "change the document as the message says; validate compiles what run would"
+                .to_string(),
+        }
+    }
+}
 
 type R<T> = Result<T, CompileError>;
 
@@ -78,6 +98,23 @@ pub struct Compiled {
     /// Record 55 K7: which answer columns read a quasi identifying field the
     /// caller may not project raw, answered as their shapes.
     pub shaped_columns: Vec<usize>,
+    /// Record 55 K7, the ruling of 2026-10-12: which answer columns read a
+    /// group's mean or count of distinct values of such a field, answered
+    /// for a group of `MEASURE_K` subjects with a value and null where it
+    /// is held back.
+    pub held_columns: Vec<usize>,
+    /// Record 55 K7, small counts at plain (the ruling of 2026-10-12): which
+    /// answer columns are counts of rows a quasi identifying field chose or
+    /// grouped, held back (null) for fewer than `MEASURE_K` subjects and
+    /// beside such a count.
+    pub count_columns: Vec<usize>,
+    /// Record 55 K7, the ruling of 2026-10-13 (small lists at plain): where
+    /// the answer lists the rows of a set a quasi identifying field chose,
+    /// below detail quasi, one statement over the same sets that answers 1
+    /// where the set holds 1 to 4 subjects, so the list is held back whole;
+    /// it binds the first `list_guard_params` of `params`.
+    pub list_guard: Option<String>,
+    pub list_guard_params: usize,
 }
 
 /// The dialect layer: the hooks (H1 to H11) and the closures (§11.2, §11.3).
@@ -280,6 +317,16 @@ impl Sql {
         }
     }
 
+    /// The day an instant falls on, in UTC (2026-10-12): a day and an
+    /// instant are compared by their days, the same on both backends.
+    pub fn day_of(self, x: &str) -> String {
+        if self.is_pg() {
+            format!("(({x}) AT TIME ZONE 'UTC')::date")
+        } else {
+            format!("substr({x}, 1, 10)")
+        }
+    }
+
     /// A LIKE that escapes its pattern's own wildcards.
     pub fn like(self, x: &str, pattern_placeholder: &str) -> String {
         format!("{x} LIKE {pattern_placeholder} ESCAPE '\\'")
@@ -322,6 +369,17 @@ pub fn like_escape(s: &str) -> String {
     out
 }
 
+/// A literal that writes no date where a date meets it: a number or a
+/// truth, refused there (2026-10-12).
+fn not_a_date(a: &Arg) -> Option<String> {
+    match a {
+        Arg::Int(n) => Some(n.to_string()),
+        Arg::Number(n) => Some(n.to_string()),
+        Arg::Bool(b) => Some(b.to_string()),
+        _ => None,
+    }
+}
+
 /// A text as an SQL literal, its quotes doubled: for the names of a pack's
 /// vocabulary, which are the same on every run.
 fn sql_text(s: &str) -> String {
@@ -342,10 +400,21 @@ struct Term {
     /// second use binds it again instead of naming a placeholder twice.
     param: Option<(Param, Type)>,
     /// Wave 7a: the value is a list of names joined by `, ` (the datasets
-    /// a subject's or a session's stacks are of), so `=`, `<>`, `in`,
+    /// holding a file of a stack, or of a subject's or a session's
+    /// stacks), so `=`, `<>`, `in`,
     /// `not_in` and `has` ask whether a name is among them, and a group
     /// keyed by it counts a row once under each name.
     members: bool,
+    /// The value is a date, a day or an instant (2026-10-12), so a text it
+    /// meets is read as a date: Postgres compares no date with text.
+    dated: Option<Dated>,
+}
+
+/// What a date holds: a day, or an instant written `YYYY-MM-DDTHH:MM:SSZ`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Dated {
+    Day,
+    Instant,
 }
 
 impl Term {
@@ -356,7 +425,28 @@ impl Term {
             ci: None,
             param: None,
             members: false,
+            dated: None,
         }
+    }
+
+    /// The same term, a day or an instant.
+    fn dated(mut self, d: Option<Dated>) -> Term {
+        self.dated = d;
+        self
+    }
+}
+
+/// What a column holds when it is a date, from the registry's schema.
+fn dated_column(table: &str, column: &str) -> Option<Dated> {
+    let ty = nils_registry::schema::registry_tables()
+        .iter()
+        .find(|t| t.name == table)?
+        .column(column)?
+        .ty;
+    match ty {
+        Type::Date => Some(Dated::Day),
+        Type::Timestamp => Some(Dated::Instant),
+        _ => None,
     }
 }
 
@@ -375,6 +465,12 @@ struct Frame {
     has_prec: bool,
     of: Option<String>,
     picked: bool,
+    /// Record 55 K7, the ruling of 2026-10-12: a group's held bindings, each
+    /// with the column that counts the subjects whose value it reads.
+    held_counts: BTreeMap<String, String>,
+    /// Record 55 K7, small counts at plain: per size of the count rule, the
+    /// column that is 1 where the group's counts by it are held back.
+    count_flags: Vec<String>,
 }
 
 fn column_name(binding: &str) -> String {
@@ -459,6 +555,22 @@ struct Builder<'a> {
     /// The sets whose totals show only for `MEASURE_K` scans or more
     /// (below detail quasi, over a pipeline's measures).
     small_cells: BTreeSet<String>,
+    /// Record 55 K7, the ruling of 2026-10-12: the places in `out.columns`
+    /// held to a group's subjects, with the bindings whose subjects hold
+    /// each, and the held columns' places in the answer.
+    held: BTreeMap<usize, BTreeSet<String>>,
+    held_columns: Vec<usize>,
+    /// Record 55 K7, small counts at plain (the ruling of 2026-10-12): the
+    /// sets a quasi identifying field chose or grouped, the rule for the
+    /// answer's group counts, and the count columns' places in the answer.
+    quasi_sets: BTreeSet<String>,
+    counts: crate::validate::CountRule,
+    count_columns: Vec<usize>,
+    /// Record 55 K7, small lists at plain (the ruling of 2026-10-13): the
+    /// select that says the answer's list is held back, and how many of
+    /// the parameters the sets bind.
+    list_guard: Option<String>,
+    list_guard_params: usize,
 }
 
 const AGGREGATES: &[&str] = &["count", "distinct", "min", "max", "sum", "avg", "list"];
@@ -481,6 +593,44 @@ const PHYSICS: &[&str] = &[
 
 fn cte_name(set: &str) -> String {
     format!("s_{set}")
+}
+
+/// Record 55 K7, the ruling of 2026-10-12: how many subjects (rows, where
+/// the rows have none) have a value of `x` among the rows `ch`, the number
+/// a group's mean or count of distinct values of a quasi identifying field
+/// is held to below detail quasi. Subjects, never rows: one subject's five
+/// visits are one subject's age.
+fn subjects_with(x: &str, has_subj: bool) -> String {
+    let who = if has_subj { "ch.subj" } else { "ch.k" };
+    format!("COUNT(DISTINCT CASE WHEN ({x}) IS NOT NULL THEN {who} END)")
+}
+
+/// The column of a group's layer that counts the subjects of a held binding.
+fn held_count_col(binding: &str) -> String {
+    format!("kn_{}", binding.replace('.', "__"))
+}
+
+/// Record 55 K7, small counts at plain (the ruling of 2026-10-12): the
+/// column of the answer's group layer that counts its subjects, whatever
+/// else holds its `_subjects`.
+const COUNT_SUBJECTS: &str = "kq_subjects";
+
+/// The column of the answer's group layer that counts the subjects a
+/// binding counts by a quasi identifying field of its own.
+fn own_count_col(binding: &str) -> String {
+    format!("kq_{}", binding.replace('.', "__"))
+}
+
+/// How many subjects (rows, where the rows have none) of the rows `ch` a
+/// count of `x` counts: those with a value, or, for a sum or a mean of a
+/// comparison such as the women of a group, those whose value is not 0.
+fn subjects_counted(x: &str, nonzero: bool, has_subj: bool) -> String {
+    let who = if has_subj { "ch.subj" } else { "ch.k" };
+    if nonzero {
+        format!("COUNT(DISTINCT CASE WHEN ({x}) <> 0 THEN {who} END)")
+    } else {
+        format!("COUNT(DISTINCT CASE WHEN ({x}) IS NOT NULL THEN {who} END)")
+    }
 }
 
 fn window_days(w: &crate::ast::WindowSpec, at: &str) -> R<(Option<i64>, Option<i64>)> {
@@ -623,6 +773,51 @@ fn external_paths(ask: &Ask) -> HashMap<String, BTreeSet<String>> {
 impl<'a> Builder<'a> {
     fn q(&self, table: &str) -> String {
         qualified(self.ctx.schema.as_deref(), table)
+    }
+
+    /// One place of truth for the main scans (Nima, 2026-10-11): the picks
+    /// `picked` and a role set read, as a relation in place of the table
+    /// (`nils_registry::pick_truth`). A dataset or a cohort named
+    /// (`{dataset: NAME}`, `{cohort: NAME}`) reads its own once a run of its
+    /// saved rules finished, else the pack's; none named, each subject reads
+    /// its own dataset's by the same rule, else the pack's, as the Main
+    /// scans page, the viewer and a release do.
+    fn main_picks(&self, opts: Option<&BTreeMap<String, Value>>, at: &str) -> R<String> {
+        use nils_registry::pick_truth::{Holder, Of, Version};
+        let named = |k: &str| opts.and_then(|o| o.get(k));
+        let of = match (named("dataset"), named("cohort")) {
+            (None, None) => Of::own_of(self.ctx.names.datasets().into_iter().map(|d| Holder {
+                id: d.id,
+                name: d.name,
+                sources: d.sources,
+                version: Version::Now,
+            })),
+            (Some(Value::String(d)), None) => {
+                let name = d.trim_start_matches('@');
+                let found = self
+                    .ctx
+                    .names
+                    .datasets()
+                    .into_iter()
+                    .find(|x| x.name == name)
+                    .ok_or_else(|| err(at, format!("picked reads no dataset named {name}")))?;
+                Of::dataset(found.id, &found.name, found.sources)
+            }
+            (None, Some(Value::String(c))) => {
+                if !self.ctx.names.cohorts().iter().any(|x| x == c) {
+                    return Err(err(at, format!("picked reads no cohort named {c}")));
+                }
+                Of::cohort_named(c)
+            }
+            (Some(_), Some(_)) => {
+                return Err(err(
+                    at,
+                    "picked reads one scope: a dataset or a cohort, not both",
+                ));
+            }
+            _ => return Err(err(at, "picked names its dataset or its cohort by name")),
+        };
+        Ok(of.relation(self.ctx.schema.as_deref()))
     }
 
     /// Record 48, D1 of the move: the standing predicate that leaves out a
@@ -835,9 +1030,10 @@ impl<'a> Builder<'a> {
             return self.dataset_column(level);
         }
         if c.table == "study" && c.column == "day" {
-            return Some(Term::plain(
-                "COALESCE(sy.date_filled, sy.study_date)".into(),
-            ));
+            return Some(
+                Term::plain("COALESCE(sy.date_filled, sy.study_date)".into())
+                    .dated(Some(Dated::Day)),
+            );
         }
         let alias = alias_of(&c.table)?;
         let prec = (c.table == "event" && c.column == "event_date")
@@ -848,14 +1044,20 @@ impl<'a> Builder<'a> {
             ci: c.ci.map(|ci| format!("{alias}.{ci}")),
             param: None,
             members: false,
+            dated: dated_column(&c.table, &c.column),
         })
     }
 
-    /// Wave 7a: a stack's `dataset`, the name of the dataset whose digest
-    /// first read it, and a session's or a subject's, the names of the
-    /// datasets its stacks are of as one sorted list, read beside the base
-    /// relation through each stack's first batch and that batch's source.
-    /// The stacks rolled up are the ones a stack set sees: none the pack
+    /// Wave 7a: the `dataset` of a stack, a session or a subject, the names
+    /// of the datasets whose tree holds a file of the stack, or of one of
+    /// the session's or the subject's stacks, as one sorted list, read
+    /// beside the base relation through the stacks' holders. Nima,
+    /// 2026-10-12: a dataset is a folder that holds stacks, so a subject is
+    /// counted in a dataset when some of its stacks are there, and only a
+    /// cohort has members; a stack with a path in two datasets is one stack
+    /// in both (record 55), and one with no path in any, or a subject or a
+    /// session with no such stack, reads null. The stacks rolled up for a
+    /// session or a subject are the ones a stack set sees: none the pack
     /// ruled out, and none of a sample sealed now where those are withheld.
     fn dataset_column(&self, level: &str) -> Option<Term> {
         if !matches!(level, "stack" | "session" | "subject") {
@@ -871,57 +1073,64 @@ impl<'a> Builder<'a> {
             }
         }
         let mut term = if sources.is_empty() {
-            // no dataset holds a source, so no stack is of one
+            // no dataset holds a source, so no stack is in one
             Term::plain("CAST(NULL AS TEXT)".into())
         } else {
             let name = format!("CASE dsb.source_id{whens} END");
-            let (batch, stack) = (self.q("ingest_batch"), self.q("stack"));
-            if level == "stack" {
-                let first = match self.current {
-                    Some(Grain::Instance) => format!(
-                        "(SELECT dst.first_batch_id FROM {stack} dst WHERE dst.id = i.stack_id)"
-                    ),
-                    _ => "st.first_batch_id".to_string(),
-                };
-                return Some(Term::plain(format!(
-                    "(SELECT {name} FROM {batch} dsb WHERE dsb.id = {first})"
-                )));
-            }
-            let series = self.q("series");
+            let (stack, series) = (self.q("stack"), self.q("series"));
+            // the sources whose tree holds a file of the stack, as every
+            // reader of a dataset's stacks reads them
+            let holders =
+                nils_registry::dataset_subjects::holders(self.ctx.schema.as_deref(), "dst", "dsb");
+            let standing = || {
+                let mut standing = format!(
+                    " AND NOT EXISTS (SELECT 1 FROM {} dsx WHERE dsx.stack_id = dst.id \
+                     AND dsx.axis = 'disposition' AND dsx.value = 'excluded')",
+                    self.q("classification_axis")
+                );
+                if let Some(sealed) = self.not_sealed("dst.id") {
+                    standing.push_str(&format!(" AND {sealed}"));
+                }
+                standing
+            };
             // whose stack it is comes off its series (record 35 finding 1),
-            // and a session's stacks are its studies' of its own subject
-            let (from, unit) = if level == "subject" {
-                (
+            // and a session's stacks are its studies' of its own subject;
+            // a stack is the row itself, which its set already sees
+            let (from, unit, standing) = match level {
+                "stack" => {
+                    let id = match self.current {
+                        Some(Grain::Instance) => "i.stack_id",
+                        _ => "st.id",
+                    };
+                    (
+                        format!("{stack} dst"),
+                        format!("dst.id = {id}"),
+                        String::new(),
+                    )
+                }
+                "subject" => (
                     format!("{stack} dst JOIN {series} dse ON dse.id = dst.series_id"),
-                    "dse.subject_id = su.id",
-                )
-            } else {
-                (
+                    "dse.subject_id = su.id".to_string(),
+                    standing(),
+                ),
+                _ => (
                     format!(
                         "{} dscs JOIN {series} dse ON dse.study_id = dscs.study_id \
                          JOIN {stack} dst ON dst.series_id = dse.id",
                         self.q("session_cache_study")
                     ),
-                    "dscs.session_id = sc.id AND dse.subject_id = sc.subject_id",
-                )
+                    "dscs.session_id = sc.id AND dse.subject_id = sc.subject_id".to_string(),
+                    standing(),
+                ),
             };
-            let mut standing = format!(
-                " AND NOT EXISTS (SELECT 1 FROM {} dsx WHERE dsx.stack_id = dst.id \
-                 AND dsx.axis = 'disposition' AND dsx.value = 'excluded')",
-                self.q("classification_axis")
-            );
-            if let Some(sealed) = self.not_sealed("dst.id") {
-                standing.push_str(&format!(" AND {sealed}"));
-            }
             Term::plain(format!(
-                "(SELECT {} FROM (SELECT DISTINCT {name} AS n FROM {from} \
-                 JOIN {batch} dsb ON dsb.id = dst.first_batch_id \
+                "(SELECT {} FROM (SELECT DISTINCT {name} AS n FROM {from} {holders} \
                  WHERE {unit} AND dsb.source_id IN ({}){standing}) dsn)",
                 self.sql.name_list("dsn.n"),
                 sources.join(", ")
             ))
         };
-        term.members = level != "stack";
+        term.members = true;
         Some(term)
     }
 
@@ -929,6 +1138,9 @@ impl<'a> Builder<'a> {
     /// <pipeline>:<name>` as the catalog names it: the value of the newest
     /// run that measured the unit, read beside the base relation by the
     /// unit's key (a stack, a subject and a session's day, or a subject).
+    /// Record 55 H3: `checked:<pipeline>:`, the status a check left on that
+    /// run's results of the unit, the worst of them (rejected, flagged,
+    /// unchecked, accepted); none where the run made no mask for it.
     fn measure_column(&self, level: &str, column: &str) -> Option<Term> {
         let mut parts = column.splitn(3, ':');
         let (what, pipeline, name) = (parts.next()?, parts.next()?, parts.next()?);
@@ -937,6 +1149,7 @@ impl<'a> Builder<'a> {
             "number" => "nm.number",
             "text" => "nm.text",
             "run" => "nm.run_id",
+            "checked" => "",
             _ => return None,
         };
         let unit = |a: &str| match level {
@@ -947,7 +1160,30 @@ impl<'a> Builder<'a> {
             "subject" => Some(format!("{a}.subject_id = su.id")),
             _ => None,
         };
-        let (mu, ru) = (unit("nm")?, unit("mr")?);
+        let (mu, ru, du) = (unit("nm")?, unit("mr")?, unit("dd")?);
+        // record 48, D1 of the move: a unit's measure is what a system said
+        // of the stacks it was given, so where a sealed sample's stacks are
+        // withheld, a session's or a subject's that holds one reads null,
+        // its run and its check too (a stack's own leaves with the stack,
+        // by the base's standing predicate)
+        let guard = match (self.ctx.withhold_sealed, level) {
+            (true, "session") => format!(
+                " AND NOT EXISTS (SELECT 1 FROM {} mcs JOIN {} mse ON mse.study_id = mcs.study_id \
+                 JOIN {} mst ON mst.series_id = mse.id JOIN {} mss ON mss.stack_id = mst.id \
+                 WHERE mcs.session_id = sc.id AND mse.subject_id = sc.subject_id \
+                 AND mss.unsealed_at IS NULL)",
+                self.q("session_cache_study"),
+                self.q("series"),
+                self.q("stack"),
+                self.q("sealed_stack")
+            ),
+            (true, "subject") => format!(
+                " AND NOT EXISTS (SELECT 1 FROM {} mss WHERE mss.subject_id = su.id \
+                 AND mss.unsealed_at IS NULL)",
+                self.q("sealed_stack")
+            ),
+            _ => String::new(),
+        };
         // the run a unit's values are read from: its newest run of the
         // pipeline's current version (the newest active one), else its
         // newest run of any version; every value, and the run field, come
@@ -957,8 +1193,10 @@ impl<'a> Builder<'a> {
             self.q("pipeline"),
             quote(pipeline)
         );
+        // the guard rides on the run, which every value and the check read
+        // their row by
         let run = format!(
-            "(SELECT mr.run_id FROM {} mr WHERE mr.pipeline = {} AND mr.scope = {} AND {ru} \
+            "(SELECT mr.run_id FROM {} mr WHERE mr.pipeline = {} AND mr.scope = {} AND {ru}{guard} \
              ORDER BY CASE WHEN mr.pipeline_id = {current} THEN 1 ELSE 0 END DESC, mr.run_id DESC LIMIT 1)",
             self.q("measure"),
             quote(pipeline),
@@ -966,6 +1204,15 @@ impl<'a> Builder<'a> {
         );
         if what == "run" {
             return Some(Term::plain(run));
+        }
+        if what == "checked" {
+            return Some(Term::plain(format!(
+                "(SELECT CASE MIN(CASE dd.check_status WHEN 'rejected' THEN 0 WHEN 'flagged' THEN 1 \
+                 WHEN 'accepted' THEN 3 ELSE 2 END) WHEN 0 THEN 'rejected' WHEN 1 THEN 'flagged' \
+                 WHEN 2 THEN 'unchecked' WHEN 3 THEN 'accepted' END FROM {} dd \
+                 WHERE dd.run_id = {run} AND dd.kind = 'mask' AND dd.withdrawn_at IS NULL AND {du})",
+                self.q("derivative"),
+            )));
         }
         Some(Term::plain(format!(
             "(SELECT {value} FROM {} nm WHERE nm.pipeline = {} AND nm.name = {} AND nm.scope = {} \
@@ -1245,10 +1492,11 @@ impl<'a> Builder<'a> {
                     return Err(err(format!("{path}.from"), "a role is a stack set"));
                 }
                 let role = self.p(Param::from(r.as_str()), Type::Text);
+                // the main scans, as `picked` reads them with no scope named
+                let picks = self.main_picks(None, &format!("{path}.from"))?;
                 from.push_str(&format!(
-                    " JOIN {} ps ON ps.stack_id = st.id JOIN {} p ON p.id = ps.pick_id AND p.role = {role} AND p.withdrawn_at IS NULL",
+                    " JOIN {} ps ON ps.stack_id = st.id JOIN {picks} p ON p.id = ps.pick_id AND p.role = {role}",
                     self.q("pick_stack"),
-                    self.q("pick")
                 ));
             }
             Some(Src::Handle { id, .. }) => {
@@ -1335,6 +1583,7 @@ impl<'a> Builder<'a> {
                             ci: None,
                             param: None,
                             members: t.members,
+                            dated: t.dated,
                         },
                     ));
                 }
@@ -1356,6 +1605,7 @@ impl<'a> Builder<'a> {
                 projected.push(format!("{} AS {col}", t.sql));
                 let mut layered = Term::plain(col.clone());
                 layered.members = t.members;
+                layered.dated = t.dated;
                 if let Some(pc) = &t.prec {
                     let pcol = format!("{col}__prec");
                     projected.push(format!("{pc} AS {pcol}"));
@@ -1379,6 +1629,7 @@ impl<'a> Builder<'a> {
                     ci: None,
                     param: None,
                     members: false,
+                    dated: Some(Dated::Day),
                 },
             ));
         }
@@ -1467,6 +1718,7 @@ impl<'a> Builder<'a> {
                     ci: None,
                     param: None,
                     members: expr.members,
+                    dated: expr.dated,
                 },
             ));
         }
@@ -1569,6 +1821,7 @@ impl<'a> Builder<'a> {
                     ci,
                     param: None,
                     members: t.members,
+                    dated: t.dated,
                 },
             ));
         }
@@ -1586,6 +1839,7 @@ impl<'a> Builder<'a> {
                     ci: None,
                     param: None,
                     members: false,
+                    dated: (n == "date").then_some(Dated::Day),
                 },
             ));
         }
@@ -1682,6 +1936,7 @@ impl<'a> Builder<'a> {
                                 ci: None,
                                 param: None,
                                 members: t.members,
+                                dated: t.dated,
                             },
                         )
                     })
@@ -1695,10 +1950,14 @@ impl<'a> Builder<'a> {
                             ci: None,
                             param: None,
                             members: t.members,
+                            dated: t.dated,
                         },
                     ));
                 }
-                both.push((format!("{}.date", n.as_), Term::plain(p_first.clone())));
+                both.push((
+                    format!("{}.date", n.as_),
+                    Term::plain(p_first.clone()).dated(Some(Dated::Day)),
+                ));
                 both.push((
                     format!("{}.offset_days", n.as_),
                     Term::plain(offset.clone()),
@@ -1927,6 +2186,7 @@ impl<'a> Builder<'a> {
             ci: None,
             param: None,
             members: false,
+            dated: Some(Dated::Day),
         };
         terms.push((
             binding.to_string(),
@@ -1938,7 +2198,7 @@ impl<'a> Builder<'a> {
         ));
         terms.push((
             format!("{binding}.from_date"),
-            Term::plain(format!("{col}__from_date")),
+            Term::plain(format!("{col}__from_date")).dated(Some(Dated::Day)),
         ));
         terms.push((
             format!("{binding}.precision"),
@@ -1974,6 +2234,8 @@ impl<'a> Builder<'a> {
         let mut axis_cols: Vec<String> = Vec::new();
         let mut axis_joins: Vec<String> = Vec::new();
         let mut by_sql: Vec<String> = Vec::new();
+        // what each key is when it is a date (2026-10-12)
+        let mut by_dated: Vec<Option<Dated>> = Vec::new();
         // Wave 7a: the keys read by an axis, by their column's name, which
         // hold each value in the form the pack stores
         let mut axis_keys: BTreeMap<String, String> = BTreeMap::new();
@@ -1983,11 +2245,13 @@ impl<'a> Builder<'a> {
                 let key = self.expr(c, &child_terms, "ch", &at)?;
                 if !key.members {
                     by_sql.push(key.sql);
+                    by_dated.push(key.dated);
                     continue;
                 }
-                // Wave 7a: a subject or a session counts once under each
-                // dataset its stacks are of, as an axis read with `each`
-                // counts a stack, and under null where it has none
+                // Wave 7a: a stack, a subject or a session counts once under
+                // each dataset holding a file of it or of one of its stacks,
+                // as an axis read with `each` counts a stack, and under null
+                // where none holds one
                 let col = format!("names_g{i}");
                 let mut names: Vec<String> = self
                     .ctx
@@ -2013,6 +2277,7 @@ impl<'a> Builder<'a> {
                     axis_cols.push(format!("{alias}.n AS {col}"));
                 }
                 by_sql.push(format!("ch.{col}"));
+                by_dated.push(None);
                 continue;
             }
             let child_grain = self.ask.sets.get(&g.of).map(|s| s.grain);
@@ -2043,6 +2308,7 @@ impl<'a> Builder<'a> {
             }
             axis_keys.insert(axis.to_string(), axis.to_string());
             by_sql.push(format!("ch.{col}"));
+            by_dated.push(None);
         }
         let source = if axis_cols.is_empty() {
             format!("{} ch", cte_name(&g.of))
@@ -2088,6 +2354,20 @@ impl<'a> Builder<'a> {
                 "COUNT(DISTINCT ch.k)".into()
             })
         ));
+        // Record 55 K7, small counts at plain (the ruling of 2026-10-12):
+        // the answer's group counts its subjects as they are, whatever a
+        // measure's rule holds, so its counts are held by them
+        let counted = name == self.ask.out.set && !self.counts.is_empty();
+        if counted {
+            cols.push(format!(
+                "{} AS {COUNT_SUBJECTS}",
+                if child.has_subj {
+                    "COUNT(DISTINCT ch.subj)"
+                } else {
+                    "COUNT(DISTINCT ch.k)"
+                }
+            ));
+        }
         frame.bindings.push(("_rows".into(), "_rows".into()));
         frame
             .bindings
@@ -2096,14 +2376,22 @@ impl<'a> Builder<'a> {
             ("_rows".into(), Term::plain("_rows".into())),
             ("_subjects".into(), Term::plain("_subjects".into())),
         ];
-        for (label, col) in &frame.group_by {
-            terms.push((label.clone(), Term::plain(col.clone())));
+        for ((label, col), dated) in frame.group_by.iter().zip(&by_dated) {
+            terms.push((label.clone(), Term::plain(col.clone()).dated(*dated)));
         }
+        // Record 55 K7, the ruling of 2026-10-12: beside each binding of the
+        // answer's group that its subjects hold, how many subjects have the
+        // value it reads, which the answer's column is held to
+        let held_here: BTreeSet<String> = if name == self.ask.out.set {
+            self.held.values().flatten().cloned().collect()
+        } else {
+            BTreeSet::new()
+        };
         let mut post: Vec<(String, String)> = Vec::new();
         for (b, c) in &set.bind.0 {
             let bp = format!("{path}.bind.{b}");
             let col = column_name(b);
-            if AGGREGATES.contains(&c.op.as_str()) {
+            let dated = if AGGREGATES.contains(&c.op.as_str()) {
                 let target = c.opts.get("set").and_then(Value::as_str).unwrap_or("");
                 if target != g.of {
                     return Err(err(
@@ -2112,22 +2400,53 @@ impl<'a> Builder<'a> {
                     ));
                 }
                 let inner = match c.args.first() {
-                    Some(Arg::Clause(inner)) => {
-                        Some(self.expr(inner, &child_terms, "ch", &bp)?.sql)
-                    }
+                    Some(Arg::Clause(inner)) => Some(self.expr(inner, &child_terms, "ch", &bp)?),
                     Some(_) => return Err(err(bp, "an aggregate's argument is a clause")),
                     None => None,
                 };
+                // the earliest or the latest of dates is a date
+                let dated = inner
+                    .as_ref()
+                    .and_then(|t| t.dated)
+                    .filter(|_| matches!(c.op.as_str(), "min" | "max"));
+                let inner = inner.map(|t| t.sql);
                 cols.push(format!(
                     "{} AS {col}",
                     held(self.aggregate(&c.op, inner.as_deref(), &bp)?)
                 ));
+                if held_here.contains(b) {
+                    let x = inner
+                        .as_deref()
+                        .ok_or_else(|| err(&bp, "a held aggregate reads a column"))?;
+                    let count = held_count_col(b);
+                    cols.push(format!("{} AS {count}", subjects_with(x, child.has_subj)));
+                    frame.held_counts.insert(b.clone(), count);
+                }
+                // small counts at plain: the subjects a binding counts by a
+                // quasi identifying field of its own
+                if counted {
+                    for size in &self.counts.sizes {
+                        if let crate::validate::CountSize::Own { binding, nonzero } = size
+                            && binding == b
+                        {
+                            let x = inner
+                                .as_deref()
+                                .ok_or_else(|| err(&bp, "a held count reads a column"))?;
+                            cols.push(format!(
+                                "{} AS {}",
+                                subjects_counted(x, *nonzero, child.has_subj),
+                                own_count_col(b)
+                            ));
+                        }
+                    }
+                }
+                dated
             } else {
                 post.push((b.clone(), col.clone()));
                 continue;
-            }
+            };
             frame.bindings.push((b.clone(), col.clone()));
-            terms.push((b.clone(), Term::plain(col)));
+            terms.push((b.clone(), Term::plain(col).dated(dated)));
         }
         let mut layer = format!(
             "SELECT {} FROM {source} GROUP BY {}",
@@ -2139,7 +2458,7 @@ impl<'a> Builder<'a> {
             let e = self.expr(&c, &terms, "q", &format!("{path}.bind.{b}"))?;
             layer = format!("SELECT q.*, {} AS {col} FROM ({layer}) q", e.sql);
             frame.bindings.push((b.clone(), col.clone()));
-            terms.push((b, Term::plain(col)));
+            terms.push((b, Term::plain(col).dated(e.dated)));
         }
         // A null key (a stack with no value on an axis, a field nobody
         // filled) is numbered last on both backends, so a group's key is
@@ -2153,6 +2472,11 @@ impl<'a> Builder<'a> {
             "SELECT q.*, ROW_NUMBER() OVER (ORDER BY {}) AS k, NULL AS subj FROM ({layer}) q",
             order.join(", ")
         );
+        if counted {
+            let (held, flags) = self.count_flags(&layer, &frame);
+            layer = held;
+            frame.count_flags = flags;
+        }
         if !set.where_.is_empty() {
             let mut preds = Vec::new();
             for (i, c) in set.where_.iter().enumerate() {
@@ -2169,6 +2493,93 @@ impl<'a> Builder<'a> {
         self.frames.insert(name.to_string(), frame);
         self.push_cte(name, &layer);
         Ok(())
+    }
+
+    /// Record 55 K7, small counts at plain (the ruling of 2026-10-12): which
+    /// of the answer's groups hold their counts back, one flag column per
+    /// size of the rule over the layer `layer` (whose rows carry `k` and
+    /// the keys), so the answer reads 1 where a count is held.
+    ///
+    /// A group is held where the size counts fewer than `MEASURE_K`
+    /// subjects; for a binding's own count, also where the group's other
+    /// subjects are fewer, since the group's total less the count is them.
+    /// Then, so that no held count is the difference between a total the
+    /// ask answers elsewhere and the counts shown, every line of groups
+    /// (the groups that share all keys but one; with one key, all of them)
+    /// that holds a count holds one more: where the line holds one alone,
+    /// or holds only counts under the bound (two groups of one each would
+    /// be found from their sum), the group with the fewest subjects of
+    /// those shown, the first by key on a tie. With several keys this runs
+    /// a pass per key three times, so that a group held for one line is
+    /// never alone in another. Every group's flags are decided over all
+    /// the groups, before the group's own `where`, a page or a limit, so
+    /// the rows shown never decide which are held.
+    fn count_flags(&self, layer: &str, frame: &Frame) -> (String, Vec<String>) {
+        let k = crate::validate::MEASURE_K;
+        let all = format!("q.{COUNT_SUBJECTS}");
+        let mut sizes: Vec<(String, String)> = Vec::new();
+        for size in &self.counts.sizes {
+            match size {
+                crate::validate::CountSize::Group => {
+                    sizes.push((all.clone(), format!("{all} < {k}")));
+                }
+                crate::validate::CountSize::Own { binding, .. } => {
+                    let own = format!("q.{}", own_count_col(binding));
+                    sizes.push((
+                        own.clone(),
+                        format!(
+                            "({own} BETWEEN 1 AND {small}) OR ({all} - {own} BETWEEN 1 AND {small})",
+                            small = k - 1
+                        ),
+                    ));
+                }
+            }
+        }
+        let mut cols = Vec::new();
+        for (i, (_, small)) in sizes.iter().enumerate() {
+            cols.push(format!("CASE WHEN {small} THEN 1 ELSE 0 END AS kp{i}"));
+            cols.push(format!("CASE WHEN {small} THEN 1 ELSE 0 END AS kh{i}_0"));
+        }
+        let mut layer = format!("SELECT q.*, {} FROM ({layer}) q", cols.join(", "));
+        let keys: Vec<String> = frame
+            .group_by
+            .iter()
+            .map(|(_, c)| format!("q.{c}"))
+            .collect();
+        let passes = if keys.len() <= 1 { 1 } else { 3 * keys.len() };
+        for pass in 1..=passes {
+            let mut cols = Vec::new();
+            for (i, (size, _)) in sizes.iter().enumerate() {
+                let h = format!("q.kh{i}_{}", pass - 1);
+                let lines: Vec<String> = (0..keys.len().max(1))
+                    .map(|j| {
+                        let others: Vec<&str> = keys
+                            .iter()
+                            .enumerate()
+                            .filter(|(x, _)| *x != j)
+                            .map(|(_, c)| c.as_str())
+                            .collect();
+                        let part = if others.is_empty() {
+                            String::new()
+                        } else {
+                            format!("PARTITION BY {} ", others.join(", "))
+                        };
+                        format!(
+                            "(SUM({h}) OVER ({part}) >= 1 AND (SUM({h}) OVER ({part}) = 1 OR SUM({h} * (1 - q.kp{i})) OVER ({part}) = 0) AND ROW_NUMBER() OVER ({part}ORDER BY {h}, CASE WHEN {size} = 0 THEN 1 ELSE 0 END, {size}, q.k) = 1)"
+                        )
+                    })
+                    .collect();
+                cols.push(format!(
+                    "CASE WHEN {h} = 1 OR {} THEN 1 ELSE 0 END AS kh{i}_{pass}",
+                    lines.join(" OR ")
+                ));
+            }
+            layer = format!("SELECT q.*, {} FROM ({layer}) q", cols.join(", "));
+        }
+        let flags = (0..sizes.len())
+            .map(|i| format!("kh{i}_{passes}"))
+            .collect();
+        (layer, flags)
     }
 
     fn aggregate(&self, op: &str, inner: Option<&str>, path: &str) -> R<String> {
@@ -2285,6 +2696,7 @@ impl<'a> Builder<'a> {
             ci: t.ci.as_deref().map(dot),
             param: None,
             members: t.members,
+            dated: t.dated,
         })
     }
 
@@ -2351,6 +2763,7 @@ impl<'a> Builder<'a> {
             ci: None,
             param: Some((param, ty)),
             members: false,
+            dated: (ty == Type::Date).then_some(Dated::Day),
         })
     }
 
@@ -2358,6 +2771,212 @@ impl<'a> Builder<'a> {
         match a {
             Arg::Clause(c) => self.expr(c, terms, alias, at),
             other => self.literal(other, at),
+        }
+    }
+
+    /// The text an argument writes where a date may meet it: a literal, or
+    /// a parameter that holds text or a date. None for anything else.
+    fn loose_text(&self, a: &Arg) -> Option<String> {
+        match a {
+            Arg::Text(t) => Some(t.clone()),
+            Arg::Clause(c) if c.op == "param" => {
+                let decl = self.ask.params.get(c.ref_name()?)?;
+                match (decl.type_, decl.value.as_ref()?) {
+                    (ParamType::Text | ParamType::Date, Value::String(s)) => Some(s.clone()),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// A text read as a date where it meets one (2026-10-12): Postgres
+    /// compares no date with text, and answered `first >= "2020-01-01"`
+    /// with 500. Bound as a day, or as an instant where it writes one and
+    /// meets an instant. A text that writes no date is refused here, where
+    /// validate could not tell the date it meets.
+    fn written_date(&mut self, text: &str, kind: Dated, at: &str) -> R<Term> {
+        let w = crate::validate::written_date(text).ok_or_else(|| {
+            err(
+                at,
+                format!("{text} is not a date; {}", crate::validate::DATE_FORMS),
+            )
+        })?;
+        let (v, ty, dated) = match (kind, &w) {
+            (Dated::Instant, WrittenDate::Instant(t)) => {
+                (t.clone(), Type::Timestamp, Dated::Instant)
+            }
+            _ => (w.day().to_string(), Type::Date, Dated::Day),
+        };
+        let param = Param::from(v.as_str());
+        let sql = self.p(param.clone(), ty);
+        Ok(Term {
+            sql,
+            prec: None,
+            ci: None,
+            param: Some((param, ty)),
+            members: false,
+            dated: Some(dated),
+        })
+    }
+
+    /// A date read as the day it falls on: an instant's day in UTC, a day as
+    /// it is.
+    fn as_day(&self, t: Term) -> Term {
+        match t.dated {
+            Some(Dated::Instant) => Term {
+                sql: self.sql.day_of(&t.sql),
+                prec: None,
+                ci: None,
+                param: None,
+                members: false,
+                dated: Some(Dated::Day),
+            },
+            _ => t,
+        }
+    }
+
+    /// The two sides of a comparison (2026-10-12): a text either side
+    /// writes, as a literal or a parameter, is read as a date where the
+    /// other side is one, a number there is refused, and a day and an
+    /// instant are compared by their days, on both backends alike.
+    fn operands(
+        &mut self,
+        l: &Arg,
+        r: &Arg,
+        terms: &[(String, Term)],
+        alias: &str,
+        at: &str,
+    ) -> R<(Term, Term)> {
+        let (a, b) = match (self.loose_text(l), self.loose_text(r)) {
+            (Some(text), None) => {
+                let b = self.arg(r, terms, alias, at)?;
+                let a = match b.dated {
+                    Some(k) => self.written_date(&text, k, at)?,
+                    None => self.arg(l, terms, alias, at)?,
+                };
+                (a, b)
+            }
+            (None, Some(text)) => {
+                let a = self.arg(l, terms, alias, at)?;
+                let b = match a.dated {
+                    Some(k) => self.written_date(&text, k, at)?,
+                    None => self.arg(r, terms, alias, at)?,
+                };
+                (a, b)
+            }
+            _ => {
+                let a = self.arg(l, terms, alias, at)?;
+                let b = self.arg(r, terms, alias, at)?;
+                for (t, other) in [(&a, r), (&b, l)] {
+                    if t.dated.is_some()
+                        && let Some(v) = not_a_date(other)
+                    {
+                        return Err(err(
+                            at,
+                            format!("{v} is not a date; {}", crate::validate::DATE_FORMS),
+                        ));
+                    }
+                }
+                (a, b)
+            }
+        };
+        Ok(match (a.dated, b.dated) {
+            (Some(Dated::Day), Some(Dated::Instant)) => {
+                let b = self.as_day(b);
+                (a, b)
+            }
+            (Some(Dated::Instant), Some(Dated::Day)) => (self.as_day(a), b),
+            _ => (a, b),
+        })
+    }
+
+    /// The date a function reads (2026-10-12): a text it is given, as a
+    /// literal or a parameter, is read as a day, and an instant as the day
+    /// it falls on, so `days_between`, `age_at`, `shift`, `bucket` and
+    /// `part` count days on both backends.
+    fn date_arg(&mut self, a: &Arg, terms: &[(String, Term)], alias: &str, at: &str) -> R<Term> {
+        if let Some(text) = self.loose_text(a) {
+            return self.written_date(&text, Dated::Day, at);
+        }
+        if let Some(v) = not_a_date(a) {
+            return Err(err(
+                at,
+                format!("{v} is not a date; {}", crate::validate::DATE_FORMS),
+            ));
+        }
+        let t = self.arg(a, terms, alias, at)?;
+        Ok(self.as_day(t))
+    }
+
+    /// The values one expression may yield, a coalesce's, a case's
+    /// branches, a least's or a greatest's (2026-10-12): where one is a
+    /// date, a text among them is read as a date, and all are instants
+    /// where every date among them is one, else days, so Postgres finds
+    /// one type for them. Each value's text, and what they are.
+    fn alike(
+        &mut self,
+        args: &[&Arg],
+        terms: &[(String, Term)],
+        alias: &str,
+        at: &str,
+    ) -> R<(Vec<String>, Option<Dated>)> {
+        let mut compiled: Vec<Option<Term>> = Vec::with_capacity(args.len());
+        for a in args {
+            compiled.push(match self.loose_text(a) {
+                Some(_) => None,
+                None => Some(self.arg(a, terms, alias, at)?),
+            });
+        }
+        let mut kinds: Vec<Dated> = compiled.iter().flatten().filter_map(|t| t.dated).collect();
+        if !kinds.is_empty() {
+            for a in args {
+                if let Some(w) = self
+                    .loose_text(a)
+                    .and_then(|t| crate::validate::written_date(&t))
+                {
+                    kinds.push(match w {
+                        WrittenDate::Day(_) => Dated::Day,
+                        WrittenDate::Instant(_) => Dated::Instant,
+                    });
+                }
+            }
+        }
+        let kind = match kinds.as_slice() {
+            [] => None,
+            k if k.iter().all(|d| *d == Dated::Instant) => Some(Dated::Instant),
+            _ => Some(Dated::Day),
+        };
+        let mut out = Vec::with_capacity(args.len());
+        for (a, t) in args.iter().zip(compiled) {
+            out.push(match (t, kind) {
+                (Some(t), Some(Dated::Day)) => self.as_day(t).sql,
+                (Some(t), _) => t.sql,
+                (None, Some(k)) => {
+                    let text = self.loose_text(a).unwrap_or_default();
+                    self.written_date(&text, k, at)?.sql
+                }
+                (None, None) => self.arg(a, terms, alias, at)?.sql,
+            });
+        }
+        Ok((out, kind))
+    }
+
+    /// A long list of dates, bound as one JSON array as [`Self::long_list`]
+    /// binds one, each read back as a date of the type it is compared as.
+    fn long_dates(&mut self, values: Vec<String>, ty: Type) -> String {
+        let doc = Value::Array(values.into_iter().map(Value::from).collect()).to_string();
+        let ph = self.p(Param::Text(doc), Type::Text);
+        match self.ctx.dialect {
+            Dialect::Sqlite => format!("(SELECT value FROM json_each({ph}))"),
+            _ => format!(
+                "(SELECT (e.v)::{} FROM jsonb_array_elements_text(({ph})::jsonb) AS e(v))",
+                if ty == Type::Timestamp {
+                    "timestamptz"
+                } else {
+                    "date"
+                }
+            ),
         }
     }
 
@@ -2578,6 +3197,7 @@ impl<'a> Builder<'a> {
                     ci: None,
                     param: None,
                     members: false,
+                    dated: Some(Dated::Day),
                 })
             }
             "voxel" | "voxel_max" => {
@@ -2895,15 +3515,10 @@ impl<'a> Builder<'a> {
                         exists
                     });
                 }
-                let a = self.arg(
+                let (a, b) = self.operands(
                     c.args
                         .first()
                         .ok_or_else(|| err(at, format!("{op} needs two arguments")))?,
-                    terms,
-                    alias,
-                    at,
-                )?;
-                let b = self.arg(
                     c.args
                         .get(1)
                         .ok_or_else(|| err(at, format!("{op} needs two arguments")))?,
@@ -2911,9 +3526,9 @@ impl<'a> Builder<'a> {
                     alias,
                     at,
                 )?;
-                // Wave 7a: a subject or a session is of a dataset when one of
-                // its stacks is, so = and <> ask whether the name is among
-                // its datasets
+                // Wave 7a: a stack, a subject or a session is in a dataset
+                // when the dataset holds a file of it or of one of its
+                // stacks, so = and <> ask whether the name is among them
                 if matches!(op, "=" | "<>") && a.members != b.members {
                     let (list, name) = if a.members { (&a, &b) } else { (&b, &a) };
                     let among = self.sql.member(&list.sql, &name.sql);
@@ -2926,15 +3541,10 @@ impl<'a> Builder<'a> {
                 plain(self.compare(op, a, b, strict))
             }
             "~=" => {
-                let a = self.arg(
+                let (a, b) = self.operands(
                     c.args
                         .first()
                         .ok_or_else(|| err(at, "~= needs two arguments"))?,
-                    terms,
-                    alias,
-                    at,
-                )?;
-                let b = self.arg(
                     c.args
                         .get(1)
                         .ok_or_else(|| err(at, "~= needs two arguments"))?,
@@ -2952,6 +3562,15 @@ impl<'a> Builder<'a> {
                     }
                     None => return Err(err(at, "~= needs tol")),
                 };
+                // two dates are near within tol days, counted alike on both
+                // backends (2026-10-12)
+                if a.dated.is_some() || b.dated.is_some() {
+                    let (a, b) = (self.as_day(a), self.as_day(b));
+                    return plain(format!(
+                        "(ABS({}) <= {tol})",
+                        self.sql.days_between(&a.sql, &b.sql)
+                    ));
+                }
                 plain(format!("(ABS({} - {}) <= {tol})", a.sql, b.sql))
             }
             "in" | "not_in" => {
@@ -3011,8 +3630,8 @@ impl<'a> Builder<'a> {
                 )?;
                 let listed = c.args.get(1).ok_or_else(|| err(at, "in needs a list"))?;
                 if a.members {
-                    // Wave 7a: one of the names among a subject's or a
-                    // session's datasets
+                    // Wave 7a: one of the names among a stack's, a
+                    // subject's or a session's datasets
                     let items = self.list_params(listed, at)?;
                     if items.len() > LIST_BIND_MAX {
                         return Err(err(
@@ -3038,6 +3657,59 @@ impl<'a> Builder<'a> {
                         format!("(NOT {any})")
                     });
                 }
+                if let Some(kind) = a.dated {
+                    // dates listed against a date (2026-10-12): each read as
+                    // a date, instants against an instant where every one is
+                    // an instant, else the days
+                    let mut written = Vec::new();
+                    for i in self.list_params(listed, at)? {
+                        let w = match &i {
+                            Param::Text(t) => crate::validate::written_date(t),
+                            _ => None,
+                        };
+                        written.push(w.ok_or_else(|| {
+                            let v = match i {
+                                Param::Text(t) => t,
+                                Param::Int(n) => n.to_string(),
+                                Param::Double(d) => d.to_string(),
+                                _ => "a value".to_string(),
+                            };
+                            err(
+                                at,
+                                format!("{v} is not a date; {}", crate::validate::DATE_FORMS),
+                            )
+                        })?);
+                    }
+                    let instants = kind == Dated::Instant
+                        && written.iter().all(|w| matches!(w, WrittenDate::Instant(_)));
+                    let (lhs, ty) = if instants {
+                        (a.sql, Type::Timestamp)
+                    } else {
+                        (self.as_day(a).sql, Type::Date)
+                    };
+                    let values: Vec<String> = written
+                        .iter()
+                        .map(|w| match w {
+                            WrittenDate::Instant(t) if instants => t.clone(),
+                            other => other.day().to_string(),
+                        })
+                        .collect();
+                    let list = if values.is_empty() {
+                        "(NULL)".to_string()
+                    } else if values.len() > LIST_BIND_MAX {
+                        self.long_dates(values, ty)
+                    } else {
+                        let ph: Vec<String> = values
+                            .into_iter()
+                            .map(|v| self.p(Param::from(v.as_str()), ty))
+                            .collect();
+                        format!("({})", ph.join(", "))
+                    };
+                    return plain(format!(
+                        "({lhs} {}IN {list})",
+                        if op == "not_in" { "NOT " } else { "" }
+                    ));
+                }
                 let list = self.list_placeholders(listed, at)?;
                 plain(format!(
                     "({} {}IN {list})",
@@ -3050,13 +3722,14 @@ impl<'a> Builder<'a> {
                     return Err(err(at, "has takes an axis and a value"));
                 };
                 if l.op != "axis" {
-                    // Wave 7a: the datasets of a subject or a session are
-                    // many names, read as an axis of many values is
+                    // Wave 7a: the datasets of a stack, a subject or a
+                    // session are many names, read as an axis of many values
+                    // is
                     let list = self.expr(l, terms, alias, at)?;
                     if !list.members {
                         return Err(err(
                             at,
-                            "has takes an axis, or a field of several names: a subject's or a session's dataset",
+                            "has takes an axis, or a field of several names: a stack's, a subject's or a session's dataset",
                         ));
                     }
                     let v = self.arg(
@@ -3087,10 +3760,10 @@ impl<'a> Builder<'a> {
                     .opt_placeholder(&c.opts, "role", at)?
                     .ok_or_else(|| err(at, "picked names its role: {role}"))?;
                 let digest = self.p(Param::from(self.ctx.scheme_digest.as_str()), Type::Text);
+                let picks = self.main_picks(Some(&c.opts), at)?;
                 let mut sql = format!(
-                    "EXISTS (SELECT 1 FROM {} p JOIN {} ps ON ps.pick_id = p.id WHERE ps.stack_id = {} AND p.role = {role} \
-                     AND p.withdrawn_at IS NULL AND p.scheme_digest = {digest}",
-                    self.q("pick"),
+                    "EXISTS (SELECT 1 FROM {picks} p JOIN {} ps ON ps.pick_id = p.id WHERE ps.stack_id = {} AND p.role = {role} \
+                     AND p.scheme_digest = {digest}",
                     self.q("pick_stack"),
                     dot("k")
                 );
@@ -3214,11 +3887,9 @@ impl<'a> Builder<'a> {
                 }
             }
             "coalesce" => {
-                let mut parts = Vec::new();
-                for a in &c.args {
-                    parts.push(self.arg(a, terms, alias, at)?.sql);
-                }
-                plain(format!("COALESCE({})", parts.join(", ")))
+                let args: Vec<&Arg> = c.args.iter().collect();
+                let (parts, dated) = self.alike(&args, terms, alias, at)?;
+                Ok(Term::plain(format!("COALESCE({})", parts.join(", "))).dated(dated))
             }
             "case" => {
                 let cond = self.arg(
@@ -3229,20 +3900,15 @@ impl<'a> Builder<'a> {
                     alias,
                     at,
                 )?;
-                let then = self.arg(
-                    c.args.get(1).ok_or_else(|| err(at, "case takes a then"))?,
-                    terms,
-                    alias,
-                    at,
-                )?;
-                let otherwise = match c.args.get(2) {
-                    Some(e) => self.arg(e, terms, alias, at)?.sql,
-                    None => "NULL".into(),
-                };
-                plain(format!(
+                let then = c.args.get(1).ok_or_else(|| err(at, "case takes a then"))?;
+                let branches: Vec<&Arg> = std::iter::once(then).chain(c.args.get(2)).collect();
+                let (values, dated) = self.alike(&branches, terms, alias, at)?;
+                let otherwise = values.get(1).cloned().unwrap_or_else(|| "NULL".into());
+                Ok(Term::plain(format!(
                     "CASE WHEN {} THEN {} ELSE {otherwise} END",
-                    cond.sql, then.sql
+                    cond.sql, values[0]
                 ))
+                .dated(dated))
             }
             "concat" => {
                 let mut parts = Vec::new();
@@ -3252,7 +3918,7 @@ impl<'a> Builder<'a> {
                 plain(format!("({})", parts.join(" || ")))
             }
             "days_between" => {
-                let a = self.arg(
+                let a = self.date_arg(
                     c.args
                         .first()
                         .ok_or_else(|| err(at, "days_between needs two dates"))?,
@@ -3260,7 +3926,7 @@ impl<'a> Builder<'a> {
                     alias,
                     at,
                 )?;
-                let b = self.arg(
+                let b = self.date_arg(
                     c.args
                         .get(1)
                         .ok_or_else(|| err(at, "days_between needs two dates"))?,
@@ -3271,7 +3937,7 @@ impl<'a> Builder<'a> {
                 plain(self.sql.days_between(&a.sql, &b.sql))
             }
             "shift" => {
-                let d = self.arg(
+                let d = self.date_arg(
                     c.args
                         .first()
                         .ok_or_else(|| err(at, "shift needs a date and a count"))?,
@@ -3299,10 +3965,10 @@ impl<'a> Builder<'a> {
                 } else {
                     format!("({} * {per})", n.sql)
                 };
-                plain(self.sql.shift_days(&d.sql, &days))
+                Ok(Term::plain(self.sql.shift_days(&d.sql, &days)).dated(Some(Dated::Day)))
             }
             "age_at" => {
-                let birth = self.arg(
+                let birth = self.date_arg(
                     c.args
                         .first()
                         .ok_or_else(|| err(at, "age_at needs a birth date and a day"))?,
@@ -3310,7 +3976,7 @@ impl<'a> Builder<'a> {
                     alias,
                     at,
                 )?;
-                let day = self.arg(
+                let day = self.date_arg(
                     c.args.get(1).ok_or_else(|| err(at, "age_at needs a day"))?,
                     terms,
                     alias,
@@ -3321,7 +3987,7 @@ impl<'a> Builder<'a> {
                 plain(self.sql.age_at((&birth.sql, &birth2), (&day.sql, &day2)))
             }
             "bucket" | "part" => {
-                let d = self.arg(
+                let d = self.date_arg(
                     c.args
                         .first()
                         .ok_or_else(|| err(at, format!("{op} needs a date")))?,
@@ -3334,34 +4000,33 @@ impl<'a> Builder<'a> {
                     .get("unit")
                     .and_then(Value::as_str)
                     .ok_or_else(|| err(at, format!("{op} needs {{unit}}")))?;
-                plain(if op == "bucket" {
-                    self.sql.bucket(&d.sql, unit)?
-                } else {
-                    self.sql.part(&d.sql, unit)?
-                })
+                // a unit the dialect does not read is refused at the
+                // clause's path, not the op's name
+                plain(
+                    if op == "bucket" {
+                        self.sql.bucket(&d.sql, unit)
+                    } else {
+                        self.sql.part(&d.sql, unit)
+                    }
+                    .map_err(|e| err(at, e.message))?,
+                )
             }
             "least" | "greatest" => {
-                let a = self.arg(
-                    c.args
-                        .first()
-                        .ok_or_else(|| err(at, format!("{op} needs two arguments")))?,
-                    terms,
-                    alias,
-                    at,
-                )?;
-                let b = self.arg(
-                    c.args
-                        .get(1)
-                        .ok_or_else(|| err(at, format!("{op} needs two arguments")))?,
-                    terms,
-                    alias,
-                    at,
-                )?;
-                plain(if op == "least" {
-                    self.sql.least(&a.sql, &b.sql)
+                let a = c
+                    .args
+                    .first()
+                    .ok_or_else(|| err(at, format!("{op} needs two arguments")))?;
+                let b = c
+                    .args
+                    .get(1)
+                    .ok_or_else(|| err(at, format!("{op} needs two arguments")))?;
+                let (v, dated) = self.alike(&[a, b], terms, alias, at)?;
+                Ok(Term::plain(if op == "least" {
+                    self.sql.least(&v[0], &v[1])
                 } else {
-                    self.sql.greatest(&a.sql, &b.sql)
+                    self.sql.greatest(&v[0], &v[1])
                 })
+                .dated(dated))
             }
             "json" => {
                 let a = self.arg(
@@ -3420,6 +4085,7 @@ impl<'a> Builder<'a> {
                     ci: None,
                     param: None,
                     members: false,
+                    dated: a.dated,
                 })
             }
             "share" => {
@@ -3482,18 +4148,68 @@ impl<'a> Builder<'a> {
                     format!("{} = {}", Self::link(&child, g, "ch", at)?, dot("k"))
                 };
                 let inner = match c.args.first() {
-                    Some(Arg::Clause(inner)) => Some(self.expr(inner, &child.terms, "ch", at)?.sql),
+                    Some(Arg::Clause(inner)) => Some(self.expr(inner, &child.terms, "ch", at)?),
                     Some(_) => return Err(err(at, "an aggregate's argument is a clause")),
                     None => None,
                 };
+                let dated = inner
+                    .as_ref()
+                    .and_then(|t| t.dated)
+                    .filter(|_| matches!(op, "min" | "max"));
+                let inner = inner.map(|t| t.sql);
                 let agg = self.aggregate(op, inner.as_deref(), at)?;
-                plain(format!(
+                Ok(Term::plain(format!(
                     "(SELECT {agg} FROM {} ch WHERE {link})",
                     cte_name(&target)
                 ))
+                .dated(dated))
             }
             other => Err(err(at, format!("{other} is not an op of the language"))),
         }
+    }
+
+    /// Record 55 K7, small counts at plain (the ruling of 2026-10-12): how
+    /// many subjects a count of the answer's set counts, where a quasi
+    /// identifying field chose or grouped its rows; none where none did. A
+    /// group set's rows are its keys' values, so its count is held by the
+    /// subjects under it, as a count of distinct values is.
+    fn quasi_subjects(&self, frame: &Frame) -> Option<String> {
+        let out = &self.ask.out;
+        if !self.quasi_sets.contains(&out.set) {
+            return None;
+        }
+        let set = self.ask.sets.get(&out.set)?;
+        Some(match &set.group {
+            Some(g) => {
+                let child = self.frames.get(&g.of).cloned().unwrap_or_default();
+                let who = if child.has_subj { "ch.subj" } else { "ch.k" };
+                format!("(SELECT COUNT(DISTINCT {who}) FROM {} ch)", cte_name(&g.of))
+            }
+            None if frame.has_subj => "COUNT(DISTINCT o.subj)".into(),
+            None => "COUNT(*)".into(),
+        })
+    }
+
+    /// Record 55 K7, small lists at plain (the ruling of 2026-10-13): how
+    /// many subjects a list of the answer's set would show, as one value
+    /// read apart from the list, where a quasi identifying field chose or
+    /// grouped its rows; none where none did. A group set's rows are its
+    /// keys' values, so its list is held by the subjects under it.
+    fn list_subjects(&self, frame: &Frame) -> Option<String> {
+        let out = &self.ask.out;
+        if !self.quasi_sets.contains(&out.set) {
+            return None;
+        }
+        let set = self.ask.sets.get(&out.set)?;
+        if set.group.is_some() {
+            return self.quasi_subjects(frame);
+        }
+        let who = if frame.has_subj {
+            "COUNT(DISTINCT x.subj)"
+        } else {
+            "COUNT(*)"
+        };
+        Some(format!("(SELECT {who} FROM {} x)", cte_name(&out.set)))
     }
 
     /// The final SELECT over the answer's set.
@@ -3505,6 +4221,8 @@ impl<'a> Builder<'a> {
         let mut names = vec!["_key".to_string(), "_subject".to_string()];
         let mut code_columns = Vec::new();
         let mut shaped_columns = Vec::new();
+        let mut held_columns = Vec::new();
+        let mut count_columns = Vec::new();
         match out.level {
             crate::ast::Level::Count => {
                 let subjects = if frame.has_subj {
@@ -3524,16 +4242,51 @@ impl<'a> Builder<'a> {
                         e
                     }
                 };
+                // record 55 K7, small counts at plain (the ruling of
+                // 2026-10-12): a count of a set a quasi identifying field
+                // chose or grouped, none or MEASURE_K subjects and more,
+                // else held back
+                let quasi = self.quasi_subjects(&frame);
+                let held_q = |e: String| -> String {
+                    match &quasi {
+                        Some(n) => format!(
+                            "CASE WHEN {n} = 0 OR {n} >= {} THEN {e} END",
+                            crate::validate::MEASURE_K
+                        ),
+                        None => e,
+                    }
+                };
                 let sql = format!(
                     "SELECT {} AS rows_, {} AS subjects_ FROM {} o",
-                    held(self.sql.as_bigint("COUNT(*)")),
-                    held(self.sql.as_bigint(subjects)),
+                    held_q(held(self.sql.as_bigint("COUNT(*)"))),
+                    held_q(held(self.sql.as_bigint(subjects))),
                     cte_name(&out.set)
                 );
                 self.answer_columns = vec!["rows".into(), "subjects".into()];
+                if quasi.is_some() {
+                    self.count_columns = vec![0, 1];
+                }
                 return Ok(sql);
             }
             crate::ast::Level::Boolean => {
+                // record 55 K7, small counts at plain: whether any is a
+                // count too, so it answers none, MEASURE_K subjects and
+                // more, or is held back between
+                if let Some(n) = self.quasi_subjects(&frame) {
+                    let k = crate::validate::MEASURE_K;
+                    let measured = if self.small_cells.contains(&out.set) {
+                        format!(" AND COUNT(*) >= {k}")
+                    } else {
+                        String::new()
+                    };
+                    let sql = format!(
+                        "SELECT CASE WHEN COUNT(*) = 0 THEN 0 WHEN {n} >= {k}{measured} THEN 1 END AS any_ FROM {} o",
+                        cte_name(&out.set)
+                    );
+                    self.answer_columns = vec!["any".into()];
+                    self.count_columns = vec![0];
+                    return Ok(sql);
+                }
                 let sql = if self.small_cells.contains(&out.set) {
                     format!(
                         "SELECT CASE WHEN COUNT(*) = 0 THEN 0 WHEN COUNT(*) >= {} THEN 1 END AS any_ FROM {} o",
@@ -3551,8 +4304,21 @@ impl<'a> Builder<'a> {
             }
             _ => {}
         }
+        // record 55 K7, small lists at plain (the ruling of 2026-10-13): a
+        // list of the rows a quasi identifying field chose is a count by
+        // its length, so where the set holds 1 to 4 subjects no row of it
+        // is answered. The guard reads the whole set, before a page, an
+        // `after` or a limit, and binds only the sets' own parameters.
+        if let Some(n) = self.list_subjects(&frame) {
+            self.list_guard_params = self.params.len();
+            self.list_guard = Some(format!(
+                "SELECT CASE WHEN {n} BETWEEN 1 AND {} THEN 1 ELSE 0 END AS held_",
+                crate::validate::MEASURE_K - 1
+            ));
+        }
         for (i, c) in out.columns.iter().enumerate() {
-            let e = self.expr(c, &terms, "o", &format!("out.columns[{i}]"))?;
+            let at = format!("out.columns[{i}]");
+            let e = self.expr(c, &terms, "o", &at)?;
             let name = c
                 .ref_name()
                 .map(str::to_string)
@@ -3564,7 +4330,7 @@ impl<'a> Builder<'a> {
                 || name == "last"
                 || name.ends_with(".first")
                 || name.ends_with(".last");
-            let rendered = if is_date {
+            let mut rendered = if is_date {
                 format!("CAST({} AS TEXT)", e.sql)
             } else {
                 e.sql
@@ -3574,6 +4340,40 @@ impl<'a> Builder<'a> {
             }
             if self.shaped.contains(&i) {
                 shaped_columns.push(cols.len());
+            }
+            // record 55 K7, the ruling of 2026-10-12: a column made from a
+            // group's mean or count of distinct values of a quasi
+            // identifying field shows only where the group holds MEASURE_K
+            // subjects with a value, and is null where it is held back
+            if let Some(by) = self.held.get(&i) {
+                let mut holds = Vec::new();
+                for b in by {
+                    let count = frame
+                        .held_counts
+                        .get(b)
+                        .ok_or_else(|| err(&at, format!("no count of the subjects {b} reads")))?;
+                    holds.push(format!("o.{count} >= {}", crate::validate::MEASURE_K));
+                }
+                if !holds.is_empty() {
+                    rendered = format!("CASE WHEN {} THEN {rendered} END", holds.join(" AND "));
+                }
+                held_columns.push(cols.len());
+            }
+            // record 55 K7, small counts at plain (the ruling of
+            // 2026-10-12): a count of the groups' rows a quasi identifying
+            // field chose or keyed, and what is made of it, shows only where
+            // no flag of its sizes holds it back
+            if let Some(sizes) = self.counts.columns.get(&i) {
+                let mut holds = Vec::new();
+                for &s in sizes {
+                    let flag = frame
+                        .count_flags
+                        .get(s)
+                        .ok_or_else(|| err(&at, "no flag holds this count"))?;
+                    holds.push(format!("o.{flag} = 0"));
+                }
+                rendered = format!("CASE WHEN {} THEN {rendered} END", holds.join(" AND "));
+                count_columns.push(cols.len());
             }
             cols.push(format!("{rendered} AS c{i}"));
             names.push(name);
@@ -3615,6 +4415,8 @@ impl<'a> Builder<'a> {
         self.answer_columns = names;
         self.code_columns = code_columns;
         self.shaped_columns = shaped_columns;
+        self.held_columns = held_columns;
+        self.count_columns = count_columns;
         Ok(sql)
     }
 }
@@ -3645,6 +4447,13 @@ pub fn compile(ask: &Ask, validated: &Validated, ctx: &Context<'_>) -> R<Compile
         shaped: validated.shaped.clone(),
         shaped_columns: Vec::new(),
         small_cells: validated.small_cells.clone(),
+        held: validated.held.clone(),
+        held_columns: Vec::new(),
+        quasi_sets: validated.quasi_sets.clone(),
+        counts: validated.counts.clone(),
+        count_columns: Vec::new(),
+        list_guard: None,
+        list_guard_params: 0,
     };
     for name in &validated.order {
         b.current = Some(ask.sets[name].grain);
@@ -3659,5 +4468,12 @@ pub fn compile(ask: &Ask, validated: &Validated, ctx: &Context<'_>) -> R<Compile
         columns: b.answer_columns.clone(),
         code_columns: b.code_columns.clone(),
         shaped_columns: b.shaped_columns.clone(),
+        held_columns: b.held_columns.clone(),
+        count_columns: b.count_columns.clone(),
+        list_guard: b
+            .list_guard
+            .as_ref()
+            .map(|g| format!("WITH {} {g}", b.ctes.join(", "))),
+        list_guard_params: b.list_guard_params,
     })
 }

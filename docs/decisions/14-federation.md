@@ -1,4 +1,4 @@
-# 14 — Federation: nodes, and data that stays where it is
+# 14 · Federation: nodes, and data that stays where it is
 
 Two conversations put this on the table. A PI from Vienna spent time with the group
 to see how we work, and the question came up whether NILS could be federated: each
@@ -142,7 +142,7 @@ server in a hospital basement.
   (principle 7).
 - **Outbound-only nodes are the normal case.** Hospital networks accept no inbound
   connection; Stockholm's own node sits behind one today and we reach it over a
-  tailnet. Two patterns cover it: a self-hosted WireGuard mesh (Headscale with a
+  tailnet. Two patterns cover it: a self-hosted WireGuard mesh (an open-source coordination server with a
   DERP relay on 443, which is what we already run), or a **blind store-and-forward
   relay** that holds signed, encrypted envelopes and sees only metadata. The mesh is
   the recommendation for two or three nodes; the relay is for a member that cannot
@@ -285,9 +285,11 @@ federation.request:
   policy, audit review cadence, incident process, and exit. Exit is revoking a key;
   nothing individual-level was shared, so nothing needs recalling beyond aggregate
   results and logs.
-- **Versions.** Packs use semantic versions and a vocabulary change is a major. A
-  request declares the pack version it was written for; a peer on an incompatible
-  version answers `incompatible` with a diff, never an approximation. Contract
+- **Versions.** Packs use semantic versions: adding to a vocabulary is a minor,
+  removing or renaming any of it a major (amended 2026-10-10: it first said every
+  vocabulary change was a major). A request declares the pack version it was
+  written for; a peer on another major, or on an earlier minor than the
+  request's, answers `incompatible` with a diff, never an approximation. Contract
   versions likewise (D26).
 - **Monitoring.** Node liveness, request latency, approval backlog. Nothing else
   leaves a node.

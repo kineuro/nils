@@ -19,6 +19,13 @@
 # Each session runs in a container of its own (`x-nils.units: apart`), so
 # the lane runs as many side by side as its budget holds, each with its own
 # work folder under a private /tmp.
+#
+# MRIQC sends two things out unless told not to: the IQMs with the scan's
+# parameters to its public web API (`--no-sub` stops it), and usage
+# telemetry to the NiPreps developers (`--notrack` stops it). Both are on by
+# default in 24.0.2, so both flags are set. The engine runs the container
+# without a network as well; the flags keep the run quiet wherever the
+# image runs.
 name: mriqc
 schema-version: "0.5"
 tool-version: "24.0.2"
@@ -54,11 +61,16 @@ inputs:
 
 command-line: >-
   [InputDataset] [OutputLocation] participant --participant-label [ParticipantLabels]
-  -m T1w --no-sub -w [OutputLocation]/.work-mriqc --nprocs [NPROCS] --omp-nthreads [NPROCS] --mem-gb [MEM]
+  -m T1w --no-sub --notrack -w [OutputLocation]/.work-mriqc --nprocs [NPROCS] --omp-nthreads [NPROCS] --mem-gb [MEM]
 
 x-nils:
   contract: 1
   analysis-level: session
+  # It fixes the earlier versions (the review of 2026-10-12), so a new
+  # run no longer takes them; their runs and results keep their names.
+  # No version list: every earlier version of the name in a catalog.
+  replaces:
+    why: "It passes --notrack, so MRIQC sends no usage report; the earlier versions left that on."
   input:
     layout: bids
     roles: [t1w]

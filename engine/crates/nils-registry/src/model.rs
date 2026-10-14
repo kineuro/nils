@@ -7,14 +7,31 @@
 //! A model passes through four states, the lifecycle Kvasir keeps for the
 //! language models it serves: registered with its card; admitted by a check
 //! that passed, which stays on it; promoted, which is refused unless it was
-//! admitted and retires the model promoted before it in the same task and
-//! slot; and retired. A failed check is kept as an event and moves nothing.
-//! Every transition is an event row and an audit row, and nothing is
-//! deleted, because a retired model still names what it decided.
+//! admitted; and retired. A failed check is kept as an event and moves
+//! nothing. Every transition is an event row and an audit row, and nothing
+//! is deleted, because a retired model still names what it decided.
+//!
+//! Record 55 D4 (spec 10.2): several admitted or promoted models answer one
+//! task and slot, and promoting one retires none. The one a run takes is
+//! the **chosen** model ([`chosen`]): the one a site's admin chose
+//! ([`choose`]), audited, or by default the one a recorded certificate
+//! names, then the one promoted last, then the newest admitted. A retired
+//! model's files stay where its card says, so a past result can be run
+//! again.
+//!
+//! Record 55 A5 (spec 4.2, 10.5): a card states its speed on a CPU and on
+//! a GPU, its GPU need and the equivalence class of its CPU and GPU
+//! answers; the admission suite measures that class again
+//! ([`equivalence`]) and a model whose measured class is worse than its
+//! card's is not admitted ([`admit`]).
 //!
 //! A model's answer is a decision with `author_kind` model and this model's
 //! id ([`crate::review::apply`]), refused unless the model is admitted or
 //! promoted, and staged until a person commits it (record 42 R6).
+//!
+//! A cascade (record 55 E2, the ruling of 2026-10-10) is one model whose
+//! card names its parts, each a registered model by digest under the name of
+//! the pipeline input it fills (`parts`); promoting it retires none of them.
 
 use serde_json::{Value, json};
 
@@ -153,9 +170,81 @@ impl Model {
             "retired_by": self.retired_by,
             "retired_at": self.retired_at,
             "review_item": self.review_item,
+            "complete": self.missing().is_empty(),
+            "missing": self.missing(),
+            "equivalence_measured": self
+                .check
+                .as_ref()
+                .and_then(|c| c.get("equivalence"))
+                .filter(|e| !e.is_null()),
         })
     }
+
+    /// What its card lacks to be complete (record 55 D4, T22): the label
+    /// set it was trained on, its tested claims, its speed on a CPU and,
+    /// unless it needs no GPU, on one, its GPU need, its equivalence
+    /// unless it needs no GPU, its intended use and its limits. Empty for
+    /// a complete card.
+    pub fn missing(&self) -> Vec<&'static str> {
+        missing(&self.card)
+    }
+
+    /// What its card says it needs of a GPU; `none` where it says nothing.
+    pub fn gpu(&self) -> &str {
+        self.card["gpu"].as_str().unwrap_or("none")
+    }
 }
+
+/// What a card lacks to be complete, by field (see [`Model::missing`]).
+pub fn missing(card: &Value) -> Vec<&'static str> {
+    let mut out = Vec::new();
+    let text = |v: &Value| v.as_str().is_some_and(|s| !s.trim().is_empty());
+    if !card["trained_on"]["label_set"]
+        .as_str()
+        .is_some_and(is_digest)
+    {
+        out.push("trained_on");
+    }
+    if !card["tested"].as_array().is_some_and(|a| !a.is_empty()) {
+        out.push("tested");
+    }
+    let gpu = card["gpu"].as_str();
+    if gpu.is_none() {
+        out.push("gpu");
+    }
+    if !card["speed"]["cpu"].is_object() {
+        out.push("speed.cpu");
+    }
+    let needs_gpu = gpu.is_none_or(|g| g != "none");
+    if needs_gpu && !card["speed"]["gpu"].is_object() {
+        out.push("speed.gpu");
+    }
+    if needs_gpu && !card["equivalence"].is_object() {
+        out.push("equivalence");
+    }
+    if !text(&card["intended_use"]) {
+        out.push("intended_use");
+    }
+    if !card["limits"]
+        .as_array()
+        .is_some_and(|a| a.iter().any(text))
+    {
+        out.push("limits");
+    }
+    out
+}
+
+/// The equivalence classes, best first (spec 16.3).
+pub const CLASSES: [&str; 3] = ["I", "II", "III"];
+
+/// The rank of a class, 0 the best; none for a text that is not one.
+pub fn class_rank(class: &str) -> Option<usize> {
+    CLASSES.iter().position(|c| *c == class)
+}
+
+/// The class I tolerance where a card gives none: the speed study's, for a
+/// calibrated probability.
+pub const CLASS_I_TOLERANCE: f64 = 0.001;
 
 fn invalid(m: impl Into<String>) -> Error {
     Error::Invalid(m.into())
@@ -534,7 +623,126 @@ fn checked_slot(store: &mut Store, card: &Value) -> Result<String, Error> {
             ));
         }
     }
+    checked_parts_of_a_card(card)?;
     Ok(slot)
+}
+
+/// Record 55 D4 and A5: the card's tested claims, speed, GPU need and
+/// equivalence, each as the contract has it where the card gives it.
+fn checked_parts_of_a_card(card: &Value) -> Result<(), Error> {
+    let text = |v: &Value| v.as_str().is_some_and(|s| !s.trim().is_empty());
+    match card.get("tested") {
+        None | Some(Value::Null) => {}
+        Some(Value::Array(claims)) => {
+            for (i, c) in claims.iter().enumerate() {
+                if !text(&c["claim"]) {
+                    return Err(invalid(format!(
+                        "tested claim {} says what was measured (claim)",
+                        i + 1
+                    )));
+                }
+                if !(c["value"].is_number() || text(&c["value"])) {
+                    return Err(invalid(format!(
+                        "tested claim {} ({}) gives its value, a number or a text",
+                        i + 1,
+                        c["claim"].as_str().unwrap_or("")
+                    )));
+                }
+                if !text(&c["evidence"]) {
+                    return Err(invalid(format!(
+                        "tested claim {} ({}) names the evidence run its number comes from",
+                        i + 1,
+                        c["claim"].as_str().unwrap_or("")
+                    )));
+                }
+            }
+        }
+        Some(_) => {
+            return Err(invalid(
+                "tested is a list of claims, each with its claim, value, bound and evidence",
+            ));
+        }
+    }
+    let gpu = match card.get("gpu") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(g)) if ["none", "optional", "required"].contains(&g.as_str()) => {
+            Some(g.as_str())
+        }
+        Some(other) => {
+            return Err(invalid(format!(
+                "gpu is none, optional or required, not {other}"
+            )));
+        }
+    };
+    match card.get("speed") {
+        None | Some(Value::Null) => {}
+        Some(Value::Object(s)) => {
+            for (side, required) in [("cpu", true), ("gpu", false)] {
+                match s.get(side) {
+                    None | Some(Value::Null) if !required => {}
+                    Some(one @ Value::Object(_)) => {
+                        let rate = one["stacks_per_second"].as_f64();
+                        if !rate.is_some_and(|r| r.is_finite() && r > 0.0) {
+                            return Err(invalid(format!(
+                                "speed.{side} gives stacks_per_second, a number above 0"
+                            )));
+                        }
+                        if !text(&one["hardware"]) || !text(&one["evidence"]) {
+                            return Err(invalid(format!(
+                                "speed.{side} names the hardware it was measured on and its evidence run"
+                            )));
+                        }
+                    }
+                    _ => {
+                        return Err(invalid(format!(
+                            "speed.{side} is stacks_per_second, hardware and evidence"
+                        )));
+                    }
+                }
+            }
+            if gpu == Some("none") && s.get("gpu").is_some_and(|g| !g.is_null()) {
+                return Err(invalid(
+                    "a card whose gpu is none states no speed with a GPU",
+                ));
+            }
+        }
+        Some(_) => {
+            return Err(invalid(
+                "speed is an object of cpu and gpu, each stacks_per_second, hardware and evidence",
+            ));
+        }
+    }
+    match card.get("equivalence") {
+        None | Some(Value::Null) => {}
+        Some(e @ Value::Object(_)) => {
+            if !e["class"].as_str().is_some_and(|c| class_rank(c).is_some()) {
+                return Err(invalid(format!(
+                    "equivalence.class is one of {}",
+                    CLASSES.join(", ")
+                )));
+            }
+            match &e["tolerance"] {
+                Value::Null => {}
+                v if v.as_f64().is_some_and(|t| t.is_finite() && t >= 0.0) => {}
+                v => {
+                    return Err(invalid(format!(
+                        "equivalence.tolerance is a number at least 0, not {v}"
+                    )));
+                }
+            }
+            if !text(&e["set"]) || !text(&e["evidence"]) {
+                return Err(invalid(
+                    "equivalence names the set it was measured on and its evidence run",
+                ));
+            }
+        }
+        Some(_) => {
+            return Err(invalid(
+                "equivalence is an object: class, tolerance, set and evidence",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn labels_err(e: crate::labels::Error) -> Error {
@@ -578,6 +786,8 @@ pub fn register(registry: &mut Registry, card: &Value, who: &str) -> Result<Mode
     // given beside the list it is one of them.
     let encoders = encoders_of(store, card, &kind)?;
     let encoder = encoders.first().copied();
+    // record 55 E2: a cascade's parts are registered models, none retired
+    parts_of(store, card)?;
     let trained_on = card["trained_on"]["label_set"].as_str().map(str::to_string);
     // Record 40 R3 and 42 S7: the labels a model was fitted on are a label
     // set this registry wrote, and none drawn from a sealed certification
@@ -732,6 +942,147 @@ fn encoders_of(store: &mut Store, card: &Value, kind: &str) -> Result<Vec<i64>, 
     Ok(out)
 }
 
+/// The most parts a cascade's card names.
+const MOST_PARTS: usize = 16;
+
+/// Whether a text names a pipeline input, as a descriptor's input ids do:
+/// a lowercase letter, then lowercase letters, digits and underscores.
+fn part_name_ok(text: &str) -> bool {
+    let mut chars = text.chars();
+    chars.next().is_some_and(|c| c.is_ascii_lowercase())
+        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+}
+
+/// The parts a card names (record 55 E2), in the card's order: each the
+/// name of the pipeline input it fills and a registered model that is not
+/// retired. Refused for a `parts` that is not an object of such names and
+/// digests, a part that is not registered or is retired, and more than
+/// [`MOST_PARTS`]. None for a card without parts.
+fn parts_of(store: &mut Store, card: &Value) -> Result<Vec<(String, Model)>, Error> {
+    let parts = match card.get("parts") {
+        None | Some(Value::Null) => return Ok(Vec::new()),
+        Some(Value::Object(map)) if !map.is_empty() && map.len() <= MOST_PARTS => map,
+        Some(_) => {
+            return Err(invalid(format!(
+                "parts is an object of at most {MOST_PARTS} parts, each the pipeline input it fills and the digest of a registered model"
+            )));
+        }
+    };
+    let own = card["digest"].as_str().unwrap_or("");
+    let mut out = Vec::with_capacity(parts.len());
+    for (name, digest) in parts {
+        if !part_name_ok(name) {
+            return Err(invalid(format!(
+                "{name} is not a part's name: the pipeline input it fills, such as head"
+            )));
+        }
+        let d = digest.as_str().unwrap_or("");
+        if !is_digest(d) {
+            return Err(invalid(format!(
+                "the part {name} is named by its digest: sha256: and 64 lowercase hex digits"
+            )));
+        }
+        if d == own {
+            return Err(invalid(format!("the part {name} is the model itself")));
+        }
+        let Some(m) = by_digest(store, d)? else {
+            return Err(Error::Unknown(format!(
+                "the part {name}, {d}, is not registered; register it first"
+            )));
+        };
+        if m.state == "retired" {
+            return Err(refused(format!(
+                "the part {name} is model {} ({}), which is retired",
+                m.id,
+                m.label()
+            )));
+        }
+        out.push((name.clone(), m));
+    }
+    Ok(out)
+}
+
+/// The parts a registered model's card names (record 55 E2): each the name
+/// of the pipeline input it fills and the model, as they are now (a part
+/// may have been retired since). Empty for a model that is no cascade.
+pub fn parts(store: &mut Store, m: &Model) -> Result<Vec<(String, Model)>, StoreError> {
+    let Some(map) = m.card.get("parts").and_then(Value::as_object) else {
+        return Ok(Vec::new());
+    };
+    let mut out = Vec::with_capacity(map.len());
+    for (name, digest) in map {
+        if let Some(part) = digest
+            .as_str()
+            .map(|d| by_digest(store, d))
+            .transpose()?
+            .flatten()
+        {
+            out.push((name.clone(), part));
+        }
+    }
+    Ok(out)
+}
+
+/// The admitted or promoted cascades that read `part` (record 55 E2), each
+/// with the name of the input the part fills, leaving out those `except`
+/// names.
+fn holders(
+    store: &mut Store,
+    part: &Model,
+    except: &[i64],
+) -> Result<Vec<(String, Model)>, StoreError> {
+    Ok(list(store, &Filter::default())?
+        .into_iter()
+        .filter(|m| matches!(m.state.as_str(), "admitted" | "promoted") && !except.contains(&m.id))
+        .filter_map(|m| {
+            let name = m
+                .card
+                .get("parts")?
+                .as_object()?
+                .iter()
+                .find(|(_, d)| d.as_str() == Some(part.digest.as_str()))?
+                .0
+                .clone();
+            Some((name, m))
+        })
+        .collect())
+}
+
+/// Refused for a cascade one of whose parts is retired (record 55 E2): it
+/// can be neither admitted nor promoted, since no run would be given it.
+fn parts_stand(store: &mut Store, m: &Model, doing: &str) -> Result<(), Error> {
+    if let Some((name, gone)) = parts(store, m)?
+        .into_iter()
+        .find(|(_, p)| p.state == "retired")
+    {
+        return Err(refused(format!(
+            "model {} ({}) reads its part {name}, model {} ({}), which is retired, so it is not {doing}; register a cascade of parts that stand",
+            m.id,
+            m.label(),
+            gone.id,
+            gone.label()
+        )));
+    }
+    Ok(())
+}
+
+/// Refused where retiring `old` would leave an admitted or promoted
+/// cascade (other than those `except` names) without one of its parts
+/// (record 55 E2): the cascade names it, and goes first.
+fn not_held(store: &mut Store, old: &Model, except: &[i64], why: &str) -> Result<(), Error> {
+    if let Some((name, c)) = holders(store, old, except)?.into_iter().next() {
+        return Err(refused(format!(
+            "{why}: model {} ({}) is the part {name} of cascade {} ({}), which is {}; retire the cascade first",
+            old.id,
+            old.label(),
+            c.id,
+            c.label(),
+            c.state
+        )));
+    }
+    Ok(())
+}
+
 /// Check a check against `contracts/model/v1/lifecycle.schema.json`: a
 /// suite, a verdict and the checks behind it, which must agree.
 fn checked_check(check: &Value) -> Result<bool, Error> {
@@ -780,9 +1131,40 @@ fn known(store: &mut Store, id: i64) -> Result<Model, Error> {
 /// it; one that failed is an event and moves nothing. A promoted or retired
 /// model is not checked again: register a new version.
 pub fn admit(registry: &mut Registry, id: i64, check: &Value, who: &str) -> Result<Model, Error> {
-    let passed = checked_check(check)?;
+    let mut passed = checked_check(check)?;
     let store = registry.store();
     let m = known(store, id)?;
+    // record 55 A5: a model that takes a GPU is admitted only with its CPU
+    // and GPU answers measured on a fixed set, of a class no worse than its
+    // card's; the measure is kept as one of the check's checks
+    let mut check = check.clone();
+    if m.gpu() != "none" {
+        let measured = check.get("equivalence").cloned().unwrap_or(Value::Null);
+        if let Some(d) = measured["digest"].as_str()
+            && d != m.digest
+        {
+            return Err(invalid(format!(
+                "the equivalence was measured on {d}, not on {} ({}): it is tested on the file that ships",
+                m.digest,
+                m.label()
+            )));
+        }
+        let short = equivalence_short(&m, &measured);
+        let row = json!({
+            "name": "cpu_gpu_equivalence",
+            "passed": short.is_none(),
+            "value": measured["class"].as_str().unwrap_or("not measured"),
+            "threshold": m.card["equivalence"]["class"].as_str(),
+            "why": short,
+        });
+        if let Some(list) = check["checks"].as_array_mut() {
+            list.retain(|c| c["name"] != "cpu_gpu_equivalence");
+            list.push(row);
+        }
+        passed &= short.is_none();
+        check["passed"] = Value::Bool(passed);
+    }
+    let check = &check;
     if matches!(m.state.as_str(), "promoted" | "retired") {
         return Err(refused(format!(
             "model {} ({}) is {}; a check belongs before a promotion, so register a new version",
@@ -791,6 +1173,7 @@ pub fn admit(registry: &mut Registry, id: i64, check: &Value, who: &str) -> Resu
             m.state
         )));
     }
+    parts_stand(store, &m, "admitted")?;
     let now = now_iso();
     let mut recorded = check.clone();
     if recorded.get("at").is_none() {
@@ -861,13 +1244,13 @@ pub fn admit(registry: &mut Registry, id: i64, check: &Value, who: &str) -> Resu
 #[derive(Debug, Clone, PartialEq)]
 pub struct Promoted {
     pub model: Model,
-    /// The model promoted before it in the same task and slot, retired now.
-    pub retired: Option<Model>,
 }
 
-/// Promote a model: refused unless it was admitted by a check that passed.
-/// The model promoted before it in the same task and slot is retired, so a
-/// slot has at most one promoted model.
+/// Promote a model: refused unless it was admitted by a check that passed,
+/// and for a cascade with a retired part (record 55 E2). Since record 55
+/// D4 a promotion retires nothing: several models answer a task and slot,
+/// and the site chooses the one that does ([`choose`]); a promoted model
+/// is a default only where nobody chose and no certificate names one.
 pub fn promote(
     registry: &mut Registry,
     id: i64,
@@ -901,53 +1284,10 @@ pub fn promote(
             m.label()
         )));
     }
+    parts_stand(store, &m, "promoted")?;
     let d = store.dialect();
-    let sql = format!(
-        "SELECT id FROM {} WHERE task = {} AND slot = {} AND state = 'promoted' AND id <> {}",
-        store.qualified("model"),
-        d.param(1, Type::Text),
-        d.param(2, Type::Text),
-        d.param(3, Type::Int),
-    );
-    let before: Vec<i64> = store
-        .query(
-            &sql,
-            &[
-                Param::from(m.task.as_str()),
-                Param::from(m.slot.as_str()),
-                Param::Int(id),
-            ],
-        )?
-        .iter()
-        .map(|r| r.int(0))
-        .collect::<Result<_, _>>()?;
     let now = now_iso();
     in_transaction(store, |store| {
-        for old in &before {
-            let sql = format!(
-                "UPDATE {} SET state = 'retired', retired_by = {}, retired_at = {} WHERE id = {}",
-                store.qualified("model"),
-                d.param(1, Type::Text),
-                d.param(2, Type::Timestamp),
-                d.param(3, Type::Int),
-            );
-            store.execute(
-                &sql,
-                &[
-                    Param::from(who),
-                    Param::from(now.as_str()),
-                    Param::Int(*old),
-                ],
-            )?;
-            event(
-                store,
-                *old,
-                "retired",
-                who,
-                &now,
-                Some(json!({ "replaced_by": id })),
-            )?;
-        }
         let sql = format!(
             "UPDATE {} SET state = 'promoted', promoted_by = {}, promoted_at = {}, review_item = {} WHERE id = {}",
             store.qualified("model"),
@@ -971,26 +1311,24 @@ pub fn promote(
             "promoted",
             who,
             &now,
-            Some(json!({ "retired": before, "review_item": review_item, "why": why })),
+            Some(json!({ "review_item": review_item, "why": why })),
         )?;
         Ok(())
     })?;
     let model = known(registry.store(), id)?;
-    let retired = match before.first() {
-        Some(old) => Some(known(registry.store(), *old)?),
-        None => None,
-    };
     audit_row(
         registry,
         Action::ModelPromote,
         who,
         &model,
-        json!({ "retired": before, "review_item": review_item, "why": why }),
+        json!({ "review_item": review_item, "why": why }),
     )?;
-    Ok(Promoted { model, retired })
+    Ok(Promoted { model })
 }
 
-/// Retire a model. Its decisions stay, and keep naming it.
+/// Retire a model. Its decisions stay, and keep naming it. Refused for a
+/// part of an admitted or promoted cascade (record 55 E2): the cascade is
+/// retired first.
 pub fn retire(
     registry: &mut Registry,
     id: i64,
@@ -1006,6 +1344,7 @@ pub fn retire(
             m.label()
         )));
     }
+    not_held(store, &m, &[], "a served cascade reads it")?;
     let now = now_iso();
     let d = store.dialect();
     in_transaction(store, |store| {
@@ -1032,6 +1371,554 @@ pub fn retire(
         json!({ "why": why }),
     )?;
     Ok(m)
+}
+
+// ------------------------------------------ CPU and GPU equivalence
+
+/// The effective outcome of a proposal at its model's threshold: the value
+/// where the model answers, none ("not sure") where it does not. A model
+/// whose card names no threshold answers its value.
+fn effective(p: &crate::proposals::Proposal, threshold: Option<f64>) -> Option<String> {
+    let confidence = p.probabilities.get(&p.value).copied().unwrap_or(0.0);
+    match threshold {
+        Some(t) if confidence < t => None,
+        _ => Some(p.value.clone()),
+    }
+}
+
+/// Measure the class of the difference between a model's answers on a CPU
+/// and on a GPU (record 55 A5, spec 10.5 and 16.3), from the proposals of
+/// two runs over the same stacks: each read at its own model's threshold
+/// (its card's), keyed by stack and axis. A stack one run answers and the
+/// other does not is "not sure" on that side.
+///
+/// - **I**, the same answer always: no effective outcome and no most
+///   probable value changed, and no calibrated probability further apart
+///   than the card's tolerance (0.001 where the card gives none for I);
+/// - **II**, the same answer within the tolerance on the model's score: no
+///   effective outcome changed, and no probability further apart than the
+///   card's tolerance for II;
+/// - **III**, every change between an answer and not sure: no value turned
+///   into another, and the share of changes at most the card's tolerance
+///   for III where it gives one;
+/// - none, where a value turned into another.
+///
+/// Answers `{class, tolerance, n, changes, flips, top_changed,
+/// max_difference}`; refused when the two runs share no stack.
+pub fn equivalence(
+    store: &mut Store,
+    m: &Model,
+    cpu: &[crate::proposals::Proposal],
+    gpu: &[crate::proposals::Proposal],
+) -> Result<Value, Error> {
+    use std::collections::BTreeMap;
+    let mut thresholds: BTreeMap<String, Option<f64>> = BTreeMap::new();
+    let mut threshold_of = |store: &mut Store,
+                            p: &crate::proposals::Proposal|
+     -> Result<Option<f64>, Error> {
+        let key = p
+            .model_id
+            .map(|i| i.to_string())
+            .or_else(|| p.model_digest.clone())
+            .unwrap_or_default();
+        if let Some(t) = thresholds.get(&key) {
+            return Ok(*t);
+        }
+        let model = match (p.model_id, p.model_digest.as_deref()) {
+            (Some(id), _) => get(store, id)?,
+            (None, Some(d)) => by_digest(store, d)?,
+            (None, None) => None,
+        };
+        let Some(model) = model else {
+            return Err(Error::Unknown(format!(
+                "a proposal on stack {} names a model that is not registered ({key}); the comparison reads each answer at its model's threshold",
+                p.stack_id
+            )));
+        };
+        let t = model.threshold();
+        thresholds.insert(key, t);
+        Ok(t)
+    };
+    type Side = BTreeMap<(i64, String), (Option<String>, String, BTreeMap<String, f64>)>;
+    let mut side =
+        |store: &mut Store, list: &[crate::proposals::Proposal]| -> Result<Side, Error> {
+            let mut out = Side::new();
+            for p in list {
+                let t = threshold_of(store, p)?;
+                out.insert(
+                    (p.stack_id, p.axis.clone()),
+                    (effective(p, t), p.value.clone(), p.probabilities.clone()),
+                );
+            }
+            Ok(out)
+        };
+    let a = side(store, cpu)?;
+    let b = side(store, gpu)?;
+    let keys: std::collections::BTreeSet<&(i64, String)> = a.keys().chain(b.keys()).collect();
+    if a.keys().all(|k| !b.contains_key(k)) {
+        return Err(invalid(
+            "the two runs answer no stack in common; an equivalence compares one fixed set run twice",
+        ));
+    }
+    let (mut changes, mut flips, mut top_changed) = (0i64, 0i64, 0i64);
+    let mut max_difference = 0f64;
+    for k in &keys {
+        let (ea, ta, pa) = match a.get(*k) {
+            Some((e, t, p)) => (e.clone(), Some(t.as_str()), Some(p)),
+            None => (None, None, None),
+        };
+        let (eb, tb, pb) = match b.get(*k) {
+            Some((e, t, p)) => (e.clone(), Some(t.as_str()), Some(p)),
+            None => (None, None, None),
+        };
+        match (&ea, &eb) {
+            (Some(x), Some(y)) if x != y => flips += 1,
+            (Some(_), None) | (None, Some(_)) => changes += 1,
+            _ => {}
+        }
+        if ta != tb {
+            top_changed += 1;
+        }
+        if let (Some(pa), Some(pb)) = (pa, pb) {
+            for class in pa.keys().chain(pb.keys()) {
+                let d = (pa.get(class).copied().unwrap_or(0.0)
+                    - pb.get(class).copied().unwrap_or(0.0))
+                .abs();
+                if d > max_difference {
+                    max_difference = d;
+                }
+            }
+        }
+    }
+    let n = keys.len() as i64;
+    let stated = m.card["equivalence"]["class"].as_str().unwrap_or("");
+    let stated_tolerance = m.card["equivalence"]["tolerance"].as_f64();
+    // class I's tolerance is the card's where it states class I; class
+    // II's where it states I or II; else the speed study's
+    let tolerance_i = match stated {
+        "I" => stated_tolerance.unwrap_or(CLASS_I_TOLERANCE),
+        _ => CLASS_I_TOLERANCE,
+    };
+    let tolerance_ii = match stated {
+        "I" | "II" => stated_tolerance.unwrap_or(CLASS_I_TOLERANCE),
+        _ => CLASS_I_TOLERANCE,
+    };
+    let share_tolerance = if stated == "III" {
+        stated_tolerance
+    } else {
+        None
+    };
+    let class = if flips == 0 && changes == 0 && top_changed == 0 && max_difference <= tolerance_i {
+        Some("I")
+    } else if flips == 0 && changes == 0 && max_difference <= tolerance_ii {
+        Some("II")
+    } else if flips == 0 && share_tolerance.is_none_or(|s| (changes as f64) <= s * n as f64) {
+        Some("III")
+    } else {
+        None
+    };
+    Ok(json!({
+        "class": class,
+        "tolerance": stated_tolerance,
+        "n": n,
+        "changes": changes,
+        "flips": flips,
+        "top_changed": top_changed,
+        "max_difference": max_difference,
+    }))
+}
+
+/// Whether a measured equivalence meets the class a card states: refused
+/// words where it does not (record 55 A5: a model whose class is worse
+/// than its card states is not admitted).
+fn equivalence_short(m: &Model, measured: &Value) -> Option<String> {
+    let stated = m.card["equivalence"]["class"].as_str();
+    let Some(stated) = stated.and_then(class_rank).map(|r| CLASSES[r]) else {
+        return Some(format!(
+            "{} needs a GPU {} and its card states no equivalence class for its CPU and GPU answers",
+            m.label(),
+            m.gpu()
+        ));
+    };
+    match measured["class"].as_str().and_then(class_rank) {
+        None if measured.is_null() || measured.get("class").is_none() => Some(format!(
+            "{} takes a GPU ({}), and the check carries no measured CPU and GPU equivalence (nils model admit --cpu run:<id> --gpu run:<id>)",
+            m.label(),
+            m.gpu()
+        )),
+        None => Some(format!(
+            "on the equivalence set {} of {} answers changed from one value to another between the CPU and the GPU, worse than class III",
+            measured["flips"], measured["n"]
+        )),
+        Some(r) if r > class_rank(stated).unwrap_or(0) => Some(format!(
+            "the measured class is {}, worse than class {stated} its card states",
+            CLASSES[r]
+        )),
+        Some(_) => None,
+    }
+}
+
+// ------------------------------------------------- the chosen model
+
+/// Why a model answers its task and slot (record 55 D4): a site's admin
+/// chose it, a recorded certificate names it, or, where neither, it is the
+/// one promoted last, or the newest admitted.
+pub const CHOSEN_BY: [&str; 4] = ["site", "certificate", "promoted", "admitted"];
+
+/// The model that answers a task and slot, and why.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Chosen {
+    pub model: Model,
+    /// One of [`CHOSEN_BY`].
+    pub by: &'static str,
+    /// The certificate that names it, where that is why.
+    pub certificate_id: Option<i64>,
+    /// Who chose it, when and why, where a person did.
+    pub chosen_by: Option<String>,
+    pub chosen_at: Option<String>,
+    pub why: Option<String>,
+}
+
+impl Chosen {
+    /// As the doors and `nils model chosen --json` answer it.
+    pub fn as_json(&self) -> Value {
+        json!({
+            "model_id": self.model.id, "name": self.model.name, "version": self.model.version,
+            "by": self.by, "certificate_id": self.certificate_id,
+            "chosen_by": self.chosen_by, "chosen_at": self.chosen_at, "why": self.why,
+        })
+    }
+}
+
+/// One row of the choice's history.
+#[derive(Debug, Clone, PartialEq)]
+struct Choice {
+    model_id: Option<i64>,
+    chosen_by: String,
+    chosen_at: String,
+    why: Option<String>,
+}
+
+/// The choice in force for a task and slot: its newest row.
+fn choice_now(store: &mut Store, task: &str, slot: &str) -> Result<Option<Choice>, StoreError> {
+    let d = store.dialect();
+    let t = table("model_choice");
+    let sql = format!(
+        "SELECT model_id, chosen_by, {}, why FROM {} WHERE task = {} AND slot = {} ORDER BY id DESC LIMIT 1",
+        d.text_of(t.column("chosen_at").expect("chosen_at")),
+        store.qualified("model_choice"),
+        d.param(1, Type::Text),
+        d.param(2, Type::Text),
+    );
+    store
+        .query_opt(&sql, &[Param::from(task), Param::from(slot)])?
+        .map(|r| {
+            Ok(Choice {
+                model_id: r.opt_int(0)?,
+                chosen_by: r.text(1)?.to_string(),
+                chosen_at: r.text(2)?.to_string(),
+                why: r.opt_text(3)?.map(str::to_string),
+            })
+        })
+        .transpose()
+}
+
+/// Whether a model may answer now: admitted or promoted, and, for a
+/// cascade, none of its parts retired (record 55 E2).
+fn may_answer(store: &mut Store, m: &Model) -> Result<bool, StoreError> {
+    if !m.answers() {
+        return Ok(false);
+    }
+    Ok(!parts(store, m)?.iter().any(|(_, p)| p.state == "retired"))
+}
+
+/// Whether a model is a cascade (record 55 E2): its card names parts.
+pub fn is_cascade(m: &Model) -> bool {
+    m.card
+        .get("parts")
+        .and_then(Value::as_object)
+        .is_some_and(|p| !p.is_empty())
+}
+
+/// The model that answers a task and slot now (record 55 D4), and why: the
+/// one a site's admin chose, while it may answer; else the one the newest
+/// recorded certificate names; else the one promoted last; else the newest
+/// admitted that is no cascade, since a cascade answers only once a person
+/// chose, certified or promoted it. None where no model may answer.
+pub fn chosen(store: &mut Store, task: &str, slot: &str) -> Result<Option<Chosen>, StoreError> {
+    let choice = choice_now(store, task, slot)?;
+    if let Some(c) = &choice
+        && let Some(id) = c.model_id
+        && let Some(m) = get(store, id)?
+        && m.task == task
+        && m.slot == slot
+        && may_answer(store, &m)?
+    {
+        return Ok(Some(Chosen {
+            model: m,
+            by: "site",
+            certificate_id: None,
+            chosen_by: Some(c.chosen_by.clone()),
+            chosen_at: Some(c.chosen_at.clone()),
+            why: c.why.clone(),
+        }));
+    }
+    // newest first
+    let mut candidates = Vec::new();
+    for m in list(
+        store,
+        &Filter {
+            task: Some(task),
+            slot: Some(slot),
+            ..Default::default()
+        },
+    )?
+    .into_iter()
+    .rev()
+    {
+        if may_answer(store, &m)? {
+            candidates.push(m);
+        }
+    }
+    let default = |model: Model, by: &'static str, certificate_id: Option<i64>| Chosen {
+        model,
+        by,
+        certificate_id,
+        chosen_by: None,
+        chosen_at: None,
+        why: None,
+    };
+    let certificates = crate::labels::certificates(store).map_err(|e| match e {
+        crate::labels::Error::Store(s) => s,
+        other => StoreError::Message(other.to_string()),
+    })?;
+    for cert in &certificates {
+        if let Some(m) = candidates.iter().find(|m| cert.model_ids.contains(&m.id)) {
+            return Ok(Some(default(m.clone(), "certificate", Some(cert.id))));
+        }
+    }
+    // the one promoted last, by its promotion's event
+    let sql = format!(
+        "SELECT model_id, MAX(id) FROM {} WHERE transition = 'promoted' GROUP BY model_id",
+        store.qualified("model_event")
+    );
+    let mut last: std::collections::BTreeMap<i64, i64> = std::collections::BTreeMap::new();
+    for r in store.query(&sql, &[])? {
+        last.insert(r.int(0)?, r.int(1)?);
+    }
+    if let Some(m) = candidates
+        .iter()
+        .filter(|m| m.state == "promoted")
+        .max_by_key(|m| (last.get(&m.id).copied().unwrap_or(0), m.id))
+    {
+        return Ok(Some(default(m.clone(), "promoted", None)));
+    }
+    Ok(candidates
+        .into_iter()
+        .find(|m| !is_cascade(m))
+        .map(|m| default(m, "admitted", None)))
+}
+
+/// Every task and slot a model is registered for, in order.
+pub fn tasks(store: &mut Store) -> Result<Vec<(String, String)>, StoreError> {
+    let sql = format!(
+        "SELECT DISTINCT task, slot FROM {} ORDER BY task, slot",
+        store.qualified("model")
+    );
+    store
+        .query(&sql, &[])?
+        .iter()
+        .map(|r| Ok((r.text(0)?.to_string(), r.text(1)?.to_string())))
+        .collect()
+}
+
+/// The model chosen now for every task and slot, by id.
+pub fn chosen_ids(store: &mut Store) -> Result<std::collections::BTreeSet<i64>, StoreError> {
+    let mut out = std::collections::BTreeSet::new();
+    for (task, slot) in tasks(store)? {
+        if let Some(c) = chosen(store, &task, &slot)? {
+            out.insert(c.model.id);
+        }
+    }
+    Ok(out)
+}
+
+/// A model as the doors answer it, with whether it is chosen now.
+pub fn to_json_with(m: &Model, chosen: &std::collections::BTreeSet<i64>) -> Value {
+    let mut v = m.to_json();
+    v["chosen"] = Value::Bool(chosen.contains(&m.id));
+    v
+}
+
+/// Every task and slot with the model chosen there and every model
+/// registered there, newest first, retired included (record 55 D4): what
+/// `GET /api/models/tasks` and `nils model chosen` answer.
+pub fn tasks_json(store: &mut Store, only: Option<&str>) -> Result<Value, StoreError> {
+    let mut out = Vec::new();
+    for (task, slot) in tasks(store)? {
+        if only.is_some_and(|t| t != task) {
+            continue;
+        }
+        let chosen = chosen(store, &task, &slot)?;
+        let ids: std::collections::BTreeSet<i64> = chosen.iter().map(|c| c.model.id).collect();
+        let mut models = list(
+            store,
+            &Filter {
+                task: Some(&task),
+                slot: Some(&slot),
+                ..Default::default()
+            },
+        )?;
+        models.reverse();
+        out.push(json!({
+            "task": task,
+            "slot": slot,
+            "chosen": chosen.as_ref().map(Chosen::as_json),
+            "models": models.iter().map(|m| to_json_with(m, &ids)).collect::<Vec<_>>(),
+        }));
+    }
+    Ok(json!({ "tasks": out }))
+}
+
+fn write_choice(
+    store: &mut Store,
+    task: &str,
+    slot: &str,
+    model_id: Option<i64>,
+    who: &str,
+    now: &str,
+    why: Option<&str>,
+) -> Result<(), StoreError> {
+    store.insert(
+        &Insert::new(
+            table("model_choice"),
+            &["task", "slot", "model_id", "chosen_by", "chosen_at", "why"],
+        ),
+        &[vec![
+            Param::from(task),
+            Param::from(slot),
+            model_id.map_or(Param::Null, Param::Int),
+            Param::from(who),
+            Param::from(now),
+            why.map_or(Param::Null, Param::from),
+        ]],
+    )?;
+    Ok(())
+}
+
+/// Choose the model that answers its task and slot (record 55 D4): a site
+/// admin's act, audited, with an event on the model chosen and on the one
+/// a person chose before. Refused for a model that is neither admitted nor
+/// promoted, and for a cascade with a retired part.
+pub fn choose(
+    registry: &mut Registry,
+    id: i64,
+    who: &str,
+    why: Option<&str>,
+) -> Result<Chosen, Error> {
+    let store = registry.store();
+    let m = known(store, id)?;
+    if !m.answers() {
+        return Err(refused(format!(
+            "model {} ({}) is {}; only an admitted or promoted model is chosen to answer {}",
+            m.id,
+            m.label(),
+            m.state,
+            m.task
+        )));
+    }
+    parts_stand(store, &m, "chosen")?;
+    let before = choice_now(store, &m.task, &m.slot)?.and_then(|c| c.model_id);
+    let now = now_iso();
+    in_transaction(store, |store| {
+        write_choice(store, &m.task, &m.slot, Some(id), who, &now, why)?;
+        if let Some(old) = before.filter(|old| *old != id) {
+            event(
+                store,
+                old,
+                "unchosen",
+                who,
+                &now,
+                Some(json!({ "replaced_by": id, "why": why })),
+            )?;
+        }
+        event(
+            store,
+            id,
+            "chosen",
+            who,
+            &now,
+            Some(json!({ "task": m.task, "slot": m.slot, "before": before, "why": why })),
+        )?;
+        Ok(())
+    })?;
+    audit_row(
+        registry,
+        Action::ModelChoose,
+        who,
+        &m,
+        json!({ "chosen": id, "before": before, "why": why }),
+    )?;
+    chosen(registry.store(), &m.task, &m.slot)?
+        .filter(|c| c.model.id == id)
+        .ok_or_else(|| refused(format!("model {id} was chosen and does not answer")))
+}
+
+/// Send a task and slot back to its default (record 55 D4): the model a
+/// recorded certificate names, else the one promoted last, else the newest
+/// admitted. Audited; the model a person chose before gets an event.
+/// Answers the model that answers now, if any.
+pub fn unchoose(
+    registry: &mut Registry,
+    task: &str,
+    slot: &str,
+    who: &str,
+    why: Option<&str>,
+) -> Result<Option<Chosen>, Error> {
+    if !task_ok(task) {
+        return Err(invalid(format!(
+            "{task} is not a task, such as axis:body_part"
+        )));
+    }
+    let store = registry.store();
+    if !tasks(store)?.iter().any(|(t, s)| t == task && s == slot) {
+        return Err(Error::Unknown(format!(
+            "no model is registered for {task} in slot {slot}"
+        )));
+    }
+    let before = choice_now(store, task, slot)?.and_then(|c| c.model_id);
+    let now = now_iso();
+    in_transaction(store, |store| {
+        write_choice(store, task, slot, None, who, &now, why)?;
+        if let Some(old) = before {
+            event(
+                store,
+                old,
+                "unchosen",
+                who,
+                &now,
+                Some(json!({ "replaced_by": null, "why": why })),
+            )?;
+        }
+        Ok(())
+    })?;
+    let after = chosen(registry.store(), task, slot)?;
+    audit::record(
+        registry,
+        &Entry {
+            principal: who,
+            action: Action::ModelChoose,
+            scope: json!({ "task": task, "slot": slot }),
+            policy: None,
+            job_id: None,
+            details: Some(json!({
+                "chosen": null, "before": before, "why": why,
+                "answers": after.as_ref().map(|c| c.model.id),
+                "by": after.as_ref().map(|c| c.by),
+            })),
+        },
+    )?;
+    Ok(after)
 }
 
 /// Name the job that fitted a model (record 43: a pipeline run's).
@@ -1083,5 +1970,15 @@ mod tests {
         assert!(name_ok("bodypart-head_v1.2"));
         assert!(!name_ok("-x"));
         assert!(!name_ok("a b"));
+    }
+
+    #[test]
+    fn a_part_is_named_as_a_pipeline_input() {
+        for ok in ["head", "coarse", "student", "deferral", "stage_2"] {
+            assert!(part_name_ok(ok), "{ok}");
+        }
+        for bad in ["", "Head", "2nd", "a-b", "a b", "head:x"] {
+            assert!(!part_name_ok(bad), "{bad}");
+        }
     }
 }

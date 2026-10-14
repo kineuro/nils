@@ -253,16 +253,22 @@ rules:
   # says so), as the reading guide has it for any acquisition: dev-1 settled
   # none on 28 of the 30 where the route wrote Magnitude, and ND on the
   # other two. Magnitude stays for what the software wrote as one.
+  # MRI pack 1.2.0 (record 55, ruling 17, Q2 and Q6, reversing 0.12.0's
+  # reading): the construct records the component the image was stored as,
+  # even for the raw inputs of the quantitative fit, so an acquired MDME or
+  # QALAS magnitude is Magnitude too; and an acquired image that names no
+  # component (GE MAGiC's or Philips' proton-density pass) is a magnitude
+  # image (ruling 18). Phase and Real keep their rules above.
   magnitude:
     clauses:
       - {flag: has_magnitude, tier: exclusive}
       - {keywords: [magnitude], tier: keywords}
-    set: {provenance: [{value: RawRecon, when: {not: is_derived}}], base: null, base_basis: null, contrast_mix: null, construct: [{value: Magnitude, when: is_derived}, {value: ND, when: has_nd}], technique: {from: symri_technique}, directory_type: anat}
+    set: {provenance: [{value: RawRecon, when: {not: is_derived}}], base: null, base_basis: null, contrast_mix: null, construct: [Magnitude, {value: ND, when: has_nd}], technique: {from: symri_technique}, directory_type: anat}
     confidence: 0.8
 
   fallback:
     clauses:
       - {when: true, cite: SyMRI, source: provenance}
-    set: {provenance: [{value: RawRecon, when: {not: is_derived}}], base: null, base_basis: null, contrast_mix: null, construct: [{value: Magnitude, when: is_derived}, {value: ND, when: has_nd}], technique: {from: symri_technique}, directory_type: anat}
+    set: {provenance: [{value: RawRecon, when: {not: is_derived}}], base: null, base_basis: null, contrast_mix: null, construct: [{value: Magnitude, when: {any: [is_derived, {not: r17_states_other_component}]}}, {value: ND, when: has_nd}], technique: {from: symri_technique}, directory_type: anat}
     confidence: 0.7
     why: 'a SyMRI acquisition whose output is unclear is the raw source data'

@@ -10,6 +10,7 @@
 //! deciding that `ir` means inversion recovery is not, and it lives in a pack.
 
 pub mod classify;
+pub mod contrast;
 pub mod coverage;
 pub mod derived;
 pub mod diagnostics;
@@ -18,6 +19,7 @@ pub mod effect;
 pub mod fingerprint;
 pub mod fold;
 pub mod job;
+pub mod main_scans;
 pub mod passes;
 pub mod picking;
 pub mod rehearse;

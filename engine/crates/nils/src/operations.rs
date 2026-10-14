@@ -28,10 +28,13 @@
 //! `bodypart-infer-fusion` given its registered parts (the encoder the head
 //! names, the head that answers `body_part`, and the coarse mode that
 //! answers `body_region` from the same encoder where one is served).
-//! Post-contrast's own label (record 55 F2 and F5, the time rule as a
-//! session pass) is not in the engine yet, and no model answers it (E3):
-//! its run is refused, and until a model for its axis is served its step
-//! is not available.
+//! Post-contrast (record 55 E3) is the certified model r1 served through
+//! its cascade, `postcontrast-cascade` given the promoted cascade's parts
+//! (the few-slice student and r1's fusion): it answers on T1-type brain
+//! and says "not sure" elsewhere, and what it defers goes to the full
+//! pipeline, `postcontrast-full`, queued over those stacks when it is
+//! installed. Its own label (record 55 F2 and F5, the time rule) is
+//! `crate::contrast`'s, and its counts are on its step.
 
 use std::collections::BTreeSet;
 
@@ -53,6 +56,14 @@ pub(crate) const OPERATIONS: [(&str, &[&str]); 2] = [
 /// The pipeline body part's step runs: the certified model of record 50,
 /// one frozen model with two modes, given its registered parts.
 pub(crate) const BODY_PART_PIPELINE: &str = "bodypart-infer-fusion";
+
+/// The pipeline post-contrast's step runs (record 55 E3): the certified
+/// model r1 through its cascade, the few-slice student first.
+pub(crate) const POST_CONTRAST_PIPELINE: &str = "postcontrast-cascade";
+
+/// The full pipeline that answers what the cascade defers (record 55 E3,
+/// spec §12.2), queued over the deferred stacks when it is installed.
+pub(crate) const POST_CONTRAST_FULL: &str = "postcontrast-full";
 
 /// How many of an operation's newest runs over the scans are looked
 /// through for the one that runs and the jobs of its log.
@@ -84,21 +95,48 @@ fn title(step: &str) -> &str {
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum Scope<'a> {
     /// A dataset's: the stacks its sources (a comma list of `source` ids)
-    /// created first; none where the list is empty.
+    /// hold a file of, whoever read them first (record 55, 2026-10-10);
+    /// none where the list is empty.
     Sources(&'a str),
     /// A cohort's: the stacks of its open members.
     Cohort(i64),
+}
+
+/// Record 55 (Nima's duplicate policy, 2026-10-10): the condition a stack
+/// aliased `alias` meets when one of the sources (a comma list of `source`
+/// ids) holds a file of it, its instance's own or a copy, whoever read the
+/// stack first. Every door that counts or lists a dataset's scans asks it,
+/// so a dataset holds what its tree holds.
+pub(crate) fn held_by(store: &Store, alias: &str, sources: &str) -> String {
+    if sources.trim().is_empty() {
+        return "1 = 0".to_string();
+    }
+    format!(
+        "{alias}.id IN (SELECT ss.stack_id FROM {} ss WHERE ss.source_id IN ({sources}))",
+        store.qualified("source_stack")
+    )
+}
+
+/// The condition a study aliased `alias` meets when one of the sources
+/// holds a file of a stack of it ([`held_by`]).
+pub(crate) fn studies_held_by(store: &Store, alias: &str, sources: &str) -> String {
+    if sources.trim().is_empty() {
+        return "1 = 0".to_string();
+    }
+    format!(
+        "{alias}.id IN (SELECT hse.study_id FROM {} hse JOIN {} hst ON hst.series_id = hse.id \
+         JOIN {} hss ON hss.stack_id = hst.id WHERE hss.source_id IN ({sources}))",
+        store.qualified("series"),
+        store.qualified("stack"),
+        store.qualified("source_stack")
+    )
 }
 
 impl Scope<'_> {
     /// The condition a stack aliased `x` meets to be in scope.
     pub(crate) fn holds(&self, store: &Store) -> String {
         match self {
-            Scope::Sources(ids) if ids.trim().is_empty() => "1 = 0".to_string(),
-            Scope::Sources(ids) => format!(
-                "x.first_batch_id IN (SELECT b.id FROM {} b WHERE b.source_id IN ({ids}))",
-                store.qualified("ingest_batch")
-            ),
+            Scope::Sources(ids) => held_by(store, "x", ids),
             Scope::Cohort(id) => format!(
                 "x.series_id IN (SELECT se.id FROM {} se JOIN {} m ON m.subject_id = se.subject_id \
                  WHERE m.cohort_id = {id} AND m.left_at IS NULL)",
@@ -168,7 +206,7 @@ impl Refused {
     }
 
     /// As the door answers it: the words, the reason and the step.
-    fn reply(&self, step: &str) -> Reply {
+    pub(crate) fn reply(&self, step: &str) -> Reply {
         let mut r = Reply::error(self.status, self.error.clone());
         r.body["reason"] = json!(self.reason);
         r.body["step"] = json!(step);
@@ -209,12 +247,24 @@ fn served(store: &mut Store, task: &str, reads: Option<i64>) -> Result<Vec<Model
     Ok(all)
 }
 
+use nils_registry::model::is_cascade;
+
 /// Body part's run: the newest active `bodypart-infer-fusion` and the
-/// certified model's three parts, each the one served, in the order the
-/// descriptor declares them: the encoder the head names, the head that
-/// answers `body_part`, and the coarse mode that answers `body_region`
-/// from the same encoder, its card naming the head where one does, which
-/// the run goes without where none is served.
+/// chosen model's parts (record 55 D4: the model the site chose for
+/// `axis:body_part` in slot site, by default the one a recorded certificate
+/// names, then the one promoted last, then the newest admitted single model),
+/// in the order the descriptor declares them: the encoder the head names,
+/// the head that answers `body_part`, and the coarse mode that answers
+/// `body_region` from the same encoder (the one chosen for it where that
+/// reads this encoder, its card naming the head where one does), which the
+/// run goes without where none is served. Where the chosen model is a
+/// cascade (record 55 E2), and it is one only once a person chose,
+/// certified or promoted it (an admitted cascade waits), each input its
+/// card names a part for gets that part, the input `cascade` gets the
+/// cascade, and the coarse mode is the cascade's own part `coarse` and no
+/// other, since the image refuses a coarse mode its cascade file does not
+/// name; a cascade naming none is refused here. An optional input nothing
+/// fills is left out.
 fn body_part(store: &mut Store) -> Result<Result<Plan, Refused>, StoreError> {
     let refused =
         |reason: &'static str, error: String| -> Result<Result<Plan, Refused>, StoreError> {
@@ -235,8 +285,85 @@ fn body_part(store: &mut Store) -> Result<Result<Plan, Refused>, StoreError> {
             );
         }
     };
-    let Some(head) = served(store, "axis:body_part", None)?.into_iter().next() else {
-        return refused("no_model", "no body-part model is installed".into());
+    // record 55 D4: the chosen model answers; a cascade only once a person
+    // chose, certified or promoted it, since choosing the body-part model
+    // is a person's (the fast-path plan's 4.3)
+    let Some(head) = model::chosen(store, "axis:body_part", "site")?.map(|c| c.model) else {
+        let waiting = served(store, "axis:body_part", None)?
+            .into_iter()
+            .find(is_cascade)
+            .map(|m| m.label());
+        return refused(
+            "no_model",
+            match waiting {
+                Some(c) => format!(
+                    "no body-part model is served: the cascade {c} is admitted, and answers the step once it is chosen or promoted"
+                ),
+                None => "no body-part model is installed".into(),
+            },
+        );
+    };
+    // record 55 E2: a cascade names its parts, each by the input it fills,
+    // and fills the input `cascade` itself; each part it names must be
+    // registered, not retired, and admitted or promoted, as the model it
+    // stands for would have to be
+    let parts = model::parts(store, &head)?;
+    let cascade = is_cascade(&head);
+    if cascade {
+        for (name, digest) in head.card["parts"].as_object().into_iter().flatten() {
+            let why = match parts.iter().find(|(n, _)| n == name) {
+                None => format!(
+                    "{} names a part {name}, {}, that is not registered",
+                    head.label(),
+                    digest.as_str().unwrap_or("?")
+                ),
+                Some((_, m)) if m.state == "retired" => format!(
+                    "{} reads its part {name}, {}, which is retired",
+                    head.label(),
+                    m.label()
+                ),
+                Some((_, m)) if !m.answers() => format!(
+                    "{} reads its part {name}, {}, which is {} and neither admitted nor promoted",
+                    head.label(),
+                    m.label(),
+                    m.state
+                ),
+                Some(_) => continue,
+            };
+            return refused("no_model", why);
+        }
+    }
+    // a descriptor that takes no cascade (one older than it), or not each
+    // of its parts, would run the plain path from the parts, or a cascade
+    // without one: refused, so the run is never another model's
+    if cascade {
+        let takes: BTreeSet<&str> = d
+            .inputs
+            .iter()
+            .filter(|t| t.ty == "model")
+            .map(|t| t.id.as_str())
+            .collect();
+        let missing: Vec<&str> = std::iter::once("cascade")
+            .chain(parts.iter().map(|(n, _)| n.as_str()))
+            .filter(|n| !takes.contains(n))
+            .collect();
+        if !missing.is_empty() {
+            return refused(
+                "no_pipeline",
+                format!(
+                    "{} takes no model input {}, which the cascade {} is run with; add a descriptor version that takes it",
+                    p.label(),
+                    missing.join(", "),
+                    head.label()
+                ),
+            );
+        }
+    }
+    let part = |input: &str| {
+        parts
+            .iter()
+            .find(|(name, _)| name == input)
+            .map(|(_, m)| m.id)
     };
     let encoder = match head.encoder_model_id {
         Some(id) => model::get(store, id)?.filter(|m| m.state != "retired"),
@@ -250,28 +377,69 @@ fn body_part(store: &mut Store) -> Result<Result<Plan, Refused>, StoreError> {
     };
     // the coarse mode names the head it sums: one whose card names this
     // head first, else one of the same encoder (the image refuses a mode
-    // file of another head)
-    let modes = served(store, "axis:body_region", Some(encoder.id))?;
-    let coarse = modes
-        .iter()
-        .find(|m| m.card.to_string().contains(&head.digest))
-        .or(modes.first());
+    // file of another head). A cascade answers both modes with the coarse
+    // part its file names, so it is given that part and no other: a mode
+    // naming the cascade could never pass, since the cascade's file would
+    // have to hold that mode's digest and the mode the cascade's
+    let coarse = if !cascade {
+        let modes = served(store, "axis:body_region", Some(encoder.id))?;
+        // the chosen coarse mode where it names this head, since the image
+        // takes only a mode of the head it sums; else as before
+        let names_head = |m: &Model| m.card.to_string().contains(&head.digest);
+        let chosen = model::chosen(store, "axis:body_region", "site")?
+            .map(|c| c.model)
+            .filter(|m| m.encoder_model_ids.contains(&encoder.id) && names_head(m));
+        let named = modes.iter().find(|m| names_head(m)).map(|m| m.id);
+        chosen
+            .map(|m| m.id)
+            .or(named)
+            .or(modes.first().map(|m| m.id))
+    } else {
+        let Some(id) = part("coarse") else {
+            return refused(
+                "no_model",
+                format!(
+                    "{} names no coarse part: a cascade answers body_region with the coarse mode its file names",
+                    head.label()
+                ),
+            );
+        };
+        Some(id)
+    };
     let mut models = Vec::new();
     let mut skipped: Option<&str> = None;
     for t in d.inputs.iter().filter(|t| t.ty == "model") {
+        // a cascade fills every input but its own from its parts: the
+        // cascade is never its own head, nor its encoder the encoder
+        if cascade && t.id != "cascade" && t.id != "coarse" && part(&t.id).is_none() {
+            return refused(
+                "no_model",
+                format!(
+                    "{} names no part {}, which {} reads",
+                    head.label(),
+                    t.id,
+                    p.label()
+                ),
+            );
+        }
         let given = match t.id.as_str() {
-            "encoder" => Some(encoder.id),
-            "head" => Some(head.id),
-            "coarse" => coarse.map(|m| m.id),
-            other => {
-                return refused(
-                    "no_pipeline",
-                    format!(
-                        "{} reads a model input {other} the body-part step does not fill",
-                        p.label()
-                    ),
-                );
-            }
+            "encoder" => part("encoder").or(Some(encoder.id)),
+            "head" => part("head").or(Some(head.id)),
+            "coarse" => coarse,
+            "cascade" => cascade.then_some(head.id),
+            other => match part(other) {
+                Some(id) => Some(id),
+                None if t.optional => None,
+                None => {
+                    return refused(
+                        "no_pipeline",
+                        format!(
+                            "{} reads a model input {other} the body-part step does not fill",
+                            p.label()
+                        ),
+                    );
+                }
+            },
         };
         // models are given in the order of the inputs, so one left out
         // can only be the last
@@ -302,6 +470,287 @@ fn body_part(store: &mut Store) -> Result<Result<Plan, Refused>, StoreError> {
     }))
 }
 
+/// Post-contrast's run (record 55 E3): `pipeline` (the cascade's, or the
+/// full pipeline's) given the chosen post-contrast cascade and its parts
+/// (record 55 D4). The cascade answers the step only once a person chose,
+/// certified or promoted it
+/// (the speed plan's choice, as body part's); each part its card names
+/// must be registered, not retired, and admitted or promoted; each model
+/// input of the descriptor is filled by the part of its name, and the input
+/// `cascade` by the cascade itself; an optional input nothing fills is left
+/// out, and a required one refuses the run.
+fn post_contrast(store: &mut Store, pipeline: &str) -> Result<Result<Plan, Refused>, StoreError> {
+    let refused =
+        |reason: &'static str, error: String| -> Result<Result<Plan, Refused>, StoreError> {
+            Ok(Err(Refused::new(409, reason, error)))
+        };
+    let Some(p) = nils_registry::pipeline::resolve(store, pipeline)? else {
+        return refused(
+            "no_pipeline",
+            format!("no post-contrast pipeline {pipeline} is installed"),
+        );
+    };
+    let d = match nils_pipeline::descriptor::from_value(p.descriptor.clone()) {
+        Ok(d) => d,
+        Err(e) => {
+            return refused(
+                "no_pipeline",
+                format!(
+                    "{}: the catalog's descriptor no longer checks: {e}",
+                    p.label()
+                ),
+            );
+        }
+    };
+    // record 55 D4: the chosen model, a cascade, answers; an admitted
+    // cascade only once a person chose, certified or promoted it
+    let cascade = model::chosen(store, "axis:post_contrast", "site")?
+        .map(|c| c.model)
+        .filter(is_cascade);
+    let Some(head) = cascade else {
+        let candidates = served(store, "axis:post_contrast", None)?;
+        let waiting = candidates.iter().find(|m| is_cascade(m)).map(Model::label);
+        return refused(
+            "no_model",
+            match waiting {
+                Some(c) => format!(
+                    "no post-contrast model is served: the cascade {c} is admitted, and answers the step once it is chosen or promoted"
+                ),
+                None => "no post-contrast model is installed".into(),
+            },
+        );
+    };
+    let parts = model::parts(store, &head)?;
+    for (name, digest) in head.card["parts"].as_object().into_iter().flatten() {
+        let why = match parts.iter().find(|(n, _)| n == name) {
+            None => format!(
+                "{} names a part {name}, {}, that is not registered",
+                head.label(),
+                digest.as_str().unwrap_or("?")
+            ),
+            Some((_, m)) if m.state == "retired" => format!(
+                "{} reads its part {name}, {}, which is retired",
+                head.label(),
+                m.label()
+            ),
+            Some((_, m)) if !m.answers() => format!(
+                "{} reads its part {name}, {}, which is {} and neither admitted nor promoted",
+                head.label(),
+                m.label(),
+                m.state
+            ),
+            Some(_) => continue,
+        };
+        return refused("no_model", why);
+    }
+    let mut models = Vec::new();
+    let mut skipped: Option<&str> = None;
+    for t in d.inputs.iter().filter(|t| t.ty == "model") {
+        let given = match t.id.as_str() {
+            "cascade" => Some(head.id),
+            other => parts.iter().find(|(n, _)| n == other).map(|(_, m)| m.id),
+        };
+        match (given, skipped) {
+            (Some(_), Some(gone)) => {
+                return refused(
+                    "no_model",
+                    format!(
+                        "{} reads {} after {gone}, which {} names no part for",
+                        p.label(),
+                        t.id,
+                        head.label()
+                    ),
+                );
+            }
+            (Some(id), None) => models.push(id),
+            (None, _) if t.optional => skipped = Some(t.id.as_str()),
+            (None, _) => {
+                return refused(
+                    "no_model",
+                    format!(
+                        "{} names no part {}, which {} reads",
+                        head.label(),
+                        t.id,
+                        p.label()
+                    ),
+                );
+            }
+        }
+    }
+    Ok(Ok(Plan {
+        pipeline: p.label(),
+        models,
+    }))
+}
+
+/// System 1's run (record 55 D3, spec §11.1): the newest active
+/// `system1-score` given the model chosen for the task `system1` (record
+/// 55 D4), a site model; refused where none is registered, admitted or
+/// chosen, and where the pipeline is not in the catalog.
+fn system1(store: &mut Store) -> Result<Result<Plan, Refused>, StoreError> {
+    let refused =
+        |reason: &'static str, error: String| -> Result<Result<Plan, Refused>, StoreError> {
+            Ok(Err(Refused::new(409, reason, error)))
+        };
+    let Some(p) = nils_registry::pipeline::resolve(store, crate::system1::PIPELINE)? else {
+        return refused(
+            "no_pipeline",
+            format!(
+                "no System 1 pipeline is installed: {} is added from the engine's pipelines folder",
+                crate::system1::PIPELINE
+            ),
+        );
+    };
+    let d = match nils_pipeline::descriptor::from_value(p.descriptor.clone()) {
+        Ok(d) => d,
+        Err(e) => {
+            return refused(
+                "no_pipeline",
+                format!(
+                    "{}: the catalog's descriptor no longer checks: {e}",
+                    p.label()
+                ),
+            );
+        }
+    };
+    let Some(chosen) = nils_registry::opinion::chosen(store)? else {
+        let any = model::list(
+            store,
+            &model::Filter {
+                task: Some(nils_registry::opinion::TASK),
+                ..Default::default()
+            },
+        )?;
+        return refused(
+            "no_model",
+            if any.is_empty() {
+                "no System 1 model is installed: it is a site model, registered for the task system1 and admitted before it runs".to_string()
+            } else {
+                "no System 1 model is admitted, promoted or chosen: a registered one answers once it is admitted".to_string()
+            },
+        );
+    };
+    if d.inputs.iter().filter(|t| t.ty == "model").count() != 1 {
+        return refused(
+            "no_pipeline",
+            format!(
+                "{} reads {} models; System 1's pipeline reads one, the chosen model",
+                p.label(),
+                d.inputs.iter().filter(|t| t.ty == "model").count()
+            ),
+        );
+    }
+    Ok(Ok(Plan {
+        pipeline: p.label(),
+        models: vec![chosen.model.id],
+    }))
+}
+
+/// After a run of the post-contrast cascade (record 55 E3): the stacks
+/// whose table says `deferred` go to the full pipeline, frozen into a
+/// handle and queued as a job of the same step and for the same scope as
+/// the cascade's own job, where the full pipeline is installed and its
+/// plan holds; otherwise they stay "not sure" and the summary says why.
+pub(crate) fn fallback(
+    registry: &mut Registry,
+    run_id: i64,
+    job_id: i64,
+    principal: &str,
+) -> Value {
+    let result = (|| -> Result<Value, String> {
+        let epoch = registry.meta().epoch;
+        let store = registry.store();
+        let d = store.dialect();
+        let sql = format!(
+            "SELECT DISTINCT m.stack_id, se.subject_id FROM {} m JOIN {} x ON x.id = m.stack_id \
+             JOIN {} se ON se.id = x.series_id WHERE m.run_id = {} AND m.name = 'reason' \
+             AND m.text = 'deferred' ORDER BY m.stack_id",
+            store.qualified("measure"),
+            store.qualified("stack"),
+            store.qualified("series"),
+            d.param(1, nils_registry::schema::Type::Int)
+        );
+        let rows: Vec<Row> = store
+            .query(&sql, &[nils_registry::store::Param::Int(run_id)])
+            .map_err(|e| e.to_string())?
+            .iter()
+            .map(|r| {
+                Ok(Row(vec![
+                    Cell::Int(r.int(0)?),
+                    r.opt_int(1)?.map_or(Cell::Null, Cell::Int),
+                ]))
+            })
+            .collect::<Result<_, StoreError>>()
+            .map_err(|e| e.to_string())?;
+        if rows.is_empty() {
+            return Ok(json!({"deferred": 0}));
+        }
+        let deferred = rows.len();
+        let plan = match post_contrast(store, POST_CONTRAST_FULL).map_err(|e| e.to_string())? {
+            Ok(plan) => plan,
+            Err(refused) => {
+                return Ok(json!({
+                    "deferred": deferred, "queued": false, "why": refused.error,
+                }));
+            }
+        };
+        let (handle, frozen) = save_stacks(store, rows, principal, epoch, &Pinned::default())?;
+        let mut command = vec![
+            "run".to_string(),
+            plan.pipeline,
+            "--handle".to_string(),
+            handle.to_string(),
+        ];
+        for m in &plan.models {
+            command.extend(["--model".to_string(), m.to_string()]);
+        }
+        // the cascade's job says which step and scope it ran for
+        let sql = format!(
+            "SELECT {}, name FROM {} WHERE id = {}",
+            crate::text_of(store, "job", "args"),
+            store.qualified("job"),
+            d.param(1, nils_registry::schema::Type::Int)
+        );
+        let (args, target) = match store
+            .query_opt(&sql, &[nils_registry::store::Param::Int(job_id)])
+            .map_err(|e| e.to_string())?
+        {
+            Some(r) => (
+                r.opt_text(0)
+                    .ok()
+                    .flatten()
+                    .and_then(|t| serde_json::from_str::<Value>(t).ok())
+                    .unwrap_or(Value::Null),
+                r.opt_text(1).ok().flatten().map(str::to_string),
+            ),
+            None => (Value::Null, None),
+        };
+        // under the grants, detail and principal the cascade's job ran with
+        let mut extra = match args {
+            Value::Object(mut m) => {
+                m.remove("argv");
+                m.remove("queued");
+                Value::Object(m)
+            }
+            _ => json!({}),
+        };
+        extra["step"] = json!("post_contrast");
+        extra["fallback_of"] = json!(run_id);
+        let id = nils_registry::job::enqueue_with(
+            store,
+            &command,
+            target.as_deref(),
+            Some(principal),
+            extra,
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(json!({
+            "deferred": deferred, "queued": true, "job": id, "handle": handle, "stacks": frozen,
+        }))
+    })();
+    result.unwrap_or_else(|e| json!({"error": e}))
+}
+
 /// What an operation's run would be here, or why it is refused: a pipeline
 /// in the catalog runs it, the models it reads are served, and pipelines
 /// run here, with a container runtime and a working place.
@@ -311,16 +760,14 @@ pub(crate) fn plan(
 ) -> Result<Result<Plan, Refused>, StoreError> {
     let planned = match step {
         "body_part" => body_part(registry.store())?,
-        // record 55 F5 and E3: no model answers post-contrast yet
-        "post_contrast" => Err(Refused::new(
-            409,
-            "no_model",
-            "no post-contrast model is installed",
-        )),
+        // record 55 E3: model r1 through its cascade
+        "post_contrast" => post_contrast(registry.store(), POST_CONTRAST_PIPELINE)?,
+        // record 55 D3: System 1, the chosen site model of its task
+        crate::system1::STEP => system1(registry.store())?,
         other => Err(Refused::new(
             404,
             "no_step",
-            format!("{other} is not a step a door runs; body_part and post_contrast are"),
+            format!("{other} is not a step a door runs; body_part, post_contrast and system1 are"),
         )),
     };
     let plan = match planned {
@@ -714,6 +1161,13 @@ pub(crate) fn steps(
                 ))
             });
         let refused = refusal(name, at.busy(), &planned, scans);
+        // record 55 F5: post-contrast's own label, the time rule's, on the
+        // scans in scope
+        let label = if name == "post_contrast" {
+            Some(crate::contrast::counts(store, &holds)?)
+        } else {
+            None
+        };
         out.push(json!({
             "step": name,
             "state": state,
@@ -728,6 +1182,7 @@ pub(crate) fn steps(
             "of": scans,
             "jobs": at.jobs(),
             "refusal": refused.map(|r| r.doc()),
+            "label": label,
         }));
     }
     Ok(out)
@@ -817,6 +1272,30 @@ fn freeze(
         })
         .collect::<Result<_, StoreError>>()
         .map_err(|e| e.to_string())?;
+    save_stacks(store, rows, principal, epoch, &Pinned::default())
+}
+
+/// What a handle of stacks frozen by the engine records of where they came
+/// from: its pins (a scope's main scans name the version of the rules they
+/// were read under), the pack and the scheme. None of these for a step's
+/// scans, which are every scan in scope.
+#[derive(Debug, Default)]
+pub(crate) struct Pinned<'a> {
+    pub(crate) versions: Value,
+    pub(crate) pack_version: Option<&'a str>,
+    pub(crate) scheme_digest: Option<&'a str>,
+}
+
+/// Save rows of a stack and its subject, in the order given, as a handle a
+/// run pins, under the hash the ask gives an answer. Answers the handle and
+/// how many stacks it holds.
+pub(crate) fn save_stacks(
+    store: &mut Store,
+    rows: Vec<Row>,
+    principal: &str,
+    epoch: i64,
+    pinned: &Pinned<'_>,
+) -> Result<(i64, usize), String> {
     // the hash the ask gives an answer: each row's cells as text
     let hash = {
         use blake2::Digest as _;
@@ -834,6 +1313,10 @@ fn freeze(
         truncated: false,
         content_hash: Some(hash),
         elapsed_ms: 0,
+        shaped: Vec::new(),
+        held_back: Vec::new(),
+        held_counts: Vec::new(),
+        rows_held: false,
     };
     let node = nils_registry::job::hostname();
     let spec = nils_ask::handle::Spec {
@@ -841,14 +1324,17 @@ fn freeze(
         grain: nils_ask::Grain::Stack,
         ask: None,
         params: json!({}),
-        selection_versions: json!([]),
+        selection_versions: match &pinned.versions {
+            Value::Null => json!([]),
+            v => v.clone(),
+        },
         values_unresolved: json!({}),
         provenance: nils_ask::handle::Provenance {
             principal,
             node: &node,
-            pack_version: None,
+            pack_version: pinned.pack_version,
             epoch,
-            scheme_digest: None,
+            scheme_digest: pinned.scheme_digest,
             disclosure: "local",
             suppression: json!({"classes": ["technical"], "sealed": "read", "quasi": "shape"}),
         },
@@ -889,11 +1375,18 @@ pub(crate) fn run_door(
         "cohorts" => crate::viewer::Scope::cohort(registry, name)?,
         _ => crate::viewer::Scope::dataset(registry, name)?,
     };
-    let Some((step, axes)) = OPERATIONS.iter().find(|(n, _)| *n == step).copied() else {
+    // record 55 D3: System 1 is a step a door runs too, owning no axis
+    let system1: (&str, &[&str]) = (crate::system1::STEP, &[]);
+    let Some((step, axes)) = OPERATIONS
+        .iter()
+        .chain(std::iter::once(&system1))
+        .find(|(n, _)| *n == step)
+        .copied()
+    else {
         return Err(Refused::new(
             404,
             "no_step",
-            format!("{step} is not a step a door runs; body_part and post_contrast are"),
+            format!("{step} is not a step a door runs; body_part, post_contrast and system1 are"),
         )
         .reply(step));
     };
@@ -907,6 +1400,10 @@ pub(crate) fn run_door(
             Scope::Sources(&ids)
         }
         crate::viewer::Scope::Cohort(c) => Scope::Cohort(c.id),
+        // a step door names a dataset or a cohort, never the registry
+        crate::viewer::Scope::Registry { .. } => {
+            return Err(Reply::error(400, "a step runs over a dataset or a cohort"));
+        }
     };
     let store = registry.store();
     let scans = count(
@@ -938,6 +1435,16 @@ pub(crate) fn run_door(
         command.extend(["--model".to_string(), m.to_string()]);
     }
     let command = crate::pipelines::located(doors.pack_dir.as_deref(), command)?;
+    // 2026-10-12: refused by its kind where it lacks what it needs here
+    // (its scans are counted above, and its units are a stack each)
+    crate::requirements::at_the_door(
+        &doors.home,
+        doors.pack_dir.as_deref(),
+        registry,
+        &command,
+        false,
+    )?;
+    let store = registry.store();
     // the step and what it is for, which its state and the dataset's log
     // find it by, beside who asked and under what
     let mut extra = crate::serve::queued_by(caller);

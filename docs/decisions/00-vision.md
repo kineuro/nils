@@ -1,10 +1,10 @@
-# 00 — Vision and principles
+# 00 · Vision and principles
 
 ## What NILS v1 is
 
 NILS v1 is the reference tool for turning raw DICOM into curated, classified,
-anonymized, BIDS-organized data — at any scale from a handful of sessions on a laptop
-to a registry of tens of millions of instances — with intelligence available at every
+anonymized, BIDS-organized data (at any scale from a handful of sessions on a laptop
+to a registry of tens of millions of instances) with intelligence available at every
 decision point, and required at none of them.
 
 On names: **v0** is the 0.x line running in production today (0.5.3); it never reached 1.0
@@ -16,7 +16,7 @@ Three sentences define the product:
 1. **`nils` is a single binary** you install like any good CLI tool. It digests,
    classifies, anonymizes and bidsifies without a database server, a container
    runtime, a browser, or a network connection.
-2. **The same engine scales up** — as a server it carries the multi-user registry,
+2. **The same engine scales up**: as a server it carries the multi-user registry,
    the web UI, the review workflows, and the contracts every other app builds on.
 3. **Everything else is optional.** The query notebook, the segmentation app, the
    agent: each adds a capability when present and takes nothing away when absent.
@@ -29,7 +29,7 @@ optional twice over: off by default, and adding a node is adding a line of trust
 
 The ambition is explicit: the tool the field remembers as the gold standard for this
 job, in the age where curation decisions can be assisted by agents. Gold standards
-are won on three fronts at once — being the fastest and most correct, being trivially
+are won on three fronts at once: being the fastest and most correct, being trivially
 adoptable (one binary, open development, a contract others can extend), and being the
 first tool whose *judgement points* were designed for AI participation rather than
 retrofitted.
@@ -48,7 +48,7 @@ fits none of them, that is the signal to re-examine it.
    flags wherever possible.
 3. **One governed door.** Data questions go through the query AST; work goes through
    jobs; judgements go through review items. UI, CLI, and agents are three clients of
-   the same doors — never three implementations. A request from another node is a
+   the same doors, never three implementations. A request from another node is a
    fourth client of the same doors, asked from outside and answered under the
    same policies ([14](14-federation.md), D28).
 4. **State lives in the registry; steps are idempotent set operations.** A stage's
@@ -58,7 +58,7 @@ fits none of them, that is the signal to re-examine it.
    its production host, a large shared server (Postgres parallelism disabled
    "during extraction", 100-row commits, a 48 GB database cap), and has never been
    measured on a small machine.
-   v1 makes an 8-core/64 GB host the design target and Asgard the bonus, with the
+   v1 makes an 8-core/64 GB host the design target and the compute server the bonus, with the
    budget enforced in CI (D6) and a measured baseline first
    ([12](12-review-devils-advocate.md), C6).
 6. **The science is data, not code.** Classification rules are YAML packs, queries
@@ -83,7 +83,7 @@ fits none of them, that is the signal to re-examine it.
 - Not a PACS, not a DICOM router, not an archive. NILS reads sources and writes
   curated outputs; it does not want to be where data lives.
 - Not another auth system, portal framework, or agent harness.
-- Not a workflow engine for arbitrary science — pipelines are containers under a
+- Not a workflow engine for arbitrary science: pipelines are containers under a
   contract (D9), and the contract is the field's, not ours.
 - Not a data-sharing platform. Moving individual-level data between sites is a
   transfer under an agreement, and Bifrost does it; federation

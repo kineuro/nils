@@ -340,6 +340,128 @@ not in others:
 returns are the ones the person's level allows, and that sequence names are
 returned at every level.
 
+**Aggregates of a quasi-identifying field (the ruling of 2026-10-12).** Below
+detail quasi, at plain, the ask answers a group's summary of such a field, an age
+for one, as follows. A group is a group set's child, keyed by the group's key;
+each limit counts the group's subjects that have a value, never its rows, so one
+subject's five visits are one subject.
+
+| Of the field, over a group | At detail plain |
+|---|---|
+| The mean (`avg`) | answered when the group holds 5 subjects or more (`MEASURE_K`, as a pipeline's measures under record 49 R4); held back below |
+| The spread (`stddev` of the group's child) | the same |
+| The count of distinct values (`distinct`) | the same |
+| The min, the max, the median, a percentile | never answered: each is one person's own value. The min and the max are shapes; the median and a percentile are refused |
+| The sum and the list | shapes |
+| A count of rows or subjects, a comparison | answered, but a count of rows the field chose or grouped is held below 5 subjects (small counts, below) |
+
+A held-back value is null, and every answer that holds rows names its columns
+with a value held back and why, beside `shaped`: `held_back`, as
+`[{column, why}]` with why `a group under 5 subjects`, on a run and its cached
+answer, a preview, a handle and a page of it, and a job's result. A mean or a
+count of distinct values made anywhere but as a group set's own binding reads a
+row's own subject, session or stack, one person's rows, and stays a shape. What a
+group's other bindings and the answer's columns make of a mean alone (a rounded
+mean, a share of it) is held with it; made with a shaped value, it is a shape.
+
+**Small counts (the ruling of 2026-10-12).** Below detail quasi, at plain, a
+count of rows that a quasi-identifying field chose or grouped is answered only for
+none or 5 subjects and more (`MEASURE_K`); between, it is held back: null, and
+named in `held_back` with why `fewer than 5, or held beside a count of fewer than
+5 so that it is not found by subtraction`. Counts of rows that technical and
+clinical fields alone chose and grouped stay exact, and detail quasi and above see
+every count. The chat bench found it: a plain reader rebuilt ages as counts per
+age band, one band holding a single subject.
+
+A quasi-identifying field chooses a set's rows where:
+
+| The set | Example |
+|---|---|
+| a `where` reads one, through any comparison or function, or a binding made from one | `age >= 45`, `sex = 'F'`, `first between two dates` |
+| it is a group keyed by one, or by a value made from one | a band of the age, the year of a date |
+| it keeps the rows that have rows within a window of days (`has` with a window), or that have a partner a near finds (every near reads a window of days; an optional near does not filter, but everything read of its partner reads a day) | sessions with a score within 90 days |
+| it keeps the rows that have rows of such a set (`has`, `attach`), narrows one (`from`), lies under one (`of`), combines one (`algebra`), or groups one | the sessions of the subjects aged 40 to 44 |
+| a group's own `where` reads one | the bands whose mean age is over 40 |
+
+A `pick` keeps the same number of rows whatever it orders by, so it chooses none.
+A subject's ordinal, the visit number, is no quasi-identifying field.
+
+What is held, at plain:
+
+| The count | Held |
+|---|---|
+| `level: count` of such a set: its rows and its subjects | when it holds 1 to 4 subjects |
+| `level: boolean` of such a set | null (neither 0 nor 1) when it holds 1 to 4 subjects |
+| a count of a group set at `level: count` (its number of groups) | when the groups hold 1 to 4 subjects |
+| a group's `_rows`, `_subjects`, `count` and `distinct`, where such a field chose the group's child or keys the group | when the group holds 1 to 4 subjects, every count of the group's row |
+| a group's count of its own by such a field: a `count` of a value made from one (the subjects with a value), a `sum` or an `avg` of one read through a comparison (`n_female`, the subjects whose value is not 0) | when it counts 1 to 4 subjects, or the group's other subjects are 1 to 4, which its total less it would say |
+| what the group's other bindings and the answer's columns make of a held count (twice it, a share of it), and a `share` measure of one | with it |
+| a `share` measure over such a set | in every row, when the set holds 1 to 4 subjects |
+| the diagnosis's funnel: a stage's rows and subjects, its keys, and what its clause group lost | when such a field chose the stage and it holds 1 to 4 subjects, when it dropped 1 to 4 from the stage before it, and when it starts from a set whose last stage is held |
+
+**No count is found by subtraction.** The ask answers a group's total anyway,
+as another question: the subjects of a cohort, the subjects with an age. So a
+group's count held alone would be that total less the counts shown. I chose to
+hold one count more, never the total, since the total is an ordinary question
+of its own: in every line of groups (with one key, all the answer's groups; with
+several, the groups that share every key but one) that holds a count, where the
+line holds one count alone, or only counts under 5 (two groups of 1 would be
+found from their sum of 2), the line's group with the fewest subjects of those
+shown is held too, the first by key on a tie. A count held beside another is not
+under 5 itself, so the why says both, and the desk and the chat never say which
+it is: saying it would tell the reader the other one. With several keys, the
+passes run three times over every key, so a count held for one line is not left
+alone in another. The groups held are decided over every group of the answer,
+before the group's own `where`, a page or a limit, so the rows a page shows never
+change which are held.
+
+What the desk and the chat see: a held count is null in the rows (an empty cell),
+and the answer's `held_back` names its column with the why, on a run and its
+cached answer, a preview, a handle and a page of it, and a job's result; the
+diagnosis's stages carry `held_back` too, with null `rows` and `subjects`. A
+handle records `quasi_counts` in its suppression, so no answer cached while such
+counts were numbers is served again.
+
+**Small lists (the ruling of 2026-10-13).** A list's length is a count, so the
+rule for counts holds for lists too. Below detail quasi, at plain, an answer that
+lists the rows of a set a quasi-identifying field chose (by the table above) is
+answered only where the set holds none or 5 subjects and more; where it holds 1
+to 4, no row is answered at all. That covers every level that returns one row
+per member, `level: record` and `aggregate`, and a group set over such rows,
+whose number of groups says something of the few subjects under it (the subjects
+under the group set decide). The subjects are counted over the whole set, before
+an `after`, a limit or a page, in the same read as the list, so a page never
+decides it and the rows are never read.
+
+| What the answer says | Where |
+|---|---|
+| no row, and every column named in `held_back` with why `a list of fewer than 5 subjects that a quasi identifying field chose; its length is a count, so no row is shown` | a run and its cached answer, a preview, a handle (which has no page: page 0 answers 404 as an empty handle's does), a job's result, MCP |
+| `row_count` null (never 0, which would say none), `pages` 0, `truncated` false | a run, its cached answer, a handle, the list of handles, a kept set, a job's result |
+| the stage's `rows` and `subjects` null, no keys, `held_back` | the diagnosis's funnel with keys; a pick's ties are null |
+
+A handle frozen from such an answer holds no row and no key, so no later page,
+export or reader can read one. It is no source either: a set read from it, a start
+from it and a promotion of it into a cohort are refused (409, `handle N holds no rows`), since
+either would answer none where there were some. The CSV export of it writes the
+header alone and says why. A list of the rows that technical and clinical fields
+alone chose (the visits numbered 6, a scanner's sessions) is answered at plain
+whatever its length, and detail quasi and above see every list. A handle records
+`quasi_lists` in its suppression, so no answer cached while such a list held its
+rows is served again. Only the ask's own reads for itself are not held: a share's
+denominator, a group's spread, the values sampler and a selection frozen for a
+pipeline, a campaign or a seal, whose rows never reach the reader.
+
+> **Limit: plain detail still filters.** A filter, an order and a count read a
+> quasi-identifying field itself at every detail, and the ask holds each answer to
+> these rules, not a person's series of questions. So repeated questions can
+> narrow a value: asked again with a narrower filter (ages 40 to 50, then 40 to
+> 45), a count of 5 or more says how many people are left in the range, a
+> count of the ages outside the range less the whole says the ones inside, and a
+> group's mean moves by what the narrower filter took out. A row's own count of
+> its subject's rows (a subject's visits in a year) is one person's and is
+> answered. The real protection is who is given plain detail (record 25):
+> give it only to people who may see such counts and summaries of the registry.
+
 ### 7.2 What a release records about itself (K9)
 
 Three items record 26 left for later join this wave's de-identification work:
@@ -470,6 +592,26 @@ days.
   release and an update control.
 - **Versions.** The certified rules are MRI pack 1.0.0, the paper's named release;
   production fixes ship as 1.0.1, 1.0.2 and on.
+
+**As built (2026-10-10).** The pack contract is the compatibility key: every
+engine already refuses a pack whose contract is above its own, so a rules
+release that needs a later engine declares the contract that engine
+introduced. The `engine` range is pack contract 10, an optional key for what
+a contract cannot say (an engine fix a rules fix relies on, an upper bound);
+the loader refuses it in a pack that declares less, so an engine at 9 refuses
+such a pack by its contract. The MRI pack names no range yet; it gains one
+with the release that needs it. A release carries `pack-<name>.tar.gz` (holding
+`packs/<name>/`), `pack-<name>.VERSION` and `SHA256SUMS`, is published by
+`rules-release.yml` and is never the repository's latest release. The engine
+finds a pack's releases in the GitHub listing by their tag, or on a channel of
+a deployment's own by `latest/download/pack-<name>.VERSION`. The update path
+reads a release's `pack.yml` before it installs it; the engine's own release
+stays the floor, and a pack's own release goes in where it is at least as new
+as the copy the engine carries, in the same single swap. `nils update --part
+rules` takes the rules alone and starts nothing again, since the engine reads
+a pack again whenever its files change. The setup record notes the rules in
+use (`[rules.<name>]`). An engine in a container reads the packs its image
+carries.
 
 ### 9.3 The release discipline (C2)
 
@@ -785,28 +927,65 @@ several readers, blind, with their agreement measured.
 |---|---|---|---|
 | 1. Answer a question about a scan | an axis, several axes, a form | the rate reader | finished: every kind made in the desk |
 | 2. Pick a session's main scan | choose the stack for a role | the session board | finished, with the cohort heatmap |
-| 3. Check a result | accept, reject or flag a pipeline's output | the rate reader with an overlay | new |
+| 3. Check a result | accept, reject or flag a pipeline's output | the check reader: the result over the scan it was made on and the visit's main scans | new |
 | 4. Draw or correct a mask | edit a segmentation | an annotation app | Wave 7b |
 | 5. Settle a disagreement | two answers side by side | the adjudication workspace; the A/B reader | finished |
 
 - **Nothing typed by hand:** the create door draws pair, anchored and A/B items, and
   the desk picks selections, handles and review kinds from lists.
-- **Type 3, new.** Stack items carry their `inputs` (the derivatives to check); the
-  viewer draws a derivative as an overlay on its stack (a mask's outline or fill,
-  with opacity); the question is fixed (accept, reject, flag, with a reason); and the
-  campaign's close writes a QC status onto each derivative (`accepted`, `rejected`,
-  `flagged`, with the decision's id), a new column of the derivative row. A type-3
-  campaign can be seeded from a run's `pipeline:qc` review items.
+- **Type 3, new** (the check-a-result build spec of 2026-10-11). A check is a
+  campaign whose question is "is this result right?" (`kind: check`). Its item is one
+  result, a mask a pipeline registered, read as one of the part sets its output
+  declares (each lesion a connected component of a label, each structure a label of
+  a label map), or at part grain one item per lesion. Every mask records its grid and
+  the scan whose grid it is on, tied `same`, `world` or `none`; a result that cannot
+  be drawn is left out of a check and counted, never drawn approximately. A check
+  never holds a sealed scan's result (the rulings of 2026-10-12, item 6): a result
+  made from a stack of a sample sealed now is left out first and counted, never
+  named, and a check made before that holds one withholds its item from every
+  rater without the audited grant to read sealed stacks, and its close writes
+  nothing of it.
+  - **Panels:** the scan the result was made on, then the visit's main scans by the
+    roles the check declares (T1w and FLAIR by default, at most 8), frozen when the
+    check is made. The viewer draws the result as a mask layer on each scan's own
+    picture pyramid (fill, outline, opacity, hidden at a key), and a scan is never
+    resampled. On a scan of a sample sealed now a panel says its series description,
+    never its role.
+  - **The answer:** a verdict, accepted, rejected or flagged, with the reasons the
+    check declares (one to seven, the keys 3 to 9), on the whole result, on a lesion,
+    or as a point for a missed lesion; the lesions the rater had in focus are kept.
+    Two raters are compared on the verdict, an agreed flag is the union of their
+    flags, and a different verdict goes to the adjudicator.
+  - **The close** (`closes_into: check`) writes, through the one write path, a
+    decision on the result (scope `derivative`) and on each lesion it judged (scope
+    `derivative_part`), each a person's, and the status (accepted, rejected or
+    flagged, with the decision's id) on the derivative and its parts. A person may
+    also check one result directly, and withdraw it; a later check withdraws the
+    earlier decision, and nothing is deleted.
+  - **What reads it:** a run's derivative input takes no rejected result unless its
+    descriptor asks for any (`checked`), and the ask's measures carry the status of
+    the run's results of each unit, so "where the segmentation was accepted" is one
+    filter.
+  - **Making one** is a button on the run page: a run's results (all, not yet
+    checked, or the units its declared checks flagged), named results, or a
+    selection's newest, with a preview that writes nothing. A flagged result waits
+    for correction, which is type 4 (Wave 7b).
 - **The two proofs** of Wave 6's gate run in the desk on the production install: a
   body-part curation round and a per-axis review, with zero database-level
   integration and no table named for a kind of QC.
 
 ### 13.3 Segmentation checks, learnt from a working prototype (H4)
 
-A segmentation QC tool in daily use outside NILS is the model for type 3: its author
-shows how it is used (what is looked at, the keys, what is recorded, the pace), and
-type 3 is built with that author as its first user, so the checking moves into
-NILS. Manual segmentation (type 4) waits for Wave 7b.
+A segmentation QC tool in daily use outside NILS was read as the model for type 3:
+what is looked at, the keys, what is recorded, the pace. Type 3 is designed from
+that reading (the check-a-result build spec), with nothing asked of its author, and
+keeps what worked: one press per answer, the lesion in focus zoomed with its anchor
+inside it, the mask at an opacity the rater sets, a short note. It adds what the tool
+lacked: a check made from a run in two presses, any campaign's raters, agreement and
+adjudication, the lesions seen recorded, a missed lesion as a point in the same
+check, and a status on the result that later runs and the ask read. The first real
+set is checked by its first user (T33), so the checking moves into NILS. Manual
+segmentation (type 4) waits for Wave 7b.
 
 ### 13.4 The reader (H5)
 

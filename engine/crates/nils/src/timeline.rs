@@ -786,10 +786,28 @@ fn stack(store: &mut Store, id: i64) -> Result<Option<Vec<Event>>, String> {
             "review_item",
         ));
     }
-    // picked
+    // picked: every pick ever made of the stack, in any scope; which of
+    // them are its main scans now is the one resolver's to say (2026-10-11)
+    let now: std::collections::BTreeSet<i64> = {
+        let picks = nils_registry::pick_truth::Of::own(store)
+            .map_err(err)?
+            .picks(store);
+        let sql = format!(
+            "SELECT p.id FROM {} ps JOIN {picks} p ON p.id = ps.pick_id WHERE ps.stack_id = {}",
+            store.qualified("pick_stack"),
+            d.param(1, Type::Int)
+        );
+        store
+            .query(&sql, &[Param::Int(id)])
+            .map_err(err)?
+            .iter()
+            .filter_map(|r| r.int(0).ok())
+            .collect()
+    };
     let pick_at = text_of(store, "pick", "decided_at");
     let sql = format!(
-        "SELECT p.id, p.role, p.actor, {pick_at} FROM {} ps JOIN {} p ON p.id = ps.pick_id \
+        "SELECT p.id, p.role, p.actor, {pick_at}, p.rules_scope_kind, p.rules_scope_id, \
+                p.rules_version FROM {} ps JOIN {} p ON p.id = ps.pick_id \
          WHERE ps.stack_id = {} ORDER BY p.id",
         store.qualified("pick_stack"),
         store.qualified("pick"),
@@ -801,7 +819,23 @@ fn stack(store: &mut Store, id: i64) -> Result<Option<Vec<Event>>, String> {
             r.opt_text(3).map_err(err)?.unwrap_or_default(),
             "picked",
             r.opt_text(2).map_err(err)?,
-            format!("picked as {}", r.opt_text(1).map_err(err)?.unwrap_or("?")),
+            // record 55, decision 6: whose picks it is among
+            format!(
+                "picked as {}{}{}",
+                r.opt_text(1).map_err(err)?.unwrap_or("?"),
+                match (r.opt_text(4).map_err(err)?, r.opt_int(5).map_err(err)?) {
+                    (Some(kind), Some(scope)) => format!(
+                        " for {kind} {scope} under its rules, version {}",
+                        r.opt_int(6).map_err(err)?.unwrap_or(0)
+                    ),
+                    _ => " for the pack".to_string(),
+                },
+                if now.contains(&pick) {
+                    ", a main scan now"
+                } else {
+                    ""
+                }
+            ),
             produced("pick", pick),
             "pick",
         ));
@@ -861,7 +895,10 @@ fn decision_events(r: &nils_registry::store::Row) -> Result<Vec<Event>, String> 
             at,
             "staged",
             actor.as_deref(),
-            format!("decision {id} staged by a {kind}: {what}"),
+            format!(
+                "decision {id} staged by {}: {what}",
+                nils_registry::a_or_an(&kind)
+            ),
             produced("decision", id),
             "decision",
         ));
@@ -880,7 +917,7 @@ fn decision_events(r: &nils_registry::store::Row) -> Result<Vec<Event>, String> 
             at,
             "decision",
             actor.as_deref(),
-            format!("decision {id} by a {kind}: {what}"),
+            format!("decision {id} by {}: {what}", nils_registry::a_or_an(&kind)),
             produced("decision", id),
             "decision",
         ));

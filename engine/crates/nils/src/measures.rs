@@ -169,12 +169,25 @@ pub(crate) fn unit_named<'a>(
     written: &str,
     units: &'a [(String, Option<Belongs>)],
 ) -> Option<(&'a str, &'a Option<Belongs>)> {
-    let w = nils_pipeline::results::normalise(written);
+    let id = unit_name_of(written, units.iter().map(|(id, _)| id.as_str()))?;
     units
         .iter()
-        .filter(|(id, _)| w == *id || w.starts_with(&format!("{id}_")))
-        .max_by_key(|(id, _)| id.len())
-        .map(|(id, b)| (id.as_str(), b))
+        .find(|(u, _)| u == id)
+        .map(|(u, b)| (u.as_str(), b))
+}
+
+/// The name among `names` a run's table row names its unit by, as
+/// [`unit_named`] reads it; record 48's content door reads a row's unit,
+/// and so its stacks, the same way.
+pub(crate) fn unit_name_of<'a>(
+    written: &str,
+    names: impl IntoIterator<Item = &'a str>,
+) -> Option<&'a str> {
+    let w = nils_pipeline::results::normalise(written);
+    names
+        .into_iter()
+        .filter(|id| w == *id || w.starts_with(&format!("{id}_")))
+        .max_by_key(|id| id.len())
 }
 
 /// The checks one unit breaks: each check's metric read from the unit's

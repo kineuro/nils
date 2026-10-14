@@ -169,6 +169,11 @@ pub struct Classified {
     /// of one image each, information and no longer a question.
     #[serde(default)]
     pub split_notes: i64,
+    /// Record 55 F2 and F5: the post-contrast label written after the
+    /// disposition, over every subject with an MR stack
+    /// (`crate::contrast::Labelled`).
+    #[serde(default)]
+    pub contrast: Option<serde_json::Value>,
     pub seconds: f64,
     pub peak_rss: Option<u64>,
     pub cancelled: bool,
@@ -205,6 +210,7 @@ impl Classified {
             split_notes: 0,
             seconds: 0.0,
             peak_rss: None,
+            contrast: None,
             cancelled: false,
         }
     }

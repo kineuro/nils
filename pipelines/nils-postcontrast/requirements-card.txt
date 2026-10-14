@@ -1,0 +1,8 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# The Frangi filter on a card in the feature environment, installed without
+# their dependencies beside requirements-full.txt as the speed study's round
+# 2 ran them (cuCIM 24.4.0 asks for an older scikit-image than model r1's;
+# its filter needs none of it).
+cupy-cuda12x==13.6.0
+cucim-cu12==24.4.0
+fastrlock==0.8.3

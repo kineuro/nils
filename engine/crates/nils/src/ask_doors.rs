@@ -306,11 +306,24 @@ pub(crate) fn withhold_rows(
     Ok(before - rows.len())
 }
 
-fn scheme_of(registry: &mut Registry, ask: &Ask) -> Result<Scheme, Reply> {
+/// The session scheme a document reads. A name the registry keeps no
+/// scheme under is the document's to change, never a 500 (2026-10-12): a
+/// document the request carries is refused as validate refuses it (400),
+/// and a stored one (`stored`, its id) is told the scheme is gone since it
+/// was stored and what to do (409), as a handle that no longer holds is.
+fn scheme_of(registry: &mut Registry, ask: &Ask, stored: Option<i64>) -> Result<Scheme, Reply> {
     match &ask.scheme {
         None => Ok(Scheme::default()),
         Some(SchemeRef::Name(n)) if n == "default" || n == "day" => Ok(Scheme::default()),
-        Some(SchemeRef::Name(n)) => crate::stored_scheme(registry, n).map_err(Reply::from),
+        Some(SchemeRef::Name(n)) => crate::kept_scheme(registry, n)
+            .map_err(Reply::from)?
+            .ok_or_else(|| {
+                issues_reply(
+                    if stored.is_some() { 409 } else { 400 },
+                    "the document is refused",
+                    &[nils_ask::validate::scheme_not_kept(n, stored)],
+                )
+            }),
         Some(SchemeRef::Inline(m)) => {
             let text = serde_json::to_string(m).unwrap_or_default();
             Scheme::from_json(&text)
@@ -365,10 +378,17 @@ fn ask_err(e: AskError) -> Reply {
 fn run_err(e: RunError) -> Reply {
     match e {
         RunError::Ask(a) => ask_err(a),
+        // what only the compiler refuses, a parameter without a value for
+        // one, is refused as a validation refusal is, at the path the
+        // compiler names, and no longer answers 500 (2026-10-12)
+        RunError::Compile(c) => issues_reply(400, "the document is refused", &[c.issue()]),
         RunError::Forbidden(m) => Reply::error(403, m),
         RunError::Handle(HandleError::NotFound(id)) => Reply::error(404, format!("no handle {id}")),
         RunError::Handle(
-            e @ (HandleError::Expired(_) | HandleError::Withdrawn(_) | HandleError::Truncated(_)),
+            e @ (HandleError::Expired(_)
+            | HandleError::Withdrawn(_)
+            | HandleError::Truncated(_)
+            | HandleError::Held(_)),
         ) => Reply::error(409, e.to_string()),
         e @ RunError::NameTaken(_) => Reply::error(409, e.to_string()),
         RunError::Exec(ExecError::Timeout(ms)) => Reply::error(
@@ -535,16 +555,19 @@ fn answer(
     };
     // A catalog is built at an epoch and a run moves no epoch, so a handle
     // written since is unknown to it until the next build. The resolver of
-    // Wave 5 §12.1 starts from the handle a person just ran, so it reads the
-    // handle itself and tells the catalog before it validates.
-    if matches!(segs, ["api", "ask", "start"])
-        && let Some(id) = doc["from"]["handle"].as_i64()
-        && let Some((_, c)) = catalog.as_mut()
-        && !c.handles.contains_key(&id.to_string())
-        && let Ok(Some(h)) = handle::get(registry.store(), id)
-        && h.withdrawn_at.is_none()
-    {
-        c.handles.insert(id.to_string(), h.grain);
+    // Wave 5 §12.1 starts from the handle a person just ran, and a document
+    // may read a set from one (`handle:N`), so each handle a body names is
+    // read and told to the catalog before it validates; otherwise whether a
+    // handle just made is known would hang on when the catalog was built.
+    if let Some((_, c)) = catalog.as_mut() {
+        for id in handles_named(&doc) {
+            if !c.handles.contains_key(&id.to_string())
+                && let Ok(Some(h)) = handle::get(registry.store(), id)
+                && h.withdrawn_at.is_none()
+            {
+                c.handles.insert(id.to_string(), h.grain);
+            }
+        }
     }
     let catalog: &Catalog = &catalog.as_ref().expect("the catalog is built").1;
     let reader: &mut Store = reader.as_mut().expect("the reader is open");
@@ -578,16 +601,25 @@ fn answer(
         }
         ["api", "ask", "validate"] if post => {
             let repair = doc["mode"].as_str() == Some("repair");
-            let (ask, repairs) = if repair {
+            let (ask, repairs, stored) = if repair {
                 let text = doc["document"].to_string();
-                parse_repaired(&text).map_err(ask_err)?
+                let (ask, repairs) = parse_repaired(&text).map_err(ask_err)?;
+                (ask, repairs, None)
             } else {
-                (document_of(registry, &doc)?.0, Vec::new())
+                let (ask, stored) = document_of(registry, &doc)?;
+                (ask, Vec::new(), stored)
+            };
+            // a stored document's scheme removed since it was stored is said
+            // to be gone before it is validated, as the other doors say it
+            // (2026-10-12)
+            let scheme = if repair {
+                None
+            } else {
+                Some(scheme_of(registry, &ask, stored)?)
             };
             let prepared = prepare(ask.clone(), catalog, &scope).map_err(ask_err)?;
             // Wave 4c: strict validate compiles what run would (kineuro/nils#93)
-            if !repair {
-                let scheme = scheme_of(registry, &ask)?;
+            if let Some(scheme) = scheme {
                 let s = Setting {
                     names: catalog,
                     scope: &scope,
@@ -611,8 +643,8 @@ fn answer(
             })))
         }
         ["api", "ask", "run"] if post => {
-            let (ask, _) = document_of(registry, &doc)?;
-            let scheme = scheme_of(registry, &ask)?;
+            let (ask, stored) = document_of(registry, &doc)?;
+            let scheme = scheme_of(registry, &ask, stored)?;
             // Wave 5 §12.8: the content hash as a cache key. A core that ran
             // at this epoch and pack answers its handle again, unless the
             // caller asks for a fresh run.
@@ -669,11 +701,15 @@ fn answer(
                     "handle": h.id,
                     "hash": hash,
                     "grain": h.grain,
-                    "row_count": h.row_count,
+                    // record 55 K7, small lists at plain (2026-10-13): a
+                    // list held back whole gives no length
+                    "row_count": h.row_count_shown(),
                     "declaration": declaration,
                     "content_hash": h.content_hash,
                     "truncated": h.truncated,
                     "columns": h.columns,
+                    "shaped": h.shaped(),
+                    "held_back": h.held_back(),
                     "rows": rows,
                     "page_rows": page_rows,
                     "pages": pages,
@@ -747,17 +783,23 @@ fn answer(
                 "handle": out.handle.id,
                 "hash": out.hash,
                 "grain": out.handle.grain,
-                "row_count": n,
+                // record 55 K7, small lists at plain (the ruling of
+                // 2026-10-13): a list held back whole gives no length
+                "row_count": out.answer.row_count(),
                 "declaration": declaration,
                 "content_hash": out.handle.content_hash,
                 "truncated": out.answer.truncated,
                 "columns": out.answer.columns,
+                // record 55 K7: the columns this detail sees as shapes, and
+                // those with values held back for a group too small
+                "shaped": out.answer.shaped_names(),
+                "held_back": out.answer.held_back_named(),
                 "rows": rows,
                 "page_rows": page_rows,
                 "pages": n.div_ceil(page_rows),
                 "measures": out.measured,
                 "drift": out.drift,
-                "kept": out.kept.iter().map(|k| json!({"handle": k.id, "name": k.name, "grain": k.grain, "row_count": k.row_count})).collect::<Vec<_>>(),
+                "kept": out.kept.iter().map(|k| json!({"handle": k.id, "name": k.name, "grain": k.grain, "row_count": k.row_count_shown()})).collect::<Vec<_>>(),
                 "identifiers": out.identifiers,
                 "inlined": out.inlined,
                 "epoch": epoch,
@@ -773,10 +815,34 @@ fn answer(
                     "identifiers are projected only at detail sensitive",
                 ));
             }
+            // and what only the compiler refuses, a parameter without a
+            // value for one, which the worker failed on once the door had
+            // queued it (2026-10-12)
+            let compiles = |registry: &mut Registry| -> Result<(), Reply> {
+                let scheme = scheme_of(registry, &ask, id)?;
+                let s = Setting {
+                    names: catalog,
+                    scope: &scope,
+                    scheme: &scheme,
+                    principal,
+                    bounds,
+                    values_cap: caps.options_values as usize,
+                };
+                let issues = affordance::compile_issues(registry, &ask, &s);
+                if issues.is_empty() {
+                    Ok(())
+                } else {
+                    Err(issues_reply(400, "the document is refused", &issues))
+                }
+            };
             let id = match id {
-                Some(id) => id,
+                Some(id) => {
+                    compiles(registry)?;
+                    id
+                }
                 None => {
                     let prepared = prepare(ask.clone(), catalog, &scope).map_err(ask_err)?;
+                    compiles(registry)?;
                     document::put(registry.store(), &ask, &prepared.hash, principal, None)
                         .map_err(|e| Reply::error(500, e.to_string()))?
                         .id
@@ -926,14 +992,14 @@ fn answer(
             ))
         }
         ["api", "ask", "explain"] if post => {
-            let (ask, _) = document_of(registry, &doc)?;
-            let scheme = scheme_of(registry, &ask)?;
+            let (ask, stored) = document_of(registry, &doc)?;
+            let scheme = scheme_of(registry, &ask, stored)?;
             let ex = run::explain(registry, ask, catalog, &scope, &scheme).map_err(run_err)?;
             Ok(Reply::ok(serde_json::to_value(ex).unwrap_or(Value::Null)))
         }
         ["api", "ask", "options"] if post => {
-            let (ask, _) = document_of(registry, &doc)?;
-            let scheme = scheme_of(registry, &ask)?;
+            let (ask, stored) = document_of(registry, &doc)?;
+            let scheme = scheme_of(registry, &ask, stored)?;
             let s = Setting {
                 names: catalog,
                 scope: &scope,
@@ -967,7 +1033,7 @@ fn answer(
             let d = document::get(registry.store(), id)
                 .map_err(|e| Reply::error(500, e.to_string()))?
                 .ok_or_else(|| Reply::error(404, format!("no document {id}")))?;
-            let scheme = scheme_of(registry, &d.ask)?;
+            let scheme = scheme_of(registry, &d.ask, Some(id))?;
             let s = Setting {
                 names: catalog,
                 scope: &scope,
@@ -983,8 +1049,8 @@ fn answer(
             ))
         }
         ["api", "ask", "diagnose"] if post => {
-            let (ask, _) = document_of(registry, &doc)?;
-            let scheme = scheme_of(registry, &ask)?;
+            let (ask, stored) = document_of(registry, &doc)?;
+            let scheme = scheme_of(registry, &ask, stored)?;
             let out_set = ask.out.set.clone();
             let d = diagnose::diagnose(
                 registry,
@@ -1011,8 +1077,8 @@ fn answer(
             Ok(Reply::ok(serde_json::to_value(d).unwrap_or(Value::Null)))
         }
         ["api", "ask", "preview"] if post => {
-            let (ask, _) = document_of(registry, &doc)?;
-            let scheme = scheme_of(registry, &ask)?;
+            let (ask, stored) = document_of(registry, &doc)?;
+            let scheme = scheme_of(registry, &ask, stored)?;
             let s = Setting {
                 names: catalog,
                 scope: &scope,
@@ -1041,8 +1107,8 @@ fn answer(
             Ok(Reply::ok(v))
         }
         ["api", "ask", "profile"] if post => {
-            let (ask, _) = document_of(registry, &doc)?;
-            let scheme = scheme_of(registry, &ask)?;
+            let (ask, stored) = document_of(registry, &doc)?;
+            let scheme = scheme_of(registry, &ask, stored)?;
             let s = Setting {
                 names: catalog,
                 scope: &scope,
@@ -1063,8 +1129,8 @@ fn answer(
             Ok(Reply::ok(profile))
         }
         ["api", "ask", "describe"] if post => {
-            let (ask, _) = document_of(registry, &doc)?;
-            let scheme = scheme_of(registry, &ask)?;
+            let (ask, stored) = document_of(registry, &doc)?;
+            let scheme = scheme_of(registry, &ask, stored)?;
             let s = Setting {
                 names: catalog,
                 scope: &scope,
@@ -1101,6 +1167,7 @@ fn answer(
             let mut params = serde_json::Map::new();
             let mut values_decl = serde_json::Map::new();
             let mut whole: Option<Ask> = None;
+            let mut stored: Option<i64> = None;
             let set_name;
             let grain: Grain;
             if let Some(list) = from["cohorts"].as_array() {
@@ -1159,6 +1226,7 @@ fn answer(
                     .unwrap_or(Grain::Subject);
                 set_name = d.ask.out.set.clone();
                 whole = Some(d.ask);
+                stored = Some(id);
             } else if let Some(upload) = from["values"].as_str() {
                 caller.allowed(
                     "starting from an uploaded list",
@@ -1209,7 +1277,7 @@ fn answer(
                     })?
                 }
             };
-            let scheme = scheme_of(registry, &ask)?;
+            let scheme = scheme_of(registry, &ask, stored)?;
             let opening = ask.clone();
             let diagnosis = diagnose::diagnose(
                 registry,
@@ -1233,11 +1301,12 @@ fn answer(
                     .rfind(|s| s.set == name)
                     .map(|s| (s.rows, s.subjects))
             };
-            let (count, subjects) = stage_of(&set_name).unwrap_or((0, 0));
+            // record 55 K7, small counts at plain: a count held back is null
+            let (count, subjects) = stage_of(&set_name).unwrap_or((Some(0), Some(0)));
             let sessions = if under {
-                stage_of("sessions_under").map(|(rows, _)| rows)
+                stage_of("sessions_under").and_then(|(rows, _)| rows)
             } else if grain == Grain::Session {
-                Some(count)
+                count
             } else {
                 None
             };
@@ -1355,7 +1424,7 @@ fn answer(
             ))
         }
         ["api", "ask", "documents"] if post => {
-            let (ask, _) = document_of(registry, &doc)?;
+            let (ask, stored) = document_of(registry, &doc)?;
             // stored under another document, it is that document's next
             // version: an accepted proposal joins the line it was proposed for
             let parent = match doc.get("parent") {
@@ -1370,7 +1439,7 @@ fn answer(
                     Some(p)
                 }
             };
-            let scheme = scheme_of(registry, &ask)?;
+            let scheme = scheme_of(registry, &ask, stored)?;
             let s = Setting {
                 names: catalog,
                 scope: &scope,
@@ -1574,7 +1643,7 @@ fn answer(
                     json!({
                         "invalidated": out.contains(&h.id),
                         "stale": out.contains(&h.id) || h.epoch != epoch,
-                        "id": h.id, "name": h.name, "grain": h.grain, "row_count": h.row_count,
+                        "id": h.id, "name": h.name, "grain": h.grain, "row_count": h.row_count_shown(),
                         "content_hash": h.content_hash, "principal": h.principal, "actor": h.actor,
                         "created_at": h.created_at, "epoch": h.epoch, "pack_version": h.pack_version,
                         "disclosure": h.disclosure, "truncated": h.truncated,
@@ -1596,6 +1665,9 @@ fn answer(
             let pins = handle::pinned_by(registry.store(), id)
                 .map_err(|e| Reply::error(500, e.to_string()))?;
             let mut v = serde_json::to_value(&h).unwrap_or(Value::Null);
+            v["shaped"] = json!(h.shaped());
+            v["held_back"] = json!(h.held_back());
+            v["row_count"] = json!(h.row_count_shown());
             v["pinned_by"] = json!(pins);
             // Wave 5 §12.8: the invalidation, when there is one, and what
             // it means for the answer
@@ -1653,7 +1725,7 @@ fn answer(
                 epoch,
             )
             .map_err(|e| Reply::error(500, e.to_string()))?;
-            let mut v = json!({"handle": id, "page": page, "pages": pages, "columns": h.columns, "rows": rows});
+            let mut v = json!({"handle": id, "page": page, "pages": pages, "columns": h.columns, "shaped": h.shaped(), "held_back": h.held_back(), "rows": rows});
             if withheld > 0 {
                 v["withheld_sealed"] = json!(withheld);
             }
@@ -1671,6 +1743,11 @@ fn answer(
             // comes in the desk's order
             if let Some(why) = not_reproducible(registry, &h, "promoted")? {
                 return Err(Reply::error(409, why));
+            }
+            // record 55 K7, small lists at plain (the ruling of 2026-10-13):
+            // a list held back whole holds no subject to promote
+            if h.rows_held() {
+                return Err(Reply::error(409, HandleError::Held(id).to_string()));
             }
             let mut command = vec![
                 "ask".to_string(),
@@ -1849,5 +1926,53 @@ mod sized_tests {
             sized_rows(&mut store, &handle(true), &unsealed),
             Ok(Some(3))
         ));
+    }
+}
+
+/// The handles a door's body names: the start's `from.handle`, and each set
+/// of a document (the body's `document`, or the body itself) read from
+/// `handle:N`.
+fn handles_named(doc: &Value) -> Vec<i64> {
+    let mut out = Vec::new();
+    if let Some(id) = doc["from"]["handle"].as_i64() {
+        out.push(id);
+    }
+    for d in [&doc["document"], doc] {
+        if let Some(sets) = d["sets"].as_object() {
+            for set in sets.values() {
+                if let Some(id) = set["from"]
+                    .as_str()
+                    .and_then(|f| f.strip_prefix("handle:"))
+                    .and_then(|h| h.parse::<i64>().ok())
+                {
+                    out.push(id);
+                }
+            }
+        }
+    }
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+#[cfg(test)]
+mod handles_named_tests {
+    use super::handles_named;
+    use serde_json::json;
+
+    #[test]
+    fn a_body_names_its_handles_by_start_and_by_set() {
+        assert_eq!(handles_named(&json!({"from": {"handle": 7}})), vec![7]);
+        let doc = json!({"document": {"sets": {
+            "a": {"grain": "session", "from": "handle:3"},
+            "b": {"grain": "session", "from": "a"},
+            "c": {"grain": "stack", "from": "handle:x"}
+        }}});
+        assert_eq!(handles_named(&doc), vec![3]);
+        assert_eq!(
+            handles_named(&json!({"sets": {"t": {"from": "handle:12"}}})),
+            vec![12]
+        );
+        assert!(handles_named(&json!({})).is_empty());
     }
 }

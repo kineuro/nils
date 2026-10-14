@@ -1,0 +1,184 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nils.kineuro.se/contracts/job/v1/opinions.schema.json",
+  "title": "NILS pipeline opinions (System 1)",
+  "description": "Record 55 D3 and record 56 (spec 11.1): the opinions member of a pipeline run's results.json, what System 1 says of each stack and axis: its answer, its calibrated probability, the reliability of the rules on that header (the error model with the signs of damage) and the fields that mattered most, each measured by leaving it out. The engine keeps them beside the rules' answers. An opinion is never a decision and raises no review item by itself: it is shown beside the questions Review holds, and on a dataset flagged as having damaged headers it feeds the gate once System 1 is confirmed by a recorded certificate. Only a model registered for the task system1 and admitted, promoted or chosen may give one, and only on the run's own stacks.",
+  "type": "array",
+  "items": {
+    "$ref": "#/$defs/opinion"
+  },
+  "$defs": {
+    "opinion": {
+      "type": "object",
+      "required": [
+        "stack_id",
+        "axis",
+        "p"
+      ],
+      "anyOf": [
+        {
+          "required": [
+            "model_id"
+          ]
+        },
+        {
+          "required": [
+            "model_digest"
+          ]
+        }
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "stack_id": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "The stack, by the id the run's stacks.json gave it"
+        },
+        "axis": {
+          "type": "string",
+          "pattern": "^[a-z_]+$",
+          "description": "An axis of the pack, declared in the descriptor's x-nils.opinions"
+        },
+        "value": {
+          "description": "The answer: a value of the axis, a list of values for a multi-valued axis, or null for no value",
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "p": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "The answer's calibrated probability"
+        },
+        "reliability": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 1,
+          "description": "How far the rules can be trusted on this header, from the error model and the signs of damage (missing fields, unknown words, an unseen vendor, a fallback clause); null where the model has no reliability part"
+        },
+        "fields": {
+          "type": "array",
+          "maxItems": 10,
+          "items": {
+            "type": "object",
+            "required": [
+              "field",
+              "effect"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "field": {
+                "type": "string",
+                "minLength": 1
+              },
+              "effect": {
+                "type": "number",
+                "description": "The change in the answer's probability when the field is left out"
+              }
+            }
+          },
+          "description": "The fields that mattered most, largest effect first"
+        },
+        "probabilities": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "description": "The probability of each class the head weighed, where it has one"
+        },
+        "model_id": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "The registered model, by the id the run's model manifest gave it"
+        },
+        "model_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "description": "Or by its digest"
+        },
+        "note": {
+          "type": "string",
+          "description": "Words a person reads beside the numbers. Never a name, a code or a date of a person"
+        },
+        "rules_read": {
+          "type": "object",
+          "required": [
+            "value"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "value": {
+              "oneOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "description": "The rules' answer on the axis as the model reads it, in the model's own vocabulary (the reading its certificate measured agreement with): the gate and the suggestions compare the model's answer with this, never with the stored value, whose words are the pack's (a vendor's SPACE where the model says 3D-TSE). Absent, they compare with the stored value"
+        }
+      }
+    }
+  },
+  "examples": [
+    [
+      {
+        "stack_id": 41,
+        "axis": "base",
+        "value": "T1w",
+        "p": 0.97,
+        "reliability": 0.995,
+        "fields": [
+          {
+            "field": "text_series_description",
+            "effect": 0.41
+          },
+          {
+            "field": "inversion_time",
+            "effect": 0.12
+          }
+        ],
+        "model_id": 7,
+        "rules_read": {
+          "value": "T1w"
+        }
+      },
+      {
+        "stack_id": 41,
+        "axis": "modifier",
+        "value": [
+          "FatSat"
+        ],
+        "p": 0.88,
+        "reliability": 0.995,
+        "model_id": 7
+      }
+    ]
+  ]
+}

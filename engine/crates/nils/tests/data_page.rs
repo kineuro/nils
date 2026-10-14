@@ -274,7 +274,9 @@ fn round(pg: Option<(String, String)>) {
                     VR::DS,
                     "1\\0\\0\\0\\1\\0",
                 ));
-                e.push(synth::text(tags::PIXEL_SPACING, VR::DS, "1\\1"));
+                // 16 pixels of 16 mm: a brain's 256 mm across, since the
+                // MRI pack gives no role to a slab under 175 mm both ways
+                e.push(synth::text(tags::PIXEL_SPACING, VR::DS, "16\\16"));
                 e.push(synth::text(tags::SLICE_THICKNESS, VR::DS, "2"));
                 e.push(synth::us(tags::SAMPLES_PER_PIXEL, 1));
                 e.push(synth::text(
@@ -1785,5 +1787,1040 @@ fn a_look_is_counted_the_same_on_postgres_too() {
     };
     drop();
     looks(Some((dsn.clone(), schema.to_string())));
+    drop();
+}
+
+/// 2026-10-10, found trying the desk: a folder added again after its
+/// dataset was removed showed the removed dataset's failed run as its own,
+/// a "Stopped" with the other dataset's words. A dataset's jobs are its own:
+/// none made for another dataset, and where its folder held a dataset
+/// before, none from before it was added.
+#[test]
+fn a_folder_added_again_shows_none_of_the_removed_dataset_s_runs() {
+    let home = Home {
+        dir: TempDir::new("data-page-again-home"),
+        pg: None,
+    };
+    let (good, _, err) = home.run(&["key", "add", "k"], Some("a data page test key\n"));
+    assert!(good, "{err}");
+    home.ok(&["init", "--key", "k"]);
+    let dir = TempDir::new("data-page-again");
+    std::fs::create_dir_all(dir.path().join("derivatives/dcm-anon")).unwrap();
+    let folder = dir.path().to_str().unwrap();
+    let declare = |name: &str| {
+        home.ok(&[
+            "place",
+            "add",
+            name,
+            folder,
+            "--role",
+            "source",
+            "--patient-id",
+            "id-type:patient-id",
+            "--subjects",
+            "generated",
+        ]);
+    };
+    declare("first");
+
+    // a run of the first dataset that fails: a read of a folder in its tree that is not there
+    let server = Worked::start(&home);
+    let (status, queued) = server.call(
+        "POST",
+        "/api/jobs",
+        Some(json!({"command": ["digest", "@first/not-there", "--name", "first-2026-10-10"]})),
+        OPS,
+    );
+    assert_eq!(status, 202, "{queued}");
+    let jobs = server.settled("first", &["digest"]);
+    assert!(
+        jobs.iter().any(|j| j["state"] == "failed"),
+        "the first dataset's read failed: {jobs:?}"
+    );
+    let before = server.get("/api/datasets/first/summary", OPS);
+    assert_eq!(step(&before, "read")["state"], "failed", "{before}");
+
+    // the first dataset removed as the desk removes it, the folder added
+    // again as another, a moment later
+    let places = server.get("/api/places", OPS);
+    let id = places["places"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["name"] == "first")
+        .and_then(|p| p["id"].as_i64())
+        .unwrap_or_else(|| panic!("no place first: {places}"));
+    let (status, retired) = server.call(
+        "PUT",
+        &format!("/api/places/{id}"),
+        Some(json!({"retired": true})),
+        OPS,
+    );
+    assert_eq!(status, 200, "{retired}");
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    declare("again");
+    let mine = server.get("/api/jobs?dataset=again&all=1", OPS);
+    assert_eq!(
+        mine["count"], 0,
+        "the removed dataset's runs are not the new one's: {mine}"
+    );
+    let s = server.get("/api/datasets/again/summary", OPS);
+    for (name, st) in steps(&s) {
+        assert_ne!(
+            st["state"], "failed",
+            "{name} says another dataset's run failed: {s}"
+        );
+    }
+}
+
+/// 2026-10-10, found trying the desk: a removed dataset kept its name, so
+/// its folder added again came back under the root's name before it. A
+/// removed dataset's name is free for a new one, and the removed row keeps
+/// its id, its folder and its history under its name and id.
+#[test]
+fn a_removed_dataset_s_name_is_free_for_its_folder_again() {
+    let home = Home {
+        dir: TempDir::new("data-page-name-home"),
+        pg: None,
+    };
+    let (good, _, err) = home.run(&["key", "add", "k"], Some("a data page test key\n"));
+    assert!(good, "{err}");
+    home.ok(&["init", "--key", "k"]);
+    let root = TempDir::new("data-page-name-root");
+    std::fs::create_dir_all(root.path().join("fresh/derivatives/dcm-anon")).unwrap();
+    std::fs::create_dir_all(root.path().join("other/derivatives/dcm-anon")).unwrap();
+    home.ok(&[
+        "place",
+        "add",
+        "data-test",
+        root.path().to_str().unwrap(),
+        "--role",
+        "source",
+    ]);
+    let server = Worked::serve(&home, false);
+    let add = || {
+        server.call(
+            "POST",
+            "/api/places",
+            Some(json!({
+                "role": "source", "root": "data-test", "folder": "fresh",
+                "patient_id": "id-type:patient-id", "subjects": "generated",
+            })),
+            OPS,
+        )
+    };
+    let (status, first) = add();
+    assert_eq!(status, 201, "{first}");
+    assert_eq!(first["name"], "fresh", "{first}");
+    let id = first["id"].as_i64().unwrap();
+    let (status, retired) = server.call(
+        "PUT",
+        &format!("/api/places/{id}"),
+        Some(json!({"retired": true})),
+        OPS,
+    );
+    assert_eq!(status, 200, "{retired}");
+
+    // added again: its own name, not the root's before it
+    let (status, again) = add();
+    assert_eq!(status, 201, "{again}");
+    assert_eq!(again["name"], "fresh", "{again}");
+    assert_ne!(again["id"], first["id"], "{again}");
+    let places = server.get("/api/places", OPS);
+    let old = places["places"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["id"] == first["id"])
+        .unwrap_or_else(|| panic!("the removed dataset is kept: {places}"))
+        .clone();
+    assert_eq!(old["name"], format!("fresh.retired-{id}"), "{old}");
+    assert_eq!(old["path"], first["path"], "{old}");
+    assert!(!old["retired_at"].is_null(), "{old}");
+
+    // a name in force stays taken, for another folder too
+    let (status, taken) = server.call(
+        "POST",
+        "/api/places",
+        Some(json!({"role": "source", "root": "data-test", "folder": "other", "name": "fresh"})),
+        OPS,
+    );
+    assert_eq!(status, 409, "{taken}");
+}
+
+/// Record 55 (Nima's duplicate policy, 2026-10-10): a dataset holds every
+/// scan its tree has a file of, whoever read it first. A second dataset
+/// holding copies of one subject's scans (one of them twice) and a file
+/// whose instance UID the registry holds under the other subject counts and
+/// lists the copied scans as its own, on the card, in the summary, at the
+/// scans door and in the Grid; its read says how many files were copies of
+/// what another dataset read, how many it holds twice, and how many are
+/// held for the question it raises; and the first dataset is as it was.
+fn copies(pg: Option<(String, String)>) {
+    let home = Home {
+        dir: TempDir::new("data-page-copies"),
+        pg,
+    };
+    let (good, _, err) = home.run(&["key", "add", "k"], Some("a data page test key\n"));
+    assert!(good, "{err}");
+    match &home.pg {
+        Some((dsn, schema)) => {
+            home.ok(&[
+                "init",
+                "--backend",
+                "postgres",
+                "--dsn",
+                dsn,
+                "--schema",
+                schema,
+                "--key",
+                "k",
+            ]);
+        }
+        None => {
+            home.ok(&["init", "--key", "k"]);
+        }
+    }
+    let map = home.dir.file(
+        "map.csv",
+        b"PatientID,subject_code\nS-0001,copies-0001\nS-0002,copies-0002\n",
+    );
+    home.ok(&[
+        "linkage",
+        "import",
+        map.to_str().unwrap(),
+        "--id-column",
+        "PatientID",
+        "--code-column",
+        "subject_code",
+    ]);
+    let add = |name: &str, tree: &TempDir| {
+        home.ok(&[
+            "place",
+            "add",
+            name,
+            tree.path().to_str().unwrap(),
+            "--role",
+            "source",
+            "--patient-id",
+            "id-type:patient-id",
+            "--subjects",
+            "map",
+        ]);
+        home.ok(&[
+            "digest",
+            "--name",
+            name,
+            "--no-private",
+            &format!("@{name}"),
+        ]);
+    };
+
+    // the first dataset: two subjects, two scans each
+    let first = TempDir::new("data-page-copies-first");
+    const FILES: &str = "\
+S-0001|1.2.9.A|1.2.9.A.1|20260102|t1 mprage
+S-0001|1.2.9.A|1.2.9.A.2|20260102|flair
+S-0002|1.2.9.C|1.2.9.C.1|20260407|dwi
+S-0002|1.2.9.C|1.2.9.C.2|20260407|t2 tse";
+    for line in FILES.lines() {
+        let f: Vec<&str> = line.split('|').collect();
+        scan_file(&first, f[0], f[1], f[2], f[3], f[4]);
+    }
+    add("first", &first);
+
+    // the second: the first subject's two scans, one of them twice, and a
+    // file of the second subject's scan that names the first subject
+    let second = TempDir::new("data-page-copies-second");
+    let copy = |from: &str, to: &str| {
+        let bytes = std::fs::read(first.path().join(from)).unwrap();
+        second.file(to, &bytes);
+    };
+    copy(
+        "derivatives/dcm-anon/1.2.9.A/1.2.9.A.1.1",
+        "derivatives/dcm-anon/a/one.dcm",
+    );
+    copy(
+        "derivatives/dcm-anon/1.2.9.A/1.2.9.A.1.1",
+        "derivatives/dcm-anon/a/one-again.dcm",
+    );
+    copy(
+        "derivatives/dcm-anon/1.2.9.A/1.2.9.A.2.1",
+        "derivatives/dcm-anon/a/two.dcm",
+    );
+    scan_file(&second, "S-0001", "1.2.9.C", "1.2.9.C.1", "20260407", "dwi");
+    // and a file of the first subject's first scan, its instance UID, filed
+    // under another series of the same subject: no merge answers that, a
+    // person lets it go (the duplicate policy's defaults, 2026-10-10)
+    {
+        let sop = "1.2.9.A.1.1";
+        let mut e = synth::minimal_mr("1.2.9.A", "1.2.9.A.7", sop);
+        e.push(synth::text(tags::PATIENT_ID, VR::LO, "S-0001"));
+        e.push(synth::text(tags::STUDY_DATE, VR::DA, "20260102"));
+        e.push(synth::text(tags::SERIES_DESCRIPTION, VR::LO, "t1 mprage"));
+        second.file(
+            "derivatives/dcm-anon/a/other-series.dcm",
+            &synth::part10(&MetaFields::mr(sop), &e, true),
+        );
+    }
+    add("second", &second);
+
+    let server = Worked::serve(&home, false);
+    let sources = server.get("/api/sources", OPS);
+    let card = |name: &str| -> Value {
+        sources["sources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["name"] == name)
+            .cloned()
+            .unwrap_or_else(|| panic!("no source {name}: {sources}"))
+    };
+    let (one, two) = (card("first"), card("second"));
+    assert_eq!(one["totals"]["stacks"], 4, "{one}");
+    assert_eq!(one["totals"]["subjects"], 2, "{one}");
+    assert_eq!(two["totals"]["stacks"], 2, "the copied scans: {two}");
+    assert_eq!(two["totals"]["subjects"], 1, "{two}");
+    assert_eq!(two["totals"]["studies"], 1, "{two}");
+    assert_eq!(two["totals"]["refused_files"], 0, "{two}");
+    assert_eq!(two["totals"]["same_instance_files"], 2, "{two}");
+    let files = &two["digests"]["recent"][0]["files"];
+    assert_eq!(
+        (
+            files["new"].as_i64(),
+            files["known"].as_i64(),
+            files["twice"].as_i64(),
+            files["same_instance"].as_i64()
+        ),
+        (Some(0), Some(2), Some(1), Some(2)),
+        "{two}"
+    );
+
+    let summary = server.get("/api/datasets/second/summary", READS);
+    assert_eq!(summary["scans"], 2, "{summary}");
+    assert_eq!(summary["subjects"], 1, "{summary}");
+    let read = step(&summary, "read");
+    assert_eq!(
+        (
+            read["new"].as_i64(),
+            read["known"].as_i64(),
+            read["twice"].as_i64(),
+            read["same_instance"].as_i64(),
+            read["refused"].as_i64()
+        ),
+        (Some(0), Some(2), Some(1), Some(2), Some(0)),
+        "{summary}"
+    );
+    assert_eq!(summary["files"]["known"], 2, "{summary}");
+    assert_eq!(summary["identity_questions"], 2, "{summary}");
+    assert_eq!(
+        (
+            summary["files"]["left_out"].as_i64(),
+            summary["files"]["gone"].as_i64()
+        ),
+        (Some(0), Some(0)),
+        "{summary}"
+    );
+    let page = server.get("/api/datasets/second/scans?limit=200", READS);
+    assert_eq!(page["total"], 2, "{page}");
+    let grid = server.get("/api/datasets/second/subjects", READS);
+    assert_eq!(grid["subjects"].as_array().unwrap().len(), 1, "{grid}");
+    // the first dataset is as it was
+    let summary = server.get("/api/datasets/first/summary", READS);
+    assert_eq!(summary["scans"], 4, "{summary}");
+    assert_eq!(step(&summary, "read")["new"], 4, "{summary}");
+
+    // one question about the file the registry holds under another subject
+    let mut store = home.store();
+    let item = store.qualified("review_item");
+    let open = store
+        .query(
+            &format!(
+                "SELECT COUNT(*) FROM {item} WHERE kind = 'identity.same_instance' AND status = 'open'"
+            ),
+            &[],
+        )
+        .unwrap()[0]
+        .int(0)
+        .unwrap();
+    assert_eq!(open, 2);
+
+    // the dataset's Review lists both, as its summary counts them
+    let listed = server.get("/api/review?dataset=second&status=open", OPS);
+    let same: Vec<&Value> = listed["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|i| i["kind"] == "identity.same_instance")
+        .collect();
+    assert_eq!(same.len(), 2, "{listed}");
+    let by_kind = server.get("/api/review/summary?dataset=second", OPS);
+    assert_eq!(by_kind["by_kind"]["identity.same_instance"], 2, "{by_kind}");
+    // a scan under another subject is a merge's, not a let-go's
+    let of = |differs: &str| -> i64 {
+        same.iter()
+            .find(|i| i["evidence"]["differs"][differs].is_i64())
+            .and_then(|i| i["id"].as_i64())
+            .unwrap_or_else(|| panic!("no item differing by {differs}: {listed}"))
+    };
+    let (by_subject, by_series) = (of("subject"), of("series"));
+    let (status, refused) = server.call(
+        "POST",
+        &format!("/api/review/{by_subject}/let-go"),
+        Some(serde_json::json!({"keep": true, "why": "the same scan"})),
+        OPS,
+    );
+    assert_eq!(status, 409, "{refused}");
+    assert!(
+        refused["error"].as_str().unwrap_or("").contains("merge"),
+        "{refused}"
+    );
+    let (status, _) = server.call(
+        "POST",
+        &format!("/api/review/{by_series}/let-go"),
+        Some(serde_json::json!({"keep": true})),
+        OPS,
+    );
+    assert_eq!(status, 400, "a let-go says why");
+    let (status, done) = server.call(
+        "POST",
+        &format!("/api/review/{by_series}/let-go"),
+        Some(serde_json::json!({"keep": true, "why": "a resend of the same scan"})),
+        OPS,
+    );
+    assert_eq!(status, 200, "{done}");
+    assert_eq!(
+        (done["files"].as_i64(), done["keep"].as_bool()),
+        (Some(1), Some(true)),
+        "{done}"
+    );
+    // the next read files it as a copy; the other question stays
+    let before = step(&server.get("/api/datasets/second/summary", READS), "read");
+    drop(server);
+    home.ok(&["digest", "--name", "second", "--no-private", "@second"]);
+    let server = Worked::serve(&home, false);
+    let summary = server.get("/api/datasets/second/summary", READS);
+    let read = step(&summary, "read");
+    assert_eq!(read["same_instance"], 1, "{summary}");
+    assert_eq!(
+        read["twice"].as_i64().unwrap() + read["known"].as_i64().unwrap(),
+        before["twice"].as_i64().unwrap() + before["known"].as_i64().unwrap() + 1,
+        "{summary}"
+    );
+    assert_eq!(summary["identity_questions"], 1, "{summary}");
+    let mut store = home.store();
+    let audit = store.qualified("audit");
+    let acts = store
+        .query(
+            &format!("SELECT COUNT(*) FROM {audit} WHERE action = 'review.let_go'"),
+            &[],
+        )
+        .unwrap()[0]
+        .int(0)
+        .unwrap();
+    assert_eq!(acts, 1);
+    drop(server);
+}
+
+#[test]
+fn a_dataset_holds_the_scans_its_tree_has_a_file_of() {
+    copies(None);
+}
+
+#[test]
+fn a_dataset_holds_the_scans_its_tree_has_a_file_of_on_postgres_too() {
+    let Some(dsn) = std::env::var("NILS_TEST_POSTGRES_DSN")
+        .ok()
+        .filter(|d| !d.is_empty())
+    else {
+        eprintln!("NILS_TEST_POSTGRES_DSN is not set; the Postgres half is skipped");
+        return;
+    };
+    let schema = "nils_data_page_copies";
+    let drop = || {
+        let mut store = Store::connect_postgres(&dsn, schema).expect("connect");
+        store
+            .batch(&format!(
+                "DROP SCHEMA IF EXISTS {schema} CASCADE; DROP SCHEMA IF EXISTS {schema}_linkage CASCADE"
+            ))
+            .expect("drop");
+    };
+    drop();
+    copies(Some((dsn.clone(), schema.to_string())));
+    drop();
+}
+
+/// A part 10 file of a SOP class the read does not take, in a dataset's
+/// tree: a screen capture, a presentation state or a PDF.
+fn object_file(tree: &TempDir, patient: &str, study: &str, sop: &str, class: &str) {
+    let mut e = synth::minimal_mr(study, &format!("{study}.9"), sop);
+    e.retain(|x| x.tag != tags::SOP_CLASS_UID);
+    e.push(synth::text(tags::SOP_CLASS_UID, VR::UI, class));
+    e.push(synth::text(tags::PATIENT_ID, VR::LO, patient));
+    e.push(synth::text(tags::STUDY_DATE, VR::DA, "20260102"));
+    tree.file(
+        &format!("derivatives/dcm-anon/{study}/{sop}"),
+        &synth::part10(
+            &MetaFields::with("1.2.840.10008.1.2.1", class, sop),
+            &e,
+            true,
+        ),
+    );
+}
+
+/// Record 56 (2026-10-11): what a read set aside by policy is counted, not
+/// asked about. A dataset's screen capture, presentation states and PDF
+/// file no review item, and its summary counts them by kind in plain
+/// words; a file that is not DICOM still asks. A registry an older digest
+/// left an open item of a policy class in has it superseded when it opens
+/// under this binary.
+fn set_aside(pg: Option<(String, String)>) {
+    let home = Home {
+        dir: TempDir::new("data-page-set-aside"),
+        pg,
+    };
+    let (good, _, err) = home.run(&["key", "add", "k"], Some("a data page test key\n"));
+    assert!(good, "{err}");
+    match &home.pg {
+        Some((dsn, schema)) => {
+            home.ok(&[
+                "init",
+                "--backend",
+                "postgres",
+                "--dsn",
+                dsn,
+                "--schema",
+                schema,
+                "--key",
+                "k",
+            ]);
+        }
+        None => {
+            home.ok(&["init", "--key", "k"]);
+        }
+    }
+    let tree = TempDir::new("data-page-set-aside-ds");
+    scan_file(
+        &tree,
+        "S-0001",
+        "1.2.9.A",
+        "1.2.9.A.1",
+        "20260102",
+        "t1 mprage",
+    );
+    scan_file(&tree, "S-0001", "1.2.9.A", "1.2.9.A.2", "20260102", "flair");
+    object_file(
+        &tree,
+        "S-0001",
+        "1.2.9.A",
+        "1.2.9.A.9.1",
+        "1.2.840.10008.5.1.4.1.1.7",
+    );
+    object_file(
+        &tree,
+        "S-0001",
+        "1.2.9.A",
+        "1.2.9.A.9.2",
+        "1.2.840.10008.5.1.4.1.1.11.1",
+    );
+    object_file(
+        &tree,
+        "S-0001",
+        "1.2.9.A",
+        "1.2.9.A.9.3",
+        "1.2.840.10008.5.1.4.1.1.11.1",
+    );
+    object_file(
+        &tree,
+        "S-0001",
+        "1.2.9.A",
+        "1.2.9.A.9.4",
+        "1.2.840.10008.5.1.4.1.1.104.1",
+    );
+    tree.file("derivatives/dcm-anon/notes.txt", b"not a scan at all");
+    home.ok(&[
+        "place",
+        "add",
+        "ds",
+        tree.path().to_str().unwrap(),
+        "--role",
+        "source",
+        "--patient-id",
+        "id-type:patient-id",
+        "--subjects",
+        "generated",
+    ]);
+    home.ok(&["digest", "--name", "ds", "--no-private", "@ds"]);
+
+    // only the file the reader could not take asks a person
+    let open_items = |home: &Home| -> Vec<String> {
+        let mut store = home.store();
+        let sql = format!(
+            "SELECT CAST(ref AS TEXT) FROM {} WHERE kind = 'ingest.quarantine' AND status = 'open' ORDER BY id",
+            store.qualified("review_item")
+        );
+        store
+            .query(&sql, &[])
+            .unwrap()
+            .iter()
+            .map(|r| {
+                let v: Value = serde_json::from_str(r.text(0).unwrap()).unwrap();
+                v["class"].as_str().unwrap().to_string()
+            })
+            .collect()
+    };
+    assert_eq!(open_items(&home), ["not_dicom"]);
+
+    let server = Worked::serve(&home, false);
+    let s = server.get("/api/datasets/ds/summary", READS);
+    assert_eq!(s["scans"], 2, "{s}");
+    assert_eq!(s["files"]["read"], 2, "{s}");
+    assert_eq!(s["files"]["refused"], 5, "{s}");
+    assert_eq!(s["files"]["set_aside"], 4, "{s}");
+    assert_eq!(
+        s["files"]["set_aside_kinds"],
+        json!([
+            {"kind": "presentation_state", "words": "presentation states", "count": 2},
+            {"kind": "pdf", "words": "PDFs", "count": 1},
+            {"kind": "screen_capture", "words": "screen captures", "count": 1},
+        ]),
+        "{s}"
+    );
+    // the link to what was refused goes to the batch of the file that asks
+    assert!(s["files"]["refused_batch"].as_i64().is_some(), "{s}");
+    let read = step(&s, "read");
+    assert_eq!(read["refused"], 5, "{s}");
+    assert_eq!(read["set_aside"], 4, "{s}");
+    drop(server);
+
+    // a registry an older digest left an item of a policy class in
+    {
+        let mut store = home.store();
+        let item = store.qualified("review_item");
+        let meta = store.qualified("registry_meta");
+        let json_text = |t: &str| match home.pg {
+            Some(_) => format!("CAST('{t}' AS JSONB)"),
+            None => format!("'{t}'"),
+        };
+        let at = match home.pg {
+            Some(_) => "CAST('2026-10-10T00:00:00Z' AS TIMESTAMPTZ)",
+            None => "'2026-10-10T00:00:00Z'",
+        };
+        store
+            .execute(
+                &format!(
+                    "INSERT INTO {item} (kind, scope, ref, evidence, status, created_at) VALUES \
+                     ('ingest.quarantine', 'batch', {}, {}, 'open', {at})",
+                    json_text(r#"{"batch_id": 1, "class": "unsupported_sop_class"}"#),
+                    json_text(r#"{"count": 4}"#),
+                ),
+                &[],
+            )
+            .unwrap();
+        store
+            .execute(
+                &format!("UPDATE {meta} SET value = '88' WHERE key = 'schema_version'"),
+                &[],
+            )
+            .unwrap();
+    }
+    assert_eq!(open_items(&home), ["not_dicom", "unsupported_sop_class"]);
+    // opening it under this binary supersedes the policy item, and the
+    // reader's stays open
+    home.ok(&["review", "list"]);
+    assert_eq!(open_items(&home), ["not_dicom"]);
+    let mut store = home.store();
+    let sql = format!(
+        "SELECT actor FROM {} WHERE status = 'superseded'",
+        store.qualified("review_item")
+    );
+    let actors: Vec<String> = store
+        .query(&sql, &[])
+        .unwrap()
+        .iter()
+        .map(|r| r.text(0).unwrap().to_string())
+        .collect();
+    assert_eq!(actors, ["nils"]);
+}
+
+#[test]
+fn a_file_set_aside_by_policy_is_counted_and_asks_nobody() {
+    set_aside(None);
+}
+
+#[test]
+fn a_file_set_aside_by_policy_is_counted_and_asks_nobody_on_postgres_too() {
+    let Some(dsn) = std::env::var("NILS_TEST_POSTGRES_DSN")
+        .ok()
+        .filter(|d| !d.is_empty())
+    else {
+        eprintln!("NILS_TEST_POSTGRES_DSN is not set; the Postgres half is skipped");
+        return;
+    };
+    let schema = "nils_data_page_set_aside";
+    let drop = || {
+        let mut store = Store::connect_postgres(&dsn, schema).expect("connect");
+        store
+            .batch(&format!(
+                "DROP SCHEMA IF EXISTS {schema} CASCADE; DROP SCHEMA IF EXISTS {schema}_linkage CASCADE"
+            ))
+            .expect("drop");
+    };
+    drop();
+    set_aside(Some((dsn.clone(), schema.to_string())));
+    drop();
+}
+
+/// An identified file at the top of a dataset's folder, for the person to
+/// move into its originals: an image of a scan, or a file of a SOP class
+/// the read sets aside (`class`).
+fn original_file(dir: &TempDir, patient: &str, study: &str, sop: &str, class: Option<&str>) {
+    let mut e = synth::minimal_mr(study, &format!("{study}.1"), sop);
+    let meta = match class {
+        Some(class) => {
+            e.retain(|x| x.tag != tags::SOP_CLASS_UID);
+            e.push(synth::text(tags::SOP_CLASS_UID, VR::UI, class));
+            MetaFields::with("1.2.840.10008.1.2.1", class, sop)
+        }
+        None => MetaFields::mr(sop),
+    };
+    e.push(synth::text(tags::PATIENT_ID, VR::LO, patient));
+    e.push(synth::text(tags::STUDY_DATE, VR::DA, "20260102"));
+    e.push(synth::text(tags::SERIES_DESCRIPTION, VR::LO, "t1 mprage"));
+    dir.file(&format!("{patient}/{sop}"), &synth::part10(&meta, &e, true));
+}
+
+/// Nima's model of 2026-10-12: a dataset is a folder that holds stacks and
+/// files, never subjects, and only a cohort has members. "N subjects in a
+/// dataset" are the subjects with a stack whose file is in it, a stack with
+/// files in two datasets is one stack in both, and a subject whose files in
+/// a dataset were all set aside is no subject of it, only a fact about its
+/// set-aside files. Two identified datasets are pseudonymised and read: in
+/// the first a subject with a scan and a presentation state, and a subject
+/// with a presentation state and a screen capture alone, whose scan is in
+/// the second; and two datasets read in place hold one file each of one
+/// scan. The summary, the card's sources door, the main scans summary, the
+/// Grid and its visits, and the ask count and list the subjects through
+/// their stacks, the ask names every dataset holding a stack, and says so
+/// when it describes an answer.
+fn folders(pg: Option<(String, String)>) {
+    const PRESENTATION: &str = "1.2.840.10008.5.1.4.1.1.11.1";
+    const CAPTURE: &str = "1.2.840.10008.5.1.4.1.1.7";
+    let home = Home {
+        dir: TempDir::new("data-page-folders"),
+        pg,
+    };
+    let (good, _, err) = home.run(&["key", "add", "k"], Some("a data page test key\n"));
+    assert!(good, "{err}");
+    match &home.pg {
+        Some((dsn, schema)) => {
+            home.ok(&[
+                "init",
+                "--backend",
+                "postgres",
+                "--dsn",
+                dsn,
+                "--schema",
+                schema,
+                "--key",
+                "k",
+            ]);
+        }
+        None => {
+            home.ok(&["init", "--key", "k"]);
+        }
+    }
+    let ids = TempDir::new("data-page-folders-ids");
+    original_file(&ids, "PAT-P1", "1.2.9.P", "1.2.9.P.1.1", None);
+    original_file(&ids, "PAT-P1", "1.2.9.P", "1.2.9.P.9.1", Some(PRESENTATION));
+    original_file(&ids, "PAT-Q2", "1.2.9.Q", "1.2.9.Q.9.1", Some(PRESENTATION));
+    original_file(&ids, "PAT-Q2", "1.2.9.Q", "1.2.9.Q.9.2", Some(CAPTURE));
+    let other = TempDir::new("data-page-folders-other");
+    original_file(&other, "PAT-Q2", "1.2.9.R", "1.2.9.R.1.1", None);
+    for (name, dir) in [("ids", &ids), ("other", &other)] {
+        home.ok(&[
+            "place",
+            "add",
+            name,
+            dir.path().to_str().unwrap(),
+            "--role",
+            "source",
+            "--move-into",
+            "originals",
+            "--confirm-move",
+            "--unmapped",
+            "code",
+        ]);
+        home.ok(&["pseudonymize", &format!("@{name}")]);
+        home.ok(&[
+            "digest",
+            "--name",
+            name,
+            "--no-private",
+            &format!("@{name}"),
+        ]);
+    }
+    let first = TempDir::new("data-page-folders-first");
+    scan_file(
+        &first,
+        "PAT-S3",
+        "1.2.9.S",
+        "1.2.9.S.1",
+        "20260102",
+        "t1 mprage",
+    );
+    let second = TempDir::new("data-page-folders-second");
+    second.file(
+        "derivatives/dcm-anon/s/copy.dcm",
+        &std::fs::read(
+            first
+                .path()
+                .join("derivatives/dcm-anon/1.2.9.S/1.2.9.S.1.1"),
+        )
+        .unwrap(),
+    );
+    for (name, dir) in [("first", &first), ("second", &second)] {
+        home.ok(&[
+            "place",
+            "add",
+            name,
+            dir.path().to_str().unwrap(),
+            "--role",
+            "source",
+            "--patient-id",
+            "id-type:patient-id",
+            "--subjects",
+            "generated",
+        ]);
+        home.ok(&[
+            "digest",
+            "--name",
+            name,
+            "--no-private",
+            &format!("@{name}"),
+        ]);
+    }
+
+    // a stack set sees the stacks a fingerprint describes
+    home.ok(&["fingerprint"]);
+
+    let server = Worked::serve(&home, false);
+    let ask = |doc: Value| -> Value {
+        let (status, ran) = server.call(
+            "POST",
+            "/api/ask/run",
+            Some(json!({"document": doc, "fresh": true})),
+            READS,
+        );
+        assert_eq!(status, 200, "{ran}");
+        ran
+    };
+    let column = |ran: &Value, name: &str| -> Vec<Value> {
+        let i = ran["columns"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .position(|c| c == name || c["name"] == name)
+            .unwrap_or_else(|| panic!("no column {name}: {ran}"));
+        ran["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r[i].clone())
+            .collect()
+    };
+    let ids_of = |ran: &Value| -> Vec<i64> {
+        column(ran, "id")
+            .iter()
+            .map(|v| v.as_i64().unwrap())
+            .collect()
+    };
+    let at = |level: &str, clause: Option<Value>| {
+        let set = match clause {
+            Some(c) => json!({"grain": level, "where": [c]}),
+            None => json!({"grain": level}),
+        };
+        ask(json!({
+            "ast_version": 1,
+            "sets": {"s": set},
+            "out": {"set": "s", "level": "record",
+                    "columns": [["field", {}, "id"], ["field", {}, "dataset"]],
+                    "order": [[["field", {}, "id"], "asc"]]}
+        }))
+    };
+    let in_dataset = |level: &str, name: &str| {
+        ids_of(&at(
+            level,
+            Some(json!(["=", {}, ["field", {}, "dataset"], name])),
+        ))
+    };
+
+    // every subject by the datasets holding its stacks: P of the first
+    // identified dataset, Q of the second alone, S of both datasets read in
+    // place, its scan one stack in both
+    let people = at("subject", None);
+    let subjects = ids_of(&people);
+    assert_eq!(subjects.len(), 3, "{people}");
+    let named: Vec<Value> = column(&people, "dataset");
+    let of = |name: &str| -> i64 {
+        subjects[named
+            .iter()
+            .position(|d| d == name)
+            .unwrap_or_else(|| panic!("no {name}: {people}"))]
+    };
+    let (p, q, s) = (of("ids"), of("other"), of("first, second"));
+    assert_eq!(in_dataset("subject", "ids"), [p]);
+    assert_eq!(in_dataset("subject", "other"), [q]);
+    assert_eq!(in_dataset("subject", "first"), [s]);
+    assert_eq!(in_dataset("subject", "second"), [s]);
+    let scans = at("stack", None);
+    assert_eq!(
+        ids_of(&scans).len(),
+        3,
+        "the copied scan is one stack: {scans}"
+    );
+    assert_eq!(
+        column(&scans, "dataset")
+            .iter()
+            .filter(|d| *d == "first, second")
+            .count(),
+        1,
+        "{scans}"
+    );
+    assert_eq!(in_dataset("stack", "second").len(), 1);
+    let grouped = ask(json!({
+        "ast_version": 1,
+        "sets": {
+            "people": {"grain": "subject"},
+            "g": {"grain": "group", "group": {"of": "people", "by": [["field", {}, "dataset"]]}}
+        },
+        "out": {"set": "g", "level": "aggregate",
+                "columns": [["field", {}, "dataset"], ["field", {}, "_rows"]]}
+    }));
+    let mut groups: Vec<(Value, Value)> = column(&grouped, "dataset")
+        .into_iter()
+        .zip(column(&grouped, "_rows"))
+        .collect();
+    groups.sort_by_key(|(name, _)| name.as_str().map(str::to_string));
+    assert_eq!(
+        groups,
+        ["first", "ids", "other", "second"]
+            .map(|n| (json!(n), json!(1)))
+            .to_vec(),
+        "{grouped}"
+    );
+    let (status, described) = server.call(
+        "POST",
+        "/api/ask/describe",
+        Some(json!({"document": {
+            "ast_version": 1,
+            "sets": {"people": {"grain": "subject", "where": [["=", {}, ["field", {}, "dataset"], "ids"]]}},
+            "out": {"set": "people", "level": "count"}
+        }})),
+        READS,
+    );
+    assert_eq!(status, 200, "{described}");
+    assert!(
+        described
+            .to_string()
+            .contains("datasets are folders that hold stacks")
+            && described.to_string().contains("only cohorts have members"),
+        "{described}"
+    );
+
+    // the first identified dataset counts P alone; its set-aside files are
+    // three, two of them of one subject with no stack in it
+    let summary = |name: &str| server.get(&format!("/api/datasets/{name}/summary"), READS);
+    let sm = summary("ids");
+    assert_eq!(sm["subjects"], 1, "{sm}");
+    assert_eq!(sm["scans"], 1, "{sm}");
+    assert!(sm.get("no_scans").is_none(), "{sm}");
+    assert_eq!(sm["files"]["set_aside"], 3, "{sm}");
+    assert_eq!(
+        sm["files"]["set_aside_no_scans"],
+        json!({"subjects": 1, "files": 2}),
+        "{sm}"
+    );
+    // the second counts Q, whose scan it holds, and sets nothing aside
+    let sm = summary("other");
+    assert_eq!(sm["subjects"], 1, "{sm}");
+    assert_eq!(
+        sm["files"]["set_aside_no_scans"],
+        json!({"subjects": 0, "files": 0}),
+        "{sm}"
+    );
+    // each dataset read in place counts the one scan and its subject once
+    for name in ["first", "second"] {
+        let sm = summary(name);
+        assert_eq!(
+            (sm["subjects"].clone(), sm["scans"].clone()),
+            (json!(1), json!(1)),
+            "{name}: {sm}"
+        );
+    }
+    let sources = server.get("/api/sources", READS);
+    let card = |name: &str| {
+        sources["sources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["name"] == name)
+            .unwrap_or_else(|| panic!("{name}: {sources}"))["totals"]
+            .clone()
+    };
+    for (name, n) in [("ids", 1), ("other", 1), ("first", 1), ("second", 1)] {
+        let totals = card(name);
+        assert_eq!(totals["subjects"], n, "{name}: {totals}");
+        assert!(totals.get("no_scans").is_none(), "{name}: {totals}");
+    }
+    let picks = server.get("/api/picks/summary?dataset=ids", READS);
+    assert_eq!(picks["subjects"], 1, "{picks}");
+    // the Grid lists P alone, and Q's visits are no visits of the dataset;
+    // the second identified dataset lists Q with its scan
+    let grid = server.get("/api/datasets/ids/subjects", READS);
+    assert_eq!(grid["totals"]["subjects"], 1, "{grid}");
+    let listed: Vec<i64> = grid["subjects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x["id"].as_i64().unwrap())
+        .collect();
+    assert_eq!(listed, [p], "{grid}");
+    let (status, none) = server.call(
+        "GET",
+        &format!("/api/datasets/ids/subjects/{q}/visits"),
+        None,
+        READS,
+    );
+    assert_eq!(status, 404, "{none}");
+    let visits = server.get(&format!("/api/datasets/other/subjects/{q}/visits"), READS);
+    assert_eq!(visits["visits"].as_array().unwrap().len(), 1, "{visits}");
+}
+
+#[test]
+fn a_dataset_is_a_folder_of_stacks_and_counts_subjects_through_them() {
+    folders(None);
+}
+
+#[test]
+fn a_dataset_is_a_folder_of_stacks_on_postgres_too() {
+    let Some(dsn) = std::env::var("NILS_TEST_POSTGRES_DSN")
+        .ok()
+        .filter(|d| !d.is_empty())
+    else {
+        eprintln!("NILS_TEST_POSTGRES_DSN is not set; the Postgres half is skipped");
+        return;
+    };
+    let schema = "nils_data_page_folders";
+    let drop = || {
+        let mut store = Store::connect_postgres(&dsn, schema).expect("connect");
+        store
+            .batch(&format!(
+                "DROP SCHEMA IF EXISTS {schema} CASCADE; DROP SCHEMA IF EXISTS {schema}_linkage CASCADE"
+            ))
+            .expect("drop");
+    };
+    drop();
+    folders(Some((dsn.clone(), schema.to_string())));
     drop();
 }

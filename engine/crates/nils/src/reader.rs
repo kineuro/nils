@@ -573,7 +573,8 @@ pub(crate) fn why(
         match (&set_by["kind"], decided.as_ref()) {
             (Value::String(k), _) if k != "rule" => {
                 line.push_str(&format!(
-                    ", a {k}'s ({})",
+                    ", {}'s ({})",
+                    nils_registry::a_or_an(k),
                     set_by["actor"].as_str().unwrap_or("unnamed")
                 ));
             }
@@ -675,6 +676,9 @@ pub(crate) fn why(
         // `axes`
         "unresolved": notes["unresolved"].as_array().cloned().unwrap_or_default(),
         "overridden": overridden,
+        // record 55 F5: the post-contrast label the time rule gave the
+        // stack, where it has one
+        "contrast_label": crate::contrast::of_stack(store, stack)?,
     })))
 }
 

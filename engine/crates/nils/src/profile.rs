@@ -121,8 +121,14 @@ impl Reading<'_, '_> {
         .map_err(|e| e.to_string())
     }
 
-    /// How many rows `set` holds, and how many subjects, each once.
-    fn count(&mut self, sets: &[(String, Value)], set: &str) -> Result<(i64, i64), String> {
+    /// How many rows `set` holds, and how many subjects, each once; null
+    /// where the ask holds the count back (record 55 K7, small counts at
+    /// plain: fewer than 5 subjects a quasi identifying field chose).
+    fn count(
+        &mut self,
+        sets: &[(String, Value)],
+        set: &str,
+    ) -> Result<(Option<i64>, Option<i64>), String> {
         let p = self.preview(sets, json!({"set": set, "level": "count"}))?;
         let row = p.rows.first().ok_or("the count came back with no row")?;
         let at = |name: &str| {
@@ -131,13 +137,12 @@ impl Reading<'_, '_> {
                 .position(|c| c == name)
                 .and_then(|i| row.get(i))
                 .and_then(Value::as_i64)
-                .unwrap_or(0)
         };
         Ok((at("rows"), at("subjects")))
     }
 
     /// How many members `of` holds, each once: the rows of a group of it by id.
-    fn members(&mut self, mut sets: Vec<(String, Value)>, of: &str) -> Result<i64, String> {
+    fn members(&mut self, mut sets: Vec<(String, Value)>, of: &str) -> Result<Option<i64>, String> {
         let name = fresh(&self.base, "profile_ids");
         sets.push((
             name.clone(),
@@ -147,7 +152,7 @@ impl Reading<'_, '_> {
     }
 
     /// How many members a companion set holds, each once.
-    fn members_of(&mut self, stem: &str, set: Value) -> Result<i64, String> {
+    fn members_of(&mut self, stem: &str, set: Value) -> Result<Option<i64>, String> {
         let name = fresh(&self.base, stem);
         self.members(vec![(name.clone(), set)], &name)
     }

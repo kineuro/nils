@@ -68,6 +68,10 @@ struct Fixture {
     limit: Option<String>,
     #[serde(default)]
     note: Option<String>,
+    /// The detail a fixture runs at (record 25: plain, quasi or sensitive);
+    /// without one, the gate's own, which reads every class an ask may.
+    #[serde(default)]
+    detail: Option<String>,
 }
 
 /// What a fixture left the last time the canonicals were written.
@@ -82,9 +86,21 @@ struct Canonical {
     /// Every row, rendered: the declared normalisation.
     rows: Vec<Vec<String>>,
     /// The funnel's last stage per named set, so a fixture says where its
-    /// subjects went and not only how many came back.
+    /// subjects went and not only how many came back. Null where the
+    /// fixture's detail holds the stage's count back (record 55 K7, small
+    /// counts at plain).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    funnel: BTreeMap<String, i64>,
+    funnel: BTreeMap<String, Option<i64>>,
+    /// The columns answered as their shapes at the fixture's detail (record
+    /// 55 K7); none at the gate's own.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    shaped: Vec<String>,
+    /// The columns with values held back at the fixture's detail, a group's
+    /// mean, spread or count of distinct values of a quasi identifying
+    /// field for a group under 5 subjects (record 55 K7, the ruling of
+    /// 2026-10-12); none at the gate's own.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    held_back: Vec<String>,
 }
 
 /// One fixture's outcome in a run.
@@ -110,6 +126,22 @@ fn scope() -> Scope {
             .into_iter()
             .collect(),
         unsealed: false,
+    }
+}
+
+/// The scope a fixture runs under: the detail it names, as a door gives
+/// it, or the gate's own.
+fn scope_of(f: &Fixture) -> Result<Scope, Exit> {
+    match f.detail.as_deref() {
+        None => Ok(scope()),
+        Some(d) => crate::grants::Detail::parse(d)
+            .map(crate::ask_doors::scope_of_detail)
+            .ok_or_else(|| {
+                usage(format!(
+                    "{}: {d} is not a detail; those are plain, quasi and sensitive",
+                    f.name
+                ))
+            }),
     }
 }
 
@@ -235,7 +267,7 @@ fn run_fixture(
     let text =
         std::fs::read_to_string(&path).map_err(|e| usage(format!("{}: {e}", path.display())))?;
     let ask = parse(&text).map_err(|e| usage(format!("{}: {e}", path.display())))?;
-    let scope = scope();
+    let scope = scope_of(f)?;
     let scheme = Scheme::default();
     let node = "gate".to_string();
     let out = run::run(
@@ -279,7 +311,7 @@ fn run_fixture(
         None,
     )
     .map_err(|e| fail(format!("{}: {e}", f.name)))?;
-    let mut funnel: BTreeMap<String, i64> = BTreeMap::new();
+    let mut funnel: BTreeMap<String, Option<i64>> = BTreeMap::new();
     for stage in &d.funnel {
         funnel.insert(stage.set.clone(), stage.subjects);
     }
@@ -296,6 +328,13 @@ fn run_fixture(
             .map(|r| r.0.iter().map(nils_ask::exec::render).collect())
             .collect(),
         funnel,
+        shaped: out.answer.shaped_names(),
+        held_back: out
+            .answer
+            .held_back_named()
+            .into_iter()
+            .map(|h| h.column)
+            .collect(),
     })
 }
 
@@ -314,6 +353,35 @@ fn differences(want: &Canonical, got: &Canonical) -> Vec<String> {
             "the columns: {} became {}",
             want.columns.join(", "),
             got.columns.join(", ")
+        ));
+    }
+    if want.shaped != got.shaped {
+        out.push(format!(
+            "the columns answered as shapes: {} became {}",
+            if want.shaped.is_empty() {
+                "none".to_string()
+            } else {
+                want.shaped.join(", ")
+            },
+            if got.shaped.is_empty() {
+                "none".to_string()
+            } else {
+                got.shaped.join(", ")
+            }
+        ));
+    }
+    if want.held_back != got.held_back {
+        let named = |c: &[String]| {
+            if c.is_empty() {
+                "none".to_string()
+            } else {
+                c.join(", ")
+            }
+        };
+        out.push(format!(
+            "the columns with values held back: {} became {}",
+            named(&want.held_back),
+            named(&got.held_back)
         ));
     }
     if want.row_count != got.row_count {
@@ -335,13 +403,15 @@ fn differences(want: &Canonical, got: &Canonical) -> Vec<String> {
             break;
         }
     }
+    let said = |n: &Option<i64>| n.map_or_else(|| "held back".to_string(), |n| n.to_string());
     for (set, subjects) in &want.funnel {
         if got.funnel.get(set) != Some(subjects) {
             out.push(format!(
-                "the funnel at {set}: {subjects} subjects became {}",
+                "the funnel at {set}: {} subjects became {}",
+                said(subjects),
                 got.funnel
                     .get(set)
-                    .map(i64::to_string)
+                    .map(said)
                     .unwrap_or_else(|| "no stage".into())
             ));
         }

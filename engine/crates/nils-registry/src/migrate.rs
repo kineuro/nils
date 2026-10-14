@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 85;
+pub const SCHEMA_VERSION: i64 = 98;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -394,7 +394,345 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 85,
         apply: a_classification_notes_what_was_not_asked,
     },
+    Migration {
+        version: 86,
+        apply: the_same_everywhere_id_type_is_built_in,
+    },
+    Migration {
+        version: 87,
+        apply: a_scan_is_held_wherever_its_files_are,
+    },
+    Migration {
+        version: 88,
+        apply: a_scope_keeps_its_own_main_scan_rules,
+    },
+    Migration {
+        version: 89,
+        apply: a_file_set_aside_by_policy_asks_nobody,
+    },
+    Migration {
+        version: 90,
+        apply: a_result_can_be_checked,
+    },
+    Migration {
+        version: 91,
+        apply: a_check_is_a_campaign,
+    },
+    Migration {
+        version: 92,
+        apply: a_refused_item_says_why,
+    },
+    Migration {
+        version: 93,
+        apply: a_failure_says_its_kind,
+    },
+    Migration {
+        version: 94,
+        apply: a_release_keeps_the_picks_it_read,
+    },
+    Migration {
+        version: 95,
+        apply: a_stack_carries_its_contrast_label,
+    },
+    Migration {
+        version: 96,
+        apply: a_site_chooses_a_model_per_task,
+    },
+    Migration {
+        version: 97,
+        apply: a_file_s_content_is_learnt_when_it_is_read,
+    },
+    Migration {
+        version: 98,
+        apply: system_one_beside_the_rules,
+    },
 ];
+
+/// Record 55 F2 and F5 (spec §12.3): the post-contrast label of each stack,
+/// the time rule's and the subject step's (`contrast_label`). Only a table
+/// is added; a registry from before has no labels until its sessions are
+/// labelled (`nils contrast label`, or the next classification).
+fn a_stack_carries_its_contrast_label(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_tables(store, kind, &["contrast_label"])
+}
+
+/// Record 55 D4: several admitted models per task and slot, and the one a
+/// site chose (`model_choice`). Only a table is added; a registry from
+/// before has no choice, and each task answers with its default.
+/// Record 55 D3, D6 and D7 with record 56 (spec §11): System 1's answers
+/// as a second opinion (`opinion`), the rounds of a rules version and a
+/// System 1 version and the gate's outcomes on flagged datasets, a
+/// question's mode and the provisional answers and reads of blind-first
+/// review, the blind mark and the seconds on a decision and on a
+/// campaign's answer, a campaign's purpose and its reveals, a dataset's
+/// damaged-header flag, and the audit draws. Only tables and columns are
+/// added; no row is touched.
+fn system_one_beside_the_rules(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_tables(
+        store,
+        kind,
+        &[
+            "opinion",
+            "review_round",
+            "gate_outcome",
+            "review_provisional",
+            "review_read",
+            "campaign_reveal",
+            "audit_draw",
+            "audit_draw_stack",
+        ],
+    )?;
+    add_columns(store, "review_item", &["mode"])?;
+    add_columns(store, "decision", &["blind", "seconds", "mode"])?;
+    add_columns(store, "campaign", &["purpose"])?;
+    add_columns(store, "campaign_answer", &["blind"])?;
+    add_columns(store, "place", &["headers"])
+}
+
+fn a_site_chooses_a_model_per_task(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_tables(store, kind, &["model_choice"])
+}
+
+/// Record 55 E5: the sha256 of a source file's bytes, learnt when a
+/// pipeline read it whole (`file_content`). Only a table is added; a
+/// registry from before knows no file's content until a run reads it.
+fn a_file_s_content_is_learnt_when_it_is_read(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_tables(store, kind, &["file_content"])
+}
+
+/// After type 3's pipe test (record 55 H3): an item its close could not
+/// write is kept as refused, with when and why, rather than left looking
+/// agreed. Only columns are added; no row is touched.
+fn a_refused_item_says_why(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_columns(store, "campaign_item", &["refused_at", "refused_why"])
+}
+
+/// Record 55 (rulings of 2026-10-12, item 6, carried to releases): a
+/// release keeps the main scans it read, frozen when it is made
+/// (`release_pick`), since a scope's newer rules replace the picks of the
+/// version before. Only a table is added; a release from before has none,
+/// and its readers read the live picks of what it recorded while they are
+/// there.
+fn a_release_keeps_the_picks_it_read(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_tables(store, kind, &["release_pick"])
+}
+
+/// 2026-10-12: a run's failure is recorded with its kind (dependency,
+/// resource, input or the pipeline's own), its cause and what to do, beside
+/// the error it keeps. Only a column is added; a run from before reads its
+/// failure from its error.
+fn a_failure_says_its_kind(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_columns(store, "pipeline_run", &["failure"])
+}
+
+/// Job type 3, check a result (record 55 H3, the build spec's section 7,
+/// the campaign's half): a campaign item names the one result it asks
+/// about, the part set it is read as and, at part grain, the part; a check
+/// item's panels are frozen in `campaign_check_panel`. Only columns and a
+/// table are added; no row is touched.
+fn a_check_is_a_campaign(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_columns(
+        store,
+        "campaign_item",
+        &["derivative_id", "part_set", "part_label"],
+    )?;
+    add_indexes(store, "campaign_item")?;
+    add_tables(store, kind, &["campaign_check_panel"])
+}
+
+/// Job type 3, check a result (record 55 H3, the build spec's section 7,
+/// the result's half): a derivative gains its grid, the scan whose grid it
+/// is on and how the two are tied, its part sets, and the status a check
+/// writes; each part of a mask is a row of `derivative_part`. Only columns
+/// and a table are added: a mask registered before gains its grid and its
+/// parts from `nils derivative parts` the first time a check needs them,
+/// and no row is touched here.
+fn a_result_can_be_checked(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_columns(
+        store,
+        "derivative",
+        &[
+            "grid",
+            "grid_stack_id",
+            "grid_link",
+            "part_sets",
+            "check_status",
+            "check_reasons",
+            "check_decision_id",
+            "checked_at",
+        ],
+    )?;
+    add_indexes(store, "derivative")?;
+    add_tables(store, kind, &["derivative_part"])
+}
+
+/// Record 56 (the rules decide; Review asks only what matters), 2026-10-11:
+/// a file the read set aside by policy, a SOP class or a modality outside
+/// the batch's knobs, files no review item any more. The open
+/// `ingest.quarantine` items an older digest filed for those classes are
+/// superseded, by `nils` and with the record as the decision, so the queue
+/// shows none of them; the files stay quarantined rows as they were, and an
+/// item of a class the reader decides stays open.
+fn a_file_set_aside_by_policy_asks_nobody(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry || !table_exists(store, "review_item")? {
+        return Ok(());
+    }
+    let rows = store.query(
+        &format!(
+            "SELECT id, CAST(ref AS TEXT) FROM {} WHERE kind = 'ingest.quarantine' AND status = 'open'",
+            store.qualified("review_item")
+        ),
+        &[],
+    )?;
+    let mut ids = Vec::new();
+    for r in &rows {
+        let reference: serde_json::Value =
+            serde_json::from_str(r.opt_text(1)?.unwrap_or("null")).unwrap_or_default();
+        let policy = reference["class"]
+            .as_str()
+            .and_then(nils_dicom::QuarantineClass::from_name)
+            .is_some_and(|c| c.is_policy_class());
+        if policy {
+            ids.push(r.int(0)?.to_string());
+        }
+    }
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let d = store.dialect();
+    let decision = serde_json::json!({
+        "decision": "set_aside",
+        "why": "record 56: a file set aside by policy is counted, not asked about",
+    });
+    store.execute(
+        &format!(
+            "UPDATE {} SET status = 'superseded', decided_at = {}, actor = 'nils', decision = {} \
+             WHERE status = 'open' AND id IN ({})",
+            store.qualified("review_item"),
+            d.param(1, schema::Type::Timestamp),
+            d.param(2, schema::Type::Json),
+            ids.join(", ")
+        ),
+        &[
+            Param::from(crate::time::now_iso()),
+            Param::from(decision.to_string()),
+        ],
+    )?;
+    Ok(())
+}
+
+/// Record 55, decision 6 (the main-scans study, section 4): a dataset or a
+/// cohort may keep main-scan rules of its own, versioned in `pick_rules`; a
+/// pick names the scope it belongs to and the version of the rules it was
+/// made with; and a release names the rules whose picks it read. A registry
+/// from before gains the table empty and the columns null: every pick it
+/// holds is the pack's.
+fn a_scope_keeps_its_own_main_scan_rules(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_tables(store, kind, &["pick_rules", "pick_rules_run"])?;
+    add_columns(
+        store,
+        "pick",
+        &["rules_scope_kind", "rules_scope_id", "rules_version"],
+    )?;
+    add_columns(store, "release", &["pick_rules"])
+}
+
+/// Wave 7a (2026-10-10, found trying the desk): a dataset whose PatientID
+/// held an identifying ID that is the same everywhere failed at its first
+/// run, because the registry's linkage store had no id type for it. Every linkage store has
+/// it now: a fresh one from the seed ([`ID_TYPES`]), one from before from
+/// here, once. A store where a person made the type already keeps theirs.
+fn the_same_everywhere_id_type_is_built_in(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Linkage {
+        return Ok(());
+    }
+    if crate::linkage::id_type_id(store, schema::GENERATOR_ID_TYPE)?.is_some() {
+        return Ok(());
+    }
+    let table = store.qualified("id_type");
+    let d = store.dialect();
+    let sql = format!(
+        "INSERT INTO {table} (name, description) VALUES ({}, {})",
+        d.param(1, crate::schema::Type::Text),
+        d.param(2, crate::schema::Type::Text)
+    );
+    store.execute(
+        &sql,
+        &[
+            Param::from(schema::GENERATOR_ID_TYPE),
+            Param::from(schema::GENERATOR_ID_DESCRIPTION),
+        ],
+    )?;
+    Ok(())
+}
+
+/// Record 55 (Nima's duplicate policy, 2026-10-10): a file whose subject,
+/// study, series and instance UIDs are an instance the registry holds is a
+/// location of that instance, and a dataset holds every scan its tree has a
+/// file of, whoever read the scan first. `source_file` gains when a file was
+/// first seen, filled from when it was last seen on a row from before;
+/// `source_stack`, which sources hold a file of each stack, is filled from
+/// the instances' own files a registry from before recorded; and a copy it
+/// filed by its instance UID alone is marked `unchecked`, so that the next
+/// read of its source compares its subject, study and series and records it
+/// as a copy or holds it. No file is touched.
+fn a_scan_is_held_wherever_its_files_are(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry || !table_exists(store, "source_file")? {
+        return Ok(());
+    }
+    add_columns(store, "source_file", &["first_seen_at"])?;
+    store.execute(
+        &format!(
+            "UPDATE {} SET first_seen_at = seen_at WHERE first_seen_at IS NULL",
+            store.qualified("source_file")
+        ),
+        &[],
+    )?;
+    let fresh = !table_exists(store, "source_stack")?;
+    add_tables(store, kind, &["source_stack"])?;
+    if fresh && table_exists(store, "instance")? && table_exists(store, "instance_frame")? {
+        crate::location::backfill(store)?;
+    }
+    // a copy filed by its instance UID alone is compared on its next read
+    store.execute(
+        &format!(
+            "UPDATE {} SET reason = 'unchecked' WHERE status = 'duplicate' AND reason IS NULL",
+            store.qualified("source_file")
+        ),
+        &[],
+    )?;
+    Ok(())
+}
 
 /// Record 55 H3 (Nima's ruling of 2026-10-09): what the sort decided without
 /// asking anybody is kept on the stack's classification. `notes` holds who
@@ -2426,14 +2764,36 @@ fn add_tables(store: &mut Store, kind: Kind, names: &[&str]) -> Result<(), Error
     Ok(())
 }
 
-/// Create a table's declared indexes that are not there yet.
+/// Create a table's declared indexes that are not there yet, of those whose
+/// columns the table has now. The declaration is the current schema's, so
+/// a migration that runs before a later one added a column leaves that
+/// column's index to the migration that adds it (the review of E1, item
+/// 6: a registry at schema 56 to 59 failed at 60 on the indexes of check
+/// and grid_stack_id, which migration 90 adds).
 fn add_indexes(store: &mut Store, table: &str) -> Result<(), Error> {
     if !table_exists(store, table)? {
         return Ok(());
     }
     let dialect = store.dialect();
     let schema = store.schema().map(str::to_string);
-    for ix in dialect.create_indexes(schema.as_deref(), schema::table(table)) {
+    let mut now = schema::table(table).clone();
+    let named: Vec<&'static str> = now
+        .indexes
+        .iter()
+        .flatten()
+        .chain(now.partial_uniques.iter().flat_map(|p| p.columns.iter()))
+        .copied()
+        .collect();
+    let mut has: std::collections::BTreeMap<&'static str, bool> = std::collections::BTreeMap::new();
+    for c in named {
+        if !has.contains_key(c) {
+            has.insert(c, column_exists(store, table, c)?);
+        }
+    }
+    let there = |cols: &[&str]| cols.iter().all(|c| has.get(c).copied().unwrap_or(false));
+    now.indexes.retain(|key| there(key));
+    now.partial_uniques.retain(|p| there(&p.columns));
+    for ix in dialect.create_indexes(schema.as_deref(), &now) {
         store.batch(&ix)?;
     }
     Ok(())
@@ -2714,12 +3074,64 @@ mod tests {
         let names: Vec<&str> = rows.iter().map(|r| r.text(0).unwrap()).collect();
         assert_eq!(
             names,
-            vec!["patient-id", "study-instance-uid", "subject-code"]
+            vec![
+                "patient-id",
+                "study-instance-uid",
+                "subject-code",
+                "personnummer"
+            ]
         );
         assert_eq!(
             standing(&mut store, Kind::Linkage).unwrap(),
             Standing::Current
         );
+    }
+
+    /// A linkage store from before migration 86 gains the type of an ID
+    /// that is the same everywhere once; one where a person had made it
+    /// keeps theirs (2026-10-10: a dataset declared one and its run failed).
+    #[test]
+    fn a_linkage_store_from_before_gains_the_same_everywhere_id_type() {
+        let mut store = Store::sqlite_in_memory().unwrap();
+        for m in MIGRATIONS.iter().take_while(|m| m.version <= 85) {
+            (m.apply)(&mut store, Kind::Linkage).unwrap();
+            set_version(&mut store, Kind::Linkage, m.version).unwrap();
+        }
+        store
+            .execute("DELETE FROM id_type WHERE name = 'personnummer'", &[])
+            .unwrap();
+        assert_eq!(
+            standing(&mut store, Kind::Linkage).unwrap(),
+            Standing::Behind(85)
+        );
+        migrate(&mut store, Kind::Linkage).unwrap();
+        let count = |store: &mut Store| {
+            store
+                .query(
+                    "SELECT COUNT(*) FROM id_type WHERE name = 'personnummer'",
+                    &[],
+                )
+                .unwrap()[0]
+                .int(0)
+                .unwrap()
+        };
+        assert_eq!(count(&mut store), 1);
+        let described = store
+            .query(
+                "SELECT description FROM id_type WHERE name = 'personnummer'",
+                &[],
+            )
+            .unwrap()[0]
+            .text(0)
+            .unwrap()
+            .to_string();
+        assert_eq!(described, schema::GENERATOR_ID_DESCRIPTION);
+        // once: running it again adds nothing
+        the_same_everywhere_id_type_is_built_in(&mut store, Kind::Linkage).unwrap();
+        assert_eq!(count(&mut store), 1);
+        // the registry store has nothing to do
+        let mut registry = Store::sqlite_in_memory().unwrap();
+        the_same_everywhere_id_type_is_built_in(&mut registry, Kind::Registry).unwrap();
     }
 
     /// A linkage store seeded before record 26 gains `subject-code` from
@@ -2748,6 +3160,77 @@ mod tests {
 #[cfg(test)]
 mod column_migration {
     use super::*;
+
+    /// Record 56 (2026-10-11): the open quarantine items of a policy class an
+    /// older digest filed are superseded; a reader's class stays open, and an
+    /// item a person decided keeps its decision.
+    #[test]
+    fn an_open_item_about_files_set_aside_by_policy_is_superseded() {
+        let mut store = Store::sqlite_in_memory().unwrap();
+        for m in MIGRATIONS.iter().take_while(|m| m.version <= 88) {
+            (m.apply)(&mut store, Kind::Registry).unwrap();
+        }
+        for (id, class, status) in [
+            (1, "unsupported_sop_class", "open"),
+            (2, "unsupported_modality", "open"),
+            (3, "not_dicom", "open"),
+            (4, "missing_modality", "open"),
+            (5, "unsupported_sop_class", "accepted"),
+        ] {
+            store
+                .execute(
+                    &format!(
+                        "INSERT INTO review_item (id, kind, scope, ref, evidence, status, created_at) \
+                         VALUES ({id}, 'ingest.quarantine', 'batch', '{{\"batch_id\": 2, \"class\": \"{class}\"}}', \
+                         '{{\"count\": 3}}', '{status}', '2026-10-10T00:00:00Z')"
+                    ),
+                    &[],
+                )
+                .unwrap();
+        }
+        // another kind with a class of the same name is not the digest's
+        store
+            .execute(
+                "INSERT INTO review_item (id, kind, scope, ref, status, created_at) \
+                 VALUES (6, 'identity.unmapped', 'batch', '{\"class\": \"unsupported_sop_class\"}', 'open', 't')",
+                &[],
+            )
+            .unwrap();
+        a_file_set_aside_by_policy_asks_nobody(&mut store, Kind::Registry).unwrap();
+        // and again, because a migration that has run must be safe to run
+        a_file_set_aside_by_policy_asks_nobody(&mut store, Kind::Registry).unwrap();
+        let rows = store
+            .query(
+                "SELECT id, status, actor, decided_at IS NOT NULL FROM review_item ORDER BY id",
+                &[],
+            )
+            .unwrap();
+        let got: Vec<(i64, String, Option<String>, i64)> = rows
+            .iter()
+            .map(|r| {
+                (
+                    r.int(0).unwrap(),
+                    r.text(1).unwrap().to_string(),
+                    r.opt_text(2).unwrap().map(str::to_string),
+                    r.int(3).unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            got,
+            [
+                (1, "superseded".to_string(), Some("nils".to_string()), 1),
+                (2, "superseded".to_string(), Some("nils".to_string()), 1),
+                (3, "open".to_string(), None, 0),
+                (4, "open".to_string(), None, 0),
+                (5, "accepted".to_string(), None, 0),
+                (6, "open".to_string(), None, 0),
+            ]
+        );
+        // a linkage store has no review items
+        let mut linkage = Store::sqlite_in_memory().unwrap();
+        a_file_set_aside_by_policy_asks_nobody(&mut linkage, Kind::Linkage).unwrap();
+    }
 
     /// A registry written before Wave 2's passes opens under this binary with
     /// the two columns added rather than being rebuilt.
@@ -3090,8 +3573,9 @@ mod column_migration {
         let keys = crate::linkage::Subkeys::derive(b"a test key");
         let mut linkage = Store::sqlite_in_memory().unwrap();
         migrate(&mut linkage, Kind::Linkage).unwrap();
-        let pnr = crate::linkage::add_id_type(&mut linkage, "personnummer", None)
+        let pnr = crate::linkage::ensure_id_type(&mut linkage, "personnummer", None)
             .unwrap()
+            .0
             .id;
         let other = crate::linkage::id_type_id(&mut linkage, "patient-id")
             .unwrap()

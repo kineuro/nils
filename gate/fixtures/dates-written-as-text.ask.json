@@ -1,0 +1,39 @@
+{
+  "ast_version": 1,
+  "name": "Sessions between two dates written as text, a day and an instant, by year",
+  "sets": {
+    "visits": {
+      "grain": "session",
+      "where": [
+        [">=", {}, ["field", {}, "first"], "2005-01-01"],
+        ["<", {}, ["field", {}, "first"], "2015-01-01T00:00:00Z"],
+        ["not_in", {}, ["field", {}, "first"], ["2005-01-02", "2006-03-04T05:06:07Z"]]
+      ],
+      "bind": {
+        "year": ["bucket", {"unit": "year"}, ["field", {}, "first"]],
+        "since": ["days_between", {}, ["field", {}, "first"], "2005-01-01"]
+      }
+    },
+    "by_year": {
+      "grain": "group",
+      "group": {"of": "visits", "by": [["field", {}, "year"]]},
+      "bind": {
+        "n": ["count", {"set": "visits"}],
+        "earliest": ["min", {"set": "visits"}, ["field", {}, "first"]],
+        "days_in": ["min", {"set": "visits"}, ["field", {}, "since"]]
+      },
+      "where": [[">", {}, ["field", {}, "earliest"], "2005-06-30"]]
+    }
+  },
+  "out": {
+    "set": "by_year",
+    "level": "aggregate",
+    "columns": [
+      ["field", {}, "year"],
+      ["field", {}, "n"],
+      ["field", {}, "earliest"],
+      ["field", {}, "days_in"]
+    ],
+    "order": [[["field", {}, "year"], "asc"]]
+  }
+}

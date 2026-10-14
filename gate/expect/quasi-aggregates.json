@@ -1,0 +1,32 @@
+{
+  "name": "quasi-aggregates",
+  "question": "The spread of each subject's age at the first visit in ms-cohort-a",
+  "hash": "fbfd89f853b85410d83db15884e39995492692a5bf6c0ff7063b89b117519b5a",
+  "columns": [
+    "_key",
+    "_subject",
+    "n_subjects",
+    "youngest",
+    "oldest",
+    "mean_age",
+    "n_ages"
+  ],
+  "row_count": 1,
+  "rows": [
+    [
+      "1",
+      "",
+      "38",
+      "29",
+      "53",
+      "40.764705882",
+      "11"
+    ]
+  ],
+  "funnel": {
+    "firsts": 38,
+    "people": 38,
+    "scope": 1,
+    "visits": 38
+  }
+}

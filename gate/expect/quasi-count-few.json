@@ -1,0 +1,21 @@
+{
+  "name": "quasi-count-few",
+  "question": "How many subjects were 45 or older at their first visit",
+  "hash": "cc35ccaa46d517539a9fc4eb38df242cdea89d40a4aa72375f64fb344c8a27a3",
+  "columns": [
+    "rows",
+    "subjects"
+  ],
+  "row_count": 1,
+  "rows": [
+    [
+      "2",
+      "2"
+    ]
+  ],
+  "funnel": {
+    "older": 2,
+    "people": 48,
+    "visits": 48
+  }
+}

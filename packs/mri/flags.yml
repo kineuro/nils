@@ -4450,6 +4450,12 @@ flags:
   # such runs carry AngioFlag N, and all are Dixon, so they stay DCE. Rule 2
   # (spatial MIP or subtraction children in the study) is the session's, and
   # the archive holds none.
+  #
+  # Rule 2 waits for a real case (record 55 C3, the ruling of 2026-10-08).
+  # It needs an engine change, since a session pass cannot replace the DCE
+  # that `twist_vibe_dynamic` above decides, and the archive holds no case to
+  # check it on. It is written once a TWIST-VIBE run whose study holds its
+  # MIP or subtraction appears, with that case in the corpus.
   twist_angio_evidence:
     any:
       - angio_flag_y
@@ -4513,7 +4519,10 @@ flags:
   # YBR form, or three samples a pixel): a display composite of the viewer's
   # settings, a map coloured over a synthetic image, not a map (research
   # round 6, question 3, from the SyMRI manual). Read as the SyMRI
-  # screenshot is (record 48, D4): no axis of an image of a person.
+  # screenshot is (record 48, D4) up to MRI pack 1.0.2, and from 1.1.0 a
+  # display composite of its own, construct DisplayComposite and disposition
+  # display_composite, classified and found like any stack and left out of a
+  # release unless asked for (record 55 C3, rules/display.yml).
   colour_pixels:
     any:
       - {text: photometric_interpretation, matches: '^\s*(rgb|ybr)'}
@@ -4607,3 +4616,37 @@ flags:
   ge_adc_by_name_or_label: {any: [ge_plain_adc_named, ge_coil_label_isoadc]}
   eadc_by_words_or_label: {any: [eadc_stated, ge_coil_label_expatt]}
   fa_by_name_or_label: {any: [fa_named, ge_coil_label_fa]}
+
+  # === 28. MRI pack 1.2.0: ruling 17, the stored image component ==========
+  #
+  # Record 55, ruling 17 (Nima, 2026-10-13, Q1 to Q6) and its scope in
+  # ruling 18 (2026-10-14): for six researched cases the construct records
+  # the image component as stored, even for the raw inputs of a quantitative
+  # method (the design repository's
+  # `studies/2026-10-13-agent-reference-protocol-truth/`). N7 stands for
+  # every other plain acquisition: no Magnitude there. rules/component.yml
+  # reads these with the technique.
+
+  # An image as acquired (ORIGINAL) that is not a SyMRI synthetic.
+  r17_acquired: {all: [image_type.is_original, {not: is_synthetic}]}
+  # It states a component other than the magnitude, which the image type
+  # names (`P`, `PHASE MAP`, `R`, `I`) or GE's private image type does (real).
+  r17_states_other_component: {any: [has_phase, has_real, has_imaginary, ge_mdme_real]}
+  # Q4: an ASL image that is neither a difference, a map, a t-test nor an
+  # M0 scan by its own image type: a label or a control image, with or
+  # without a component token (Siemens writes `ORIGINAL\PRIMARY\ASL\NONE`).
+  r17_asl_raw:
+    all:
+      - r17_acquired
+      - {not: {parser: image_type, any_token: [SUB, SUBTRACTION, PERFUSION, RELCBF, CBF, TTEST, M0]}}
+      - {not: r17_states_other_component}
+  # Q3: a Siemens SWI-type 3D EPI (`epfid3d`, named for SWI) whose SWI
+  # processing was off, stored as its magnitude.
+  r17_swi_off_epi_magnitude:
+    all:
+      - {text: manufacturer, prefix: siemens}
+      - {text: text_sequence_name, matches: '^\*?epfid3d'}
+      - {text: search_text, matches: '(^|[^a-z])swi'}
+      - image_type.is_original
+      - {not: has_swi}
+      - has_magnitude

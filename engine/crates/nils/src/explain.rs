@@ -522,8 +522,8 @@ pub(crate) fn text(doc: &Value) -> String {
         // in the same place a rule's answer says which rule.
         if let Some(d) = a["decision"].as_object() {
             out.push_str(&format!(
-                "      a {}, {}, decided {} for the {}{}\n",
-                d["kind"].as_str().unwrap_or("person"),
+                "      {}, {}, decided {} for the {}{}\n",
+                nils_registry::a_or_an(d["kind"].as_str().unwrap_or("person")),
                 d["actor"].as_str().unwrap_or("unnamed"),
                 value,
                 a["axis"].as_str().unwrap_or_default(),

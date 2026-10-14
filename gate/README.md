@@ -54,6 +54,55 @@ the funnel's last stage per named set, so a fixture that drifts says both
 what came back and where the subjects went. A hash alone is not an oracle,
 which is why the rows are here.
 
+## The detail a fixture runs at
+
+A fixture runs at the gate's own detail, which reads every class an ask
+may read, unless it names one with `detail` (record 25: `plain`, `quasi`
+or `sensitive`), as a door gives a person of that detail. Below detail
+quasi a column that reads a quasi-identifying field is answered as its
+shape (record 55 K7), and the canonical lists those columns under
+`shaped`, so both backends must answer the same shapes for the same
+columns. A group's mean, spread and count of distinct values of such a
+field are answered for a group of 5 subjects or more with a value and
+held back (null) below (the ruling of 2026-10-12), and the canonical
+lists the columns with a value held back under `held_back`.
+`quasi-aggregates-plain` holds the rule for one group of 38: the youngest
+and the oldest age are shapes, the mean age and the count of distinct
+ages are numbers. `quasi-by-visit-plain` holds both kinds of group at
+once: the last visit number has 3 subjects, so its mean, its count of
+distinct ages and its spread are held back while the other groups answer
+them. `gold-c-demographics-plain` answers gold C's mean and spread of age
+per cohort at plain, and holds back its count and share of women, since
+the sex is quasi identifying and one cohort's women leave 3 men.
+
+A count of rows a quasi-identifying field chose or grouped is answered at
+plain for none or 5 subjects and more, and held back (null) between, with
+one count more held in each line of groups that holds one, so that a total
+less the counts shown never says it (small counts, the ruling of
+2026-10-12). The canonical lists such columns under `held_back` too, and a
+stage of the funnel held back is `null`. `quasi-age-bands-plain` holds the
+band of 45 and over, 2 subjects, and the band of 25 to 34 beside it, while
+the band of 35 to 44 answers 34; `quasi-count-few-plain` holds a count of 2
+subjects an age chose.
+
+A list's length is a count, so a list of the rows a quasi-identifying field
+chose is answered at plain for none or 5 subjects and more, and held back
+whole between: no row, and every column under `held_back` (small lists, the
+ruling of 2026-10-13). `quasi-list-few-plain` holds the first visits of the
+2 subjects 45 or older, which `quasi-list-few` lists at the gate's own
+detail, and `quasi-list-many-plain` lists the 36 subjects 35 or older.
+
+## Dates written as text
+
+A document writes a date as text, `2020-01-31` or `2020-01-31T08:30:00Z`,
+and the engine reads it as a date wherever a date meets it: Postgres
+compares no date with text. `dates-written-as-text` bounds the sessions
+by a day and an instant, leaves two out by a list, reads a day in a date
+function and compares a group's earliest date with a day;
+`cohorts-made-before-a-date` compares a cohort's instant of making with a
+day and an instant. Both failed on Postgres before 2026-10-12, and both
+backends answer them with one canonical.
+
 ## The Wave 4c fixtures
 
 Wave 4c (`docs/specs/wave4c-the-assistant.md` §6.8) adds eight fixtures, each of

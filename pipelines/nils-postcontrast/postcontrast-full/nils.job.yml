@@ -1,0 +1,131 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# postcontrast-full: model r1's full post-contrast pipeline, the fallback
+# behind the cascade (record 55 E3, spec 12.2). The engine queues it over
+# the stacks a run of postcontrast-cascade marks deferred, given the
+# promoted cascade and the parts its card names: the fusion (the cascade's
+# own) and the arms.
+#
+# Per stack: dcm2niix (retried once), SynthMorph's affine to the MNI
+# template carrying the template regions and the venous regions onto the
+# stack, SynthSeg, SynthStrip; the regions' and the structures' intensities,
+# a Frangi vessel filter and the stripped stack's intensity tail (no N4);
+# model r1's three frozen arms and its fusion with the stack's header
+# evidence, calibrated per site. It answers only T1-type brain at a
+# calibrated site and says "not sure" everywhere else, as the cascade.
+#
+# With a card the tools run in waves on it (several SynthSeg processes,
+# each held to a share of the card) while worker processes convert before
+# and compute the features after; without one, every tool runs on the CPU,
+# one SynthSeg process per 96 GB of the memory given.
+#
+# The image is FreeSurfer 8.2.0's with the card's runtimes beside it
+# (Dockerfile.full). It carries third-party components FreeSurfer
+# distributes whose terms are not ours to pass on, so it is built by each
+# site and never published: the digest below is the image built from this
+# folder, and a site that builds its own pins its own. The weights and the
+# atlases are the run's model inputs, never part of the image; it runs
+# offline.
+name: postcontrast-full
+schema-version: "0.5"
+tool-version: "0.1.0"
+description: >-
+  Answer post_contrast with model r1's full pipeline on the T1-type brain
+  stacks the cascade defers; "not sure" elsewhere.
+
+container-image:
+  type: docker
+  image: "ghcr.io/kineuro/nils-postcontrast-full@sha256:591f596ec1f43accf338a64222f02da3e6c7e6a7a3fbae59790d4e8162f6dde1"
+
+inputs:
+  - id: threads
+    name: Workers
+    type: Number
+    integer: true
+    minimum: 1
+    maximum: 64
+    description: Worker processes computing the stacks' features.
+    value-key: "[THREADS]"
+    command-line-flag: --threads
+    default-value: 12
+    optional: true
+  - id: memory
+    name: Memory
+    type: Number
+    integer: true
+    minimum: 96
+    maximum: 1024
+    description: The memory in GB the run may use; SynthSeg on the CPU runs at most one process per 96 GB of it (one large volume held 85 GB).
+    value-key: "[MEMORY]"
+    command-line-flag: --memory-gb
+    default-value: 96
+    optional: true
+  - id: synthseg_procs
+    name: SynthSeg processes
+    type: Number
+    integer: true
+    minimum: 1
+    maximum: 16
+    description: SynthSeg processes a wave runs on a card at once.
+    value-key: "[SSPROCS]"
+    command-line-flag: --synthseg-procs
+    default-value: 2
+    optional: true
+
+command-line: "nils-postcontrast full --stacks [Manifest] --inputs [Inputs] --output [OutputLocation] [THREADS] [MEMORY] [SSPROCS]"
+
+output-files:
+  - id: scores
+    name: The stack's post-contrast answer or why it has none
+    path-template: "postcontrast/{stack}.json"
+
+suggested-resources:
+  cpu-cores: 16
+  ram: 96
+  walltime-estimate: 1.0
+
+x-nils:
+  contract: 1
+  analysis-level: stack
+  input:
+    layout: stacks
+    header: true
+    geometry: true
+    contrast: true
+  inputs:
+    - id: fusion
+      type: model
+      description: Model r1's frozen fusion (kind head, task axis:post_contrast, JSON) with its per-site calibration and threshold, which the cascade names
+    - id: arms
+      type: model
+      description: Model r1's three frozen image arms with the atlases they were fitted on (JSON), of the same frozen model as the fusion
+    - id: cascade
+      type: model
+      description: The cascade (task axis:post_contrast), whose card names the fusion and the arms by digest
+  outputs:
+    - id: scores
+      kind: table
+      format: json
+      path-template: "postcontrast/{stack}.json"
+      media-type: application/json
+      columns:
+        - {name: p_given, description: "The fused, calibrated probability that contrast was given; null where the stack was not scored"}
+        - {name: value, type: text, description: "given or not_given where the stack is answered, else null"}
+        - {name: confidence, description: "The answer's probability, max(p, 1 - p)"}
+        - {name: answers, type: integer, description: 1 when the stack is answered, else 0}
+        - {name: stage, type: text, description: "full when the full pipeline scored the stack; null otherwise"}
+        - {name: reason, type: text, description: "Why the stack has no answer: sealed, not-mr, not-t1-brain, no-calibration, no-files or not-sure; null when answered"}
+        - {name: arms, type: text, description: "The image arms the stack had (T, U, V); a failed tool leaves the arms it could not feed out, as model r1"}
+        - {name: failed_steps, type: text, description: "The steps that failed for the stack: convert, tools, base, tail, features"}
+        - {name: cascade_digest, type: text, description: The cascade}
+        - {name: fusion_digest, type: text, description: The cascade's fusion}
+        - {name: arms_digest, type: text, description: The arms}
+  needs:
+    gpu: optional
+    memory-gb: 96
+    gpu-memory-gb: 48
+    cores: 16
+    cores-input: threads
+  proposals:
+    - axis: post_contrast
+      description: given or not_given per answered T1-type brain stack the cascade deferred, with the calibrated probabilities, by the cascade's digest

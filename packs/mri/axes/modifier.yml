@@ -252,6 +252,10 @@ values:
   # names are reliable may give the value words through an overlay.
   FlowComp:
     terms: ['flow compensation', 'flow comp', 'gradient moment nulling', 'GMN']
+    # MRI pack 1.2.0 (record 55, rulings 17 and 18): no modifier on an MDME
+    # image as acquired (Q5): GE MAGiC states flow compensation in its
+    # ScanOptions, and the method reads it as part of the acquisition.
+    requires: {not: mdme_acquired_echo}
     detection:
       exclusive: has_flow_comp
   BlackBlood:

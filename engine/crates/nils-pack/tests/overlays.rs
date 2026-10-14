@@ -198,7 +198,7 @@ fn an_overlay_scoped_by_a_selection_is_refused() {
     let d = pack();
     let o = overlay(
         &d,
-        "overlay: k\nversion: 1.0.0\npack: t\nscope: {cohort: nmosd}\nbuckets:\n  agents: {add: [x]}\ncases:\n  - {name: c, stack: {text_contrast: x}, flags: {has_agent: true}}\n",
+        "overlay: k\nversion: 1.0.0\npack: t\nscope: {cohort: d}\nbuckets:\n  agents: {add: [x]}\ncases:\n  - {name: c, stack: {text_contrast: x}, flags: {has_agent: true}}\n",
     );
     let e = nils_pack::Overlay::load(&o).err().unwrap().to_string();
     assert!(e.contains("scoped by origin"), "{e}");

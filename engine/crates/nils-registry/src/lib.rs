@@ -20,9 +20,14 @@ pub mod actor;
 pub mod anchored;
 pub mod asked;
 pub mod audit;
+pub mod audit_draw;
+pub mod blind;
 pub mod campaign;
+pub mod check;
 pub mod clinical;
 pub mod cohort;
+pub mod content;
+pub mod dataset_subjects;
 pub mod day;
 pub mod derivative;
 pub mod dialect;
@@ -37,25 +42,48 @@ pub mod job;
 pub mod keys;
 pub mod labels;
 pub mod linkage;
+pub mod location;
 pub mod lock;
 pub mod measure;
 pub mod merge;
 pub mod migrate;
 pub mod model;
+pub mod opinion;
 pub mod overlay;
 pub mod pair;
 pub mod personnummer;
+pub mod pick_rules;
+pub mod pick_truth;
 pub mod pipeline;
 pub mod place;
 pub mod principal;
 pub mod proposals;
 pub mod pseudonym;
 pub mod review;
+pub mod round;
 pub mod schema;
 pub mod session;
 pub mod store;
 pub mod suggestion;
 pub mod time;
+
+/// A word with the article a sentence gives it, by its first letter: "an
+/// agent", "an adjudicator", "an export place", "a mask", "a unit". The
+/// engine's own words (author kinds, roles, kinds of places, derivatives,
+/// jobs and rows) are all it is asked of.
+pub fn a_or_an(word: impl AsRef<str>) -> String {
+    let word = word.as_ref();
+    let w = word.trim_start().to_ascii_lowercase();
+    let vowel = match w.chars().next() {
+        Some('a' | 'e' | 'i' | 'o') => true,
+        // "an unchecked", "an update"; "a unit", "a user", "a usual"
+        Some('u') => !["uni", "use", "usu", "uti", "ura"]
+            .iter()
+            .any(|p| w.starts_with(p)),
+        _ => false,
+    };
+    format!("{} {word}", if vowel { "an" } else { "a" })
+}
 
 pub use home::{Home, HomeError, InitOptions, Meta, Registry};
 pub use keys::{KeyError, KeyStore};
@@ -122,6 +150,27 @@ impl FromStr for Backend {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_word_takes_the_article_a_sentence_gives_it() {
+        for (word, said) in [
+            ("agent", "an agent"),
+            ("adjudicator", "an adjudicator"),
+            ("export", "an export"),
+            ("embedding", "an embedding"),
+            ("instance", "an instance"),
+            ("output", "an output"),
+            ("unchecked", "an unchecked"),
+            ("person", "a person"),
+            ("rater", "a rater"),
+            ("mask", "a mask"),
+            ("unit", "a unit"),
+            ("user", "a user"),
+            ("", "a "),
+        ] {
+            assert_eq!(super::a_or_an(word), said);
+        }
+    }
     use super::*;
 
     #[test]

@@ -74,6 +74,22 @@ gate:
       question: Per cohort demographics with no value list in the document
       file: fixtures/gold-c.ask.yml
       outcome: passes
+    - name: gold-c-demographics-plain
+      family: gold
+      question: The same demographics, asked at detail plain
+      file: fixtures/gold-c.ask.yml
+      outcome: passes
+      detail: plain
+      note: >-
+        Record 55 K7, the ruling of 2026-10-12: at detail plain each
+        cohort's mean age and its spread (stddev) are the numbers of the
+        fixture above, since each cohort holds 5 subjects or more, and its
+        youngest and oldest age are shapes. The sex is quasi identifying,
+        so the count of women is a count a quasi identifying field chose
+        (small counts, the ruling of 2026-10-12): ms-cohort-b's 9 women of
+        12 subjects leave 3 men, under 5, so its count and share of women
+        are held back, and ms-cohort-a's with them, so that the women of
+        both cohorts less ms-cohort-a's do not say ms-cohort-b's.
 
     # --- the conformance suite (section 13.3): every hook and every
     #     disputed construct, hashed on both backends
@@ -150,6 +166,26 @@ gate:
       outcome: passes
       note: The sequences over one subject, ordered by day then precision then key.
 
+    # --- 2026-10-12: a date written as text, which Postgres refused
+    - name: dates-written-as-text
+      family: conformance
+      question: Sessions between two dates written as text, a day and an instant, by year
+      file: fixtures/dates-written-as-text.ask.json
+      outcome: passes
+      note: >-
+        A text a date meets is read as a date: a day and an instant bound
+        the range, a list leaves two out, a date function reads a day, and a
+        group's earliest date is compared with a day. Postgres compares no
+        date with text and refused every one of them before 2026-10-12.
+    - name: cohorts-made-before-a-date
+      family: conformance
+      question: The cohorts made since a day and before an instant, both written as text
+      file: fixtures/cohorts-made-before-a-date.ask.json
+      outcome: passes
+      note: >-
+        A cohort's instant of making against a day, compared by its day, and
+        against an instant; both cohorts the generator makes are in use.
+
     # --- record 38 S4: a group keyed by an axis of the pack
     - name: axis-group-single
       family: record 38
@@ -186,6 +222,120 @@ gate:
         compiler that forgot the predicate answers a third row, excluded,
         with the captures in it, which is the defect of record 35 this
         gate could not see before the generator wrote one.
+
+    # --- record 55 K7: an aggregate of a quasi identifying field follows
+    # the field, at the detail a fixture names (`detail`, record 25)
+    - name: quasi-aggregates
+      family: record 55
+      question: The spread of each subject's age at the first visit in ms-cohort-a
+      file: fixtures/quasi-aggregates.ask.yml
+      outcome: passes
+      note: >-
+        The bench's grouped question at the gate's own detail, which reads
+        quasi identifying fields: the count of subjects, the youngest, the
+        oldest and the mean age at the first visit, and the count of
+        distinct ages, as values.
+    - name: quasi-aggregates-plain
+      family: record 55
+      question: The same spread, asked at detail plain
+      file: fixtures/quasi-aggregates.ask.yml
+      outcome: passes
+      detail: plain
+      note: >-
+        The same document at detail plain (the ruling of 2026-10-12): the
+        youngest and the oldest age are one person's own and are answered as
+        their shapes, and the canonical names them as shaped; the mean age
+        and the count of distinct ages are numbers, the fixture above's,
+        since the group holds 5 subjects or more, and the count of subjects
+        reads no value.
+    - name: quasi-by-visit
+      family: record 55
+      question: The age at each visit number in ms-cohort-a, its mean, youngest, count of distinct values and spread
+      file: fixtures/quasi-by-visit.ask.yml
+      outcome: passes
+      note: >-
+        At the gate's own detail every group's mean, youngest, count of
+        distinct ages and spread are values, the last group's from 3
+        subjects.
+    - name: quasi-by-visit-plain
+      family: record 55
+      question: The same ages by visit number, asked at detail plain
+      file: fixtures/quasi-by-visit.ask.yml
+      outcome: passes
+      detail: plain
+      note: >-
+        At detail plain (the ruling of 2026-10-12) the youngest is a shape
+        in every group; the mean, the count of distinct ages and the spread
+        are the values above in a group of 5 subjects or more, and null in
+        the last group, which holds 3, and the canonical names those three
+        columns as held back.
+
+    - name: quasi-age-bands
+      family: record 55
+      question: The subjects of ms-cohort-a per five-year band of their age at the first visit
+      file: fixtures/quasi-age-bands.ask.yml
+      outcome: passes
+      note: >-
+        At the gate's own detail every band's count of subjects, its count
+        of first sessions and its share of the cohort are numbers.
+    - name: quasi-age-bands-plain
+      family: record 55
+      question: The same bands, asked at detail plain
+      file: fixtures/quasi-age-bands.ask.yml
+      outcome: passes
+      detail: plain
+      note: >-
+        At detail plain (small counts, the ruling of 2026-10-12) the band
+        is a shape, and the counts of the subjects an age grouped are held
+        back for a band under 5 subjects: the band of 45 and over holds 2,
+        so its subjects, its sessions and its share are null, and so are
+        the band of 25 to 34's, the smallest band beside it, so that the 44
+        subjects with an age less the band shown say neither. The funnel
+        holds back the subjects with an age at the first visit, since the
+        clause that chose them dropped 4 subjects from the 48 before it.
+    - name: quasi-count-few
+      family: record 55
+      question: How many subjects were 45 or older at their first visit
+      file: fixtures/quasi-count-few.ask.yml
+      outcome: passes
+      note: At the gate's own detail, a count of 2 subjects and 2 sessions.
+    - name: quasi-count-few-plain
+      family: record 55
+      question: The same count, asked at detail plain
+      file: fixtures/quasi-count-few.ask.yml
+      outcome: passes
+      detail: plain
+      note: >-
+        At detail plain (small counts, the ruling of 2026-10-12) a filter on
+        an age chose the rows, and they are 2 subjects, under 5: the count
+        of rows and of subjects is held back.
+    - name: quasi-list-few
+      family: record 55
+      question: The first visits of the subjects 45 or older at that visit
+      file: fixtures/quasi-list-few.ask.yml
+      outcome: passes
+      note: At the gate's own detail, a list of 2 rows, one per subject.
+    - name: quasi-list-few-plain
+      family: record 55
+      question: The same list, asked at detail plain
+      file: fixtures/quasi-list-few.ask.yml
+      outcome: passes
+      detail: plain
+      note: >-
+        At detail plain (small lists, the ruling of 2026-10-13) a filter on
+        an age chose the rows, and they are 2 subjects, under 5: a list's
+        length is a count, so no row is answered, and every column is named
+        as held back.
+    - name: quasi-list-many-plain
+      family: record 55
+      question: The first visits of the subjects 35 or older, asked at detail plain
+      file: fixtures/quasi-list-many.ask.yml
+      outcome: passes
+      detail: plain
+      note: >-
+        At detail plain an age chose the rows, and they are 36 subjects, 5
+        or more: the list is answered, one row per subject, and nothing is
+        held back.
 
     # --- what this wave does not answer, named rather than hidden
     - name: pair-grain-matching

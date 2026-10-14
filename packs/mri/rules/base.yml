@@ -39,6 +39,7 @@ order:
   - 'technique:DWI-TSE'
   - 'bold:gre_epi'
   - 'construct:m0'
+  - 'r17:asl_label_control'
   - 'technique:ASL'
   - 'perfusion:single_volume'
   - 'technique:Perfusion-EPI'
@@ -419,10 +420,25 @@ rules:
     confidence: 0.95
     why: 'the M0 scan of an ASL is its proton-density reference'
 
+  # MRI pack 1.2.0 (record 55, ruling 17, Q4): an ASL label or control
+  # image as acquired, which rules/component.yml gives the construct
+  # Magnitude, is base ASL. Only the label minus control difference is
+  # perfusion-weighted (DeltaM, below), and the M0 scan is PDw (above).
+  'r17:asl_label_control':
+    clauses:
+      - {when: {all: [{axis: technique, is: 'ASL'}, {axis: construct, is: Magnitude}]}, cite: 'an ASL label or control image', source: construct}
+    set: {base: 'ASL', base_basis: physics, contrast_mix: null}
+    confidence: 0.95
+    why: 'an ASL label or control image is neither perfusion-weighted nor a tissue contrast: the perfusion weighting is the difference of the two'
+
   # [RP5, MQ2, D1, D2]
+  # MRI pack 1.2.0: not a label or control image (above), nor an M0 scan,
+  # which the rule before it takes; said here too, so that what a campaign
+  # freezes from this rule (technique ASL implies PWI) holds of every stack
+  # it is frozen for.
   'technique:ASL':
     clauses:
-      - {when: {axis: technique, is: 'ASL'}, cite: 'ASL', source: technique}
+      - {when: {all: [{axis: technique, is: 'ASL'}, {not: {axis: construct, is: Magnitude}}, {not: {axis: construct, is: M0}}]}, cite: 'ASL', source: technique}
     set: {base: 'PWI', base_basis: physics, contrast_mix: null}
     confidence: 0.95
     why: 'arterial spin labelling is perfusion-weighted imaging'

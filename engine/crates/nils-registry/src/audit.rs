@@ -22,6 +22,10 @@ use crate::time::now_iso;
 pub enum Action {
     Decision,
     ReviewAccept,
+    /// A person let go the files of an `identity.same_instance` item: kept as
+    /// another location of their instance, or left out of the read (record
+    /// 55, the duplicate policy's defaults, 2026-10-10).
+    ReviewLetGo,
     ClinicalImport,
     VocabularyLoad,
     LinkageImport,
@@ -86,6 +90,9 @@ pub enum Action {
     ModelAdmit,
     ModelPromote,
     ModelRetire,
+    /// Record 55 D4: a site chose the model that answers a task and slot,
+    /// or sent the task back to its default.
+    ModelChoose,
     /// Record 42 S3: a person picked the stack that stands for a session's
     /// role, or withdrew a person's pick. The ask reads picks, so both
     /// move the epoch.
@@ -133,6 +140,10 @@ pub enum Action {
     /// from v0 imported as person decisions.
     LabelsExport,
     LabelsImport,
+    /// Record 55 E6: a label set made outside the engine, registered with
+    /// its provenance and the sha256 of every file, its rows keyed by
+    /// DICOM identity.
+    LabelsRegister,
     /// Record 40 R3: a sample sealed for certification, never training data.
     LabelsSeal,
     /// Record 48 R2: a certificate recorded for a sealed sample, and the
@@ -141,7 +152,8 @@ pub enum Action {
     LabelsUnseal,
     /// Record 48, D1 of the move: what a system said of a stack of a sample
     /// sealed now was read at the keyboard with `--unsealed-access`, and the
-    /// reason given. It changes nothing.
+    /// reason given; or at the derivative content door under sealed:see,
+    /// naming the derivative. It changes nothing.
     SealedRead,
     /// Record 43: a descriptor added to the pipeline catalog, a pipeline
     /// run over a frozen selection (its derivatives and review items with
@@ -154,6 +166,12 @@ pub enum Action {
     /// series that hold no instance removed (`nils repair empty-stacks`).
     /// The rows gone are what an ask reads, so it moves the epoch.
     RegistryRepair,
+    /// 2026-10-12: a tool the engine runs beside itself installed by an
+    /// admin, dcm2niix, from its pinned release. It changes no judgement.
+    ToolInstall,
+    /// Record 55 H2: a session scheme kept under a name at its door, as
+    /// `nils session scheme add` keeps one. A new name relabels nothing.
+    SessionScheme,
 }
 
 impl Action {
@@ -161,6 +179,7 @@ impl Action {
         match self {
             Action::Decision => "decision",
             Action::ReviewAccept => "review.accept",
+            Action::ReviewLetGo => "review.let_go",
             Action::ClinicalImport => "clinical.import",
             Action::VocabularyLoad => "vocabulary.load",
             Action::LinkageImport => "linkage.import",
@@ -199,6 +218,7 @@ impl Action {
             Action::ModelAdmit => "model.admit",
             Action::ModelPromote => "model.promote",
             Action::ModelRetire => "model.retire",
+            Action::ModelChoose => "model.choose",
             Action::PickSet => "pick.set",
             Action::PickWithdraw => "pick.withdraw",
             Action::DerivativeRegister => "derivative.register",
@@ -220,6 +240,7 @@ impl Action {
             Action::CampaignAnchored => "campaign.anchored",
             Action::LabelsExport => "labels.export",
             Action::LabelsImport => "labels.import",
+            Action::LabelsRegister => "labels.register",
             Action::LabelsSeal => "labels.seal",
             Action::LabelsCertificate => "labels.certificate",
             Action::LabelsUnseal => "labels.unseal",
@@ -228,6 +249,8 @@ impl Action {
             Action::PipelineRun => "pipeline.run",
             Action::PipelineRuntime => "pipeline.runtime",
             Action::RegistryRepair => "registry.repair",
+            Action::ToolInstall => "tool.install",
+            Action::SessionScheme => "session.scheme",
         }
     }
 
@@ -250,6 +273,7 @@ impl Action {
                 | Action::ModelAdmit
                 | Action::ModelPromote
                 | Action::ModelRetire
+                | Action::ModelChoose
                 | Action::DerivativeRegister
                 | Action::DerivativeRead
                 | Action::CampaignCreate
@@ -268,6 +292,7 @@ impl Action {
                 | Action::CampaignPair
                 | Action::CampaignAnchored
                 | Action::LabelsExport
+                | Action::LabelsRegister
                 | Action::LabelsSeal
                 | Action::LabelsCertificate
                 | Action::LabelsUnseal
@@ -275,6 +300,8 @@ impl Action {
                 | Action::PipelineAdd
                 | Action::PipelineRun
                 | Action::PipelineRuntime
+                | Action::ToolInstall
+                | Action::SessionScheme
         )
     }
 }

@@ -16,7 +16,7 @@ use nils_registry::store::Store;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::ast::{Ask, Clause, Grain, Level, Out, Set};
+use crate::ast::{Ask, Clause, Grain, Level, Out, Set, Src};
 use crate::describe::clause_text;
 use crate::exec::Bounds;
 use crate::repair::Repair;
@@ -24,33 +24,42 @@ use crate::run::{RunError, Runner, count_level, inline_selections, keys_level};
 use crate::validate::{Issue, Names, Scope, validate};
 use crate::{Error as AskError, prepare};
 
-/// One stage of the funnel.
+/// One stage of the funnel. Record 55 K7, small counts at plain (the
+/// ruling of 2026-10-12): below detail quasi, the rows and the subjects of
+/// a stage a quasi identifying field chose are null (held back) for fewer
+/// than 5 subjects, and where the stage dropped fewer than 5 subjects from
+/// the stage before it, which the two counts would say by subtraction.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Stage {
     pub set: String,
     pub grain: String,
     pub stage: String,
-    pub rows: i64,
-    pub subjects: i64,
+    pub rows: Option<i64>,
+    pub subjects: Option<i64>,
     /// Whether the set lies on the subject's path from the cohort down (a
     /// cohort, subject or session set); a stack or event set is a helper a
     /// partner relation reads, and a subject absent from it has not fallen
     /// out.
     pub on_path: bool,
     /// The subject keys surviving, when asked for; bounded by the row cap.
+    /// None where the stage's counts are held back.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub keys: Vec<i64>,
+    /// Why the stage's counts are held back, where they are.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub held_back: Option<String>,
 }
 
-/// A where clause of the answer's set, and what it dropped.
+/// A where clause of the answer's set, and what it dropped; a count held
+/// back is null (record 55 K7, small counts at plain).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Drop {
     pub set: String,
     pub clause: String,
-    pub before: i64,
-    pub after: i64,
+    pub before: Option<i64>,
+    pub after: Option<i64>,
     /// Rows the clause could not judge: its first field was null.
-    pub nulls: i64,
+    pub nulls: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -74,9 +83,9 @@ pub struct ClauseGroup {
     pub grain: String,
     pub group: String,
     pub clauses: usize,
-    pub kept: i64,
-    pub subjects: i64,
-    pub lost: i64,
+    pub kept: Option<i64>,
+    pub subjects: Option<i64>,
+    pub lost: Option<i64>,
 }
 
 pub const GROUPS: [&str; 7] = ["source", "near", "attach", "has", "where", "pick", "out"];
@@ -89,11 +98,12 @@ pub struct Diagnosis {
     pub warnings: Vec<Issue>,
     pub zero_rows: Option<String>,
     pub drops: Vec<Drop>,
-    /// A picked set and how many of its rows tied.
-    pub ties: Vec<(String, i64)>,
+    /// A picked set and how many of its rows tied; null where held back.
+    pub ties: Vec<(String, Option<i64>)>,
     pub unresolved: Vec<Value>,
-    /// A dated set and how many of its rows are coarser than a day.
-    pub coarse: Vec<(String, i64)>,
+    /// A dated set and how many of its rows are coarser than a day; null
+    /// where held back.
+    pub coarse: Vec<(String, Option<i64>)>,
     pub cost: Cost,
     pub funnel: Vec<Stage>,
     /// How the funnel is keyed: `set` (the stages) or `clause` (the groups
@@ -110,6 +120,28 @@ fn by_set() -> String {
 }
 
 impl Diagnosis {
+    /// A document refused before anything runs: its issues and their next
+    /// calls, the repairs made, its cost class, and no counts.
+    pub fn refused(issues: Vec<Issue>, repairs: Vec<Repair>, cost: Cost) -> Diagnosis {
+        let next: Vec<String> = issues.iter().map(|i| i.next.clone()).collect();
+        Diagnosis {
+            valid: false,
+            issues,
+            repairs,
+            warnings: Vec::new(),
+            zero_rows: None,
+            drops: Vec::new(),
+            ties: Vec::new(),
+            unresolved: Vec::new(),
+            coarse: Vec::new(),
+            cost,
+            funnel: Vec::new(),
+            by: by_set(),
+            groups: Vec::new(),
+            next,
+        }
+    }
+
     /// Key the funnel by clause group (Wave 5 section 12.3): the stages of
     /// each set folded into the language's groups, in order; a group a set
     /// has no clause of is not a row; the answer's set ends with `out`.
@@ -123,7 +155,7 @@ impl Diagnosis {
         }
         for set in sets {
             let stages: Vec<&Stage> = self.funnel.iter().filter(|s| s.set == set).collect();
-            let mut before: Option<i64> = None;
+            let mut before: Option<Option<i64>> = None;
             for group in GROUPS.iter().take(6) {
                 let mine: Vec<&&Stage> = stages
                     .iter()
@@ -133,7 +165,11 @@ impl Diagnosis {
                     continue;
                 };
                 let kept = last.rows;
-                let lost = before.map(|b| b - kept).unwrap_or(0).max(0);
+                // a count held back holds what it lost with it
+                let lost = match before {
+                    None => Some(0),
+                    Some(b) => b.zip(kept).map(|(b, k)| (b - k).max(0)),
+                };
                 groups.push(ClauseGroup {
                     set: set.to_string(),
                     grain: last.grain.clone(),
@@ -155,7 +191,7 @@ impl Diagnosis {
                     clauses: 1,
                     kept: last.rows,
                     subjects: last.subjects,
-                    lost: 0,
+                    lost: Some(0),
                 });
             }
         }
@@ -316,20 +352,44 @@ struct Counter<'a> {
     scope: &'a Scope,
 }
 
+/// A count the diagnosis read: its rows and subjects, null where held back
+/// (record 55 K7, small counts at plain), and whether a quasi identifying
+/// field chose the rows it counts below detail quasi.
+#[derive(Debug, Clone, Copy, Default)]
+struct Count {
+    rows: Option<i64>,
+    subjects: Option<i64>,
+    quasi: bool,
+}
+
 impl Counter<'_> {
-    fn count(&mut self, registry: &mut Registry, ask: &Ask) -> Result<(i64, i64), RunError> {
+    /// A count level variant's rows and subjects, as the ask answers them
+    /// under the caller's scope.
+    fn count(&mut self, registry: &mut Registry, ask: &Ask) -> Result<Count, RunError> {
         let v = validate(ask, self.names, self.scope).map_err(AskError::Invalid)?;
+        let quasi = v.quasi_sets.contains(&ask.out.set);
         let (_, a) = self.runner.answer(registry, ask, &v, None, None)?;
         let row = a.rows.first();
-        Ok((
-            row.map(|r| r.int(0)).transpose()?.unwrap_or(0),
-            row.map(|r| r.int(1)).transpose()?.unwrap_or(0),
-        ))
+        let cell = |i: usize| -> Result<Option<i64>, RunError> {
+            Ok(match row {
+                Some(r) => r.opt_int(i)?,
+                None => Some(0),
+            })
+        };
+        Ok(Count {
+            rows: cell(0)?,
+            subjects: cell(1)?,
+            quasi,
+        })
     }
 
-    /// The subject keys of a record level variant, bounded by the cap.
-    fn keys(&mut self, registry: &mut Registry, ask: &Ask) -> Result<(i64, Vec<i64>), RunError> {
+    /// The subject keys of a record level variant, bounded by the cap,
+    /// none where a quasi identifying field chose fewer than
+    /// [`crate::validate::MEASURE_K`] subjects below detail quasi, whose
+    /// count is then held back as a count level variant's is.
+    fn keys(&mut self, registry: &mut Registry, ask: &Ask) -> Result<(Count, Vec<i64>), RunError> {
         let v = validate(ask, self.names, self.scope).map_err(AskError::Invalid)?;
+        let quasi = v.quasi_sets.contains(&ask.out.set);
         let (_, a) = self.runner.answer(registry, ask, &v, None, None)?;
         let mut keys: Vec<i64> = a
             .rows
@@ -343,12 +403,32 @@ impl Counter<'_> {
             .collect();
         keys.sort_unstable();
         keys.dedup();
-        Ok((a.rows.len() as i64, keys))
+        let (rows, subjects) = (a.rows.len() as i64, keys.len() as i64);
+        // a list held back whole (small lists at plain, the ruling of
+        // 2026-10-13) read no row: its count is held, never none
+        if a.rows_held || (quasi && subjects > 0 && subjects < crate::validate::MEASURE_K) {
+            return Ok((
+                Count {
+                    rows: None,
+                    subjects: None,
+                    quasi,
+                },
+                Vec::new(),
+            ));
+        }
+        Ok((
+            Count {
+                rows: Some(rows),
+                subjects: Some(subjects),
+                quasi,
+            },
+            keys,
+        ))
     }
 }
 
-/// Diagnose a document: its issues when invalid (no query), else the
-/// funnel and the counts.
+/// Diagnose a document: its issues when invalid or when the compiler
+/// refuses it (no query), else the funnel and the counts.
 #[allow(clippy::too_many_arguments)]
 pub fn diagnose(
     registry: &mut Registry,
@@ -362,29 +442,20 @@ pub fn diagnose(
     reader: Option<&mut Store>,
 ) -> Result<Diagnosis, RunError> {
     let cost = cost_of(&ask);
+    // the diagnosis compiles what it counts, so what the compiler refuses
+    // is refused before anything is counted, as what the validator refuses
+    // is: a clause the validator passed and the compiler refused, a
+    // `bucket` bound without its unit, failed a count, and the draft door
+    // answered a bare 500 (2026-10-12)
+    let unreadable = crate::run::not_compilable(registry, &ask, names, scope, scheme);
     let prepared = match prepare(ask, names, scope) {
         Ok(p) => p,
-        Err(AskError::Invalid(issues)) => {
-            let next: Vec<String> = issues.iter().map(|i| i.next.clone()).collect();
-            return Ok(Diagnosis {
-                valid: false,
-                issues,
-                repairs,
-                warnings: Vec::new(),
-                zero_rows: None,
-                drops: Vec::new(),
-                ties: Vec::new(),
-                unresolved: Vec::new(),
-                coarse: Vec::new(),
-                cost,
-                funnel: Vec::new(),
-                by: by_set(),
-                groups: Vec::new(),
-                next,
-            });
-        }
+        Err(AskError::Invalid(issues)) => return Ok(Diagnosis::refused(issues, repairs, cost)),
         Err(e) => return Err(e.into()),
     };
+    if !unreadable.is_empty() {
+        return Ok(Diagnosis::refused(unreadable, repairs, cost));
+    }
     let mut ask = prepared.ask;
     let warnings = prepared.validated.warnings.clone();
     let inlined = inline_selections(registry, &mut ask)?;
@@ -406,7 +477,10 @@ pub fn diagnose(
     };
     // the funnel, set by set in topological order, stage by stage
     let mut funnel = Vec::new();
-    let mut stage_counts: BTreeMap<(String, String), (i64, i64)> = BTreeMap::new();
+    let mut stage_counts: BTreeMap<(String, String), (Option<i64>, Option<i64>)> = BTreeMap::new();
+    // the sets whose last stage is held back: a set that narrows one, or
+    // reads below it, starts from the same rows and holds its source too
+    let mut last_held: BTreeSet<String> = BTreeSet::new();
     for name in &validated.order {
         if name.contains("__") {
             continue;
@@ -417,26 +491,49 @@ pub fn diagnose(
         if set.grain == Grain::Group {
             continue;
         }
+        // the subjects of the stage before, as shown
+        let mut before: Option<i64> = None;
+        let from_held = matches!(&set.from, Some(Src::Set(x)) if last_held.contains(x))
+            || set.of.as_ref().is_some_and(|o| last_held.contains(o));
+        let mut held_last = false;
         for (step, label) in steps(set) {
-            let (rows, subjects, keys) = if with_keys {
+            let (mut count, mut keys) = if with_keys {
                 let v = variant(&ask, name, &step, Level::Record);
-                let (rows, keys) = counter.keys(registry, &v)?;
-                (rows, keys.len() as i64, keys)
+                counter.keys(registry, &v)?
             } else {
                 let v = variant(&ask, name, &step, Level::Count);
-                let (rows, subjects) = counter.count(registry, &v)?;
-                (rows, subjects, Vec::new())
+                (counter.count(registry, &v)?, Vec::new())
             };
-            stage_counts.insert((name.clone(), label.clone()), (rows, subjects));
+            // record 55 K7, small counts at plain (the ruling of
+            // 2026-10-12): a stage a quasi identifying field chose that
+            // drops fewer than MEASURE_K subjects from the stage before it
+            // is held back, since the two counts would say the few dropped
+            let k = crate::validate::MEASURE_K;
+            let dropped = before.zip(count.subjects).map(|(b, s)| b - s);
+            let source_held = step == Step::Source && from_held;
+            if count.quasi && (source_held || dropped.is_some_and(|d| d > 0 && d < k)) {
+                count.rows = None;
+                count.subjects = None;
+                keys = Vec::new();
+            }
+            let held_back =
+                (count.quasi && count.subjects.is_none()).then(crate::validate::held_count_why);
+            before = count.subjects;
+            held_last = held_back.is_some();
+            stage_counts.insert((name.clone(), label.clone()), (count.rows, count.subjects));
             funnel.push(Stage {
                 set: name.clone(),
                 grain: set.grain.name().to_string(),
                 stage: label,
-                rows,
-                subjects,
+                rows: count.rows,
+                subjects: count.subjects,
                 on_path: matches!(set.grain, Grain::Cohort | Grain::Subject | Grain::Session),
                 keys,
+                held_back,
             });
+        }
+        if held_last {
+            last_held.insert(name.clone());
         }
     }
     // the answer's where clauses: before, after and the nulls
@@ -454,12 +551,10 @@ pub fn diagnose(
                 .unwrap_or_else(|| "source".into());
             let before = stage_counts
                 .get(&(ask.out.set.clone(), before_label))
-                .map(|c| c.0)
-                .unwrap_or(0);
+                .map_or(Some(0), |c| c.0);
             let after = stage_counts
                 .get(&(ask.out.set.clone(), this.clone()))
-                .map(|c| c.0)
-                .unwrap_or(0);
+                .map_or(Some(0), |c| c.0);
             let mut paths = BTreeSet::new();
             paths_in(c, &mut paths);
             let nulls = match paths.iter().next() {
@@ -476,9 +571,9 @@ pub fn diagnose(
                             Clause::new("is_null").arg(crate::ast::Arg::Clause(Clause::field(p))),
                         );
                     }
-                    counter.count(registry, &v).map(|c| c.0).unwrap_or(0)
+                    counter.count(registry, &v).map_or(Some(0), |c| c.rows)
                 }
-                None => 0,
+                None => Some(0),
             };
             drops.push(Drop {
                 set: ask.out.set.clone(),
@@ -501,13 +596,17 @@ pub fn diagnose(
         }
         v.out.columns = vec![Clause::field("pick.tied")];
         let vv = validate(&v, names, scope).map_err(AskError::Invalid)?;
+        let quasi = vv.quasi_sets.contains(name);
         let (_, a) = counter.runner.answer(registry, &v, &vv, None, None)?;
         let tied = a
             .rows
             .iter()
             .filter(|r| r.opt_int(2).ok().flatten() == Some(1))
             .count() as i64;
-        ties.push((name.clone(), tied));
+        // record 55 K7, small counts at plain: a count of the rows a quasi
+        // identifying field chose
+        let small = a.rows_held || (quasi && tied > 0 && tied < crate::validate::MEASURE_K);
+        ties.push((name.clone(), (!small).then_some(tied)));
     }
     // rows coarser than a day, per dated set with a precision
     let mut coarse = Vec::new();
@@ -529,8 +628,8 @@ pub fn diagnose(
                     .arg(crate::ast::Arg::Text("day".into())),
             );
         }
-        let (rows, _) = counter.count(registry, &v)?;
-        if rows > 0 {
+        let rows = counter.count(registry, &v)?.rows;
+        if rows != Some(0) {
             coarse.push((name.clone(), rows));
         }
     }
@@ -549,9 +648,9 @@ pub fn diagnose(
         .rfind(|((s, _), _)| *s == ask.out.set)
         .map(|(_, c)| c.0);
     let zero_rows = match answer_rows {
-        Some(0) => funnel
+        Some(Some(0)) => funnel
             .iter()
-            .find(|s| s.subjects == 0 && s.rows == 0)
+            .find(|s| s.subjects == Some(0) && s.rows == Some(0))
             .map(|s| {
                 format!(
                     "no {} of {} survives {}; everything after it is empty",

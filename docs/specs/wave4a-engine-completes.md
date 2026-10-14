@@ -192,7 +192,7 @@ whether it is printable and how many distinct values it takes.
 | | files with private elements | distinct elements | orphaned |
 |---|---|---|---|
 | an MS cohort, legacy scanners | 39,997 of 39,997 | 228 | 0 |
-| nmosd | 39,999 of 40,000 | 158 | 0 |
+| study D | 39,999 of 40,000 | 158 | 0 |
 | mix, multi-vendor | 28,503 of 39,963 | 1,377 | 484 |
 
 Five facts decide the design:
@@ -329,7 +329,7 @@ the pack was written by hand and carries the numbers.
 **Measured, three cohorts** (varied within / series that hold it; distinct
 across series). Blank where the cohort has no such element.
 
-| address | reading | nmosd | mix | legacy MS |
+| address | reading | study D | mix | legacy MS |
 |---|---|---|---|---|
 | `0051xx0C` FoV text | parameter, kept | 0/984, 16 | 5/945, 152 | 0/921, 29 |
 | `0051xx0A` TA text | parameter, kept | 0/984, 33 | 44/824, 348 | 28/911, 88 |
@@ -546,7 +546,7 @@ not listed by row, so a file with a thousand bad dates is one line. The
 example mappings and the format are in `packs/clinical/imports/`.
 
 **Proved on the real rows.** On the v0 host, read-only against v0's clinical
-database, the nmosd cohort's rows were exported keyed by the cohort's own
+database, the study D cohort's rows were exported keyed by the cohort's own
 identifier, the cohort's raw DICOM was digested into a scratch registry with
 the same binary (493,708 files, 44 subjects, 82 studies), and every file went
 through the importer, previewed, applied, and applied again: the cohort (1),
@@ -743,7 +743,7 @@ log as a store of its own.
 v0 flags 435k of 518k stacks, most for "no keyword evidence" rather than for
 doubt, and a queue that long is read by nobody. The pack already declares
 emission thresholds per axis (Wave 2 §8.2). **The first thing this slice does
-is turn them up and count what survives**, on the reference corpus and on nmosd,
+is turn them up and count what survives**, on the reference corpus and on study D,
 before a line of grouping is written. The number goes in the pull request.
 
 ### 10.2 Then the spine
@@ -770,21 +770,21 @@ above it. A group is one (kind, value, tier).
 
 | corpus | stacks | threshold | items | stacks asked | groups |
 |---|---|---|---|---|---|
-| nmosd | 2,484 | the pack's (0.70, body_part 0.65) | 3, all `ingest.quarantine` | 0 | 1 |
-| nmosd | 2,484 | 0.75 | 2,528 | 2,433 | 4 |
-| nmosd | 2,484 | 0.85 | 7,286 | 2,475 | 16 |
-| nmosd | 2,484 | 0.95 | 10,791 | 2,483 | 34 |
+| study D | 2,484 | the pack's (0.70, body_part 0.65) | 3, all `ingest.quarantine` | 0 | 1 |
+| study D | 2,484 | 0.75 | 2,528 | 2,433 | 4 |
+| study D | 2,484 | 0.85 | 7,286 | 2,475 | 16 |
+| study D | 2,484 | 0.95 | 10,791 | 2,483 | 34 |
 | mixed | 4,120 | the pack's | 77 | 45 | 9 |
 | mixed | 4,120 | 0.75 | 1,822 | 1,553 | 23 |
 | mixed | 4,120 | 0.85 | 7,114 | 3,024 | 45 |
 | mixed | 4,120 | 0.95 | 10,725 | 3,076 | 108 |
 
-The largest groups at 0.75 on nmosd are body_part brain by keywords
+The largest groups at 0.75 on study D are body_part brain by keywords
 (2,140), body_part spine by keywords (293) and base T1w by physics (92); at
 the pack's thresholds on the mixed corpus they are the votes on base T1w
 (30) and technique FLASH (25), base PDw by physics (9) and body_part spine
 by physics (4). The number that decided the shape: at every threshold the
-queue is tens of questions, not thousands of items. 10,791 items on nmosd
+queue is tens of questions, not thousands of items. 10,791 items on study D
 at 0.95 are 34 questions; 10,725 on the mixed corpus are 108.
 
 **As built (slice 13, 2026-09-06).** The spine is `nils_registry::review`,

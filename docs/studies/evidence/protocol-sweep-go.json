@@ -1,0 +1,23 @@
+{
+ "run": "protocol-sweep-go",
+ "purpose": "p-go's wrong stacks under 0.23.0 and 0.24.0 and the grade's full bad lists, sealed apart and unread until certificate 2's go decision (plan.md section 9)",
+ "study": "studies/2026-10-02-protocol-sweep/plan.md",
+ "created": "2026-10-03T00:57:17Z",
+ "sealed": "2026-10-03T01:02:30Z",
+ "files": 14,
+ "bytes": 82732,
+ "by_folder": {
+  ".": 1,
+  "scoring": 13
+ },
+ "manifest_sha256": "3eed30891dca889c892c135a411fc9aca269a83881c8a910777b3c7990c50357",
+ "per_stack_files_by_folder": {
+  "scoring/#/": 2,
+  "scoring/grade/g-#/": 6,
+  "scoring/grade/g-#/private/": 4
+ },
+ "sha256": {
+  "RUN.json": "fcf9839fc30e5e8147ec4a34828203fb372564f600db2dc3b684c7882eab28e9",
+  "scoring/p-go.stacks": "50bc24033377f0c377c8f3b514af8146c634cd15c213567707bf0e8016e770c7"
+ }
+}

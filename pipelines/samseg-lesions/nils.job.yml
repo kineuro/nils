@@ -17,11 +17,46 @@
 # reaches this without its FLAIR writes nothing here, so the run makes it
 # a pipeline:qc item.
 #
+# The resampling trusts the image headers alone: nothing registers the
+# FLAIR to the T1w, and SAMSEG needs its inputs aligned. Until NILS has a
+# registration step, each unit checks the alignment (the review of
+# 2026-10-12): mri_synthstrip, which reads any contrast, makes a brain
+# mask of the T1w and one of the FLAIR on the T1w's grid, and the Dice of
+# the two, inside the FLAIR's field of view, is the table's column
+# flair_t1_brain_dice. The check holds it against 0.85 (a NILS policy,
+# from the review's segcsvd QC table): below it the session is flagged, a
+# pipeline:qc item, and not failed, and the unit's log says "FLAIR and T1
+# may not be aligned (brain masks agree at 0.xx)". On three open sessions
+# whose two series share the scanner's coordinates the masks agreed at
+# 0.95 to 0.99, and with the FLAIR moved 15 mm at 0.80 to 0.86: the check
+# catches a FLAIR off by 15 mm or more (a patient who moved, another
+# series), not a few millimetres. A unit whose masks could not be made
+# says so and goes on without the column.
+#
+# SAMSEG models the pallidum as white matter unless told to separate it,
+# since on a T1w the two "can't be discerned easily" (SAMSEG's wiki): its
+# wiki, and the review of the starters' rules (record 57, research 02),
+# separate it only with a T2w or a FLAIR among the inputs. So the unit
+# passes `--pallidum-separate` only where it gives SAMSEG the FLAIR, with
+# lesions on and the setting on, and never with the T1w alone, as the
+# earlier versions did. Separating it changes the pallidum and white-matter
+# volumes, so the table's column pallidum_separate says which each unit
+# did, 1 or 0, and results of the two are not compared.
+#
 # The image is FreeSurfer 8.2.0 (run_samseg, surfa in fspython), pinned by
 # its registry manifest digest, resolved 2026-09-24 by a registry manifest
 # request, not pulled. v0 ran SAMSEG standalone (MIT) in a private image;
 # this uses the one inside FreeSurfer, and declares no licence, which v0's
 # notes say SAMSEG needs none of.
+#
+# A check reads the label map (record 55 H3, job type 3): SAMSEG writes
+# its segmentation on the grid of its first input, the T1w, so the map is
+# tied to the T1w the unit was given (`grid: t1w`). It is read as its
+# lesions, each 26-connected component of label 99, and as its
+# structures, each label a part named as FreeSurfer's colour table
+# (FreeSurferColorLUT.txt) names it. The structures are every label the
+# map holds, so where lesions were segmented label 99 is one of them too;
+# with lesions off the map holds no 99 and the lesions have no parts.
 name: samseg-lesions
 schema-version: "0.5"
 tool-version: "freesurfer-8.2.0"
@@ -46,7 +81,7 @@ inputs:
   - id: pallidum_separate
     name: Separate pallidum
     type: Flag
-    description: Segment the pallidum as a class of its own rather than with the putamen.
+    description: "Segment the pallidum as a class of its own rather than as white matter, where the FLAIR is among SAMSEG's inputs (lesions on); with the T1w alone it is never separated, since a T1w cannot tell the two apart. The table's pallidum_separate says which each session had: it changes the pallidum and white-matter volumes."
     value-key: "[PALLIDUM]"
     command-line-flag: "--pallidum-separate"
     default-value: true
@@ -72,15 +107,29 @@ command-line: >-
   if [ "[LESION]" = on ]; then
   if [ -z "$fl" ]; then echo "$a holds no FLAIR, so no lesions"; rm -rf "$w"; continue; fi;
   fspython -c "import sys, surfa; surfa.load_volume(sys.argv[1]).resample_like(surfa.load_volume(sys.argv[2])).save(sys.argv[3])" "$fl" "$f" "$w/flair.mgz" || { rm -rf "$w"; continue; };
+  if mri_synthstrip -i "$f" -m "$w/t1_brain.nii.gz" -t [THREADS] && mri_synthstrip -i "$w/flair.mgz" -m "$w/flair_brain.nii.gz" -t [THREADS]
+  && al=$(fspython -c "import sys, numpy as np, nibabel as n, scipy.ndimage as d; t, f, p, q = (n.load(x) for x in sys.argv[1:5]); m = np.linalg.inv(f.affine) @ t.affine;
+  v = d.affine_transform(np.ones(f.shape[:3], np.float32), m[:3, :3], m[:3, 3], t.shape[:3], order=0) > 0.5; a = (np.asarray(p.dataobj) > 0) & v; b = (np.asarray(q.dataobj) > 0) & v;
+  r = round(2 * float((a & b).sum()) / max(int(a.sum() + b.sum()), 1), 2); print(\"%.2f\" % r);
+  r < 0.85 and print(sys.argv[5] + \": FLAIR and T1 may not be aligned (brain masks agree at %.2f)\" % r, file=sys.stderr)" "$f" "$fl" "$w/t1_brain.nii.gz" "$w/flair_brain.nii.gz" "$a") && [ -n "$al" ];
+  then echo "$a: the brain masks of the FLAIR and the T1w agree at $al (Dice)"; else al=""; echo "$a: the FLAIR was not checked against the T1w"; fi;
+  ps=0; [ -n "[PALLIDUM]" ] && ps=1;
   run_samseg -i "$f" -i "$w/flair.mgz" --lesion --lesion-mask-pattern 0 1 -o "$w/out" --threads [THREADS] [PALLIDUM] || { rm -rf "$w"; continue; };
-  else run_samseg -i "$f" -o "$w/out" --threads [THREADS] [PALLIDUM] || { rm -rf "$w"; continue; }; fi;
+  else al=""; ps=0; run_samseg -i "$f" -o "$w/out" --threads [THREADS] || { rm -rf "$w"; continue; }; fi;
+  echo "$a: the pallidum separate from the white matter: $([ $ps = 1 ] && echo yes || echo no)";
   fspython -c "import sys, surfa; surfa.load_volume(sys.argv[1]).save(sys.argv[2])" "$w/out/seg.mgz" "$d/${b}_desc-samseg_dseg.nii.gz" || { rm -rf "$w"; continue; };
-  fspython -c "import sys, json; print(json.dumps(dict((p[0].strip(), float(p[1])) for n in (\"samseg.stats\", \"sbtiv.stats\") for l in open(sys.argv[1] + \"/\" + n) if l.startswith(\"# Measure\") for p in [l[9:].split(\",\")])))" "$w/out" > "$d/${b}_desc-samseg_volumes.json";
+  fspython -c "import sys, json; r = dict((p[0].strip(), float(p[1])) for n in (\"samseg.stats\", \"sbtiv.stats\") for l in open(sys.argv[1] + \"/\" + n) if l.startswith(\"# Measure\") for p in [l[9:].split(\",\")]);
+  r.update(zip(sys.argv[2::2], map(float, sys.argv[3::2]))); print(json.dumps(r))" "$w/out" ${al:+flair_t1_brain_dice $al} pallidum_separate $ps > "$d/${b}_desc-samseg_volumes.json";
   rm -rf "$w"; done'
 
 x-nils:
   contract: 1
   analysis-level: session
+  # It fixes the earlier versions (the review of 2026-10-12), so a new
+  # run no longer takes them; their runs and results keep their names.
+  # No version list: every earlier version of the name in a catalog.
+  replaces:
+    why: "It separates the pallidum from the white matter only with the FLAIR among SAMSEG's inputs and says which in pallidum_separate; the earlier versions passed --pallidum-separate for a T1w alone too, where SAMSEG cannot tell the two apart, which changes the pallidum and white-matter volumes."
   input:
     layout: bids
     roles: [t1w, flair]
@@ -90,6 +139,57 @@ x-nils:
       kind: mask
       path-template: "sub-{subject}/ses-{session}/anat/*_desc-samseg_dseg.nii.gz"
       media-type: application/x-nifti+gzip
+      grid: t1w
+      parts:
+        - {key: lesions, words: Lesions, kind: components, labels: [99]}
+        - key: structures
+          words: Structures
+          kind: labels
+          names:
+            2: Left-Cerebral-White-Matter
+            3: Left-Cerebral-Cortex
+            4: Left-Lateral-Ventricle
+            5: Left-Inf-Lat-Vent
+            7: Left-Cerebellum-White-Matter
+            8: Left-Cerebellum-Cortex
+            10: Left-Thalamus
+            11: Left-Caudate
+            12: Left-Putamen
+            13: Left-Pallidum
+            14: 3rd-Ventricle
+            15: 4th-Ventricle
+            16: Brain-Stem
+            17: Left-Hippocampus
+            18: Left-Amygdala
+            24: CSF
+            26: Left-Accumbens-area
+            28: Left-VentralDC
+            30: Left-vessel
+            31: Left-choroid-plexus
+            41: Right-Cerebral-White-Matter
+            42: Right-Cerebral-Cortex
+            43: Right-Lateral-Ventricle
+            44: Right-Inf-Lat-Vent
+            46: Right-Cerebellum-White-Matter
+            47: Right-Cerebellum-Cortex
+            49: Right-Thalamus
+            50: Right-Caudate
+            51: Right-Putamen
+            52: Right-Pallidum
+            53: Right-Hippocampus
+            54: Right-Amygdala
+            58: Right-Accumbens-area
+            60: Right-VentralDC
+            62: Right-vessel
+            63: Right-choroid-plexus
+            72: 5th-Ventricle
+            77: WM-hypointensities
+            80: non-WM-hypointensities
+            85: Optic-Chiasm
+            99: Lesion
+            165: Skull
+            258: Head-ExtraCerebral
+            259: Eye-Fluid
     - id: volumes
       kind: table
       format: json
@@ -109,9 +209,12 @@ x-nils:
         - {name: right_hippocampus, unit: mm3}
         - {name: brain_stem, unit: mm3}
         - {name: csf, unit: mm3}
+        - {name: flair_t1_brain_dice, description: "How well the FLAIR sits on the T1w: the Dice of their SynthStrip brain masks on the T1w's grid, inside the FLAIR's field of view; absent when lesions were off"}
+        - {name: pallidum_separate, type: integer, description: "1 where SAMSEG segmented the pallidum apart from the white matter (the FLAIR among its inputs and the setting on), 0 where it did not (the T1w alone, or the setting off); it changes the pallidum and white-matter volumes, so results of 1 and 0 are not comparable"}
   qc:
     - {metric: intracranial, op: ">=", value: 900000, description: "An intracranial volume under 0.9 litres is a failed segmentation more often than a head"}
     - {metric: intracranial, op: "<=", value: 2300000, description: "Over 2.3 litres the segmentation took more than the head"}
+    - {metric: flair_t1_brain_dice, op: ">=", value: 0.85, description: "FLAIR and T1 may not be aligned: their brain masks agree below 0.85 (a NILS policy), and nothing registers them yet"}
   needs:
     cores-input: threads
     gpu: none

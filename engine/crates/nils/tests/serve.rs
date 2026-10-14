@@ -633,6 +633,86 @@ fn the_event_stream_is_display_plumbing() {
     server.finish();
 }
 
+/// 2026-10-11: the capabilities answer while the host's container runtime
+/// is slow to say what it is. The door ran `podman info` itself whenever
+/// its finding was half a minute old, which took 5 s on a busy laptop, and
+/// the desk, which gives the engine 5 s, said every half minute that the
+/// engine did not answer. The look now runs behind the doors.
+///
+/// The stand-in podman answers `info` only once the test lets it, so the
+/// test holds the look out as long as it likes: every read meanwhile must
+/// answer that pipelines wait for the look, which a door that asked podman
+/// itself could not. No read is held to a time: the first read of a cold
+/// debug engine on a busy machine took up to 9 s with an instant podman.
+#[test]
+fn the_capabilities_answer_while_a_slow_runtime_is_looked_at() {
+    let home = registry();
+    let bin = TempDir::new("serve-slow-runtime-bin");
+    let release = bin.path().join("release");
+    // a podman that says it is rootless only once released (or after 25 s), and no GPU
+    let podman = bin.file(
+        "podman",
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = info ]; then\n  i=0\n  while [ ! -e '{}' ] && [ $i -lt 250 ]; do sleep 0.1; i=$((i+1)); done\n  echo true; exit 0\nfi\necho 'podman version 9.9.9-test'\n",
+            release.display()
+        )
+        .as_bytes(),
+    );
+    let smi = bin.file("nvidia-smi", b"#!/bin/sh\nexit 1\n");
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for f in [&podman, &smi] {
+            std::fs::set_permissions(f, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+    let path = format!(
+        "{}:{}",
+        bin.path().display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let server = Server::start(&home, 1000, &[], &[("PATH", &path)]);
+    let read = |server: &Server| {
+        let (status, doc) = server.request("GET", "/api/capabilities", None, None);
+        assert_eq!(status, 200, "{doc}");
+        doc["pipelines"].clone()
+    };
+    let waits = |p: &serde_json::Value| {
+        assert_eq!(p["enabled"], false, "{p}");
+        assert_eq!(p["runtime"], serde_json::Value::Null, "{p}");
+        assert!(
+            p["reason"]
+                .as_str()
+                .is_some_and(|r| r.contains("still looking for a container runtime")),
+            "a read waited for podman instead of answering that the look is out: {p}"
+        );
+    };
+    // while the look is out, the door answers, and says pipelines wait
+    for _ in 0..3 {
+        waits(&read(&server));
+    }
+    // and several callers at once are none of them held behind podman
+    std::thread::scope(|s| {
+        let calls: Vec<_> = (0..3).map(|_| s.spawn(|| read(&server))).collect();
+        for c in calls {
+            waits(&c.join().unwrap());
+        }
+    });
+    // podman answers: the look comes back behind the door, and a read has its finding
+    std::fs::write(&release, b"").unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    loop {
+        let p = read(&server);
+        if p["runtime"]["name"] == "podman" {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the look behind the door never came back: {p}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+}
+
 /// Wave 4a §11.2: the `oidc` mode. The engine validates the token against
 /// the issuer's keys and audience, maps groups to grants, makes the subject
 /// the audit principal, and keeps no user table beyond a cache of claims.
@@ -1162,7 +1242,7 @@ fn the_deployment_surface_has_doors_locations_and_an_archive_that_verifies() {
         "a longhand rule's words"
     );
     assert_eq!(packs_doc["packs"][0]["lists"], lists.len(), "{packs_doc}");
-    assert_eq!(packs_doc["packs"][0]["contract"], 9, "{packs_doc}");
+    assert_eq!(packs_doc["packs"][0]["contract"], 10, "{packs_doc}");
     let (status, batches) = server.request("GET", "/api/batches", None, reader);
     assert_eq!(status, 200, "{batches}");
     assert!(batches["count"].as_i64().unwrap() >= 1, "{batches}");
@@ -3175,6 +3255,9 @@ fn a_dataset_is_declared_on_a_source_place_and_named_by_its_name() {
     };
     let ends = |v: &serde_json::Value, tail: &str| v.as_str().is_some_and(|s| s.ends_with(tail));
 
+    // what the registry held before any source was added (T4 below)
+    let (_, before) = ask("GET", "/api/status", None, ops);
+    let (_, jobs_before) = ask("GET", "/api/jobs?all=1", None, ops);
     // before anything is declared, a look says what the folder holds
     let (status, look) = ask("POST", "/api/ingest/look", Some(r#"{"at": "@old"}"#), ops);
     assert_eq!(status, 200, "{look}");
@@ -3561,6 +3644,15 @@ fn a_dataset_is_declared_on_a_source_place_and_named_by_its_name() {
             "{command}: {refused}"
         );
     }
+    // T4 (Wave 7a §17): every source added through the door so far, the
+    // root and the folders of unknown structure under it among them, and 0
+    // files digested: no batch, and no job queued, since the first look
+    let (status, now) = ask("GET", "/api/status", None, ops);
+    assert_eq!(status, 200, "{now}");
+    assert_eq!(now["batches"], before["batches"], "{now}");
+    let (status, jobs) = ask("GET", "/api/jobs?all=1", None, ops);
+    assert_eq!(status, 200, "{jobs}");
+    assert_eq!(jobs, jobs_before, "a job was queued");
     let (_, listed) = ask("GET", "/api/places", None, ops);
     let row = listed["places"]
         .as_array()
@@ -3611,6 +3703,36 @@ fn a_dataset_is_declared_on_a_source_place_and_named_by_its_name() {
             .join("sub-9/derivatives/dcm-anon/a.dcm")
             .is_file()
     );
+
+    // the type its rule names is the registry's before a dataset declares
+    // it (2026-10-10): refused while the registry lacks it, nothing moved,
+    // then made
+    let early = body(
+        "ds",
+        "source",
+        identified.path(),
+        serde_json::json!({
+            "move_into": "originals",
+            "confirm_move": true,
+            "identity": {"id_type": "study-id", "from": [{"field": "PatientID"}]},
+        }),
+    );
+    let (status, refused) = ask("POST", "/api/places", Some(&early), ops);
+    assert_eq!(status, 400, "{refused}");
+    assert!(
+        refused["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("no ID type named study-id"),
+        "{refused}"
+    );
+    let (status, made) = ask(
+        "POST",
+        "/api/linkage/types",
+        Some(r#"{"name": "study-id"}"#),
+        ops,
+    );
+    assert_eq!(status, 201, "{made}");
 
     // the person's word: the study goes into the originals, and the
     // structure says identified
@@ -5318,7 +5440,13 @@ fn a_chain_runs_through_the_jobs_door_and_a_refused_step_ends_it() {
     assert_eq!(queued["command"][0], "pseudonymize", "{queued}");
     assert_eq!(queued["command"][1], "@ds", "{queued}");
     let then = queued["then"].as_array().unwrap();
-    assert_eq!(then.len(), 3, "{queued}");
+    // record 55 E5: the image models score the batch, last
+    assert_eq!(then.len(), 4, "{queued}");
+    assert_eq!(
+        then[3],
+        serde_json::json!(["score", "@ds", "--name", "chain-1", "--pack-dir", packs()]),
+        "{queued}"
+    );
     assert_eq!(then[0][0], "digest", "{queued}");
     assert!(
         then[0][1]
@@ -5328,14 +5456,19 @@ fn a_chain_runs_through_the_jobs_door_and_a_refused_step_ends_it() {
         "the digest's tree located: {queued}"
     );
     assert_eq!(then[1], serde_json::json!(["fingerprint"]), "{queued}");
-    assert_eq!(then[2], serde_json::json!(["classify"]), "{queued}");
+    // the sort names the packs the engine serves (the T33 pipe test)
+    assert_eq!(
+        then[2],
+        serde_json::json!(["classify", "--pack-dir", packs()]),
+        "{queued}"
+    );
     let first = queued["job"].as_i64().unwrap();
     let mut ids = vec![first];
     let mut job = wait(first);
     assert_eq!(job["state"], "done", "{job}");
     assert_eq!(job["kind"], "pseudonymize", "{job}");
     assert_eq!(job["result"]["files"]["written"], 6, "{job}");
-    assert_eq!(job["then"].as_array().unwrap().len(), 3, "{job}");
+    assert_eq!(job["then"].as_array().unwrap().len(), 4, "{job}");
     assert_eq!(job["chain"]["before"], serde_json::Value::Null, "{job}");
     // the chain, step by step, each job naming the one before
     for expected in ["digest", "fingerprint", "classify"] {
@@ -5354,11 +5487,13 @@ fn a_chain_runs_through_the_jobs_door_and_a_refused_step_ends_it() {
         assert_eq!(job["args"]["detail"], "sensitive", "{job}");
         ids.push(next);
     }
-    // the chain the door queued ends with the sort; record 55 H2 (round 4):
-    // a sort that judged stacks is followed by picking main scans for the
-    // subjects it judged, which the worker queues and links once the sort
-    // is over, and nothing comes after the pick run
-    assert_eq!(job["then"], serde_json::json!([]), "{job}");
+    // record 55 H2 (round 4): a sort that judged stacks is followed by
+    // picking main scans for the subjects it judged, which the worker
+    // queues and links once the sort is over; record 55 E5: the score
+    // comes after the pick run, last
+    let score_step =
+        serde_json::json!([["score", "@ds", "--name", "chain-1", "--pack-dir", packs()]]);
+    assert_eq!(job["then"], score_step, "{job}");
     let sort = *ids.last().unwrap();
     let pick = marked(sort, after)
         .as_i64()
@@ -5368,17 +5503,41 @@ fn a_chain_runs_through_the_jobs_door_and_a_refused_step_ends_it() {
     assert_eq!(picked["kind"], "pick", "{picked}");
     assert_eq!(
         picked["args"]["queued"],
-        serde_json::json!(["pick", "run", "--after-sort", sort.to_string()]),
-        "{picked}"
+        serde_json::json!([
+            "pick",
+            "run",
+            "--after-sort",
+            sort.to_string(),
+            "--pack-dir",
+            packs()
+        ]),
+        "{picked}: the sort's packs"
     );
     assert_eq!(picked["chain"]["before"], sort, "{picked}");
     assert_eq!(picked["args"]["principal"], "ops@lab", "{picked}");
     assert_eq!(picked["args"]["detail"], "sensitive", "{picked}");
-    assert_eq!(picked["then"], serde_json::json!([]), "{picked}");
+    assert_eq!(picked["then"], score_step, "{picked}");
+    let score = marked(pick, after)
+        .as_i64()
+        .unwrap_or_else(|| panic!("no score queued after the pick run {picked}"));
+    let scored = wait(score);
+    assert_eq!(scored["state"], "done", "{scored}");
+    assert_eq!(scored["kind"], "score", "{scored}");
+    assert_eq!(scored["result"]["new_stacks"], 2, "{scored}");
+    // no pipeline answers either step here: each is skipped, and says why
     assert_eq!(
-        picked["chain"]["after"],
+        scored["result"]["queued"],
+        serde_json::json!([]),
+        "{scored}"
+    );
+    assert_eq!(
+        scored["result"]["skipped"][0]["reason"], "no_pipeline",
+        "{scored}"
+    );
+    assert_eq!(
+        scored["chain"]["after"],
         serde_json::Value::Null,
-        "{picked}"
+        "{scored}"
     );
 
     // the batch is the thread: the two batches of one name, the stages
@@ -5591,7 +5750,7 @@ fn a_chain_runs_through_the_jobs_door_and_a_refused_step_ends_it() {
     let ended = marked(second, |j| j["result"]["chain_ended"].clone());
     assert_eq!(
         ended["skipped"],
-        serde_json::json!([["fingerprint"], ["classify"]]),
+        serde_json::json!([["fingerprint"], ["classify", "--pack-dir", packs()]]),
         "{ended}"
     );
     assert!(
@@ -5876,7 +6035,7 @@ fn a_list_on_an_axis_value_rehearses_adopts_and_is_named_on_the_pack() {
         None,
     );
     let classified: serde_json::Value = serde_json::from_str(&classified).unwrap();
-    assert_eq!(classified["pack"], "mri@1.0.2", "{classified}");
+    assert_eq!(classified["pack"], "mri@1.2.0", "{classified}");
 }
 
 /// Record 42 S1: the author of a decision is the verified actor, never the
@@ -6326,6 +6485,7 @@ fn the_model_doors_register_admit_promote_and_a_model_answers_through_apply() {
     );
     assert_eq!(status, 200, "{doc}");
     assert_eq!(doc["retired"], serde_json::Value::Null, "{doc}");
+    assert_eq!(doc["retired_models"], serde_json::json!([]), "{doc}");
     let (status, doc) = server.request("GET", &format!("/api/models/{id}"), None, Some(&reviewer));
     assert_eq!(status, 200, "{doc}");
     assert_eq!(doc["state"], "promoted", "{doc}");
@@ -6959,7 +7119,7 @@ fn a_dataset_added_while_the_engine_runs_is_read_by_its_name() {
     // names the places it had then
     let server = Server::start(
         &home,
-        9,
+        12,
         &[
             "--auth",
             "token",
@@ -6999,6 +7159,35 @@ fn a_dataset_added_while_the_engine_runs_is_read_by_its_name() {
     assert_eq!(
         look["layout"]["settings"]["subjects"]["required"], true,
         "{look}"
+    );
+
+    // an ID type the registry lacks is refused when it is declared, never
+    // at the dataset's first run, in words naming the types there are; the
+    // generator's type is built in and read as an ID that is the same
+    // everywhere (2026-10-10)
+    for body in [
+        r#"{"role": "source", "root": "data-test", "folder": "study-two", "identity": {"id_type": "study-id", "from": [{"field": "PatientID"}]}}"#,
+        r#"{"role": "source", "root": "data-test", "folder": "study-two", "patient_id": "id-type:study-id", "subjects": "generated"}"#,
+    ] {
+        let (status, refused) = server.request("POST", "/api/places", Some(body), ops);
+        assert_eq!(status, 400, "{refused}");
+        let why = refused["error"].as_str().unwrap_or_default();
+        assert!(why.contains("no ID type named study-id"), "{refused}");
+        assert!(why.contains("ID that is the same everywhere"), "{refused}");
+        assert!(why.contains("patient-id"), "{refused}");
+        assert!(!why.contains("subject-code"), "{refused}");
+    }
+    let (status, types) = server.request("GET", "/api/linkage/types", None, ops);
+    assert_eq!(status, 200, "{types}");
+    let built_in = types
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["name"] == "personnummer")
+        .unwrap_or_else(|| panic!("the generator's type is built in: {types}"));
+    assert_eq!(
+        built_in["label"], "ID that is the same everywhere",
+        "{types}"
     );
 
     // added without saying what PatientID holds: added, not read
@@ -7060,8 +7249,8 @@ fn a_dataset_added_while_the_engine_runs_is_read_by_its_name() {
         refused["error"].as_str().unwrap().contains("study-big"),
         "{refused}"
     );
-    let (status, _) = server.request("GET", "/api/places", None, ops);
-    assert_eq!(status, 200);
+    let (status, places) = server.request("GET", "/api/places", None, ops);
+    assert_eq!(status, 200, "{places}");
     let (status, _) = server.request("GET", "/api/capabilities", None, ops);
     assert_eq!(status, 200);
     server.finish();

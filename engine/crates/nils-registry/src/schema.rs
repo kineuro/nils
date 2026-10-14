@@ -352,12 +352,61 @@ fn build_registry() -> Vec<Table> {
                 col("detail", Type::Text),
                 col("instance_id", Type::Int),
                 req("seen_at", Type::Timestamp),
+                // Record 55 (Nima, 2026-10-10): a file is a location of its
+                // instance, the instance's own or another copy of it, and
+                // says when it was first seen as well as when last
+                // (`seen_at`). Null on a row from before, which migration 87
+                // fills from `seen_at`.
+                col("first_seen_at", Type::Timestamp),
             ],
         )
         .unique(&["source_id", "path"])
         .index(&["source_id", "dir"])
         .index(&["batch_id", "status"])
         .index(&["instance_id"]),
+        // Record 55 (Nima's duplicate policy, 2026-10-10): the stacks a
+        // source holds a file of, whoever read the stack first. A file whose
+        // subject, study, series and instance UIDs are an instance the
+        // registry holds is that instance's location and not a new one, so
+        // a dataset holds every scan its tree has a file of, and counts and
+        // lists it as its own; one row per source and stack, written by the
+        // digest as it files a file, moved by an echo fold with the
+        // instances and removed with the stack.
+        Table::new(
+            "source_stack",
+            vec![
+                col("id", Type::Id),
+                req("source_id", Type::Int),
+                req("stack_id", Type::Int),
+                req("first_seen_at", Type::Timestamp),
+            ],
+        )
+        .unique(&["source_id", "stack_id"])
+        .index(&["stack_id"]),
+        // Record 55 E5 (spec section 10.4, ruling R3 of 2026-10-10): the
+        // sha256 of a source file's bytes, learnt when a pipeline read the
+        // file whole and said so, never by a pass over the archive. A file
+        // is named as `source_file` names it, by its source and path, with
+        // the size and time it had when its content was hashed: the hash
+        // holds only while `source_file` still says that size and time, so
+        // a file that changed is never given its old content's hash. The
+        // slice cache is keyed by it beside the SOP Instance UID.
+        Table::new(
+            "file_content",
+            vec![
+                col("id", Type::Id),
+                req("source_id", Type::Int),
+                req("path", Type::Text),
+                req("size", Type::Int),
+                req("mtime_ns", Type::Int),
+                // sha256:<hex>
+                req("sha256", Type::Text),
+                req("learnt_at", Type::Timestamp),
+                // the pipeline run whose image read it whole
+                col("run_id", Type::Int),
+            ],
+        )
+        .unique(&["source_id", "path"]),
         // `code_digest` and `first_batch_id` are null for a subject that
         // `nils linkage import` created: its code came from outside, not from
         // the scheme, and no batch made it (§7.4).
@@ -973,6 +1022,11 @@ fn build_registry() -> Vec<Table> {
                 // lists and what becomes of the originals. Null on any other
                 // role; `place::dataset_of` reads it whole.
                 col("dataset", Type::Json),
+                // Record 56 section 3: a dataset whose headers are damaged
+                // or foreign (stripped names, another site's anonymised
+                // export, another language), as a person flagged it:
+                // {damaged, why, by, at}. Null reads the signs instead.
+                col("headers", Type::Json),
             ],
         )
         .unique(&["name"])
@@ -1214,6 +1268,15 @@ fn build_registry() -> Vec<Table> {
                 col("model_id", Type::Int),
                 col("campaign_id", Type::Int),
                 col("committed_by", Type::Text),
+                // Record 55 D6 (spec §11.4): 1 where the value was given
+                // blind (before any suggestion showed), 0 where it was
+                // not; null for a decision from before the mark, or one no
+                // person answered. Only a blind answer becomes a training
+                // label. The seconds the answer took, where measured, and
+                // the question's mode.
+                col("blind", Type::Int),
+                col("seconds", Type::Double),
+                col("mode", Type::Text),
             ],
         )
         .index(&["scope", "ref", "axis"]),
@@ -1279,13 +1342,22 @@ fn build_registry() -> Vec<Table> {
                 // applying. Withdrawing that person's pick lets it apply
                 // again, so a person's mistake is undone without a new run.
                 col("overruled_by", Type::Int),
+                // Record 55, decision 6 (the main-scans study, section 4):
+                // the scope a pick belongs to, a `dataset` or a `cohort` and
+                // its id, both null for the pack's; and the version of the
+                // scope's rules it was made with (1 is the pack's defaults).
+                // A run writes and replaces the run picks of its own scope.
+                col("rules_scope_kind", Type::Text),
+                col("rules_scope_id", Type::Int),
+                col("rules_version", Type::Int),
             ],
         )
         .index(&["role", "subject_id", "session_day"]),
         // Record 42 S2 (D15): a model whose answers become registry facts,
         // identified by the digest of its canonical artifact and described
         // by its card (`contracts/model/v1`). Registered, admitted by a check
-        // that passed, promoted (one per task and slot), retired; nothing is
+        // that passed, promoted, retired (record 55 D4: several per task and
+        // slot, one of them chosen, `model_choice`); nothing is
         // deleted, because a retired model still names what it decided.
         Table::new(
             "model",
@@ -1337,7 +1409,8 @@ fn build_registry() -> Vec<Table> {
             vec![
                 col("id", Type::Id),
                 req("model_id", Type::Int),
-                // registered, admitted, admission_failed, promoted, retired
+                // registered, admitted, admission_failed, promoted, retired,
+                // chosen, unchosen (record 55 D4)
                 req("transition", Type::Text),
                 req("principal", Type::Text),
                 req("at", Type::Timestamp),
@@ -1345,6 +1418,185 @@ fn build_registry() -> Vec<Table> {
             ],
         )
         .index(&["model_id"]),
+        // Record 55 D4: the model a site chose for a task and slot, as a
+        // history: the newest row of a task and slot is the choice in force,
+        // and a row with no model sends it back to the default (the model a
+        // recorded certificate names). Nothing is deleted.
+        Table::new(
+            "model_choice",
+            vec![
+                col("id", Type::Id),
+                req("task", Type::Text),
+                req("slot", Type::Text),
+                // none: back to the default
+                col("model_id", Type::Int),
+                req("chosen_by", Type::Text),
+                req("chosen_at", Type::Timestamp),
+                col("why", Type::Text),
+            ],
+        )
+        .index(&["task", "slot"]),
+        // Record 55 D3 and record 56 (spec §11.1): System 1's answer on a
+        // stack and axis, a second opinion beside the rules' and never a
+        // decision: its value, its calibrated probability, the rules'
+        // reliability on that header, and the fields that mattered most.
+        // A newer run of a model writes newer rows; the newest is read.
+        Table::new(
+            "opinion",
+            vec![
+                col("id", Type::Id),
+                req("stack_id", Type::Int),
+                req("axis", Type::Text),
+                req("model_id", Type::Int),
+                col("run_id", Type::Int),
+                // a value, values joined by a comma for a multi-valued axis,
+                // or null for "no value here"
+                col("value", Type::Text),
+                req("p", Type::Double),
+                col("reliability", Type::Double),
+                // [{field, effect}], each field's effect measured by
+                // leaving it out, largest first
+                col("fields", Type::Json),
+                col("probabilities", Type::Json),
+                col("note", Type::Text),
+                // 1 where the model said how it read the rules' answer, and
+                // that reading (record 55 D3, after D2): what the gate and
+                // the suggestions compare its answer with
+                col("rules_read", Type::Int),
+                col("rules_value", Type::Text),
+                req("created_at", Type::Timestamp),
+            ],
+        )
+        .index(&["stack_id", "axis"])
+        .index(&["model_id"]),
+        // Record 55 D3 (spec §11.2): a round is a pair of a rules version
+        // and a System 1 version (none until one is chosen); a new rules
+        // release or a new chosen model starts a new one, and the gate's
+        // thresholds, as the model's card set them, belong to the pair.
+        Table::new(
+            "review_round",
+            vec![
+                col("id", Type::Id),
+                req("pack", Type::Text),
+                req("pack_version", Type::Text),
+                col("model_id", Type::Int),
+                // {axis: {lambda1, lambda2}} from the card, frozen here
+                col("gate", Type::Json),
+                // whether a recorded certificate named the model when the
+                // round began (record 56: its gate waits for D2)
+                col("confirmed", Type::Int),
+                req("started_at", Type::Timestamp),
+                req("started_by", Type::Text),
+            ],
+        )
+        .index(&["pack", "pack_version"]),
+        // Record 56 section 3 (spec §11.2): the gate's outcome on a stack
+        // and axis of a dataset flagged as having damaged headers: accepted
+        // (both authors recorded: the round names the rules' version and
+        // System 1's model), disagree or unsure (a review question).
+        Table::new(
+            "gate_outcome",
+            vec![
+                col("id", Type::Id),
+                req("round_id", Type::Int),
+                req("stack_id", Type::Int),
+                req("axis", Type::Text),
+                req("outcome", Type::Text),
+                col("rules_value", Type::Text),
+                col("model_value", Type::Text),
+                col("p", Type::Double),
+                col("reliability", Type::Double),
+                col("review_item", Type::Int),
+                req("at", Type::Timestamp),
+            ],
+        )
+        .unique(&["round_id", "stack_id", "axis"])
+        .index(&["stack_id"]),
+        // Record 55 D6 (spec §11.4): a blind-first question's provisional
+        // answer, given before the suggestions showed, with the time it
+        // took; the suggestions show to that person only after one.
+        Table::new(
+            "review_provisional",
+            vec![
+                col("id", Type::Id),
+                req("item_id", Type::Int),
+                req("principal", Type::Text),
+                // {value} or {values: {axis: value}}, as the apply door
+                // takes it
+                req("answer", Type::Json),
+                col("seconds", Type::Double),
+                req("answered_at", Type::Timestamp),
+            ],
+        )
+        .unique(&["item_id", "principal"]),
+        // Record 55 D6: when a person first opened a review question, so
+        // the time an answer took is measured by the engine.
+        Table::new(
+            "review_read",
+            vec![
+                col("id", Type::Id),
+                req("item_id", Type::Int),
+                req("principal", Type::Text),
+                req("first_read_at", Type::Timestamp),
+                // when the suggestions were first shown to the person
+                col("revealed_at", Type::Timestamp),
+            ],
+        )
+        .unique(&["item_id", "principal"]),
+        // Record 55 D6 (spec §11.4): when a rater of a blind-first
+        // campaign was first shown an item's suggestion, after their answer.
+        Table::new(
+            "campaign_reveal",
+            vec![
+                col("id", Type::Id),
+                req("campaign_id", Type::Int),
+                req("item_id", Type::Int),
+                req("principal", Type::Text),
+                req("revealed_at", Type::Timestamp),
+            ],
+        )
+        .unique(&["item_id", "principal"]),
+        // Record 55 D7 (spec §11.5): a round's blind audit draw, a seeded
+        // share of its accepted stacks keyed by DICOM identity, the frame
+        // it was drawn from (its size and the digest of its identities),
+        // the audit campaign it is read in, and the grade of its settled
+        // answers (the accepted error and its exact bound).
+        Table::new(
+            "audit_draw",
+            vec![
+                col("id", Type::Id),
+                req("round_id", Type::Int),
+                req("seed", Type::Text),
+                req("share", Type::Double),
+                req("frame_count", Type::Int),
+                req("frame_digest", Type::Text),
+                req("drawn", Type::Int),
+                col("campaign_id", Type::Int),
+                req("created_by", Type::Text),
+                req("created_at", Type::Timestamp),
+                col("grade", Type::Json),
+                col("graded_at", Type::Timestamp),
+                col("graded_by", Type::Text),
+            ],
+        )
+        .index(&["round_id"]),
+        // One stack of a draw, by its DICOM identity (the study and series
+        // instance UIDs and the stack key in its series) and its id now, with
+        // the rules' answer it was accepted with, frozen at the draw.
+        Table::new(
+            "audit_draw_stack",
+            vec![
+                col("id", Type::Id),
+                req("draw_id", Type::Int),
+                req("stack_id", Type::Int),
+                req("study_uid", Type::Text),
+                req("series_uid", Type::Text),
+                req("stack_key", Type::Text),
+                // {axis: value} the rules gave it when it was drawn
+                req("accepted", Type::Json),
+            ],
+        )
+        .unique(&["draw_id", "stack_id"]),
         // Record 43: every encoder a head reads, in the order it
         // concatenates their features. A small table rather than a list
         // in the model row, so that the heads a new encoder makes stale are
@@ -1370,6 +1622,49 @@ fn build_registry() -> Vec<Table> {
         )
         .index(&["pick_id"])
         .index(&["stack_id"]),
+        // Record 55, decision 6 (the main-scans study, section 4): a
+        // dataset's or a cohort's own main-scan rules, one row per version.
+        // Version 1 is the pack's defaults and is never stored; a row is
+        // never changed or deleted, so every release names rules it can
+        // still read.
+        Table::new(
+            "pick_rules",
+            vec![
+                col("id", Type::Id),
+                // `dataset` (a source place's id) or `cohort` (a cohort's id)
+                req("scope_kind", Type::Text),
+                req("scope_id", Type::Int),
+                req("version", Type::Int),
+                req("rules", Type::Json),
+                // of the rules as stored
+                req("digest", Type::Text),
+                req("reason", Type::Text),
+                req("author", Type::Text),
+                req("created_at", Type::Timestamp),
+            ],
+        )
+        .unique(&["scope_kind", "scope_id", "version"]),
+        // Record 55, decision 6: each run of a scope's saved rules, so that
+        // a scope is read only once a run of a version has finished over all
+        // its subjects; until then its readers keep the version before, or
+        // the pack's picks. `state` is `running`, `done` or `failed`;
+        // `whole` says the run decided every subject of the scope.
+        Table::new(
+            "pick_rules_run",
+            vec![
+                col("id", Type::Id),
+                req("scope_kind", Type::Text),
+                req("scope_id", Type::Int),
+                req("version", Type::Int),
+                col("job_id", Type::Int),
+                req("state", Type::Text),
+                req("whole", Type::Int),
+                col("error", Type::Text),
+                req("started_at", Type::Timestamp),
+                col("finished_at", Type::Timestamp),
+            ],
+        )
+        .index(&["scope_kind", "scope_id", "version"]),
         // Record 42 S4: a file made from the archive that is not the archive,
         // a mask, an embedding, a pipeline's output, kept in a working place
         // (Wave 5 section 10.2) and named here by its digest. The registry
@@ -1414,12 +1709,38 @@ fn build_registry() -> Vec<Table> {
                 col("supersedes_id", Type::Int),
                 req("created_at", Type::Timestamp),
                 col("withdrawn_at", Type::Timestamp),
+                // Job type 3, check a result (record 55 H3): a mask's grid,
+                // read from its file's header when it is registered, as
+                // {dims, affine (4 by 4, voxel to RAS millimetres),
+                // datatype}; the scan whose grid it is on; and how the two
+                // are tied: `same` (voxel for voxel), `world` (another grid
+                // in the scan's frame, resampled by world position) or
+                // `none` (no scan known, never drawn).
+                col("grid", Type::Json),
+                col("grid_stack_id", Type::Int),
+                col("grid_link", Type::Text),
+                // The part sets the mask is read as: [{key, words, kind
+                // (components, labels or whole), labels, names,
+                // connectivity, note}], its parts in derivative_part.
+                col("part_sets", Type::Json),
+                // The status a check wrote, as a person's decision:
+                // accepted, rejected, flagged or null (not checked), the
+                // result-level reasons of the deciding answer, the
+                // decision's id and when. `check` is a word SQL keeps for
+                // itself, so the column is `check_status`; the doors call
+                // it `check`.
+                col("check_status", Type::Text),
+                col("check_reasons", Type::Json),
+                col("check_decision_id", Type::Int),
+                col("checked_at", Type::Timestamp),
             ],
         )
         .index(&["stack_id"])
         .index(&["subject_id"])
         .index(&["kind"])
         .index(&["sha256"])
+        .index(&["check_status"])
+        .index(&["grid_stack_id"])
         // Record 43 S4: the embedding cache's key. One live embedding per
         // stack, encoder and preprocessing version; a new preprocessing
         // version is a new key, so its rows sit beside the old ones, and a
@@ -1430,6 +1751,37 @@ fn build_registry() -> Vec<Table> {
             &["kind", "stack_id", "model_id", "preprocess_version"],
             "kind = 'embedding' AND withdrawn_at IS NULL",
         ),
+        // Job type 3, check a result (record 55 H3): one part of a mask,
+        // computed in the mask's own grid when it is registered or by
+        // `nils derivative parts`: a connected component of a lesion
+        // label (`components`), or one label of a label map (`labels`).
+        // `label` is the component's number or the label's value; the
+        // anchor is the part's voxel nearest its centre of mass and the box
+        // the world minimum and maximum of its voxels' corners, both in
+        // millimetres, LPS; `position` the order along the grid scan's
+        // slice direction, bottom to top. `check_status` (accepted,
+        // rejected, flagged) is a person's decision, as the result's is.
+        Table::new(
+            "derivative_part",
+            vec![
+                col("id", Type::Id),
+                req("derivative_id", Type::Int),
+                req("part_set", Type::Text),
+                req("label", Type::Int),
+                col("name", Type::Text),
+                req("voxels", Type::Int),
+                req("volume_mm3", Type::Double),
+                req("anchor_mm", Type::Json),
+                req("box_mm", Type::Json),
+                req("position", Type::Int),
+                req("method", Type::Text),
+                col("check_status", Type::Text),
+                col("check_reason", Type::Text),
+                col("check_decision_id", Type::Int),
+            ],
+        )
+        .unique(&["derivative_id", "part_set", "label"])
+        .index(&["derivative_id"]),
         // Wave 3 §8.5: what a release did, as rows.
         //
         // Not a workbook beside the originals under a password kept in a
@@ -1536,6 +1888,10 @@ fn build_registry() -> Vec<Table> {
                 // pipeline run materialised, which the history leaves out
                 // unless asked (the run names it as `input_release_id`).
                 col("purpose", Type::Text),
+                // Record 55, decision 6: the main-scan rules whose picks the
+                // release read, `{scope, version, digest}`, or the pack's
+                // defaults with the pack's version. Null where it read none.
+                col("pick_rules", Type::Json),
             ],
         )
         .index(&["name"]),
@@ -1729,6 +2085,83 @@ fn build_registry() -> Vec<Table> {
             ],
         )
         .index(&["release_id"]),
+        // Record 55 (rulings of 2026-10-12, item 6, carried to releases):
+        // the main scans a release read, frozen when it was made. A
+        // scope's newer rules replace the picks of the version before, and
+        // the pack's run makes its own again, so a reader of a release's
+        // picks after it was made reads these, never the live picks
+        // (`pick_truth::Picks::Frozen`). One row per visit, role and
+        // stack: of each visit the release took a stack of, every live
+        // pick of what it read (`release.pick_rules`) with each stack the
+        // pick names, and the scope and version of the rules the pick was
+        // made with, the scope null for the pack's. Never changed.
+        Table::new(
+            "release_pick",
+            vec![
+                col("id", Type::Id),
+                req("release_id", Type::Int),
+                req("subject_id", Type::Int),
+                // the visit, as the pick names it: its first day
+                req("session_day", Type::Date),
+                req("role", Type::Text),
+                req("stack_id", Type::Int),
+                col("rules_scope_kind", Type::Text),
+                col("rules_scope_id", Type::Int),
+                col("rules_version", Type::Int),
+            ],
+        )
+        .index(&["release_id"])
+        .index(&["stack_id"])
+        .index(&["subject_id"]),
+        // Record 55 F2 and F5 (spec §12.3): the post-contrast label of a
+        // stack, which the time rule's session pass and the subject step
+        // after it write (`nils_pack::contrast`, `nils_classify::contrast`).
+        // One row a stack, written again whole for a subject each time its
+        // sessions are labelled: the state, the minutes since injection and
+        // what they are counted from, where the label came from, the 72-hour
+        // flag, ASL after contrast, and the reason and every check that
+        // fired, with the session's bracket and the rule's version.
+        Table::new(
+            "contrast_label",
+            vec![
+                col("id", Type::Id),
+                req("stack_id", Type::Int),
+                req("study_id", Type::Int),
+                req("subject_id", Type::Int),
+                // pre, post, by_definition, undetermined
+                req("contrast_state", Type::Text),
+                col("minutes_since_injection", Type::Double),
+                // bolus_start or first_post_t1
+                col("injection_ref", Type::Text),
+                // instance or stack_time
+                col("minutes_basis", Type::Text),
+                // t1_anchor_time_rule, header, image, reader
+                req("contrast_source", Type::Text),
+                // own_answer, bracket, bolus, family, none
+                req("basis", Type::Text),
+                // yes, no, unknown
+                req("contrast_prior_72h", Type::Text),
+                // yes, no, unknown on an ASL stack; null on any other
+                col("asl_after_contrast", Type::Text),
+                // the check or the rule's reason, on undetermined
+                col("reason", Type::Text),
+                // a JSON array of every check that fired, flags included
+                req("checks", Type::Json),
+                req("weak_f", Type::Int),
+                req("family", Type::Text),
+                req("t1_family", Type::Int),
+                req("use_level", Type::Text),
+                // whether the session holds a certified T1 answer
+                req("anchored", Type::Int),
+                col("first_post_stack", Type::Int),
+                col("last_pre_stack", Type::Int),
+                req("rule", Type::Text),
+                req("labelled_at", Type::Timestamp),
+            ],
+        )
+        .unique(&["stack_id"])
+        .index(&["subject_id"])
+        .index(&["study_id"]),
         Table::new(
             "diagnostic",
             vec![
@@ -1770,6 +2203,9 @@ fn build_registry() -> Vec<Table> {
                 // withdrawal finds its items by a number and not by
                 // matching JSON text, which the two backends spell apart.
                 col("decision_id", Type::Int),
+                // Record 55 D6 (spec §11.4): routine or blind_first, drawn
+                // once when the question is first read and kept.
+                col("mode", Type::Text),
             ],
         )
         .index(&["status", "kind"])
@@ -2092,6 +2528,10 @@ fn build_registry() -> Vec<Table> {
                 // of the file's header beside them, as pair mode does; said
                 // when it is made. Null or 0 shows the header.
                 col("hide_header", Type::Int),
+                // Record 55 D6 and D7 (spec §11.4, §11.5): what its answers
+                // are for: decide (null), train or measure, read blind
+                // first always, or audit, read blind and never training.
+                col("purpose", Type::Text),
             ],
         )
         .unique(&["name"]),
@@ -2111,7 +2551,7 @@ fn build_registry() -> Vec<Table> {
                 // Seeds and pre-segmentations an annotator starts from.
                 col("input_derivative_ids", Type::Json),
                 // open | awaiting_metric | needs_adjudication | agreed |
-                // adjudicated | disagreed | resolved | unresolved
+                // adjudicated | disagreed | refused | resolved
                 req("state", Type::Text),
                 req("round", Type::Int),
                 // The share of the raters whose answer is the item's outcome.
@@ -2126,13 +2566,28 @@ fn build_registry() -> Vec<Table> {
                 // Record 48 R1: 1 when a batch accepted in one move held the
                 // item back to be read alone; no later batch takes it.
                 col("held_back", Type::Int),
+                // Job type 3, check a result (record 55 H3): the one result
+                // a check item asks about, the part set it is read as, and at
+                // part grain the part's label (null at result grain).
+                // `input_derivative_ids` stays the starting files of an
+                // annotator (type 4).
+                col("derivative_id", Type::Int),
+                col("part_set", Type::Text),
+                col("part_label", Type::Int),
+                // An item its close could not write (state `refused`): when
+                // the close refused it and why, in the close's own words.
+                // Nothing was written for it; a later close tries it again
+                // and clears both once it writes it.
+                col("refused_at", Type::Timestamp),
+                col("refused_why", Type::Text),
             ],
         )
         .unique(&["campaign_id", "position"])
         .index(&["review_item_id"])
         .index(&["subject_id"])
         // a commit by filter and a label set read an item by its decision
-        .index(&["decision_id"]),
+        .index(&["decision_id"])
+        .index(&["derivative_id"]),
         Table::new(
             "campaign_assignment",
             vec![
@@ -2221,6 +2676,10 @@ fn build_registry() -> Vec<Table> {
                 // value the voters agreed on), `neither`, `cant_tell` or
                 // `not_asked`. Null on any other campaign's answer.
                 col("choices", Type::Json),
+                // Record 55 D6 (spec §11.4): 1 where the answer was given
+                // blind, before the rater was shown any suggestion of the
+                // item; 0 where after; null from before the mark.
+                col("blind", Type::Int),
             ],
         )
         // one first answer per item, rater and round: a repeat is the same
@@ -2351,6 +2810,30 @@ fn build_registry() -> Vec<Table> {
             ],
         )
         .unique(&["item_id", "side"])
+        .index(&["campaign_id"])
+        .index(&["stack_id"]),
+        // Job type 3, check a result (record 55 H3, the build spec's
+        // section 5): one panel of a check item, frozen when the campaign
+        // is made so its content hash names what was shown. Panel 0 is the
+        // scan the result was made on (role `made_on`); the others are the
+        // visit's main scans for the roles the campaign declares (`t1w`,
+        // `flair`, ...), each in the result's frame: `same` where its grid
+        // is the result's own, else `world`.
+        Table::new(
+            "campaign_check_panel",
+            vec![
+                col("id", Type::Id),
+                req("campaign_id", Type::Int),
+                req("item_id", Type::Int),
+                // 0 is made_on, then the declared roles in their order
+                req("panel", Type::Int),
+                req("role", Type::Text),
+                req("stack_id", Type::Int),
+                // same | world
+                req("link", Type::Text),
+            ],
+        )
+        .unique(&["item_id", "panel"])
         .index(&["campaign_id"])
         .index(&["stack_id"]),
         // Post-contrast gold, anchored reading (record 48, 2026-09-29
@@ -2545,6 +3028,11 @@ fn build_registry() -> Vec<Table> {
                 // is not the output's; none on a run from before, which
                 // kept both in place_id
                 col("scratch_place_id", Type::Int),
+                // 2026-10-12: what its failure was, {kind, cause, advice,
+                // fix}, beside its error; none on a run that did not fail
+                // and on one from before, which the doors read from its
+                // error
+                col("failure", Type::Json),
             ],
         )
         .index(&["pipeline_id"])
@@ -2706,9 +3194,13 @@ fn build_linkage() -> Vec<Table> {
 /// The id type a merge files the alias's code under (record 26 §6).
 pub const SUBJECT_CODE_TYPE: &str = "subject-code";
 
-/// The id types seeded at `nils init` (§7.2), and the one a merge needs,
-/// which migration 39 adds to a store from before it.
-pub const ID_TYPES: [(&str, &str); 3] = [
+/// The id types seeded at `nils init` (§7.2), the one a merge needs,
+/// which migration 39 adds to a store from before it, and the type of an
+/// identifying ID that is the same everywhere, which migration 86 adds
+/// (2026-10-10: a dataset whose PatientID held such an ID failed at its
+/// first run on a registry that lacked the type). Its internal name stays
+/// the one the rules, the maps and the generator read.
+pub const ID_TYPES: [(&str, &str); 4] = [
     ("patient-id", "PatientID (0010,0020) as written, trimmed"),
     (
         "study-instance-uid",
@@ -2716,9 +3208,28 @@ pub const ID_TYPES: [(&str, &str); 3] = [
     ),
     (
         SUBJECT_CODE_TYPE,
-        "the code of a subject merged into this one",
+        "the subject code of a subject merged into this one",
     ),
+    (GENERATOR_ID_TYPE, GENERATOR_ID_DESCRIPTION),
 ];
+
+/// The id type of an identifying ID that is the same everywhere (a
+/// personnummer, a national ID), which the subject code generator codes
+/// with the key and no map, by its internal name.
+pub const GENERATOR_ID_TYPE: &str = crate::personnummer::ID_TYPE;
+
+/// What a person reads of that type.
+pub const GENERATOR_ID_DESCRIPTION: &str = "An identifying ID that is the same everywhere (personnummer, national ID, social security number), coded by the subject code generator";
+
+/// An id type as a person reads it: the generator's as an ID that is the
+/// same everywhere, every other type (a hospital or study ID) by its name.
+pub fn id_type_label(name: &str) -> &str {
+    if name == GENERATOR_ID_TYPE {
+        "ID that is the same everywhere"
+    } else {
+        name
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -2770,6 +3281,8 @@ mod tests {
             "campaign_ab_cause",
             "campaign_pair_side",
             "campaign_anchor_panel",
+            "derivative_part",
+            "campaign_check_panel",
         ] {
             assert!(registry_tables().iter().any(|t| t.name == name), "{name}");
         }

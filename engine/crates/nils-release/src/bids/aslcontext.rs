@@ -16,6 +16,17 @@ use std::path::Path;
 /// `dim[0]` says there is a fourth dimension, else one. NIfTI-1 and NIfTI-2,
 /// either byte order, gzipped when the name ends in `.gz`.
 pub fn volumes(path: &Path) -> Result<i64, String> {
+    volumes_of(&head_of(path)?)
+}
+
+/// How many dimensions a NIfTI image has, `dim[0]` of its header (Wave 7a
+/// §8.2: BIDS holds a T1w to three).
+pub fn rank(path: &Path) -> Result<i64, String> {
+    dims_of(&head_of(path)?).map(|(rank, _)| rank)
+}
+
+/// The first 540 bytes of an image, through its compression.
+fn head_of(path: &Path) -> Result<Vec<u8>, String> {
     let file = std::fs::File::open(path).map_err(|_| "the image is unreadable".to_string())?;
     let mut head = Vec::with_capacity(540);
     let read = match path.extension().is_some_and(|e| e == "gz") {
@@ -25,11 +36,24 @@ pub fn volumes(path: &Path) -> Result<i64, String> {
         false => file.take(540).read_to_end(&mut head),
     };
     read.map_err(|_| "the image's header is unreadable".to_string())?;
-    volumes_of(&head)
+    Ok(head)
 }
 
 /// [`volumes`] on the header's bytes.
 pub fn volumes_of(head: &[u8]) -> Result<i64, String> {
+    let (rank, fourth) = dims_of(head)?;
+    if rank < 4 {
+        return Ok(1);
+    }
+    let n = fourth.ok_or_else(|| "the image's header is too short to be NIfTI".to_string())?;
+    match n >= 1 {
+        true => Ok(n),
+        false => Err(format!("the image's header says {n} volumes")),
+    }
+}
+
+/// `dim[0]` and `dim[4]` of a NIfTI header's bytes.
+fn dims_of(head: &[u8]) -> Result<(i64, Option<i64>), String> {
     let short = || "the image's header is too short to be NIfTI".to_string();
     let int32 = |at: usize, big: bool| -> Option<i64> {
         let b: [u8; 4] = head.get(at..at + 4)?.try_into().ok()?;
@@ -71,14 +95,7 @@ pub fn volumes_of(head: &[u8]) -> Result<i64, String> {
     if !(1..=7).contains(&rank) {
         return Err(format!("the image's header says {rank} dimensions"));
     }
-    if rank < 4 {
-        return Ok(1);
-    }
-    let n = dim(4).ok_or_else(short)?;
-    match n >= 1 {
-        true => Ok(n),
-        false => Err(format!("the image's header says {n} volumes")),
-    }
+    Ok((rank, dim(4)))
 }
 
 /// The table: its header and one row per volume, each the one type.

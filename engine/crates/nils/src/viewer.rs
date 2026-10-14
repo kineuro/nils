@@ -86,9 +86,21 @@ pub(crate) enum Scope {
         sources: Vec<i64>,
     },
     Cohort(Cohort),
+    /// The whole registry (record 55 H3, Browse): every stack, the main
+    /// scans each subject's own dataset's once read, else the pack's, as a
+    /// reader about no scope reads them.
+    Registry {
+        picks: nils_registry::pick_truth::Of,
+    },
 }
 
 impl Scope {
+    /// The whole registry, for Browse.
+    pub(crate) fn registry(registry: &mut Registry) -> Result<Scope, Reply> {
+        let picks = nils_registry::pick_truth::Of::own(registry.store()).map_err(failed)?;
+        Ok(Scope::Registry { picks })
+    }
+
     /// The dataset a door names, by its name or its id.
     pub(crate) fn dataset(registry: &mut Registry, name: &str) -> Result<Scope, Reply> {
         let place = crate::scans::dataset_named(registry, name)?;
@@ -97,6 +109,20 @@ impl Scope {
             place: Box::new(place),
             sources,
         })
+    }
+
+    /// Whose picks the viewer reads, as the one resolver says
+    /// (`nils_registry::pick_truth`): this dataset's or cohort's own once
+    /// read, else the pack's (record 55, decision 6; 2026-10-11).
+    pub(crate) fn picks(&self) -> nils_registry::pick_truth::Of {
+        use nils_registry::pick_truth::Of;
+        match self {
+            Scope::Dataset { place, sources } => {
+                Of::dataset(place.id, &place.name, sources.clone())
+            }
+            Scope::Cohort(c) => Of::cohort(c.id, &c.name),
+            Scope::Registry { picks } => picks.clone(),
+        }
     }
 
     /// The cohort a door names, retired or not.
@@ -111,6 +137,7 @@ impl Scope {
         match self {
             Scope::Dataset { .. } => "dataset",
             Scope::Cohort(_) => "cohort",
+            Scope::Registry { .. } => "registry",
         }
     }
 
@@ -118,6 +145,7 @@ impl Scope {
         match self {
             Scope::Dataset { place, .. } => &place.name,
             Scope::Cohort(c) => &c.name,
+            Scope::Registry { .. } => "the registry",
         }
     }
 
@@ -125,30 +153,36 @@ impl Scope {
         match self {
             Scope::Dataset { place, .. } => place.id,
             Scope::Cohort(c) => c.id,
+            Scope::Registry { .. } => 0,
         }
     }
 
     pub(crate) fn as_json(&self) -> Value {
-        json!({"kind": self.kind(), "name": self.name(), "id": self.id()})
+        match self {
+            Scope::Registry { .. } => json!({"kind": "registry"}),
+            _ => json!({"kind": self.kind(), "name": self.name(), "id": self.id()}),
+        }
     }
 
     /// The condition that keeps the scope's stacks, over a stack aliased
-    /// `st`, its first batch `b` and its series `se`, with the sealed rule
-    /// for this caller; none for a dataset nothing has read.
+    /// `st` and its series `se`, with the sealed rule for this caller; none
+    /// for a dataset nothing has read. A dataset's are the stacks its tree
+    /// holds a file of (record 55, 2026-10-10).
     pub(crate) fn holds(
         &self,
         store: &Store,
         access: &Access,
         st: &str,
-        b: &str,
         se: &str,
     ) -> Option<String> {
         let mut out = match self {
+            // record 55 (2026-10-10): every scan the dataset's tree has a
+            // file of, whoever read it first
             Scope::Dataset { sources, .. } => {
                 if sources.is_empty() {
                     return None;
                 }
-                format!("{b}.source_id IN ({})", list(sources))
+                crate::operations::held_by(store, st, &list(sources))
             }
             Scope::Cohort(c) => format!(
                 "{se}.subject_id IN (SELECT cm.subject_id FROM {} cm \
@@ -156,6 +190,8 @@ impl Scope {
                 store.qualified("cohort_member"),
                 c.id
             ),
+            // every stack of the registry
+            Scope::Registry { .. } => "1 = 1".to_string(),
         };
         if !crate::sealed::reads(access) {
             out.push_str(&format!(
@@ -168,10 +204,12 @@ impl Scope {
     }
 
     /// The current members of a cohort, every one of them whether or not a
-    /// scan of theirs is in the scope; none for a dataset.
+    /// scan of theirs is in the scope; none for a dataset, which holds
+    /// stacks and has no members (Nima, 2026-10-12): its subjects come with
+    /// the scans its tree holds a file of.
     fn members(&self, store: &mut Store) -> Result<Option<Vec<i64>>, StoreError> {
         match self {
-            Scope::Dataset { .. } => Ok(None),
+            Scope::Dataset { .. } | Scope::Registry { .. } => Ok(None),
             Scope::Cohort(c) => Ok(Some(
                 nils_registry::cohort::open_members(store, c.id)?
                     .into_iter()
@@ -194,7 +232,7 @@ fn stacks_from(store: &Store) -> String {
 
 /// A study's day as text on either backend: the measured date, else the
 /// one the date vote filled in.
-fn study_day(store: &Store, alias: &str) -> String {
+pub(crate) fn study_day(store: &Store, alias: &str) -> String {
     let d = store.dialect();
     let t = nils_registry::schema::table("study");
     let column = |c: &str| d.text_of_qualified(Some(alias), t.column(c).expect("study column"));
@@ -207,7 +245,7 @@ fn study_day(store: &Store, alias: &str) -> String {
 
 /// The window every visit is of: the one the session cache was built
 /// under, the default scheme's where it holds nothing.
-fn window(store: &mut Store) -> Result<i64, StoreError> {
+pub(crate) fn window(store: &mut Store) -> Result<i64, StoreError> {
     Ok(nils_registry::cohort::built_window(store)?.unwrap_or(Scheme::default().window_days))
 }
 
@@ -430,16 +468,26 @@ fn axes_of(store: &mut Store, stacks: &[i64]) -> Result<HashMap<i64, Axes>, Stor
 }
 
 /// The roles of the live picks naming each of these stacks: a pick no
-/// person withdrew or overruled.
-fn picked(store: &mut Store, stacks: &[i64]) -> Result<HashMap<i64, BTreeSet<String>>, StoreError> {
+/// person withdrew or overruled, of the scope the viewer was opened from
+/// once it is read, else the pack's; opened from none, each subject's own
+/// dataset's (record 55, decision 6; one place of truth, 2026-10-11).
+fn picked(
+    store: &mut Store,
+    stacks: &[i64],
+    scope: Option<&Scope>,
+) -> Result<HashMap<i64, BTreeSet<String>>, StoreError> {
+    let picks = match scope {
+        Some(s) => s.picks(),
+        None => nils_registry::pick_truth::Of::own(store)?,
+    }
+    .picks(store);
     let mut out: HashMap<i64, BTreeSet<String>> = HashMap::new();
     for chunk in stacks.chunks(IN_CHUNKS) {
         for r in store.query(
             &format!(
-                "SELECT ps.stack_id, p.role FROM {} ps JOIN {} p ON p.id = ps.pick_id \
-                 WHERE p.withdrawn_at IS NULL AND ps.stack_id IN ({})",
+                "SELECT ps.stack_id, p.role FROM {} ps JOIN {picks} p ON p.id = ps.pick_id \
+                 WHERE ps.stack_id IN ({})",
                 store.qualified("pick_stack"),
-                store.qualified("pick"),
                 list(chunk)
             ),
             &[],
@@ -744,17 +792,16 @@ pub(crate) fn subjects(
             }
         }
     }
-    let holds = scope.holds(store, access, "st", "b", "se");
+    let holds = scope.holds(store, access, "st", "se");
     if let Some(holds) = &holds {
         let from = stacks_from(store);
         let q = |t: &str| store.qualified(t);
-        let (subject, study, cached, axis, fp, pick, pick_stack) = (
+        let (subject, study, cached, axis, fp, pick_stack) = (
             q("subject"),
             q("study"),
             q("session_cache_study"),
             q("classification_axis"),
             q("stack_fingerprint"),
-            q("pick"),
             q("pick_stack"),
         );
         // the scans, by subject
@@ -836,14 +883,16 @@ pub(crate) fn subjects(
                 f.makers.insert(m);
             }
         }
-        // the roles of the live picks among the scope's scans
+        // the roles of the live picks among the scope's scans, the scope's
+        // own where it has main-scan rules (record 55, decision 6)
+        let pick = scope.picks().picks(store);
         for r in store
             .query(
                 &format!(
                     "SELECT DISTINCT se.subject_id, p.role FROM {from} \
                      JOIN {pick_stack} ps ON ps.stack_id = st.id \
                      JOIN {pick} p ON p.id = ps.pick_id \
-                     WHERE {holds} AND p.withdrawn_at IS NULL"
+                     WHERE {holds}"
                 ),
                 &[],
             )
@@ -1019,12 +1068,15 @@ pub(crate) fn visits(
     let missing = || {
         Reply::error(
             404,
-            format!("no subject {subject} in {} {}", scope.kind(), scope.name()),
+            match scope {
+                Scope::Registry { .. } => format!("no subject {subject} in the registry"),
+                _ => format!("no subject {subject} in {} {}", scope.kind(), scope.name()),
+            },
         )
     };
 
     let store = registry.store();
-    let holds = scope.holds(store, access, "st", "b", "se");
+    let holds = scope.holds(store, access, "st", "se");
     let from = stacks_from(store);
     // the subject's scans in the scope, by study
     let stacks: Vec<(i64, i64)> = match &holds {
@@ -1130,7 +1182,7 @@ pub(crate) fn visits(
             .collect(),
         None => HashSet::new(),
     };
-    let picks = picked(store, &ids).map_err(failed)?;
+    let picks = picked(store, &ids, Some(scope)).map_err(failed)?;
     let mains: Vec<i64> = {
         let mut m: Vec<i64> = picks.keys().copied().collect();
         m.sort_unstable();
@@ -1288,7 +1340,11 @@ pub(crate) fn visits(
 /// the echo, repetition and inversion times (milliseconds) and the flip
 /// angle (degrees) from its fingerprint, or null; and `main`, the roles of
 /// the live picks naming it. None of it is quasi-identifying.
-pub(crate) fn with_facts(registry: &mut Registry, doc: &mut Value) -> Result<(), Reply> {
+pub(crate) fn with_facts(
+    registry: &mut Registry,
+    doc: &mut Value,
+    scope: &Scope,
+) -> Result<(), Reply> {
     let stacks: Vec<i64> = doc["scans"]
         .as_array()
         .map(|a| a.iter().filter_map(|s| s["stack"].as_i64()).collect())
@@ -1319,7 +1375,7 @@ pub(crate) fn with_facts(registry: &mut Registry, doc: &mut Value) -> Result<(),
             );
         }
     }
-    let picks = picked(store, &stacks).map_err(failed)?;
+    let picks = picked(store, &stacks, Some(scope)).map_err(failed)?;
     if let Some(scans) = doc["scans"].as_array_mut() {
         for scan in scans {
             let stack = scan["stack"].as_i64().unwrap_or_default();
