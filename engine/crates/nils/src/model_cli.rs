@@ -14,11 +14,16 @@
 //! `equivalence` measures the class of the difference between a model's
 //! answers on a CPU and on a GPU from two runs over one fixed set, and
 //! `admit --cpu --gpu` records it with the check.
+//!
+//! Record 55 ruling 22 (b): `certify` records a certificate that cites the
+//! graded run that measured a model, at the engine's door under a person's
+//! token (`nils login`, `--token` or `NILS_TOKEN`), so the person is the
+//! identity the engine verified and never a local user name.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use clap::Subcommand;
+use clap::{Args, Subcommand};
 use nils_registry::home::Home;
 use nils_registry::model::{self, Error, Filter, Model};
 
@@ -167,8 +172,8 @@ pub(crate) enum ModelCommand {
         #[arg(long)]
         json: bool,
     },
-    /// One model: its card, its state, the check that admitted it and every
-    /// transition
+    /// One model: its card, its state, the check that admitted it, the
+    /// certificate that names it and every transition
     Show {
         /// The model: its id, its digest (sha256:...) or name@version
         model: String,
@@ -176,6 +181,91 @@ pub(crate) enum ModelCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Record a certificate that cites the graded run that measured a model
+    /// (record 55 ruling 22 b), at the engine's door under a person's token.
+    /// It unseals nothing, so one person records it; the audit keeps it
+    Certify(CertifyArgs),
+}
+
+/// `nils model certify`: the model, the graded run it cites, and its result.
+#[derive(Debug, Args)]
+pub(crate) struct CertifyArgs {
+    /// The model the run graded: its id, its digest (sha256:...) or name@version
+    model: String,
+    /// The engine, http://host:port: its local port or a tunnel to it
+    #[arg(long, value_name = "URL")]
+    server: String,
+    /// The person's token; NILS_TOKEN, then the one nils login kept, when absent
+    #[arg(long, value_name = "TOKEN")]
+    token: Option<String>,
+    /// The evidence run's MANIFEST.json: its sha256 is cited, with the run it names
+    #[arg(long, value_name = "FILE", required_unless_present = "manifest_sha256")]
+    evidence: Option<PathBuf>,
+    /// The manifest's sha256, where the file is not at hand; with --run
+    #[arg(
+        long,
+        value_name = "SHA256",
+        conflicts_with = "evidence",
+        requires = "run"
+    )]
+    manifest_sha256: Option<String>,
+    /// The evidence run's name; read from the manifest where it is given
+    #[arg(long, value_name = "RUN")]
+    run: Option<String>,
+    /// The commit that registered the plan before the run was drawn
+    #[arg(long, value_name = "COMMIT")]
+    plan_commit: String,
+    /// Where the plan is written, in a few words
+    #[arg(long, value_name = "TEXT")]
+    plan: Option<String>,
+    /// The artifact digest of the model the run graded, sha256:...
+    #[arg(long, value_name = "DIGEST")]
+    model_digest: String,
+    /// The bar: the most wrong the plan allowed, as a share (0.01 for 1 %)
+    #[arg(long, value_name = "SHARE")]
+    bar: f64,
+    /// How many stacks the run graded
+    #[arg(long, value_name = "N")]
+    n: i64,
+    /// How many of those were wrong
+    #[arg(long, value_name = "N")]
+    errors: i64,
+    /// The bound the run reported; the engine works it out again from the counts
+    #[arg(long, value_name = "SHARE")]
+    bound: Option<f64>,
+    /// The bound's confidence
+    #[arg(long, value_name = "SHARE", default_value_t = 0.95)]
+    confidence: f64,
+    /// The share of stacks the model accepted
+    #[arg(long, value_name = "SHARE")]
+    coverage: Option<f64>,
+    /// The test it graded, such as T19
+    #[arg(long, value_name = "NAME")]
+    test: Option<String>,
+    /// The claim, in words
+    #[arg(long, value_name = "TEXT")]
+    claim: Option<String>,
+    /// The MANIFEST.json of the run that showed the artifact registered here
+    /// answers as the graded one did
+    #[arg(long, value_name = "FILE", requires = "equivalence_class")]
+    equivalence: Option<PathBuf>,
+    /// That manifest's sha256, where the file is not at hand; with --equivalence-run
+    #[arg(
+        long,
+        value_name = "SHA256",
+        conflicts_with = "equivalence",
+        requires_all = ["equivalence_run", "equivalence_class"]
+    )]
+    equivalence_sha256: Option<String>,
+    /// That run's name, where its manifest is not at hand
+    #[arg(long, value_name = "RUN", requires = "equivalence_sha256")]
+    equivalence_run: Option<String>,
+    /// That run's class: I, II or III
+    #[arg(long, value_name = "CLASS")]
+    equivalence_class: Option<String>,
+    /// Machine-readable output
+    #[arg(long)]
+    json: bool,
 }
 
 fn model_err(e: Error) -> Exit {
@@ -244,9 +334,15 @@ fn print_json(doc: &serde_json::Value) {
 }
 
 pub(crate) fn model_command(home: &Home, cmd: ModelCommand) -> Result<(), Exit> {
+    // a certificate is recorded at the engine's door, never in a registry
+    // opened here
+    if let ModelCommand::Certify(args) = cmd {
+        return certify(&args);
+    }
     let mut registry = open(home)?;
     let who = actor();
     match cmd {
+        ModelCommand::Certify(_) => unreachable!("recorded at the door above"),
         ModelCommand::Register {
             card,
             artifact,
@@ -489,14 +585,19 @@ pub(crate) fn model_command(home: &Home, cmd: ModelCommand) -> Result<(), Exit> 
         ModelCommand::Show { model, json } => {
             let m = resolved(&mut registry, &model)?;
             let events = model::events(registry.store(), m.id)?;
+            let certified = model::certified(registry.store())?;
             if json {
                 let mut doc = m.to_json();
                 doc["events"] = serde_json::Value::from(events);
+                doc["certificate"] = model::certificate_json(&m, &certified);
                 print_json(&doc);
                 return Ok(());
             }
             println!("{}", line(&m));
             println!("  digest      {}", m.digest);
+            if let Some(c) = certified.get(&m.id) {
+                println!("  certified   {}", c.words());
+            }
             if let Some(e) = m.encoder_model_id {
                 println!("  encoder     model {e}");
             }
@@ -525,6 +626,124 @@ pub(crate) fn model_command(home: &Home, cmd: ModelCommand) -> Result<(), Exit> 
             Ok(())
         }
     }
+}
+
+/// An evidence run's manifest: its sha256, and the run it names.
+fn manifest_of(path: &Path) -> Result<(String, Option<String>), Exit> {
+    let digest = digest_of(path)?;
+    let doc = read_json(path, "evidence manifest")?;
+    Ok((digest, doc["run"].as_str().map(str::to_string)))
+}
+
+/// `nils model certify` (record 55 ruling 22 b): a certificate that cites
+/// the graded run that measured a model, posted to the engine's door under
+/// the person's token, which tells the engine who records it.
+fn certify(a: &CertifyArgs) -> Result<(), Exit> {
+    let (manifest, run) = match (&a.evidence, &a.manifest_sha256) {
+        (Some(path), _) => {
+            let (digest, named) = manifest_of(path)?;
+            let run = match (named, &a.run) {
+                (Some(named), Some(given)) if &named != given => {
+                    return Err(usage(format!(
+                        "{} is the manifest of the run {named}, not {given}",
+                        path.display()
+                    )));
+                }
+                (Some(named), _) => named,
+                (None, Some(given)) => given.clone(),
+                (None, None) => {
+                    return Err(usage(format!(
+                        "{} names no run: give it with --run",
+                        path.display()
+                    )));
+                }
+            };
+            (digest, run)
+        }
+        (None, Some(sha)) => (sha.clone(), a.run.clone().unwrap_or_default()),
+        (None, None) => {
+            return Err(usage(
+                "--evidence MANIFEST.json, or --manifest-sha256 with --run",
+            ));
+        }
+    };
+    let mut evidence = serde_json::json!({
+        "run": run, "manifest_sha256": manifest, "plan_commit": a.plan_commit,
+        "model_digest": a.model_digest,
+    });
+    if let Some(p) = &a.plan {
+        evidence["plan"] = serde_json::json!(p);
+    }
+    let served = match (&a.equivalence, &a.equivalence_sha256) {
+        (Some(path), _) => {
+            let (digest, named) = manifest_of(path)?;
+            let run = named.ok_or_else(|| usage(format!("{} names no run", path.display())))?;
+            Some((run, digest))
+        }
+        (None, Some(sha)) => Some((a.equivalence_run.clone().unwrap_or_default(), sha.clone())),
+        (None, None) => None,
+    };
+    match (served, &a.equivalence_class) {
+        (Some((run, digest)), Some(class)) => {
+            evidence["equivalence"] =
+                serde_json::json!({"run": run, "manifest_sha256": digest, "class": class});
+        }
+        (Some(_), None) => {
+            return Err(usage(
+                "--equivalence-class: the class the served artifact's run showed, I, II or III",
+            ));
+        }
+        (None, Some(_)) => {
+            return Err(usage(
+                "--equivalence-class goes with --equivalence MANIFEST.json, or --equivalence-sha256 and --equivalence-run",
+            ));
+        }
+        (None, None) => {}
+    }
+    let mut result = serde_json::json!({
+        "bar": a.bar, "n": a.n, "errors": a.errors, "confidence": a.confidence,
+    });
+    for (k, v) in [
+        ("bound", a.bound.map(serde_json::Value::from)),
+        ("coverage", a.coverage.map(serde_json::Value::from)),
+        ("test", a.test.clone().map(serde_json::Value::from)),
+        ("claim", a.claim.clone().map(serde_json::Value::from)),
+    ] {
+        if let Some(v) = v {
+            result[k] = v;
+        }
+    }
+    let token = a
+        .token
+        .clone()
+        .or_else(|| std::env::var("NILS_TOKEN").ok().filter(|t| !t.is_empty()))
+        .or_else(crate::login::saved_token)
+        .ok_or_else(|| {
+            usage(
+                "a certificate is a person's act at the engine's door: sign in with nils login, or give --token or NILS_TOKEN",
+            )
+        })?;
+    let door = crate::door_client::Door::new(&a.server, Some(token), 30_000)?;
+    let cert = door.post(
+        "/api/certificates",
+        &serde_json::json!({"models": [a.model], "evidence": evidence, "result": result}),
+    )?;
+    if a.json {
+        print_json(&cert);
+    } else {
+        println!(
+            "recorded {}",
+            cert["words"]
+                .as_str()
+                .map(str::to_string)
+                .unwrap_or_else(|| cert.to_string())
+        );
+        println!(
+            "  by {}; it unseals nothing",
+            cert["created_by"].as_str().unwrap_or("?")
+        );
+    }
+    Ok(())
 }
 
 /// Why a chosen model answers, in words.

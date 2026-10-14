@@ -285,12 +285,21 @@ pub(crate) fn settings_doc(registry: &mut Registry) -> Result<Value, Reply> {
         Some(c) => opinion::confirmed(registry.store(), c.model.id).map_err(failed)?,
         None => None,
     };
+    // record 55 ruling 22 (b): what confirms it, a sealed sample or a
+    // graded run
+    let certificate = match confirmed {
+        Some(id) => nils_registry::labels::certificate(registry.store(), id)
+            .map_err(|e| Reply::error(500, e.to_string()))?
+            .map(|c| json!({"id": c.id, "cites": if c.cites_evidence() { "evidence" } else { "sample" }, "words": c.words()})),
+        None => None,
+    };
     Ok(json!({
         "blind_share": share, "default_blind_share": blind::DEFAULT_SHARE,
         "system1": {
             "task": opinion::TASK,
             "chosen": chosen.as_ref().map(nils_registry::model::Chosen::as_json),
             "confirmed": confirmed.is_some(), "certificate_id": confirmed,
+            "certificate": certificate,
         },
         "audit_share": audit_draw::DEFAULT_SHARE,
     }))
@@ -784,20 +793,112 @@ fn flagged_stacks(
     Ok(out)
 }
 
+/// The pack's words for staging System 1's answers (record 55, ruling
+/// 20): what naming nothing is on an axis, and how a value is stored.
+struct PackWords(std::sync::Arc<nils_pack::Pack>);
+
+impl PackWords {
+    fn axis(&self, name: &str) -> Option<&nils_pack::rules::Axis> {
+        self.0.axes.iter().find(|a| a.name == name)
+    }
+}
+
+impl round::Words for PackWords {
+    fn names_nothing(&self, axis: &str, rule: Option<&str>) -> bool {
+        let Some(a) = self.axis(axis) else {
+            return false;
+        };
+        if a.multi {
+            return false;
+        }
+        match rule {
+            None => true,
+            // the fallback word, technique's `Unknown`, is none of its values
+            Some(v) => {
+                a.default.as_deref() == Some(v)
+                    && a.value_index(v).is_none()
+                    && a.id_of_stored(v).is_none()
+            }
+        }
+    }
+
+    fn stored(&self, axis: &str, value: &str) -> Result<String, String> {
+        let a = self
+            .axis(axis)
+            .ok_or_else(|| format!("the pack {} has no axis {axis}", self.0.id()))?;
+        let mut words = Vec::new();
+        for w in value.split(',').map(str::trim).filter(|w| !w.is_empty()) {
+            // System 1 answers in the vocabulary's identities (3D-TSE,
+            // T2starw); the axis may store the label (SPACE, T2*w)
+            let i = a
+                .value_index(w)
+                .or_else(|| a.id_of_stored(w).and_then(|id| a.value_index(id)))
+                .ok_or_else(|| {
+                    format!(
+                        "{w} is none of the {axis} values of the pack {}",
+                        self.0.id()
+                    )
+                })?;
+            // the pack's own marker for an axis nobody could decide
+            if a.values[i].id == "Unknown" {
+                return Err(format!("System 1 names no {axis}: it says Unknown"));
+            }
+            words.push(a.stored(i).to_string());
+        }
+        words.sort();
+        words.dedup();
+        match words.len() {
+            0 => Err(format!("System 1 names no {axis} value")),
+            1 => Ok(words.remove(0)),
+            _ if a.multi => Ok(words.join(",")),
+            _ => Err(format!(
+                "{axis} takes one value, and System 1 names {value}"
+            )),
+        }
+    }
+}
+
 /// Run the gate over the flagged datasets' stacks (of `only`, where
-/// given), round by round.
+/// given), round by round, and stage System 1's answers where the rules
+/// name nothing (record 55, ruling 20) with the words of the round's pack
+/// in `pack_dir`.
 fn gate_over(
     registry: &mut Registry,
     only: Option<&[i64]>,
     dataset: Option<&str>,
     who: &str,
+    pack_dir: Option<&std::path::Path>,
 ) -> Result<Value, StoreError> {
     let groups = flagged_stacks(registry, only, dataset)?;
     let mut rounds = Vec::new();
     for ((pack, version), stacks) in groups {
         let store = registry.store();
         let r = round::current(store, &pack, &version, who)?;
-        let done = round::gate(store, &r, &stacks, who)?;
+        let mut done = round::gate(store, &r, &stacks, who)?;
+        if !done.questions.is_empty() {
+            match crate::reader::served_pack(pack_dir, &pack) {
+                Some(p) => {
+                    done.staged = round::stage(registry, &r, &done.questions, &PackWords(p), who)?;
+                }
+                None => {
+                    let confident = done
+                        .questions
+                        .iter()
+                        .filter(|q| {
+                            q.kind == round::DISAGREE && q.value.is_some() && q.p >= q.lambda1
+                        })
+                        .count() as i64;
+                    if confident > 0 {
+                        done.staged.not_staged.insert(
+                            format!(
+                                "the pack {pack} is not served here, so System 1's words are not read as its values"
+                            ),
+                            confident,
+                        );
+                    }
+                }
+            }
+        }
         rounds.push(json!({"round": r.as_json(), "gated": done.to_json()}));
     }
     Ok(json!({"rounds": rounds}))
@@ -805,12 +906,14 @@ fn gate_over(
 
 /// After a System 1 run: the gate over its stacks of flagged datasets.
 pub(crate) fn after_opinions(
-    _home: &nils_registry::Home,
+    home: &nils_registry::Home,
     registry: &mut Registry,
     stacks: &[i64],
     who: &str,
 ) -> Value {
-    gate_over(registry, Some(stacks), None, who).unwrap_or_else(|e| json!({"error": e.to_string()}))
+    let packs = crate::pack_dir(home, None).ok();
+    gate_over(registry, Some(stacks), None, who, packs.as_deref())
+        .unwrap_or_else(|e| json!({"error": e.to_string()}))
 }
 
 // --------------------------------------------------------- the rounds
@@ -1244,8 +1347,14 @@ pub(crate) fn route(
         ["api", "review", "settings"] if get => settings_doc(registry).map(Reply::ok),
         ["api", "review", "gate"] if post => (|| {
             let doc = json_body(body)?;
-            let done = gate_over(registry, None, doc["dataset"].as_str(), &caller.principal)
-                .map_err(failed)?;
+            let done = gate_over(
+                registry,
+                None,
+                doc["dataset"].as_str(),
+                &caller.principal,
+                doors.pack_dir.as_deref(),
+            )
+            .map_err(failed)?;
             Ok(Reply::ok(done))
         })(),
         ["api", "review", "system1", "run"] if post => archive_run(doors, registry, caller),

@@ -26,14 +26,22 @@
 //!   below a threshold.
 //!
 //! The gate on flagged datasets waits for System 1 to be confirmed: until
-//! a recorded certificate names the chosen model (D2) it raises nothing,
-//! and a gate asked for says so. An axis a person decided is never asked
-//! again, and a stack of a sample sealed now never becomes a review item.
+//! a recorded certificate names the chosen model (D2), on a sealed sample or
+//! citing its graded run (record 55 ruling 22 b), it raises nothing, and a
+//! gate asked for says so. An axis a person decided is never asked again,
+//! and a stack of a sample sealed now never becomes a review item.
+//!
+//! **System 1 never fills an answer silently** (record 55, ruling 20):
+//! where the rules name nothing on an axis of a flagged dataset and System
+//! 1 is confident, its answer is staged on the gate's question for a person
+//! to confirm ([`stage`]). The pack says what naming nothing is and how
+//! System 1's word is stored ([`Words`]).
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{Value, json};
 
+use crate::Registry;
 use crate::model::Model;
 use crate::opinion::{self, Opinion};
 use crate::schema::{Type, table};
@@ -283,6 +291,11 @@ pub struct Gated {
     pub skipped: BTreeMap<String, i64>,
     /// Why nothing was gated, where nothing was.
     pub waiting: Option<String>,
+    /// The questions raised or brought up to date, with what [`stage`]
+    /// reads of each.
+    pub questions: Vec<Question>,
+    /// What [`stage`] did with System 1's confident answers.
+    pub staged: Staged,
 }
 
 impl Gated {
@@ -291,8 +304,65 @@ impl Gated {
             "outcomes": self.outcomes, "accepted_stacks": self.accepted_stacks,
             "stacks": self.stacks, "raised": self.raised, "closed": self.closed,
             "skipped": self.skipped, "waiting": self.waiting,
+            "staged": self.staged.to_json(),
         })
     }
+}
+
+/// One question the gate raised or brought up to date: its stack and axis,
+/// the rules' stored value, System 1's answer and probability, the axis's
+/// λ1, and the answer of System 1's staged on it now, where one is.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Question {
+    pub item: i64,
+    pub stack: i64,
+    pub axis: String,
+    /// [`DISAGREE`] or [`UNSURE`].
+    pub kind: &'static str,
+    pub rule: Option<String>,
+    pub value: Option<String>,
+    pub p: f64,
+    pub lambda1: f64,
+    /// The staged decision on the question and its value.
+    pub staged: Option<(i64, Option<String>)>,
+}
+
+/// System 1's answers staged for a person to confirm (record 55, ruling
+/// 20), as [`stage`] left them.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Staged {
+    /// The decisions staged now.
+    pub staged: Vec<i64>,
+    /// Answers staged before and still System 1's, left as they were.
+    pub kept: i64,
+    /// Staged answers withdrawn, since System 1 no longer fills the gap,
+    /// their questions open again.
+    pub withdrawn: i64,
+    /// Why a confident answer where the rules name nothing was not staged,
+    /// counted.
+    pub not_staged: BTreeMap<String, i64>,
+}
+
+impl Staged {
+    pub fn to_json(&self) -> Value {
+        json!({
+            "decisions": self.staged, "count": self.staged.len(), "kept": self.kept,
+            "withdrawn": self.withdrawn, "not_staged": self.not_staged,
+        })
+    }
+}
+
+/// What staging reads of the pack the round's rules come from (record 55,
+/// ruling 20).
+pub trait Words {
+    /// Whether the rules' stored value on an axis names nothing: no value
+    /// on a single-valued axis, or the axis's fallback word that is none of
+    /// its values (technique's `Unknown`). A multi-valued axis left empty
+    /// holds the rules' answer, none of its values, so it names something.
+    fn names_nothing(&self, axis: &str, rule: Option<&str>) -> bool;
+    /// System 1's answer as the axis stores it, or why it is none of the
+    /// axis's values.
+    fn stored(&self, axis: &str, value: &str) -> Result<String, String>;
 }
 
 /// Per stack, per axis: the rules' value and whether a person decided it.
@@ -327,6 +397,28 @@ pub fn rules_answers(store: &mut Store, stacks: &[i64]) -> Result<RulesAnswers, 
             }
             if r.text(3)? == "decision" {
                 e.1 = true;
+            }
+        }
+        // a decision put in force on the stack since it was last sorted (an
+        // answer of System 1's a person committed, a gate question a person
+        // answered) has decided the axis already: the gate asks no more
+        let refs = chunk
+            .iter()
+            .map(|s| format!("'{s}'"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT ref, axis FROM {} WHERE scope = 'stack' AND ref IN ({refs}) \
+             AND withdrawn_at IS NULL AND (staged_at IS NULL OR committed_at IS NOT NULL)",
+            store.qualified("decision")
+        );
+        for r in store.query(&sql, &[])? {
+            if let Ok(stack) = r.text(0)?.parse::<i64>() {
+                rows.entry(stack)
+                    .or_default()
+                    .entry(r.text(1)?.to_string())
+                    .or_default()
+                    .1 = true;
             }
         }
     }
@@ -420,18 +512,36 @@ pub fn gate(
                     all = false;
                 }
                 let item = match outcome {
-                    DISAGREE | UNSURE => Some(raise(
-                        store,
-                        round,
-                        stack,
-                        axis,
-                        outcome,
-                        rule.as_deref(),
-                        o,
-                        l1,
-                        l2,
-                        &now,
-                    )?),
+                    DISAGREE | UNSURE => {
+                        let (id, staged) = raise(
+                            store,
+                            round,
+                            stack,
+                            axis,
+                            outcome,
+                            rule.as_deref(),
+                            o,
+                            l1,
+                            l2,
+                            &now,
+                        )?;
+                        out.questions.push(Question {
+                            item: id,
+                            stack,
+                            axis: axis.clone(),
+                            kind: if outcome == DISAGREE {
+                                DISAGREE
+                            } else {
+                                UNSURE
+                            },
+                            rule: rule.clone(),
+                            value: o.and_then(|o| o.value.clone()),
+                            p: o.map_or(0.0, |o| o.p),
+                            lambda1: l1,
+                            staged,
+                        });
+                        Some(id)
+                    }
                     _ => {
                         out.closed += close(store, stack, axis, who, &now)?;
                         None
@@ -507,7 +617,7 @@ fn raise(
     lambda1: f64,
     lambda2: f64,
     now: &str,
-) -> Result<i64, StoreError> {
+) -> Result<Pending, StoreError> {
     let k = kind(axis, why);
     let group = key(axis, stack);
     let evidence = json!({
@@ -519,16 +629,17 @@ fn raise(
         "value": rule,
         "confidence": o.map(|o| o.p),
     });
-    // a question of the other kind on the same stack and axis is replaced
+    // a question of the other kind on the same stack and axis is replaced,
+    // and an answer staged on it withdrawn
     let other = kind(axis, if why == DISAGREE { UNSURE } else { DISAGREE });
-    if let Some((id, _)) = crate::review::open_item(store, &other, &group)? {
-        supersede(store, id, now)?;
+    if let Some((id, staged)) = pending(store, &other, &group)? {
+        supersede(store, id, staged.map(|(d, _)| d), now)?;
     }
-    if let Some((id, _)) = crate::review::open_item(store, &k, &group)? {
+    if let Some((id, staged)) = pending(store, &k, &group)? {
         crate::review::refresh_item(store, id, &evidence, 1, None)?;
-        return Ok(id);
+        return Ok((id, staged));
     }
-    crate::review::open_new(
+    let id = crate::review::open_new(
         store,
         &k,
         "stack",
@@ -538,10 +649,49 @@ fn raise(
         1,
         None,
         now,
-    )
+    )?;
+    Ok((id, None))
 }
 
-fn supersede(store: &mut Store, id: i64, now: &str) -> Result<(), StoreError> {
+/// The gate's question of a kind on a stack and axis that still waits for
+/// a person: open, or staged with an answer of System 1's (record 55,
+/// ruling 20). Its id and, where staged, the staged decision and its value.
+type Pending = (i64, Option<(i64, Option<String>)>);
+
+fn pending(store: &mut Store, kind: &str, group: &str) -> Result<Option<Pending>, StoreError> {
+    let d = store.dialect();
+    let sql = format!(
+        "SELECT id, status, decision_id FROM {} WHERE kind = {} AND group_key = {} \
+         AND status IN ('open', 'staged') ORDER BY id DESC LIMIT 1",
+        store.qualified("review_item"),
+        d.param(1, Type::Text),
+        d.param(2, Type::Text),
+    );
+    let Some(r) = store.query_opt(&sql, &[Param::from(kind), Param::from(group)])? else {
+        return Ok(None);
+    };
+    let id = r.int(0)?;
+    if r.text(1)? != "staged" {
+        return Ok(Some((id, None)));
+    }
+    let Some(decision) = r.opt_int(2)? else {
+        return Ok(Some((id, None)));
+    };
+    let sql = format!(
+        "SELECT value FROM {} WHERE id = {} AND withdrawn_at IS NULL AND committed_at IS NULL",
+        store.qualified("decision"),
+        d.param(1, Type::Int),
+    );
+    let value = store
+        .query_opt(&sql, &[Param::Int(decision)])?
+        .map(|r| r.opt_text(0).map(|v| v.map(str::to_string)))
+        .transpose()?;
+    Ok(Some((id, value.map(|v| (decision, v)))))
+}
+
+/// Close a question as superseded; an answer staged on it that nobody
+/// committed is withdrawn with it.
+fn supersede(store: &mut Store, id: i64, staged: Option<i64>, now: &str) -> Result<(), StoreError> {
     store.update_by_id(
         table("review_item"),
         &[
@@ -551,11 +701,25 @@ fn supersede(store: &mut Store, id: i64, now: &str) -> Result<(), StoreError> {
         "id",
         id,
     )?;
+    if let Some(decision) = staged {
+        let d = store.dialect();
+        store.execute(
+            &format!(
+                "UPDATE {} SET withdrawn_at = {} WHERE id = {} AND withdrawn_at IS NULL \
+                 AND staged_at IS NOT NULL AND committed_at IS NULL",
+                store.qualified("decision"),
+                d.param(1, Type::Timestamp),
+                d.param(2, Type::Int),
+            ),
+            &[Param::from(now), Param::Int(decision)],
+        )?;
+    }
     Ok(())
 }
 
-/// Close the gate's open questions on a stack and axis the gate accepts
-/// now. Answers how many it closed.
+/// Close the gate's questions on a stack and axis the gate accepts now,
+/// open or staged, withdrawing an answer staged on one. Answers how many
+/// it closed.
 fn close(
     store: &mut Store,
     stack: i64,
@@ -566,12 +730,98 @@ fn close(
     let group = key(axis, stack);
     let mut n = 0;
     for why in [DISAGREE, UNSURE] {
-        if let Some((id, _)) = crate::review::open_item(store, &kind(axis, why), &group)? {
-            supersede(store, id, now)?;
+        if let Some((id, staged)) = pending(store, &kind(axis, why), &group)? {
+            supersede(store, id, staged.map(|(d, _)| d), now)?;
             n += 1;
         }
     }
     Ok(n)
+}
+
+/// Stage System 1's answers where the rules name nothing (record 55,
+/// ruling 20), over the questions a gate in a confirmed round raised:
+/// where the question is a disagreement, the rules' stored value names
+/// nothing ([`Words::names_nothing`]), no person decided it, and System 1
+/// names a value of the axis's vocabulary at its λ1 or above, that value,
+/// as the axis stores it, is staged on the question as a decision of System
+/// 1's model, for a person to confirm (commit) or to answer otherwise.
+/// Nothing is in force until a person commits it. An answer staged before
+/// that is still System 1's is left; one that no longer is, is withdrawn
+/// and its question open again. Each staging is its own act, written and
+/// audited as a model's staged decision.
+pub fn stage(
+    registry: &mut Registry,
+    round: &Round,
+    questions: &[Question],
+    words: &dyn Words,
+    who: &str,
+) -> Result<Staged, StoreError> {
+    let mut out = Staged::default();
+    let Some(model) = round.model_id else {
+        return Ok(out);
+    };
+    if !round.confirmed {
+        return Ok(out);
+    }
+    for q in questions {
+        let confident = q.kind == DISAGREE
+            && q.value.as_deref().is_some_and(|v| !v.is_empty())
+            && q.p >= q.lambda1
+            && words.names_nothing(&q.axis, q.rule.as_deref());
+        let stored = if confident {
+            match words.stored(&q.axis, q.value.as_deref().unwrap_or_default()) {
+                Ok(s) => Some(s),
+                Err(why) => {
+                    *out.not_staged.entry(why).or_default() += 1;
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        match (stored, &q.staged) {
+            (Some(s), Some((_, Some(v)))) if *v == s => out.kept += 1,
+            (Some(s), _) => {
+                let why = format!(
+                    "System 1 (model {model}) names {} at {:.3} where the rules name nothing; staged for a person to confirm (record 55, ruling 20)",
+                    q.value.as_deref().unwrap_or_default(),
+                    q.p
+                );
+                let done = crate::review::apply(
+                    registry,
+                    &crate::review::Apply {
+                        item: q.item,
+                        member: None,
+                        scope: "stack",
+                        value: Some(s.as_str()),
+                        author: crate::review::Author {
+                            who,
+                            kind: "model",
+                            version: None,
+                            model: Some(model),
+                        },
+                        stage: true,
+                        why: Some(why.as_str()),
+                        campaign: None,
+                    },
+                );
+                match done {
+                    Ok(applied) => out.staged.push(applied.decision),
+                    Err(crate::review::Error::Store(e)) => return Err(e),
+                    Err(other) => *out.not_staged.entry(other.to_string()).or_default() += 1,
+                }
+            }
+            (None, Some((decision, _))) => {
+                match crate::review::withdraw(registry, *decision, who) {
+                    Ok(_) => out.withdrawn += 1,
+                    Err(crate::review::Error::Store(e)) => return Err(e),
+                    Err(other) => *out.not_staged.entry(other.to_string()).or_default() += 1,
+                }
+            }
+            (None, None) => {}
+        }
+    }
+    Ok(out)
 }
 
 #[allow(clippy::too_many_arguments)]

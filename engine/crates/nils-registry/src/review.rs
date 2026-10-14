@@ -600,9 +600,12 @@ fn apply_as(
                 ))
             })?,
     };
-    // A model answers the task it was registered for, and no other.
+    // A model answers the task it was registered for, and no other; System
+    // 1 (task `system1`) answers the axes its card's gate covers, where its
+    // answer is staged for a person to confirm (record 55, ruling 20).
     if let Some(m) = &model
         && m.task != format!("axis:{axis}")
+        && !(m.task == crate::opinion::TASK && crate::opinion::thresholds(m).contains_key(&axis))
     {
         return Err(refused(format!(
             "model {} ({}) answers {}, and review item {} asks about the axis {axis}",

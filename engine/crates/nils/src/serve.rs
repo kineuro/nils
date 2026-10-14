@@ -4546,13 +4546,15 @@ fn routed(
                 state: query.get("state").map(String::as_str),
             };
             let models = nils_registry::model::list(registry.store(), &filter)?;
-            // record 55 D4: which of them answers its task and slot now
+            // record 55 D4: which of them answers its task and slot now;
+            // ruling 22 (b): and the certificate that names each
             let chosen = nils_registry::model::chosen_ids(registry.store())?;
+            let certified = nils_registry::model::certified(registry.store())?;
             Ok(Reply::ok(serde_json::json!({
                 "count": models.len(),
                 "models": models
                     .iter()
-                    .map(|m| nils_registry::model::to_json_with(m, &chosen))
+                    .map(|m| nils_registry::model::to_json_full(m, &chosen, &certified))
                     .collect::<Vec<_>>(),
             })))
         }
@@ -4617,6 +4619,9 @@ fn routed(
             let mut doc = m.to_json();
             doc["events"] =
                 serde_json::Value::from(nils_registry::model::events(registry.store(), id)?);
+            // record 55 ruling 22 (b): the certificate that names it
+            let certified = nils_registry::model::certified(registry.store())?;
+            doc["certificate"] = nils_registry::model::certificate_json(&m, &certified);
             Ok(Reply::ok(doc))
         }
         ["api", "models", _, "admit"] if post => {

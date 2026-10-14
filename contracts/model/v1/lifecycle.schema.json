@@ -93,6 +93,45 @@
           "description": "The check, the model a promotion retired or was retired by, the review item a person accepted, why"
         }
       }
+    },
+    "citation": {
+      "type": "object",
+      "description": "Record 55 ruling 22 (b): the graded run a certificate cites instead of a sample sealed in the registry",
+      "required": ["run", "manifest_sha256", "plan_commit", "model_digest"],
+      "properties": {
+        "run": { "type": "string", "minLength": 1, "description": "The evidence run" },
+        "manifest_sha256": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$", "description": "The sha256 of the run's MANIFEST.json" },
+        "plan_commit": { "type": "string", "pattern": "^[0-9a-f]{7,40}$", "description": "The commit that registered the plan before the run was drawn" },
+        "model_digest": { "$ref": "card.schema.json#/$defs/digest", "description": "The artifact digest of the one model the run graded" },
+        "plan": { "type": "string", "description": "Where the plan is written" },
+        "equivalence": {
+          "type": "object",
+          "required": ["run", "manifest_sha256", "class"],
+          "description": "The run that showed the artifact registered here answers as the graded one did",
+          "properties": {
+            "run": { "type": "string" },
+            "manifest_sha256": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+            "class": { "type": "string", "enum": ["I", "II", "III"] }
+          }
+        }
+      }
+    },
+    "certificate": {
+      "type": "object",
+      "description": "Record 48 R2 and record 55 ruling 22 (b): a recorded certificate, on a sample sealed in the registry or citing the graded run that measured the model, as GET /api/certificates answers it",
+      "required": ["id", "sample", "model_ids", "result", "created_by", "created_at", "cites"],
+      "properties": {
+        "id": { "type": "integer" },
+        "sample": { "type": "string", "description": "The sealed sample it measured, or evidence:<run> for one that cites its graded run" },
+        "model_ids": { "type": "array", "items": { "type": "integer" } },
+        "result": { "type": "object", "description": "On a sealed sample, the result as the certifying tool gave it (sample, sample_digest, risk, n, errors); citing a graded run, bar, n, errors, confidence, bound (the exact one-sided Clopper-Pearson bound the engine worked out from the counts), method and passes, with coverage, test and claim where given" },
+        "cites": { "type": "string", "enum": ["sample", "evidence"] },
+        "evidence": { "oneOf": [{ "$ref": "#/$defs/citation" }, { "type": "null" }] },
+        "unseals": { "type": "boolean", "description": "Whether a sample sealed here is unsealed by it; a certificate citing its graded run unseals nothing" },
+        "words": { "type": "string", "description": "What it certified, in a line" },
+        "created_by": { "type": "string" },
+        "created_at": { "type": "string" }
+      }
     }
   },
   "type": "object",
@@ -131,6 +170,10 @@
     "equivalence_measured": {
       "oneOf": [{ "$ref": "#/$defs/equivalence" }, { "type": "null" }],
       "description": "The equivalence its admitting check measured"
+    },
+    "certificate": {
+      "oneOf": [{ "$ref": "#/$defs/certificate" }, { "type": "null" }],
+      "description": "Record 55 ruling 22 (b): the newest recorded certificate naming the model, on a sealed sample or citing its graded run; null where none names it"
     },
     "events": {
       "type": "array",

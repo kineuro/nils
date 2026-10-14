@@ -42,7 +42,60 @@ the rules' answers; they never become decisions.
 > model, the gate raises nothing and Review shows System 1's opinion marked as
 > not confirmed.
 
-## 2. Review blind first
+## 2. Record System 1's certificate
+
+A model graded on research evidence is certified by citing its graded run,
+since the site's registry holds no sample sealed for it (record 55, ruling 22
+b). One person records it, under their own sign-in and models:work: nothing is
+unsealed, so no second person is needed. The audit keeps it as
+`labels.certificate`.
+
+1. Sign in at the keyboard, or have the person's token at hand:
+
+   ```
+   nils login --issuer https://sign-in.example.org/application/o/nils/ --client nils-cli --username <you> --password-stdin
+   ```
+
+2. Record the certificate at the engine's door, from the run's manifest:
+
+   ```
+   nils model certify <name>@<version> --server http://127.0.0.1:8437 \
+     --evidence MANIFEST.json --plan-commit <commit> \
+     --model-digest sha256:<the registered artifact> \
+     --bar 0.01 --n <graded> --errors <wrong> --bound <reported bound> \
+     --test T19 --claim "wrong among accepted stacks under held-out damage"
+   ```
+
+   Where the manifest is not at hand, give `--manifest-sha256` and `--run`
+   instead of `--evidence`. In the desk the same is Pipelines, Models, the
+   model's page, Record a certificate.
+
+3. Check that System 1 is confirmed:
+
+   ```
+   GET /api/review/settings
+   ```
+
+The engine works the exact one-sided Clopper-Pearson bound out again from the
+counts. A stated bound that differs is refused, and so is a result above its
+bar. The model's page shows it as certified, with the run, its manifest and
+the plan's commit.
+
+> **Warning: the digest is the registered artifact's.** A certificate that
+> cites a graded run certifies the one model whose artifact digest it names.
+> Where the served artifact is a repackaging of the file the run graded, cite
+> the run that showed it answers the same with `--equivalence MANIFEST.json
+> --equivalence-class I`.
+
+Once System 1 is confirmed, the gate on a flagged dataset stages System 1's
+answer where the rules name nothing and System 1 is confident (at its λ1 or
+above), on a single-valued axis its card gates and in a value of the pack's
+vocabulary. The answer waits in Review as a staged decision of System 1's
+model: a person confirms it with one commit, or answers otherwise. System 1
+never fills an answer on its own, and a dataset without the flag stages
+nothing.
+
+## 3. Review blind first
 
 1. Set the share of questions read blind first (one in five by default):
 
@@ -70,7 +123,7 @@ Only blind answers become training labels. A campaign whose answers train or
 measure is made with `purpose` `train` or `measure` and is read blind first
 always.
 
-## 3. Run a round's audit
+## 4. Run a round's audit
 
 1. Draw the audit: 1 % of the round's accepted stacks, by a seed keyed by
    DICOM identity, and the campaign that reads them blind:
@@ -114,6 +167,7 @@ bound at 95 %. An audit's reads never train.
 | `GET /api/review/{id}/suggestions` | review:see |
 | `POST /api/review/{id}/provisional` | review:work |
 | `GET /api/review/rounds`, `/rounds/{id}`, `/settings` | review:see |
+| `POST /api/certificates` | models:work, a person |
 | `POST /api/review/gate` | review:work |
 | `POST /api/review/system1/run` | pipelines:work, at quasi |
 | `GET`, `PUT /api/datasets/{name}/headers` | data:see or review:see; data:work |

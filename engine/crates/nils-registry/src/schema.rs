@@ -2928,11 +2928,14 @@ fn build_registry() -> Vec<Table> {
         // Record 48 R2: what a certification measured on a sealed sample:
         // the sample, the models it certified, and the result as recorded.
         // Its labels train the next model only once this row exists.
+        // Record 55 ruling 22 (b): a certificate may cite its graded run
+        // instead of a sample sealed in this registry.
         Table::new(
             "certificate",
             vec![
                 col("id", Type::Id),
-                // the sealed sample, as `nils labels seal` named it
+                // the sealed sample, as `nils labels seal` named it; for a
+                // certificate that cites its graded run, `evidence:<run>`
                 req("sample", Type::Text),
                 // the registered models it measured, a list of ids
                 req("model_ids", Type::Json),
@@ -2940,6 +2943,10 @@ fn build_registry() -> Vec<Table> {
                 req("result", Type::Json),
                 req("created_by", Type::Text),
                 req("created_at", Type::Timestamp),
+                // the graded run it cites: the run, its manifest's sha256,
+                // the commit that registered the plan and the artifact
+                // digest of the model it graded; none on a sealed sample
+                col("evidence", Type::Json),
             ],
         )
         .index(&["sample"]),
