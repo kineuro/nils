@@ -191,11 +191,24 @@ pub fn run(
             continue;
         }
         let Some(vote) = pass.vote() else { continue };
-        out.push(run_one(store, pack, pass, vote, &corpus, job_id, &filled)?);
+        out.push(run_one(
+            store,
+            pack,
+            pass,
+            vote,
+            &corpus,
+            job_id,
+            &filled,
+            &settings.stacks,
+        )?);
     }
     Ok(out)
 }
 
+/// One vote over the whole corpus, written only to the stacks the run
+/// judges (record 56 §6.5: a scoped re-sort's pool is the registry as it
+/// stands, its writes its own stacks').
+#[allow(clippy::too_many_arguments)]
 fn run_one(
     store: &mut Store,
     pack: &Pack,
@@ -204,6 +217,7 @@ fn run_one(
     corpus: &Corpus,
     job_id: i64,
     filled: &HashSet<(i64, String)>,
+    judged: &crate::job::Stacks,
 ) -> Result<Ran, Error> {
     let mut ran = Ran {
         pass: pass.name.clone(),
@@ -212,6 +226,10 @@ fn run_one(
         ..Ran::default()
     };
     let (answers, pool, _pools) = run_vote(pack, pass, vote, corpus, false);
+    let answers: Vec<_> = answers
+        .into_iter()
+        .filter(|a| judged.holds(corpus.ids[a.at]))
+        .collect();
     ran.pool = pool;
     ran.targets = answers.len() as i64;
 

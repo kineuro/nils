@@ -215,6 +215,117 @@ pub(crate) fn select(store: &Store, modality: Option<&str>, ids: bool) -> String
     )
 }
 
+/// Record 56 §6.5: the same columns as [`select`], with or without ids, for
+/// the stacks named, in stack order: a window of a scoped re-sort.
+pub(crate) fn select_in(
+    store: &Store,
+    modality: Option<&str>,
+    ids: bool,
+    stacks: &[i64],
+) -> String {
+    let (cols, joins) = select_parts(store, ids);
+    let filter = match modality {
+        Some(m) => format!(" AND f.modality = '{}'", m.replace('\'', "''")),
+        None => String::new(),
+    };
+    let list = stacks
+        .iter()
+        .map(i64::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "SELECT {} FROM {} AS f{joins} WHERE f.stack_id IN ({list}){filter} ORDER BY f.stack_id",
+        cols.join(", "),
+        store.qualified("stack_fingerprint"),
+    )
+}
+
+/// The windows a run reads, in stack order: every stack a window at a time
+/// by the paged [`select`], less those a scoped re-sort leaves out; or the
+/// stacks it names, a window of them at a time. A window may come back
+/// empty where every stack of it is left out; `None` is the end.
+pub(crate) struct Windows {
+    sql: String,
+    modality: Option<String>,
+    ids: bool,
+    stacks: crate::job::Stacks,
+    only: Vec<i64>,
+    at: usize,
+    after: i64,
+    window: usize,
+    done: bool,
+}
+
+impl Windows {
+    pub(crate) fn new(store: &Store, settings: &crate::job::Settings, ids: bool) -> Windows {
+        let only = match &settings.stacks {
+            crate::job::Stacks::Only(s) => s.iter().copied().collect(),
+            _ => Vec::new(),
+        };
+        Windows {
+            sql: select(store, settings.modality.as_deref(), ids),
+            modality: settings.modality.clone(),
+            ids,
+            stacks: settings.stacks.clone(),
+            only,
+            at: 0,
+            after: 0,
+            window: settings.window.max(1),
+            done: false,
+        }
+    }
+
+    pub(crate) fn next(&mut self, store: &mut Store) -> Result<Option<Vec<Row>>, Error> {
+        if self.done {
+            return Ok(None);
+        }
+        if let crate::job::Stacks::Only(_) = self.stacks {
+            if self.at >= self.only.len() {
+                self.done = true;
+                return Ok(None);
+            }
+            let end = (self.at + self.window).min(self.only.len());
+            let chunk = &self.only[self.at..end];
+            self.at = end;
+            let rows = store.query(
+                &select_in(store, self.modality.as_deref(), self.ids, chunk),
+                &[],
+            )?;
+            return Ok(Some(rows));
+        }
+        let rows = store.query(
+            &self.sql,
+            &[Param::Int(self.after), Param::Int(self.window as i64)],
+        )?;
+        let Some(last) = rows.last() else {
+            self.done = true;
+            return Ok(None);
+        };
+        self.after = last.int(0)?;
+        if rows.len() < self.window {
+            self.done = true;
+        }
+        if self.stacks.is_all() {
+            return Ok(Some(rows));
+        }
+        let mut kept = Vec::with_capacity(rows.len());
+        for r in rows {
+            if self.stacks.holds(r.int(0)?) {
+                kept.push(r);
+            }
+        }
+        Ok(Some(kept))
+    }
+}
+
+/// Stack ids as an SQL list.
+fn id_list(ids: &[i64]) -> String {
+    ids.iter()
+        .map(i64::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// Record 53: the same columns as [`select`] without ids, for the stacks
 /// named, in stack order: the siblings of a session.
 pub(crate) fn select_stacks(store: &Store, stacks: &[i64]) -> String {
@@ -1039,6 +1150,14 @@ fn sorts_own(kind: &str, by_model: &[String]) -> bool {
 }
 
 /// Classify every stack in scope.
+///
+/// Record 56 §6.5: the pack's adopted scoped changes are applied as the
+/// sort goes, each operation to the stacks its scope holds and to no other
+/// ([`crate::scoped`]): the stacks are judged in groups, those no change
+/// reaches by the pack as it is, and each set of stacks the same changes
+/// reach by the pack with those changes applied, all in one job. A scoped
+/// re-sort (`Settings::stacks`) judges the stacks it names and writes
+/// nothing about any other.
 pub fn classify(
     registry: &mut Registry,
     pack: &Pack,
@@ -1047,7 +1166,7 @@ pub fn classify(
 ) -> Result<crate::report::Classified, Error> {
     let started = Instant::now();
     let job_id = crate::job::claim_for(registry, settings, "classify")?;
-    let mut result = run(registry, pack, settings, cancel, job_id, started);
+    let mut result = run_groups(registry, pack, settings, cancel, job_id, started);
     // Wave 4a §10.2: one question about a rule is one item with n members.
     if let Ok(report) = &mut result {
         match nils_registry::review::group_run(registry.store(), job_id) {
@@ -1085,7 +1204,14 @@ pub fn classify(
     result
 }
 
-fn run(
+fn scoped_error(e: crate::scoped::Error) -> Error {
+    Error::Store(nils_registry::store::Error::Message(e.to_string()))
+}
+
+/// The run in its groups: the stacks the adopted scoped changes reach, by
+/// the pack with them applied, the rest by the pack; then what is written
+/// once for the whole run (the diagnostics and the post-contrast label).
+fn run_groups(
     registry: &mut Registry,
     pack: &Pack,
     settings: &crate::job::Settings,
@@ -1093,10 +1219,174 @@ fn run(
     job_id: i64,
     started: Instant,
 ) -> Result<crate::report::Classified, Error> {
+    let adopted = crate::scoped::adopted(registry.store(), pack).map_err(scoped_error)?;
+    let mut groups: Vec<(Option<Pack>, crate::job::Settings, Vec<String>)> = Vec::new();
+    let mut applied: Vec<serde_json::Value> = Vec::new();
+    let mut skipped = adopted.skipped.clone();
+    if adopted.is_empty() {
+        groups.push((None, settings.clone(), Vec::new()));
+    } else {
+        let resolver = crate::scoped::Resolver::load(registry.store(), &pack.modality)
+            .map_err(scoped_error)?;
+        let plan = crate::scoped::plan(registry.store(), &resolver, &adopted, &|id| {
+            settings.stacks.holds(id)
+        });
+        let mut reached: std::collections::BTreeSet<i64> = std::collections::BTreeSet::new();
+        let mut variants = Vec::new();
+        for (ops, stacks) in plan.groups {
+            match crate::scoped::variant(pack, &adopted, &ops) {
+                Ok(p) => {
+                    reached.extend(stacks.iter().copied());
+                    let names: Vec<String> = ops
+                        .iter()
+                        .map(|i| adopted.ops[*i].proposal)
+                        .collect::<std::collections::BTreeSet<_>>()
+                        .into_iter()
+                        .map(|id| format!("proposal:{id}"))
+                        .collect();
+                    let mut s = settings.clone();
+                    s.stacks = crate::job::Stacks::Only(std::sync::Arc::new(stacks));
+                    variants.push((Some(p), s, names));
+                }
+                // the stacks of a set of changes that do not apply together
+                // are sorted by the pack as it is, and said
+                Err(why) => skipped.push(serde_json::json!({
+                    "proposals": ops.iter().map(|i| adopted.ops[*i].proposal).collect::<std::collections::BTreeSet<_>>(),
+                    "stacks": stacks.len(),
+                    "why": format!("these changes do not apply together: {why}"),
+                })),
+            }
+        }
+        for (i, a) in adopted.ops.iter().enumerate() {
+            applied.push(serde_json::json!({
+                "proposal": a.proposal,
+                "at": a.at,
+                "op": a.op.kind,
+                "scope": a.op.scope.text(),
+                "stacks": plan.reach[i],
+            }));
+        }
+        let mut rest = settings.clone();
+        rest.stacks = settings.stacks.without(&reached);
+        groups.push((None, rest, Vec::new()));
+        groups.extend(variants);
+    }
     let epoch = registry.meta().epoch;
     let mut report = crate::report::Classified::new(job_id, epoch, pack.id());
-    let window = settings.window.max(1);
+    let mut tallies = crate::diagnostics::Tallies::default();
+    for (variant, group, changes) in &groups {
+        if cancel.stop() {
+            report.cancelled = true;
+            break;
+        }
+        // a group of a scoped re-sort that every change's group took whole
+        if matches!(&group.stacks, crate::job::Stacks::Only(s) if s.is_empty()) {
+            continue;
+        }
+        let (one, t) = run(
+            registry,
+            variant.as_ref().unwrap_or(pack),
+            group,
+            changes,
+            cancel,
+            job_id,
+        )?;
+        report.merge(one);
+        tallies.absorb(t);
+        if report.cancelled {
+            break;
+        }
+    }
+    report.scoped = applied;
+    report.scoped_skipped = skipped;
     let store = registry.store();
+    // Wave 4c §6.6: the diagnostics, per batch and per kind, replacing
+    // what the last run said about the same batches; a scoped re-sort
+    // replaces only the batches it judged whole
+    if !report.cancelled {
+        if !settings.stacks.is_all() {
+            let whole = whole_batches(store, pack, settings)?;
+            tallies.retain(|b| whole.contains(&b));
+        }
+        let now = now_iso();
+        report.diagnostics = tallies.write(store, &pack.overlay_terms, &now)?;
+    }
+    // Record 55 F2 and F5: the post-contrast label, the time rule's session
+    // pass and the subject step after it, from what the rules and the
+    // passes decided and the certified T1 answers in the registry; a scoped
+    // re-sort labels its stacks' subjects
+    if !report.cancelled {
+        let subjects = match &settings.stacks {
+            crate::job::Stacks::Only(s) => {
+                let ids: Vec<i64> = s.iter().copied().collect();
+                Some(crate::contrast::subjects_of(store, &ids)?)
+            }
+            _ => None,
+        };
+        report.contrast = Some(crate::contrast::label(store, pack, subjects.as_deref())?.to_json());
+    }
+    if !settings.scope.is_empty() {
+        let stacks = match &settings.stacks {
+            crate::job::Stacks::Only(s) => s.len(),
+            _ => 0,
+        };
+        report.scope = Some(serde_json::json!({"named": settings.scope, "stacks": stacks}));
+    }
+    report.seconds = started.elapsed().as_secs_f64();
+    report.peak_rss = nils_digest::rss::peak_rss();
+    Ok(report)
+}
+
+/// The batches every stack of which a scoped re-sort judged: their
+/// diagnostics are replaced, the others' kept.
+fn whole_batches(
+    store: &mut Store,
+    pack: &Pack,
+    settings: &crate::job::Settings,
+) -> Result<std::collections::BTreeSet<i64>, Error> {
+    let modality = settings.modality.as_deref().unwrap_or(&pack.modality);
+    let sql = format!(
+        "SELECT f.stack_id, k.first_batch_id FROM {} f JOIN {} k ON k.id = f.stack_id WHERE f.modality = {}",
+        store.qualified("stack_fingerprint"),
+        store.qualified("stack"),
+        store.dialect().param(1, Type::Text),
+    );
+    let mut partial: std::collections::BTreeSet<i64> = std::collections::BTreeSet::new();
+    let mut seen: std::collections::BTreeSet<i64> = std::collections::BTreeSet::new();
+    for r in store.query(&sql, &[Param::from(modality)])? {
+        let Some(batch) = r.opt_int(1)? else { continue };
+        if settings.stacks.holds(r.int(0)?) {
+            seen.insert(batch);
+        } else {
+            partial.insert(batch);
+        }
+    }
+    Ok(seen.difference(&partial).copied().collect())
+}
+
+/// One group of a run: the stacks `settings.stacks` names, judged by
+/// `pack`, which carries the scoped changes `changes` names (written on
+/// each stack's classification), then its passes, its missing questions
+/// and its disposition. Answers what it did and the diagnostics it
+/// tallied, which the run writes once.
+fn run(
+    registry: &mut Registry,
+    pack: &Pack,
+    settings: &crate::job::Settings,
+    changes: &[String],
+    cancel: &nils_digest::Cancel,
+    job_id: i64,
+) -> Result<(crate::report::Classified, crate::diagnostics::Tallies), Error> {
+    let epoch = registry.meta().epoch;
+    let mut report = crate::report::Classified::new(job_id, epoch, pack.id());
+    let store = registry.store();
+    // record 56 §6.5: what sorted a stack beside the pack, on its row: an
+    // overlay it was read under, else the scoped changes that reached it
+    let overlay = match (&pack.overlay, changes.is_empty()) {
+        (Some(o), _) => Some(o.clone()),
+        (None, false) => Some(changes.join(",")),
+        (None, true) => None,
+    };
     let decisions = Decisions::load(store)?;
     let with_ids = decisions.needs_ids();
     // Nothing was decided by a person, so nothing is looked up per axis.
@@ -1104,7 +1394,7 @@ fn run(
     // Record 48: the constraints the rules' own answer must keep, the same
     // ones a rater's answer is held to, worked out once for the run.
     let constraints = nils_pack::legal::class_constraints(pack);
-    let sql = select(store, settings.modality.as_deref(), with_ids);
+    let mut windows = Windows::new(store, settings, with_ids);
     let now = now_iso();
     let voters = if settings.votes {
         Some(Voters::register(store, pack)?)
@@ -1133,17 +1423,18 @@ fn run(
     // written once at the end as diagnostic rows with samples.
     let mut tallies: crate::diagnostics::Tallies = Default::default();
 
-    let mut after: i64 = 0;
     loop {
         if cancel.stop() {
             report.cancelled = true;
             break;
         }
-        let rows = store.query(&sql, &[Param::Int(after), Param::Int(window as i64)])?;
-        if rows.is_empty() {
+        let Some(rows) = windows.next(store)? else {
             break;
+        };
+        if rows.is_empty() {
+            crate::job::beat(store, job_id, cancel)?;
+            continue;
         }
-        let last = rows.last().expect("a non-empty window").int(0)?;
         // record 48, D1 of the move: what the rules find on a stack of a
         // sample sealed now stays out of the batch diagnostics and never
         // becomes a review item
@@ -1501,7 +1792,7 @@ fn run(
                 Param::from(pack.name.as_str()),
                 Param::from(pack.version.to_string()),
                 Param::Int(i64::from(pack.contract)),
-                match &pack.overlay {
+                match &overlay {
                     Some(o) => Param::from(o.as_str()),
                     None => Param::Null,
                 },
@@ -1559,20 +1850,19 @@ fn run(
                         &[],
                     )?;
                 }
+                // the rows of the stacks judged, and of no other: a scoped
+                // re-sort writes nothing about a stack outside its scope
                 for t in [axis_t, ev_t, vote_t] {
-                    let sql = format!(
-                        "DELETE FROM {} WHERE stack_id > {} AND stack_id <= {}",
-                        store.qualified(t.name),
-                        store.dialect().param(1, Type::Int),
-                        store.dialect().param(2, Type::Int),
-                    );
-                    store.execute(
-                        &sql,
-                        &[
-                            Param::Int(after),
-                            Param::Int(*ids.iter().max().unwrap_or(&after)),
-                        ],
-                    )?;
+                    for chunk in ids.chunks(500) {
+                        store.execute(
+                            &format!(
+                                "DELETE FROM {} WHERE stack_id IN ({})",
+                                store.qualified(t.name),
+                                id_list(chunk)
+                            ),
+                            &[],
+                        )?;
+                    }
                 }
                 let overwritten: Vec<&str> = vec![
                     "pack",
@@ -1669,16 +1959,6 @@ fn run(
         }
 
         crate::job::beat(store, job_id, cancel)?;
-        after = last;
-        if rows.len() < window {
-            break;
-        }
-    }
-
-    // Wave 4c §6.6: the diagnostics, per batch and per kind, replacing
-    // what the last run said about the same batches.
-    if !report.cancelled {
-        report.diagnostics = tallies.write(store, &pack.overlay_terms, &now)?;
     }
 
     // The passes: the phases that read more than one stack. They run once,
@@ -1711,19 +1991,9 @@ fn run(
     // And last, what to do with each stack (Wave 3 §7), from what the rules
     // and the passes between them decided.
     if !report.cancelled {
-        report.disposed = dispose(store, pack, settings, cancel, job_id, &sql, voters.as_ref())?;
+        report.disposed = dispose(store, pack, settings, cancel, job_id, voters.as_ref())?;
     }
-
-    // Record 55 F2 and F5: the post-contrast label, the time rule's session
-    // pass and the subject step after it, from what the rules and the
-    // passes decided and the certified T1 answers in the registry.
-    if !report.cancelled {
-        report.contrast = Some(crate::contrast::label(store, pack, None)?.to_json());
-    }
-
-    report.seconds = started.elapsed().as_secs_f64();
-    report.peak_rss = nils_digest::rss::peak_rss();
-    Ok(report)
+    Ok((report, tallies))
 }
 
 /// §7: the disposition of every stack, decided after the passes.
@@ -1744,7 +2014,6 @@ fn dispose(
     settings: &crate::job::Settings,
     cancel: &nils_digest::Cancel,
     job_id: i64,
-    sql: &str,
     voters: Option<&Voters>,
 ) -> Result<i64, Error> {
     let names: Vec<&str> = pack
@@ -1756,7 +2025,6 @@ fn dispose(
     if names.is_empty() {
         return Ok(0);
     }
-    let window = settings.window.max(1);
     let axis_t = table("classification_axis");
     let ev_t = table("classification_evidence");
     let vote_t = table("classification_vote");
@@ -1764,28 +2032,36 @@ fn dispose(
     let scope = format!("axis IN ({})", quoted.join(", "));
 
     let mut disposed = 0i64;
-    let mut after: i64 = 0;
+    let mut windows = Windows::new(store, settings, false);
     loop {
         if cancel.stop() {
             break;
         }
-        let rows = store.query(sql, &[Param::Int(after), Param::Int(window as i64)])?;
-        if rows.is_empty() {
+        let Some(rows) = windows.next(store)? else {
             break;
+        };
+        if rows.is_empty() {
+            crate::job::beat(store, job_id, cancel)?;
+            continue;
         }
-        let last = rows.last().expect("a non-empty window").int(0)?;
+        let window_ids: Vec<i64> = rows.iter().map(|r| r.int(0)).collect::<Result<_, _>>()?;
 
         // What the rules and the passes left, for the stacks of this window.
         // A multi-valued axis is stored comma-joined, so it is split back into
         // the values the rules put there.
         let mut decided: HashMap<i64, Vec<Vec<String>>> = HashMap::new();
-        let seed_sql = format!(
-            "SELECT stack_id, axis, value FROM {} WHERE stack_id > {} AND stack_id <= {}",
-            store.qualified("classification_axis"),
-            store.dialect().param(1, Type::Int),
-            store.dialect().param(2, Type::Int),
-        );
-        for r in store.query(&seed_sql, &[Param::Int(after), Param::Int(last)])? {
+        let mut seeds = Vec::new();
+        for chunk in window_ids.chunks(500) {
+            seeds.extend(store.query(
+                &format!(
+                    "SELECT stack_id, axis, value FROM {} WHERE stack_id IN ({})",
+                    store.qualified("classification_axis"),
+                    id_list(chunk)
+                ),
+                &[],
+            )?);
+        }
+        for r in seeds {
             let name = r.text(1)?;
             let Some(a) = pack.axes.iter().position(|x| x.name == name) else {
                 continue;
@@ -1805,6 +2081,7 @@ fn dispose(
         let mut axes: Vec<Vec<Param>> = Vec::new();
         let mut evidence: Vec<Vec<Param>> = Vec::new();
         let mut votes: Vec<Vec<Param>> = Vec::new();
+        let mut judged: Vec<i64> = Vec::new();
         for r in &rows {
             let (ids, stack, private) = to_stack(r, false, pack)?;
             let modality =
@@ -1812,6 +2089,7 @@ fn dispose(
             if modality != pack.modality {
                 continue;
             }
+            judged.push(ids.stack);
             let seed = decided.get(&ids.stack).unwrap_or(&empty);
             let evaluated = Evaluated::with_private(pack, &stack, private);
             let verdict = match voters {
@@ -1849,28 +2127,27 @@ fn dispose(
         if !axes.is_empty() {
             store.begin()?;
             let write = (|| -> Result<(), nils_registry::store::Error> {
-                // Only this phase's rows: the class phase's answers are what
-                // this one was worked out from.
-                for t in [axis_t, ev_t] {
+                // Only this phase's rows, of the stacks disposed: the class
+                // phase's answers are what this one was worked out from.
+                for chunk in judged.chunks(500) {
+                    let list = id_list(chunk);
+                    for t in [axis_t, ev_t] {
+                        store.execute(
+                            &format!(
+                                "DELETE FROM {} WHERE stack_id IN ({list}) AND {scope}",
+                                store.qualified(t.name),
+                            ),
+                            &[],
+                        )?;
+                    }
                     store.execute(
                         &format!(
-                            "DELETE FROM {} WHERE stack_id > {} AND stack_id <= {} AND {scope}",
-                            store.qualified(t.name),
-                            store.dialect().param(1, Type::Int),
-                            store.dialect().param(2, Type::Int),
+                            "DELETE FROM {} WHERE stack_id IN ({list}) AND phase = 'disposition'",
+                            store.qualified(vote_t.name),
                         ),
-                        &[Param::Int(after), Param::Int(last)],
+                        &[],
                     )?;
                 }
-                store.execute(
-                    &format!(
-                        "DELETE FROM {} WHERE stack_id > {} AND stack_id <= {} AND phase = 'disposition'",
-                        store.qualified(vote_t.name),
-                        store.dialect().param(1, Type::Int),
-                        store.dialect().param(2, Type::Int),
-                    ),
-                    &[Param::Int(after), Param::Int(last)],
-                )?;
                 store.insert(
                     &Insert::new(vote_t, &["stack_id", "phase", "votes"]),
                     &votes,
@@ -1908,10 +2185,6 @@ fn dispose(
         }
 
         crate::job::beat(store, job_id, cancel)?;
-        after = last;
-        if rows.len() < window {
-            break;
-        }
     }
     Ok(disposed)
 }

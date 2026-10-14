@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 99;
+pub const SCHEMA_VERSION: i64 = 100;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -450,6 +450,10 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 99,
         apply: a_certificate_may_cite_its_graded_run,
     },
+    Migration {
+        version: 100,
+        apply: a_rule_change_is_proposed_and_decided,
+    },
 ];
 
 /// Record 55 ruling 22 (b): a certificate may cite its graded run (the
@@ -464,6 +468,16 @@ fn a_certificate_may_cite_its_graded_run(store: &mut Store, kind: Kind) -> Resul
     }
     add_columns(store, "certificate", &["evidence", "model_id"])?;
     add_indexes(store, "certificate")
+}
+
+/// Record 56 (sections 6.4 and 6.5): a proposed rule change as a registry
+/// object (`rule_proposal`), decided by a person and applied by a re-sort.
+/// Only a table is added; a registry from before has no proposals.
+fn a_rule_change_is_proposed_and_decided(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_tables(store, kind, &["rule_proposal"])
 }
 
 /// Record 55 F2 and F5 (spec §12.3): the post-contrast label of each stack,

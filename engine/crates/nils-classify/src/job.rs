@@ -59,6 +59,54 @@ pub struct Settings {
     /// step still runs, and a cancel still reaches it (review of
     /// 2026-10-10). A cancelled or failed sort finishes its job as before.
     pub leave_open: bool,
+    /// Record 56 section 6.5, a scoped re-sort: the stacks a classify
+    /// judges, every one by default. A stack outside them is neither read
+    /// as a target nor written: its rows, its questions and its passes'
+    /// answers stay as they are.
+    pub stacks: Stacks,
+    /// What `stacks` was named by (`dataset:NAME`, `handle:ID`), for the
+    /// job's record and the report; empty for every stack.
+    pub scope: Vec<String>,
+}
+
+/// The stacks a classify judges (record 56 section 6.5).
+#[derive(Debug, Clone, Default)]
+pub enum Stacks {
+    /// Every stack of the modality.
+    #[default]
+    All,
+    /// These and no other.
+    Only(std::sync::Arc<std::collections::BTreeSet<i64>>),
+    /// Every stack but these.
+    Except(std::sync::Arc<std::collections::BTreeSet<i64>>),
+}
+
+impl Stacks {
+    /// Whether a stack is one the run judges.
+    pub fn holds(&self, stack: i64) -> bool {
+        match self {
+            Stacks::All => true,
+            Stacks::Only(s) => s.contains(&stack),
+            Stacks::Except(s) => !s.contains(&stack),
+        }
+    }
+
+    pub fn is_all(&self) -> bool {
+        matches!(self, Stacks::All)
+    }
+
+    /// These stacks less `out`.
+    pub fn without(&self, out: &std::collections::BTreeSet<i64>) -> Stacks {
+        use std::sync::Arc;
+        if out.is_empty() {
+            return self.clone();
+        }
+        match self {
+            Stacks::All => Stacks::Except(Arc::new(out.clone())),
+            Stacks::Only(s) => Stacks::Only(Arc::new(s.difference(out).copied().collect())),
+            Stacks::Except(s) => Stacks::Except(Arc::new(s.union(out).copied().collect())),
+        }
+    }
 }
 
 impl Default for Settings {
@@ -71,6 +119,8 @@ impl Default for Settings {
             window: WINDOW,
             votes: true,
             leave_open: false,
+            stacks: Stacks::All,
+            scope: Vec::new(),
         }
     }
 }
@@ -78,13 +128,18 @@ impl Default for Settings {
 impl Settings {
     /// What the job row records, so that a run can be repeated from it.
     pub fn config(&self) -> serde_json::Value {
-        serde_json::json!({
+        let mut config = serde_json::json!({
             "force": self.force,
             "modality": self.modality,
             "review_below": self.review_below,
             "window": self.window,
             "votes": self.votes,
-        })
+        });
+        // record 56 section 6.5: a scoped re-sort says its scope
+        if !self.scope.is_empty() {
+            config["scope"] = serde_json::json!(self.scope);
+        }
+        config
     }
 }
 

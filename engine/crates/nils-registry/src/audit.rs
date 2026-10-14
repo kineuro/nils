@@ -39,6 +39,11 @@ pub enum Action {
     /// adopted, which queues the reclassify that changes judgements.
     OverlayPropose,
     OverlayAdopt,
+    /// Record 56: a rule change proposed with its effect report, adopted
+    /// by a person (a pack's next version, or a scoped change) or rejected.
+    RulesPropose,
+    RulesAdopt,
+    RulesReject,
     Release,
     Handover,
     ReleaseWithdraw,
@@ -190,6 +195,9 @@ impl Action {
             Action::Backup => "backup",
             Action::OverlayPropose => "overlay.propose",
             Action::OverlayAdopt => "overlay.adopt",
+            Action::RulesPropose => "rules.propose",
+            Action::RulesAdopt => "rules.adopt",
+            Action::RulesReject => "rules.reject",
             Action::Release => "release",
             Action::Handover => "handover",
             Action::ReleaseWithdraw => "release.withdraw",
@@ -264,6 +272,8 @@ impl Action {
                 | Action::JobsPrune
                 | Action::Backup
                 | Action::OverlayPropose
+                | Action::RulesPropose
+                | Action::RulesReject
                 | Action::InstanceOpen
                 | Action::PlaceAdd
                 | Action::PlaceSet

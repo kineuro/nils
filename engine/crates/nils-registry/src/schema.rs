@@ -3126,6 +3126,54 @@ fn build_registry() -> Vec<Table> {
         .index(&["run_id"])
         .index(&["subject_id"])
         .index(&["stack_id"]),
+        // Record 56 (sections 5.3 to 5.6, 6.4 and 6.5): a proposed rule
+        // change, typed operations with their reason, evidence and scope,
+        // kept with the effect report it was rehearsed into and decided by
+        // a person. Adopted, a pack edit is the pack's next version (the
+        // rules version written, `version`) and a scoped one a change every
+        // sort applies to the stacks its scope holds; `applied` is what the
+        // re-sort after it did.
+        Table::new(
+            "rule_proposal",
+            vec![
+                col("id", Type::Id),
+                req("pack", Type::Text),
+                req("title", Type::Text),
+                // pack (a pack edit) or scoped (a site's, a dataset's, a
+                // scanner's or a batch's)
+                req("kind", Type::Text),
+                // the pack version it was last rehearsed against
+                req("on_version", Type::Text),
+                // the scopes of its operations, as their text
+                req("scopes", Type::Json),
+                // the patch as rehearsed: its operations as written, each
+                // with its scope, reason and evidence, its cases and ships
+                req("patch", Type::Json),
+                col("reason", Type::Text),
+                col("evidence", Type::Json),
+                // the datasets it touches, by name
+                col("datasets", Type::Json),
+                // proposed, adopted or rejected
+                req("status", Type::Text),
+                col("report", Type::Json),
+                col("card", Type::Json),
+                col("rehearsed_at", Type::Timestamp),
+                req("author", Type::Text),
+                req("author_kind", Type::Text),
+                col("actor", Type::Json),
+                req("created_at", Type::Timestamp),
+                col("decided_at", Type::Timestamp),
+                col("decided_by", Type::Text),
+                col("why", Type::Text),
+                // the re-sort an adoption queued
+                col("job_id", Type::Int),
+                // the rules version an adopted pack edit wrote
+                col("version", Type::Json),
+                // what the re-sort did: expected (the report's) and measured
+                col("applied", Type::Json),
+            ],
+        )
+        .index(&["pack", "status"]),
     ]
 }
 

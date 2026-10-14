@@ -79,6 +79,7 @@ mod rehearse;
 mod releases;
 mod requirements;
 mod review_rule;
+mod rule_changes;
 mod rules;
 mod scans;
 mod schedule;
@@ -2557,6 +2558,16 @@ struct ClassifyArgs {
     /// build` makes them later
     #[arg(long)]
     no_previews: bool,
+    /// Judge only the stacks a scope holds (record 56, a scoped re-sort):
+    /// site:NAME, dataset:NAME[,NAME], scanner:KEY=VALUE[,KEY=VALUE],
+    /// batch:ID or handle:ID; repeated, their union. Nothing about any
+    /// other stack is written
+    #[arg(long, value_name = "SCOPE")]
+    scope: Vec<String>,
+    /// The adopted rule change this re-sort applies: what it did is written
+    /// on the proposal when it ends (the decide door queues it)
+    #[arg(long, value_name = "ID")]
+    proposal: Option<i64>,
     /// Machine-readable output
     #[arg(long)]
     json: bool,
@@ -2667,19 +2678,67 @@ fn classify(home: &Home, args: ClassifyArgs) -> Result<(), Exit> {
 
     let cancel = stop_on_signal()?;
     let mut registry = open(home)?;
+    // record 56 §6.5: a scoped re-sort judges the stacks its scope holds
+    if !args.scope.is_empty() {
+        let stacks = classify_scope(&mut registry, &pack.modality, &args.scope)?;
+        settings.stacks = nils_classify::job::Stacks::Only(std::sync::Arc::new(stacks));
+        settings.scope = args.scope.clone();
+    }
+    // record 56 §6.5: the re-sort after an adopted rule change, which says
+    // on the proposal what it did
+    let watched = match args.proposal {
+        Some(id) => {
+            let p = nils_registry::rule_proposal::get(registry.store(), id)
+                .map_err(|e| fail(e.to_string()))?
+                .ok_or_else(|| usage(format!("no proposal {id}")))?;
+            if p.status != nils_registry::rule_proposal::ADOPTED {
+                return Err(usage(format!(
+                    "proposal {id} is {}, and only an adopted one is applied",
+                    p.status
+                )));
+            }
+            let only = match &settings.stacks {
+                nils_classify::job::Stacks::Only(s) => Some(s.as_ref().clone()),
+                _ => None,
+            };
+            let before = rule_changes::snapshot(registry.store(), only.as_ref())
+                .map_err(|e| fail(e.to_string()))?;
+            Some((id, only, before))
+        }
+        None => None,
+    };
     // record 55 H2: the stacks judged get their previews in the same run,
     // while the sort is still the job, so no picture waits for a queue; the
     // job stays running until they are made, so it is never shown done
     // while they run and a cancel reaches them (review of 2026-10-10)
     settings.leave_open = !args.no_previews;
-    let report = nils_classify::classify::classify(&mut registry, &pack, &settings, &cancel)
-        .map_err(|e| match e {
-            nils_classify::Error::Busy { .. } => Exit {
-                code: BUSY,
-                message: e.to_string(),
-            },
-            other => fail(other.to_string()),
-        })?;
+    let result = nils_classify::classify::classify(&mut registry, &pack, &settings, &cancel);
+    // a sort that could not start (another holds the registry) did nothing
+    // to record; the proposal says its job's state until one runs
+    let started = !matches!(result, Err(nils_classify::Error::Busy { .. }));
+    if let Some((id, only, before)) = watched.as_ref().filter(|_| started) {
+        let (state, stacks, job) = match &result {
+            Ok(r) if r.cancelled => ("cancelled", r.written, r.job_id),
+            Ok(r) => ("done", r.written, r.job_id),
+            Err(_) => ("failed", 0, 0),
+        };
+        let after = rule_changes::snapshot(registry.store(), only.as_ref())
+            .map_err(|e| fail(e.to_string()))?;
+        let mut m =
+            rule_changes::measured(before, &after, stacks as usize, &settings.scope, job, state);
+        if let Err(e) = &result {
+            m["error"] = serde_json::json!(e.to_string());
+        }
+        nils_registry::rule_proposal::set_measured(registry.store(), *id, &m)
+            .map_err(|e| fail(e.to_string()))?;
+    }
+    let report = result.map_err(|e| match e {
+        nils_classify::Error::Busy { .. } => Exit {
+            code: BUSY,
+            message: e.to_string(),
+        },
+        other => fail(other.to_string()),
+    })?;
     let printed = if args.json {
         serde_json::to_string_pretty(&report)
             .map(|text| println!("{text}"))
@@ -2712,6 +2771,47 @@ fn classify(home: &Home, args: ClassifyArgs) -> Result<(), Exit> {
         return Ok(());
     }
     printed
+}
+
+/// The stacks a classify's `--scope` words hold, their union (record 56
+/// §6.5): a site, a dataset, a scanner or a batch as the rehearsal reads
+/// them, or a frozen handle's stacks.
+fn classify_scope(
+    registry: &mut Registry,
+    modality: &str,
+    scopes: &[String],
+) -> Result<std::collections::BTreeSet<i64>, Exit> {
+    let mut out = std::collections::BTreeSet::new();
+    let mut resolver: Option<nils_classify::scoped::Resolver> = None;
+    for s in scopes {
+        if let Some(h) = s.trim().strip_prefix("handle:") {
+            let id: i64 = h
+                .trim()
+                .parse()
+                .map_err(|_| usage(format!("--scope {s}: handle:ID names a handle by its id")))?;
+            out.extend(crate::pipelines::handle_stacks(registry.store(), id)?);
+            continue;
+        }
+        let scope =
+            nils_pack::patch::Scope::parse(s).map_err(|e| usage(format!("--scope {s}: {e}")))?;
+        if scope.is_pack() {
+            return Err(usage(
+                "--scope pack is every stack, which a classify without --scope judges",
+            ));
+        }
+        if resolver.is_none() {
+            resolver = Some(
+                nils_classify::scoped::Resolver::load(registry.store(), modality)
+                    .map_err(|e| fail(e.to_string()))?,
+            );
+        }
+        let r = resolver.as_ref().expect("loaded");
+        let scope = r
+            .known(&scope, registry.store())
+            .map_err(|e| usage(format!("--scope {s}: {e}")))?;
+        out.extend(r.stacks(&scope));
+    }
+    Ok(out)
 }
 
 /// The preview step of a classify run (record 55 H2): the previews of the
@@ -4674,6 +4774,7 @@ fn pack_command(home: &Home, command: PackCommand) -> Result<(), Exit> {
                 workers,
                 cap,
                 progress,
+                all_breaks: false,
             };
             let made = rehearse::report(&mut registry, &dir, &patch, &settings);
             if let Some(id) = job {

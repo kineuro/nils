@@ -61,6 +61,7 @@ pub mod proposals;
 pub mod pseudonym;
 pub mod review;
 pub mod round;
+pub mod rule_proposal;
 pub mod schema;
 pub mod session;
 pub mod store;

@@ -2109,6 +2109,13 @@ fn routed(
     ) {
         return r;
     }
+    // record 56 §6.4, §6.5: the pack's quality, the proposed rule changes
+    // and their adoption
+    if let Some(r) =
+        crate::rule_changes::route(doors, registry, caller, method.as_str(), &segs, query, body)
+    {
+        return r;
+    }
     // record 55 D3, D6, D7: System 1 in the review rule, blind first, and
     // the audit stream
     if let Some(r) = crate::review_rule::route(
@@ -2317,6 +2324,7 @@ fn routed(
                 workers,
                 cap: Some(crate::rehearse::at_once()),
                 progress: None,
+                all_breaks: false,
             };
             match crate::rehearse::report_scoped(registry, &dir, &patch, &settings, scoped) {
                 Ok(mut answer) => {
@@ -5322,6 +5330,10 @@ pub(crate) fn door(method: &str, segs: &[&str]) -> (Need, Detail) {
     if let Some(n) = crate::review_rule::door(method, segs) {
         return n;
     }
+    // record 56 §6.4, §6.5: the Rules page's doors
+    if let Some(n) = crate::rule_changes::door(method, segs) {
+        return n;
+    }
     match (method, segs) {
         // the Query page: reading and running questions
         (
@@ -6160,6 +6172,7 @@ pub(crate) fn doors_list() -> Vec<String> {
     .chain(crate::ask_doors::DOORS.iter())
     .chain(crate::main_scans::DOORS.iter())
     .chain(crate::review_rule::DOORS.iter())
+    .chain(crate::rule_changes::DOORS.iter())
     .map(|d| (*d).to_string())
     .collect()
 }
@@ -6400,6 +6413,18 @@ fn events(doors: &Doors, registry: &mut Registry, request: Request, all: bool) {
 /// the deployment's directory; `verify NAME` checks one archive in it.
 fn located(doors: &Doors, store: &mut Store, command: Vec<String>) -> Result<Vec<String>, Reply> {
     let verb = command[0].as_str();
+    // record 56 §6.5: the re-sort after an adopted rule change writes on its
+    // proposal, and only the decide door queues it
+    if verb == "classify"
+        && command
+            .iter()
+            .any(|w| w == "--proposal" || w.starts_with("--proposal="))
+    {
+        return Err(Reply::error(
+            400,
+            "--proposal is the decide door's word: a rule change is adopted at POST /api/packs/{name}/proposals/{id}/decide",
+        ));
+    }
     match verb {
         "backup" => {
             let dir = doors.backup_dir.as_ref().ok_or_else(|| {
@@ -8130,6 +8155,7 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
             .iter()
             .chain(crate::main_scans::POLICY.iter())
             .chain(crate::review_rule::POLICY.iter())
+            .chain(crate::rule_changes::POLICY.iter())
             .map(|(door, writes, idem, cost, cap, now, then)| {
                 row(door, *writes, *idem, cost, cap, now, then)
             }),

@@ -26,6 +26,7 @@ pub mod picking;
 pub mod rehearse;
 pub mod report;
 pub mod scope;
+pub mod scoped;
 pub mod session;
 pub mod signals;
 pub mod votes;
