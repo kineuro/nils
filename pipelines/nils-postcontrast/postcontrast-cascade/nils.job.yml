@@ -36,8 +36,9 @@ description: >-
   post-contrast model, through its three-slice student; defer the rest of
   T1-type brain to the full pipeline and say "not sure" elsewhere.
 
-# Pinned to the image built from this folder (CPU build, torch 2.8.0); the
-# release that publishes the image replaces it with the published digest.
+# The image is built by each site from this folder; no release publishes
+# it. The digest below is the image built from this folder (CPU build,
+# torch 2.8.0), and a site that builds its own pins its own.
 container-image:
   type: docker
   image: "ghcr.io/kineuro/nils-postcontrast@sha256:cbafd715a69c8e2c571ea1ce5f9ea7d2349d3e109300cd84d2d7d1e1fada5a7c"

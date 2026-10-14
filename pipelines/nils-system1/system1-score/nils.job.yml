@@ -28,8 +28,9 @@ description: >-
   probability, the rules' reliability on the header and the fields that
   mattered, as a second opinion beside the rules'.
 
-# Pinned to the image built from this folder; the release that publishes
-# the image replaces it with the published digest.
+# The image is built by each site from this folder; no release publishes
+# it. The digest below is the image built from this folder, and a site
+# that builds its own pins its own.
 container-image:
   type: docker
   image: "ghcr.io/kineuro/nils-system1@sha256:53171a3a2e107840dc4319a0f5b79e3d1e377b498cef507c9b21ec76b407de81"

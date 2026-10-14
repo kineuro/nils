@@ -1698,7 +1698,7 @@ dependencies = [
 
 [[package]]
 name = "nils"
-version = "1.0.0-alpha.79"
+version = "1.0.0-alpha.80"
 dependencies = [
  "base64 0.22.1",
  "blake2",
@@ -1747,7 +1747,7 @@ dependencies = [
 
 [[package]]
 name = "nils-ask"
-version = "1.0.0-alpha.79"
+version = "1.0.0-alpha.80"
 dependencies = [
  "blake2",
  "hex",
@@ -1760,7 +1760,7 @@ dependencies = [
 
 [[package]]
 name = "nils-catalog"
-version = "1.0.0-alpha.79"
+version = "1.0.0-alpha.80"
 dependencies = [
  "nils-ask",
  "nils-dicom",
@@ -1774,7 +1774,7 @@ dependencies = [
 
 [[package]]
 name = "nils-classify"
-version = "1.0.0-alpha.79"
+version = "1.0.0-alpha.80"
 dependencies = [
  "dicom-core",
  "dicom-dictionary-std",
@@ -1791,7 +1791,7 @@ dependencies = [
 
 [[package]]
 name = "nils-dicom"
-version = "1.0.0-alpha.79"
+version = "1.0.0-alpha.80"
 dependencies = [
  "dicom-core",
  "dicom-dictionary-std",
@@ -1804,7 +1804,7 @@ dependencies = [
 
 [[package]]
 name = "nils-digest"
-version = "1.0.0-alpha.79"
+version = "1.0.0-alpha.80"
 dependencies = [
  "blake2",
  "crossbeam-channel",
@@ -1825,7 +1825,7 @@ dependencies = [
 
 [[package]]
 name = "nils-pack"
-version = "1.0.0-alpha.79"
+version = "1.0.0-alpha.80"
 dependencies = [
  "aho-corasick",
  "csv",
@@ -1837,7 +1837,7 @@ dependencies = [
 
 [[package]]
 name = "nils-pipeline"
-version = "1.0.0-alpha.79"
+version = "1.0.0-alpha.80"
 dependencies = [
  "csv",
  "flate2",
@@ -1851,7 +1851,7 @@ dependencies = [
 
 [[package]]
 name = "nils-pseudonymize"
-version = "1.0.0-alpha.79"
+version = "1.0.0-alpha.80"
 dependencies = [
  "blake2",
  "crossbeam-channel",
@@ -1871,7 +1871,7 @@ dependencies = [
 
 [[package]]
 name = "nils-registry"
-version = "1.0.0-alpha.79"
+version = "1.0.0-alpha.80"
 dependencies = [
  "blake2",
  "bytes",
@@ -1893,7 +1893,7 @@ dependencies = [
 
 [[package]]
 name = "nils-release"
-version = "1.0.0-alpha.79"
+version = "1.0.0-alpha.80"
 dependencies = [
  "blake2",
  "dicom-core",
@@ -1917,7 +1917,7 @@ dependencies = [
 
 [[package]]
 name = "nils-session"
-version = "1.0.0-alpha.79"
+version = "1.0.0-alpha.80"
 dependencies = [
  "blake2",
  "csv",
@@ -1932,7 +1932,7 @@ dependencies = [
 
 [[package]]
 name = "nils-synth"
-version = "1.0.0-alpha.79"
+version = "1.0.0-alpha.80"
 dependencies = [
  "nils-dicom",
  "nils-registry",
