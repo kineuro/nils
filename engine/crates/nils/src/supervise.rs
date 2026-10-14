@@ -936,7 +936,18 @@ impl Runs {
             "finished_at": null,
             "exit": null,
         });
-        write_run(&self.dir, &id, &doc);
+        // the run is on record before its id is answered, or it is not
+        // started: an id the door cannot read back would leave a desk with
+        // "no run by that id" for a run that is going
+        write_run(&self.dir, &id, &doc).map_err(|e| {
+            (
+                500,
+                format!(
+                    "{what}: the run could not be recorded in {}: {e}",
+                    self.dir.display()
+                ),
+            )
+        })?;
         // the recorder runs the command and writes down how it ended, so the
         // ending is kept even when this service is restarted meanwhile
         let mut recorder = vec![
@@ -966,8 +977,7 @@ impl Runs {
         if id.is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric()) {
             return None;
         }
-        let path = self.dir.join(format!("{id}.json"));
-        let read = || -> Option<Value> { serde_json::from_slice(&std::fs::read(&path).ok()?).ok() };
+        let read = || read_run(&self.dir, id);
         let mut doc = read()?;
         if doc["state"] == "running" {
             let mut children = self.children.lock().ok()?;
@@ -988,7 +998,7 @@ impl Runs {
                 if doc["state"] == "running" {
                     doc["state"] = json!("ended");
                     doc["finished_at"] = json!(nils_registry::time::now_iso());
-                    write_run(&self.dir, id, &doc);
+                    let _ = write_run(&self.dir, id, &doc);
                 }
             }
         }
@@ -1004,16 +1014,10 @@ impl Runs {
 /// service, so a run that outlives a restart of the service still says how
 /// it went.
 fn record(dir: &Path, id: &str, command: &[String]) -> Result<(), Exit> {
-    let path = dir.join(format!("{id}.json"));
-    let read = || -> Value {
-        std::fs::read(&path)
-            .ok()
-            .and_then(|b| serde_json::from_slice(&b).ok())
-            .unwrap_or_else(|| json!({ "id": id }))
-    };
+    let read = || read_run(dir, id).unwrap_or_else(|| json!({ "id": id }));
     let mut doc = read();
     doc["pid"] = json!(std::process::id());
-    write_run(dir, id, &doc);
+    let _ = write_run(dir, id, &doc);
     let log = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -1039,15 +1043,36 @@ fn record(dir: &Path, id: &str, command: &[String]) -> Result<(), Exit> {
         }
     }
     doc["finished_at"] = json!(nils_registry::time::now_iso());
-    write_run(dir, id, &doc);
+    let _ = write_run(dir, id, &doc);
     Ok(())
 }
 
-fn write_run(dir: &Path, id: &str, doc: &Value) {
-    let _ = std::fs::write(
-        dir.join(format!("{id}.json")),
-        serde_json::to_vec_pretty(doc).unwrap_or_default(),
-    );
+/// A run's document as it was last written, or `None` where there is none.
+fn read_run(dir: &Path, id: &str) -> Option<Value> {
+    serde_json::from_slice(&std::fs::read(dir.join(format!("{id}.json"))).ok()?).ok()
+}
+
+/// A run's document, written whole: into a file of the writer's own beside
+/// it, then renamed over it, so whoever reads it finds the document before or
+/// the one after and never an empty or half-written file. The recorder
+/// rewrites it as its run starts and as it ends while a desk polls the door,
+/// and written in place, a read between the truncation and the write found
+/// nothing to read: the door answered 404 "no run by that id" for a run it
+/// had just started.
+fn write_run(dir: &Path, id: &str, doc: &Value) -> std::io::Result<()> {
+    // a file of this write's own: the service and the recorder are two
+    // processes, and two threads of one may write the same run at once (the
+    // start and the end of a short run), so the process's id alone is not
+    // enough: one write would truncate the file the other is renaming
+    static WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let fresh = dir.join(format!(".{id}.json.{}.{n}", std::process::id()));
+    let written = std::fs::write(&fresh, serde_json::to_vec_pretty(doc).unwrap_or_default())
+        .and_then(|()| std::fs::rename(&fresh, dir.join(format!("{id}.json"))));
+    if written.is_err() {
+        let _ = std::fs::remove_file(&fresh);
+    }
+    written
 }
 
 type Slot = OnceLock<Mutex<Option<(Instant, Value)>>>;
@@ -1869,5 +1894,152 @@ pub(crate) fn command(command: SuperviseCommand) -> Result<(), Exit> {
                 Err(why) => Err(fail(why)),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// A run's document as large as a long run's, so that writing it is more
+    /// than one block.
+    fn run_doc(n: usize) -> Value {
+        json!({ "id": "r1", "state": "running", "pid": n, "command": vec!["word"; 1000] })
+    }
+
+    /// The door reads a run's document while its recorder rewrites it (its
+    /// process as the run starts, its ending as it stops), and every read
+    /// finds a whole document. Written in place, a read between the truncation
+    /// and the write found an empty file, and the door answered "no run by
+    /// that id" for a run it had just started; on that write this test found
+    /// an empty read within its first 30 reads.
+    #[test]
+    fn a_run_rewritten_while_it_is_read_is_read_whole_every_time() {
+        let dir = std::env::temp_dir().join(format!("nils-runs-whole-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        write_run(&dir, "r1", &run_doc(0)).unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let writer = {
+            let (dir, stop) = (dir.clone(), Arc::clone(&stop));
+            std::thread::spawn(move || {
+                let mut n = 0;
+                while !stop.load(Ordering::SeqCst) {
+                    n += 1;
+                    write_run(&dir, "r1", &run_doc(n)).unwrap();
+                }
+                n
+            })
+        };
+        // read for two seconds while it is rewritten, whatever the machine's speed
+        let until = Instant::now() + Duration::from_secs(2);
+        let mut reads = 0usize;
+        let mut broken = None;
+        while Instant::now() < until {
+            if !read_run(&dir, "r1").is_some_and(|d| d["id"] == "r1") {
+                broken = Some(reads);
+                break;
+            }
+            reads += 1;
+        }
+        stop.store(true, Ordering::SeqCst);
+        let writes = writer.join().unwrap();
+        assert_eq!(
+            broken, None,
+            "read {reads} of {writes} writes found no whole document"
+        );
+        assert!(reads > 0 && writes > 0, "{reads} reads, {writes} writes");
+        assert_eq!(read_run(&dir, "r1").unwrap()["pid"], writes);
+        // and the writers leave no file of their own beside it
+        let names: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, ["r1.json"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Two writers of one run at once, as the start and the end of a short
+    /// run can be from two threads of one process, and a reader: every read
+    /// finds a whole document, every write lands, and no writer's file is
+    /// left behind. With one file name per process, one write truncated the
+    /// file the other was renaming.
+    #[test]
+    fn two_writers_of_one_run_and_a_reader_find_it_whole_every_time() {
+        let dir = std::env::temp_dir().join(format!("nils-runs-two-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        write_run(&dir, "r1", &run_doc(0)).unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let writers: Vec<_> = (0..2)
+            .map(|w| {
+                let (dir, stop) = (dir.clone(), Arc::clone(&stop));
+                std::thread::spawn(move || {
+                    let (mut n, mut failed) = (0usize, 0usize);
+                    while !stop.load(Ordering::SeqCst) {
+                        n += 1;
+                        if write_run(&dir, "r1", &run_doc(w * 1_000_000 + n)).is_err() {
+                            failed += 1;
+                        }
+                    }
+                    (n, failed)
+                })
+            })
+            .collect();
+        let until = Instant::now() + Duration::from_secs(2);
+        let mut reads = 0usize;
+        let mut broken = None;
+        while Instant::now() < until {
+            let whole = read_run(&dir, "r1").is_some_and(|d| {
+                d["id"] == "r1" && d["command"].as_array().is_some_and(|c| c.len() == 1000)
+            });
+            if !whole {
+                broken = Some(reads);
+                break;
+            }
+            reads += 1;
+        }
+        stop.store(true, Ordering::SeqCst);
+        let done: Vec<(usize, usize)> = writers.into_iter().map(|h| h.join().unwrap()).collect();
+        assert_eq!(
+            broken, None,
+            "read {reads} found no whole document ({done:?})"
+        );
+        assert!(done.iter().all(|(n, _)| *n > 0), "{done:?}");
+        assert!(
+            done.iter().all(|(_, failed)| *failed == 0),
+            "writes failed: {done:?}"
+        );
+        let names: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, ["r1.json"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A document that cannot be written says so, which `Runs::start` turns
+    /// into a refusal rather than an id the door could never read back, and
+    /// leaves no file of the writer's own behind.
+    #[test]
+    fn a_run_that_cannot_be_written_says_so_and_leaves_nothing() {
+        let root =
+            std::env::temp_dir().join(format!("nils-runs-unwritable-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        // a folder in the document's own place: the rename cannot replace it
+        std::fs::create_dir_all(root.join("r1.json")).unwrap();
+        assert!(write_run(&root, "r1", &run_doc(1)).is_err());
+        assert!(write_run(&root.join("absent"), "r1", &run_doc(1)).is_err());
+        let names: Vec<String> = std::fs::read_dir(&root)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, ["r1.json"]);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

@@ -4580,9 +4580,47 @@ fn write_state(state: &State) -> Result<PathBuf, Exit> {
         std::fs::create_dir_all(dir).map_err(|e| fail(format!("{}: {e}", dir.display())))?;
     }
     let text = toml::to_string(state).map_err(|e| fail(e.to_string()))?;
-    std::fs::write(&path, &text).map_err(|e| fail(format!("{}: {e}", path.display())))?;
+    write_whole(&path, text.as_bytes()).map_err(|e| fail(format!("{}: {e}", path.display())))?;
     mirror_state(state, &text);
     Ok(path)
+}
+
+/// A file written whole: into a file of this write's own beside it, given the
+/// mode of the file it replaces (and its owner, where this process may give
+/// it), then renamed over it, so whoever reads it finds the one before or the
+/// one after and never an empty or half-written file. Every update rewrites
+/// the setup record while the supervisor's install door reads it for the
+/// desk; written in place, a read between the truncation and the write found
+/// nothing, and the door answered that no setup was recorded.
+pub(crate) fn write_whole(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    // a name of this write's own, never only the process's: two threads of
+    // one process may write the same file at once
+    static WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = path.parent().unwrap_or(Path::new("."));
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let fresh = dir.join(format!(".{name}.{}.{n}", std::process::id()));
+    let written = std::fs::write(&fresh, bytes)
+        .and_then(|()| match std::fs::metadata(path) {
+            Ok(was) => {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::MetadataExt as _;
+                    // root may give it back to its owner; anyone else owns it already
+                    let _ = std::os::unix::fs::chown(&fresh, Some(was.uid()), Some(was.gid()));
+                }
+                std::fs::set_permissions(&fresh, was.permissions())
+            }
+            Err(_) => Ok(()),
+        })
+        .and_then(|()| std::fs::rename(&fresh, path));
+    if written.is_err() {
+        let _ = std::fs::remove_file(&fresh);
+    }
+    written
 }
 
 /// The record written again where the supervisor can read it, for an install
@@ -4597,7 +4635,7 @@ fn mirror_state(state: &State, text: &str) {
     let config = mirrored_config(Path::new(&state.dir));
     let dir = config.join("nils");
     if std::fs::create_dir_all(&dir).is_err()
-        || std::fs::write(dir.join("setup.toml"), text).is_err()
+        || write_whole(&dir.join("setup.toml"), text.as_bytes()).is_err()
     {
         return;
     }
@@ -20426,6 +20464,82 @@ fn remove_path(path: &Path, runtime: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The setup record rewritten by two writers at once while it is read,
+    /// as the install door reads it during an update: every read is one of
+    /// the records written, whole; every write lands; the record keeps its
+    /// mode; and no writer's file is left behind.
+    #[test]
+    fn a_record_rewritten_while_it_is_read_is_read_whole_and_keeps_its_mode() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::{Duration, Instant};
+        let dir = std::env::temp_dir().join(format!("nils-record-whole-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("setup.toml");
+        // records of two sizes, so a half-written one is never another whole one
+        let record = |w: usize| {
+            format!(
+                "dir = \"/srv/nils\"\nwriter = {w}\n{}",
+                "# a line\n".repeat(400 + w * 300)
+            )
+        };
+        std::fs::write(&path, record(0)).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let stop = Arc::new(AtomicBool::new(false));
+        let writers: Vec<_> = (1..=2)
+            .map(|w| {
+                let (path, stop, text) = (path.clone(), Arc::clone(&stop), record(w));
+                std::thread::spawn(move || {
+                    let (mut n, mut failed) = (0usize, 0usize);
+                    while !stop.load(Ordering::SeqCst) {
+                        n += 1;
+                        if write_whole(&path, text.as_bytes()).is_err() {
+                            failed += 1;
+                        }
+                    }
+                    (n, failed)
+                })
+            })
+            .collect();
+        let whole: Vec<String> = (0..=2).map(record).collect();
+        let until = Instant::now() + Duration::from_secs(2);
+        let mut reads = 0usize;
+        let mut broken = None;
+        while Instant::now() < until {
+            let text = std::fs::read_to_string(&path).unwrap_or_default();
+            if !whole.contains(&text) {
+                broken = Some(text.len());
+                break;
+            }
+            reads += 1;
+        }
+        stop.store(true, Ordering::SeqCst);
+        let done: Vec<(usize, usize)> = writers.into_iter().map(|h| h.join().unwrap()).collect();
+        assert_eq!(broken, None, "read {reads} was no whole record ({done:?})");
+        assert!(
+            done.iter().all(|(n, failed)| *n > 0 && *failed == 0),
+            "{done:?}"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "the record keeps its mode");
+        }
+        let names: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, ["setup.toml"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn a_provider_that_offers_entitlements_is_asked_for_them() {
