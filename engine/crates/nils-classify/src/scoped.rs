@@ -397,23 +397,25 @@ pub fn adopted(store: &mut Store, pack: &Pack) -> Result<Adopted, Error> {
                 continue;
             }
         };
-        // it applies to the pack as it is, after the ones adopted before it
-        let trial = Adopted {
-            ops: out
-                .ops
+        // it applies to the pack as it is, on its own: two changes of
+        // scopes apart may make the same edit (one word for two batches),
+        // and only the stacks both scopes hold see them together, where a
+        // sort says so for those stacks
+        let own = Adopted {
+            ops: patch
+                .operations
                 .iter()
-                .cloned()
-                .chain(patch.operations.iter().map(|op| AdoptedOp {
+                .map(|op| AdoptedOp {
                     proposal: p.id,
                     at: op.at,
                     op: op.clone(),
-                }))
+                })
                 .collect(),
             skipped: Vec::new(),
         };
-        let whole = trial.with(&pack.name, None);
+        let whole = own.with(&pack.name, None);
         match nils_pack::patch::apply(&pack.dir, &whole, &|_| true) {
-            Ok(_) => out.ops = trial.ops,
+            Ok(_) => out.ops.extend(own.ops),
             Err(e) => out.skipped.push(json!({
                 "proposal": p.id,
                 "why": format!("it no longer applies to {} {}: {e}", pack.name, pack.version),

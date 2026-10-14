@@ -3652,13 +3652,21 @@ fn routed(
                 crate::depends::Outcome::Closure(c) => c,
                 _ => return Err(Reply::error(404, format!("no overlay {id}"))),
             };
-            let mut command = vec![
-                "classify".to_string(),
-                "--pack".into(),
-                o.pack.clone(),
-                "--overlay-id".into(),
-                id.to_string(),
-            ];
+            // record 56 §5.6: the overlay is kept as the scoped change it
+            // is, which every sort applies to the stacks its origin holds
+            // and to no other, and only its scope is re-sorted now
+            let kept = nils_registry::rule_proposal::from_overlay(registry.store(), &o, principal)?
+                .ok_or_else(|| Reply::error(409, format!("overlay {id} changes no word")))?;
+            let scopes = nils_registry::rule_proposal::get(registry.store(), kept)?
+                .map(|p| p.scopes)
+                .unwrap_or_default();
+            let mut command = vec!["classify".to_string(), "--pack".into(), o.pack.clone()];
+            for s in &scopes {
+                command.push("--scope".into());
+                command.push(s.clone());
+            }
+            command.push("--proposal".into());
+            command.push(kept.to_string());
             // The worker runs where this engine runs, but knows no pack
             // directory of its own: the one this engine serves is named.
             if let Some(dir) = &doors.pack_dir {
@@ -3674,9 +3682,11 @@ fn routed(
                     "detail": caller.access.detail.name(),
                     "actor": caller.actor,
                     "overlay": id,
+                    "proposal": kept,
                 }),
             )
             .map_err(job_err)?;
+            nils_registry::rule_proposal::set_job(registry.store(), kept, job)?;
             nils_registry::overlay::decide(
                 registry.store(),
                 id,
@@ -3720,6 +3730,7 @@ fn routed(
             Ok(Reply::accepted(serde_json::json!({
                 "job": job,
                 "overlay": id,
+                "proposal": kept,
                 "status": nils_registry::overlay::ADOPTED,
                 "closure": closure.counts(),
                 "invalidated": invalidated,

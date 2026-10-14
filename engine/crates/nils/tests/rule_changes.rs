@@ -827,6 +827,141 @@ fn round(pg: Option<(String, String)>) {
         None,
     );
     assert!(!good && err.contains("no dataset named nowhere"), "{err}");
+
+    // --- a word overlay adopted at the overlays door is a scoped change
+    // too: it stays in its origin and every sort keeps it
+    let batch_of = |store: &mut Store, stacks: &[i64]| -> i64 {
+        let k = store.qualified("stack");
+        let ids = stacks
+            .iter()
+            .map(i64::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let rows = store
+            .query(
+                &format!("SELECT DISTINCT first_batch_id FROM {k} WHERE id IN ({ids})"),
+                &[],
+            )
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        rows[0].int(0).unwrap()
+    };
+    let overlay = |name: &str, batch: i64| {
+        json!({
+            "overlay": name, "version": "1.0.0", "pack": "mri",
+            "scope": {"batch": batch.to_string()},
+            "lists": {"modifier.MoCo": {"add": ["zzqx"]}},
+            "cases": [{"name": "the batch's word", "stack": {"text_series_description": "zzqx"},
+                       "axes": {"modifier": "MoCo"}}],
+        })
+    };
+    let beta_batch = batch_of(&mut store, &beta);
+    let alpha_batch = batch_of(&mut store, &alpha);
+    let (status, proposed) = server.call(
+        "POST",
+        "/api/overlays",
+        Some(
+            json!({"name": "beta words", "overlay": overlay("beta-words", beta_batch),
+                    "scope": format!("batch:{beta_batch}")}),
+        ),
+        REV,
+    );
+    assert_eq!(status, 201, "{proposed}");
+    let oid = proposed["overlay"]["id"].as_i64().unwrap();
+    let (status, adopted) = server.call("POST", &format!("/api/overlays/{oid}/adopt"), None, OPS);
+    assert_eq!(status, 202, "{adopted}");
+    let kept = adopted["proposal"].as_i64().unwrap();
+    assert_eq!(
+        server.over(adopted["job"].as_i64().unwrap())["state"],
+        "done"
+    );
+    server.quiet();
+    let p = server.get(&format!("/api/packs/mri/proposals/{kept}"), REV);
+    assert_eq!(p["kind"], "scoped", "{p}");
+    assert_eq!(p["status"], "adopted", "{p}");
+    assert_eq!(p["scopes"], json!([format!("batch:{beta_batch}")]), "{p}");
+    assert_eq!(p["evidence"]["overlay"], oid, "{p}");
+    assert_eq!(
+        p["applied"]["measured"]["stacks"], 6,
+        "only the batch's stacks: {p}"
+    );
+    let moco = |store: &mut Store, s: &[i64]| {
+        s.iter()
+            .filter(|x| modifier_holds(store, **x, "MoCo"))
+            .count()
+    };
+    assert_eq!(moco(&mut store, &beta_z), 2);
+    assert_eq!(moco(&mut store, &alpha_z), 0, "never outside its origin");
+    home.ok(&["classify", "--pack-dir", home.packs(), "--no-previews"]);
+    assert_eq!(moco(&mut store, &beta_z), 2, "a later sort keeps it");
+    assert_eq!(moco(&mut store, &alpha_z), 0);
+
+    // an overlay adopted before (the old adoption sorted the whole registry
+    // under it once) becomes its scoped change as the registry migrates
+    let (status, proposed) = server.call(
+        "POST",
+        "/api/overlays",
+        Some(
+            json!({"name": "alpha words", "overlay": overlay("alpha-words", alpha_batch),
+                    "scope": format!("batch:{alpha_batch}")}),
+        ),
+        REV,
+    );
+    assert_eq!(status, 201, "{proposed}");
+    let old = proposed["overlay"]["id"].as_i64().unwrap();
+    let o = store.qualified("overlay");
+    store
+        .execute(
+            &format!("UPDATE {o} SET status = 'adopted', decided_by = 'ops@lab' WHERE id = {old}"),
+            &[],
+        )
+        .unwrap();
+    let made = nils_registry::rule_proposal::adopt_overlays(&mut store).unwrap();
+    assert_eq!(made.len(), 1, "{made:?}");
+    assert!(
+        nils_registry::rule_proposal::adopt_overlays(&mut store)
+            .unwrap()
+            .is_empty()
+    );
+    let migrated = made[0];
+    let report = home.json(&[
+        "classify",
+        "--pack-dir",
+        home.packs(),
+        "--no-previews",
+        "--json",
+    ]);
+    // the next sort applies it to alpha's batch alone, beside the change
+    // adopted for alpha before (whose MT already holds the word there)
+    assert!(report.get("scoped_skipped").is_none(), "{report}");
+    let reach = report["scoped"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["proposal"] == migrated)
+        .unwrap_or_else(|| panic!("{report}"));
+    assert_eq!(reach["stacks"], 4, "{report}");
+    for s in &alpha {
+        let (_, overlay, _) = judged_by(&mut store, *s);
+        assert_eq!(
+            overlay,
+            Some(format!("proposal:{id1},proposal:{migrated}")),
+            "stack {s}"
+        );
+    }
+    for s in &beta {
+        let (_, overlay, _) = judged_by(&mut store, *s);
+        assert!(
+            !overlay
+                .unwrap_or_default()
+                .contains(&format!("proposal:{migrated}")),
+            "beta's {s} is outside it"
+        );
+    }
+    assert_eq!(moco(&mut store, &beta_z), 2);
+    for s in alpha.iter().chain(&beta).filter(|s| !zzqx.contains(s)) {
+        assert!(!modifier_holds(&mut store, *s, "MoCo"), "{s} has no word");
+    }
     drop(server);
 }
 

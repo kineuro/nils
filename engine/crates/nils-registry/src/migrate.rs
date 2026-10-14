@@ -472,12 +472,18 @@ fn a_certificate_may_cite_its_graded_run(store: &mut Store, kind: Kind) -> Resul
 
 /// Record 56 (sections 6.4 and 6.5): a proposed rule change as a registry
 /// object (`rule_proposal`), decided by a person and applied by a re-sort.
-/// Only a table is added; a registry from before has no proposals.
+/// Every overlay adopted before becomes the scoped change it is, so it stays
+/// in its scope and every sort applies it, where its adoption sorted the
+/// whole registry under it once and the next sort dropped it.
 fn a_rule_change_is_proposed_and_decided(store: &mut Store, kind: Kind) -> Result<(), Error> {
     if kind != Kind::Registry {
         return Ok(());
     }
-    add_tables(store, kind, &["rule_proposal"])
+    add_tables(store, kind, &["rule_proposal"])?;
+    if table_exists(store, "overlay")? {
+        crate::rule_proposal::adopt_overlays(store)?;
+    }
+    Ok(())
 }
 
 /// Record 55 F2 and F5 (spec §12.3): the post-contrast label of each stack,

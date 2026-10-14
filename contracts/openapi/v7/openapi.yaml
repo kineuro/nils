@@ -1741,10 +1741,11 @@ paths:
   /api/overlays/{id}/adopt:
     post:
       summary: Adopt a proposed overlay and queue a reclassify over its scope (Wave 4c section 6.6; review:work and data:work)
+      description: "Amended in place on 2026-10-15 by record 56 (section 5.6, an overlay never leaves its scope): the adopted overlay is kept as the scoped change it is, an adopted proposal of the pack (GET /api/packs/{name}/proposals/{id}, its operations the overlay's word edits scoped to its origin, its evidence the overlay), which every sort from then on applies to the stacks its origin holds and to no other; the reclassify queued is that scope's re-sort (`classify --scope ... --proposal ...`), not the whole registry under the overlay. A registry migrating to schema 100 keeps each overlay it adopted before the same way."
       parameters:
         - {name: id, in: path, required: true, schema: {type: integer}}
       responses:
-        "202": {description: "{job, overlay, status: adopted}"}
+        "202": {description: "{job, overlay, proposal, status: adopted, closure, invalidated}: `proposal` the scoped change it is kept as"}
         "409": {description: "A lower author than the one who decided, or not proposed"}
   /api/ingest/probe:
     post:

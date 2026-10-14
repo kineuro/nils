@@ -429,6 +429,172 @@ pub fn set_measured(store: &mut Store, id: i64, measured: &Value) -> Result<bool
     Ok(true)
 }
 
+/// The scope an overlay is keyed on (C2: a manufacturer, a model, a station
+/// or an ingest batch), as a rule change's scope reads it: `batch:ID` for a
+/// batch alone, else `scanner:KEY=VALUE[,KEY=VALUE]`, its keys in order.
+pub fn overlay_scope(document: &Value) -> Option<String> {
+    let m = document["scope"].as_object()?;
+    let mut keys: Vec<(String, String)> = m
+        .iter()
+        .filter_map(|(k, v)| {
+            let v = match v {
+                Value::String(s) => s.trim().to_string(),
+                Value::Number(n) => n.to_string(),
+                _ => return None,
+            };
+            (!v.is_empty()).then(|| (k.clone(), v))
+        })
+        .collect();
+    if keys.is_empty() {
+        return None;
+    }
+    keys.sort();
+    if keys.len() == 1 && keys[0].0 == "batch" {
+        return Some(format!("batch:{}", keys[0].1));
+    }
+    Some(format!(
+        "scanner:{}",
+        keys.iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect::<Vec<_>>()
+            .join(",")
+    ))
+}
+
+/// A word overlay as the typed operations it is (record 56 section 5.5):
+/// each bucket edit and each `axis.value` list edit an `add_words` and a
+/// `remove_words`, all scoped to the overlay's origin, with the overlay as
+/// their reason and evidence. None for a document that names no scope or
+/// changes no word.
+pub fn overlay_patch(id: i64, pack: &str, document: &Value) -> Option<(String, Value)> {
+    let scope = overlay_scope(document)?;
+    let name = format!(
+        "{}@{}",
+        document["overlay"].as_str().unwrap_or("overlay"),
+        document["version"].as_str().unwrap_or("0")
+    );
+    let reason = format!("the overlay {name}");
+    let evidence = serde_json::json!({"overlay": id});
+    let words = |v: &Value| -> Vec<Value> {
+        v.as_array()
+            .map(|a| a.iter().filter(|w| w.is_string()).cloned().collect())
+            .unwrap_or_default()
+    };
+    let mut operations: Vec<Value> = Vec::new();
+    for (key, list) in [("buckets", false), ("lists", true)] {
+        for (target, edit) in document[key].as_object().into_iter().flatten() {
+            for (op, side) in [("add_words", "add"), ("remove_words", "remove")] {
+                let w = words(&edit[side]);
+                if w.is_empty() {
+                    continue;
+                }
+                let mut o = serde_json::json!({
+                    "op": op, "words": w, "scope": scope,
+                    "reason": reason, "evidence": evidence,
+                });
+                if list {
+                    let (axis, value) = target.split_once('.').unwrap_or((target, ""));
+                    o["axis"] = Value::from(axis);
+                    o["value"] = Value::from(value);
+                } else {
+                    o["bucket"] = Value::from(target.as_str());
+                }
+                operations.push(o);
+            }
+        }
+    }
+    if operations.is_empty() {
+        return None;
+    }
+    Some((
+        scope,
+        serde_json::json!({
+            "patch": 1, "pack": pack, "operations": operations,
+            "reason": reason, "evidence": evidence,
+        }),
+    ))
+}
+
+/// The scoped change an adopted word overlay is (record 56 section 5.6: an
+/// overlay never leaves its scope, and is applied by every sort, not by the
+/// one re-sort its adoption queued): an adopted proposal of kind scoped
+/// whose operations are the overlay's words, its evidence the overlay.
+/// Answers the proposal's id; the one made before for the same overlay
+/// where there is one; none where the overlay changes no word.
+pub fn from_overlay(
+    store: &mut Store,
+    o: &crate::overlay::Overlay,
+    by: &str,
+) -> Result<Option<i64>, Error> {
+    if let Some(p) = list(store, Some(&o.pack))?
+        .into_iter()
+        .find(|p| p.evidence["overlay"].as_i64() == Some(o.id))
+    {
+        return Ok(Some(p.id));
+    }
+    let Some((scope, patch)) = overlay_patch(o.id, &o.pack, &o.document) else {
+        return Ok(None);
+    };
+    let title = format!("the overlay {} {}", o.name, o.version);
+    let scopes = vec![scope];
+    let evidence = serde_json::json!({"overlay": o.id});
+    let id = create(
+        store,
+        &New {
+            pack: &o.pack,
+            title: &title,
+            kind: SCOPED,
+            on_version: "",
+            scopes: &scopes,
+            patch: &patch,
+            reason: o.why.as_deref(),
+            evidence: &evidence,
+            datasets: &[],
+            report: &o.tried,
+            card: &serde_json::json!({}),
+            author: &o.author,
+            author_kind: &o.author_kind,
+            actor: &o.actor,
+        },
+    )?;
+    let applied =
+        serde_json::json!({"state": "queued", "expected": null, "measured": null, "overlay": o.id});
+    decide(
+        store,
+        id,
+        &Decided {
+            status: ADOPTED,
+            by,
+            why: Some("an adopted overlay, kept as the scoped change it is"),
+            job: o.job_id,
+            version: &Value::Null,
+            applied: &applied,
+        },
+    )?;
+    Ok(Some(id))
+}
+
+/// Every adopted overlay, as the scoped change it is, made once: what a
+/// registry from before record 56's scoped changes takes when it migrates,
+/// so the overlays it adopted stay in their scope and survive every sort.
+/// Answers the proposals made now.
+pub fn adopt_overlays(store: &mut Store) -> Result<Vec<i64>, Error> {
+    let before: Vec<i64> = list(store, None)?.iter().map(|p| p.id).collect();
+    let mut made = Vec::new();
+    for o in crate::overlay::list(store)?
+        .into_iter()
+        .filter(|o| o.status == crate::overlay::ADOPTED)
+    {
+        let by = o.decided_by.clone().unwrap_or_else(|| o.author.clone());
+        if let Some(id) = from_overlay(store, &o, &by)?
+            && !before.contains(&id)
+        {
+            made.push(id);
+        }
+    }
+    Ok(made)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -520,5 +686,62 @@ mod tests {
         assert_eq!(p.job_id, Some(7));
         assert_eq!(list(&mut s, Some("mri")).unwrap().len(), 1);
         assert!(list(&mut s, Some("ct")).unwrap().is_empty());
+    }
+
+    #[test]
+    fn an_adopted_overlay_becomes_its_scoped_change_once() {
+        let mut s = store();
+        let doc = json!({
+            "overlay": "site", "version": "1.0.0", "pack": "mri",
+            "scope": {"manufacturer": "ACME", "station": "MR1"},
+            "buckets": {"contrast_positive": {"add": ["zorvex"]}},
+            "lists": {"technique.TSE": {"add": ["zzturbo"], "remove": ["turbo"]}},
+        });
+        let (scope, patch) = overlay_patch(4, "mri", &doc).unwrap();
+        assert_eq!(scope, "scanner:manufacturer=ACME,station=MR1");
+        let ops = patch["operations"].as_array().unwrap();
+        assert_eq!(ops.len(), 3, "{patch}");
+        assert_eq!(ops[0]["bucket"], "contrast_positive");
+        assert_eq!(ops[1]["axis"], "technique");
+        assert_eq!(ops[2]["op"], "remove_words");
+        assert_eq!(
+            overlay_scope(&json!({"scope": {"batch": "7"}})).as_deref(),
+            Some("batch:7")
+        );
+        let p = crate::overlay::Proposal {
+            name: "site",
+            version: "1.0.0",
+            pack: "mri",
+            author: "rev@lab",
+            author_kind: "person",
+            actor: json!({}),
+            scope: json!({"over": "batch:1"}),
+            document: doc,
+            tried: json!({}),
+            why: Some("the site's words"),
+        };
+        let (overlay, _) = crate::overlay::propose(&mut s, &p).unwrap();
+        // proposed only: nothing to keep
+        assert!(adopt_overlays(&mut s).unwrap().is_empty());
+        crate::overlay::decide(
+            &mut s,
+            overlay,
+            crate::overlay::ADOPTED,
+            "ops@lab",
+            Some(3),
+            None,
+        )
+        .unwrap();
+        let made = adopt_overlays(&mut s).unwrap();
+        assert_eq!(made.len(), 1);
+        let kept = adopted_scoped(&mut s, "mri").unwrap();
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].evidence["overlay"], overlay);
+        assert_eq!(kept[0].scopes, ["scanner:manufacturer=ACME,station=MR1"]);
+        assert_eq!(kept[0].decided_by.as_deref(), Some("ops@lab"));
+        assert_eq!(kept[0].job_id, Some(3));
+        // once
+        assert!(adopt_overlays(&mut s).unwrap().is_empty());
+        assert_eq!(adopted_scoped(&mut s, "mri").unwrap().len(), 1);
     }
 }

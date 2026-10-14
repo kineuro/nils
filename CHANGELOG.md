@@ -81,6 +81,7 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 - The body-part descriptors pin the `nils-bodypart` image that 1.0.0-alpha.62 published, a new build of the same 0.2.0 sources. Its baked encoder weights verify with the same two digests as before, so those pins stay (kineuro/nils#308).
 - The rehearse door reads the registry as it is sorted: the adopted scoped changes are applied on both sides, each to its scope, and the report lists them (`adopted`). A dataset holds the stacks its tree holds a file of, as the dataset summary counts them, so a stack with files in two datasets counts in both, in a scope and in a transition's `datasets`.
 - A sort deletes and writes the rows of the stacks it judges, by their ids, where it cleared every row in the range of each window: a stack of another modality, or one outside a scoped re-sort, keeps its rows.
+- An adopted word overlay is kept as the scoped change it is (record 56, section 5.6): adopting one at `POST /api/overlays/{id}/adopt` makes an adopted proposal of its word edits scoped to its origin, which every sort applies to the stacks of that origin and to no other, and re-sorts that scope (`proposal` in the answer). Before, an adoption sorted the whole registry under the overlay once and the next sort dropped it. Migrating to schema 100 keeps every overlay adopted before the same way.
 
 ## [pack-mri-v1.2.2] - 2026-10-15
 
