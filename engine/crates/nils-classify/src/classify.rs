@@ -1877,20 +1877,15 @@ fn run(
                     .collect();
                 stale.sort_unstable();
                 stale.dedup();
-                for chunk in stale.chunks(500) {
-                    store.execute(
-                        &format!(
-                            "UPDATE {} SET status = 'superseded' WHERE status = 'open' AND id IN ({})",
-                            store.qualified("review_item"),
-                            chunk
-                                .iter()
-                                .map(i64::to_string)
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        ),
-                        &[],
-                    )?;
-                }
+                // record 56 section 6.3: a re-sort of some stacks splits a
+                // grouped question whose other members still wait, so none
+                // is lost
+                nils_registry::review::supersede_judged(
+                    store,
+                    &stale,
+                    (!settings.stacks.is_all()).then_some(&|s| settings.stacks.holds(s)),
+                    &now,
+                )?;
                 // the rows of the stacks judged, and of no other: a scoped
                 // re-sort writes nothing about a stack outside its scope
                 for t in [axis_t, ev_t, vote_t] {

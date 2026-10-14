@@ -209,6 +209,146 @@ pub fn group_run(store: &mut Store, job_id: i64) -> Result<Grouped, Error> {
     Ok(out)
 }
 
+/// Mark superseded the open questions a sort asks again of the stacks it
+/// judged (Wave 4a §10.2: a re-classification emits new items and never
+/// overwrites). `judged` names the stacks of a re-sort that judges only
+/// some (record 56 §6.3, the scans a person just answered): a grouped
+/// question with members outside them still waiting is split, so no
+/// question about another scan is lost. The group is superseded and its
+/// waiting members outside the re-sort are asked again as a group of their
+/// own: the same kind, evidence, run, grouping and mode, `split_from`
+/// naming the group it came from. A whole sort (`judged` none) supersedes
+/// each item whole, as it judges every member. The caller holds the
+/// transaction. Answers the groups opened by a split.
+pub fn supersede_judged(
+    store: &mut Store,
+    items: &[i64],
+    judged: Option<&dyn Fn(i64) -> bool>,
+    now: &str,
+) -> Result<Vec<i64>, StoreError> {
+    let mut opened = Vec::new();
+    if let Some(judged) = judged {
+        let d = store.dialect();
+        let t = table("review_item");
+        for chunk in items.chunks(500) {
+            let list = chunk
+                .iter()
+                .map(i64::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
+            let groups = store.query(
+                &format!(
+                    "SELECT id, kind, {}, {}, job_id, group_key, mode FROM {} \
+                     WHERE status = 'open' AND scope = 'group' AND id IN ({list}) ORDER BY id",
+                    d.text_of(t.column("ref").expect("ref")),
+                    d.text_of(t.column("evidence").expect("evidence")),
+                    store.qualified("review_item"),
+                ),
+                &[],
+            )?;
+            for g in &groups {
+                let id = g.int(0)?;
+                let m = table("review_member");
+                let waiting = store.query(
+                    &format!(
+                        "SELECT stack_id, {} FROM {} WHERE item_id = {} AND decided_at IS NULL ORDER BY stack_id",
+                        d.text_of(m.column("evidence").expect("evidence")),
+                        store.qualified("review_member"),
+                        d.param(1, Type::Int)
+                    ),
+                    &[Param::Int(id)],
+                )?;
+                let outside: Vec<(i64, Option<String>)> = waiting
+                    .iter()
+                    .map(|r| Ok((r.int(0)?, r.opt_text(1)?.map(str::to_string))))
+                    .collect::<Result<Vec<_>, StoreError>>()?
+                    .into_iter()
+                    .filter(|(s, _)| !judged(*s))
+                    .collect();
+                if outside.is_empty() {
+                    continue;
+                }
+                let mut evidence: serde_json::Value = g
+                    .opt_text(3)?
+                    .and_then(|t| serde_json::from_str(t).ok())
+                    .unwrap_or_else(|| serde_json::json!({}));
+                if let serde_json::Value::Object(o) = &mut evidence {
+                    o.insert("members".into(), serde_json::json!(outside.len()));
+                    o.insert("split_from".into(), serde_json::json!(id));
+                }
+                let new = store
+                    .insert(
+                        &Insert::new(
+                            table("review_item"),
+                            &[
+                                "kind",
+                                "scope",
+                                "ref",
+                                "evidence",
+                                "status",
+                                "created_at",
+                                "job_id",
+                                "members",
+                                "group_key",
+                                "mode",
+                            ],
+                        )
+                        .returning(&["id"]),
+                        &[vec![
+                            Param::from(g.text(1)?),
+                            Param::from("group"),
+                            g.opt_text(2)?.map_or(Param::Null, Param::from),
+                            Param::from(evidence.to_string()),
+                            Param::from("open"),
+                            Param::from(now),
+                            g.opt_int(4)?.map_or(Param::Null, Param::Int),
+                            Param::Int(outside.len() as i64),
+                            g.opt_text(5)?.map_or(Param::Null, Param::from),
+                            g.opt_text(6)?.map_or(Param::Null, Param::from),
+                        ]],
+                    )?
+                    .first()
+                    .ok_or_else(|| {
+                        StoreError::Message("the split group was not written back".into())
+                    })?
+                    .int(0)?;
+                let rows: Vec<Vec<Param>> = outside
+                    .iter()
+                    .map(|(s, ev)| {
+                        vec![
+                            Param::Int(new),
+                            Param::Int(*s),
+                            ev.as_deref().map_or(Param::Null, Param::from),
+                        ]
+                    })
+                    .collect();
+                for part in rows.chunks(500) {
+                    store.insert(
+                        &Insert::new(table("review_member"), &["item_id", "stack_id", "evidence"]),
+                        part,
+                    )?;
+                }
+                opened.push(new);
+            }
+        }
+    }
+    for chunk in items.chunks(500) {
+        store.execute(
+            &format!(
+                "UPDATE {} SET status = 'superseded' WHERE status = 'open' AND id IN ({})",
+                store.qualified("review_item"),
+                chunk
+                    .iter()
+                    .map(i64::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            &[],
+        )?;
+    }
+    Ok(opened)
+}
+
 /// One member of a grouped item.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Member {
