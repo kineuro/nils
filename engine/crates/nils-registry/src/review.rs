@@ -2864,8 +2864,12 @@ pub fn raise_empty_study(
     let reference =
         serde_json::json!({ "study_id": study_id, "subject_id": subject_id, "code": code });
     let evidence = serde_json::json!({ "series": 0, "day": day, "session": false });
-    if let Some((id, _)) = open_item(store, EMPTY_STUDY_KIND, &key)? {
-        refresh_item(store, id, &evidence, 1, None)?;
+    if let Some((id, was)) = open_item(store, EMPTY_STUDY_KIND, &key)? {
+        // a rebuild runs on a read too, and one that finds the item as it
+        // was writes nothing (2026-10-14)
+        if was != evidence {
+            refresh_item(store, id, &evidence, 1, None)?;
+        }
         return Ok(id);
     }
     open_new(
@@ -2894,8 +2898,10 @@ pub fn raise_no_study(
     let key = no_study_key(subject_id);
     let reference = serde_json::json!({ "subject_id": subject_id, "code": code });
     let evidence = serde_json::json!({ "series": series, "instances": instances, "studies": 0 });
-    if let Some((id, _)) = open_item(store, NO_STUDY_KIND, &key)? {
-        refresh_item(store, id, &evidence, 1, None)?;
+    if let Some((id, was)) = open_item(store, NO_STUDY_KIND, &key)? {
+        if was != evidence {
+            refresh_item(store, id, &evidence, 1, None)?;
+        }
         return Ok(id);
     }
     open_new(

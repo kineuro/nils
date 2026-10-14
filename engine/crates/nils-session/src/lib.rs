@@ -23,6 +23,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use nils_registry::clinical;
 use nils_registry::day::Day;
+use nils_registry::dialect::Conflict;
+use nils_registry::lock;
 use nils_registry::review;
 use nils_registry::schema::{Type, table};
 use nils_registry::session::{self, Anchor, Scheme, Session, Study};
@@ -35,6 +37,31 @@ pub use nils_registry::session::{Collision, Naming, Reason, Said, Unmatched};
 
 /// The review item kind a moved or vanished span raises.
 pub const MOVED_KIND: &str = "session.moved";
+
+/// The lock a build of the cache holds for its transaction, so that builds
+/// take turns (2026-10-14).
+const CACHE_LOCK: &str = "session-cache";
+
+/// The columns of a label row, and those an insert that meets the row of
+/// its key writes over.
+const LABEL_COLUMNS: [&str; 8] = [
+    "session_id",
+    "scheme_digest",
+    "label",
+    "months",
+    "nominal",
+    "offset_months",
+    "flagged",
+    "reason",
+];
+const LABEL_SET: [&str; 6] = [
+    "label",
+    "months",
+    "nominal",
+    "offset_months",
+    "flagged",
+    "reason",
+];
 
 #[derive(Debug)]
 pub enum Error {
@@ -196,6 +223,9 @@ pub struct Rebuilt {
     pub unchanged: usize,
     pub rebuilt: usize,
     pub sessions: usize,
+    /// Sessions whose label row under the scheme the run wrote: made,
+    /// changed or taken away. None where the rows already said what the
+    /// scheme says, so a read of a cache nothing changed counts none.
     pub relabelled: usize,
     pub moved: usize,
     pub vanished: usize,
@@ -410,7 +440,9 @@ fn stored(store: &mut Store, subject: i64, window: i64) -> Result<Vec<Stored>, E
 
 /// Build or refresh the cache under a scheme: identity for every subject
 /// whose timeline changed (or every subject, when forced), and the labels
-/// the scheme gives, for one subject or for all. Runs in one transaction.
+/// the scheme gives, for one subject or for all. Runs in one transaction,
+/// one build at a time, and writes only what changed: a run over timelines
+/// and labels that did not change writes nothing.
 pub fn ensure(
     registry: &mut Registry,
     scheme: &Scheme,
@@ -429,7 +461,9 @@ pub fn ensure(
 /// their timelines alone, which is what a reader of a dataset's or a
 /// cohort's visits needs before it reads them (2026-10-12: a dataset read
 /// and sorted with nothing since that built the cache had no visits on its
-/// Main scans map). A subject whose timeline is unchanged costs one read.
+/// Main scans map). A subject whose timeline and labels are unchanged costs
+/// a few reads and no write, so the doors that read visits can call it on
+/// every read, several at once.
 pub fn ensure_for(
     registry: &mut Registry,
     scheme: &Scheme,
@@ -449,20 +483,27 @@ fn ensure_of(
 ) -> Result<Rebuilt, Error> {
     let epoch = registry.meta().epoch;
     let store = registry.store();
-    let all = points(store, scheme, whose)?;
-    let mut by_subject: BTreeMap<i64, (String, Vec<Study>)> = BTreeMap::new();
-    for p in all {
-        let e = by_subject
-            .entry(p.subject_id)
-            .or_insert_with(|| (p.code.clone(), Vec::new()));
-        e.1.push(p.study);
-    }
     let digest = scheme.digest();
     let window = scheme.window_days;
     let now = now_iso();
     let mut out = Rebuilt::default();
     store.begin()?;
     let result = (|| -> Result<(), Error> {
+        // One build at a time (2026-10-14). A reader brings the cache up to
+        // date before it reads, and a page sends several reads at once; on
+        // Postgres, under read committed, two builds side by side each
+        // wrote the rows the other was writing, and the second failed on a
+        // unique key. The second now waits here until the first commits,
+        // then reads the timelines and the cache as the first left them,
+        // and finds nothing to do. SQLite's writers take turns already.
+        lock::take_for_transaction(store, CACHE_LOCK)?;
+        let mut by_subject: BTreeMap<i64, (String, Vec<Study>)> = BTreeMap::new();
+        for p in points(store, scheme, whose)? {
+            let e = by_subject
+                .entry(p.subject_id)
+                .or_insert_with(|| (p.code.clone(), Vec::new()));
+            e.1.push(p.study);
+        }
         for (subject, (code, studies)) in &by_subject {
             out.subjects += 1;
             let timeline = timeline_digest(studies);
@@ -473,9 +514,10 @@ fn ensure_of(
             if unchanged {
                 out.unchanged += 1;
                 out.sessions += old.len();
-                // the labels under this scheme may still be missing
+                // the labels under this scheme may still be missing, or say
+                // what another month zero made of them
                 let ids: Vec<i64> = old.iter().map(|s| s.id).collect();
-                out.relabelled += relabel(store, &ids, &old, &resolved, &digest)?;
+                out.relabelled += relabel(store, *subject, window, &ids, &old, &resolved, &digest)?;
                 continue;
             }
             out.rebuilt += 1;
@@ -485,7 +527,7 @@ fn ensure_of(
             )?;
             out.sessions += ids.len();
             let fresh = stored(store, *subject, window)?;
-            out.relabelled += relabel(store, &ids, &fresh, &resolved, &digest)?;
+            out.relabelled += relabel(store, *subject, window, &ids, &fresh, &resolved, &digest)?;
         }
         // What the timeline could not take, said rather than dropped. Over
         // the whole registry, whichever subject was asked for: an empty row
@@ -755,10 +797,112 @@ fn reconcile(
     Ok(ids)
 }
 
-/// The labels under one scheme for the sessions named, replaced whole.
-/// Returns how many sessions got a label row.
+/// What a scheme calls one session, as its `session_label` row says it.
+#[derive(Debug, Clone)]
+struct Label {
+    label: Option<String>,
+    months: Option<i64>,
+    nominal: Option<i64>,
+    offset_months: Option<f64>,
+    flagged: i64,
+    reason: Option<String>,
+}
+
+impl Label {
+    fn of(s: &Session) -> Label {
+        Label {
+            label: s.label.clone(),
+            months: s.months.map(i64::from),
+            nominal: s.nominal.map(i64::from),
+            offset_months: s.offset_months,
+            flagged: i64::from(s.flagged),
+            reason: s.reason.map(|r| r.name().to_string()),
+        }
+    }
+
+    /// Whether a stored row says this already. A double reads back as it
+    /// was written on either backend; zero and minus zero are one value.
+    fn said_by(&self, row: &Label) -> bool {
+        let offset = match (self.offset_months, row.offset_months) {
+            (Some(a), Some(b)) => a == b || (a.is_nan() && b.is_nan()),
+            (a, b) => a.is_none() && b.is_none(),
+        };
+        offset
+            && self.label == row.label
+            && self.months == row.months
+            && self.nominal == row.nominal
+            && self.flagged == row.flagged
+            && self.reason == row.reason
+    }
+
+    /// The row an insert writes, in the order of [`LABEL_COLUMNS`].
+    fn row(&self, session_id: i64, scheme_digest: &str) -> Vec<Param> {
+        vec![
+            Param::Int(session_id),
+            Param::from(scheme_digest),
+            self.label.as_deref().map_or(Param::Null, Param::from),
+            self.months.map_or(Param::Null, Param::Int),
+            self.nominal.map_or(Param::Null, Param::Int),
+            self.offset_months.map_or(Param::Null, Param::Double),
+            Param::Int(self.flagged),
+            self.reason.as_deref().map_or(Param::Null, Param::from),
+        ]
+    }
+}
+
+/// The label rows under a scheme of one subject's sessions in a window, by
+/// session. One statement whatever the subject, so a connection that reads
+/// many subjects prepares it once.
+fn labels_of(
+    store: &mut Store,
+    subject: i64,
+    window: i64,
+    scheme_digest: &str,
+) -> Result<HashMap<i64, Label>, Error> {
+    let d = store.dialect();
+    let sql = format!(
+        "SELECT l.session_id, l.label, l.months, l.nominal, l.offset_months, l.flagged, l.reason \
+         FROM {label} l JOIN {cache} c ON c.id = l.session_id \
+         WHERE c.subject_id = {} AND c.window_days = {} AND l.scheme_digest = {}",
+        d.param(1, Type::Int),
+        d.param(2, Type::Int),
+        d.param(3, Type::Text),
+        label = store.qualified("session_label"),
+        cache = store.qualified("session_cache"),
+    );
+    let mut out = HashMap::new();
+    let params = [
+        Param::Int(subject),
+        Param::Int(window),
+        Param::from(scheme_digest),
+    ];
+    for r in store.query(&sql, &params)? {
+        out.insert(
+            r.int(0)?,
+            Label {
+                label: r.opt_text(1)?.map(str::to_string),
+                months: r.opt_int(2)?,
+                nominal: r.opt_int(3)?,
+                offset_months: r.opt_double(4)?,
+                flagged: r.int(5)?,
+                reason: r.opt_text(6)?.map(str::to_string),
+            },
+        );
+    }
+    Ok(out)
+}
+
+/// The labels under one scheme of a subject's sessions named, brought to
+/// what the resolver says: a missing row is written, a row that says
+/// something else is written over, the row of a session the resolver gives
+/// no label is taken away, and a row that says it already is left alone
+/// (2026-10-14: every read deleted every row and wrote it again, and two
+/// reads at once collided on the rows' unique key). Answers how many
+/// sessions' rows it wrote, none where the labels stood.
 fn relabel(
     store: &mut Store,
+    subject: i64,
+    window: i64,
     ids: &[i64],
     cached: &[Stored],
     resolved: &[Session],
@@ -767,7 +911,7 @@ fn relabel(
     if ids.is_empty() {
         return Ok(0);
     }
-    let d = store.dialect();
+    let mut held = labels_of(store, subject, window, scheme_digest)?;
     // the resolver's session for each cached one, by its first study
     let mut rows: Vec<Vec<Param>> = Vec::new();
     for c in cached.iter().filter(|c| ids.contains(&c.id)) {
@@ -777,18 +921,18 @@ fn relabel(
         else {
             continue;
         };
-        rows.push(vec![
-            Param::Int(c.id),
-            Param::from(scheme_digest),
-            s.label.as_deref().map_or(Param::Null, Param::from),
-            s.months.map_or(Param::Null, |m| Param::Int(i64::from(m))),
-            s.nominal.map_or(Param::Null, |m| Param::Int(i64::from(m))),
-            s.offset_months.map_or(Param::Null, Param::Double),
-            Param::Int(i64::from(s.flagged)),
-            s.reason.map_or(Param::Null, |r| Param::from(r.name())),
-        ]);
+        let label = Label::of(s);
+        if held.remove(&c.id).is_some_and(|row| label.said_by(&row)) {
+            continue;
+        }
+        rows.push(label.row(c.id, scheme_digest));
     }
-    for id in ids {
+    // a row still held is of a session named that the resolver gives no
+    // label
+    let mut stale: Vec<i64> = held.into_keys().filter(|id| ids.contains(id)).collect();
+    stale.sort_unstable();
+    let d = store.dialect();
+    for id in &stale {
         store.execute(
             &format!(
                 "DELETE FROM {} WHERE session_id = {} AND scheme_digest = {}",
@@ -799,26 +943,19 @@ fn relabel(
             &[Param::Int(*id), Param::from(scheme_digest)],
         )?;
     }
-    let n = rows.len();
-    if n > 0 {
+    if !rows.is_empty() {
+        // an insert that writes over the row its key finds: the lock keeps
+        // two builds apart, and this is what a row another writer made
+        // meanwhile meets
         store.insert(
-            &Insert::new(
-                table("session_label"),
-                &[
-                    "session_id",
-                    "scheme_digest",
-                    "label",
-                    "months",
-                    "nominal",
-                    "offset_months",
-                    "flagged",
-                    "reason",
-                ],
-            ),
+            &Insert::new(table("session_label"), &LABEL_COLUMNS).on_conflict(Conflict::Update {
+                target: &["session_id", "scheme_digest"],
+                set: &LABEL_SET,
+            }),
             &rows,
         )?;
     }
-    Ok(n)
+    Ok(rows.len() + stale.len())
 }
 
 fn iso(d: Day) -> String {

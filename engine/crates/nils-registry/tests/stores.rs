@@ -1261,6 +1261,62 @@ fn a_registry_lock_is_held_by_one_connection_at_a_time() {
     }
 }
 
+/// A lock held for a transaction (2026-10-14): on Postgres a second taker
+/// waits until the transaction that holds it ends, by commit or by rollback,
+/// and the name's lock of [`lock::try_take`] is the same key; on SQLite it
+/// is nothing, since a writing transaction there holds the one write lock.
+#[test]
+fn a_transaction_lock_is_held_until_the_transaction_ends() {
+    use nils_registry::lock;
+    use std::time::{Duration, Instant};
+    let mut alone = Store::sqlite_in_memory().unwrap();
+    alone.begin().unwrap();
+    lock::take_for_transaction(&mut alone, "session-cache").unwrap();
+    alone.commit().unwrap();
+    let Some((_guard, mut a)) = postgres_store(SCHEMA) else {
+        return;
+    };
+    let dsn = postgres_dsn().unwrap();
+    let mut b = Store::connect_postgres(&dsn, SCHEMA).unwrap();
+    for end in ["commit", "rollback"] {
+        a.begin().unwrap();
+        lock::take_for_transaction(&mut a, "session-cache").unwrap();
+        assert!(
+            lock::try_take(&mut b, "session-cache").unwrap().is_none(),
+            "{end}: the name's lock is the same key"
+        );
+        let other = lock::try_take(&mut b, "pipeline-intake")
+            .unwrap()
+            .unwrap_or_else(|| panic!("{end}: another name is another lock"));
+        lock::release(&mut b, other).unwrap();
+        let started = Instant::now();
+        let waited = std::thread::scope(|s| {
+            let waiter = s.spawn(|| {
+                b.begin().unwrap();
+                lock::take_for_transaction(&mut b, "session-cache").unwrap();
+                let at = started.elapsed();
+                b.commit().unwrap();
+                at
+            });
+            std::thread::sleep(Duration::from_millis(300));
+            match end {
+                "commit" => a.commit().unwrap(),
+                _ => a.rollback().unwrap(),
+            }
+            waiter.join().unwrap()
+        });
+        assert!(
+            waited >= Duration::from_millis(300),
+            "{end}: a second taker had it after {waited:?}, while the first held it"
+        );
+    }
+    // with both transactions over, nothing holds it
+    let held = lock::try_take(&mut a, "session-cache")
+        .unwrap()
+        .expect("a transaction lock outlived its transaction");
+    lock::release(&mut a, held).unwrap();
+}
+
 /// Wave 4a §9.1: the one job model, on both backends. A claim holds its
 /// kind and no other, a stale job of any kind is taken over, a cancel
 /// asked from outside is seen at the heartbeat, and the queue is rows.

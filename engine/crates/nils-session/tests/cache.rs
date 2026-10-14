@@ -3,17 +3,19 @@
 //! The session cache (`docs/specs/wave4b-the-ask.md`, §7 and §15, slice 2),
 //! on the synthetic registry, on both backends.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::env;
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Barrier, Mutex, MutexGuard};
 
 use nils_dicom::synth::TempDir;
 use nils_registry::day::Day;
 use nils_registry::home::{Home, InitOptions};
 use nils_registry::schema::{Type, table};
 use nils_registry::session::{self, Anchor, Naming, Scheme};
-use nils_registry::{Backend, Insert, Param, Registry};
-use nils_session::{Anchors, MOVED_KIND, ensure, labels_by_study, sessions_of};
+use nils_registry::{Backend, Insert, Param, Registry, Row, Store};
+use nils_session::{
+    Anchors, MOVED_KIND, Rebuilt, ensure, ensure_for, labels_by_study, sessions_of,
+};
 
 static POSTGRES: Mutex<()> = Mutex::new(());
 
@@ -84,12 +86,44 @@ fn labs() -> Vec<Lab> {
     out
 }
 
+/// The Postgres lab alone, for what only a backend whose writers run side
+/// by side can show; none, and said, where no Postgres is given.
+fn postgres_lab() -> Option<Lab> {
+    match env::var("NILS_TEST_POSTGRES_DSN") {
+        Ok(dsn) if !dsn.is_empty() => {
+            let guard = POSTGRES.lock().unwrap_or_else(|e| e.into_inner());
+            let mut l = lab("postgres", Backend::Postgres, Some(dsn));
+            l._guard = Some(guard);
+            Some(l)
+        }
+        _ => {
+            eprintln!("NILS_TEST_POSTGRES_DSN is not set; the Postgres test is skipped");
+            None
+        }
+    }
+}
+
 /// What the resolver says on its own, per subject, for the check that the
 /// cache says the same.
 fn direct(
     registry: &mut Registry,
     scheme: &Scheme,
 ) -> BTreeMap<String, Vec<(Day, Option<String>)>> {
+    timelines(registry)
+        .into_iter()
+        .map(|(code, studies)| {
+            let anchor = studies.iter().map(|s| s.day).min();
+            let sessions = session::sessions(&studies, anchor, scheme)
+                .into_iter()
+                .map(|s| (s.first, s.label))
+                .collect();
+            (code, sessions)
+        })
+        .collect()
+}
+
+/// Every subject's dated studies, by code.
+fn timelines(registry: &mut Registry) -> BTreeMap<String, Vec<session::Study>> {
     let store = registry.store();
     let d = store.dialect();
     let st = table("study");
@@ -110,16 +144,7 @@ fn direct(
                 Day::parse(r.text(2).unwrap()).unwrap(),
             ));
     }
-    by.into_iter()
-        .map(|(code, studies)| {
-            let anchor = studies.iter().map(|s| s.day).min();
-            let sessions = session::sessions(&studies, anchor, scheme)
-                .into_iter()
-                .map(|s| (s.first, s.label))
-                .collect();
-            (code, sessions)
-        })
-        .collect()
+    by
 }
 
 #[test]
@@ -653,4 +678,494 @@ fn open_items(
             )
         })
         .collect()
+}
+
+// ---------------------------------------------------------------- reads at once
+
+/// How many connections bring the cache up to date at once, and how often.
+const AT_ONCE: usize = 6;
+const ROUNDS: usize = 25;
+const COLD_ROUNDS: usize = 8;
+
+/// The scheme the reads below read under: a window and month labels, so
+/// that identity and labels both have rows to collide on.
+fn months_scheme() -> Scheme {
+    Scheme {
+        window_days: 14,
+        naming: Naming::Months {
+            cadence: vec![0, 12, 24, 36, 48, 60],
+            tolerance: 3.0,
+        },
+        ..Scheme::default()
+    }
+}
+
+/// Every subject's id, as a door that reads a dataset's visits names them.
+fn subject_ids(registry: &mut Registry) -> BTreeSet<i64> {
+    let store = registry.store();
+    let sql = format!("SELECT id FROM {}", store.qualified("subject"));
+    store
+        .query(&sql, &[])
+        .unwrap()
+        .iter()
+        .map(|r| r.int(0).unwrap())
+        .collect()
+}
+
+/// More connections to the lab's registry, one per reader, as the server
+/// keeps one per handler thread.
+fn connections(l: &Lab, n: usize) -> Vec<Registry> {
+    (0..n)
+        .map(|_| Home::new(l._dir.path()).open().unwrap())
+        .collect()
+}
+
+/// `each` on every registry at once, their starts lined up; what each run
+/// answered, a failure as its text.
+fn at_once(
+    registries: &mut [Registry],
+    each: &(dyn Fn(&mut Registry) -> Result<Rebuilt, nils_session::Error> + Sync),
+) -> Vec<Result<Rebuilt, String>> {
+    let start = Barrier::new(registries.len());
+    std::thread::scope(|s| {
+        let runs: Vec<_> = registries
+            .iter_mut()
+            .map(|r| {
+                let start = &start;
+                s.spawn(move || {
+                    start.wait();
+                    each(r).map_err(|e| e.to_string())
+                })
+            })
+            .collect();
+        runs.into_iter()
+            .map(|h| h.join().expect("a reader panicked"))
+            .collect()
+    })
+}
+
+/// The failures among some runs, each said once with how often.
+fn failures(runs: &[Result<Rebuilt, String>]) -> String {
+    let mut by: BTreeMap<&str, usize> = BTreeMap::new();
+    for e in runs.iter().filter_map(|r| r.as_ref().err()) {
+        *by.entry(e.as_str()).or_default() += 1;
+    }
+    by.iter()
+        .map(|(e, n)| format!("{n} times: {e}"))
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+/// The rows of a table by id, each with what says it was written: on
+/// Postgres the transaction that wrote its version (`xmin`), which an update
+/// in place changes as a new row does; on SQLite nothing, where [`changes`]
+/// counts every row written instead.
+fn versions(registry: &mut Registry, t: &str) -> Vec<(i64, String)> {
+    let store = registry.store();
+    let version = match store.backend() {
+        Backend::Postgres => "xmin::text",
+        Backend::Sqlite => "''",
+    };
+    let sql = format!(
+        "SELECT id, {version} FROM {} ORDER BY id",
+        store.qualified(t)
+    );
+    store
+        .query(&sql, &[])
+        .unwrap()
+        .iter()
+        .map(|r| (r.int(0).unwrap(), r.text(1).unwrap().to_string()))
+        .collect()
+}
+
+/// The tables a build of the cache writes, each with its rows' versions.
+fn written(registry: &mut Registry) -> BTreeMap<&'static str, Vec<(i64, String)>> {
+    [
+        "session_cache",
+        "session_cache_study",
+        "session_label",
+        "review_item",
+    ]
+    .into_iter()
+    .map(|t| (t, versions(registry, t)))
+    .collect()
+}
+
+/// Every row SQLite's connection has written since it opened; none on
+/// Postgres.
+fn changes(registry: &mut Registry) -> Option<u64> {
+    match registry.store() {
+        Store::Sqlite(c) => Some(c.total_changes()),
+        Store::Postgres { .. } => None,
+    }
+}
+
+/// The label rows under a scheme by session: the row's id, then what it
+/// says.
+fn label_rows(registry: &mut Registry, scheme: &Scheme) -> BTreeMap<i64, Row> {
+    let store = registry.store();
+    let sql = format!(
+        "SELECT session_id, id, label, months, nominal, offset_months, flagged, reason \
+         FROM {} WHERE scheme_digest = {}",
+        store.qualified("session_label"),
+        store.dialect().param(1, Type::Text)
+    );
+    store
+        .query(&sql, &[Param::from(scheme.digest())])
+        .unwrap()
+        .into_iter()
+        .map(|r| (r.int(0).unwrap(), r))
+        .collect()
+}
+
+/// 2026-10-14, a registry on Postgres: the Main scans page sends its
+/// requests at once, and each brings the session cache up to date for the
+/// dataset's subjects before it reads their visits. Each deleted every label
+/// row of those subjects and wrote it again, so under read committed the
+/// second of two, whose delete could not see the rows the first wrote
+/// meanwhile, failed on the labels' unique key, and the page with it.
+/// Several readers at once, many times over: none fails, and none writes a
+/// row, since nothing changed.
+#[test]
+fn readers_of_one_cache_at_once_never_collide() {
+    let Some(mut l) = postgres_lab() else {
+        return;
+    };
+    let scheme = months_scheme();
+    let anchors = Anchors::resolve(&mut l.registry, &scheme, BTreeMap::new()).unwrap();
+    let subjects = subject_ids(&mut l.registry);
+    let first = ensure_for(&mut l.registry, &scheme, &anchors, &subjects).unwrap();
+    assert_eq!(first.rebuilt, subjects.len());
+    let labels = label_rows(&mut l.registry, &scheme);
+    assert_eq!(labels.len(), first.sessions);
+    let before = written(&mut l.registry);
+
+    let mut readers = connections(&l, AT_ONCE);
+    let read = |r: &mut Registry| ensure_for(r, &scheme, &anchors, &subjects);
+    let mut runs = Vec::new();
+    for _ in 0..ROUNDS {
+        runs.extend(at_once(&mut readers, &read));
+    }
+    let failed = runs.iter().filter(|r| r.is_err()).count();
+    assert_eq!(
+        failed,
+        0,
+        "{failed} of {} reads failed: {}",
+        runs.len(),
+        failures(&runs)
+    );
+    for done in runs.iter().flatten() {
+        assert_eq!(
+            (done.unchanged, done.rebuilt, done.relabelled),
+            (subjects.len(), 0, 0)
+        );
+    }
+    // the cache is the one the first build made, row for row
+    assert_eq!(label_rows(&mut l.registry, &scheme), labels);
+    assert_eq!(written(&mut l.registry), before);
+}
+
+/// The same where the readers find the cache cold at once: the identity rows
+/// had the same exposure, each reader making the sessions another had just
+/// made. The first builds them, and the rest find them built.
+#[test]
+fn readers_that_find_the_cache_cold_at_once_build_it_once() {
+    let Some(mut l) = postgres_lab() else {
+        return;
+    };
+    let scheme = months_scheme();
+    let anchors = Anchors::resolve(&mut l.registry, &scheme, BTreeMap::new()).unwrap();
+    let subjects = subject_ids(&mut l.registry);
+    let expected = direct(&mut l.registry, &scheme);
+    let mut readers = connections(&l, AT_ONCE);
+    let read = |r: &mut Registry| ensure_for(r, &scheme, &anchors, &subjects);
+    for round in 0..COLD_ROUNDS {
+        // nothing built under the window
+        {
+            let store = l.registry.store();
+            for t in ["session_label", "session_cache_study", "session_cache"] {
+                store
+                    .execute(&format!("DELETE FROM {}", store.qualified(t)), &[])
+                    .unwrap();
+            }
+        }
+        let runs = at_once(&mut readers, &read);
+        let failed = runs.iter().filter(|r| r.is_err()).count();
+        assert_eq!(
+            failed,
+            0,
+            "round {round}: {failed} of {} reads failed: {}",
+            runs.len(),
+            failures(&runs)
+        );
+        // each subject built once, by whichever reader came first, and no
+        // span said to have moved
+        let done: Vec<&Rebuilt> = runs.iter().flatten().collect();
+        assert_eq!(
+            done.iter().map(|d| d.rebuilt).sum::<usize>(),
+            subjects.len(),
+            "round {round}"
+        );
+        assert!(
+            done.iter().all(|d| d.moved + d.vanished + d.items == 0),
+            "round {round}"
+        );
+        // and the cache says what the resolver says
+        let cached = sessions_of(l.registry.store(), &scheme, None).unwrap();
+        let mut got: BTreeMap<String, Vec<(Day, Option<String>)>> = BTreeMap::new();
+        for c in &cached {
+            got.entry(c.code.clone())
+                .or_default()
+                .push((c.first, c.label.clone()));
+        }
+        assert_eq!(got, expected, "round {round}");
+    }
+}
+
+/// And where they find a span moved at once: it moves once and is said
+/// once, where the readers after the first failed on the labels' key.
+#[test]
+fn readers_that_find_a_span_moved_at_once_say_it_once() {
+    let Some(mut l) = postgres_lab() else {
+        return;
+    };
+    let scheme = months_scheme();
+    let anchors = Anchors::resolve(&mut l.registry, &scheme, BTreeMap::new()).unwrap();
+    let subjects = subject_ids(&mut l.registry);
+    ensure_for(&mut l.registry, &scheme, &anchors, &subjects).unwrap();
+    // a subject's first visit, of two studies or more, that a day more
+    // still holds whole: its first study a day earlier moves the visit and
+    // nothing else
+    let cached = sessions_of(l.registry.store(), &scheme, None).unwrap();
+    let target = cached
+        .iter()
+        .filter(|c| c.studies.len() >= 2 && c.last.to_days() - c.first.to_days() <= 13)
+        .find(|c| {
+            !cached
+                .iter()
+                .any(|o| o.subject_id == c.subject_id && o.first < c.first)
+        })
+        .expect("a first visit of two studies")
+        .clone();
+    let first_study = target.studies[0];
+    let mut readers = connections(&l, AT_ONCE);
+    let read = |r: &mut Registry| ensure_for(r, &scheme, &anchors, &subjects);
+    for round in 0..COLD_ROUNDS {
+        // a day earlier, then back, then earlier again
+        let day = if round % 2 == 0 {
+            Day::from_days(target.first.to_days() - 1)
+        } else {
+            target.first
+        };
+        {
+            let store = l.registry.store();
+            let d = store.dialect();
+            let iso = format!("{:04}-{:02}-{:02}", day.year(), day.month(), day.day());
+            store
+                .execute(
+                    &format!(
+                        "UPDATE {} SET date_filled = {}, study_date = {} WHERE id = {}",
+                        store.qualified("study"),
+                        d.param(1, Type::Date),
+                        d.param(2, Type::Date),
+                        d.param(3, Type::Int)
+                    ),
+                    &[
+                        Param::from(iso.as_str()),
+                        Param::from(iso.as_str()),
+                        Param::Int(first_study),
+                    ],
+                )
+                .unwrap();
+        }
+        let runs = at_once(&mut readers, &read);
+        let failed = runs.iter().filter(|r| r.is_err()).count();
+        assert_eq!(
+            failed,
+            0,
+            "round {round}: {failed} of {} reads failed: {}",
+            runs.len(),
+            failures(&runs)
+        );
+        let done: Vec<Rebuilt> = runs.into_iter().flatten().collect();
+        let sum = |f: fn(&Rebuilt) -> usize| done.iter().map(f).sum::<usize>();
+        assert_eq!(
+            (sum(|d| d.rebuilt), sum(|d| d.moved), sum(|d| d.items)),
+            (1, 1, 1),
+            "round {round}"
+        );
+        let after = sessions_of(l.registry.store(), &scheme, Some(&target.code)).unwrap();
+        let same = after
+            .iter()
+            .find(|c| c.id == target.id)
+            .expect("the surrogate survives");
+        assert_eq!(
+            (same.first, &same.studies),
+            (day, &target.studies),
+            "round {round}"
+        );
+    }
+    // one item for each move
+    let store = l.registry.store();
+    let sql = format!(
+        "SELECT COUNT(*) FROM {} WHERE kind = {}",
+        store.qualified("review_item"),
+        store.dialect().param(1, Type::Text)
+    );
+    let items = store.query(&sql, &[Param::from(MOVED_KIND)]).unwrap()[0]
+        .int(0)
+        .unwrap();
+    assert_eq!(items, COLD_ROUNDS as i64);
+}
+
+/// A read of timelines that did not change writes nothing: not a label, not
+/// an identity row, not the review item an earlier build raised.
+#[test]
+fn an_unchanged_cache_brought_up_to_date_writes_nothing() {
+    for mut l in labs() {
+        let name = l.name;
+        let scheme = months_scheme();
+        let anchors = Anchors::resolve(&mut l.registry, &scheme, BTreeMap::new()).unwrap();
+        // a study row with no series, so that an open review item is there
+        // to be left alone too
+        let subject = *subject_ids(&mut l.registry).first().unwrap();
+        l.registry
+            .store()
+            .insert(
+                &Insert::new(
+                    table("study"),
+                    &[
+                        "study_instance_uid",
+                        "subject_id",
+                        "study_date",
+                        "first_batch_id",
+                    ],
+                ),
+                &[vec![
+                    Param::from("1.2.826.0.1.3680043.10.999.3"),
+                    Param::Int(subject),
+                    Param::from("2024-03-04"),
+                    Param::Int(1),
+                ]],
+            )
+            .unwrap();
+        let subjects = subject_ids(&mut l.registry);
+        let first = ensure_for(&mut l.registry, &scheme, &anchors, &subjects).unwrap();
+        assert_eq!(first.relabelled, first.sessions, "{name}");
+        assert_eq!(first.empty_studies, 1, "{name}");
+        let before = written(&mut l.registry);
+        let counted = changes(&mut l.registry);
+
+        let again = ensure_for(&mut l.registry, &scheme, &anchors, &subjects).unwrap();
+        assert_eq!(
+            (again.unchanged, again.rebuilt, again.relabelled),
+            (subjects.len(), 0, 0),
+            "{name}"
+        );
+        assert_eq!(again.empty_studies, 1, "{name}");
+        assert_eq!(written(&mut l.registry), before, "{name}");
+        assert_eq!(changes(&mut l.registry), counted, "{name}: rows written");
+
+        // and the same over every subject, as a release or a list reads
+        let all = ensure(&mut l.registry, &scheme, &anchors, None, false).unwrap();
+        assert_eq!((all.rebuilt, all.relabelled), (0, 0), "{name}");
+        assert_eq!(written(&mut l.registry), before, "{name}");
+        assert_eq!(changes(&mut l.registry), counted, "{name}: rows written");
+    }
+}
+
+/// Labels that changed while the timeline did not, as when a month zero is
+/// given anew, are updated where they stand: the same rows with new words,
+/// and only the rows whose words changed.
+#[test]
+fn a_changed_label_is_updated_in_place_and_nothing_else_is_written() {
+    for mut l in labs() {
+        let name = l.name;
+        let scheme = Scheme {
+            anchor: Anchor::Explicit,
+            ..months_scheme()
+        };
+        // month zero is each subject's first visit
+        let timelines = timelines(&mut l.registry);
+        let explicit: BTreeMap<String, Day> = timelines
+            .iter()
+            .map(|(code, studies)| (code.clone(), studies.iter().map(|s| s.day).min().unwrap()))
+            .collect();
+        let anchors = Anchors {
+            explicit: explicit.clone(),
+            events: BTreeMap::new(),
+        };
+        let subjects = subject_ids(&mut l.registry);
+        ensure_for(&mut l.registry, &scheme, &anchors, &subjects).unwrap();
+        let before = label_rows(&mut l.registry, &scheme);
+        let versions_before = versions(&mut l.registry, "session_label");
+        let counted = changes(&mut l.registry);
+
+        // one subject's month zero a year earlier: each of its visits is a
+        // year further from it
+        let code = timelines
+            .iter()
+            .find(|(_, studies)| studies.len() >= 3)
+            .map(|(code, _)| code.clone())
+            .expect("a subject with several studies");
+        let zero = Day::from_days(explicit[&code].to_days() - 365);
+        let mut moved = explicit.clone();
+        moved.insert(code.clone(), zero);
+        let anchors = Anchors {
+            explicit: moved,
+            events: BTreeMap::new(),
+        };
+        let done = ensure_for(&mut l.registry, &scheme, &anchors, &subjects).unwrap();
+        let theirs = sessions_of(l.registry.store(), &scheme, Some(&code)).unwrap();
+        assert_eq!(done.rebuilt, 0, "{name}");
+        assert_eq!(done.relabelled, theirs.len(), "{name}");
+
+        // what the resolver says under the new month zero
+        let want: Vec<(Day, Option<String>, Option<i32>)> =
+            session::sessions(&timelines[&code], Some(zero), &scheme)
+                .into_iter()
+                .map(|s| (s.first, s.label, s.months))
+                .collect();
+        let got: Vec<(Day, Option<String>, Option<i32>)> = theirs
+            .iter()
+            .map(|c| (c.first, c.label.clone(), c.months))
+            .collect();
+        assert_eq!(got, want, "{name}");
+
+        // the same rows, the subject's alone with new words
+        let after = label_rows(&mut l.registry, &scheme);
+        assert_eq!(
+            after.keys().collect::<Vec<_>>(),
+            before.keys().collect::<Vec<_>>(),
+            "{name}"
+        );
+        let ids: BTreeSet<i64> = theirs.iter().map(|c| c.id).collect();
+        let mut rows_of_theirs = BTreeSet::new();
+        for (session, row) in &after {
+            let was = &before[session];
+            assert_eq!(row.int(1).unwrap(), was.int(1).unwrap(), "{name}: one row");
+            if ids.contains(session) {
+                assert_ne!(row, was, "{name}: the subject's label changed");
+                rows_of_theirs.insert(row.int(1).unwrap());
+            } else {
+                assert_eq!(row, was, "{name}");
+            }
+        }
+        // and only those rows were written
+        let versions_after = versions(&mut l.registry, "session_label");
+        let rewritten: BTreeSet<i64> = versions_after
+            .iter()
+            .zip(&versions_before)
+            .filter(|(a, b)| a != b)
+            .map(|(a, _)| a.0)
+            .collect();
+        match changes(&mut l.registry) {
+            Some(now) => assert_eq!(
+                now - counted.unwrap(),
+                ids.len() as u64,
+                "{name}: rows written"
+            ),
+            None => assert_eq!(rewritten, rows_of_theirs, "{name}"),
+        }
+    }
 }
