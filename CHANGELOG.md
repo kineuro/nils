@@ -4,9 +4,17 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [1.0.0-alpha.81] - 2026-10-14
+
+Fixes found on the first dataset read on a site after the beta. A dataset's Main scans page works on a registry on Postgres again: builds of the session cache take turns, and a read that changes nothing writes nothing. SyMRI's acquisition stays in SyMRI's folder; each scan carries the acquisition family its route recognised, so an acquisition's own images are grouped together; a visit's kinds count SyMRI's acquisition with SyMRI; and a dataset's file count says when it stopped short. It goes with desk 1.0.0-alpha.64. The installs it sets up take Kvasir 1.0.0-alpha.10 and the assistant 1.0.0-alpha.28, as before.
+
 ### Added
 
 - Each scan of the scans doors (a dataset's, a cohort's, Browse's and a session's stacks) carries `acquisition_family`: the family of the acquisition the pack's routes recognised in it, `symri`, `swi`, `mix` (EPIMix or NeuroMix) or `stage`, from the route whose rules decided one of its axes, as its evidence names the rule set, else from the provenance a route enters on; null where none entered. `family` takes it first, so an acquisition's own images are grouped with what was made of them: SyMRI's acquisition with its maps and synthetic contrasts, an SWI's magnitude, phase and minIP with its processed image, and a projection or a reformat of SyMRI, an SWI or STAGE with its acquisition rather than among the derived images. Nothing is classified again: the evidence a registry holds already says it. Contract v7 amended in place, additively.
+
+### Changed
+
+- The five body-part descriptors pin `nils-bodypart` 0.6.0, the image the 1.0.0-alpha.80 release published (`sha256:06b7ab6b141e3b56e0a26c5d6cfb65a0e8797c76e70b3d70519f37c2e8183a7c`), where they pinned 1.0.0-alpha.71's. Its two encoders bake the same weights as before (`nils_bodypart.bake verify`, offline), so `bodypart-embed`'s encoder digests stand.
 
 ### Fixed
 
@@ -14,11 +22,6 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 - A dataset's found count says when it stopped short, and a read counts the tree whole. The probe that counts a dataset's tree reads a page's worth of entries and stops short of a large one, and its count was shown as final, so a large dataset's card showed a small part of its files as the whole. `GET /api/datasets/{name}/summary` now says `files.found_partial` and the found step's `partial`, and once a read of the tree NILS reads has finished (for an identified dataset, a pseudonymise run of its originals), the found step and `files.found` count the files it saw, with their bytes where it measured every one (else the probe's where the probe counted the tree whole), and the found step's `counted_by` says which. Contract v7 amended in place, additively.
 - SyMRI's multi-dynamic multi-echo or QALAS acquisition stays with the rest of SyMRI (record 55 C4). The MRI pack makes it a working scan, which a BIDS release routed to `sourcedata` before it asked for SyMRI's folder: it now takes the folder's route, still DICOM and never converted, its slices in SyMRI's folder of the DICOM export (`sourcedata/dicom/sub-*/ses-*/anat/SyMRI/<name>/`) as before, so a release's record and a pipeline's plan say it is in the folder. The scans doors showed it under other: its datatype is `anat` and its folder `anat/SyMRI`. The descriptive layout keeps it in `anat/SyMRI` with SyMRI's other images, as v0 did, where it had been in `anat` since the pack called what the scanner acquired RawRecon (MRI pack 0.9.0); a re-run of a descriptive release moves it there. A BIDS release made before writes nothing again, and its record names the folder. Under `--synthetic anat` or `derivatives` it stays in `sourcedata/` under its datatype, in no folder, as SyMRI's other stacks use none there.
 
-### Changed
-
-- The five body-part descriptors pin `nils-bodypart` 0.6.0, the image the 1.0.0-alpha.80 release published (`sha256:06b7ab6b141e3b56e0a26c5d6cfb65a0e8797c76e70b3d70519f37c2e8183a7c`), where they pinned 1.0.0-alpha.71's. Its two encoders bake the same weights as before (`nils_bodypart.bake verify`, offline), so `bodypart-embed`'s encoder digests stand.
-
-### Fixed
 
 - A dataset's Main scans page in Review no longer fails on a registry on Postgres with `duplicate key value violates unique constraint "uq_session_label_session_id_scheme_digest"` (1.0.0-alpha.80). Each of the page's requests brings the session cache up to date for the dataset's subjects before it reads their visits, and the page sends several at once. Each build deleted every label row of those subjects and wrote it again, so under read committed the second of two builds side by side, whose delete could not see the rows the first had just written, failed on them. A build of the cache now holds a transaction lock (`pg_advisory_xact_lock` on a key of the registry's schema; nothing on SQLite, whose writers already take turns), reads the timelines under it, and writes only the labels that changed, as an insert that updates the row its unique key finds: a read whose timelines and labels did not change writes nothing, not even the open review item of an empty study it raised before. Builds that found the cache cold or a span moved at the same time failed the same way, on the session rows' unique key as well as the labels'. A merge of two subjects, which drops their sessions for the next build to make again, takes the same lock from its first write, so a build beside it no longer leaves a label of a session the merge dropped.
 
