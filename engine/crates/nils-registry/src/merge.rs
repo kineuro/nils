@@ -12,7 +12,9 @@
 //!
 //! A merge stands alone ([`merge`]) or inside a larger transaction
 //! ([`merge_in`]): the identifier map merges as part of its one apply, so
-//! that a map whose merge fails leaves nothing behind.
+//! that a map whose merge fails leaves nothing behind. Either way it holds
+//! the session cache's lock ([`lock::SESSION_CACHE`]) from its first write
+//! to the end of the transaction, as a build of the cache does.
 //!
 //! Which tables carry a subject is not remembered here by hand: every
 //! table with a `subject_id` column is listed in [`SUBJECT_TABLES`] with
@@ -23,6 +25,7 @@ use std::collections::BTreeMap;
 
 use crate::audit::{self, Action, Entry};
 use crate::linkage::{self, NewIdentity, Subject, Subkeys};
+use crate::lock;
 use crate::review;
 use crate::schema::{SUBJECT_CODE_TYPE, Type, table};
 use crate::store::{Error, Param, Store};
@@ -269,6 +272,14 @@ pub fn merge_in(
             )));
         }
     }
+    // The session cache's lock, before the first write (2026-10-14). The
+    // merge drops both subjects' sessions, and a build of the cache beside
+    // it could write a label of a session it had just dropped; the build
+    // now waits for the merge, or the merge for the build. Taken before the
+    // picks and review items are written, which a build writes too, so the
+    // two take their locks in one order and neither waits on the other's
+    // rows while holding what the other waits for.
+    lock::take_for_transaction(registry, lock::SESSION_CACHE)?;
     let now = now_iso();
     let d = registry.dialect();
     let mut moved = BTreeMap::new();
