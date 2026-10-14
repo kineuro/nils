@@ -5915,6 +5915,10 @@ fn schedule(
                 Ok(Some(status)) => {
                     let r = running.remove(i);
                     ledger.give(ask);
+                    // what the container kept in its /tmp is gone with it
+                    if let Some(w) = &r.inv.workdir {
+                        let _ = std::fs::remove_dir_all(w);
+                    }
                     take_in(
                         registry,
                         x,
@@ -6140,6 +6144,8 @@ fn invocation_of(
         gpu: x.gpu,
         card: None,
         local_image: shared.local_image.clone(),
+        // apptainer's /tmp and /var/tmp, on disk beside the unit's log
+        workdir: b.log.parent().map(|d| d.join("tmp")),
         env,
         user,
         // the unit's declared cores and memory, enforced where the runtime
@@ -6223,6 +6229,7 @@ fn stop_left(rt: &runtime::Cli, together: bool, units: &[rows::Unit], out: &Path
                 gpu: false,
                 card: None,
                 local_image: None,
+                workdir: None,
                 env: Vec::new(),
                 user: None,
                 cpus: None,

@@ -2793,7 +2793,7 @@ while i < len(a):
         host, ctr = a[i + 1].split(":")[:2]; mounts[ctr] = host; i += 2
     elif w == "--env":
         k, v = a[i + 1].split("=", 1); env[k] = v; i += 2
-    elif w in ("--network", "--cpus", "--memory", "--pwd"):
+    elif w in ("--network", "--cpus", "--memory", "--pwd", "--workdir"):
         i += 2
     elif w.startswith("--"):
         i += 1
@@ -3704,9 +3704,22 @@ fn an_optional_gpu_need_takes_the_leased_card_under_apptainer_and_else_the_cpu()
     assert!(ok, "{err}");
     assert_eq!(r["device"], "cuda:Stand-in Card", "{r}");
     assert_eq!(execs.len(), 4, "{execs:?}");
+    let runs = lab.work.path().canonicalize().unwrap().join("runs");
     for e in &execs {
         assert!(e.iter().any(|w| w == "--nv"), "{e:?}");
         assert!(pair(e, "--env", "CUDA_VISIBLE_DEVICES=1"), "{e:?}");
+        // the container's /tmp on disk in the unit's folder, gone after it
+        let w = e
+            .windows(2)
+            .find(|w| w[0] == "--workdir")
+            .map(|w| PathBuf::from(&w[1]));
+        let w = w.unwrap_or_else(|| panic!("no --workdir: {e:?}"));
+        assert!(
+            (w.starts_with(&runs) || w.starts_with(lab.work.path().join("runs")))
+                && w.ends_with("tmp"),
+            "{w:?}"
+        );
+        assert!(!w.exists(), "{w:?} is left");
     }
     for u in r["units_run"].as_array().unwrap() {
         assert_eq!(u["gpu_card"], 1, "{u}");

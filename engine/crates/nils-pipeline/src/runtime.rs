@@ -110,6 +110,12 @@ pub struct Invocation {
     /// For apptainer, the SIF file or sandbox folder built from the image's
     /// digest; none runs `docker://<image>`.
     pub local_image: Option<PathBuf>,
+    /// For apptainer, the host folder that holds the container's /tmp and
+    /// /var/tmp (its `--workdir`): contained, they are otherwise a tmpfs of
+    /// 64 MB, where a tool's temporary files do not fit (2026-10-14, the
+    /// post-contrast fallback's work folder). Podman's and docker's /tmp is
+    /// the container's own, on disk. Made before the run.
+    pub workdir: Option<PathBuf>,
     pub env: Vec<(String, String)>,
     /// The uid and gid the process runs as: the engine's user (for podman
     /// the engine process's own uid and gid, the ids keep-id maps). Docker
@@ -278,6 +284,9 @@ pub fn argv(kind: Kind, inv: &Invocation) -> Vec<String> {
             }
             if let Some(m) = inv.memory_mib {
                 a.extend(["--memory".to_string(), format!("{m}M")]);
+            }
+            if let Some(w) = &inv.workdir {
+                a.extend(["--workdir".to_string(), w.display().to_string()]);
             }
             if inv.gpu {
                 // --nv shows every card of the host: the process is told
@@ -877,6 +886,9 @@ pub fn spawn(
 ) -> std::io::Result<std::process::Child> {
     check_mounts(&inv.mounts).map_err(std::io::Error::other)?;
     prepare_mountpoints(&inv.mounts)?;
+    if let Some(w) = &inv.workdir {
+        std::fs::create_dir_all(w)?;
+    }
     let out = std::fs::File::create(log)?;
     let err = out.try_clone()?;
     let mut c = rt.command(inv);
@@ -1047,6 +1059,7 @@ mod tests {
             gpu,
             card: None,
             local_image: None,
+            workdir: None,
             env: vec![("NILS_RUN".into(), "7".into())],
             user: Some((1000, 1000)),
             cpus: None,
@@ -1215,6 +1228,30 @@ mod tests {
         let p = argv(Kind::Podman, &i);
         assert!(!p.iter().any(|w| w == "--no-eval"), "{p:?}");
         assert_eq!(&p[p.len() - 3..], ["bash", "-c", script]);
+    }
+
+    /// 2026-10-14: a contained apptainer run's /tmp is a tmpfs of 64 MB, so
+    /// apptainer is given a work folder on the host (`--workdir`), before
+    /// the image; podman and docker keep their own /tmp on disk.
+    #[test]
+    fn apptainer_keeps_a_container_s_tmp_on_disk() {
+        let mut i = inv(false);
+        i.workdir = Some(PathBuf::from("/w/runs/7/units/stack-1/tmp"));
+        i.local_image = Some(PathBuf::from("/w/images/abc.sandbox"));
+        let a = argv(Kind::Apptainer, &i);
+        let at = a.iter().position(|w| w == "/w/images/abc.sandbox").unwrap();
+        assert!(
+            has2(&a[..at], &["--workdir", "/w/runs/7/units/stack-1/tmp"]),
+            "{a:?}"
+        );
+        for kind in [Kind::Podman, Kind::Docker] {
+            assert!(!argv(kind, &i).iter().any(|w| w == "--workdir"), "{kind:?}");
+        }
+        assert!(
+            !argv(Kind::Apptainer, &inv(false))
+                .iter()
+                .any(|w| w == "--workdir")
+        );
     }
 
     #[test]
