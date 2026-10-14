@@ -1057,6 +1057,11 @@ pub(crate) fn steps(
     );
     let mut out = Vec::new();
     for (name, axes) in OPERATIONS {
+        // a step no plan is given for is not asked about: `step_of` asks
+        // about one
+        let Some((_, planned)) = plans.iter().find(|(n, _)| *n == name) else {
+            continue;
+        };
         let (pipelines, active) = proposing(store, axes)?;
         let tasks: Vec<String> = axes.iter().map(|a| format!("axis:{a}")).collect();
         let models = count(
@@ -1149,18 +1154,7 @@ pub(crate) fn steps(
             (None, Some(j)) => j.progress.clone(),
             (None, None) => None,
         };
-        let planned = plans
-            .iter()
-            .find(|(n, _)| *n == name)
-            .map(|(_, p)| p.clone())
-            .unwrap_or_else(|| {
-                Err(Refused::new(
-                    404,
-                    "no_step",
-                    format!("{name} is not a step a door runs"),
-                ))
-            });
-        let refused = refusal(name, at.busy(), &planned, scans);
+        let refused = refusal(name, at.busy(), planned, scans);
         // record 55 F5: post-contrast's own label, the time rule's, on the
         // scans in scope
         let label = if name == "post_contrast" {
@@ -1186,6 +1180,37 @@ pub(crate) fn steps(
         }));
     }
     Ok(out)
+}
+
+/// One operation's step over a dataset's or a cohort's scans, as [`steps`]
+/// gives it on their pages (the dataset's summary, the cohort's document),
+/// for a page that shows the operation's answers: the Main scans map's
+/// layers (record 55, decision 6). Its state, its run and job, what its
+/// model answered, and why a run of it would be refused now; none for a
+/// step that is no operation of its own.
+pub(crate) fn step_of(
+    registry: &mut Registry,
+    scope: Scope<'_>,
+    target: &str,
+    step: &str,
+    hide_sealed: bool,
+) -> Result<Option<Value>, StoreError> {
+    let Some((name, _)) = OPERATIONS.iter().find(|(n, _)| *n == step) else {
+        return Ok(None);
+    };
+    let plans: Plans = vec![(*name, plan(registry, name)?)];
+    let store = registry.store();
+    let holds = shown(store, scope.holds(store), hide_sealed);
+    let scans = count(
+        store,
+        &format!(
+            "SELECT COUNT(*) FROM {} x WHERE {holds}",
+            store.qualified("stack")
+        ),
+    )?;
+    Ok(steps(store, scope, target, scans, &plans, hide_sealed)?
+        .into_iter()
+        .next())
 }
 
 /// A cohort's steps, as its document carries them: its members' scans

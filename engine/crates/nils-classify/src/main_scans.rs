@@ -51,6 +51,9 @@ pub struct Ask<'a> {
     /// Stacks the caller is not shown (of a sample sealed now): no part of
     /// any visit.
     pub withheld: &'a BTreeSet<i64>,
+    /// A layer over the map, where one is asked: what each visit's scans
+    /// are by one operation's answers.
+    pub layer: Option<Layer>,
 }
 
 /// A pick stored on a visit, applying: a person's or a run's.
@@ -81,6 +84,8 @@ struct Subject {
 pub struct Read {
     subjects: Vec<Subject>,
     datasets: HashMap<i64, Vec<String>>,
+    /// The layer asked, read over the same visits.
+    layer: Option<Layered>,
 }
 
 /// What one visit takes under one set of rules.
@@ -166,9 +171,14 @@ pub fn read(registry: &mut Registry, ask: &Ask<'_>) -> Result<Read, Error> {
             visits,
         });
     }
+    let layer = ask
+        .layer
+        .map(|layer| layered(store, layer, &subjects, &labels, ask.withheld))
+        .transpose()?;
     Ok(Read {
         subjects,
         datasets: ask.datasets.clone(),
+        layer,
     })
 }
 
@@ -826,6 +836,11 @@ pub fn map(
             "before": metrics(read, &cmp.saved.taken),
         });
     }
+    if let Some(l) = &read.layer {
+        // with a draft, what the saved rules take beside it
+        let saved = cmp.draft.as_ref().map(|_| cmp.saved.taken.as_slice());
+        out["layer"] = l.summary(&shown.taken, saved);
+    }
     out
 }
 
@@ -925,7 +940,7 @@ pub fn subjects(
                 .map(|(vi, ((v, x), (at, field)))| {
                     let stored = v.stored.as_ref();
                     // no date leaves the door: a visit is its session's id
-                    json!({
+                    let mut doc = json!({
                         "session_id": v.session_id,
                         "visit": vi + 1,
                         // the first of the columns it is shown under, which
@@ -941,13 +956,21 @@ pub fn subjects(
                         "pick": stored.map(|p| p.id),
                         "why": stored.and_then(|p| p.why.clone()),
                         "candidates": candidates(v, &x.chosen),
-                    })
+                    });
+                    if let Some(l) = &read.layer {
+                        l.on_visit(&mut doc, *si, vi, x);
+                    }
+                    doc
                 })
                 .collect();
             json!({"subject_id": s.id, "subject": s.code, "visits": visits})
         })
         .collect();
-    json!({"total": total, "page": page, "per_page": per_page, "subjects": page_of})
+    let mut out = json!({"total": total, "page": page, "per_page": per_page, "subjects": page_of});
+    if let Some(l) = &read.layer {
+        out["layer"] = l.head();
+    }
+    out
 }
 
 /// A visit's candidates of the role, with their kinds and, where the rules
@@ -1004,12 +1027,400 @@ pub fn strips(read: &Read, cmp: &Compare, model: &Model, role: &str, by: Columns
             json!({"subject_id": s.id, "column": column, "visits": visits})
         })
         .collect();
-    json!({
+    let mut out = json!({
         "kinds": keys,
         "columns": laid.columns.iter().map(Column::to_json).collect::<Vec<_>>(),
         "shared_visits": laid.shared,
         "subjects": subjects,
+    });
+    if let Some(l) = &read.layer {
+        l.on_strips(&mut out, &shown.taken);
+    }
+    out
+}
+
+// ---------------------------------------------------------------- layers
+
+/// A layer over the map (record 55, decision 6 of 2026-10-10: "the data
+/// map (v0's heatmap, for datasets and cohorts, with layers such as body
+/// part and post-contrast) is where the trade-off is seen"; left out of the
+/// main-scans study's first round, its section 8, until Nima's ruling of
+/// 2026-10-13 that nothing of the wave is held back): what each visit's
+/// scans are by one operation's answers, beside the kinds the rules take.
+/// It is read from the stored answers and written nowhere, over the MR
+/// stacks of the visits the map holds, a stack the caller is not shown
+/// left out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Layer {
+    /// The body-part step's coarse mode, the axis `body_region` (record
+    /// 50): head, spine, chest, other.
+    BodyRegion,
+    /// Its fine mode, the axis `body_part`: brain, brain-neck, neck, spine,
+    /// chest, other.
+    BodyPart,
+    /// The post-contrast label's state (record 55 F2 and F5, spec §12.3):
+    /// pre, post, by definition, undetermined; for a stack no label has
+    /// reached yet (a registry sorted before the label), what the
+    /// `post_contrast` axis says, `1` post and `0` pre.
+    PostContrast,
+}
+
+impl Layer {
+    pub fn parse(word: &str) -> Option<Layer> {
+        match word {
+            "body_region" => Some(Layer::BodyRegion),
+            "body_part" => Some(Layer::BodyPart),
+            "post_contrast" => Some(Layer::PostContrast),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Layer::BodyRegion => "body_region",
+            Layer::BodyPart => "body_part",
+            Layer::PostContrast => "post_contrast",
+        }
+    }
+
+    /// The operation whose answers the layer shows, by its step's name:
+    /// body part answers both its modes.
+    pub fn step(self) -> &'static str {
+        match self {
+            Layer::BodyRegion | Layer::BodyPart => "body_part",
+            Layer::PostContrast => "post_contrast",
+        }
+    }
+
+    /// Its values in the order a person reads them; a value a pack adds
+    /// comes after them, by name.
+    fn order(self) -> &'static [&'static str] {
+        match self {
+            Layer::BodyRegion => &["head", "spine", "chest", "other"],
+            Layer::BodyPart => &["brain", "brain-neck", "neck", "spine", "chest", "other"],
+            Layer::PostContrast => &["pre", "post", "by_definition", "undetermined"],
+        }
+    }
+
+    /// Where a value comes in the layer's order; a value it does not name
+    /// after every one it does.
+    fn position(self, value: &str) -> usize {
+        let order = self.order();
+        order
+            .iter()
+            .position(|v| *v == value)
+            .unwrap_or(order.len())
+    }
+
+    /// A value's place for sorting: its position, then its name.
+    fn rank(self, value: &str) -> (usize, &str) {
+        (self.position(value), value)
+    }
+}
+
+/// What the `post_contrast` axis says of a stack no label has reached, as
+/// the label's state: given is post, not given pre.
+fn stated(value: &str) -> Option<&'static str> {
+    match value.trim() {
+        "1" | "given" => Some("post"),
+        "0" | "not_given" => Some("pre"),
+        _ => None,
+    }
+}
+
+/// One visit's scans on a layer: how many carry each value, how many carry
+/// none, and on how many the 72-hour flag is up (post-contrast: the subject
+/// had contrast in the 72 hours before).
+#[derive(Debug, Clone, Default, PartialEq)]
+struct Held {
+    values: BTreeMap<String, i64>,
+    none: i64,
+    prior_72h: i64,
+}
+
+impl Held {
+    /// The value most of its scans carry, a tie going to the one first in
+    /// the layer's order; none where none of them carries one.
+    fn most(&self, layer: Layer) -> Option<&String> {
+        self.values
+            .iter()
+            .filter(|(_, n)| **n > 0)
+            .max_by(|a, b| {
+                a.1.cmp(b.1)
+                    .then_with(|| layer.rank(b.0).cmp(&layer.rank(a.0)))
+            })
+            .map(|(v, _)| v)
+    }
+}
+
+/// A layer read over the map's visits.
+struct Layered {
+    layer: Layer,
+    /// Each stack's value, for a stack that carries one.
+    of: HashMap<i64, String>,
+    /// Each visit's scans on it, by subject and visit, as `Read` orders them.
+    held: Vec<Vec<Held>>,
+    /// Every value the visits hold, in the layer's order.
+    values: Vec<String>,
+}
+
+/// Read a layer over the visits read: every MR stack of their subjects, by
+/// the visit it belongs to under the scheme, with its value. A stack of a
+/// visit the map does not hold (one with no scan of the role) is no part
+/// of it.
+fn layered(
+    store: &mut Store,
+    layer: Layer,
+    subjects: &[Subject],
+    labels: &HashMap<i64, nils_session::Labelled>,
+    withheld: &BTreeSet<i64>,
+) -> Result<Layered, StoreError> {
+    let mut at: HashMap<(i64, i64), (usize, usize)> = HashMap::new();
+    for (si, s) in subjects.iter().enumerate() {
+        for (vi, v) in s.visits.iter().enumerate() {
+            at.insert((s.id, v.session_id), (si, vi));
+        }
+    }
+    let mut held: Vec<Vec<Held>> = subjects
+        .iter()
+        .map(|s| vec![Held::default(); s.visits.len()])
+        .collect();
+    let mut of: HashMap<i64, String> = HashMap::new();
+    let (stack, series, axis, label) = (
+        store.qualified("stack"),
+        store.qualified("series"),
+        store.qualified("classification_axis"),
+        store.qualified("contrast_label"),
+    );
+    let ids: Vec<i64> = subjects.iter().map(|s| s.id).collect();
+    let mut seen: BTreeSet<i64> = BTreeSet::new();
+    for chunk in ids.chunks(500) {
+        let sql = match layer {
+            Layer::PostContrast => format!(
+                "SELECT x.id, se.subject_id, se.study_id, a.value, cl.contrast_state, \
+                 cl.contrast_prior_72h FROM {stack} x JOIN {series} se ON se.id = x.series_id \
+                 LEFT JOIN {label} cl ON cl.stack_id = x.id \
+                 LEFT JOIN {axis} a ON a.stack_id = x.id AND a.axis = 'post_contrast' \
+                 WHERE x.modality = 'MR' AND se.subject_id IN ({}) ORDER BY x.id",
+                list(chunk)
+            ),
+            _ => format!(
+                "SELECT x.id, se.subject_id, se.study_id, a.value FROM {stack} x \
+                 JOIN {series} se ON se.id = x.series_id \
+                 LEFT JOIN {axis} a ON a.stack_id = x.id AND a.axis = '{}' \
+                 WHERE x.modality = 'MR' AND se.subject_id IN ({}) ORDER BY x.id",
+                layer.name(),
+                list(chunk)
+            ),
+        };
+        for r in store.query(&sql, &[])? {
+            let id = r.int(0)?;
+            // one row a stack: an axis of one value has one row (Wave 4a
+            // §6.1), and a stack read once is not counted again
+            if withheld.contains(&id) || !seen.insert(id) {
+                continue;
+            }
+            let Some(l) = labels.get(&r.int(2)?) else {
+                continue;
+            };
+            let Some(&(si, vi)) = at.get(&(r.int(1)?, l.session_id)) else {
+                continue;
+            };
+            let axis_value = r
+                .opt_text(3)?
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .map(str::to_string);
+            let (value, flagged) = match layer {
+                Layer::PostContrast => {
+                    let state = r
+                        .opt_text(4)?
+                        .map(str::trim)
+                        .filter(|v| !v.is_empty())
+                        .map(str::to_string);
+                    let flagged = r.opt_text(5)?.is_some_and(|f| f.trim() == "yes");
+                    let value = state
+                        .or_else(|| axis_value.as_deref().and_then(stated).map(str::to_string));
+                    (value, flagged)
+                }
+                _ => (axis_value, false),
+            };
+            let h = &mut held[si][vi];
+            match value {
+                Some(v) => {
+                    *h.values.entry(v.clone()).or_insert(0) += 1;
+                    of.insert(id, v);
+                }
+                None => h.none += 1,
+            }
+            if flagged {
+                h.prior_72h += 1;
+            }
+        }
+    }
+    let mut values: Vec<String> = held
+        .iter()
+        .flatten()
+        .flat_map(|h| h.values.keys().cloned())
+        .collect::<BTreeSet<String>>()
+        .into_iter()
+        .collect();
+    // by name from the set, then by the layer's order, a sort that keeps
+    // the names' order among values the order does not name
+    values.sort_by_key(|v| layer.position(v));
+    Ok(Layered {
+        layer,
+        of,
+        held,
+        values,
     })
+}
+
+impl Layered {
+    /// The value of a scan made of these stacks: the first that carries one.
+    fn value_of(&self, stacks: &[i64]) -> Option<&String> {
+        stacks.iter().find_map(|s| self.of.get(s))
+    }
+
+    /// The value of the scan a visit takes; none where it takes none.
+    fn taken(&self, x: &Taken) -> Option<&String> {
+        x.kind.as_ref().and(self.value_of(&x.stacks))
+    }
+
+    /// The layer, the operation that answers it and every value the visits
+    /// hold, in order, as each door carries it.
+    fn head(&self) -> Value {
+        json!({
+            "layer": self.layer.name(),
+            "operation": self.layer.step(),
+            "values": self.values,
+        })
+    }
+
+    /// `POST /api/picks/map`'s layer: each value with the visits that hold
+    /// a scan of it, the visits whose scan taken carries it (under the
+    /// draft where one is given, and under the saved rules beside it) and
+    /// its scans; the visits, the scans and the scans taken that carry
+    /// none; and, for post-contrast, the visits the 72-hour flag is up on.
+    fn summary(&self, shown: &[Vec<Taken>], saved: Option<&[Vec<Taken>]>) -> Value {
+        let mut with: BTreeMap<&str, i64> = BTreeMap::new();
+        let mut scans: BTreeMap<&str, i64> = BTreeMap::new();
+        let mut taken: BTreeMap<&str, i64> = BTreeMap::new();
+        let mut before: BTreeMap<&str, i64> = BTreeMap::new();
+        let (mut visits_none, mut scans_none, mut flagged) = (0i64, 0i64, 0i64);
+        let (mut taken_none, mut before_none) = (0i64, 0i64);
+        for (si, visits) in self.held.iter().enumerate() {
+            for (vi, h) in visits.iter().enumerate() {
+                for (v, n) in &h.values {
+                    *with.entry(v.as_str()).or_insert(0) += 1;
+                    *scans.entry(v.as_str()).or_insert(0) += n;
+                }
+                scans_none += h.none;
+                if h.values.is_empty() {
+                    visits_none += 1;
+                }
+                if h.prior_72h > 0 {
+                    flagged += 1;
+                }
+                let x = &shown[si][vi];
+                if x.kind.is_some() {
+                    match self.taken(x) {
+                        Some(v) => *taken.entry(v.as_str()).or_insert(0) += 1,
+                        None => taken_none += 1,
+                    }
+                }
+                if let Some(saved) = saved {
+                    let x = &saved[si][vi];
+                    if x.kind.is_some() {
+                        match self.taken(x) {
+                            Some(v) => *before.entry(v.as_str()).or_insert(0) += 1,
+                            None => before_none += 1,
+                        }
+                    }
+                }
+            }
+        }
+        let draft = saved.is_some();
+        let values: Vec<Value> = self
+            .values
+            .iter()
+            .map(|v| {
+                let v = v.as_str();
+                let mut row = json!({
+                    "value": v,
+                    "visits_with": with.get(v).copied().unwrap_or(0),
+                    "visits_taken": taken.get(v).copied().unwrap_or(0),
+                    "scans": scans.get(v).copied().unwrap_or(0),
+                });
+                if draft {
+                    row["visits_taken_before"] = json!(before.get(v).copied().unwrap_or(0));
+                }
+                row
+            })
+            .collect();
+        let mut none = json!({"visits": visits_none, "scans": scans_none, "taken": taken_none});
+        if draft {
+            none["taken_before"] = json!(before_none);
+        }
+        let mut out = self.head();
+        out["values"] = Value::Array(values);
+        out["none"] = none;
+        if self.layer == Layer::PostContrast {
+            out["prior_72h"] = json!(flagged);
+        }
+        out
+    }
+
+    /// A visit of `POST /api/picks/map/subjects` on the layer: the value of
+    /// the scan it takes, how many of its scans carry each value and how
+    /// many none, the 72-hour flag's scans for post-contrast, and each
+    /// candidate's value.
+    fn on_visit(&self, doc: &mut Value, si: usize, vi: usize, x: &Taken) {
+        let h = &self.held[si][vi];
+        let mut layer = json!({
+            "taken": self.taken(x),
+            "scans": h.values,
+            "none": h.none,
+        });
+        if self.layer == Layer::PostContrast {
+            layer["prior_72h"] = json!(h.prior_72h);
+        }
+        doc["layer"] = layer;
+        for c in doc["candidates"].as_array_mut().into_iter().flatten() {
+            let stacks: Vec<i64> = c["stacks"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_i64)
+                .collect();
+            c["layer"] = json!(self.value_of(&stacks));
+        }
+    }
+
+    /// `POST /api/picks/map/strips` on the layer, compactly: each subject's
+    /// visits by the value of the scan each takes (`taken`) and by the value
+    /// most of its scans carry (`held`), an index into `values`, `-1` for
+    /// none.
+    fn on_strips(&self, out: &mut Value, taken: &[Vec<Taken>]) {
+        let index = |v: Option<&String>| {
+            v.and_then(|v| self.values.iter().position(|x| x == v))
+                .map_or(-1, |i| i as i64)
+        };
+        for (si, s) in out["subjects"]
+            .as_array_mut()
+            .into_iter()
+            .flatten()
+            .enumerate()
+        {
+            let took: Vec<i64> = taken[si].iter().map(|x| index(self.taken(x))).collect();
+            let most: Vec<i64> = self.held[si]
+                .iter()
+                .map(|h| index(h.most(self.layer)))
+                .collect();
+            s["layer"] = json!({"taken": took, "held": most});
+        }
+        out["layer"] = self.head();
+    }
 }
 
 #[cfg(test)]
@@ -1108,7 +1519,11 @@ mod tests {
                 chosen: Chosen::default(),
             }]);
         }
-        let read = Read { subjects, datasets };
+        let read = Read {
+            subjects,
+            datasets,
+            layer: None,
+        };
         let laid = columns(&read, &taken, Columns::Dataset);
         let at = |stack: usize| laid.visits[stack - 1][0].0.clone();
         assert_eq!(at(1), ["a", "b"]);
@@ -1143,5 +1558,136 @@ mod tests {
         let laid = columns(&read, &taken, Columns::Scanner);
         assert_eq!(laid.shared, 0);
         assert_eq!(laid.columns, [column("Unknown scanner", 18, 0)]);
+    }
+
+    /// Record 55, decision 6, the layers: a visit's scans by value, the
+    /// value of the scan it takes, and the value most of its scans carry,
+    /// a tie going to the first in the layer's order; on the map each value
+    /// counts the visits that hold it, those that take it (under a draft,
+    /// beside the saved rules) and its scans; and the `post_contrast` axis
+    /// speaks for a stack no label reached.
+    #[test]
+    fn a_layer_counts_each_visit_s_scans_and_the_scan_it_takes() {
+        assert_eq!(Layer::parse("body_region"), Some(Layer::BodyRegion));
+        assert_eq!(Layer::parse("post_contrast"), Some(Layer::PostContrast));
+        assert_eq!(Layer::parse("contrast"), None);
+        assert_eq!(Layer::BodyRegion.step(), "body_part");
+        assert_eq!(Layer::BodyPart.step(), "body_part");
+        assert_eq!(Layer::PostContrast.step(), "post_contrast");
+        assert_eq!(stated("1"), Some("post"));
+        assert_eq!(stated("given"), Some("post"));
+        assert_eq!(stated("0"), Some("pre"));
+        assert_eq!(stated("not_given"), Some("pre"));
+        assert_eq!(stated(""), None);
+        let held = |pairs: &[(&str, i64)], none: i64| Held {
+            values: pairs.iter().map(|(v, n)| (v.to_string(), *n)).collect(),
+            none,
+            prior_72h: 0,
+        };
+        let most = |h: Held| h.most(Layer::BodyRegion).cloned();
+        assert_eq!(
+            most(held(&[("spine", 2), ("head", 2)], 0)).as_deref(),
+            Some("head"),
+            "a tie goes to the first in the order"
+        );
+        assert_eq!(
+            most(held(&[("spine", 3), ("head", 2)], 0)).as_deref(),
+            Some("spine")
+        );
+        assert_eq!(most(held(&[], 4)), None);
+
+        let taken = |kind: Option<&str>, stacks: &[i64]| Taken {
+            kind: kind.map(str::to_string),
+            stacks: stacks.to_vec(),
+            by: "rules",
+            chosen: Chosen::default(),
+        };
+        // one subject with a head visit, then a visit of head and spine
+        // scans and one with none; a second subject whose one visit has no
+        // answer and no pick
+        let layered = Layered {
+            layer: Layer::BodyRegion,
+            of: HashMap::from([
+                (1, "head".to_string()),
+                (2, "head".to_string()),
+                (3, "spine".to_string()),
+                (4, "spine".to_string()),
+                (5, "head".to_string()),
+            ]),
+            held: vec![
+                vec![
+                    held(&[("head", 2)], 0),
+                    held(&[("spine", 2), ("head", 1)], 1),
+                ],
+                vec![held(&[], 3)],
+            ],
+            values: vec!["head".into(), "spine".into()],
+        };
+        let saved = vec![
+            vec![
+                taken(Some("3D MPRAGE"), &[1]),
+                taken(Some("2D SE"), &[3, 4]),
+            ],
+            vec![taken(None, &[])],
+        ];
+        let draft = vec![
+            vec![
+                taken(Some("3D MPRAGE"), &[1]),
+                taken(Some("3D MPRAGE"), &[5]),
+            ],
+            vec![taken(None, &[])],
+        ];
+        let map = layered.summary(&draft, Some(saved.as_slice()));
+        assert_eq!(map["layer"], "body_region", "{map}");
+        assert_eq!(map["operation"], "body_part", "{map}");
+        assert_eq!(
+            map["values"],
+            json!([
+                {"value": "head", "visits_with": 2, "visits_taken": 2, "scans": 3, "visits_taken_before": 1},
+                {"value": "spine", "visits_with": 1, "visits_taken": 0, "scans": 2, "visits_taken_before": 1},
+            ]),
+            "{map}"
+        );
+        assert_eq!(
+            map["none"],
+            json!({"visits": 1, "scans": 4, "taken": 0, "taken_before": 0}),
+            "{map}"
+        );
+        assert!(map.get("prior_72h").is_none(), "{map}");
+        // without a draft, nothing is said of before
+        let map = layered.summary(&saved, None);
+        assert!(
+            map["values"][0].get("visits_taken_before").is_none(),
+            "{map}"
+        );
+        assert!(map["none"].get("taken_before").is_none(), "{map}");
+
+        // a visit of the subjects door: the scan it takes, its scans by
+        // value, and each candidate's value
+        let mut doc = json!({"candidates": [{"stacks": [3, 4]}, {"stacks": [9]}]});
+        layered.on_visit(&mut doc, 0, 1, &saved[0][1]);
+        assert_eq!(
+            doc["layer"],
+            json!({"taken": "spine", "scans": {"head": 1, "spine": 2}, "none": 1}),
+            "{doc}"
+        );
+        assert_eq!(doc["candidates"][0]["layer"], "spine", "{doc}");
+        assert!(doc["candidates"][1]["layer"].is_null(), "{doc}");
+
+        // the strips, compactly: the value taken and the value most scans
+        // carry, by visit, as indexes into the values
+        let mut strips = json!({"subjects": [{"subject_id": 1}, {"subject_id": 2}]});
+        layered.on_strips(&mut strips, &saved);
+        assert_eq!(
+            strips["subjects"][0]["layer"],
+            json!({"taken": [0, 1], "held": [0, 1]}),
+            "{strips}"
+        );
+        assert_eq!(
+            strips["subjects"][1]["layer"],
+            json!({"taken": [-1], "held": [-1]}),
+            "{strips}"
+        );
+        assert_eq!(strips["layer"]["values"], json!(["head", "spine"]));
     }
 }

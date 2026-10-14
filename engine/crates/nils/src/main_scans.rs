@@ -5,11 +5,14 @@
 //! saved as a new version that queues the scope's pick run; and the map of
 //! what the rules, saved or drafted, take for a role, read from the stored
 //! axes and written nowhere. A scope is `?cohort=NAME` or `?dataset=NAME`
-//! (or ID), or the same under `scope` or at the top of a body.
+//! (or ID), or the same under `scope` or at the top of a body. A map door
+//! asked for a `layer` (body region, body part or post-contrast) says what
+//! each visit's scans are by that operation's answers, and whether its step
+//! has run over the scope (record 55, decision 6: the data map's layers).
 
 use std::collections::{BTreeSet, HashMap};
 
-use nils_classify::main_scans::{self, Ask, Columns, Compare, Group};
+use nils_classify::main_scans::{self, Ask, Columns, Compare, Group, Layer};
 use nils_pack::pick::Model;
 use nils_pack::pick_rules::Rules;
 use nils_registry::Registry;
@@ -540,6 +543,7 @@ pub(crate) fn map(
         None | Some("default" | "day") => nils_registry::session::Scheme::default(),
         Some(n) => crate::stored_scheme(registry, n).map_err(Reply::from)?,
     };
+    let layer = layer_of(doc)?;
     let (saved, stored) = current(registry, model, &scope)?;
     let version = stored.as_ref().map_or(1, |s| s.version);
     let draft = match &doc["rules"] {
@@ -584,6 +588,7 @@ pub(crate) fn map(
             picks: &picks,
             datasets: &datasets,
             withheld: &withheld,
+            layer,
         },
     )
     .map_err(failed)?;
@@ -597,7 +602,7 @@ pub(crate) fn map(
         _ => None,
     };
     let cmp = Compare::new(&read, model, role, saved, draft, reference.as_ref());
-    let out = match door {
+    let mut out = match door {
         Door::Map => main_scans::map(&read, &cmp, model, role, by, version),
         Door::Strips => main_scans::strips(&read, &cmp, model, role, by),
         Door::Subjects => {
@@ -628,5 +633,69 @@ pub(crate) fn map(
             page
         }
     };
+    if let Some(layer) = layer {
+        // whether the step that answers the layer has run over the scope,
+        // as the scope's Data page says it, with why a run of it would be
+        // refused now
+        out["layer"]["step"] = layer_step(registry, &scope, caller, layer)?;
+    }
     Ok(Reply::ok(out))
+}
+
+/// The layer a map door asks for: `body_region`, `body_part` or
+/// `post_contrast`, none where `layer` is missing or null.
+fn layer_of(doc: &Value) -> Result<Option<Layer>, Reply> {
+    match &doc["layer"] {
+        Value::Null => Ok(None),
+        Value::String(w) if w.is_empty() => Ok(None),
+        v => v.as_str().and_then(Layer::parse).map(Some).ok_or_else(|| {
+            let mut r = Reply::error(400, "layer: body_region, body_part or post_contrast");
+            r.body["field"] = Value::from("layer");
+            r
+        }),
+    }
+}
+
+/// The step of the operation that answers a layer, over the scope's scans,
+/// as the dataset's or the cohort's own page carries it
+/// (`crate::operations::steps`): its state (done once a run of it finished
+/// over the scans or its model answered one of them), its run and job, what
+/// it answered, and why a run of it would be refused now. A dataset's counts
+/// keep a sealed sample as its Data page's do; a cohort's leave it out for
+/// a caller who may not read it, as the cohort's door does.
+fn layer_step(
+    registry: &mut Registry,
+    scope: &Scope,
+    caller: &crate::serve::Caller,
+    layer: Layer,
+) -> Result<Value, Reply> {
+    use nils_registry::pick_rules::ScopeKind;
+    // a dataset's scans as its Data page counts them: the stacks the
+    // `source` rows under its folder hold a file of
+    let ids = match scope.kind {
+        ScopeKind::Dataset => {
+            let store = registry.store();
+            match nils_registry::place::show(store, scope.id).map_err(failed)? {
+                Some(place) => crate::sources::source_ids(store, &place)
+                    .map_err(failed)?
+                    .iter()
+                    .map(i64::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                None => String::new(),
+            }
+        }
+        ScopeKind::Cohort => String::new(),
+    };
+    let (held, hide_sealed) = match scope.kind {
+        ScopeKind::Dataset => (crate::operations::Scope::Sources(&ids), false),
+        ScopeKind::Cohort => (
+            crate::operations::Scope::Cohort(scope.id),
+            !crate::sealed::reads(&caller.access),
+        ),
+    };
+    let target = scope.label();
+    crate::operations::step_of(registry, held, &target, layer.step(), hide_sealed)
+        .map_err(failed)?
+        .ok_or_else(|| Reply::error(500, format!("{} is not an operation", layer.step())))
 }
