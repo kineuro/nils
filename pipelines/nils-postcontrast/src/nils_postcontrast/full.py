@@ -14,7 +14,13 @@ calibrated per site, as the cascade's first stage uses it.
 
 Who is a candidate is the cascade's rule (T1-type brain at a calibrated
 site); every other stack is "not sure" with its reason. A stack whose
-tools fail keeps the arms it has, as model r1 does.
+tools fail keeps the arms it has, as model r1 does; but a stack left with
+no image arm at all because it has no usable volume (no conversion, fewer
+than 3 slices, 4D) or no segmentation after the card, its retry and the
+CPU is "not sure" (``no-usable-volume``, ``no-segmentation``): model r1
+would answer it from its header evidence alone, which no test has compared
+with a reference, and the model answers only where it is certified
+(record 55 E3, 2026-10-14). The change is class III by construction.
 
 **Where it runs.** With a card, the tools run in waves on it (``tools.wave``)
 while worker processes convert the stacks before and compute the features
@@ -51,6 +57,20 @@ from .results import FAILED, SKIPPED, Run, Unit
 
 logger = logging.getLogger("nils_postcontrast.full")
 VALUE = {"given": GIVEN, "not given": NOT_GIVEN}
+NO_VOLUME, NO_SEGMENTATION = "no-usable-volume", "no-segmentation"
+
+
+def no_arm_reason(arms: str, convert_failed: bool, segmented: bool) -> str | None:
+    """Why a candidate is "not sure" though model r1 could answer it from
+    its header evidence alone: no image arm at all, and no usable volume or
+    no segmentation; none where it keeps an arm, or its tools did not fail."""
+    if arms:
+        return None
+    if convert_failed:
+        return NO_VOLUME
+    if not segmented:
+        return NO_SEGMENTATION
+    return None
 CPU_SYNTHSEG_GB = 96  # the most one CPU SynthSeg process was seen to hold: 85 GB on a large deferred volume
 
 
@@ -500,6 +520,12 @@ def cmd_full(a) -> int:
                                  ("base", r.get("base_fail")), ("tail", r.get("t_fail")), ("features", r.get("features_died"))) if v]
         pi = float(p[i])
         a_ = str(ans[i])
+        segmented = os.path.exists(tools.paths(str(work / "stacks" / str(sid)))["ss"])
+        lost = no_arm_reason(armset, bool(r.get("fail")), segmented)
+        if lost:
+            # record 55 E3: no image arm, so not where model r1 is certified
+            tables[sid] = _table(sid, P, stage="full", reason=lost, arms=armset, failed_steps=failed or None, seconds=r["stage"])
+            continue
         if a_ in VALUE:
             tables[sid] = _table(sid, P, p_given=round(pi, 6), value=VALUE[a_], confidence=round(max(pi, 1 - pi), 6), answers=1, stage="full",
                                  arms=armset, failed_steps=failed or None, seconds=r["stage"])

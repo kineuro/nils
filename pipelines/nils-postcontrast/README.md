@@ -33,7 +33,10 @@ The weights are a site's model inputs and are never part of the image.
 `nils-postcontrast full` (descriptor `postcontrast-full/nils.job.yml`) is
 model r1 itself on the stacks the cascade defers: dcm2niix, SynthMorph,
 SynthSeg and SynthStrip, the regions', structures' and tail features, the
-three frozen arms (model input `arms`, with their atlases) and the fusion.
+three frozen arms (model input `arms`, with their atlases) and the fusion. A
+stack left with no image arm because it has no usable volume or no
+segmentation is "not sure" (`no-usable-volume`, `no-segmentation`), where
+model r1 would answer from its header evidence alone.
 Its image is `Dockerfile.full`, FreeSurfer 8.2.0's image with the card's
 runtimes beside it. FreeSurfer's image carries third-party components whose
 terms are not ours to pass on, so each site builds it and repins the

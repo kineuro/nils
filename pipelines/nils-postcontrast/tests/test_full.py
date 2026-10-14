@@ -179,6 +179,10 @@ def labels(nat, names):
     for n in range(1, names + 1):
         lab[33:37, 4 * n:4 * n + 3, 0:3] = n
     return lab
+# STANDIN_NO_TOOLS=<stack id>: every tool fails on that stack's files
+no_tools = os.environ.get("STANDIN_NO_TOOLS")
+if tool != "dcm2niix" and no_tools and any(f"/stacks/{no_tools}/" in w for w in a):
+    sys.exit(1)
 if tool == "dcm2niix":
     o, lk = a[a.index("-o") + 1], a[-1]
     flag = os.path.join(o, ".failed-once")
@@ -187,7 +191,9 @@ if tool == "dcm2niix":
     n = len(os.listdir(lk))
     sys.path.insert(0, os.environ["STANDIN_TESTS"])
     from test_full import brain_volume
-    v = brain_volume((40, 48, max(n, 8)), seed=n)
+    # STANDIN_FLAT=<stack id>: that stack converts to two slices, no usable volume
+    flat = os.environ.get("STANDIN_FLAT") and os.path.basename(o) == os.environ["STANDIN_FLAT"]
+    v = brain_volume((40, 48, 2 if flat else max(n, 8)), seed=n)
     nib.save(nib.Nifti1Image(v, np.diag([1.0, 1.0, 2.0, 1.0])), os.path.join(o, "nat.nii.gz"))
 elif tool == "mri_synthmorph" and a[0] == "register":
     open(a[a.index("-T") + 1], "w").write("affine\n")
@@ -342,6 +348,35 @@ def test_a_tool_the_kernel_kills_does_not_end_the_run(standin_env, monkeypatch):
     for s in (1, 2):
         assert T[s]["stage"] == "full" and T[s]["failed_steps"], T[s]
         assert "V" not in (T[s]["arms"] or "")
+
+
+def test_only_a_stack_its_tools_left_with_no_image_arm_abstains():
+    """Record 55 E3: model r1 answers only where it is certified. A stack
+    left with no image arm because its volume is unusable or it has no
+    segmentation is "not sure", where r1 would answer from its header
+    evidence alone; a stack that keeps an arm, or has none for its domain
+    with its tools done, is r1's as before."""
+    assert full.no_arm_reason("", convert_failed=True, segmented=False) == full.NO_VOLUME == "no-usable-volume"
+    assert full.no_arm_reason("", convert_failed=False, segmented=False) == full.NO_SEGMENTATION == "no-segmentation"
+    assert full.no_arm_reason("", convert_failed=False, segmented=True) is None
+    assert full.no_arm_reason("U", convert_failed=False, segmented=False) is None
+    assert full.no_arm_reason("TUV", convert_failed=True, segmented=False) is None
+
+
+def test_a_stack_with_no_image_arm_is_not_sure_and_says_why(standin_env, monkeypatch):
+    monkeypatch.setenv("STANDIN_FLAT", "2")  # stack 2 converts to two slices: no usable volume
+    monkeypatch.setenv("STANDIN_NO_TOOLS", "1")  # stack 1: every tool fails, so no segmentation and no arm
+    rc, out = run(standin_env)
+    assert rc == 0
+    T = tables(out)
+    # the header evidence alone would answer both "given" (the fusion's
+    # intercept); without an image arm they are not sure, and say why
+    assert (T[2]["reason"], T[2]["answers"], T[2]["value"], T[2]["p_given"]) == ("no-usable-volume", 0, None, None), T[2]
+    assert (T[1]["reason"], T[1]["answers"], T[1]["value"], T[1]["arms"]) == ("no-segmentation", 0, None, ""), T[1]
+    assert T[2]["failed_steps"] and "convert" in T[2]["failed_steps"]
+    res = json.loads((out / "results.json").read_text())
+    assert not res.get("proposals")
+    assert res["metrics"]["by_outcome"] == {"no-segmentation": 1, "no-usable-volume": 1, "not-t1-brain": 1, "sealed": 1, "no-calibration": 1}
 
 
 def test_the_parts_must_belong_together(standin_env):
