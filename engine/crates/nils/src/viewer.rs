@@ -378,13 +378,19 @@ pub(crate) const KINDS: [&str; 13] = [
 /// scout first (whatever else it is), then what made it (SyMRI), then its
 /// datatype (diffusion, perfusion, functional, a field map), then FLAIR and
 /// SWI, then its weighting.
-pub(crate) fn kind_of(a: &Axes) -> &'static str {
+///
+/// `folder` is the folder of its own the pack gives the stack under `anat/`
+/// ([`own_folder`]): a scan in SyMRI's is SyMRI's, as a release and the
+/// Browse folders place it, so SyMRI's multi-dynamic multi-echo or QALAS
+/// acquisition, a working scan the pack calls RawRecon, counts with SyMRI
+/// and not as Other (2026-10-14).
+pub(crate) fn kind_of(a: &Axes, folder: Option<&str>) -> &'static str {
     if has(a, "disposition", "scout")
         || has(a, "directory_type", "localizer")
         || has(a, "provenance", "Localizer")
     {
         "Scout"
-    } else if has(a, "provenance", "SyMRI") {
+    } else if is_symri(a, folder) {
         "SyMRI"
     } else if has(a, "directory_type", "dwi") || has(a, "base", "DWI") {
         "DWI"
@@ -501,6 +507,31 @@ fn routes_of(store: &mut Store, stacks: &[i64]) -> Result<HashMap<i64, Vec<Strin
     Ok(out)
 }
 
+/// Whether a scan is SyMRI's: made by it (provenance SyMRI), or in its
+/// folder, as its acquisition is (record 55 C4).
+fn is_symri(a: &Axes, folder: Option<&str>) -> bool {
+    has(a, "provenance", "SyMRI") || folder == Some("SyMRI")
+}
+
+/// The folder of its own the pack gives a stack under `anat/` (record 55
+/// C4, its BIDS mapping's `folders`): SyMRI's, for its maps and synthetic
+/// images by their provenance and for its acquisition by its technique (MDME
+/// or QALAS), as a release and the scans doors place it
+/// (`nils_release::run::name_of`). None with no pack served.
+pub(crate) fn own_folder<'p>(pack: Option<&'p nils_pack::Pack>, a: &Axes) -> Option<&'p str> {
+    let pack = pack?;
+    let id = |axis: &str| -> Option<String> {
+        let stored = a.get(axis)?.first()?;
+        pack.axes
+            .iter()
+            .find(|x| x.name == axis)?
+            .id_of_stored(stored)
+            .map(str::to_string)
+    };
+    pack.bids
+        .folder_of(id("provenance").as_deref(), id("technique").as_deref())
+}
+
 /// Whether a contrast agent was given: the label the pack stores for
 /// `given`, or the id itself.
 pub(crate) fn contrast_of(a: &Axes) -> bool {
@@ -515,7 +546,7 @@ fn axes_of(store: &mut Store, stacks: &[i64]) -> Result<HashMap<i64, Axes>, Stor
             &format!(
                 "SELECT stack_id, axis, value FROM {} WHERE stack_id IN ({}) \
                  AND value IS NOT NULL AND axis IN ('body_part', 'provenance', 'post_contrast', \
-                 'base', 'modifier', 'directory_type', 'disposition') ORDER BY id",
+                 'base', 'modifier', 'directory_type', 'disposition', 'technique') ORDER BY id",
                 store.qualified("classification_axis"),
                 list(chunk)
             ),
@@ -1290,12 +1321,15 @@ pub(crate) fn visits(
         let mut main: Vec<(String, i64)> = Vec::new();
         for (stack, _) in &v.stacks {
             let a = axes.get(stack).unwrap_or(&empty);
-            *kinds.entry(kind_of(a)).or_default() += 1;
+            // SyMRI's acquisition is SyMRI's here as in its folder (record
+            // 55 C4, 2026-10-14), for the kinds and for `symri`
+            let folder = own_folder(pack, a);
+            *kinds.entry(kind_of(a, folder)).or_default() += 1;
             for part in a.get("body_part").into_iter().flatten() {
                 regions.extend(regions_of(part));
             }
             contrast |= contrast_of(a);
-            if has(a, "provenance", "SyMRI") {
+            if is_symri(a, folder) {
                 symri += 1;
             }
             if looks.contains(stack) {
@@ -1520,53 +1554,124 @@ mod tests {
 
     #[test]
     fn a_scan_is_told_by_one_kind() {
-        assert_eq!(kind_of(&axes(&[("base", "T1w")])), "T1w");
+        assert_eq!(kind_of(&axes(&[("base", "T1w")]), None), "T1w");
         assert_eq!(
-            kind_of(&axes(&[("base", "T2w"), ("modifier", "FLAIR")])),
+            kind_of(&axes(&[("base", "T2w"), ("modifier", "FLAIR")]), None),
             "FLAIR"
         );
         assert_eq!(
-            kind_of(&axes(&[
-                ("base", "T2w"),
-                ("modifier", "FatSat"),
-                ("modifier", "FLAIR")
-            ])),
+            kind_of(
+                &axes(&[
+                    ("base", "T2w"),
+                    ("modifier", "FatSat"),
+                    ("modifier", "FLAIR")
+                ]),
+                None
+            ),
             "FLAIR"
         );
-        assert_eq!(kind_of(&axes(&[("base", "T2*w")])), "T2*w");
-        assert_eq!(kind_of(&axes(&[("base", "SWI")])), "SWI");
+        assert_eq!(kind_of(&axes(&[("base", "T2*w")]), None), "T2*w");
+        assert_eq!(kind_of(&axes(&[("base", "SWI")]), None), "SWI");
         assert_eq!(
-            kind_of(&axes(&[("provenance", "SWIRecon"), ("base", "T2*w")])),
+            kind_of(&axes(&[("provenance", "SWIRecon"), ("base", "T2*w")]), None),
             "SWI"
         );
-        assert_eq!(kind_of(&axes(&[("base", "DWI")])), "DWI");
+        assert_eq!(kind_of(&axes(&[("base", "DWI")]), None), "DWI");
         assert_eq!(
-            kind_of(&axes(&[("directory_type", "dwi"), ("base", "T2w")])),
+            kind_of(&axes(&[("directory_type", "dwi"), ("base", "T2w")]), None),
             "DWI"
         );
-        assert_eq!(kind_of(&axes(&[("directory_type", "perf")])), "Perfusion");
-        assert_eq!(kind_of(&axes(&[("directory_type", "func")])), "fMRI");
-        assert_eq!(kind_of(&axes(&[("directory_type", "fmap")])), "Field map");
+        assert_eq!(
+            kind_of(&axes(&[("directory_type", "perf")]), None),
+            "Perfusion"
+        );
+        assert_eq!(kind_of(&axes(&[("directory_type", "func")]), None), "fMRI");
+        assert_eq!(
+            kind_of(&axes(&[("directory_type", "fmap")]), None),
+            "Field map"
+        );
         // what made it before what it weighs, a scout before anything
         assert_eq!(
-            kind_of(&axes(&[("provenance", "SyMRI"), ("base", "T1w")])),
+            kind_of(&axes(&[("provenance", "SyMRI"), ("base", "T1w")]), None),
             "SyMRI"
         );
         assert_eq!(
-            kind_of(&axes(&[("disposition", "scout"), ("base", "T1w")])),
+            kind_of(&axes(&[("disposition", "scout"), ("base", "T1w")]), None),
             "Scout"
         );
-        assert_eq!(kind_of(&axes(&[("directory_type", "localizer")])), "Scout");
-        assert_eq!(kind_of(&axes(&[])), "Other");
-        assert_eq!(kind_of(&axes(&[("base", "MTw")])), "Other");
+        assert_eq!(
+            kind_of(&axes(&[("directory_type", "localizer")]), None),
+            "Scout"
+        );
+        assert_eq!(kind_of(&axes(&[]), None), "Other");
+        assert_eq!(kind_of(&axes(&[("base", "MTw")]), None), "Other");
         // every kind a scan can be is one the visit lists
         for a in [
             axes(&[("base", "PDw")]),
             axes(&[("base", "T2w")]),
             axes(&[]),
         ] {
-            assert!(KINDS.contains(&kind_of(&a)));
+            assert!(KINDS.contains(&kind_of(&a, None)));
         }
+    }
+
+    /// The MRI pack as the repository holds it.
+    fn mri() -> &'static nils_pack::Pack {
+        static PACK: std::sync::OnceLock<nils_pack::Pack> = std::sync::OnceLock::new();
+        PACK.get_or_init(|| {
+            let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packs/mri");
+            nils_pack::load(&dir, None).expect("the MRI pack loads")
+        })
+    }
+
+    #[test]
+    fn symri_s_acquisition_counts_with_symri_as_its_folder_holds_it() {
+        // 2026-10-14: the pack calls SyMRI's multi-dynamic multi-echo or
+        // QALAS acquisition RawRecon and a working scan; it is in SyMRI's
+        // folder (record 55 C4), and a visit counts it with SyMRI, not as
+        // Other
+        let kind = |a: &Axes| kind_of(a, own_folder(Some(mri()), a));
+        for technique in ["MDME", "QALAS"] {
+            let acquisition = axes(&[
+                ("provenance", "RawRecon"),
+                ("technique", technique),
+                ("directory_type", "anat"),
+                ("disposition", "working_scan"),
+            ]);
+            assert_eq!(own_folder(Some(mri()), &acquisition), Some("SyMRI"));
+            assert_eq!(kind(&acquisition), "SyMRI", "{technique}");
+            assert!(is_symri(
+                &acquisition,
+                own_folder(Some(mri()), &acquisition)
+            ));
+        }
+        // its maps and synthetic images, by their provenance as before
+        let synthetic = axes(&[
+            ("provenance", "SyMRI"),
+            ("technique", "MDME"),
+            ("base", "T1w"),
+        ]);
+        assert_eq!(kind(&synthetic), "SyMRI");
+        // a scout is a scout first, a working scan no folder claims is Other
+        let scout = axes(&[("technique", "MDME"), ("disposition", "scout")]);
+        assert_eq!(kind(&scout), "Scout");
+        let calibration = axes(&[
+            ("provenance", "Calibration"),
+            ("disposition", "working_scan"),
+        ]);
+        assert_eq!(own_folder(Some(mri()), &calibration), None);
+        assert_eq!(kind(&calibration), "Other");
+        // an SWI's magnitude keeps its weighting; no folder of its own
+        let magnitude = axes(&[
+            ("provenance", "RawRecon"),
+            ("technique", "GRE-EPI"),
+            ("base", "T2*w"),
+        ]);
+        assert_eq!(kind(&magnitude), "T2*w");
+        // with no pack served nothing knows SyMRI's folder by its technique
+        let mdme = axes(&[("provenance", "RawRecon"), ("technique", "MDME")]);
+        assert_eq!(own_folder(None, &mdme), None);
+        assert_eq!(kind_of(&mdme, None), "Other");
     }
 
     #[test]

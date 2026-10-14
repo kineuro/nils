@@ -8511,7 +8511,7 @@ fn families_sweep(dsn: Option<&str>) {
 
     let server = Server::start(
         &home,
-        3,
+        4,
         &[
             "--auth",
             "token",
@@ -8551,7 +8551,37 @@ fn families_sweep(dsn: Option<&str>) {
         reviewer,
     );
     assert_eq!(status, 200, "{visit}");
+    // and the subject's visits, whose kinds line counts SyMRI's acquisition
+    // with SyMRI, as its folder holds it, never as Other (2026-10-14)
+    let subject = dataset["scans"][0]["subject"]["id"]
+        .as_i64()
+        .unwrap_or_else(|| panic!("a subject: {dataset}"));
+    let (status, visits) = server.request(
+        "GET",
+        &format!("/api/datasets/exam/subjects/{subject}/visits"),
+        None,
+        reviewer,
+    );
+    assert_eq!(status, 200, "{visits}");
     server.finish();
+    let one = &visits["visits"][0];
+    let kinds: std::collections::BTreeMap<String, i64> = one["kinds"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|k| {
+            (
+                k["kind"].as_str().unwrap().to_string(),
+                k["scans"].as_i64().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(kinds.get("SyMRI"), Some(&2), "{visits}");
+    assert_eq!(one["symri"], 2, "{visits}");
+    // every scan once: the acquisition is no Other (the SWI's phase, which
+    // has no weighting, is the one Other here)
+    assert_eq!(kinds.values().sum::<i64>(), 7, "{visits}");
+    assert_eq!(kinds.get("Other"), Some(&1), "{visits}");
 
     for doc in [&dataset, &browse, &visit] {
         let scans = by_series(doc);
