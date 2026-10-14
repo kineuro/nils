@@ -28,12 +28,23 @@
 //! with [`release`]; the caller waits between tries, so it can beat its
 //! job's heart and see a cancel meanwhile. A process never takes a lock it
 //! holds already: a file lock taken twice by one process waits on itself.
+//!
+//! A step that runs inside one transaction takes its lock with
+//! [`take_for_transaction`] instead, which waits, and which is let go when
+//! the transaction ends: on Postgres a transaction-level advisory lock on
+//! the same key, on SQLite nothing, since a writing transaction there
+//! already holds the database's one write lock.
 
 use std::fs::{File, OpenOptions, TryLockError};
 use std::path::PathBuf;
 
 use crate::schema::Type;
 use crate::store::{Error, Param, Store};
+
+/// The lock of the session cache, held for its transaction by a build of
+/// the cache and by a merge of two subjects, which drops their sessions for
+/// the next build to make again (2026-10-14).
+pub const SESSION_CACHE: &str = "session-cache";
 
 /// A lock this process holds. Give it back with [`release`]; a guard that
 /// is dropped instead lets a file lock go with its file, and leaves an
@@ -148,6 +159,38 @@ pub fn try_take(store: &mut Store, name: &str) -> Result<Option<Held>, Error> {
             }
         }
     }
+}
+
+/// Take a lock for the rest of the transaction this connection is in,
+/// waiting while another connection holds it: what a step takes that reads
+/// rows and then writes them where another connection may be writing the
+/// same rows at the same time, such as a build of the session cache
+/// (2026-10-14: reads of the Main scans page, side by side, each wrote the
+/// labels the other was writing, and one failed on their unique key).
+///
+/// - Postgres: a transaction-level advisory lock (`pg_advisory_xact_lock`)
+///   on the key [`advisory_key`] makes of the registry's schema and the
+///   name, the key [`try_take`] takes. The server lets it go when the
+///   transaction commits or rolls back, so it is never given back by hand
+///   and never outlives the transaction, however that ends. Under read
+///   committed every statement after it sees what the holder before it
+///   committed. Outside a transaction it would end with its own statement,
+///   so it is taken right after [`Store::begin`].
+/// - SQLite: nothing. A writing transaction there begins `IMMEDIATE`, which
+///   holds the database's one write lock until it ends, so its writers
+///   already go one at a time.
+pub fn take_for_transaction(store: &mut Store, name: &str) -> Result<(), Error> {
+    let key = match store {
+        Store::Postgres { schema, .. } => advisory_key(schema, name),
+        Store::Sqlite(_) => return Ok(()),
+    };
+    // executed, not queried: the function answers `void`, which no row reads
+    let sql = format!(
+        "SELECT pg_advisory_xact_lock({}::bigint)",
+        store.dialect().param(1, Type::Int)
+    );
+    store.execute(&sql, &[Param::Int(key)])?;
+    Ok(())
 }
 
 /// Give a lock back. On Postgres a transaction a step left aborted is
