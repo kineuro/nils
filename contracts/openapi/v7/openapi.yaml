@@ -394,6 +394,24 @@
 # `retired`), and a refused overlay retires the one made of it; a sort with
 # scoped changes runs every group's rules before any group's passes; and a
 # scoped re-sort writes the post-contrast label of its own stacks alone.
+# Added in place, additively, on 2026-10-14 by record 56 (section 6.3,
+# Review round 1: the few questions left, each answered as a grid of its
+# scans). GET /api/review/questions answers the sort's own questions that
+# wait for a person (open or staged, the one meaning of need a look) about a
+# dataset's, a cohort's or the registry's scans, gathered into plain
+# questions: an axis the rules left empty (`<axis>:missing`), two values in
+# dispute on an axis (`<axis>:<a>|<b>`), or one answer in doubt
+# (`<axis>:<v>?`), each with its distinct scans and the two answers its keys
+# give. GET /api/review/questions/{key}/scans pages a question's scans, each
+# with its picture, NILS's answer, the rules' reason with the rules it was
+# decided over, System 1's answer and any staged answer. POST
+# /api/review/questions/{key}/answer answers a question for the scans a
+# person saw with one value and its exceptions, one decision per scan in one
+# transaction through the review spine, and re-sorts those scans at once, a
+# classify job over them alone. A grouped question part of whose scans a
+# re-sort judges again is split: the group is superseded and its other
+# waiting members are asked again as a group of their own, so a re-sort of
+# some scans loses no question about another.
 openapi: 3.1.0
 info:
   title: NILS engine API
@@ -763,6 +781,64 @@ paths:
       summary: The review settings (review:see)
       responses:
         "200": {description: "{blind_share, default_blind_share, system1: {task, chosen, confirmed, certificate_id, certificate}, audit_share}; certificate (record 55 ruling 22 b, added in place) is {id, cites: sample or evidence, words}, or null"}
+  /api/review/questions:
+    get:
+      summary: The questions the sort leaves to a person, in plain words, each with its distinct scans (record 56 section 6.3, Review round 1; review:see)
+      description: "Added in place, additively, on 2026-10-14 by record 56. The sort's own questions that wait for a person, open or staged, by the one meaning of need a look (the review summary's and the sources door's), about the scans of `dataset` (a name or an id), of `cohort`, or of the registry, gathered into one row per question. Its `key` names it at the other doors: `<axis>:missing` where the rules found no value on an axis that matters; `<axis>:<a>|<b>` where two values are in dispute (the gate's `<axis>:disagree`, a person's decision the rules differ from, `<axis>:decision`, or an older engine's `<axis>:conflict`), the two in the order of their names; `<axis>:<v>?` where one answer is in doubt (the gate's `<axis>:unsure`, a person's own `<axis>:low_confidence`). `shape` is missing, pair or doubt. `scans` counts distinct scans, never items or memberships: a group's member decided on its own in force no longer waits. `staged` counts the scans whose answer a model or an agent staged, waiting for a person to confirm it. `words` is the question (`Which base?`, `T2w or FLAIR?`, `T2w?`) and `reason` why it is asked (`The rules found no base for these scans.`). `values` are the two answers its keys 1 and 2 give: the pair; else System 1's most frequent answers on its scans, a staged answer first; else the values the axis holds most often in the scope, then in the registry; else the axis's first values. `vocabularies` holds each asked axis's values, the full list a person chooses from, each `{value, name, label}` with `value` the form the axis stores. With `stack`, only the questions that ask that scan. A question about several axes at once (System 1's `classify.asked`, a broken constraint `classify.excluded` or `classify.implied`) is answered on its own page and counted under `elsewhere`; an item an open campaign holds is answered in the campaign, and its scans are counted under `held` and in no question. A stack of a sample sealed now is in no count unless the caller reads sealed stacks."
+      parameters:
+        - {name: dataset, in: query, schema: {type: string}, description: A dataset's name or id}
+        - {name: cohort, in: query, schema: {type: string}, description: A cohort's name}
+        - {name: stack, in: query, schema: {type: integer}, description: Only the questions that ask this scan}
+      responses:
+        "200": {description: "{scope: {kind, name, id}, scans, questions: [{key, axis, shape, values, words, reason, scans, staged, kinds: {kind: scans}}], vocabularies: {axis: [{value, name, label}]}, elsewhere: [{kind, scans, words, page}], held: {scans, campaigns: [{id, name}]}}"}
+        "400": {description: Both dataset and cohort}
+        "404": {description: No dataset or cohort so named}
+  /api/review/questions/{key}/scans:
+    get:
+      summary: One question's scans, a page at a time, each with its picture, NILS's answer and both reasons (record 56 section 6.3; review:see)
+      description: "Added in place, additively, on 2026-10-14 by record 56. The scans a question asks now in the scope (`dataset`, `cohort` or the registry, as its list was read), 50 a page (`limit` up to 200, `page` from 1), in the order of the subject, the day and the stack. Each scan: `stack`; `items`, the waiting review items that ask it; `status`, open or staged; `mode`, routine or blind_first; `subject` {id, code}, `session` {id, label} and `day`, shaped below detail quasi as the dataset scans door answers them; `series_description`, `series_number`, `name`, `bids` and `axes` as that door answers them; `picture`, its middle plane inline as that door answers it with pictures=1 (pixels, so query:see at detail quasi, each opening audited; the page's `pictures` says why none are shown); `nils`, the axis's value in force now, null where none; `other`, the other value in dispute on this scan where it has one; `rules`, the rules' answer and reason on the axis as the suggestions door answers it (the value, who set it, the rule and its clause, the fields it read, the words it matched at detail quasi, the rules that voted, and `overridden`, the rules it was decided over by the pack's ranking); `system1`, System 1's answer on the axis with its probability, the rules' reliability and whether it agrees, where it has one; and `staged`, an answer a model or an agent staged on the axis, waiting for a person to confirm it ({value, decision, author_kind, actor, model_id}). A blind-first question the caller has not answered provisionally shows none of NILS's answers: `blind` true, and `nils`, `other`, `rules`, `system1`, `staged`, `name`, `bids` and `axes` null. Reading a page notes each of its questions read by the caller, so the time an answer takes is counted from then. `values` and `vocabulary` are the question's keys and the axis's values, as the list gives them."
+      parameters:
+        - {name: key, in: path, required: true, schema: {type: string}, description: "A question's key, percent-encoded"}
+        - {name: dataset, in: query, schema: {type: string}}
+        - {name: cohort, in: query, schema: {type: string}}
+        - {name: page, in: query, schema: {type: integer, default: 1}}
+        - {name: limit, in: query, schema: {type: integer, default: 50}}
+      responses:
+        "200": {description: "{key, axis, shape, words, reason, values, vocabulary: [{value, name, label}], system1: {status, model, why}, total, page, pages, limit, scans: [...], pictures}"}
+        "400": {description: "A key that names no question, or both dataset and cohort"}
+        "404": {description: "No such dataset or cohort, or the question asks no scan there now"}
+  /api/review/questions/{key}/answer:
+    post:
+      summary: Answer a question for its scans with one value and its exceptions in one transaction, and re-sort those scans at once (record 56 section 6.3; review:work)
+      description: "Added in place, additively, on 2026-10-14 by record 56. The body: `value` (one of the axis's values, by the form it stores, its name or its label) or `nothing` true (the axis has no value here); `stacks`, the scans the answer covers, the page the person saw (every scan the question asks in the scope where it is left out); `except`, the scans set apart, each `{stack, value}`, `{stack, nothing: true}` or `{stack, skip: true}` (left waiting); and `dataset` or `cohort`, the scope the question was read in. Every stack must be one the question asks there now and every value one of the axis's, or nothing is written (400 or 409, naming them). Each scan gets one decision on the axis at the stack's scope through the review spine's apply, by the verified actor (a person's in force, an agent's or a model's staged), and the decision closes the question on that scan: a question about the stack alone at once, a group's item when its last member is decided. All of it is one transaction, with each decision's audit row. An item an open campaign holds is refused (409, naming the campaign), and so is a stack of a sample sealed now. Each decision is marked with its question's mode, the seconds since the caller first opened it, and blind where the question is blind first and the answer was given before its suggestions showed to the caller, or is the provisional answer the caller gave. Then the scans are re-sorted at once: a `classify` job over those stacks alone, by the pack that sorted them, writes their rules' answers with the decisions in force, the passes' answers for them, the questions a sort asks of them, their disposition and the post-contrast label of their subjects, and nothing of another stack. The gate runs again over those of a dataset flagged as having damaged headers, and a pick run for their subjects is queued after the job where the caller may run one, as one follows every sort. While another sort runs the decisions stand, and `resort` says the scans wait for the next. `left` counts the scans the question still asks in the scope."
+      parameters:
+        - {name: key, in: path, required: true, schema: {type: string}, description: "A question's key, percent-encoded"}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                value: {type: string}
+                nothing: {type: boolean}
+                stacks: {type: array, items: {type: integer}}
+                except:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      stack: {type: integer}
+                      value: {type: string}
+                      nothing: {type: boolean}
+                      skip: {type: boolean}
+                dataset: {type: string}
+                cohort: {type: string}
+      responses:
+        "200": {description: "{key, axis, answered, decisions: [{stack, value, decision, items, staged}], closed, skipped, staged, blind, resort: {job, state, stacks, seconds, questions, gate, why}, picks: {job} | {why}, left}"}
+        "400": {description: "No value and no nothing, a value not of the axis, an exception for a stack the answer does not cover, or a key that names no question"}
+        "404": {description: "No such dataset or cohort, or the question asks no scan there now"}
+        "409": {description: "A stack the question no longer asks (answered meanwhile), an item a campaign holds, a stack of a sample sealed now, or a decision of a higher rank on the key"}
   /api/datasets/{name}/headers:
     get:
       summary: A dataset's damaged-header flag (record 56 section 3; data:see or review:see)

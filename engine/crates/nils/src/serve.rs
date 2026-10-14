@@ -2116,6 +2116,20 @@ fn routed(
     {
         return r;
     }
+    // record 56 §6.3: Review round 1, the questions answered as a grid of
+    // scans; a key is read decoded, as a pipeline's name is
+    if let Some(r) = crate::review_questions::route(
+        doors,
+        registry,
+        caller,
+        method.as_str(),
+        &pipeline_segs,
+        query,
+        body,
+        quasi,
+    ) {
+        return r;
+    }
     // record 55 D3, D6, D7: System 1 in the review rule, blind first, and
     // the audit stream
     if let Some(r) = crate::review_rule::route(
@@ -5299,6 +5313,11 @@ pub(crate) fn door(method: &str, segs: &[&str]) -> (Need, Detail) {
     if let Some(n) = crate::rule_changes::door(method, segs) {
         return n;
     }
+    // record 56 §6.3: Review round 1's questions, before the table's
+    // pattern for one item
+    if let Some(n) = crate::review_questions::door(method, segs) {
+        return n;
+    }
     match (method, segs) {
         // the Query page: reading and running questions
         (
@@ -5811,7 +5830,7 @@ pub(crate) fn author_of(caller: &Caller) -> (&str, Option<&str>) {
 /// name the caller did not prove. Record 42 S2: a model acting names the
 /// registered model in the header's `model`, by id, digest or
 /// `name@version`, and one that no registered model answers to is refused.
-fn author_at_apply<'a>(
+pub(crate) fn author_at_apply<'a>(
     registry: &mut Registry,
     caller: &'a Caller,
     doc: &'a serde_json::Value,
@@ -6110,6 +6129,7 @@ pub(crate) fn doors_list() -> Vec<String> {
     .chain(crate::main_scans::DOORS.iter())
     .chain(crate::review_rule::DOORS.iter())
     .chain(crate::rule_changes::DOORS.iter())
+    .chain(crate::review_questions::DOORS.iter())
     .map(|d| (*d).to_string())
     .collect()
 }
@@ -8093,6 +8113,7 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
             .chain(crate::main_scans::POLICY.iter())
             .chain(crate::review_rule::POLICY.iter())
             .chain(crate::rule_changes::POLICY.iter())
+            .chain(crate::review_questions::POLICY.iter())
             .map(|(door, writes, idem, cost, cap, now, then)| {
                 row(door, *writes, *idem, cost, cap, now, then)
             }),

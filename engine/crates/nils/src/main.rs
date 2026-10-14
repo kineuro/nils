@@ -78,6 +78,7 @@ mod reader;
 mod rehearse;
 mod releases;
 mod requirements;
+mod review_questions;
 mod review_rule;
 mod rule_changes;
 mod rules;

@@ -123,6 +123,35 @@ Only blind answers become training labels. A campaign whose answers train or
 measure is made with `purpose` `train` or `measure` and is read blind first
 always.
 
+## 3. Answer the questions
+
+The few questions the rules leave (record 56) are answered a question at a
+time, each as a grid of its scans.
+
+1. Read a dataset's questions, each with its distinct scans and the two
+   answers its keys give:
+
+   ```
+   GET /api/review/questions?dataset=<name>
+   ```
+
+2. Read a question's scans, a page of 50, each with its picture, NILS's answer
+   and the rules' reason (a key is percent-encoded: `base%3Amissing`):
+
+   ```
+   GET /api/review/questions/<key>/scans?dataset=<name>&page=1
+   ```
+
+3. Answer the page with one value, and give the scans set apart their own:
+
+   ```
+   POST /api/review/questions/<key>/answer  {"dataset": "<name>", "value": "T2w", "stacks": [12, 13, 14], "except": [{"stack": 13, "value": "PDw"}]}
+   ```
+
+   Each scan gets a decision at its own scope, all in one transaction, and the
+   scans are re-sorted at once. A scan the page did not hold, or one answered
+   meanwhile, refuses the whole answer.
+
 ## 4. Run a round's audit
 
 1. Draw the audit: 1 % of the round's accepted stacks, by a seed keyed by
@@ -165,6 +194,8 @@ bound at 95 %. An audit's reads never train.
 | Door | Grant |
 |---|---|
 | `GET /api/review/{id}/suggestions` | review:see |
+| `GET /api/review/questions`, `/questions/{key}/scans` | review:see |
+| `POST /api/review/questions/{key}/answer` | review:work |
 | `POST /api/review/{id}/provisional` | review:work |
 | `GET /api/review/rounds`, `/rounds/{id}`, `/settings` | review:see |
 | `POST /api/certificates` | models:work, a person |
