@@ -242,7 +242,9 @@ impl How {
             How::Identifier { id_type, code } => {
                 format!("subject {code}, by its {id_type} identifier")
             }
-            How::Session(inner) => format!("session of a {}", inner.describe()),
+            How::Session(inner) => {
+                format!("session of {}", nils_registry::a_or_an(inner.describe()))
+            }
             How::Stack => "stack, by id".to_string(),
             How::Axis { stacks } => format!("axis value, held by {stacks} stack(s)"),
         }

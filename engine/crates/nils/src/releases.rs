@@ -27,8 +27,11 @@ use crate::update;
 
 /// The parts that have releases of their own, in the order an update takes
 /// them. Postgres stays at its major version, and llama.cpp is the build the
-/// engine's release pins, so neither is among them.
-pub(crate) const OWN_RELEASES: [&str; 4] = ["engine", "desk", "assistant", "kvasir"];
+/// engine's release pins, so neither is among them. The rules are the
+/// first-party packs' own releases (record 55 B5), read where the engine
+/// reads its packs, so they are no part of the record's `parts` and their
+/// rows are made apart ([`crate::rules`]).
+pub(crate) const OWN_RELEASES: [&str; 5] = ["engine", "desk", "assistant", "kvasir", "rules"];
 
 /// The contract versions the engine this binary is speaks.
 pub(crate) fn engine_contracts() -> Contracts {

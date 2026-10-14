@@ -1,0 +1,20 @@
+{
+ "run": "final-cert-2-sel-code",
+ "purpose": "certificate 2's selective-claim tools (sel9.py, selS.sh) as installed in the research container, prereg, uncommitted",
+ "study": "studies/2026-10-02-final-certificate-2/plan.md",
+ "created": "2026-10-03T23:31:12Z",
+ "sealed": "2026-10-03T23:31:12Z",
+ "files": 3,
+ "bytes": 10345,
+ "by_folder": {
+  ".": 1,
+  "code": 2
+ },
+ "manifest_sha256": "43a321b7066235af95ff8fc1d1cf1f6be3d394582e35bab78d9c6d9288b7d83d",
+ "per_stack_files_by_folder": {},
+ "sha256": {
+  "RUN.json": "cba96ea2ba4a66d21e3ad62e994ec0e682dfcf997d730711ae472db1043d153d",
+  "code/tools/sel9.py": "3d6d13d6c82266003e3e6d6d5f663abe56a144a8ff0e6c1acb0ed570df8247c5",
+  "code/tools/selS.sh": "3c8f785bd59fca59fdcaad44f8ff17dfbc7273256455e88f8b33f8c77e05c8e9"
+ }
+}

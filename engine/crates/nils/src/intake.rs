@@ -291,6 +291,29 @@ impl<T> Intake<T> {
         self.lock().stopped
     }
 
+    /// Every request still waiting once the intake stopped, taken out so
+    /// the engine answers each, never drops it: a dropped request is an
+    /// empty 500 to its caller (2026-10-12).
+    pub fn drain(&self) -> Vec<T> {
+        let mut s = self.lock();
+        let mut out: Vec<T> = s.other.drain(..).collect();
+        let turns: Vec<u64> = s.turns.drain(..).collect();
+        for client in turns {
+            if let Some(q) = s.pictures.remove(&client) {
+                out.extend(q);
+            }
+        }
+        let left: Vec<u64> = s.pictures.keys().copied().collect();
+        for client in left {
+            if let Some(q) = s.pictures.remove(&client) {
+                out.extend(q);
+            }
+        }
+        s.waiting = 0;
+        s.waiting_since = None;
+        out
+    }
+
     pub fn snapshot(&self) -> Snapshot {
         let s = self.lock();
         let stalled_for = s.waiting_since.and_then(|since| {
@@ -552,6 +575,20 @@ mod tests {
         for _ in 0..n {
             i.push(kind, label).unwrap();
         }
+    }
+
+    #[test]
+    fn what_waits_when_the_intake_stops_is_handed_back_to_be_answered() {
+        let i: Intake<&str> = Intake::new(2);
+        i.push(Kind::Other, "late").unwrap();
+        fill(&i, A, "a", 2);
+        i.stop();
+        assert!(i.take(Duration::ZERO).is_none());
+        let mut left = i.drain();
+        left.sort();
+        assert_eq!(left, vec!["a", "a", "late"]);
+        assert!(i.drain().is_empty());
+        assert_eq!(i.snapshot().waiting, 0);
     }
 
     #[test]

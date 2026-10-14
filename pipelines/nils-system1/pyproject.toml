@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nils-system1"
+version = "0.1.0"
+description = "System 1, the rules' learned partner, served as a NILS pipeline image: each stack's answer, its probability and the rules' reliability on its header, as a second opinion"
+license = "AGPL-3.0-only"
+requires-python = ">=3.11"
+# The image itself needs nothing beyond the standard library. A site's
+# System 1 model brings its own code in its bundle and runs on what the
+# image's `model` extra installs (numpy, scipy, lightgbm), pinned in
+# requirements.txt.
+dependencies = []
+
+[project.optional-dependencies]
+model = ["numpy>=1.26", "scipy>=1.11", "lightgbm>=4.3", "pyyaml>=6"]
+test = ["pytest>=8", "jsonschema>=4", "pyyaml>=6"]
+
+[project.scripts]
+nils-system1 = "nils_system1.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

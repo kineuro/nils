@@ -35,7 +35,7 @@ pub const DEFAULT_GPU_MEMORY_GB: f64 = 8.0;
 
 /// The container paths a secret may not be mounted at or under: the
 /// runner's own.
-pub const RUNNER_PATHS: [&str; 4] = ["/input", "/inputs", "/output", "/source"];
+pub const RUNNER_PATHS: [&str; 5] = ["/input", "/inputs", "/output", "/source", "/cache"];
 
 /// The parameter types (the Boutiques inputs a runner takes).
 pub const PARAM_TYPES: [&str; 3] = ["Number", "String", "Flag"];
@@ -63,18 +63,40 @@ pub const CHECK_OPS: [&str; 4] = [">=", "<=", ">", "<"];
 /// The column names a table may not take: the ask's own word for a run.
 pub const RESERVED_COLUMNS: [&str; 1] = ["run"];
 
+/// The kinds a mask output's part set may be (`x-nils.outputs[].parts`,
+/// record 55 H3): the connected components of the named labels, or each
+/// label value a part of its own.
+pub const PART_KINDS: [&str; 2] = ["components", "labels"];
+
+/// How a components set joins voxels: through a face, an edge or a corner.
+pub const CONNECTIVITY: [u8; 3] = [6, 18, 26];
+
+/// What a `derivative:<kind>` input takes of a check's status (record 55
+/// H3, section 6.5): only accepted results, any but a rejected one (the
+/// default), or any.
+pub const CHECKED: [&str; 3] = ["accepted", "not_rejected", "any"];
+
+/// The key of the one set a mask output that declares none is read as.
+pub const WHOLE: &str = "whole";
+
 /// Where an output belongs (`x-nils.outputs[].level`).
 pub const OUTPUT_LEVELS: [&str; 2] = ["unit", "run"];
 
 /// The value-keys the engine fills, which no parameter may take.
-pub const RESERVED_KEYS: [&str; 6] = [
+pub const RESERVED_KEYS: [&str; 7] = [
     "[InputDataset]",
     "[OutputLocation]",
     "[AnalysisLevel]",
     "[ParticipantLabels]",
     "[Manifest]",
     "[Inputs]",
+    "[Cache]",
 ];
+
+/// Where a run that declares the slice cache (`x-nils.cache`, record 55
+/// E5) finds it in its container, read-write: the site's working place's
+/// `slice-cache/` folder, which `[Cache]` names on the command line.
+pub const CACHE_PATH: &str = "/cache";
 
 /// The command a descriptor without one runs: the BIDS-Apps shape (D9).
 pub const BIDS_APP_COMMAND: &str =
@@ -194,6 +216,75 @@ pub struct Secret {
     pub optional: bool,
 }
 
+/// What a version replaces because it fixes it (`x-nils.replaces`, Nima's
+/// ruling of 2026-10-12): the earlier versions of its name a new run no
+/// longer takes, and why. Their runs, derivatives and checks still read and
+/// name them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Replaces {
+    /// The earlier versions it replaces, by number; none is every earlier
+    /// version of the name in the catalog it is added to, which is how a
+    /// descriptor written for many catalogs says it.
+    pub versions: Option<Vec<i64>>,
+    /// Why, in a line a person reads where the older version is refused.
+    pub why: String,
+}
+
+impl Replaces {
+    /// Whether it replaces `version`, an earlier version of its name.
+    pub fn covers(&self, version: i64) -> bool {
+        self.versions.as_ref().is_none_or(|v| v.contains(&version))
+    }
+}
+
+/// `x-nils.replaces` as a document holds it, read without checking the rest
+/// of the descriptor: what the catalog reads of each version it keeps.
+/// None where it says nothing, or says it in a form this version does not
+/// take.
+pub fn replaces_of(document: &Value) -> Option<Replaces> {
+    replaces(&document["x-nils"]).ok().flatten()
+}
+
+fn replaces(x: &Value) -> Result<Option<Replaces>, String> {
+    let r = &x["replaces"];
+    if r.is_null() {
+        return Ok(None);
+    }
+    let at = "x-nils.replaces.";
+    if !r.is_object() {
+        return Err(
+            "x-nils.replaces is a mapping: why, and versions where not every earlier one".into(),
+        );
+    }
+    let why = text(r, "why", at)?.trim().to_string();
+    let versions = match &r["versions"] {
+        Value::Null => None,
+        Value::Array(list) if !list.is_empty() => {
+            let mut out: Vec<i64> = Vec::new();
+            for (i, v) in list.iter().enumerate() {
+                match v.as_i64() {
+                    Some(n) if n >= 1 => {
+                        if !out.contains(&n) {
+                            out.push(n);
+                        }
+                    }
+                    _ => {
+                        return Err(format!("{at}versions[{i}] is a version number, 1 or more"));
+                    }
+                }
+            }
+            out.sort_unstable();
+            Some(out)
+        }
+        _ => {
+            return Err(format!(
+                "{at}versions is a list of earlier version numbers; leave it out for every earlier version"
+            ));
+        }
+    };
+    Ok(Some(Replaces { versions, why }))
+}
+
 /// The image, by its registry manifest digest.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Image {
@@ -236,6 +327,26 @@ pub struct TypedInput {
     /// `model`, `label_set` or `derivative:<kind>`.
     pub ty: String,
     pub optional: bool,
+    /// For a `derivative:<kind>` input (record 55 H3): what it takes of a
+    /// check's status, one of [`CHECKED`]; none is `not_rejected`.
+    pub checked: Option<String>,
+}
+
+/// One part set a mask output declares (record 55 H3, section 3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PartSet {
+    /// `[a-z][a-z0-9_]*`, never `whole`.
+    pub key: String,
+    /// What a person reads, such as Lesions.
+    pub words: String,
+    /// `components` or `labels`.
+    pub kind: String,
+    /// The label values it reads; none is every value but 0 (`nonzero`).
+    pub labels: Option<Vec<i64>>,
+    /// For a labels set, each value's name.
+    pub names: std::collections::BTreeMap<i64, String>,
+    /// For a components set: 6, 18 or 26 (the default).
+    pub connectivity: u8,
 }
 
 /// One declared output.
@@ -255,6 +366,11 @@ pub struct Output {
     pub encoders: Vec<String>,
     /// For a table output (record 49 A3): its format and typed columns.
     pub table: Option<Table>,
+    /// For a mask output (record 55 H3): the input role whose stack the
+    /// mask's grid is on (`grid`), and the part sets it is read as
+    /// (`parts`); a mask declaring none is read as one set, whole.
+    pub grid: Option<String>,
+    pub parts: Vec<PartSet>,
 }
 
 /// The type of a table's column.
@@ -399,9 +515,58 @@ pub struct Descriptor {
     /// fingerprint row, the classification rows, its first ingest batch and
     /// its subject's open cohorts. Off unless asked for.
     pub header: bool,
+    /// For a stacks input, whether each stack's entry of `stacks.json`
+    /// carries its geometry and each of its files their own
+    /// (`x-nils.input.geometry`, record 55 E2): where each image sits, its
+    /// matrix, its spacing and its number, as the registry read them from
+    /// the headers, so an image chooses which frames to read without
+    /// reading a header first. Off unless asked for.
+    pub geometry: bool,
+    /// For a stacks input with the header and the geometry, whether each
+    /// stack's entry of `stacks.json`, and each entry of its `context`,
+    /// carries the facts the post-contrast model reads of a session
+    /// (`x-nils.input.contrast`, record 55 E3): its series' contrast tags,
+    /// its clock, its physics and the post-contrast rules that fired, and
+    /// the header the datasets that hold a file of it. Off unless asked for.
+    pub contrast: bool,
+    /// For a stacks input with the header, whether `stacks.json` carries
+    /// the registry's rows a header model reads (`x-nils.input.rows`,
+    /// record 55 D3, spec §11.1): each stack's whole fingerprint row, its
+    /// classification votes and its series' private elements and frame of
+    /// reference (as a digest), for the run's stacks and the other MR
+    /// stacks of their sessions, which are read and never scored. Off
+    /// unless asked for.
+    pub rows: bool,
+    /// The axes its results may give an opinion on (`x-nils.opinions`,
+    /// record 55 D3): System 1's answers, kept as a second opinion beside
+    /// the rules' and never a decision.
+    pub opinions: Vec<String>,
     /// Typical minutes a unit takes on the CPU (`x-nils.needs.unit-minutes`),
     /// which the pre-flight estimates from until the pipeline has run here.
     pub unit_minutes: Option<f64>,
+    /// The GB of disk one scheduling unit's outputs take in the output
+    /// place (`x-nils.needs.disk-gb`, 2026-10-12), which the pre-flight and
+    /// the run door hold against the place's free space before a run is
+    /// queued; none where the descriptor does not say.
+    pub disk_gb: Option<f64>,
+    /// The earlier versions of its name it replaces because it fixes them
+    /// (`x-nils.replaces`, 2026-10-12); none where it replaces none.
+    pub replaces: Option<Replaces>,
+    /// Record 55 E5 (spec section 10.4): whether a dataset's bring-in runs
+    /// it over its new stacks without a manual run, when it is the chosen
+    /// model's pipeline of a step (`x-nils.on-arrival`: `true`, or
+    /// `{params: {id: value}}` for the parameters such a run is given);
+    /// none where it is not. The parameters, as `--param id=value` words.
+    pub on_arrival: Option<Vec<(String, String)>>,
+    /// Record 55 E5: the model input versions it keeps in the slice cache
+    /// and reads from it (`x-nils.cache.inputs`, such as
+    /// `bodypart-slice-192:v1`). A run of a pipeline that declares one is
+    /// given the site's working place's `slice-cache/` read-write at
+    /// [`CACHE_PATH`] (`[Cache]` on its command line), and its
+    /// `stacks.json` names each file's SOP Instance UID and, where the
+    /// engine knows it, the sha256 of its content, so the image can look
+    /// in the cache before it reads a file. Empty where it declares none.
+    pub cache: Vec<String>,
     /// The document as it parsed, kept whole.
     pub document: Value,
 }
@@ -736,10 +901,25 @@ pub fn from_value(document: Value) -> Result<Descriptor, String> {
                 OUTPUT_KINDS.join("|")
             ));
         }
+        let checked = opt_text(t, "checked", &at)?;
+        if let Some(c) = &checked {
+            if !ty.starts_with("derivative:") {
+                return Err(format!(
+                    "{at}checked belongs to a derivative input: what it takes of a check's status"
+                ));
+            }
+            if !CHECKED.contains(&c.as_str()) {
+                return Err(format!(
+                    "{at}checked is one of {}, not {c}",
+                    CHECKED.join(", ")
+                ));
+            }
+        }
         inputs.push(TypedInput {
             id,
             ty,
             optional: opt_bool(t, "optional", &at)?.unwrap_or(false),
+            checked,
         });
     }
     if inputs.iter().filter(|t| t.ty == "label_set").count() > 1 {
@@ -826,6 +1006,18 @@ pub fn from_value(document: Value) -> Result<Descriptor, String> {
             }
             None
         };
+        let grid = opt_text(o, "grid", &at)?;
+        let parts = parts_of(o, &at)?;
+        if kind != "mask" {
+            if grid.is_some() {
+                return Err(format!(
+                    "{at}grid belongs to a mask output: the input role whose stack its grid is on"
+                ));
+            }
+            if !o["parts"].is_null() {
+                return Err(format!("{at}parts belong to a mask output"));
+            }
+        }
         outputs.push(Output {
             id,
             kind,
@@ -835,6 +1027,8 @@ pub fn from_value(document: Value) -> Result<Descriptor, String> {
             card,
             encoders,
             table,
+            grid,
+            parts,
         });
     }
     if outputs.is_empty() {
@@ -1018,17 +1212,89 @@ pub fn from_value(document: Value) -> Result<Descriptor, String> {
             "x-nils.input.roles are the picks a bids input carries; a stacks input has none".into(),
         );
     }
+    // record 55 H3: a mask's grid is the stack a bids unit was given for a
+    // role; a stacks unit's mask is on its own stack's grid
+    for (i, o) in outputs.iter().enumerate() {
+        let Some(role) = &o.grid else { continue };
+        let at = format!("x-nils.outputs[{i}].");
+        if layout != Layout::Bids {
+            return Err(format!(
+                "{at}grid names a role of a bids input; a stacks unit's mask is on its own stack's grid"
+            ));
+        }
+        if !is_ident(role, true) {
+            return Err(format!(
+                "{at}grid {role} is a pick role of the pack, such as t1w"
+            ));
+        }
+        if !roles.is_empty() && !roles.contains(role) {
+            return Err(format!(
+                "{at}grid {role} is not one of the roles a unit is given ({})",
+                roles.join(", ")
+            ));
+        }
+    }
     let header = opt_bool(&x["input"], "header", "x-nils.input.")?.unwrap_or(false);
     if header && layout != Layout::Stacks {
         return Err(
             "x-nils.input.header puts each stack's header facts in stacks.json; a bids input has no stacks.json, so it is for a stacks input only".into(),
         );
     }
+    let geometry = opt_bool(&x["input"], "geometry", "x-nils.input.")?.unwrap_or(false);
+    if geometry && layout != Layout::Stacks {
+        return Err(
+            "x-nils.input.geometry puts each file's geometry in stacks.json; a bids input has no stacks.json, so it is for a stacks input only".into(),
+        );
+    }
+    let contrast = opt_bool(&x["input"], "contrast", "x-nils.input.")?.unwrap_or(false);
+    if contrast && !(layout == Layout::Stacks && header && geometry) {
+        return Err(
+            "x-nils.input.contrast puts each stack's session facts beside its header and its session's context in stacks.json, so it is for a stacks input with header: true and geometry: true only".into(),
+        );
+    }
+    let rows = opt_bool(&x["input"], "rows", "x-nils.input.")?.unwrap_or(false);
+    if rows && !(layout == Layout::Stacks && header) {
+        return Err(
+            "x-nils.input.rows puts the registry's rows a header model reads in stacks.json, so it is for a stacks input with header: true only".into(),
+        );
+    }
+    let mut opinions: Vec<String> = Vec::new();
+    for (i, p) in array(x, "opinions", "x-nils.")?.iter().enumerate() {
+        let axis = text(p, "axis", &format!("x-nils.opinions[{i}]."))?;
+        if !axis.chars().all(|c| c.is_ascii_lowercase() || c == '_') {
+            return Err(format!("x-nils.opinions[{i}].axis {axis} is a pack axis"));
+        }
+        if !opinions.iter().any(|o| o == axis) {
+            opinions.push(axis.to_string());
+        }
+    }
     let unit_minutes = match opt_number(&x["needs"], "unit-minutes", "x-nils.needs.")? {
         None => None,
         Some(m) if m > 0.0 && m.is_finite() => Some(m),
         Some(m) => return Err(format!("x-nils.needs.unit-minutes is above 0, not {m}")),
     };
+    let disk_gb = match opt_number(&x["needs"], "disk-gb", "x-nils.needs.")? {
+        None => None,
+        Some(g) if g > 0.0 && g.is_finite() => Some(g),
+        Some(g) => return Err(format!("x-nils.needs.disk-gb is above 0, not {g}")),
+    };
+    let replaces = replaces(x)?;
+    let cache = cache_of(x)?;
+    if !cache.is_empty() && layout != Layout::Stacks {
+        return Err(
+            "x-nils.cache keeps what a model reads of a scan's files, which a stacks input names; a bids input has none".into(),
+        );
+    }
+    if command_line
+        .as_deref()
+        .is_some_and(|c| c.contains("[Cache]"))
+        && cache.is_empty()
+    {
+        return Err(
+            "command-line names [Cache], and x-nils.cache declares no input version the run keeps there".into(),
+        );
+    }
+    let on_arrival = on_arrival_of(x, &params)?;
     Ok(Descriptor {
         name,
         tool_version,
@@ -1047,9 +1313,234 @@ pub fn from_value(document: Value) -> Result<Descriptor, String> {
         checks,
         roles,
         header,
+        geometry,
+        contrast,
+        rows,
+        opinions,
         unit_minutes,
+        disk_gb,
+        replaces,
+        on_arrival,
+        cache,
         document,
     })
+}
+
+/// `x-nils.cache` (record 55 E5): `{inputs: [version, ...]}`, each a model
+/// input's name and version as `<name>:v<n>`, lowercase letters, digits
+/// and dashes before the colon.
+fn cache_of(x: &Value) -> Result<Vec<String>, String> {
+    let c = &x["cache"];
+    if c.is_null() {
+        return Ok(Vec::new());
+    }
+    if !c.is_object() {
+        return Err("x-nils.cache is {inputs: [<name>:v<n>, ...]}".into());
+    }
+    let mut out: Vec<String> = Vec::new();
+    for (i, v) in array(c, "inputs", "x-nils.cache.")?.iter().enumerate() {
+        let version = v
+            .as_str()
+            .filter(|v| is_cache_version(v))
+            .ok_or_else(|| {
+                format!(
+                    "x-nils.cache.inputs[{i}] is a model input's version, as <name>:v<n>, such as bodypart-slice-192:v1"
+                )
+            })?;
+        if !out.iter().any(|o| o == version) {
+            out.push(version.to_string());
+        }
+    }
+    if out.is_empty() {
+        return Err("x-nils.cache names no input version (inputs)".into());
+    }
+    Ok(out)
+}
+
+/// A slice cache input version: `<name>:v<n>`, the name lowercase letters,
+/// digits and dashes, starting with a letter, the version a whole number.
+pub fn is_cache_version(v: &str) -> bool {
+    let Some((name, version)) = v.split_once(':') else {
+        return false;
+    };
+    let name_ok = name.len() <= 63
+        && name.chars().next().is_some_and(|c| c.is_ascii_lowercase())
+        && name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+    let version_ok = version
+        .strip_prefix('v')
+        .is_some_and(|n| !n.is_empty() && n.len() <= 9 && n.bytes().all(|b| b.is_ascii_digit()));
+    name_ok && version_ok
+}
+
+/// `x-nils.on-arrival` (record 55 E5): `true`, `false`, or `{params: {id:
+/// value}}`, each a declared parameter and a value it takes; the words a
+/// run at arrival is given, `id=value`.
+fn on_arrival_of(x: &Value, params: &[Param]) -> Result<Option<Vec<(String, String)>>, String> {
+    let given = match &x["on-arrival"] {
+        Value::Null | Value::Bool(false) => return Ok(None),
+        Value::Bool(true) => return Ok(Some(Vec::new())),
+        Value::Object(o) => o,
+        _ => {
+            return Err("x-nils.on-arrival is true, false or {params: {id: value}}".into());
+        }
+    };
+    if let Some(k) = given.keys().find(|k| *k != "params") {
+        return Err(format!("x-nils.on-arrival takes params only, not {k}"));
+    }
+    let mut out = Vec::new();
+    match given.get("params") {
+        None | Some(Value::Null) => {}
+        Some(Value::Object(m)) => {
+            for (id, v) in m {
+                let Some(p) = params.iter().find(|p| &p.id == id) else {
+                    return Err(format!(
+                        "x-nils.on-arrival.params.{id} is not a parameter of the descriptor"
+                    ));
+                };
+                let value = match v {
+                    Value::String(s) => Value::String(s.clone()),
+                    Value::Number(_) | Value::Bool(_) => v.clone(),
+                    _ => {
+                        return Err(format!("x-nils.on-arrival.params.{id} is a value, not {v}"));
+                    }
+                };
+                check_value(p, &value).map_err(|e| format!("x-nils.on-arrival.params: {e}"))?;
+                out.push((id.clone(), value_text(&value)));
+            }
+        }
+        Some(_) => {
+            return Err("x-nils.on-arrival.params is a mapping of id to value".into());
+        }
+    }
+    Ok(Some(out))
+}
+
+/// A mask output's part sets (record 55 H3, section 3): each a key, the
+/// words a person reads, its kind, the labels it reads (a list, or
+/// `nonzero`), for a labels set each value's name (a mapping from value to
+/// name, or a list of `{label, name}`), and for a components set how voxels
+/// join (6, 18 or 26, the default).
+fn parts_of(o: &Value, at: &str) -> Result<Vec<PartSet>, String> {
+    let mut out: Vec<PartSet> = Vec::new();
+    for (j, p) in array(o, "parts", at)?.iter().enumerate() {
+        let pat = format!("{at}parts[{j}].");
+        if !p.is_object() {
+            return Err(format!(
+                "{at}parts[{j}] is a mapping: key, words, kind, labels, names"
+            ));
+        }
+        let key = text(p, "key", &pat)?.to_string();
+        if !is_ident(&key, true) {
+            return Err(format!(
+                "{pat}key {key} is lowercase letters, digits and _, starting with a letter"
+            ));
+        }
+        if key == WHOLE {
+            return Err(format!(
+                "{pat}key {WHOLE} is the set a mask with no parts is read as"
+            ));
+        }
+        if out.iter().any(|q| q.key == key) {
+            return Err(format!("{pat}key {key} is declared twice"));
+        }
+        let words = text(p, "words", &pat)?.trim().to_string();
+        let kind = text(p, "kind", &pat)?.to_string();
+        if !PART_KINDS.contains(&kind.as_str()) {
+            return Err(format!(
+                "{pat}kind is one of {}, not {kind}",
+                PART_KINDS.join(", ")
+            ));
+        }
+        let labels = match &p["labels"] {
+            Value::Null => None,
+            Value::String(s) if s == "nonzero" => None,
+            Value::Array(a) if !a.is_empty() => {
+                let mut ls = Vec::new();
+                for v in a {
+                    match v.as_i64() {
+                        Some(l) if l > 0 => {
+                            if !ls.contains(&l) {
+                                ls.push(l);
+                            }
+                        }
+                        _ => {
+                            return Err(format!(
+                                "{pat}labels are whole numbers above 0, or nonzero"
+                            ));
+                        }
+                    }
+                }
+                Some(ls)
+            }
+            _ => {
+                return Err(format!(
+                    "{pat}labels is a list of label values, such as [99], or nonzero"
+                ));
+            }
+        };
+        if kind == "components" && p["labels"].is_null() {
+            return Err(format!(
+                "{pat}a components set names the labels it joins: a list, or nonzero"
+            ));
+        }
+        let mut names = std::collections::BTreeMap::new();
+        let mut name_of = |label: Option<i64>, name: Option<&str>| -> Result<(), String> {
+            let (Some(l), Some(n)) = (label.filter(|l| *l > 0), name) else {
+                return Err(format!("{pat}names maps a label value above 0 to its name"));
+            };
+            if n.trim().is_empty() {
+                return Err(format!("{pat}names: label {l} has an empty name"));
+            }
+            names.insert(l, n.trim().to_string());
+            Ok(())
+        };
+        match &p["names"] {
+            Value::Null => {}
+            Value::Object(m) => {
+                for (k, v) in m {
+                    name_of(k.trim().parse().ok(), v.as_str())?;
+                }
+            }
+            Value::Array(a) => {
+                for v in a {
+                    name_of(v["label"].as_i64(), v["name"].as_str())?;
+                }
+            }
+            _ => {
+                return Err(format!(
+                    "{pat}names is a mapping from label value to name, or a list of {{label, name}}"
+                ));
+            }
+        }
+        if kind == "components" && !names.is_empty() {
+            return Err(format!(
+                "{pat}names belong to a labels set; a component is named by its number"
+            ));
+        }
+        let connectivity = match &p["connectivity"] {
+            Value::Null => 26,
+            v => match v.as_u64() {
+                Some(c) if c <= 26 && CONNECTIVITY.contains(&(c as u8)) => c as u8,
+                _ => {
+                    return Err(format!("{pat}connectivity is 6, 18 or 26, not {v}"));
+                }
+            },
+        };
+        if kind != "components" && !p["connectivity"].is_null() {
+            return Err(format!("{pat}connectivity belongs to a components set"));
+        }
+        out.push(PartSet {
+            key,
+            words,
+            kind,
+            labels,
+            names,
+            connectivity,
+        });
+    }
+    Ok(out)
 }
 
 /// A table output's format and columns (record 49 A3).
@@ -1464,6 +1955,7 @@ impl Descriptor {
             ("[ParticipantLabels]".into(), participants.to_vec()),
             ("[Manifest]".into(), vec!["/input/stacks.json".into()]),
             ("[Inputs]".into(), vec!["/inputs".into()]),
+            ("[Cache]".into(), vec![CACHE_PATH.into()]),
         ];
         for p in &self.params {
             let Some(key) = &p.value_key else { continue };
@@ -1594,6 +2086,147 @@ x-nils:
             "  type: docker\n  container-hash: sha256:abc\n",
         );
         assert!(parse(&with_hash).unwrap_err().contains("container-hash"));
+    }
+
+    /// Nima's ruling of 2026-10-12: a version that fixes earlier ones says
+    /// so, with why, and which where not every earlier one; a form it does
+    /// not take is refused, and the catalog reads it from a document alone.
+    #[test]
+    fn a_version_says_which_earlier_versions_it_replaces_and_why() {
+        let base = doc(&format!("antsx/ants@sha256:{HEX}"));
+        assert_eq!(parse(&base).unwrap().replaces, None);
+        let with = |r: &str| {
+            base.replace(
+                "  needs: {gpu: optional}",
+                &format!("  needs: {{gpu: optional}}\n  replaces: {r}"),
+            )
+        };
+        let d = parse(&with("{why: \"the old mask was off by a voxel\"}")).unwrap();
+        let r = d.replaces.clone().unwrap();
+        assert_eq!(r.versions, None);
+        assert_eq!(r.why, "the old mask was off by a voxel");
+        assert!(r.covers(1) && r.covers(7), "every earlier version");
+        let d = parse(&with("{versions: [2, 1, 2], why: fixed}")).unwrap();
+        let r = d.replaces.clone().unwrap();
+        assert_eq!(r.versions, Some(vec![1, 2]));
+        assert!(r.covers(2) && !r.covers(3));
+        assert_eq!(replaces_of(&d.document), Some(r));
+        for (bad, words) in [
+            ("{versions: [1]}", "why is required"),
+            ("{why: \"  \"}", "why is required"),
+            ("{versions: [], why: x}", "versions is a list"),
+            ("{versions: [0], why: x}", "versions[0] is a version number"),
+            (
+                "{versions: [one], why: x}",
+                "versions[0] is a version number",
+            ),
+            ("[1]", "x-nils.replaces is a mapping"),
+        ] {
+            let e = parse(&with(bad)).unwrap_err();
+            assert!(e.contains(words), "{bad}: {e}");
+        }
+        assert_eq!(
+            replaces_of(&serde_json::json!({"x-nils": {"replaces": [1]}})),
+            None
+        );
+    }
+
+    /// Record 55 H3 (section 8.6): a mask output declares the role whose
+    /// stack its grid is on and the part sets it is read as, and a
+    /// derivative input what it takes of a check's status; all three are
+    /// optional, and refused where they do not belong.
+    #[test]
+    fn a_mask_declares_its_grid_and_parts_and_an_input_what_it_takes_of_a_check() {
+        let base = doc(&format!("antsx/ants@sha256:{HEX}"));
+        // without the keys a mask registers as before
+        let plain = base.replace("kind: output", "kind: mask");
+        let d = parse(&plain).unwrap();
+        assert_eq!(d.outputs[0].grid, None);
+        assert!(d.outputs[0].parts.is_empty());
+        let with = |extra: &str| {
+            base.replace("kind: output", &format!("kind: mask\n{extra}"))
+                .replace(
+                    "  input: {layout: bids}",
+                    "  input: {layout: bids, roles: [t1w, flair]}\n  inputs:\n    - {id: prior, type: \"derivative:mask\", checked: accepted}",
+                )
+        };
+        let d = parse(&with(
+            "      grid: t1w\n      parts:\n        - {key: lesions, words: Lesions, kind: components, labels: [99]}\n        - {key: structures, words: Structures, kind: labels, names: {2: Left-Cerebral-White-Matter, 41: Right-Cerebral-White-Matter}}\n        - {key: spots, words: Spots, kind: components, labels: nonzero, connectivity: 6}",
+        ))
+        .unwrap();
+        let o = &d.outputs[0];
+        assert_eq!(o.grid.as_deref(), Some("t1w"));
+        assert_eq!(o.parts.len(), 3);
+        assert_eq!(o.parts[0].labels, Some(vec![99]));
+        assert_eq!(o.parts[0].connectivity, 26);
+        assert_eq!(o.parts[1].names[&41], "Right-Cerebral-White-Matter");
+        assert_eq!(o.parts[1].labels, None);
+        assert_eq!(
+            (o.parts[2].labels.clone(), o.parts[2].connectivity),
+            (None, 6)
+        );
+        assert_eq!(d.inputs[0].checked.as_deref(), Some("accepted"));
+        // names as a list read the same
+        let d = parse(&with(
+            "      parts:\n        - {key: s, words: S, kind: labels, names: [{label: 17, name: Left-Hippocampus}]}",
+        ))
+        .unwrap();
+        assert_eq!(d.outputs[0].parts[0].names[&17], "Left-Hippocampus");
+        for (extra, words) in [
+            ("      grid: t2w", "not one of the roles"),
+            (
+                "      parts: [{key: whole, words: W, kind: labels}]",
+                "a mask with no parts",
+            ),
+            (
+                "      parts: [{key: a, words: A, kind: blobs}]",
+                "kind is one of",
+            ),
+            (
+                "      parts: [{key: a, words: A, kind: components}]",
+                "names the labels it joins",
+            ),
+            (
+                "      parts: [{key: a, words: A, kind: components, labels: [0]}]",
+                "above 0",
+            ),
+            (
+                "      parts: [{key: a, words: A, kind: components, labels: [1], connectivity: 8}]",
+                "6, 18 or 26",
+            ),
+            (
+                "      parts: [{key: a, words: A, kind: labels, connectivity: 6}]",
+                "belongs to a components set",
+            ),
+            (
+                "      parts: [{key: a, words: A, kind: components, labels: [1], names: {1: x}}]",
+                "belong to a labels set",
+            ),
+            (
+                "      parts: [{key: a, words: A, kind: labels}, {key: a, words: B, kind: labels}]",
+                "declared twice",
+            ),
+            (
+                "      parts: [{key: A, words: A, kind: labels}]",
+                "lowercase",
+            ),
+        ] {
+            let e = parse(&with(extra)).unwrap_err();
+            assert!(e.contains(words), "{extra}: {e}");
+        }
+        // only a mask has a grid and parts, and only a derivative input a check
+        let e = parse(&base.replace("kind: output", "kind: output\n      grid: t1w")).unwrap_err();
+        assert!(e.contains("grid belongs to a mask output"), "{e}");
+        let e = parse(&base.replace(
+            "kind: output",
+            "kind: output\n      parts: [{key: a, words: A, kind: labels}]",
+        ))
+        .unwrap_err();
+        assert!(e.contains("parts belong to a mask output"), "{e}");
+        let e = parse(&with("").replace("checked: accepted", "checked: maybe")).unwrap_err();
+        assert!(e.contains("checked is one of"), "{e}");
+        let e = parse(&with("").replace("\"derivative:mask\"", "model")).unwrap_err();
+        assert!(e.contains("checked belongs to a derivative input"), "{e}");
     }
 
     #[test]
@@ -1758,6 +2391,158 @@ x-nils:
         let t = d.outputs.iter().find(|o| o.id == "scores").unwrap();
         assert_eq!(t.table.as_ref().unwrap().format, "json");
         assert!(!t.run_level);
+    }
+
+    /// Record 55 E2: a stacks input may ask for each file's geometry in
+    /// `stacks.json`, beside the header or alone; it is off unless asked
+    /// for, and a bids input, which has no `stacks.json`, is refused it.
+    #[test]
+    fn a_stacks_input_may_ask_for_the_geometry_and_a_bids_one_may_not() {
+        let base = doc(&format!("antsx/ants@sha256:{HEX}"));
+        assert!(!parse(&base).unwrap().geometry);
+        let stacks = |input: &str| {
+            base.replace("analysis-level: session", "analysis-level: stack")
+                .replace("  input: {layout: bids}\n", &format!("  input: {input}\n"))
+                .replace(
+                    "sub-{subject}/ses-{session}/anat/*_desc-n4_T1w.nii.gz",
+                    "stack-{stack}/n4.nii.gz",
+                )
+        };
+        let d = parse(&stacks("{layout: stacks}")).unwrap();
+        assert!(!d.geometry && !d.header);
+        assert!(
+            !parse(&stacks("{layout: stacks, geometry: false}"))
+                .unwrap()
+                .geometry
+        );
+        let d = parse(&stacks("{layout: stacks, geometry: true}")).unwrap();
+        assert!(d.geometry && !d.header, "the geometry alone");
+        let d = parse(&stacks("{layout: stacks, header: true, geometry: true}")).unwrap();
+        assert!(d.geometry && d.header, "both");
+        let e = parse(&stacks("{layout: stacks, geometry: 1}")).unwrap_err();
+        assert!(e.contains("x-nils.input.geometry is true or false"), "{e}");
+        let e = parse(&base.replace(
+            "  input: {layout: bids}\n",
+            "  input: {layout: bids, geometry: true}\n",
+        ))
+        .unwrap_err();
+        assert!(e.contains("for a stacks input only"), "{e}");
+    }
+
+    /// Record 55 E5: a pipeline may score at arrival, with parameters of
+    /// its own for such a run, and may keep model inputs in the slice
+    /// cache, which a stacks input only can and `[Cache]` names.
+    #[test]
+    fn a_pipeline_may_score_at_arrival_and_keep_its_inputs_in_the_slice_cache() {
+        let base = doc(&format!("antsx/ants@sha256:{HEX}"));
+        let d = parse(&base).unwrap();
+        assert_eq!(d.on_arrival, None);
+        assert!(d.cache.is_empty());
+        let stacks = |x: &str| {
+            base.replace("analysis-level: session", "analysis-level: stack")
+                .replace(
+                    "  input: {layout: bids}\n",
+                    &format!("  input: {{layout: stacks}}\n{x}"),
+                )
+                .replace(
+                    "sub-{subject}/ses-{session}/anat/*_desc-n4_T1w.nii.gz",
+                    "stack-{stack}/n4.nii.gz",
+                )
+        };
+        let d = parse(&stacks("  on-arrival: true\n")).unwrap();
+        assert_eq!(d.on_arrival, Some(Vec::new()));
+        assert_eq!(
+            parse(&stacks("  on-arrival: false\n")).unwrap().on_arrival,
+            None
+        );
+        let d = parse(&stacks(
+            "  on-arrival: {params: {shrink: 4, verbose: true}}\n",
+        ))
+        .unwrap();
+        assert_eq!(
+            d.on_arrival,
+            Some(vec![
+                ("shrink".to_string(), "4".to_string()),
+                ("verbose".to_string(), "true".to_string())
+            ])
+        );
+        for (bad, says) in [
+            ("  on-arrival: yes-please\n", "true, false or {params"),
+            ("  on-arrival: {when: always}\n", "takes params only"),
+            ("  on-arrival: {params: {threads: 2}}\n", "not a parameter"),
+            ("  on-arrival: {params: {dimension: 9}}\n", "at most 4"),
+        ] {
+            let e = parse(&stacks(bad)).unwrap_err();
+            assert!(e.contains(says), "{bad}: {e}");
+        }
+        let cached = stacks("  cache: {inputs: [bodypart-slice-192:v1, bodypart-planes-b24:v1, bodypart-slice-192:v1]}\n")
+            .replace("--labels [ParticipantLabels]", "--cache [Cache]");
+        let d = parse(&cached).unwrap();
+        assert_eq!(d.cache, ["bodypart-slice-192:v1", "bodypart-planes-b24:v1"]);
+        let argv = d.argv(&d.resolve(&[]).unwrap(), &[]).unwrap();
+        assert!(
+            argv.windows(2).any(|w| w == ["--cache", CACHE_PATH]),
+            "{argv:?}"
+        );
+        for (bad, says) in [
+            ("  cache: {inputs: [Slices]}\n", "<name>:v<n>"),
+            ("  cache: {inputs: [slices:1]}\n", "<name>:v<n>"),
+            ("  cache: {inputs: []}\n", "names no input version"),
+            ("  cache: [slices:v1]\n", "x-nils.cache is {inputs"),
+        ] {
+            let e = parse(&stacks(bad)).unwrap_err();
+            assert!(e.contains(says), "{bad}: {e}");
+        }
+        let e = parse(&stacks("").replace("--labels [ParticipantLabels]", "--cache [Cache]"))
+            .unwrap_err();
+        assert!(e.contains("names [Cache]"), "{e}");
+        let e = parse(&base.replace(
+            "  input: {layout: bids}\n",
+            "  input: {layout: bids}\n  cache: {inputs: [slices:v1]}\n",
+        ))
+        .unwrap_err();
+        assert!(e.contains("a bids input has none"), "{e}");
+        assert!(is_cache_version("bodypart-planes-touched:v12"));
+        assert!(!is_cache_version("bodypart:v"));
+        assert!(!is_cache_version("../x:v1"));
+    }
+
+    /// Record 55 E3: a stacks input with the header and the geometry may
+    /// ask for the session facts the post-contrast model reads; off unless
+    /// asked for, and refused without either.
+    #[test]
+    fn a_stacks_input_with_header_and_geometry_may_ask_for_the_contrast_facts() {
+        let base = doc(&format!("antsx/ants@sha256:{HEX}"));
+        let stacks = |input: &str| {
+            base.replace("analysis-level: session", "analysis-level: stack")
+                .replace("  input: {layout: bids}\n", &format!("  input: {input}\n"))
+                .replace(
+                    "sub-{subject}/ses-{session}/anat/*_desc-n4_T1w.nii.gz",
+                    "stack-{stack}/n4.nii.gz",
+                )
+        };
+        assert!(
+            !parse(&stacks("{layout: stacks, header: true, geometry: true}"))
+                .unwrap()
+                .contrast
+        );
+        let d = parse(&stacks(
+            "{layout: stacks, header: true, geometry: true, contrast: true}",
+        ))
+        .unwrap();
+        assert!(d.contrast && d.header && d.geometry);
+        for without in [
+            "{layout: stacks, geometry: true, contrast: true}",
+            "{layout: stacks, header: true, contrast: true}",
+        ] {
+            let e = parse(&stacks(without)).unwrap_err();
+            assert!(e.contains("header: true and geometry: true"), "{e}");
+        }
+        let e = parse(&stacks(
+            "{layout: stacks, header: true, geometry: true, contrast: 1}",
+        ))
+        .unwrap_err();
+        assert!(e.contains("x-nils.input.contrast is true or false"), "{e}");
     }
 
     #[test]
@@ -1931,7 +2716,7 @@ x-nils:
             };
             base.replace(
                 "  needs: {gpu: optional}",
-                &format!("{extra}  needs: {{gpu: optional, unit-minutes: 5}}\n{x}"),
+                &format!("{extra}  needs: {{gpu: optional, unit-minutes: 5, disk-gb: 1.5}}\n{x}"),
             )
         };
         let table = "    - id: vols\n      kind: table\n      path-template: \"sub-{subject}/ses-{session}/vols.csv\"\n      columns:\n        - {name: total_intracranial, unit: mm3}\n        - {name: third_ventricle, from: 3rd ventricle}\n        - {name: site, type: text}\n";
@@ -1951,6 +2736,7 @@ x-nils:
         assert!(d.checks[1].holds(5000.0) && !d.checks[1].holds(5000.5));
         assert_eq!(d.roles, ["t1w", "flair"]);
         assert_eq!(d.unit_minutes, Some(5.0));
+        assert_eq!(d.disk_gb, Some(1.5));
         assert_eq!(fold(" Left-Hippocampus "), "left_hippocampus");
         assert_eq!(fold("putamen+pallidum"), "putamen_pallidum");
         for (extra, x, words) in [

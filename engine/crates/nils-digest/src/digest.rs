@@ -485,13 +485,12 @@ fn execute(
         (walked, resumed, counts, wrote)
     });
 
-    let (written, own, provisional) = match writer.take() {
+    let (written, own) = match writer.take() {
         Some(mut w) => (
             Some(std::mem::take(&mut w.written)),
             Some(std::mem::take(&mut w.counts)),
-            std::mem::take(&mut w.provisional),
         ),
-        None => (None, None, BTreeMap::new()),
+        None => (None, None),
     };
     // the writer's borrow of the registry ends here
     drop(writer);
@@ -529,15 +528,7 @@ fn execute(
     let elapsed = start.elapsed().as_secs_f64();
     match (registry, run, written) {
         (Some(reg), Some(r), Some(written)) => finish(
-            reg,
-            r,
-            settings,
-            setup,
-            &counts,
-            written,
-            &provisional,
-            elapsed,
-            cancelled,
+            reg, r, settings, setup, &counts, written, elapsed, cancelled,
         ),
         _ => {
             let mut report = Report::new(setup, &counts, elapsed, peak_rss());
@@ -558,7 +549,6 @@ fn finish(
     setup: Setup,
     counts: &Counts,
     mut written: Written,
-    provisional: &BTreeMap<i64, writer::Provisional>,
     elapsed: f64,
     cancelled: Option<Cancelled>,
 ) -> Result<Report, DigestError> {
@@ -575,10 +565,11 @@ fn finish(
     // transaction before the batch closes, so the batch's record carries it.
     let joined = feed_cohort(registry, run, settings)?;
     // Record 26 §4: the question the files this run held raise, one item
-    // per dataset and shape, in a transaction of its own as the cohort is,
-    // and the one each subject it coded instead raises.
+    // per dataset and shape, in a transaction of its own as the cohort is.
+    // A subject it coded from the ID asks nothing: its subject code is
+    // final (2026-10-10).
     ask_about_held(registry, run, settings, &now)?;
-    ask_about_provisional(registry, run, settings, provisional, &now)?;
+    ask_about_same_instance(registry, run, settings, &now)?;
     let store = registry.store();
     store.begin()?;
     let result = (|| -> Result<Report, DigestError> {
@@ -619,11 +610,19 @@ fn finish(
         report.joined = joined;
         report.cancelled = cancelled;
         // one review item per class the run quarantined into (§5.3): the
-        // count is the evidence, the paths stay in the quarantine list
+        // count is the evidence, the paths stay in the quarantine list.
+        // Record 56 (2026-10-11): a file the knobs set aside by policy (a
+        // screen capture, a report, another modality) asks nobody anything;
+        // it is counted on the report and the dataset's summary, and only a
+        // file the reader could not take files an item.
         let items: Vec<Vec<Param>> = report
             .quarantine
             .iter()
             .filter(|c| c.count > 0)
+            .filter(|c| {
+                nils_dicom::QuarantineClass::from_name(&c.class)
+                    .is_none_or(|class| !class.is_policy_class())
+            })
             .map(|c| {
                 let reference = serde_json::json!({ "batch_id": run.batch_id, "class": c.class });
                 // record 37 S9: what was set aside, by kind, so a reader of
@@ -825,6 +824,143 @@ fn ask_about_held(
     }
 }
 
+/// The files a source holds under one pair of subjects: how many, by what
+/// differs, and when the first of them was held.
+struct Held {
+    files: i64,
+    differs: BTreeMap<String, i64>,
+    first_seen: String,
+}
+
+/// Record 55 (Nima's duplicate policy, 2026-10-10): one
+/// `identity.same_instance` item per pair of subjects this source holds
+/// files under because the registry holds their instance UIDs under another
+/// subject, study or series; brought up to date by every run, and closed by
+/// a run that holds nothing under the pair any more, as after a merge of the
+/// two. The item names the subjects and counts the files; never a value.
+fn ask_about_same_instance(
+    registry: &mut Registry,
+    run: &Run,
+    settings: &Settings,
+    now: &str,
+) -> Result<(), DigestError> {
+    let store = registry.store();
+    let d = store.dialect();
+    let first = d.text_of(
+        table("source_file")
+            .column("first_seen_at")
+            .expect("first_seen_at"),
+    );
+    let sql = format!(
+        "SELECT detail, COUNT(*), MIN({first}) FROM {} WHERE source_id = {} AND status = 'quarantined' \
+         AND reason = {} AND detail IS NOT NULL GROUP BY detail",
+        store.qualified("source_file"),
+        d.param(1, Type::Int),
+        d.param(2, Type::Text),
+    );
+    let rows = store.query(
+        &sql,
+        &[
+            Param::Int(run.source_id),
+            Param::from(nils_registry::review::SAME_INSTANCE_KIND),
+        ],
+    )?;
+    let mut pairs: BTreeMap<(i64, i64), Held> = BTreeMap::new();
+    for r in &rows {
+        let detail = r.text(0)?;
+        let field = |name: &str| {
+            detail
+                .split('|')
+                .find_map(|part| part.strip_prefix(name))
+                .map(str::to_string)
+        };
+        let (Some(subject), Some(holder)) = (
+            field("subject:").and_then(|v| v.parse::<i64>().ok()),
+            field("holder:").and_then(|v| v.parse::<i64>().ok()),
+        ) else {
+            continue;
+        };
+        let what = field("differs:").unwrap_or_else(|| "subject".into());
+        let files = r.int(1)?;
+        let seen = r.opt_text(2)?.unwrap_or(now).to_string();
+        let entry = pairs.entry((subject, holder)).or_insert_with(|| Held {
+            files: 0,
+            differs: BTreeMap::new(),
+            first_seen: seen.clone(),
+        });
+        entry.files += files;
+        *entry.differs.entry(what).or_default() += files;
+        if seen < entry.first_seen {
+            entry.first_seen = seen;
+        }
+    }
+    let mut codes: BTreeMap<i64, String> = BTreeMap::new();
+    let ids: Vec<i64> = pairs
+        .keys()
+        .flat_map(|(a, b)| [*a, *b])
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    if !ids.is_empty() {
+        let t = table("subject");
+        let cols = [
+            t.column("id").expect("subject.id"),
+            t.column("code").expect("subject.code"),
+        ];
+        for r in &store.select_by_ids(t, &cols, "id", &ids)? {
+            codes.insert(r.int(0)?, r.text(1)?.to_string());
+        }
+    }
+    let place = nils_registry::place::tree_holding(store, "anon", &settings.root)?;
+    store.begin()?;
+    let result = (|| -> Result<(), DigestError> {
+        let mut open: Vec<String> = Vec::new();
+        for ((subject, holder), held) in &pairs {
+            let (files, first_seen) = (&held.files, &held.first_seen);
+            let differs = serde_json::json!(held.differs);
+            nils_registry::review::raise_same_instance(
+                store,
+                &nils_registry::review::SameInstance {
+                    source_id: run.source_id,
+                    subject_id: *subject,
+                    code: codes.get(subject).map_or("", String::as_str),
+                    holder_id: *holder,
+                    holder_code: codes.get(holder).map_or("", String::as_str),
+                    files: *files,
+                    differs: &differs,
+                    first_seen,
+                    place_id: place.as_ref().map(|p| p.id),
+                    place: place.as_ref().map(|p| p.name.as_str()),
+                    batch_id: Some(run.batch_id),
+                    job_id: Some(run.job_id),
+                },
+                now,
+            )?;
+            open.push(nils_registry::review::same_instance_key(
+                run.source_id,
+                *subject,
+                *holder,
+            ));
+        }
+        for key in nils_registry::review::open_same_instance_keys(store, run.source_id)? {
+            if !open.contains(&key) {
+                nils_registry::review::close_same_instance(store, &key, now)?;
+            }
+        }
+        Ok(())
+    })();
+    match result {
+        Ok(()) => {
+            store.commit()?;
+            Ok(())
+        }
+        Err(e) => {
+            let _ = store.rollback();
+            Err(e)
+        }
+    }
+}
+
 /// The dataset a path is the pseudonymised tree of, where the dataset is one
 /// read in place (record 26 §1). A dataset that arrives identified has none:
 /// the pseudonymiser held or coded every file of its originals before it
@@ -844,71 +980,6 @@ fn read_in_place(
         id: place.id,
         name: place.name,
     }))
-}
-
-/// Record 26 §4: one `identity.provisional` item per subject the run coded
-/// from an identifier no map named, as the pseudonymiser opens one for every
-/// subject it codes. The item carries the subject and its code, the shape of
-/// the identifier and how many of the run's files are about the person, and
-/// never an identifier. A merge of the subject closes it.
-fn ask_about_provisional(
-    registry: &mut Registry,
-    run: &Run,
-    settings: &Settings,
-    provisional: &BTreeMap<i64, writer::Provisional>,
-    now: &str,
-) -> Result<(), DigestError> {
-    if provisional.is_empty() {
-        return Ok(());
-    }
-    let store = registry.store();
-    let Some(place) = nils_registry::place::tree_holding(store, "anon", &settings.root)? else {
-        return Ok(());
-    };
-    let t = table("subject");
-    let cols = [
-        t.column("id").expect("subject.id"),
-        t.column("code").expect("subject.code"),
-    ];
-    let ids: Vec<i64> = provisional.keys().copied().collect();
-    let mut codes: BTreeMap<i64, String> = BTreeMap::new();
-    for r in &store.select_by_ids(t, &cols, "id", &ids)? {
-        codes.insert(r.int(0)?, r.text(1)?.to_string());
-    }
-    store.begin()?;
-    let result = (|| -> Result<(), DigestError> {
-        for (id, p) in provisional {
-            let Some(code) = codes.get(id) else {
-                continue;
-            };
-            nils_registry::review::raise_provisional(
-                store,
-                &nils_registry::review::Provisional {
-                    subject_id: *id,
-                    code,
-                    id_type: &settings.identity.id_type,
-                    shape: &p.shape,
-                    place_id: place.id,
-                    place: &place.name,
-                    files: p.files,
-                    batch_id: Some(run.batch_id),
-                    job_id: Some(run.job_id),
-                },
-                now,
-            )?;
-        }
-        Ok(())
-    })();
-    match result {
-        Ok(()) => {
-            store.commit()?;
-            Ok(())
-        }
-        Err(e) => {
-            let _ = store.rollback();
-            Err(e)
-        }
-    }
 }
 
 /// One parser thread: every task until the resume check is done or a stop is

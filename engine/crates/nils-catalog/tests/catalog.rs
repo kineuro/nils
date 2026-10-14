@@ -68,10 +68,25 @@ fn fixture(name: &str) -> String {
 fn the_four_fixtures_validate_against_the_real_catalog() {
     let (mut registry, _dir) = registry();
     let catalog = Catalog::build(&mut registry, &pack()).unwrap();
+    // the documents read quasi identifying fields, as the gate runs them
+    let quasi = Scope {
+        classes: [Class::QuasiIdentifying].into_iter().collect(),
+        ..Scope::default()
+    };
     for name in ["yardstick", "gold-a", "gold-b", "gold-c"] {
         let ask = parse(&fixture(name)).unwrap();
-        let prepared =
-            prepare(ask, &catalog, &Scope::default()).unwrap_or_else(|e| panic!("{name}: {e}"));
+        // record 55 K7: at detail plain each validates too, gold C's standard
+        // deviation of age among them since the ruling of 2026-10-12: a
+        // group's spread is held to its subjects, answered for 5 or more
+        let plain = prepare(ask.clone(), &catalog, &Scope::default())
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+        let held: Vec<String> = plain.validated.held_measures.into_iter().collect();
+        if name == "gold-c" {
+            assert_eq!(held, ["stddev.age"], "{name}");
+        } else {
+            assert!(held.is_empty(), "{name}: {held:?}");
+        }
+        let prepared = prepare(ask, &catalog, &quasi).unwrap_or_else(|e| panic!("{name}: {e}"));
         assert!(
             prepared
                 .validated
@@ -375,4 +390,64 @@ fn curation_is_keyed_by_path_and_survives_a_rebuild() {
         store.query(&sql, &[]).unwrap()[0].int(0).unwrap()
     };
     assert_eq!(rows, 1);
+}
+
+/// 2026-10-11: the function table lists every op the validator accepts, so
+/// an author who reads it finds `picked`, the main scans of a stack.
+#[test]
+fn the_function_table_lists_picked() {
+    let table = nils_catalog::functions();
+    let comparison: Vec<&str> = table["comparison"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert!(comparison.contains(&"picked"), "{table}");
+}
+
+/// 2026-10-12: a `picked` whose role the served pack does not pick read no
+/// rows at all. It is refused at validate, naming the roles the pack's
+/// picks declare (the MRI pack's main picks t1w, flair and t2w), and each
+/// of those roles is read.
+#[test]
+fn picked_is_refused_a_role_the_served_pack_does_not_pick() {
+    let (mut registry, _dir) = registry();
+    let catalog = Catalog::build(&mut registry, &pack()).unwrap();
+    assert_eq!(catalog.roles, vec!["t1w", "flair", "t2w"]);
+    let doc = |role: &str| {
+        parse(
+            &serde_json::json!({
+                "ast_version": 1,
+                "sets": {"t": {"grain": "stack", "where": [["picked", {"role": role}]]}},
+                "out": {"set": "t", "level": "count"}
+            })
+            .to_string(),
+        )
+        .unwrap()
+    };
+    for role in ["t1w", "flair", "t2w"] {
+        prepare(doc(role), &catalog, &Scope::default()).unwrap_or_else(|e| panic!("{role}: {e}"));
+    }
+    for role in ["dwi", "T2w", "main"] {
+        match prepare(doc(role), &catalog, &Scope::default()) {
+            Err(nils_ask::Error::Invalid(issues)) => {
+                assert_eq!(issues.len(), 1, "{role}: {issues:?}");
+                let i = &issues[0];
+                assert_eq!(i.code, Code::UnknownValue, "{role}");
+                assert_eq!(i.path, "sets.t.where[0]", "{role}");
+                assert_eq!(
+                    i.message,
+                    format!(
+                        "picked reads no role named {role}; the pack's roles are t1w, flair, t2w"
+                    )
+                );
+                assert_eq!(
+                    i.next,
+                    r#"write ["picked", {role: t1w}] in a stack set's where; the roles are t1w, flair, t2w"#
+                );
+            }
+            other => panic!("{role} accepted: {other:?}"),
+        }
+    }
 }

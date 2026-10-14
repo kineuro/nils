@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 
 use crate::name;
 use nils_registry::day::Day;
+use nils_registry::pick_truth::{Of, Picks};
 use nils_registry::schema::{Type, table};
 use nils_registry::session::Scheme;
 use nils_registry::store::{Error as StoreError, Insert, Param, Store};
@@ -51,7 +52,9 @@ pub struct Selection {
     /// Stacks, by id. The narrowest grain, and the one a query returns.
     pub stacks: Vec<i64>,
     /// Stacks holding this value on the disposition axis. Empty means the
-    /// release's default, which is everything that is not `excluded`.
+    /// release's default, which is everything but what
+    /// [`LEFT_OUT_UNLESS_ASKED`] names, unless an axis item on the
+    /// disposition axis names the dispositions instead.
     pub dispositions: Vec<String>,
     /// Stacks holding one of these roles.
     pub roles: Vec<String>,
@@ -68,6 +71,16 @@ pub struct Selection {
     /// Record 26 §13: only the files under these datasets' pseudonymised
     /// trees, by the source places' names.
     pub datasets: Vec<String>,
+    /// Record 55 (rulings of 2026-10-12, item 6): the stacks are a pipeline
+    /// run's frozen list of a dataset's or a cohort's main scans, and these
+    /// the picks it was resolved from, as `pick_truth::Of::record` writes
+    /// them, with `main`, the role the list's stacks are the main scans of.
+    /// A release of picked stacks takes the list as it was frozen,
+    /// whatever the picks say now (a scope's newer rules replace the picks
+    /// of the version before), and records these picks; none, the picks as
+    /// [`picks_read`] says. Either way it freezes what it read of them with
+    /// it ([`nils_registry::pick_truth::freeze`]).
+    pub picks: Option<serde_json::Value>,
 }
 
 impl Selection {
@@ -83,13 +96,36 @@ impl Selection {
             "axes": self.axes,
             "cohorts": self.cohorts,
             "datasets": self.datasets,
+            "picks": self.picks,
         })
     }
 
     pub fn is_everything(&self) -> bool {
         self == &Selection::default()
     }
+
+    /// Whether the selection says which dispositions it takes, by
+    /// `dispositions` (`--disposition`) or by an axis item on the
+    /// disposition axis (`--axis disposition=...`, a door's `axes`). A
+    /// selection that says none takes every stack but what
+    /// [`LEFT_OUT_UNLESS_ASKED`] names.
+    pub fn names_dispositions(&self) -> bool {
+        !self.dispositions.is_empty() || self.axes.iter().any(|(axis, _)| axis == "disposition")
+    }
 }
+
+/// The dispositions a release leaves out unless its selection names them.
+///
+/// What the pack ruled out is no image of a person (a screen capture, an
+/// error map), and saying so as a default rather than as a flag is what keeps
+/// a release from carrying screenshots. Record 55 C3 (2026-10-08): a
+/// display composite, a picture made to be looked at (SyMRI's maps saved in
+/// colour), stays classified and findable, and is left out of a release the
+/// same way: it is no material for an analysis. A selection that names a
+/// disposition takes it ([`Selection::names_dispositions`]), and a release
+/// counts what this left out (`Report::left_out_unless_asked`), so a missing
+/// composite is never a silent one.
+pub const LEFT_OUT_UNLESS_ASKED: &[&str] = &["excluded", "display_composite"];
 
 /// What a run says when it is done.
 #[derive(Debug, Clone, Default, serde::Serialize)]
@@ -194,6 +230,11 @@ pub struct Report {
     /// standard admits and writes them as NIfTI, so neither its stack count
     /// nor its file count is a descriptive tree's.
     pub left_out: i64,
+    /// Record 55 C3: the stacks of the selection a release leaves out unless
+    /// it is asked for them, by disposition ([`LEFT_OUT_UNLESS_ASKED`]): the
+    /// ones the pack ruled out and the display composites. Empty where the
+    /// selection named the dispositions it takes.
+    pub left_out_unless_asked: BTreeMap<String, i64>,
     /// Stacks written as DICOM because the converter would not convert them.
     /// v0 carries a hard-coded list of vendors instead, so a stack it could
     /// have converted is skipped and one it cannot is a failure.
@@ -523,7 +564,16 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
     let started = std::time::Instant::now();
     // Record 26 §13: the policies in play, the run's own and each
     // dataset's, every one checked by name before anything is read.
-    let policies = Policies::resolve(registry.store(), settings)?;
+    // record 55, decision 6: the picks a release of picked stacks reads,
+    // worked out once, and what its row records of them
+    let (reading, pick_rules) = picks_read(
+        registry.store(),
+        &settings.selection,
+        &settings.pack.name,
+        &settings.pack.version.to_string(),
+    )?;
+    let live = Picks::Live(reading.clone());
+    let policies = Policies::resolve(registry.store(), settings, &live)?;
     let scheme = settings.scheme;
 
     // §9.2 and §9.6, before a registry row exists. A pack with no mapping
@@ -554,7 +604,7 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
     // has to be room. A release that discovers a full disk after 400 GB has
     // written 400 GB for nothing, and what it reports is the operating
     // system's word for it rather than what to do about it.
-    let wanted = selection_bytes(registry.store(), &settings.selection)?;
+    let wanted = selection_bytes(registry.store(), &settings.selection, &live)?;
     preflight(settings.root, wanted)?;
     let days = study_days(registry.store())?;
     let pixels = pixel_verdicts(registry.store())?;
@@ -641,6 +691,7 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
             .map(|c| c.name().to_string())
             .collect(),
         on_unknown: settings.on_unknown.name().to_string(),
+        left_out_unless_asked: left_out_unless_asked(registry.store(), &settings.selection, &live)?,
         // Record 37 S2. Only a BIDS run spells a `run-`, so only a BIDS run
         // reports on one: the descriptive layout names every stack and needs
         // no index at all.
@@ -662,7 +713,32 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
         earlier.as_ref(),
         &report.placements,
         &report.policies,
+        pick_rules.as_ref(),
     )?;
+    // record 55 (rulings of 2026-10-12, item 6, carried to releases): what
+    // the release reads of the picks is frozen with it before it takes a
+    // stack, and it takes its stacks by the list it froze, so every reader
+    // of its picks after it reads the stacks it took, whatever the picks
+    // say by then (a scope's newer rules replace the picks of the version
+    // before, and the pack's run makes its own again)
+    let picks = match &pick_rules {
+        Some(doc) => {
+            let frozen = freeze_picks(
+                registry,
+                settings,
+                &reading,
+                &live,
+                &by_study,
+                report.release_id,
+            )?;
+            let mut doc = doc.clone();
+            doc["frozen"] = frozen.doc();
+            set_pick_rules(registry.store(), report.release_id, &doc)?;
+            Picks::Frozen(report.release_id)
+        }
+        None => live,
+    };
+    let picks = &picks;
 
     // The parts of a stack's content digest that are the same for every stack
     // in the release (§8.6).
@@ -720,8 +796,8 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
     // about: places() names every stack of the registry, so that a name never
     // depends on what else a release took.
     let mut in_version: std::collections::BTreeSet<i64> = std::collections::BTreeSet::new();
-    for (subject, code) in selected_subjects(registry.store(), &settings.selection)? {
-        let mine = select_subject(registry.store(), &settings.selection, subject)?;
+    for (subject, code) in selected_subjects(registry.store(), &settings.selection, picks)? {
+        let mine = select_subject(registry.store(), &settings.selection, subject, picks)?;
         if mine.is_empty() {
             continue;
         }
@@ -2055,13 +2131,20 @@ pub struct PlannedStack {
 /// The plan of a BIDS release of the picked stacks among `stacks`, under
 /// `scheme` and the pack's mapping, with the release's default placements:
 /// what a pipeline run's input would hold (record 49 A3). Reads the
-/// session cache the release builds, and writes nothing else.
+/// session cache the release builds, and writes nothing else. `picks` are
+/// the picks a run's frozen list recorded, where it did (record 55).
 pub fn plan_picked(
     registry: &mut Registry,
     pack: &nils_pack::pack::Pack,
     scheme: &Scheme,
     stacks: &[i64],
+    picks: Option<&serde_json::Value>,
 ) -> Result<Vec<PlannedStack>, Error> {
+    // the plan of no stack is none: a selection of no stack is no filter,
+    // and would plan every picked stack of the registry
+    if stacks.is_empty() {
+        return Ok(Vec::new());
+    }
     let anchors =
         nils_session::Anchors::resolve(registry, scheme, BTreeMap::new()).map_err(session_err)?;
     nils_session::ensure(registry, scheme, &anchors, None, false).map_err(session_err)?;
@@ -2083,11 +2166,14 @@ pub fn plan_picked(
     let selection = Selection {
         stacks: stacks.to_vec(),
         picked_only: true,
+        picks: picks.cloned(),
         ..Selection::default()
     };
     let mut out = Vec::new();
-    for (subject, code) in selected_subjects(registry.store(), &selection)? {
-        let mine = select_subject(registry.store(), &selection, subject)?;
+    let (reading, _) = picks_read(registry.store(), &selection, "", "")?;
+    let live = &Picks::Live(reading);
+    for (subject, code) in selected_subjects(registry.store(), &selection, live)? {
+        let mine = select_subject(registry.store(), &selection, subject, live)?;
         let labels = session_labels(&mine, &by_study, subject);
         let mut studies: BTreeMap<i64, i64> = BTreeMap::new();
         for i in &mine {
@@ -2672,7 +2758,14 @@ fn prune(root: &Path, from: Option<&Path>) {
 
 /// The `WHERE` of a selection over the joined tables `i`, `k`, `se`, `su`,
 /// `sf`, `so`, shared by the three readers below so they cannot disagree.
-fn selection_where(store: &mut Store, selection: &Selection) -> String {
+fn selection_where(store: &mut Store, selection: &Selection, picks: &Picks) -> String {
+    filter_of(store, selection, picks, true)
+}
+
+/// [`selection_where`], with or without the default that leaves out what
+/// [`LEFT_OUT_UNLESS_ASKED`] names, so a release can count what the default
+/// left out by the same filter it reads with.
+fn filter_of(store: &mut Store, selection: &Selection, picks: &Picks, by_default: bool) -> String {
     let mut wheres: Vec<String> = Vec::new();
     if !selection.subjects.is_empty() {
         wheres.push(format!(
@@ -2728,14 +2821,18 @@ fn selection_where(store: &mut Store, selection: &Selection) -> String {
                 .join(", ")
         ));
     }
-    // A stack the pack ruled out is not written, and saying so as a default
-    // rather than as a flag is what keeps a release from carrying screenshots.
-    if selection.dispositions.is_empty() {
-        wheres.push(format!(
-            "NOT EXISTS (SELECT 1 FROM {axis} a WHERE a.stack_id = k.id AND a.axis = 'disposition' \
-             AND a.value = 'excluded')"
-        ));
-    } else {
+    // A stack the pack ruled out is not written, nor (record 55 C3) a display
+    // composite, unless the selection names the dispositions it takes, here
+    // or by an axis item on the disposition axis, which the loop above reads.
+    if !selection.names_dispositions() {
+        if by_default {
+            wheres.push(format!(
+                "NOT EXISTS (SELECT 1 FROM {axis} a WHERE a.stack_id = k.id \
+                 AND a.axis = 'disposition' AND a.value IN ({}))",
+                quoted(LEFT_OUT_UNLESS_ASKED)
+            ));
+        }
+    } else if !selection.dispositions.is_empty() {
         wheres.push(format!(
             "EXISTS (SELECT 1 FROM {axis} a WHERE a.stack_id = k.id AND a.axis = 'disposition' \
              AND a.value IN ({}))",
@@ -2760,12 +2857,16 @@ fn selection_where(store: &mut Store, selection: &Selection) -> String {
              AND a.value IN ({any}))"
         ));
     }
-    if selection.picked_only {
+    if selection.picked_only && selection.picks.is_none() {
+        // Record 55, decision 6, and one place of truth (2026-10-11): a
+        // release of a cohort or a dataset reads its own picks once read,
+        // else the pack's; any other, each subject's own dataset's by the
+        // same rule, as every reader of the main scans does. A release
+        // takes its stacks by the list it froze of them (record 55, rulings
+        // of 2026-10-12, item 6, carried to releases).
         wheres.push(format!(
-            "EXISTS (SELECT 1 FROM {} ps JOIN {} p ON p.id = ps.pick_id \
-             WHERE ps.stack_id = k.id AND p.withdrawn_at IS NULL)",
-            store.qualified("pick_stack"),
-            store.qualified("pick"),
+            "EXISTS (SELECT 1 FROM {} p WHERE p.stack_id = k.id)",
+            picks.stacks(store),
         ));
     }
     // Record 26 §13: only the files under the named datasets' pseudonymised
@@ -2788,6 +2889,224 @@ fn selection_where(store: &mut Store, selection: &Selection) -> String {
         true => String::new(),
         false => format!(" AND {}", wheres.join(" AND ")),
     }
+}
+
+/// Values as an SQL list of quoted literals.
+fn quoted(values: &[&str]) -> String {
+    values
+        .iter()
+        .map(|v| format!("'{}'", v.replace('\'', "''")))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The stacks the selection reaches that its default leaves out, by
+/// disposition (record 55 C3): nothing when the selection names the
+/// dispositions it takes, since then nothing is left out by default.
+fn left_out_unless_asked(
+    store: &mut Store,
+    selection: &Selection,
+    picks: &Picks,
+) -> Result<BTreeMap<String, i64>, Error> {
+    let mut out = BTreeMap::new();
+    if selection.names_dispositions() {
+        return Ok(out);
+    }
+    let from = selection_from(store);
+    let filter = filter_of(store, selection, picks, false);
+    let sql = format!(
+        "SELECT a.value, COUNT(DISTINCT k.id) {from} \
+         JOIN {} a ON a.stack_id = k.id AND a.axis = 'disposition' \
+         WHERE a.value IN ({}){filter} GROUP BY a.value ORDER BY a.value",
+        store.qualified("classification_axis"),
+        quoted(LEFT_OUT_UNLESS_ASKED)
+    );
+    for r in store.query(&sql, &[])? {
+        out.insert(r.text(0)?.to_string(), r.int(1)?);
+    }
+    Ok(out)
+}
+
+/// Record 55, decision 6: what a release of picked stacks reads of the
+/// picks (`nils_registry::pick_truth`, pinned to the versions read now) and
+/// what it records of them, worked out once per release. A release of all
+/// stacks reads no picks.
+fn picks_read(
+    store: &mut Store,
+    selection: &Selection,
+    pack: &str,
+    pack_version: &str,
+) -> Result<(Of, Option<serde_json::Value>), Error> {
+    if !selection.picked_only {
+        return Ok((Of::Pack, None));
+    }
+    // record 55 (rulings of 2026-10-12, item 6): a run's frozen list of a
+    // dataset's or a cohort's main scans is the picks it was resolved from,
+    // which the release records as they were recorded
+    if let Some(doc) = &selection.picks {
+        return Ok((Of::of_record(doc), Some(picks_recorded(doc))));
+    }
+    let (of, doc) = nils_registry::pick_truth::for_release(
+        store,
+        &selection.cohorts,
+        &selection.datasets,
+        pack,
+        pack_version,
+    )?;
+    Ok((of, Some(doc)))
+}
+
+/// Record 55 (rulings of 2026-10-12, item 6, carried to releases): freeze
+/// what a release reads of the picks, before it takes a stack
+/// ([`nils_registry::pick_truth::freeze`]): of each visit a stack the
+/// selection reaches is picked on, every live pick of what it read, of
+/// every role; of a run's list of a scope's main scans, each of its stacks
+/// the main scan of the list's role on its visit as well.
+fn freeze_picks(
+    registry: &mut Registry,
+    settings: &Settings,
+    reading: &Of,
+    live: &Picks,
+    by_study: &HashMap<i64, nils_session::Labelled>,
+    release: i64,
+) -> Result<nils_registry::pick_truth::Frozen, Error> {
+    let taken: Vec<(i64, i64)> = {
+        let store = registry.store();
+        let from = selection_from(store);
+        let filter = selection_where(store, &settings.selection, live);
+        let sql = format!("SELECT DISTINCT k.id, se.subject_id {from} WHERE 1 = 1{filter}");
+        store
+            .query(&sql, &[])?
+            .iter()
+            .map(|r| Ok((r.int(0)?, r.int(1)?)))
+            .collect::<Result<_, StoreError>>()?
+    };
+    let roles = settings.selection.picks.as_ref().map(listed_roles);
+    let listed = match roles.filter(|r| !r.is_empty()) {
+        Some(roles) => {
+            // each stack's visit as a pick names it: the first day of its
+            // session under the default scheme
+            let default = Scheme::default();
+            let other;
+            let labels = if settings.scheme.digest() == default.digest() {
+                by_study
+            } else {
+                let anchors = nils_session::Anchors::resolve(registry, &default, BTreeMap::new())
+                    .map_err(session_err)?;
+                nils_session::ensure(registry, &default, &anchors, None, false)
+                    .map_err(session_err)?;
+                other = nils_session::labels_by_study(registry.store(), &default)
+                    .map_err(session_err)?;
+                &other
+            };
+            let visits = visits_of(registry.store(), &settings.selection.stacks, labels)?;
+            roles
+                .into_iter()
+                .map(|(role, of)| nils_registry::pick_truth::Listed {
+                    role,
+                    stacks: visits
+                        .iter()
+                        .filter(|(s, _, _)| of.as_ref().is_none_or(|of| of.contains(s)))
+                        .cloned()
+                        .collect(),
+                })
+                .collect()
+        }
+        None => Vec::new(),
+    };
+    Ok(nils_registry::pick_truth::freeze(
+        registry.store(),
+        release,
+        reading,
+        &taken,
+        &listed,
+    )?)
+}
+
+/// The roles a run's list of a scope's main scans was taken for, as its
+/// picks document names them: `main`, the one role every stack of the list
+/// is the main scan of; or, of a list over several roles (2026-10-12),
+/// `by_role`, each role with its own stacks.
+fn listed_roles(doc: &serde_json::Value) -> Vec<(String, Option<std::collections::BTreeSet<i64>>)> {
+    match doc["by_role"].as_object() {
+        Some(roles) => roles
+            .iter()
+            .map(|(role, stacks)| {
+                (
+                    role.clone(),
+                    Some(
+                        stacks
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .filter_map(serde_json::Value::as_i64)
+                            .collect(),
+                    ),
+                )
+            })
+            .collect(),
+        None => doc["main"]
+            .as_str()
+            .map(|role| vec![(role.to_string(), None)])
+            .unwrap_or_default(),
+    }
+}
+
+/// A run's picks document as the release records it: each role's own
+/// stacks left out (the list is the release's stacks), its roles named.
+fn picks_recorded(doc: &serde_json::Value) -> serde_json::Value {
+    let mut out = doc.clone();
+    if let Some(o) = out.as_object_mut()
+        && let Some(roles) = o.remove("by_role")
+    {
+        let names: Vec<String> = roles
+            .as_object()
+            .map(|r| r.keys().cloned().collect())
+            .unwrap_or_default();
+        o.insert("roles".to_string(), serde_json::json!(names));
+    }
+    out
+}
+
+/// Each of `stacks` with its subject and its visit's first day under
+/// `labels`, as a pick names a visit; a stack of no session is left out.
+fn visits_of(
+    store: &mut Store,
+    stacks: &[i64],
+    labels: &HashMap<i64, nils_session::Labelled>,
+) -> Result<Vec<(i64, i64, String)>, Error> {
+    let mut out = Vec::new();
+    for chunk in stacks.chunks(500) {
+        let sql = format!(
+            "SELECT st.id, se.study_id FROM {} st JOIN {} se ON se.id = st.series_id \
+             WHERE st.id IN ({})",
+            store.qualified("stack"),
+            store.qualified("series"),
+            chunk
+                .iter()
+                .map(i64::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        for r in store.query(&sql, &[])? {
+            if let Some(l) = labels.get(&r.int(1)?) {
+                out.push((r.int(0)?, l.subject_id, l.first.to_string()));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// What a release's row records of the picks it read, once it has frozen
+/// them.
+fn set_pick_rules(store: &mut Store, release: i64, doc: &serde_json::Value) -> Result<(), Error> {
+    store.update_by_id(
+        table("release"),
+        &[("pick_rules", Param::from(doc.to_string()))],
+        "id",
+        release,
+    )?;
+    Ok(())
 }
 
 /// The sources whose root lies under one of the named datasets'
@@ -2827,7 +3146,7 @@ struct Policies {
 }
 
 impl Policies {
-    fn resolve(store: &mut Store, settings: &Settings) -> Result<Policies, Error> {
+    fn resolve(store: &mut Store, settings: &Settings, picks: &Picks) -> Result<Policies, Error> {
         let mut out = Policies {
             all: vec![settings.policy.clone()],
             datasets: vec![None],
@@ -2837,7 +3156,7 @@ impl Policies {
         // the source roots the selection reaches, and the dataset holding
         // each
         let from = selection_from(store);
-        let filter = selection_where(store, &settings.selection);
+        let filter = selection_where(store, &settings.selection, picks);
         let sql = format!("SELECT DISTINCT so.root, so.root_canonical {from} WHERE 1 = 1{filter}");
         let roots: Vec<(String, String)> = store
             .query(&sql, &[])?
@@ -2938,9 +3257,10 @@ fn selection_from(store: &mut Store) -> String {
 fn selected_subjects(
     store: &mut Store,
     selection: &Selection,
+    picks: &Picks,
 ) -> Result<Vec<(i64, String)>, Error> {
     let from = selection_from(store);
-    let filter = selection_where(store, selection);
+    let filter = selection_where(store, selection, picks);
     let sql = format!(
         "SELECT DISTINCT se.subject_id, su.code {from} WHERE 1 = 1{filter} ORDER BY se.subject_id"
     );
@@ -2952,9 +3272,9 @@ fn selected_subjects(
 }
 
 /// How much source the selection is, for the preflight.
-fn selection_bytes(store: &mut Store, selection: &Selection) -> Result<i64, Error> {
+fn selection_bytes(store: &mut Store, selection: &Selection, picks: &Picks) -> Result<i64, Error> {
     let from = selection_from(store);
-    let filter = selection_where(store, selection);
+    let filter = selection_where(store, selection, picks);
     // Cast, because a sum of bigints is a numeric on Postgres and the store
     // reads a numeric only as text.
     let sql =
@@ -2980,8 +3300,9 @@ pub struct Preview {
 }
 
 pub fn preview(store: &mut Store, selection: &Selection) -> Result<Preview, Error> {
+    let (reading, _) = picks_read(store, selection, "", "")?;
     let from = selection_from(store);
-    let filter = selection_where(store, selection);
+    let filter = selection_where(store, selection, &Picks::Live(reading));
     let sql = format!(
         "SELECT COUNT(DISTINCT su.id), COUNT(DISTINCT se.study_id), COUNT(DISTINCT k.id),                 COUNT(*), CAST(COALESCE(SUM(sf.size), 0) AS BIGINT)          {from} WHERE 1 = 1{filter}"
     );
@@ -3006,9 +3327,10 @@ fn select_subject(
     store: &mut Store,
     selection: &Selection,
     subject: i64,
+    picks: &Picks,
 ) -> Result<Vec<Instance>, Error> {
     let from = selection_from(store);
-    let filter = selection_where(store, selection);
+    let filter = selection_where(store, selection, picks);
     let sql = format!(
         // The stored path is relative to the batch root it was walked from,
         // which is what makes a registry portable; the root is on `source`.
@@ -3264,6 +3586,27 @@ fn write_bids(
         &stem,
         settings.compress,
     );
+    // Wave 7a §8.2: an image BIDS cannot admit from its headers alone is no
+    // BIDS image; it goes under `sourcedata/` as one that did not convert
+    let made = made.and_then(|made| {
+        let datatype = job.place.dir.rsplit('/').next().unwrap_or("");
+        let raw = job.place.dir.starts_with("sub-") && job.place.dir.split('/').count() == 3;
+        let lacks = match raw {
+            true => crate::bids::sidecar::gaps(datatype, &stem, &into, &made.files),
+            false => Vec::new(),
+        };
+        if lacks.is_empty() {
+            return Ok(made);
+        }
+        for f in &made.files {
+            std::fs::remove_file(into.join(f)).ok();
+        }
+        Err(format!(
+            "BIDS requires of {datatype}/{} what its headers do not give: {}",
+            stem_suffix(&stem),
+            lacks.join(", ")
+        ))
+    });
     match made {
         Ok(made) => {
             // Record 55 C4 (2026-10-09), after v0's `bids-dcm` tree: the
@@ -3305,6 +3648,19 @@ fn write_bids(
             // or an ADC map carrying them is an error, so a file whose
             // extension the suffix's group does not admit is not kept.
             let datatype = job.place.dir.rsplit('/').next().unwrap_or("");
+            // and with no group to ask, a gradient table stays beside a
+            // `dwi` image alone (a trace's was found by the validator)
+            if crate::bids::schema::group_of(datatype, stem_suffix(&stem)).is_none()
+                && stem_suffix(&stem) != "dwi"
+            {
+                files.retain(|file| {
+                    let table = file.ends_with(".bval") || file.ends_with(".bvec");
+                    if table {
+                        std::fs::remove_file(into.join(file)).ok();
+                    }
+                    !table
+                });
+            }
             if let Some(group) = crate::bids::schema::group_of(datatype, stem_suffix(&stem)) {
                 files.retain(|file| {
                     let admitted = group
@@ -3508,6 +3864,7 @@ fn open_row(
     earlier: Option<&Earlier>,
     placements: &BTreeMap<String, String>,
     policies: &[serde_json::Value],
+    pick_rules: Option<&serde_json::Value>,
 ) -> Result<i64, Error> {
     let categories: Vec<&str> = settings.categories.iter().map(|c| c.name()).collect();
     // record 26 §13: the row says where its policy came from, and what each
@@ -3519,6 +3876,7 @@ fn open_row(
     // number means written and counted under the default and held under
     // `--on-unknown hold`.
     policy["on_unknown"] = serde_json::Value::from(settings.on_unknown.name());
+    let pick_rules = pick_rules.map_or(Param::Null, |doc| Param::from(doc.to_string()));
     let written = store.insert(
         &Insert::new(
             table("release"),
@@ -3548,6 +3906,7 @@ fn open_row(
                 "added",
                 "removed",
                 "policies",
+                "pick_rules",
             ],
         )
         .returning(&["id"]),
@@ -3585,6 +3944,7 @@ fn open_row(
             Param::Int(0),
             Param::Int(0),
             Param::from(serde_json::Value::Array(policies.to_vec()).to_string()),
+            pick_rules,
         ]],
     )?;
     Ok(written.first().map(|r| r.int(0)).transpose()?.unwrap_or(0))

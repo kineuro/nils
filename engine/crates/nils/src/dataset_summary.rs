@@ -235,11 +235,10 @@ fn seeds(store: &mut Store, sources: &[i64]) -> Result<BTreeSet<i64>, StoreError
     }
     for r in store.query(
         &format!(
-            "SELECT DISTINCT cl.job_id FROM {} cl JOIN {} x ON x.id = cl.stack_id \
-             JOIN {} b ON b.id = x.first_batch_id WHERE b.source_id IN ({ids})",
+            "SELECT DISTINCT cl.job_id FROM {} cl JOIN {} x ON x.id = cl.stack_id WHERE {}",
             store.qualified("classification"),
             store.qualified("stack"),
-            store.qualified("ingest_batch"),
+            crate::operations::held_by(store, "x", &ids),
         ),
         &[],
     )? {
@@ -271,10 +270,29 @@ pub(crate) fn jobs_of(
     }
     // a step's run a door queued for it, before its run names its stacks
     let queued_for = format!("dataset:{}", dataset.name);
+    // a folder added again after its dataset was removed (2026-10-10): the
+    // removed dataset's runs are its own, never the new one's, so where the
+    // folder held a dataset before, only the runs since this one was added
+    // are this one's
+    let added_again = was_a_dataset_before(store, dataset, &folders)?;
     let mut jobs = newest(store, window)?;
     jobs.reverse();
     let mut out = Vec::new();
     for j in jobs {
+        // a run made for another dataset is that one's, whatever folder it read
+        if j.args["place_id"]
+            .as_i64()
+            .is_some_and(|id| id != dataset.id)
+        {
+            continue;
+        }
+        if added_again
+            && j.started_at
+                .as_deref()
+                .is_some_and(|t| t < dataset.created_at.as_str())
+        {
+            continue;
+        }
         let w = words(&j.args);
         let linked = |id: Option<i64>| id.is_some_and(|id| related.contains(&id));
         let mine = related.contains(&j.id)
@@ -292,6 +310,30 @@ pub(crate) fn jobs_of(
     }
     out.reverse();
     Ok(out)
+}
+
+/// Whether the dataset's folder or its name was another dataset's, removed
+/// before this one was added: a source place retired on the same folder, as
+/// declared or as the disk resolves it, or one that gave its name up to
+/// this one (`place::retired_name`), whose runs name it still.
+fn was_a_dataset_before(
+    store: &mut Store,
+    dataset: &Place,
+    folders: &[String],
+) -> Result<bool, StoreError> {
+    let same = |path: &str| {
+        let declared = path.trim_end_matches('/').to_string();
+        let real = std::fs::canonicalize(path)
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| declared.clone());
+        folders.contains(&declared) || folders.contains(&real)
+    };
+    Ok(place::list(store)?.into_iter().any(|p| {
+        p.id != dataset.id
+            && p.role == place::Role::Source
+            && p.retired_at.is_some()
+            && (same(&p.path) || p.name == place::retired_name(&dataset.name, p.id))
+    }))
 }
 
 /// The ids of a dataset's jobs, newest first, for the jobs door.
@@ -314,11 +356,11 @@ fn by_axis(
     axis: &str,
     sealed: Option<&str>,
 ) -> Result<Vec<(String, i64)>, StoreError> {
-    let (class_axis, stack, batch) = (
+    let (class_axis, stack) = (
         store.qualified("classification_axis"),
         store.qualified("stack"),
-        store.qualified("ingest_batch"),
     );
+    let held = crate::operations::held_by(store, "x", sources);
     let label = if axis == KIND_AXIS {
         format!(
             "CASE WHEN EXISTS (SELECT 1 FROM {class_axis} m WHERE m.stack_id = a.stack_id \
@@ -337,9 +379,9 @@ fn by_axis(
         .unwrap_or_default();
     let sql = format!(
         "SELECT k.label, COUNT(*) FROM (SELECT {label} AS label FROM {class_axis} a \
-         JOIN {stack} x ON x.id = a.stack_id JOIN {batch} b ON b.id = x.first_batch_id \
+         JOIN {stack} x ON x.id = a.stack_id \
          WHERE a.axis = '{axis}' AND a.value IS NOT NULL AND a.value <> '' \
-         AND b.source_id IN ({sources}){hidden}) k GROUP BY k.label"
+         AND {held}{hidden}) k GROUP BY k.label"
     );
     let mut out: Vec<(String, i64)> = store
         .query(&sql, &[])?
@@ -400,6 +442,18 @@ fn state_of(open: Option<&Light>, done: bool) -> &'static str {
     }
 }
 
+/// A step of the dataset's chain (pseudonymise, read, sort, main scans):
+/// the open job's state, else `failed` where the step's newest job failed,
+/// so a run that stopped says so (2026-10-10: a pseudonymise run that failed
+/// at once left the page as if nothing had happened), else done or waiting.
+/// The job's own words are the jobs door's, never the summary's.
+fn chain_state(open: Option<&Light>, newest: Option<&Light>, done: bool) -> &'static str {
+    if open.is_none() && newest.is_some_and(|j| j.state == "failed") {
+        return "failed";
+    }
+    state_of(open, done)
+}
+
 /// One step: its name, state and counts, and the job that ran it last (or
 /// runs it now) with its times and its progress while it runs.
 fn step(name: &str, state: &str, job: Option<&Light>, counts: Value) -> Value {
@@ -417,6 +471,61 @@ fn step(name: &str, state: &str, job: Option<&Light>, counts: Value) -> Value {
         }
     }
     doc
+}
+
+/// One kind of file a read set aside by policy, in the words of
+/// `nils_dicom::set_aside_words`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SetAside {
+    pub(crate) kind: &'static str,
+    pub(crate) words: &'static str,
+    pub(crate) count: i64,
+}
+
+/// The names of the policy classes, the reasons a read sets a file aside.
+fn policy_names() -> Vec<&'static str> {
+    nils_dicom::QuarantineClass::ALL
+        .into_iter()
+        .filter(|c| c.is_policy_class())
+        .map(|c| c.name())
+        .collect()
+}
+
+/// The policy classes as a SQL list of their names.
+fn policy_reasons() -> String {
+    policy_names()
+        .into_iter()
+        .map(|n| format!("'{n}'"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Record 56 (2026-10-11): the files of the sources the read set aside by
+/// policy (a SOP class or a modality outside the batch's knobs), by kind in
+/// plain words, most first. They ask nobody anything; the files the reader
+/// could not take keep their review item and are not counted here.
+pub(crate) fn set_aside_of(store: &mut Store, sources: &str) -> Result<Vec<SetAside>, StoreError> {
+    let sql = format!(
+        "SELECT reason, detail, COUNT(*) FROM {} WHERE source_id IN ({sources}) \
+         AND status = 'quarantined' AND reason IN ({}) GROUP BY reason, detail",
+        store.qualified("source_file"),
+        policy_reasons()
+    );
+    let mut by: std::collections::BTreeMap<&'static str, (&'static str, i64)> =
+        std::collections::BTreeMap::new();
+    for r in store.query(&sql, &[])? {
+        let Some(class) = nils_dicom::QuarantineClass::from_name(r.text(0)?) else {
+            continue;
+        };
+        let (kind, words) = nils_dicom::set_aside_words(class, r.opt_text(1)?);
+        by.entry(kind).or_insert((words, 0)).1 += r.int(2)?;
+    }
+    let mut out: Vec<SetAside> = by
+        .into_iter()
+        .map(|(kind, (words, count))| SetAside { kind, words, count })
+        .collect();
+    out.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.kind.cmp(b.kind)));
+    Ok(out)
 }
 
 /// The summary of one dataset, as `GET /api/datasets/{name}/summary`
@@ -459,60 +568,88 @@ pub(crate) fn document(
     let sources = list(&ids);
     // the visits are none where nobody has built the session cache, and
     // a count of it where somebody has
-    let (mut subjects, mut studies, mut stacks, mut sessions) = (0, 0, 0, window.map(|_| 0));
+    let (mut studies, mut stacks, mut sessions) = (0, 0, window.map(|_| 0));
+    // Nima, 2026-10-12: a dataset holds stacks and files, never subjects;
+    // the subjects counted in it are those with a stack its tree holds a
+    // file of, as every reader counts them (`nils_registry::dataset_subjects`)
+    let subjects = nils_registry::dataset_subjects::count(store, &ids).map_err(failed)?;
     let (mut read, mut refused, mut reads, mut classified) = (0, 0, 0, 0);
+    // record 55 (2026-10-10): the files read as their instance's own, the
+    // copies of an instance another dataset read (`known`) or this one holds
+    // a file of already (`twice`), and the files held because the registry
+    // holds their instance UID under another subject, study or series
+    let (mut new, mut known, mut twice, mut same_instance) = (0, 0, 0, 0);
+    // and the files a person let go out of the read, the files gone from the
+    // tree since a read, and the open questions about the dataset's held
+    // files (the duplicate policy's defaults, 2026-10-10)
+    let (mut left_out, mut gone, mut identity_questions) = (0, 0, 0);
     let mut refused_batch: Option<i64> = None;
+    // record 56 (2026-10-11): the files the read set aside by policy, which
+    // ask nobody anything, by kind in plain words
+    let mut set_aside: Vec<SetAside> = Vec::new();
+    // and the subjects with no stack in it its set-aside files are of, a
+    // fact about those files (2026-10-12)
+    let mut set_aside_no_scans = nils_registry::dataset_subjects::SetAside::default();
     let mut certainty = crate::certainty::Certainty::default();
     let mut passes = 0;
     let (mut kinds, mut regions) = (Vec::new(), Vec::new());
     let mut last_digest: Option<(String, Option<String>)> = None;
     if !ids.is_empty() {
         let q = |t: &str| store.qualified(t);
-        let (batch, stack, study, subject, file, cache, instance, series, class) = (
+        let (batch, stack, study, file, cache, instance, class) = (
             q("ingest_batch"),
             q("stack"),
             q("study"),
-            q("subject"),
             q("source_file"),
             q("session_cache_study"),
             q("instance"),
-            q("series"),
             q("classification"),
         );
-        let of_source =
-            format!("JOIN {batch} b ON b.id = x.first_batch_id WHERE b.source_id IN ({sources})");
-        // as the sources door counts them, so the card and its detail agree
-        subjects = count(
-            store,
-            &format!(
-                "SELECT COUNT(DISTINCT se.subject_id) FROM {file} f \
-                 JOIN {instance} i ON i.id = f.instance_id JOIN {series} se ON se.id = i.series_id \
-                 JOIN {subject} su ON su.id = se.subject_id \
-                 WHERE f.source_id IN ({sources}) AND su.merged_into IS NULL"
-            ),
-        )
-        .map_err(failed)?;
+        // record 55 (2026-10-10): every scan its tree has a file of, whoever
+        // read it first
+        let in_tree = crate::operations::held_by(store, "x", &sources);
+        let studies_in_tree = crate::operations::studies_held_by(store, "x", &sources);
         studies = count(
             store,
-            &format!("SELECT COUNT(*) FROM {study} x {of_source}"),
+            &format!("SELECT COUNT(*) FROM {study} x WHERE {studies_in_tree}"),
         )
         .map_err(failed)?;
         stacks = count(
             store,
-            &format!("SELECT COUNT(*) FROM {stack} x {of_source}"),
+            &format!("SELECT COUNT(*) FROM {stack} x WHERE {in_tree}"),
         )
         .map_err(failed)?;
         if let Some(window) = window {
-            sessions = Some(
-                count(
-                    store,
-                    &format!(
-                        "SELECT COUNT(DISTINCT scs.session_id) FROM {cache} scs \
-                         JOIN {study} x ON x.id = scs.study_id {of_source} AND scs.window_days = {window}"
-                    ),
+            // 2026-10-12: and none where the cache holds not all of its
+            // dated studies yet (read since anything built it), so that a
+            // dataset read after the cache was built does not say 0 visits
+            let uncached = count(
+                store,
+                &format!(
+                    "SELECT COUNT(*) FROM {study} x WHERE {studies_in_tree} \
+                     AND COALESCE(x.date_filled, x.study_date) IS NOT NULL \
+                     AND EXISTS (SELECT 1 FROM {series} se WHERE se.study_id = x.id) \
+                     AND NOT EXISTS (SELECT 1 FROM {cache} scs WHERE scs.study_id = x.id \
+                     AND scs.window_days = {window})",
+                    series = store.qualified("series"),
+                ),
+            )
+            .map_err(failed)?;
+            sessions = if uncached > 0 {
+                None
+            } else {
+                Some(
+                    count(
+                        store,
+                        &format!(
+                            "SELECT COUNT(DISTINCT scs.session_id) FROM {cache} scs \
+                             JOIN {study} x ON x.id = scs.study_id WHERE {studies_in_tree} \
+                             AND scs.window_days = {window}"
+                        ),
+                    )
+                    .map_err(failed)?,
                 )
-                .map_err(failed)?,
-            );
+            };
         }
         read = count(
             store,
@@ -522,17 +659,95 @@ pub(crate) fn document(
             ),
         )
         .map_err(failed)?;
+        let same = nils_registry::review::SAME_INSTANCE_KIND;
         refused = count(
             store,
             &format!(
-                "SELECT COUNT(*) FROM {file} WHERE source_id IN ({sources}) AND status = 'quarantined'"
+                "SELECT COUNT(*) FROM {file} WHERE source_id IN ({sources}) AND status = 'quarantined' \
+                 AND (reason IS NULL OR reason NOT LIKE '{same}%')"
             ),
         )
         .map_err(failed)?;
+        let drop = nils_registry::review::SAME_INSTANCE_DROP;
+        left_out = count(
+            store,
+            &format!(
+                "SELECT COUNT(*) FROM {file} WHERE source_id IN ({sources}) AND status = 'quarantined' \
+                 AND reason = '{drop}'"
+            ),
+        )
+        .map_err(failed)?;
+        gone = count(
+            store,
+            &format!(
+                "SELECT COUNT(*) FROM {file} WHERE source_id IN ({sources}) AND status = 'gone'"
+            ),
+        )
+        .map_err(failed)?;
+        let item = store.qualified("review_item");
+        let keys: Vec<String> = ids
+            .iter()
+            .map(|id| format!("ri.group_key LIKE 'source:{id}|%'"))
+            .collect();
+        identity_questions = count(
+            store,
+            &format!(
+                "SELECT COUNT(*) FROM {item} ri WHERE ri.kind = '{same}' AND ri.status = 'open' AND ({})",
+                keys.join(" OR ")
+            ),
+        )
+        .map_err(failed)?;
+        same_instance = count(
+            store,
+            &format!(
+                "SELECT COUNT(*) FROM {file} WHERE source_id IN ({sources}) AND status = 'quarantined' \
+                 AND reason = '{same}'"
+            ),
+        )
+        .map_err(failed)?;
+        new = count(
+            store,
+            &format!(
+                "SELECT COUNT(*) FROM {file} WHERE source_id IN ({sources}) AND status = 'ingested'"
+            ),
+        )
+        .map_err(failed)?;
+        let copies = count(
+            store,
+            &format!(
+                "SELECT COUNT(*) FROM {file} WHERE source_id IN ({sources}) AND status = 'duplicate'"
+            ),
+        )
+        .map_err(failed)?;
+        // one copy of each instance whose own file is no live file of this
+        // dataset is known; every other copy is this dataset's second file
+        known = count(
+            store,
+            &format!(
+                "SELECT COUNT(DISTINCT f.instance_id) FROM {file} f \
+                 JOIN {instance} i ON i.id = f.instance_id LEFT JOIN {file} o ON o.id = i.source_file_id \
+                 WHERE f.source_id IN ({sources}) AND f.status = 'duplicate' \
+                 AND (o.id IS NULL OR o.source_id NOT IN ({sources}) OR o.status NOT IN ('ingested', 'duplicate'))"
+            ),
+        )
+        .map_err(failed)?;
+        twice = (copies - known).max(0);
+        set_aside = set_aside_of(store, &sources).map_err(failed)?;
+        set_aside_no_scans = nils_registry::dataset_subjects::set_aside_without_stacks(
+            store,
+            dataset.id,
+            &ids,
+            &policy_names(),
+        )
+        .map_err(failed)?;
+        // the newest batch that refused a file a person may look at: none
+        // set aside by policy, none held for its instance
         refused_batch = store
             .query(
                 &format!(
-                    "SELECT MAX(batch_id) FROM {file} WHERE source_id IN ({sources}) AND status = 'quarantined'"
+                    "SELECT MAX(batch_id) FROM {file} WHERE source_id IN ({sources}) AND status = 'quarantined' \
+                     AND (reason IS NULL OR (reason NOT LIKE '{same}%' AND reason NOT IN ({})))",
+                    policy_reasons()
                 ),
                 &[],
             )
@@ -572,9 +787,7 @@ pub(crate) fn document(
             .map_err(failed)?;
         classified = count(
             store,
-            &format!(
-                "SELECT COUNT(*) FROM {stack} x JOIN {class} cl ON cl.stack_id = x.id {of_source}"
-            ),
+            &format!("SELECT COUNT(*) FROM {stack} x JOIN {class} cl ON cl.stack_id = x.id WHERE {in_tree}"),
         )
         .map_err(failed)?;
         // record 56: how sure the sort is counts what the sort asks, never
@@ -644,17 +857,26 @@ pub(crate) fn document(
         let open = open_of(&["pseudonymize"]);
         steps.push(step(
             "pseudonymised",
-            state_of(open, copied > 0 && waiting == 0),
+            chain_state(
+                open,
+                newest_of(&["pseudonymize"]),
+                copied > 0 && waiting == 0,
+            ),
             open.or_else(|| newest_of(&["pseudonymize"])),
             json!({"files": copied, "waiting": waiting, "held": held}),
         ));
     }
+    let set_aside_total: i64 = set_aside.iter().map(|k| k.count).sum();
     let open = open_of(&["digest", "ingest"]);
     let mut read_step = step(
         "read",
-        state_of(open, reads > 0),
+        chain_state(open, newest_of(&["digest", "ingest"]), reads > 0),
         open.or_else(|| newest_of(&["digest", "ingest"])),
-        json!({"files": read, "refused": refused, "reads": reads}),
+        json!({
+            "files": read, "new": new, "known": known, "twice": twice,
+            "same_instance": same_instance, "left_out": left_out, "gone": gone,
+            "refused": refused, "set_aside": set_aside_total, "reads": reads,
+        }),
     );
     if read_step["job"].is_null()
         && let Some((started, finished)) = &last_digest
@@ -665,10 +887,15 @@ pub(crate) fn document(
     steps.push(read_step);
     let unsorted = certainty.unsorted;
     let open = open_of(&["fingerprint", "classify"]);
+    let sort_failed = newest_of(&["fingerprint", "classify"]).filter(|j| j.state == "failed");
     steps.push(step(
         "sorted",
-        state_of(open, stacks > 0 && unsorted == 0),
-        open.or_else(|| newest_of(&["classify"])),
+        chain_state(
+            open,
+            newest_of(&["fingerprint", "classify"]),
+            stacks > 0 && unsorted == 0,
+        ),
+        open.or(sort_failed).or_else(|| newest_of(&["classify"])),
         json!({
             "scans": classified, "of": stacks, "look": certainty.to_sort,
             "passes": passes, "unsorted": unsorted,
@@ -696,7 +923,11 @@ pub(crate) fn document(
         if picks_off && open.is_none() {
             "off"
         } else {
-            state_of(open, picked > 0 || !picks["last_run"].is_null())
+            chain_state(
+                open,
+                newest_of(&["pick"]),
+                picked > 0 || !picks["last_run"].is_null(),
+            )
         },
         open.or_else(|| newest_of(&["pick"])),
         json!({"picked": picked, "borders": borders}),
@@ -784,14 +1015,30 @@ pub(crate) fn document(
         "need_a_look": certainty.to_sort,
         "unsorted": unsorted,
         "look_kinds": certainty.need_a_look,
+        "identity_questions": identity_questions,
         "kinds": pairs(kinds, "kind"),
         "body_regions": pairs(regions, "region"),
         "files": {
             "found": found_files,
             "bytes": tree(found_tree, "bytes"),
             "read": read,
+            "new": new,
+            "known": known,
+            "twice": twice,
+            "same_instance": same_instance,
+            "left_out": left_out,
+            "gone": gone,
             "refused": refused,
             "refused_batch": refused_batch,
+            "set_aside": set_aside_total,
+            "set_aside_kinds": set_aside
+                .iter()
+                .map(|k| json!({"kind": k.kind, "words": k.words, "count": k.count}))
+                .collect::<Vec<_>>(),
+            "set_aside_no_scans": {
+                "subjects": set_aside_no_scans.subjects,
+                "files": set_aside_no_scans.files,
+            },
             "held": held,
         },
         "pictures_place": working.map(|w| w.name),
@@ -801,7 +1048,7 @@ pub(crate) fn document(
 
 #[cfg(test)]
 mod tests {
-    use super::{flag_id, named_for, names};
+    use super::{Light, chain_state, flag_id, named_for, names};
 
     fn w(line: &str) -> Vec<String> {
         line.split_whitespace().map(str::to_string).collect()
@@ -853,5 +1100,40 @@ mod tests {
         );
         assert_eq!(flag_id(&w("pick run --after-sort x"), "--after-sort"), None);
         assert_eq!(flag_id(&w("pick run"), "--after-sort"), None);
+    }
+
+    /// A job of a step as the summary reads it, in one state.
+    fn light(id: i64, state: &str) -> Light {
+        Light {
+            id,
+            kind: "pseudonymize".into(),
+            name: None,
+            state: state.into(),
+            started_at: None,
+            finished_at: None,
+            args: serde_json::json!({}),
+            progress: None,
+        }
+    }
+
+    /// 2026-10-10: a pseudonymise run that failed at once left the step
+    /// waiting, as if nothing had happened; the chain's step says failed.
+    #[test]
+    fn a_chain_step_whose_newest_job_failed_says_so() {
+        let failed = light(154, "failed");
+        let done = light(150, "done");
+        let running = light(155, "running");
+        assert_eq!(chain_state(None, Some(&failed), false), "failed");
+        // a failure is said even where an earlier run had done the step
+        assert_eq!(chain_state(None, Some(&failed), true), "failed");
+        // a run of it going again is what the step is
+        assert_eq!(
+            chain_state(Some(&running), Some(&running), false),
+            "running"
+        );
+        // the newest that ended well, or none, is done or waiting as before
+        assert_eq!(chain_state(None, Some(&done), true), "done");
+        assert_eq!(chain_state(None, Some(&done), false), "waiting");
+        assert_eq!(chain_state(None, None, false), "waiting");
     }
 }

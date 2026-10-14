@@ -1,4 +1,4 @@
-# 16 — v0 capability audit
+# 16 · v0 capability audit
 
 Written 2026-09-04, after Nima observed that the Wave 3 draft was built on a
 partial reading: "you check some file and forget the rest ... did we cover all
@@ -14,11 +14,11 @@ live metadata database and the application database, read-only.
 
 Status vocabulary:
 
-- **done** — built in v1 and gated.
-- **partial** — built, with a named thing missing.
-- **missing** — a real gap. Nothing in v1 does this.
-- **dropped** — deliberately not carried, with the reason.
-- **planned** — assigned to a named later wave.
+- **done**: built in v1 and gated.
+- **partial**: built, with a named thing missing.
+- **missing**: a real gap. Nothing in v1 does this.
+- **dropped**: deliberately not carried, with the reason.
+- **planned**: assigned to a named later wave.
 
 ## 0. The shape of v0
 
@@ -180,7 +180,7 @@ v0's code and the stack. Recorded in 11 and in the Wave 2 spec §11.1.
 Under a diagnosis anchor, 9.9 percent of live sessions precede their anchor and
 for a quarter of those subjects label order runs backwards against date order.
 
-## 6. `qc` — the largest package, and the least covered
+## 6. `qc` · the largest package, and the least covered
 
 Five products, 14,327 lines.
 
@@ -238,7 +238,7 @@ in a `bids/query.py` docstring: the echo suffix disappears when a single echo of
 a two-echo series is exported, because the collision counter counts stacks per
 series over the already filtered list.
 
-## 8. `compress` — an unrecorded capability
+## 8. `compress` · an unrecorded capability
 
 `compress/engine.py` packs a de-identified tree into **password-protected 7z
 archives in ~100 GB chunks** (`-mhe=on`, so the filenames inside are encrypted
@@ -255,7 +255,7 @@ release: a release that cannot be handed over is not finished. What v1 adds is
 that the archive set is part of the release record, so "what did we send them,
 and is it still intact" is a query rather than a folder someone remembers.
 
-## 9. `metadata_imports` — the clinical layer
+## 9. `metadata_imports` · the clinical layer
 
 Thirteen importers, 5,807 lines: subjects, cohorts, subject-cohorts,
 identifiers, id types, diseases, disease types, subject-diseases,

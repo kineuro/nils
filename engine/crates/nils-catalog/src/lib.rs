@@ -162,6 +162,10 @@ pub struct CohortRecord {
     pub name: String,
     pub owner: String,
     pub members: i64,
+    /// When the cohort was made, `YYYY-MM-DDTHH:MM:SSZ` on either backend:
+    /// the cohort's own date, not a subject's, so the chat can say which
+    /// cohort was made when (2026-10-12).
+    pub created_at: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -287,8 +291,8 @@ fn fixed_fields() -> Vec<Field> {
              provenance: &'static str,
              description: &str| {
         let (table, column): (&str, &str) = match (level, path) {
-            // Wave 7a: the name of a source place, through a stack's first
-            // digest and its source
+            // Wave 7a: the name of a source place, through the sources
+            // holding a file of a stack
             (_, "dataset") => (DATASET_TABLE, "name"),
             ("cohort", _) => ("cohort", path),
             ("subject", _) => ("subject", path),
@@ -362,6 +366,28 @@ fn fixed_fields() -> Vec<Field> {
             "registry",
             "what the cohort is",
         ),
+        // a cohort's dates are the cohort's own, never a subject's, so they
+        // are technical at every detail (2026-10-12)
+        f(
+            "cohort",
+            "created_at",
+            "timestamp",
+            Technical,
+            true,
+            false,
+            "registry",
+            "when the cohort was made, YYYY-MM-DDTHH:MM:SSZ: the cohort's own date, not a subject's",
+        ),
+        f(
+            "cohort",
+            "retired_at",
+            "timestamp",
+            Technical,
+            true,
+            false,
+            "registry",
+            "when the cohort was retired, null while it is in use; a retired cohort keeps its members and is read at this grain, never in the catalog's list of cohorts",
+        ),
         f(
             "subject",
             "id",
@@ -390,7 +416,7 @@ fn fixed_fields() -> Vec<Field> {
             false,
             false,
             "registry",
-            "the datasets the subject's stacks came from, by name; = and in ask whether one is among them",
+            "the datasets holding some of the subject's stacks, by name: a dataset is a folder of stacks and a subject is counted in it when some of its stacks are there (only a cohort has members); null for a subject with no stack in any; = and in ask whether one is among them",
         ),
         f(
             "subject",
@@ -510,7 +536,7 @@ fn fixed_fields() -> Vec<Field> {
             false,
             false,
             "registry",
-            "the datasets the session's stacks came from, by name; = and in ask whether one is among them",
+            "the datasets holding some of the session's stacks, by name; null where none does; = and in ask whether one is among them",
         ),
         f(
             "study",
@@ -610,7 +636,7 @@ fn fixed_fields() -> Vec<Field> {
             false,
             false,
             "registry",
-            "the dataset the stack came from, by name: the source place whose digest first read it",
+            "the datasets whose folder holds a file of the stack, by name: a stack with copies in two datasets is one stack in both; = and in ask whether one is among them",
         ),
         f(
             "stack",
@@ -1380,6 +1406,26 @@ fn measure_fields(store: &mut Store) -> Result<Vec<Field>, Error> {
             table: MEASURE_TABLE.into(),
             column: format!("run:{pipeline}:"),
         });
+        // record 55 H3, section 6.5: the status a check left on that run's
+        // results of the unit, so "where the segmentation was accepted" is
+        // one filter
+        out.push(Field {
+            level: scope.clone(),
+            path: format!("measure.{pipeline}.checked"),
+            type_: "text".into(),
+            class: Class::Technical,
+            dated: false,
+            federated: false,
+            description: format!(
+                "what a check said of the {scope}'s results of that {pipeline} run, the worst of them: rejected, flagged, unchecked or accepted; none where the run made no mask for it"
+            ),
+            caveats: None,
+            ai_context: None,
+            curated: false,
+            provenance: "pipeline",
+            table: MEASURE_TABLE.into(),
+            column: format!("checked:{pipeline}:"),
+        });
     }
     Ok(out)
 }
@@ -1676,15 +1722,24 @@ impl Catalog {
                 d.courses.push(r.text(1)?.to_string());
             }
         }
+        // the namespaces an answer may reveal: never the generator's type,
+        // whose value NILS does not keep (record 55 B2), so it is no
+        // namespace of any registry's (2026-10-10, the type made built in)
         let namespaces = nils_registry::schema::ID_TYPES
             .iter()
+            .filter(|(n, _)| *n != nils_registry::schema::GENERATOR_ID_TYPE)
             .map(|(n, _)| n.to_string())
             .collect();
         let mut cohorts = Vec::new();
+        let created = store.dialect().text_of_qualified(
+            Some("c"),
+            table("cohort").column("created_at").expect("created_at"),
+        );
         for r in store.query(
             &format!(
                 "SELECT c.id, c.name, c.owner, \
-                 (SELECT COUNT(*) FROM {} m WHERE m.cohort_id = c.id AND m.left_at IS NULL) \
+                 (SELECT COUNT(*) FROM {} m WHERE m.cohort_id = c.id AND m.left_at IS NULL), \
+                 {created} \
                  FROM {} c WHERE c.retired_at IS NULL ORDER BY c.name",
                 store.qualified("cohort_member"),
                 store.qualified("cohort")
@@ -1696,6 +1751,7 @@ impl Catalog {
                 name: r.text(1)?.to_string(),
                 owner: r.text(2)?.to_string(),
                 members: r.int(3)?,
+                created_at: r.opt_text(4)?.unwrap_or_default().to_string(),
             });
         }
         let mut schemes = Vec::new();
@@ -1954,7 +2010,7 @@ pub fn functions() -> Value {
     json!({
         "refs": ["field", "axis", "derived", "param"],
         "arithmetic": ["+", "-", "*", "/", "abs", "round", "coalesce", "case", "concat"],
-        "comparison": ["=", "<>", ">", ">=", "<", "<=", "~=", "in", "not_in", "has", "not_null", "is_null", "contains", "starts_with", "and", "or", "not"],
+        "comparison": ["=", "<>", ">", ">=", "<", "<=", "~=", "in", "not_in", "has", "not_null", "is_null", "contains", "starts_with", "and", "or", "not", "picked"],
         "time": ["days_between", "shift", "age_at", "bucket", "part"],
         "sequence": ["ordinal", "prev", "next", "change"],
         "aggregate": ["count", "distinct", "min", "max", "sum", "avg", "list", "share"],
@@ -2130,6 +2186,7 @@ impl Names for Catalog {
             .map(|d| Dataset {
                 name: d.name.clone(),
                 sources: d.sources.clone(),
+                id: d.id,
             })
             .collect()
     }

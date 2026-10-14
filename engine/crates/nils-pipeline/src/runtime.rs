@@ -575,6 +575,38 @@ pub fn detect_within(choice: Choice, path: Option<&OsStr>, cap: Duration) -> Det
     none(choice, looked, reason, unknown)
 }
 
+/// Whether a runtime holds an image already (2026-10-12), asked of its own
+/// store within `cap` and never pulled: `podman image exists` and `docker
+/// image inspect`. None where it did not answer in time, and for
+/// apptainer, whose images are files the engine builds and checks itself.
+pub fn image_here(cli: &Cli, image: &str, cap: Duration) -> Option<bool> {
+    let args: Vec<&str> = match cli.kind {
+        Kind::Podman => vec!["image", "exists", image],
+        Kind::Docker => vec!["image", "inspect", "--format", "{{.Id}}", image],
+        Kind::Apptainer => return None,
+    };
+    let mut child = Command::new(&cli.program)
+        .args(&args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let started = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Some(status.success()),
+            Ok(None) if started.elapsed() > cap => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+            Err(_) => return None,
+        }
+    }
+}
+
 /// Whether an apptainer version runs `--net --network none` for an
 /// unprivileged user: 1.1 and later.
 pub fn apptainer_isolates(version: &str) -> bool {
@@ -785,6 +817,14 @@ pub fn image_verified(target: &Path, form: ImageForm) -> bool {
         return false;
     };
     image_fingerprint(target, form).is_ok_and(|d| d == recorded.trim())
+}
+
+/// Whether a cached image is there with the record of its digest beside
+/// it, read without hashing it (2026-10-12): what a check before a run may
+/// ask, which never reads a whole image. The run verifies it before it is
+/// used.
+pub fn image_recorded(target: &Path) -> bool {
+    std::fs::symlink_metadata(target).is_ok() && image_record(target).is_file()
 }
 
 /// How an invocation ended.

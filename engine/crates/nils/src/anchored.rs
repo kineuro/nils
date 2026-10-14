@@ -35,6 +35,7 @@ use nils_registry::store::{Param, Store};
 use serde_json::{Value, json};
 
 use crate::campaigns::{campaign_err, cerr, print, rerr, shown, who};
+use crate::drawn::Refused;
 use crate::serve::{Caller, Reply};
 use crate::{Exit, usage};
 
@@ -159,11 +160,6 @@ fn items_in(text: &str) -> Result<Vec<Named>, String> {
 /// `nils campaign anchored`: check the items, draw their panels and order,
 /// and make the campaign.
 pub(crate) fn make(home: &Home, a: AnchoredArgs) -> Result<(), Exit> {
-    if a.seed.trim().is_empty() {
-        return Err(usage(
-            "--seed: the seed that draws the panels, written down before the draw",
-        ));
-    }
     let mut named: Vec<Named> = Vec::new();
     if let Some(f) = &a.items {
         let text =
@@ -182,49 +178,92 @@ pub(crate) fn make(home: &Home, a: AnchoredArgs) -> Result<(), Exit> {
         ));
     }
     let question = json!({"kind": "anchored", "axis": a.axis, "post": a.post, "pre": a.pre});
-    campaign::Question::parse(&question).map_err(cerr)?;
     let served = crate::pack_dir(home, a.pack_dir.clone())
         .ok()
         .and_then(|d| nils_pack::load(&d.join(&a.pack), None).ok());
-    if let Some(p) = &served {
-        let axis = p
-            .axes
-            .iter()
-            .find(|x| x.name == a.axis)
-            .ok_or_else(|| usage(format!("--axis {}: the pack has no such axis", a.axis)))?;
-        for v in [&a.post, &a.pre] {
-            if !axis.values.iter().any(|x| &x.id == v) {
-                return Err(usage(format!("{v} is not a value of {}", a.axis)));
-            }
-        }
-    }
     let mut registry = crate::open(home)?;
+    let principal = who();
+    let (out, made) = make_anchored(
+        &mut registry,
+        &crate::drawn::Making {
+            name: &a.name,
+            owner: &principal,
+            question,
+            seed: &a.seed,
+            raters: a.raters.clone(),
+            raters_per_item: a.raters_per_item,
+            lease_seconds: a.lease_seconds,
+            served: served.as_ref(),
+            dry_run: a.dry_run,
+            counts: serde_json::Map::new(),
+        },
+        &named,
+        None,
+    )
+    .map_err(crate::drawn::exit)?;
+    match made {
+        Some(made) if a.json => {
+            let mut v = shown(registry.store(), &made).map_err(rerr)?;
+            v["anchored"] = out;
+            print(&v);
+            Ok(())
+        }
+        _ => report(&out, a.json),
+    }
+}
+
+/// An anchored campaign made from the items named, at the keyboard or the
+/// door: the three stacks of an item one subject's, the panels and the
+/// order drawn by the seed, nothing suggested, the make audited. An anchor
+/// is of another session than its candidate's where `other` says so (the
+/// door, which drew them by session), else where it is of another study
+/// (the keyboard). With `dry_run`, the counts alone.
+pub(crate) fn make_anchored(
+    registry: &mut Registry,
+    m: &crate::drawn::Making<'_>,
+    named: &[Named],
+    other: Option<&BTreeMap<i64, (bool, bool)>>,
+) -> Result<(Value, Option<campaign::Campaign>), Refused> {
+    if m.seed.trim().is_empty() {
+        return Err((
+            400,
+            "seed: the seed that draws the panels, written down before the draw".into(),
+        ));
+    }
+    if named.is_empty() {
+        return Err((400, "an anchored campaign needs items".into()));
+    }
+    crate::pair::check_axis(&m.question, m.served)?;
     let stacks: Vec<i64> = named
         .iter()
         .flat_map(|n| [n.candidate, n.pre, n.post])
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
-    let of = crate::pair::whose(registry.store(), &stacks)?;
+    let of = crate::pair::whose_of(registry.store(), &stacks).map_err(|e| (500, e.to_string()))?;
     if let Some(s) = stacks.iter().find(|s| !of.contains_key(s)) {
-        return Err(usage(format!("stack {s} is not in the registry")));
+        return Err((400, format!("stack {s} is not in the registry")));
     }
     // the three stacks of an item are one person's; an anchor from another
     // session (study) than the candidate's is allowed, and flagged
-    let mut other: BTreeMap<i64, (bool, bool)> = BTreeMap::new();
-    for n in &named {
+    let mut by_study: BTreeMap<i64, (bool, bool)> = BTreeMap::new();
+    for n in named {
         let (sc, tc) = of[&n.candidate];
         for anchor in [n.pre, n.post] {
             if of[&anchor].0 != sc {
-                return Err(usage(format!(
-                    "stacks {} and {anchor} are two people's; an anchor is of the candidate's subject",
-                    n.candidate
-                )));
+                return Err((
+                    400,
+                    format!(
+                        "stacks {} and {anchor} are two people's; an anchor is of the candidate's subject",
+                        n.candidate
+                    ),
+                ));
             }
         }
-        other.insert(n.candidate, (of[&n.pre].1 != tc, of[&n.post].1 != tc));
+        by_study.insert(n.candidate, (of[&n.pre].1 != tc, of[&n.post].1 != tc));
     }
-    let drawn = anchored::draw(&named, &other, &a.seed).map_err(cerr)?;
+    let other = other.unwrap_or(&by_study);
+    let drawn = anchored::draw(named, other, m.seed).map_err(|e| (400, e.to_string()))?;
     let candidates: BTreeSet<i64> = named.iter().map(|n| n.candidate).collect();
     let anchors: BTreeSet<i64> = named.iter().flat_map(|n| [n.pre, n.post]).collect();
     let pre_other = drawn.iter().filter(|s| s.pre_other_session).count();
@@ -236,42 +275,44 @@ pub(crate) fn make(home: &Home, a: AnchoredArgs) -> Result<(), Exit> {
     // a stack that is a candidate here and an anchor there would show the
     // reader its label: counted, so the list can be mended before it is made
     let both = candidates.intersection(&anchors).count();
-    let seed_sha256 = crate::campaigns::sha256(a.seed.as_bytes());
-    let counts = json!({
+    let seed_sha256 = crate::campaigns::sha256(m.seed.as_bytes());
+    let mut counts = json!({
         "items": drawn.len(), "stacks": stacks.len(), "anchors": anchors.len(),
         "items_with_an_anchor_of_another_session": any_other,
         "pre_anchors_of_another_session": pre_other,
         "post_anchors_of_another_session": post_other,
         "candidates_that_are_also_anchors": both,
     });
+    for (k, v) in &m.counts {
+        counts[k.as_str()] = v.clone();
+    }
     let mut out = json!({
-        "name": a.name, "counts": counts, "seed_sha256": seed_sha256, "dry_run": a.dry_run,
+        "name": m.name, "counts": counts, "seed_sha256": seed_sha256, "dry_run": m.dry_run,
     });
-    if a.dry_run {
-        return report(&out, a.json);
+    if m.dry_run {
+        return Ok((out, None));
     }
     let source = json!({
         "anchored": {"seed_sha256": seed_sha256, "items": drawn.len()},
     });
-    let pack_version = served.as_ref().map(|p| format!("{}@{}", p.name, p.version));
-    let principal = who();
+    let pack_version = m.served.map(|p| format!("{}@{}", p.name, p.version));
     let made = campaign::create(
-        &mut registry,
+        registry,
         &New {
-            name: &a.name,
-            owner: &principal,
-            question: &question,
+            name: m.name,
+            owner: m.owner,
+            question: &m.question,
             source,
             items: Items::Anchored(drawn),
             handle_id: None,
             content_hash: None,
             pack_version: pack_version.as_deref(),
-            raters_per_item: a.raters_per_item,
-            raters: a.raters.clone(),
+            raters_per_item: m.raters_per_item,
+            raters: m.raters.clone(),
             adjudicators: Vec::new(),
             adjudication: &json!({"when": "never", "metric": "exact"}),
             closes_into: "none",
-            lease_seconds: a.lease_seconds,
+            lease_seconds: m.lease_seconds,
             inputs: BTreeMap::new(),
             hold_back: None,
             // the three pictures are all there is: nothing is suggested
@@ -280,29 +321,22 @@ pub(crate) fn make(home: &Home, a: AnchoredArgs) -> Result<(), Exit> {
             hide_header: false,
         },
     )
-    .map_err(cerr)?;
+    .map_err(|e| crate::drawn::refused(campaign_err(e)))?;
     nils_registry::audit::record(
-        &mut registry,
+        registry,
         &nils_registry::audit::Entry {
-            principal: &principal,
+            principal: m.owner,
             action: nils_registry::audit::Action::CampaignAnchored,
             scope: json!({"campaign": made.id, "name": made.name}),
             policy: None,
             job_id: None,
-            details: Some(json!({"counts": counts, "seed_sha256": seed_sha256})),
+            details: Some(json!({"counts": out["counts"], "seed_sha256": seed_sha256})),
         },
     )
-    .map_err(|e| crate::fail(e.to_string()))?;
-    let pictures = crate::pyramid::pictures(registry.store(), &stacks);
+    .map_err(|e| (500, e.to_string()))?;
     out["campaign"] = json!(made.id);
-    out["pictures"] = pictures;
-    if a.json {
-        let mut v = shown(registry.store(), &made).map_err(rerr)?;
-        v["anchored"] = out;
-        print(&v);
-        return Ok(());
-    }
-    report(&out, false)
+    out["pictures"] = crate::pyramid::pictures(registry.store(), &stacks);
+    Ok((out, Some(made)))
 }
 
 fn report(out: &Value, json: bool) -> Result<(), Exit> {

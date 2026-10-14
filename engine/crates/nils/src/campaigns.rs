@@ -8,7 +8,7 @@
 //! the grants of R7, `campaigns:see` and `campaigns:work`, since a rater is
 //! not a reviewer of the whole queue.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 use clap::{Args, Subcommand};
@@ -42,6 +42,7 @@ pub(crate) const DOORS: &[&str] = &[
     "POST /api/campaigns/{id}/export",
     "GET /api/label-sets",
     "POST /api/label-sets",
+    "POST /api/label-sets/register",
     "GET /api/label-sets/{id}",
     "POST /api/decisions/commit",
     "GET /api/stacks/{stack}/why",
@@ -69,6 +70,9 @@ pub(crate) const DOORS: &[&str] = &[
     "GET /api/campaigns/{id}/items/{item}/anchored",
     "GET /api/campaigns/{id}/anchored",
     "GET /api/campaigns/{id}/anchored/values",
+    // record 55 H3, job type 3: what a check would make, and its item
+    "POST /api/campaigns/preview",
+    "GET /api/campaigns/{id}/items/{item}/check",
     "GET /api/certificates",
     "POST /api/certificates",
     "POST /api/certificates/{id}/unseal",
@@ -98,7 +102,7 @@ pub(crate) fn door(method: &str, segs: &[&str]) -> Option<(Need, Detail)> {
                 _,
                 "items",
                 _,
-                "candidates" | "why" | "header" | "ab" | "pair" | "anchored",
+                "candidates" | "why" | "header" | "ab" | "pair" | "anchored" | "check",
             ],
         )
         | ("GET", ["api", "campaigns", _, "ab", "decisions"])
@@ -136,7 +140,10 @@ pub(crate) fn door(method: &str, segs: &[&str]) -> Option<(Need, Detail)> {
         ("POST", ["api", "certificates"]) | ("POST", ["api", "certificates", _, "unseal"]) => {
             (Need::One("models:work"), Plain)
         }
+        // record 55 H3: a check's preview writes nothing; making a check
+        // and its preview need pipelines:see beside, checked at the door
         ("POST", ["api", "campaigns"])
+        | ("POST", ["api", "campaigns", "preview"])
         | ("POST", ["api", "campaigns", _, "claim" | "export"])
         | (
             "POST",
@@ -161,6 +168,9 @@ pub(crate) fn door(method: &str, segs: &[&str]) -> Option<(Need, Detail)> {
             (Need::AnyOf(&["campaigns:see", "review:see"]), Plain)
         }
         ("POST", ["api", "label-sets"]) => (Need::AnyOf(&["campaigns:work", "review:work"]), Plain),
+        // record 55 E6: a set made outside the engine, which a model's card
+        // then names as what it was trained on
+        ("POST", ["api", "label-sets", "register"]) => (Need::One("models:work"), Plain),
         ("POST", ["api", "decisions", "commit"]) => (Need::One("review:work"), Plain),
         _ => return None,
     })
@@ -294,6 +304,15 @@ pub(crate) const POLICY: &[(&str, bool, bool, &str, &str, &str, &str)] = &[
         "one label set",
         "Exporting labels",
         "Exported labels",
+    ),
+    (
+        "POST /api/label-sets/register",
+        true,
+        false,
+        "bounded",
+        "one label set",
+        "Registering a label set made outside",
+        "Registered a label set made outside",
     ),
     (
         "GET /api/label-sets/{id}",
@@ -485,6 +504,24 @@ pub(crate) const POLICY: &[(&str, bool, bool, &str, &str, &str, &str)] = &[
         "Gave a cause",
     ),
     (
+        "POST /api/campaigns/preview",
+        false,
+        true,
+        "bounded",
+        "50,000 items counted",
+        "Previewing a check",
+        "Previewed a check",
+    ),
+    (
+        "GET /api/campaigns/{id}/items/{item}/check",
+        false,
+        false,
+        "bounded",
+        "one item and 2,000 parts",
+        "Reading a check's item",
+        "Read a check's item",
+    ),
+    (
         "GET /api/certificates",
         false,
         false,
@@ -552,6 +589,13 @@ pub(crate) fn ahead_of(store: &mut Store, ahead: &[(i64, Option<i64>)]) -> Resul
     for r in store.query(&sql, &[])? {
         shown.entry(r.int(0)?).or_default().push(r.int(1)?);
     }
+    // record 55 H3: a check's panels, the made-on scan first, and the
+    // result's layer on each
+    let mut layers: BTreeMap<i64, Vec<Value>> = BTreeMap::new();
+    for (item, (stacks, its)) in crate::checks::ahead_stacks(store, &ids)? {
+        shown.entry(item).or_default().extend(stacks);
+        layers.insert(item, its);
+    }
     Ok(Value::Array(
         ahead
             .iter()
@@ -561,7 +605,11 @@ pub(crate) fn ahead_of(store: &mut Store, ahead: &[(i64, Option<i64>)]) -> Resul
                     (None, Some(panels)) => panels.clone(),
                     (None, None) => Vec::new(),
                 };
-                json!({"item": item, "position": position.get(item), "stacks": stacks})
+                let mut v = json!({"item": item, "position": position.get(item), "stacks": stacks});
+                if let Some(l) = layers.get(item) {
+                    v["layers"] = json!(l);
+                }
+                v
             })
             .collect(),
     ))
@@ -627,6 +675,7 @@ pub(crate) fn route(
         // unless the caller reads every campaign; one that is not theirs is
         // answered as one that does not exist
         if let ["api", "campaigns", which, ..] = segs
+            && !(post && segs.len() == 3 && *which == "preview")
             && !oversees(caller)
         {
             let c = campaign::find(registry.store(), which).map_err(campaign_err)?;
@@ -655,6 +704,8 @@ pub(crate) fn route(
                     }
                     let mut v = c.as_json();
                     v["counts"] = campaign::counts(registry.store(), c.id).map_err(campaign_err)?;
+                    // record 55 D6 and D7: what its answers are for
+                    v["purpose"] = json!(nils_registry::blind::purpose(registry.store(), c.id)?);
                     out.push(v);
                 }
                 Ok(Reply::ok(json!({"count": out.len(), "campaigns": out})))
@@ -663,6 +714,16 @@ pub(crate) fn route(
                 let doc = json_body(body)?;
                 let made = create_at_door(doors, registry, ask, caller, &doc)?;
                 Ok(Reply::created(made))
+            }
+            // record 55 H3: what a check would make, written nowhere
+            ["api", "campaigns", "preview"] if post => {
+                let doc = json_body(body)?;
+                // record 55 H3: what a drawn source would make, its counts
+                if crate::drawn::drawn_kind(&doc).is_some() {
+                    return crate::drawn::door(doors, registry, ask, caller, &doc, true)
+                        .map(Reply::ok);
+                }
+                crate::checks::preview(doors, registry, ask, caller, &doc)
             }
             ["api", "campaigns", which] if get => {
                 let c = campaign::find(registry.store(), which).map_err(campaign_err)?;
@@ -780,9 +841,18 @@ pub(crate) fn route(
                     (Value::Null, _) => false,
                     _ => return Err(Reply::error(400, "alone: true or false")),
                 };
-                let claimed =
-                    campaign::claim_with(registry, c.id, principal, role, order, alone, &now)
-                        .map_err(campaign_err)?;
+                // record 55, the rulings of 2026-10-12, item 6: a check's
+                // items whose result was made from a stack of a sample sealed
+                // now are offered to no one who does not read sealed stacks
+                let withheld = crate::checks::withheld_items(
+                    registry.store(),
+                    crate::sealed::reads(&caller.access),
+                    &c,
+                )?;
+                let claimed = campaign::claim_withholding(
+                    registry, c.id, principal, role, order, alone, &withheld, &now,
+                )
+                .map_err(campaign_err)?;
                 Ok(Reply::ok(match claimed {
                     Some(cl) => {
                         let mut doc = cl.as_json();
@@ -790,7 +860,7 @@ pub(crate) fn route(
                         doc
                     }
                     None => json!({"assignment": null, "item": null, "why": format!(
-                        "nothing in campaign {} is left for {principal} as a {}", c.name, role.name()
+                        "nothing in campaign {} is left for {principal} as {}", c.name, nils_registry::a_or_an(role.name())
                     )}),
                 }))
             }
@@ -799,6 +869,14 @@ pub(crate) fn route(
                 let c = campaign::find(registry.store(), which).map_err(campaign_err)?;
                 let a = id_of(a)?;
                 belongs(registry.store(), c.id, "campaign_assignment", a)?;
+                // record 55, the rulings of 2026-10-12, item 6: a check's item
+                // whose result is sealed now is answered by no rater who may
+                // not read it, whatever lease they held before
+                if nils_registry::check::is_check(&c)
+                    && let Some(item) = own_item(registry.store(), c.id, a, principal)?
+                {
+                    crate::checks::refuse_sealed(registry.store(), caller, &c, item)?;
+                }
                 let form = (!doc["form"].is_null()).then(|| doc["form"].clone());
                 let value = match &doc["value"] {
                     Value::Null => None,
@@ -1006,6 +1084,11 @@ pub(crate) fn route(
                 let earlier = campaign::answer_by_id(registry.store(), answer)
                     .map_err(campaign_err)?
                     .ok_or_else(|| Reply::error(404, format!("no answer {answer}")))?;
+                // record 55, the rulings of 2026-10-12, item 6: nor is an
+                // answer to it corrected
+                if earlier.principal == principal {
+                    crate::checks::refuse_sealed(registry.store(), caller, &c, earlier.item_id)?;
+                }
                 // the axes derived from the correction through the pack, the
                 // engine's own computation, kept beside it
                 let derived = match value
@@ -1141,11 +1224,25 @@ pub(crate) fn route(
                         author_kind: kind_of(caller),
                         model: acting,
                         picks: Some(&picks),
+                        sealed: Some(&crate::checks::sealed_results),
                     },
                     &now,
                 )
                 .map_err(campaign_err)?;
-                Ok(Reply::ok(closed.as_json()))
+                let mut doc = closed.as_json();
+                // record 55 F5: a settled read of post-contrast is a T1 anchor
+                let pack = doors
+                    .pack_dir
+                    .as_ref()
+                    .and_then(|dir| nils_pack::load(&dir.join(&doors.ask_pack), None).ok());
+                if let Some(label) = crate::contrast::after_decisions(
+                    registry.store(),
+                    pack.as_ref(),
+                    &closed.decisions,
+                ) {
+                    doc["contrast_label"] = label;
+                }
+                Ok(Reply::ok(doc))
             }
             ["api", "campaigns", which, "export"] if post => {
                 let doc = json_body(body)?;
@@ -1244,8 +1341,11 @@ pub(crate) fn route(
                 // candidates are the only answers shown, and never as a
                 // system's, whatever the campaign says it suggests
                 let ab = nils_registry::ab::is_ab(&c);
-                let blind = sealed || ab || c.suggest == campaign::Suggest::None;
-                let rules_hidden = sealed || ab || hides_rules(&c);
+                // record 55 D6: a campaign that trains or measures shows a
+                // rater an item's suggestion only after their answer
+                let first = !revealed_to(registry.store(), &c, item, principal)?;
+                let blind = sealed || ab || first || c.suggest == campaign::Suggest::None;
+                let rules_hidden = sealed || ab || first || hides_rules(&c);
                 let mut doc = crate::reader::why(
                     registry.store(),
                     stack,
@@ -1254,6 +1354,11 @@ pub(crate) fn route(
                     rules_hidden,
                 )?
                 .unwrap_or_else(|| json!({"stack": stack, "axes": [], "blind": false}));
+                // record 55 F5: a rater is shown what the campaign suggests
+                // and no post-contrast label, which may rest on a read
+                if let Some(m) = doc.as_object_mut() {
+                    m.remove("contrast_label");
+                }
                 doc["blind"] = json!(blind);
                 doc["suggest"] = json!(c.suggest.name());
                 let suggested = if blind {
@@ -1418,6 +1523,7 @@ pub(crate) fn route(
             ["api", "campaigns", which, "batches"] if get => {
                 let c = campaign::find(registry.store(), which).map_err(campaign_err)?;
                 ab_one_by_one(&c)?;
+                blind_one_by_one(registry.store(), &c)?;
                 let pack = crate::reader::served_pack(doors.pack_dir.as_deref(), &doors.ask_pack);
                 let found =
                     crate::reader::batches(registry.store(), &c, principal, pack.as_deref(), None)
@@ -1449,6 +1555,7 @@ pub(crate) fn route(
                     }
                 }
                 let c = campaign::find(registry.store(), which).map_err(campaign_err)?;
+                blind_one_by_one(registry.store(), &c)?;
                 let named: Option<Vec<i64>> = match &doc["items"] {
                     Value::Null => None,
                     Value::Array(list) => {
@@ -1637,6 +1744,7 @@ pub(crate) fn route(
             ["api", "campaigns", which, "gallery"] if get => {
                 let c = campaign::find(registry.store(), which).map_err(campaign_err)?;
                 ab_one_by_one(&c)?;
+                blind_one_by_one(registry.store(), &c)?;
                 let listed = c.raters();
                 if !listed.is_empty() && !listed.iter().any(|p| p == principal) {
                     return Err(Reply::error(
@@ -1682,6 +1790,7 @@ pub(crate) fn route(
                     }
                 }
                 let c = campaign::find(registry.store(), which).map_err(campaign_err)?;
+                blind_one_by_one(registry.store(), &c)?;
                 let q = c.question().map_err(campaign_err)?;
                 if campaign::single_axis(&q).is_none() {
                     return Err(Reply::error(
@@ -1883,6 +1992,13 @@ pub(crate) fn route(
             }
             // anchored reading (the post-contrast study): one item's three
             // panels, how the campaign goes, and each answer's candidate
+            // record 55 H3, job type 3: a check's item, as the reader reads it
+            ["api", "campaigns", which, "items", item, "check"] if get => {
+                let c = campaign::find(registry.store(), which).map_err(campaign_err)?;
+                let item = id_of(item)?;
+                belongs(registry.store(), c.id, "campaign_item", item)?;
+                crate::checks::item_door(registry, caller, &c, item)
+            }
             ["api", "campaigns", which, "items", item, "anchored"] if get => {
                 let c = campaign::find(registry.store(), which).map_err(campaign_err)?;
                 let item = id_of(item)?;
@@ -2092,6 +2208,45 @@ pub(crate) fn route(
                 }
                 Ok(Reply::created(v))
             }
+            ["api", "label-sets", "register"] if post => {
+                let doc = json_body(body)?;
+                no_sealed_flag(&doc)?;
+                let text = |k: &str| -> Result<String, Reply> {
+                    doc[k]
+                        .as_str()
+                        .map(str::to_string)
+                        .ok_or_else(|| Reply::error(400, format!("{k}: the file's text")))
+                };
+                let name = doc["name"]
+                    .as_str()
+                    .filter(|n| !n.trim().is_empty())
+                    .ok_or_else(|| Reply::error(400, "name: what the set is called"))?
+                    .to_string();
+                let sha256: BTreeMap<String, String> = match &doc["sha256"] {
+                    Value::Object(m) => m
+                        .iter()
+                        .map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string()))
+                        .collect(),
+                    _ => {
+                        return Err(Reply::error(
+                            400,
+                            "sha256: the sha256 of every file of the set, by its name",
+                        ));
+                    }
+                };
+                let outside = Outside {
+                    name: &name,
+                    what: doc["what"].as_str(),
+                    labels_tsv: &text("labels_tsv")?,
+                    provenance_json: &text("provenance_json")?,
+                    sha256: &sha256,
+                    created_by: principal,
+                };
+                let dir = export_dir(registry.store(), doc["place"].as_str(), &name)?;
+                let set = register_outside(registry, &dir, &outside)
+                    .map_err(|(status, e)| Reply::error(status, e))?;
+                Ok(Reply::created(set_json(&set, None)))
+            }
             ["api", "label-sets", id] if get => {
                 let id = id_of(id)?;
                 let set = labels::get(registry.store(), id)
@@ -2125,9 +2280,43 @@ pub(crate) fn route(
                 let answers = set.kind == Of::Answers.name() || set.kind == Of::Outcomes.name();
                 let reads = answers || crate::sealed::reads(&caller.access);
                 let mut withheld = 0usize;
+                let outside = set.kind == labels::OUTSIDE;
                 let mut tsv = |text: String| -> Result<String, Reply> {
                     if reads {
                         return Ok(text);
+                    }
+                    // record 55 E6: a set from outside, by DICOM identity
+                    if outside {
+                        let Ok((_, rows)) = labels::outside_canonical(&text) else {
+                            return Ok(text);
+                        };
+                        let marks = labels::outside_sealed_marks(registry.store(), &rows)
+                            .map_err(labels_err)?;
+                        withheld = marks.iter().filter(|m| **m).count();
+                        if withheld == 0 {
+                            return Ok(text);
+                        }
+                        let mut kept = labels::OUTSIDE_COLUMNS.join("\t");
+                        kept.push('\n');
+                        for (r, sealed) in rows.iter().zip(marks) {
+                            if !sealed {
+                                kept.push_str(
+                                    &[
+                                        r.study.as_str(),
+                                        &r.series,
+                                        &r.stack_key,
+                                        &r.sop,
+                                        &r.what,
+                                        &r.value,
+                                        &r.author_kind,
+                                        &r.author,
+                                    ]
+                                    .join("\t"),
+                                );
+                                kept.push('\n');
+                            }
+                        }
+                        return Ok(kept);
                     }
                     let (kept, n) = withhold_tsv(registry.store(), &text)?;
                     withheld = n;
@@ -2271,6 +2460,46 @@ fn ab_one_by_one(c: &campaign::Campaign) -> Result<(), Reply> {
     Ok(())
 }
 
+/// Record 55 D6 (spec §11.4): a campaign whose answers train or measure is
+/// read blind first, one item at a time; a batch or a gallery would show
+/// many items' suggestions before any answer, so neither is served.
+fn blind_one_by_one(store: &mut Store, c: &campaign::Campaign) -> Result<(), Reply> {
+    let purpose = nils_registry::blind::purpose(store, c.id)?;
+    if nils_registry::blind::blind_purpose(&purpose) && c.suggest != campaign::Suggest::None {
+        return Err(Reply::error(
+            409,
+            format!(
+                "campaign {} is for {purpose}, so it is read blind first: each item is answered before its suggestion shows, never in a batch or a gallery",
+                c.name
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// Record 55 D6: whether a rater of a blind-first campaign is shown an
+/// item's suggestion now, which is only once they answered it; the reveal
+/// is kept, so an answer after it is not blind.
+fn revealed_to(
+    store: &mut Store,
+    c: &campaign::Campaign,
+    item: i64,
+    principal: &str,
+) -> Result<bool, Reply> {
+    let purpose = nils_registry::blind::purpose(store, c.id)?;
+    if !nils_registry::blind::blind_purpose(&purpose) || c.suggest == campaign::Suggest::None {
+        return Ok(true);
+    }
+    let answered = campaign::mine(store, c.id, principal)
+        .map_err(campaign_err)?
+        .iter()
+        .any(|a| a.item_id == item);
+    if answered {
+        nils_registry::blind::campaign_reveal(store, c.id, item, principal)?;
+    }
+    Ok(answered)
+}
+
 pub(crate) fn blind_to(store: &mut Store, caller: &Caller, stack: i64) -> Result<bool, Reply> {
     Ok(!blind_among(store, caller, &[stack])?.is_empty())
 }
@@ -2308,7 +2537,10 @@ fn person_only(doors: &Doors, caller: &Caller, act: &str) -> Result<(), Reply> {
     if kind != "person" {
         return Err(Reply::error(
             403,
-            format!("{act} is a person's act, and this caller acts as a {kind}"),
+            format!(
+                "{act} is a person's act, and this caller acts as {}",
+                nils_registry::a_or_an(kind)
+            ),
         ));
     }
     Ok(())
@@ -2320,6 +2552,14 @@ fn person_only(doors: &Doors, caller: &Caller, act: &str) -> Result<(), Reply> {
 fn training_now(store: &mut Store, set: &LabelSet, v: &mut Value) {
     if set.sealed && labels::usable_for_training(store, set.id).is_ok() {
         v["training"] = json!("allowed: its sample was unsealed by a certificate (record 48 R2)");
+    }
+    // record 55 E6: a set from outside is read again by DICOM identity;
+    // record 55 D6 and D7: a campaign's set trains only where every answer
+    // was given blind and the campaign is no audit
+    if (set.kind == labels::OUTSIDE || set.campaign_id.is_some())
+        && let Err(e) = labels::usable_for_training(store, set.id)
+    {
+        v["training"] = json!(format!("refused: {e}"));
     }
 }
 
@@ -2409,7 +2649,7 @@ fn own(store: &mut Store, caller: &Caller, c: &campaign::Campaign) -> Result<boo
 
 /// Whether the caller is named in a campaign as a rater or an adjudicator.
 /// A campaign that names no raters opens nothing through this.
-fn rates_in(caller: &Caller, c: &campaign::Campaign) -> bool {
+pub(crate) fn rates_in(caller: &Caller, c: &campaign::Campaign) -> bool {
     let p = caller.principal.as_str();
     c.raters().iter().any(|r| r == p) || c.adjudicators().iter().any(|a| a == p)
 }
@@ -2470,6 +2710,75 @@ pub(crate) fn pictures_through(
     caller: &Caller,
     stack: i64,
 ) -> Result<Option<i64>, Reply> {
+    for id in showing(store, stack)? {
+        if let Some(c) = campaign::get(store, id).map_err(campaign_err)?
+            && c.status == "open"
+            && rates_in(caller, &c)
+        {
+            return Ok(Some(id));
+        }
+    }
+    Ok(None)
+}
+
+/// Record 55 H3 (job type 3): the open campaign a caller rates in through
+/// which they read a result, its parts and, with `stack`, its layer on that
+/// stack: one whose items hold the result (a check item names it, or an
+/// item's inputs do) and,
+/// with a stack, whose items or panels show the stack, as
+/// [`pictures_through`] finds them. None when no such campaign is open.
+pub(crate) fn results_through(
+    store: &mut Store,
+    caller: &Caller,
+    derivative: i64,
+    stack: Option<i64>,
+) -> Result<Option<i64>, Reply> {
+    let shown = match stack {
+        Some(s) => Some(showing(store, s)?),
+        None => None,
+    };
+    let sql = format!(
+        "SELECT i.campaign_id, {} FROM {} i JOIN {} c ON c.id = i.campaign_id \
+         WHERE c.status = 'open' AND i.input_derivative_ids IS NOT NULL",
+        store.dialect().text_of_qualified(
+            Some("i"),
+            nils_registry::schema::table("campaign_item")
+                .column("input_derivative_ids")
+                .expect("input_derivative_ids"),
+        ),
+        store.qualified("campaign_item"),
+        store.qualified("campaign"),
+    );
+    let mut holding: std::collections::BTreeSet<i64> = std::collections::BTreeSet::new();
+    // a check's items name their result
+    holding.extend(crate::checks::campaigns_holding(store, derivative)?);
+    for r in store.query(&sql, &[])? {
+        let ids: Vec<i64> = r
+            .opt_text(1)?
+            .and_then(|t| serde_json::from_str(t).ok())
+            .unwrap_or_default();
+        if ids.contains(&derivative) {
+            holding.insert(r.int(0)?);
+        }
+    }
+    for id in holding {
+        if shown.as_ref().is_some_and(|s| !s.contains(&id)) {
+            continue;
+        }
+        if let Some(c) = campaign::get(store, id).map_err(campaign_err)?
+            && c.status == "open"
+            && rates_in(caller, &c)
+        {
+            return Ok(Some(id));
+        }
+    }
+    Ok(None)
+}
+
+/// The open campaigns whose items or panels show a stack: an item of the
+/// stack, a pair's side, an anchored panel, or a session item of the
+/// stack's session.
+fn showing(store: &mut Store, stack: i64) -> Result<std::collections::BTreeSet<i64>, Reply> {
     let d = store.dialect();
     let mut asked: std::collections::BTreeSet<i64> = std::collections::BTreeSet::new();
     let sql = format!(
@@ -2488,6 +2797,9 @@ pub(crate) fn pictures_through(
     // anchored reading: nor does an item of an anchored campaign; its
     // panels do
     asked.extend(crate::anchored::campaigns_showing(store, stack)?);
+    // record 55 H3: nor does a check's; its panels do, and "+ scan" opens
+    // the other scans of the made-on scan's frame
+    asked.extend(crate::checks::campaigns_showing(store, stack)?);
     // the sessions the stack is of, each its subject and its day
     let sql = format!(
         "SELECT DISTINCT sc.subject_id, {} FROM {} k JOIN {} r ON r.id = k.series_id \
@@ -2532,15 +2844,7 @@ pub(crate) fn pictures_through(
             }
         }
     }
-    for id in asked {
-        if let Some(c) = campaign::get(store, id).map_err(campaign_err)?
-            && c.status == "open"
-            && rates_in(caller, &c)
-        {
-            return Ok(Some(id));
-        }
-    }
-    Ok(None)
+    Ok(asked)
 }
 
 pub(crate) fn plain(caller: &Caller) -> bool {
@@ -2743,6 +3047,8 @@ fn axes_value(question: &Value, value: &mut Value) {
 
 pub(crate) fn shown(store: &mut Store, c: &campaign::Campaign) -> Result<Value, Reply> {
     let mut v = c.as_json();
+    // record 55 D6 and D7: what its answers are for
+    v["purpose"] = json!(nils_registry::blind::purpose(store, c.id)?);
     v["counts"] = campaign::counts(store, c.id).map_err(campaign_err)?;
     v["items"] = json!(
         campaign::items(store, c.id)
@@ -2765,6 +3071,9 @@ pub(crate) fn shown(store: &mut Store, c: &campaign::Campaign) -> Result<Value, 
     if c.status == "open" {
         v["agreement"] = campaign::agreement(store, c.id).map_err(campaign_err)?;
     }
+    // after type 3's pipe test: a closed check holding an item its close
+    // refused, whose question is open, is closed again by a person
+    v["close_again"] = json!(campaign::closes_again(store, c).map_err(campaign_err)?);
     Ok(v)
 }
 
@@ -2853,7 +3162,7 @@ pub(crate) fn handle_keys(
 
 /// Run the freezing document of a selection through the ask door itself,
 /// under the caller's own grants, and read the keys of the handle it left.
-fn freeze_at_door(
+pub(crate) fn freeze_at_door(
     doors: &Doors,
     registry: &mut Registry,
     ask: &mut crate::ask_doors::AskState,
@@ -2942,7 +3251,7 @@ pub(crate) fn content_hash(store: &mut Store, handle: i64) -> Result<Option<Stri
     Ok(nils_ask::handle::get(store, handle)?.and_then(|h| h.content_hash))
 }
 
-fn pack_version_of(doors: &Doors) -> Option<String> {
+pub(crate) fn pack_version_of(doors: &Doors) -> Option<String> {
     let dir = doors.pack_dir.as_ref()?;
     let pack = nils_pack::load(&dir.join(&doors.ask_pack), None).ok()?;
     Some(format!("{}@{}", pack.name, pack.version))
@@ -3020,6 +3329,15 @@ fn create_at_door(
     caller: &Caller,
     doc: &Value,
 ) -> Result<Value, Reply> {
+    // record 55 H3: a check is made from results, not from stacks
+    if doc["question"]["kind"] == "check" {
+        return crate::checks::create(doors, registry, ask, caller, doc);
+    }
+    // and a pair, an anchored or an A/B campaign from the stacks of saved
+    // selections, drawn at the door (nothing typed by hand)
+    if crate::drawn::drawn_kind(doc).is_some() {
+        return crate::drawn::door(doors, registry, ask, caller, doc, false);
+    }
     let name = doc["name"]
         .as_str()
         .ok_or_else(|| Reply::error(400, "name: what the campaign is called"))?;
@@ -3081,13 +3399,34 @@ fn create_at_door(
     } else {
         return Err(Reply::error(
             400,
-            "source: {selection: name@v}, {handle: id} or {review: {kind | kind_prefix, job_id?, limit?}}",
+            "source: {selection: name@v}, {handle: id}, {review: {kind | kind_prefix, job_id?, limit?}}, {pair: ...}, {anchored: ...} or {ab: ...}",
         ));
     };
     let hash = match handle_id {
         Some(h) => content_hash(registry.store(), h)?,
         None => None,
     };
+    let purpose = doc["purpose"].as_str().unwrap_or("decide");
+    if !nils_registry::blind::PURPOSES.contains(&purpose) {
+        return Err(Reply::error(
+            400,
+            format!(
+                "purpose: {}, not {purpose}",
+                nils_registry::blind::PURPOSES.join(", ")
+            ),
+        ));
+    }
+    // an audit reads blind and closes into nothing: its answers measure the
+    // accepted error and never become a decision or a label
+    if purpose == "audit"
+        && (doc["closes_into"].as_str().unwrap_or("none") != "none"
+            || suggest_of(&doc["suggest"])?.is_some_and(|s| s != campaign::Suggest::None))
+    {
+        return Err(Reply::error(
+            400,
+            "an audit campaign suggests none and closes into none: its reads are blind and never train",
+        ));
+    }
     let pack_version = pack_version_of(doors);
     let adjudication = if doc["adjudication"].is_null() {
         json!({})
@@ -3118,6 +3457,13 @@ fn create_at_door(
         },
     )
     .map_err(campaign_err)?;
+    // record 55 D6 and D7: what its answers are for, said once when it is
+    // made: a read that trains or measures is blind first, an audit's
+    // answers never train
+    if purpose != "decide" {
+        nils_registry::blind::set_purpose(registry.store(), made.id, purpose)
+            .map_err(|e| Reply::error(500, e))?;
+    }
     let mut v = shown(registry.store(), &made)?;
     v["pictures"] = pictures_of(registry.store(), &made)?;
     Ok(v)
@@ -3302,6 +3648,34 @@ fn item_stack(store: &mut Store, item: i64) -> Result<i64, Reply> {
                 format!("item {item} is a session's; only a stack's axes are derived"),
             )
         })
+}
+
+/// The item of an assignment of a campaign, where the assignment is the
+/// principal's own.
+fn own_item(
+    store: &mut Store,
+    campaign: i64,
+    assignment: i64,
+    principal: &str,
+) -> Result<Option<i64>, Reply> {
+    let d = store.dialect();
+    let sql = format!(
+        "SELECT item_id FROM {} WHERE id = {} AND campaign_id = {} AND principal = {}",
+        store.qualified("campaign_assignment"),
+        d.param(1, Type::Int),
+        d.param(2, Type::Int),
+        d.param(3, Type::Text)
+    );
+    Ok(store
+        .query_opt(
+            &sql,
+            &[
+                Param::Int(assignment),
+                Param::Int(campaign),
+                Param::from(principal),
+            ],
+        )?
+        .and_then(|r| r.int(0).ok()))
 }
 
 /// The stack the item of an assignment stands on, where it is a stack's.
@@ -3608,6 +3982,10 @@ fn campaign_stacks(store: &mut Store, c: &campaign::Campaign) -> Result<Vec<i64>
     if nils_registry::anchored::is_anchored(c) {
         return Ok(nils_registry::anchored::stacks_of(store, c.id)?);
     }
+    // record 55 H3: nor do a check's; its panels do
+    if nils_registry::check::is_check(c) {
+        return Ok(nils_registry::check::stacks_of(store, c.id)?);
+    }
     let mut out = Vec::new();
     for it in campaign::items(store, c.id).map_err(campaign_err)? {
         if let Some(s) = it.stack_id {
@@ -3701,7 +4079,8 @@ fn candidates(
         let t = nils_registry::schema::table("pick");
         let sql = format!(
             "SELECT id, author_kind, actor, score, margin, borders, {}, model FROM {} \
-             WHERE role = {} AND subject_id = {} AND {} = {} AND withdrawn_at IS NULL ORDER BY id",
+             WHERE role = {} AND subject_id = {} AND {} = {} AND withdrawn_at IS NULL \
+               AND rules_scope_kind IS NULL ORDER BY id",
             d.text_of(t.column("considered").expect("considered")),
             store.qualified("pick"),
             d.param(1, Type::Text),
@@ -3771,7 +4150,11 @@ pub(crate) fn pictures_of(store: &mut Store, c: &campaign::Campaign) -> Result<V
     Ok(v)
 }
 
-fn items_of(store: &mut Store, want: Grain, keys: &[(i64, Option<i64>)]) -> Result<Items, Reply> {
+pub(crate) fn items_of(
+    store: &mut Store,
+    want: Grain,
+    keys: &[(i64, Option<i64>)],
+) -> Result<Items, Reply> {
     Ok(match want {
         Grain::Session => Items::Sessions(sessions_of(store, keys)?),
         _ => Items::Stacks(keys.iter().map(|(k, _)| *k).collect()),
@@ -3793,6 +4176,25 @@ pub(crate) struct SetMeta<'a> {
 
 pub(crate) fn sha256(bytes: &[u8]) -> String {
     hex::encode(ring::digest::digest(&ring::digest::SHA256, bytes).as_ref())
+}
+
+/// The sha256 of a file, hex, read in pieces.
+fn sha256_of_file(path: &Path) -> Result<String, Exit> {
+    use std::io::Read;
+    let mut file =
+        std::fs::File::open(path).map_err(|e| usage(format!("{}: {e}", path.display())))?;
+    let mut ctx = ring::digest::Context::new(&ring::digest::SHA256);
+    let mut buf = vec![0u8; 1 << 20];
+    loop {
+        let n = file
+            .read(&mut buf)
+            .map_err(|e| fail(format!("{}: {e}", path.display())))?;
+        if n == 0 {
+            break;
+        }
+        ctx.update(&buf[..n]);
+    }
+    Ok(hex::encode(ctx.finish().as_ref()))
 }
 
 /// Where a door writes a set: under `labels/<name>` in the export place it
@@ -3964,6 +4366,172 @@ pub(crate) fn write_set(
         serde_json::to_string_pretty(&provenance).unwrap_or_default() + "\n",
     )
     .map_err(|e| e500(format!("{}: {e}", dir.display())))?;
+    Ok(set)
+}
+
+/// A label set made outside the engine, as it is registered (record 55
+/// E6): its `labels.tsv` and `provenance.json` as given, and the sha256 of
+/// every file of the set by its name.
+pub(crate) struct Outside<'a> {
+    pub(crate) name: &'a str,
+    /// What was labelled; where none is given, the one `what` of its rows.
+    pub(crate) what: Option<&'a str>,
+    pub(crate) labels_tsv: &'a str,
+    pub(crate) provenance_json: &'a str,
+    pub(crate) sha256: &'a BTreeMap<String, String>,
+    pub(crate) created_by: &'a str,
+}
+
+/// Register a label set made outside the engine (record 55 E6, spec
+/// 10.3): the sha256 given of `labels.tsv` and `provenance.json` must be
+/// theirs, every file named by a plain name and a digest; its rows, keyed
+/// by DICOM identity, are read and put in canonical order, and its digest
+/// is that of the canonical `labels.tsv`; a set any row of which is of a
+/// sample sealed now, by DICOM identity, is refused (409). Written like a
+/// door's set, into `v<N>` under the name's directory (`labels.tsv`
+/// canonical, `provenance.json` as given, `SHA256SUMS` of the files given),
+/// and recorded as kind `outside`.
+pub(crate) fn register_outside(
+    registry: &mut Registry,
+    dir: &Path,
+    o: &Outside<'_>,
+) -> Result<LabelSet, (u16, String)> {
+    let e400 = |e: String| (400, e);
+    let e500 = |e: String| (500, e);
+    let hex_of = |v: &str| v.strip_prefix("sha256:").unwrap_or(v).to_string();
+    for (file, digest) in o.sha256 {
+        let plain = !file.is_empty()
+            && !file.starts_with('.')
+            && file
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'));
+        if !plain {
+            return Err(e400(format!(
+                "{file:?} is not a file of the set: a plain name, no folder"
+            )));
+        }
+        let hex = hex_of(digest);
+        if hex.len() != 64
+            || !hex
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return Err(e400(format!(
+                "the sha256 of {file} is 64 lowercase hex digits, not {digest:?}"
+            )));
+        }
+    }
+    for (file, bytes) in [
+        ("labels.tsv", o.labels_tsv.as_bytes()),
+        ("provenance.json", o.provenance_json.as_bytes()),
+    ] {
+        let Some(said) = o.sha256.get(file) else {
+            return Err(e400(format!(
+                "sha256 names every file of the set, {file} among them"
+            )));
+        };
+        let got = sha256(bytes);
+        if hex_of(said) != got {
+            return Err(e400(format!(
+                "{file} hashes to sha256:{got}, not the {said} given: not the file the set names"
+            )));
+        }
+    }
+    let provenance: Value = serde_json::from_str(o.provenance_json)
+        .map_err(|e| e400(format!("provenance.json is not JSON: {e}")))?;
+    if !provenance.as_object().is_some_and(|m| !m.is_empty()) {
+        return Err(e400(
+            "provenance.json says where the labels came from: a JSON object, not empty".into(),
+        ));
+    }
+    let (canonical, rows) =
+        labels::outside_canonical(o.labels_tsv).map_err(|e| e400(e.to_string()))?;
+    let whats: BTreeSet<&str> = rows.iter().map(|r| r.what.as_str()).collect();
+    let what = match o.what {
+        Some(w) if !w.trim().is_empty() => {
+            if let Some(other) = whats.iter().find(|x| **x != w) {
+                return Err(e400(format!("the set is of {w}, and a row labels {other}")));
+            }
+            w.to_string()
+        }
+        _ => whats.iter().copied().collect::<Vec<_>>().join(","),
+    };
+    let over = labels::outside_sealed(registry.store(), &rows).map_err(|e| e500(e.to_string()))?;
+    if over > 0 {
+        return Err((
+            409,
+            format!(
+                "{over} of the set's {} rows are of a sample sealed now, by DICOM identity (study, series, stack key or SOP Instance UID), and a set holding an item of a sealed certification sample is never registered for training (records 40 R3 and 55 E6)",
+                rows.len()
+            ),
+        ));
+    }
+    let digest = labels::outside_digest(&canonical);
+    let hex = hex_of(&digest);
+    let version =
+        labels::next_version(registry.store(), o.name).map_err(|e| e500(e.to_string()))?;
+    let dir = dir.join(format!("v{version}"));
+    for held in ["labels.tsv", "provenance.json", "SHA256SUMS"] {
+        if dir.join(held).exists() {
+            return Err((
+                409,
+                format!(
+                    "{} holds a label set already, and a set never writes over another's files",
+                    dir.display()
+                ),
+            ));
+        }
+    }
+    std::fs::create_dir_all(&dir).map_err(|e| e500(format!("{}: {e}", dir.display())))?;
+    let place =
+        nils_registry::place::holding(registry.store(), nils_registry::place::Role::Export, &dir)
+            .map_err(|e| e500(e.to_string()))?;
+    let sums: String = o
+        .sha256
+        .iter()
+        .map(|(f, d)| format!("{}  {f}\n", hex_of(d)))
+        .collect();
+    let partial = dir.join(format!(".labels.tsv.{}", std::process::id()));
+    std::fs::write(&partial, &canonical).map_err(|e| e500(format!("{}: {e}", dir.display())))?;
+    let recorded = labels::record(
+        registry,
+        &NewSet {
+            name: o.name,
+            version,
+            kind: labels::OUTSIDE,
+            what: &what,
+            source: json!({
+                "provenance": provenance,
+                "sha256": o.sha256,
+                "given_canonical": o.labels_tsv == canonical,
+                "columns": labels::OUTSIDE_COLUMNS,
+                "keyed_by": "DICOM identity",
+            }),
+            campaign_id: None,
+            handle_id: None,
+            pack_version: None,
+            scheme_digest: None,
+            sealed: false,
+            rows: rows.len() as i64,
+            digest: &hex,
+            place_id: place.as_ref().map(|p| p.id),
+            path: Some(&dir.display().to_string()),
+            created_by: o.created_by,
+        },
+    );
+    let set = match recorded {
+        Ok(set) => set,
+        Err(e) => {
+            std::fs::remove_file(&partial).ok();
+            return Err(e500(e.to_string()));
+        }
+    };
+    std::fs::rename(&partial, dir.join("labels.tsv"))
+        .map_err(|e| e500(format!("{}: {e}", dir.display())))?;
+    std::fs::write(dir.join("provenance.json"), o.provenance_json)
+        .map_err(|e| e500(format!("{}: {e}", dir.display())))?;
+    std::fs::write(dir.join("SHA256SUMS"), sums)
+        .map_err(|e| e500(format!("{}: {e}", dir.display())))?;
     Ok(set)
 }
 
@@ -4301,6 +4869,24 @@ pub(crate) enum LabelsCommand {
     /// Write the decisions in force on one axis as labels.tsv and
     /// provenance.json, with a digest over the labels
     Export(Box<ExportArgs>),
+    /// Register a label set made outside the engine (record 55 E6): a
+    /// folder of labels.tsv (rows keyed by DICOM identity), provenance.json
+    /// and SHA256SUMS naming every file of the set
+    Register {
+        /// The folder
+        dir: PathBuf,
+        /// What the set is called; the folder's name when not given
+        #[arg(long, value_name = "NAME")]
+        name: Option<String>,
+        /// What was labelled; the rows' when not given
+        #[arg(long, value_name = "WHAT")]
+        what: Option<String>,
+        /// The export place it is written into; the one there is when not given
+        #[arg(long, value_name = "PLACE")]
+        place: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
     /// Every label set, newest first
     List {
         #[arg(long)]
@@ -4519,6 +5105,8 @@ fn pick_writer(
                 actor: ask.who,
                 campaign: Some(ask.campaign),
                 occasion: Some((ask.subject_id, ask.session_day)),
+                scope: None,
+                made_in: None,
             },
         )
         .map(|picked| picked.id)
@@ -4752,8 +5340,26 @@ pub(crate) fn campaign_command(home: &Home, cmd: CampaignCommand) -> Result<(), 
             };
             let principal = who();
             let order = campaign::Order::parse(&order).map_err(cerr)?;
-            let claimed = campaign::claim_in(&mut registry, c.id, &principal, role, order, &now)
-                .map_err(cerr)?;
+            // record 55, the rulings of 2026-10-12, item 6: the keyboard is
+            // offered no check's item whose result is sealed now, unless
+            // --unsealed-access says why
+            let withheld = crate::checks::withheld_items(
+                registry.store(),
+                crate::sealed::keyboard_reads(),
+                &c,
+            )
+            .map_err(rerr)?;
+            let claimed = campaign::claim_withholding(
+                &mut registry,
+                c.id,
+                &principal,
+                role,
+                order,
+                false,
+                &withheld,
+                &now,
+            )
+            .map_err(cerr)?;
             match claimed {
                 Some(cl) if json => print(&cl.as_json()),
                 Some(cl) => println!(
@@ -4798,6 +5404,22 @@ pub(crate) fn campaign_command(home: &Home, cmd: CampaignCommand) -> Result<(), 
             let suggested = match campaign_of {
                 Some(cid) => {
                     let c = campaign::find(registry.store(), &cid.to_string()).map_err(cerr)?;
+                    // record 55, the rulings of 2026-10-12, item 6: nor does
+                    // the keyboard answer a check's item whose result is
+                    // sealed now, unless --unsealed-access says why
+                    if nils_registry::check::is_check(&c)
+                        && !crate::sealed::keyboard_reads()
+                        && let Some(item) = own_item(registry.store(), c.id, assignment, &principal)
+                            .map_err(rerr)?
+                        && crate::checks::withheld_items(registry.store(), false, &c)
+                            .map_err(rerr)?
+                            .contains(&item)
+                    {
+                        return Err(fail(format!(
+                            "item {item} of check {}: its result was made from a stack of a sample sealed for certification, and a check never holds a sealed scan's result (record 55); pass --unsealed-access REASON to answer it, which is audited",
+                            c.name
+                        )));
+                    }
                     let name = c
                         .pack_version
                         .as_deref()
@@ -4938,6 +5560,7 @@ pub(crate) fn campaign_command(home: &Home, cmd: CampaignCommand) -> Result<(), 
             let pack = crate::pack_dir(home, pack_dir)
                 .ok()
                 .and_then(|d| nils_pack::load(&d.join(&pack), None).ok());
+            let pack_for_label = pack.clone();
             let picks = pick_writer(pack);
             let (author_kind, model) = keyboard_author(&mut registry)?;
             let closed = campaign::close(
@@ -4948,12 +5571,23 @@ pub(crate) fn campaign_command(home: &Home, cmd: CampaignCommand) -> Result<(), 
                     author_kind,
                     model,
                     picks: Some(&picks),
+                    sealed: Some(&crate::checks::sealed_results),
                 },
                 &now,
             )
             .map_err(cerr)?;
+            // record 55 F5: a settled read of post-contrast is a T1 anchor
+            let label = crate::contrast::after_decisions(
+                registry.store(),
+                pack_for_label.as_ref(),
+                &closed.decisions,
+            );
             if json {
-                print(&closed.as_json());
+                let mut doc = closed.as_json();
+                if let Some(label) = label {
+                    doc["contrast_label"] = label;
+                }
+                print(&doc);
                 return Ok(());
             }
             println!(
@@ -4970,6 +5604,12 @@ pub(crate) fn campaign_command(home: &Home, cmd: CampaignCommand) -> Result<(), 
             }
             for (item, why) in &closed.skipped {
                 println!("  item {item} skipped: {why}");
+            }
+            if closed.left_out_sealed > 0 {
+                println!(
+                    "  {} item(s) left out: sealed for certification",
+                    closed.left_out_sealed
+                );
             }
             println!("  agreement {}", closed.agreement);
             Ok(())
@@ -5341,6 +5981,84 @@ fn create_verb(home: &Home, a: CreateArgs) -> Result<(), Exit> {
 
 pub(crate) fn labels_command(home: &Home, cmd: LabelsCommand) -> Result<(), Exit> {
     match cmd {
+        LabelsCommand::Register {
+            dir,
+            name,
+            what,
+            place,
+            json,
+        } => {
+            let read = |f: &str| {
+                std::fs::read(dir.join(f))
+                    .map_err(|e| usage(format!("{}: {e}", dir.join(f).display())))
+            };
+            let sums = String::from_utf8(read("SHA256SUMS")?)
+                .map_err(|_| usage("SHA256SUMS is not text"))?;
+            let mut sha256: BTreeMap<String, String> = BTreeMap::new();
+            for line in sums.lines().filter(|l| !l.trim().is_empty()) {
+                let Some((hex, file)) = line.split_once(char::is_whitespace) else {
+                    return Err(usage(format!(
+                        "SHA256SUMS: {line:?} is not <sha256>  <file>"
+                    )));
+                };
+                let file = file.trim_start().trim_start_matches('*').to_string();
+                // every file the sums name is the file in the folder
+                let got = sha256_of_file(&dir.join(&file))?;
+                if got != hex {
+                    return Err(usage(format!(
+                        "{file} hashes to {got}, and SHA256SUMS says {hex}"
+                    )));
+                }
+                sha256.insert(file, hex.to_string());
+            }
+            let labels_tsv = String::from_utf8(read("labels.tsv")?)
+                .map_err(|_| usage("labels.tsv is not text"))?;
+            let provenance_json = String::from_utf8(read("provenance.json")?)
+                .map_err(|_| usage("provenance.json is not text"))?;
+            let name = name.unwrap_or_else(|| {
+                dir.file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default()
+            });
+            let who = who();
+            let outside = Outside {
+                name: &name,
+                what: what.as_deref(),
+                labels_tsv: &labels_tsv,
+                provenance_json: &provenance_json,
+                sha256: &sha256,
+                created_by: &who,
+            };
+            let mut registry = crate::open(home)?;
+            let target = export_dir(registry.store(), place.as_deref(), &name).map_err(|r| {
+                usage(
+                    r.body["error"]
+                        .as_str()
+                        .unwrap_or("no export place")
+                        .to_string(),
+                )
+            })?;
+            let set = register_outside(&mut registry, &target, &outside)
+                .map_err(|(status, e)| if status >= 500 { fail(e) } else { usage(e) })?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&set.as_json()).unwrap_or_default()
+                );
+            } else {
+                println!(
+                    "registered label set {} {} v{}: {} rows of {}, sha256:{}, at {}",
+                    set.id,
+                    set.name,
+                    set.version,
+                    set.rows,
+                    set.what,
+                    set.digest,
+                    set.path.as_deref().unwrap_or("")
+                );
+            }
+            Ok(())
+        }
         LabelsCommand::Export(a) => {
             let a = *a;
             for k in &a.authors {

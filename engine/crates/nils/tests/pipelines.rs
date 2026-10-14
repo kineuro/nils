@@ -20,7 +20,7 @@
 //! or with `NILS_TEST_PIPELINE_RUNTIME=docker` on a machine an operator lets
 //! run docker, and says so and passes elsewhere.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
@@ -239,7 +239,9 @@ fn tree_of(at: impl Fn(&str, &str, u32) -> String, people: &[Person<'_>]) -> Tem
                     synth::us(tags::PIXEL_REPRESENTATION, 0),
                     synth::us(tags::SAMPLES_PER_PIXEL, 1),
                     synth::text(tags::PHOTOMETRIC_INTERPRETATION, VR::CS, "MONOCHROME2"),
-                    synth::text(tags::PIXEL_SPACING, VR::DS, "1.0\\1.0"),
+                    // 32 pixels of 8 mm: a brain's 256 mm across, since the
+                    // MRI pack gives no role to a slab under 175 mm both ways
+                    synth::text(tags::PIXEL_SPACING, VR::DS, "8.0\\8.0"),
                     synth::text(tags::SLICE_THICKNESS, VR::DS, "1.0"),
                     synth::text(tags::IMAGE_ORIENTATION_PATIENT, VR::DS, "0\\1\\0\\0\\0\\-1"),
                     synth::text(
@@ -1211,13 +1213,24 @@ fn a_bids_run_takes_what_an_earlier_bids_run_made_of_its_sessions() {
     }
     let lab = Lab::new("pipelines-bids-chain");
     lab.add_descriptor("bids-reader", BIDS_READER);
-    // nothing made yet: the input it needs is named, and nothing runs
+    // nothing made yet: the input it needs is named, and nothing runs;
+    // since 2026-10-12 its pre-flight refuses it, before a run is made
     let (good, _, err) = lab.run(
         &["run", "bids-reader", "--select", "selection:every@1"],
         None,
     );
     assert!(!good, "a run without its derivative input is refused");
-    assert!(err.contains("none is registered"), "{err}");
+    assert!(
+        err.contains(
+            "refused before it started: no session can run: 2 of 2 lack an input (no output yet)"
+        ),
+        "{err}"
+    );
+    assert_eq!(
+        lab.count("SELECT COUNT(*) FROM pipeline_run"),
+        0,
+        "no run is made"
+    );
     lab.add_descriptor("bids-copy", BIDS_COPY);
     let first = lab.json(&[
         "run",
@@ -1383,6 +1396,11 @@ const PLAIN: &str = "a-plain-pipelines-token-long";
 const READER: &str = "a-reader-token-of-its-length";
 /// Record 49 R4's review: a reader of runs and of review items at plain.
 const PLAIN_REVIEW: &str = "a-plain-review-token-of-lens";
+/// Record 48, D1 of the move: the certificate's computation, an operator
+/// with the one grant no ladder set holds.
+const CERT: &str = "a-certificate-token-of-length";
+/// Record 55 H2: an admin, who adds a pipeline, sets the lane and a secret.
+const ADMIN: &str = "an-admin-token-of-its-length";
 
 impl Server {
     fn start(lab: &Lab) -> Server {
@@ -1401,6 +1419,8 @@ impl Server {
             format!("{PLAIN}=pat@lab:pipelines:work,pipelines:see"),
             format!("{READER}=lou@lab:reader"),
             format!("{PLAIN_REVIEW}=rae@lab:pipelines:see,review:see"),
+            format!("{CERT}=cert@lab:operator,sealed:see"),
+            format!("{ADMIN}=ada@lab:admin"),
         ]
         .join(",");
         let child = lab
@@ -1434,10 +1454,46 @@ impl Server {
         held.port = addr.rsplit(':').next().unwrap().parse().unwrap();
         // the worker prints a line a job; nobody need read them
         std::thread::spawn(move || for _ in lines {});
+        held.runtime_looked();
         held
     }
 
+    /// Wait until the engine has finished its first look for a container
+    /// runtime: until then its doors say pipelines are off for a moment,
+    /// and the jobs door refuses a run, which a test would read as its own
+    /// failure on a slow machine. The capabilities say it: `pipelines.reason`
+    /// is the moment's sentence while the engine looks.
+    fn runtime_looked(&self) {
+        const LOOKING: &str = "the engine is still looking for a container runtime";
+        let started = std::time::Instant::now();
+        loop {
+            let (status, caps) = self.call("GET", "/api/capabilities", None, OPERATOR);
+            let reason = caps["pipelines"]["reason"].as_str().unwrap_or_default();
+            if status == 200 && !reason.contains(LOOKING) {
+                return;
+            }
+            assert!(
+                started.elapsed().as_secs() < 60,
+                "nils serve was still looking for a container runtime after 60 s ({status}): {caps}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+
     fn raw(&self, method: &str, path: &str, body: Option<Value>, token: &str) -> (u16, Vec<u8>) {
+        let (status, _, bytes) = self.fetch(method, path, body, token);
+        (status, bytes)
+    }
+
+    /// One request: its status, its headers by their lower-case names, and
+    /// the body's bytes.
+    fn fetch(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<Value>,
+        token: &str,
+    ) -> (u16, BTreeMap<String, String>, Vec<u8>) {
         let mut stream = TcpStream::connect(("127.0.0.1", self.port)).unwrap();
         let body = body.map(|b| b.to_string()).unwrap_or_default();
         let head = format!(
@@ -1451,7 +1507,15 @@ impl Server {
         let split = response.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
         let head = String::from_utf8_lossy(&response[..split]).to_string();
         let status: u16 = head.split_whitespace().nth(1).unwrap().parse().unwrap();
-        (status, response[split + 4..].to_vec())
+        let headers = head
+            .lines()
+            .skip(1)
+            .filter_map(|l| {
+                l.split_once(':')
+                    .map(|(k, v)| (k.trim().to_lowercase(), v.trim().to_string()))
+            })
+            .collect();
+        (status, headers, response[split + 4..].to_vec())
     }
 
     fn call(&self, method: &str, path: &str, body: Option<Value>, token: &str) -> (u16, Value) {
@@ -1969,8 +2033,8 @@ fn real_containers_run_n4_rootless_with_no_network() {
         assert_eq!(owner(&out.join("kept.txt")), me);
     }
 
-    // N4 over the frozen selection: one derivative per session, and the
-    // same digests again
+    // N4 over the frozen selection: the corrected image and the bias field
+    // of each session, and the same digests again
     let n4 = repo().join("pipelines/n4-bias-correction/nils.job.yml");
     ok(&["pipeline", "add", n4.to_str().unwrap()]);
     let first = ok(&[
@@ -1985,8 +2049,32 @@ fn real_containers_run_n4_rootless_with_no_network() {
     assert_eq!(first["status"], "done", "{first}");
     assert_eq!(first["summary"]["units"]["succeeded"], 2, "{first}");
     assert_eq!(
-        first["summary"]["derivatives"], 2,
-        "one per session: {first}"
+        first["summary"]["derivatives"], 4,
+        "two per session: {first}"
+    );
+    let rows = ok(&[
+        "derivative",
+        "list",
+        "--run",
+        &first["id"].to_string(),
+        "--json",
+    ]);
+    let mut names: Vec<&str> = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|d| d["path"].as_str()?.rsplit_once("_desc-n4_").map(|(_, n)| n))
+        .collect();
+    names.sort();
+    assert_eq!(
+        names,
+        [
+            "T1w.nii.gz",
+            "T1w.nii.gz",
+            "biasfield.nii.gz",
+            "biasfield.nii.gz"
+        ],
+        "{rows}"
     );
     let second = ok(&[
         "run",
@@ -2736,6 +2824,8 @@ exit 1
 /// A pipeline of the stacks layout whose units run apart (record 49 A1):
 /// each unit sees its own stack alone, notes when it starts and ends in the
 /// file `LANE_TRACE` names, waits while the file `SLOW_HOLD` names is there,
+/// and, where `SLOW_GATE` names a gate, notes its process in
+/// `<gate>-<unit>.pid` and waits until `<gate>-<unit>` is there; then
 /// sleeps, and writes one file.
 fn stack_slow(name: &str, needs: &str, extra: &str) -> String {
     format!(
@@ -2767,6 +2857,12 @@ command-line: |
   hold = os.environ.get("SLOW_HOLD")
   while hold and os.path.exists(hold):
       time.sleep(0.05)
+  gate = os.environ.get("SLOW_GATE")
+  if gate:
+      gate = gate + "-" + os.environ["NILS_UNIT"]
+      open(gate + ".pid", "w").write(str(os.getpid()))
+      while not os.path.exists(gate):
+          time.sleep(0.05)
   time.sleep(float(sys.argv[3]))
   s = m["stacks"][0]; u = s["unit"]; d = os.path.join(out, u); os.makedirs(d, exist_ok=True)
   open(os.path.join(d, "out.txt"), "w").write("stack %d\n" % s["stack_id"])
@@ -2958,6 +3054,58 @@ fn a_killed_run_is_taken_up_where_it_stopped() {
         None,
     );
     let t = lab.work.path().join("trace");
+    // each unit of the run that is killed waits at a gate of its own: the
+    // first two are let through and end; the two after them wait at theirs
+    // until something stops them, however slow the machine, so only the
+    // resume's stop of what the dead engine left can end them
+    let gate = lab.work.path().join("gate");
+    let gate_of = |unit: &str| PathBuf::from(format!("{}-{unit}", gate.display()));
+    let pid_of = |unit: &str| -> Option<i32> {
+        std::fs::read_to_string(format!("{}.pid", gate_of(unit).display()))
+            .ok()
+            .and_then(|p| p.trim().parse().ok())
+    };
+    let alive = |pid: i32| {
+        std::fs::read_to_string(format!("/proc/{pid}/stat"))
+            .ok()
+            .and_then(|s| s.rsplit(')').next().map(|r| r.trim_start().to_string()))
+            .is_some_and(|state| !state.starts_with('Z'))
+    };
+    // whatever happens, nothing the run started outlives the test: every
+    // gate is opened at the end, so a unit still waiting goes on and ends
+    struct Reap(PathBuf);
+    impl Drop for Reap {
+        fn drop(&mut self) {
+            let dir = self.0.parent().unwrap();
+            let mut opened = Vec::new();
+            for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+                let name = e.file_name().to_string_lossy().to_string();
+                if let Some(gate) = name.strip_suffix(".pid").filter(|n| n.starts_with("gate-")) {
+                    let _ = std::fs::write(dir.join(gate), "");
+                    opened.push(e.path());
+                }
+            }
+            // and waited for, before the lab's folder goes with the gates
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            for pid in opened
+                .iter()
+                .filter_map(|p| std::fs::read_to_string(p).ok())
+            {
+                let proc = format!("/proc/{}/stat", pid.trim());
+                while std::fs::read_to_string(&proc).is_ok_and(|s| {
+                    !s.rsplit(')')
+                        .next()
+                        .unwrap_or("")
+                        .trim_start()
+                        .starts_with('Z')
+                }) && std::time::Instant::now() < until
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+            }
+        }
+    }
+    let _reap = Reap(gate.clone());
     let mut child = {
         use std::os::unix::process::CommandExt;
         lab.command(&lab.path)
@@ -2967,31 +3115,51 @@ fn a_killed_run_is_taken_up_where_it_stopped() {
                 "--select",
                 "selection:every@1",
                 "--param",
-                "sleep=2",
+                "sleep=0.2",
             ])
             .env("LANE_TRACE", &t)
+            .env("SLOW_GATE", &gate)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
-            // a group of its own, so the kill takes its containers with it
+            // a group of its own, so the kill takes the engine; each
+            // unit's runtime leads a group of its own, which it leaves
             .process_group(0)
             .spawn()
             .unwrap()
     };
-    // the first two units end, the next two start; then the engine dies
+    // the first two units end; the next two start and wait at their gates;
+    // then the engine dies
+    let mut through: Vec<String> = Vec::new();
     let started = std::time::Instant::now();
-    loop {
+    let waiting: Vec<String> = loop {
+        let begun: Vec<String> = trace(&t)
+            .into_iter()
+            .filter(|e| e.0 == "start")
+            .map(|e| e.2)
+            .collect();
+        for unit in begun.iter().take(2) {
+            if !through.contains(unit) {
+                std::fs::write(gate_of(unit), "").unwrap();
+                through.push(unit.clone());
+            }
+        }
         let over = lab.count("SELECT COUNT(*) FROM pipeline_unit WHERE state = 'over'");
-        let marked = trace(&t).iter().filter(|e| e.0 == "start").count();
-        if over >= 2 && marked >= 3 {
-            break;
+        let held: Vec<String> = begun
+            .iter()
+            .skip(2)
+            .filter(|u| pid_of(u).is_some())
+            .cloned()
+            .collect();
+        if over == 2 && held.len() == 2 {
+            break held;
         }
         assert!(
             started.elapsed().as_secs() < 60,
-            "the run never got half way"
+            "the run never got half way: {begun:?}, {over} over"
         );
         std::thread::sleep(std::time::Duration::from_millis(50));
-    }
+    };
     let pgid = child.id();
     // `--` before the group: procps 4.0.4 (Ubuntu 24.04) reads a bare
     // `-<pgid>` after the signal as something else, kills nothing and says 0
@@ -3011,10 +3179,17 @@ fn a_killed_run_is_taken_up_where_it_stopped() {
         .iter()
         .map(|r| r.text(0).unwrap().to_string())
         .collect();
-    assert!(
-        over_before.len() >= 2 && over_before.len() < 4,
-        "{over_before:?}"
-    );
+    let mut first = through.clone();
+    first.sort();
+    assert_eq!(over_before, first, "the two let through");
+    // the two in flight outlive the engine, waiting at their gates
+    let orphans: Vec<i32> = waiting.iter().map(|u| pid_of(u).unwrap()).collect();
+    for (unit, pid) in waiting.iter().zip(&orphans) {
+        assert!(
+            alive(*pid),
+            "{unit} went with the engine; the test proves nothing"
+        );
+    }
     assert_eq!(
         lab.count("SELECT COUNT(*) FROM pipeline_run WHERE status = 'running'"),
         1,
@@ -3055,6 +3230,16 @@ fn a_killed_run_is_taken_up_where_it_stopped() {
         "{}",
         std::fs::read_to_string(&said).unwrap_or_default()
     );
+    // the resume stopped what the dead engine left: the two at their gates,
+    // which nothing else would have ended (their gates are shut still)
+    for (unit, pid) in waiting.iter().zip(&orphans) {
+        assert!(!gate_of(unit).exists());
+        let stopping = std::time::Instant::now();
+        while alive(*pid) && stopping.elapsed().as_secs() < 10 {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(!alive(*pid), "the resume left {unit} running");
+    }
     let run: Value =
         serde_json::from_str(&lab.ok(&["pipeline", "runs", "1", "--json"], None)).unwrap();
     assert_eq!(run["status"], "done", "{run}");
@@ -3076,11 +3261,16 @@ fn a_killed_run_is_taken_up_where_it_stopped() {
             .count();
         assert_eq!(starts, 1, "{unit} ran again: {events:?}");
     }
-    // every unit ended once at least, and the ones in flight twice started
+    // the two in flight started twice, and ended once, in the resume: the
+    // stop ended their first start before it got anywhere
+    for unit in &waiting {
+        let of = |w: &str| events.iter().filter(|e| e.0 == w && &e.2 == unit).count();
+        assert_eq!((of("start"), of("end")), (2, 1), "{unit}: {events:?}");
+    }
     let starts = events.iter().filter(|e| e.0 == "start").count();
-    assert!(starts > 4 && starts <= 6, "{events:?}");
+    assert_eq!(starts, 6, "{events:?}");
     let ends = events.iter().filter(|e| e.0 == "end").count();
-    assert_eq!(ends, 4, "a killed unit never ended: {events:?}");
+    assert_eq!(ends, 4, "a stopped unit never ended: {events:?}");
     let attempts: i64 = lab.count("SELECT SUM(attempts) FROM pipeline_unit");
     assert_eq!(attempts as usize, starts, "{events:?}");
     // the job that took it up ran as the one the killed run recorded
@@ -3851,9 +4041,10 @@ fn a_run_s_table_answers_in_the_ask_and_a_planted_breach_raises_its_item() {
     }
     let lab = Lab::new("pipelines-numbers");
     lab.add_descriptor("volumes", VOLUMES);
-    let stacks: Vec<i64> = lab
-        .store()
-        .query("SELECT id FROM stack ORDER BY id", &[])
+    let mut store = lab.store();
+    let stack_t = store.qualified("stack");
+    let stacks: Vec<i64> = store
+        .query(&format!("SELECT id FROM {stack_t} ORDER BY id"), &[])
         .unwrap()
         .iter()
         .map(|r| r.int(0).unwrap())
@@ -4294,6 +4485,234 @@ fn is_flair_image(name: &str) -> bool {
     })
 }
 
+/// A reader of masks an earlier run made, as segcsvd reads one: each
+/// session writes the names of the masks its input holds. Its input takes
+/// what a check left standing, as every derivative input does unless it
+/// says otherwise: a mask a check rejected is none.
+const MASK_READER: &str = r#"name: mask-reader
+schema-version: "0.5"
+tool-version: "1"
+container-image:
+  type: docker
+  image: "example.org/mask-reader@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+command-line: |
+  python3 -c '
+  import glob, os, sys
+  src, out, masks = sys.argv[1], sys.argv[2], sys.argv[3]
+  seen = sorted(os.path.basename(f) for f in glob.glob(masks + "/**/*", recursive=True) if os.path.isfile(f))
+  for s in sorted(glob.glob(src + "/sub-*/ses-*")):
+      d = os.path.join(out, os.path.relpath(s, src), "anat"); os.makedirs(d, exist_ok=True)
+      open(os.path.join(d, "seen.txt"), "w").write("\n".join(seen) + "\n")
+  ' [InputDataset] [OutputLocation] [Inputs]/mask
+x-nils:
+  analysis-level: session
+  input: {layout: bids}
+  units: apart
+  inputs:
+    - {id: mask, type: "derivative:mask"}
+  outputs:
+    - id: seen
+      kind: output
+      path-template: "sub-{subject}/ses-{session}/anat/seen.txt"
+"#;
+
+/// Record 55 H3, section 6.5, found by the T33 pipe test: a session whose
+/// only mask a check rejected is not ready, and the pre-flight says why;
+/// the run's inputs leave that mask out, and the run skips the session as
+/// the pre-flight said and runs the other. Every mask rejected, the run is
+/// refused before anything runs.
+#[test]
+fn a_session_whose_only_mask_was_rejected_is_neither_ready_nor_run() {
+    if !have("python3") || !have("dcm2niix") {
+        eprintln!(
+            "python3 or dcm2niix is not installed; the bids layout needs a converter, so this test is skipped"
+        );
+        return;
+    }
+    let lab = Lab::new("pipelines-checked-mask");
+    lab.add_descriptor("mask-reader", MASK_READER);
+    let preflight = || {
+        lab.json(&[
+            "run",
+            "mask-reader",
+            "--select",
+            "selection:every@1",
+            "--preflight",
+            "--json",
+        ])
+    };
+    // no mask yet: neither session has its input
+    let pre = preflight();
+    assert_eq!(pre["units"]["missing"], 2, "{pre}");
+    let sessions: Vec<(i64, String)> = pre["missing"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| {
+            assert_eq!(
+                m["why"],
+                json!(["no mask derivative of it for the input mask"]),
+                "{pre}"
+            );
+            (
+                m["subject_id"].as_i64().unwrap(),
+                m["session_day"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    // the first session's mask is the session's, as a run of the bids
+    // layout registers one (SynthSeg's label map); the second's is of its
+    // T1w
+    let t1 = lab
+        .store()
+        .query(
+            &format!(
+                "SELECT ps.stack_id FROM pick_stack ps JOIN pick p ON p.id = ps.pick_id \
+                 JOIN stack st ON st.id = ps.stack_id JOIN series se ON se.id = st.series_id \
+                 WHERE p.role = 't1w' AND p.withdrawn_at IS NULL AND se.subject_id = {}",
+                sessions[1].0
+            ),
+            &[],
+        )
+        .unwrap()[0]
+        .int(0)
+        .unwrap()
+        .to_string();
+    let add = |i: usize, of: &[&str]| -> i64 {
+        let file = lab.work.path().join(format!("mask-{i}.nii.gz"));
+        std::fs::write(&file, format!("the mask of session {i}")).unwrap();
+        let mut args = vec![
+            "derivative",
+            "add",
+            file.to_str().unwrap(),
+            "--kind",
+            "mask",
+        ];
+        args.extend(of);
+        args.push("--json");
+        let v = lab.json(&args);
+        std::fs::remove_file(&file).unwrap();
+        v["id"].as_i64().unwrap_or_else(|| panic!("{v}"))
+    };
+    let subject = sessions[0].0.to_string();
+    let masks = [
+        add(0, &["--subject", &subject, "--day", &sessions[0].1]),
+        add(1, &["--stack", &t1]),
+    ];
+    let pre = preflight();
+    assert_eq!(pre["units"]["missing"], 0, "both masks are inputs: {pre}");
+    let reject = |ids: &[i64]| {
+        let list = ids
+            .iter()
+            .map(i64::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        lab.store()
+            .execute(
+                &format!("UPDATE derivative SET check_status = 'rejected' WHERE id IN ({list})"),
+                &[],
+            )
+            .unwrap();
+    };
+    // a check rejects the first session's mask
+    reject(&masks[..1]);
+    let pre = preflight();
+    assert_eq!(pre["units"]["total"], 2, "{pre}");
+    assert_eq!(pre["units"]["missing"], 1, "{pre}");
+    assert_eq!(pre["missing"][0]["subject_id"], sessions[0].0, "{pre}");
+    let why = pre["missing"][0]["why"].to_string();
+    assert!(why.contains("rejected by a check"), "{pre}");
+    assert_eq!(pre["ready"], true, "the other session runs: {pre}");
+    let text = lab.ok(
+        &[
+            "run",
+            "mask-reader",
+            "--select",
+            "selection:every@1",
+            "--preflight",
+        ],
+        None,
+    );
+    assert!(text.contains("2 (1 ready, 1 missing an input)"), "{text}");
+    assert!(lab.podman_runs().is_empty(), "nothing ran");
+
+    // the run: the rejected mask is no input, and its session is not run
+    let v = lab.json(&[
+        "run",
+        "mask-reader",
+        "--select",
+        "selection:every@1",
+        "--json",
+    ]);
+    assert_eq!(v["summary"]["units"]["total"], 2, "{v}");
+    assert_eq!(
+        v["summary"]["units"]["skipped"], pre["units"]["missing"],
+        "{v}"
+    );
+    assert_eq!(
+        v["summary"]["units"]["succeeded"], pre["units"]["ready"],
+        "{v}"
+    );
+    assert_eq!(v["summary"]["units"]["failed"], 0, "{v}");
+    assert_eq!(
+        lab.podman_runs().len(),
+        1,
+        "one container, the other session's"
+    );
+    let run = v["id"].as_i64().unwrap();
+    let manifest: Value = serde_json::from_str(
+        &std::fs::read_to_string(
+            lab.work
+                .path()
+                .join(format!("runs/{run}/inputs/manifest.json")),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let taken: Vec<i64> = manifest["derivatives"]["mask"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["id"].as_i64().unwrap())
+        .collect();
+    assert_eq!(taken, masks[1..], "{manifest}");
+    let skipped: Vec<&Value> = v["units_run"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|u| u["status"] == "skipped")
+        .collect();
+    assert_eq!(skipped.len(), 1, "{v}");
+    assert_eq!(skipped[0]["attempts"], 0, "no container: {v}");
+    let outcome = lab
+        .store()
+        .query("SELECT outcome FROM pipeline_unit WHERE attempts = 0", &[])
+        .unwrap()[0]
+        .text(0)
+        .unwrap()
+        .to_string();
+    assert!(
+        outcome.contains("missing an input") && outcome.contains("rejected by a check"),
+        "{outcome}"
+    );
+
+    // every mask rejected: refused before anything runs
+    reject(&masks);
+    let pre = preflight();
+    assert_eq!(pre["units"]["missing"], 2, "{pre}");
+    let (good, _, err) = lab.run(
+        &["run", "mask-reader", "--select", "selection:every@1"],
+        None,
+    );
+    assert!(!good, "a run with no mask it takes is refused");
+    // since 2026-10-12 by its pre-flight, before a run is made
+    assert!(
+        err.contains("refused before it started: no session can run: 2 of 2 lack an input (its mask was rejected)"),
+        "{err}"
+    );
+    assert_eq!(lab.podman_runs().len(), 1, "no container more");
+}
+
 /// Record 49 A3's proof, the second half: the pre-flight of a selection
 /// whose one session lacks its FLAIR counts the units the run then has and
 /// names the one it then fails, at the command line and at the door, and
@@ -4508,7 +4927,9 @@ fn the_preflight_counts_what_the_run_then_does() {
 /// stood in for by scripts that keep their words, and each unit's needs
 /// made small enough for any machine's lane: SynthSeg's label maps,
 /// segcsvd's WMH segmented on each session's FLAIR and named for it, and
-/// SAMSEG with the FLAIR resampled onto the T1w.
+/// SAMSEG with the FLAIR resampled onto the T1w. Both check each FLAIR
+/// against its T1w first (the review of 2026-10-12), and the session whose
+/// brain masks agree below 0.85 is flagged, never failed.
 #[test]
 fn the_starters_that_read_a_flair_find_it_in_the_release_a_run_makes() {
     if !have("python3") || !have("dcm2niix") {
@@ -4522,13 +4943,14 @@ fn the_starters_that_read_a_flair_find_it_in_the_release_a_run_makes() {
     // its threads follow
     let cores = regex::Regex::new(r"(?m)^    cores: \d+$").unwrap();
     let memory = regex::Regex::new(r"(?m)^    memory-gb: \d+$").unwrap();
+    let mut labels = BTreeMap::new();
     for name in ["synthseg", "segcsvd", "samseg-lesions"] {
         let text =
             std::fs::read_to_string(repo().join(format!("pipelines/{name}/nils.job.yml"))).unwrap();
         let small = cores.replace_all(&text, "    cores: 1");
         let small = memory.replace_all(&small, "    memory-gb: 2").to_string();
         assert_ne!(small, text, "{name} declares its needs");
-        lab.add_descriptor(name, &small);
+        labels.insert(name, lab.add_descriptor(name, &small)["label"].clone());
     }
     // the images' tools: each keeps its words, a line a call, and writes
     // what the command line reads next
@@ -4537,7 +4959,7 @@ fn the_starters_that_read_a_flair_find_it_in_the_release_a_run_makes() {
         "l=${{0##*/}}; for a; do l=\"$l\t$a\"; done; printf '%s\\n' \"$l\" >> '{}'",
         log.display()
     );
-    let tools: [(&str, &str); 6] = [
+    let tools: [(&str, &str); 7] = [
         (
             "mri_synthseg",
             r#"while [ $# -gt 0 ]; do case "$1" in --o) o=$2;; --vol) v=$2;; --qc) q=$2;; esac; shift; done
@@ -4554,26 +4976,39 @@ printf 'subject,general white matter,general grey matter,general csf\nx,0.9,0.9,
             "segment_pvs",
             r#"printf x > "$4"; printf x > "$(dirname "$4")/thr_pvs.nii.gz""#,
         ),
-        // SAMSEG's folder read for its measures; otherwise an image written
-        // to its last word
+        // the alignment check, the masks of the first session it is given
+        // agreeing at 0.6, the other's at 0.97; SAMSEG's folder read for
+        // its measures, and the numbers after it; otherwise an image
+        // written to its last word
         (
             "fspython",
-            r#"for l; do :; done; if [ -d "$l" ]; then echo '{"Intra-Cranial": 1500000.0, "Lesions": 1200.0}'; else printf x > "$l"; fi"#,
+            r#"case "$2" in
+*affine_transform*) if mkdir "$(dirname "$0")/samseg-low" 2>/dev/null; then echo 0.60; else echo 0.97; fi;;
+*samseg.stats*) shift 3; s='"Intra-Cranial": 1500000.0, "Lesions": 1200.0'; while [ $# -gt 1 ]; do s="$s, \"$1\": $2"; shift 2; done; echo "{$s}";;
+*) for l; do :; done; printf x > "$l";;
+esac"#,
         ),
         (
             "run_samseg",
             r#"while [ $# -gt 0 ]; do [ "$1" = -o ] && o=$2; shift; done; mkdir -p "$o"; printf x > "$o/seg.mgz""#,
         ),
+        // a brain mask of the image it is given
+        (
+            "mri_synthstrip",
+            r#"while [ $# -gt 0 ]; do [ "$1" = -m ] && m=$2; shift; done; printf x > "$m""#,
+        ),
     ];
     // python3 runs the stand-in podman too: only the image's nibabel steps
-    // are stood in for, the volumes of the masks given in pairs, each there
+    // are stood in for, the alignment check as fspython's is, and the
+    // volumes of the masks given in pairs, each there, beside the numbers
     let python = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
         .map(|d| d.join("python3"))
         .find(|p| p.is_file())
         .unwrap();
     let python3 = format!(
         r#"case "$2" in
-*nibabel*json.dumps*) shift 2; s=; while [ $# -gt 1 ]; do [ -s "$2" ] || exit 1; s="$s${{s:+, }}\"$1\": 1.0"; shift 2; done; echo "{{$s}}"; exit 0;;
+*threshold_otsu*) if mkdir "$(dirname "$0")/segcsvd-low" 2>/dev/null; then echo 0.60; else echo 0.97; fi; exit 0;;
+*nibabel*json.dumps*) shift 2; s=; while [ $# -gt 1 ]; do v=$2; case "$1" in *_volume) [ -s "$2" ] || exit 1; v=1.0;; esac; case "$v" in *[!0-9.]*) v="\"$v\"";; esac; s="$s${{s:+, }}\"$1\": $v"; shift 2; done; echo "{{$s}}"; exit 0;;
 *nibabel*) for l; do :; done; printf x > "$l"; exit 0;;
 esac
 exec '{}' "$@""#,
@@ -4611,7 +5046,18 @@ exec '{}' "$@""#,
         };
         assert_eq!(pre["roles"], roles, "{pre}");
         assert_eq!(pre["units"]["total"], 2, "{name}: {pre}");
-        assert_eq!(pre["units"]["missing"], 0, "{name}: {pre}");
+        // segcsvd's label maps are SynthSeg's, which has not run yet: each
+        // session lacks that input, as the run would find (the T33 pipe
+        // test), and has its roles
+        let lacking = if name == "segcsvd" { 2 } else { 0 };
+        assert_eq!(pre["units"]["missing"], lacking, "{name}: {pre}");
+        for m in pre["missing"].as_array().unwrap() {
+            assert_eq!(
+                m["why"],
+                json!(["no mask derivative of it for the input synthseg"]),
+                "{pre}"
+            );
+        }
     }
 
     let run = |name: &str| -> Value {
@@ -4640,7 +5086,16 @@ exec '{}' "$@""#,
         out
     };
 
-    run("synthseg");
+    let synthseg = run("synthseg");
+    let pre = lab.json(&[
+        "run",
+        "segcsvd",
+        "--select",
+        "selection:every@1",
+        "--preflight",
+        "--json",
+    ]);
+    assert_eq!(pre["units"]["missing"], 0, "SynthSeg's label maps: {pre}");
     let v = run("segcsvd");
     let flairs = handed("segment_wmh");
     assert_eq!(flairs.len(), 2, "a FLAIR in each session: {flairs:?}");
@@ -4683,6 +5138,45 @@ exec '{}' "$@""#,
         volumes.iter().all(|t| t["wmh_volume"] == 1.0),
         "{volumes:?}"
     );
+    // record 57 P11: each unit names the SynthSeg it read, from what the
+    // manifest says made the label map: the run, its pipeline and
+    // version, and robust (the starter's default); the stand-in's map is
+    // no image, so it was never tied to a scan and its contrast is not
+    // said (the masks test below has it)
+    for t in &volumes {
+        assert_eq!(t["synthseg_run"], synthseg["id"], "{t}");
+        assert_eq!(t["synthseg_pipeline"], labels["synthseg"], "{t}");
+        assert_eq!(t["synthseg_robust"], 1, "{t}");
+        assert!(t.get("synthseg_contrast").is_none(), "{t}");
+    }
+    // the review of 2026-10-12: each unit checks its FLAIR against its
+    // T1w, the agreement a column of its table; the session whose masks
+    // agree below 0.85 is flagged, a pipeline:qc item, and its unit still
+    // succeeded
+    let flagged = |v: &Value, volumes: &[Value]| {
+        let mut dice: Vec<f64> = volumes
+            .iter()
+            .map(|t| t["flair_t1_brain_dice"].as_f64().unwrap_or(f64::NAN))
+            .collect();
+        dice.sort_by(f64::total_cmp);
+        assert_eq!(dice, [0.6, 0.97], "{volumes:?}");
+        assert_eq!(v["summary"]["numbers"]["checks"]["breaches"], 1, "{v}");
+        let items = lab.json(&["review", "list", "--kind", "pipeline:qc", "--json"]);
+        let mine: Vec<&Value> = items["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|i| i["ref"]["run_id"] == v["id"])
+            .collect();
+        assert_eq!(mine.len(), 1, "{items}");
+        assert_eq!(mine[0]["evidence"]["status"], "breach", "{items}");
+        assert_eq!(
+            mine[0]["evidence"]["error"],
+            "flair_t1_brain_dice is 0.6, and the check is flair_t1_brain_dice >= 0.85",
+            "{items}"
+        );
+    };
+    flagged(&v, &volumes);
 
     let v = run("samseg-lesions");
     let resampled = handed("fspython");
@@ -4692,8 +5186,480 @@ exec '{}' "$@""#,
     let lesions = calls
         .lines()
         .filter(|l| l.starts_with("run_samseg\t") && l.contains("\t--lesion\t"))
+        .filter(|l| l.contains("\t--pallidum-separate"))
         .count();
-    assert_eq!(lesions, 2, "{calls}");
+    assert_eq!(
+        lesions, 2,
+        "the pallidum separated beside the FLAIR: {calls}"
+    );
+    let rows = lab.json(&[
+        "derivative",
+        "list",
+        "--run",
+        &v["id"].to_string(),
+        "--json",
+    ]);
+    let volumes: Vec<Value> = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|d| d["path"].as_str())
+        .filter(|p| p.ends_with("_desc-samseg_volumes.json"))
+        .map(|p| serde_json::from_slice(&std::fs::read(lab.work.path().join(p)).unwrap()).unwrap())
+        .collect();
+    assert_eq!(volumes.len(), 2, "{rows}");
+    assert!(
+        volumes.iter().all(|t| t["pallidum_separate"] == 1),
+        "{volumes:?}"
+    );
+    flagged(&v, &volumes);
+    // each brain mask made of the session's own two images
+    let stripped = calls
+        .lines()
+        .filter(|l| l.starts_with("mri_synthstrip\t"))
+        .count();
+    assert_eq!(stripped, 4, "{calls}");
+}
+
+/// The descriptors whose masks a check reads (record 55 H3, job type 3):
+/// each mask output's grid role, where it names one, and its part sets as
+/// key and kind.
+type CheckedMasks<'a> = &'a [(&'a str, Option<&'a str>, &'a [(&'a str, &'a str)])];
+
+/// Record 55 H3 (job type 3, the pipelines' slice): SAMSEG with lesions,
+/// segcsvd and SynthSeg declare the grid each mask is on and the parts a
+/// check reads it as, and the LST-AI descriptor does too; each parses, and
+/// a structures set names its labels as FreeSurfer's colour table does.
+#[test]
+fn the_masks_a_check_reads_declare_their_grid_and_parts() {
+    let expect: [(&str, CheckedMasks<'_>); 4] = [
+        (
+            "samseg-lesions",
+            &[(
+                "labels",
+                Some("t1w"),
+                &[("lesions", "components"), ("structures", "labels")],
+            )],
+        ),
+        (
+            "segcsvd",
+            &[
+                ("wmh", None, &[("wmh", "components")]),
+                ("pvs", Some("t1w"), &[("pvs", "components")]),
+            ],
+        ),
+        (
+            "synthseg",
+            &[("labels", Some("t1w"), &[("structures", "labels")])],
+        ),
+        (
+            "lst-ai",
+            &[
+                ("lesions", Some("flair"), &[("lesions", "components")]),
+                (
+                    "regions",
+                    Some("flair"),
+                    &[("lesions", "components"), ("regions", "labels")],
+                ),
+            ],
+        ),
+    ];
+    for (name, masks) in expect {
+        let text =
+            std::fs::read_to_string(repo().join(format!("pipelines/{name}/nils.job.yml"))).unwrap();
+        let d = nils_pipeline::descriptor::parse(&text).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let declared: Vec<&str> = d
+            .outputs
+            .iter()
+            .filter(|o| o.kind == "mask")
+            .map(|o| o.id.as_str())
+            .collect();
+        assert_eq!(
+            declared,
+            masks.iter().map(|m| m.0).collect::<Vec<_>>(),
+            "{name}"
+        );
+        for (id, grid, sets) in masks {
+            let o = d.outputs.iter().find(|o| o.id == *id).unwrap();
+            assert_eq!(o.grid.as_deref(), *grid, "{name}.{id}");
+            let got: Vec<(&str, &str)> = o
+                .parts
+                .iter()
+                .map(|p| (p.key.as_str(), p.kind.as_str()))
+                .collect();
+            assert_eq!(got, *sets, "{name}.{id}");
+            for p in &o.parts {
+                assert!(!p.words.is_empty(), "{name}.{id}.{}", p.key);
+                if p.kind == "components" {
+                    assert_eq!(p.connectivity, 26, "{name}.{id}.{}", p.key);
+                }
+            }
+        }
+    }
+    // the lesions SAMSEG writes as 99; FreeSurfer's names for its labels
+    let text =
+        std::fs::read_to_string(repo().join("pipelines/samseg-lesions/nils.job.yml")).unwrap();
+    let samseg = nils_pipeline::descriptor::parse(&text).unwrap();
+    let parts = &samseg.outputs[0].parts;
+    assert_eq!(parts[0].labels, Some(vec![99]));
+    assert_eq!(parts[1].labels, None, "every label the map holds");
+    for (label, name) in [
+        (2, "Left-Cerebral-White-Matter"),
+        (17, "Left-Hippocampus"),
+        (41, "Right-Cerebral-White-Matter"),
+        (99, "Lesion"),
+    ] {
+        assert_eq!(parts[1].names[&label], name);
+    }
+    let text = std::fs::read_to_string(repo().join("pipelines/synthseg/nils.job.yml")).unwrap();
+    let synthseg = nils_pipeline::descriptor::parse(&text).unwrap();
+    let names = &synthseg.outputs[0].parts[0].names;
+    assert_eq!(
+        names.len(),
+        32,
+        "SynthSeg's labels without the parcellation"
+    );
+    assert_eq!(names[&14], "3rd-Ventricle");
+    assert_eq!(names[&60], "Right-VentralDC");
+    // LST-AI's regions, as its annotation numbers them
+    let text = std::fs::read_to_string(repo().join("pipelines/lst-ai/nils.job.yml")).unwrap();
+    let lst = nils_pipeline::descriptor::parse(&text).unwrap();
+    let regions = &lst.outputs[1].parts[1].names;
+    assert_eq!(
+        regions.values().map(String::as_str).collect::<Vec<_>>(),
+        [
+            "Periventricular",
+            "Juxtacortical",
+            "Subcortical",
+            "Infratentorial"
+        ]
+    );
+    assert_eq!(lst.roles, ["t1w", "flair"]);
+}
+
+/// A mask writer the stand-in tools call with the real python3: a NIfTI-1
+/// of u8 labels on the grid of the image it is given (its header kept,
+/// the sform with it), gzipped, as `mode` fills it. `blobs`: two lesions
+/// of value 1, a cube of 8 voxels near one corner and one voxel near the
+/// other; `regions`: the same, the cube 1 (periventricular) and the voxel
+/// 3 (subcortical); `map`: three structures, 2 and 41 on the two halves
+/// of a middle plane and 17 in a block above it; `samseg`: the map with
+/// the two lesions as 99.
+const MKMASK: &str = r#"import gzip, struct, sys
+ref, out, mode = sys.argv[1:4]
+with (gzip.open if ref.endswith(".gz") else open)(ref, "rb") as f:
+    h = bytearray(f.read(348))
+e = "<" if struct.unpack("<i", h[0:4])[0] == 348 else ">"
+d = struct.unpack(e + "8h", h[40:56])
+nx, ny, nz = d[1], d[2], max(d[3], 1)
+struct.pack_into(e + "8h", h, 40, 3, nx, ny, nz, 1, 1, 1, 1)
+struct.pack_into(e + "hh", h, 70, 2, 8)
+struct.pack_into(e + "fff", h, 108, 352.0, 1.0, 0.0)
+data = bytearray(nx * ny * nz)
+def put(i, j, k, v):
+    data[i + nx * (j + ny * k)] = v
+if mode in ("map", "samseg"):
+    for i in range(nx):
+        for j in range(ny):
+            put(i, j, nz // 2, 2 if i < nx // 2 else 41)
+    for i in (1, 2):
+        for j in (1, 2):
+            put(i, j, nz // 2 + 1, 17)
+if mode != "map":
+    a, b = {"blobs": (1, 1), "regions": (1, 3), "samseg": (99, 99)}[mode]
+    for i in (1, 2):
+        for j in (1, 2):
+            for k in (1, 2):
+                put(i, j, k, a)
+    put(nx - 2, ny - 2, nz - 2, b)
+with gzip.open(out, "wb") as f:
+    f.write(bytes(h) + bytes(4) + bytes(data))
+"#;
+
+/// Record 55 H3's proof for the pipelines (job type 3, the build spec of
+/// 2026-10-11, section 16, P1): SynthSeg, segcsvd, SAMSEG with lesions and
+/// LST-AI run as the runner runs them, their command lines as shipped and
+/// the images' tools stood in for by scripts that write real masks on the
+/// grid of the image each is handed, and every mask they make is
+/// registered tied `same` to the scan it is on, read into the part sets
+/// its descriptor declares: on the T1w the unit was given for SynthSeg's
+/// and SAMSEG's label maps and segcsvd's PVS, on the FLAIR for LST-AI's
+/// masks, and for segcsvd's WMH, which names no role, on the input whose
+/// grid it matches. The stand-in podman runs a command line after the
+/// image as an image without an ENTRYPOINT would; LST-AI's own image has
+/// one (its descriptor's notes), so this proves its command line, not its
+/// image.
+#[test]
+fn the_masks_the_starters_make_are_tied_to_their_scans_and_read_into_their_parts() {
+    if !have("python3") || !have("dcm2niix") {
+        eprintln!(
+            "python3 or dcm2niix is not installed; the bids layout needs a converter, so this test is skipped"
+        );
+        return;
+    }
+    let lab = Lab::new("pipelines-check-masks");
+    // the shipped descriptors, each unit asking one core and 2 GB
+    let cores = regex::Regex::new(r"(?m)^    cores: \d+$").unwrap();
+    let memory = regex::Regex::new(r"(?m)^    memory-gb: \d+$").unwrap();
+    let names = ["synthseg", "segcsvd", "samseg-lesions", "lst-ai"];
+    for name in names {
+        let text =
+            std::fs::read_to_string(repo().join(format!("pipelines/{name}/nils.job.yml"))).unwrap();
+        let small = cores.replace_all(&text, "    cores: 1");
+        let small = memory.replace_all(&small, "    memory-gb: 2").to_string();
+        assert_ne!(small, text, "{name} declares its needs");
+        lab.add_descriptor(name, &small);
+    }
+    let python = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+        .map(|d| d.join("python3"))
+        .find(|p| p.is_file())
+        .unwrap();
+    let mkmask = lab.bin.file("mkmask.py", MKMASK.as_bytes());
+    let mk = format!("'{}' '{}'", python.display(), mkmask.display());
+    let tools: [(&str, String); 7] = [
+        (
+            "mri_synthseg",
+            format!(
+                r#"while [ $# -gt 0 ]; do case "$1" in --i) i=$2;; --o) o=$2;; --vol) v=$2;; --qc) q=$2;; esac; shift; done
+{mk} "$i" "$o" map || exit 1
+printf 'subject,total intracranial\nx,1500000\n' > "$v"
+printf 'subject,general white matter,general grey matter,general csf\nx,0.9,0.9,0.9\n' > "$q""#
+            ),
+        ),
+        ("sbtResliceLike", r#"printf x > "$3""#.to_string()),
+        (
+            "segment_wmh",
+            format!(r#"printf x > "$3"; {mk} "$1" "$(dirname "$3")/thr_wmh.nii.gz" blobs"#),
+        ),
+        (
+            "segment_pvs",
+            format!(r#"printf x > "$4"; {mk} "$1" "$(dirname "$4")/thr_pvs.nii.gz" blobs"#),
+        ),
+        // SAMSEG's map, written on its first input's grid, then saved as
+        // the label map; its folder read for its measures; the FLAIR's
+        // resampling written as anything
+        (
+            "run_samseg",
+            format!(
+                r#"while [ $# -gt 0 ]; do case "$1" in -i) [ -n "${{t:-}}" ] || t=$2;; -o) o=$2;; esac; shift; done; mkdir -p "$o"; {mk} "$t" "$o/seg.mgz" samseg"#
+            ),
+        ),
+        (
+            "fspython",
+            r#"for l; do :; done
+case "$2" in
+*resample_like*) printf x > "$l";;
+*json.dumps*) echo '{"Intra-Cranial": 1500000.0, "Lesions": 1200.0}';;
+*) cp "$3" "$l";;
+esac"#
+                .to_string(),
+        ),
+        (
+            "lst",
+            format!(
+                r#"while [ $# -gt 0 ]; do case "$1" in --flair) fl=$2;; --output) o=$2;; esac; shift; done; mkdir -p "$o"
+{mk} "$fl" "$o/space-flair_seg-lst.nii.gz" blobs || exit 1
+{mk} "$fl" "$o/space-flair_desc-annotated_seg-lst.nii.gz" regions || exit 1
+printf 'Num_Lesions,Num_Vox,Lesion_Volume\n2,9,9.0\n' > "$o/lesion_stats.csv""#
+            ),
+        ),
+    ];
+    // python3 runs the stand-in podman too: only segcsvd's nibabel step,
+    // the volumes of the masks it is given in pairs and the numbers and
+    // words beside them, is stood in for
+    let python3 = format!(
+        r#"case "$2" in
+*nibabel*json.dumps*) shift 2; s=; while [ $# -gt 1 ]; do v=1.0; case "$1" in *_volume) [ -s "$2" ] || exit 1;; *) v=$2; case "$v" in *[!0-9.]*) v="\"$v\"";; esac;; esac; s="$s${{s:+, }}\"$1\": $v"; shift 2; done; echo "{{$s}}"; exit 0;;
+esac
+exec '{}' "$@""#,
+        python.display()
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for (tool, body) in &tools {
+            let f = lab
+                .bin
+                .file(tool, format!("#!/bin/sh\n{body}\n").as_bytes());
+            std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let f = lab
+            .bin
+            .file("python3", format!("#!/bin/sh\n{python3}\n").as_bytes());
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    // each stack's series, the T1w ending .1 and the FLAIR .2
+    let series_of = |stack: i64| -> String {
+        lab.store()
+            .query(
+                &format!(
+                    "SELECT se.series_instance_uid FROM stack st JOIN series se ON se.id = st.series_id WHERE st.id = {stack}"
+                ),
+                &[],
+            )
+            .unwrap()[0]
+            .text(0)
+            .unwrap()
+            .to_string()
+    };
+    // what each mask output must be tied to, and the part sets with the
+    // parts each holds: the map's three structures, and SAMSEG's 99 too;
+    // two lesions everywhere; LST-AI's regions 1 and 3
+    type Masks<'a> = &'a [(&'a str, Option<&'a str>, &'a [(&'a str, i64)])];
+    let expect: [(&str, Masks<'_>); 4] = [
+        (
+            "synthseg",
+            &[(
+                "_desc-synthseg_dseg.nii.gz",
+                Some("t1w"),
+                &[("structures", 3)],
+            )],
+        ),
+        (
+            "segcsvd",
+            &[
+                ("_label-WMH_desc-segcsvd_mask.nii.gz", None, &[("wmh", 2)]),
+                (
+                    "_label-PVS_desc-segcsvd_mask.nii.gz",
+                    Some("t1w"),
+                    &[("pvs", 2)],
+                ),
+            ],
+        ),
+        (
+            "samseg-lesions",
+            &[(
+                "_desc-samseg_dseg.nii.gz",
+                Some("t1w"),
+                &[("lesions", 2), ("structures", 4)],
+            )],
+        ),
+        (
+            "lst-ai",
+            &[
+                (
+                    "_label-lesion_desc-lstai_mask.nii.gz",
+                    Some("flair"),
+                    &[("lesions", 2)],
+                ),
+                (
+                    "_desc-lstai_dseg.nii.gz",
+                    Some("flair"),
+                    &[("lesions", 2), ("regions", 2)],
+                ),
+            ],
+        ),
+    ];
+    let mut synthseg = Value::Null;
+    for (name, masks) in expect {
+        let v = lab.json(&["run", name, "--select", "selection:every@1", "--json"]);
+        assert_eq!(v["status"], "done", "{name}: {v}");
+        assert_eq!(v["summary"]["units"]["succeeded"], 2, "{name}: {v}");
+        let rows = lab.json(&[
+            "derivative",
+            "list",
+            "--run",
+            &v["id"].to_string(),
+            "--json",
+        ]);
+        if name == "synthseg" {
+            synthseg = v["id"].clone();
+        }
+        // record 57 P11: segcsvd names the SynthSeg it read, and, its
+        // label map tied to the T1w, the contrast that run read
+        if name == "segcsvd" {
+            let tables: Vec<Value> = rows
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|d| d["path"].as_str())
+                .filter(|p| p.ends_with("_desc-segcsvd_volumes.json"))
+                .map(|p| {
+                    serde_json::from_slice(&std::fs::read(lab.work.path().join(p)).unwrap())
+                        .unwrap()
+                })
+                .collect();
+            assert_eq!(tables.len(), 2, "{rows}");
+            for t in &tables {
+                assert_eq!(t["synthseg_run"], synthseg, "{t}");
+                assert_eq!(t["synthseg_robust"], 1, "{t}");
+                assert_eq!(t["synthseg_contrast"], "T1w", "{t}");
+            }
+        }
+        for (suffix, role, sets) in masks {
+            let made: Vec<i64> = rows
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|d| d["path"].as_str().is_some_and(|p| p.ends_with(suffix)))
+                .map(|d| d["id"].as_i64().unwrap())
+                .collect();
+            assert_eq!(made.len(), 2, "{name}: one {suffix} a session: {rows}");
+            for id in made {
+                let shown = lab.json(&["derivative", "show", &id.to_string(), "--json"]);
+                assert_eq!(shown["kind"], "mask", "{name}: {shown}");
+                assert_eq!(shown["grid_link"], "same", "{name} {suffix}: {shown}");
+                let stack = shown["grid_stack_id"].as_i64().unwrap();
+                let uid = series_of(stack);
+                match role {
+                    Some("t1w") => assert!(uid.ends_with(".1"), "{name}: on the T1w: {uid}"),
+                    Some(_) => assert!(uid.ends_with(".2"), "{name}: on the FLAIR: {uid}"),
+                    // the lab's T1w and FLAIR share one lattice, so the
+                    // WMH's matches both, and either is its scan
+                    None => assert!(uid.ends_with(".1") || uid.ends_with(".2"), "{uid}"),
+                }
+                let got: Vec<(&str, i64)> = shown["part_sets"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|s| (s["key"].as_str().unwrap(), s["count"].as_i64().unwrap()))
+                    .collect();
+                assert_eq!(got, *sets, "{name} {suffix}: {shown}");
+            }
+        }
+    }
+}
+
+/// The LST-AI descriptor's image is pinned by a manifest digest its
+/// registry still serves (record 55 H3, P1). It asks Docker Hub, so it
+/// needs the network: run it by name with `--ignored`.
+#[test]
+#[ignore = "asks Docker Hub: run by hand"]
+fn the_lst_ai_image_digest_resolves_at_its_registry() {
+    let text = std::fs::read_to_string(repo().join("pipelines/lst-ai/nils.job.yml")).unwrap();
+    let d = nils_pipeline::descriptor::parse(&text).unwrap();
+    let repository = d
+        .image
+        .repository
+        .strip_prefix("docker.io/")
+        .expect("a Docker Hub image");
+    let mut token = ureq::get(format!(
+        "https://auth.docker.io/token?service=registry.docker.io&scope=repository:{repository}:pull"
+    ))
+    .call()
+    .unwrap();
+    let token: Value = serde_json::from_str(&token.body_mut().read_to_string().unwrap()).unwrap();
+    let answer = ureq::head(format!(
+        "https://registry-1.docker.io/v2/{repository}/manifests/{}",
+        d.image.digest
+    ))
+    .header(
+        "Authorization",
+        format!("Bearer {}", token["token"].as_str().unwrap()),
+    )
+    .header(
+        "Accept",
+        "application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.manifest.v1+json",
+    )
+    .call()
+    .unwrap();
+    assert_eq!(answer.status(), 200);
+    let digest = answer
+        .headers()
+        .get("docker-content-digest")
+        .and_then(|v| v.to_str().ok());
+    assert_eq!(digest, Some(d.image.digest.as_str()));
 }
 
 /// Record 49 A4's proof: an engine started on a fresh registry seeds the
@@ -5100,7 +6066,12 @@ fn the_lane_puts_a_run_s_outputs_and_its_scratch_where_it_names() {
 /// `NILS_TEST_POSTGRES_DSN` names one, in a schema of its own that is
 /// dropped before and after.
 fn on_both(name: &str, schema: &str, test: impl Fn(&Lab)) {
-    test(&Lab::new(name));
+    on_both_over(name, schema, tree, test);
+}
+
+/// [`on_both`] over the files `src` makes, made afresh for each lab.
+fn on_both_over(name: &str, schema: &str, src: impl Fn() -> TempDir, test: impl Fn(&Lab)) {
+    test(&Lab::with_tree(name, src()));
     let Some(dsn) = std::env::var("NILS_TEST_POSTGRES_DSN")
         .ok()
         .filter(|d| !d.is_empty())
@@ -5119,7 +6090,7 @@ fn on_both(name: &str, schema: &str, test: impl Fn(&Lab)) {
     drop();
     test(&Lab::with_backend(
         &format!("{name}-pg"),
-        tree(),
+        src(),
         Some((dsn.clone(), schema.to_string())),
     ));
     drop();
@@ -5278,7 +6249,7 @@ fn a_stacks_input_carries_each_stack_s_header_when_it_asks() {
             assert_eq!(fp["rows"], 32);
             assert_eq!(fp["columns"], 32);
             assert_eq!(fp["n_slices"], json!(row.opt_int(5).unwrap()));
-            assert_eq!(fp["pixel_spacing_row"], json!(1.0));
+            assert_eq!(fp["pixel_spacing_row"], json!(8.0));
             assert_eq!(
                 fp["text_series_description_ci"],
                 json!(row.opt_text(7).unwrap())
@@ -5348,6 +6319,500 @@ fn a_stacks_input_carries_each_stack_s_header_when_it_asks() {
             assert_eq!(own["stacks"][0]["header"], e["header"], "{unit}");
         }
     });
+}
+
+/// [`tree`] and a third person's Enhanced MR file of eight frames in two
+/// orientations, four axial and four sagittal, each where it sits: one file
+/// that is two stacks, each given its own frames (record 37 S8).
+fn tree_with_frames() -> TempDir {
+    let dir = tree();
+    let root = "1.2.826.0.1.3680043.8.498.73";
+    let (study, series, sop) = (
+        format!("{root}.1"),
+        format!("{root}.1.3"),
+        format!("{root}.1.3.1"),
+    );
+    let per_frame: Vec<Vec<synth::Elem>> = (0..8u32)
+        .map(|i| {
+            let (iop, ipp) = if i < 4 {
+                ("1\\0\\0\\0\\1\\0", format!("-4\\-4\\{}", 5 * i))
+            } else {
+                ("0\\1\\0\\0\\0\\-1", format!("{}\\-4\\4", 5 * (i - 4)))
+            };
+            vec![
+                synth::fg_orientation(iop),
+                synth::fg(
+                    tags::PLANE_POSITION_SEQUENCE,
+                    vec![synth::text(tags::IMAGE_POSITION_PATIENT, VR::DS, &ipp)],
+                ),
+            ]
+        })
+        .collect();
+    let shared = vec![synth::fg(
+        tags::PIXEL_MEASURES_SEQUENCE,
+        vec![
+            synth::text(tags::PIXEL_SPACING, VR::DS, "0.5\\0.5"),
+            synth::text(tags::SLICE_THICKNESS, VR::DS, "5"),
+        ],
+    )];
+    let mut e = synth::enhanced_mr(&study, &series, &sop, shared, per_frame);
+    e.extend([
+        synth::text(tags::PATIENT_ID, VR::LO, "P3"),
+        synth::text(tags::STUDY_DATE, VR::DA, "20240101"),
+        synth::text(tags::SERIES_TIME, VR::TM, "091415"),
+        synth::text(tags::SERIES_DESCRIPTION, VR::LO, "t2_tse"),
+        synth::text(tags::PROTOCOL_NAME, VR::LO, "T2 TSE"),
+        synth::text(tags::MANUFACTURER, VR::LO, "SYNTHETIC"),
+        synth::text(tags::IMAGE_TYPE, VR::CS, "ORIGINAL\\PRIMARY\\M\\NONE"),
+        synth::us(tags::ROWS, 16),
+        synth::us(tags::COLUMNS, 16),
+    ]);
+    dir.file(
+        "P3/3/1",
+        &synth::part10(&synth::enhanced_meta(&sop), &e, true),
+    );
+    dir
+}
+
+/// Record 55 E2: a stacks input that asks for the geometry (`x-nils.input.
+/// geometry`) finds, in `stacks.json`, each stack's orientation, slice
+/// thickness and spacing, and each of its files their own position, pixel
+/// spacing, matrix, number and frame count, as the registry read them from
+/// the headers: a single-frame file and both stacks of a file whose frames
+/// hold two orientations, together and apart, alone or beside the header.
+/// Without the flag the file is what it was.
+#[test]
+fn a_stacks_input_carries_each_file_s_geometry_when_it_asks() {
+    if !have("python3") {
+        eprintln!(
+            "python3 is not installed; the stand-in podman needs it, so this test is skipped"
+        );
+        return;
+    }
+    on_both_over(
+        "pipelines-geometry",
+        "nils_pipelines_geometry",
+        tree_with_frames,
+        |lab| {
+            let image = format!("example.org/stack-echo@sha256:{}", "a".repeat(64));
+            let plain = stack_echo(&image);
+            lab.add_descriptor("stack-echo", &plain);
+            let with_geometry = plain
+                .replace("name: stack-echo", "name: stack-geo")
+                .replace(
+                    "input: {layout: stacks}",
+                    "input: {layout: stacks, geometry: true}",
+                );
+            lab.add_descriptor("stack-geo", &with_geometry);
+            lab.add_descriptor(
+                "stack-geo-apart",
+                &with_geometry
+                    .replace("name: stack-geo", "name: stack-geo-apart")
+                    .replace(
+                        "  needs: {gpu: optional}",
+                        "  units: apart\n  needs: {gpu: optional}",
+                    ),
+            );
+            lab.add_descriptor(
+                "stack-both",
+                &with_geometry
+                    .replace("name: stack-geo", "name: stack-both")
+                    .replace(
+                        "input: {layout: stacks, geometry: true}",
+                        "input: {layout: stacks, header: true, geometry: true}",
+                    ),
+            );
+            let run = |name: &str| -> i64 {
+                let r = lab.json(&["run", name, "--select", "selection:every@1", "--json"]);
+                assert_eq!(r["status"], "done", "{r}");
+                r["id"].as_i64().unwrap()
+            };
+            let off = stacks_json(lab, run("stack-echo"), None);
+            let geo_run = run("stack-geo");
+            let on = stacks_json(lab, geo_run, None);
+            // with the geometry the file is compact, three to four times
+            // smaller than pretty-printed; without it, as before
+            let text = |r: i64| {
+                std::fs::read_to_string(
+                    lab.work
+                        .path()
+                        .join("runs")
+                        .join(r.to_string())
+                        .join("input/stacks.json"),
+                )
+                .unwrap()
+            };
+            assert!(!text(geo_run).contains('\n'), "compact with the geometry");
+            assert!(
+                text(run("stack-echo")).contains("\n  "),
+                "pretty without it"
+            );
+            let entries = on["stacks"].as_array().unwrap();
+            assert_eq!(
+                entries.len(),
+                6,
+                "four stacks of single frames, two of one file"
+            );
+
+            // without the flag, no geometry; with it, the same entries and
+            // the geometry of each stack and each file
+            let strip = |doc: &Value| -> Value {
+                let mut doc = doc.clone();
+                // P1b: a run of whole sessions lists no context
+                let context = doc.as_object_mut().unwrap().remove("context");
+                assert_eq!(context, Some(json!([])), "{doc}");
+                for e in doc["stacks"].as_array_mut().unwrap() {
+                    let e = e.as_object_mut().unwrap();
+                    assert!(e.remove("geometry").is_some(), "{e:?}");
+                    for f in e.get_mut("files").unwrap().as_array_mut().unwrap() {
+                        assert!(
+                            f.as_object_mut().unwrap().remove("geometry").is_some(),
+                            "{f}"
+                        );
+                    }
+                }
+                doc
+            };
+            assert_eq!(strip(&on), off, "the geometry is all the flag adds");
+            assert!(off.get("context").is_none(), "{off}");
+            for e in off["stacks"].as_array().unwrap() {
+                assert!(e.get("geometry").is_none(), "{e}");
+                for f in e["files"].as_array().unwrap() {
+                    assert!(f.get("geometry").is_none(), "{f}");
+                }
+            }
+
+            let numbers = |text: Option<&str>| -> Value {
+                text.map_or(Value::Null, |t| {
+                    json!(
+                        t.split('\\')
+                            .map(|v| v.trim().parse::<f64>().unwrap())
+                            .collect::<Vec<_>>()
+                    )
+                })
+            };
+            let mut store = lab.store();
+            let stack_t = store.qualified("stack");
+            let fp_t = store.qualified("stack_fingerprint");
+            let instance_t = store.qualified("instance");
+            let file_t = store.qualified("source_file");
+            let frame_t = store.qualified("instance_frame");
+            let series_t = store.qualified("series");
+            let mut studies: std::collections::BTreeSet<i64> = Default::default();
+            let mut orientations: Vec<Value> = Vec::new();
+            let mut framed = 0;
+            for e in entries {
+                let stack = e["stack_id"].as_i64().unwrap();
+                // the stack's own orientation, and its fingerprint's slices
+                let g = &e["geometry"];
+                let mut keys: Vec<&String> = g.as_object().unwrap().keys().collect();
+                keys.sort();
+                assert_eq!(
+                    keys,
+                    [
+                        "image_orientation_patient",
+                        "image_type",
+                        "n_instances",
+                        "sealed",
+                        "slice_thickness",
+                        "sop_class_uid",
+                        "spacing_between_slices",
+                        "study"
+                    ],
+                    "{g}"
+                );
+                let row = store
+                    .query(
+                        &format!(
+                            "SELECT st.image_orientation_patient, fp.slice_thickness, fp.spacing_between_slices, \
+                             se.study_id, st.image_type, fp.sop_class_uid, st.n_instances \
+                             FROM {stack_t} st JOIN {series_t} se ON se.id = st.series_id \
+                             LEFT JOIN {fp_t} fp ON fp.stack_id = st.id WHERE st.id = {stack}"
+                        ),
+                        &[],
+                    )
+                    .unwrap();
+                // P1b: the stack's study, image type, SOP class and count,
+                // as the registry holds them, and unsealed
+                assert_eq!(g["study"], json!(row[0].int(3).unwrap()), "{g}");
+                assert_eq!(g["image_type"], json!(row[0].opt_text(4).unwrap()), "{g}");
+                assert!(g["image_type"].is_string(), "{g}");
+                assert_eq!(
+                    g["sop_class_uid"],
+                    json!(row[0].opt_text(5).unwrap()),
+                    "{g}"
+                );
+                assert!(g["sop_class_uid"].is_string(), "{g}");
+                assert_eq!(g["n_instances"], json!(row[0].opt_int(6).unwrap()), "{g}");
+                assert!(g["n_instances"].as_i64().unwrap() >= 1, "{g}");
+                assert_eq!(g["sealed"], json!(false), "{g}");
+                studies.insert(g["study"].as_i64().unwrap());
+                let iop = numbers(row[0].opt_text(0).unwrap());
+                assert_eq!(iop.as_array().map(Vec::len), Some(6), "{iop}");
+                assert_eq!(g["image_orientation_patient"], iop, "{g}");
+                assert_eq!(
+                    g["slice_thickness"],
+                    json!(row[0].opt_double(1).unwrap()),
+                    "{g}"
+                );
+                assert_eq!(
+                    g["spacing_between_slices"],
+                    json!(row[0].opt_double(2).unwrap()),
+                    "{g}"
+                );
+                orientations.push(iop);
+
+                // each file's own, as its instance row holds it, found by
+                // its name among the stack's files
+                let rows = store
+                    .query(
+                        &format!(
+                            "SELECT f.path, i.image_position_patient, i.pixel_spacing, i.rows, i.columns, \
+                             i.instance_number, i.number_of_frames FROM {instance_t} i \
+                             JOIN {file_t} f ON f.id = i.source_file_id \
+                             WHERE i.stack_id = {stack} \
+                             OR i.id IN (SELECT fr.instance_id FROM {frame_t} fr WHERE fr.stack_id = {stack})"
+                        ),
+                        &[],
+                    )
+                    .unwrap();
+                let files = e["files"].as_array().unwrap();
+                assert_eq!(files.len(), rows.len(), "{e}");
+                for f in files {
+                    let geo = &f["geometry"];
+                    let mut keys: Vec<&String> = geo.as_object().unwrap().keys().collect();
+                    keys.sort();
+                    assert_eq!(
+                        keys,
+                        [
+                            "columns",
+                            "image_position_patient",
+                            "instance_number",
+                            "number_of_frames",
+                            "pixel_spacing",
+                            "rows"
+                        ],
+                        "{geo}"
+                    );
+                    let name = f["path"].as_str().unwrap().rsplit('/').next().unwrap();
+                    let r = rows
+                        .iter()
+                        .find(|r| r.text(0).unwrap().rsplit('/').next() == Some(name))
+                        .unwrap_or_else(|| panic!("no instance row for {name}"));
+                    assert_eq!(
+                        geo["image_position_patient"],
+                        numbers(r.opt_text(1).unwrap())
+                    );
+                    assert_eq!(geo["pixel_spacing"], numbers(r.opt_text(2).unwrap()));
+                    assert_eq!(geo["rows"], json!(r.opt_int(3).unwrap()));
+                    assert_eq!(geo["columns"], json!(r.opt_int(4).unwrap()));
+                    assert_eq!(geo["instance_number"], json!(r.opt_int(5).unwrap()));
+                    assert_eq!(geo["number_of_frames"], json!(r.opt_int(6).unwrap()));
+                    if f["frames"].is_string() {
+                        // a file of frames: its matrix, its spacing and its
+                        // count, and the first frame's position
+                        framed += 1;
+                        assert_eq!(geo["number_of_frames"], 8, "{geo}");
+                        assert_eq!((&geo["rows"], &geo["columns"]), (&json!(16), &json!(16)));
+                        assert_eq!(geo["pixel_spacing"], json!([0.5, 0.5]), "{geo}");
+                        assert_eq!(
+                            geo["image_position_patient"].as_array().map(Vec::len),
+                            Some(3),
+                            "{geo}"
+                        );
+                    } else {
+                        // a single frame: where it sits is its number
+                        assert_eq!(geo["number_of_frames"], Value::Null, "{geo}");
+                        assert_eq!((&geo["rows"], &geo["columns"]), (&json!(32), &json!(32)));
+                        // the tree's files are 32 pixels of 8 mm
+                        assert_eq!(geo["pixel_spacing"], json!([8.0, 8.0]), "{geo}");
+                        let n = geo["instance_number"].as_f64().unwrap();
+                        assert_eq!(geo["image_position_patient"], json!([n, 0.0, 0.0]), "{geo}");
+                    }
+                }
+            }
+            assert_eq!(framed, 2, "both stacks of the file of frames");
+            assert!(studies.len() >= 2, "the tree's studies apart: {studies:?}");
+            for want in [
+                json!([0.0, 1.0, 0.0, 0.0, 0.0, -1.0]),
+                json!([1.0, 0.0, 0.0, 0.0, 1.0, 0.0]),
+            ] {
+                assert!(orientations.contains(&want), "{want} in {orientations:?}");
+            }
+
+            // apart: each unit's own stacks.json carries its stack's geometry
+            let apart = run("stack-geo-apart");
+            for e in entries {
+                let unit = e["unit"].as_str().unwrap();
+                let own = stacks_json(lab, apart, Some(unit));
+                assert_eq!(own["stacks"].as_array().unwrap().len(), 1);
+                assert_eq!(own["stacks"][0]["geometry"], e["geometry"], "{unit}");
+                assert_eq!(own["stacks"][0]["files"], e["files"], "{unit}");
+                // and the rest of its session as its context (P1b)
+                let others: Vec<&Value> = own["context"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|c| &c["stack_id"])
+                    .collect();
+                let want: Vec<&Value> = entries
+                    .iter()
+                    .filter(|o| {
+                        o["geometry"]["study"] == e["geometry"]["study"]
+                            && o["stack_id"] != e["stack_id"]
+                    })
+                    .map(|o| &o["stack_id"])
+                    .collect();
+                assert_eq!(others, want, "{unit}: {own}");
+            }
+
+            // beside the header: each entry carries both, and nothing else
+            let both = stacks_json(lab, run("stack-both"), None);
+            let mut stripped = strip(&both);
+            for e in stripped["stacks"].as_array_mut().unwrap() {
+                assert!(e.as_object_mut().unwrap().remove("header").is_some(), "{e}");
+            }
+            assert_eq!(
+                stripped, off,
+                "the header and the geometry are all the flags add"
+            );
+            for (a, b) in both["stacks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .zip(entries.iter())
+            {
+                assert_eq!(a["geometry"], b["geometry"]);
+                assert_eq!(a["files"], b["files"]);
+            }
+
+            // P1b: a run that holds part of a session lists the rest of it
+            // as context, each MR stack with the geometry and the files'
+            // geometry a run of the whole session gives it, and no path; a
+            // page of --chunk 1 holds one stack of its session
+            let context_of = |doc: &Value, sealed: Option<i64>| {
+                let held = &doc["stacks"][0];
+                let study = &held["geometry"]["study"];
+                let want: Vec<Value> = entries
+                    .iter()
+                    .filter(|e| {
+                        &e["geometry"]["study"] == study && e["stack_id"] != held["stack_id"]
+                    })
+                    .filter(|e| e["stack_id"].as_i64() != sealed)
+                    .map(|e| {
+                        let files: Vec<Value> = e["files"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .map(|f| json!({"geometry": f["geometry"]}))
+                            .collect();
+                        json!({"stack_id": e["stack_id"], "modality": e["modality"],
+                               "geometry": e["geometry"], "files": files})
+                    })
+                    .collect();
+                assert_eq!(doc["context"], json!(want), "{doc}");
+                want.len()
+            };
+            let paged = |sealed: Option<i64>| -> usize {
+                let before: std::collections::BTreeSet<i64> = lab
+                    .json(&["pipeline", "runs", "--limit", "100", "--json"])
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|r| r["id"].as_i64().unwrap())
+                    .collect();
+                let (good, _out, err) = lab.run(
+                    &[
+                        "run",
+                        "stack-geo",
+                        "--select",
+                        "selection:every@1",
+                        "--chunk",
+                        "1",
+                        "--json",
+                    ],
+                    None,
+                );
+                assert!(good, "{err}");
+                let mut listed = 0;
+                let mut pages = 0;
+                for r in lab
+                    .json(&["pipeline", "runs", "--limit", "100", "--json"])
+                    .as_array()
+                    .unwrap()
+                {
+                    let id = r["id"].as_i64().unwrap();
+                    if before.contains(&id) {
+                        continue;
+                    }
+                    let doc = stacks_json(lab, id, None);
+                    assert_eq!(doc["stacks"].as_array().unwrap().len(), 1, "{doc}");
+                    if doc["stacks"][0]["stack_id"].as_i64() == sealed {
+                        assert_eq!(
+                            doc["context"],
+                            json!([]),
+                            "a sealed stack's session is not read: {doc}"
+                        );
+                    } else {
+                        listed += context_of(&doc, sealed);
+                    }
+                    pages += 1;
+                }
+                assert_eq!(pages, entries.len());
+                listed
+            };
+            let listed = paged(None);
+            assert!(
+                listed >= 2,
+                "the file of frames' two stacks, each the other's context"
+            );
+
+            // P1b: a stack of a sample sealed now says so, and only it; one
+            // unsealed again does not
+            let sealed = entries[0]["stack_id"].as_i64().unwrap();
+            let sealed_t = store.qualified("sealed_stack");
+            let subject = store
+                .query(
+                    &format!(
+                        "SELECT se.subject_id FROM {stack_t} st JOIN {series_t} se ON se.id = st.series_id \
+                         WHERE st.id = {sealed}"
+                    ),
+                    &[],
+                )
+                .unwrap()[0]
+                .int(0)
+                .unwrap();
+            store
+                .execute(
+                    &format!(
+                        "INSERT INTO {sealed_t} (sample, stack_id, subject_id, sealed_by, sealed_at) \
+                         VALUES ('test-sample@1', {sealed}, {subject}, 'test', '2026-10-11T00:00:00Z')"
+                    ),
+                    &[],
+                )
+                .unwrap();
+            let after = stacks_json(lab, run("stack-geo"), None);
+            for e in after["stacks"].as_array().unwrap() {
+                let is = e["stack_id"].as_i64() == Some(sealed);
+                assert_eq!(e["geometry"]["sealed"], json!(is), "{e}");
+            }
+            // and it is no part of its session's context
+            paged(Some(sealed));
+            store
+                .execute(
+                    &format!(
+                        "UPDATE {sealed_t} SET unsealed_at = '2026-10-11T01:00:00Z', unsealed_by = 'test' \
+                         WHERE stack_id = {sealed}"
+                    ),
+                    &[],
+                )
+                .unwrap();
+            let again = stacks_json(lab, run("stack-geo"), None);
+            for e in again["stacks"].as_array().unwrap() {
+                assert_eq!(e["geometry"]["sealed"], json!(false), "{e}");
+            }
+        },
+    );
 }
 
 /// Record 50 E2: `nils model keep` copies a registered model's artifact
@@ -5554,6 +7019,25 @@ x-nils:
         );
         assert!(!good);
         assert!(err.contains("is retired"), "{err}");
+
+        // record 55 D4 (T22): a retired model stays runnable, from the file
+        // kept while it served, so a past result can be run again
+        let again = lab.json(&[
+            "run",
+            "reads-coarse",
+            "--select",
+            "selection:every@1",
+            "--model",
+            "bp-coarse@r7",
+            "--json",
+        ]);
+        assert_eq!(again["status"], "done", "{again}");
+        assert_ne!(again["id"], run_id, "{again}");
+        let words = lab.podman_runs().pop().unwrap();
+        assert!(
+            pair(&words, "--volume", &format!("{folder}:/inputs/coarse:ro")),
+            "{words:?}"
+        );
     });
 }
 
@@ -6103,8 +7587,7 @@ fn a_person_s_pick_of_nothing_is_no_pick_to_the_preflight_and_the_release() {
     assert_eq!(flairs(&lab, "before"), 3);
 
     // P1's two FLAIRs made the outputs of one Dixon that the pack does not
-    // measure on: nothing is eligible there, and the earlier run's pick of
-    // them still applies
+    // measure on: nothing is eligible there
     let mut store = lab.store();
     let mut by_subject: std::collections::BTreeMap<i64, Vec<i64>> = Default::default();
     for r in store
@@ -6145,13 +7628,57 @@ fn a_person_s_pick_of_nothing_is_no_pick_to_the_preflight_and_the_release() {
             )
             .unwrap();
     }
+    // the earlier run's pick on P1's occasion, which says where it looked
+    let earlier = store
+        .query(
+            &format!(
+                "SELECT model, subject_id, CAST(session_day AS TEXT), scheme, scheme_digest, pack, \
+                        pack_version FROM pick WHERE role = 'flair' AND author_kind = 'agent' \
+                        AND subject_id = (SELECT subject_id FROM stack_fingerprint WHERE stack_id = {})",
+                p1[0]
+            ),
+            &[],
+        )
+        .unwrap()
+        .remove(0);
     let run = lab.json(&["pick", "run", "--pack-dir", p, "--json"]);
-    assert_eq!(run["borders"]["nothing_eligible"], 1, "{run}");
+    // record 55, decision 6: under the rules nothing is asked, and where
+    // nothing is eligible the earlier run's pick is removed
+    assert_eq!(run["raised"], 0, "{run}");
+    assert!(run["empty"].as_i64().unwrap() >= 1, "{run}");
     let pre = preflight(&lab);
     assert_eq!(
-        pre["units"]["missing"], 0,
-        "the earlier pick still applies: {pre}"
+        pre["units"]["missing"], 1,
+        "no pick applies there now: {pre}"
     );
+
+    // a border on the occasion, as a run before the rules raised one
+    let scheme = json!({
+        "name": earlier.text(3).unwrap(), "digest": earlier.text(4).unwrap(),
+        "definition": nils_registry::session::Scheme::default(),
+    });
+    nils_registry::review::raise_pick_border(
+        &mut store,
+        &nils_registry::review::PickBorder {
+            model: earlier.text(0).unwrap(),
+            role: "flair",
+            subject_id: earlier.int(1).unwrap(),
+            day: &earlier.text(2).unwrap()[..10],
+            borders: &["nothing_eligible"],
+            pick_id: None,
+            score: None,
+            margin: None,
+            runner_up_score: None,
+            considered: &json!([]),
+            notes: &json!({}),
+            job_id: None,
+            scheme: &scheme,
+            pack: earlier.text(5).unwrap(),
+            pack_version: earlier.text(6).unwrap(),
+        },
+        "2026-10-10T00:00:00Z",
+    )
+    .unwrap();
 
     // kept: no FLAIR stands for P1's session, said by a person
     let items = lab.json(&[
@@ -6976,5 +8503,2857 @@ fn a_run_held_in_its_intake_past_the_freshness_is_not_taken_over() {
             lab.count("SELECT COUNT(*) FROM job WHERE kind = 'pipeline' AND state = 'done'"),
             2
         );
+    });
+}
+
+/// Record 48, D1 of the move: a pipeline of the stacks layout that writes,
+/// for each stack, a table of its own (one row, which names no stack) and,
+/// for the run, one table of every stack's score, a row a stack's unit.
+const SCORES: &str = r#"name: scores
+schema-version: "0.5"
+tool-version: "1"
+container-image:
+  type: docker
+  image: "example.org/scores@sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+command-line: |
+  python3 -c '
+  import json, os, sys
+  m = json.load(open(sys.argv[1])); out = sys.argv[2]
+  units, rows = [], ["unit,score"]
+  for s in m["stacks"]:
+      u = s["unit"]; d = os.path.join(out, u); os.makedirs(d, exist_ok=True)
+      json.dump({"score": 1000 + s["stack_id"]}, open(os.path.join(d, "score.json"), "w"))
+      rows.append("%s,%d" % (u, 1000 + s["stack_id"]))
+      units.append({"unit_id": u, "status": "succeeded", "derivatives": [u + "/score.json"]})
+  open(os.path.join(out, "scores.csv"), "w").write("\n".join(rows) + "\n")
+  json.dump({"schema_version": "1", "units": units}, open(os.path.join(out, "results.json"), "w"))
+  ' [Manifest] [OutputLocation]
+x-nils:
+  analysis-level: stack
+  input: {layout: stacks}
+  outputs:
+    - id: score
+      kind: table
+      format: json
+      path-template: "stack-{stack}/score.json"
+      columns: [{name: score}]
+    - id: scores
+      kind: table
+      level: run
+      path-template: "scores.csv"
+      unit-column: unit
+      columns: [{name: run_score, from: score}]
+"#;
+
+/// Record 48: seal these stacks as the certification sample `name@1`.
+fn seal(lab: &Lab, name: &str, ids: &[i64]) {
+    select_stacks(lab, name, ids);
+    let packs = packs();
+    let done = lab.json(&[
+        "labels",
+        "seal",
+        "--select",
+        &format!("selection:{name}@1"),
+        "--pack-dir",
+        packs.to_str().unwrap(),
+        "--json",
+    ]);
+    assert_eq!(done["stacks"].as_i64(), Some(ids.len() as i64), "{done}");
+}
+
+/// The `sealed.read` rows of the audit: each one's principal and the
+/// derivative it names.
+fn sealed_reads(lab: &Lab) -> Vec<(String, Option<i64>)> {
+    lab.store()
+        .query(
+            "SELECT principal, scope FROM audit WHERE action = 'sealed.read' ORDER BY id",
+            &[],
+        )
+        .unwrap()
+        .iter()
+        .map(|r| {
+            let scope: Value = serde_json::from_str(r.text(1).unwrap()).unwrap();
+            (r.text(0).unwrap().to_string(), scope["derivative"].as_i64())
+        })
+        .collect()
+}
+
+/// Record 48, D1 of the move: sealed means sealed at the derivative
+/// content door. A run's table that names a stack a row loses the sealed
+/// stack's row and says how many rows went, never which; the sealed
+/// stack's own table and a mask of it are withheld whole, by what they
+/// were made from, as the mask's parts and layer are; a table registered
+/// by hand of the sealed stack's subject loses that stack's row alone; the
+/// open stacks' come as they were registered; and the certificate's grant
+/// reads every one of them, each read audited as sealed.read. A shared
+/// path reads the whole file, so it is refused where rows are withheld.
+#[test]
+fn the_content_door_withholds_a_sealed_stack_s_rows_and_its_own_results() {
+    if !have("python3") {
+        eprintln!(
+            "python3 is not installed; the stand-in podman needs it, so this test is skipped"
+        );
+        return;
+    }
+    on_both(
+        "pipelines-sealed-content",
+        "nils_pipelines_sealed_content",
+        |lab| {
+            lab.add_descriptor("scores", SCORES);
+            let v = lab.json(&["run", "scores", "--select", "selection:every@1", "--json"]);
+            assert_eq!(v["status"], "done", "{v}");
+            let run = v["id"].as_i64().unwrap();
+            let made = lab.json(&["derivative", "list", "--run", &run.to_string(), "--json"]);
+            let made = made.as_array().unwrap();
+            let table = made
+                .iter()
+                .find(|d| d["scope"] == "run")
+                .unwrap_or_else(|| panic!("no run table: {made:?}"))
+                .clone();
+            let own: BTreeMap<i64, Value> = made
+                .iter()
+                .filter(|d| d["scope"] == "stack")
+                .map(|d| (d["stack_id"].as_i64().unwrap(), d.clone()))
+                .collect();
+            assert_eq!(own.len(), 4, "{made:?}");
+            let stacks: Vec<i64> = own.keys().copied().collect();
+            let (open, sealed) = (stacks[0], stacks[1]);
+            // registered by hand: a mask of each, and a table of the sealed
+            // stack's subject whose rows name its stacks
+            let subject = lab.count(&format!(
+                "SELECT se.subject_id FROM stack st JOIN series se ON se.id = st.series_id WHERE st.id = {sealed}"
+            ));
+            let mates: Vec<i64> = lab
+                .store()
+                .query(
+                    &format!(
+                        "SELECT st.id FROM stack st JOIN series se ON se.id = st.series_id WHERE se.subject_id = {subject} ORDER BY st.id"
+                    ),
+                    &[],
+                )
+                .unwrap()
+                .iter()
+                .map(|r| r.int(0).unwrap())
+                .collect();
+            assert!(mates.len() >= 2 && mates.contains(&sealed), "{mates:?}");
+            let tsv = lab.work.path().join("by-hand.tsv");
+            let lines: Vec<String> = std::iter::once("stack_id\tvolume".to_string())
+                .chain(mates.iter().map(|s| format!("{s}\t{}", 5000 + s)))
+                .collect();
+            std::fs::write(&tsv, lines.join("\n") + "\n").unwrap();
+            let by_hand = lab.json(&[
+                "derivative",
+                "add",
+                tsv.to_str().unwrap(),
+                "--kind",
+                "table",
+                "--subject",
+                &subject.to_string(),
+                "--media-type",
+                "text/tab-separated-values",
+                "--json",
+            ]);
+            let mask_of = |stack: i64| {
+                let f = lab.work.path().join(format!("mask-{stack}.nii.gz"));
+                std::fs::write(&f, format!("a result of stack {stack}, no NIfTI")).unwrap();
+                lab.json(&[
+                    "derivative",
+                    "add",
+                    f.to_str().unwrap(),
+                    "--kind",
+                    "mask",
+                    "--stack",
+                    &stack.to_string(),
+                    "--json",
+                ])
+            };
+            let (mask, open_mask) = (mask_of(sealed), mask_of(open));
+            // the sample is sealed after the run, as a certification sample is
+            seal(lab, "sealed", &[sealed]);
+
+            let server = Server::start(lab);
+            let content = |d: &Value| format!("/api/derivatives/{}/content", d["id"]);
+            let file_of = |d: &Value| {
+                std::fs::read(lab.work.path().join(d["path"].as_str().unwrap())).unwrap()
+            };
+            let header = |h: &BTreeMap<String, String>, k: &str| h.get(k).cloned();
+
+            // the run's table: every row but the sealed stack's, and how many went
+            let (status, h, bytes) = server.fetch("GET", &content(&table), None, OPERATOR);
+            let text = String::from_utf8(bytes.clone()).unwrap();
+            assert_eq!(status, 200, "{text}");
+            assert_eq!(
+                header(&h, "x-nils-withheld-sealed").as_deref(),
+                Some("1"),
+                "{h:?}"
+            );
+            let lines: Vec<&str> = text.lines().collect();
+            assert_eq!(lines[0], "unit,score", "{text}");
+            assert_eq!(lines.len(), 4, "the header and three rows of four: {text}");
+            assert!(!text.contains(&format!("stack-{sealed},")), "{text}");
+            assert!(!text.contains(&(1000 + sealed).to_string()), "{text}");
+            for s in stacks.iter().filter(|s| **s != sealed) {
+                assert!(
+                    text.contains(&format!("stack-{s},{}\n", 1000 + s)),
+                    "{text}"
+                );
+            }
+            assert_eq!(header(&h, "x-nils-sha256"), Some(sha256(&bytes)), "{h:?}");
+            assert_ne!(table["sha256"].as_str(), Some(sha256(&bytes).as_str()));
+            // the sealed stack's own table and its mask: withheld whole,
+            // saying why and nothing of what they hold
+            for d in [&own[&sealed], &mask] {
+                let (status, doc) = server.call("GET", &content(d), None, OPERATOR);
+                assert_eq!(status, 403, "{doc}");
+                assert_eq!(doc["sealed"], true, "{doc}");
+                let why = doc["error"].as_str().unwrap();
+                assert!(why.contains("sealed for certification"), "{doc}");
+                assert!(why.contains("sealed:see"), "{doc}");
+                assert!(
+                    !doc.to_string().contains(&(1000 + sealed).to_string()),
+                    "{doc}"
+                );
+            }
+            // as are the mask's parts and its layer, to pipelines:see alone
+            for door in [
+                format!("/api/derivatives/{}/parts", mask["id"]),
+                format!(
+                    "/api/derivatives/{}/layers/{sealed}/whole/manifest",
+                    mask["id"]
+                ),
+            ] {
+                let (status, doc) = server.call("GET", &door, None, OPERATOR);
+                assert_eq!(status, 403, "{door}: {doc}");
+                assert_eq!(doc["sealed"], true, "{door}: {doc}");
+            }
+            // the open stack's: as they were registered
+            let (status, h, bytes) = server.fetch("GET", &content(&own[&open]), None, OPERATOR);
+            assert_eq!(status, 200);
+            assert_eq!(bytes, file_of(&own[&open]));
+            assert_eq!(
+                header(&h, "x-nils-sha256").as_deref(),
+                own[&open]["sha256"].as_str()
+            );
+            assert!(header(&h, "x-nils-withheld-sealed").is_none(), "{h:?}");
+            let (status, bytes) = server.raw("GET", &content(&open_mask), None, OPERATOR);
+            assert_eq!(status, 200);
+            assert_eq!(bytes, file_of(&open_mask));
+            let (status, doc) = server.call(
+                "GET",
+                &format!("/api/derivatives/{}/parts", open_mask["id"]),
+                None,
+                OPERATOR,
+            );
+            assert_ne!(status, 403, "{doc}");
+            // the table by hand: the rows of the subject's other stacks
+            let (status, h, bytes) = server.fetch("GET", &content(&by_hand), None, OPERATOR);
+            let text = String::from_utf8(bytes).unwrap();
+            assert_eq!(status, 200, "{text}");
+            assert_eq!(
+                header(&h, "x-nils-withheld-sealed").as_deref(),
+                Some("1"),
+                "{h:?}"
+            );
+            assert_eq!(text.lines().count(), mates.len(), "{text}");
+            assert!(!text.contains(&format!("{sealed}\t")), "{text}");
+            for s in mates.iter().filter(|s| **s != sealed) {
+                assert!(text.contains(&format!("{s}\t{}\n", 5000 + s)), "{text}");
+            }
+
+            // the certificate's grant reads every one as it was registered
+            for d in [&table, &own[&sealed], &mask, &by_hand, &own[&open]] {
+                let (status, h, bytes) = server.fetch("GET", &content(d), None, CERT);
+                assert_eq!(status, 200, "{d}");
+                assert_eq!(bytes, file_of(d), "{d}");
+                assert_eq!(header(&h, "x-nils-sha256").as_deref(), d["sha256"].as_str());
+                assert!(header(&h, "x-nils-withheld-sealed").is_none(), "{h:?}");
+            }
+            let (status, doc) = server.call(
+                "GET",
+                &format!("/api/derivatives/{}/parts", mask["id"]),
+                None,
+                CERT,
+            );
+            assert_ne!(status, 403, "{doc}");
+
+            // the mask's row keeps the file's facts and loses what it holds:
+            // its parts' counts and its check; nor is it listed by a check
+            let (status, row) = server.call(
+                "GET",
+                &format!("/api/derivatives/{}", mask["id"]),
+                None,
+                OPERATOR,
+            );
+            assert_eq!(status, 200, "{row}");
+            assert_eq!(row["sealed"], true, "{row}");
+            assert_eq!(row["sha256"], mask["sha256"], "{row}");
+            let sets = row["part_sets"].as_array().unwrap();
+            assert!(!sets.is_empty(), "{row}");
+            for set in sets {
+                assert!(
+                    set.get("count").is_none() && set.get("note").is_none(),
+                    "{row}"
+                );
+            }
+            let (_, row) = server.call(
+                "GET",
+                &format!("/api/derivatives/{}", mask["id"]),
+                None,
+                CERT,
+            );
+            assert!(row.get("sealed").is_none(), "{row}");
+            assert!(row["part_sets"][0]["count"].is_number(), "{row}");
+            let unchecked = |token: &str| -> BTreeSet<i64> {
+                let (status, doc) = server.call(
+                    "GET",
+                    "/api/derivatives?check=unchecked&limit=500",
+                    None,
+                    token,
+                );
+                assert_eq!(status, 200, "{doc}");
+                doc["derivatives"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter_map(|d| d["id"].as_i64())
+                    .collect()
+            };
+            let (mask_id, open_mask_id) = (
+                mask["id"].as_i64().unwrap(),
+                open_mask["id"].as_i64().unwrap(),
+            );
+            assert!(!unchecked(OPERATOR).contains(&mask_id));
+            assert!(unchecked(OPERATOR).contains(&open_mask_id));
+            assert!(unchecked(CERT).contains(&mask_id));
+            let (_, listed) = server.call(
+                "GET",
+                &format!("/api/derivatives?stack={sealed}&limit=500"),
+                None,
+                OPERATOR,
+            );
+            assert!(
+                listed["derivatives"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|d| d["id"] == mask_id && d["sealed"] == true),
+                "{listed}"
+            );
+            // the keyboard withholds the same, unless --unsealed-access says why
+            let mid = mask_id.to_string();
+            let shown = lab.json(&["derivative", "show", &mid, "--json"]);
+            assert_eq!(shown["sealed"], true, "{shown}");
+            let read = lab.json(&["derivative", "parts", &mid, "--force", "--json"]);
+            assert_eq!(read["results"][0]["withheld_sealed"], true, "{read}");
+            let why = "grading the segmenter on the sealed sample";
+            let shown = lab.json(&[
+                "derivative",
+                "show",
+                &mid,
+                "--json",
+                "--unsealed-access",
+                why,
+            ]);
+            assert!(shown.get("sealed").is_none(), "{shown}");
+            assert!(shown["part_sets"][0]["count"].is_number(), "{shown}");
+            let read = lab.json(&[
+                "derivative",
+                "parts",
+                &mid,
+                "--force",
+                "--json",
+                "--unsealed-access",
+                why,
+            ]);
+            assert!(
+                read["results"][0].get("withheld_sealed").is_none(),
+                "{read}"
+            );
+            let listed = lab.ok(&["derivative", "list", "--check", "unchecked"], None);
+            let rows: Vec<Vec<&str>> = listed
+                .lines()
+                .map(|l| l.split_whitespace().take(2).collect())
+                .collect();
+            assert!(!rows.contains(&vec![mid.as_str(), "mask"]), "{listed}");
+            let open_mid = open_mask_id.to_string();
+            assert!(rows.contains(&vec![open_mid.as_str(), "mask"]), "{listed}");
+
+            // a shared path reads the whole file
+            let places: Value =
+                serde_json::from_str(&lab.ok(&["place", "list", "--json"], None)).unwrap();
+            let place = places
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|p| p["role"] == "working")
+                .unwrap()["id"]
+                .to_string();
+            let work = lab.work.path().canonicalize().unwrap();
+            lab.ok(
+                &["place", "set", &place, "--share", work.to_str().unwrap()],
+                None,
+            );
+            let share = |d: &Value| format!("{}?transport=share", content(d));
+            let (status, doc) = server.call("GET", &share(&table), None, OPERATOR);
+            assert_eq!(status, 403, "{doc}");
+            assert_eq!(doc["withheld_sealed"], 1, "{doc}");
+            assert!(
+                doc["error"].as_str().unwrap().contains("transport=door"),
+                "{doc}"
+            );
+            let (status, doc) = server.call("GET", &share(&own[&sealed]), None, OPERATOR);
+            assert_eq!(status, 403, "{doc}");
+            let (status, doc) = server.call("GET", &share(&own[&open]), None, OPERATOR);
+            assert_eq!(status, 200, "{doc}");
+            let (status, doc) = server.call("GET", &share(&table), None, CERT);
+            assert_eq!(status, 200, "{doc}");
+            assert_eq!(doc["sha256"], table["sha256"], "{doc}");
+            drop(server);
+
+            // each read of what the seal withholds is the grant's, and audited:
+            // the door's name the derivative, the keyboard's its command
+            let reads = sealed_reads(lab);
+            let (door, keyboard): (Vec<_>, Vec<_>) = reads.iter().partition(|(_, d)| d.is_some());
+            assert!(door.iter().all(|(p, _)| p == "cert@lab"), "{reads:?}");
+            let named: BTreeSet<i64> = door.iter().filter_map(|(_, d)| *d).collect();
+            let want: BTreeSet<i64> = [&table, &own[&sealed], &mask, &by_hand]
+                .iter()
+                .map(|d| d["id"].as_i64().unwrap())
+                .collect();
+            assert_eq!(named, want, "{reads:?}");
+            assert_eq!(
+                door.len(),
+                5,
+                "four by the door, one by the share: {reads:?}"
+            );
+            assert_eq!(keyboard.len(), 2, "show and parts: {reads:?}");
+            // every download stays a derivative.read; a table less its rows says how many went
+            let left_out = lab
+                .store()
+                .query(
+                    "SELECT details FROM audit WHERE action = 'derivative.read' AND principal = 'ops@lab'",
+                    &[],
+                )
+                .unwrap()
+                .iter()
+                .filter_map(|r| r.opt_text(0).unwrap().map(str::to_string))
+                .filter_map(|t| serde_json::from_str::<Value>(&t).ok())
+                .filter(|d| d["withheld_sealed"] == 1)
+                .count();
+            assert_eq!(left_out, 2, "the run's table and the table by hand");
+        },
+    );
+}
+
+/// Record 48 with a bids session pipeline: each session's own table and a
+/// table of the run, a row a session, whose unit column names its rows.
+const SESSION_FILES: &str = r#"name: session-files
+schema-version: "0.5"
+tool-version: "1"
+container-image:
+  type: docker
+  image: "example.org/session-files@sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+command-line: |
+  python3 -c '
+  import glob, json, os, sys
+  src, out = sys.argv[1], sys.argv[2]
+  rows = ["session\tfiles"]
+  for s in sorted(glob.glob(src + "/sub-*/ses-*")):
+      rel = os.path.relpath(s, src)
+      n = len(glob.glob(s + "/*/*.nii.gz"))
+      d = os.path.join(out, rel, "anat"); os.makedirs(d, exist_ok=True)
+      json.dump({"files": n}, open(os.path.join(d, "files.json"), "w"))
+      rows.append("%s\t%d" % (rel.replace("/", "_"), n))
+  open(os.path.join(out, "sessions.tsv"), "w").write("\n".join(rows) + "\n")
+  ' [InputDataset] [OutputLocation]
+x-nils:
+  analysis-level: session
+  input: {layout: bids}
+  outputs:
+    - id: files
+      kind: table
+      path-template: "sub-{subject}/ses-{session}/anat/files.json"
+      columns: [{name: files, type: integer}]
+    - id: sessions
+      kind: table
+      level: run
+      path-template: "sessions.tsv"
+      unit-column: session
+      columns: [{name: session_files, from: files, type: integer}]
+"#;
+
+/// Record 48, D1 of the move, by a session's unit: a session's own table
+/// is withheld whole where the stacks the run's release placed in its
+/// folder hold a stack sealed now, and the other session's is served; the
+/// run's table loses that session's row; the ask reads that session's
+/// measures as nothing, unless `--unsealed-access` says why, which the
+/// audit keeps.
+#[test]
+fn a_session_is_withheld_by_the_stacks_its_unit_was_given() {
+    if !have("python3") || !have("dcm2niix") {
+        eprintln!(
+            "python3 or dcm2niix is not installed; the bids layout needs a converter, so this test is skipped"
+        );
+        return;
+    }
+    on_both(
+        "pipelines-sealed-sessions",
+        "nils_pipelines_sealed_sessions",
+        |lab| {
+            lab.add_descriptor("session-files", SESSION_FILES);
+            let v = lab.json(&[
+                "run",
+                "session-files",
+                "--select",
+                "selection:every@1",
+                "--json",
+            ]);
+            assert_eq!(v["status"], "done", "{v}");
+            assert_eq!(v["summary"]["units"]["total"], 2, "{v}");
+            let run = v["id"].as_i64().unwrap();
+            let release = v["input_release_id"].as_i64().unwrap();
+            // a stack the release placed in a session's folder
+            let placed: Vec<(i64, String)> = lab
+                .store()
+                .query(
+                    &format!(
+                        "SELECT rs.stack_id, rs.dir FROM release r JOIN release_stack rs ON rs.dataset_id = r.dataset_id WHERE r.id = {release} ORDER BY rs.stack_id"
+                    ),
+                    &[],
+                )
+                .unwrap()
+                .iter()
+                .map(|r| (r.int(0).unwrap(), r.text(1).unwrap().to_string()))
+                .collect();
+            let (sealed, dir) = placed
+                .iter()
+                .find(|(_, d)| d.starts_with("sub-") && d.contains("/ses-"))
+                .cloned()
+                .unwrap_or_else(|| panic!("{placed:?}"));
+            let folder = dir.split('/').take(2).collect::<Vec<_>>().join("/");
+            let made = lab.json(&["derivative", "list", "--run", &run.to_string(), "--json"]);
+            let made = made.as_array().unwrap();
+            let table = made
+                .iter()
+                .find(|d| d["scope"] == "run")
+                .unwrap_or_else(|| panic!("no run table: {made:?}"))
+                .clone();
+            let (mine, other): (Vec<&Value>, Vec<&Value>) = made
+                .iter()
+                .filter(|d| d["scope"] == "session")
+                .partition(|d| d["path"].as_str().unwrap().contains(&format!("{folder}/")));
+            assert_eq!((mine.len(), other.len()), (1, 1), "{made:?}");
+            seal(lab, "sealed", &[sealed]);
+
+            let server = Server::start(lab);
+            let content = |d: &Value| format!("/api/derivatives/{}/content", d["id"]);
+            let file_of = |d: &Value| {
+                std::fs::read(lab.work.path().join(d["path"].as_str().unwrap())).unwrap()
+            };
+            let (status, doc) = server.call("GET", &content(mine[0]), None, OPERATOR);
+            assert_eq!(status, 403, "{doc}");
+            assert_eq!(doc["sealed"], true, "{doc}");
+            let (status, bytes) = server.raw("GET", &content(other[0]), None, OPERATOR);
+            assert_eq!(status, 200);
+            assert_eq!(bytes, file_of(other[0]));
+            let (status, h, bytes) = server.fetch("GET", &content(&table), None, OPERATOR);
+            let text = String::from_utf8(bytes).unwrap();
+            assert_eq!(status, 200, "{text}");
+            assert_eq!(
+                h.get("x-nils-withheld-sealed").map(String::as_str),
+                Some("1"),
+                "{h:?}"
+            );
+            assert_eq!(
+                text.lines().count(),
+                2,
+                "the header and the other session's row: {text}"
+            );
+            assert!(!text.contains(&folder.replace('/', "_")), "{text}");
+            for d in [mine[0], other[0], &table] {
+                let (status, bytes) = server.raw("GET", &content(d), None, CERT);
+                assert_eq!(status, 200, "{d}");
+                assert_eq!(bytes, file_of(d), "{d}");
+            }
+            drop(server);
+            let named: BTreeSet<i64> = sealed_reads(lab).iter().filter_map(|(_, d)| *d).collect();
+            assert_eq!(
+                named,
+                [
+                    mine[0]["id"].as_i64().unwrap(),
+                    table["id"].as_i64().unwrap()
+                ]
+                .into_iter()
+                .collect(),
+            );
+
+            // the ask: a session's measures are what the run said of its stacks
+            let packs = packs();
+            let p = packs.to_str().unwrap();
+            let doc = json!({
+                "ast_version": 1,
+                "sets": {"s": {"grain": "session"}},
+                "out": {"set": "s", "level": "record", "columns": [
+                    ["field", {}, "measure.session-files.files"],
+                    ["field", {}, "measure.session-files.session_files"],
+                    ["field", {}, "measure.session-files.run"],
+                ]},
+            });
+            let file = ask_file(lab, "sessions", &doc);
+            let filled = |extra: &[&str]| -> (usize, usize) {
+                let mut args: Vec<&str> = vec![
+                    "ask",
+                    "run",
+                    "--file",
+                    file.as_str(),
+                    "--pack-dir",
+                    p,
+                    "--json",
+                ];
+                args.extend_from_slice(extra);
+                let answer = lab.json(&args);
+                let csv = lab
+                    .work
+                    .path()
+                    .join(format!("sessions-{}.csv", extra.len()));
+                let mut export = vec![
+                    "ask".to_string(),
+                    "handles".into(),
+                    "export".into(),
+                    "--handle".into(),
+                    answer["handle"].to_string(),
+                    "--out".into(),
+                    csv.to_str().unwrap().into(),
+                ];
+                export.extend(extra.iter().map(|s| s.to_string()));
+                let words: Vec<&str> = export.iter().map(String::as_str).collect();
+                lab.ok(&words, None);
+                let text = std::fs::read_to_string(&csv).unwrap();
+                let mut lines = text.lines();
+                let header: Vec<String> = lines
+                    .next()
+                    .unwrap_or_default()
+                    .split(',')
+                    .map(|c| c.trim_matches('"').to_string())
+                    .collect();
+                let rows: Vec<BTreeMap<String, String>> = lines
+                    .map(|l| {
+                        header
+                            .iter()
+                            .cloned()
+                            .zip(l.split(',').map(|c| c.trim_matches('"').to_string()))
+                            .collect()
+                    })
+                    .collect();
+                let n = |name: &str| rows.iter().filter(|r| !cell(r, name).is_empty()).count();
+                assert_eq!(
+                    n("measure.session-files.files"),
+                    n("measure.session-files.session_files"),
+                    "{rows:?}"
+                );
+                assert_eq!(
+                    n("measure.session-files.files"),
+                    n("measure.session-files.run"),
+                    "{rows:?}"
+                );
+                (rows.len(), n("measure.session-files.files"))
+            };
+            assert_eq!(
+                filled(&[]),
+                (2, 1),
+                "the sealed session's measures withheld"
+            );
+            assert_eq!(
+                filled(&[
+                    "--unsealed-access",
+                    "grading the session pipeline on the sealed sample"
+                ]),
+                (2, 2),
+                "the keyboard's audited access reads them"
+            );
+            let audit = lab.ok(
+                &["audit", "list", "--action", "sealed.read", "--json"],
+                None,
+            );
+            assert!(
+                audit.contains("grading the session pipeline on the sealed sample"),
+                "{audit}"
+            );
+        },
+    );
+}
+
+/// The `sealed.read` rows of the audit that name a run: each one's
+/// principal and how many units' breaches it read.
+fn sealed_run_reads(lab: &Lab, run: i64) -> Vec<(String, i64)> {
+    lab.store()
+        .query(
+            "SELECT principal, scope FROM audit WHERE action = 'sealed.read' ORDER BY id",
+            &[],
+        )
+        .unwrap()
+        .iter()
+        .filter_map(|r| {
+            let scope: Value = serde_json::from_str(r.text(1).unwrap()).unwrap();
+            (scope["run"].as_i64() == Some(run)).then(|| {
+                (
+                    r.text(0).unwrap().to_string(),
+                    scope["breaches_of_units"].as_i64().unwrap_or(-1),
+                )
+            })
+        })
+        .collect()
+}
+
+/// Record 48, D1 of the move: sealed means sealed in a run's QC summary.
+/// Every unit of a run breaches a check, and one unit's stack is of a
+/// sample sealed after the run. At detail quasi the run doors, the jobs
+/// doors and the keyboard leave that unit's breaches out, its name and its
+/// value with them, and say how many units went, never which; below quasi
+/// the counts by check leave it out as well, and the count of what went is
+/// held as any count of scans is; a holder of sealed:see reads every
+/// breach, each read audited as sealed.read, and so does the keyboard with
+/// --unsealed-access.
+#[test]
+fn a_run_s_qc_summary_withholds_the_breaches_of_a_sealed_stack() {
+    if !have("python3") {
+        eprintln!(
+            "python3 is not installed; the stand-in podman needs it, so this test is skipped"
+        );
+        return;
+    }
+    on_both("pipelines-sealed-qc", "nils_pipelines_sealed_qc", |lab| {
+        lab.add_descriptor("volumes", VOLUMES);
+        let stacks: Vec<i64> = lab
+            .store()
+            .query("SELECT id FROM stack ORDER BY id", &[])
+            .unwrap()
+            .iter()
+            .map(|r| r.int(0).unwrap())
+            .collect();
+        assert_eq!(stacks.len(), 4);
+        let server = Server::start(lab);
+        // every volume over the check's bound: each of the four units breaches it
+        let command = json!({"command": ["run", "volumes", "--select", "selection:every@1", "--param", "scale=1000000000"]});
+        let (status, doc) = server.call("POST", "/api/jobs", Some(command), OPERATOR);
+        assert_eq!(status, 202, "{doc}");
+        let job = doc["job"].as_i64().unwrap();
+        let mut state = Value::Null;
+        for _ in 0..600 {
+            let (_, j) = server.call("GET", &format!("/api/jobs/{job}"), None, OPERATOR);
+            state = j;
+            if matches!(
+                state["state"].as_str(),
+                Some("done" | "failed" | "cancelled")
+            ) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        assert_eq!(state["state"], "done", "{state}");
+        let run = state["result"]["run"].as_i64().unwrap();
+        let units = |s: &Value| -> Vec<String> {
+            s["breaches"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{s}"))
+                .iter()
+                .map(|b| b["unit"].as_str().unwrap().to_string())
+                .collect()
+        };
+        assert_eq!(units(&state["result"]["summary"]).len(), 4, "{state}");
+        // the sample is sealed after the run, as a certification sample is
+        let sealed = stacks[1];
+        seal(lab, "sealed_qc", &[sealed]);
+        let unit = format!("stack-{sealed}");
+        let value = format!("{}", 1_000_000_000 * sealed);
+        let open: Vec<String> = stacks
+            .iter()
+            .filter(|s| **s != sealed)
+            .map(|s| format!("stack-{s}"))
+            .collect();
+        // the unit is still one the run ran (`units_run`); what its check
+        // said of it, its breach and the value, is gone from every summary
+        let quiet = |what: &str, doc: &Value| {
+            let text = doc.to_string();
+            assert!(!text.contains(&value), "{what}: its value in {text}");
+            let mut docs = vec![doc];
+            docs.extend(doc["runs"].as_array().into_iter().flatten());
+            docs.extend(doc["jobs"].as_array().into_iter().flatten());
+            for d in docs {
+                for s in [&d["summary"], &d["result"]["summary"]] {
+                    for b in s["breaches"].as_array().into_iter().flatten() {
+                        assert_ne!(b["unit"], unit.as_str(), "{what}: its breach in {text}");
+                    }
+                }
+            }
+        };
+        let withheld = |what: &str, s: &Value| {
+            let mut shown = units(s);
+            shown.sort();
+            assert_eq!(shown, open, "{what}: {s}");
+            assert_eq!(s["breaches_withheld_sealed"], 1, "{what}: {s}");
+            // the run's own counts stay what they were
+            assert_eq!(s["numbers"]["checks"]["breaches"], 4, "{what}: {s}");
+        };
+
+        // detail quasi: the run doors and the jobs doors
+        let (status, doc) =
+            server.call("GET", &format!("/api/pipeline-runs/{run}"), None, OPERATOR);
+        assert_eq!(status, 200, "{doc}");
+        quiet("the run door", &doc);
+        withheld("the run door", &doc["summary"]);
+        let (_, list) = server.call("GET", "/api/pipeline-runs", None, OPERATOR);
+        quiet("the runs door", &list);
+        let listed = list["runs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["id"] == run)
+            .unwrap()
+            .clone();
+        withheld("the runs door", &listed["summary"]);
+        let (_, j) = server.call("GET", &format!("/api/jobs/{job}"), None, OPERATOR);
+        quiet("the job door", &j);
+        withheld("the job door", &j["result"]["summary"]);
+        let (_, all) = server.call("GET", "/api/jobs?all=1", None, OPERATOR);
+        quiet("the jobs door", &all);
+        let mine = all["jobs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["id"] == job)
+            .unwrap()
+            .clone();
+        withheld("the jobs door", &mine["result"]["summary"]);
+
+        // below detail quasi: the counts by check leave it out, and how many
+        // went is a count of scans, held below 5
+        let (_, plain) = server.call("GET", &format!("/api/pipeline-runs/{run}"), None, PLAIN);
+        quiet("below quasi", &plain);
+        let s = &plain["summary"];
+        assert_eq!(s["detail"], "totals", "{plain}");
+        assert!(s["breaches_withheld_sealed"].is_null(), "{plain}");
+        assert!(
+            s["withheld"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|w| w == "breaches_withheld_sealed"),
+            "{plain}"
+        );
+        assert_eq!(
+            s["breaches_by_check"],
+            json!([{"check": "brain_volume <= 100000000", "metric": "brain_volume", "units": null, "withheld": true}]),
+            "three units, fewer than five: {plain}"
+        );
+        assert!(sealed_run_reads(lab, run).is_empty());
+
+        // the certificate's grant reads every breach, each read audited
+        let (_, cert) = server.call("GET", &format!("/api/pipeline-runs/{run}"), None, CERT);
+        let mut every = units(&cert["summary"]);
+        every.sort();
+        assert_eq!(every.len(), 4, "{cert}");
+        assert!(every.contains(&unit), "{cert}");
+        assert!(
+            cert["summary"].get("breaches_withheld_sealed").is_none(),
+            "{cert}"
+        );
+        let (_, j) = server.call("GET", &format!("/api/jobs/{job}"), None, CERT);
+        assert_eq!(units(&j["result"]["summary"]).len(), 4, "{j}");
+        assert_eq!(
+            sealed_run_reads(lab, run),
+            vec![("cert@lab".to_string(), 1), ("cert@lab".to_string(), 1)]
+        );
+        drop(server);
+
+        // the keyboard withholds the same, unless --unsealed-access says why
+        let run_id = run.to_string();
+        let shown = lab.json(&["pipeline", "runs", &run_id, "--json"]);
+        quiet("the keyboard", &shown);
+        withheld("the keyboard", &shown["summary"]);
+        let listed = lab.json(&["pipeline", "runs", "--json"]);
+        quiet("the keyboard's list", &listed);
+        let shown_job = lab.json(&["jobs", "show", &job.to_string(), "--json"]);
+        quiet("the keyboard's job", &shown_job);
+        withheld("the keyboard's job", &shown_job["result"]["summary"]);
+        let why = "grading the QC of the sealed sample";
+        let read = lab.json(&[
+            "pipeline",
+            "runs",
+            &run_id,
+            "--json",
+            "--unsealed-access",
+            why,
+        ]);
+        assert_eq!(units(&read["summary"]).len(), 4, "{read}");
+        assert!(
+            read["summary"].get("breaches_withheld_sealed").is_none(),
+            "{read}"
+        );
+    });
+}
+
+/// Record 48: a pipeline of the bids layout whose every session breaches
+/// its check, as the volumes pipeline's stacks do.
+const SESSION_QC: &str = r#"name: session-qc
+schema-version: "0.5"
+tool-version: "1"
+container-image:
+  type: docker
+  image: "example.org/session-qc@sha256:abababababababababababababababababababababababababababababababab"
+command-line: |
+  python3 -c '
+  import glob, json, os, sys
+  src, out = sys.argv[1], sys.argv[2]
+  units = []
+  for s in sorted(glob.glob(src + "/sub-*/ses-*")):
+      rel = os.path.relpath(s, src); sub, ses = rel.split(os.sep)
+      d = os.path.join(out, rel, "anat"); os.makedirs(d, exist_ok=True)
+      open(os.path.join(d, "qc.txt"), "w").write("read\n")
+      units.append({"unit_id": sub + "_" + ses, "status": "succeeded", "derivatives": [rel + "/anat/qc.txt"], "metrics": {"snr": 3.25}})
+  json.dump({"schema_version": "1", "units": units}, open(os.path.join(out, "results.json"), "w"))
+  ' [InputDataset] [OutputLocation]
+x-nils:
+  analysis-level: session
+  input: {layout: bids}
+  outputs:
+    - id: qc
+      kind: output
+      path-template: "sub-{subject}/ses-{session}/anat/qc.txt"
+  qc: ["snr >= 8"]
+"#;
+
+/// Record 48, D1 of the move: a session's unit holds the stacks its run
+/// placed in its folder, so where one of them is of a sample sealed now,
+/// the session's breaches leave the run's QC summary and its `pipeline:qc`
+/// item leaves the review doors, for every caller but a holder of
+/// sealed:see; the other session's stay.
+#[test]
+fn a_session_s_qc_is_withheld_where_the_session_holds_a_sealed_stack() {
+    if !have("python3") || !have("dcm2niix") {
+        eprintln!(
+            "python3 or dcm2niix is not installed; the bids layout needs a converter, so this test is skipped"
+        );
+        return;
+    }
+    on_both(
+        "pipelines-sealed-session-qc",
+        "nils_pipelines_sealed_session_qc",
+        |lab| {
+            lab.add_descriptor("session-qc", SESSION_QC);
+            let v = lab.json(&[
+                "run",
+                "session-qc",
+                "--select",
+                "selection:every@1",
+                "--json",
+            ]);
+            assert_eq!(v["status"], "done", "{v}");
+            let run = v["id"].as_i64().unwrap();
+            let units = |s: &Value| -> Vec<String> {
+                let mut out: Vec<String> = s["breaches"]
+                    .as_array()
+                    .unwrap_or_else(|| panic!("{s}"))
+                    .iter()
+                    .map(|b| b["unit"].as_str().unwrap().to_string())
+                    .collect();
+                out.sort();
+                out
+            };
+            let both = units(&v["summary"]);
+            assert_eq!(both.len(), 2, "{v}");
+            // the first session's unit, its subject, and a stack of it
+            let (unit, subject): (String, i64) = lab
+                .store()
+                .query(
+                    "SELECT ref FROM review_item WHERE kind = 'pipeline:qc' ORDER BY id",
+                    &[],
+                )
+                .unwrap()
+                .iter()
+                .map(|r| {
+                    let reference: Value = serde_json::from_str(r.text(0).unwrap()).unwrap();
+                    (
+                        reference["unit"].as_str().unwrap().to_string(),
+                        reference["subject_id"].as_i64().unwrap(),
+                    )
+                })
+                .find(|(u, _)| *u == both[0])
+                .unwrap();
+            assert!(unit.contains("_ses-"), "a session's unit: {unit}");
+            let stack = lab.count(&format!(
+                "SELECT MIN(st.id) FROM stack st JOIN series se ON se.id = st.series_id WHERE se.subject_id = {subject}"
+            ));
+            seal(lab, "sealed_session", &[stack]);
+
+            let server = Server::start(lab);
+            let (status, doc) =
+                server.call("GET", &format!("/api/pipeline-runs/{run}"), None, OPERATOR);
+            assert_eq!(status, 200, "{doc}");
+            assert_eq!(units(&doc["summary"]), vec![both[1].clone()], "{doc}");
+            assert_eq!(doc["summary"]["breaches_withheld_sealed"], 1, "{doc}");
+            // the review doors: the session's item is not listed, the other is
+            let (_, items) = server.call("GET", "/api/review?kind=pipeline:qc", None, OPERATOR);
+            let listed: Vec<&str> = items["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|i| i["ref"]["unit"].as_str().unwrap())
+                .collect();
+            assert_eq!(listed, vec![both[1].as_str()], "{items}");
+            assert!(!items.to_string().contains(&unit), "{items}");
+            // the certificate's grant reads both
+            let (_, cert) = server.call("GET", &format!("/api/pipeline-runs/{run}"), None, CERT);
+            assert_eq!(units(&cert["summary"]), both, "{cert}");
+            let (_, items) = server.call("GET", "/api/review?kind=pipeline:qc", None, CERT);
+            assert_eq!(items["count"], 2, "{items}");
+        },
+    );
+}
+
+/// 2026-10-12: a stacks pipeline whose first unit fails for a full disk,
+/// as a tool says it, and whose others succeed.
+const DISK_FULL: &str = r#"name: disk-full
+schema-version: "0.5"
+tool-version: "1"
+container-image:
+  type: docker
+  image: "example.org/disk-full@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+command-line: |
+  python3 -c '
+  import json, os, sys
+  m = json.load(open(sys.argv[1])); out = sys.argv[2]
+  units = []
+  for i, s in enumerate(m["stacks"]):
+      u = s["unit"]
+      if i == 0:
+          units.append({"unit_id": u, "status": "failed", "error": "OSError: [Errno 28] No space left on device"})
+          continue
+      d = os.path.join(out, u); os.makedirs(d, exist_ok=True)
+      open(os.path.join(d, "out.txt"), "w").write("x")
+      units.append({"unit_id": u, "status": "succeeded", "derivatives": [u + "/out.txt"]})
+  json.dump({"schema_version": "1", "units": units}, open(os.path.join(out, "results.json"), "w"))
+  ' [Manifest] [OutputLocation]
+x-nils:
+  analysis-level: stack
+  input: {layout: stacks}
+  outputs:
+    - id: out
+      kind: output
+      path-template: "stack-{stack}/out.txt"
+      media-type: text/plain
+  needs: {gpu: none}
+"#;
+
+/// The newest run, as `nils pipeline runs <id>` answers it.
+fn newest_run(lab: &Lab) -> Value {
+    let runs = lab.json(&["pipeline", "runs", "--json"]);
+    let id = runs[0]["id"].as_i64().unwrap_or_else(|| panic!("{runs}"));
+    lab.json(&["pipeline", "runs", &id.to_string(), "--json"])
+}
+
+/// 2026-10-12: a run's failure, and each unit's, says its kind beside its
+/// error, on both backends: a unit whose tool found the disk full is a
+/// resource's and the run partial; a container killed with 137 is memory
+/// for every unit and the run, its job saying the same; podman's own 125
+/// with an image it cannot find is a dependency. The error stays as it was
+/// written, and the words a person reads say what to do.
+#[test]
+fn a_failure_says_its_kind_beside_its_error() {
+    if !have("python3") {
+        eprintln!(
+            "python3 is not installed; the stand-in podman needs it, so this test is skipped"
+        );
+        return;
+    }
+    on_both("pipelines-failures", "nils_failures", |lab| {
+        lab.add_descriptor("disk-full", DISK_FULL);
+        let v = lab.json(&[
+            "run",
+            "disk-full",
+            "--select",
+            "selection:every@1",
+            "--json",
+        ]);
+        assert_eq!(v["status"], "partial", "{v}");
+        assert!(v["failure"].is_null(), "a partial run did not fail: {v}");
+        assert_eq!(
+            v["summary"]["failures_by_cause"],
+            json!([{"kind": "resource", "cause": "disk", "units": 1}]),
+            "{v}"
+        );
+        let shown = newest_run(lab);
+        let failed: Vec<&Value> = shown["units_run"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|u| u["status"] == "failed")
+            .collect();
+        assert_eq!(failed.len(), 1, "{shown}");
+        assert_eq!(failed[0]["failure"]["kind"], "resource", "{shown}");
+        assert_eq!(failed[0]["failure"]["cause"], "disk", "{shown}");
+        assert_eq!(
+            failed[0]["error"], "OSError: [Errno 28] No space left on device",
+            "the error is kept as it was written: {shown}"
+        );
+        assert!(
+            shown["units_run"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|u| u["status"] == "succeeded")
+                .all(|u| u["failure"].is_null()),
+            "{shown}"
+        );
+
+        lab.add_descriptor(
+            "stack-echo",
+            &stack_echo(&format!("example.org/stack-echo@sha256:{}", "a".repeat(64))),
+        );
+        let killed = lab
+            .command(&lab.path)
+            .args(["run", "stack-echo", "--select", "selection:every@1"])
+            .env("FAKE_PODMAN_EXIT", "137")
+            .output()
+            .unwrap();
+        assert!(!killed.status.success());
+        let err = String::from_utf8_lossy(&killed.stderr);
+        assert!(err.contains("the container exited 137"), "{err}");
+        assert!(
+            err.contains("resource (memory): a container was killed for memory"),
+            "{err}"
+        );
+        let run = newest_run(lab);
+        assert_eq!(run["status"], "failed", "{run}");
+        assert!(
+            run["error"].as_str().unwrap().contains("exited 137"),
+            "{run}"
+        );
+        assert_eq!(run["failure"]["kind"], "resource", "{run}");
+        assert_eq!(run["failure"]["cause"], "memory", "{run}");
+        assert!(run["failure"]["fix"].is_null(), "{run}");
+        assert!(
+            run["units_run"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|u| u["failure"]["cause"] == "memory"),
+            "{run}"
+        );
+        let job = lab.json(&["jobs", "show", &run["job_id"].to_string(), "--json"]);
+        assert_eq!(job["state"], "failed", "{job}");
+        assert_eq!(job["failure"]["cause"], "memory", "{job}");
+        let text = lab.ok(&["pipeline", "runs", &run["id"].to_string()], None);
+        assert!(
+            text.contains("failure          resource (memory)"),
+            "{text}"
+        );
+        let text = lab.ok(&["jobs", "show", &run["job_id"].to_string()], None);
+        assert!(text.contains("failure     resource (memory)"), "{text}");
+        let text = lab.ok(&["pipeline", "runs"], None);
+        assert!(text.contains("resource (memory)"), "{text}");
+
+        let missing = lab
+            .command(&lab.path)
+            .args(["run", "stack-echo", "--select", "selection:every@1"])
+            .env("FAKE_PODMAN_EXIT", "125")
+            .output()
+            .unwrap();
+        assert!(!missing.status.success());
+        let run = newest_run(lab);
+        assert_eq!(run["failure"]["kind"], "dependency", "{run}");
+        assert_eq!(run["failure"]["cause"], "image", "{run}");
+    });
+}
+
+/// A search path for a lab that holds python3 and no dcm2niix.
+fn path_without_dcm2niix(lab: &Lab) -> OsString {
+    let tools = lab.bin.path().join("no-dcm2niix");
+    std::fs::create_dir_all(&tools).unwrap();
+    let python = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+        .map(|d| d.join("python3"))
+        .find(|p| p.is_file())
+        .expect("python3");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&python, tools.join("python3")).unwrap();
+    let mut path = lab.bin.path().as_os_str().to_owned();
+    path.push(":");
+    path.push(tools.as_os_str());
+    path
+}
+
+/// 2026-10-12: what a run needs of this machine is checked before it is
+/// queued. Without dcm2niix a bids run is refused at the pre-flight, at
+/// `nils run` and at the jobs door, by its kind and with the engine's own
+/// install as the fix, and nothing is queued; a unit whose declared disk is
+/// more than the working place has free is refused as a resource's. An
+/// image not pulled yet is information, never a refusal.
+#[test]
+fn a_run_is_refused_before_it_is_queued_for_what_it_lacks() {
+    if !have("python3") {
+        eprintln!(
+            "python3 is not installed; the stand-in podman needs it, so this test is skipped"
+        );
+        return;
+    }
+    let lab = Lab::new("pipelines-refused");
+    let path = path_without_dcm2niix(&lab);
+    lab.add_descriptor("bids-copy", BIDS_COPY);
+    let pre = lab.run_on(
+        &path,
+        &[
+            "run",
+            "bids-copy",
+            "--select",
+            "selection:every@1",
+            "--preflight",
+            "--json",
+        ],
+        None,
+    );
+    assert!(pre.0, "{}", pre.2);
+    let pre: Value = serde_json::from_str(&pre.1).unwrap();
+    assert_eq!(pre["ready"], false, "{pre}");
+    assert_eq!(pre["failure"]["kind"], "dependency", "{pre}");
+    assert_eq!(pre["failure"]["cause"], "dcm2niix", "{pre}");
+    assert_eq!(
+        pre["failure"]["fix"]["door"], "POST /api/tools/dcm2niix/install",
+        "{pre}"
+    );
+    let converter = pre["requirements"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["check"] == "converter")
+        .unwrap();
+    assert_eq!(converter["ok"], false, "{pre}");
+    assert!(
+        pre["blockers"]
+            .to_string()
+            .contains("dcm2niix is not on the engine's search path"),
+        "{pre}"
+    );
+    let image = pre["requirements"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["check"] == "image")
+        .unwrap();
+    assert_eq!(image["ok"], true, "the stand-in holds every image: {pre}");
+    let text = lab.run_on(
+        &path,
+        &[
+            "run",
+            "bids-copy",
+            "--select",
+            "selection:every@1",
+            "--preflight",
+        ],
+        None,
+    );
+    assert!(
+        text.1.contains("what to do: dependency (dcm2niix)"),
+        "{}",
+        text.1
+    );
+
+    let (good, _, err) = lab.run_on(
+        &path,
+        &["run", "bids-copy", "--select", "selection:every@1"],
+        None,
+    );
+    assert!(!good);
+    assert!(err.contains("refused before it started"), "{err}");
+    assert!(err.contains("nils tools install dcm2niix"), "{err}");
+    let count = |sql: &str| -> i64 { lab.store().query(sql, &[]).unwrap()[0].int(0).unwrap() };
+    assert_eq!(count("SELECT COUNT(*) FROM job WHERE kind = 'pipeline'"), 0);
+    assert_eq!(count("SELECT COUNT(*) FROM pipeline_run"), 0);
+
+    // a declared disk no place has free
+    let huge = stack_echo(&format!("example.org/stack-echo@sha256:{}", "a".repeat(64))).replace(
+        "needs: {gpu: optional}",
+        "needs: {gpu: optional, disk-gb: 900000000}",
+    );
+    lab.add_descriptor("stack-echo", &huge);
+    let (good, _, err) = lab.run_on(
+        &path,
+        &["run", "stack-echo", "--select", "selection:every@1"],
+        None,
+    );
+    assert!(!good);
+    assert!(err.contains("(failure: disk)"), "{err}");
+    assert!(err.contains("which has"), "{err}");
+
+    // the doors refuse the same and queue nothing
+    let server = Server::start_env(&lab, &[], &[("PATH", Path::new(&path))]);
+    let (status, refused) = server.call(
+        "POST",
+        "/api/jobs",
+        Some(json!({"command": ["run", "bids-copy", "--select", "selection:every@1"]})),
+        OPERATOR,
+    );
+    assert_eq!(status, 409, "{refused}");
+    assert_eq!(refused["failure"]["cause"], "dcm2niix", "{refused}");
+    assert_eq!(
+        refused["failure"]["fix"]["grant"], "install:work",
+        "{refused}"
+    );
+    assert!(refused["requirements"].is_array(), "{refused}");
+    let (status, refused) = server.call(
+        "POST",
+        "/api/jobs",
+        Some(json!({"command": ["run", "stack-echo", "--select", "selection:every@1"]})),
+        OPERATOR,
+    );
+    assert_eq!(status, 409, "{refused}");
+    assert_eq!(refused["failure"]["kind"], "resource", "{refused}");
+    assert_eq!(refused["failure"]["cause"], "disk", "{refused}");
+    let (status, door) = server.call(
+        "POST",
+        "/api/pipelines/bids-copy/preflight",
+        Some(json!({"select": "selection:every@1"})),
+        OPERATOR,
+    );
+    assert_eq!(status, 200, "{door}");
+    assert_eq!(door["failure"]["cause"], "dcm2niix", "{door}");
+    drop(server);
+    assert_eq!(count("SELECT COUNT(*) FROM job WHERE kind = 'pipeline'"), 0);
+    assert_eq!(count("SELECT COUNT(*) FROM pipeline_run"), 0);
+}
+
+/// 2026-10-12, with record 48: a unit's error is what its pipeline said of
+/// its stack, so once that stack is of a sample sealed, a reader who does
+/// not read sealed stacks reads the unit's failure by its kind and cause
+/// and never its words, at the door and at the keyboard; the keyboard with
+/// --unsealed-access reads them.
+#[test]
+fn a_sealed_stack_s_unit_says_its_failure_and_not_its_words() {
+    if !have("python3") {
+        eprintln!(
+            "python3 is not installed; the stand-in podman needs it, so this test is skipped"
+        );
+        return;
+    }
+    let lab = Lab::new("pipelines-sealed-errors");
+    lab.add_descriptor("disk-full", DISK_FULL);
+    let v = lab.json(&[
+        "run",
+        "disk-full",
+        "--select",
+        "selection:every@1",
+        "--json",
+    ]);
+    assert_eq!(v["status"], "partial", "{v}");
+    let id = v["id"].to_string();
+    let shown = lab.json(&["pipeline", "runs", &id, "--json"]);
+    let failed = shown["units_run"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|u| u["status"] == "failed")
+        .cloned()
+        .unwrap();
+    let unit = failed["unit"].as_str().unwrap().to_string();
+    let stack: i64 = unit.trim_start_matches("stack-").parse().unwrap();
+    seal(&lab, "sealed_errors", &[stack]);
+    let of = |doc: &Value| -> Value {
+        doc["units_run"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|u| u["unit"] == unit.as_str())
+            .cloned()
+            .unwrap()
+    };
+    let kept = of(&lab.json(&["pipeline", "runs", &id, "--json"]));
+    assert!(kept["error"].is_null(), "{kept}");
+    assert_eq!(kept["sealed"], true, "{kept}");
+    assert_eq!(kept["failure"]["cause"], "disk", "{kept}");
+    let read = of(&lab.json(&[
+        "pipeline",
+        "runs",
+        &id,
+        "--json",
+        "--unsealed-access",
+        "reading why a sealed unit failed",
+    ]));
+    assert_eq!(
+        read["error"], "OSError: [Errno 28] No space left on device",
+        "{read}"
+    );
+    let server = Server::start(&lab);
+    let (status, doc) = server.call("GET", &format!("/api/pipeline-runs/{id}"), None, OPERATOR);
+    assert_eq!(status, 200, "{doc}");
+    let at_door = of(&doc);
+    assert!(at_door["error"].is_null(), "{at_door}");
+    assert_eq!(at_door["failure"]["kind"], "resource", "{at_door}");
+    drop(server);
+}
+
+// ------------------------------------------- what a run made, unit by unit
+
+/// The stacks picked as a FLAIR, in stack order.
+fn flair_stacks(lab: &Lab) -> Vec<i64> {
+    lab.store()
+        .query(
+            "SELECT DISTINCT ps.stack_id FROM pick_stack ps JOIN pick p ON p.id = ps.pick_id \
+             WHERE p.role = 'flair' AND p.withdrawn_at IS NULL ORDER BY ps.stack_id",
+            &[],
+        )
+        .unwrap()
+        .iter()
+        .map(|r| r.int(0).unwrap())
+        .collect()
+}
+
+/// A selection of every stack but `leave_out`, saved as `name` version 1.
+fn save_but(lab: &Lab, name: &str, leave_out: &[i64]) {
+    let not: Vec<Value> = leave_out
+        .iter()
+        .map(|s| json!(["<>", {}, ["field", {}, "id"], s]))
+        .collect();
+    let file = ask_file(
+        lab,
+        name,
+        &json!({"ast_version": 1, "sets": {name: {"grain": "stack", "where": not}},
+                "out": {"set": name, "level": "record"}}),
+    );
+    lab.ok(
+        &[
+            "ask",
+            "selections",
+            "save",
+            "--name",
+            name,
+            "--file",
+            &file,
+            "--pack-dir",
+            packs().to_str().unwrap(),
+        ],
+        None,
+    );
+}
+
+/// A search path whose first folder holds a dcm2niix that answers its
+/// version and converts nothing: a run passes its checks and stops at the
+/// release of its input, as one does whose converter went missing between.
+fn broken_dcm2niix_path(lab: &Lab) -> OsString {
+    let dir = lab.bin.path().join("broken-dcm2niix");
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("dcm2niix");
+    std::fs::write(
+        &file,
+        "#!/bin/sh\ncase \"$1\" in --version|-v) echo \"dcm2niiX version v0.0.0-broken\"; exit 0;; esac\necho 'converts nothing, on purpose' >&2\nexit 3\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let mut path = dir.as_os_str().to_owned();
+    path.push(":");
+    path.push(&lab.path);
+    path
+}
+
+/// A pipeline run's job once it is over, read at the door.
+fn job_over(server: &Server, id: i64) -> Value {
+    let started = std::time::Instant::now();
+    loop {
+        let (status, job) = server.call("GET", &format!("/api/jobs/{id}"), None, OPERATOR);
+        assert_eq!(status, 200, "{job}");
+        if ["done", "failed", "cancelled"].contains(&job["state"].as_str().unwrap_or_default()) {
+            return job;
+        }
+        assert!(
+            started.elapsed().as_secs() < 180,
+            "job {id} did not end: {job}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+}
+
+/// 2026-10-12 (Nima, trying the desk: "done-fail should be per unit of job
+/// not the whole thing"): a run reads as its units summed, never a bare
+/// done. A run of a pipeline that needs a T1w and a FLAIR a session, over a
+/// selection one session of which lacks its FLAIR, is done with one session
+/// made and one skipped, and says so with the skipped one's reason in a few
+/// words: at the command line, at the doors (at detail plain too, naming no
+/// session) and on its job. A run from before every unit of which was
+/// skipped, its reasons not summed, reads as having made nothing, with its
+/// reasons read from its units.
+#[test]
+fn a_run_reads_as_what_its_units_made() {
+    if !have("python3") || !have("dcm2niix") {
+        eprintln!(
+            "python3 or dcm2niix is not installed; the bids layout needs a converter, so this test is skipped"
+        );
+        return;
+    }
+    on_both("pipelines-made", "nils_pipelines_made", |lab| {
+        lab.add_descriptor("needs-flair", NEEDS_FLAIR);
+        let flairs = flair_stacks(lab);
+        assert_eq!(flairs.len(), 2, "{flairs:?}");
+        save_but(lab, "most", &flairs[..1]);
+        let v = lab.json(&[
+            "run",
+            "needs-flair",
+            "--select",
+            "selection:most@1",
+            "--json",
+        ]);
+        assert_eq!(v["status"], "done", "{v}");
+        let line = "1 of 2 made · 1 skipped: no FLAIR picked";
+        assert_eq!(v["made"]["line"], line, "{v}");
+        assert_eq!(v["made"]["nothing"], false, "{v}");
+        assert_eq!(
+            (
+                &v["made"]["made"],
+                &v["made"]["skipped"],
+                &v["made"]["failed"]
+            ),
+            (&json!(1), &json!(1), &json!(0)),
+            "{v}"
+        );
+        assert_eq!(
+            v["summary"]["skipped_by_why"],
+            json!([{"why": "no FLAIR picked", "units": 1}]),
+            "{v}"
+        );
+        let skipped: Vec<&Value> = v["units_run"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|u| u["status"] == "skipped")
+            .collect();
+        assert_eq!(skipped.len(), 1, "{v}");
+        assert_eq!(skipped[0]["lacks"], json!(["no FLAIR picked"]), "{v}");
+        let run = v["id"].as_i64().unwrap();
+        let job = v["job_id"].as_i64().unwrap();
+
+        // the command line
+        let text = lab.ok(&["pipeline", "runs", &run.to_string()], None);
+        assert!(
+            text.contains(&format!("run {run} of needs-flair@1: done · {line}")),
+            "{text}"
+        );
+        let list = lab.ok(&["pipeline", "runs"], None);
+        assert!(list.contains(line), "{list}");
+        let doc = lab.json(&["jobs", "show", &job.to_string(), "--json"]);
+        assert_eq!(doc["made"]["line"], line, "{doc}");
+        assert!(doc["taken_up"].is_null(), "{doc}");
+        let said = lab.ok(&["jobs", "show", &job.to_string()], None);
+        assert!(said.contains(&format!("made        {line}")), "{said}");
+
+        // the doors, at detail plain too, which names no session
+        let server = Server::start(lab);
+        for token in [OPERATOR, PLAIN] {
+            let (status, one) =
+                server.call("GET", &format!("/api/pipeline-runs/{run}"), None, token);
+            assert_eq!(status, 200, "{one}");
+            assert_eq!(one["made"]["line"], line, "{one}");
+            assert!(!one["made"].to_string().contains("sub-"), "{one}");
+            let (status, all) = server.call("GET", "/api/pipeline-runs", None, token);
+            assert_eq!(status, 200, "{all}");
+            let listed = all["runs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|r| r["id"] == run)
+                .unwrap_or_else(|| panic!("{all}"));
+            assert_eq!(listed["made"]["line"], line, "{listed}");
+            let (status, j) = server.call("GET", &format!("/api/jobs/{job}"), None, token);
+            assert_eq!(status, 200, "{j}");
+            assert_eq!(j["made"]["line"], line, "{j}");
+        }
+        drop(server);
+
+        // a run from before: every unit skipped, its reasons not summed in
+        // its summary, as a laptop install's engine left one on 2026-10-12
+        let mut store = lab.store();
+        let units = store
+            .query(
+                &format!("SELECT id, outcome FROM pipeline_unit WHERE run_id = {run}"),
+                &[],
+            )
+            .unwrap();
+        let outcomes: Vec<(i64, Value)> = units
+            .iter()
+            .map(|r| {
+                (
+                    r.int(0).unwrap(),
+                    serde_json::from_str(r.text(1).unwrap()).unwrap(),
+                )
+            })
+            .collect();
+        let (_, skipped) = outcomes
+            .iter()
+            .find(|(_, o)| o["status"] == "skipped")
+            .cloned()
+            .unwrap();
+        let quoted = |v: &Value| v.to_string().replace('\'', "''");
+        for (id, o) in &outcomes {
+            if o["status"] == "succeeded" {
+                store
+                    .execute(
+                        &format!(
+                            "UPDATE pipeline_unit SET outcome = '{}', attempts = 0 WHERE id = {id}",
+                            quoted(&skipped)
+                        ),
+                        &[],
+                    )
+                    .unwrap();
+            }
+        }
+        let before = json!({"units": {"total": 2, "succeeded": 0, "failed": 0, "skipped": 2,
+                                      "unreported": 0, "missing_input": 2},
+                            "failures_by_cause": [], "derivatives": 0});
+        store
+            .execute(
+                &format!(
+                    "UPDATE pipeline_run SET summary = '{}' WHERE id = {run}",
+                    quoted(&before)
+                ),
+                &[],
+            )
+            .unwrap();
+        let nothing = "nothing made · 2 of 2 skipped: no FLAIR picked";
+        let one = lab.json(&["pipeline", "runs", &run.to_string(), "--json"]);
+        assert_eq!(one["made"]["line"], nothing, "{one}");
+        assert_eq!(one["made"]["nothing"], true, "{one}");
+        let all = lab.json(&["pipeline", "runs", "--json"]);
+        let listed = all
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["id"] == run)
+            .unwrap_or_else(|| panic!("{all}"));
+        assert_eq!(listed["made"]["line"], nothing, "{listed}");
+        assert_eq!(listed["made"]["nothing"], true, "{listed}");
+        let text = lab.ok(&["pipeline", "runs", &run.to_string()], None);
+        assert!(text.contains(&format!("done · {nothing}")), "{text}");
+    });
+}
+
+/// 2026-10-12 (Nima: "if the selection does not fulfill or maybe some part
+/// of it the pipeline should say that these sessions cannot be [run] unless
+/// they have whatever"): the pre-flight names the sessions that cannot run,
+/// one line a reason with the sessions under it, and says so plainly where
+/// every one can; a run none of whose sessions could run is not ready, and
+/// `nils run` and the jobs door refuse it before anything is made or
+/// queued, saying why.
+#[test]
+fn a_run_none_of_whose_units_could_run_is_refused_and_says_why() {
+    if !have("python3") || !have("dcm2niix") {
+        eprintln!(
+            "python3 or dcm2niix is not installed; the bids layout needs a converter, so this test is skipped"
+        );
+        return;
+    }
+    on_both("pipelines-cannot", "nils_pipelines_cannot", |lab| {
+        lab.add_descriptor("needs-flair", NEEDS_FLAIR);
+        let flairs = flair_stacks(lab);
+        save_but(lab, "t1s", &flairs);
+        let over = [
+            "run",
+            "needs-flair",
+            "--select",
+            "selection:t1s@1",
+            "--preflight",
+        ];
+        let pre = lab.json(&[&over[..], &["--json"]].concat());
+        assert_eq!(
+            pre["units"],
+            json!({"total": 2, "ready": 0, "missing": 2}),
+            "{pre}"
+        );
+        assert_eq!(pre["ready"], false, "{pre}");
+        assert_eq!(pre["unit"], "session", "{pre}");
+        assert_eq!(pre["cannot"].as_array().unwrap().len(), 1, "{pre}");
+        assert_eq!(pre["cannot"][0]["why"], "no FLAIR picked", "{pre}");
+        assert_eq!(pre["cannot"][0]["units"], 2, "{pre}");
+        let named = pre["cannot"][0]["named"].as_array().unwrap();
+        assert_eq!(named.len(), 2, "{pre}");
+        assert!(
+            named
+                .iter()
+                .all(|n| n.as_str().unwrap().starts_with("sub-")),
+            "{pre}"
+        );
+        assert_eq!(
+            pre["missing"][0]["lacks"],
+            json!(["no FLAIR picked"]),
+            "{pre}"
+        );
+        let blocker = "no session can run: 2 of 2 lack an input (no FLAIR picked)";
+        assert!(
+            pre["blockers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|b| b == blocker),
+            "{pre}"
+        );
+        let text = lab.ok(&over, None);
+        assert!(
+            text.contains("cannot run       2 sessions: no FLAIR picked"),
+            "{text}"
+        );
+        assert!(text.contains(&format!("not ready: {blocker}")), "{text}");
+
+        // the run is refused before anything is made
+        let (good, _, err) = lab.run(&["run", "needs-flair", "--select", "selection:t1s@1"], None);
+        assert!(!good, "{err}");
+        assert!(
+            err.contains(&format!("refused before it started: {blocker}")),
+            "{err}"
+        );
+        assert!(err.contains("(failure: input)"), "{err}");
+        assert_eq!(lab.count("SELECT COUNT(*) FROM pipeline_run"), 0);
+        assert!(lab.podman_runs().is_empty(), "nothing ran");
+
+        // and at the jobs door, with nothing queued
+        let server = Server::start(lab);
+        let runs_queued = "SELECT COUNT(*) FROM job WHERE kind = 'pipeline'";
+        let jobs = lab.count(runs_queued);
+        let (status, refused) = server.call(
+            "POST",
+            "/api/jobs",
+            Some(json!({"command": ["run", "needs-flair", "--select", "selection:t1s@1"]})),
+            OPERATOR,
+        );
+        assert_eq!(status, 409, "{refused}");
+        assert!(
+            refused["error"].as_str().unwrap().contains(blocker),
+            "{refused}"
+        );
+        assert_eq!(refused["failure"]["kind"], "input", "{refused}");
+        assert_eq!(refused["cannot"][0]["why"], "no FLAIR picked", "{refused}");
+        assert_eq!(refused["units"]["total"], 2, "{refused}");
+        assert_eq!(refused["unit"], "session", "{refused}");
+        assert!(refused["requirements"].is_array(), "{refused}");
+        assert_eq!(lab.count(runs_queued), jobs, "nothing queued");
+        // the door's pre-flight, at detail plain naming no session
+        let (status, flat) = server.call(
+            "POST",
+            "/api/pipelines/needs-flair/preflight",
+            Some(json!({"select": "selection:t1s@1"})),
+            PLAIN,
+        );
+        assert_eq!(status, 200, "{flat}");
+        assert_eq!(flat["cannot"][0]["units"], 2, "{flat}");
+        assert_eq!(flat["cannot"][0]["named"], json!([]), "{flat}");
+        assert_eq!(
+            flat["missing"][0]["lacks"],
+            json!(["no FLAIR picked"]),
+            "{flat}"
+        );
+        assert!(flat["missing"][0].get("unit").is_none(), "{flat}");
+        drop(server);
+
+        // a selection every session of which can run says so plainly
+        let every = [
+            "run",
+            "needs-flair",
+            "--select",
+            "selection:every@1",
+            "--preflight",
+        ];
+        let text = lab.ok(&every, None);
+        assert!(
+            text.contains("can run          every session: 2 sessions"),
+            "{text}"
+        );
+        let pre = lab.json(&[&every[..], &["--json"]].concat());
+        assert_eq!(pre["cannot"], json!([]), "{pre}");
+        assert_eq!(pre["ready"], true, "{pre}");
+    });
+}
+
+/// 2026-10-12, found on a laptop install: a run that stopped at its release for want of
+/// a dependency, taken up again with Run again once the dependency was
+/// there, ran with no session able to run and read as done. A run taken up
+/// again is checked as a new run is: its pre-flight (`nils run --resume
+/// --preflight`, `{resume}` at the door) says what it needs of this machine
+/// and which of the sessions it still has to run cannot, and `nils run
+/// --resume` and the jobs door refuse it, nothing claimed or queued, where
+/// none of them could run or a check fails; once they can, the door takes
+/// it up, and the job that stopped says which job took its run up again.
+#[test]
+fn a_run_taken_up_again_is_checked_as_a_new_run_is() {
+    if !have("python3") || !have("dcm2niix") {
+        eprintln!(
+            "python3 or dcm2niix is not installed; the bids layout needs a converter, so this test is skipped"
+        );
+        return;
+    }
+    on_both("pipelines-again", "nils_pipelines_again", |lab| {
+        lab.add_descriptor("needs-flair", NEEDS_FLAIR);
+        let broken = broken_dcm2niix_path(lab);
+        let (good, _, err) = lab.run_on(
+            &broken,
+            &["run", "needs-flair", "--select", "selection:every@1"],
+            None,
+        );
+        assert!(!good, "the release stops: {err}");
+        // as the run a laptop install's engine stopped on did, its release never
+        // recorded: the release of its input is made again when it goes on
+        assert!(
+            lab.store()
+                .execute(
+                    "UPDATE pipeline_run SET input_release_id = NULL WHERE id = 1",
+                    &[]
+                )
+                .unwrap()
+                == 1
+        );
+        let run = lab.json(&["pipeline", "runs", "1", "--json"]);
+        assert_eq!(run["status"], "failed", "{run}");
+        assert!(run["input_release_id"].is_null(), "{run}");
+        let first = run["job_id"].as_i64().unwrap();
+
+        // its FLAIR picks withdrawn since: none of its sessions can run
+        let withdraw = |on: bool| {
+            let sql = if on {
+                "UPDATE pick SET withdrawn_at = '2026-10-12T12:00:00Z', withdrawn_by = 'the test' \
+                 WHERE role = 'flair' AND withdrawn_at IS NULL"
+            } else {
+                "UPDATE pick SET withdrawn_at = NULL, withdrawn_by = NULL WHERE withdrawn_by = 'the test'"
+            };
+            assert!(lab.store().execute(sql, &[]).unwrap() > 0, "{sql}");
+        };
+        withdraw(true);
+        let pre = lab.json(&["run", "--resume", "1", "--preflight", "--json"]);
+        assert_eq!(pre["resume"]["run"], 1, "{pre}");
+        assert_eq!(pre["resume"]["kept"], 0, "{pre}");
+        assert_eq!(pre["units"]["total"], 2, "{pre}");
+        assert_eq!(pre["units"]["ready"], 0, "{pre}");
+        assert_eq!(pre["ready"], false, "{pre}");
+        assert_eq!(pre["cannot"][0]["why"], "no FLAIR picked", "{pre}");
+        let blocker = "no session can run: 2 of 2 lack an input (no FLAIR picked)";
+        assert!(pre["blockers"].to_string().contains(blocker), "{pre}");
+        let text = lab.ok(&["run", "--resume", "1", "--preflight"], None);
+        assert!(text.contains("taken up again   run 1 (failed)"), "{text}");
+        assert!(
+            text.contains("cannot run       2 sessions: no FLAIR picked"),
+            "{text}"
+        );
+        let (good, _, err) = lab.run(&["run", "--resume", "1"], None);
+        assert!(!good, "{err}");
+        assert!(
+            err.contains(&format!("refused before it started: {blocker}")),
+            "{err}"
+        );
+        let kept = lab.json(&["pipeline", "runs", "1", "--json"]);
+        assert_eq!(kept["status"], "failed", "nothing was claimed: {kept}");
+        assert_eq!(kept["job_id"], first, "{kept}");
+        assert_eq!(kept["resumes"].as_i64().unwrap_or(0), 0, "{kept}");
+
+        let server = Server::start(lab);
+        let (status, door) = server.call(
+            "POST",
+            "/api/pipelines/needs-flair/preflight",
+            Some(json!({"resume": 1})),
+            OPERATOR,
+        );
+        assert_eq!(status, 200, "{door}");
+        assert_eq!(door["ready"], false, "{door}");
+        assert_eq!(door["cannot"], pre["cannot"], "{door}");
+        assert_eq!(door["resume"]["run"], 1, "{door}");
+        let (status, _) = server.call(
+            "POST",
+            "/api/pipelines/needs-flair/preflight",
+            Some(json!({"resume": 99})),
+            OPERATOR,
+        );
+        assert_eq!(status, 404, "no such run");
+        let (status, caps) = server.call("GET", "/api/capabilities", None, OPERATOR);
+        assert_eq!(status, 200, "{caps}");
+        assert_eq!(caps["pipelines"]["preflight"]["resume"], true, "{caps}");
+        let runs_queued = "SELECT COUNT(*) FROM job WHERE kind = 'pipeline'";
+        let jobs = lab.count(runs_queued);
+        let (status, refused) = server.call(
+            "POST",
+            "/api/jobs",
+            Some(json!({"command": ["run", "--resume", "1"]})),
+            OPERATOR,
+        );
+        assert_eq!(status, 409, "{refused}");
+        assert_eq!(refused["failure"]["kind"], "input", "{refused}");
+        assert_eq!(refused["cannot"][0]["why"], "no FLAIR picked", "{refused}");
+        assert_eq!(lab.count(runs_queued), jobs, "nothing queued");
+
+        // its picks back, it can run, and its pre-flight says so
+        withdraw(false);
+        let (status, door) = server.call(
+            "POST",
+            "/api/pipelines/needs-flair/preflight",
+            Some(json!({"resume": 1})),
+            OPERATOR,
+        );
+        assert_eq!(status, 200, "{door}");
+        assert_eq!(door["ready"], true, "{door}");
+        assert_eq!(door["units"]["ready"], 2, "{door}");
+        assert_eq!(door["cannot"], json!([]), "{door}");
+        // without its converter it is refused for it, as a new run is
+        let (good, _, err) =
+            lab.run_on(&path_without_dcm2niix(lab), &["run", "--resume", "1"], None);
+        assert!(!good, "{err}");
+        assert!(err.contains("refused before it started"), "{err}");
+        assert!(err.contains("nils tools install dcm2niix"), "{err}");
+
+        // taken up again at the door, and the job that stopped says which
+        // job took its run up again
+        let (status, queued) = server.call(
+            "POST",
+            "/api/jobs",
+            Some(json!({"command": ["run", "--resume", "1"]})),
+            OPERATOR,
+        );
+        assert_eq!(status, 202, "{queued}");
+        let again = queued["job"].as_i64().unwrap();
+        let done = job_over(&server, again);
+        assert_eq!(done["state"], "done", "{done}");
+        assert_eq!(done["made"]["line"], "2 of 2 made", "{done}");
+        assert!(done["taken_up"].is_null(), "{done}");
+        let (status, run) = server.call("GET", "/api/pipeline-runs/1", None, OPERATOR);
+        assert_eq!(status, 200, "{run}");
+        assert_eq!(run["status"], "done", "{run}");
+        assert_eq!(run["job_id"], again, "{run}");
+        assert_eq!(run["made"]["line"], "2 of 2 made", "{run}");
+        let (status, old) = server.call("GET", &format!("/api/jobs/{first}"), None, OPERATOR);
+        assert_eq!(status, 200, "{old}");
+        assert_eq!(
+            old["taken_up"],
+            json!({"job": again, "state": "done", "run": 1}),
+            "{old}"
+        );
+        let (status, all) = server.call("GET", "/api/jobs?all=1", None, OPERATOR);
+        assert_eq!(status, 200, "{all}");
+        let listed = all["jobs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|j| j["id"] == first)
+            .unwrap_or_else(|| panic!("{all}"));
+        assert_eq!(listed["taken_up"]["job"], again, "{listed}");
+        drop(server);
+        let said = lab.ok(&["jobs", "show", &first.to_string()], None);
+        assert!(
+            said.contains(&format!("taken up    again as job {again} (done)")),
+            "{said}"
+        );
+        // and a run that is done has nothing left to run, at the door too
+        let server = Server::start(lab);
+        let (status, done) = server.call(
+            "POST",
+            "/api/jobs",
+            Some(json!({"command": ["run", "--resume", "1"]})),
+            OPERATOR,
+        );
+        assert_eq!(status, 409, "{done}");
+        assert!(
+            done["error"]
+                .as_str()
+                .unwrap()
+                .contains("nothing is left to run"),
+            "{done}"
+        );
+        drop(server);
+    });
+}
+
+/// Nima's ruling of 2026-10-12 on pipeline versions: a version that fixes
+/// earlier ones says so (`x-nils.replaces`), and the catalog answers each
+/// name's versions with how each stands: current, selectable, or replaced
+/// by which and why. A replaced version is not offered for a new run: the
+/// run, the pre-flight and the jobs door refuse it naming the version that
+/// replaces it, and only `--replaced` at the keyboard runs it still. Its
+/// old run is read and named as before. On SQLite and on Postgres.
+#[test]
+fn a_replaced_version_is_not_offered_for_a_new_run_and_its_old_run_still_reads() {
+    if !have("python3") {
+        eprintln!("python3 is not installed; the lab needs it, so this test is skipped");
+        return;
+    }
+    on_both("pipelines-versions", "nils_pipelines_versions", |lab| {
+        let image = format!("example.org/stack-echo@sha256:{}", "a".repeat(64));
+        let v1 = stack_echo(&image);
+        lab.add_descriptor("stack-echo-1", &v1);
+        // a run of the first version, before any later one
+        let old = lab.json(&[
+            "run",
+            "stack-echo",
+            "--select",
+            "selection:every@1",
+            "--json",
+        ]);
+        assert_eq!(old["status"], "done", "{old}");
+        assert_eq!(old["pipeline"], "stack-echo@1");
+        let old_id = old["id"].as_i64().unwrap();
+
+        // the second version fixes the first; the third changes what it
+        // makes and replaces nothing, so the second stays selectable
+        let v2 = v1.replace(
+            "  analysis-level: stack\n",
+            "  analysis-level: stack\n  replaces: {why: \"the first counted a stack's files twice\"}\n",
+        );
+        let added = lab.add_descriptor("stack-echo-2", &v2);
+        assert_eq!(added["label"], "stack-echo@2", "{added}");
+        assert_eq!(added["replaces"], json!(["stack-echo@1"]), "{added}");
+        let v3 = v1.replace("tool-version: \"1\"", "tool-version: \"2\"");
+        assert_eq!(
+            lab.add_descriptor("stack-echo-3", &v3)["label"],
+            "stack-echo@3"
+        );
+
+        let listed = lab.json(&["pipeline", "list", "--json"]);
+        let entry = |label: &str| {
+            listed["pipelines"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|p| p["label"] == label)
+                .unwrap_or_else(|| panic!("{label}: {listed}"))
+                .clone()
+        };
+        let (e1, e2, e3) = (
+            entry("stack-echo@1"),
+            entry("stack-echo@2"),
+            entry("stack-echo@3"),
+        );
+        assert_eq!(e1["standing"], "replaced", "{e1}");
+        assert_eq!(e1["replaced_by"], "stack-echo@2", "{e1}");
+        assert_eq!(
+            e1["replaced_why"],
+            "the first counted a stack's files twice"
+        );
+        assert_eq!(e1["state"], "active", "replacing retires nothing");
+        assert_eq!(e2["standing"], "selectable", "{e2}");
+        assert_eq!(e3["standing"], "current", "{e3}");
+        let name = listed["names"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|n| n["name"] == "stack-echo")
+            .unwrap_or_else(|| panic!("{listed}"))
+            .clone();
+        assert_eq!(name["current"], e3["id"], "{name}");
+        assert_eq!(
+            name["offered"],
+            json!([e3["id"], e2["id"]]),
+            "newest first: {name}"
+        );
+        assert_eq!(name["versions"][2]["standing"], "replaced", "{name}");
+        let text = lab.ok(&["pipeline", "list"], None);
+        assert!(
+            text.contains("stack-echo@1 is replaced by stack-echo@2: the first counted"),
+            "{text}"
+        );
+        let shown = lab.ok(&["pipeline", "show", "stack-echo@1"], None);
+        assert!(shown.contains("replaced by stack-echo@2"), "{shown}");
+
+        // a new run of it is refused, naming what replaces it and what a
+        // new run takes; a name alone runs the current version
+        let (good, _, err) = lab.run(
+            &["run", "stack-echo@1", "--select", "selection:every@1"],
+            None,
+        );
+        assert!(!good);
+        assert!(
+            err.contains("stack-echo@1 is replaced by stack-echo@2")
+                && err.contains("a new run takes stack-echo@3")
+                && err.contains("--replaced"),
+            "{err}"
+        );
+        let pre = lab.json(&[
+            "run",
+            "stack-echo@1",
+            "--preflight",
+            "--select",
+            "selection:every@1",
+            "--json",
+        ]);
+        assert!(
+            pre["blockers"]
+                .to_string()
+                .contains("is replaced by stack-echo@2"),
+            "{pre}"
+        );
+        let pre = lab.json(&[
+            "run",
+            "stack-echo@1",
+            "--replaced",
+            "--preflight",
+            "--select",
+            "selection:every@1",
+            "--json",
+        ]);
+        assert!(!pre["blockers"].to_string().contains("replaced"), "{pre}");
+        // asked for by name at the keyboard with --replaced, it runs still
+        let again = lab.json(&[
+            "run",
+            "stack-echo@1",
+            "--replaced",
+            "--select",
+            "selection:every@1",
+            "--json",
+        ]);
+        assert_eq!(again["status"], "done", "{again}");
+        assert_eq!(again["pipeline"], "stack-echo@1");
+        let selectable = lab.json(&[
+            "run",
+            "stack-echo@2",
+            "--select",
+            "selection:every@1",
+            "--json",
+        ]);
+        assert_eq!(selectable["pipeline"], "stack-echo@2", "{selectable}");
+
+        // its old run reads and names it as before
+        let read = lab.json(&["pipeline", "runs", &old_id.to_string(), "--json"]);
+        assert_eq!(read["pipeline"], "stack-echo@1", "{read}");
+        assert_eq!(read["derivatives"].as_array().unwrap().len(), 4, "{read}");
+
+        // the doors: the catalog by name, the run read, the jobs door and
+        // the pre-flight door refuse it, and --replaced is no door's word
+        let server = Server::start(lab);
+        let (status, cat) = server.call("GET", "/api/pipelines", None, OPERATOR);
+        assert_eq!(status, 200, "{cat}");
+        let names = cat["names"].as_array().unwrap();
+        let echo = names.iter().find(|n| n["name"] == "stack-echo").unwrap();
+        assert_eq!(echo["offered"], json!([e3["id"], e2["id"]]), "{echo}");
+        let (status, one) = server.call(
+            "GET",
+            &format!("/api/pipelines/{}", e1["id"]),
+            None,
+            OPERATOR,
+        );
+        assert_eq!(status, 200, "{one}");
+        assert_eq!(one["standing"], "replaced", "{one}");
+        assert_eq!(one["current"], "stack-echo@3", "{one}");
+        let (status, run) = server.call(
+            "GET",
+            &format!("/api/pipeline-runs/{old_id}"),
+            None,
+            OPERATOR,
+        );
+        assert_eq!(status, 200, "{run}");
+        assert_eq!(run["pipeline"], "stack-echo@1", "{run}");
+        let (status, refused) = server.call(
+            "POST",
+            "/api/jobs",
+            Some(json!({"command": ["run", "stack-echo@1", "--select", "selection:every@1"]})),
+            OPERATOR,
+        );
+        assert_eq!(status, 409, "{refused}");
+        assert_eq!(
+            refused["replaced"]["replaced_by"], "stack-echo@2",
+            "{refused}"
+        );
+        assert_eq!(refused["replaced"]["current"], "stack-echo@3", "{refused}");
+        assert!(
+            refused["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("is replaced by stack-echo@2"),
+            "{refused}"
+        );
+        let (status, doc) = server.call(
+            "POST",
+            "/api/jobs",
+            Some(json!({"command": ["run", "stack-echo@1", "--replaced", "--select", "selection:every@1"]})),
+            OPERATOR,
+        );
+        assert_eq!(status, 400, "{doc}");
+        let (status, pre) = server.call(
+            "POST",
+            "/api/pipelines/stack-echo@1/preflight",
+            Some(json!({"select": "selection:every@1"})),
+            OPERATOR,
+        );
+        assert_eq!(status, 200, "{pre}");
+        assert!(
+            pre["blockers"]
+                .to_string()
+                .contains("is replaced by stack-echo@2"),
+            "{pre}"
+        );
+        drop(server);
+    });
+}
+
+/// Nima's ruling of 2026-10-12, at the starters: where a catalog holds an
+/// older starter, the engine seeds the new one as the name's next version,
+/// and the four whose new version fixes the old (recon-all's memory,
+/// MRIQC's `--notrack`, SAMSEG's pallidum beside a FLAIR and segcsvd's
+/// SynthSeg named, after their FLAIR alignment check) replace it, while N4's, whose spline distance and bias field change what
+/// it makes, leaves it selectable.
+#[test]
+fn the_starters_that_fix_their_older_versions_replace_them_and_n4_leaves_its_own() {
+    if !have("python3") {
+        eprintln!("python3 is not installed; the lab needs it, so this test is skipped");
+        return;
+    }
+    let lab = Lab::new("pipelines-starter-versions");
+    let fixes = ["freesurfer-recon-all", "mriqc", "samseg-lesions", "segcsvd"];
+    // an older starter of each: today's without what it replaces, and
+    // marked so N4's differs too
+    for name in fixes.iter().chain(&["n4-bias-correction"]) {
+        let text =
+            std::fs::read_to_string(repo().join(format!("pipelines/{name}/nils.job.yml"))).unwrap();
+        let mut old: Vec<&str> = Vec::new();
+        let mut skipping = false;
+        for line in text.lines() {
+            if line == "  replaces:" {
+                skipping = true;
+                continue;
+            }
+            if skipping && line.starts_with("    ") {
+                continue;
+            }
+            skipping = false;
+            old.push(line);
+        }
+        let old = old.join("\n").replace(
+            "  contract: 1\n",
+            "  contract: 1\n  note: an older starter\n",
+        );
+        assert_eq!(lab.add_descriptor(name, &old)["label"], format!("{name}@1"));
+    }
+    lab.store()
+        .batch("UPDATE pipeline SET origin = 'starter'")
+        .unwrap();
+    let seeded = lab.json(&["pipeline", "starter", "--seed", "--json"]);
+    let added: Vec<&str> = seeded["added"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|a| a["label"].as_str())
+        .collect();
+    for name in fixes.iter().chain(&["n4-bias-correction"]) {
+        assert!(added.contains(&format!("{name}@2").as_str()), "{seeded}");
+    }
+    let listed = lab.json(&["pipeline", "list", "--json"]);
+    let standing = |label: &str| {
+        listed["pipelines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["label"] == label)
+            .unwrap_or_else(|| panic!("{label}: {listed}"))["standing"]
+            .clone()
+    };
+    for name in fixes {
+        assert_eq!(standing(&format!("{name}@1")), "replaced", "{name}");
+        assert_eq!(standing(&format!("{name}@2")), "current", "{name}");
+    }
+    // and why, in the newest starter's words: SAMSEG's pallidum and the
+    // SynthSeg segcsvd read (record 57 P11)
+    let why = |label: &str| {
+        listed["pipelines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["label"] == label)
+            .unwrap()["replaced_why"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string()
+    };
+    assert!(why("samseg-lesions@1").contains("pallidum"), "{listed}");
+    assert!(why("segcsvd@1").contains("SynthSeg"), "{listed}");
+    assert_eq!(standing("n4-bias-correction@1"), "selectable");
+    assert_eq!(standing("n4-bias-correction@2"), "current");
+    assert_eq!(standing("synthstrip@1"), "current");
+    let (good, _, err) = lab.run(
+        &["run", "samseg-lesions@1", "--select", "selection:every@1"],
+        None,
+    );
+    assert!(
+        !good && err.contains("is replaced by samseg-lesions@2"),
+        "{err}"
+    );
+}
+
+/// Record 55 H2, round 5 (A23): the logs at the doors. A job's log is what
+/// its verb printed, written by the worker beside the registry and read in
+/// slices, by whoever may run its verb at detail quasi; a run's units ran
+/// together keep one log, which each unit answers as shared, and units that
+/// ran apart keep one each, read at pipelines:see and detail quasi. A unit
+/// holding a stack of a sample sealed now is read only with sealed:see,
+/// audited, and a shared log with such a unit in it the same.
+#[test]
+fn the_logs_of_a_job_a_run_and_its_units_are_read_at_their_doors() {
+    if !have("python3") {
+        eprintln!(
+            "python3 is not installed; the stand-in podman needs it, so this test is skipped"
+        );
+        return;
+    }
+    let lab = Lab::new("pipelines-logs");
+    lab.add_descriptor(
+        "stack-echo",
+        &stack_echo(&format!("example.org/stack-echo@sha256:{}", "a".repeat(64))),
+    );
+    lab.add_descriptor("slow", &stack_slow("slow", "{cores: 1, memory-gb: 1}", ""));
+    let server = Server::start(&lab);
+    let (_, caps) = server.call("GET", "/api/capabilities", None, OPERATOR);
+    for door in [
+        "GET /api/jobs/{id}/log",
+        "GET /api/pipeline-runs/{id}/log",
+        "GET /api/pipeline-runs/{id}/units/{unit}/log",
+    ] {
+        assert!(
+            caps["doors"].as_array().unwrap().iter().any(|d| d == door),
+            "{door}"
+        );
+        assert!(
+            caps["policy"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|p| p["door"] == door && p["detail"] == "quasi"),
+            "{door} at quasi"
+        );
+    }
+    let wait = |job: i64| {
+        for _ in 0..600 {
+            let (_, j) = server.call("GET", &format!("/api/jobs/{job}"), None, OPERATOR);
+            if matches!(j["state"].as_str(), Some("done" | "failed" | "cancelled")) {
+                return j;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        panic!("job {job} did not end");
+    };
+    let queue = |command: Value| {
+        let (status, doc) = server.call(
+            "POST",
+            "/api/jobs",
+            Some(json!({ "command": command })),
+            OPERATOR,
+        );
+        assert_eq!(status, 202, "{doc}");
+        doc["job"].as_i64().unwrap()
+    };
+    let together = queue(json!([
+        "run",
+        "stack-echo",
+        "--select",
+        "selection:every@1"
+    ]));
+    assert_eq!(wait(together)["state"], "done");
+    let apart = queue(json!([
+        "run",
+        "slow",
+        "--select",
+        "selection:every@1",
+        "--param",
+        "sleep=0"
+    ]));
+    assert_eq!(wait(apart)["state"], "done");
+
+    // the job's log: what the verb printed, read whole by pages that end
+    // after a line, and the end of it by default
+    let file = lab
+        .home
+        .path()
+        .join("logs/jobs")
+        .join(format!("{together}.log"));
+    let kept = std::fs::read_to_string(&file).expect("the worker wrote the job's log");
+    assert!(!kept.is_empty(), "the run said something");
+    let door = format!("/api/jobs/{together}/log");
+    let (status, tail) = server.call("GET", &door, None, OPERATOR);
+    assert_eq!(status, 200, "{tail}");
+    assert_eq!(tail["job"], together);
+    assert_eq!(tail["state"], "done");
+    assert_eq!(tail["over"], true);
+    assert_eq!(tail["size"], kept.len());
+    assert_eq!(tail["to"], kept.len());
+    assert!(kept.ends_with(tail["text"].as_str().unwrap()), "{tail}");
+    let mut read = String::new();
+    let mut from = 0;
+    loop {
+        let (status, page) = server.call(
+            "GET",
+            &format!("{door}?from={from}&limit=40"),
+            None,
+            OPERATOR,
+        );
+        assert_eq!(status, 200, "{page}");
+        assert_eq!(page["from"], from);
+        assert_eq!(page["earlier"], from > 0);
+        read.push_str(page["text"].as_str().unwrap());
+        let to = page["to"].as_u64().unwrap();
+        if to == kept.len() as u64 {
+            break;
+        }
+        assert!(to > from, "a page moves on: {page}");
+        from = to;
+    }
+    assert_eq!(read, kept, "the pages put together are the log");
+    // whoever may run the verb, at quasi: a run's verb is pipelines:work
+    let (status, _) = server.call("GET", &door, None, PLAIN);
+    assert_eq!(status, 403, "pipelines:work at plain detail");
+    let (status, _) = server.call("GET", &door, None, READER);
+    assert_eq!(status, 403);
+    let (status, doc) = server.call("GET", &format!("{door}?from=start"), None, OPERATOR);
+    assert_eq!(status, 400, "{doc}");
+    let (status, _) = server.call("GET", "/api/jobs/99999/log", None, OPERATOR);
+    assert_eq!(status, 404);
+    // a job that kept no log says why
+    std::fs::remove_file(&file).unwrap();
+    let (status, doc) = server.call("GET", &door, None, OPERATOR);
+    assert_eq!(status, 404, "{doc}");
+    assert!(
+        doc["error"].as_str().unwrap().contains("kept no log"),
+        "{doc}"
+    );
+
+    // the runs: one together, one apart
+    let (_, runs) = server.call("GET", "/api/pipeline-runs", None, OPERATOR);
+    let run_of = |job: i64| {
+        runs["runs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["job_id"] == job)
+            .unwrap_or_else(|| panic!("{runs}"))["id"]
+            .as_i64()
+            .unwrap()
+    };
+    let (run_t, run_a) = (run_of(together), run_of(apart));
+    let units_of = |run: i64| -> Vec<String> {
+        let (_, r) = server.call("GET", &format!("/api/pipeline-runs/{run}"), None, OPERATOR);
+        r["units_run"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|u| u["unit"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let (units_t, units_a) = (units_of(run_t), units_of(run_a));
+    assert_eq!(units_t.len(), 4, "{units_t:?}");
+    assert_eq!(units_a.len(), 4, "{units_a:?}");
+
+    let (status, whole) = server.call(
+        "GET",
+        &format!("/api/pipeline-runs/{run_t}/log"),
+        None,
+        OPERATOR,
+    );
+    assert_eq!(status, 200, "{whole}");
+    assert_eq!(whole["run"], run_t);
+    assert_eq!(whole["shared"], false);
+    assert_eq!(whole["over"], true);
+    let (status, unit) = server.call(
+        "GET",
+        &format!("/api/pipeline-runs/{run_t}/units/{}/log", units_t[0]),
+        None,
+        OPERATOR,
+    );
+    assert_eq!(status, 200, "{unit}");
+    assert_eq!(
+        unit["shared"], true,
+        "units that ran together share the run's log"
+    );
+    assert_eq!(unit["unit"], units_t[0].as_str());
+    assert_eq!(unit["text"], whole["text"]);
+    let (status, doc) = server.call(
+        "GET",
+        &format!("/api/pipeline-runs/{run_a}/log"),
+        None,
+        OPERATOR,
+    );
+    assert_eq!(status, 404, "{doc}");
+    assert!(
+        doc["error"].as_str().unwrap().contains("ran apart"),
+        "{doc}"
+    );
+    for u in &units_a {
+        let (status, doc) = server.call(
+            "GET",
+            &format!("/api/pipeline-runs/{run_a}/units/{u}/log"),
+            None,
+            OPERATOR,
+        );
+        assert_eq!(status, 200, "{doc}");
+        assert_eq!(doc["shared"], false);
+        let on_disk = std::fs::read_to_string(
+            lab.work
+                .path()
+                .join(format!("runs/{run_a}/units/{u}/log.txt")),
+        )
+        .unwrap();
+        assert_eq!(doc["size"], on_disk.len(), "{doc}");
+    }
+    for (path, want) in [
+        (format!("/api/pipeline-runs/{run_a}/units/nobody/log"), 404),
+        (
+            format!("/api/pipeline-runs/{run_a}/units/..%2F..%2Fx/log"),
+            404,
+        ),
+        ("/api/pipeline-runs/99999/log".to_string(), 404),
+        (
+            format!("/api/pipeline-runs/{run_a}/units/{}/log", units_a[0]),
+            403,
+        ),
+    ] {
+        let token = if want == 403 { PLAIN } else { OPERATOR };
+        let (status, doc) = server.call("GET", &path, None, token);
+        assert_eq!(status, want, "{path}: {doc}");
+    }
+
+    // a sealed stack's unit: refused but with sealed:see, which is audited;
+    // the shared log of the run that held it, the same
+    let mut store = lab.store();
+    let stack_t = store.qualified("stack");
+    let stacks: Vec<i64> = store
+        .query(&format!("SELECT id FROM {stack_t} ORDER BY id"), &[])
+        .unwrap()
+        .iter()
+        .map(|r| r.int(0).unwrap())
+        .collect();
+    seal(&lab, "cert_logs", &stacks[..1]);
+    let refused: Vec<&String> = units_a
+        .iter()
+        .filter(|u| {
+            let (status, _) = server.call(
+                "GET",
+                &format!("/api/pipeline-runs/{run_a}/units/{u}/log"),
+                None,
+                OPERATOR,
+            );
+            status == 403
+        })
+        .collect();
+    assert_eq!(
+        refused.len(),
+        1,
+        "the sealed stack's unit alone: {refused:?}"
+    );
+    let (status, _) = server.call(
+        "GET",
+        &format!("/api/pipeline-runs/{run_a}/units/{}/log", refused[0]),
+        None,
+        CERT,
+    );
+    assert_eq!(status, 200);
+    let (status, _) = server.call(
+        "GET",
+        &format!("/api/pipeline-runs/{run_t}/log"),
+        None,
+        OPERATOR,
+    );
+    assert_eq!(status, 403, "a shared log holds the sealed unit's words");
+    let (status, _) = server.call(
+        "GET",
+        &format!("/api/pipeline-runs/{run_t}/log"),
+        None,
+        CERT,
+    );
+    assert_eq!(status, 200);
+    let doors: Vec<String> = lab
+        .store()
+        .query(
+            "SELECT scope FROM audit WHERE action = 'sealed.read' ORDER BY id",
+            &[],
+        )
+        .unwrap()
+        .iter()
+        .map(|r| {
+            let scope: Value = serde_json::from_str(r.text(0).unwrap()).unwrap();
+            scope["door"].as_str().unwrap_or_default().to_string()
+        })
+        .collect();
+    assert_eq!(
+        doors,
+        [
+            "GET /api/pipeline-runs/{id}/units/{unit}/log",
+            "GET /api/pipeline-runs/{id}/log"
+        ],
+        "each sealed read audited"
+    );
+}
+
+/// Record 55 H2 (no command line inside a desk flow): a pipeline added at
+/// its door as `nils pipeline add` adds it, the lane read and set, and a
+/// secret kept as a file of the engine's own, set and forgotten, each under
+/// its grant. On SQLite and on Postgres.
+#[test]
+fn the_setup_doors_add_a_pipeline_set_the_lane_and_keep_a_secret() {
+    if !have("python3") {
+        eprintln!(
+            "python3 is not installed; the stand-in podman needs it, so this test is skipped"
+        );
+        return;
+    }
+    on_both("pipelines-setup-doors", "pipelines_setup_doors", |lab| {
+        let server = Server::start(lab);
+        let pinned = stack_slow(
+            "slow",
+            "{cores: 1, memory-gb: 1}",
+            "  secrets:\n    - id: freesurfer_license\n      env: FS_LICENSE\n",
+        );
+        let body = json!({ "descriptor": pinned });
+        // adding brings an image onto the site: an admin's alone
+        for token in [READER, PLAIN, OPERATOR] {
+            let (status, v) = server.call("POST", "/api/pipelines", Some(body.clone()), token);
+            assert_eq!(status, 403, "{v}");
+        }
+        // an image named by a tag is refused in words
+        let tagged = json!({ "descriptor": stack_echo("ghcr.io/example/tagged:v1") });
+        let (status, v) = server.call("POST", "/api/pipelines", Some(tagged), ADMIN);
+        assert_eq!(status, 400, "{v}");
+        assert!(
+            v["error"]
+                .as_str()
+                .unwrap()
+                .contains("not pinned by its registry manifest digest"),
+            "{v}"
+        );
+        let (status, v) = server.call("POST", "/api/pipelines", Some(json!({})), ADMIN);
+        assert_eq!(status, 400, "{v}");
+        let (status, added) = server.call("POST", "/api/pipelines", Some(body.clone()), ADMIN);
+        assert_eq!(status, 201, "{added}");
+        assert_eq!(added["label"], "slow@1", "{added}");
+        assert_eq!(added["added"], true);
+        assert_eq!(added["replaces"], json!([]));
+        // the same descriptor again is the version it is, and no new row
+        let (status, again) = server.call("POST", "/api/pipelines", Some(body), ADMIN);
+        assert_eq!(status, 200, "{again}");
+        assert_eq!(again["id"], added["id"]);
+        assert_eq!(again["added"], false);
+        let n = lab
+            .store()
+            .query("SELECT scope FROM audit WHERE action = 'pipeline.add'", &[])
+            .unwrap()
+            .iter()
+            .filter(|r| {
+                serde_json::from_str::<Value>(r.text(0).unwrap()).unwrap()["name"] == "slow"
+            })
+            .count();
+        assert_eq!(n, 1);
+        let (status, listed) = server.call("GET", "/api/pipelines", None, PLAIN);
+        assert_eq!(status, 200);
+        assert!(
+            listed["pipelines"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|p| p["label"] == "slow@1"),
+            "{listed}"
+        );
+
+        // the lane: read on the Pipelines page, set by an admin
+        let (status, lane) = server.call("GET", "/api/pipelines/lane", None, PLAIN);
+        assert_eq!(status, 200, "{lane}");
+        assert!(lane["cores"].as_u64().is_some(), "{lane}");
+        assert_eq!(lane["places"]["output"], "scratch", "{lane}");
+        let (status, _) = server.call("GET", "/api/pipelines/lane", None, READER);
+        assert_eq!(status, 403);
+        let change = json!({"cores": 2, "memory_gb": 3, "gpu_card": "none"});
+        let (status, _) = server.call("PUT", "/api/pipelines/lane", Some(change.clone()), PLAIN);
+        assert_eq!(status, 403);
+        let (status, lane) = server.call("PUT", "/api/pipelines/lane", Some(change), ADMIN);
+        assert_eq!(status, 200, "{lane}");
+        assert_eq!(lane["set"], json!({"cores": 2, "memory_gb": 3}), "{lane}");
+        assert!(lane["gpu_card"].is_null(), "{lane}");
+        for bad in [
+            json!({"output_place": "nowhere"}),
+            json!({"cores": 0}),
+            json!({"gpu_card": "first"}),
+            json!({"lanes": 1}),
+        ] {
+            let (status, v) = server.call("PUT", "/api/pipelines/lane", Some(bad.clone()), ADMIN);
+            assert_eq!(status, 400, "{bad}: {v}");
+        }
+        let (_, lane) = server.call("GET", "/api/pipelines/lane", None, PLAIN);
+        assert_eq!(lane["set"], json!({"cores": 2, "memory_gb": 3}), "{lane}");
+
+        // the secrets: what the pipelines declare, never a byte of them
+        let (status, secrets) = server.call("GET", "/api/pipelines/secrets", None, PLAIN);
+        assert_eq!(status, 200, "{secrets}");
+        let licence_row = |v: &Value| {
+            v["secrets"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|s| s["id"] == "freesurfer_license")
+                .cloned()
+                .unwrap_or_else(|| panic!("no freesurfer_license in {v}"))
+        };
+        let row = licence_row(&secrets);
+        assert!(
+            row["declared_by"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("slow@1")),
+            "{row}"
+        );
+        assert_eq!(row["optional"], false, "{row}");
+        assert_eq!(row["set"], false, "{row}");
+        assert_eq!(row["readable"], false, "{row}");
+        const LICENCE: &str = "NILS-PLANTED-LICENCE-4e1d\nline two\n";
+        let put = json!({ "content": LICENCE });
+        let path = "/api/pipelines/secrets/freesurfer_license";
+        let (status, _) = server.call("PUT", path, Some(put.clone()), PLAIN);
+        assert_eq!(status, 403);
+        let (status, v) = server.call(
+            "PUT",
+            "/api/pipelines/secrets/Bad-Id",
+            Some(put.clone()),
+            ADMIN,
+        );
+        assert_eq!(status, 400, "{v}");
+        let (status, v) = server.call("PUT", path, Some(json!({"content": "  "})), ADMIN);
+        assert_eq!(status, 400, "{v}");
+        let (status, one) = server.call("PUT", path, Some(put), ADMIN);
+        assert_eq!(status, 200, "{one}");
+        assert_eq!(one["set"], true, "{one}");
+        assert_eq!(one["readable"], true, "{one}");
+        assert!(!one.to_string().contains("PLANTED"), "{one}");
+        let file = lab.home.path().join("secrets/freesurfer_license");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), LICENCE);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&file).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+            let dir = std::fs::metadata(file.parent().unwrap())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(dir, 0o700);
+        }
+        let (_, secrets) = server.call("GET", "/api/pipelines/secrets", None, PLAIN);
+        assert!(!secrets.to_string().contains("PLANTED"), "{secrets}");
+        assert!(!secrets.to_string().contains("secrets/"), "{secrets}");
+        // the command line sees the same secret set
+        let listed = lab.json(&["pipeline", "secret", "list", "--json"]);
+        assert_eq!(
+            listed,
+            json!([{"id": "freesurfer_license", "readable": true}])
+        );
+        // nothing of it in the audit
+        let rows = lab
+            .store()
+            .query(
+                "SELECT scope FROM audit WHERE action = 'pipeline.runtime'",
+                &[],
+            )
+            .unwrap();
+        assert!(!rows.is_empty());
+        for r in &rows {
+            assert!(!r.text(0).unwrap_or_default().contains("PLANTED"));
+        }
+        let (status, _) = server.call("DELETE", path, None, PLAIN);
+        assert_eq!(status, 403);
+        let (status, one) = server.call("DELETE", path, None, ADMIN);
+        assert_eq!(status, 200, "{one}");
+        assert_eq!(one["set"], false, "{one}");
+        assert!(!file.exists());
+        drop(server);
+    });
+}
+
+/// Record 55 H2: the session schemes kept at their door, from the release
+/// form, as `nils session scheme add` keeps them, never replaced there. On
+/// SQLite and on Postgres.
+#[test]
+fn a_session_scheme_is_kept_at_its_door_and_never_replaced_there() {
+    if !have("python3") {
+        eprintln!(
+            "python3 is not installed; the stand-in podman needs it, so this test is skipped"
+        );
+        return;
+    }
+    on_both("session-scheme-doors", "session_scheme_doors", |lab| {
+        let server = Server::start(lab);
+        // a reader holds no release:see
+        let (status, _) = server.call("GET", "/api/session-schemes", None, READER);
+        assert_eq!(status, 403);
+        let (status, v) = server.call("GET", "/api/session-schemes", None, OPERATOR);
+        assert_eq!(status, 200, "{v}");
+        assert_eq!(v["schemes"], json!([]), "{v}");
+        assert_eq!(v["default"]["naming"], "date", "{v}");
+        let yearly = json!({
+            "name": "yearly",
+            "scheme": {"window_days": 30, "naming": {"months": {"cadence": [0, 12, 24], "tolerance": 2.0}}},
+            "note": "the cohort's yearly visits",
+        });
+        // keeping one is release:work
+        let (status, _) = server.call("POST", "/api/session-schemes", Some(yearly.clone()), PLAIN);
+        assert_eq!(status, 403);
+        let (status, kept) = server.call(
+            "POST",
+            "/api/session-schemes",
+            Some(yearly.clone()),
+            OPERATOR,
+        );
+        assert_eq!(status, 201, "{kept}");
+        assert_eq!(kept["name"], "yearly");
+        assert_eq!(kept["scheme"]["window_days"], 30, "{kept}");
+        assert_eq!(kept["note"], "the cohort's yearly visits");
+        assert!(kept["digest"].as_str().is_some(), "{kept}");
+        // the same name again is refused, never replaced
+        let (status, v) = server.call("POST", "/api/session-schemes", Some(yearly), OPERATOR);
+        assert_eq!(status, 409, "{v}");
+        // a scheme's own error, in its words
+        let (status, v) = server.call(
+            "POST",
+            "/api/session-schemes",
+            Some(json!({"name": "onset", "scheme": {"anchor": "event"}})),
+            OPERATOR,
+        );
+        assert_eq!(status, 400, "{v}");
+        assert!(
+            v["error"].as_str().unwrap().contains("session.event"),
+            "{v}"
+        );
+        for bad in [
+            json!({"name": "a b", "scheme": {}}),
+            json!({"name": "", "scheme": {}}),
+            json!({"name": "x", "scheme": {"window": 3}}),
+            json!({"name": "x", "scheme": 3}),
+        ] {
+            let (status, v) =
+                server.call("POST", "/api/session-schemes", Some(bad.clone()), OPERATOR);
+            assert_eq!(status, 400, "{bad}: {v}");
+        }
+        // the text of a scheme file, as the command line reads it
+        let (status, kept) = server.call(
+            "POST",
+            "/api/session-schemes",
+            Some(json!({"name": "visits", "scheme": "session:\n  naming: ordinal\n"})),
+            OPERATOR,
+        );
+        assert_eq!(status, 201, "{kept}");
+        assert_eq!(kept["scheme"]["naming"], "ordinal", "{kept}");
+        let (_, v) = server.call("GET", "/api/session-schemes", None, OPERATOR);
+        let names: Vec<&str> = v["schemes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, ["visits", "yearly"], "{v}");
+        // the command line keeps the same rows
+        let shown = lab.ok(&["session", "scheme", "show", "yearly", "--json"], None);
+        assert!(shown.contains("\"window_days\": 30"), "{shown}");
+        let n = lab
+            .store()
+            .query(
+                "SELECT COUNT(*) FROM audit WHERE action = 'session.scheme'",
+                &[],
+            )
+            .unwrap()[0]
+            .int(0)
+            .unwrap();
+        assert_eq!(n, 2);
+        drop(server);
     });
 }

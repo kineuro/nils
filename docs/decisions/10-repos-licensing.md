@@ -1,4 +1,4 @@
-# 10 — Repositories, releases, licensing (D10)
+# 10 · Repositories, releases, licensing (D10)
 
 ## The repo model
 
@@ -18,7 +18,7 @@ a standard needs.
 | `nils-legacy` | public, archived 2026-09-02 | the v0 mirror, formerly `kineuro/nils`: 14 commits and 2 forks, read-only (15 R3) |
 | deployment glue | private (ours) | our compose files, Authentik/Traefik config, site specifics |
 
-Development happens on the public repos directly — branches and tags are the
+Development happens on the public repos directly: branches and tags are the
 dev/stable split; the corpus fixtures that would leak anything clinical stay out by
 construction (synthetic and fully-anonymized fixtures only; the live-DB regression
 harness runs on the production host against the private data and reports pass/fail upstream).

@@ -2,12 +2,12 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://nils.kineuro.se/contracts/job/v1/nils.job.schema.json",
   "title": "NILS pipeline descriptor (nils.job.yml)",
-  "description": "Decision record 09 (D9) and record 43 S1: what a pipeline is, as the engine's runner reads it. v0's descriptor, a subset of Boutiques 0.5 with an x-nils block, kept, with the image pinned by its registry manifest digest or refused (record 43 R3). The file is YAML; this schema is of the value it parses to. The parameters are the Boutiques inputs; everything the Boutiques contract cannot say (the analysis level, the input layout, the typed inputs, the outputs by derivative kind, the needs and the proposals) is under x-nils. Record 49 A3 adds, in place and additively: the table output kind with its format and typed columns, the declared checks (x-nils.qc), the pick roles a unit of a bids input needs (x-nils.input.roles) and a unit's typical minutes (x-nils.needs.unit-minutes). A reader keeps a key it does not know, so a later version can add one without breaking an older reader; a key this version names is checked.",
+  "description": "Decision record 09 (D9) and record 43 S1: what a pipeline is, as the engine's runner reads it. v0's descriptor, a subset of Boutiques 0.5 with an x-nils block, kept, with the image pinned by its registry manifest digest or refused (record 43 R3). The file is YAML; this schema is of the value it parses to. The parameters are the Boutiques inputs; everything the Boutiques contract cannot say (the analysis level, the input layout, the typed inputs, the outputs by derivative kind, the needs and the proposals) is under x-nils. Record 49 A3 adds, in place and additively: the table output kind with its format and typed columns, the declared checks (x-nils.qc), the pick roles a unit of a bids input needs (x-nils.input.roles) and a unit's typical minutes (x-nils.needs.unit-minutes). Added in place and additively on 2026-10-12: the disk a unit's outputs take (x-nils.needs.disk-gb), which the pre-flight and the run door hold against the output place's free space. Added in place and additively on 2026-10-12: the earlier versions a version replaces because it fixes them (x-nils.replaces), which a new run no longer takes. Record 55 H3 (job type 3, check a result) adds, in place and additively: a mask output's grid and parts, and what a derivative input takes of a check's status (checked). A reader keeps a key it does not know, so a later version can add one without breaking an older reader; a key this version names is checked.",
   "$defs": {
     "value_key": {
       "type": "string",
       "pattern": "^\\[[A-Za-z0-9_]+\\]$",
-      "description": "A placeholder in the command line, in brackets. The engine's own are [InputDataset] (/input), [OutputLocation] (/output), [AnalysisLevel] (participant), [ParticipantLabels] (the labels of the run's participants, one word each), [Manifest] (/input/stacks.json in the stacks layout) and [Inputs] (/inputs, the typed inputs and manifest.json); a parameter may not take one of them"
+      "description": "A placeholder in the command line, in brackets. The engine's own are [InputDataset] (/input), [OutputLocation] (/output), [AnalysisLevel] (participant), [ParticipantLabels] (the labels of the run's participants, one word each), [Manifest] (/input/stacks.json in the stacks layout), [Inputs] (/inputs, the typed inputs and manifest.json) and, for a pipeline that declares x-nils.cache, [Cache] (/cache, the slice cache, record 55 E5); a parameter may not take one of them"
     },
     "parameter": {
       "type": "object",
@@ -39,7 +39,20 @@
           "description": "What is mounted read-only under /inputs/<id>, with a line in /inputs/manifest.json: a registered model (nils run --model), a label set (nils run --labels) or derivatives of one kind. The selection itself is not one of these: it is the input the layout materialises"
         },
         "optional": {"type": "boolean"},
-        "description": {"type": "string"}
+        "description": {"type": "string"},
+        "checked": {"enum": ["accepted", "not_rejected", "any"], "description": "For a derivative input (record 55 H3, job type 3, added in place and additively): what it takes of the status a check wrote onto a result. accepted takes only results a check accepted; not_rejected, the default, any result but one a check rejected; any, every result. A run is never given a rejected result unless its descriptor says any"}
+      }
+    },
+    "part_set": {
+      "type": "object",
+      "required": ["key", "words", "kind"],
+      "properties": {
+        "key": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$", "not": {"const": "whole"}, "description": "The set's key, unique in the output. whole is the set a mask that declares none is read as: the result checked as a whole, with no parts"},
+        "words": {"type": "string", "description": "What a person reads, such as Lesions or Structures"},
+        "kind": {"enum": ["components", "labels"], "description": "components: each connected component of the labels named is a part (a lesion); labels: each label value is a part (a structure), named from names"},
+        "labels": {"oneOf": [{"const": "nonzero"}, {"type": "array", "minItems": 1, "items": {"type": "integer", "minimum": 1}}], "description": "The label values the set reads: a list, such as [99] for SAMSEG's lesions, or nonzero for every value but 0 (a binary mask). A components set names them; a labels set without them reads every value the mask holds"},
+        "names": {"oneOf": [{"type": "object"}, {"type": "array", "items": {"type": "object", "required": ["label", "name"], "properties": {"label": {"type": "integer", "minimum": 1}, "name": {"type": "string"}}}}], "description": "For a labels set: each value's name, as a mapping from the value to its name or as a list of {label, name}"},
+        "connectivity": {"enum": [6, 18, 26], "default": 26, "description": "For a components set: whether voxels touching at a face (6), an edge (18) or a corner (26) are one part"}
       }
     },
     "output": {
@@ -59,7 +72,9 @@
         },
         "encoders": {"type": "array", "items": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}, "description": "For an embedding output (record 43): the encoders, by weight digest, whose embeddings it may make. The runner keeps an embedding only by one of these or by an encoder the run was given as a model, and registers it from the card the results carry"},
         "card": {"type": "string", "pattern": "^[^/].*$", "description": "For a model output: the path under /output of the model's card (contracts/model/v1), whose digest is the artifact's. The runner fills trained_on with the label set the run was given, and refuses a card that names another"},
-        "media-type": {"type": "string"}
+        "media-type": {"type": "string"},
+        "grid": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$", "description": "For a mask output of a bids input (record 55 H3, job type 3, added in place and additively): the role, one of x-nils.input.roles where it names them, whose stack the unit was given and whose grid the mask is on. The runner reads the mask's grid from its header when it registers it and ties it to that scan: same where the grids match within 0.01 mm and 0.001 in direction, world where it is another grid in the scan's frame. Without it, a stack unit's mask is on its own stack's grid, and a session's on the input whose grid it matches"},
+        "parts": {"type": "array", "items": {"$ref": "#/$defs/part_set"}, "description": "For a mask output (record 55 H3): the part sets a check reads it as, each a key, words, a kind, the labels and for a labels set their names. The engine makes the parts when it registers the mask: at most 10,000 in a set, else the set is read whole. A mask declaring none is read as one set, whole, with no parts"}
       }
     },
     "column": {
@@ -99,7 +114,8 @@
         "gpu-memory-gb": {"type": "number", "exclusiveMinimum": 0, "description": "Record 49 A2: of the card's memory, for a unit that takes the GPU; 8 where absent. A unit waits while the card's free memory, less what the lane's own running units there declared, is below it"},
         "cores-input": {"type": "string", "description": "Record 49, after review: the id of the Number parameter that tells the tool its threads. Left out of a run, it is set to cores; asked above cores, the run is refused"},
         "memory-input": {"type": "string", "description": "Record 49, after review: the id of the Number parameter that tells the tool the memory, in GB, it plans within. Left out of a run, it is set to memory-gb; asked above memory-gb, the run is refused"},
-        "unit-minutes": {"type": "number", "exclusiveMinimum": 0, "description": "Record 49 A3: the typical minutes a unit takes on the CPU, which the pre-flight estimates from until the pipeline has run on this engine, and from its own past runs after"}
+        "unit-minutes": {"type": "number", "exclusiveMinimum": 0, "description": "Record 49 A3: the typical minutes a unit takes on the CPU, which the pre-flight estimates from until the pipeline has run on this engine, and from its own past runs after"},
+        "disk-gb": {"type": "number", "exclusiveMinimum": 0, "description": "2026-10-12: the GB of disk one scheduling unit's outputs take in the output place. The pre-flight and the run door refuse a run, before anything is queued, whose units would take more than the place has free; absent, nothing is held against the disk"}
       }
     },
     "secret": {
@@ -159,6 +175,30 @@
       "required": ["analysis-level", "input", "outputs"],
       "properties": {
         "contract": {"const": 1, "description": "The job contract version the descriptor was written to"},
+        "replaces": {
+          "type": "object",
+          "required": ["why"],
+          "properties": {
+            "why": {"type": "string", "minLength": 1, "pattern": "\\S", "description": "Why, in a line a person reads where an earlier version is refused: what this version fixes"},
+            "versions": {"type": "array", "minItems": 1, "items": {"type": "integer", "minimum": 1}, "description": "The earlier versions of the name it replaces, by number. Left out, it replaces every earlier version of the name in the catalog it is added to, which is how a descriptor written for many catalogs, such as a starter, says it, since a version's number is the catalog's own"}
+          },
+          "description": "Added in place and additively on 2026-10-12: this version fixes earlier versions of its name, so a new run no longer takes them. The catalog answers each version with its standing: current (the newest active version), selectable (an older active version no later one replaces) or replaced (by the earliest later active version that names it, and why). A new run of a replaced version is refused by the run, the pre-flight and the jobs door, naming the version that replaces it; only `nils run <name>@<version> --replaced` at the keyboard runs it still. Its runs, derivatives and checks read and name it as before. A retired version replaces nothing. A version that changes what a pipeline makes without fixing the earlier one leaves this out, and the earlier one stays selectable"
+        },
+        "on-arrival": {
+          "description": "Added in place and additively by record 55 E5: a dataset's bring-in runs the pipeline over the stacks its batch brought, without a manual run, where it is the run of a step of its own (body part, post-contrast) with the chosen model. true, or {params: {id: value}} for the parameters such a run is given, each a declared parameter and a value it takes. Left out or false, it runs only when asked for",
+          "oneOf": [
+            {"type": "boolean"},
+            {"type": "object", "additionalProperties": false, "properties": {"params": {"type": "object", "additionalProperties": {"type": ["string", "number", "boolean"]}}}}
+          ]
+        },
+        "cache": {
+          "type": "object",
+          "required": ["inputs"],
+          "description": "Added in place and additively by record 55 E5, stacks layout only: the model inputs the pipeline keeps in the slice cache and reads from it, each by its version. A run is given the working place's slice-cache/ read-write at /cache ([Cache] on its command line) and a stacks.json that names each file's SOP Instance UID and, where the engine knows it, the sha256 of its bytes; each unit's results.json entry names the files it read whole (read). An input version no admitted or promoted model reads is dropped 30 days after it went unread",
+          "properties": {
+            "inputs": {"type": "array", "minItems": 1, "items": {"type": "string", "pattern": "^[a-z][a-z0-9-]{0,62}:v[0-9]{1,9}$"}}
+          }
+        },
         "analysis-level": {
           "enum": ["participant", "session", "stack"],
           "description": "The work unit: a participant or one of its sessions in the bids layout, a stack in the stacks layout. A failed unit is one pipeline:qc review item"
@@ -172,7 +212,10 @@
               "description": "bids: a release of the selection in the BIDS layout with the picks applied (record 43 R4), mounted read-only at /input, so a BIDS App meets one image per role and session. stacks: /input/stacks.json (stacks.schema.json) names each stack's files under the source places, mounted read-only at /source/<n>, with no conversion"
             },
             "roles": {"type": "array", "items": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"}, "description": "Record 49 A3, bids layout only: the pick roles of the pack each unit needs (t1w, flair); the pre-flight names a unit without a pick of one, with the role it lacks"},
-            "header": {"type": "boolean", "default": false, "description": "Record 50, stacks layout only: each stack's entry of stacks.json also carries its header facts, the header object of stacks.schema.json (its fingerprint row, its classification rows, its first ingest batch and its subject's open cohorts). Off, stacks.json is as it was. Refused with the bids layout"}
+            "header": {"type": "boolean", "default": false, "description": "Record 50, stacks layout only: each stack's entry of stacks.json also carries its header facts, the header object of stacks.schema.json (its fingerprint row, its classification rows, its first ingest batch and its subject's open cohorts). Off, stacks.json is as it was. Refused with the bids layout"},
+            "geometry": {"type": "boolean", "default": false, "description": "Record 55 E2, stacks layout only: each stack's entry of stacks.json also carries its geometry, and each of its files their own, the geometry objects of stacks.schema.json (where each image sits, its spacing, its matrix, its number and how many frames it holds; the stack's orientation, slice thickness and spacing), as the registry read them from the headers, so an image chooses which frames to read without reading a header first. Off, stacks.json is as it was. Refused with the bids layout"},
+            "contrast": {"type": "boolean", "default": false, "description": "Record 55 E3, stacks layout with header and geometry only: each stack's entry of stacks.json, and each entry of its context, also carries the session facts the post-contrast model reads (the contrast object of stacks.schema.json: its series' contrast tags, its clock, its physics and the post-contrast rules that fired), each context entry its series and header, and each header the datasets that hold a file of the stack. Off, stacks.json is as it was. Refused without header and geometry, and with the bids layout"},
+            "rows": {"type": "boolean", "default": false, "description": "Record 55 D3, stacks layout with header only: stacks.json also carries rows (stacks.schema.json), the registry's rows a header model reads: each stack's whole fingerprint row, its classification votes as nils classify votes writes them, and its series' private elements and frame of reference (a sha256 digest), for the run's stacks and the other MR stacks of their sessions, which are read and never scored. Off, stacks.json is as it was. Refused without header, and with the bids layout"}
           }
         },
         "inputs": {"type": "array", "items": {"$ref": "#/$defs/typed_input"}},
@@ -189,6 +232,7 @@
           "description": "Record 49 R3: files the site keeps, such as a licence, that the engine reads at run time and mounts read-only into this pipeline's containers alone. After each container every file it left that holds the secret is removed and refused, and its log and results.json are written again with it replaced by [secret <id>]; a run records the secret's id, never its path or its bytes"
         },
         "proposals": {"type": "array", "items": {"$ref": "#/$defs/proposal"}, "description": "The axes the pipeline's results may propose values on; a proposal on an axis not declared here is not taken"},
+        "opinions": {"type": "array", "items": {"$ref": "#/$defs/proposal"}, "description": "Record 55 D3: the axes the pipeline's results may give System 1's opinion on (opinions.schema.json), kept as a second opinion beside the rules' and never a decision; an opinion on an axis not declared here is not taken"},
         "qc": {"type": "array", "items": {"$ref": "#/$defs/check"}, "description": "Record 49 A3: the checks each unit that succeeded is held to"}
       }
     }

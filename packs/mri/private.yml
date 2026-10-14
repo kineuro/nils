@@ -24,7 +24,7 @@
 #
 # The ingest list is measured, not chosen from a chair, in two halves. First
 # `nils private` was run over 40,000 files of each of three cohorts (an MS
-# cohort on legacy scanners, nmosd, and a multi-vendor mix), and an element
+# cohort on legacy scanners, study D, and a multi-vendor mix), and an element
 # became a candidate because it varied per acquisition, was printable and was
 # short; `nils private --suggest` is the repeatable way to grow that list.
 # Then each cohort was digested with every candidate and `nils private
@@ -34,7 +34,7 @@
 # acquisition, however much it varies across the archive, and an element
 # with one value across a cohort is a property of the scanner or the site.
 # Each `why` below carries what was measured, as "varied within / series" on
-# the two cohorts that hold it (nmosd, mix), and the block at the end says
+# the two cohorts that hold it (D and the mix), and the block at the end says
 # what was measured and left out, and why. The names come from
 # `private-dictionary.tsv` where the dictionary has them and from what the
 # console prints where it does not.
@@ -59,14 +59,14 @@ private:
       element: 0x0F
       name: siemens_gradient_mode
       kind: parameter
-      why: "the gradient mode the sequence was run under; constant within a series, two to three values across a cohort (0 of 277 varied on nmosd, 0 of 471 on mix)"
+      why: "the gradient mode the sequence was run under; constant within a series, two to three values across a cohort (0 of 277 varied on D, 0 of 471 on mix)"
 
     - creator: SIEMENS MR HEADER
       group: 0x0019
       element: 0x14
       name: siemens_table_position
       kind: geometry
-      why: "the table position relative to the first image, which separates the stations of a multi-station spine; a parameter (0 of 358 varied within on nmosd, 4 of 485 on mix; 93 and 150 distinct)"
+      why: "the table position relative to the first image, which separates the stations of a multi-station spine; a parameter (0 of 358 varied within on D, 4 of 485 on mix; 93 and 150 distinct)"
 
     # --- Siemens, group 0051: the reconstruction parameters the console
     # prints on the image. The dictionary names two; the others are named
@@ -76,7 +76,7 @@ private:
       element: 0x0A
       name: siemens_acquisition_time_text
       kind: timing
-      why: "the acquisition duration as the console prints it (TA 04:12); a parameter (0 of 984 varied within on nmosd, 44 of 824 on mix; 33 and 348 distinct)"
+      why: "the acquisition duration as the console prints it (TA 04:12); a parameter (0 of 984 varied within on D, 44 of 824 on mix; 33 and 348 distinct)"
 
     - creator: SIEMENS MR HEADER
       group: 0x0051
@@ -97,7 +97,7 @@ private:
       element: 0x0E
       name: siemens_orientation_text
       kind: geometry
-      why: "the slice orientation as the console prints it (Tra, Sag, Cor, or a tilt such as Tra>Cor); mostly a parameter, varying inside the series of a multi-angle acquisition (30 of 358 varied within on nmosd, 130 of 633 on mix)"
+      why: "the slice orientation as the console prints it (Tra, Sag, Cor, or a tilt such as Tra>Cor); mostly a parameter, varying inside the series of a multi-angle acquisition (30 of 358 varied within on D, 130 of 633 on mix)"
 
     - creator: SIEMENS MR HEADER
       group: 0x0051
@@ -124,7 +124,7 @@ private:
       element: 0x1C
       name: siemens_sds_0021xx1c
       kind: unknown
-      why: "a decimal string of 22 to 28 bytes; a parameter by shape (4 of 578 varied within on nmosd, 2 of 222 on mix; 64 and 180 distinct); meaning not yet known"
+      why: "a decimal string of 22 to 28 bytes; a parameter by shape (4 of 578 varied within on D, 2 of 222 on mix; 64 and 180 distinct); meaning not yet known"
 
     - creator: SIEMENS MR SDS 01
       group: 0x0021

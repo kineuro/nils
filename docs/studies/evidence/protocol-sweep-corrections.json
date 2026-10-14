@@ -1,0 +1,26 @@
+{
+ "run": "protocol-sweep-corrections",
+ "purpose": "Supplement to protocol-sweep: the final correction record (rulings.py build --record final as in nils-design main at 4723772, with D3, V12, DR9 and DR6 narrowed and the X9 rules) over the sweep's settled reference and packets, with the localizers' record and the audit re-scored; built and sealed before any rule answer on a sweep stack is read",
+ "study": "studies/2026-10-02-protocol-sweep/plan.md",
+ "created": "2026-10-03T00:49:31Z",
+ "sealed": "2026-10-03T00:53:25Z",
+ "files": 8,
+ "bytes": 112973,
+ "by_folder": {
+  ".": 1,
+  "code": 3,
+  "scoring": 4
+ },
+ "manifest_sha256": "66f9b280ab8b62cf57052ce306b3990899facff2c27e97e7899286066c38c654",
+ "per_stack_files_by_folder": {},
+ "sha256": {
+  "RUN.json": "f2d5490ec42cccbaca6148d9a1cf763893cf69631dc8076e016db00398442497",
+  "code/COMMIT": "b680d09b9c2e0b05329488785bf3097cd71d53e970a705d82ff1ad7cb3fcdc7c",
+  "code/rulings.py": "fc7e2705289a1173162657ca6e7d52736be4c7658383e680e741705b9c9aadbf",
+  "code/rulings.sha256": "5de36c3039304b2b00cadff9c5675eb6b721e988c7179bf65088a898b73aa0af",
+  "scoring/audit-rescored.txt": "86e51365cb53abcb20334107f9da755ffad19f99bd13ae0deb6f0502fa05a132",
+  "scoring/corrections-localizers.jsonl": "0dd10145c2e3d2f3cd489f46872836a4b92f8d93289a20fbb1636bfc36dc90ac",
+  "scoring/corrections-summary.json": "75545f5f40f95e94ab5508c0b2022bd2fdb4995f1b02af810394c99132428731",
+  "scoring/corrections.jsonl": "d66d6fab8b938d4d666602c44529510b060cc62a228b21caec2c21f63c23f69b"
+ }
+}

@@ -1,0 +1,40 @@
+{
+ "run": "pack-0250-go-rules",
+ "purpose": "pack 0.25.0's stored answers, votes, evidence and voters on the protocol sweep's 5,530 drawn stacks (job 397 pack-0250-timing, every row mri 0.25.0), fetched through the research views before certificate 2's go read is registered; unread until the registration commit",
+ "study": "studies/2026-10-04-pack-0250-go/grade.md",
+ "created": "2026-10-03T22:53:36Z",
+ "sealed": "2026-10-03T22:53:36Z",
+ "files": 22,
+ "bytes": 8520288,
+ "by_folder": {
+  ".": 2,
+  "logs": 11,
+  "rules": 9
+ },
+ "manifest_sha256": "3d9133db4a269aab2b3a94167bc550035381a963a66cbc5d293500f2385c94f3",
+ "per_stack_files_by_folder": {},
+ "sha256": {
+  "RUN.json": "563863396d423bf703cbe8de4c127f4ea1755b42dd8e00b7c720e5bd642132a5",
+  "SHA256SUMS": "3faf88060f629b9c22050446fca2f31c9995f7605392c66a090db4cd3cd5580b",
+  "logs/rules-axes.err": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "logs/rules-axes.sql": "c7c310e0e39c0cb1b3da47a96a9bba4761b9e09c291fe492b5399c011f056031",
+  "logs/rules-evidence.err": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "logs/rules-evidence.sql": "41a5fd2a09f1758b0b423beda1f76581315177f459843f2109dc72d1870f8865",
+  "logs/rules-jobs-after.err": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "logs/rules-jobs.err": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "logs/rules-jobs.sql": "85162a6a327ebaa7e45206b2e322a522d318ab14e00bcfb52b576a09556e7df6",
+  "logs/rules-voters.err": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "logs/rules-voters.sql": "7b88abcc659a2aa4eb2e18e96c32a2101de9d053d1ac98d16bc95b0864f12834",
+  "logs/rules-votes.err": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "logs/rules-votes.sql": "5f98fc466af2b8cb1fa75cf2a65aad24449778405421a9d7913bc50e99cb0c81",
+  "rules/axes.tsv": "96d1c28d824ae5d87effc88933d75b5a027134703440941d35f4773c6f596778",
+  "rules/evidence.tsv": "0380bd7f25cf199096eb189202768a7027de884720880b4d36ee3e628e039515",
+  "rules/fetch.end": "c9bcedcfe7671acb16052ee024e5f339693f9bc04a88b68cd2a51c36c1f36db1",
+  "rules/fetch.start": "164a74d47fdec8c042113aba2c5ac807ab6b3733f597a6b51e7bdbfeb0955c09",
+  "rules/jobs-after.tsv": "f858e5071f976227228972f993b3596e25c98dd5b251ee6f1e0fd8c9f03e5af8",
+  "rules/jobs.tsv": "f858e5071f976227228972f993b3596e25c98dd5b251ee6f1e0fd8c9f03e5af8",
+  "rules/stack-ids.txt": "d694c9ae46a77338962a6baff3ea7b50819276dd70a76d27417cc4eead7313fa",
+  "rules/voters.tsv": "f5247e569c54da9dd246e51313887b7e7f66602a0e2bcb24e42ce0c9de4657b6",
+  "rules/votes.tsv": "5e668ffc0beb929c6ad3e76044edca5cf0b3fbceac6649f9b19f1881d1106b2c"
+ }
+}

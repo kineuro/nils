@@ -701,6 +701,177 @@ fn the_install_door_says_packs_behind_the_engines_release() {
     assert_eq!(doc["release"]["newer"], serde_json::Value::Null, "{doc}");
 }
 
+/// A tarball holding `packs/<name>/pack.yml` for each pack given, the shape
+/// both an engine release's `packs.tar.gz` and a pack's own release carry.
+fn packs_tarball(packs: &[(&str, &str)]) -> Vec<u8> {
+    let mut tar = tar::Builder::new(flate2::write::GzEncoder::new(
+        Vec::new(),
+        flate2::Compression::fast(),
+    ));
+    for (name, manifest) in packs {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(manifest.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        tar.append_data(
+            &mut header,
+            format!("packs/{name}/pack.yml"),
+            manifest.as_bytes(),
+        )
+        .unwrap();
+    }
+    tar.into_inner().unwrap().finish().unwrap()
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    hex::encode(ring::digest::digest(&ring::digest::SHA256, bytes).as_ref())
+}
+
+/// Record 55 B5 (T9): the install door says a rules release beside the
+/// engine's, as a part of its own in the shape of every other part's, so a
+/// desk offers it; and the update the desk asks for with it takes the rules
+/// and nothing else, here and in no place outside the test's own.
+#[test]
+fn the_install_door_offers_a_rules_release_and_its_update_takes_only_the_rules() {
+    let c = Channel::new();
+    let install = c.dir.path().join("install");
+    std::fs::create_dir_all(&install).unwrap();
+    std::fs::write(install.join("VERSION"), "1.0.0\n").unwrap();
+    let config = c.config("engine", &install, "true");
+    let home = TempDir::new("supervise-rules");
+    let mri = |version: &str| format!("pack: mri\nversion: {version}\ncontract: 8\nmodality: MR\n");
+    let packs = home.path().join("engine").join("packs");
+    std::fs::create_dir_all(packs.join("mri")).unwrap();
+    std::fs::write(packs.join("mri/pack.yml"), mri("0.8.0")).unwrap();
+    let settings = home.path().join("config");
+    std::fs::create_dir_all(settings.join("nils")).unwrap();
+    let record = settings.join("nils").join("setup.toml");
+    std::fs::write(
+        &record,
+        format!(
+            "dir = \"{}\"\nmode = \"off\"\nruntime = \"machine\"\nservice = \"none\"\n\n[parts.engine]\nversion = \"1.0.0-alpha.14\"\npath = \"{}\"\n\n[site]\npack_dir = \"{}\"\n",
+            home.path().join("nils").display(),
+            home.path().join("engine").join("nils").display(),
+            packs.display()
+        ),
+    )
+    .unwrap();
+    // the engine's channel: its release carries mri 0.8.0, and the MRI
+    // pack's own release 0.9.0 is out beside it
+    let releases = home.path().join("engine-releases");
+    std::fs::create_dir_all(releases.join("latest").join("download")).unwrap();
+    std::fs::write(
+        releases.join("latest").join("download").join("VERSION"),
+        "1.0.0-alpha.14\n",
+    )
+    .unwrap();
+    let at = releases.join("download").join("v1.0.0-alpha.14");
+    std::fs::create_dir_all(&at).unwrap();
+    let tar = packs_tarball(&[("mri", &mri("0.8.0"))]);
+    std::fs::write(at.join("packs.tar.gz"), &tar).unwrap();
+    std::fs::write(
+        at.join("SHA256SUMS"),
+        format!("{}  packs.tar.gz\n", sha256_hex(&tar)),
+    )
+    .unwrap();
+    let own = releases.join("download").join("pack-mri-v0.9.0");
+    std::fs::create_dir_all(&own).unwrap();
+    let tar = packs_tarball(&[("mri", &mri("0.9.0"))]);
+    std::fs::write(own.join("pack-mri.tar.gz"), &tar).unwrap();
+    std::fs::write(
+        own.join("SHA256SUMS"),
+        format!("{}  pack-mri.tar.gz\n", sha256_hex(&tar)),
+    )
+    .unwrap();
+    std::fs::write(
+        releases
+            .join("latest")
+            .join("download")
+            .join("pack-mri.VERSION"),
+        "0.9.0\n",
+    )
+    .unwrap();
+    let engine = format!("file://{}", releases.display());
+    let s = Service::start_with(
+        &config,
+        &[
+            ("XDG_CONFIG_HOME", settings.to_str().unwrap()),
+            ("HOME", home.path().to_str().unwrap()),
+            ("NILS_RELEASES", engine.as_str()),
+        ],
+    );
+    let token = Some("a-supervisor-token-of-length");
+    let (status, doc) = s.call("GET", "/api/supervise/install", None, token);
+    assert_eq!(status, 200, "{doc}");
+    let release = &doc["release"];
+    assert_eq!(release["packs"]["behind"], false, "{doc}");
+    assert_eq!(release["behind"], serde_json::json!(["rules"]), "{doc}");
+    assert_eq!(release["newer"], "rules mri 0.9.0", "{doc}");
+    let row = release["parts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["part"] == "rules")
+        .cloned()
+        .expect("the rules are a part");
+    assert_eq!(row["pack"], "mri", "{row}");
+    assert_eq!(row["installed"], "0.8.0", "{row}");
+    assert_eq!(row["newer"], "0.9.0", "{row}");
+    assert_eq!(row["command"], "nils update --part rules", "{row}");
+    assert_eq!(release["rules"][0], row, "{doc}");
+
+    // the desk's update control for it: a run of nils update --part rules
+    let (status, run) = s.call(
+        "POST",
+        "/api/supervise/update-all",
+        Some(r#"{"part":"rules"}"#),
+        token,
+    );
+    assert_eq!(status, 202, "{run}");
+    let id = run["id"].as_str().unwrap().to_string();
+    let mut ended = serde_json::Value::Null;
+    for _ in 0..300 {
+        let (_, doc) = s.call("GET", &format!("/api/supervise/runs/{id}"), None, token);
+        if doc["state"] != "running" {
+            ended = doc;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert_eq!(ended["state"], "done", "{ended}");
+    assert_eq!(
+        std::fs::read_to_string(packs.join("mri/pack.yml")).unwrap(),
+        mri("0.9.0"),
+        "{ended}"
+    );
+    let text = std::fs::read_to_string(&record).unwrap();
+    assert!(
+        text.contains("[rules.mri]") && text.contains("version = \"0.9.0\""),
+        "{text}"
+    );
+    assert!(
+        text.contains("version = \"1.0.0-alpha.14\""),
+        "the engine stays: {text}"
+    );
+    // every path the run named is the test's own
+    for line in ended["tail"].as_array().unwrap() {
+        for word in line.as_str().unwrap_or("").split_whitespace() {
+            let word = word.trim_matches(|c: char| ",;:()".contains(c));
+            if word.starts_with('/') {
+                assert!(
+                    std::path::Path::new(word).starts_with(home.path()),
+                    "{word} is outside the test's own directory: {ended}"
+                );
+            }
+        }
+    }
+
+    // and the door, which reads the disk on every call, offers it no more
+    let (_, doc) = s.call("GET", "/api/supervise/install", None, token);
+    assert_eq!(doc["release"]["behind"], serde_json::json!([]), "{doc}");
+    assert_eq!(doc["release"]["newer"], serde_json::Value::Null, "{doc}");
+}
+
 /// The install door (the desk's Settings read it): an install nils setup
 /// recorded is reported as recorded; a restart runs apart from the door and
 /// ends with its reason; and a folder is looked inside before it is added,

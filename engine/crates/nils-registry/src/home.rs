@@ -758,7 +758,8 @@ mod tests {
         let n = linkage.query("SELECT COUNT(*) FROM id_type", &[]).unwrap()[0]
             .int(0)
             .unwrap();
-        assert_eq!(n, 3);
+        // patient-id, study-instance-uid, subject-code and the generator's
+        assert_eq!(n, 4);
         let owner = linkage
             .query(
                 "SELECT value FROM linkage_meta WHERE key = 'registry_id'",

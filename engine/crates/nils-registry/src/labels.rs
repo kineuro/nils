@@ -16,6 +16,15 @@
 //! R5: v0's human body-part labels come in as person decisions marked as
 //! imported from v0, with the date v0 gave them ([`import_v0`]). A label
 //! set is not a database migration: v0's databases migrate nowhere.
+//!
+//! Record 55 E6 (spec 10.3): a set made outside the engine is registered
+//! with its `labels.tsv`, its provenance and the sha256 of every file, of
+//! kind `outside`. Its rows are keyed by DICOM identity, never by registry
+//! ids ([`OUTSIDE_COLUMNS`]), so it means the same in any registry; it is
+//! identified by its name, its version and the digest of its canonical
+//! `labels.tsv` ([`outside_canonical`]), like a set the engine wrote, and a
+//! set any row of which is of a sample sealed now is refused
+//! ([`outside_sealed`]). A card's `trained_on` may then name it.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -471,7 +480,8 @@ pub fn campaign_labels(store: &mut Store, campaign: i64, of: Of) -> Result<Vec<L
                         .value
                         .clone()
                         .or_else(|| a.form.as_ref().map(|f| f.to_string())),
-                    derivative_id: a.derivative_id,
+                    // record 55 H3: a check's answer is about its item's result
+                    derivative_id: a.derivative_id.or(it.derivative_id),
                     author_kind: a.author_kind.clone(),
                     author: a.principal.clone(),
                     decision_id: None,
@@ -517,6 +527,7 @@ pub fn campaign_labels(store: &mut Store, campaign: i64, of: Of) -> Result<Vec<L
                     subject_id: it.subject_id,
                     session_day: it.session_day.clone(),
                     what: what.clone(),
+                    derivative_id: it.derivative_id,
                     campaign_id: Some(campaign),
                     unsure: Some(settled_unsure(it, answers.iter())),
                     ..Label::default()
@@ -1008,10 +1019,10 @@ pub fn record(registry: &mut Registry, n: &NewSet<'_>) -> Result<LabelSet, Error
         registry,
         &Entry {
             principal: n.created_by,
-            action: if n.kind == "imported" {
-                Action::LabelsImport
-            } else {
-                Action::LabelsExport
+            action: match n.kind {
+                "imported" => Action::LabelsImport,
+                OUTSIDE => Action::LabelsRegister,
+                _ => Action::LabelsExport,
             },
             scope: json!({
                 "label_set": id, "name": n.name, "version": n.version, "kind": n.kind, "what": n.what,
@@ -1086,6 +1097,21 @@ pub fn usable_for_training(store: &mut Store, id: i64) -> Result<LabelSet, Error
             "label set {id} {why}, and is not training data (records 40 R3 and 48 R2)"
         )))
     };
+    // record 55 D6 and D7 (spec §11.4, §11.5): an audit's reads never
+    // train, and only blind answers become training labels
+    if let Some(c) = set.campaign_id {
+        if crate::blind::purpose(store, c)? == "audit" {
+            return Err(Error::Refused(format!(
+                "label set {id} is of an audit campaign, whose reads never train (record 55 D7)"
+            )));
+        }
+        let seen = crate::blind::answers_not_blind(store, c)?;
+        if seen > 0 {
+            return Err(Error::Refused(format!(
+                "label set {id} is of a campaign {seen} of whose answers were given after the suggestions showed; only blind answers train (record 55 D6)"
+            )));
+        }
+    }
     let text = set
         .path
         .as_deref()
@@ -1099,6 +1125,20 @@ pub fn usable_for_training(store: &mut Store, id: i64) -> Result<LabelSet, Error
             let Ok(text) = String::from_utf8(bytes) else {
                 return refuse("has a labels.tsv that does not read".into());
             };
+            // record 55 E6: a set from outside is held by DICOM identity
+            if set.kind == OUTSIDE {
+                let rows = match outside_canonical(&text) {
+                    Ok((_, rows)) if rows.len() as i64 == set.rows => rows,
+                    _ => return refuse("has a labels.tsv that does not read as its rows".into()),
+                };
+                let over = outside_sealed(store, &rows)?;
+                if over > 0 {
+                    return refuse(format!(
+                        "holds {over} row(s) of a sample sealed now, by DICOM identity, until its certificate is recorded and the sample unsealed"
+                    ));
+                }
+                return Ok(set);
+            }
             let rows = keys_of_tsv(&text);
             let header = text.lines().next();
             let known = header == Some(COLUMNS.join("\t").as_str())
@@ -1192,6 +1232,240 @@ fn keys_of_tsv(text: &str) -> Vec<Label> {
             }
         })
         .collect()
+}
+
+// ------------------------------------------------ sets from outside
+
+/// The kind of a set registered from outside the engine (record 55 E6).
+pub const OUTSIDE: &str = "outside";
+
+/// The columns of an outside set's `labels.tsv`, in order: a row names a
+/// stack by its study, its series and the stack key within the series,
+/// and may name one SOP Instance UID of it; a row with no stack key is the
+/// whole series, one with no series the whole study. What was labelled,
+/// the author's kind and the author are required; an empty value is "not
+/// sure".
+pub const OUTSIDE_COLUMNS: [&str; 8] = [
+    "study_instance_uid",
+    "series_instance_uid",
+    "stack_key",
+    "sop_instance_uid",
+    "what",
+    "value",
+    "author_kind",
+    "author",
+];
+
+/// One row of an outside set.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct OutsideRow {
+    pub study: String,
+    pub series: String,
+    pub stack_key: String,
+    pub sop: String,
+    pub what: String,
+    pub value: String,
+    pub author_kind: String,
+    pub author: String,
+}
+
+/// Whether a text can be a UID as the registry holds one: printable ASCII
+/// and no space. Not held to the standard's digits and dots, since a UID
+/// is matched as the files wrote it, and some archives wrote others.
+fn uid_ok(text: &str) -> bool {
+    !text.is_empty() && text.bytes().all(|b| b.is_ascii_graphic())
+}
+
+/// Read an outside set's `labels.tsv` and answer its canonical form and its
+/// rows. The canonical form is the header, then the rows sorted bytewise as
+/// whole lines, each line ended by a line feed, so the same labels always
+/// give the same bytes and digest. Refused for another header, a row of
+/// another width, a UID that is not one, a stack key or SOP Instance UID
+/// without its series, a row missing what, the author's kind or the
+/// author, a duplicate row, and a set with no row.
+pub fn outside_canonical(text: &str) -> Result<(String, Vec<OutsideRow>), Error> {
+    let bad = |m: String| Err(Error::Invalid(m));
+    let mut lines = text.split('\n').map(|l| l.strip_suffix('\r').unwrap_or(l));
+    let header = OUTSIDE_COLUMNS.join("\t");
+    if lines.next() != Some(header.as_str()) {
+        return bad(format!(
+            "an outside label set's labels.tsv starts with the header {}, tab separated",
+            OUTSIDE_COLUMNS.join(", ")
+        ));
+    }
+    let mut rows = Vec::new();
+    for (i, line) in lines.enumerate() {
+        if line.is_empty() {
+            continue;
+        }
+        let at = i + 2;
+        let cells: Vec<&str> = line.split('\t').collect();
+        if cells.len() != OUTSIDE_COLUMNS.len() {
+            return bad(format!(
+                "line {at} has {} cells, and a row has {}",
+                cells.len(),
+                OUTSIDE_COLUMNS.len()
+            ));
+        }
+        let row = OutsideRow {
+            study: cells[0].to_string(),
+            series: cells[1].to_string(),
+            stack_key: cells[2].to_string(),
+            sop: cells[3].to_string(),
+            what: cells[4].to_string(),
+            value: cells[5].to_string(),
+            author_kind: cells[6].to_string(),
+            author: cells[7].to_string(),
+        };
+        if !uid_ok(&row.study) {
+            return bad(format!(
+                "line {at}: study_instance_uid is a UID, printable and with no space"
+            ));
+        }
+        for (name, uid) in [
+            ("series_instance_uid", &row.series),
+            ("sop_instance_uid", &row.sop),
+        ] {
+            if !uid.is_empty() && !uid_ok(uid) {
+                return bad(format!(
+                    "line {at}: {name} is a UID, printable and with no space"
+                ));
+            }
+        }
+        if row.series.is_empty() && !(row.stack_key.is_empty() && row.sop.is_empty()) {
+            return bad(format!(
+                "line {at}: a stack key or a SOP Instance UID is named within its series"
+            ));
+        }
+        if row.stack_key.chars().any(char::is_whitespace) {
+            return bad(format!("line {at}: the stack key holds a space"));
+        }
+        for (name, v) in [
+            ("what", &row.what),
+            ("author_kind", &row.author_kind),
+            ("author", &row.author),
+        ] {
+            if v.trim().is_empty() {
+                return bad(format!("line {at}: {name} is required"));
+            }
+        }
+        rows.push(row);
+    }
+    if rows.is_empty() {
+        return bad("the labels.tsv holds no row".into());
+    }
+    rows.sort();
+    if let Some(w) = rows.windows(2).find(|w| w[0] == w[1]) {
+        return bad(format!(
+            "a row is given twice: {} {} {}",
+            w[0].what, w[0].series, w[0].stack_key
+        ));
+    }
+    let mut lines: Vec<String> = rows
+        .iter()
+        .map(|r| {
+            [
+                r.study.as_str(),
+                &r.series,
+                &r.stack_key,
+                &r.sop,
+                &r.what,
+                &r.value,
+                &r.author_kind,
+                &r.author,
+            ]
+            .join("\t")
+        })
+        .collect();
+    lines.sort();
+    let mut out = header;
+    out.push('\n');
+    for l in lines {
+        out.push_str(&l);
+        out.push('\n');
+    }
+    Ok((out, rows))
+}
+
+/// The sha256 of an outside set's canonical `labels.tsv`, `sha256:` before
+/// it: the set's digest, which a card's `trained_on` names.
+pub fn outside_digest(canonical: &str) -> String {
+    format!("sha256:{}", sha256_hex(canonical.as_bytes()))
+}
+
+/// How many of these rows are of a sample sealed now, compared by DICOM
+/// identity (record 55 E6, spec 16.1): a row of a study, of a series or of
+/// a stack (its series and stack key) holding a sealed stack, or naming a
+/// SOP Instance UID of one. A stack a certificate unsealed is not sealed.
+pub fn outside_sealed(store: &mut Store, rows: &[OutsideRow]) -> Result<i64, Error> {
+    Ok(outside_sealed_marks(store, rows)?
+        .iter()
+        .filter(|m| **m)
+        .count() as i64)
+}
+
+/// For each row, whether it is of a sample sealed now, as
+/// [`outside_sealed`] reads it.
+pub fn outside_sealed_marks(store: &mut Store, rows: &[OutsideRow]) -> Result<Vec<bool>, Error> {
+    let sql = format!(
+        "SELECT st.study_instance_uid, se.series_instance_uid, k.stack_key FROM {} ss \
+         JOIN {} k ON k.id = ss.stack_id JOIN {} se ON se.id = k.series_id \
+         JOIN {} st ON st.id = se.study_id WHERE ss.unsealed_at IS NULL",
+        store.qualified("sealed_stack"),
+        store.qualified("stack"),
+        store.qualified("series"),
+        store.qualified("study"),
+    );
+    let mut studies: BTreeSet<String> = BTreeSet::new();
+    let mut series: BTreeSet<String> = BTreeSet::new();
+    let mut stacks: BTreeSet<(String, String)> = BTreeSet::new();
+    for r in store.query(&sql, &[])? {
+        studies.insert(r.text(0)?.to_string());
+        series.insert(r.text(1)?.to_string());
+        stacks.insert((r.text(1)?.to_string(), r.text(2)?.to_string()));
+    }
+    if studies.is_empty() {
+        return Ok(vec![false; rows.len()]);
+    }
+    // the SOP Instance UIDs the rows name that are of a sealed stack
+    let sops: Vec<&str> = rows
+        .iter()
+        .filter(|r| !r.sop.is_empty())
+        .map(|r| r.sop.as_str())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let mut sealed_sops: BTreeSet<String> = BTreeSet::new();
+    let d = store.dialect();
+    for chunk in sops.chunks(500) {
+        let marks: Vec<String> = (1..=chunk.len()).map(|i| d.param(i, Type::Text)).collect();
+        let sql = format!(
+            "SELECT i.sop_instance_uid FROM {} i JOIN {} ss ON ss.stack_id = i.stack_id \
+             WHERE ss.unsealed_at IS NULL AND i.sop_instance_uid IN ({})",
+            store.qualified("instance"),
+            store.qualified("sealed_stack"),
+            marks.join(", ")
+        );
+        let params: Vec<Param> = chunk.iter().map(|s| Param::from(*s)).collect();
+        for r in store.query(&sql, &params)? {
+            sealed_sops.insert(r.text(0)?.to_string());
+        }
+    }
+    Ok(rows
+        .iter()
+        .map(|r| {
+            if !r.sop.is_empty() && sealed_sops.contains(&r.sop) {
+                return true;
+            }
+            if r.series.is_empty() {
+                studies.contains(&r.study)
+            } else if r.stack_key.is_empty() {
+                series.contains(&r.series)
+            } else {
+                stacks.contains(&(r.series.clone(), r.stack_key.clone()))
+            }
+        })
+        .collect())
 }
 
 // ------------------------------------------------------- sealed samples
@@ -1509,7 +1783,36 @@ pub fn training_labels(
             },
         )?);
     }
-    drop_sealed(store, rows)
+    // record 55 D6 (spec §11.4): only a blind answer trains; a decision
+    // marked as given after the suggestions showed is a decision and no
+    // label, and is counted with the sealed ones left out
+    let (rows, not_blind) = drop_not_blind(store, rows)?;
+    let (rows, sealed) = drop_sealed(store, rows)?;
+    Ok((rows, sealed + not_blind))
+}
+
+/// The labels of decisions marked as not given blind (record 55 D6), left
+/// out, and how many.
+pub fn drop_not_blind(store: &mut Store, labels: Vec<Label>) -> Result<(Vec<Label>, usize), Error> {
+    let ids: Vec<i64> = labels.iter().filter_map(|l| l.decision_id).collect();
+    let mut seen: BTreeSet<i64> = BTreeSet::new();
+    for chunk in ids.chunks(500) {
+        let sql = format!(
+            "SELECT id FROM {} WHERE id IN ({}) AND blind = 0",
+            store.qualified("decision"),
+            join_ids(chunk)
+        );
+        for r in store.query(&sql, &[])? {
+            seen.insert(r.int(0)?);
+        }
+    }
+    let before = labels.len();
+    let kept: Vec<Label> = labels
+        .into_iter()
+        .filter(|l| !l.decision_id.is_some_and(|d| seen.contains(&d)))
+        .collect();
+    let dropped = before - kept.len();
+    Ok((kept, dropped))
 }
 
 // ------------------------------------------------------ the certificates
@@ -1651,7 +1954,8 @@ pub fn record_certificate(
 ) -> Result<Certificate, Error> {
     if author_kind != "person" {
         return Err(Error::Refused(format!(
-            "a certificate is a person's act, and {who} acts as a {author_kind}"
+            "a certificate is a person's act, and {who} acts as {}",
+            crate::a_or_an(author_kind)
         )));
     }
     let sample = sample.trim();
@@ -1828,7 +2132,8 @@ pub fn unseal(
 ) -> Result<Unsealed, Error> {
     if author_kind != "person" {
         return Err(Error::Refused(format!(
-            "unsealing a certified sample is a person's act, and {who} acts as a {author_kind}"
+            "unsealing a certified sample is a person's act, and {who} acts as {}",
+            crate::a_or_an(author_kind)
         )));
     }
     let store = registry.store();

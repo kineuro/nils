@@ -427,11 +427,12 @@ fn a_home_on_postgres_initialises_and_reopens() {
     let mut linkage = reg.open_linkage().unwrap();
     assert_eq!(linkage.schema(), Some("nils_home_test_linkage"));
     // the seeded types: patient-id, study-instance-uid and, since record
-    // 26, subject-code
+    // 26, subject-code, and since 2026-10-10 the type of an ID that is the
+    // same everywhere
     let n = linkage.query("SELECT COUNT(*) FROM id_type", &[]).unwrap()[0]
         .int(0)
         .unwrap();
-    assert_eq!(n, 3);
+    assert_eq!(n, 4);
     drop(linkage);
     reg.store()
         .batch("DROP SCHEMA nils_home_test CASCADE; DROP SCHEMA nils_home_test_linkage CASCADE")
@@ -1782,9 +1783,243 @@ fn registries() -> Vec<(
     out
 }
 
+/// Record 55 E2 on both backends (the ruling of 2026-10-10): a cascade
+/// is one model whose card names its parts by the input each fills; a part
+/// must be registered and not retired; promoting the cascade retires none
+/// of its parts, and since record 55 D4 a plain head promoted after it
+/// retires nothing either.
+#[test]
+fn a_cascade_names_its_parts_and_promoting_it_retires_none_on_both_backends() {
+    use nils_registry::model::{self, Error};
+    for (name, _guard, _dir, mut reg) in registries() {
+        let digest = |c: char| format!("sha256:{}", c.to_string().repeat(64));
+        let passed = serde_json::json!({"suite": "s", "passed": true, "checks": [{"name": "c", "passed": true}]});
+        let add = |reg: &mut nils_registry::Registry, card: serde_json::Value| {
+            model::register(reg, &card, "anna@ward-3")
+        };
+        let enc = add(&mut reg, serde_json::json!({"name": "tiny", "version": "1", "kind": "encoder", "digest": digest('e'), "task": "features:image"})).unwrap();
+        let head = add(&mut reg, serde_json::json!({"name": "fusion", "version": "1", "kind": "head", "digest": digest('a'), "task": "axis:body_part", "encoders": [{"digest": digest('e')}], "threshold": 0.9})).unwrap();
+        model::admit(&mut reg, head.id, &passed, "anna@ward-3").unwrap();
+        model::promote(&mut reg, head.id, "anna@ward-3", None, None).unwrap();
+        let student = add(&mut reg, serde_json::json!({"name": "student", "version": "1", "kind": "encoder", "digest": digest('b'), "task": "features:slice"})).unwrap();
+        let deferral = add(&mut reg, serde_json::json!({"name": "deferral", "version": "1", "kind": "head", "digest": digest('d'), "task": "cascade:body_part", "encoders": [{"digest": digest('b')}]})).unwrap();
+        let cascade_card = |parts: serde_json::Value| {
+            serde_json::json!({
+                "name": "cascade", "version": "1", "kind": "head", "digest": digest('c'), "task": "axis:body_part",
+                "encoders": [{"digest": digest('e')}, {"digest": digest('b')}], "threshold": 0.9, "parts": parts,
+            })
+        };
+        // the parts are registered models, by the input each fills
+        for (bad, what) in [
+            (serde_json::json!({"head": digest('f')}), "not registered"),
+            (
+                serde_json::json!({"Head": digest('a')}),
+                "not a part's name",
+            ),
+            (serde_json::json!({"head": "fusion@1"}), "by its digest"),
+            (serde_json::json!({"head": digest('c')}), "the model itself"),
+            (serde_json::json!([digest('a')]), "an object"),
+            (serde_json::json!({}), "an object"),
+        ] {
+            let e = add(&mut reg, cascade_card(bad.clone())).unwrap_err();
+            assert!(e.to_string().contains(what), "{name}: {bad}: {e}");
+        }
+        let cascade = add(&mut reg, cascade_card(serde_json::json!({
+            "encoder": digest('e'), "head": digest('a'), "student": digest('b'), "deferral": digest('d'),
+        })))
+        .unwrap();
+        let parts: Vec<(String, i64)> = model::parts(reg.store(), &cascade)
+            .unwrap()
+            .into_iter()
+            .map(|(n, m)| (n, m.id))
+            .collect();
+        assert_eq!(parts.len(), 4, "{name}: {parts:?}");
+        for (n, id) in [
+            ("encoder", enc.id),
+            ("head", head.id),
+            ("student", student.id),
+            ("deferral", deferral.id),
+        ] {
+            assert!(
+                parts.contains(&(n.to_string(), id)),
+                "{name}: {n} in {parts:?}"
+            );
+        }
+        // promoting the cascade retires none of its parts
+        model::admit(&mut reg, cascade.id, &passed, "anna@ward-3").unwrap();
+        model::promote(&mut reg, cascade.id, "anna@ward-3", None, Some("faster")).unwrap();
+        assert_eq!(
+            model::get(reg.store(), head.id).unwrap().unwrap().state,
+            "promoted",
+            "{name}"
+        );
+        // a retired model is no part
+        let other = add(&mut reg, serde_json::json!({"name": "fusion", "version": "2", "kind": "head", "digest": digest('2'), "task": "axis:body_part", "encoders": [{"digest": digest('e')}]})).unwrap();
+        model::admit(&mut reg, other.id, &passed, "anna@ward-3").unwrap();
+        model::promote(&mut reg, other.id, "anna@ward-3", None, None).unwrap();
+        // record 55 D4: a promotion retires nothing; the cascade goes first,
+        // then the head it read
+        for id in [cascade.id, head.id] {
+            assert_eq!(
+                model::get(reg.store(), id).unwrap().unwrap().state,
+                "promoted",
+                "{name}: {id}"
+            );
+            model::retire(&mut reg, id, "anna@ward-3", None).unwrap();
+        }
+        for id in [head.id, cascade.id] {
+            assert_eq!(
+                model::get(reg.store(), id).unwrap().unwrap().state,
+                "retired",
+                "{name}: {id}"
+            );
+        }
+        let late = add(
+            &mut reg,
+            serde_json::json!({
+                "name": "cascade", "version": "2", "kind": "head", "digest": digest('3'), "task": "axis:body_part",
+                "encoders": [{"digest": digest('e')}], "parts": {"head": digest('a')},
+            }),
+        );
+        assert!(
+            matches!(&late, Err(Error::Refused(m)) if m.contains("retired")),
+            "{name}: {late:?}"
+        );
+    }
+}
+
+/// Record 55 E2 on both backends: a served cascade keeps its parts. A
+/// promotion retires nothing (record 55 D4), and retiring a part of a
+/// served cascade is refused, naming the cascade; a cascade with a retired
+/// part is neither admitted nor promoted.
+#[test]
+fn a_served_cascade_keeps_its_parts_on_both_backends() {
+    use nils_registry::model::{self, Error};
+    for (name, _guard, _dir, mut reg) in registries() {
+        let digest = |c: char| format!("sha256:{}", c.to_string().repeat(64));
+        let passed = serde_json::json!({"suite": "s", "passed": true, "checks": [{"name": "c", "passed": true}]});
+        let who = "anna@ward-3";
+        let add = |reg: &mut nils_registry::Registry, card: serde_json::Value| {
+            model::register(reg, &card, who).unwrap()
+        };
+        let state = |reg: &mut nils_registry::Registry, id: i64| {
+            model::get(reg.store(), id).unwrap().unwrap().state
+        };
+        let refused = |r: Result<model::Promoted, Error>| match r {
+            Err(Error::Refused(m)) => m,
+            other => panic!("{name}: {other:?}"),
+        };
+        add(
+            &mut reg,
+            serde_json::json!({"name": "tiny", "version": "1", "kind": "encoder", "digest": digest('e'), "task": "features:image"}),
+        );
+        let head = add(
+            &mut reg,
+            serde_json::json!({"name": "fusion", "version": "1", "kind": "head", "digest": digest('a'), "task": "axis:body_part", "encoders": [{"digest": digest('e')}], "threshold": 0.9}),
+        );
+        let coarse = add(
+            &mut reg,
+            serde_json::json!({"name": "coarse", "version": "1", "kind": "head", "digest": digest('5'), "task": "axis:body_region", "encoders": [{"digest": digest('e')}], "threshold": 0.9}),
+        );
+        let student = add(
+            &mut reg,
+            serde_json::json!({"name": "student", "version": "1", "kind": "encoder", "digest": digest('b'), "task": "features:slice"}),
+        );
+        add(
+            &mut reg,
+            serde_json::json!({"name": "deferral", "version": "1", "kind": "head", "digest": digest('d'), "task": "cascade:body_part", "encoders": [{"digest": digest('b')}]}),
+        );
+        let parts = serde_json::json!({"encoder": digest('e'), "head": digest('a'), "coarse": digest('5'), "student": digest('b'), "deferral": digest('d')});
+        let cascade = add(
+            &mut reg,
+            serde_json::json!({"name": "cascade", "version": "1", "kind": "head", "digest": digest('c'), "task": "axis:body_part",
+                                                       "encoders": [{"digest": digest('e')}, {"digest": digest('b')}], "threshold": 0.9, "parts": parts}),
+        );
+        for id in [head.id, coarse.id, cascade.id] {
+            model::admit(&mut reg, id, &passed, who).unwrap();
+        }
+        model::promote(&mut reg, coarse.id, who, None, None).unwrap();
+        model::promote(&mut reg, cascade.id, who, None, None).unwrap();
+        // promoting the cascade's own head retires no cascade that reads it
+        model::promote(&mut reg, head.id, who, None, None).unwrap();
+        assert_eq!(state(&mut reg, cascade.id), "promoted", "{name}");
+        // a new coarse mode is promoted beside the cascade's coarse part,
+        // which stays (record 55 D4)
+        let coarse2 = add(
+            &mut reg,
+            serde_json::json!({"name": "coarse", "version": "2", "kind": "head", "digest": digest('6'), "task": "axis:body_region", "encoders": [{"digest": digest('e')}], "threshold": 0.9}),
+        );
+        model::admit(&mut reg, coarse2.id, &passed, who).unwrap();
+        model::promote(&mut reg, coarse2.id, who, None, None).unwrap();
+        assert_eq!(
+            (state(&mut reg, coarse.id), state(&mut reg, coarse2.id)),
+            ("promoted".into(), "promoted".into()),
+            "{name}"
+        );
+        // retiring a part of a served cascade is refused, a registered part's too
+        for part in [coarse.id, student.id, head.id] {
+            let e = model::retire(&mut reg, part, who, None).unwrap_err();
+            assert!(
+                matches!(&e, Error::Refused(m) if m.contains(&format!("cascade {}", cascade.id))),
+                "{name}: {e:?}"
+            );
+        }
+        // a plain head promoted in the slot retires nothing; the cascade
+        // retired first, its parts may go
+        let other = add(
+            &mut reg,
+            serde_json::json!({"name": "fusion", "version": "2", "kind": "head", "digest": digest('2'), "task": "axis:body_part", "encoders": [{"digest": digest('e')}], "threshold": 0.9}),
+        );
+        model::admit(&mut reg, other.id, &passed, who).unwrap();
+        model::promote(&mut reg, other.id, who, None, None).unwrap();
+        assert_eq!(state(&mut reg, cascade.id), "promoted", "{name}");
+        model::retire(&mut reg, cascade.id, who, None).unwrap();
+        model::retire(&mut reg, head.id, who, None).unwrap();
+        model::retire(&mut reg, student.id, who, Some("no cascade reads it")).unwrap();
+        // a cascade with a retired part is neither admitted nor promoted
+        let late = add(
+            &mut reg,
+            serde_json::json!({"name": "cascade", "version": "2", "kind": "head", "digest": digest('3'), "task": "axis:body_part",
+                                                    "encoders": [{"digest": digest('e')}], "threshold": 0.9,
+                                                    "parts": {"encoder": digest('e'), "head": digest('2'), "coarse": digest('5')}}),
+        );
+        let admitted = add(
+            &mut reg,
+            serde_json::json!({"name": "cascade", "version": "3", "kind": "head", "digest": digest('4'), "task": "axis:body_part",
+                                                        "encoders": [{"digest": digest('e')}], "threshold": 0.9,
+                                                        "parts": {"encoder": digest('e'), "head": digest('2'), "coarse": digest('6')}}),
+        );
+        model::admit(&mut reg, admitted.id, &passed, who).unwrap();
+        // a part retired behind the cascade's back, as an older engine could
+        let store = reg.store();
+        let t = store.qualified("model");
+        store
+            .execute(
+                &format!(
+                    "UPDATE {t} SET state = 'retired' WHERE id IN ({}, {})",
+                    other.id, coarse2.id
+                ),
+                &[],
+            )
+            .unwrap();
+        let e = model::admit(&mut reg, late.id, &passed, who).unwrap_err();
+        assert!(
+            matches!(&e, Error::Refused(m) if m.contains("which is retired")),
+            "{name}: {e:?}"
+        );
+        let m = refused(model::promote(&mut reg, admitted.id, who, None, None));
+        assert!(m.contains("which is retired"), "{name}: {m}");
+        assert_eq!(
+            (state(&mut reg, late.id), state(&mut reg, admitted.id)),
+            ("registered".into(), "admitted".into()),
+            "{name}"
+        );
+    }
+}
+
 /// Record 42 S2 on both backends: register by digest, promotion refused
-/// before admission, a failed check moving nothing, one promoted model per
-/// slot, a cohort slot only for a cohort that exists; and a model's answer
+/// before admission, a failed check moving nothing, several promoted models
+/// in a slot (record 55 D4), a cohort slot only for a cohort that exists; and a model's answer
 /// refused for an unknown model, staged for an admitted one, and committed
 /// by a person and never by an agent.
 #[test]
@@ -1872,9 +2107,8 @@ fn the_model_registry_keeps_its_rules_on_both_backends() {
             "{name}"
         );
         model::admit(&mut reg, one.id, &passed, "anna@ward-3").unwrap();
-        let first = model::promote(&mut reg, one.id, "anna@ward-3", None, None).unwrap();
-        assert_eq!(first.retired, None, "{name}");
-        // the second promotion in the slot retires the first
+        model::promote(&mut reg, one.id, "anna@ward-3", None, None).unwrap();
+        // record 55 D4: the second promotion in the slot retires none
         let two = model::register(
             &mut reg,
             &card("head", "2", "head", &digest('2'), with_encoder.clone()),
@@ -1882,13 +2116,7 @@ fn the_model_registry_keeps_its_rules_on_both_backends() {
         )
         .unwrap();
         model::admit(&mut reg, two.id, &passed, "anna@ward-3").unwrap();
-        let second = model::promote(&mut reg, two.id, "anna@ward-3", None, Some("better")).unwrap();
-        assert_eq!(
-            second.retired.as_ref().map(|m| m.id),
-            Some(one.id),
-            "{name}"
-        );
-        assert_eq!(second.retired.unwrap().state, "retired", "{name}");
+        model::promote(&mut reg, two.id, "anna@ward-3", None, Some("better")).unwrap();
         let promoted = model::list(
             reg.store(),
             &model::Filter {
@@ -1898,7 +2126,17 @@ fn the_model_registry_keeps_its_rules_on_both_backends() {
             },
         )
         .unwrap();
-        assert_eq!(promoted.len(), 1, "{name}: one promoted model per slot");
+        assert_eq!(
+            promoted.len(),
+            2,
+            "{name}: several promoted models in a slot"
+        );
+        // the newest promoted answers by default; then the first is retired
+        let chosen = model::chosen(reg.store(), "axis:body_part", "site")
+            .unwrap()
+            .unwrap();
+        assert_eq!((chosen.model.id, chosen.by), (two.id, "promoted"), "{name}");
+        model::retire(&mut reg, one.id, "anna@ward-3", Some("replaced")).unwrap();
         assert_eq!(
             model::events(reg.store(), one.id).unwrap().len(),
             5,
@@ -2065,10 +2303,7 @@ fn migration_59_gives_pipelines_a_catalog_and_runs_on_both_backends() {
         );
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [
-                59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79,
-                80, 81, 82, 83, 84, 85
-            ],
+            (59..=migrate::SCHEMA_VERSION).collect::<Vec<i64>>(),
             "{name}"
         );
         let descriptor = serde_json::json!({"name": "n4", "x-nils": {"analysis-level": "session"}});
@@ -2125,11 +2360,13 @@ fn migration_59_gives_pipelines_a_catalog_and_runs_on_both_backends() {
                 results_digest: Some("sha256:ab"),
                 summary: &summary,
                 error: None,
+                failure: None,
             },
         )
         .unwrap();
         let back = pipeline::run(&mut store, run).unwrap().unwrap();
         assert_eq!(back.params, params, "{name}");
+        assert_eq!(back.failure, serde_json::Value::Null, "{name}");
         assert_eq!(back.summary, summary, "{name}");
         assert_eq!(back.model_ids, serde_json::json!([]), "{name}");
         assert_eq!(
@@ -2225,10 +2462,7 @@ fn migration_61_gives_each_head_its_encoder_as_the_first_of_a_list() {
             .unwrap();
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [
-                61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81,
-                82, 83, 84, 85
-            ],
+            (61..=migrate::SCHEMA_VERSION).collect::<Vec<i64>>(),
             "{name}"
         );
         let head = model::by_digest(&mut store, &hex('b')).unwrap().unwrap();
@@ -2290,10 +2524,7 @@ fn migration_63_times_an_answer_and_lets_a_certificate_unseal_on_both_backends()
         store.batch(&sql).unwrap();
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [
-                63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83,
-                84, 85
-            ],
+            (63..=migrate::SCHEMA_VERSION).collect::<Vec<i64>>(),
             "{name}"
         );
         for (t, col) in [
@@ -2367,10 +2598,7 @@ fn migration_64_schedules_a_run_s_units_on_both_backends() {
         store.batch(&sql).unwrap();
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [
-                64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84,
-                85
-            ],
+            (64..=migrate::SCHEMA_VERSION).collect::<Vec<i64>>(),
             "{name}"
         );
         for col in ["units", "resumes", "threshold"] {
@@ -2419,9 +2647,7 @@ fn migration_65_gives_a_run_s_numbers_a_table_and_a_starter_its_origin_on_both_b
             .unwrap();
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [
-                65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85
-            ],
+            (65..=migrate::SCHEMA_VERSION).collect::<Vec<i64>>(),
             "{name}"
         );
         assert!(
@@ -2462,9 +2688,7 @@ fn migration_66_lets_an_answer_be_unsure_on_both_backends() {
         );
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [
-                66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85
-            ],
+            (66..=migrate::SCHEMA_VERSION).collect::<Vec<i64>>(),
             "{name}"
         );
         assert!(
@@ -2502,9 +2726,7 @@ fn migration_67_keeps_a_run_s_scratch_apart_on_both_backends() {
         );
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [
-                67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85
-            ],
+            (67..=migrate::SCHEMA_VERSION).collect::<Vec<i64>>(),
             "{name}"
         );
         assert!(
@@ -2542,9 +2764,7 @@ fn migration_68_lets_an_answer_keep_what_it_derived_on_both_backends() {
         );
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [
-                68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85
-            ],
+            (68..=migrate::SCHEMA_VERSION).collect::<Vec<i64>>(),
             "{name}"
         );
         assert!(
@@ -2578,9 +2798,7 @@ fn migration_69_lets_a_campaign_carry_suggestions_on_both_backends() {
         );
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [
-                69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85
-            ],
+            (69..=migrate::SCHEMA_VERSION).collect::<Vec<i64>>(),
             "{name}"
         );
         assert!(
@@ -2656,9 +2874,7 @@ fn migration_70_lets_an_answer_be_corrected_on_both_backends() {
             .unwrap();
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [
-                70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85
-            ],
+            (70..=migrate::SCHEMA_VERSION).collect::<Vec<i64>>(),
             "{name}"
         );
         assert!(
@@ -2713,7 +2929,7 @@ fn migration_71_gives_a_series_its_pulse_sequence_on_both_backends() {
             .unwrap();
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85],
+            (71..=migrate::SCHEMA_VERSION).collect::<Vec<i64>>(),
             "{name}"
         );
         for table in ["series_mr", "stack_fingerprint"] {
@@ -2769,7 +2985,7 @@ fn migration_72_writes_what_each_campaign_suggested_on_both_backends() {
             .unwrap();
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85],
+            (72..=migrate::SCHEMA_VERSION).collect::<Vec<i64>>(),
             "{name}"
         );
         let said: Vec<(String, String)> = store
@@ -2823,7 +3039,7 @@ fn migration_73_lets_a_campaign_settle_candidates_on_both_backends() {
             .unwrap();
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85],
+            (73..=migrate::SCHEMA_VERSION).collect::<Vec<i64>>(),
             "{name}"
         );
         assert!(
@@ -2869,7 +3085,7 @@ fn migration_75_lets_a_campaign_show_the_pictures_alone_on_both_backends() {
         );
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85],
+            (75..=migrate::SCHEMA_VERSION).collect::<Vec<i64>>(),
             "{name}"
         );
         assert!(
@@ -3006,7 +3222,7 @@ fn migration_74_lets_a_campaign_show_two_stacks_side_by_side_on_both_backends() 
             .unwrap();
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85],
+            (74..=migrate::SCHEMA_VERSION).collect::<Vec<i64>>(),
             "{name}"
         );
         assert!(
@@ -3041,7 +3257,7 @@ fn migration_76_lets_a_campaign_read_a_stack_beside_two_anchors_on_both_backends
             .unwrap();
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [76, 77, 78, 79, 80, 81, 82, 83, 84, 85],
+            (76..=migrate::SCHEMA_VERSION).collect::<Vec<i64>>(),
             "{name}"
         );
         assert!(
@@ -3095,7 +3311,7 @@ fn migration_77_gives_a_series_its_mechanism_on_both_backends() {
         store.batch(&sql).unwrap();
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [77, 78, 79, 80, 81, 82, 83, 84, 85],
+            (77..=migrate::SCHEMA_VERSION).collect::<Vec<i64>>(),
             "{name}"
         );
         for c in SERIES {
@@ -3148,7 +3364,7 @@ fn migration_78_gives_a_stack_the_philips_frame_image_type_on_both_backends() {
         }
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [78, 79, 80, 81, 82, 83, 84, 85],
+            (78..=migrate::SCHEMA_VERSION).collect::<Vec<i64>>(),
             "{name}"
         );
         for table in ["stack", "stack_fingerprint"] {
@@ -3172,7 +3388,7 @@ fn migration_78_gives_a_stack_the_philips_frame_image_type_on_both_backends() {
             .unwrap();
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [78, 79, 80, 81, 82, 83, 84, 85],
+            (78..=migrate::SCHEMA_VERSION).collect::<Vec<i64>>(),
             "{name}"
         );
         for table in ["stack", "stack_fingerprint"] {
@@ -3213,7 +3429,7 @@ fn migration_79_gives_the_fingerprint_its_2026_10_03_fields_on_both_backends() {
         store.batch(&sql).unwrap();
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [79, 80, 81, 82, 83, 84, 85],
+            (79..=migrate::SCHEMA_VERSION).collect::<Vec<i64>>(),
             "{name}"
         );
         for (t, cols) in tables {
@@ -3231,6 +3447,143 @@ fn migration_79_gives_the_fingerprint_its_2026_10_03_fields_on_both_backends() {
                 .is_empty(),
             "{name}"
         );
+    }
+}
+
+/// Record 55 (Nima's duplicate policy, 2026-10-10), migration 87, on both
+/// backends: a registry of schema 86 gains when each file was first seen,
+/// filled from when it was last seen, and which sources hold a file of each
+/// stack, filled from the instances' own files, a file whose frames are in
+/// two stacks holding both, and neither a file that is gone nor one held;
+/// a copy filed by its instance UID alone holds nothing yet and is marked
+/// `unchecked`, for its next read to compare. The migration run twice is
+/// run once.
+#[test]
+fn migration_87_says_which_sources_hold_each_stack_on_both_backends() {
+    for (name, _guard, mut store) in stores() {
+        migrate::migrate(&mut store, Kind::Registry).unwrap();
+        let (f, ss, i, fr, meta) = (
+            store.qualified("source_file"),
+            store.qualified("source_stack"),
+            store.qualified("instance"),
+            store.qualified("instance_frame"),
+            store.qualified("registry_meta"),
+        );
+        store
+            .batch(&format!(
+                "ALTER TABLE {f} DROP COLUMN first_seen_at;\n\
+                 DROP TABLE {ss};\n\
+                 INSERT INTO {i} (sop_instance_uid, series_id, stack_id, first_batch_id) VALUES \
+                 ('1.1', 10, 100, 1), ('1.2', 10, 101, 1), ('1.3', 11, 102, 1);\n\
+                 UPDATE {meta} SET value = '86' WHERE key = 'schema_version'"
+            ))
+            .unwrap();
+        let id = |store: &mut Store, sop: &str| {
+            store
+                .query(
+                    &format!("SELECT id FROM {i} WHERE sop_instance_uid = '{sop}'"),
+                    &[],
+                )
+                .unwrap()[0]
+                .int(0)
+                .unwrap()
+        };
+        let (a, b, c) = (
+            id(&mut store, "1.1"),
+            id(&mut store, "1.2"),
+            id(&mut store, "1.3"),
+        );
+        store
+            .batch(&format!(
+                "INSERT INTO {fr} (instance_id, stack_id, n_frames, first_frame, frames, first_batch_id) \
+                 VALUES ({c}, 102, 2, 1, '1-2', 1), ({c}, 103, 2, 3, '3-4', 1);\n\
+                 INSERT INTO {f} (source_id, batch_id, dir, path, size, mtime_ns, status, reason, instance_id, seen_at) VALUES \
+                 (1, 1, 'd', 'd/a', 1, 1, 'ingested', NULL, {a}, '2026-10-01T10:00:00Z'), \
+                 (1, 1, 'd', 'd/b', 1, 1, 'ingested', NULL, {b}, '2026-10-01T10:00:00Z'), \
+                 (1, 1, 'd', 'd/c', 1, 1, 'ingested', NULL, {c}, '2026-10-01T10:00:00Z'), \
+                 (2, 2, 'e', 'e/a', 1, 1, 'duplicate', NULL, {a}, '2026-10-02T10:00:00Z'), \
+                 (2, 2, 'e', 'e/x', 1, 1, 'quarantined', 'unsupported_sop_class', NULL, '2026-10-02T10:00:00Z'), \
+                 (3, 3, 'g', 'g/b', 1, 1, 'gone', NULL, {b}, '2026-10-03T10:00:00Z')"
+            ))
+            .unwrap();
+        assert_eq!(
+            migrate::migrate(&mut store, Kind::Registry).unwrap(),
+            (87..=migrate::SCHEMA_VERSION).collect::<Vec<i64>>(),
+            "{name}"
+        );
+        let held = |store: &mut Store| -> Vec<(i64, i64)> {
+            store
+                .query(
+                    &format!("SELECT source_id, stack_id FROM {ss} ORDER BY source_id, stack_id"),
+                    &[],
+                )
+                .unwrap()
+                .iter()
+                .map(|r| (r.int(0).unwrap(), r.int(1).unwrap()))
+                .collect()
+        };
+        assert_eq!(
+            held(&mut store),
+            [(1, 100), (1, 101), (1, 102), (1, 103)],
+            "{name}"
+        );
+        let reasons = store
+            .query(
+                &format!("SELECT status, reason FROM {f} WHERE reason IS NOT NULL ORDER BY path"),
+                &[],
+            )
+            .unwrap()
+            .iter()
+            .map(|r| {
+                (
+                    r.text(0).unwrap().to_string(),
+                    r.text(1).unwrap().to_string(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            reasons,
+            [
+                ("duplicate".to_string(), "unchecked".to_string()),
+                (
+                    "quarantined".to_string(),
+                    "unsupported_sop_class".to_string()
+                )
+            ],
+            "{name}"
+        );
+        let count =
+            |store: &mut Store, sql: &str| store.query(sql, &[]).unwrap()[0].int(0).unwrap();
+        assert_eq!(
+            count(
+                &mut store,
+                &format!(
+                    "SELECT COUNT(*) FROM {f} WHERE first_seen_at IS NULL OR first_seen_at <> seen_at"
+                )
+            ),
+            0,
+            "{name}: a row from before was first seen when it was last seen"
+        );
+        // twice is once
+        assert!(
+            migrate::migrate(&mut store, Kind::Registry)
+                .unwrap()
+                .is_empty(),
+            "{name}"
+        );
+        // and one that finds the table there leaves what it holds
+        store
+            .batch(&format!(
+                "DELETE FROM {ss} WHERE stack_id = 103;\n\
+                 UPDATE {meta} SET value = '86' WHERE key = 'schema_version'"
+            ))
+            .unwrap();
+        assert_eq!(
+            migrate::migrate(&mut store, Kind::Registry).unwrap(),
+            (87..=migrate::SCHEMA_VERSION).collect::<Vec<i64>>(),
+            "{name}"
+        );
+        assert_eq!(held(&mut store), [(1, 100), (1, 101), (1, 102)], "{name}");
     }
 }
 
@@ -3268,7 +3621,7 @@ fn migration_85_gives_a_classification_its_notes_on_both_backends() {
         }
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [85],
+            (85..=migrate::SCHEMA_VERSION).collect::<Vec<i64>>(),
             "{name}"
         );
         for col in ["notes", "disagreements"] {
@@ -3319,7 +3672,7 @@ fn migration_85_gives_a_classification_its_notes_on_both_backends() {
             .unwrap();
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [85],
+            (85..=migrate::SCHEMA_VERSION).collect::<Vec<i64>>(),
             "{name}"
         );
         let (.., kept, count) = read(&mut store);
@@ -3330,5 +3683,1191 @@ fn migration_85_gives_a_classification_its_notes_on_both_backends() {
             "{name}"
         );
         assert_eq!(count, Some(2), "{name}");
+    }
+}
+
+/// Record 55, decision 6 (the main-scans study, section 4), migration 88,
+/// on both backends: a registry of schema 87 gains `pick_rules` empty, the
+/// pick's scope and rules version null (every pick it holds is the pack's)
+/// and the release's `pick_rules` null; a version saved after it is read
+/// back, and a second save on the same version is behind.
+#[test]
+fn migration_88_keeps_a_scope_s_main_scan_rules_on_both_backends() {
+    use nils_registry::pick_rules::{self, SaveError, Scope, ScopeKind};
+    for (name, _guard, mut store) in stores() {
+        migrate::migrate(&mut store, Kind::Registry).unwrap();
+        let (p, r, pr, meta) = (
+            store.qualified("pick"),
+            store.qualified("release"),
+            store.qualified("pick_rules"),
+            store.qualified("registry_meta"),
+        );
+        store
+            .batch(&format!(
+                "ALTER TABLE {p} DROP COLUMN rules_scope_kind;\n\
+                 ALTER TABLE {p} DROP COLUMN rules_scope_id;\n\
+                 ALTER TABLE {p} DROP COLUMN rules_version;\n\
+                 ALTER TABLE {r} DROP COLUMN pick_rules;\n\
+                 DROP TABLE {pr};\n\
+                 INSERT INTO {p} (model, role, subject_id, session_day, scheme, reference, pack, pack_version, actor, author_kind, decided_at) \
+                 VALUES ('main', 't1w', 2, '2020-01-01', 's', 'registry', 'mri', '1', 'a', 'agent', '2026-10-01T10:00:00Z');\n\
+                 UPDATE {meta} SET value = '87' WHERE key = 'schema_version'"
+            ))
+            .unwrap();
+        assert_eq!(
+            migrate::migrate(&mut store, Kind::Registry).unwrap(),
+            (88..=migrate::SCHEMA_VERSION).collect::<Vec<i64>>(),
+            "{name}"
+        );
+        let n = store
+            .query(
+                &format!("SELECT COUNT(*) FROM {p} WHERE rules_scope_kind IS NULL AND rules_version IS NULL"),
+                &[],
+            )
+            .unwrap()[0]
+            .int(0)
+            .unwrap();
+        assert_eq!(n, 1, "{name}: the pick from before is the pack's");
+        let scope = Scope {
+            kind: ScopeKind::Cohort,
+            id: 3,
+            name: "trio".into(),
+        };
+        let rules = serde_json::json!({"roles": {"t1w": {"keep_alike": "balanced"}}});
+        assert_eq!(
+            pick_rules::save(&mut store, &scope, &rules, "3D first", "anna", 1).unwrap(),
+            2,
+            "{name}"
+        );
+        assert!(
+            matches!(
+                pick_rules::save(&mut store, &scope, &rules, "mine", "bo", 1),
+                Err(SaveError::Behind { latest: 2 })
+            ),
+            "{name}"
+        );
+        let saved = pick_rules::latest(&mut store, &scope).unwrap().unwrap();
+        assert_eq!((saved.version, saved.rules), (2, rules), "{name}");
+        assert!(
+            migrate::migrate(&mut store, Kind::Registry)
+                .unwrap()
+                .is_empty()
+        );
+    }
+}
+
+/// Record 55 H3, job type 3 (the check-a-result build spec, section 7), on
+/// both backends: a registry of the schema before gains a derivative's
+/// grid, part sets and check, and the table of parts; every derivative it
+/// held is kept as it was, and nothing is added to it until a job reads the
+/// mask. A set of parts written reads back by position and by size, a
+/// check on a part survives the parts being made again, and the list
+/// narrows to what a check left.
+#[test]
+fn migration_90_lets_a_result_be_checked() {
+    use nils_registry::derivative::{self, Part, PartOrder};
+    for (name, _guard, mut store) in stores() {
+        migrate::migrate(&mut store, Kind::Registry).unwrap();
+        let (d, p, meta) = (
+            store.qualified("derivative"),
+            store.qualified("derivative_part"),
+            store.qualified("registry_meta"),
+        );
+        let (ix_check, ix_grid) = (
+            store.qualified("ix_derivative_check_status"),
+            store.qualified("ix_derivative_grid_stack_id"),
+        );
+        store
+            .batch(&format!(
+                "DROP INDEX IF EXISTS {ix_check};
+                 DROP INDEX IF EXISTS {ix_grid};
+                 ALTER TABLE {d} DROP COLUMN grid;
+                 ALTER TABLE {d} DROP COLUMN grid_stack_id;
+                 ALTER TABLE {d} DROP COLUMN grid_link;
+                 ALTER TABLE {d} DROP COLUMN part_sets;
+                 ALTER TABLE {d} DROP COLUMN check_status;
+                 ALTER TABLE {d} DROP COLUMN check_reasons;
+                 ALTER TABLE {d} DROP COLUMN check_decision_id;
+                 ALTER TABLE {d} DROP COLUMN checked_at;
+                 DROP TABLE {p};
+                 UPDATE {meta} SET value = '88' WHERE key = 'schema_version';
+                 INSERT INTO {d} (kind, scope, subject_id, session_day, place_id, path, bytes, sha256, media_type, created_at)
+                   VALUES ('mask', 'session', 3, '2021-02-03', 1, 'derivatives/mask/ab/abcd.nii.gz', 12, 'abcd', 'application/x-nifti+gzip', '2026-09-24T00:00:00Z')"
+            ))
+            .unwrap();
+        assert_eq!(
+            migrate::standing(&mut store, Kind::Registry).unwrap(),
+            Standing::Behind(88),
+            "{name}"
+        );
+        assert_eq!(
+            migrate::migrate(&mut store, Kind::Registry).unwrap(),
+            (89..=migrate::SCHEMA_VERSION).collect::<Vec<i64>>(),
+            "{name}"
+        );
+        for c in [
+            "grid",
+            "grid_stack_id",
+            "grid_link",
+            "part_sets",
+            "check_status",
+            "check_reasons",
+            "check_decision_id",
+            "checked_at",
+        ] {
+            assert!(
+                migrate::column_exists(&mut store, "derivative", c).unwrap(),
+                "{name}: derivative.{c}"
+            );
+        }
+        assert!(
+            migrate::table_exists(&mut store, "derivative_part").unwrap(),
+            "{name}"
+        );
+        // the derivative from before is as it was, and nothing was added
+        let all = derivative::list(
+            &mut store,
+            &derivative::Filter {
+                limit: 10,
+                ..derivative::Filter::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(all.len(), 1, "{name}");
+        let old = &all[0];
+        assert_eq!(
+            (old.kind.as_str(), old.sha256.as_str(), old.bytes),
+            ("mask", "abcd", 12),
+            "{name}"
+        );
+        assert!(old.grid.is_null() && old.part_sets.is_null(), "{name}");
+        assert_eq!(
+            (&old.grid_link, old.grid_stack_id, &old.check_status),
+            (&None, None, &None),
+            "{name}"
+        );
+        let n = store
+            .query(&format!("SELECT COUNT(*) FROM {p}"), &[])
+            .unwrap()[0]
+            .int(0)
+            .unwrap();
+        assert_eq!(n, 0, "{name}: no part until a job reads the mask");
+
+        // what the job writes, and what reads it
+        let grid = serde_json::json!({"dims": [4, 4, 2], "affine": [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]], "datatype": "uint8"});
+        derivative::set_grid(&mut store, old.id, &grid, Some(7), "world").unwrap();
+        assert!(derivative::set_grid(&mut store, old.id, &grid, None, "near").is_err());
+        let part = |label: i64, voxels: i64, position: i64| Part {
+            label,
+            name: None,
+            voxels,
+            volume_mm3: voxels as f64 * 0.5,
+            anchor_mm: [1.0, 2.0, 3.0],
+            box_mm: [[0.5, 1.5, 2.5], [1.5, 2.5, 3.5]],
+            position,
+            method: "26-connected".into(),
+            check_status: None,
+            check_reason: None,
+            check_decision_id: None,
+        };
+        let sets =
+            serde_json::json!([{"key": "lesions", "words": "Lesions", "kind": "components"}]);
+        derivative::set_parts(
+            &mut store,
+            old.id,
+            &sets,
+            &[(
+                "lesions".to_string(),
+                vec![part(1, 3, 1), part(2, 9, 0), part(3, 1, 2)],
+            )],
+        )
+        .unwrap();
+        let (count, by_position) =
+            derivative::parts(&mut store, old.id, "lesions", PartOrder::Position, 0, 500).unwrap();
+        assert_eq!(count, 3, "{name}");
+        assert_eq!(
+            by_position.iter().map(|p| p.label).collect::<Vec<_>>(),
+            [2, 1, 3],
+            "{name}"
+        );
+        assert_eq!(by_position[0].box_mm, [[0.5, 1.5, 2.5], [1.5, 2.5, 3.5]]);
+        assert_eq!(by_position[0].volume_mm3, 4.5, "{name}");
+        let (_, by_size) =
+            derivative::parts(&mut store, old.id, "lesions", PartOrder::Size, 0, 2).unwrap();
+        assert_eq!(
+            by_size.iter().map(|p| p.label).collect::<Vec<_>>(),
+            [2, 1],
+            "{name}"
+        );
+        // a part a person decided keeps its status when it is made again
+        // the same; one whose label now names other geometry loses it, and
+        // its decision is withdrawn (the review of E1, item 4); one no set
+        // holds any longer and nobody decided goes
+        let dec = store.qualified("decision");
+        store
+            .execute(
+                &format!(
+                    "INSERT INTO {dec} (scope, ref, axis, value, actor, author_kind, decided_at) \
+                     VALUES ('derivative_part', '{}:lesions:3', 'check', 'flagged', 'anna', 'person', '2026-10-11T10:00:00Z')",
+                    old.id
+                ),
+                &[],
+            )
+            .unwrap();
+        let dec3 = store
+            .query(&format!("SELECT MAX(id) FROM {dec}"), &[])
+            .unwrap()[0]
+            .int(0)
+            .unwrap();
+        store
+            .execute(
+                &format!(
+                    "UPDATE {p} SET check_status = 'flagged', check_reason = 'under' WHERE label = 2;"
+                ),
+                &[],
+            )
+            .unwrap();
+        store
+            .execute(
+                &format!(
+                    "UPDATE {p} SET check_status = 'flagged', check_reason = 'over', check_decision_id = {dec3} WHERE label = 3"
+                ),
+                &[],
+            )
+            .unwrap();
+        let withdrawn = derivative::set_parts(
+            &mut store,
+            old.id,
+            &sets,
+            &[("lesions".to_string(), vec![part(2, 9, 0), part(3, 5, 1)])],
+        )
+        .unwrap();
+        assert_eq!(withdrawn, vec![dec3], "{name}");
+        let (_, now) =
+            derivative::parts(&mut store, old.id, "lesions", PartOrder::Position, 0, 500).unwrap();
+        assert_eq!(now[0].check_status.as_deref(), Some("flagged"), "{name}");
+        assert_eq!(
+            (now[1].label, now[1].check_status.clone()),
+            (3, None),
+            "{name}"
+        );
+        let gone = store
+            .query(
+                &format!(
+                    "SELECT COUNT(*) FROM {dec} WHERE id = {dec3} AND withdrawn_at IS NOT NULL"
+                ),
+                &[],
+            )
+            .unwrap()[0]
+            .int(0)
+            .unwrap();
+        assert_eq!(gone, 1, "{name}: withdrawn, never deleted");
+        derivative::set_parts(
+            &mut store,
+            old.id,
+            &sets,
+            &[("lesions".to_string(), vec![part(2, 9, 0)])],
+        )
+        .unwrap();
+        let (count, kept) =
+            derivative::parts(&mut store, old.id, "lesions", PartOrder::Position, 0, 500).unwrap();
+        assert_eq!(count, 1, "{name}");
+        assert_eq!(kept[0].label, 2, "{name}");
+        assert_eq!(kept[0].check_status.as_deref(), Some("flagged"), "{name}");
+        let back = derivative::get(&mut store, old.id).unwrap().unwrap();
+        assert_eq!(back.grid, grid, "{name}");
+        assert_eq!(back.grid_stack_id, Some(7), "{name}");
+        assert_eq!(back.grid_link.as_deref(), Some("world"), "{name}");
+        assert_eq!(back.part_sets, sets, "{name}");
+        // the list narrows to what a check left
+        let by = |store: &mut Store, check: &str| {
+            derivative::list(
+                store,
+                &derivative::Filter {
+                    check: Some(check),
+                    limit: 10,
+                    ..derivative::Filter::default()
+                },
+            )
+            .unwrap()
+            .len()
+        };
+        assert_eq!(by(&mut store, "unchecked"), 1, "{name}");
+        assert_eq!(by(&mut store, "accepted"), 0, "{name}");
+        store
+            .execute(
+                &format!(
+                    "UPDATE {d} SET check_status = 'accepted' WHERE id = {}",
+                    old.id
+                ),
+                &[],
+            )
+            .unwrap();
+        assert_eq!(by(&mut store, "accepted"), 1, "{name}");
+        assert_eq!(by(&mut store, "unchecked"), 0, "{name}");
+        assert!(
+            derivative::list(
+                &mut store,
+                &derivative::Filter {
+                    check: Some("maybe"),
+                    limit: 10,
+                    ..derivative::Filter::default()
+                },
+            )
+            .is_err()
+        );
+        assert!(
+            migrate::migrate(&mut store, Kind::Registry)
+                .unwrap()
+                .is_empty()
+        );
+    }
+}
+
+/// Record 55 H3, job type 3 (the check-a-result build spec, section 7, the
+/// campaign's half), on both backends: a registry of the schema before
+/// gains a campaign item's result, part set and part, and the table of a
+/// check's panels; every item it held is kept as it was, naming no result.
+#[test]
+fn migration_91_lets_a_check_be_a_campaign() {
+    for (name, _guard, mut store) in stores() {
+        migrate::migrate(&mut store, Kind::Registry).unwrap();
+        let (i, p, meta) = (
+            store.qualified("campaign_item"),
+            store.qualified("campaign_check_panel"),
+            store.qualified("registry_meta"),
+        );
+        let ix = store.qualified("ix_campaign_item_derivative_id");
+        store
+            .batch(&format!(
+                "DROP INDEX IF EXISTS {ix};
+                 ALTER TABLE {i} DROP COLUMN derivative_id;
+                 ALTER TABLE {i} DROP COLUMN part_set;
+                 ALTER TABLE {i} DROP COLUMN part_label;
+                 DROP TABLE {p};
+                 UPDATE {meta} SET value = '90' WHERE key = 'schema_version';
+                 INSERT INTO {i} (campaign_id, position, review_item_id, stack_id, key, state, round)
+                   VALUES (1, 0, 5, 12, 'stack:12', 'open', 1)"
+            ))
+            .unwrap();
+        assert_eq!(
+            migrate::standing(&mut store, Kind::Registry).unwrap(),
+            Standing::Behind(90),
+            "{name}"
+        );
+        assert_eq!(
+            migrate::migrate(&mut store, Kind::Registry).unwrap(),
+            (91..=migrate::SCHEMA_VERSION).collect::<Vec<i64>>(),
+            "{name}"
+        );
+        for c in ["derivative_id", "part_set", "part_label"] {
+            assert!(
+                migrate::column_exists(&mut store, "campaign_item", c).unwrap(),
+                "{name}: campaign_item.{c}"
+            );
+        }
+        assert!(
+            migrate::table_exists(&mut store, "campaign_check_panel").unwrap(),
+            "{name}"
+        );
+        // the item from before is as it was, and names no result
+        let it = nils_registry::campaign::items(&mut store, 1).unwrap();
+        assert_eq!(it.len(), 1, "{name}");
+        assert_eq!(
+            (
+                it[0].stack_id,
+                it[0].derivative_id,
+                &it[0].part_set,
+                it[0].part_label
+            ),
+            (Some(12), None, &None, None),
+            "{name}"
+        );
+        let n = store
+            .query(&format!("SELECT COUNT(*) FROM {p}"), &[])
+            .unwrap()[0]
+            .int(0)
+            .unwrap();
+        assert_eq!(n, 0, "{name}");
+        assert!(
+            migrate::migrate(&mut store, Kind::Registry)
+                .unwrap()
+                .is_empty(),
+            "{name}"
+        );
+    }
+}
+
+/// After type 3's first end-to-end test, on both backends: a registry of the
+/// schema before gains when and why a close refused an item; every item it
+/// held is kept as it was, refused by nothing.
+#[test]
+fn migration_92_lets_a_refused_item_say_why() {
+    for (name, _guard, mut store) in stores() {
+        migrate::migrate(&mut store, Kind::Registry).unwrap();
+        let (i, meta) = (
+            store.qualified("campaign_item"),
+            store.qualified("registry_meta"),
+        );
+        store
+            .batch(&format!(
+                "ALTER TABLE {i} DROP COLUMN refused_at;
+                 ALTER TABLE {i} DROP COLUMN refused_why;
+                 UPDATE {meta} SET value = '91' WHERE key = 'schema_version';
+                 INSERT INTO {i} (campaign_id, position, review_item_id, stack_id, key, state, round)
+                   VALUES (1, 0, 5, 12, 'stack:12', 'agreed', 1)"
+            ))
+            .unwrap();
+        assert_eq!(
+            migrate::standing(&mut store, Kind::Registry).unwrap(),
+            Standing::Behind(91),
+            "{name}"
+        );
+        assert_eq!(
+            migrate::migrate(&mut store, Kind::Registry).unwrap(),
+            (92..=migrate::SCHEMA_VERSION).collect::<Vec<i64>>(),
+            "{name}"
+        );
+        for c in ["refused_at", "refused_why"] {
+            assert!(
+                migrate::column_exists(&mut store, "campaign_item", c).unwrap(),
+                "{name}: campaign_item.{c}"
+            );
+        }
+        let it = nils_registry::campaign::items(&mut store, 1).unwrap();
+        assert_eq!(it.len(), 1, "{name}");
+        assert_eq!(
+            (it[0].state.as_str(), &it[0].refused_at, &it[0].refused_why),
+            ("agreed", &None, &None),
+            "{name}"
+        );
+        assert_eq!(
+            it[0].as_json()["refused"],
+            serde_json::Value::Null,
+            "{name}"
+        );
+        assert!(
+            migrate::migrate(&mut store, Kind::Registry)
+                .unwrap()
+                .is_empty(),
+            "{name}"
+        );
+    }
+}
+
+/// The review of E1, item 6, on both backends: a registry at schema 59, from
+/// before a derivative had a check and a grid scan, migrates to the newest:
+/// migration 60 makes the derivative's indexes it has columns for, and
+/// migration 90 the indexes of the columns it adds.
+#[test]
+fn a_registry_at_59_migrates_past_the_check_s_indexes() {
+    for (name, _guard, mut store) in stores() {
+        migrate::migrate(&mut store, Kind::Registry).unwrap();
+        let (d, p, meta) = (
+            store.qualified("derivative"),
+            store.qualified("derivative_part"),
+            store.qualified("registry_meta"),
+        );
+        let ixs = [
+            "ix_derivative_check_status",
+            "ix_derivative_grid_stack_id",
+            "ix_campaign_item_derivative_id",
+        ]
+        .map(|i| store.qualified(i));
+        let (i, cp) = (
+            store.qualified("campaign_item"),
+            store.qualified("campaign_check_panel"),
+        );
+        store
+            .batch(&format!(
+                "DROP INDEX IF EXISTS {};
+                 DROP INDEX IF EXISTS {};
+                 DROP INDEX IF EXISTS {};
+                 ALTER TABLE {d} DROP COLUMN grid;
+                 ALTER TABLE {d} DROP COLUMN grid_stack_id;
+                 ALTER TABLE {d} DROP COLUMN grid_link;
+                 ALTER TABLE {d} DROP COLUMN part_sets;
+                 ALTER TABLE {d} DROP COLUMN check_status;
+                 ALTER TABLE {d} DROP COLUMN check_reasons;
+                 ALTER TABLE {d} DROP COLUMN check_decision_id;
+                 ALTER TABLE {d} DROP COLUMN checked_at;
+                 ALTER TABLE {i} DROP COLUMN derivative_id;
+                 ALTER TABLE {i} DROP COLUMN part_set;
+                 ALTER TABLE {i} DROP COLUMN part_label;
+                 DROP TABLE {p};
+                 DROP TABLE {cp};
+                 UPDATE {meta} SET value = '59' WHERE key = 'schema_version'",
+                ixs[0], ixs[1], ixs[2],
+            ))
+            .unwrap();
+        assert_eq!(
+            migrate::migrate(&mut store, Kind::Registry).unwrap(),
+            (60..=migrate::SCHEMA_VERSION).collect::<Vec<i64>>(),
+            "{name}"
+        );
+        for c in ["check_status", "grid_stack_id"] {
+            assert!(
+                migrate::column_exists(&mut store, "derivative", c).unwrap(),
+                "{name}: {c}"
+            );
+        }
+        // the indexes are there: a second migration finds nothing to do,
+        // and each is named in the catalogue of its backend
+        let names: Vec<String> = match name.as_str() {
+            "sqlite" => store
+                .query("SELECT name FROM sqlite_master WHERE type = 'index'", &[])
+                .unwrap()
+                .iter()
+                .map(|r| r.text(0).unwrap().to_string())
+                .collect(),
+            _ => store
+                .query(
+                    &format!(
+                        "SELECT indexname FROM pg_indexes WHERE schemaname = '{}'",
+                        store.schema().unwrap()
+                    ),
+                    &[],
+                )
+                .unwrap()
+                .iter()
+                .map(|r| r.text(0).unwrap().to_string())
+                .collect(),
+        };
+        for ix in [
+            "ix_derivative_check_status",
+            "ix_derivative_grid_stack_id",
+            "ix_campaign_item_derivative_id",
+        ] {
+            assert!(names.iter().any(|n| n == ix), "{name}: {ix} in {names:?}");
+        }
+        assert!(
+            migrate::migrate(&mut store, Kind::Registry)
+                .unwrap()
+                .is_empty(),
+            "{name}"
+        );
+    }
+}
+
+/// 2026-10-12, migration 93, on both backends: a registry from before gains
+/// `pipeline_run.failure`, and a failed run keeps its failure beside its
+/// error until it is taken up again.
+#[test]
+fn migration_93_keeps_a_run_s_failure_on_both_backends() {
+    use nils_registry::pipeline;
+    for (name, _guard, mut store) in stores() {
+        migrate::migrate(&mut store, Kind::Registry).unwrap();
+        let (r, meta) = (
+            store.qualified("pipeline_run"),
+            store.qualified("registry_meta"),
+        );
+        store
+            .batch(&format!(
+                "ALTER TABLE {r} DROP COLUMN failure;
+                 UPDATE {meta} SET value = '92' WHERE key = 'schema_version'"
+            ))
+            .unwrap();
+        assert_eq!(
+            migrate::standing(&mut store, Kind::Registry).unwrap(),
+            Standing::Behind(92),
+            "{name}"
+        );
+        assert_eq!(
+            migrate::migrate(&mut store, Kind::Registry).unwrap(),
+            (93..=migrate::SCHEMA_VERSION).collect::<Vec<i64>>(),
+            "{name}"
+        );
+        assert!(
+            migrate::column_exists(&mut store, "pipeline_run", "failure").unwrap(),
+            "{name}"
+        );
+        let descriptor = serde_json::json!({"name": "n4", "x-nils": {"analysis-level": "session"}});
+        let (entry, _) = pipeline::add(
+            &mut store,
+            &pipeline::New {
+                name: "n4",
+                tool_version: "2.6",
+                descriptor: &descriptor,
+                descriptor_digest: "sha256:01",
+                image: "antsx/ants@sha256:00",
+                image_digest: "sha256:00",
+                layout: "bids",
+                level: "session",
+                added_by: "ops@lab",
+                added_at: "2026-09-24T10:00:00Z",
+            },
+        )
+        .unwrap();
+        let params = serde_json::json!({});
+        let failed = pipeline::start(
+            &mut store,
+            &pipeline::NewRun {
+                pipeline_id: entry.id,
+                job_id: Some(8),
+                handle_id: Some(3),
+                selection: None,
+                params: &params,
+                runtime: "podman",
+                runtime_version: "5.0.3",
+                host: "ward-3",
+                device: "cpu",
+                model_ids: &[],
+                label_set_id: None,
+                place_id: Some(1),
+                scratch_place_id: None,
+                principal: "ops@lab",
+                actor: None,
+                started_at: "2026-09-24T10:03:00Z",
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            pipeline::run(&mut store, failed).unwrap().unwrap().failure,
+            serde_json::Value::Null,
+            "{name}"
+        );
+        let failure = serde_json::json!({"kind": "dependency", "cause": "dcm2niix", "advice": "install it", "fix": null});
+        pipeline::finish(
+            &mut store,
+            failed,
+            &pipeline::Finish {
+                status: "failed",
+                finished_at: "2026-09-24T10:04:00Z",
+                exit_code: None,
+                results_digest: None,
+                summary: &serde_json::json!({}),
+                error: Some("the release of the input failed: dcm2niix is not runnable"),
+                failure: Some(&failure),
+            },
+        )
+        .unwrap();
+        let kept = pipeline::run(&mut store, failed).unwrap().unwrap();
+        assert_eq!(kept.failure, failure, "{name}");
+        assert_eq!(
+            kept.error.as_deref(),
+            Some("the release of the input failed: dcm2niix is not runnable"),
+            "{name}"
+        );
+        pipeline::resume(&mut store, failed, 9).unwrap();
+        let resumed = pipeline::run(&mut store, failed).unwrap().unwrap();
+        assert_eq!(resumed.failure, serde_json::Value::Null, "{name}");
+        assert_eq!(resumed.error, None, "{name}");
+    }
+}
+
+/// Record 55 (rulings of 2026-10-12, item 6, carried to releases),
+/// migration 94, on both backends: a registry of schema 93 gains
+/// `release_pick` empty. A release from before it, of picked stacks, reads
+/// the live picks of what it recorded while they name the stacks it holds,
+/// and says they are gone once they no longer do; a release that froze its
+/// picks reads the list it froze, whatever the live picks say by then.
+#[test]
+fn migration_94_keeps_the_picks_a_release_read_on_both_backends() {
+    use nils_registry::pick_truth::{self, Of, OfRelease, Picks};
+    for (name, _guard, mut store) in stores() {
+        migrate::migrate(&mut store, Kind::Registry).unwrap();
+        let (rp, meta) = (
+            store.qualified("release_pick"),
+            store.qualified("registry_meta"),
+        );
+        store
+            .batch(&format!(
+                "DROP TABLE {rp};\n\
+                 UPDATE {meta} SET value = '93' WHERE key = 'schema_version'"
+            ))
+            .unwrap();
+        assert_eq!(
+            migrate::migrate(&mut store, Kind::Registry).unwrap(),
+            (94..=migrate::SCHEMA_VERSION).collect::<Vec<i64>>(),
+            "{name}"
+        );
+        assert!(
+            migrate::table_exists(&mut store, "release_pick").unwrap(),
+            "{name}"
+        );
+        // the pack's pick of subject 2's visit names stack 5; two releases
+        // of picked stacks hold it, one recorded from before, one frozen
+        let (p, ps, r, rs) = (
+            store.qualified("pick"),
+            store.qualified("pick_stack"),
+            store.qualified("release"),
+            store.qualified("release_stack"),
+        );
+        let one = |store: &mut Store, sql: &str| store.query(sql, &[]).unwrap()[0].int(0).unwrap();
+        store
+            .batch(&format!(
+                "INSERT INTO {p} (model, role, subject_id, session_day, scheme, reference, pack, pack_version, \
+                 actor, author_kind, decided_at, rules_version) VALUES ('main', 't1w', 2, '2020-01-01', 's', \
+                 'registry', 'mri', '1', 'a', 'agent', '2026-10-01T10:00:00Z', 1)"
+            ))
+            .unwrap();
+        let pick = one(&mut store, &format!("SELECT MAX(id) FROM {p}"));
+        store
+            .batch(&format!(
+                "INSERT INTO {ps} (pick_id, stack_id) VALUES ({pick}, 5)"
+            ))
+            .unwrap();
+        let mut release = |name: &str| -> i64 {
+            store
+                .batch(&format!(
+                    "INSERT INTO {r} (name, version, root, policy, selection, categories, session_scheme, \
+                     layout, placements, pack, pack_version, actor, started_at, files, subjects, unchanged, \
+                     moved, rewritten, added, removed, pick_rules) VALUES ('{name}', '2026.10.12.1', \
+                     '/out/{name}', '{{}}', '{{\"picked_only\": true}}', '', '{{}}', 'descriptive', '{{}}', \
+                     'mri', '1', 'anna', '2026-10-12T10:00:00Z', 1, 1, 0, 0, 0, 1, 0, \
+                     '{{\"scope\": null, \"version\": 1, \"defaults\": true}}')"
+                ))
+                .unwrap();
+            let id = one(
+                &mut store,
+                &format!("SELECT id FROM {r} WHERE name = '{name}'"),
+            );
+            store
+                .batch(&format!(
+                    "INSERT INTO {rs} (dataset_id, stack_id, release_id, content, dir, route, files, bytes, digest) \
+                     VALUES ({id}, 5, {id}, 'c', 'sub-a/ses-b', 'raw', 1, 1, 'd')"
+                ))
+                .unwrap();
+            id
+        };
+        let (before, kept, listed) = (release("from-before"), release("kept"), release("listed"));
+        let frozen = pick_truth::freeze(&mut store, kept, &Of::Pack, &[(5, 2)], &[]).unwrap();
+        assert_eq!(
+            frozen.doc(),
+            serde_json::json!({"visits": 1, "picks": 1, "stacks": 1}),
+            "{name}"
+        );
+        store
+            .batch(&format!(
+                "UPDATE {r} SET pick_rules = '{{\"scope\": null, \"version\": 1, \"defaults\": true, \
+                 \"frozen\": {}}}' WHERE id = {kept}",
+                frozen.doc()
+            ))
+            .unwrap();
+        assert_eq!(
+            pick_truth::of_release(&mut store, before).unwrap(),
+            Some(OfRelease::Recorded(Of::Pack)),
+            "{name}: from before, its picks there"
+        );
+        assert_eq!(
+            pick_truth::of_release(&mut store, kept).unwrap(),
+            Some(OfRelease::Frozen(kept)),
+            "{name}"
+        );
+        assert_eq!(
+            pick_truth::of_release(&mut store, kept + 100).unwrap(),
+            None
+        );
+        // the pack's run picks stack 6 instead
+        store
+            .batch(&format!(
+                "UPDATE {ps} SET stack_id = 6 WHERE pick_id = {pick}"
+            ))
+            .unwrap();
+        let gone = pick_truth::of_release(&mut store, before).unwrap().unwrap();
+        assert_eq!(gone.picks(), None, "{name}");
+        assert_eq!(
+            gone.gone(),
+            Some("the pack's main scans, which no longer name 1 of the stacks it holds"),
+            "{name}"
+        );
+        let read = |store: &mut Store, picks: &Picks| -> Vec<(i64, String, String, i64)> {
+            let sql = format!(
+                "SELECT p.subject_id, CAST(p.session_day AS TEXT), p.role, p.stack_id FROM {} p",
+                picks.stacks(store)
+            );
+            store
+                .query(&sql, &[])
+                .unwrap()
+                .iter()
+                .map(|r| {
+                    (
+                        r.int(0).unwrap(),
+                        r.text(1).unwrap().chars().take(10).collect(),
+                        r.text(2).unwrap().to_string(),
+                        r.int(3).unwrap(),
+                    )
+                })
+                .collect()
+        };
+        let row = |stack: i64| vec![(2, "2020-01-01".to_string(), "t1w".to_string(), stack)];
+        assert_eq!(read(&mut store, &Picks::Frozen(kept)), row(5), "{name}");
+        assert_eq!(read(&mut store, &Picks::Live(Of::Pack)), row(6), "{name}");
+        // a run's list over two roles (2026-10-12): the visit's T1w is
+        // picked live, its FLAIR (stack 7) by no pick any more; each is kept
+        // as the role the list took it for
+        let list = |role: &str, stack: i64| pick_truth::Listed {
+            role: role.to_string(),
+            stacks: vec![(stack, 2, "2020-01-01".to_string())],
+        };
+        let frozen = pick_truth::freeze(
+            &mut store,
+            listed,
+            &Of::Pack,
+            &[(6, 2), (7, 2)],
+            &[list("t1w", 6), list("flair", 7)],
+        )
+        .unwrap();
+        assert_eq!(
+            frozen.doc(),
+            serde_json::json!({"visits": 1, "picks": 2, "stacks": 2, "listed": 1}),
+            "{name}"
+        );
+        let mut kept_roles = read(&mut store, &Picks::Frozen(listed));
+        kept_roles.sort();
+        assert_eq!(
+            kept_roles,
+            vec![
+                (2, "2020-01-01".to_string(), "flair".to_string(), 7),
+                (2, "2020-01-01".to_string(), "t1w".to_string(), 6),
+            ],
+            "{name}"
+        );
+        assert!(
+            migrate::migrate(&mut store, Kind::Registry)
+                .unwrap()
+                .is_empty()
+        );
+    }
+}
+
+/// Record 55 F2 and F5, migration 95, on both backends: a registry of
+/// schema 94 gains `contrast_label` empty, with one row a stack.
+#[test]
+fn migration_95_adds_the_contrast_label_on_both_backends() {
+    for (name, _guard, mut store) in stores() {
+        migrate::migrate(&mut store, Kind::Registry).unwrap();
+        let (cl, meta) = (
+            store.qualified("contrast_label"),
+            store.qualified("registry_meta"),
+        );
+        store
+            .batch(&format!(
+                "DROP TABLE {cl};\n\
+                 UPDATE {meta} SET value = '94' WHERE key = 'schema_version'"
+            ))
+            .unwrap();
+        assert_eq!(
+            migrate::migrate(&mut store, Kind::Registry).unwrap(),
+            (95..=migrate::SCHEMA_VERSION).collect::<Vec<i64>>(),
+            "{name}"
+        );
+        assert!(
+            migrate::table_exists(&mut store, "contrast_label").unwrap(),
+            "{name}"
+        );
+        let insert = |store: &mut Store| {
+            store.batch(&format!(
+                "INSERT INTO {cl} (stack_id, study_id, subject_id, contrast_state, contrast_source, basis, \
+                 contrast_prior_72h, checks, weak_f, family, t1_family, use_level, anchored, rule, labelled_at) \
+                 VALUES (7, 3, 2, 'post', 't1_anchor_time_rule', 'bracket', 'no', '[]', 0, 'FLAIR', 0, \
+                 '1 %', 1, 'time-rule-1', '2026-10-13T10:00:00Z')"
+            ))
+        };
+        insert(&mut store).unwrap();
+        assert!(insert(&mut store).is_err(), "one row a stack: {name}");
+    }
+}
+
+/// Record 55 D4 and A5 on both backends (T22, T23): a card's tested
+/// claims, speeds, GPU need and equivalence are checked as the contract has
+/// them and a card lacking one is not complete; several admitted models
+/// answer a task, the chosen one by the site's choice, else the one a
+/// recorded certificate names, else the one promoted last, else the newest
+/// admitted, and a choice goes back to the default; the CPU and GPU
+/// equivalence is measured in its classes, and a model that takes a GPU is
+/// admitted only with a class no worse than its card's.
+#[test]
+fn several_models_answer_a_task_and_the_site_chooses_on_both_backends() {
+    use nils_registry::model::{self, Error};
+    use nils_registry::proposals::Proposal;
+    for (name, _guard, _dir, mut reg) in registries() {
+        let digest = |c: char| format!("sha256:{}", c.to_string().repeat(64));
+        let who = "anna@ward-3";
+        let full = |v: &str, d: &str, class: &str| {
+            serde_json::json!({
+                "name": "fusion", "version": v, "kind": "head", "digest": d, "task": "axis:body_part",
+                "encoders": [{"digest": digest('e')}], "threshold": 0.9,
+                "tested": [{"claim": "E1", "value": 0.997, "bound": 0.996, "n": 100, "evidence": "run-1"}],
+                "speed": {"cpu": {"stacks_per_second": 20.0, "hardware": "64 cores", "evidence": "run-2"},
+                          "gpu": {"stacks_per_second": 100.0, "hardware": "a card", "evidence": "run-2"}},
+                "gpu": "optional",
+                "equivalence": {"class": class, "tolerance": null, "set": "blocks", "evidence": "run-2"},
+                "intended_use": "body part", "limits": ["MR only"],
+            })
+        };
+        model::register(
+            &mut reg,
+            &serde_json::json!({"name": "tiny", "version": "1", "kind": "encoder", "digest": digest('e'), "task": "features:image"}),
+            who,
+        )
+        .unwrap();
+        // the card's new fields, as the contract has them
+        for (field, bad, what) in [
+            ("gpu", serde_json::json!("maybe"), "gpu is none"),
+            (
+                "equivalence",
+                serde_json::json!({"class": "IV", "set": "s", "evidence": "e"}),
+                "equivalence.class",
+            ),
+            (
+                "tested",
+                serde_json::json!([{"claim": "E1", "value": 1}]),
+                "evidence run",
+            ),
+            (
+                "speed",
+                serde_json::json!({"gpu": {"stacks_per_second": 1, "hardware": "h", "evidence": "e"}}),
+                "speed.cpu",
+            ),
+            (
+                "speed",
+                serde_json::json!({"cpu": {"stacks_per_second": 0, "hardware": "h", "evidence": "e"}}),
+                "above 0",
+            ),
+        ] {
+            let mut c = full("x", &digest('8'), "I");
+            c[field] = bad.clone();
+            let e = model::register(&mut reg, &c, who).unwrap_err();
+            assert!(
+                matches!(&e, Error::Invalid(m) if m.contains(what)),
+                "{name}: {field} {bad}: {e:?}"
+            );
+        }
+        let one = model::register(&mut reg, &full("1", &digest('1'), "I"), who).unwrap();
+        // no label set named: the one thing the card lacks
+        assert_eq!(one.missing(), ["trained_on"], "{name}");
+        let two = model::register(&mut reg, &full("2", &digest('2'), "III"), who).unwrap();
+        assert_eq!(
+            model::chosen(reg.store(), "axis:body_part", "site").unwrap(),
+            None,
+            "{name}: nothing answers before a check"
+        );
+        // the equivalence classes, each answer read at its model's threshold
+        let p = |stack: i64, value: &str, conf: f64| Proposal {
+            stack_id: stack,
+            axis: "body_part".into(),
+            value: value.into(),
+            probabilities: [(value.to_string(), conf), ("other".to_string(), 1.0 - conf)]
+                .into_iter()
+                .collect(),
+            model_id: Some(one.id),
+            model_digest: None,
+            note: None,
+        };
+        let cpu = [p(1, "brain", 0.97), p(2, "spine", 0.93)];
+        let class = |reg: &mut nils_registry::Registry, m: &model::Model, gpu: &[Proposal]| {
+            model::equivalence(reg.store(), m, &cpu, gpu).unwrap()
+        };
+        let same = class(
+            &mut reg,
+            &one,
+            &[p(1, "brain", 0.9704), p(2, "spine", 0.93)],
+        );
+        assert_eq!(same["class"], "I", "{name}: {same}");
+        let unsure = class(&mut reg, &one, &[p(1, "brain", 0.97), p(2, "spine", 0.85)]);
+        assert_eq!(
+            (unsure["class"].as_str(), unsure["changes"].as_i64()),
+            (Some("III"), Some(1)),
+            "{name}: {unsure}"
+        );
+        let flipped = class(&mut reg, &one, &[p(1, "spine", 0.97), p(2, "spine", 0.93)]);
+        assert_eq!(
+            (flipped["class"].clone(), flipped["flips"].as_i64()),
+            (serde_json::Value::Null, Some(1)),
+            "{name}: {flipped}"
+        );
+        let apart = model::equivalence(reg.store(), &one, &cpu, &[p(9, "brain", 0.97)]);
+        assert!(matches!(apart, Err(Error::Invalid(_))), "{name}: {apart:?}");
+        // admission: a class worse than the card's is a failed check
+        let check = |eq: serde_json::Value| serde_json::json!({"suite": "s", "passed": true, "checks": [{"name": "c", "passed": true}], "equivalence": eq});
+        let refused = model::admit(&mut reg, one.id, &check(unsure.clone()), who).unwrap();
+        assert_eq!(refused.state, "registered", "{name}");
+        let failed: Vec<&serde_json::Value> = refused.check.as_ref().unwrap()["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|c| c["passed"] == false)
+            .collect();
+        assert_eq!(failed.len(), 1, "{name}: {failed:?}");
+        assert_eq!(failed[0]["name"], "cpu_gpu_equivalence", "{name}");
+        let mut other_file = same.clone();
+        other_file["digest"] = serde_json::json!(digest('9'));
+        assert!(
+            matches!(model::admit(&mut reg, one.id, &check(other_file), who), Err(Error::Invalid(m)) if m.contains("the file that ships")),
+            "{name}"
+        );
+        let one = model::admit(&mut reg, one.id, &check(same), who).unwrap();
+        assert_eq!(one.state, "admitted", "{name}");
+        let two = model::admit(&mut reg, two.id, &check(unsure), who).unwrap();
+        assert_eq!(
+            two.state, "admitted",
+            "{name}: class III on a class III card"
+        );
+        // the default: the newest admitted, then the newest promoted
+        let by = |reg: &mut nils_registry::Registry| {
+            let c = model::chosen(reg.store(), "axis:body_part", "site")
+                .unwrap()
+                .unwrap();
+            (c.model.id, c.by)
+        };
+        assert_eq!(by(&mut reg), (two.id, "admitted"), "{name}");
+        model::promote(&mut reg, one.id, who, None, None).unwrap();
+        assert_eq!(by(&mut reg), (one.id, "promoted"), "{name}");
+        model::promote(&mut reg, two.id, who, None, None).unwrap();
+        assert_eq!(
+            by(&mut reg),
+            (two.id, "promoted"),
+            "{name}: none retired, the newest answers"
+        );
+        // a certificate names the first: it is the default
+        let store = reg.store();
+        let cert = store
+            .insert(
+                &Insert::new(
+                    table("certificate"),
+                    &["sample", "model_ids", "result", "created_by", "created_at"],
+                )
+                .returning(&["id"]),
+                &[vec![
+                    Param::from("selection:s@1"),
+                    Param::from(format!("[{}]", one.id)),
+                    Param::from("{}"),
+                    Param::from(who),
+                    Param::from("2026-10-13T00:00:00Z"),
+                ]],
+            )
+            .unwrap()[0]
+            .int(0)
+            .unwrap();
+        let c = model::chosen(reg.store(), "axis:body_part", "site")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (c.model.id, c.by, c.certificate_id),
+            (one.id, "certificate", Some(cert)),
+            "{name}"
+        );
+        // the site chooses the second, audited; then back to the default
+        let chose = model::choose(&mut reg, two.id, who, Some("faster")).unwrap();
+        assert_eq!(
+            (chose.model.id, chose.by, chose.why.as_deref()),
+            (two.id, "site", Some("faster")),
+            "{name}"
+        );
+        assert_eq!(
+            model::chosen_ids(reg.store())
+                .unwrap()
+                .into_iter()
+                .collect::<Vec<_>>(),
+            [two.id],
+            "{name}"
+        );
+        let back = model::unchoose(&mut reg, "axis:body_part", "site", who, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!((back.model.id, back.by), (one.id, "certificate"), "{name}");
+        let moves: Vec<String> = model::events(reg.store(), two.id)
+            .unwrap()
+            .iter()
+            .filter_map(|e| e["transition"].as_str().map(str::to_string))
+            .collect();
+        assert!(
+            moves.ends_with(&["chosen".to_string(), "unchosen".to_string()]),
+            "{name}: {moves:?}"
+        );
+        // a chosen model that is retired since answers no more
+        model::choose(&mut reg, two.id, who, None).unwrap();
+        model::retire(&mut reg, two.id, who, None).unwrap();
+        assert_eq!(by(&mut reg), (one.id, "certificate"), "{name}");
+        let e = model::choose(&mut reg, two.id, who, None).unwrap_err();
+        assert!(
+            matches!(&e, Error::Refused(m) if m.contains("retired")),
+            "{name}: {e:?}"
+        );
+        assert!(
+            matches!(
+                model::unchoose(&mut reg, "axis:nothing", "site", who, None),
+                Err(Error::Unknown(_))
+            ),
+            "{name}"
+        );
+    }
+}
+
+/// Record 55 E5, migration 97, on both backends: a registry of schema 96
+/// gains `file_content`; a hash learnt for a file holds while the file has
+/// the size and time it was learnt at, a newer hash replaces it, and one
+/// that is not `sha256:<hex>` is never kept.
+#[test]
+fn migration_97_adds_what_a_file_holds_and_a_hash_holds_while_the_file_is_unchanged() {
+    use nils_registry::content::{self, Learnt};
+    for (name, _guard, mut store) in stores() {
+        migrate::migrate(&mut store, Kind::Registry).unwrap();
+        let (fc, meta) = (
+            store.qualified("file_content"),
+            store.qualified("registry_meta"),
+        );
+        store
+            .batch(&format!(
+                "DROP TABLE {fc};\n\
+                 UPDATE {meta} SET value = '96' WHERE key = 'schema_version'"
+            ))
+            .unwrap();
+        assert_eq!(
+            migrate::migrate(&mut store, Kind::Registry).unwrap(),
+            (97..=migrate::SCHEMA_VERSION).collect::<Vec<i64>>(),
+            "{name}"
+        );
+        let sf = store.qualified("source_file");
+        store
+            .batch(&format!(
+                "INSERT INTO {sf} (source_id, batch_id, dir, path, size, mtime_ns, status, seen_at) \
+                 VALUES (1, 1, 'a', 'a/IM1', 100, 5, 'ingested', '2026-10-14T10:00:00Z'), \
+                 (1, 1, 'a', 'a/IM2', 200, 6, 'ingested', '2026-10-14T10:00:00Z')"
+            ))
+            .unwrap();
+        let hash = |c: char| format!("sha256:{}", c.to_string().repeat(64));
+        let learnt = |path: &str, size: i64, sha: String| Learnt {
+            source_id: 1,
+            path: path.to_string(),
+            size,
+            mtime_ns: if path.ends_with('1') { 5 } else { 6 },
+            sha256: sha,
+            run_id: Some(3),
+        };
+        assert_eq!(
+            content::learn(
+                &mut store,
+                &[
+                    learnt("a/IM1", 100, hash('a')),
+                    learnt("a/IM2", 999, hash('b')),
+                    learnt("a/IM3", 1, "not a hash".into()),
+                ],
+            )
+            .unwrap(),
+            2,
+            "{name}"
+        );
+        // IM2 was learnt at another size than the registry holds: no hash
+        assert_eq!(content::known(&mut store).unwrap(), 1, "{name}");
+        content::learn(&mut store, &[learnt("a/IM2", 200, hash('c'))]).unwrap();
+        assert_eq!(content::known(&mut store).unwrap(), 2, "{name}");
+        let read = format!(
+            "SELECT fc.sha256 FROM {sf} f {} WHERE f.path = 'a/IM2'",
+            content::join(&store, "f", "fc")
+        );
+        assert_eq!(
+            store.query(&read, &[]).unwrap()[0].text(0).unwrap(),
+            hash('c'),
+            "{name}"
+        );
+        // the digest saw the file change: its hash no longer holds
+        store
+            .batch(&format!(
+                "UPDATE {sf} SET mtime_ns = 7 WHERE path = 'a/IM1'"
+            ))
+            .unwrap();
+        assert_eq!(content::known(&mut store).unwrap(), 1, "{name}");
     }
 }

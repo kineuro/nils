@@ -151,17 +151,88 @@ fn picked(home: &Home) -> Vec<i64> {
         .collect()
 }
 
+/// A run's pick (the pack's, applying) on an occasion with more than one
+/// candidate.
+fn ambiguous(home: &Home) -> i64 {
+    let mut store = home.store();
+    let rows = store
+        .query(
+            &format!(
+                "SELECT id, CAST(considered AS TEXT) FROM {} WHERE author_kind = 'agent' \
+                 AND withdrawn_at IS NULL AND rules_scope_kind IS NULL AND role = 't1w' ORDER BY id",
+                store.qualified("pick")
+            ),
+            &[],
+        )
+        .unwrap();
+    rows.iter()
+        .find(|r| {
+            serde_json::from_str::<serde_json::Value>(r.text(1).unwrap())
+                .unwrap()
+                .as_array()
+                .is_some_and(|c| c.len() >= 2)
+        })
+        .expect("the synthetic registry has an occasion of two candidates")
+        .int(0)
+        .unwrap()
+}
+
+/// An open `pick.border` item on the occasion of run pick `pick`, as a run
+/// before record 55's rules raised one: a run under the rules raises none
+/// and settles those open on what it decides.
+fn plant_border(home: &Home, pick: i64, borders: &[&str], names_pick: bool) -> i64 {
+    let mut store = home.store();
+    let r = store
+        .query(
+            &format!(
+                "SELECT model, role, subject_id, CAST(session_day AS TEXT), scheme, scheme_digest, \
+                        pack, pack_version, CAST(considered AS TEXT) FROM {} WHERE id = {pick}",
+                store.qualified("pick")
+            ),
+            &[],
+        )
+        .unwrap()
+        .remove(0);
+    let considered: serde_json::Value = serde_json::from_str(r.text(8).unwrap()).unwrap();
+    let scheme = serde_json::json!({
+        "name": r.text(4).unwrap(), "digest": r.text(5).unwrap(),
+        "definition": nils_registry::session::Scheme::default(),
+    });
+    nils_registry::review::raise_pick_border(
+        &mut store,
+        &nils_registry::review::PickBorder {
+            model: r.text(0).unwrap(),
+            role: r.text(1).unwrap(),
+            subject_id: r.int(2).unwrap(),
+            day: &r.text(3).unwrap()[..10],
+            borders,
+            pick_id: names_pick.then_some(pick),
+            score: None,
+            margin: None,
+            runner_up_score: None,
+            considered: &considered,
+            notes: &serde_json::json!({}),
+            job_id: None,
+            scheme: &scheme,
+            pack: r.text(6).unwrap(),
+            pack_version: r.text(7).unwrap(),
+        },
+        "2026-10-10T00:00:00Z",
+    )
+    .unwrap()
+}
+
 fn round(home: &Home) {
     let p = packs();
     let first = home.json(&["pick", "run", "--pack-dir", &p, "--json"]);
+    // Record 55, decision 6: a run under the rules asks nothing.
     let raised = first["raised"].as_i64().unwrap();
-    assert!(
-        raised > 0,
-        "the synthetic registry has an ambiguous session: {first}"
-    );
+    assert_eq!(raised, 0, "{first}");
     assert_eq!(first["standing"], 0, "{first}");
 
-    // Each ambiguous session is an open pick.border item in the review queue.
+    // An ambiguous session a run before the rules asked about: an open
+    // pick.border item in the review queue.
+    plant_border(home, ambiguous(home), &["too_close"], true);
     let items = home.json(&["review", "list", "--kind", "pick.border", "--json"]);
     let open: Vec<&serde_json::Value> = items["items"]
         .as_array()
@@ -169,7 +240,7 @@ fn round(home: &Home) {
         .iter()
         .filter(|i| i["status"] == "open")
         .collect();
-    assert_eq!(open.len() as i64, raised, "{items}");
+    assert_eq!(open.len(), 1, "{items}");
     let item = open[0];
     assert_eq!(item["scope"], "subject", "{item}");
     assert_eq!(item["ref"]["role"], "t1w", "{item}");
@@ -223,7 +294,7 @@ fn round(home: &Home) {
     // It survives a run, which asks nothing more about that session.
     let again = home.json(&["pick", "run", "--pack-dir", &p, "--json"]);
     assert_eq!(again["standing"], 1, "{again}");
-    assert_eq!(again["raised"].as_i64().unwrap(), raised - 1, "{again}");
+    assert_eq!(again["raised"].as_i64().unwrap(), 0, "{again}");
     let listed = home.json(&["pick", "list", "--json"]);
     let row = listed
         .as_array()
@@ -266,10 +337,11 @@ fn round(home: &Home) {
     assert!(!good);
     assert!(err.contains("already withdrawn"), "{err}");
 
-    // With the person's pick gone, the next run asks about the session again.
+    // With the person's pick gone, the next run picks the session again,
+    // asking nothing.
     let third = home.json(&["pick", "run", "--pack-dir", &p, "--json"]);
     assert_eq!(third["standing"], 0, "{third}");
-    assert_eq!(third["raised"].as_i64().unwrap(), raised, "{third}");
+    assert_eq!(third["raised"].as_i64().unwrap(), 0, "{third}");
 
     // Both acts are in the audit log.
     let audit = store
@@ -868,14 +940,13 @@ impl Keeper<'_> {
 fn keep_round(home: &Home, keeper: &Keeper<'_>) {
     let p = packs();
     let first = home.json(&["pick", "run", "--pack-dir", &p, "--json"]);
-    let raised = first["raised"].as_i64().unwrap();
-    assert!(raised > 0, "{first}");
+    assert_eq!(first["raised"], 0, "{first}");
+    let read = ambiguous(home);
+    let id = plant_border(home, read, &["too_close"], true);
     let item = open_borders(home)
         .into_iter()
-        .find(|i| i["evidence"]["pick_id"].is_i64())
-        .expect("a border on an occasion the run picked on");
-    let id = item["id"].as_i64().unwrap();
-    let read = item["evidence"]["pick_id"].as_i64().unwrap();
+        .find(|i| i["id"] == id)
+        .expect("the planted border is open");
     let mut store = home.store();
     let run_stacks = stacks_of(&mut store, read);
     assert!(!run_stacks.is_empty());
@@ -883,8 +954,10 @@ fn keep_round(home: &Home, keeper: &Keeper<'_>) {
     assert!(item["evidence"]["scheme"]["digest"].is_string(), "{item}");
     assert!(item["evidence"]["pack_version"].is_string(), "{item}");
 
-    // a run between reading and keeping: the pick read is not the run's now
-    home.json(&["pick", "run", "--pack-dir", &p, "--json"]);
+    // a run between reading and keeping settles the border by the rules, so
+    // the keep is refused and writes nothing
+    let between = home.json(&["pick", "run", "--pack-dir", &p, "--json"]);
+    assert_eq!(between["settled"], 1, "{between}");
     let persons = |store: &mut Store| -> i64 {
         store
             .query(
@@ -904,7 +977,7 @@ fn keep_round(home: &Home, keeper: &Keeper<'_>) {
         audited(&mut store, "pick.set"),
     );
     let err = keeper.keep(home, id, read).unwrap_err();
-    assert!(err.contains("the run changed its pick"), "{err}");
+    assert!(err.contains("already"), "{err}");
     assert_eq!(
         (
             persons(&mut store),
@@ -914,13 +987,21 @@ fn keep_round(home: &Home, keeper: &Keeper<'_>) {
         before,
         "a stale keep writes nothing"
     );
-    let now = open_borders(home)
-        .into_iter()
-        .find(|i| i["id"] == id)
-        .expect("the item is still open");
-    let current = now["evidence"]["pick_id"].as_i64().unwrap();
+    let shown = home.json(&["review", "show", &id.to_string(), "--json"]);
+    assert_eq!(shown["status"], "superseded", "{shown}");
+    assert!(
+        shown["decision"]["why"]
+            .as_str()
+            .unwrap()
+            .contains("settled by the pack's rules, version 1"),
+        "{shown}"
+    );
+
+    // a border open again on the occasion, naming the run's pick now
+    let current = ambiguous(home);
     assert_ne!(current, read);
     assert_eq!(stacks_of(&mut store, current), run_stacks);
+    let id = plant_border(home, current, &["too_close"], true);
 
     // kept, with the pick the person read now
     let kept = keeper.keep(home, id, current).unwrap();
@@ -941,7 +1022,7 @@ fn keep_round(home: &Home, keeper: &Keeper<'_>) {
     // the next run leaves it standing and raises nothing on the occasion
     let second = home.json(&["pick", "run", "--pack-dir", &p, "--json"]);
     assert_eq!(second["standing"], 1, "{second}");
-    assert_eq!(second["raised"].as_i64().unwrap(), raised - 1, "{second}");
+    assert_eq!(second["raised"].as_i64().unwrap(), 0, "{second}");
     assert!(
         !open_borders(home).iter().any(|i| same_occasion(i, &item)),
         "no open pick.border on the kept occasion"
@@ -958,22 +1039,20 @@ fn keep_round(home: &Home, keeper: &Keeper<'_>) {
     assert_eq!(row["stacks"], run_stacks.len() as i64, "{row}");
     let why = row["why"].as_str().unwrap();
     assert!(why.starts_with("kept the run's pick ("), "{why}");
-    for b in item["evidence"]["borders"].as_array().unwrap() {
-        assert!(why.contains(b.as_str().unwrap()), "{why}");
-    }
+    assert!(why.contains("too_close"), "{why}");
     // the ask reads the stacks the person kept
     let seen = picked(home);
     assert!(run_stacks.iter().all(|s| seen.contains(s)), "{seen:?}");
 
-    // withdrawn, the run's pick applies again and the border comes back
+    // withdrawn, the run's pick applies again, and no border comes back
     let done = home.json(&["pick", "withdraw", &person.to_string(), "--json"]);
     assert_eq!(done["restored"].as_array().unwrap().len(), 1, "{done}");
     let third = home.json(&["pick", "run", "--pack-dir", &p, "--json"]);
     assert_eq!(third["standing"], 0, "{third}");
-    assert_eq!(third["raised"].as_i64().unwrap(), raised, "{third}");
+    assert_eq!(third["raised"].as_i64().unwrap(), 0, "{third}");
     assert!(
-        open_borders(home).iter().any(|i| same_occasion(i, &item)),
-        "the border is raised again"
+        !open_borders(home).iter().any(|i| same_occasion(i, &item)),
+        "under the rules the border is not raised again"
     );
 }
 
@@ -1020,7 +1099,8 @@ fn a_border_kept_at_the_door_stands_through_the_next_pick_run() {
     );
     assert_eq!(status, 404, "{doc}");
 
-    // the border raised again after the withdraw
+    // a border open again on an occasion the run picked on
+    plant_border(&home, ambiguous(&home), &["too_close"], true);
     let item = open_borders(&home)
         .into_iter()
         .find(|i| i["evidence"]["pick_id"].is_i64())
@@ -1140,27 +1220,51 @@ fn nothing_round(home: &Home) {
         )
     };
     let earlier_stacks = stacks_of(&mut store, earlier);
+    // every T1w stack of the subject: under the rules a run's considered
+    // names the candidates of the kind it took, and the occasion may hold
+    // others
+    let occasion: Vec<i64> = {
+        let mut all: Vec<i64> = store
+            .query(
+                &format!(
+                    "SELECT f.stack_id FROM {} f JOIN {} a ON a.stack_id = f.stack_id \
+                     WHERE f.subject_id = {subject} AND a.axis = 'role' AND a.value = 't1w'",
+                    store.qualified("stack_fingerprint"),
+                    store.qualified("classification_axis")
+                ),
+                &[],
+            )
+            .unwrap()
+            .iter()
+            .map(|r| r.int(0).unwrap())
+            .collect();
+        all.extend(occasion);
+        all.sort_unstable();
+        all.dedup();
+        all
+    };
+    let _ = &day;
+    // a border on the occasion, as a run before the rules raised one, once
+    // nothing on it was eligible
+    let id = plant_border(home, earlier, &["nothing_eligible"], false);
     nothing_eligible_on(home, &occasion);
-    let again = home.json(&["pick", "run", "--pack-dir", &p, "--json"]);
-    assert!(
-        again["borders"]["nothing_eligible"].as_i64().unwrap() >= 1,
-        "{again}"
-    );
+    // Record 55, decision 6: where the rules allow nothing, a run removes
+    // what an earlier run picked there, and asks nothing; the border open
+    // before stays open until it is kept, as the run that settles it reads
+    // the occasions it decides
     let item = open_borders(home)
         .into_iter()
-        .find(|i| i["ref"]["subject_id"] == subject && i["ref"]["session_day"] == day.as_str())
-        .expect("a nothing_eligible border on the planted occasion");
+        .find(|i| i["id"] == id)
+        .expect("the planted border");
     assert_eq!(
         item["evidence"]["borders"],
         serde_json::json!(["nothing_eligible"]),
         "{item}"
     );
     assert!(item["evidence"]["pick_id"].is_null(), "{item}");
-    // an earlier run's pick is still there, and the ask reads it
     let seen = picked(home);
     assert!(earlier_stacks.iter().all(|s| seen.contains(s)), "{seen:?}");
 
-    let id = item["id"].as_i64().unwrap();
     let kept = home.json(&["review", "accept", &id.to_string(), "--json"]);
     let pick = &kept["pick"];
     let person = pick["id"].as_i64().unwrap();
@@ -1176,12 +1280,23 @@ fn nothing_round(home: &Home) {
         "{listed}"
     );
 
-    // it stands through the next run, which asks nothing more
+    // it stands through the next run, which asks nothing and picks nothing
+    // there
     let third = home.json(&["pick", "run", "--pack-dir", &p, "--json"]);
-    assert!(third["standing"].as_i64().unwrap() >= 1, "{third}");
+    assert!(third["empty"].as_i64().unwrap() >= 1, "{third}");
+    assert_eq!(third["raised"], 0, "{third}");
     assert!(
         !open_borders(home).iter().any(|i| same_occasion(i, &item)),
         "no open border on the kept occasion"
+    );
+    let still = home.json(&["pick", "list", "--json"]);
+    assert!(
+        still
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["id"] == person && r["author_kind"] == "person"),
+        "{still}"
     );
     // and the ask reads no pick there, where the earlier run's was
     let seen = picked(home);
@@ -1342,13 +1457,21 @@ const READS: &str = "a-reader-token-of-its-length";
 
 impl Worked {
     fn start(home: &Home, ingest: &std::path::Path) -> Worked {
+        Worked::start_with(home, ingest, true)
+    }
+
+    /// With `packs_in_env` false, the engine and its worker know the packs
+    /// only from `--pack-dir`: an install whose packs are not where the
+    /// engine looks by itself, as the T33 pipe test's was.
+    fn start_with(home: &Home, ingest: &std::path::Path, packs_in_env: bool) -> Worked {
         use std::io::BufRead as _;
         let tokens = [
             format!("{OPS}=ops@lab:operator"),
             format!("{READS}=lou@lab:reader"),
         ]
         .join(",");
-        let child = nils()
+        let mut command = nils();
+        command
             .arg("--registry")
             .arg(home.dir.path())
             .args([
@@ -1361,9 +1484,14 @@ impl Worked {
             ])
             .args(["--auth", "token", "--pack-dir", &packs()])
             .arg("--ingest-root")
-            .arg(format!("ds={}", ingest.display()))
+            .arg(format!("ds={}", ingest.display()));
+        if packs_in_env {
+            command.env("NILS_PACK_DIR", packs());
+        } else {
+            command.env_remove("NILS_PACK_DIR");
+        }
+        let child = command
             .env("NILS_TOKENS", tokens)
-            .env("NILS_PACK_DIR", packs())
             .env("USER", "anna")
             .env("HOSTNAME", "ward-3")
             .env_remove("NILS_JOB_ID")
@@ -1503,7 +1631,9 @@ fn a_pick_run_is_part_of_the_bring_in_and_has_a_door() {
     assert_eq!(status, 202, "{queued}");
     assert_eq!(queued["command"][0], "digest", "{queued}");
     let then = queued["then"].as_array().unwrap();
-    assert_eq!(then.len(), 3, "{queued}");
+    // record 55 E5: the score after the pick run, last
+    assert_eq!(then.len(), 4, "{queued}");
+    assert_eq!(then[3][0], "score", "{queued}");
     let pick: Vec<&str> = then[2]
         .as_array()
         .unwrap()
@@ -1683,7 +1813,9 @@ fn after_sort_round(pg: Option<(String, String)>) {
         "--subjects",
         "generated",
     ]);
-    let server = Worked::start(&home, dir.path());
+    // the packs only where the engine is told: the bring-in's sort and the
+    // pick run after it read them all the same (the T33 pipe test)
+    let server = Worked::start_with(&home, dir.path(), false);
     let (status, queued) = server.call(
         "POST",
         "/api/jobs",
@@ -1691,8 +1823,15 @@ fn after_sort_round(pg: Option<(String, String)>) {
         OPS,
     );
     assert_eq!(status, 202, "{queued}");
-    // no cohort: the bring-in names no pick run of its own
-    assert_eq!(queued["then"].as_array().unwrap().len(), 2, "{queued}");
+    // no cohort: the bring-in names no pick run of its own; record 55
+    // E5: the score, last
+    assert_eq!(queued["then"].as_array().unwrap().len(), 3, "{queued}");
+    assert_eq!(queued["then"][2][0], "score", "{queued}");
+    assert_eq!(
+        queued["then"][1],
+        serde_json::json!(["classify", "--pack-dir", packs()]),
+        "the deployment's packs: {queued}"
+    );
     let mut job = server.over(queued["job"].as_i64().unwrap());
     let mut sort = 0;
     for expected in ["fingerprint", "classify", "pick"] {
@@ -1880,4 +2019,79 @@ fn a_sort_ends_with_picking_and_the_card_says_how_sure_on_postgres_too() {
     drop();
     after_sort_round(Some((dsn.clone(), schema.to_string())));
     drop();
+}
+
+/// The T33 pipe test: on an install whose packs are not where the engine
+/// looks by itself, a sort the jobs door queues, alone or as a step of a
+/// chain the desk composes, reads the packs the engine serves, as the
+/// bring-in's does; one that names its own pack directory keeps it.
+#[test]
+fn a_sort_the_doors_queue_reads_the_served_packs() {
+    let home = Home {
+        dir: TempDir::new("picks-served-packs-home"),
+        pg: None,
+    };
+    let (good, _, err) = home.run(&["key", "add", "k"], Some("a served packs test key\n"));
+    assert!(good, "{err}");
+    home.ok(&["init", "--key", "k"]);
+    let ingest = TempDir::new("picks-served-packs-ds");
+    let server = Worked::start_with(&home, ingest.path(), false);
+    let served = packs();
+    let (status, queued) = server.call(
+        "POST",
+        "/api/jobs",
+        Some(serde_json::json!({"command": ["classify", "--pack", "mri"]})),
+        OPS,
+    );
+    assert_eq!(status, 202, "{queued}");
+    assert_eq!(
+        queued["command"],
+        serde_json::json!(["classify", "--pack", "mri", "--pack-dir", served]),
+        "{queued}"
+    );
+    let done = server.over(queued["job"].as_i64().unwrap());
+    assert_eq!(done["state"], "done", "{done}");
+    let (status, queued) = server.call(
+        "POST",
+        "/api/jobs",
+        Some(serde_json::json!({"command": ["fingerprint"], "then": [["classify", "--pack", "mri"]]})),
+        OPS,
+    );
+    assert_eq!(status, 202, "{queued}");
+    assert_eq!(
+        queued["then"][0],
+        serde_json::json!(["classify", "--pack", "mri", "--pack-dir", served]),
+        "{queued}"
+    );
+    let first = server.over(queued["job"].as_i64().unwrap());
+    assert_eq!(first["state"], "done", "{first}");
+    let mut next = first["chain"]["after"].as_i64();
+    for _ in 0..600 {
+        if next.is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let (_, j) = server.call("GET", &format!("/api/jobs/{}", first["id"]), None, OPS);
+        next = j["chain"]["after"].as_i64();
+    }
+    let sort = server.over(next.expect("the chain's sort"));
+    assert_eq!(sort["kind"], "classify", "{sort}");
+    assert_eq!(sort["state"], "done", "{sort}");
+    // a sort that names a pack directory keeps the one it names
+    let (status, queued) = server.call(
+        "POST",
+        "/api/jobs",
+        Some(serde_json::json!({"command": ["classify", "--pack-dir", served]})),
+        OPS,
+    );
+    assert_eq!(status, 202, "{queued}");
+    assert_eq!(
+        queued["command"],
+        serde_json::json!(["classify", "--pack-dir", served]),
+        "{queued}"
+    );
+    assert_eq!(
+        server.over(queued["job"].as_i64().unwrap())["state"],
+        "done"
+    );
 }

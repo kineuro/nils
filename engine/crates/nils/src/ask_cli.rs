@@ -331,7 +331,7 @@ pub(crate) struct AskTimeArgs {
     runs: usize,
 }
 
-fn principal() -> String {
+pub(crate) fn principal() -> String {
     std::env::var("NILS_PRINCIPAL")
         .ok()
         .filter(|p| !p.is_empty())
@@ -425,10 +425,12 @@ fn local(home: &Home, at: &Where) -> Result<Local, Exit> {
 }
 
 impl Local {
-    fn scheme(&mut self, ask: &Ask) -> Result<Scheme, Exit> {
+    /// The session scheme a document reads; `stored` is the document's id
+    /// when it is one the registry holds (2026-10-12).
+    fn scheme(&mut self, ask: &Ask, stored: Option<i64>) -> Result<Scheme, Exit> {
         match &ask.scheme {
             Some(nils_ask::ast::SchemeRef::Name(n)) if n != "default" && n != "day" => {
-                crate::stored_scheme(&mut self.registry, n)
+                kept_or_refused(&mut self.registry, n, stored)
             }
             Some(nils_ask::ast::SchemeRef::Inline(m)) => {
                 Scheme::from_json(&serde_json::to_string(m).unwrap_or_default())
@@ -503,6 +505,17 @@ fn text_of(v: &serde_json::Value) -> String {
         .unwrap_or_else(|| v.to_string())
 }
 
+/// A handle's row count as the terminal says it: `held` where the list was
+/// held back whole and gives no length (record 55 K7, small lists at plain,
+/// the ruling of 2026-10-13).
+fn rows_or_held(v: &serde_json::Value) -> String {
+    if v.is_null() {
+        "held".to_string()
+    } else {
+        v.to_string()
+    }
+}
+
 // ------------------------------------------------------------------ validate
 
 fn validate(home: &Home, args: AskValidateArgs) -> Result<(), Exit> {
@@ -526,7 +539,18 @@ fn validate(home: &Home, args: AskValidateArgs) -> Result<(), Exit> {
                 }
                 _ => (ask_of(&mut l, &args.which)?, Vec::new()),
             };
-            let prepared = nils_ask::prepare(ask, &l.catalog, &scope).map_err(refused)?;
+            let prepared = nils_ask::prepare(ask.clone(), &l.catalog, &scope).map_err(refused)?;
+            // strict validate compiles what run would, as the door does
+            // (kineuro/nils#93), so what only the compiler refuses is
+            // refused here too (2026-10-12)
+            if !args.repair {
+                let scheme = l.scheme(&ask, args.which.document)?;
+                let issues =
+                    run::not_compilable(&mut l.registry, &ask, &l.catalog, &scope, &scheme);
+                if !issues.is_empty() {
+                    return Err(refused(nils_ask::Error::Invalid(issues)));
+                }
+            }
             json!({
                 "hash": prepared.hash,
                 "bound_hash": prepared.bound_hash,
@@ -579,10 +603,10 @@ fn explain(home: &Home, args: AskExplainArgs) -> Result<(), Exit> {
         None => {
             let mut l = local(home, &args.at)?;
             let ask = ask_of(&mut l, &args.which)?;
-            let scheme = l.scheme(&ask)?;
+            let scheme = l.scheme(&ask, args.which.document)?;
             let scope = scope();
             let ex = run::explain(&mut l.registry, ask, &l.catalog, &scope, &scheme)
-                .map_err(|e| fail(e.to_string()))?;
+                .map_err(run_refused)?;
             serde_json::to_value(ex).unwrap_or_default()
         }
     };
@@ -629,7 +653,7 @@ fn options(home: &Home, args: AskSetArgs) -> Result<(), Exit> {
         None => {
             let mut l = local(home, &args.at)?;
             let ask = ask_of(&mut l, &args.which)?;
-            let scheme = l.scheme(&ask)?;
+            let scheme = l.scheme(&ask, args.which.document)?;
             let epoch = l.registry.meta().epoch;
             let scope = scope();
             let setting = l.setting(&scheme, &scope);
@@ -710,7 +734,7 @@ fn diagnose_cmd(home: &Home, args: AskDiagnoseArgs) -> Result<(), Exit> {
         None => {
             let mut l = local(home, &args.at)?;
             let ask = ask_of(&mut l, &args.which)?;
-            let scheme = l.scheme(&ask)?;
+            let scheme = l.scheme(&ask, args.which.document)?;
             let scope = scope();
             let d = diagnose::diagnose(
                 &mut l.registry,
@@ -807,7 +831,7 @@ fn describe(home: &Home, args: AskDocArgs) -> Result<(), Exit> {
         None => {
             let mut l = local(home, &args.at)?;
             let ask = ask_of(&mut l, &args.which)?;
-            let scheme = l.scheme(&ask)?;
+            let scheme = l.scheme(&ask, args.which.document)?;
             let scope = scope();
             let setting = l.setting(&scheme, &scope);
             let d = affordance::describe(&ask, &setting).map_err(|e| usage(e.to_string()))?;
@@ -874,7 +898,8 @@ fn handles(home: &Home, cmd: HandlesCommand) -> Result<(), Exit> {
                     h.id,
                     h.name.clone().unwrap_or_else(|| "-".into()),
                     h.grain.name(),
-                    h.row_count,
+                    h.row_count_shown()
+                        .map_or_else(|| "held".to_string(), |n| n.to_string()),
                     if h.has_rows() { "kept   " } else { "dropped" },
                     h.created_at
                 );
@@ -896,6 +921,8 @@ fn handles(home: &Home, cmd: HandlesCommand) -> Result<(), Exit> {
                     let reads = handle::read_count(registry.store(), args.handle)
                         .map_err(|e| fail(e.to_string()))?;
                     let mut v = serde_json::to_value(&h).unwrap_or_default();
+                    v["row_count"] = json!(h.row_count_shown());
+                    v["held_back"] = json!(h.held_back());
                     v["pinned_by"] = json!(pins);
                     v["pages"] = json!(pages);
                     v["reads"] = json!(reads);
@@ -910,7 +937,7 @@ fn handles(home: &Home, cmd: HandlesCommand) -> Result<(), Exit> {
                 "handle {}   {}   {} rows   {} pages   {}",
                 doc["id"],
                 text_of(&doc["grain"]),
-                doc["row_count"],
+                rows_or_held(&doc["row_count"]),
                 doc["pages"],
                 doc["name"]
                     .as_str()
@@ -980,9 +1007,13 @@ fn handles(home: &Home, cmd: HandlesCommand) -> Result<(), Exit> {
 /// A handle's rows as CSV, read from its stored pages: no compiler, no
 /// statement, no database driver (§15, slice 10).
 fn export(home: &Home, args: ExportArgs) -> Result<(), Exit> {
+    // record 55 K7, small lists at plain (the ruling of 2026-10-13): a
+    // handle whose list was held back whole holds no row, and says so
+    let held: bool;
     let (columns, pages): (Vec<String>, Vec<Vec<Vec<serde_json::Value>>>) = match args.at.door()? {
         Some(door) => {
             let head = door.get(&format!("/api/ask/handles/{}", args.handle))?;
+            held = head["row_count"].is_null();
             let columns = head["columns"]
                 .as_array()
                 .map(|a| a.iter().map(|c| text_of(&c["name"])).collect())
@@ -1020,6 +1051,7 @@ fn export(home: &Home, args: ExportArgs) -> Result<(), Exit> {
                     args.handle
                 ))));
             }
+            held = h.rows_held();
             let n = handle::page_count(registry.store(), args.handle)
                 .map_err(|e| fail(e.to_string()))?;
             let mut pages = Vec::new();
@@ -1076,7 +1108,13 @@ fn export(home: &Home, args: ExportArgs) -> Result<(), Exit> {
     }
     csv.flush().map_err(|e| fail(e.to_string()))?;
     drop(csv);
-    if let Some(path) = &args.out {
+    if held {
+        eprintln!(
+            "handle {} holds no rows: its answer was {}",
+            args.handle,
+            nils_ask::validate::held_list_why()
+        );
+    } else if let Some(path) = &args.out {
         println!("{rows} rows to {}", path.display());
     }
     Ok(())
@@ -1199,6 +1237,21 @@ fn selections(home: &Home, cmd: SelectionsCommand) -> Result<(), Exit> {
     }
 }
 
+/// The session scheme kept under a name, or a refusal that names it and
+/// what to do, exit 2, as the doors refuse it (2026-10-12): a stored
+/// document whose scheme was removed failed as the engine's own fault.
+fn kept_or_refused(
+    registry: &mut Registry,
+    name: &str,
+    stored: Option<i64>,
+) -> Result<Scheme, Exit> {
+    crate::kept_scheme(registry, name)?.ok_or_else(|| {
+        refused(nils_ask::Error::Invalid(vec![
+            nils_ask::validate::scheme_not_kept(name, stored),
+        ]))
+    })
+}
+
 /// A refused document, with every issue and the call that settles it.
 fn refused(e: nils_ask::Error) -> Exit {
     match e {
@@ -1246,7 +1299,7 @@ fn ask_run(home: &Home, args: AskRunArgs) -> Result<(), Exit> {
             println!(
                 "nils ask run   handle {}   {} rows   hash {}   {}",
                 doc["handle"],
-                doc["row_count"],
+                rows_or_held(&doc["row_count"]),
                 text_of(&doc["hash"]),
                 if doc["truncated"].as_bool().unwrap_or(false) {
                     "truncated"
@@ -1279,7 +1332,7 @@ fn ask_run(home: &Home, args: AskRunArgs) -> Result<(), Exit> {
     };
     let scheme = match &ask.scheme {
         Some(nils_ask::ast::SchemeRef::Name(n)) if n != "default" && n != "day" => {
-            crate::stored_scheme(&mut registry, n)?
+            kept_or_refused(&mut registry, n, args.document)?
         }
         Some(nils_ask::ast::SchemeRef::Inline(m)) => {
             Scheme::from_json(&serde_json::to_string(m).unwrap_or_default())
@@ -1373,10 +1426,17 @@ fn ask_run(home: &Home, args: AskRunArgs) -> Result<(), Exit> {
                 "handle": out.handle.id,
                 "hash": out.hash,
                 "grain": out.handle.grain,
-                "row_count": out.handle.row_count,
+                // record 55 K7, small lists at plain (the ruling of
+                // 2026-10-13): a list held back whole gives no length
+                "row_count": out.answer.row_count(),
                 "content_hash": out.handle.content_hash,
                 "truncated": out.answer.truncated,
                 "columns": out.answer.columns,
+                // record 55 K7: under a queued detail below quasi, the
+                // columns it answered as shapes and those with values held
+                // back for a group too small; none at the keyboard
+                "shaped": out.answer.shaped_names(),
+                "held_back": out.answer.held_back_named(),
                 "kept": out.kept.iter().map(|k| k.id).collect::<Vec<_>>(),
                 "drift": out.drift,
                 "job": job,
@@ -1389,7 +1449,9 @@ fn ask_run(home: &Home, args: AskRunArgs) -> Result<(), Exit> {
                 println!(
                     "nils ask run   handle {}   {} rows   hash {}   {}",
                     out.handle.id,
-                    out.handle.row_count,
+                    out.answer
+                        .row_count()
+                        .map_or_else(|| "held".to_string(), |n| n.to_string()),
                     out.hash,
                     if out.answer.truncated {
                         "truncated"
@@ -1402,8 +1464,21 @@ fn ask_run(home: &Home, args: AskRunArgs) -> Result<(), Exit> {
         }
         Err(e) => {
             let _ = job::finish(registry.store(), job, State::Failed, Some(&e.to_string()));
-            Err(fail(e.to_string()))
+            Err(run_refused(e))
         }
+    }
+}
+
+/// A run's error as the command line says it: a refusal of the document,
+/// what the validator, the compiler or the post pass refuses, names its
+/// issues and exits 2, as `validate` does and as a door's 400 reads through
+/// `--server`; anything else is a failure (2026-10-12).
+fn run_refused(e: run::RunError) -> Exit {
+    match e {
+        run::RunError::Ask(a) => refused(a),
+        run::RunError::Compile(c) => refused(nils_ask::Error::Invalid(vec![c.issue()])),
+        run::RunError::Measure(m) => refused(nils_ask::Error::Invalid(vec![m.issue()])),
+        other => fail(other.to_string()),
     }
 }
 
@@ -1704,7 +1779,10 @@ fn whole_bounds() -> Bounds {
 }
 
 /// Freeze a saved selection into a handle of its stacks or sessions, as
-/// much of it as `how` keeps.
+/// much of it as `how` keeps. Record 55 (rulings of 2026-10-12, item 6): a
+/// dataset's or a cohort's main scans by role, `main:<role>@dataset:<name>`
+/// or `main:<role>@cohort:<name>`, are frozen the same way, resolved now
+/// (`crate::main_input`).
 pub(crate) fn freeze(
     home: &Home,
     spec: &str,
@@ -1713,6 +1791,13 @@ pub(crate) fn freeze(
     pack_name: &str,
     how: Freeze,
 ) -> Result<Frozen, Exit> {
+    if let Some(main) = crate::main_input::Spec::parse(spec) {
+        let main = main.map_err(usage)?;
+        // no pipeline here: a spec without a role is refused with the form
+        // that names one (2026-10-12)
+        return crate::main_input::freeze(home, &main, want, pack_dir, pack_name, how, &[])
+            .map(|(f, _)| f);
+    }
     let dir = crate::pack_dir(home, pack_dir)
         .map_err(|_| usage("no packs here: pass --pack-dir DIR to freeze a selection"))?;
     let pack = load_pack(&dir, pack_name)?;

@@ -122,11 +122,12 @@ pub struct Resolved {
 pub enum Make {
     /// Never: an unknown identifier is answered as such.
     Nothing,
-    /// A subject as the digest makes one.
+    /// A subject, its code made from the identifier. A subject code made
+    /// from the ID is final, whether a map, the dataset's `code` or a
+    /// person asked for it; no subject is made provisional any more
+    /// (2026-10-10), and the `provisional` mark stays only on subjects an
+    /// older engine made.
     Subject,
-    /// A subject marked provisional (record 26 §4): coded from an
-    /// identifier no map named.
-    Provisional,
 }
 
 pub struct Resolver {
@@ -174,7 +175,7 @@ impl Resolver {
         let scheme = registry.meta().pseudonym_scheme;
         if rule.normalises() && scheme != Scheme::SUBJECT_CODE_GENERATOR {
             return Err(HomeError::Message(format!(
-                "a personnummer's code is the subject code generator's, and this registry makes its codes with {}; read personnummer into a registry made with the generator's scheme (nils init --scheme subject-code-generator)",
+                "an ID that is the same everywhere is coded by the subject code generator, and this registry makes its subject codes with {}; read such IDs into a registry made with the generator's scheme (nils init --scheme subject-code-generator)",
                 scheme.name()
             )));
         }
@@ -466,12 +467,9 @@ impl Resolver {
                 }
                 row.push(Param::Int(self.batch_id));
                 row.push(Param::from(now));
-                // a personnummer is its own map: its subject is no
-                // provisional one (record 54, D4)
-                row.push(match make {
-                    Make::Provisional if !self.derives_by_generator(w.ident) => Param::Int(1),
-                    _ => Param::Null,
-                });
+                // a subject code made from the ID is final: no subject is
+                // provisional (record 54, D4; 2026-10-10)
+                row.push(Param::Null);
                 rows.push(row);
             }
             let spec = Insert::new(t, &columns)
@@ -635,7 +633,8 @@ fn id_type_of(linkage: &mut Store, name: &str) -> Result<IdType, HomeError> {
 
 pub(crate) fn missing_row(what: &str) -> HomeError {
     HomeError::Message(format!(
-        "a {what} row was neither inserted nor found; the store changed under the writer"
+        "{} row was neither inserted nor found; the store changed under the writer",
+        nils_registry::a_or_an(what)
     ))
 }
 

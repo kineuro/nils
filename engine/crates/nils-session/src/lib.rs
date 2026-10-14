@@ -19,7 +19,7 @@
 //! item says so; a session that is gone withdraws its picks and says so too.
 //! Nothing drops silently.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use nils_registry::clinical;
 use nils_registry::day::Day;
@@ -230,7 +230,28 @@ struct Point {
 /// source's own label always asked for a series, by joining through one, so
 /// the two ways of reading a timeline used to disagree about which studies
 /// are on it.
-fn points(store: &mut Store, scheme: &Scheme, only: Option<&str>) -> Result<Vec<Point>, Error> {
+/// Whose timelines a run of [`ensure`] reads: every subject's, one
+/// subject's by code, or some subjects' by id.
+#[derive(Clone, Copy)]
+enum Whose<'a> {
+    All,
+    Code(&'a str),
+    Ids(&'a [i64]),
+}
+
+/// How many subject ids one query of [`points`] names.
+const IDS_CHUNK: usize = 500;
+
+fn points(store: &mut Store, scheme: &Scheme, whose: Whose<'_>) -> Result<Vec<Point>, Error> {
+    if let Whose::Ids(ids) = whose
+        && ids.len() > IDS_CHUNK
+    {
+        let mut out = Vec::new();
+        for chunk in ids.chunks(IDS_CHUNK) {
+            out.extend(points(store, scheme, Whose::Ids(chunk))?);
+        }
+        return Ok(out);
+    }
     let d = store.dialect();
     let (study_t, subject_t) = (store.qualified("study"), store.qualified("subject"));
     let st = table("study");
@@ -238,9 +259,21 @@ fn points(store: &mut Store, scheme: &Scheme, only: Option<&str>) -> Result<Vec<
     let dated = d.text_of_qualified(Some("st"), st.column("study_date").expect("study_date"));
     let mut params: Vec<Param> = Vec::new();
     let mut where_subject = String::new();
-    if let Some(code) = only {
-        where_subject = format!(" AND su.code = {}", d.param(1, Type::Text));
-        params.push(Param::from(code));
+    match whose {
+        Whose::All => {}
+        Whose::Code(code) => {
+            where_subject = format!(" AND su.code = {}", d.param(1, Type::Text));
+            params.push(Param::from(code));
+        }
+        Whose::Ids([]) => return Ok(Vec::new()),
+        Whose::Ids(ids) => {
+            let list = ids
+                .iter()
+                .map(i64::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
+            where_subject = format!(" AND su.id IN ({list})");
+        }
     }
     let said = match &scheme.said {
         Some(spec) => Some((
@@ -385,9 +418,38 @@ pub fn ensure(
     only: Option<&str>,
     force: bool,
 ) -> Result<Rebuilt, Error> {
+    let whose = match only {
+        Some(code) => Whose::Code(code),
+        None => Whose::All,
+    };
+    ensure_of(registry, scheme, anchors, whose, force)
+}
+
+/// [`ensure`] for some subjects by id: the cache brought up to date for
+/// their timelines alone, which is what a reader of a dataset's or a
+/// cohort's visits needs before it reads them (2026-10-12: a dataset read
+/// and sorted with nothing since that built the cache had no visits on its
+/// Main scans map). A subject whose timeline is unchanged costs one read.
+pub fn ensure_for(
+    registry: &mut Registry,
+    scheme: &Scheme,
+    anchors: &Anchors,
+    subjects: &BTreeSet<i64>,
+) -> Result<Rebuilt, Error> {
+    let ids: Vec<i64> = subjects.iter().copied().collect();
+    ensure_of(registry, scheme, anchors, Whose::Ids(&ids), false)
+}
+
+fn ensure_of(
+    registry: &mut Registry,
+    scheme: &Scheme,
+    anchors: &Anchors,
+    whose: Whose<'_>,
+    force: bool,
+) -> Result<Rebuilt, Error> {
     let epoch = registry.meta().epoch;
     let store = registry.store();
-    let all = points(store, scheme, only)?;
+    let all = points(store, scheme, whose)?;
     let mut by_subject: BTreeMap<i64, (String, Vec<Study>)> = BTreeMap::new();
     for p in all {
         let e = by_subject

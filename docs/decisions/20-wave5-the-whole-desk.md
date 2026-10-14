@@ -1,10 +1,11 @@
-# 20 — Wave 5, the whole desk: the rulings, the two studies, the design and the wave
+# 20 · Wave 5, the whole desk: the rulings, the two studies, the design and the wave
 
 Written 2026-09-10 from the talk that followed the close of Wave 4c: the Metabase
 study of the same day (`studies/2026-09-10-metabase-ui-study/`), the proposal
 that answered it (`studies/2026-09-10-desk-direction/`), and Nima's five answers
 and two additions. Status: **ratified 2026-09-10** (Nima: "if this is ok you can
-start writing the wave 5", after the five answers and the two additions below).
+start writing the wave 5", after the five answers and the two additions below; then
+"start the wave then. let me know along the way if I can check it").
 The specification written from it is `docs/specs/wave5-the-whole-desk.md` in the
 public repository; this document is the record it cites, and the only place the
 group's own hosts, pools, paths and domains are named.
@@ -17,8 +18,8 @@ Ids continue 19: decisions D53 onward, amendments C49 onward, rulings R12 to R14
 | | Ruling | What it changes |
 |---|---|---|
 | R12 | The desk is a workbench designed toward one scene (§4), not a directory of doors. "Make desk something extraordinary and take it to the next level." | The shell is rebuilt around Home, objects with pages and one conversation rail; Operations is retired. |
-| R13 | The five answers. (1) The ladder, yes; the identity provider decides what a person may do, the grant is the person's consent. (2) The supervisor: "do it instead of showing how to, but showing is also good to add as a guide." (3) The viewer: "we absolutely need to benchmark and find the best; we handle very big CT scans; it should be smooth; we have PCCT data in source; in the right order." (4) The sections liked; database management and places in Settings, with every path given a role, on any machine. (5) Teaching: yes. | D68, D76, D78, D74, D75, D72. |
-| R14 | The look follows the website's design DNA and the mark of the family (Bifrost's, with the naudiz rune); the group's deployment goes on the website now so the wave is seen as it is built; and "nils is an application everyone should be able to use, not something specific to our setup or website: if I install nils on my laptop I should see the same thing and I shouldn't need an Asgard-like system." | The theme as a file (D53), the mark (D54), the site rule and the laptop rule (spec §4), and every slice's gate carrying the laptop test. |
+| R13 | The five answers. (1) The ladder, yes; the identity provider decides what a person may do, the grant is the person's consent. (2) The supervisor: "do it instead of showing how to, but showing is also good to add as a guide." (3) The viewer: "we absolutely need to benchmark and find the best; we handle very big CT scans; it should be smooth; we have photon-counting CT data in source; in the right order." (4) The sections liked; database management and places in Settings, with every path given a role, on any machine. (5) Teaching: yes. | D68, D76, D78, D74, D75, D72. |
+| R14 | The look follows the website's design DNA and the mark of the family (Bifrost's, with the naudiz rune); the group's deployment goes on the website now so the wave is seen as it is built; and "nils is an application everyone should be able to use, not something specific to our setup or website: if I install nils on my laptop I should see the same thing and I shouldn't need an the compute server-like system." | The theme as a file (D53), the mark (D54), the site rule and the laptop rule (spec §4), and every slice's gate carrying the laptop test. |
 
 ## 2. What the Metabase reading settled
 
@@ -152,7 +153,7 @@ window-level at sixty frames, the precompute's cost. Nothing leaves the deployme
 
 ## 10. Questions carried into the wave (Q21 to Q27)
 
-- **Q21** The rune on the mark: naudiz ᚾ as drawn, or the ᛅ of Nima's message. Settled by Nima against the drawing in B1.
+- **Q21** The rune on the mark: naudiz ᚾ as drawn, or the ᛅ of Nima's message. **Settled 2026-09-10** (Nima: "My bad! the ᚾ perhaps or the one that is /n/ as in Nils in same box shape as we did Bifrost"): naudiz ᚾ, the /n/ rune, in Bifrost's square.
 - **Q22** When the deployment moves from the synthetic registry to the group's data: inside the wave, or after it closes.
 - **Q23** Whether `assist-run` is wanted from the start.
 - **Q24** The viewer, by S1's report.
@@ -163,3 +164,57 @@ window-level at sixty frames, the precompute's cost. Nothing leaves the deployme
 ## 11. Order
 
 Twenty slices, spec §15: A0 W0 B1 A1 A2 B2 A3 B3 D1 B4 A4 A5 B5 E1 D2 S1 A6 B6 C1 D3 W1. W0 is the first thing built after the record so that everything after it is seen on the portal the day it merges.
+
+## 12. Closing (2026-09-10)
+
+Every slice of §11 is merged and live on the deployment, the last two (A6 nils
+#112, B6 nils-desk #23) as this section is written and merged the same evening;
+the public specification carries the as-built paragraphs and what the bars found
+(nils #113). The bars of spec §13, as they stand on the group's own machines:
+
+1. The rig on the laptop is the install with nothing beside the binaries, in
+   `off` mode; the deployment behind the portal has updated on merge since W0.
+   Passed.
+2. The scene: a question started from nothing, built by clicking and by talking,
+   its counts moving and its conversation kept; a batch walked through Data; an
+   item judged in Review with the evidence beside it; a release described in
+   full. Ran headless through the workbench on the rig (36 authored questions,
+   34 with the station's content hash, 1 the same rows, 1 without a station
+   document; a clicked and a written question hashing the same) and by hand on
+   the deployment after the first login. Passed.
+3. The overnight instruction as a plan: the ladder test in the assistant's CI
+   (three rung-two jobs under grants, one rung-three proposal unapplied, every
+   step in the inbox, a step without a grant waiting with its reason). Passed in
+   CI; not yet run overnight on the deployment against a real batch.
+4. The registry role without a backup and a release outside an export place:
+   both refused at the door, in A4's tests. Passed. The group's own places are
+   not yet declared on the guest: the engine keeps its flags until an operator
+   binds them from Settings, Places.
+5. The supervisor: keygen, sign, verify, an unsigned artifact refused by name, a
+   tampered one by digest, an update over a file channel with roll-back, in E1's
+   tests; the guide by hand. Passed in CI. No supervisor runs on the guest yet
+   and no channel is published: deploy on merge stays the group's update path
+   until one is.
+6. The viewer study's report is in §7 with its numbers; Review is built on what
+   it chose. Passed, with the corpus caveat: no photon-counting CT was found
+   under the source place (all MR); the scale was measured on a 5 GB resampled
+   volume. Where the photon-counting CT data lives is a question for Nima (§10, Q28 below).
+7. Teaching ran the loop on the bench with a dry fine-tune: torch and peft are
+   not on the guest, so the recipe is recorded and no adapter is made; admission
+   and the bench sit beside each other and promotion is refused until both are
+   green. Passed as a loop, not yet as a real fine-tune.
+8. The theme lint and the context test run in CI; a sweep of the four public
+   repositories for the group's own names found none. Passed.
+
+Two faults the first real login found, both fixed the same hour: the OAuth2
+provider made through the ak shell allowed no grant types (`invalid_request`),
+and the desk asked the engine with its own bearer, none in `oidc` mode, so a
+signed-in person read "the engine did not answer" (nils-desk #19, #21).
+
+Open after the close: Q28, where the photon-counting CT is (the exchange inbox
+holds 14 TB under the source's study names and was listed, not read); MPR in the
+browser through a slab-fed volume viewport (B6 serves the coronal and sagittal
+planes through the render door for now); a real fine-tune once torch and peft
+are on the guest; the supervisor and a channel on the guest; the group's places
+declared; Q22, the move from the synthetic registry to the group's data, which is
+the next wave's first question.

@@ -14,6 +14,7 @@
 
 use serde::Serialize;
 
+use crate::dialect::Conflict;
 use crate::schema::{Type, table};
 use crate::store::{Error, Insert, Param, Row, Store};
 
@@ -108,7 +109,32 @@ pub struct Derivative {
     pub supersedes_id: Option<i64>,
     pub created_at: String,
     pub withdrawn_at: Option<String>,
+    /// Job type 3 (record 55 H3): a mask's grid as its header says it,
+    /// {dims, affine, datatype}, null until it is read.
+    pub grid: serde_json::Value,
+    /// The scan whose grid the mask is on.
+    pub grid_stack_id: Option<i64>,
+    /// `same`, `world` or `none`; null until the grid is read.
+    pub grid_link: Option<String>,
+    /// The part sets the mask is read as, null until its parts are made.
+    pub part_sets: serde_json::Value,
+    /// The status a check wrote: accepted, rejected, flagged, or null.
+    #[serde(rename = "check")]
+    pub check_status: Option<String>,
+    pub check_reasons: serde_json::Value,
+    pub check_decision_id: Option<i64>,
+    pub checked_at: Option<String>,
 }
+
+/// The statuses a check writes onto a result and its parts (record 55 H3).
+pub const CHECKS: [&str; 3] = ["accepted", "rejected", "flagged"];
+
+/// The most parts one set of a mask holds (record 55 H3, section 3.5); a
+/// set with more is read whole.
+pub const PARTS_MAX: usize = 10_000;
+
+/// How a mask's grid is tied to its scan's (record 55 H3, section 2).
+pub const GRID_LINKS: [&str; 3] = ["same", "world", "none"];
 
 /// A derivative to register, its file already in its place.
 #[derive(Debug, Clone)]
@@ -326,7 +352,7 @@ fn insert_row(store: &mut Store, n: &New<'_>, run_id: Option<i64>) -> Result<i64
         .int(0)
 }
 
-const COLUMNS: [&str; 20] = [
+const COLUMNS: [&str; 28] = [
     "id",
     "kind",
     "scope",
@@ -347,6 +373,14 @@ const COLUMNS: [&str; 20] = [
     "supersedes_id",
     "created_at",
     "withdrawn_at",
+    "grid",
+    "grid_stack_id",
+    "grid_link",
+    "part_sets",
+    "check_status",
+    "check_reasons",
+    "check_decision_id",
+    "checked_at",
 ];
 
 pub(crate) fn select(store: &mut Store) -> String {
@@ -388,7 +422,20 @@ pub(crate) fn of(r: &Row) -> Result<Derivative, Error> {
         supersedes_id: r.opt_int(17)?,
         created_at: r.text(18)?.to_string(),
         withdrawn_at: r.opt_text(19)?.map(str::to_string),
+        grid: json_of(r.opt_text(20)?),
+        grid_stack_id: r.opt_int(21)?,
+        grid_link: r.opt_text(22)?.map(str::to_string),
+        part_sets: json_of(r.opt_text(23)?),
+        check_status: r.opt_text(24)?.map(str::to_string),
+        check_reasons: json_of(r.opt_text(25)?),
+        check_decision_id: r.opt_int(26)?,
+        checked_at: r.opt_text(27)?.map(str::to_string),
     })
+}
+
+fn json_of(text: Option<&str>) -> serde_json::Value {
+    text.and_then(|t| serde_json::from_str(t).ok())
+        .unwrap_or(serde_json::Value::Null)
 }
 
 /// One derivative by id.
@@ -399,6 +446,27 @@ pub fn get(store: &mut Store, id: i64) -> Result<Option<Derivative>, Error> {
         .query_opt(&sql, &[Param::Int(id)])?
         .map(|r| of(&r))
         .transpose()
+}
+
+/// The derivatives of these ids that are there, each once and in id order,
+/// read a few hundred at a time.
+pub fn of_ids(store: &mut Store, ids: &[i64]) -> Result<Vec<Derivative>, Error> {
+    let mut ids = ids.to_vec();
+    ids.sort_unstable();
+    ids.dedup();
+    let mut out = Vec::with_capacity(ids.len());
+    for chunk in ids.chunks(500) {
+        let list = chunk
+            .iter()
+            .map(i64::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!("{} WHERE id IN ({list}) ORDER BY id", select(store));
+        for r in store.query(&sql, &[])? {
+            out.push(of(&r)?);
+        }
+    }
+    Ok(out)
 }
 
 /// The live derivatives of one kind of `stacks` in one place, read a few
@@ -487,6 +555,9 @@ pub struct Filter<'a> {
     pub subject_id: Option<i64>,
     /// Record 43: only the files one pipeline run made.
     pub run_id: Option<i64>,
+    /// Record 55 H3: only the results a check left so (accepted, rejected,
+    /// flagged), or that no check has decided (`unchecked`).
+    pub check: Option<&'a str>,
     pub limit: usize,
 }
 
@@ -523,8 +594,494 @@ pub fn list(store: &mut Store, f: &Filter<'_>) -> Result<Vec<Derivative>, Error>
             d.param(params.len(), Type::Int)
         ));
     }
+    match f.check {
+        None => {}
+        Some("unchecked") => sql.push_str(" AND check_status IS NULL"),
+        Some(c) if CHECKS.contains(&c) => {
+            params.push(Param::from(c));
+            sql.push_str(&format!(
+                " AND check_status = {}",
+                d.param(params.len(), Type::Text)
+            ));
+        }
+        Some(other) => {
+            return Err(Error::Message(format!(
+                "check is accepted, rejected, flagged or unchecked, not {other}"
+            )));
+        }
+    }
     sql.push_str(&format!(" ORDER BY id DESC LIMIT {}", f.limit.max(1)));
     store.query(&sql, &params)?.iter().map(of).collect()
+}
+
+/// Write what a mask's header says of its grid, the scan whose grid it is
+/// on and how the two are tied (record 55 H3, section 2).
+pub fn set_grid(
+    store: &mut Store,
+    id: i64,
+    grid: &serde_json::Value,
+    grid_stack_id: Option<i64>,
+    link: &str,
+) -> Result<(), Error> {
+    if !GRID_LINKS.contains(&link) {
+        return Err(Error::Message(format!(
+            "a grid link is same, world or none, not {link}"
+        )));
+    }
+    store.update_by_id(
+        table("derivative"),
+        &[
+            (
+                "grid",
+                if grid.is_null() {
+                    Param::Null
+                } else {
+                    Param::from(grid.to_string())
+                },
+            ),
+            (
+                "grid_stack_id",
+                grid_stack_id.map_or(Param::Null, Param::Int),
+            ),
+            ("grid_link", Param::from(link)),
+        ],
+        "id",
+        id,
+    )?;
+    Ok(())
+}
+
+/// One part of a mask (record 55 H3, section 3): a component of a lesion
+/// label, or one label of a label map, in the mask's own grid.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Part {
+    pub label: i64,
+    pub name: Option<String>,
+    pub voxels: i64,
+    pub volume_mm3: f64,
+    /// The part's voxel nearest its centre of mass, millimetres, LPS.
+    pub anchor_mm: [f64; 3],
+    /// The world minimum and maximum of the part's voxels' corners, LPS.
+    pub box_mm: [[f64; 3]; 2],
+    /// Its place in the order along the grid scan's slice direction,
+    /// bottom to top, from 0.
+    pub position: i64,
+    pub method: String,
+    #[serde(rename = "check")]
+    pub check_status: Option<String>,
+    pub check_reason: Option<String>,
+    #[serde(skip)]
+    pub check_decision_id: Option<i64>,
+}
+
+/// Write a mask's part sets and the parts of each, in one transaction. A
+/// part made again the same keeps its check: the status is a person's and
+/// stays. A part whose label now names other geometry (other voxels, anchor
+/// or box), and a decided part a set no longer holds, lose their check and
+/// its decision is withdrawn, never deleted, so a status never moves onto
+/// another lesion (the review of E1, item 4). A part no check decided that
+/// a set no longer holds is removed. Answers the decisions withdrawn.
+pub fn set_parts(
+    store: &mut Store,
+    id: i64,
+    part_sets: &serde_json::Value,
+    parts: &[(String, Vec<Part>)],
+) -> Result<Vec<i64>, Error> {
+    store.begin()?;
+    let written = (|| -> Result<Vec<i64>, Error> {
+        store.update_by_id(
+            table("derivative"),
+            &[("part_sets", Param::from(part_sets.to_string()))],
+            "id",
+            id,
+        )?;
+        let d = store.dialect();
+        let t = table("derivative_part");
+        let mut withdrawn: Vec<i64> = Vec::new();
+        for (set, list) in parts {
+            let made: std::collections::BTreeMap<i64, &Part> =
+                list.iter().map(|p| (p.label, p)).collect();
+            // what each label holds now, as numbers, whatever text a
+            // backend keeps the JSON in
+            let sql = format!(
+                "SELECT label, voxels, {}, {}, check_status, check_decision_id FROM {} \
+                 WHERE derivative_id = {} AND part_set = {}",
+                d.text_of(t.column("anchor_mm").expect("anchor_mm")),
+                d.text_of(t.column("box_mm").expect("box_mm")),
+                store.qualified("derivative_part"),
+                d.param(1, Type::Int),
+                d.param(2, Type::Text)
+            );
+            let mut gone: Vec<i64> = Vec::new();
+            let mut moved: Vec<i64> = Vec::new();
+            for r in store.query(&sql, &[Param::Int(id), Param::from(set.as_str())])? {
+                let label = r.int(0)?;
+                let decided = r.opt_text(4)?.is_some();
+                let decision = r.opt_int(5)?;
+                match made.get(&label) {
+                    None => {
+                        gone.push(label);
+                        withdrawn.extend(decision);
+                    }
+                    Some(p) if decided => {
+                        let anchor: Option<[f64; 3]> =
+                            r.opt_text(2)?.and_then(|t| serde_json::from_str(t).ok());
+                        let bx: Option<[[f64; 3]; 2]> =
+                            r.opt_text(3)?.and_then(|t| serde_json::from_str(t).ok());
+                        let same = r.int(1)? == p.voxels
+                            && anchor.is_some_and(|a| close3(a, p.anchor_mm))
+                            && bx.is_some_and(|b| {
+                                close3(b[0], p.box_mm[0]) && close3(b[1], p.box_mm[1])
+                            });
+                        if !same {
+                            moved.push(label);
+                            withdrawn.extend(decision);
+                        }
+                    }
+                    Some(_) => {}
+                }
+            }
+            for chunk in gone.chunks(500) {
+                let list = chunk
+                    .iter()
+                    .map(i64::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                store.execute(
+                    &format!(
+                        "DELETE FROM {} WHERE derivative_id = {} AND part_set = {} AND label IN ({list})",
+                        store.qualified("derivative_part"),
+                        d.param(1, Type::Int),
+                        d.param(2, Type::Text)
+                    ),
+                    &[Param::Int(id), Param::from(set.as_str())],
+                )?;
+            }
+            for chunk in moved.chunks(500) {
+                let list = chunk
+                    .iter()
+                    .map(i64::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                store.execute(
+                    &format!(
+                        "UPDATE {} SET check_status = NULL, check_reason = NULL, check_decision_id = NULL \
+                         WHERE derivative_id = {} AND part_set = {} AND label IN ({list})",
+                        store.qualified("derivative_part"),
+                        d.param(1, Type::Int),
+                        d.param(2, Type::Text)
+                    ),
+                    &[Param::Int(id), Param::from(set.as_str())],
+                )?;
+            }
+            let rows: Vec<Vec<Param>> = list
+                .iter()
+                .map(|p| {
+                    vec![
+                        Param::Int(id),
+                        Param::from(set.as_str()),
+                        Param::Int(p.label),
+                        p.name.as_deref().map_or(Param::Null, Param::from),
+                        Param::Int(p.voxels),
+                        Param::Double(p.volume_mm3),
+                        Param::from(serde_json::json!(p.anchor_mm).to_string()),
+                        Param::from(serde_json::json!(p.box_mm).to_string()),
+                        Param::Int(p.position),
+                        Param::from(p.method.as_str()),
+                    ]
+                })
+                .collect();
+            for chunk in rows.chunks(500) {
+                store.insert(
+                    &Insert::new(
+                        table("derivative_part"),
+                        &[
+                            "derivative_id",
+                            "part_set",
+                            "label",
+                            "name",
+                            "voxels",
+                            "volume_mm3",
+                            "anchor_mm",
+                            "box_mm",
+                            "position",
+                            "method",
+                        ],
+                    )
+                    .on_conflict(Conflict::Update {
+                        target: &["derivative_id", "part_set", "label"],
+                        set: &[
+                            "name",
+                            "voxels",
+                            "volume_mm3",
+                            "anchor_mm",
+                            "box_mm",
+                            "position",
+                            "method",
+                        ],
+                    }),
+                    chunk,
+                )?;
+            }
+        }
+        withdrawn.sort_unstable();
+        withdrawn.dedup();
+        if !withdrawn.is_empty() {
+            let now = crate::time::now_iso();
+            store.execute(
+                &format!(
+                    "UPDATE {} SET withdrawn_at = {} WHERE withdrawn_at IS NULL AND id IN ({})",
+                    store.qualified("decision"),
+                    d.param(1, Type::Timestamp),
+                    withdrawn
+                        .iter()
+                        .map(i64::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+                &[Param::from(now.as_str())],
+            )?;
+        }
+        Ok(withdrawn)
+    })();
+    match written {
+        Ok(w) => {
+            store.commit()?;
+            Ok(w)
+        }
+        Err(e) => {
+            let _ = store.rollback();
+            Err(e)
+        }
+    }
+}
+
+/// Whether two points are one, to the thousandth of a millimetre a part
+/// keeps.
+fn close3(a: [f64; 3], b: [f64; 3]) -> bool {
+    a.iter().zip(&b).all(|(x, y)| (x - y).abs() < 0.0015)
+}
+
+/// How a page of parts is ordered: along the slice direction, or largest
+/// first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PartOrder {
+    Position,
+    Size,
+}
+
+/// One page of a set's parts, and how many the set holds.
+pub fn parts(
+    store: &mut Store,
+    id: i64,
+    set: &str,
+    order: PartOrder,
+    page: usize,
+    per_page: usize,
+) -> Result<(i64, Vec<Part>), Error> {
+    let d = store.dialect();
+    let t = table("derivative_part");
+    let count = store
+        .query_opt(
+            &format!(
+                "SELECT COUNT(*) FROM {} WHERE derivative_id = {} AND part_set = {}",
+                store.qualified("derivative_part"),
+                d.param(1, Type::Int),
+                d.param(2, Type::Text)
+            ),
+            &[Param::Int(id), Param::from(set)],
+        )?
+        .map(|r| r.int(0))
+        .transpose()?
+        .unwrap_or(0);
+    let by = match order {
+        PartOrder::Position => "position, label",
+        PartOrder::Size => "voxels DESC, position, label",
+    };
+    let cols = [
+        "label",
+        "name",
+        "voxels",
+        "volume_mm3",
+        "anchor_mm",
+        "box_mm",
+        "position",
+        "method",
+        "check_status",
+        "check_reason",
+        "check_decision_id",
+    ]
+    .iter()
+    .map(|c| d.text_of(t.column(c).expect("a part column")))
+    .collect::<Vec<_>>()
+    .join(", ");
+    // a page past the set is empty, read from nothing, and its offset
+    // never overflows (the review of E1, item 11)
+    let per_page = per_page.clamp(1, PARTS_MAX);
+    let offset = page.saturating_mul(per_page);
+    if offset >= count.max(0) as usize {
+        return Ok((count, Vec::new()));
+    }
+    let sql = format!(
+        "SELECT {cols} FROM {} WHERE derivative_id = {} AND part_set = {} ORDER BY {by} LIMIT {per_page} OFFSET {offset}",
+        store.qualified("derivative_part"),
+        d.param(1, Type::Int),
+        d.param(2, Type::Text),
+    );
+    let three = |text: Option<&str>| -> [f64; 3] {
+        text.and_then(|t| serde_json::from_str(t).ok())
+            .unwrap_or([0.0; 3])
+    };
+    let mut out = Vec::new();
+    for r in store.query(&sql, &[Param::Int(id), Param::from(set)])? {
+        out.push(Part {
+            label: r.int(0)?,
+            name: r.opt_text(1)?.map(str::to_string),
+            voxels: r.int(2)?,
+            volume_mm3: r.double(3)?,
+            anchor_mm: three(r.opt_text(4)?),
+            box_mm: r
+                .opt_text(5)?
+                .and_then(|t| serde_json::from_str(t).ok())
+                .unwrap_or([[0.0; 3]; 2]),
+            position: r.int(6)?,
+            method: r.text(7)?.to_string(),
+            check_status: r.opt_text(8)?.map(str::to_string),
+            check_reason: r.opt_text(9)?.map(str::to_string),
+            check_decision_id: r.opt_int(10)?,
+        });
+    }
+    Ok((count, out))
+}
+
+/// Write the status a check left on a result (record 55 H3, section 6.4):
+/// the verdict, the result-level reasons of the deciding answer, the
+/// decision it is and when. None clears it, as a withdrawal does. Inside
+/// the caller's transaction.
+pub fn set_check(
+    store: &mut Store,
+    id: i64,
+    status: Option<&str>,
+    reasons: &serde_json::Value,
+    decision: Option<i64>,
+    at: Option<&str>,
+) -> Result<(), Error> {
+    if let Some(s) = status
+        && !CHECKS.contains(&s)
+    {
+        return Err(Error::Message(format!(
+            "a check is accepted, rejected or flagged, not {s}"
+        )));
+    }
+    store.update_by_id(
+        table("derivative"),
+        &[
+            ("check_status", status.map_or(Param::Null, Param::from)),
+            (
+                "check_reasons",
+                if reasons.is_null() || status.is_none() {
+                    Param::Null
+                } else {
+                    Param::from(reasons.to_string())
+                },
+            ),
+            (
+                "check_decision_id",
+                decision.map_or(Param::Null, Param::Int),
+            ),
+            ("checked_at", at.map_or(Param::Null, Param::from)),
+        ],
+        "id",
+        id,
+    )?;
+    Ok(())
+}
+
+/// Write the status a check left on one part of a result: the verdict, the
+/// reason and the decision. None clears it. Answers whether the part is
+/// there: a part a set no longer holds is not written.
+pub fn set_part_check(
+    store: &mut Store,
+    id: i64,
+    set: &str,
+    label: i64,
+    status: Option<&str>,
+    reason: Option<&str>,
+    decision: Option<i64>,
+) -> Result<bool, Error> {
+    if let Some(s) = status
+        && !CHECKS.contains(&s)
+    {
+        return Err(Error::Message(format!(
+            "a check is accepted, rejected or flagged, not {s}"
+        )));
+    }
+    let d = store.dialect();
+    let n = store.execute(
+        &format!(
+            "UPDATE {} SET check_status = {}, check_reason = {}, check_decision_id = {} \
+             WHERE derivative_id = {} AND part_set = {} AND label = {}",
+            store.qualified("derivative_part"),
+            d.param(1, Type::Text),
+            d.param(2, Type::Text),
+            d.param(3, Type::Int),
+            d.param(4, Type::Int),
+            d.param(5, Type::Text),
+            d.param(6, Type::Int),
+        ),
+        &[
+            status.map_or(Param::Null, Param::from),
+            reason.map_or(Param::Null, Param::from),
+            decision.map_or(Param::Null, Param::Int),
+            Param::Int(id),
+            Param::from(set),
+            Param::Int(label),
+        ],
+    )?;
+    Ok(n > 0)
+}
+
+/// Clear every part status a result's parts hold, as a withdrawal of its
+/// check does. Answers how many were cleared.
+pub fn clear_part_checks(store: &mut Store, id: i64) -> Result<u64, Error> {
+    let d = store.dialect();
+    store.execute(
+        &format!(
+            "UPDATE {} SET check_status = NULL, check_reason = NULL, check_decision_id = NULL \
+             WHERE derivative_id = {} AND check_status IS NOT NULL",
+            store.qualified("derivative_part"),
+            d.param(1, Type::Int),
+        ),
+        &[Param::Int(id)],
+    )
+}
+
+/// The labels of a set that a result holds, of those asked.
+pub fn labels_held(
+    store: &mut Store,
+    id: i64,
+    set: &str,
+    labels: &[i64],
+) -> Result<std::collections::BTreeSet<i64>, Error> {
+    let d = store.dialect();
+    let mut out = std::collections::BTreeSet::new();
+    for chunk in labels.chunks(500) {
+        let list = chunk
+            .iter()
+            .map(i64::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT label FROM {} WHERE derivative_id = {} AND part_set = {} AND label IN ({list})",
+            store.qualified("derivative_part"),
+            d.param(1, Type::Int),
+            d.param(2, Type::Text),
+        );
+        for r in store.query(&sql, &[Param::Int(id), Param::from(set)])? {
+            out.insert(r.int(0)?);
+        }
+    }
+    Ok(out)
 }
 
 /// How many rows and bytes the registry names, for custody.

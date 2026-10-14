@@ -14,8 +14,10 @@
 
 pub mod bids;
 mod cache;
+pub mod contrast;
 pub mod corpus;
 pub mod derive;
+pub mod engines;
 pub mod error;
 pub mod eval;
 pub mod expr;
@@ -30,6 +32,7 @@ pub mod pack;
 pub mod pass;
 pub mod patch;
 pub mod pick;
+pub mod pick_rules;
 pub mod private;
 pub mod reads;
 pub mod replay;

@@ -245,7 +245,7 @@ hash `signature` and the reason `split_reason`, and a pack author cannot
 confuse them.
 
 The reason itself is derived from the stacks rather than copied from v0, and
-the two agree on all 2,165 series of the nmosd corpus. On the mix corpus they
+the two agree on all 2,165 series of the study D corpus. On the mix corpus they
 agree on 2,559 of 2,567, and the eight are v0's, with a named cause: v0 writes
 the key in its **sort** step and not in extraction, so a series that was
 extracted and never sorted has none. Across the whole live corpus that is 19
@@ -335,10 +335,12 @@ that evaluated it**. That single column is what turns re-classification from a
 blind overwrite into a diff: "pack 2.1 changes 3,412 stacks, here they are".
 
 The engine refuses to load a pack whose own corpus fails, and refuses a pack
-whose contract version it does not implement. A vocabulary change (an axis
-value, a directory type, an identifier namespace) is a **major** version bump,
-because a federated question asked for pack 2 must not be answered by pack 3's
-vocabulary (D26).
+whose contract version it does not implement. Adding to the vocabulary (an
+axis value, a directory type, an identifier namespace) is a **minor** version
+bump and removing or renaming any of it a **major** one (amended 2026-10-10: it
+was first that every vocabulary change is a major), so a federated question
+written for pack 2.1 is answered alike by every later 2.x and never by pack
+3's vocabulary (D26).
 
 ### 5.3 Overlays (C2)
 
@@ -585,8 +587,9 @@ cheap. To classify an experimental sequence that needs its own logic:
 
 1. write `rules/<name>.yml` with an `enter_when`, the axes it `decides`, and
    its rules in the order that matters;
-2. add whatever vocabulary it needs to the axis files, which is a major
-   version bump (§5.2) because a vocabulary is a contract;
+2. add whatever vocabulary it needs to the axis files, which is a minor
+   version bump (§5.2): adding keeps every earlier question's meaning, and
+   only removing or renaming a value is a major one;
 3. add its cases to the pack's corpus, which the engine checks at load.
 
 No Rust, no release of the engine, no pipeline stage to insert, no skip flag to
@@ -1007,7 +1010,7 @@ value accumulates.
 Written after the wave. `series_classification_cache` is what v0 said the last
 time it sorted each cohort, and v0's code has moved since, so a run against it
 reports v0 disagreeing with itself as though v1 had caused it. Two of the
-nmosd gate's four difference groups were exactly that.
+study D gate's four difference groups were exactly that.
 
 `tools/pack-check/resort.py` runs v0's own classification over the same stacks
 from current v0 code, plus the two step 4 phases that change an axis, and writes
@@ -1078,7 +1081,7 @@ quoted by file and line, and one sentence saying which is right and why. A group
 whose cause is "walk order" or "v0 bug" and nothing more is not adjudicated; it
 is an open item, and the gate does not pass with open items.
 
-This is the bar that Wave 1's nmosd gate was actually held to, written down:
+This is the bar that Wave 1's study D gate was actually held to, written down:
 there, four mismatched studies looked like a classification difference and were
 two unrelated causes: an import reading the wrong identifier table, and a
 session duplicated on disk by an export that read a subject number out of a

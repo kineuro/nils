@@ -234,8 +234,8 @@ impl Mapping {
         let m = file.import;
         if m.target.has_subject() && m.subject.is_none() {
             return Err(Error::Mapping(format!(
-                "a {} row names a subject, and the mapping says how under `subject`",
-                m.target.name()
+                "{} row names a subject, and the mapping says how under `subject`",
+                crate::a_or_an(m.target.name())
             )));
         }
         if let Some(s) = &m.subject
@@ -250,8 +250,8 @@ impl Mapping {
             match r {
                 Some(_) => Ok(()),
                 None => Err(Error::Mapping(format!(
-                    "a {} row needs `{what}`, a constant or a column",
-                    m.target.name()
+                    "{} row needs `{what}`, a constant or a column",
+                    crate::a_or_an(m.target.name())
                 ))),
             }
         };
@@ -296,8 +296,8 @@ impl Mapping {
         for (field, required) in m.target.fields() {
             if *required && !m.columns.contains_key(*field) {
                 return Err(Error::Mapping(format!(
-                    "a {} row needs {field}",
-                    m.target.name()
+                    "{} row needs {field}",
+                    crate::a_or_an(m.target.name())
                 )));
             }
         }
@@ -1099,8 +1099,8 @@ fn write_event(
     let value = r.fields.get("value");
     if value_type.is_some() && value.is_none() {
         return Ok(Verdict::Refused(format!(
-            "the kind carries a {} value and the row has none",
-            value_type.unwrap_or("")
+            "the kind carries {} value and the row has none",
+            crate::a_or_an(value_type.unwrap_or(""))
         )));
     }
     let number = match value_type {

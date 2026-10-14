@@ -1,0 +1,23 @@
+{
+ "run": "final-cert-frame-2",
+ "purpose": "The final certificate's frame, version 2: the header reads' sessions apart from the picture reads' (body-part and post-contrast campaigns), so the plan can offer both exclusion rules; sources from run final-cert-frame",
+ "study": "studies/2026-09-30-final-certificate/plan-draft.md",
+ "created": "2026-09-30T18:06:12Z",
+ "sealed": "2026-09-30T18:06:12Z",
+ "files": 5,
+ "bytes": 377690,
+ "by_folder": {
+  ".": 1,
+  "code": 3,
+  "logs": 1
+ },
+ "manifest_sha256": "867765a7408e99274a16d4255e1467f7efa334540f9c8d55d6f596ddd7ff3f47",
+ "per_stack_files_by_folder": {},
+ "sha256": {
+  "RUN.json": "88e64e8cda3cd9af41d1c59aabcb23a0ccf51f3e6120da70543ee8b9021b1512",
+  "code/frame-final.sql": "a9d8c3d20f43c39e0a798d95b1b1ff29abff477ece6cf7dfed4a341be32be133",
+  "code/frame_final.py": "0c43d34e65320bec56249c8e0d5e6a1c10b3d20800ad84c0228a4fd67a5789db",
+  "code/sop3.sql": "5525680618f3a8a91e2e45f023588ad320f1c9cce9b1a7cfe3871899e23f295b",
+  "logs/run.md": "801c2565e72c832c89cfb9d22e192b28148d76e10aa2f2140f941d046c9e44cf"
+ }
+}

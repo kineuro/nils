@@ -60,7 +60,12 @@ pub const SUBJECT_TABLES: &[(&str, Handling)] = &[
     // record 42 S4: a derivative names its subject whatever its scope
     ("derivative", Handling::Repoint),
     ("handover_subject", Handling::Repoint),
+    // the main scans a release read, frozen when it was made
+    ("release_pick", Handling::Repoint),
     ("session_cache", Handling::Rebuild),
+    // record 55 F5: the post-contrast label follows its stack, and the next
+    // labelling reads the merged subject's sessions together
+    ("contrast_label", Handling::Repoint),
     ("handle_member", Handling::Repoint),
     ("values_member", Handling::Repoint),
     // record 42: a session-grain campaign item names its subject

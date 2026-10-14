@@ -21,7 +21,19 @@
 # stopped keeps the sessions it finished.
 #
 # The image is FreeSurfer 8.2.0, pinned by its registry manifest digest,
-# resolved 2026-09-24 by a registry manifest request, not pulled.
+# resolved 2026-09-24 by a registry manifest request, not pulled. It
+# carries the fix for 8.2.0's expert-options bug (a recon-all given an
+# expert-options file stopped at the surface registration): its
+# bin/recon-all and bin/rca-surfreg have the checksums of those in
+# fs820_updates.sh's patch of 2026-06-25. The bug only touched a run given
+# such a file (by -expert, or left in the subject by an earlier run); this
+# one starts each session in a new folder without one.
+#
+# Memory: FreeSurfer 8's deep-learning steps hold far more than 7 did. Its
+# release notes give about 24 GB, and its install notes (rel8notes) about
+# 80 GB in use at one point of a recon-all, which a machine of 32 GB
+# carries only with nothing else running. A unit declares 32 GB, up from
+# the 8 that fitted FreeSurfer 7.
 name: freesurfer-recon-all
 schema-version: "0.5"
 tool-version: "8.2.0"
@@ -58,6 +70,11 @@ command-line: >-
 x-nils:
   contract: 1
   analysis-level: session
+  # It fixes the earlier versions (the review of 2026-10-12), so a new
+  # run no longer takes them; their runs and results keep their names.
+  # No version list: every earlier version of the name in a catalog.
+  replaces:
+    why: "It declares the 32 GB FreeSurfer 8's recon-all takes; the earlier versions declared 8 GB, and a unit held to that could be killed for memory."
   input:
     layout: bids
     roles: [t1w]
@@ -96,5 +113,7 @@ x-nils:
     cores-input: threads
     gpu: none
     cores: 2
-    memory-gb: 8
+    # FreeSurfer 8: about 24 GB (release notes), up to an 80 GB peak
+    # (install notes); 8 GB was a FreeSurfer 7 budget
+    memory-gb: 32
     unit-minutes: 420

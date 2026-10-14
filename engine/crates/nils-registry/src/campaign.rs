@@ -16,12 +16,15 @@
 //!   written as decisions would cancel each other. An answer stays an
 //!   answer, kept for good, and an item becomes one decision only when the
 //!   campaign closes: the value the raters agreed on, or the adjudicator's.
-//! - **Six questions.** `axis` (which value of one pack axis), `axes`
+//! - **The questions.** `axis` (which value of one pack axis), `axes`
 //!   (several axes of a stack at once, record 45: the answer is held to the
 //!   pack's legal combinations and closes into one decision per axis),
 //!   `pick` (which stacks stand for a role in a session), `form` (a small
 //!   declared form), `derivative` (a file answer, a mask, named by its
-//!   derivative id; the bytes go through the derivative door) and `free`.
+//!   derivative id; the bytes go through the derivative door), `free`, the
+//!   two post-contrast readings (`pair`, `anchored`), and `check` (record 55
+//!   H3: is this result right? accepted, rejected or flagged, closing into
+//!   a status on the result, [`crate::check`]).
 //! - **Agreement.** Exact agreement per item, Cohen's and Fleiss' kappa over
 //!   the campaign, or an external metric a caller posts for an item (a Dice
 //!   over masks, which something with pixels computed: the engine never
@@ -140,10 +143,21 @@ pub enum Question {
         post: String,
         pre: String,
     },
+    /// Job type 3, check a result (record 55 H3, the build spec's section
+    /// 6.1): is this result right? An item is a result read as one of its
+    /// part sets (or at part grain one part of a `components` set); the
+    /// answer is a verdict, accepted, rejected or flagged, with the reasons
+    /// the question declares ([`crate::check`]). It closes into a status on
+    /// the result and its parts.
+    Check {
+        part_set: String,
+        grain: String,
+        reasons: Vec<crate::check::Reason>,
+    },
 }
 
 /// The question kinds, as a campaign names them.
-pub const KINDS: [&str; 8] = [
+pub const KINDS: [&str; 9] = [
     "axis",
     "axes",
     "pick",
@@ -152,12 +166,15 @@ pub const KINDS: [&str; 8] = [
     "free",
     "pair",
     "anchored",
+    "check",
 ];
 
 impl Question {
     pub fn parse(v: &Value) -> Result<Question, Error> {
         let kind = v["kind"].as_str().ok_or_else(|| {
-            invalid("question.kind: axis, axes, pick, form, derivative, free, pair or anchored")
+            invalid(
+                "question.kind: axis, axes, pick, form, derivative, free, pair, anchored or check",
+            )
         })?;
         Ok(match kind {
             "axis" => {
@@ -289,9 +306,33 @@ impl Question {
                     Question::Pair { axis, post, pre }
                 }
             }
+            "check" => {
+                let part_set = v["part_set"]
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .ok_or_else(|| {
+                        invalid("question.part_set: the part set the result is read as (lesions, structures, whole)")
+                    })?
+                    .to_string();
+                let grain = match &v["grain"] {
+                    Value::Null => "result".to_string(),
+                    Value::String(g) if crate::check::GRAINS.contains(&g.as_str()) => g.clone(),
+                    other => {
+                        return Err(invalid(format!(
+                            "question.grain: result or part, not {other}"
+                        )));
+                    }
+                };
+                Question::Check {
+                    part_set,
+                    grain,
+                    reasons: crate::check::parse_reasons(&v["reasons"])?,
+                }
+            }
             other => {
                 return Err(invalid(format!(
-                    "{other} is not a question: axis, axes, pick, form, derivative, free, pair or anchored"
+                    "{other} is not a question: axis, axes, pick, form, derivative, free, pair, anchored or check"
                 )));
             }
         })
@@ -307,6 +348,7 @@ impl Question {
             Question::Free => "free",
             Question::Pair { .. } => "pair",
             Question::Anchored { .. } => "anchored",
+            Question::Check { .. } => "check",
         }
     }
 
@@ -357,6 +399,15 @@ impl Question {
                 "kind": "anchored", "axis": axis, "post": post, "pre": pre,
                 "answers": crate::anchored::ANSWERS,
             }),
+            Question::Check {
+                part_set,
+                grain,
+                reasons,
+            } => json!({
+                "kind": "check", "part_set": part_set, "grain": grain,
+                "reasons": crate::check::reasons_json(reasons),
+                "verdicts": crate::check::VERDICTS,
+            }),
         }
     }
 
@@ -374,6 +425,7 @@ impl Question {
             Question::Free => "free".to_string(),
             Question::Pair { axis, .. } => format!("pair:{axis}"),
             Question::Anchored { axis, .. } => format!("anchored:{axis}"),
+            Question::Check { part_set, .. } => format!("check:{part_set}"),
         }
     }
 
@@ -469,6 +521,9 @@ impl Question {
                     )));
                 }
             }
+            Question::Check { grain, reasons, .. } => {
+                crate::check::fits(grain, reasons, value, a.form, a.why)?;
+            }
             Question::Anchored { .. } => {
                 let words = crate::anchored::ANSWERS.join(", ");
                 let v = value.map(str::trim).ok_or_else(|| {
@@ -500,10 +555,13 @@ impl Question {
                     .map(|j| canonical_joint(constraints, &j))
                     .unwrap_or_else(|_| v.to_string())
             }),
+            // a check is compared on its verdict; its reasons are compared
+            // as sets and reported (record 55 H3, section 6.3)
             Question::Axis { .. }
             | Question::Free
             | Question::Pair { .. }
-            | Question::Anchored { .. } => a.value.clone(),
+            | Question::Anchored { .. }
+            | Question::Check { .. } => a.value.clone(),
             Question::Pick { .. } => a
                 .value
                 .as_deref()
@@ -1132,8 +1190,9 @@ impl Adjudication {
     }
 }
 
-/// What closing writes.
-pub const CLOSES_INTO: [&str; 4] = ["decision", "stage", "pick", "none"];
+/// What closing writes. Record 55 H3: `check`, a status on each result a
+/// check campaign asked about, only for a check question.
+pub const CLOSES_INTO: [&str; 5] = ["decision", "stage", "pick", "check", "none"];
 
 // ------------------------------------------------------------- creating
 
@@ -1154,6 +1213,9 @@ pub enum Items {
     /// two anchors in the panels' order, and the items in the order they
     /// are read ([`crate::anchored::draw`]).
     Anchored(Vec<crate::anchored::Shown>),
+    /// Record 55 H3: results to check, each read as a part set, at part
+    /// grain one item per part, each with its panels in order.
+    Checks(Vec<crate::check::CheckItem>),
 }
 
 /// A campaign to create.
@@ -1569,6 +1631,8 @@ pub fn create(registry: &mut Registry, n: &New<'_>) -> Result<Campaign, Error> {
             ));
         }
         ("pick", _) => return Err(invalid("only a pick question closes into a pick")),
+        ("check", Question::Check { .. }) => {}
+        ("check", _) => return Err(invalid("only a check question closes into check")),
         _ => unreachable!("checked above"),
     }
     if matches!(question, Question::Derivative { .. })
@@ -1577,6 +1641,14 @@ pub fn create(registry: &mut Registry, n: &New<'_>) -> Result<Campaign, Error> {
     {
         return Err(invalid(
             "a derivative question is compared by an external metric (a Dice something with pixels computes), or adjudicated always or never; the engine never compares files",
+        ));
+    }
+    // record 55 H3 (the review of E2, item 10): a check is compared on
+    // its verdict by the engine itself; an external metric would close an
+    // item whose raters gave different verdicts as the first one's
+    if matches!(question, Question::Check { .. }) && adjudication.metric == Metric::External {
+        return Err(invalid(
+            "adjudication.metric: a check is compared on its verdict, exact or kappa, never by an external metric",
         ));
     }
     if n.raters_per_item < 1 {
@@ -1624,6 +1696,45 @@ pub fn create(registry: &mut Registry, n: &New<'_>) -> Result<Campaign, Error> {
                 "an anchored question is asked of a candidate beside two anchors; nils campaign anchored makes one",
             ));
         }
+        (
+            Items::Checks(list),
+            Question::Check {
+                grain, part_set, ..
+            },
+        ) => {
+            for it in list {
+                it.check()?;
+                if it.part_set != *part_set {
+                    return Err(invalid(format!(
+                        "result {} is read as {}, and the check asks about {part_set}",
+                        it.derivative_id, it.part_set
+                    )));
+                }
+                if (grain == "part") != it.part_label.is_some() {
+                    return Err(invalid(format!(
+                        "a check at {grain} grain asks about {}",
+                        if grain == "part" {
+                            "one part per item"
+                        } else {
+                            "one whole result per item"
+                        }
+                    )));
+                }
+            }
+            let keys: BTreeSet<String> = list.iter().map(|i| i.key()).collect();
+            if keys.len() != list.len() {
+                return Err(invalid("the source names a result, or a part, twice"));
+            }
+            if grain == "part" { "part" } else { "result" }
+        }
+        (Items::Checks(_), _) => {
+            return Err(invalid("results are asked a check question"));
+        }
+        (_, Question::Check { .. }) => {
+            return Err(invalid(
+                "a check question is asked of results: a run's, named ones, or a selection's",
+            ));
+        }
         (Items::Sessions(_), Question::Axis { .. } | Question::Axes { .. }) => {
             return Err(invalid(
                 "an axis or an axes question is asked of stacks, not sessions",
@@ -1643,6 +1754,7 @@ pub fn create(registry: &mut Registry, n: &New<'_>) -> Result<Campaign, Error> {
         Items::Review(r) => r.len(),
         Items::Pairs(p) => p.len(),
         Items::Anchored(a) => a.len(),
+        Items::Checks(c) => c.len(),
     };
     if count == 0 {
         return Err(invalid("the source names no item"));
@@ -1705,6 +1817,28 @@ pub fn create(registry: &mut Registry, n: &New<'_>) -> Result<Campaign, Error> {
     let policy = json!({"raters": n.raters, "adjudicators": n.adjudicators});
     store.begin()?;
     let written = (|| -> Result<(i64, usize), Error> {
+        // record 55 H3 (the review of E2, item 8): a result one open check
+        // holds is held by no second, read under the lock
+        if let Items::Checks(list) = &n.items {
+            let ids: Vec<i64> = list
+                .iter()
+                .map(|c| c.derivative_id)
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect();
+            let held = crate::check::held_locked(store, &ids)?;
+            if !held.is_empty() {
+                return Err(refused(format!(
+                    "{} of the results are held by an open check, which decides them: {}",
+                    held.len(),
+                    held.iter()
+                        .take(10)
+                        .map(i64::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )));
+            }
+        }
         let id = store
             .insert(
                 &Insert::new(
@@ -1770,6 +1904,11 @@ pub fn create(registry: &mut Registry, n: &New<'_>) -> Result<Campaign, Error> {
                 Question::Axis { axis, .. } => e["axis"] = json!(axis),
                 Question::Axes { axes, .. } => e["axes"] = json!(axes),
                 Question::Pick { role, .. } => e["role"] = json!(role),
+                // record 55 H3: the axis a check's decisions are written on
+                Question::Check { part_set, .. } => {
+                    e["axis"] = json!(crate::review::CHECK_AXIS);
+                    e["part_set"] = json!(part_set);
+                }
                 _ => {}
             }
             if let (Value::Object(m), Value::Object(x)) = (&mut e, extra) {
@@ -1797,6 +1936,9 @@ pub fn create(registry: &mut Registry, n: &New<'_>) -> Result<Campaign, Error> {
                 inputs.map_or(Param::Null, Param::from),
                 Param::from("open"),
                 Param::Int(1),
+                Param::Null,
+                Param::Null,
+                Param::Null,
             ]
         };
         match &n.items {
@@ -1929,6 +2071,29 @@ pub fn create(registry: &mut Registry, n: &New<'_>) -> Result<Campaign, Error> {
                     rows.push(item_row(i, r, None, None, None, &format!("anchored:{i}")));
                 }
             }
+            // record 55 H3: one item per result, or per part, raised as a
+            // question about it; its panels are kept apart
+            // ([`crate::check::write_panels`])
+            Items::Checks(list) => {
+                for (i, c) in list.iter().enumerate() {
+                    let r = raise(
+                        store,
+                        &kind,
+                        c.scope(),
+                        &c.reference(),
+                        &evidence(
+                            json!({"position": i, "derivative": c.derivative_id, "label": c.part_label}),
+                        ),
+                        &now,
+                    )?;
+                    let mut row = item_row(i, r, None, None, None, &c.key());
+                    let n = row.len();
+                    row[n - 3] = Param::Int(c.derivative_id);
+                    row[n - 2] = Param::from(c.part_set.as_str());
+                    row[n - 1] = c.part_label.map_or(Param::Null, Param::Int);
+                    rows.push(row);
+                }
+            }
             Items::Review(_) => {
                 let mut position = 0usize;
                 for it in &adopted {
@@ -1999,6 +2164,9 @@ pub fn create(registry: &mut Registry, n: &New<'_>) -> Result<Campaign, Error> {
                         "input_derivative_ids",
                         "state",
                         "round",
+                        "derivative_id",
+                        "part_set",
+                        "part_label",
                     ],
                 ),
                 chunk,
@@ -2009,6 +2177,9 @@ pub fn create(registry: &mut Registry, n: &New<'_>) -> Result<Campaign, Error> {
         }
         if let Items::Anchored(shown) = &n.items {
             crate::anchored::write_panels(store, id, shown)?;
+        }
+        if let Items::Checks(list) = &n.items {
+            crate::check::write_panels(store, id, list)?;
         }
         Ok((id, rows.len()))
     })();
@@ -2240,6 +2411,16 @@ pub struct Item {
     pub resolved_at: Option<String>,
     /// Record 48 R1: a batch held the item back to be read alone.
     pub held_back: bool,
+    /// Record 55 H3: the result a check item asks about, the part set it is
+    /// read as, and at part grain the part.
+    pub derivative_id: Option<i64>,
+    pub part_set: Option<String>,
+    pub part_label: Option<i64>,
+    /// An item its close could not write (state `refused`): when the close
+    /// refused it, and why in the close's words. Cleared once a later close
+    /// writes it.
+    pub refused_at: Option<String>,
+    pub refused_why: Option<String>,
 }
 
 impl Item {
@@ -2252,11 +2433,21 @@ impl Item {
             "round": self.round, "agreement": self.agreement, "metric": self.metric,
             "outcome": self.outcome, "decision_id": self.decision_id, "pick_id": self.pick_id,
             "resolved_at": self.resolved_at, "held_back": self.held_back,
+            "derivative_id": self.derivative_id, "part_set": self.part_set,
+            "part_label": self.part_label, "refused": self.refused_json(),
         })
+    }
+
+    /// Why and when its close refused it, or null.
+    pub fn refused_json(&self) -> Value {
+        match (&self.refused_why, &self.refused_at) {
+            (None, None) => Value::Null,
+            (why, at) => json!({"why": why, "at": at}),
+        }
     }
 }
 
-const ITEM_COLUMNS: [&str; 18] = [
+const ITEM_COLUMNS: [&str; 23] = [
     "id",
     "campaign_id",
     "position",
@@ -2275,6 +2466,11 @@ const ITEM_COLUMNS: [&str; 18] = [
     "pick_id",
     "resolved_at",
     "held_back",
+    "derivative_id",
+    "part_set",
+    "part_label",
+    "refused_at",
+    "refused_why",
 ];
 
 fn item_of(r: &Row) -> Result<Item, StoreError> {
@@ -2297,6 +2493,11 @@ fn item_of(r: &Row) -> Result<Item, StoreError> {
         pick_id: r.opt_int(15)?,
         resolved_at: r.opt_text(16)?.map(str::to_string),
         held_back: r.opt_int(17)?.unwrap_or(0) != 0,
+        derivative_id: r.opt_int(18)?,
+        part_set: r.opt_text(19)?.map(str::to_string),
+        part_label: r.opt_int(20)?,
+        refused_at: r.opt_text(21)?.map(str::to_string),
+        refused_why: r.opt_text(22)?.map(str::to_string),
     })
 }
 
@@ -2539,6 +2740,32 @@ pub fn assignments(store: &mut Store, campaign: i64) -> Result<Vec<Assignment>, 
         .iter()
         .map(assignment_of)
         .collect::<Result<_, _>>()?)
+}
+
+/// One principal's assignments of one item, in the order they were made.
+pub fn assignments_of(
+    store: &mut Store,
+    item: i64,
+    principal: &str,
+) -> Result<Vec<Assignment>, Error> {
+    let d = store.dialect();
+    let sql = format!(
+        "SELECT {} FROM {} WHERE item_id = {} AND principal = {} ORDER BY id",
+        select_list(store, "campaign_assignment", &ASSIGNMENT_COLUMNS, None),
+        store.qualified("campaign_assignment"),
+        d.param(1, Type::Int),
+        d.param(2, Type::Text)
+    );
+    Ok(store
+        .query(&sql, &[Param::Int(item), Param::from(principal)])?
+        .iter()
+        .map(assignment_of)
+        .collect::<Result<_, _>>()?)
+}
+
+/// One item's answers now, the ones no later answer supersedes.
+pub fn item_answers(store: &mut Store, item: i64) -> Result<Vec<Answer>, Error> {
+    Ok(answers_of_item(store, item)?)
 }
 
 fn assignment(store: &mut Store, id: i64) -> Result<Option<Assignment>, Error> {
@@ -3018,14 +3245,15 @@ fn by_value(w: Option<&Worth>, position: i64) -> (u8, i64, i64) {
 
 /// The items a rater's claim takes in the order asked, the first offered
 /// first: open items of the first round that still want raters and that
-/// this principal was never given, in any role or state. By position only
-/// the first `1 + AHEAD` are read.
+/// this principal was never given, in any role or state, and that are not
+/// `withheld` from it. By position only the first `1 + AHEAD` are read.
 fn rater_order(
     store: &mut Store,
     c: &Campaign,
     principal: &str,
     order: Order,
     alone: bool,
+    withheld: &BTreeSet<i64>,
 ) -> Result<Vec<(i64, Option<i64>)>, Error> {
     let campaign = c.id;
     let d = store.dialect();
@@ -3040,8 +3268,9 @@ fn rater_order(
         d.param(1, Type::Int),
         d.param(2, Type::Int),
         d.param(3, Type::Text),
-        // by position, the one offered and the ones after it
-        if order == Order::Position && !alone {
+        // by position, the one offered and the ones after it; every one
+        // where some are withheld, which are left out below
+        if order == Order::Position && !alone && withheld.is_empty() {
             format!(" LIMIT {}", 1 + AHEAD)
         } else {
             String::new()
@@ -3058,6 +3287,9 @@ fn rater_order(
         ],
     )? {
         let id = r.int(0)?;
+        if withheld.contains(&id) {
+            continue;
+        }
         if r.opt_int(3)?.unwrap_or(0) != 0 {
             flagged.insert(id);
         }
@@ -3153,6 +3385,35 @@ pub fn claim_with(
     alone: bool,
     now: &str,
 ) -> Result<Option<Claimed>, Error> {
+    claim_withholding(
+        registry,
+        campaign,
+        principal,
+        role,
+        order,
+        alone,
+        &BTreeSet::new(),
+        now,
+    )
+}
+
+/// [`claim_with`], never offering the items `withheld` names, to a rater or
+/// an adjudicator: record 55, the rulings of 2026-10-12, item 6, a check's
+/// items whose result was made from a stack of a sample sealed now, for a
+/// principal who does not read sealed stacks. What a result was made from
+/// is the engine's reading, so the engine names them. A live lease on such
+/// an item is not handed back; it runs out as any lease does.
+#[allow(clippy::too_many_arguments)]
+pub fn claim_withholding(
+    registry: &mut Registry,
+    campaign: i64,
+    principal: &str,
+    role: Role,
+    order: Order,
+    alone: bool,
+    withheld: &BTreeSet<i64>,
+    now: &str,
+) -> Result<Option<Claimed>, Error> {
     let c = get(registry.store(), campaign)?
         .ok_or_else(|| Error::NotFound(format!("no campaign {campaign}")))?;
     if c.status != "open" {
@@ -3176,15 +3437,18 @@ pub fn claim_with(
     let done = (|| -> Result<Option<(i64, bool)>, Error> {
         lock(store, campaign)?;
         expire_in(store, campaign, now)?;
-        // a live lease is handed back, never a second
+        // a live lease is handed back, never a second; one on an item
+        // withheld from the principal is not, and runs out
         let sql = format!(
-            "SELECT id FROM {} WHERE campaign_id = {} AND principal = {} AND role = {} AND state = 'leased' ORDER BY id LIMIT 1",
+            "SELECT id, item_id FROM {} WHERE campaign_id = {} AND principal = {} AND role = {} AND state = 'leased' ORDER BY id{}",
             store.qualified("campaign_assignment"),
             d.param(1, Type::Int),
             d.param(2, Type::Text),
-            d.param(3, Type::Text)
+            d.param(3, Type::Text),
+            if withheld.is_empty() { " LIMIT 1" } else { "" }
         );
-        if let Some(r) = store.query_opt(
+        let mut held = None;
+        for r in store.query(
             &sql,
             &[
                 Param::Int(campaign),
@@ -3192,13 +3456,19 @@ pub fn claim_with(
                 Param::from(role.name()),
             ],
         )? {
+            if !withheld.contains(&r.int(1)?) {
+                held = Some(r.int(0)?);
+                break;
+            }
+        }
+        if let Some(id) = held {
             // what comes after the item held: the same order, which never
             // offers an item the principal was given, this one included
             if role == Role::Rater {
-                ahead = rater_order(store, &c, principal, order, alone)?;
+                ahead = rater_order(store, &c, principal, order, alone, withheld)?;
                 ahead.truncate(AHEAD);
             }
-            return Ok(Some((r.int(0)?, true)));
+            return Ok(Some((id, true)));
         }
         let until = plus_seconds(now, c.lease_seconds);
         let leased_ms = crate::time::millis_at(now);
@@ -3206,7 +3476,7 @@ pub fn claim_with(
         let i = store.qualified("campaign_item");
         match role {
             Role::Rater => {
-                let mut ranked = rater_order(store, &c, principal, order, alone)?;
+                let mut ranked = rater_order(store, &c, principal, order, alone, withheld)?;
                 if ranked.is_empty() {
                     return Ok(None);
                 }
@@ -3253,28 +3523,34 @@ pub fn claim_with(
             }
             Role::Adjudicator => {
                 let sql = format!(
-                    "SELECT a.id FROM {a} a JOIN {i} i ON i.id = a.item_id \
+                    "SELECT a.id, i.id FROM {a} a JOIN {i} i ON i.id = a.item_id \
                      WHERE a.campaign_id = {} AND a.role = 'adjudicator' AND a.state = 'offered' \
                      AND i.state = 'needs_adjudication' \
                      AND (a.principal IS NULL OR a.principal = {}) \
                      AND NOT EXISTS (SELECT 1 FROM {a} b WHERE b.item_id = i.id AND b.principal = {} AND b.id <> a.id) \
-                     ORDER BY i.position, a.id LIMIT 1",
+                     ORDER BY i.position, a.id{}",
                     d.param(1, Type::Int),
                     d.param(2, Type::Text),
-                    d.param(3, Type::Text)
+                    d.param(3, Type::Text),
+                    if withheld.is_empty() { " LIMIT 1" } else { "" }
                 );
-                let Some(r) = store.query_opt(
+                let mut offered = None;
+                for r in store.query(
                     &sql,
                     &[
                         Param::Int(campaign),
                         Param::from(principal),
                         Param::from(principal),
                     ],
-                )?
-                else {
+                )? {
+                    if !withheld.contains(&r.int(1)?) {
+                        offered = Some(r.int(0)?);
+                        break;
+                    }
+                }
+                let Some(id) = offered else {
                     return Ok(None);
                 };
-                let id = r.int(0)?;
                 store.update_by_id(
                     table("campaign_assignment"),
                     &[
@@ -4202,8 +4478,9 @@ fn derivative_answers(store: &mut Store, item_id: i64, id: i64, kind: &str) -> R
     })?;
     if d.kind != kind {
         return Err(invalid(format!(
-            "derivative {id} is a {}, and the question asks for a {kind}",
-            d.kind
+            "derivative {id} is {}, and the question asks for {}",
+            crate::a_or_an(&d.kind),
+            crate::a_or_an(kind)
         )));
     }
     if d.withdrawn_at.is_some() {
@@ -4312,6 +4589,12 @@ pub fn answer_with(
     question.check(g)?;
     // record 48: not asked only on a localizer of an A/B campaign
     crate::ab::gate(&c, g.value)?;
+    // record 55 H3: a check's parts and scans are the item's own
+    if matches!(question, Question::Check { .. }) {
+        let it = item(store, a.item_id)?
+            .ok_or_else(|| Error::NotFound(format!("no campaign item {}", a.item_id)))?;
+        crate::check::fits_item(store, &it, &crate::check::form_of(g.form)?)?;
+    }
     if let Question::Derivative {
         derivative_kind, ..
     } = &question
@@ -4341,7 +4624,8 @@ pub fn answer_with(
         }
         (kind, Some(_)) => {
             return Err(invalid(format!(
-                "a {kind} is not a model; only a model's answer names a model"
+                "{} is not a model; only a model's answer names a model",
+                crate::a_or_an(kind)
             )));
         }
         _ => {}
@@ -4452,6 +4736,22 @@ pub fn answer_with(
     if replayed {
         return Ok(answered);
     }
+    // record 55 D6 (spec §11.4): whether the answer was given blind, before
+    // the rater was shown any of NILS's suggestions of the item; an answer
+    // to a batch was given beside one
+    let purpose = crate::blind::purpose(store, c.id)?;
+    let blind = if t.batch {
+        false
+    } else {
+        crate::blind::campaign_answer_blind(
+            store,
+            c.suggest != Suggest::None,
+            a.item_id,
+            g.principal,
+            &purpose,
+        )?
+    };
+    crate::blind::mark_answer(store, answered.answer, blind)?;
     // the value of an axis or a pick is a word of the pack or stack ids; a
     // form's text and a free answer stay out of the audit row
     let shown = matches!(
@@ -4570,6 +4870,11 @@ pub fn amend(registry: &mut Registry, m: &Amend<'_>, now: &str) -> Result<Amende
     };
     question.check(&given)?;
     crate::ab::gate(&c, m.value)?;
+    if matches!(question, Question::Check { .. }) {
+        let it = item(store, earlier.item_id)?
+            .ok_or_else(|| Error::NotFound(format!("no campaign item {}", earlier.item_id)))?;
+        crate::check::fits_item(store, &it, &crate::check::form_of(m.form)?)?;
+    }
     if let Question::Derivative {
         derivative_kind, ..
     } = &question
@@ -5548,6 +5853,8 @@ fn p90(mut v: Vec<f64>) -> Option<f64> {
 /// answers that had a suggestion, how many changed it and the share.
 /// Counts and times only: never a value.
 pub fn stats(store: &mut Store, campaign: i64) -> Result<Value, Error> {
+    // record 55 H3: a check counts its verdicts and reasons beside the pace
+    let check = get(store, campaign)?.is_some_and(|c| crate::check::is_check(&c));
     // record 48, after the first gold campaign: a rater's answers now; a
     // correction counts once, as corrected, and is never timed
     let all = current_answers(store, campaign)?;
@@ -5569,7 +5876,7 @@ pub fn stats(store: &mut Store, campaign: i64) -> Result<Value, Error> {
         let suggested = list.iter().filter(|a| a.changed.is_some()).count();
         let changed = list.iter().filter(|a| a.changed == Some(true)).count();
         let tenth = |v: Option<f64>| v.map(|x| (x * 10.0).round() / 10.0);
-        json!({
+        let mut v = json!({
             "answers": list.len(),
             "read": read.len(),
             "batched": batched,
@@ -5580,7 +5887,13 @@ pub fn stats(store: &mut Store, campaign: i64) -> Result<Value, Error> {
             "suggested": suggested,
             "changed": changed,
             "share_changed": (suggested > 0).then(|| changed as f64 / suggested as f64),
-        })
+        });
+        if check {
+            let t = crate::check::tally(list);
+            v["verdicts"] = t["verdicts"].clone();
+            v["reasons"] = t["reasons"].clone();
+        }
+        v
     };
     let raters: Vec<Value> = by
         .iter()
@@ -5645,6 +5958,9 @@ fn outcome_of(question: &Question, answers: &[Answer]) -> Value {
             "form": null,
             "answers": answers.iter().map(|a| a.id).collect::<Vec<_>>(),
         }),
+        // record 55 H3: an agreed flag is the union of the raters' parts and
+        // points (section 6.3)
+        Question::Check { .. } => crate::check::outcome(answers),
         Question::Derivative { .. } => json!({
             "derivatives": answers.iter().filter_map(|a| a.derivative_id).collect::<Vec<_>>(),
             "form": first.and_then(|a| a.form.clone()),
@@ -5684,7 +6000,11 @@ fn set_item(
 
 /// Say on the review item where the campaign stands with it, so the
 /// ordinary queue shows an item waiting for its adjudicator (D7).
-fn mark_review_item(store: &mut Store, review_item: i64, state: &str) -> Result<(), Error> {
+pub(crate) fn mark_review_item(
+    store: &mut Store,
+    review_item: i64,
+    state: &str,
+) -> Result<(), Error> {
     let Some(it) = review::item(store, review_item).map_err(|e| invalid(e.to_string()))? else {
         return Ok(());
     };
@@ -5861,6 +6181,11 @@ pub fn agreement(store: &mut Store, campaign: i64) -> Result<Value, Error> {
         }
         out["per_axis"] = Value::Object(per);
     }
+    // record 55 H3: a check is measured on its verdict, and its reasons are
+    // compared as sets and reported beside it
+    if matches!(question, Question::Check { .. }) {
+        out["reasons"] = crate::check::reasons_overlap(&all, n);
+    }
     Ok(out)
 }
 
@@ -6011,6 +6336,13 @@ pub struct PickAsk<'a> {
 /// scheme, which this crate does not read, so the engine passes it in.
 pub type PickWriter<'a> = &'a dyn Fn(&mut Registry, &PickAsk<'_>) -> Result<i64, String>;
 
+/// Of these results, the ones made from a stack of a sample sealed now
+/// (record 48; record 55, the rulings of 2026-10-12, item 6: a check never
+/// holds a sealed scan's result). What a result was made from is the
+/// engine's reading (the stacks a run gave its unit, the list it was frozen
+/// over), which this crate does not make, so the engine passes it in.
+pub type SealedResults<'a> = &'a dyn Fn(&mut Registry, &[i64]) -> Result<BTreeSet<i64>, String>;
+
 /// Who closes, and what.
 #[derive(Clone)]
 pub struct Close<'a> {
@@ -6024,6 +6356,12 @@ pub struct Close<'a> {
     /// The person's pick writer a pick campaign closes through; a pick
     /// campaign closed without one leaves its items unresolved and says so.
     pub picks: Option<PickWriter<'a>>,
+    /// The engine's reading of which of a check's results were made from a
+    /// stack of a sample sealed now: their items are left as they were,
+    /// nothing is written of them, and they are counted
+    /// (`left_out_sealed`), never named. A check closed without one writes
+    /// none of its items and says so.
+    pub sealed: Option<SealedResults<'a>>,
 }
 
 impl std::fmt::Debug for Close<'_> {
@@ -6034,6 +6372,7 @@ impl std::fmt::Debug for Close<'_> {
             .field("author_kind", &self.author_kind)
             .field("model", &self.model)
             .field("picks", &self.picks.is_some())
+            .field("sealed", &self.sealed.is_some())
             .finish()
     }
 }
@@ -6061,7 +6400,9 @@ pub struct Closed {
     pub agreement: Value,
     /// Record 48, D1 of the move: items of a stack of a sample sealed now,
     /// which close into no decision and no pick until a certificate
-    /// unseals it.
+    /// unseals it; and (record 55, the rulings of 2026-10-12, item 6) a
+    /// check's items whose result was made from one, which close into
+    /// nothing.
     pub left_out_sealed: i64,
 }
 
@@ -6096,8 +6437,12 @@ pub fn close(registry: &mut Registry, cl: &Close<'_>, now: &str) -> Result<Close
     let c = get(registry.store(), cl.campaign)?
         .ok_or_else(|| Error::NotFound(format!("no campaign {}", cl.campaign)))?;
     // A close that died part way left the campaign closing; a person runs
-    // it again, and it writes what the first did not.
-    let again = c.status == "closing" && cl.author_kind == "person";
+    // it again, and it writes what the first did not. After type 3's pipe
+    // test (record 55 H3): a check closed with items it refused, whose
+    // questions are still open, is closed again by a person, which writes
+    // those it can now and leaves the rest refused.
+    let refused_left = closes_again(registry.store(), &c)?;
+    let again = (c.status == "closing" || refused_left) && cl.author_kind == "person";
     if c.status != "open" && !again {
         return Err(refused(format!(
             "campaign {} is {}{}",
@@ -6105,6 +6450,8 @@ pub fn close(registry: &mut Registry, cl: &Close<'_>, now: &str) -> Result<Close
             c.status,
             if c.status == "closing" {
                 "; a person runs its close again"
+            } else if refused_left {
+                "; a person closes it again to write the items its close refused"
             } else {
                 ""
             }
@@ -6148,11 +6495,18 @@ pub fn close(registry: &mut Registry, cl: &Close<'_>, now: &str) -> Result<Close
     match close_items(registry, cl, &c, &question, now) {
         Ok(out) => Ok(out),
         Err(e) => {
+            // a close that fails part way opens the campaign again; a later
+            // close of a closed check leaves it closed
+            let back = if c.status == "closed" {
+                "closed"
+            } else {
+                "open"
+            };
             let store = registry.store();
             store
                 .execute(
                     &format!(
-                        "UPDATE {} SET status = 'open' WHERE id = {} AND status = 'closing'",
+                        "UPDATE {} SET status = '{back}' WHERE id = {} AND status = 'closing'",
                         store.qualified("campaign"),
                         store.dialect().param(1, Type::Int)
                     ),
@@ -6175,6 +6529,24 @@ fn close_items(
     let mut out = Closed::default();
     let mut staged_ones: Vec<i64> = Vec::new();
     let all = items(registry.store(), c.id)?;
+    // record 55, the rulings of 2026-10-12, item 6: a check never holds a
+    // sealed scan's result. Of the results its items still to be written
+    // are about, those made from a stack of a sample sealed now, as the
+    // engine reads it; without the engine's reading, none is known
+    let sealed_results: Option<BTreeSet<i64>> = match (question, cl.sealed) {
+        (Question::Check { .. }, Some(read)) => {
+            let ids: Vec<i64> = all
+                .iter()
+                .filter(|i| i.state != "resolved")
+                .filter_map(|i| i.derivative_id)
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect();
+            Some(read(registry, &ids).map_err(StoreError::Message)?)
+        }
+        (Question::Check { .. }, None) => None,
+        _ => Some(BTreeSet::new()),
+    };
     // the items this close resolved, for a group asked member by member
     let mut resolved_here: BTreeSet<i64> = BTreeSet::new();
     for it in &all {
@@ -6183,7 +6555,13 @@ fn close_items(
             out.resolved += 1;
             continue;
         }
-        if !matches!(it.state.as_str(), "agreed" | "adjudicated") {
+        // an item an earlier close refused is tried again, while its
+        // question is open: a check of its result made since, which took its
+        // place, closed it (after type 3's pipe test, record 55 H3)
+        let retried = it.state == "refused";
+        if !matches!(it.state.as_str(), "agreed" | "adjudicated" | "refused")
+            || (retried && !question_open(registry.store(), it.review_item_id)?)
+        {
             out.unresolved += 1;
             continue;
         }
@@ -6298,6 +6676,27 @@ fn close_items(
                 continue;
             }
         }
+        // record 55, the rulings of 2026-10-12, item 6: a check's item whose
+        // result was made from a stack of a sample sealed now closes into
+        // nothing, whoever closes and whatever the check closes into: it is
+        // left as it was and counted, never named
+        if matches!(question, Question::Check { .. }) {
+            let Some(sealed) = &sealed_results else {
+                refuse(
+                    registry.store(),
+                    &mut out,
+                    it,
+                    "a check closes through the engine's reading of which of its results were made from a stack of a sample sealed now, and none was given".into(),
+                    now,
+                )?;
+                continue;
+            };
+            if it.derivative_id.is_some_and(|d| sealed.contains(&d)) {
+                out.left_out_sealed += 1;
+                out.unresolved += 1;
+                continue;
+            }
+        }
         match c.closes_into.as_str() {
             "decision" | "stage" if matches!(question, Question::Axes { .. }) => {
                 let Question::Axes {
@@ -6310,19 +6709,27 @@ fn close_items(
                     .as_str()
                     .map(|v| stored_joint_of(axes, constraints, v));
                 let Some(Ok(joint)) = joint else {
-                    out.refused
-                        .push((it.id, "the item came to no joint answer".into()));
-                    out.unresolved += 1;
+                    refuse(
+                        registry.store(),
+                        &mut out,
+                        it,
+                        "the item came to no joint answer".into(),
+                        now,
+                    )?;
                     continue;
                 };
                 // an answer kept across a repack that the pack now forbids
                 // wants a second look, never a decision
                 if let Err(why) = legal(constraints, &joint) {
-                    out.refused.push((
-                        it.id,
-                        format!("the item's answer is refused by the pack the campaign is under now: {why}"),
-                    ));
-                    out.unresolved += 1;
+                    refuse(
+                        registry.store(),
+                        &mut out,
+                        it,
+                        format!(
+                            "the item's answer is refused by the pack the campaign is under now: {why}"
+                        ),
+                        now,
+                    )?;
                     continue;
                 }
                 // Every decision of the item, its review items and the
@@ -6368,8 +6775,7 @@ fn close_items(
                     Ok(Err(why)) => {
                         registry.store().rollback().ok();
                         registry.refresh_meta().ok();
-                        out.refused.push((it.id, why));
-                        out.unresolved += 1;
+                        refuse(registry.store(), &mut out, it, why, now)?;
                     }
                     Err(e) => {
                         registry.store().rollback().ok();
@@ -6381,9 +6787,13 @@ fn close_items(
             "decision" | "stage" => {
                 let value = it.outcome["value"].as_str().map(str::to_string);
                 let Some(value) = value else {
-                    out.refused
-                        .push((it.id, "the item came to no value".into()));
-                    out.unresolved += 1;
+                    refuse(
+                        registry.store(),
+                        &mut out,
+                        it,
+                        "the item came to no value".into(),
+                        now,
+                    )?;
                     continue;
                 };
                 // The decision, its review item and the item's link to it
@@ -6437,6 +6847,8 @@ fn close_items(
                             ("state", Param::from("resolved")),
                             ("decision_id", Param::Int(applied.decision)),
                             ("resolved_at", Param::from(now)),
+                            NOT_REFUSED[0].clone(),
+                            NOT_REFUSED[1].clone(),
                         ],
                         "id",
                         it.id,
@@ -6455,8 +6867,112 @@ fn close_items(
                     Ok(Err(why)) => {
                         registry.store().rollback().ok();
                         registry.refresh_meta().ok();
-                        out.refused.push((it.id, why));
-                        out.unresolved += 1;
+                        refuse(registry.store(), &mut out, it, why, now)?;
+                    }
+                    Err(e) => {
+                        registry.store().rollback().ok();
+                        registry.refresh_meta().ok();
+                        return Err(e);
+                    }
+                }
+            }
+            // record 55 H3: a check closes into a status on its result and
+            // the parts it judged, as decisions a person made, each item in
+            // one transaction; it is never staged. A result made from a
+            // sealed stack was left out above; a sealed scan shown beside it
+            // holds nothing back (a result's status decides nothing of a scan)
+            "check" => {
+                if kind != "person" || !persons_only {
+                    refuse(
+                        registry.store(),
+                        &mut out,
+                        it,
+                        format!(
+                            "a check is a person's decision and is written in force; a model or an agent answered item {}, or {} closes as {}: a person adjudicates it or closes the campaign",
+                            it.position + 1,
+                            cl.who,
+                            crate::a_or_an(cl.author_kind)
+                        ),
+                        now,
+                    )?;
+                    continue;
+                }
+                // A later close never writes over a newer judgement: a
+                // result another open check holds is that check's to decide,
+                // and one checked since this item was refused keeps that
+                // check, which closes this item's question.
+                if let Some(d) = it.derivative_id {
+                    if let Some((other, name)) =
+                        crate::check::held_by_another(registry.store(), d, c.id)?
+                    {
+                        refuse(
+                            registry.store(),
+                            &mut out,
+                            it,
+                            format!(
+                                "result {d} is held by the open check {name} (campaign {other}), which decides it"
+                            ),
+                            now,
+                        )?;
+                        continue;
+                    }
+                    if retried
+                        && let Some(at) = it.refused_at.as_deref()
+                        && let Some(newer) =
+                            crate::check::checked_since(registry.store(), d, c.id, at)?
+                    {
+                        let store = registry.store();
+                        refuse(
+                            store,
+                            &mut out,
+                            it,
+                            format!(
+                                "result {d} was checked again (decision {newer}) after this campaign's close refused item {}; that check stands",
+                                it.position + 1
+                            ),
+                            now,
+                        )?;
+                        finish_review_item(
+                            store,
+                            it.review_item_id,
+                            review::RESOLVED,
+                            cl.who,
+                            &json!({"campaign": c.id, "closed_into": "check", "checked_since": newer}),
+                            None,
+                            now,
+                        )?;
+                        continue;
+                    }
+                }
+                registry.store().begin()?;
+                let written = (|| -> Result<Result<Vec<i64>, String>, Error> {
+                    let done = crate::check::close_item(
+                        registry,
+                        c,
+                        it,
+                        crate::check::By {
+                            who: &who,
+                            kind: &kind,
+                            campaign: Some(c.id),
+                        },
+                        now,
+                    )?;
+                    if done.is_ok() {
+                        mark_review_item(registry.store(), it.review_item_id, "resolved")?;
+                    }
+                    Ok(done)
+                })();
+                match written {
+                    Ok(Ok(ids)) => {
+                        registry.store().commit()?;
+                        out.decisions.extend(ids);
+                        resolved_here.insert(it.id);
+                        out.resolved += 1;
+                    }
+                    Ok(Err(why)) => {
+                        registry.store().rollback().ok();
+                        registry.refresh_meta().ok();
+                        refuse(registry.store(), &mut out, it, why, now)?;
                     }
                     Err(e) => {
                         registry.store().rollback().ok();
@@ -6475,40 +6991,49 @@ fn close_items(
                     .transpose()?
                     .unwrap_or_default();
                 let (Some(subject), Some(day)) = (it.subject_id, it.session_day.as_deref()) else {
-                    out.refused
-                        .push((it.id, "the item names no session".into()));
-                    out.unresolved += 1;
+                    refuse(
+                        registry.store(),
+                        &mut out,
+                        it,
+                        "the item names no session".into(),
+                        now,
+                    )?;
                     continue;
                 };
                 // a pick is a person's (record 42 S3): an agent's or a
                 // model's answer is evidence, never a pick, and a pick is
                 // written in force, so it is never staged (R6)
                 if kind != "person" {
-                    out.refused.push((
-                        it.id,
-                        format!("a pick is a person's; {who} answered as a {kind}"),
-                    ));
-                    out.unresolved += 1;
+                    refuse(
+                        registry.store(),
+                        &mut out,
+                        it,
+                        format!(
+                            "a pick is a person's; {who} answered as {}",
+                            crate::a_or_an(&kind)
+                        ),
+                        now,
+                    )?;
                     continue;
                 }
                 if !persons_only {
-                    out.refused.push((
-                        it.id,
+                    refuse(
+                        registry.store(),
+                        &mut out,
+                        it,
                         format!(
-                            "a pick is a person's and is written in force; a model answered item {}, or {} closes as a {}: a person adjudicates it or closes the campaign",
-                            it.position, cl.who, cl.author_kind
+                            "a pick is a person's and is written in force; a model answered item {}, or {} closes as {}: a person adjudicates it or closes the campaign",
+                            it.position,
+                            cl.who,
+                            crate::a_or_an(cl.author_kind)
                         ),
-                    ));
-                    out.unresolved += 1;
+                        now,
+                    )?;
                     continue;
                 }
                 let Some(write) = cl.picks else {
-                    out.refused.push((
-                        it.id,
-                        "a pick campaign closes through the person's pick writer, and none was given"
-                            .into(),
-                    ));
-                    out.unresolved += 1;
+                    let why = "a pick campaign closes through the person's pick writer, and none was given";
+                    refuse(registry.store(), &mut out, it, why.into(), now)?;
                     continue;
                 };
                 let pick = match write(
@@ -6526,8 +7051,7 @@ fn close_items(
                 ) {
                     Ok(pick) => pick,
                     Err(why) => {
-                        out.refused.push((it.id, why));
-                        out.unresolved += 1;
+                        refuse(registry.store(), &mut out, it, why, now)?;
                         continue;
                     }
                 };
@@ -6548,6 +7072,8 @@ fn close_items(
                         ("state", Param::from("resolved")),
                         ("pick_id", Param::Int(pick)),
                         ("resolved_at", Param::from(now)),
+                        NOT_REFUSED[0].clone(),
+                        NOT_REFUSED[1].clone(),
                     ],
                     "id",
                     it.id,
@@ -6606,6 +7132,8 @@ fn close_items(
                 let mut sets = vec![
                     ("state", Param::from("resolved")),
                     ("resolved_at", Param::from(now)),
+                    NOT_REFUSED[0].clone(),
+                    NOT_REFUSED[1].clone(),
                 ];
                 if outcome != it.outcome {
                     sets.push(("outcome", Param::from(outcome.to_string())));
@@ -6621,6 +7149,35 @@ fn close_items(
     // registry moved on, by the close's own later writes; what the person
     // closing looked at is the campaign, so every one carries the epoch
     // the close left.
+    // record 55 H3 (the review of E2, item 7): a check's item the close
+    // did not resolve and did not refuse (unanswered, waiting) asks nothing
+    // any more: the result is asked again by a later check, which raises
+    // its own item, so this one's review item is closed as superseded, with
+    // no decision, rather than left open where nothing could close it.
+    // After type 3's pipe test: a refused item's question stays open, said
+    // to be refused, and a person's later close writes it once it can.
+    if matches!(question, Question::Check { .. }) {
+        let store = registry.store();
+        for it in items(store, c.id)?
+            .into_iter()
+            .filter(|i| i.state != "resolved")
+        {
+            if it.state == "refused" {
+                mark_review_item(store, it.review_item_id, "refused")?;
+                continue;
+            }
+            finish_review_item(
+                store,
+                it.review_item_id,
+                review::RESOLVED,
+                cl.who,
+                &json!({"campaign": c.id, "closed_into": "check", "unresolved": it.state}),
+                None,
+                now,
+            )?;
+            mark_review_item(store, it.review_item_id, "unresolved")?;
+        }
+    }
     out.staged = staged || !staged_ones.is_empty();
     if !staged_ones.is_empty() {
         let epoch = registry.meta().epoch;
@@ -6838,11 +7395,68 @@ fn close_axes(
             ("decision_id", first.map_or(Param::Null, Param::Int)),
             ("outcome", Param::from(outcome.to_string())),
             ("resolved_at", Param::from(now)),
+            NOT_REFUSED[0].clone(),
+            NOT_REFUSED[1].clone(),
         ],
         "id",
         it.id,
     )?;
     Ok(Ok((decided, skipped)))
+}
+
+/// After type 3's pipe test (record 55 H3): an item its close cannot write
+/// is kept `refused`, with when and why in the close's words, and named in
+/// the close's answer, rather than left looking agreed. Nothing is written
+/// for it, and its question stays open for a later close.
+fn refuse(
+    store: &mut Store,
+    out: &mut Closed,
+    it: &Item,
+    why: String,
+    now: &str,
+) -> Result<(), Error> {
+    store.update_by_id(
+        table("campaign_item"),
+        &[
+            ("state", Param::from("refused")),
+            ("refused_at", Param::from(now)),
+            ("refused_why", Param::from(why.as_str())),
+        ],
+        "id",
+        it.id,
+    )?;
+    out.refused.push((it.id, why));
+    out.unresolved += 1;
+    Ok(())
+}
+
+/// What a close clears on an item it writes, which an earlier close may
+/// have refused.
+const NOT_REFUSED: [(&str, Param); 2] = [("refused_at", Param::Null), ("refused_why", Param::Null)];
+
+/// Whether a review item still asks: open, or staged for a person.
+fn question_open(store: &mut Store, review_item: i64) -> Result<bool, Error> {
+    Ok(review::item(store, review_item)
+        .map_err(|e| invalid(e.to_string()))?
+        .is_some_and(|r| matches!(r.status.as_str(), "open" | "staged")))
+}
+
+/// Whether a closed check holds an item its close refused whose question is
+/// still open: a person's later close writes it once it can (after type 3's
+/// pipe test, record 55 H3). Only a check: another campaign's refused item
+/// is decided in the queue, where its question stays open.
+pub fn closes_again(store: &mut Store, c: &Campaign) -> Result<bool, Error> {
+    if c.status != "closed" || !crate::check::is_check(c) {
+        return Ok(false);
+    }
+    let sql = format!(
+        "SELECT i.id FROM {} i JOIN {} r ON r.id = i.review_item_id \
+         WHERE i.campaign_id = {} AND i.state = 'refused' AND r.status IN ('open', 'staged')",
+        store.qualified("campaign_item"),
+        store.qualified("review_item"),
+        store.dialect().param(1, Type::Int),
+    );
+    Ok(!store.query(&sql, &[Param::Int(c.id)])?.is_empty())
 }
 
 /// Close a review item with what the campaign made of it, when `apply` did

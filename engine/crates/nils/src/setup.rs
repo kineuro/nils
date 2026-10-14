@@ -27,7 +27,7 @@ use clap::{Args, Subcommand};
 use serde::{Deserialize, Serialize};
 
 use crate::{Exit, fail, usage};
-use crate::{tui, update};
+use crate::{tools, tui, update};
 use nils_registry::home::{Home, InitOptions};
 use nils_registry::{Backend, Scheme};
 
@@ -616,6 +616,18 @@ pub(crate) struct SetupArgs {
     /// Only bring the parts already installed up to date
     #[arg(long)]
     update: bool,
+    /// Start an installed site again from an empty registry under the same
+    /// setup (Wave 7a section 15.3): the engine is stopped, the registry is
+    /// set aside beside the new one and never deleted (on Postgres its
+    /// schemas are renamed, on SQLite its files moved into a folder of the
+    /// registry's), a new registry is made on the key --reg-key-file or
+    /// --key-file gives, the setup record's places are declared in it, its
+    /// timezone and week start are carried over, and every part is started
+    /// again. The configuration, the desk's people and groups and Kvasir's
+    /// sealed credentials are kept. nils place export and import carry the
+    /// other places
+    #[arg(long, conflicts_with = "update")]
+    new_registry: bool,
     /// Where releases come from; NILS_RELEASES sets the same thing
     #[arg(long, value_name = "URL")]
     channel: Option<String>,
@@ -629,9 +641,26 @@ pub(crate) struct SetupArgs {
     #[arg(long, value_name = "FILE", requires = "model_server")]
     model_key_file: Option<PathBuf>,
     /// With --model-server: the model the stations use; asked where there
-    /// is a terminal, and needed where there is none
+    /// is a terminal, and else the server's default or only model. On the
+    /// first add, every model the server offers is added beside it, up to
+    /// eight
     #[arg(long, value_name = "ID", requires = "model_server")]
     model_server_model: Option<String>,
+    /// Whether the stations' models on the model server think before they
+    /// answer: on, the default, asks it of every model of the server that
+    /// reasons, with up to 16,384 tokens an answer, reasoning included;
+    /// off turns it off. Recorded, so an update and a repair keep it; with
+    /// --update alone it changes the server on record
+    #[arg(long, value_name = "on|off")]
+    model_thinking: Option<String>,
+    /// The dcm2niix a BIDS release and a run with a bids input convert
+    /// with, where the site keeps its own: taken as it is and recorded.
+    /// Without it, an install on this machine keeps one it finds on the
+    /// search path or beside nils, and otherwise downloads the build this
+    /// version pins beside nils, its sha256 checked (NILS_DCM2NIIX_RELEASES
+    /// names a mirror)
+    #[arg(long, value_name = "PATH")]
+    dcm2niix: Option<PathBuf>,
 }
 
 // ---------------------------------------------------------------- the parts
@@ -2144,11 +2173,15 @@ pub(crate) fn update_by_helper(only: &[String]) -> Option<Result<(), Exit>> {
 }
 
 /// The parts of a record an update may take one at a time: those with
-/// releases of their own.
+/// releases of their own, and the rules where the engine reads its packs
+/// from a directory this install keeps, which a container's image does not.
 fn updatable_parts(state: &State) -> Vec<&'static str> {
     crate::releases::OWN_RELEASES
         .into_iter()
-        .filter(|p| state.parts.contains_key(*p))
+        .filter(|p| {
+            state.parts.contains_key(*p)
+                || (*p == crate::rules::PART && engine_pack_dir(state).is_some())
+        })
         .collect()
 }
 
@@ -2398,6 +2431,223 @@ pub(crate) struct Llama {
     /// False only for a Vulkan build on a Linux machine with no
     /// libvulkan.so.1, where a model runs on the processor instead.
     pub(crate) loader: bool,
+}
+
+// ---------------------------------------------------------------- dcm2niix
+
+/// dcm2niix as an install takes it (2026-10-12): the converter a BIDS
+/// release and a run with a bids input need, decided when the plan is made.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Converter {
+    /// The site's, named with --dcm2niix now or before: taken as it is.
+    Given(PathBuf),
+    /// Here already: on the search path or beside nils, or placed by an
+    /// earlier run of setup and still the pinned build.
+    Found { path: PathBuf, placed: bool },
+    /// The pinned build, downloaded and checked, placed here.
+    Fetch { into: PathBuf },
+    /// None can be taken here, and why.
+    Unavailable(String),
+}
+
+fn runnable_file(p: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+    }
+    #[cfg(not(unix))]
+    {
+        p.is_file()
+    }
+}
+
+/// What a plan takes of dcm2niix: none where the engine runs in a
+/// container, whose image does not carry it (an admin installs it into the
+/// registry's tools folder from the desk); the site's, where one is given or
+/// on record as given; the one this install placed, while it is the pinned
+/// build and there, and the pinned build again where it is not; one found
+/// on the search path or beside nils; else the pinned build, downloaded
+/// beside nils, where rordenlab publishes one for this machine.
+fn converter_plan(
+    plan: &Plan,
+    given: Option<&Path>,
+    recorded: Option<&ConverterState>,
+) -> Option<Converter> {
+    if plan.runtime.container() {
+        return None;
+    }
+    if let Some(path) = given {
+        return Some(Converter::Given(
+            std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf()),
+        ));
+    }
+    let pinned = |into: PathBuf| match tools::pin_here() {
+        Some(_) => Converter::Fetch { into },
+        None => Converter::Unavailable(tools::no_build_here()),
+    };
+    match recorded {
+        Some(r) if r.how == "given" => return Some(Converter::Given(PathBuf::from(&r.path))),
+        Some(r) if r.placed() => {
+            let path = PathBuf::from(&r.path);
+            return Some(
+                if r.version == tools::DCM2NIIX_VERSION && runnable_file(&path) {
+                    Converter::Found { path, placed: true }
+                } else {
+                    pinned(path)
+                },
+            );
+        }
+        _ => {}
+    }
+    if let Some(path) = which_on_path(tools::DCM2NIIX)
+        .filter(|p| nils_release::bids::convert::Converter::find(p).is_ok())
+    {
+        return Some(Converter::Found {
+            path,
+            placed: false,
+        });
+    }
+    let me = std::env::current_exe()
+        .map(|p| std::fs::canonicalize(&p).unwrap_or(p))
+        .unwrap_or_else(|_| PathBuf::from("nils"));
+    let beside = binary_dir(&me, plan).join(tools::DCM2NIIX);
+    // what is beside nils and was not placed by setup is never replaced:
+    // one that runs is kept, and one that does not is said
+    if std::fs::symlink_metadata(&beside).is_ok() {
+        return Some(
+            match nils_release::bids::convert::Converter::find(&beside) {
+                Ok(_) => Converter::Found {
+                    path: beside,
+                    placed: false,
+                },
+                Err(why) => Converter::Unavailable(format!(
+                    "{} is there and does not run as dcm2niix ({why}); setup replaces only what \
+                     it placed, so mend or remove it, or name one with --dcm2niix PATH",
+                    beside.display()
+                )),
+            },
+        );
+    }
+    Some(pinned(beside))
+}
+
+/// A plan of a recorded install given a site's dcm2niix now, with
+/// `--dcm2niix` on an update, a repair or a new registry.
+fn with_given_converter(plan: &mut Plan, args: &SetupArgs) {
+    if let Some(given) = args.dcm2niix.as_deref() {
+        plan.dcm2niix = converter_plan(plan, Some(given), None);
+    }
+}
+
+/// A program on this process's search path.
+fn which_on_path(program: &str) -> Option<PathBuf> {
+    nils_pipeline::runtime::which(program, std::env::var_os("PATH").as_deref())
+}
+
+/// The plan's dcm2niix as `--print` says it.
+fn converter_row(plan: &Plan) -> String {
+    match &plan.dcm2niix {
+        None => "not in the engine's image: an admin installs it into the registry's tools \
+                 folder from the desk, or with nils tools install dcm2niix"
+            .to_string(),
+        Some(Converter::Given(path)) => format!("{}, as given with --dcm2niix", path.display()),
+        Some(Converter::Found { path, placed: true }) => format!(
+            "{} at {}, which an earlier setup placed",
+            tools::DCM2NIIX_VERSION,
+            path.display()
+        ),
+        Some(Converter::Found { path, .. }) => format!("{}, here already", path.display()),
+        Some(Converter::Fetch { into }) => format!(
+            "{} from {} into {}, its sha256 pinned",
+            tools::DCM2NIIX_VERSION,
+            match std::env::var(tools::DCM2NIIX_MIRROR_ENV) {
+                Ok(m) if !m.trim().is_empty() => m.trim().to_string(),
+                _ => "rordenlab/dcm2niix".to_string(),
+            },
+            into.display()
+        ),
+        Some(Converter::Unavailable(why)) => why.clone(),
+    }
+}
+
+/// dcm2niix placed and recorded as the plan takes it. A converter that
+/// cannot be taken stops nothing: the install goes on, and the engine
+/// refuses a BIDS release or a bids run until one is there, saying how to
+/// install it. One this install placed is a program of the install, which
+/// an uninstall removes.
+fn place_converter(c: &Converter, state: &mut State, console: &Console) {
+    use nils_release::bids::convert::Converter as Found;
+    let recorded = |path: &Path, version: String, how: &str| ConverterState {
+        path: path.display().to_string(),
+        version,
+        how: how.to_string(),
+    };
+    match c {
+        Converter::Given(path) => {
+            // a build this install placed before goes, now the site names
+            // its own
+            if let Some(before) = state.dcm2niix.clone().filter(|b| b.placed())
+                && Path::new(&before.path) != path.as_path()
+            {
+                let _ = std::fs::remove_file(&before.path);
+                state.programs.retain(|p| *p != before.path);
+            }
+            match Found::find(path) {
+                Ok(f) => console.progress(&format!("dcm2niix as given: {}", f.version)),
+                Err(e) => console.warn(&format!("the dcm2niix given does not run: {e}")),
+            }
+            let version = Found::find(path).map(|f| f.version).unwrap_or_default();
+            state.dcm2niix = Some(recorded(path, version, "given"));
+        }
+        Converter::Found { path, placed } => {
+            let version = if *placed {
+                tools::DCM2NIIX_VERSION.to_string()
+            } else {
+                Found::find(path).map(|f| f.version).unwrap_or_default()
+            };
+            console.progress(&format!("dcm2niix at {}", path.display()));
+            state.dcm2niix = Some(recorded(
+                path,
+                version,
+                if *placed { "placed" } else { "found" },
+            ));
+        }
+        Converter::Fetch { into } => {
+            console.doing(&format!("taking dcm2niix {}", tools::DCM2NIIX_VERSION));
+            let taken = tools::fetch_into(into)
+                .map_err(|e| e.said(into))
+                .and_then(|_| {
+                    Found::find(into).map_err(|e| {
+                        let _ = std::fs::remove_file(into);
+                        format!("it was downloaded and does not run here, so it was taken away again: {e}")
+                    })
+                });
+            match taken {
+                Ok(found) => {
+                    state.keep_program(into);
+                    state.dcm2niix = Some(recorded(
+                        into,
+                        tools::DCM2NIIX_VERSION.to_string(),
+                        "placed",
+                    ));
+                    console.progress(&format!(
+                        "dcm2niix {} at {}: {}",
+                        tools::DCM2NIIX_VERSION,
+                        into.display(),
+                        found.version
+                    ));
+                }
+                Err(e) => console.warn(&format!(
+                    "dcm2niix {}, which a BIDS release and a run with a bids input convert with, \
+                     was not installed: {e}; until it is, they are refused with what to do, and \
+                     nils tools install dcm2niix installs it",
+                    tools::DCM2NIIX_VERSION
+                )),
+            }
+        }
+        Converter::Unavailable(why) => console.note(why),
+    }
 }
 
 /// The archive a machine takes by its system, its processor and whether it
@@ -2851,6 +3101,9 @@ enum Flow {
     Install(Box<(Plan, Answers)>),
     Update(State),
     Repair(State),
+    /// `--new-registry`: the recorded install, started again on an empty
+    /// registry.
+    NewRegistry(State),
     Remove,
     /// `--print` said the plan and changed nothing.
     Printed,
@@ -4027,6 +4280,87 @@ pub(crate) struct State {
     /// it and seal the key again from the file.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) model_server: Option<ModelServer>,
+    /// dcm2niix, which a BIDS release and a run's bids input convert with
+    /// (2026-10-12): where it is, its build, and whether this install
+    /// placed it, and so updates and removes it, or the site named it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) dcm2niix: Option<ConverterState>,
+    /// The rules in use (record 55 B5): each first-party pack where the
+    /// engine reads its packs, by the version it states and the release it
+    /// came from, the pack's own (`pack-mri-v1.0.2`) or the engine's
+    /// (`v1.0.0-alpha.80`). Written by every setup and update that puts packs
+    /// in place, so what an install classifies with is on its record.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(crate) rules: BTreeMap<String, RulesState>,
+}
+
+/// The converter an install runs with, as the record keeps it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ConverterState {
+    pub(crate) path: String,
+    /// For one setup placed, the pinned build it took; else what the
+    /// converter said of its version.
+    #[serde(default)]
+    pub(crate) version: String,
+    /// given (the site's, named with --dcm2niix), found (on the search
+    /// path or beside nils) or placed (downloaded by setup, and so updated
+    /// and removed with the install).
+    #[serde(default)]
+    pub(crate) how: String,
+}
+
+impl ConverterState {
+    pub(crate) fn placed(&self) -> bool {
+        self.how == "placed"
+    }
+}
+
+/// One pack's rules as the record keeps them: the version its `pack.yml`
+/// states, and the release it came from where that is known.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct RulesState {
+    pub(crate) version: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub(crate) from: String,
+    /// The version the install is pinned to, where it is (record 55 B5,
+    /// 2026-10-10): an update takes that one and no other, as an install
+    /// that reproduces the paper's rules 1.0.0 does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) pinned: Option<String>,
+}
+
+/// The rules in use in a pack directory, as the record keeps them, each
+/// with the version the directory pins it to.
+pub(crate) fn rules_of(dir: &Path) -> BTreeMap<String, RulesState> {
+    let pins = crate::packs::pins_in(dir);
+    crate::packs::rules_in(dir, &FIRST_PARTY_PACKS)
+        .into_iter()
+        .map(|(name, (version, from))| {
+            let pinned = pins.get(&name).cloned();
+            (
+                name,
+                RulesState {
+                    version,
+                    from,
+                    pinned,
+                },
+            )
+        })
+        .collect()
+}
+
+/// After an update moved the packs the record's engine reads, the record
+/// says which rules are in use. Only the directory the record's engine reads
+/// is noted, and the answer is whether the record was written.
+pub(crate) fn record_rules(dir: &Path) -> bool {
+    let Some(mut state) = read_state() else {
+        return false;
+    };
+    if engine_pack_dir(&state).as_deref() != Some(dir) {
+        return false;
+    }
+    state.rules = rules_of(dir);
+    write_state(&state).is_ok()
 }
 
 /// A model server the stations use (record 47): its OpenAI address, the file
@@ -4039,6 +4373,81 @@ pub(crate) struct ModelServer {
     pub(crate) key_file: PathBuf,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) model: Option<String>,
+    /// Whether the stations' models think before they answer, where they
+    /// reason. A record from before it was kept reads as on, so an update
+    /// of such an install asks it of Kvasir.
+    #[serde(default)]
+    pub(crate) thinking: Thinking,
+}
+
+/// Whether the models of the stations' model server think before they
+/// answer (2026-10-12): on, the default, which the assistant's one-chat
+/// bench measured at 79 % against 71 % and with no words before its tools,
+/// for about a second more a turn; or off. Kvasir asks it of every model of
+/// the server that reasons, through the chat template.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum Thinking {
+    #[default]
+    On,
+    Off,
+}
+
+impl Thinking {
+    fn name(self) -> &'static str {
+        match self {
+            Thinking::On => "on",
+            Thinking::Off => "off",
+        }
+    }
+
+    fn parse(word: &str) -> Result<Thinking, String> {
+        match word.trim() {
+            "on" => Ok(Thinking::On),
+            "off" => Ok(Thinking::Off),
+            other => Err(format!("--model-thinking {other} is not on or off")),
+        }
+    }
+}
+
+/// The thinking the flags name, where they name one.
+fn thinking_of(args: &SetupArgs) -> Result<Option<Thinking>, String> {
+    args.model_thinking
+        .as_deref()
+        .map(Thinking::parse)
+        .transpose()
+}
+
+/// The stations' model server as the flags and the record give it: the one
+/// the flags name, else the one on record. The thinking the flags name goes
+/// to either; where they name none, the server on record keeps its own,
+/// also when the flags name it again. Thinking named with no model server
+/// at all is refused.
+fn server_with_record(
+    args: &SetupArgs,
+    recorded: Option<&ModelServer>,
+) -> Result<Option<ModelServer>, String> {
+    let thinking = thinking_of(args)?;
+    let mut server = match model_server_of(args)? {
+        Some(mut named) => {
+            if let Some(was) = recorded.filter(|was| was.url == named.url) {
+                named.thinking = was.thinking;
+            }
+            Some(named)
+        }
+        None => recorded.cloned(),
+    };
+    match (&mut server, thinking) {
+        (Some(server), Some(thinking)) => server.thinking = thinking,
+        (None, Some(_)) => {
+            return Err(
+                "--model-thinking is for the stations' model server: name one with --model-server"
+                    .to_string(),
+            );
+        }
+        _ => {}
+    }
+    Ok(server)
 }
 
 /// The model server the flags name, its address checked and its key file
@@ -4074,6 +4483,7 @@ fn model_server_of(args: &SetupArgs) -> Result<Option<ModelServer>, String> {
         url,
         key_file,
         model,
+        thinking: thinking_of(args)?.unwrap_or_default(),
     }))
 }
 
@@ -4147,6 +4557,8 @@ fn kept_record_path(dir: &Path) -> PathBuf {
 fn kept_record_of(state: &State) -> State {
     let mut kept = state.clone();
     kept.programs.clear();
+    // a dcm2niix this install placed goes with the programs
+    kept.dcm2niix = kept.dcm2niix.filter(|c| !c.placed());
     kept.helper = None;
     kept.unfinished = false;
     kept
@@ -4293,6 +4705,9 @@ pub(crate) struct Plan {
     /// The model server the stations use, where one was named: Kvasir
     /// holds it as one backend once it answers (record 47).
     pub(crate) model_server: Option<ModelServer>,
+    /// dcm2niix as the install takes it (2026-10-12): none where the engine
+    /// does not run on this machine.
+    pub(crate) dcm2niix: Option<Converter>,
 }
 
 /// The provider the desk signs people in at, as the desk, the engine and
@@ -4578,9 +4993,18 @@ fn plan_and_sources(state: &State, channel: Option<&str>) -> (Plan, Option<(Stri
         closed: Vec::new(),
         node: None,
         model_server: state.model_server.clone(),
+        dcm2niix: None,
     };
     let node = node_for(&plan, Some(&state.node));
-    (Plan { node, ..plan }, read)
+    let dcm2niix = converter_plan(&plan, None, state.dcm2niix.as_ref());
+    (
+        Plan {
+            node,
+            dcm2niix,
+            ..plan
+        },
+        read,
+    )
 }
 
 /// Where a recorded install's desk answers and where it binds: the origin a
@@ -5996,6 +6420,7 @@ pub(crate) fn setup(args: SetupArgs) -> Result<(), Exit> {
         }
         Flow::Update(state) => update_parts(&state, &args, &mut console),
         Flow::Repair(state) => repair(&state, &args, &mut console),
+        Flow::NewRegistry(state) => new_registry(&state, &args, &mut console),
         Flow::Remove => uninstall(UninstallArgs {
             keep_data: false,
             purge: false,
@@ -6053,6 +6478,9 @@ fn questions(
     // things a person comes back for.
     if let Some(state) = existing {
         console.say(&what_is_there(state));
+        if args.new_registry {
+            return Ok(Flow::NewRegistry(state.clone()));
+        }
         let choice = if args.update {
             0
         } else if console.interactive() {
@@ -6082,6 +6510,13 @@ fn questions(
     } else if args.update {
         return Err(usage(format!(
             "--update needs a setup to update; none is recorded at {}",
+            state_path().display()
+        ))
+        .into());
+    } else if args.new_registry {
+        return Err(usage(format!(
+            "--new-registry starts an installed site's registry again, and no setup is \
+             recorded at {}; nothing was changed",
             state_path().display()
         ))
         .into());
@@ -6745,17 +7180,18 @@ fn questions(
     // A model server named with the flags is what the stations use, and no
     // model is asked for; the model on it is asked where none was named, and
     // with nobody to ask the run stops before anything is placed (record 47).
-    let mut model_server = model_server_of(args).map_err(usage)?;
-    if model_server.is_some() && !parts.contains(&Part::Assistant) {
+    if model_server_of(args).map_err(usage)?.is_some() && !parts.contains(&Part::Assistant) {
         return Err(usage(
             "--model-server is for the assistant's stations, and the assistant is not installed",
         )
         .into());
     }
-    // one on record stays, while the assistant does, unless the flags name another
-    if model_server.is_none() && parts.contains(&Part::Assistant) {
-        model_server = existing.and_then(|s| s.model_server.clone());
-    }
+    // one on record stays, while the assistant does, unless the flags name
+    // another; its thinking stays unless the flags name one (2026-10-12)
+    let recorded = existing
+        .and_then(|s| s.model_server.as_ref())
+        .filter(|_| parts.contains(&Part::Assistant));
+    let mut model_server = server_with_record(args, recorded).map_err(usage)?;
     // The model the assistant asks for is kept unless another is chosen, and
     // a rerun is how the model is changed; with none named yet, it is asked.
     let on_record = if parts.contains(&Part::Assistant) {
@@ -6794,10 +7230,11 @@ fn questions(
         answers.model = Some(chosen);
     } else if let Some(server) = &mut model_server {
         if server.model.is_none() && !args.print {
-            if !console.interactive() {
-                return Err(usage(unnamed_server_model(server)).into());
-            }
-            server.model = Some(ask_server_model(console, server)?);
+            server.model = Some(if console.interactive() {
+                ask_server_model(console, server)?
+            } else {
+                unnamed_server_model(server).map_err(usage)?
+            });
         }
         console.said(&format!(
             "{} at {}",
@@ -7037,8 +7474,14 @@ fn questions(
         closed: Vec::new(),
         node: None,
         model_server,
+        dcm2niix: None,
     };
     plan.node = node_for(&plan, existing.map(|s| s.node.as_str()));
+    plan.dcm2niix = converter_plan(
+        &plan,
+        args.dcm2niix.as_deref(),
+        existing.and_then(|s| s.dcm2niix.as_ref()),
+    );
     // Every path a unit would keep a part out of is looked at here, as root,
     // the way systemd looks at it before the part starts, now that the
     // places and the accounts are settled. A path the part's account could
@@ -7154,29 +7597,34 @@ fn what_is_there(state: &State) -> String {
 /// names, brought to the newest release, without a question.
 fn update_parts(state: &State, args: &SetupArgs, console: &mut Console) -> Result<(), Exit> {
     let (mut plan, read) = plan_and_sources(state, args.channel.as_deref());
+    with_given_converter(&mut plan, args);
     // a model server named now takes the place of the one on record; the
-    // model named for the same server before is kept where none is named now
-    if let Some(mut server) = model_server_of(args).map_err(usage)? {
-        if !plan.has(Part::Assistant) {
-            return Err(usage(
-                "--model-server is for the assistant's stations, and this install has no assistant",
-            ));
-        }
-        if server.model.is_none() {
-            server.model = state
-                .model_server
-                .as_ref()
-                .filter(|was| was.url == server.url)
-                .and_then(|was| was.model.clone());
-        }
-        plan.model_server = Some(server);
+    // model and the thinking named for the same server before are kept
+    // where none is named now, and thinking named alone changes the one on
+    // record
+    if args.model_server.is_some() && !plan.has(Part::Assistant) {
+        return Err(usage(
+            "--model-server is for the assistant's stations, and this install has no assistant",
+        ));
     }
-    // an update asks nothing, so the model is named or the update stops here
-    if let Some(server) = &plan.model_server
+    plan.model_server = server_with_record(args, state.model_server.as_ref()).map_err(usage)?;
+    if let Some(server) = &mut plan.model_server
+        && args.model_server.is_some()
+        && server.model.is_none()
+    {
+        server.model = state
+            .model_server
+            .as_ref()
+            .filter(|was| was.url == server.url)
+            .and_then(|was| was.model.clone());
+    }
+    // an update asks nothing, so the model is named, or is the server's
+    // default or only one, or the update stops here
+    if let Some(server) = &mut plan.model_server
         && server.model.is_none()
         && !args.print
     {
-        return Err(usage(unnamed_server_model(server)));
+        server.model = Some(unnamed_server_model(server).map_err(usage)?);
     }
     if let Some(refused) = recorded_system_refusal(&plan) {
         return Err(fail(format!("nothing was changed: {refused}")));
@@ -7292,6 +7740,7 @@ fn sources_said_or_stop(
 /// what the state records, for an install whose files were lost or edited.
 fn repair(state: &State, args: &SetupArgs, console: &mut Console) -> Result<(), Exit> {
     let (mut plan, read) = plan_and_sources(state, args.channel.as_deref());
+    with_given_converter(&mut plan, args);
     if let Some(refused) = recorded_system_refusal(&plan) {
         return Err(fail(format!("nothing was changed: {refused}")));
     }
@@ -7314,6 +7763,9 @@ fn repair(state: &State, args: &SetupArgs, console: &mut Console) -> Result<(), 
     }
     make_own_dirs(&plan, console)?;
     let mut stages = Vec::new();
+    if matches!(plan.dcm2niix, Some(Converter::Fetch { .. })) {
+        stages.push((Stage::Converter, tools::DCM2NIIX.to_string()));
+    }
     if plan.postgres.is_some() {
         stages.push((Stage::Postgres, format!("Postgres {POSTGRES_MAJOR}")));
     }
@@ -7348,6 +7800,12 @@ fn repair(state: &State, args: &SetupArgs, console: &mut Console) -> Result<(), 
 fn mend(plan: &Plan, state: &State, console: &mut Console) -> Result<Vec<Service>, Exit> {
     // what a repair places is recorded, so the services and an uninstall know it
     let mut state = state.clone();
+    // 2026-10-12: a dcm2niix this install placed, taken again where it went
+    if let Some(c @ Converter::Fetch { .. }) = &plan.dcm2niix {
+        console.begin(Stage::Converter);
+        place_converter(c, &mut state, console);
+        let _ = write_state(&state);
+    }
     // A Postgres this setup runs, started again with its data and password.
     if let Some(pg) = plan.postgres {
         console.begin(Stage::Postgres);
@@ -7551,6 +8009,7 @@ fn plan_rows(plan: &Plan) -> Vec<(&'static str, String)> {
             ),
         ));
     }
+    rows.push((tools::DCM2NIIX, converter_row(plan)));
     if plan.has(Part::Assistant) {
         rows.push((LLAMA_PART, llama_row(plan)));
     }
@@ -7972,6 +8431,7 @@ fn sources_text(plan: &Plan, console: &Console) -> String {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Stage {
     Engine,
+    Converter,
     NodeImage,
     DeskImage,
     Postgres,
@@ -7998,6 +8458,9 @@ fn stages(plan: &Plan, only_update: bool) -> Vec<(Stage, String)> {
         }
     } else {
         out.push((Stage::Engine, "rule packs".to_string()));
+    }
+    if plan.dcm2niix.is_some() {
+        out.push((Stage::Converter, tools::DCM2NIIX.to_string()));
     }
     if plan.postgres.is_some() {
         out.push((Stage::Postgres, format!("Postgres {POSTGRES_MAJOR}")));
@@ -8141,6 +8604,12 @@ fn do_it(
             .map(|node| node.display().to_string())
             .unwrap_or_default(),
         model_server: plan.model_server.clone(),
+        dcm2niix: existing.as_ref().and_then(|s| s.dcm2niix.clone()),
+        // the rules in use, until the packs this run puts in place say again
+        rules: existing
+            .as_ref()
+            .map(|s| s.rules.clone())
+            .unwrap_or_default(),
     };
     let previous_parts = state.parts.clone();
     let existing_places = existing.map(|s| s.places).unwrap_or_default();
@@ -8303,7 +8772,7 @@ fn place(
             pull_or_build(plan, console, "nils-desk", DESK_IMAGE, &desk, &desk_binary)?;
         }
     } else {
-        install_packs(plan, &me, console)?;
+        state.rules = install_packs(plan, &me, console)?;
     }
 
     state.parts.insert(
@@ -8324,6 +8793,13 @@ fn place(
     );
     console.progress(&format!("engine {} ready", update::VERSION));
     checkpoint(state);
+
+    // 2026-10-12: dcm2niix beside the engine, where it runs on this machine
+    if let Some(c) = &plan.dcm2niix {
+        console.begin(Stage::Converter);
+        place_converter(c, state, console);
+        checkpoint(state);
+    }
 
     // A Postgres this setup runs, up before the registry it holds.
     if let Some(pg) = plan.postgres {
@@ -9491,6 +9967,22 @@ pub(crate) enum RegistryStep {
     /// Declare the places given as JSON on the input as setup declares them,
     /// saying what it did one JSON document a line
     Declare,
+    /// Set the registry aside for a new one (`--new-registry`): its schemas
+    /// renamed on Postgres, its files moved into a folder of the registry's;
+    /// what was done is said as JSON
+    SetAside {
+        /// The stamp the folder and the schemas are named with
+        #[arg(long, value_name = "STAMP")]
+        stamp: String,
+    },
+    /// The registry's timezone and week start, set as the registry set
+    /// aside had them
+    Calendar {
+        #[arg(long, value_name = "NAME")]
+        timezone: String,
+        #[arg(long, value_name = "DAY")]
+        week_start: String,
+    },
 }
 
 /// One step of the registry's, taken by the account running this. Setup runs
@@ -9553,6 +10045,15 @@ pub(crate) fn registry_step(home: &Home, step: RegistryStep) -> Result<(), Exit>
             println!("{}", serde_json::json!({ "places": declared }));
             Ok(())
         }
+        RegistryStep::SetAside { stamp } => {
+            let done = set_aside_here(&home_on_machine(home), &stamp).map_err(fail)?;
+            println!("{done}");
+            Ok(())
+        }
+        RegistryStep::Calendar {
+            timezone,
+            week_start,
+        } => calendar_here(&home_on_machine(home), &timezone, &week_start).map_err(fail),
     }
 }
 
@@ -9644,6 +10145,455 @@ fn drop_schemas_here(dsn: &str, schema: &str) -> Result<(), String> {
     store
         .batch(&drop_schemas_sql(schema))
         .map_err(|e| with_causes(&e))
+}
+
+// ------------------------------------------- a new registry under the same setup
+
+/// The folder of the registry a registry set aside for a new one goes into,
+/// before its stamp.
+const ASIDE_FOLDER: &str = "before-new-registry-";
+
+/// What the schemas of a registry set aside on Postgres are renamed with,
+/// between its schema and the stamp.
+const ASIDE_SCHEMA: &str = "_before_";
+
+/// The stamp a registry set aside is named with: the time, in UTC, as
+/// digits and a `t`, which a folder and a schema name may both hold.
+fn aside_stamp() -> String {
+    nils_registry::time::now_iso()
+        .chars()
+        .filter(|c| c.is_ascii_digit() || *c == 'T')
+        .map(|c| c.to_ascii_lowercase())
+        .collect()
+}
+
+/// `--new-registry` (Wave 7a §15.3): the recorded install started again on
+/// an empty registry. The engine is stopped and the registry set aside, as
+/// the engine's account where one runs it; a new registry is made on the
+/// key given, the setup record's places are declared in it and the old
+/// registry's timezone and week start set; then every part is written and
+/// started again, as a repair does. Nothing else of the install changes:
+/// the configuration, the desk's store, Kvasir's sealed credentials and
+/// the parts' files stay as they are. The registry set aside is never
+/// deleted here.
+fn new_registry(state: &State, args: &SetupArgs, console: &mut Console) -> Result<(), Exit> {
+    let (mut plan, _read) = plan_and_sources(state, args.channel.as_deref());
+    with_given_converter(&mut plan, args);
+    if let Some(refused) = recorded_system_refusal(&plan) {
+        return Err(fail(format!("nothing was changed: {refused}")));
+    }
+    masks_said_or_stop(recorded_masks_refusal(&mut plan), args.print, console)?;
+    let home = Home::new(plan.registry());
+    if !home.exists() {
+        return Err(usage(format!(
+            "there is no registry at {} to start again; nothing was changed",
+            home.dir().display()
+        )));
+    }
+    if let Some(path) = &args.reg_key_file {
+        // read now, so a key file that would be refused costs a sentence
+        // before anything is stopped; the key is read again where it is used
+        reg_key_from_file(path).map_err(usage)?;
+    }
+    plan.registry_exists = false;
+    plan.scheme = scheme_for(args.scheme.as_deref(), None).map_err(usage)?;
+    plan.reg_key_file = args.reg_key_file.clone();
+    // the new registry holds the setup's own places only, until more are
+    // imported or added; the engine is given those
+    plan.sources = recorded_sources(&state.places);
+    let stamp = aside_stamp();
+    let aside = home.dir().join(format!("{ASIDE_FOLDER}{stamp}"));
+    println!();
+    println!("{}", console.bold("Starting the registry again"));
+    print!("{}", plan_text(&plan, console));
+    let mut what = vec![
+        "the engine is stopped".to_string(),
+        match &plan.backend {
+            BackendChoice::Postgres { schema, .. } => format!(
+                "the registry is set aside: its schemas {schema} and {schema}_linkage are \
+                 renamed {schema}{ASIDE_SCHEMA}{stamp} and {schema}{ASIDE_SCHEMA}{stamp}_linkage, \
+                 its nils.toml and key store moved to {}",
+                aside.display()
+            ),
+            BackendChoice::Sqlite => format!(
+                "the registry is set aside: its databases, nils.toml and key store are moved to {}",
+                aside.display()
+            ),
+        },
+        format!(
+            "a new registry is made on {}, with the pseudonym scheme {}",
+            match (&args.reg_key_file, &args.key_file) {
+                (Some(path), _) => format!("the key in {}", path.display()),
+                (None, Some(path)) => format!("the passphrase in {}", path.display()),
+                (None, None) => "a new key".to_string(),
+            },
+            plan.scheme
+        ),
+        format!(
+            "the setup's {} places are declared in it, and its timezone and week start carried",
+            place_specs(&plan).len()
+        ),
+        "every part is written and started again; the desk's people and groups, Kvasir's \
+         sealed credentials and the configuration are kept"
+            .to_string(),
+    ];
+    if args.print {
+        what.push("nothing was changed".to_string());
+    }
+    for line in &what {
+        console.say(line);
+    }
+    if args.print {
+        return Ok(());
+    }
+    if !console.interactive() && !args.yes {
+        return Err(usage(
+            "--new-registry sets this registry aside for a new one; with no terminal to ask \
+             on, run it again with --yes. Nothing was changed",
+        ));
+    }
+    if console.interactive()
+        && !console
+            .ask_yes_no("Set the registry aside and start a new one?", false)
+            .map_err(Stop::into_exit)?
+    {
+        println!("nothing was changed");
+        return Ok(());
+    }
+    let acting = plan
+        .system
+        .as_ref()
+        .and_then(|system| AsAccount::of(Some(system), am_root(), plan.registry()));
+
+    // 1. the engine, which holds the registry, stopped
+    if let Some(unit) = service_units(state).iter().find(|u| u.part == "engine") {
+        let uid = run_quiet("id", &["-u"])
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default();
+        let argv = stop_argv(unit, &uid);
+        let words: Vec<&str> = argv[1..].iter().map(String::as_str).collect();
+        if !quietly(&argv[0], &words) {
+            return Err(fail(format!(
+                "the engine was not stopped ({} was refused); nothing was changed",
+                argv.join(" ")
+            )));
+        }
+        console.progress(&format!("{} is stopped", unit.name));
+    }
+    if port_taken(plan.ports.engine) {
+        return Err(fail(format!(
+            "something still answers on 127.0.0.1:{}, the engine's port; stop the engine that \
+             runs on this registry, then run this again. Nothing was set aside",
+            plan.ports.engine
+        )));
+    }
+
+    // 2. the registry set aside
+    let set_aside = match &acting {
+        None => set_aside_here(&home_on_machine(&home), &stamp).map_err(|why| {
+            fail(format!(
+                "the registry was not set aside: {why}; nothing was changed"
+            ))
+        })?,
+        Some(acting) => {
+            let ran = acting.run(
+                &owned_words(&[REGISTRY_STEP, "set-aside", "--stamp", &stamp]),
+                None,
+            );
+            if !ran.ok {
+                return Err(fail(format!(
+                    "the registry was not set aside as {}: {}; nothing was changed",
+                    acting.account, ran.why
+                )));
+            }
+            serde_json::from_str(ran.stdout.trim()).map_err(|e| {
+                fail(format!(
+                    "{} set the registry aside, and what it answered does not read: {e}",
+                    acting.account
+                ))
+            })?
+        }
+    };
+    console.progress(&format!("the registry set aside at {}", aside.display()));
+    let undo = || {
+        format!(
+            "\n  the old registry is set aside at {}; {}",
+            aside.display(),
+            match &plan.backend {
+                BackendChoice::Postgres { schema, .. } => format!(
+                    "to put it back, move what is in that folder back into {} and rename the \
+                     schemas {schema}{ASIDE_SCHEMA}{stamp} and its _linkage back to {schema} and \
+                     {schema}_linkage",
+                    home.dir().display()
+                ),
+                BackendChoice::Sqlite => format!(
+                    "to put it back, move what is in that folder back into {}",
+                    home.dir().display()
+                ),
+            }
+        )
+    };
+
+    // 3. the new registry, and 4. the setup's places in it
+    make_registry(&plan, &home, console, args, None, acting.as_ref())
+        .map_err(|e| fail(format!("{}{}", e.message, undo())))?;
+    let declared = declare_places(&plan, &home, console, acting.as_ref())
+        .map_err(|e| fail(format!("{}{}", e.message, undo())))?;
+
+    // 5. the calendar the old registry was read under
+    let timezone = set_aside["timezone"]
+        .as_str()
+        .unwrap_or(nils_registry::home::DEFAULT_TIMEZONE);
+    let week_start = set_aside["week_start"]
+        .as_str()
+        .unwrap_or(nils_registry::home::DEFAULT_WEEK_START);
+    if timezone != nils_registry::home::DEFAULT_TIMEZONE
+        || week_start != nils_registry::home::DEFAULT_WEEK_START
+    {
+        let carried = match &acting {
+            None => calendar_here(&home_on_machine(&home), timezone, week_start)
+                .map_err(|why| why.to_string()),
+            Some(acting) => {
+                let ran = acting.run(
+                    &owned_words(&[
+                        REGISTRY_STEP,
+                        "calendar",
+                        "--timezone",
+                        timezone,
+                        "--week-start",
+                        week_start,
+                    ]),
+                    None,
+                );
+                if ran.ok { Ok(()) } else { Err(ran.why) }
+            }
+        };
+        match carried {
+            Ok(()) => console.progress(&format!("timezone {timezone}, week start {week_start}")),
+            Err(why) => console.warn(&format!(
+                "the timezone and week start were not carried ({why}); set them with nils \
+                 settings set timezone {timezone} and nils settings set week_start {week_start}"
+            )),
+        }
+    }
+
+    // 6. on record, and every part started again
+    let mut state = state.clone();
+    state.places = declared;
+    state.at = nils_registry::time::now_iso();
+    write_state(&state)?;
+    make_own_dirs(&plan, console)?;
+    let mut stages = Vec::new();
+    if matches!(plan.dcm2niix, Some(Converter::Fetch { .. })) {
+        stages.push((Stage::Converter, tools::DCM2NIIX.to_string()));
+    }
+    if plan.postgres.is_some() {
+        stages.push((Stage::Postgres, format!("Postgres {POSTGRES_MAJOR}")));
+    }
+    if plan.has(Part::Desk) {
+        stages.push((Stage::Desk, "desk configuration".to_string()));
+    }
+    if plan.has(Part::Assistant) {
+        if plan.llama.is_some() {
+            stages.push((Stage::Runtime, LLAMA_PART.to_string()));
+        }
+        stages.push((Stage::Kvasir, "Kvasir configuration".to_string()));
+    }
+    stages.push((Stage::Services, "services".to_string()));
+    console.start_checklist("Starting again", stages);
+    let mended = mend(&plan, &state, console);
+    console.finish_checklist(
+        mended.is_ok(),
+        if mended.is_ok() {
+            "Started again"
+        } else {
+            "Stopped"
+        },
+    );
+    let services = mended?;
+    summary(&plan, console, &services);
+    console.say(&format!(
+        "the old registry is set aside at {}, and reads there: nils --registry {} status",
+        aside.display(),
+        aside.display()
+    ));
+    console.say(
+        "the places and datasets of the old registry come back with nils place import, from \
+         the file nils place export wrote before",
+    );
+    Ok(())
+}
+
+/// The timezone and week start of the registry at `home`, read as it stands
+/// with nothing changed; the defaults where it cannot be read that way.
+fn calendar_of(home: &Home) -> (String, String) {
+    use nils_registry::store::Param;
+    let read = |key: &str, default: &str| -> String {
+        let Ok(mut store) = home.open_as_it_stands() else {
+            return default.to_string();
+        };
+        let table = store.qualified("registry_meta");
+        let sql = format!(
+            "SELECT value FROM {table} WHERE key = {}",
+            store.dialect().param(1, nils_registry::schema::Type::Text)
+        );
+        store
+            .query_opt(&sql, &[Param::from(key)])
+            .ok()
+            .flatten()
+            .and_then(|row| row.text(0).ok().map(str::to_string))
+            .unwrap_or_else(|| default.to_string())
+    };
+    (
+        read("timezone", nils_registry::home::DEFAULT_TIMEZONE),
+        read("week_start", nils_registry::home::DEFAULT_WEEK_START),
+    )
+}
+
+/// The registry at `home` set aside for a new one, by the account running
+/// this: on Postgres its two schemas renamed `<schema>_before_<stamp>` and
+/// `<schema>_before_<stamp>_linkage`, and on either backend its files
+/// (nils.toml, the databases, the key store, the imports a linkage import
+/// left) moved into `before-new-registry-<stamp>/` in the registry's folder.
+/// The `nils.toml` there names the renamed schema, so the registry set aside
+/// opens where it went: `nils --registry <that folder> status`. Nothing is
+/// deleted. The files move first, and go back where the database refuses
+/// the rename, so a refusal leaves the registry as it was. What was done
+/// comes back, with the calendar the registry was read under.
+fn set_aside_here(home: &Home, stamp: &str) -> Result<serde_json::Value, String> {
+    use nils_registry::home::{CONFIG_FILE, LINKAGE_DB, REGISTRY_DB};
+    if !home.exists() {
+        return Err(format!("there is no registry at {}", home.dir().display()));
+    }
+    if stamp.is_empty() || !stamp.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return Err(format!("{stamp} is not a stamp: letters and digits"));
+    }
+    let config = home.read_config().map_err(|e| e.to_string())?;
+    let (timezone, week_start) = calendar_of(home);
+    let aside = home.dir().join(format!("{ASIDE_FOLDER}{stamp}"));
+    if aside.exists() {
+        return Err(format!("{} is there already", aside.display()));
+    }
+    // on Postgres, the names checked and the database reached before a
+    // file moves
+    let mut postgres = None;
+    if config.backend == Backend::Postgres {
+        let schema = config.schema.clone();
+        let to = format!("{schema}{ASIDE_SCHEMA}{stamp}");
+        if !plain_identifier(&schema) || !plain_identifier(&to) {
+            return Err(format!("{schema} is not a schema name this renames"));
+        }
+        // Postgres keeps 63 bytes of a name, and the linkage schema's is longer
+        if format!("{to}_linkage").len() > 63 {
+            return Err(format!(
+                "{to}_linkage is longer than a Postgres name may be"
+            ));
+        }
+        let dsn = home
+            .dialled()
+            .map(str::to_string)
+            .or_else(|| config.dsn.clone())
+            .ok_or_else(|| format!("{CONFIG_FILE} names no connection string"))?;
+        let mut store = nils_registry::store::Store::connect_postgres(
+            &dsn_from(StepRuns::OnTheMachine, &dsn),
+            &schema,
+        )
+        .map_err(|e| with_causes(&e))?;
+        let taken = store
+            .query(
+                &format!(
+                    "SELECT nspname FROM pg_namespace WHERE nspname IN ('{to}', '{to}_linkage')"
+                ),
+                &[],
+            )
+            .map_err(|e| with_causes(&e))?;
+        if !taken.is_empty() {
+            return Err(format!("the database has a schema {to} already"));
+        }
+        postgres = Some((store, schema, to));
+    }
+    let keys = Path::new(&config.keys_dir);
+    if !(keys.is_relative() && keys.components().count() == 1) {
+        return Err(format!(
+            "the key store {} is not a folder of the registry's own, so it would not go aside \
+             with it; nothing was set aside",
+            config.keys_dir
+        ));
+    }
+    let moves = |name: &str| {
+        name == CONFIG_FILE
+            || name.starts_with(REGISTRY_DB)
+            || name.starts_with(LINKAGE_DB)
+            || name == "imports"
+            || name == "backups-before-restore"
+            || Path::new(name) == keys
+    };
+    let mut entries: Vec<String> = std::fs::read_dir(home.dir())
+        .map_err(|e| format!("{}: {e}", home.dir().display()))?
+        .filter_map(|e| e.ok())
+        .filter_map(|e| e.file_name().to_str().map(str::to_string))
+        .filter(|name| moves(name))
+        .collect();
+    entries.sort();
+    std::fs::create_dir(&aside).map_err(|e| format!("{}: {e}", aside.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let _ = std::fs::set_permissions(&aside, std::fs::Permissions::from_mode(0o700));
+    }
+    let mut moved: Vec<String> = Vec::new();
+    let put_back = |moved: &[String]| {
+        for name in moved {
+            let _ = std::fs::rename(aside.join(name), home.dir().join(name));
+        }
+        let _ = std::fs::remove_dir(&aside);
+    };
+    for name in &entries {
+        if let Err(e) = std::fs::rename(home.dir().join(name), aside.join(name)) {
+            put_back(&moved);
+            return Err(format!("{name} was not moved: {e}; nothing was set aside"));
+        }
+        moved.push(name.clone());
+    }
+    let mut schemas = serde_json::Value::Null;
+    if let Some((mut store, schema, to)) = postgres {
+        if let Err(e) = store.batch(&format!(
+            "ALTER SCHEMA {schema} RENAME TO {to}; ALTER SCHEMA {schema}_linkage RENAME TO {to}_linkage"
+        )) {
+            put_back(&moved);
+            return Err(format!(
+                "the database did not rename the schemas: {}; nothing was set aside",
+                with_causes(&e)
+            ));
+        }
+        // the registry set aside opens where it went
+        let mut kept = config.clone();
+        kept.schema = to.clone();
+        let text = toml::to_string(&kept).map_err(|e| e.to_string())?;
+        write_secret(&aside.join(CONFIG_FILE), &text).map_err(|e| e.message)?;
+        schemas = serde_json::json!([to.clone(), format!("{to}_linkage")]);
+    }
+    Ok(serde_json::json!({
+        "set_aside": aside.display().to_string(),
+        "backend": config.backend.name(),
+        "moved": moved,
+        "schemas": schemas,
+        "timezone": timezone,
+        "week_start": week_start,
+    }))
+}
+
+/// The registry's calendar set by the account running this, audited as
+/// `nils settings set` audits it.
+fn calendar_here(home: &Home, timezone: &str, week_start: &str) -> Result<(), String> {
+    let mut registry = crate::open(home).map_err(|e| e.message)?;
+    let locale = nils_ask::hash::Locale {
+        timezone: timezone.to_string(),
+        week_start: week_start.to_lowercase(),
+    };
+    crate::schedule::set_calendar(&mut registry, &locale, &crate::actor())
+        .map(|_| ())
+        .map_err(|(_, why)| why)
 }
 
 /// The registry's source places as the account running this finds them, as
@@ -9742,22 +10692,53 @@ fn install_desk(into: &Path, channel: Option<&str>, version: &str) -> Result<Pat
 
 /// The rule packs, which a machine install has no other way of getting: the
 /// binary carries none and the release keeps them in one tarball beside it.
-/// A container run needs none of this, because the image holds them.
+/// A container run needs none of this, because the image holds them. Each
+/// first-party pack's own newest release this engine reads goes in where it
+/// stands above the release's copy (record 55 B5), as an update would put it.
 ///
 /// They go where the engine looks by default, so that `nils digest` finds
 /// them with no flag whoever runs it, not only the service this wizard
-/// wrote.
-fn install_packs(plan: &Plan, me: &Path, console: &mut Console) -> Result<(), Exit> {
+/// wrote. The answer is the rules in use, for the record.
+fn install_packs(
+    plan: &Plan,
+    me: &Path,
+    console: &mut Console,
+) -> Result<BTreeMap<String, RulesState>, Exit> {
     let dir = pack_destination(plan, me);
     let base = update::engine_base(plan.channel.as_deref());
     let version = update::newest_version(&base).unwrap_or_else(|_| update::VERSION.to_string());
     if let Some(parent) = dir.parent() {
         std::fs::create_dir_all(parent).map_err(|e| fail(format!("{}: {e}", parent.display())))?;
     }
-    match crate::packs::refresh(&base, &version, &dir) {
-        Ok(_) => {
+    let taken = crate::packs::bundled(&base, &version).and_then(|carried| {
+        let engine = crate::packs::Engine::this();
+        let packs: Vec<crate::packs::Pack> = carried.iter().map(|o| o.pack.clone()).collect();
+        let found = crate::rules::find_all(
+            &crate::rules::base(plan.channel.as_deref()),
+            &packs,
+            &engine,
+            &crate::packs::pins_in(&dir),
+        );
+        let packs = crate::packs::plan(
+            &dir,
+            &version,
+            carried,
+            crate::rules::takes(&found),
+            &engine,
+        );
+        let said: Vec<String> = crate::rules::rows(&packs, &found)
+            .iter()
+            .filter_map(crate::rules::Row::update_line)
+            .collect();
+        crate::packs::apply(&dir, &packs).map(|_| said)
+    });
+    match taken {
+        Ok(said) => {
             console.note(&format!("packs at {}", dir.display()));
-            Ok(())
+            for line in said {
+                console.note(&format!("{}: {line}", crate::rules::PART));
+            }
+            Ok(rules_of(&dir))
         }
         // The engine runs, digests and answers questions without packs, but
         // it cannot say what a scan is, which is most of what it is installed
@@ -9772,7 +10753,7 @@ fn install_packs(plan: &Plan, me: &Path, console: &mut Console) -> Result<(), Ex
                 "put a packs directory at {} or pass --pack-dir",
                 dir.display()
             ));
-            Ok(())
+            Ok(rules_of(&dir))
         }
     }
 }
@@ -12194,22 +13175,28 @@ fn list_models(url: &str, key: Option<&str>) -> Option<Vec<String>> {
 }
 
 /// The plan's row for a model server: its address, where its key is read
-/// from, and the model the stations go to. Never the key.
+/// from, the model the stations go to and whether it thinks. Never the key.
 fn model_server_row(server: &ModelServer) -> String {
     format!(
-        "{}, its key read from {} and sealed in Kvasir; the stations on {}",
+        "{}, its key read from {} and sealed in Kvasir; the stations on {}, thinking {}",
         server.url,
         server.key_file.display(),
-        server.model.as_deref().unwrap_or("a model not named yet")
+        server.model.as_deref().unwrap_or("a model not named yet"),
+        server.thinking.name()
     )
 }
 
-/// Why a run with nobody to ask stops where a model server's model was not
-/// named, with the models the server offers as this machine reads them.
-fn unnamed_server_model(server: &ModelServer) -> String {
+/// The model the stations use on a model server where none was named and
+/// nobody is asked: the one the server marks as its default, else its only
+/// one, as this machine reads its list. Where neither is there, why the run
+/// stops, with the models the server offers.
+fn unnamed_server_model(server: &ModelServer) -> Result<String, String> {
     let key = read_model_key(&server.key_file);
-    let offered: Vec<String> = server_offer(&server.url, key.as_deref())
-        .unwrap_or_default()
+    let listed = server_offer(&server.url, key.as_deref()).unwrap_or_default();
+    if let Some(model) = offered_default(&listed) {
+        return Ok(model);
+    }
+    let offered: Vec<String> = listed
         .iter()
         .filter_map(|m| m["id"].as_str().map(str::to_string))
         .collect();
@@ -12218,9 +13205,9 @@ fn unnamed_server_model(server: &ModelServer) -> String {
     } else {
         format!("{} offers {}", server.url, offered.join(", "))
     };
-    format!(
+    Err(format!(
         "nothing was changed: name the model the stations use with --model-server-model; {from}"
-    )
+    ))
 }
 
 /// The models an OpenAI compatible server lists, each as the server
@@ -12284,7 +13271,12 @@ fn ask_server_model(console: &mut Console, server: &ModelServer) -> Result<Strin
         .iter()
         .map(|(id, words)| (id.as_str(), words.as_str()))
         .collect();
-    let at = console.ask_choice("Which model do the stations use?", &options, 0)?;
+    // the server's default is offered first, where it marks one
+    let default = shown
+        .iter()
+        .position(|(id, _)| offered_default(&models).as_deref() == Some(id.as_str()))
+        .unwrap_or(0);
+    let at = console.ask_choice("Which model do the stations use?", &options, default)?;
     Ok(shown.get(at).map(|(id, _)| id.clone()).unwrap_or_default())
 }
 
@@ -13515,14 +14507,44 @@ const SERVER_STAGING: &str = "server-staging:";
 /// loads on the server first, and admission asks the model itself.
 const SERVER_WAIT_SECONDS: u64 = 3_600;
 
+/// How many models a model server may offer for setup to admit them all;
+/// past it, as with a big provider listing hundreds, setup admits the
+/// stations' model alone and the rest are ticked in the desk.
+const SERVER_MODELS_AT_ONCE: usize = 8;
+
+/// The longest answer the stations' model is held with on a model server,
+/// its thinking included, whether it thinks or not: what the assistant's
+/// one-chat bench measured thinking on with (2026-10-12). Kvasir holds no
+/// more than the server allows for the model, or its context.
+const STATIONS_ANSWER_TOKENS: u64 = 16_384;
+
+/// The model the stations use on a model server where none was named: the
+/// one the server marks as its default, else its only one.
+fn offered_default(offered: &[serde_json::Value]) -> Option<String> {
+    let id = |m: &serde_json::Value| m["id"].as_str().map(str::to_string);
+    if let Some(model) = offered.iter().find(|m| m["default"] == true) {
+        return id(model);
+    }
+    match offered {
+        [only] => id(only),
+        _ => None,
+    }
+}
+
 /// A model server the stations use, held by Kvasir as one backend (record
-/// 47): its key sealed under the backend's name, the model the stations use
-/// admitted from the server's list, and each of the stations' purposes
-/// mapped to that model. The key is read from its file here and goes to
-/// Kvasir's credential door alone; it is never said or written. A key that
-/// cannot be read, a model the server does not offer or that does not
-/// answer, and no model named, leave the stations with no model,
-/// which stops an install and is said on an update.
+/// 47): its key sealed under the backend's name, on the first add every
+/// model the server offers admitted from its list with the stations' model
+/// asked last (Wave 7a; only the stations' model where Kvasir holds the
+/// server already or it offers more than `SERVER_MODELS_AT_ONCE`), and each
+/// of the stations' purposes mapped to
+/// that model. The stations' model is the one named, else the server's
+/// default, else its only one. The key is read from its file here and goes
+/// to Kvasir's credential door alone; it is never said or written. A key
+/// that cannot be read, a stations' model the server does not offer or that
+/// does not answer, and none named where the server has no default, leave
+/// the stations with no model, which stops an install and is said on an
+/// update. Another model that does not answer or is refused is said, and
+/// setup goes on.
 fn use_model_server(
     plan: &Plan,
     kvasir: &Kvasir,
@@ -13632,27 +14654,83 @@ fn use_model_server(
                 ));
             }
         },
-        None => {
-            unstage();
-            console.say(&format!(
-                "name the one the stations use with --model-server-model; it offers {}",
-                ids.join(", ")
-            ));
-            return console.broken(&format!(
-                "no model was named for {url}, so the stations have no model"
-            ));
-        }
+        // none named: the one the server marks as its default, else its only one
+        None => match offered_default(&offered) {
+            Some(id) => {
+                let which = if ids.len() == 1 {
+                    "its only model"
+                } else {
+                    "its default"
+                };
+                console.progress(&format!(
+                    "no model was named for {url}, so the stations use {id}, {which}"
+                ));
+                id
+            }
+            None => {
+                unstage();
+                console.say(&format!(
+                    "name the one the stations use with --model-server-model; it offers {}",
+                    ids.join(", ")
+                ));
+                return console.broken(&format!(
+                    "no model was named for {url}, so the stations have no model"
+                ));
+            }
+        },
     };
-    // admitted on the server's one backend: asked one short question, which
-    // loads a cold model on the server first, and put through the suite
+    // On the first add, every model the server offers is admitted beside the
+    // stations' one, so a person may pick any of them later (Wave 7a); the
+    // stations' one is asked last, so that it is the one left loaded on a
+    // server with one card. A server Kvasir holds already (an update, a
+    // rerun) is sent the stations' one alone, so a model a person removed in
+    // the desk stays removed. A server offering more than a handful, as a big
+    // provider does, gives the stations' one alone, and the rest are added
+    // from the desk.
+    let admitting: Vec<String> = if held.is_some() {
+        vec![model.clone()]
+    } else if ids.len() > SERVER_MODELS_AT_ONCE {
+        console.say(&format!(
+            "it offers {} models; add more from Settings > Kvasir",
+            ids.len()
+        ));
+        vec![model.clone()]
+    } else {
+        let mut all: Vec<String> = ids
+            .iter()
+            .filter(|m| **m != model.as_str())
+            .map(|m| (*m).to_string())
+            .collect();
+        all.push(model.clone());
+        all
+    };
+    // admitted on the server's one backend: each asked one short question,
+    // which loads a cold model on the server first, and put through the suite
     let started = std::time::Instant::now();
     let asked = kvasir.clone();
-    let body = serde_json::json!({ "url": url, "id": id, "key_ref": key_ref, "models": [model] });
-    let run = std::thread::spawn(move || {
-        asked.answer("POST", "/v1/servers", Some(&body), SERVER_WAIT_SECONDS)
+    // the server's thinking as the record has it, on unless it was turned
+    // off, and the longest answer the stations' bench measured; a server
+    // held already takes both again, without its models being asked
+    let body = serde_json::json!({
+        "url": url,
+        "id": id,
+        "key_ref": key_ref,
+        "models": admitting,
+        "thinking": server.thinking.name(),
+        "max_tokens": STATIONS_ANSWER_TOKENS,
     });
+    let wait = SERVER_WAIT_SECONDS * admitting.len() as u64;
+    let run = std::thread::spawn(move || asked.answer("POST", "/v1/servers", Some(&body), wait));
+    let waiting_on = if admitting.len() == 1 {
+        model.clone()
+    } else {
+        format!("{} models", admitting.len())
+    };
     while !run.is_finished() {
-        console.waiting(&format!("Kvasir admitting {model} from {url}"), started);
+        console.waiting(
+            &format!("Kvasir admitting {waiting_on} from {url}"),
+            started,
+        );
         std::thread::sleep(std::time::Duration::from_millis(200));
     }
     console.waited();
@@ -13661,13 +14739,37 @@ fn use_model_server(
     if !matches!(answered, Some((201, _))) {
         unstage();
     }
-    let result = answered.as_ref().and_then(|(_, said)| {
-        said["results"]
-            .as_array()?
-            .iter()
-            .find(|r| r["id"] == model.as_str())
-            .cloned()
-    });
+    let result_of = |name: &str| {
+        answered.as_ref().and_then(|(_, said)| {
+            said["results"]
+                .as_array()?
+                .iter()
+                .find(|r| r["id"] == name)
+                .cloned()
+        })
+    };
+    // the other models are said one line each, and none of them stops setup
+    for other in admitting.iter().filter(|m| **m != model) {
+        match result_of(other) {
+            Some(r) if r["answered"] == true && r["admitted"] != false => {
+                console.progress(&format!("Kvasir holds {other} from {url} as well"));
+            }
+            Some(r) if r["answered"] == true => console.say(&format!(
+                "{other} from {url} did not pass Kvasir's admission, so Kvasir does not offer it"
+            )),
+            Some(r) => console.say(&format!(
+                "{other} at {url} did not answer Kvasir ({}), so Kvasir does not hold it",
+                r["error"]["message"].as_str().unwrap_or("no answer")
+            )),
+            // where Kvasir answered nothing for any of them, the stations'
+            // model below says why
+            None if matches!(answered, Some((201, _))) => {
+                console.say(&format!("Kvasir did not take {other} from {url}"));
+            }
+            None => {}
+        }
+    }
+    let result = result_of(&model);
     let backend = match (&answered, &result) {
         (Some((201, said)), Some(r)) if r["answered"] == true && r["admitted"] != false => {
             said["backend"]["id"].as_str().unwrap_or(&id).to_string()
@@ -13699,6 +14801,11 @@ fn use_model_server(
         }
     };
     console.progress(&format!("Kvasir holds {model} from {url} as {backend}"));
+    let said = answered
+        .as_ref()
+        .map(|(_, said)| said.clone())
+        .unwrap_or_default();
+    say_thinking(kvasir, console, server, &model, &backend, &offered, &said);
     // each of the stations' purposes goes to that model, once Kvasir lists
     // them: right after a restart it may not list them yet, and Kvasir maps
     // no purpose it does not list
@@ -13779,6 +14886,84 @@ fn use_model_server(
         ))?;
     }
     Ok(())
+}
+
+/// What the stations' thinking came to, said once Kvasir holds their model
+/// on a model server: whether it thinks, and how long an answer may be
+/// beside what the server allows, as Kvasir now holds it. A model the server
+/// does not say reasons has no thinking to set, and a Kvasir from before
+/// thinking was set leaves it to the server; either is said, and setup goes
+/// on, since the stations work either way.
+fn say_thinking(
+    kvasir: &Kvasir,
+    console: &Console,
+    server: &ModelServer,
+    model: &str,
+    backend: &str,
+    offered: &[serde_json::Value],
+    said: &serde_json::Value,
+) {
+    let spec = offered.iter().find(|m| m["id"] == model);
+    if !spec.is_some_and(|m| m["reasoning"] == true) {
+        console.note(&format!(
+            "{} does not say {model} reasons, so it has no thinking to turn {}",
+            server.url,
+            server.thinking.name()
+        ));
+        return;
+    }
+    // what Kvasir holds now: the backend's thinking and the model's longest answer
+    let held = kvasir
+        .call("GET", "/v1/backends", None, 10)
+        .and_then(|answer| {
+            answer["backends"]
+                .as_array()?
+                .iter()
+                .find(|b| b["id"] == backend)
+                .cloned()
+        })
+        .unwrap_or_default();
+    let thinking = said["backend"]["thinking"]
+        .as_str()
+        .or_else(|| held["thinking"].as_str());
+    let answer = held["entries"]
+        .as_array()
+        .and_then(|entries| entries.iter().find(|e| e["id"] == model))
+        .and_then(|e| e["max_tokens"].as_u64());
+    let limits = match (
+        spec.and_then(|m| m["max_output_tokens"].as_u64()),
+        spec.and_then(|m| m["context_length"].as_u64()),
+    ) {
+        (Some(most), Some(context)) => {
+            format!(" (the server allows {most}, in a context of {context})")
+        }
+        (Some(most), None) => format!(" (the server allows {most})"),
+        (None, Some(context)) => format!(" (in a context of {context})"),
+        (None, None) => String::new(),
+    };
+    let longest = answer.map_or_else(String::new, |n| {
+        format!(", with up to {n} tokens an answer{limits}")
+    });
+    match thinking {
+        Some(t) if t == server.thinking.name() => console.say(&match server.thinking {
+            Thinking::On => format!("the stations think before they answer{longest}"),
+            Thinking::Off => format!("the stations answer without thinking{longest}"),
+        }),
+        Some(t) => console.say(&format!(
+            "Kvasir holds the thinking of {backend} {t}, not {}; nils setup --update asks again",
+            server.thinking.name()
+        )),
+        None => console.say(&match server.thinking {
+            Thinking::On => format!(
+                "this Kvasir sets no thinking, so {model} thinks as the server has it by \
+                 default{longest}; one that does asks it on the next nils setup --update"
+            ),
+            Thinking::Off => format!(
+                "this Kvasir cannot turn thinking off, so {model} thinks as the server has it \
+                 by default{longest}; one that can turns it off on the next nils setup --update"
+            ),
+        }),
+    }
 }
 
 /// How long setup waits for Kvasir to list the stations' purposes, and how
@@ -16728,9 +17913,12 @@ pub(crate) fn update_all(channel: Option<&str>, only: &[String]) -> Result<bool,
     // The packs go with the engine: the ones its release carries, whichever
     // binary replaced the engine, since one older than this put them where
     // the engine does not read them (1.0.0-alpha.53 and before, where a site
-    // named its pack directory).
-    if chosen("engine") {
-        changed |= mend_packs(&state, channel);
+    // named its pack directory). The rules come with them where they are
+    // asked for: each first-party pack's own newest release this engine
+    // reads, with no engine release beside it (record 55 B5).
+    let rules = chosen(crate::rules::PART);
+    if chosen("engine") || rules {
+        changed |= mend_packs(&mut state, channel, rules);
     }
     state.at = nils_registry::time::now_iso();
     write_state(&state)?;
@@ -16783,11 +17971,19 @@ pub(crate) fn engine_version(state: &State) -> Option<String> {
 }
 
 /// The packs of the engine's release put where the engine reads them, where
-/// they are not there already, with what was done said on one line. The
-/// answer is whether the directory changed, so the engine is started again
-/// and reads them.
-fn mend_packs(state: &State, channel: Option<&str>) -> bool {
+/// they are not there already, with what was done said on one line, and with
+/// `rules` each first-party pack's own newest release this engine reads,
+/// where it stands above them. The record notes the rules in use. The answer
+/// is whether the directory changed, so the engine is started again and
+/// reads them.
+fn mend_packs(state: &mut State, channel: Option<&str>, rules: bool) -> bool {
     let Some(dir) = engine_pack_dir(state) else {
+        if rules {
+            println!(
+                "rules: this install's engine runs in a container, whose image carries its packs; \
+                 a rules release reaches it with the engine's next image"
+            );
+        }
         return false;
     };
     let Some(version) = engine_version(state) else {
@@ -16798,35 +17994,80 @@ fn mend_packs(state: &State, channel: Option<&str>) -> bool {
     if let Some(parent) = dir.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    match crate::packs::status(&base, &version, &dir) {
-        Ok(status) if !status.behind() => {
+    let carried = match crate::packs::bundled(&base, &version) {
+        Ok(carried) => carried,
+        Err(why) => {
+            println!("packs: the ones engine {version} was released with could not be read: {why}");
+            if !rules {
+                return false;
+            }
+            // the rules are measured against what is in place instead
+            Vec::new()
+        }
+    };
+    let packs: Vec<crate::packs::Pack> = carried.iter().map(|o| o.pack.clone()).collect();
+    let engine = crate::packs::Engine::of_release(&version, &packs);
+    let found = if rules {
+        let measured = if packs.is_empty() {
+            crate::packs::first_party_in(&dir, &FIRST_PARTY_PACKS)
+        } else {
+            packs
+        };
+        crate::rules::find_all(
+            &crate::rules::base(channel),
+            &measured,
+            &engine,
+            &crate::packs::pins_in(&dir),
+        )
+    } else {
+        Vec::new()
+    };
+    let plan = crate::packs::plan(
+        &dir,
+        &version,
+        carried,
+        crate::rules::takes(&found),
+        &engine,
+    );
+    for row in crate::rules::rows(&plan, &found) {
+        if let Some(line) = row.update_line() {
+            println!("{}: {line}", crate::rules::PART);
+        }
+    }
+    if !plan.behind() {
+        if !plan.status.bundled.is_empty() {
             println!(
                 "packs: the ones engine {version} was released with, in {}",
                 dir.display()
             );
-            if !status.edited.is_empty() {
-                println!(
-                    "packs: {} changed on this machine and kept as it is",
-                    status.edited.join(", ")
-                );
-            }
-            false
         }
-        Ok(_) => match crate::packs::refresh(&base, &version, &dir) {
-            Ok(said) => {
-                println!("packs: {said}");
-                true
-            }
-            Err(why) => {
-                println!("packs: left as they were: {why}");
-                false
-            }
-        },
-        Err(why) => {
-            println!("packs: the ones engine {version} was released with could not be read: {why}");
-            false
+        if !plan.status.edited.is_empty() {
+            println!(
+                "packs: {} changed on this machine and kept as it is",
+                plan.status.edited.join(", ")
+            );
         }
+        if !plan.status.ahead.is_empty() {
+            println!(
+                "packs: {} kept over the copy engine {version} carries",
+                plan.status.ahead.join(", ")
+            );
+        }
+        state.rules = rules_of(&dir);
+        return false;
     }
+    let changed = match crate::packs::apply(&dir, &plan) {
+        Ok(said) => {
+            println!("packs: {said}");
+            true
+        }
+        Err(why) => {
+            println!("packs: left as they were: {why}");
+            false
+        }
+    };
+    state.rules = rules_of(&dir);
+    changed
 }
 
 /// A part's unit stopped before an update switches its files, said on the
@@ -17173,6 +18414,7 @@ pub(crate) fn install_doc(state: &State) -> serde_json::Value {
         "services": services,
         "unfinished": state.unfinished,
         "node": node_doc(state),
+        "rules": state.rules,
     })
 }
 
@@ -17677,7 +18919,7 @@ pub(crate) struct UninstallArgs {
 /// The first-party packs a release carries. A pack directory holding only
 /// these was put there by an install; any other pack is a person's own and
 /// is never removed.
-const FIRST_PARTY_PACKS: [&str; 2] = ["mri", "clinical"];
+pub(crate) const FIRST_PARTY_PACKS: [&str; 2] = ["mri", "clinical"];
 
 /// Everything an uninstall would touch, gathered before anything is.
 struct Removal {
@@ -19285,6 +20527,7 @@ mod tests {
             closed: Vec::new(),
             node: Some(PathBuf::from("/opt/node/bin/node")),
             model_server: None,
+            dcm2niix: None,
         }
     }
 
@@ -19931,6 +21174,10 @@ mod tests {
         purposes_late: usize,
         /// Purposes `/v1/purposes` never lists.
         purposes_unlisted: Vec<&'static str>,
+        /// A Kvasir from before thinking was set per backend: an add's
+        /// `thinking` and `max_tokens` are not read, and a model is held
+        /// with the longest answer its server allows.
+        old_kvasir: bool,
     }
 
     /// Kvasir's doors over what it holds. A backend is added unless one of
@@ -20102,6 +21349,49 @@ mod tests {
                             held.sealed.insert(id.clone(), key);
                         }
                     }
+                    // the backend's thinking and each ticked model's longest
+                    // answer, never more than the server allows, as a Kvasir
+                    // that sets thinking holds them
+                    let old = held.old_kvasir;
+                    let offered = held.offered.clone();
+                    let most = |m: &str| {
+                        offered
+                            .iter()
+                            .find(|o| o["id"] == m)
+                            .and_then(|o| {
+                                o["max_output_tokens"]
+                                    .as_u64()
+                                    .or_else(|| o["context_length"].as_u64())
+                            })
+                            .unwrap_or(4_096)
+                    };
+                    if let Some(b) = held.backends.iter_mut().find(|b| b["id"] == id.as_str()) {
+                        if !old && sent.get("thinking").is_some() {
+                            b["thinking"] = sent["thinking"].clone();
+                        }
+                        let mut entries = b["entries"].as_array().cloned().unwrap_or_default();
+                        for m in &taken {
+                            let longest = match sent["max_tokens"].as_u64() {
+                                Some(asked) if !old => asked.min(most(m)),
+                                _ => most(m),
+                            };
+                            match entries.iter_mut().find(|e| e["id"] == m.as_str()) {
+                                Some(e) => e["max_tokens"] = json!(longest),
+                                None => entries.push(json!({"id": m, "max_tokens": longest})),
+                            }
+                        }
+                        b["entries"] = json!(entries);
+                    }
+                    let thinking = held
+                        .backends
+                        .iter()
+                        .find(|b| b["id"] == id.as_str())
+                        .map(|b| b["thinking"].clone())
+                        .unwrap_or_default();
+                    let mut backend = json!({"id": id, "models": models});
+                    if !thinking.is_null() {
+                        backend["thinking"] = thinking;
+                    }
                     // a staged key goes once the backend holds its own
                     if key_ref.starts_with(SERVER_STAGING) {
                         held.sealed.remove(&key_ref);
@@ -20115,8 +21405,7 @@ mod tests {
                     held.listed.extend(admitted);
                     (
                         201,
-                        json!({"backend": {"id": id, "models": models}, "results": results})
-                            .to_string(),
+                        json!({"backend": backend, "results": results}).to_string(),
                     )
                 }
                 ("POST", "/v1/subscriptions/chatgpt/sign-in") => ok(json!({
@@ -20283,6 +21572,7 @@ mod tests {
             url: "https://models.example.org/v1".to_string(),
             key_file: key_file.clone(),
             model: Some("flash-next".to_string()),
+            thinking: Thinking::On,
         });
         let console = Console::new(true);
         console.strict.set(true);
@@ -20375,13 +21665,15 @@ mod tests {
             url: "https://models.example.org/v1".to_string(),
             key_file: key_file.clone(),
             model: Some("qwen38-27b-fast".to_string()),
+            thinking: Thinking::On,
         });
         let console = Console::new(true);
         console.strict.set(true);
 
         // the model named, by its alias: the key staged, then moved by
-        // Kvasir onto the backend it holds for the server, the model
-        // admitted, and each of the stations' purposes mapped to it
+        // Kvasir onto the backend it holds for the server, every model it
+        // offers admitted with the stations' one last, and each of the
+        // stations' purposes mapped to it
         assert_eq!(ready_kvasir(&plan, &console, None).ok(), Some(true));
         let seen = calls.lock().unwrap().clone();
         assert_eq!(
@@ -20404,7 +21696,9 @@ mod tests {
             admitted,
             vec![
                 json!({"url": "https://models.example.org/v1", "id": "models-example-org",
-                        "key_ref": "server-staging:models-example-org", "models": ["qwen38-27b"]})
+                        "key_ref": "server-staging:models-example-org",
+                        "models": ["flash-next", "qwen38-27b"],
+                        "thinking": "on", "max_tokens": STATIONS_ANSWER_TOKENS})
             ]
         );
         for purpose in ["assistant.operator", "assistant.ask-help"] {
@@ -20438,7 +21732,8 @@ mod tests {
 
         // a model named goes the same way, on the backend Kvasir holds for
         // that server already, whose key is replaced under its own name, as
-        // an update with a new key file does
+        // an update with a new key file does; a server held already is sent
+        // the stations' model alone
         calls.lock().unwrap().clear();
         const NEWER: &str = "kvs_card0.the-servers-newer-secret";
         std::fs::write(&key_file, NEWER).unwrap();
@@ -20470,8 +21765,9 @@ mod tests {
         );
 
         // a model the server does not offer, one that does not pass
-        // admission, one that does not answer, none named,
-        // and a key that is not there, each stop an install
+        // admission, one that does not answer, none named where the server
+        // has no default and more than one model, and a key that is not
+        // there, each stop an install
         for (model, offered, said) in [
             (
                 Some("gone"),
@@ -20490,7 +21786,7 @@ mod tests {
             ),
             (
                 None,
-                vec![json!({"id": "flash-next", "default": true})],
+                vec![json!({"id": "flash-next"}), json!({"id": "qwen38-27b"})],
                 "no model was named for",
             ),
         ] {
@@ -20506,6 +21802,7 @@ mod tests {
             url: "https://other.example.org/v1".to_string(),
             key_file: key_file.clone(),
             model: Some("silent".to_string()),
+            thinking: Thinking::On,
         });
         held.lock().unwrap().offered = vec![json!({"id": "silent"})];
         let stopped = ready_kvasir(&plan, &console, None).unwrap_err();
@@ -20531,6 +21828,508 @@ mod tests {
             std::fs::read(state_path()).ok(),
             record_before,
             "the machine's own record changed"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_model_server_gives_kvasir_every_model_it_offers_with_the_stations_last() {
+        use serde_json::json;
+        let record_before = std::fs::read(state_path()).ok();
+        let dir = kvasir_dir(
+            "model-server-all",
+            json!([
+                {"id": "assistant.ask-help", "content": "rows"},
+                {"id": "assistant.operator", "content": "catalog"}
+            ]),
+        );
+        let key_file = dir.join("server.key");
+        std::fs::write(&key_file, "kvs_card0.a-secret\n").unwrap();
+        let held = std::sync::Arc::new(std::sync::Mutex::new(Held {
+            purposes: json!([
+                {"purpose": "assistant.operator", "content": "catalog", "backend": null},
+                {"purpose": "assistant.ask-help", "content": "rows", "backend": null}
+            ]),
+            offered: offered_by_the_card(),
+            ..Held::default()
+        }));
+        let (port, calls) = fake_kvasir(held.clone());
+        let mut plan = plan(Runtime::Machine);
+        plan.dir = dir.clone();
+        plan.ports.kvasir = port;
+        plan.model_server = Some(ModelServer {
+            url: "https://models.example.org/v1".to_string(),
+            key_file: key_file.clone(),
+            model: None,
+            thinking: Thinking::On,
+        });
+        let console = Console::new(true);
+        console.strict.set(true);
+        // the models each POST /v1/servers asked Kvasir to admit, in order
+        let asked =
+            |calls: &std::sync::Arc<std::sync::Mutex<Vec<String>>>| -> Vec<serde_json::Value> {
+                calls
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter_map(|c| c.strip_prefix("POST /v1/servers "))
+                    .map(|body| {
+                        serde_json::from_str::<serde_json::Value>(body).unwrap()["models"].clone()
+                    })
+                    .collect()
+            };
+        let mapped_to = |calls: &std::sync::Arc<std::sync::Mutex<Vec<String>>>, model: &str| {
+            calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|c| {
+                    c.starts_with("PUT /v1/purposes/assistant.")
+                        && c.contains(&format!(r#""model":"{model}""#))
+                })
+                .count()
+        };
+        // Kvasir holds the server no more, as before its first add
+        let forget = |held: &std::sync::Arc<std::sync::Mutex<Held>>| {
+            let mut held = held.lock().unwrap();
+            held.backends.clear();
+            held.sealed.clear();
+        };
+
+        // none named, on the first add: the stations use the server's
+        // default, asked last, and the other model it offers is admitted
+        // before it
+        assert_eq!(ready_kvasir(&plan, &console, None).ok(), Some(true));
+        assert_eq!(asked(&calls), vec![json!(["qwen38-27b", "flash-next"])]);
+        assert_eq!(
+            mapped_to(&calls, "flash-next"),
+            2,
+            "{:?}",
+            calls.lock().unwrap()
+        );
+        assert_eq!(
+            held.lock().unwrap().backends[0]["models"],
+            json!(["qwen38-27b", "flash-next"])
+        );
+
+        // a server Kvasir holds already, as on an update or a rerun, is sent
+        // the stations' model alone: a model a person removed in the desk
+        // stays removed
+        calls.lock().unwrap().clear();
+        held.lock().unwrap().backends[0]["models"] = json!(["flash-next"]);
+        assert_eq!(ready_kvasir(&plan, &console, None).ok(), Some(true));
+        assert_eq!(asked(&calls), vec![json!(["flash-next"])]);
+        assert_eq!(
+            held.lock().unwrap().backends[0]["models"],
+            json!(["flash-next"])
+        );
+        assert_eq!(mapped_to(&calls, "flash-next"), 2);
+
+        // none named and no default: a server's only model is the stations'
+        forget(&held);
+        calls.lock().unwrap().clear();
+        held.lock().unwrap().offered = vec![json!({"id": "qwen38-27b", "status": "cold"})];
+        assert_eq!(ready_kvasir(&plan, &console, None).ok(), Some(true));
+        assert_eq!(asked(&calls), vec![json!(["qwen38-27b"])]);
+        assert_eq!(
+            mapped_to(&calls, "qwen38-27b"),
+            2,
+            "{:?}",
+            calls.lock().unwrap()
+        );
+
+        // another model that does not answer, and one admission refuses,
+        // are said and setup goes on with the stations' model
+        forget(&held);
+        calls.lock().unwrap().clear();
+        held.lock().unwrap().offered = vec![
+            json!({"id": "silent"}),
+            json!({"id": "flash-next", "default": true}),
+            json!({"id": "unfit"}),
+        ];
+        plan.model_server.as_mut().unwrap().model = Some("flash-next".to_string());
+        assert_eq!(ready_kvasir(&plan, &console, None).ok(), Some(true));
+        assert_eq!(
+            asked(&calls),
+            vec![json!(["silent", "unfit", "flash-next"])]
+        );
+        assert_eq!(
+            mapped_to(&calls, "flash-next"),
+            2,
+            "{:?}",
+            calls.lock().unwrap()
+        );
+
+        // the stations' model failing still stops an install, whatever the
+        // others did
+        forget(&held);
+        held.lock().unwrap().offered = vec![json!({"id": "qwen38-27b"}), json!({"id": "silent"})];
+        plan.model_server.as_mut().unwrap().model = Some("silent".to_string());
+        let stopped = ready_kvasir(&plan, &console, None).unwrap_err();
+        assert!(
+            stopped
+                .message
+                .contains("silent at https://models.example.org/v1 did not answer"),
+            "{}",
+            stopped.message
+        );
+
+        // a server offering more than eight, as a big provider does: the
+        // stations' model alone, and the rest are left to the desk
+        forget(&held);
+        calls.lock().unwrap().clear();
+        held.lock().unwrap().offered = (0..9)
+            .map(|n| json!({"id": format!("provider-model-{n}")}))
+            .collect();
+        plan.model_server.as_mut().unwrap().model = Some("provider-model-4".to_string());
+        assert_eq!(ready_kvasir(&plan, &console, None).ok(), Some(true));
+        assert_eq!(asked(&calls), vec![json!(["provider-model-4"])]);
+        assert_eq!(mapped_to(&calls, "provider-model-4"), 2);
+        // and with none named there, its default still goes alone
+        forget(&held);
+        calls.lock().unwrap().clear();
+        held.lock().unwrap().offered[7]["default"] = json!(true);
+        plan.model_server.as_mut().unwrap().model = None;
+        assert_eq!(ready_kvasir(&plan, &console, None).ok(), Some(true));
+        assert_eq!(asked(&calls), vec![json!(["provider-model-7"])]);
+
+        assert_eq!(
+            std::fs::read(state_path()).ok(),
+            record_before,
+            "the machine's own record changed"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_model_server_with_nobody_to_ask_gives_the_stations_its_default_or_only_model() {
+        let offer = |models: serde_json::Value| -> Vec<serde_json::Value> {
+            models.as_array().cloned().unwrap_or_default()
+        };
+        assert_eq!(
+            offered_default(&offered_by_the_card()).as_deref(),
+            Some("flash-next")
+        );
+        assert_eq!(
+            offered_default(&offer(serde_json::json!([{"id": "only"}]))).as_deref(),
+            Some("only")
+        );
+        assert_eq!(
+            offered_default(&offer(serde_json::json!([{"id": "a"}, {"id": "b"}]))),
+            None
+        );
+        assert_eq!(offered_default(&[]), None);
+
+        // as this machine reads the server's list
+        let dir = scratch("model-server-unnamed");
+        let key_file = dir.join("server.key");
+        std::fs::write(&key_file, "sk-test").unwrap();
+        let listed = std::sync::Arc::new(std::sync::Mutex::new(serde_json::json!([
+            {"id": "qwen-small"}, {"id": "qwen-large", "default": true}
+        ])));
+        let serving = listed.clone();
+        let (port, _calls) = fake_gateway(move |_, path, _| match path {
+            "/v1/models" => (
+                200,
+                serde_json::json!({"object": "list", "data": *serving.lock().unwrap()}).to_string(),
+            ),
+            _ => (404, "{}".to_string()),
+        });
+        let server = ModelServer {
+            url: format!("http://127.0.0.1:{port}/v1"),
+            key_file,
+            model: None,
+            thinking: Thinking::On,
+        };
+        assert_eq!(unnamed_server_model(&server).as_deref(), Ok("qwen-large"));
+        *listed.lock().unwrap() = serde_json::json!([{"id": "qwen-small"}, {"id": "qwen-large"}]);
+        let stopped = unnamed_server_model(&server).unwrap_err();
+        assert!(
+            stopped.contains("--model-server-model")
+                && stopped.contains("offers qwen-small, qwen-large"),
+            "{stopped}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// What a console kept for a person to read: its lines and its notes.
+    fn kept_said(console: &Console) -> String {
+        console
+            .screens
+            .as_ref()
+            .map(|replay| {
+                replay
+                    .borrow()
+                    .said
+                    .iter()
+                    .filter_map(|s| match s {
+                        tui::Said::Text(t) | tui::Said::Note(t) => Some(t.clone()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .unwrap_or_default()
+    }
+
+    /// The stations think on a model server by default (2026-10-12): an
+    /// install asks Kvasir for thinking on and the bench's longest answer,
+    /// an update with thinking off sends the stations' model alone with it,
+    /// which Kvasir holds again in place, and what Kvasir holds is said with
+    /// the server's limits. A Kvasir from before thinking was set, and a
+    /// model the server does not say reasons, are said and do not stop it.
+    #[test]
+    fn the_stations_think_on_a_model_server_and_an_update_changes_it_in_place() {
+        use serde_json::json;
+        let record_before = std::fs::read(state_path()).ok();
+        let dir = kvasir_dir(
+            "model-server-thinking",
+            json!([{"id": "assistant.ask-help", "content": "rows"}]),
+        );
+        let key_file = dir.join("server.key");
+        std::fs::write(&key_file, "kvs_card0.a-secret\n").unwrap();
+        let reasoning = || {
+            vec![
+                json!({"id": "flash-next", "default": true, "status": "loaded", "reasoning": true,
+                       "context_length": 262_144, "max_output_tokens": 65_536}),
+                json!({"id": "qwen38-27b", "status": "cold", "reasoning": true,
+                       "context_length": 262_144, "max_output_tokens": 65_536}),
+            ]
+        };
+        let held = std::sync::Arc::new(std::sync::Mutex::new(Held {
+            purposes: json!([
+                {"purpose": "assistant.ask-help", "content": "rows", "backend": null}
+            ]),
+            offered: reasoning(),
+            ..Held::default()
+        }));
+        let (port, calls) = fake_kvasir(held.clone());
+        let mut plan = plan(Runtime::Machine);
+        plan.dir = dir.clone();
+        plan.ports.kvasir = port;
+        plan.model_server = Some(ModelServer {
+            url: "https://models.example.org/v1".to_string(),
+            key_file: key_file.clone(),
+            model: Some("flash-next".to_string()),
+            thinking: Thinking::On,
+        });
+        let mut console = Console::new(false);
+        console.screens = Some(std::cell::RefCell::new(Replay::default()));
+        console.strict.set(true);
+        let sent =
+            |calls: &std::sync::Arc<std::sync::Mutex<Vec<String>>>| -> Vec<serde_json::Value> {
+                calls
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter_map(|c| c.strip_prefix("POST /v1/servers "))
+                    .map(|body| serde_json::from_str(body).unwrap())
+                    .collect()
+            };
+        let again = |console: &Console, calls: &std::sync::Arc<std::sync::Mutex<Vec<String>>>| {
+            calls.lock().unwrap().clear();
+            if let Some(replay) = &console.screens {
+                replay.borrow_mut().said.clear();
+            }
+        };
+
+        // the install: every model ticked with thinking on and the bench's answer
+        assert_eq!(ready_kvasir(&plan, &console, None).ok(), Some(true));
+        let bodies = sent(&calls);
+        assert_eq!(bodies.len(), 1, "{bodies:?}");
+        assert_eq!(bodies[0]["models"], json!(["qwen38-27b", "flash-next"]));
+        assert_eq!(bodies[0]["thinking"], "on");
+        assert_eq!(bodies[0]["max_tokens"], 16_384);
+        assert_eq!(held.lock().unwrap().backends[0]["thinking"], "on");
+        assert!(
+            kept_said(&console).contains(
+                "the stations think before they answer, with up to 16384 tokens an answer (the \
+                 server allows 65536, in a context of 262144)"
+            ),
+            "{}",
+            kept_said(&console)
+        );
+
+        // an update with thinking off: the stations' model alone, under the
+        // backend's own key, and Kvasir holds the backend's thinking off
+        again(&console, &calls);
+        plan.model_server.as_mut().unwrap().thinking = Thinking::Off;
+        assert_eq!(ready_kvasir(&plan, &console, None).ok(), Some(true));
+        assert_eq!(
+            sent(&calls),
+            vec![
+                json!({"url": "https://models.example.org/v1", "id": "models-example-org",
+                        "key_ref": "models-example-org", "models": ["flash-next"],
+                        "thinking": "off", "max_tokens": 16_384})
+            ]
+        );
+        assert_eq!(held.lock().unwrap().backends[0]["thinking"], "off");
+        assert!(
+            kept_said(&console).contains(
+                "the stations answer without thinking, with up to 16384 tokens an answer"
+            ),
+            "{}",
+            kept_said(&console)
+        );
+
+        // and on again, as an update of an install from before does
+        again(&console, &calls);
+        plan.model_server.as_mut().unwrap().thinking = Thinking::On;
+        assert_eq!(ready_kvasir(&plan, &console, None).ok(), Some(true));
+        assert_eq!(sent(&calls)[0]["thinking"], "on");
+        assert_eq!(held.lock().unwrap().backends[0]["thinking"], "on");
+
+        // a Kvasir from before thinking was set takes neither: the stations
+        // keep the server's default and its longest answer, which is said,
+        // and the update goes on
+        {
+            let mut held = held.lock().unwrap();
+            held.old_kvasir = true;
+            held.backends.clear();
+            held.sealed.clear();
+        }
+        for (thinking, words) in [
+            (
+                Thinking::On,
+                "this Kvasir sets no thinking, so flash-next thinks as the server has it by \
+                 default, with up to 65536 tokens an answer",
+            ),
+            (
+                Thinking::Off,
+                "this Kvasir cannot turn thinking off, so flash-next thinks as the server has it \
+                 by default",
+            ),
+        ] {
+            again(&console, &calls);
+            plan.model_server.as_mut().unwrap().thinking = thinking;
+            assert_eq!(ready_kvasir(&plan, &console, None).ok(), Some(true));
+            assert!(
+                kept_said(&console).contains(words),
+                "{words} is not in:\n{}",
+                kept_said(&console)
+            );
+        }
+
+        // a model the server does not say reasons has no thinking to set
+        {
+            let mut held = held.lock().unwrap();
+            held.old_kvasir = false;
+            held.backends.clear();
+            held.sealed.clear();
+            held.offered = vec![json!({"id": "flash-next", "default": true})];
+        }
+        again(&console, &calls);
+        assert_eq!(ready_kvasir(&plan, &console, None).ok(), Some(true));
+        assert!(
+            kept_said(&console).contains(
+                "https://models.example.org/v1 does not say flash-next reasons, so it has no \
+                 thinking to turn off"
+            ),
+            "{}",
+            kept_said(&console)
+        );
+
+        assert_eq!(
+            std::fs::read(state_path()).ok(),
+            record_before,
+            "the machine's own record changed"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `--model-thinking on|off` names the stations' thinking, on by
+    /// default; the record keeps it, and a record from before reads as on;
+    /// alone it changes the server on record, a server named again keeps its
+    /// own, another starts on, and with no server at all it is refused.
+    #[test]
+    fn the_stations_thinking_is_a_flag_the_record_keeps_and_on_by_default() {
+        use clap::Parser as _;
+        const URL: &str = "https://models.example.org/v1";
+        let dir = scratch("model-thinking-record");
+        let key_file = dir.join("server.key");
+        std::fs::write(&key_file, "kvs_card0.a-secret").unwrap();
+        let key = key_file.to_str().unwrap();
+        let parsed = |extra: &[&str]| {
+            let mut argv = vec!["nils", "--dir", "/x/nils"];
+            argv.extend_from_slice(extra);
+            Wizard::try_parse_from(argv).map(|w| w.setup).unwrap()
+        };
+        let named = |url: &str, extra: &[&str]| {
+            let mut argv = vec!["--model-server", url, "--model-key-file", key];
+            argv.extend_from_slice(extra);
+            parsed(&argv)
+        };
+        assert_eq!(
+            model_server_of(&named(URL, &[])).unwrap().unwrap().thinking,
+            Thinking::On
+        );
+        assert_eq!(
+            model_server_of(&named(URL, &["--model-thinking", "off"]))
+                .unwrap()
+                .unwrap()
+                .thinking,
+            Thinking::Off
+        );
+        assert!(
+            model_server_of(&named(URL, &["--model-thinking", "maybe"]))
+                .unwrap_err()
+                .contains("--model-thinking maybe is not on or off")
+        );
+
+        // the record keeps it; one written before it was kept reads as on
+        let off = ModelServer {
+            url: URL.to_string(),
+            key_file: key_file.clone(),
+            model: Some("qwen38-27b".to_string()),
+            thinking: Thinking::Off,
+        };
+        let state = State {
+            dir: "/x/nils".to_string(),
+            mode: "off".to_string(),
+            model_server: Some(off.clone()),
+            ..State::default()
+        };
+        let text = toml::to_string(&state).unwrap();
+        assert!(text.contains("thinking = \"off\""), "{text}");
+        let back: State = toml::from_str(&text).unwrap();
+        assert_eq!(back.model_server.as_ref(), Some(&off));
+        let before: State = toml::from_str(&format!(
+            "dir = \"/x/nils\"\nmode = \"off\"\n\n[model_server]\nurl = \"{URL}\"\nkey_file = \
+             \"{key}\"\nmodel = \"qwen38-27b\"\n"
+        ))
+        .unwrap();
+        assert_eq!(before.model_server.unwrap().thinking, Thinking::On);
+        assert!(
+            model_server_row(&off).ends_with("the stations on qwen38-27b, thinking off"),
+            "{}",
+            model_server_row(&off)
+        );
+
+        // with a server on record
+        let with = |args: SetupArgs| server_with_record(&args, Some(&off)).unwrap().unwrap();
+        assert_eq!(with(parsed(&[])), off);
+        assert_eq!(
+            with(parsed(&["--model-thinking", "on"])),
+            ModelServer {
+                thinking: Thinking::On,
+                ..off.clone()
+            }
+        );
+        assert_eq!(with(named(URL, &[])).thinking, Thinking::Off);
+        assert_eq!(
+            with(named(URL, &["--model-thinking", "on"])).thinking,
+            Thinking::On
+        );
+        assert_eq!(
+            with(named("https://other.example.org/v1", &[])).thinking,
+            Thinking::On
+        );
+        // and with none
+        assert_eq!(server_with_record(&parsed(&[]), None), Ok(None));
+        assert!(
+            server_with_record(&parsed(&["--model-thinking", "off"]), None)
+                .unwrap_err()
+                .contains("name one with --model-server")
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -21805,6 +23604,7 @@ mod tests {
             url: "https://models.example.org/v1".to_string(),
             key_file: root.join("model.key"),
             model: None,
+            thinking: Thinking::On,
         });
         state.parts.insert(
             "desk".to_string(),
@@ -25872,6 +27672,29 @@ mod tests {
         assert!(helper_of(Some(&unnamed), true).is_none());
     }
 
+    /// Record 55 B5: the rules are a part the helper updates where the
+    /// engine reads its packs from a directory this install keeps, and never
+    /// where the engine's image carries them.
+    #[test]
+    fn the_rules_are_updated_through_the_helper_where_the_engine_is_a_binary() {
+        if cfg!(target_os = "macos") {
+            return;
+        }
+        let plan = deployment();
+        let state = deployed_state(&plan);
+        let own = updatable_parts(&state);
+        assert!(own.contains(&"rules"), "{own:?}");
+        let helper = plan.helper.clone().expect("a deployment keeps one");
+        let rule = sudoers_text(&helper, &state);
+        assert!(
+            rule.contains("/usr/local/sbin/nils-manage update rules"),
+            "{rule}"
+        );
+        let mut boxed = state.clone();
+        boxed.parts.get_mut("engine").expect("an engine").kind = "podman".to_string();
+        assert!(!updatable_parts(&boxed).contains(&"rules"));
+    }
+
     /// The account that keeps the parts running is named outright, and is
     /// never the account a part already runs as. Both are said before
     /// anything is written.
@@ -28109,7 +29932,7 @@ mod tests {
         assert!(place_argv(registry).contains(&"--role".to_string()));
     }
 
-    /// The places of the deployment this was written for: twelve of them
+    /// The places of a deployment like the one this was written for: twelve of them
     /// across several mounted filesystems, with a mix of roles, one archive
     /// that is the backup target, and paths that are not under the install
     /// directory at all. Ten are read.
@@ -28124,9 +29947,9 @@ mod tests {
             "exchange=/data/exchange,role=exchange,snapshots,protected,read",
             "shared=/data/shared,role=share,protected,fast,read",
             "work=/work,role=working,protected,fast,read",
-            "scratch=/scratch/nils,role=working,fast,read",
-            "homes=/fast/home,role=working,snapshots,protected,fast,read",
-            "scratches=/fast/scratch,role=working,fast,read",
+            "scratch=/scratch/site,role=working,fast,read",
+            "homes=/home,role=working,snapshots,protected,fast,read",
+            "scratches=/scratch/users,role=working,fast,read",
         ]
         .iter()
         .map(|word| (*word).to_string())
@@ -28173,7 +29996,7 @@ mod tests {
         let scratch = specs.iter().find(|s| s.name == "scratch").unwrap();
         assert_eq!(
             place_argv(scratch).join(" "),
-            "nils place add scratch /scratch/nils --role working --fast",
+            "nils place add scratch /scratch/site --role working --fast",
             "and nothing it did not declare"
         );
         let roles: Vec<&str> = specs.iter().map(|s| s.role.as_str()).collect();
@@ -28215,7 +30038,7 @@ mod tests {
             .into_iter()
             .map(|(_, path)| path.display().to_string())
             .collect();
-        assert!(paths.contains(&"/fast/home".to_string()), "{paths:?}");
+        assert!(paths.contains(&"/home".to_string()), "{paths:?}");
     }
 
     #[test]
@@ -29416,6 +31239,85 @@ mod tests {
             plists[0].1
         );
         assert!(plists[0].1.starts_with("<?xml"), "{}", plists[0].1);
+    }
+
+    /// 2026-10-12: what a plan takes of dcm2niix, decided before anything
+    /// is looked for on the search path: none in a container, the site's
+    /// where given now or on record, the build this install placed while it
+    /// is the pinned one and there, and the pinned build again where not.
+    #[test]
+    fn a_plan_takes_the_site_s_dcm2niix_or_the_pinned_one() {
+        let root = scratch("converter-plan");
+        assert_eq!(
+            converter_plan(&plan(Runtime::Podman), Some(Path::new("/x/dcm2niix")), None),
+            None,
+            "the engine runs in its image"
+        );
+        let machine = plan(Runtime::Machine);
+        assert_eq!(
+            converter_plan(
+                &machine,
+                Some(Path::new("/opt/dcm2niix/bin/dcm2niix")),
+                None
+            ),
+            Some(Converter::Given(PathBuf::from(
+                "/opt/dcm2niix/bin/dcm2niix"
+            )))
+        );
+        let given = ConverterState {
+            path: "/opt/dcm2niix/bin/dcm2niix".into(),
+            version: "v1.0.20250505".into(),
+            how: "given".into(),
+        };
+        assert_eq!(
+            converter_plan(&machine, None, Some(&given)),
+            Some(Converter::Given(PathBuf::from(
+                "/opt/dcm2niix/bin/dcm2niix"
+            )))
+        );
+        let at = root.join("bin").join("dcm2niix");
+        std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+        std::fs::write(&at, "#!/bin/sh\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&at, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let placed = ConverterState {
+            path: at.display().to_string(),
+            version: tools::DCM2NIIX_VERSION.into(),
+            how: "placed".into(),
+        };
+        assert_eq!(
+            converter_plan(&machine, None, Some(&placed)),
+            Some(Converter::Found {
+                path: at.clone(),
+                placed: true
+            })
+        );
+        let older = ConverterState {
+            version: "v1.0.20250506".into(),
+            ..placed.clone()
+        };
+        let taken_again = converter_plan(&machine, None, Some(&older)).unwrap();
+        if tools::pin_here().is_some() {
+            assert_eq!(taken_again, Converter::Fetch { into: at.clone() });
+        } else {
+            assert!(matches!(taken_again, Converter::Unavailable(_)));
+        }
+        std::fs::remove_file(&at).unwrap();
+        assert!(!matches!(
+            converter_plan(&machine, None, Some(&placed)),
+            Some(Converter::Found { placed: true, .. })
+        ));
+        let mut printed = machine.clone();
+        printed.dcm2niix = Some(Converter::Fetch { into: at.clone() });
+        assert!(
+            converter_row(&printed).ends_with(&format!("into {}, its sha256 pinned", at.display()))
+        );
+        printed.dcm2niix = None;
+        assert!(converter_row(&printed).contains("nils tools install dcm2niix"));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

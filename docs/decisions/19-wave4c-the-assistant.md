@@ -1,9 +1,9 @@
-# 19 — Wave 4c, the assistant with the desk and Kvasir: the twenty questions answered, Nima's rulings, the design and the wave
+# 19 · Wave 4c, the assistant with the desk and Kvasir: the twenty questions answered, Nima's rulings, the design and the wave
 
 Written 2026-09-08 from the study that 17 §5 required before Wave 4c could open
 (`studies/2026-09-08-wave4c-study/`: ten readers, five designs, three judges, the
 report and its twenty open questions, 9,188 lines in `results/`). Status:
-**ratified 2026-09-08** (Nima: "19 §3 and §4 confirmed", with every permission for the wave: Asgard, its GPUs and memory, the mixed corpus in scratch, containers as needed; the commercial test key arrives in a file outside every repository). The specification written from it
+**ratified 2026-09-08** (Nima: "19 §3 and §4 confirmed", with every permission for the wave: the compute server, its GPUs and memory, the mixed corpus in scratch, containers as needed; the commercial test key arrives in a file outside every repository). The specification written from it
 is `docs/specs/wave4c-the-assistant.md` in the public repository; this document is
 the record it cites.
 
@@ -25,7 +25,7 @@ hardware line of the aim is wrong in one number: the cards are 96 GB, not 98.
 | | Ruling | What it changes |
 |---|---|---|
 | R9 | **Local models may see patient information.** The goal is the best performance a local model can give, the reference being a 27B model of the current generation at over 150 tokens per second with eight concurrent users, and one whole GPU may be allocated to it. A settings section chooses which model serves which flow of the assistant, so a commercial model is usable where the operator says it is fine and the sensitive flows stay local. A commercial key (one vendor, both API shapes) is available for testing. | The disclosure ceiling for a station is where the model runs, not what the model is (Q3, Q4). No cell suppression inside the site (Q5). One card is allocated, which reopens the server design's shared-GPU rule on purpose (Q12, C47). |
-| R10 | **User management fits Authentik on Asgard.** NILS and its applications are registered there and visibility is per user: chat for some, the engine for admins, the question for all staff. This is optional: some deployments need no user management at all, and some need only a simple login with admin control over access. | Three identity modes in the desk, one code path in the engine (Q1, Q11, D42). An entitlement vocabulary for the suite. A local login mode with its own users, which amends D8 (C46). |
+| R10 | **User management fits Authentik on the compute server.** NILS and its applications are registered there and visibility is per user: chat for some, the engine for admins, the question for all staff. This is optional: some deployments need no user management at all, and some need only a simple login with admin control over access. | Three identity modes in the desk, one code path in the engine (Q1, Q11, D42). An entitlement vocabulary for the suite. A local login mode with its own users, which amends D8 (C46). |
 | R11 | **The model service is named Kvasir.** | D45; the reason is recorded so the first runbook line means something. |
 
 The three criteria Nima set for the design: it follows best practice, and it makes

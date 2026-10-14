@@ -107,6 +107,10 @@ pub fn prepare(path: &Path, rel: &str, rule: &Rule) -> Result<Prepared, Refusal>
         study_uid,
         series_number: int(dataset, tags::SERIES_NUMBER),
         instance_number: int(dataset, tags::INSTANCE_NUMBER),
+        // the description as the copy keeps it: cleaned of the file's own
+        // identifiers, as `scrub::apply` cleans it (record 55 K9)
+        series_description: text(dataset, tags::SERIES_DESCRIPTION)
+            .map(|d| scrub::cleaned(&d, &scrub::identifiers(dataset)).unwrap_or(d)),
     };
     Ok(Prepared {
         framed,

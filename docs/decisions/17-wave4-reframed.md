@@ -1,4 +1,4 @@
-# 17 — Wave 4 reframed: the engine completes, then the two apps
+# 17 · Wave 4 reframed: the engine completes, then the two apps
 
 Written 2026-09-06, after Wave 3 closed and after an eighteen-agent analysis of
 v0's server, its clinical importers, its QC surfaces, the Metabase and Flue
@@ -36,7 +36,7 @@ The record's Wave 4 becomes three, and the record's Wave 5 (nils-query MVP) is a
 
 Names are open (§8). Until they are settled the record keeps `nils-query` and `nils-agent`.
 
-## 3. Wave 4a — the engine completes
+## 3. Wave 4a · the engine completes
 
 Ordered by R3 first, then by dependency. Each slice is one merged pull request with its own tests, the granularity Wave 3 proved over thirteen.
 
@@ -46,7 +46,7 @@ Ordered by R3 first, then by dependency. Each slice is one merged pull request w
 |---|---|---|---|
 | 1 | **The manifest at stack grain** | The release's bookkeeping moves from a row per file per version to a **current state per stack plus a change log** (`release_stack` updated in place, `release_move` as history), with the five outcomes diffed **in SQL** rather than in memory. A per-file digest becomes a per-stack roll-up; `release_file` is dropped or made opt-in. Measured against today on the same 150k and 1M-file corpora. | Memory flat in the number of files; rows per dataset 518k-ish total, not per version; both layouts; the handover still verifies. |
 | 2 | **Private elements ingested** | Digest reads private elements **by creator and offset**, into a catalogue the pack declares (which elements, from which creator, with what meaning), so fingerprint and classification can use them. `nils private` grows: orphans reported by group, and a private dictionary so values come back as something other than `UN`. | The three surveys' per-acquisition candidates are readable by a pack; a Siemens 0051 block is read; a GE `GEMS_PARM_01` block is read; nothing is ever kept whole. |
-| 3 | **The allowlist from the surveys** | The 139 candidates (varies per acquisition, printable, short) become pack entries after Nima strikes what he does not want; the pack states the vendor coverage it has. | The MS, nmosd and mix surveys each lose no candidate a person kept. |
+| 3 | **The allowlist from the surveys** | The 139 candidates (varies per acquisition, printable, short) become pack entries after Nima strikes what he does not want; the pack states the vendor coverage it has. | The MS, study D and mix surveys each lose no candidate a person kept. |
 | 4 | **The faults** | (a) `nils session --anchors` reads a raw DATE (`main.rs:3414`) and fails on Postgres; (b) the CLI tests have **no Postgres half** at all (1,872 lines, zero references to the DSN); (c) `Dialect::text_of_qualified` is made unavoidable: projections resolve through `&Column` and a debug assertion fires when a Date/Time/Timestamp/Json column is selected raw; (d) **multi-valued axes stop being comma-joined strings** (`classification_axis.value`, v0's `classification_string` mistake ported deliberately, which is why a role match is four `LIKE` patterns); (e) `participants.tsv` carries nothing (`run.rs:909`), a fault that stays until the clinical layer exists but is named here. | Whole CLI suite green on both backends; a role match is an equality; a raw DATE projection cannot be written without a test failing. |
 | 5 | **`contracts/` stops being empty** | The three contracts already overdue get their skeletons with a version each: `pack/` (the pack format, which is data and has been since C11), `review-item/` (the schema), `openapi/` (an empty document that the doors fill in). The rule that a contract version changes only by a pull request that says so. | A contract test exists and is green, even if it tests little. |
 

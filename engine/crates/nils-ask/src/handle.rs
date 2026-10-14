@@ -40,6 +40,9 @@ pub enum HandleError {
     /// The rows were dropped by retention; the metadata, hash and ask stay.
     Expired(i64),
     Truncated(i64),
+    /// Record 55 K7, small lists at plain (the ruling of 2026-10-13): the
+    /// handle's list was held back whole, so it holds no row to read on.
+    Held(i64),
     Grain {
         id: i64,
         grain: Grain,
@@ -64,6 +67,11 @@ impl fmt::Display for HandleError {
                 f,
                 "handle {id} is truncated: a capped answer may be paged and read, never hashed, released, pinned or promoted"
             ),
+            HandleError::Held(id) => write!(
+                f,
+                "handle {id} holds no rows: its answer was {}, at the detail it was asked at",
+                crate::validate::held_list_why()
+            ),
             HandleError::Grain { id, grain } => write!(f, "handle {id} is a {grain} set"),
             HandleError::Message(m) => f.write_str(m),
         }
@@ -84,6 +92,17 @@ pub struct Column {
     pub name: String,
     #[serde(rename = "type")]
     pub type_: String,
+    /// Record 55 K7: the column was answered as its shape, a quasi
+    /// identifying field read below detail quasi (2026-10-12). Absent on a
+    /// column answered raw, and on every column of a handle written before.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub shaped: bool,
+    /// Record 55 K7, the ruling of 2026-10-12: why some of the column's
+    /// values were held back (null), a group's mean or count of distinct
+    /// values of a quasi identifying field where the group holds fewer
+    /// than `MEASURE_K` subjects with a value. Absent where none was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub held_back: Option<String>,
 }
 
 /// A handle as read.
@@ -135,6 +154,46 @@ impl Handle {
     /// the key of the run cache and of a saved selection (record 43).
     pub fn bound_hash(&self) -> Option<String> {
         self.ask.as_ref().map(crate::hash::bound_hash)
+    }
+
+    /// The names of the columns answered as their shapes (record 55 K7).
+    pub fn shaped(&self) -> Vec<String> {
+        self.columns
+            .iter()
+            .filter(|c| c.shaped)
+            .map(|c| c.name.clone())
+            .collect()
+    }
+
+    /// Whether the handle's list was held back whole (record 55 K7, small
+    /// lists at plain, the ruling of 2026-10-13): it holds no row, and its
+    /// row count is not a count of anything.
+    pub fn rows_held(&self) -> bool {
+        let why = crate::validate::held_list_why();
+        !self.columns.is_empty()
+            && self
+                .columns
+                .iter()
+                .all(|c| c.held_back.as_deref() == Some(why.as_str()))
+    }
+
+    /// The row count a door may give: none where the list was held back.
+    pub fn row_count_shown(&self) -> Option<i64> {
+        (!self.rows_held()).then_some(self.row_count)
+    }
+
+    /// The columns with values held back, and why (record 55 K7, the ruling
+    /// of 2026-10-12).
+    pub fn held_back(&self) -> Vec<crate::exec::HeldBack> {
+        self.columns
+            .iter()
+            .filter_map(|c| {
+                c.held_back.as_ref().map(|why| crate::exec::HeldBack {
+                    column: c.name.clone(),
+                    why: why.clone(),
+                })
+            })
+            .collect()
     }
 }
 
@@ -274,7 +333,8 @@ fn cell_type(c: &Cell) -> Option<&'static str> {
     }
 }
 
-/// The columns of an answer with the type each showed.
+/// The columns of an answer with the type each showed, whether it was
+/// answered as its shape, and why values of it were held back.
 pub fn columns_of(answer: &Answer) -> Vec<Column> {
     answer
         .columns
@@ -288,6 +348,8 @@ pub fn columns_of(answer: &Answer) -> Vec<Column> {
                 .find_map(|r| r.0.get(i).and_then(cell_type))
                 .unwrap_or("null")
                 .to_string(),
+            shaped: answer.shaped.contains(&i),
+            held_back: answer.is_held(i).then(|| answer.why_held(i)),
         })
         .collect()
 }

@@ -521,6 +521,8 @@ fn edited(contract: u32, edit: impl Fn(&str) -> String) -> PathBuf {
     let manifest = std::fs::read_to_string(to.join("pack.yml")).unwrap();
     let manifest = manifest
         .lines()
+        // the engines a pack works with are pack contract 10's
+        .filter(|l| contract >= 10 || !l.starts_with("engine:"))
         .map(|l| {
             if l.starts_with("contract:") {
                 format!("contract: {contract}")

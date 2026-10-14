@@ -107,18 +107,21 @@ pub(crate) fn page(
             "scans": [],
             "next": null,
         });
-        let (name, id) = match scope {
-            crate::viewer::Scope::Dataset { .. } => ("dataset", "dataset_id"),
-            crate::viewer::Scope::Cohort(_) => ("cohort", "cohort_id"),
+        let named = match scope {
+            crate::viewer::Scope::Dataset { .. } => Some(("dataset", "dataset_id")),
+            crate::viewer::Scope::Cohort(_) => Some(("cohort", "cohort_id")),
+            crate::viewer::Scope::Registry { .. } => None,
         };
-        doc[name] = json!(scope.name());
-        doc[id] = json!(scope.id());
+        if let Some((name, id)) = named {
+            doc[name] = json!(scope.name());
+            doc[id] = json!(scope.id());
+        }
         doc
     };
     let store = registry.store();
     // an identified dataset nothing has read yet (only its originals, no
     // digest of its pseudonymised tree) holds no scans: an empty list
-    let Some(mut filter) = scope.holds(store, access, "st", "b", "se") else {
+    let Some(mut filter) = scope.holds(store, access, "st", "se") else {
         return Ok(empty(0));
     };
     // A visit is one subject's: a study two patients' files name is filed

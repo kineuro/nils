@@ -20,11 +20,13 @@
 //!   container left (record 49 R3).
 //! - [`table`]: a table output read into rows of its declared columns
 //!   (record 49 A3).
+//! - [`failure`]: what a failure was, its kind and what to do (2026-10-12).
 //!
 //! The binary owns the registry side: the catalog and run rows, the input it
 //! materialises, the derivatives it registers and the review items it raises.
 
 pub mod descriptor;
+pub mod failure;
 pub mod files;
 pub mod lane;
 pub mod results;

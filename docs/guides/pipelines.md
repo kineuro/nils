@@ -67,7 +67,7 @@ Pipeline runs have a lane of their own: `nils serve --worker` runs them in a wor
    nils pipeline lane --output-place results --scratch-place scratch
    ```
 
-   The outputs are the derivatives and tables a run registers, under `derivatives/<pipeline>/<run>/` in the output place. The scratch is the run's input, each unit's folder, its log and apptainer's images, under `runs/<run>/` and `images/` in the scratch place. Each must be an active working place (`nils place add <name> <path> --role working`). Unset, or set to `default`, each is the first working place, as before. A run records both, so a run taken up again goes on in the places it started in, and a run reads derivative and model inputs from the output place first and the scratch place next.
+   The outputs are the derivatives and tables a run registers, under `derivatives/<pipeline>/<run>/` in the output place. The scratch is the run's input, each unit's folder, its log and apptainer's images, under `runs/<run>/` and `images/` in the scratch place. Each must be an active working place (`nils place add <name> <path> --role working`). Unset, or set to `default`, each is the first working place, as before. The desk reads and sets the lane through `GET` and `PUT /api/pipelines/lane`, the change an admin's (`install:work`). A run records both, so a run taken up again goes on in the places it started in, and a run reads derivative and model inputs from the output place first and the scratch place next.
 
 > **Warning:** the budget is the engine's own bookkeeping. Keep the container's own memory cap below the host's memory, so that what the lane is allowed is really there.
 
@@ -96,11 +96,17 @@ The engine seeds the first analyses of record 49 into its catalog each time it s
    nils pipeline starter --on
    ```
 
-A version a person added is never gone over, and a starter a person retired stays retired. A newer engine with newer pins adds them as the name's next version only where the newest version is the engine's own starter.
+A version a person added is never gone over, and a starter a person retired stays retired. A newer engine with newer pins adds them as the name's next version only where the newest version is the engine's own starter. A newer starter that fixes the older one replaces it (see *Choose a version*).
 
 > **Warning:** the starters' images are large (FreeSurfer 8.2.0 is about 14 GB, MRIQC about 5 GB) and are pulled on a run's first use. FreeSurfer recon-all reads the lab's licence as a secret input (record 49 R3) and does not start without it.
 
-> **Warning:** segcsvd (white-matter hyperintensities on the FLAIR, enlarged perivascular spaces on the T1w) reads each session's SynthSeg label map, so run `synthseg` over the selection first: a run of segcsvd with none is refused, and a session without one fails. Its image, segcsvd rc03 as its authors publish it (GPL-3.0), is about 13 GB. A session without a FLAIR gets the perivascular spaces alone.
+> **Warning:** segcsvd (white-matter hyperintensities on the FLAIR, enlarged perivascular spaces on the T1w) reads each session's SynthSeg label map, so run `synthseg` over the selection first: a run of segcsvd with none is refused, and a session without one fails. Its image, segcsvd rc03 as its authors publish it (GPL-3.0), is about 13 GB. A session without a FLAIR gets the perivascular spaces alone. Its WMH model is validated for hyperintensities of vascular origin at 3 T, not for MS lesions.
+
+> **Warning:** SAMSEG with lesions and segcsvd place each FLAIR on its T1w by the image headers alone; nothing registers them yet. Each unit compares a brain mask of the two images and writes their agreement (Dice) to its table as `flair_t1_brain_dice`. Below 0.85 the session is flagged with a `pipeline:qc` item, "FLAIR and T1 may not be aligned", and its results stand: look at the two images together before you use them.
+
+> **Warning:** SAMSEG separates the pallidum from the white matter (`pallidum_separate`, on by default) only where it reads the FLAIR, with lesions on; from the T1w alone (lesions off) it never does, since a T1w cannot tell the two apart. Separating it changes the pallidum and white-matter volumes, so each session's table says which it had in `pallidum_separate` (1 or 0): compare only results with the same value.
+
+> **Warning:** segcsvd's results depend on the SynthSeg they read: robust and not are different networks, and the WMH model was trained with a SynthSeg of the FLAIR, while segcsvd reads the T1w's. Each session's table names it: `synthseg_run`, `synthseg_pipeline` (name@version), `synthseg_robust` (1 or 0) and `synthseg_contrast` (the contrast that SynthSeg read, as the engine tied its label map to a scan). Compare only results that read the same kind of SynthSeg.
 
 ## Add a pipeline
 
@@ -110,6 +116,8 @@ nils pipeline add pipelines/n4-bias-correction/nils.job.yml
 
 The descriptor is checked and kept whole with its digest. The image must be pinned by its registry manifest digest, `repository@sha256:<hex>`; a tag or an image id is refused. Adding the same descriptor again changes nothing; one that differs becomes the name's next version.
 
+The desk adds one the same way, under Pipelines, through `POST /api/pipelines` with the descriptor's text; it is an admin's (`install:work`), since it brings a container image onto the site.
+
 A descriptor of the bids layout finds each pick's image by the name the release gives it. The suffix is the base contrast and FLAIR is always a modifier, so the T1w is `*_T1w.nii.gz` and the FLAIR is a T2w with `FLAIR` among the `+` tokens of its `acq-` (`sub-01_ses-01_acq-Ax+2D+FLAIR+IRTSE_T2w.nii.gz`), never `*_FLAIR.nii.gz`, which only older releases wrote. A T2w without the token is the `t2w` pick. The segcsvd and SAMSEG starters find their FLAIR this way.
 
 ```sh
@@ -117,9 +125,52 @@ nils pipeline list
 nils pipeline show n4-bias-correction
 ```
 
+## Choose a version
+
+A name keeps every version added under it. A version that fixes the earlier ones says so in its descriptor, and a new run no longer takes them:
+
+```yaml
+x-nils:
+  replaces:
+    why: "It checks that each FLAIR sits on its T1w; the earlier versions never checked it."
+```
+
+Without `versions`, it replaces every earlier version of the name in the catalog it is added to. Name them, as `versions: [1, 2]`, to replace those alone. A version that changes what a pipeline makes without fixing the earlier one leaves `replaces` out, and the earlier one stays selectable.
+
+1. See each version and how it stands:
+
+   ```sh
+   nils pipeline list
+   ```
+
+   | standing | what it means |
+   |---|---|
+   | `current` | the newest version; `nils run <name>` runs it |
+   | `selectable` | an older version nothing replaces; `nils run <name>@<version>` runs it |
+   | `replaced` | a later version fixes it; a new run is refused, naming that version and why |
+   | `retired` | retired by a person; it replaces nothing |
+
+2. Run an older version that nothing replaces by its number:
+
+   ```sh
+   nils run n4-bias-correction@1 --select selection:ms-baseline@1
+   ```
+
+3. Run a replaced version only where you must, at the keyboard:
+
+   ```sh
+   nils run samseg-lesions@1 --replaced --select selection:ms-baseline@1
+   ```
+
+   The desk and the doors never run one: the jobs door refuses it with 409 and the pre-flight names it as a blocker.
+
+The runs, files and checks of a replaced version keep its name and read as before.
+
+Of the starters, recon-all's memory, MRIQC's `--notrack`, and the FLAIR alignment check of SAMSEG and segcsvd fix their earlier versions, so those are replaced; so do SAMSEG's next version, which separates the pallidum only beside a FLAIR, and segcsvd's, which names the SynthSeg it read (record 57). N4's spline distance and bias field change what it makes, so its earlier version stays selectable.
+
 ## Run one
 
-1. Save the selection to run over, as a question (`nils ask selections save`), or name a frozen handle.
+1. Save the selection to run over, as a question (`nils ask selections save`), or name a frozen handle. A run can also go straight over a dataset's or a cohort's main scans of a role, with no selection made first: see *Run over a dataset's or a cohort's main scans*.
 
 2. Check what the run would do, without running it:
 
@@ -128,6 +179,29 @@ nils pipeline show n4-bias-correction
    ```
 
    The pre-flight counts the units, names the units that lack an input and why (a session with no FLAIR picked, a stack with no file or no derivative its input needs), counts the stacks no unit takes, estimates the time from the pipeline's own past runs here or else from its descriptor, says whether it wants a GPU and what it would run on, and holds what a unit needs against the lane's budget. `ready` false lists the blockers. Nothing runs.
+
+   The units that cannot run are said one line a reason, in a few words, with the units under it, and a run whose units can all run says so:
+
+   ```text
+     units            4 (1 ready, 3 missing an input)
+     cannot run       3 sessions: no FLAIR picked
+       sub-7a8b9c0d_ses-1, sub-1e2f3a4b_ses-1, sub-5c6d7e8f_ses-2
+   ```
+
+   The answer's `cannot` holds the same, `{why, units, named}` a reason, and each of `missing` its `lacks`. A run none of whose units could run would make nothing, so it is not ready (`no session can run: 4 of 4 lack an input (no FLAIR picked)`), and `nils run` and the jobs door refuse it before anything is made or queued, with the same words; the door answers 409 with `failure` (input), `units` and `cannot`.
+
+   It also checks what the run needs of this machine (`requirements`), each check with what it found:
+
+   | check | what it holds |
+   |---|---|
+   | `converter` | a bids input: dcm2niix is found and answers its version (see *dcm2niix* below) |
+   | `runtime` | a container runtime is usable |
+   | `image` | the runtime holds the image already, or can take it; an image not pulled yet is information, and the run pulls it first. Rootless podman whose account has no subordinate ids in `/etc/subuid` and `/etc/subgid` cannot unpack an image, and is refused |
+   | `memory` | a unit's `memory-gb` against this machine's memory and the lane's budget |
+   | `gpu` | a pipeline that requires a GPU has one the lane leases |
+   | `disk` | where the descriptor says what a unit's outputs take (`x-nils.needs.disk-gb`), the units against the output place's free space |
+
+   A check that fails is a blocker, and `failure` says its kind and what to do. `nils run`, the jobs door and a dataset's step refuse such a run before anything is frozen or queued, with the same words; the door answers 409 with `failure` and `requirements`. No check is slow: nothing is pulled.
 
 3. Run it:
 
@@ -154,6 +228,8 @@ nils pipeline show n4-bias-correction
    nils review list --kind pipeline:qc
    ```
 
+   A run is read by what its units made, beside its status: `4 of 4 made`, `3 of 4 made · 1 skipped: no FLAIR picked`, or, for a run that ended and made nothing, `nothing made · 4 of 4 skipped: no FLAIR picked`. The doors answer it as `made` on the run, in the listing and on the run's job, with the counts (made, failed, skipped, left), each reason with its count, `nothing` and the `line`; each unit of a run says its own status, and a skipped one what it lacked (`lacks`).
+
 Through the engine's doors a run is a job, queued by someone who holds `pipelines:work` at detail quasi:
 
 ```sh
@@ -171,6 +247,65 @@ curl -X POST http://127.0.0.1:8437/api/pipelines/samseg-lesions/preflight \
 ```
 
 The pre-flight's budget check reads the lane's own budget (see *Set the lane*).
+
+## Run over a dataset's or a cohort's main scans
+
+1. Check what the run would do over a dataset's main T1w scans:
+
+   ```sh
+   nils run synthseg --select main:t1w@dataset:study-anon --preflight
+   ```
+
+   The pre-flight says how many scans the list holds, of how many visits, and under which rules they were picked. It counts the visits that have no main scan of the role, by why, and names each at detail quasi: it holds no scan of the role; it holds one and none is picked (`nils pick run` picks it); a person said none stands for it; or, of a dataset, its main scan is one only another dataset's folder holds.
+
+2. Run it:
+
+   ```sh
+   nils run synthseg --select main:t1w@dataset:study-anon
+   ```
+
+   `main:<role>@cohort:<name>` names a cohort instead. The role is one the pack's picks name (`t1w`, `flair` and `t2w` in the MRI pack, listed as `main_roles` among the engine's capabilities). Through the doors the same text goes where a selection does: `{"select": "main:t1w@dataset:study-anon"}` to the pre-flight door, and `"--select", "main:t1w@dataset:study-anon"` in a run queued at the jobs door. `--chunk N` splits the list as it splits a selection.
+
+3. A pipeline that needs several roles (samseg-lesions and segcsvd need a T1w and a FLAIR a session, as their descriptors' `x-nils.input.roles` say) goes over the main scans of each, written without a role:
+
+   ```sh
+   nils run samseg-lesions --select main@dataset:study-anon --preflight
+   nils run samseg-lesions --select main@dataset:study-anon
+   ```
+
+   The list holds the main scan of each role of every visit that has a main scan of each, one pick a visit a role; a visit that lacks one is no unit of the run. The pre-flight's `main` names the roles (`roles`), counts the visits with every one (`main_visits`) and the visits that lack one, by role and by why (`without.why`, each `{role, why, visits}`), names those visits at detail quasi (each with its role), and gives each role's own count (`by_role`). The handle records which role each stack was taken for, so the run's bids input names each stack by its own role. `--chunk N` splits such a list by whole visits: a part never holds one role of a visit without the other. A pipeline of one role takes its role this way too; one that names no role refuses the spec and asks for `main:<role>@...`.
+
+What the list is: the scope's scans (a dataset's, the stacks its folder holds a file of; a cohort's, every stack of its open members) that the main-scan pick of their visit names. The picks are the scope's own once a run of its saved rules finished, else the pack's, as the Main scans page shows them. One pick a visit, with every stack it names.
+
+The list is resolved when the run is made and frozen into a handle, as a selection is, and the handle records the picks it was read under: the version of the scope's rules, their digest and the pick run that made them read, or the pack's defaults. A run over the handle takes the same stacks after the rules change, since a bids input is released from the list as it was frozen, each stack the main scan of its role; the input's release records the picks and keeps them with each stack of the list (see *What a release keeps of the main scans* under the reference). `nils pipeline runs <run>` says it under `main`.
+
+> **Warning:** a scope's newer rules replace the picks of the version before once their run finishes, so the pick table no longer holds the picks an older list was read under. The list itself, and what its handle records, are what a run over it reads, and what its input's release kept is what the run's readers read after it.
+
+## When a run fails
+
+A run that failed, and each unit that failed, says why beside its error, which is kept as it was written: `failure` {kind, cause, advice, fix}. `nils run`, `nils pipeline runs <run>` and `nils jobs show <job>` print it as a line; the doors answer it on the run, on each of `units_run`, and on the run's job. The kinds:
+
+| kind | causes | what it means |
+|---|---|---|
+| `dependency` | `dcm2niix`, `runtime`, `subuid`, `image`, `gpu_driver` | something the engine or a container needs is missing or does not start: dcm2niix, the container runtime, the subordinate ids rootless podman unpacks an image with, an image that will not pull, the GPU's driver. Install or mend it, then run again |
+| `resource` | `memory`, `disk`, `gpu_memory`, `lane`, `time` | the machine ran short: a container killed for memory (exit 137, or the kernel's OOM killer), a full disk, a card out of memory, more than the lane holds, a time limit. Give it more, or run fewer units at once, then `nils run --resume <run>` |
+| `input` | `input` | a unit's input is missing or was refused: the pre-flight names each unit and why |
+| `pipeline` | `pipeline` | the pipeline's own error, and whatever else is not known: the error and the run's log say why |
+
+`advice` is one sentence of what to do, in the engine's own words, so it is shown at any detail; the error, a tool's own words, is not below detail quasi. `fix` is the install the engine offers itself, where it has one: for dcm2niix, `nils tools install dcm2niix` and `POST /api/tools/dcm2niix/install`, an admin's (`install:work`). A run's summary counts its units' failures by cause (`failures_by_cause`), so a partial run says why its units failed. A run that failed before this was recorded is read from its error when it is shown.
+
+## dcm2niix
+
+A run with a bids input is given a release of its selection, which dcm2niix converts. The engine finds dcm2niix in this order: a path given with `--dcm2niix`; the one the site gave setup with `--dcm2niix`; `dcm2niix` on the engine's search path; beside the running `nils`; where the setup record names one setup found or placed; and the registry's `tools/` folder. The first that answers its version is taken. The run's summary says which it used (`summary.converter`: version, path, found_by).
+
+`nils setup` places the pinned build beside `nils` on an install on this machine (see the setup guide). Where none is found, an admin installs it:
+
+```sh
+nils tools install dcm2niix
+nils tools list
+```
+
+The install downloads the build this version of `nils` pins from rordenlab's releases (or the mirror `NILS_DCM2NIIX_RELEASES` names), checks its sha256, unpacks it into the registry's `tools/` folder and asks its version; it is audited as `tool.install`. One found already is left alone. Where the engine cannot reach GitHub, it says so and gives the way by hand. The desk offers the same install through `POST /api/tools/dcm2niix/install`, and `GET /api/tools` and the capabilities' `tools` say whether dcm2niix is here, where and which build.
 
 ## Run several at once
 
@@ -220,6 +355,14 @@ A run whose units run apart (`x-nils.units: apart`) keeps each unit it finished.
 
    A run taken up again goes on beside the runs whose stacks it does not share, and is refused, as a new run is, while a running run holds one of its stacks.
 
+   It is checked first as a new run is, for the units it still has to run: those of the bids input it released before, where it did, else those a new run over its handle would have, the units it is over with kept. Its pre-flight says which cannot run and why:
+
+   ```sh
+   nils run --resume <run> --preflight
+   ```
+
+   The door takes the same as `{"resume": <run>}` at `POST /api/pipelines/{name}/preflight`. `nils run --resume` and the jobs door refuse a run taken up again whose checks fail (dcm2niix only where its input is still to be released), one that could run none of the units it still has and made nothing, and one that cannot be taken up (done, failed after its containers ended, or running), before anything is claimed or queued. A run that made some of its units goes on though none left could run, and closes with what it made. The job that stopped says which later job took its run up again (`taken_up` at the jobs doors, and `nils jobs show <job>`).
+
 ## Give a pipeline a secret
 
 A pipeline that needs a licence, such as FreeSurfer, declares it under `x-nils.secrets`. The site keeps the file; the engine keeps its path.
@@ -235,6 +378,8 @@ A pipeline that needs a licence, such as FreeSurfer, declares it under `x-nils.s
    ```sh
    nils pipeline secret list
    ```
+
+The desk lists the secrets the pipelines declare and whether each is set (`GET /api/pipelines/secrets`), and an admin pastes a licence's text there (`PUT /api/pipelines/secrets/{id}`): the engine writes it as `secrets/<id>` under its home, mode 0600, and keeps that path. `DELETE /api/pipelines/secrets/{id}` forgets it and removes that file; a file set at the command line is the site's own and stays.
 
 The file is read when a run starts and mounted read-only into that pipeline's containers alone, at the path its descriptor names (`/secrets/<id>` by default), with the variable it names (such as `FS_LICENSE`) pointing there. A run that needs a secret the site has not set is refused before anything runs.
 
@@ -321,6 +466,59 @@ A model registered with `nils model register --card --artifact` is checked again
    The kept file's folder is mounted read-only at `/inputs/<input>/`, and `/inputs/manifest.json` names the file in `models[i].artifact` beside the card.
 
 A stacks input may ask for each stack's header facts with `x-nils.input.header: true` (record 50). Each entry of `stacks.json` then carries a `header` object: the stack's fingerprint columns (`fingerprint`, null without a fingerprint row), every classification row by axis (`classification`), the name of its first ingest batch (`batch`) and the cohorts its subject is an open member of (`cohorts`). Without the flag `stacks.json` is as before, and a bids input is refused the flag.
+
+It may also ask for the geometry with `x-nils.input.geometry: true` (record 55 E2), beside the header or alone. Each entry then carries a `geometry` object, the orientation of its images (`image_orientation_patient`, six numbers) its fingerprint's `slice_thickness` and `spacing_between_slices`, and the stack's facts a few-slice model reads beside them: `study` (an id to group a session's stacks by, nothing more), `image_type`, the fingerprint's `sop_class_uid`, `n_instances` and `sealed` (whether it is in a sample sealed now, so an image leaves it out of its session and answers it as sealed), and each of its files a `geometry` object of its own: `image_position_patient` (three numbers), `pixel_spacing` (two), `rows`, `columns`, `instance_number` and `number_of_frames`, each null where the registry holds none. An image chooses which frames to read from these without reading a header first. A multi-frame file's position is its first frame's; the other frames' positions are in the file. With the flag `stacks.json` also lists, under `context`, the other MR stacks of each session the run holds part of that are not sealed now (a page of `--chunk`, a selection that is not whole studies), each with its `modality`, its `geometry` and its files' `geometry` and no path, so an image that reads a stack against its session (body part's few-slice student, against the session's top) reads the same input in any run; a context stack is never scored, a run of whole sessions lists none, and a unit run apart is given the rest of its session. With the flag the file is written compact, without indentation. Without the flag `stacks.json` is as before, and a bids input is refused it.
+
+With the header and the geometry it may also ask for the facts the post-contrast model reads of a session, `x-nils.input.contrast: true` (record 55 E3). Each stack's entry and each `context` entry then carries a `contrast` object: its series' `contrast_bolus_agent` as written and `other_tag` (whether the route, a volume, a dose, a flow rate or a start time is filled), its clock (`acquisition_date` and `acquisition_time`, the fingerprint's earliest acquisition, else the series' date and time), `series_number`, `repetition_time`, `echo_time`, `inversion_time`, `flip_angle`, `mr_acquisition_type`, `derived`, `angio_flag`, `text_all_ci`, and `post_contrast_rules`, the post-contrast rules that fired on it. Each `context` entry also carries its `series_id` and its `header`, and every header the `datasets` that hold a file of the stack. The date and the time stay in the run's input; a pipeline never writes them out. Without the header and the geometry the flag is refused.
+
+The post-contrast step of a dataset or a cohort runs `postcontrast-cascade`, given the promoted post-contrast cascade (a model whose card names its parts) and each part under the name of the model input it fills. When a run of it ends, the stacks whose table says `reason` `deferred` are queued to `postcontrast-full`, where that pipeline is installed, under the grants of the cascade's job; where it is not, they stay "not sure" and the run's summary says why. The full pipeline reads the fusion and the arms (model r1's three image arms with the atlases they were fitted on), each a part the cascade's card names, and the cascade. Its image is built by each site from `pipelines/nils-postcontrast/Dockerfile.full` (FreeSurfer's image carries components whose terms do not allow us to publish it), and the descriptor's digest is repinned to the site's build.
+
+The post-contrast label is the engine's own and not a pipeline's (record 55 F2 and F5). Every MR stack carries a state (`pre`, `post`, `by_definition`, `undetermined`), the minutes since injection, where the label came from and the 72-hour flag, set by the time rule over its session's clock between the last pre and the first post T1 whose answer is certified (the image model at or above its threshold, or a person's read), with the checks against the eight failure modes each giving its reason code; `nils contrast show <stack>` reads one and `nils contrast label` labels again. Each label also carries its error level by use, the bar the label is held to where it is used: at most 1 % where it decides inclusion in pooled quantitative analysis (FLAIR segmentation sets, ASL blood flow, quantitative maps), 2 % for ADC, QSM and TOF, and 5 % where it is descriptive (T2, PD, DWI, SWI). A level is a bar for a use, not a claim: the label is certified for a use only where its audit's bound meets it.
+
+## Score a dataset as it arrives
+
+A dataset's bring-in ends with `score` (record 55 E5): the image models answer its new scans without anyone starting a run.
+
+1. Bring the dataset in, as ever:
+
+   ```sh
+   nils bring-in @scans
+   ```
+
+   After the digest, the fingerprints, the sort and any pick run, `nils score @scans --name <batch>` runs as the last step. For body part, then post-contrast, it queues the step's run over the stacks the batch brought (those whose first batch is the bring-in's), with the model the site chose for the task, where the step's pipeline declares `x-nils.on-arrival`. The run goes to the pipeline lane, so it never holds up the next digest, and the dataset's step shows it queued, running and done. Post-contrast reads the body part's answers, so where both run it is queued once the body part's run ends done.
+
+2. Read what it queued and what it skipped:
+
+   ```sh
+   nils jobs show <score job>
+   ```
+
+   The result names each queued run, and each step it skipped with its reason: its pipeline does not score at arrival (`not_on_arrival`), nothing here runs it (`no_pipeline`, `no_model`, `no_runtime`, `no_place`), the machine lacks what it needs (`requirements`), or the person who brought the dataset in may not run a pipeline (`no_grant`: a run reads pixels, so it needs Pipelines work at detail quasi). The bring-in itself never fails because of it, and a bring-in that read nothing new queues no score.
+
+A pipeline scores at arrival with `x-nils.on-arrival: true`, or with the parameters such a run is given, `x-nils.on-arrival: {params: {cache_fill: touched}}`.
+
+## Re-score from the slice cache
+
+The slice cache keeps the small pictures a model reads of each scan (record 55 E5), so a re-score after a model update reads them instead of the files.
+
+1. Choose the new model for its task:
+
+   ```sh
+   nils model choose bodypart-fusion@r8 --why "the new calibration"
+   ```
+
+2. Run the step over the dataset again, from the desk's dataset page or its door (`POST /api/datasets/{name}/steps/body_part/run`). The run reads each scan's inputs from the cache where it holds them and reads the files of the rest.
+
+3. See what the cache holds:
+
+   ```sh
+   nils cache show
+   nils cache prune
+   ```
+
+   A version no admitted or promoted model reads is dropped 30 days after it went unread; `prune` drops what is due now, and every run that used the cache does so when it ends.
+
+A pipeline keeps model inputs in the cache by declaring their versions, `x-nils.cache: {inputs: [bodypart-planes-b24:v1]}`, stacks layout only. Its run is given the working place's `slice-cache/` read-write at `/cache`, which `[Cache]` names on its command line; the pixels are clinical, so the cache stays in the site's working place. Each file of `stacks.json` then carries an `identity`: its `sop_instance_uid`, and its `sha256` where a run reported reading the file whole and the file still has the size and time it had then, on the disk and in the registry (`null` otherwise). Each stack carries the `study_instance_uid` of its session. An image keys what it keeps by those identities and the input's version, never a registry id, so the cache outlives a new registry, and names the files it read whole in `results.json` (`read`, each file by its place in the unit's list with its sha256), which the engine keeps as that file's content. A miss reads the files; a file whose content the engine does not know is always read.
 
 ## Curate a run's seeds
 
@@ -482,7 +680,7 @@ curl -o out.nii.gz http://127.0.0.1:8437/api/derivatives/<id>/content
 Where a client shares the working place's volume, the place declares where that client reaches it, and the door answers with a path there instead of the bytes:
 
 ```sh
-nils place set <place id> --share /mnt/nils-working
+nils place set <place id> --share /volumes/nils-working
 curl 'http://127.0.0.1:8437/api/derivatives/<id>/content?transport=share'
 ```
 
@@ -496,7 +694,7 @@ What a run does, in order:
 |---|---|
 | input | `bids`: a release of the selection in the BIDS layout with the picks applied, under `<working>/runs/<run>/input`, so a BIDS App meets the one image a pick chose per role and session, named as the release names it (a FLAIR is a T2w with `FLAIR` in its `acq-`, never `_FLAIR`). `stacks`: `<working>/runs/<run>/input/stacks.json`, each stack's files under the source places |
 | lane | a run is one job in the pipeline lane, beside the runs whose stacks it does not share; its containers start while the cores and memory each declares fit in what the running units of every run leave of the lane's budget, a GPU one only under a lease on the lane's card. Units that run apart (`x-nils.units: apart`) each have a container of their own that sees its own input alone: the dataset's top-level files and its subject's or session's folder (bids), or a `stacks.json` of its stack and the folders of its files (stacks), with `[ParticipantLabels]` its subject and `NILS_UNIT` its id; each writes `derivatives/<pipeline>/<run>/<unit>/` and a `results.json` of its own. Each container is told `NILS_CORES` and `NILS_MEMORY_GB`. A unit is `queued`, `running`, `registering` or `over`, and `nils pipeline runs <run>` lists them |
-| container | `/input` read-only, `/source/<n>` read-only in the stacks layout (one per folder that holds the selection's files, or the source places' roots past 2,000 folders, which the run's `summary.scope` says), `/inputs` read-only (`manifest.json` and the typed inputs), `/output` the one folder it writes, `<working>/derivatives/<pipeline>/<run>/`. No network. Podman runs with `--userns keep-id` and `--user`, and docker with `--user`, so the process is the engine's user on the host even where the image names a `USER` of its own, and a later run can link the files it wrote |
+| container | `/input` read-only, `/source/<n>` read-only in the stacks layout (one per folder that holds the selection's files, or the source places' roots past 2,000 folders, which the run's `summary.scope` says), `/inputs` read-only (`manifest.json` and the typed inputs; each derivative a run takes is listed under its input with `made_by`, the run that made it, its pipeline's name and version, the parameters it ran with, and the scan the derivative is tied to with the file name its release gave it), `/output` the one folder it writes, `<working>/derivatives/<pipeline>/<run>/`. No network. Podman runs with `--userns keep-id` and `--user`, and docker with `--user`, so the process is the engine's user on the host even where the image names a `USER` of its own, and a later run can link the files it wrote |
 | GPU | the lane's card alone, passed through CDI (`nvidia.com/gpu=<card>`, podman), `--nv` with `CUDA_VISIBLE_DEVICES=<card>` (apptainer) or `--gpus device=<card>` (docker) where the descriptor needs one, the host has one and the lane names a card; a pipeline whose need is `optional` runs on the CPU otherwise, and the run records `device cpu`; one whose need is `required` is refused |
 | apptainer | `apptainer run --containall --cleanenv --no-home --net --network none`, each folder bound with `--bind`, so the image's ENTRYPOINT runs before the descriptor's command line as it does under podman, the image built once from its digest into `<working>/images/` |
 | secrets | each declared secret's file mounted read-only for this pipeline's containers alone; what a container left is swept of it |
@@ -511,5 +709,13 @@ What a run does, in order:
 | run | every parameter, the runtime and its version, the host, the device, the models, the label set, the handle, the summary and a digest of the results, which a re-run that makes the same files repeats. A run whose container exited 0 is `done`, or `partial` when units failed or went unreported or a file it made was refused |
 
 A bids input's release is marked as the run's input and left out of `nils release --history`; `--runs` lists it.
+
+### What a release keeps of the main scans
+
+A release of picked stacks (`nils release --picked`, and every bids input) records which main scans it read: a dataset's or a cohort's rules at their version, each subject's own dataset's, or the pack's defaults. Since 2026-10-12 it also keeps the picks themselves, before it takes a stack: of each visit it took a stack of, every pick of what it read with every stack the pick names, and the scope and version of the rules each was made with. It takes its stacks by that list. A bids input released from a frozen list of a scope's main scans keeps each stack of the list as the main scan of its role as well; of a list over several roles, each stack as the role it was taken for, and the release records the roles (`picks.main` "t1w+flair", `picks.roles`).
+
+Whatever reads a release's picks after it was made reads what it kept, not the picks of today: the run's units, judged again when a run is taken up with `--resume`; a mask's grid by its output's role (`nils derivative parts`, and a layer's build); and a check's panels, the visit's main scans beside the scan a result was made on. `GET /api/releases` and `nils release --history` say what each release read and kept (`picks`, with `frozen`: its visits, picks and stacks).
+
+> **Warning:** a release made before 2026-10-12 kept no picks. Its readers read the live picks of what it recorded while they name the stacks it holds. Once a newer version of the rules it read has replaced them, or they no longer name its stacks, a unit says which of its stacks stands for a role is not known and why, a check's preview counts its results under `panels_gone` and shows their made-on scan alone, and a mask's grid is the input whose grid its file's matches.
 
 The container's log is `<working>/runs/<run>/log.txt`, or `<working>/runs/<run>/units/<unit>/log.txt` for a unit that runs apart, and a bids input's release log `release.log` beside it.

@@ -16,6 +16,8 @@ use nils_registry::place::{PatientId, Place};
 use nils_registry::time::today;
 use serde_json::{Value, json};
 
+use crate::layout::SeriesFolders;
+
 /// What a file whose identifier the linkage store does not know does
 /// (record 26 §4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,6 +109,10 @@ pub struct Settings {
     /// Each copy's folder is named by the id type's value PatientID holds,
     /// not the subject's code (Wave 7a, Nima 2026-10-08).
     pub folder_by_id: bool,
+    /// How the tree names its series folders (record 55 K9): a new tree by
+    /// number and description, a tree begun before by number alone; the
+    /// run decides it from the tree before it starts.
+    pub series_folders: SeriesFolders,
     pub tags: TagLists,
     /// The private elements the pack keeps, by creator and offset, and
     /// which pack said so.
@@ -189,6 +195,7 @@ impl Settings {
             folder_by_id: dataset["copy_folder"].as_str() == Some("id-type")
                 && matches!(patient_id, PatientId::IdType(_)),
             patient_id,
+            series_folders: SeriesFolders::Description,
             tags,
             private: Vec::new(),
             pack: None,
@@ -215,6 +222,7 @@ impl Settings {
             "unmapped": self.unmapped.name(),
             "patient_id": self.patient_id.as_text(),
             "copy_folder": if self.folder_by_id { "id-type" } else { "subject-code" },
+            "series_folders": self.series_folders.name(),
             "tags": {
                 "keep": self.tags.keep.iter().map(tag).collect::<Vec<_>>(),
                 "remove": self.tags.remove.iter().map(tag).collect::<Vec<_>>(),

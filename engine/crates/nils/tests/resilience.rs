@@ -299,6 +299,53 @@ fn a_handler_that_panics_answers_500_and_the_engine_serves_on() {
     );
 }
 
+/// 2026-10-12: a request that comes in after the engine's last handler
+/// ended (here the end of `--requests`) is answered that the engine stops,
+/// 503 with why; dropped, as it was, its caller read an empty 500.
+#[test]
+fn a_request_after_the_last_handler_is_answered_never_dropped() {
+    let home = TempDir::new("resilience-stopping");
+    ok(&home, &["key", "add", "k"], Some("a resilience test key\n"));
+    ok(&home, &["init", "--key", "k"], None);
+    let mut extra = tokens();
+    extra.extend(["--requests".to_string(), "1".to_string()]);
+    let mut engine = Engine::start(&home, 1024, 1, &extra);
+    let port = engine.port;
+    let asked: Vec<_> = (0..6)
+        .map(|_| std::thread::spawn(move || get(port, "/api/status", Some(READERS[0]))))
+        .collect();
+    let mut answers: Vec<(u16, String)> = Vec::new();
+    for a in asked {
+        // a request the socket no longer took is no answer at all, which
+        // is not this test's
+        if let Ok((status, body)) = a.join().unwrap() {
+            answers.push((status, String::from_utf8_lossy(&body).to_string()));
+        }
+    }
+    assert_eq!(
+        answers.iter().filter(|(s, _)| *s == 200).count(),
+        1,
+        "one request served: {answers:?}"
+    );
+    let stopping: Vec<&(u16, String)> = answers.iter().filter(|(s, _)| *s != 200).collect();
+    assert!(
+        !stopping.is_empty(),
+        "every other request was lost: {answers:?}"
+    );
+    for (status, body) in stopping {
+        assert_eq!(*status, 503, "{answers:?}");
+        assert!(body.contains("the engine is stopping"), "{answers:?}");
+    }
+    let ended = Instant::now();
+    while engine.child.try_wait().unwrap().is_none() && ended.elapsed() < Duration::from_secs(20) {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        engine.child.try_wait().unwrap().is_some(),
+        "nils serve did not end"
+    );
+}
+
 /// Under systemd's watchdog the engine says it is ready once it listens and
 /// feeds the watchdog while its own health door answers.
 #[test]

@@ -2620,6 +2620,154 @@ fn a_site_declares_the_places_it_has_and_an_update_reverts_none_of_them() {
     );
 }
 
+/// T4 for `nils setup` (Wave 7a §5.3 and §17): the source place a site
+/// declares is read by nothing before a person answers. Its folder holds
+/// loose DICOM beside a study whose identified files sit in
+/// `derivatives/dcm-original`; after setup has made the registry and the
+/// place, a digest of the folder, of the loose entries, of the study and of
+/// its originals is each refused, and the registry holds 0 files and no
+/// batch. Nothing in the folder moved.
+#[test]
+fn setup_s_source_place_is_never_read_before_the_person_s_answer() {
+    use nils_dicom::synth::{self, MetaFields};
+    let releases = Releases::new("1.0.0-alpha.1");
+    let nils = Installed::new("nils-setup-t4");
+    let config = TempDir::new("nils-setup-t4-config");
+    let base = TempDir::new("nils-setup-t4-base");
+    let dir = base.path().join("nils");
+    let data = base.path().join("dicom");
+    let files = [
+        "loose/sub-1/IM_0001",
+        "loose/sub-1/IM_0002",
+        "study/derivatives/dcm-original/p1/IM_0003",
+    ];
+    for (n, rel) in files.iter().enumerate() {
+        let sop = format!("1.2.8.{n}.1.1");
+        let mr = synth::minimal_mr(&format!("1.2.8.{n}"), &format!("1.2.8.{n}.1"), &sop);
+        let at = data.join(rel);
+        std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+        std::fs::write(&at, synth::part10(&MetaFields::mr(&sop), &mr, true)).unwrap();
+    }
+    let registry = dir.join("registry").display().to_string();
+    let (url, dir_s, packs) = (
+        releases.url(),
+        dir.display().to_string(),
+        base.path().join("packs").display().to_string(),
+    );
+    let source = format!("source={},role=source", data.display());
+    let held = format!("registry={registry},role=registry,backup=archives");
+    let archives = format!(
+        "archives={},role=backup",
+        base.path().join("archives").display()
+    );
+    let o = setup(
+        &nils.path(),
+        config.path(),
+        &[
+            "--yes",
+            "--parts",
+            "engine",
+            "--dir",
+            &dir_s,
+            "--channel",
+            &url,
+            "--pack-dir",
+            &packs,
+            "--place",
+            &archives,
+            "--place",
+            &held,
+            "--place",
+            &source,
+            "--no-service",
+        ],
+    );
+    assert!(o.ok, "{}\n{}", o.stdout, o.stderr);
+    let nils_at = |args: &[&str]| {
+        output(
+            Command::new(env!("CARGO_BIN_EXE_nils"))
+                .arg("--registry")
+                .arg(&registry)
+                .args(args),
+        )
+    };
+    let places = nils_at(&["place", "list", "--json"]);
+    assert!(places.status.success());
+    let doc: serde_json::Value = serde_json::from_slice(&places.stdout).unwrap();
+    let src = doc
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["name"] == "source")
+        .unwrap_or_else(|| panic!("{doc}"))
+        .clone();
+    assert_eq!(src["dataset"]["kind"], "root", "{src}");
+    // 0 files digested, whichever way the folder or a part of it is named
+    for target in [
+        "@source".to_string(),
+        data.display().to_string(),
+        base.path().display().to_string(),
+        data.join("loose").display().to_string(),
+        data.join("loose/sub-1").display().to_string(),
+        data.join("study").display().to_string(),
+        data.join("study/derivatives/dcm-original")
+            .display()
+            .to_string(),
+    ] {
+        let refused = nils_at(&["digest", &target]);
+        assert!(!refused.status.success(), "{target} was read");
+    }
+    let refused = nils_at(&["bring-in", "@source"]);
+    assert!(
+        !refused.status.success(),
+        "a bring-in of the root was queued"
+    );
+    let status = nils_at(&["status", "--json"]);
+    assert!(status.status.success());
+    let status: serde_json::Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert_eq!(
+        status["batches"].as_array().map(Vec::len),
+        Some(0),
+        "{status}"
+    );
+    assert_eq!(status["jobs"].as_array().map(Vec::len), Some(0), "{status}");
+    let listed = nils_at(&["jobs", "list", "--all", "--json"]);
+    assert!(listed.status.success());
+    let listed: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
+    assert_eq!(listed, serde_json::json!([]), "a job was queued: {listed}");
+    let read = instances_held(&registry);
+    assert_eq!(read, 0, "{read} file(s) digested");
+    for rel in files {
+        assert!(data.join(rel).is_file(), "{rel} moved");
+    }
+    assert!(!data.join("loose/derivatives").exists());
+}
+
+/// How many files a registry holds, by its custody page: the instances
+/// counted in every store that counts them.
+fn instances_held(registry: &str) -> i64 {
+    let out = output(
+        Command::new(env!("CARGO_BIN_EXE_nils"))
+            .arg("--registry")
+            .arg(registry)
+            .args(["custody", "--json"]),
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let counted: Vec<i64> = doc["stores"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{doc}"))
+        .iter()
+        .filter_map(|s| s["counts"]["instances"].as_i64())
+        .collect();
+    assert!(!counted.is_empty(), "no store counts instances: {doc}");
+    counted.iter().sum()
+}
+
 /// Places that cannot be the places of this install are refused with the fix
 /// in the same sentence, and nothing is written: no registry, no record.
 #[test]
@@ -2724,9 +2872,46 @@ fn a_model_server_is_planned_by_its_address_and_key_file_and_its_key_is_never_sh
     assert!(o.ok, "{}", o.stderr);
     o.says(&format!(
         "https://models.example.org/v1, its key read from {key_arg} and sealed in Kvasir; the \
-         stations on qwen38-27b"
+         stations on qwen38-27b, thinking on"
     ));
     clean(&o);
+    assert!(!dir.exists(), "--print made {}", dir.display());
+    // thinking is on unless it is turned off, and nothing else is a value
+    let install_print = |thinking: &str| {
+        setup(
+            &nils.path(),
+            config.path(),
+            &[
+                "--print",
+                "--parts",
+                "engine,desk,assistant",
+                "--runtime",
+                "machine",
+                "--dir",
+                dir.to_str().unwrap(),
+                "--model-server",
+                "https://models.example.org/v1",
+                "--model-key-file",
+                key_arg,
+                "--model-server-model",
+                "qwen38-27b",
+                "--model-thinking",
+                thinking,
+            ],
+        )
+    };
+    let o = install_print("off");
+    assert!(o.ok, "{}", o.stderr);
+    o.says("the stations on qwen38-27b, thinking off");
+    let refused = install_print("maybe");
+    assert!(!refused.ok);
+    assert!(
+        refused
+            .stderr
+            .contains("--model-thinking maybe is not on or off"),
+        "{}",
+        refused.stderr
+    );
     assert!(!dir.exists(), "--print made {}", dir.display());
     assert!(
         !config.path().join("nils").join("setup.toml").exists(),
@@ -2884,7 +3069,24 @@ fn a_model_server_is_planned_by_its_address_and_key_file_and_its_key_is_never_sh
         &["--update", "--print", "--channel", &channel],
     );
     assert!(o.ok, "{}", o.stderr);
-    o.says("the stations on qwen38-27b");
+    // a record from before thinking was kept: on, which the update asks of Kvasir
+    o.says("the stations on qwen38-27b, thinking on");
+    clean(&o);
+    // thinking named alone changes the server on record
+    let o = setup(
+        &nils.path(),
+        config.path(),
+        &[
+            "--update",
+            "--print",
+            "--channel",
+            &channel,
+            "--model-thinking",
+            "off",
+        ],
+    );
+    assert!(o.ok, "{}", o.stderr);
+    o.says("the stations on qwen38-27b, thinking off");
     clean(&o);
     assert_eq!(
         std::fs::read_to_string(config.path().join("nils").join("setup.toml")).unwrap(),
@@ -2892,6 +3094,26 @@ fn a_model_server_is_planned_by_its_address_and_key_file_and_its_key_is_never_sh
         "--print changed the record"
     );
     assert!(!dir.exists(), "--print made {}", dir.display());
+    // and with no model server on record or named, it is refused
+    std::fs::write(config.path().join("nils").join("setup.toml"), &record).unwrap();
+    let refused = setup(
+        &nils.path(),
+        config.path(),
+        &[
+            "--update",
+            "--print",
+            "--channel",
+            &channel,
+            "--model-thinking",
+            "off",
+        ],
+    );
+    assert!(!refused.ok, "{}", refused.stdout);
+    assert!(
+        refused.stderr.contains("name one with --model-server"),
+        "{}",
+        refused.stderr
+    );
 }
 
 /// `nils uninstall` with no terminal, a configuration directory and a home of
@@ -3212,4 +3434,888 @@ fn an_uninstall_naming_another_directory_than_the_record_s_removes_nothing() {
         record,
         "the record is as it was"
     );
+}
+
+/// What one registry holds, read as the tests read it: its id, its scheme,
+/// its timezone, and the names of its places in force.
+struct Held {
+    id: String,
+    scheme: String,
+    timezone: String,
+    places: Vec<String>,
+    jobs: i64,
+    stacks: i64,
+}
+
+fn held(store: &mut nils_registry::Store) -> Held {
+    let meta = |store: &mut nils_registry::Store, key: &str| -> String {
+        let sql = format!(
+            "SELECT value FROM {} WHERE key = '{key}'",
+            store.qualified("registry_meta")
+        );
+        store
+            .query_opt(&sql, &[])
+            .unwrap()
+            .map(|r| r.text(0).unwrap().to_string())
+            .unwrap_or_default()
+    };
+    let sql = format!(
+        "SELECT name FROM {} WHERE retired_at IS NULL ORDER BY name",
+        store.qualified("place")
+    );
+    let places = store
+        .query(&sql, &[])
+        .unwrap()
+        .iter()
+        .map(|r| r.text(0).unwrap().to_string())
+        .collect();
+    let count = |store: &mut nils_registry::Store, table: &str| -> i64 {
+        let sql = format!("SELECT COUNT(*) FROM {}", store.qualified(table));
+        store.query_opt(&sql, &[]).unwrap().unwrap().int(0).unwrap()
+    };
+    Held {
+        jobs: count(store, "job"),
+        stacks: count(store, "stack"),
+        id: meta(store, "registry_id"),
+        scheme: meta(store, "pseudonym_scheme"),
+        timezone: meta(store, "timezone"),
+        places,
+    }
+}
+
+/// The one folder a registry was set aside into, and its stamp.
+fn set_aside_in(registry: &Path) -> (PathBuf, String) {
+    let found: Vec<PathBuf> = std::fs::read_dir(registry)
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("before-new-registry-"))
+        })
+        .collect();
+    assert_eq!(found.len(), 1, "{found:?}");
+    let stamp = found[0]
+        .file_name()
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .trim_start_matches("before-new-registry-")
+        .to_string();
+    (found[0].clone(), stamp)
+}
+
+/// Wave 7a §15.3, a site's refresh on a throwaway install: `nils setup
+/// --new-registry` keeps the setup (the record, the mode, the ports, the
+/// places it declares) and starts an empty registry on the site's key under
+/// the subject code generator's scheme, with the old timezone carried. The
+/// old registry is set aside, never deleted, and still opens where it went;
+/// `nils place export` and `import` bring back a place the setup does not
+/// declare. On SQLite, and on Postgres where a test DSN is set.
+fn refreshed(postgres: Option<&str>) {
+    // made up for this test; no site's key
+    const OLD_KEY: &str = "test-old-key-not-real";
+    const NEW_KEY: &str = "test-new-key-not-real";
+    let label = if postgres.is_some() { "pg" } else { "sqlite" };
+    let nils = Installed::new(&format!("nils-setup-refresh-{label}"));
+    let config = TempDir::new(&format!("nils-setup-refresh-{label}-config"));
+    let base = TempDir::new(&format!("nils-setup-refresh-{label}-base"));
+    let dir = base.path().join("nils");
+    let registry = dir.join("registry");
+    let source = base.path().join("dicom");
+    let scratch = base.path().join("scratch-nvme");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::create_dir_all(&scratch).unwrap();
+    let key_file = |name: &str, value: &str| {
+        let path = base.path().join(name);
+        std::fs::write(&path, format!("REG_KEY={value}\n")).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        path.display().to_string()
+    };
+    let (old_key, new_key) = (key_file("old-key", OLD_KEY), key_file("new-key", NEW_KEY));
+    let schema = "nils_setup_refresh";
+    let drop = |dsn: &str, names: &[String]| {
+        let mut store = nils_registry::Store::connect_postgres(dsn, schema).expect("connect");
+        for name in names {
+            store
+                .batch(&format!("DROP SCHEMA IF EXISTS {name} CASCADE"))
+                .unwrap();
+        }
+    };
+    if let Some(dsn) = postgres {
+        drop(dsn, &[schema.to_string(), format!("{schema}_linkage")]);
+    }
+    let dir_s = dir.display().to_string();
+    let source_s = source.display().to_string();
+    let mut install = vec![
+        "--yes",
+        "--parts",
+        "engine",
+        "--dir",
+        &dir_s,
+        "--no-service",
+        "--source",
+        &source_s,
+        "--reg-key-file",
+        &old_key,
+        "--scheme",
+        "blake2b-32",
+    ];
+    if let Some(dsn) = postgres {
+        install.extend(["--backend", "postgres", "--dsn", dsn, "--schema", schema]);
+    }
+    let made = setup(&nils.path(), config.path(), &install);
+    assert!(made.ok, "{}\n{}", made.stdout, made.stderr);
+    let record_before = state_of(config.path());
+
+    let nils_at = |at: &Path, words: &[&str]| {
+        let out = output(
+            Command::new(nils.path())
+                .arg("--registry")
+                .arg(at)
+                .args(words)
+                .env("NO_COLOR", "1"),
+        );
+        assert!(
+            out.status.success(),
+            "nils {words:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).to_string()
+    };
+    let open = |at: &Path| {
+        nils_registry::Home::new(at)
+            .open()
+            .expect("the registry opens")
+    };
+    // the old registry: a place the setup does not declare, a timezone, an
+    // ID type in its linkage store
+    nils_at(
+        &registry,
+        &[
+            "place",
+            "add",
+            "scratch-nvme",
+            scratch.to_str().unwrap(),
+            "--role",
+            "working",
+            "--fast",
+        ],
+    );
+    nils_at(
+        &registry,
+        &["settings", "set", "timezone", "Europe/Stockholm"],
+    );
+    nils_at(&registry, &["linkage", "id-type", "add", "old-site-id"]);
+    nils_at(&registry, &["synth", "--subjects", "30"]);
+    let old = held(open(&registry).store());
+    assert_eq!(old.scheme, "blake2b-32");
+    assert!(old.stacks > 0, "the old registry holds nothing");
+    assert!(
+        old.places.contains(&"scratch-nvme".to_string()),
+        "{:?}",
+        old.places
+    );
+    let export = base.path().join("places.json");
+    let exported = output(
+        Command::new(nils.path())
+            .arg("--registry")
+            .arg(&registry)
+            .args(["place", "export", "--out"])
+            .arg(&export),
+    );
+    assert!(
+        exported.status.success(),
+        "{}",
+        String::from_utf8_lossy(&exported.stderr)
+    );
+
+    let never_said = |o: &Out| {
+        for key in [OLD_KEY, NEW_KEY] {
+            assert!(
+                !o.stdout.contains(key) && !o.stderr.contains(key),
+                "a key was said"
+            );
+        }
+    };
+    let refresh = |more: &[&str]| {
+        let mut args = vec!["--new-registry", "--reg-key-file", new_key.as_str()];
+        args.extend_from_slice(more);
+        setup(&nils.path(), config.path(), &args)
+    };
+    // with no terminal and no --yes, nothing is done
+    let unasked = refresh(&[]);
+    assert!(!unasked.ok, "{}", unasked.stdout);
+    assert!(unasked.stderr.contains("--yes"), "{}", unasked.stderr);
+    // --print says it and does nothing
+    let printed = refresh(&["--print"]);
+    assert!(printed.ok, "{}", printed.stderr);
+    printed.says("set aside");
+    printed.says("nothing was changed");
+    never_said(&printed);
+    assert_eq!(
+        held(open(&registry).store()).id,
+        old.id,
+        "a print changed the registry"
+    );
+    assert!(
+        std::fs::read_dir(&registry).unwrap().flatten().all(|e| !e
+            .file_name()
+            .to_string_lossy()
+            .starts_with("before-new-registry-")),
+        "a print set the registry aside"
+    );
+
+    let done = refresh(&["--yes"]);
+    assert!(done.ok, "{}\n{}", done.stdout, done.stderr);
+    never_said(&done);
+    done.says(&nils_registry::pseudonym::fingerprint(NEW_KEY.as_bytes()));
+
+    // an empty registry, on the new key and the generator's scheme, with the
+    // setup's own places and the old timezone
+    let new = held(open(&registry).store());
+    assert_ne!(new.id, old.id, "the registry is the old one");
+    assert_eq!(new.scheme, "blake2b-8");
+    assert_eq!(new.timezone, "Europe/Stockholm");
+    assert!(
+        !new.places.contains(&"scratch-nvme".to_string()),
+        "{:?}",
+        new.places
+    );
+    for kept in ["registry", "source", "backups"] {
+        assert!(
+            new.places.contains(&kept.to_string()),
+            "{kept}: {:?}",
+            new.places
+        );
+    }
+    let types = nils_at(&registry, &["linkage", "id-type", "list"]);
+    assert!(!types.contains("old-site-id"), "{types}");
+    let listed = nils_at(&registry, &["key", "list"]);
+    assert!(
+        listed.contains(&nils_registry::pseudonym::fingerprint(NEW_KEY.as_bytes())),
+        "{listed}"
+    );
+    assert_eq!(
+        (new.jobs, new.stacks),
+        (0, 0),
+        "the new registry is not empty"
+    );
+
+    // the setup itself unchanged but for when it ran and the places' ids
+    let record_after = state_of(config.path());
+    let settled = |text: &str| -> Vec<String> {
+        text.lines()
+            .filter(|l| !l.starts_with("at = ") && !l.starts_with("id = "))
+            .map(str::to_string)
+            .collect()
+    };
+    assert_eq!(settled(&record_after), settled(&record_before));
+
+    // the old registry, set aside and readable where it went
+    let (aside, stamp) = set_aside_in(&registry);
+    assert!(aside.join("nils.toml").is_file());
+    assert!(aside.join("keys").is_dir());
+    if postgres.is_none() {
+        assert!(aside.join("registry.db").is_file());
+        assert!(aside.join("linkage.db").is_file());
+    }
+    let kept = held(open(&aside).store());
+    assert_eq!(kept.id, old.id);
+    assert_eq!(kept.scheme, "blake2b-32");
+    assert!(kept.places.contains(&"scratch-nvme".to_string()));
+    let kept_types = nils_at(&aside, &["linkage", "id-type", "list"]);
+    assert!(kept_types.contains("old-site-id"), "{kept_types}");
+
+    // the place the setup does not declare comes back from the export
+    let imported = nils_at(&registry, &["place", "import", export.to_str().unwrap()]);
+    assert!(imported.contains("scratch-nvme"), "{imported}");
+    assert!(imported.contains("kept as it is"), "{imported}");
+    let after = held(open(&registry).store());
+    assert!(
+        after.places.contains(&"scratch-nvme".to_string()),
+        "{:?}",
+        after.places
+    );
+    assert_eq!(after.id, new.id);
+
+    if let Some(dsn) = postgres {
+        drop(
+            dsn,
+            &[
+                schema.to_string(),
+                format!("{schema}_linkage"),
+                format!("{schema}_before_{stamp}"),
+                format!("{schema}_before_{stamp}_linkage"),
+            ],
+        );
+    }
+}
+
+#[test]
+fn a_new_registry_keeps_the_setup_and_starts_empty_on_the_sites_key() {
+    refreshed(None);
+}
+
+#[test]
+fn a_new_registry_on_postgres_renames_the_old_schemas_and_keeps_them_readable() {
+    match std::env::var("NILS_TEST_POSTGRES_DSN") {
+        Ok(dsn) if !dsn.is_empty() => refreshed(Some(&dsn)),
+        _ => eprintln!("NILS_TEST_POSTGRES_DSN is not set; the Postgres test is skipped"),
+    }
+}
+
+#[test]
+fn a_new_registry_needs_a_setup_and_changes_nothing_without_one() {
+    let nils = Installed::new("nils-setup-refresh-none");
+    let config = TempDir::new("nils-setup-refresh-none-config");
+    let o = setup(&nils.path(), config.path(), &["--new-registry", "--yes"]);
+    assert!(!o.ok, "{}", o.stdout);
+    assert!(o.stderr.contains("no setup is"), "{}", o.stderr);
+    assert!(!config.path().join("nils").join("setup.toml").exists());
+}
+
+// ---------------------------------------------------------------- dcm2niix
+
+const DCM2NIIX_VERSION: &str = "v1.0.20260724";
+
+/// The archive of dcm2niix this machine takes, where rordenlab publishes
+/// one.
+fn dcm2niix_archive_here() -> Option<&'static str> {
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("linux", "x86_64") => Some("dcm2niix_lnx.zip"),
+        ("macos", _) => Some("dcm2niix_mac.zip"),
+        _ => None,
+    }
+}
+
+/// A zip archive of one file, deflated, shaped as rordenlab's.
+fn zip_of_one(name: &str, body: &[u8]) -> Vec<u8> {
+    use std::io::Write as _;
+    let mut deflated =
+        flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
+    deflated.write_all(body).unwrap();
+    let packed = deflated.finish().unwrap();
+    let mut crc = flate2::Crc::new();
+    crc.update(body);
+    let header = |sig: u32, central: bool| {
+        let mut h = Vec::new();
+        h.extend(sig.to_le_bytes());
+        if central {
+            h.extend(20u16.to_le_bytes());
+        }
+        h.extend(20u16.to_le_bytes());
+        h.extend(0u16.to_le_bytes());
+        h.extend(8u16.to_le_bytes());
+        h.extend(0u32.to_le_bytes());
+        h.extend(crc.sum().to_le_bytes());
+        h.extend((packed.len() as u32).to_le_bytes());
+        h.extend((body.len() as u32).to_le_bytes());
+        h.extend((name.len() as u16).to_le_bytes());
+        h.extend(0u16.to_le_bytes());
+        if central {
+            h.extend([0u8; 6]);
+            h.extend(0o100_755u32.wrapping_shl(16).to_le_bytes());
+            h.extend(0u32.to_le_bytes());
+        }
+        h.extend(name.as_bytes());
+        h
+    };
+    let mut out = header(0x0403_4b50, false);
+    out.extend(&packed);
+    let start = out.len() as u32;
+    let directory = header(0x0201_4b50, true);
+    out.extend(&directory);
+    out.extend(0x0605_4b50u32.to_le_bytes());
+    out.extend([0u8; 4]);
+    out.extend(1u16.to_le_bytes());
+    out.extend(1u16.to_le_bytes());
+    out.extend((directory.len() as u32).to_le_bytes());
+    out.extend(start.to_le_bytes());
+    out.extend(0u16.to_le_bytes());
+    out
+}
+
+/// [`setup`] with variables of its own.
+fn setup_env(binary: &Path, config: &Path, args: &[&str], env: &[(&str, &str)]) -> Out {
+    let mut command = Command::new(binary);
+    command
+        .arg("setup")
+        .args(args)
+        .env("NILS_NO_TTY", "1")
+        .env("NO_COLOR", "1")
+        .env("XDG_CONFIG_HOME", config)
+        .env_remove("NILS_RELEASES")
+        .env_remove("NILS_DESK_RELEASES")
+        .env_remove("NILS_DCM2NIIX_RELEASES")
+        .env_remove("NILS_DCM2NIIX_TEST_SHA256");
+    for (k, v) in env {
+        command.env(k, v);
+    }
+    let out = output(&mut command);
+    Out {
+        ok: out.status.success(),
+        stdout: String::from_utf8_lossy(&out.stdout).to_string(),
+        stderr: String::from_utf8_lossy(&out.stderr).to_string(),
+    }
+}
+
+/// 2026-10-12: an install on this machine with no dcm2niix here takes the
+/// build this version pins, from a mirror and offline, beside nils, and
+/// says so in its plan first; the run after it takes nothing, since the one
+/// it placed is the pinned build and there; a purge removes it with the
+/// install, and nothing outside the test's own folders was touched.
+#[test]
+fn a_machine_install_places_dcm2niix_beside_nils_and_a_purge_removes_it() {
+    let Some(archive) = dcm2niix_archive_here() else {
+        eprintln!("rordenlab builds no dcm2niix for this machine; skipped");
+        return;
+    };
+    let releases = Releases::new("99.0.0");
+    let nils = Installed::new("nils-setup-dcm2niix");
+    let config = TempDir::new("nils-setup-dcm2niix-config");
+    let base = TempDir::new("nils-setup-dcm2niix-base");
+    let home = TempDir::new("nils-setup-dcm2niix-home");
+    let empty = TempDir::new("nils-setup-dcm2niix-path");
+    let dir = base.path().join("nils");
+    let mirror = TempDir::new("nils-setup-dcm2niix-mirror");
+    let zip = zip_of_one(
+        "dcm2niix",
+        b"#!/bin/sh\necho \"Chris Rorden's dcm2niiX version v1.0.20260724 (stand-in)\"\n",
+    );
+    mirror.file(&format!("{DCM2NIIX_VERSION}/{archive}"), &zip);
+    let mirror_url = format!("file://{}", mirror.path().display());
+    let digest = sha256_hex(&zip);
+    let env = [
+        ("NILS_DCM2NIIX_RELEASES", mirror_url.as_str()),
+        ("NILS_DCM2NIIX_TEST_SHA256", digest.as_str()),
+        ("PATH", empty.path().to_str().unwrap()),
+        ("HOME", home.path().to_str().unwrap()),
+    ];
+    let args = [
+        "--parts",
+        "engine",
+        "--dir",
+        dir.to_str().unwrap(),
+        "--no-service",
+        "--channel",
+        &releases.url(),
+    ];
+    let beside = nils.path().parent().unwrap().join("dcm2niix");
+
+    let print: Vec<&str> = ["--print"].iter().chain(args.iter()).copied().collect();
+    let o = setup_env(&nils.path(), config.path(), &print, &env);
+    assert!(o.ok, "{}\n{}", o.stdout, o.stderr);
+    o.says(&format!(
+        "{DCM2NIIX_VERSION} from {mirror_url} into {}, its sha256 pinned",
+        beside.display()
+    ));
+    assert!(!beside.exists(), "--print writes nothing");
+
+    let yes: Vec<&str> = ["--yes"].iter().chain(args.iter()).copied().collect();
+    let o = setup_env(&nils.path(), config.path(), &yes, &env);
+    assert!(o.ok, "{}\n{}", o.stdout, o.stderr);
+    assert!(beside.is_file(), "{}", o.stdout);
+    let state = state_of(config.path());
+    assert!(state.contains("[dcm2niix]"), "{state}");
+    assert!(
+        state.contains(&format!("path = \"{}\"", beside.display())),
+        "{state}"
+    );
+    assert!(
+        state.contains(&format!("version = \"{DCM2NIIX_VERSION}\"")),
+        "{state}"
+    );
+    assert!(state.contains("how = \"placed\""), "{state}");
+    // nothing outside the test's folders: no service, no lingering
+    assert!(state.contains("service = \"none\""), "{state}");
+    assert!(!state.contains("linger"), "{state}");
+    assert!(
+        state.contains(&beside.display().to_string()),
+        "a program of the install: {state}"
+    );
+    // the engine finds it beside itself
+    let o = output(
+        Command::new(nils.path())
+            .args(["--registry", dir.join("registry").to_str().unwrap()])
+            .args(["tools", "list", "--json"])
+            .env("PATH", empty.path())
+            .env("XDG_CONFIG_HOME", config.path()),
+    );
+    let listed: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap();
+    assert_eq!(listed["tools"][0]["found_by"], "beside", "{listed}");
+    assert_eq!(listed["tools"][0]["present"], true, "{listed}");
+
+    // the next run takes nothing: the one placed is the pinned build
+    let written = std::fs::metadata(&beside).unwrap().modified().unwrap();
+    let o = setup_env(&nils.path(), config.path(), &print, &env);
+    o.says("which an earlier setup placed");
+    let o = setup_env(&nils.path(), config.path(), &yes, &env);
+    assert!(o.ok, "{}\n{}", o.stdout, o.stderr);
+    assert_eq!(
+        std::fs::metadata(&beside).unwrap().modified().unwrap(),
+        written
+    );
+
+    // the site names its own: the one setup placed goes, the site's stays
+    let own = TempDir::new("nils-setup-dcm2niix-own");
+    let site = own.file(
+        "dcm2niix",
+        b"#!/bin/sh\necho \"Chris Rorden's dcm2niiX version v1.0.20250505 (the site's)\"\n",
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&site, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let with_site: Vec<&str> = yes
+        .iter()
+        .copied()
+        .chain(["--dcm2niix", site.to_str().unwrap()])
+        .collect();
+    let o = setup_env(&nils.path(), config.path(), &with_site, &env);
+    assert!(o.ok, "{}\n{}", o.stdout, o.stderr);
+    assert!(
+        !beside.exists(),
+        "the build setup placed went: {}",
+        o.stdout
+    );
+    let state = state_of(config.path());
+    assert!(state.contains("how = \"given\""), "{state}");
+    assert!(
+        !state.contains(&beside.display().to_string()),
+        "no longer a program of the install: {state}"
+    );
+
+    // a purge removes the install, and the site's own stays
+    let o = uninstall(
+        &nils.path(),
+        config.path(),
+        home.path(),
+        &["--purge", "--yes"],
+    );
+    assert!(o.ok, "{}\n{}", o.stdout, o.stderr);
+    assert!(!dir.exists(), "{}", o.stdout);
+    assert!(site.is_file(), "the site's dcm2niix stays: {}", o.stdout);
+}
+
+/// 2026-10-12: a site's own dcm2niix, named with --dcm2niix, is taken as it
+/// is and recorded, and nothing is downloaded, mirror or none; an install
+/// whose machine cannot reach the releases still installs, and says how to
+/// take dcm2niix later.
+#[test]
+fn a_dcm2niix_given_is_taken_and_an_unreachable_one_stops_nothing() {
+    let releases = Releases::new("99.0.0");
+    let nils = Installed::new("nils-setup-dcm2niix-given");
+    let config = TempDir::new("nils-setup-dcm2niix-given-config");
+    let base = TempDir::new("nils-setup-dcm2niix-given-base");
+    let empty = TempDir::new("nils-setup-dcm2niix-given-path");
+    let own = TempDir::new("nils-setup-dcm2niix-given-own");
+    let given = own.file(
+        "dcm2niix-site",
+        b"#!/bin/sh\necho \"Chris Rorden's dcm2niiX version v1.0.20250505 (the site's)\"\n",
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&given, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let dir = base.path().join("nils");
+    let env = [
+        ("NILS_DCM2NIIX_RELEASES", "http://127.0.0.1:9"),
+        ("PATH", empty.path().to_str().unwrap()),
+    ];
+    let beside = nils.path().parent().unwrap().join("dcm2niix");
+    let o = setup_env(
+        &nils.path(),
+        config.path(),
+        &[
+            "--yes",
+            "--parts",
+            "engine",
+            "--dir",
+            dir.to_str().unwrap(),
+            "--no-service",
+            "--channel",
+            &releases.url(),
+            "--dcm2niix",
+            given.to_str().unwrap(),
+        ],
+        &env,
+    );
+    assert!(o.ok, "{}\n{}", o.stdout, o.stderr);
+    assert!(!beside.exists(), "nothing downloaded: {}", o.stdout);
+    let state = state_of(config.path());
+    assert!(
+        state.contains(&format!("path = \"{}\"", given.display())),
+        "{state}"
+    );
+    assert!(state.contains("how = \"given\""), "{state}");
+    // an update keeps the site's
+    let o = setup_env(
+        &nils.path(),
+        config.path(),
+        &["--print", "--dir", dir.to_str().unwrap()],
+        &env,
+    );
+    o.says(&format!("{}, as given with --dcm2niix", given.display()));
+
+    // something beside nils that setup did not place is never replaced,
+    // even where it does not run
+    let nils = Installed::new("nils-setup-dcm2niix-broken");
+    let config = TempDir::new("nils-setup-dcm2niix-broken-config");
+    let base = TempDir::new("nils-setup-dcm2niix-broken-base");
+    let dir = base.path().join("nils");
+    let broken = nils.path().parent().unwrap().join("dcm2niix");
+    std::fs::write(&broken, "not a program").unwrap();
+    let o = setup_env(
+        &nils.path(),
+        config.path(),
+        &[
+            "--yes",
+            "--parts",
+            "engine",
+            "--dir",
+            dir.to_str().unwrap(),
+            "--no-service",
+            "--channel",
+            &releases.url(),
+        ],
+        &env,
+    );
+    assert!(o.ok, "{}\n{}", o.stdout, o.stderr);
+    let said = format!("{}{}", o.stdout, o.stderr);
+    assert!(said.contains("does not run as dcm2niix"), "{said}");
+    assert_eq!(std::fs::read_to_string(&broken).unwrap(), "not a program");
+    assert!(!state_of(config.path()).contains("[dcm2niix]"));
+
+    // a machine that cannot reach the releases installs all the same
+    if dcm2niix_archive_here().is_some() {
+        let nils = Installed::new("nils-setup-dcm2niix-offline");
+        let config = TempDir::new("nils-setup-dcm2niix-offline-config");
+        let base = TempDir::new("nils-setup-dcm2niix-offline-base");
+        let dir = base.path().join("nils");
+        let o = setup_env(
+            &nils.path(),
+            config.path(),
+            &[
+                "--yes",
+                "--parts",
+                "engine",
+                "--dir",
+                dir.to_str().unwrap(),
+                "--no-service",
+                "--channel",
+                &releases.url(),
+            ],
+            &env,
+        );
+        assert!(o.ok, "{}\n{}", o.stdout, o.stderr);
+        let said = format!("{}{}", o.stdout, o.stderr);
+        assert!(said.contains("was not installed"), "{said}");
+        assert!(said.contains("nils tools install dcm2niix"), "{said}");
+        assert!(!nils.path().parent().unwrap().join("dcm2niix").exists());
+        assert!(!state_of(config.path()).contains("[dcm2niix]"));
+    }
+}
+
+/// A tarball holding `packs/<name>/pack.yml` for each pack given.
+fn packs_tarball(packs: &[(&str, &str)]) -> Vec<u8> {
+    let mut tar = tar::Builder::new(flate2::write::GzEncoder::new(
+        Vec::new(),
+        flate2::Compression::fast(),
+    ));
+    for (name, manifest) in packs {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(manifest.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        tar.append_data(
+            &mut header,
+            format!("packs/{name}/pack.yml"),
+            manifest.as_bytes(),
+        )
+        .unwrap();
+    }
+    tar.into_inner().unwrap().finish().unwrap()
+}
+
+impl Releases {
+    /// The engine's release carrying the packs given in place of its own.
+    fn carrying(&self, version: &str, packs: &[(&str, &str)]) {
+        let into = self.dir.path().join("download").join(format!("v{version}"));
+        let tar = packs_tarball(packs);
+        std::fs::write(into.join("packs.tar.gz"), &tar).unwrap();
+        let sums: String = std::fs::read_to_string(into.join("SHA256SUMS"))
+            .unwrap()
+            .lines()
+            .filter(|l| !l.ends_with("packs.tar.gz"))
+            .map(|l| format!("{l}\n"))
+            .collect();
+        std::fs::write(
+            into.join("SHA256SUMS"),
+            format!("{sums}{}  packs.tar.gz\n", sha256_hex(&tar)),
+        )
+        .unwrap();
+    }
+
+    /// A pack's own release beside the engine's, and the channel's pointer
+    /// to it.
+    fn rules(&self, pack: &str, version: &str, manifest: &str) {
+        let into = self
+            .dir
+            .path()
+            .join("download")
+            .join(format!("pack-{pack}-v{version}"));
+        std::fs::create_dir_all(&into).unwrap();
+        let tar = packs_tarball(&[(pack, manifest)]);
+        std::fs::write(into.join(format!("pack-{pack}.tar.gz")), &tar).unwrap();
+        std::fs::write(
+            into.join("SHA256SUMS"),
+            format!("{}  pack-{pack}.tar.gz\n", sha256_hex(&tar)),
+        )
+        .unwrap();
+        std::fs::write(
+            self.dir
+                .path()
+                .join("latest")
+                .join("download")
+                .join(format!("pack-{pack}.VERSION")),
+            format!("{version}\n"),
+        )
+        .unwrap();
+    }
+}
+
+/// Every absolute path in a plan or a run's words is inside the test's own
+/// directories: nothing of the machine's own is named, so nothing of it is
+/// touched.
+fn names_only(said: &str, roots: &[&Path]) {
+    for word in said.split_whitespace() {
+        let word = word.trim_start_matches("file://");
+        let word = word.trim_matches(|c: char| ",;:()'\"".contains(c));
+        if word.starts_with('/') {
+            assert!(
+                roots.iter().any(|r| Path::new(word).starts_with(r)),
+                "{word} is outside the test's own directories:\n{said}"
+            );
+        }
+    }
+}
+
+/// Record 55 B5: a machine install takes the MRI pack's own newest release
+/// where it stands above the copy the engine's release carries, and the
+/// setup record notes the rules in use. An uninstall that keeps the data
+/// keeps that note with the data and takes the packs as it always has, and
+/// the setup after it takes the rules again. Every path either names is the
+/// test's own.
+#[test]
+fn a_machine_install_takes_a_rules_release_and_keeping_the_data_keeps_its_note() {
+    let mri = |version: &str| format!("pack: mri\nversion: {version}\ncontract: 8\nmodality: MR\n");
+    let releases = Releases::new("99.0.0");
+    releases.carrying("99.0.0", &[("mri", &mri("1.0.1"))]);
+    releases.rules("mri", "1.0.2", &mri("1.0.2"));
+    let nils = Installed::new("nils-setup-rules");
+    let config = TempDir::new("nils-setup-rules-config");
+    let base = TempDir::new("nils-setup-rules-base");
+    let dir = base.path().join("nils");
+    // a dcm2niix of the test's own, so the converter setup names is inside
+    // the test's directories, whatever the machine's search path holds
+    let converter = base.file(
+        "dcm2niix",
+        b"#!/bin/sh\necho \"Chris Rorden's dcm2niiX version v1.0.20250505 (the test's)\"\n",
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&converter, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let roots = [
+        nils.dir.path(),
+        config.path(),
+        base.path(),
+        releases.dir.path(),
+    ];
+    let install = |binary: &Path| {
+        setup(
+            binary,
+            config.path(),
+            &[
+                "--yes",
+                "--parts",
+                "engine",
+                "--dir",
+                dir.to_str().unwrap(),
+                "--no-service",
+                "--channel",
+                &releases.url(),
+                "--dcm2niix",
+                converter.to_str().unwrap(),
+            ],
+        )
+    };
+    let o = install(&nils.path());
+    assert!(o.ok, "{}\n{}", o.stdout, o.stderr);
+    names_only(&o.stdout, &roots);
+    let packs = nils.dir.path().join("share").join("nils").join("packs");
+    assert_eq!(
+        std::fs::read_to_string(packs.join("mri/pack.yml")).unwrap(),
+        mri("1.0.2"),
+        "{}",
+        o.stdout
+    );
+    let state = state_of(config.path());
+    assert!(state.contains("[rules.mri]"), "{state}");
+    assert!(state.contains("version = \"1.0.2\""), "{state}");
+    assert!(state.contains("from = \"pack-mri-v1.0.2\""), "{state}");
+
+    // the plan of an uninstall that keeps the data names only what is the
+    // test's own, and changes nothing
+    let plan = uninstall(
+        &nils.path(),
+        config.path(),
+        base.path(),
+        &["--keep-data", "--print"],
+    );
+    assert!(plan.ok, "{}", plan.stderr);
+    names_only(&plan.stdout, &roots);
+    let (removing, _) = plan.stdout.split_once("Keeping").unwrap();
+    assert!(
+        removing.contains(&packs.join("mri").display().to_string()),
+        "the first-party packs go as before:\n{removing}"
+    );
+    assert!(packs.join("mri").is_dir());
+
+    let gone = uninstall(
+        &nils.path(),
+        config.path(),
+        base.path(),
+        &["--keep-data", "--yes"],
+    );
+    assert!(gone.ok, "{}\n{}", gone.stdout, gone.stderr);
+    names_only(&gone.stdout, &roots);
+    assert!(!packs.join("mri").exists(), "{}", gone.stdout);
+    assert!(!config.path().join("nils").join("setup.toml").exists());
+    let kept = std::fs::read_to_string(dir.join("setup.kept.toml")).unwrap();
+    assert!(
+        kept.contains("[rules.mri]") && kept.contains("version = \"1.0.2\""),
+        "the rules in use are kept with the data: {kept}"
+    );
+
+    // the setup after it takes the rules again, and notes them again
+    let nils = Installed::new("nils-setup-rules-again");
+    let o = install(&nils.path());
+    assert!(o.ok, "{}\n{}", o.stdout, o.stderr);
+    let packs = nils.dir.path().join("share").join("nils").join("packs");
+    assert_eq!(
+        std::fs::read_to_string(packs.join("mri/pack.yml")).unwrap(),
+        mri("1.0.2")
+    );
+    let state = state_of(config.path());
+    assert!(state.contains("from = \"pack-mri-v1.0.2\""), "{state}");
 }

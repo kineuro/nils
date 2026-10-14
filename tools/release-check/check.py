@@ -285,7 +285,9 @@ def bar_symri(work: Path) -> list[str]:
     `anat/SyMRI/`, the multi-dynamic multi-echo acquisition is DICOM in
     SyMRI's folder of the export, every NIfTI has its slices under
     `sourcedata/dicom/` in a folder named after the file, `.bidsignore`
-    lists the folder, and a second release writes nothing.
+    lists the folder, and a second release writes nothing. Record 55 C3: the
+    map the viewer saved in colour is a display composite, which neither
+    release writes, and each counts it as left out unless asked.
     """
     bad = []
     for tree in ("symri-bids", "symri-minimal"):
@@ -315,6 +317,13 @@ def bar_symri(work: Path) -> list[str]:
     again = load(work, "symri-bids-again")
     if again is not None and again.get("written", 0) != 0:
         bad.append(f"symri-bids: the second release wrote {again['written']} file(s)")
+    for name in ("symri-bids", "symri-minimal"):
+        report = load(work, name)
+        if report is None:
+            continue
+        left = report.get("left_out_unless_asked")
+        if left != {"display_composite": 1}:
+            bad.append(f"{name}: left out unless asked {left}, not the one display composite")
     return bad
 
 

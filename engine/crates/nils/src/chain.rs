@@ -9,7 +9,8 @@
 //! dataset: pseudonymise, then digest, fingerprint and classify, the
 //! digest sharing the pseudonymise step's batch name, and since record 55
 //! (H2) a pick run for the dataset where it feeds a cohort and the pack
-//! declares picks.
+//! declares picks, and (E5) a last step, `score`, which queues the image
+//! models' runs over the batch's new stacks (`crate::score`).
 
 use nils_registry::job::{self, Job};
 use nils_registry::place::Place;
@@ -52,50 +53,17 @@ pub(crate) fn parse_then(doc: &Value) -> Result<Vec<Vec<String>>, String> {
     Ok(out)
 }
 
-/// Record 55 H2: the subjects of a dataset, whose files a digest read from
-/// its pseudonymised tree: what a pick run for the dataset decides.
+/// Record 55 H2: the subjects counted in a dataset, what a pick run for the
+/// dataset decides and its main scans count. Nima, 2026-10-12: those with
+/// a stack its tree holds a file of, as every reader counts them
+/// (`nils_registry::dataset_subjects`); a dataset holds stacks, never
+/// subjects.
 pub(crate) fn dataset_subjects(
     store: &mut Store,
     place: &Place,
 ) -> Result<std::collections::BTreeSet<i64>, nils_registry::store::Error> {
-    use nils_registry::schema::Type;
-    use nils_registry::store::Param;
-    let tree = place
-        .tree_path("anon")
-        .unwrap_or_else(|| std::path::PathBuf::from(&place.path));
-    let real = std::fs::canonicalize(&tree).unwrap_or(tree);
-    let sql = format!(
-        "SELECT id, root_canonical FROM {}",
-        store.qualified("source")
-    );
-    let sources: Vec<i64> = store
-        .query(&sql, &[])?
-        .iter()
-        .filter_map(|r| {
-            let root = r.text(1).ok()?;
-            std::path::Path::new(root)
-                .starts_with(&real)
-                .then(|| r.int(0).ok())
-                .flatten()
-        })
-        .collect();
-    let sql = format!(
-        "SELECT DISTINCT se.subject_id FROM {} sf \
-         JOIN {} i ON i.id = sf.instance_id \
-         JOIN {} se ON se.id = i.series_id \
-         WHERE sf.source_id = {} AND sf.status <> 'gone' AND se.subject_id IS NOT NULL",
-        store.qualified("source_file"),
-        store.qualified("instance"),
-        store.qualified("series"),
-        store.dialect().param(1, Type::Int)
-    );
-    let mut out = std::collections::BTreeSet::new();
-    for source in sources {
-        for r in store.query(&sql, &[Param::Int(source)])? {
-            out.insert(r.int(0)?);
-        }
-    }
-    Ok(out)
+    let sources = crate::sources::source_ids(store, place)?;
+    nils_registry::dataset_subjects::of(store, &sources)
 }
 
 /// Whether the pack of that name, in that directory, declares picks.
@@ -130,6 +98,43 @@ pub(crate) fn pick_step(place: &Place, pack: Option<&str>) -> Vec<String> {
     pick
 }
 
+/// The steps of a chain the keyboard queues, each pick run naming the pack
+/// directory the keyboard's nils found, as the jobs door names the
+/// deployment's on every pick run it queues: the worker knows none of its
+/// own, and a chain queued from the keyboard passes no door.
+pub(crate) fn picks_named(
+    mut steps: Vec<Vec<String>>,
+    pack_dir: Option<&std::path::Path>,
+) -> Vec<Vec<String>> {
+    if let Some(dir) = pack_dir {
+        for step in steps.iter_mut().filter(|s| {
+            s.len() >= 2 && s[0] == "pick" && s[1] == "run" && !s.iter().any(|w| w == "--pack-dir")
+        }) {
+            step.extend(["--pack-dir".to_string(), dir.display().to_string()]);
+        }
+    }
+    steps
+}
+
+/// The score a bring-in ends with (record 55 E5): the image models'
+/// runs over the batch's new stacks, the batch named as the digest is.
+pub(crate) fn score_step(
+    place: &Place,
+    batch: &str,
+    pack_dir: Option<&std::path::Path>,
+) -> Vec<String> {
+    let mut score = vec![
+        "score".to_string(),
+        format!("@{}", place.name),
+        "--name".to_string(),
+        batch.to_string(),
+    ];
+    if let Some(dir) = pack_dir {
+        score.extend(["--pack-dir".to_string(), dir.display().to_string()]);
+    }
+    score
+}
+
 /// What `bring-in @dataset [--name N] [--pack P]` stands for: the first
 /// command and the ones after it. An identified dataset is pseudonymised
 /// first; any other has no first step and starts with the digest. The
@@ -139,11 +144,15 @@ pub(crate) fn pick_step(place: &Place, pack: Option<&str>) -> Vec<String> {
 /// the pseudonymise step: the tree holds files no digest has read, as a
 /// v0 folder does on its first bring-in, and the pseudonymiser leaves an
 /// original the tree holds already as it is only once the registry knows
-/// the tree's files (lab 26, defect 7).
+/// the tree's files (lab 26, defect 7). The classify step names the
+/// deployment's pack directory where there is one: the worker runs it with
+/// no pack directory of its own, and an install whose packs are not where
+/// the engine looks by itself has none.
 pub(crate) fn bring_in(
     place: &Place,
     name: Option<&str>,
     pack: Option<&str>,
+    pack_dir: Option<&std::path::Path>,
     digest_first: bool,
     picks: bool,
 ) -> (Vec<String>, Vec<Vec<String>>) {
@@ -155,6 +164,9 @@ pub(crate) fn bring_in(
     let mut classify = vec!["classify".to_string()];
     if let Some(p) = pack {
         classify.extend(["--pack".to_string(), p.to_string()]);
+    }
+    if let Some(dir) = pack_dir {
+        classify.extend(["--pack-dir".to_string(), dir.display().to_string()]);
     }
     let identified = place.dataset["arrives"].as_str() == Some("identified");
     let mut steps = Vec::new();
@@ -177,6 +189,9 @@ pub(crate) fn bring_in(
     {
         steps.push(pick_step(place, pack));
     }
+    // record 55 E5: the image models score the batch's new stacks without
+    // a manual run, the last step
+    steps.push(score_step(place, &name, pack_dir));
     let first = steps.remove(0);
     (first, steps)
 }
@@ -263,7 +278,7 @@ impl BringIn {
 /// What a chain step needs of the caller who queued the first job, as the
 /// job recorded them: the grants and the detail. A job queued from the
 /// keyboard recorded every grant and detail sensitive.
-fn recorded_access(job: &Job) -> Access {
+pub(crate) fn recorded_access(job: &Job) -> Access {
     let mut access = Access::default();
     if let Some(grants) = job.args["grants"].as_array() {
         for g in grants.iter().filter_map(Value::as_str) {
@@ -332,6 +347,13 @@ pub(crate) fn continue_chain(store: &mut Store, job: &Job) -> Result<Option<i64>
         if !result.is_object() {
             result = json!({ "result": result });
         }
+        // record 55 E5: a bring-in whose caller may not score at arrival
+        // ends done, and says the score was skipped and why
+        if next.first().is_some_and(|v| v == "score") && then.is_empty() {
+            result["score_skipped"] = json!({ "step": next, "why": why });
+            job::set_result(store, job.id, &result).map_err(|e| e.to_string())?;
+            return Ok(None);
+        }
         result["chain_stopped"] = json!({ "step": next, "why": why });
         job::set_result(store, job.id, &result).map_err(|e| e.to_string())?;
         return Ok(None);
@@ -350,11 +372,12 @@ pub(crate) fn continue_chain(store: &mut Store, job: &Job) -> Result<Option<i64>
 }
 
 /// A step of a chain that sorts what a read brought: the fingerprints, the
-/// sort, the pick after it, and the pictures of what was sorted.
+/// sort, the pick after it, the pictures of what was sorted, and the image
+/// models' score of it (record 55 E5).
 fn sorting(step: &[String]) -> bool {
     matches!(
         step.first().map(String::as_str),
-        Some("fingerprint" | "classify" | "pick" | "pyramid" | "preview")
+        Some("fingerprint" | "classify" | "pick" | "pyramid" | "preview" | "score")
     )
 }
 
@@ -467,6 +490,7 @@ mod tests {
             &["pick", "run", "--after-sort", "4"],
             &["pyramid", "build"],
             &["preview", "build"],
+            &["score", "@ds", "--name", "b"],
         ] {
             assert!(sorting(&words(step)), "{step:?}");
         }
@@ -498,50 +522,98 @@ mod tests {
             &place("identified"),
             Some("batch-1"),
             Some("mri"),
+            None,
             false,
             true,
         );
         assert_eq!(first, ["pseudonymize", "@scans", "--name", "batch-1"]);
-        assert_eq!(then.len(), 3);
+        assert_eq!(then.len(), 4);
         assert_eq!(then[0], ["digest", "@scans", "--name", "batch-1"]);
         assert_eq!(then[1], ["fingerprint"]);
         assert_eq!(then[2], ["classify", "--pack", "mri"]);
-        let (first, then) = bring_in(&place("deidentified"), None, None, false, true);
+        // record 55 E5: the image models score the batch, last
+        assert_eq!(then[3], ["score", "@scans", "--name", "batch-1"]);
+        let (first, then) = bring_in(&place("deidentified"), None, None, None, false, true);
         assert_eq!(first[0], "digest");
         assert!(first[3].starts_with("scans-20"), "{first:?}");
-        assert_eq!(then.len(), 2);
+        assert_eq!(then.len(), 3);
         assert_eq!(then[1], ["classify"]);
-        let (first, _) = bring_in(&place("coded"), None, None, false, true);
+        assert_eq!(then[2][..3], ["score", "@scans", "--name"]);
+        assert_eq!(then[2][3], first[3], "the batch the digest names");
+        let (first, _) = bring_in(&place("coded"), None, None, None, false, true);
         assert_eq!(first[0], "digest");
         // a tree with files no digest has read: the digest goes first
-        let (first, then) = bring_in(&place("identified"), Some("v0"), None, true, true);
+        let (first, then) = bring_in(&place("identified"), Some("v0"), None, None, true, true);
         assert_eq!(first, ["digest", "@scans", "--name", "v0"]);
         assert_eq!(then[0], ["pseudonymize", "@scans", "--name", "v0"]);
         assert_eq!(then[1], ["digest", "@scans", "--name", "v0"]);
-        assert_eq!(then.len(), 4);
+        assert_eq!(then.len(), 5);
         // never for a dataset with no pseudonymise step
-        let (first, then) = bring_in(&place("deidentified"), None, None, true, true);
+        let (first, then) = bring_in(&place("deidentified"), None, None, None, true, true);
         assert_eq!(first[0], "digest");
-        assert_eq!(then.len(), 2);
+        assert_eq!(then.len(), 3);
         // record 55 H2: a dataset that feeds a cohort ends with a pick run
         // for the dataset, where the pack declares picks
         let mut fed = place("identified");
         fed.dataset["cohort"] = json!("study-a");
-        let (_, then) = bring_in(&fed, Some("b"), Some("mri"), false, true);
-        assert_eq!(then.len(), 4);
+        let (_, then) = bring_in(&fed, Some("b"), Some("mri"), None, false, true);
+        assert_eq!(then.len(), 5);
         assert_eq!(
             then[3],
             ["pick", "run", "--dataset", "scans", "--pack", "mri"]
         );
-        let (_, then) = bring_in(&fed, Some("b"), None, false, false);
-        assert_eq!(then.len(), 3, "a pack with no picks: no pick run");
-        let (_, then) = bring_in(&place("identified"), Some("b"), None, false, true);
-        assert_eq!(then.len(), 3, "no cohort: no pick run");
+        assert_eq!(
+            then[4],
+            ["score", "@scans", "--name", "b"],
+            "after the pick"
+        );
+        let (_, then) = bring_in(&fed, Some("b"), None, None, false, false);
+        assert_eq!(then.len(), 4, "a pack with no picks: no pick run");
+        let (_, then) = bring_in(&place("identified"), Some("b"), None, None, false, true);
+        assert_eq!(then.len(), 4, "no cohort: no pick run");
         // record 55 H2 (round 4): a dataset whose picks are off has none
         let mut off = fed.clone();
         off.dataset["picks"] = json!("off");
-        let (_, then) = bring_in(&off, Some("b"), Some("mri"), false, true);
-        assert_eq!(then.len(), 3, "picks off: no pick run");
+        let (_, then) = bring_in(&off, Some("b"), Some("mri"), None, false, true);
+        assert_eq!(then.len(), 4, "picks off: no pick run");
+        // the T33 pipe test: the classify step names the deployment's
+        // packs, as every other job the engine queues does; the pick run
+        // has them named where it is queued
+        let dir = std::path::Path::new("/srv/packs");
+        let (_, then) = bring_in(&fed, Some("b"), Some("mri"), Some(dir), false, true);
+        assert_eq!(
+            then[2],
+            ["classify", "--pack", "mri", "--pack-dir", "/srv/packs"]
+        );
+        assert_eq!(
+            then[3],
+            ["pick", "run", "--dataset", "scans", "--pack", "mri"]
+        );
+        assert_eq!(
+            then[4],
+            ["score", "@scans", "--name", "b", "--pack-dir", "/srv/packs"]
+        );
+        let (_, then) = bring_in(&place("deidentified"), None, None, Some(dir), false, true);
+        assert_eq!(then[1], ["classify", "--pack-dir", "/srv/packs"]);
+        // queued from the keyboard, the pick run names them too, and the
+        // sort names them once
+        let (_, then) = bring_in(&fed, Some("b"), Some("mri"), Some(dir), false, true);
+        let named = picks_named(then.clone(), Some(dir));
+        assert_eq!(
+            named[3],
+            [
+                "pick",
+                "run",
+                "--dataset",
+                "scans",
+                "--pack",
+                "mri",
+                "--pack-dir",
+                "/srv/packs"
+            ]
+        );
+        assert_eq!(named[2], then[2]);
+        assert_eq!(picks_named(then.clone(), None), then);
     }
 
     #[test]

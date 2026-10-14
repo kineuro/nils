@@ -7,7 +7,7 @@
 //! PN, SH, ST, UC, UT) while it parses, and when it does not recognize the code
 //! it keeps the default repertoire, which it decodes as ISO-8859-1: a lossless
 //! map of every byte to one character. So a misspelled code (`ISO IR 100`, which
-//! the Go spike tripped over 1,771 times in the nmosd corpus) costs nothing but
+//! the Go spike tripped over 1,771 times in study D's corpus) costs nothing but
 //! a second look: the code is normalized after the parse, and when the
 //! normalized code is known and is not ISO-8859-1 itself, the text values are
 //! re-decoded from the bytes they preserve. A code that is still unknown after

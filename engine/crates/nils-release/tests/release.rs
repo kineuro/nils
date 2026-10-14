@@ -2214,3 +2214,288 @@ fn a_release_keeps_the_marks_and_states_its_own_options() {
         assert_eq!(codes, expected, "{name}");
     }
 }
+
+/// Record 55 C3: one session with an MPRAGE and a SyMRI T1 map and, with
+/// `colour`, the same map as the SyMRI viewer saves it in colour, a display
+/// composite. Two files a series, headers only.
+fn symri_tree(colour: bool) -> TempDir {
+    let dir = TempDir::new("release-display");
+    let mut series = vec![
+        (
+            "D.1.1",
+            "t1_mprage_sag_p2",
+            "ORIGINAL\\PRIMARY\\M\\ND",
+            "SIEMENS",
+            "MONOCHROME2",
+            1,
+        ),
+        (
+            "D.1.2",
+            "SyMRI T1 map",
+            "DERIVED\\PRIMARY\\QMAP\\T1",
+            "SyntheticMR",
+            "MONOCHROME2",
+            1,
+        ),
+    ];
+    if colour {
+        series.push((
+            "D.1.3",
+            "SyMRI T1 map",
+            "DERIVED\\PRIMARY\\QMAP\\T1",
+            "SyntheticMR",
+            "RGB",
+            3,
+        ));
+    }
+    for (uid, description, image_type, maker, photometric, samples) in series {
+        for n in 1..=2 {
+            let sop = format!("{uid}.{n}");
+            let mut e = synth::minimal_mr("D.1", uid, &sop);
+            e.extend([
+                synth::text(tags::PATIENT_ID, VR::LO, "release-display-subject"),
+                synth::text(tags::STUDY_DATE, VR::DA, "20230301"),
+                synth::text(tags::STUDY_TIME, VR::TM, "081500"),
+                synth::text(tags::SERIES_DESCRIPTION, VR::LO, description),
+                synth::text(tags::IMAGE_TYPE, VR::CS, image_type),
+                synth::text(tags::MANUFACTURER, VR::LO, maker),
+                synth::text(tags::MR_ACQUISITION_TYPE, VR::CS, "2D"),
+                synth::text(tags::INSTANCE_NUMBER, VR::IS, &n.to_string()),
+                synth::us(tags::SAMPLES_PER_PIXEL, samples),
+                synth::text(tags::PHOTOMETRIC_INTERPRETATION, VR::CS, photometric),
+            ]);
+            dir.file(
+                &format!("{uid}/{n}"),
+                &synth::part10(&MetaFields::mr(&sop), &e, true),
+            );
+        }
+    }
+    dir
+}
+
+/// A registry's stacks fingerprinted and sorted by the MRI pack, with the
+/// sort's report.
+fn sorted(reg: &mut Registry) -> nils_classify::Classified {
+    nils_classify::job::fingerprint(
+        reg,
+        &nils_classify::Settings::default(),
+        &nils_digest::Cancel::new(),
+    )
+    .unwrap();
+    nils_classify::classify::classify(
+        reg,
+        pack(),
+        &nils_classify::Settings::default(),
+        &nils_digest::Cancel::new(),
+    )
+    .unwrap()
+}
+
+/// The stack a series made.
+fn stack_of_series(reg: &mut Registry, uid: &str) -> i64 {
+    let store = reg.store();
+    let sql = format!(
+        "SELECT k.id FROM {} k JOIN {} s ON s.id = k.series_id WHERE s.series_instance_uid = '{uid}'",
+        store.qualified("stack"),
+        store.qualified("series"),
+    );
+    let rows = store.query(&sql, &[]).unwrap();
+    assert_eq!(rows.len(), 1, "series {uid} is one stack");
+    rows[0].int(0).unwrap()
+}
+
+/// What a stack holds on an axis, each value a row, an empty answer none.
+fn holds(reg: &mut Registry, stack: i64, axis: &str) -> Vec<String> {
+    let store = reg.store();
+    let sql = format!(
+        "SELECT value FROM {} WHERE stack_id = {stack} AND axis = '{axis}' \
+         AND value IS NOT NULL ORDER BY value",
+        store.qualified("classification_axis"),
+    );
+    store
+        .query(&sql, &[])
+        .unwrap()
+        .iter()
+        .map(|r| r.text(0).unwrap().to_string())
+        .collect()
+}
+
+/// The places of a tree's stacks, by their path under it, each with how
+/// many files it holds. A file's own name is its instance's number in the
+/// registry, which two registries of one tree need not share.
+fn paths_in(root: &Path) -> Vec<(String, usize)> {
+    let mut out: std::collections::BTreeMap<String, usize> = Default::default();
+    for p in files_under(root) {
+        let dir = p.parent().unwrap().strip_prefix(root).unwrap();
+        *out.entry(dir.display().to_string()).or_default() += 1;
+    }
+    out.into_iter().collect()
+}
+
+/// Record 55 C3 and T17 (the ruling of 2026-10-08): a SyMRI map saved in
+/// colour is classified as a display composite, on both backends. A release
+/// leaves it out unless asked, says how many it left out, and takes it when
+/// the selection names its disposition, by `dispositions` or by an axis item.
+/// The session around it is sorted, asked about and named as it is without
+/// it.
+#[test]
+fn a_display_composite_is_released_only_when_asked_and_moves_nothing_else() {
+    use nils_release::select::{self, How, Item};
+    const OWN: &str = "nils_release_display";
+    let mut backends: Vec<(Backend, Option<String>)> = vec![(Backend::Sqlite, None)];
+    if let Some(dsn) = postgres_dsn() {
+        backends.push((Backend::Postgres, Some(dsn)));
+    }
+    let policy = Policy::default();
+    let scheme = SessionScheme::default();
+    let asked = |dispositions: &[&str], axes: &[(&str, &str)]| Selection {
+        dispositions: dispositions.iter().map(|d| d.to_string()).collect(),
+        axes: axes
+            .iter()
+            .map(|(a, v)| (a.to_string(), v.to_string()))
+            .collect(),
+        ..Selection::default()
+    };
+
+    // The same session without the composite, sorted and released by
+    // default: what must not move.
+    let plain_source = symri_tree(false);
+    let plain_home = TempDir::new("display-plain-home");
+    let (_plain_home, mut plain) =
+        registry_in(&plain_home, &plain_source, Backend::Sqlite, None, OWN);
+    let plain_sort = sorted(&mut plain);
+    let plain_out = TempDir::new("display-plain-out");
+    let plain_release =
+        run::run(&mut plain, &settings(plain_out.path(), &policy, &scheme)).unwrap();
+    assert!(
+        plain_release.left_out_unless_asked.is_empty(),
+        "{plain_release:?}"
+    );
+
+    for (backend, dsn) in backends {
+        let name = format!("{backend:?}");
+        if let Some(dsn) = &dsn {
+            drop_schemas_named(dsn, OWN);
+        }
+        let source = symri_tree(true);
+        let home_dir = TempDir::new("display-home");
+        let (_home, mut reg) = registry_in(&home_dir, &source, backend, dsn.clone(), OWN);
+        let sort = sorted(&mut reg);
+
+        // The colour map is a display composite, and the grey one a map.
+        let colour = stack_of_series(&mut reg, "D.1.3");
+        let grey = stack_of_series(&mut reg, "D.1.2");
+        assert_eq!(
+            holds(&mut reg, colour, "construct"),
+            ["DisplayComposite"],
+            "{name}"
+        );
+        assert_eq!(
+            holds(&mut reg, colour, "disposition"),
+            ["display_composite"],
+            "{name}"
+        );
+        assert_eq!(holds(&mut reg, colour, "provenance"), ["SyMRI"], "{name}");
+        assert_eq!(holds(&mut reg, colour, "technique"), ["MDME"], "{name}");
+        assert!(
+            holds(&mut reg, colour, "base").is_empty(),
+            "{name}: no weighting"
+        );
+        assert!(
+            holds(&mut reg, colour, "role").is_empty(),
+            "{name}: no role"
+        );
+        assert_eq!(holds(&mut reg, grey, "construct"), ["T1map"], "{name}");
+        assert_eq!(
+            holds(&mut reg, grey, "disposition"),
+            ["scanner_derived"],
+            "{name}"
+        );
+        // Nobody is asked about it, and nothing else is asked about.
+        assert_eq!(
+            sort.review_items, plain_sort.review_items,
+            "{name}: {sort:?}"
+        );
+        assert_eq!(sort.silent, plain_sort.silent + 1, "{name}: {sort:?}");
+
+        // Found by the selection's own grain, and counted.
+        let resolved = select::resolve(
+            &mut reg,
+            &[Item::Axis("disposition".into(), "display_composite".into())],
+            Some(pack()),
+        )
+        .unwrap();
+        assert_eq!(resolved.items[0].1, How::Axis { stacks: 1 }, "{name}");
+
+        // By default a release leaves it out, and says so.
+        assert_eq!(
+            run::preview(reg.store(), &Selection::default())
+                .unwrap()
+                .stacks,
+            2,
+            "{name}"
+        );
+        let out = TempDir::new("display-default");
+        let release = run::run(&mut reg, &settings(out.path(), &policy, &scheme)).unwrap();
+        assert_eq!(release.stacks, 2, "{name}: {release:?}");
+        assert_eq!(
+            release.left_out_unless_asked,
+            std::collections::BTreeMap::from([("display_composite".to_string(), 1)]),
+            "{name}"
+        );
+        // and the rest is named as it is without the composite
+        assert_eq!(paths_in(out.path()), paths_in(plain_out.path()), "{name}");
+
+        // Asked for by its disposition, or by an axis item on it, it is
+        // released, and nothing is left out by a default no longer in force.
+        for (how, selection) in [
+            ("dispositions", asked(&["display_composite"], &[])),
+            (
+                "an axis item",
+                asked(&[], &[("disposition", "display_composite")]),
+            ),
+        ] {
+            assert_eq!(
+                run::preview(reg.store(), &selection).unwrap().stacks,
+                1,
+                "{name}, {how}"
+            );
+            let out = TempDir::new("display-asked");
+            let release = run::run(
+                &mut reg,
+                &run::Settings {
+                    selection,
+                    ..settings(out.path(), &policy, &scheme)
+                },
+            )
+            .unwrap();
+            assert_eq!(release.stacks, 1, "{name}, {how}: {release:?}");
+            assert_eq!(release.files, 2, "{name}, {how}");
+            assert!(release.left_out_unless_asked.is_empty(), "{name}, {how}");
+        }
+        // And beside every other disposition the session holds.
+        let out = TempDir::new("display-all");
+        let release = run::run(
+            &mut reg,
+            &run::Settings {
+                selection: asked(
+                    &["acquisition", "scanner_derived", "display_composite"],
+                    &[],
+                ),
+                ..settings(out.path(), &policy, &scheme)
+            },
+        )
+        .unwrap();
+        assert_eq!(release.stacks, 3, "{name}: {release:?}");
+        let everything = paths_in(out.path());
+        for (place, files) in paths_in(plain_out.path()) {
+            assert!(
+                everything.contains(&(place.clone(), files)),
+                "{name}: {place} kept its name: {everything:?}"
+            );
+        }
+        if let Some(dsn) = &dsn {
+            drop_schemas_named(dsn, OWN);
+        }
+    }
+}

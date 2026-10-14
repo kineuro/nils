@@ -1,0 +1,59 @@
+{
+  "name": "gold-c-demographics-plain",
+  "question": "The same demographics, asked at detail plain",
+  "hash": "ecbe0b7189cf113150aba21a14108b8573525d3f2749a86bf04a9ea613efa3eb",
+  "columns": [
+    "_key",
+    "_subject",
+    "cohort.id",
+    "_subjects",
+    "n_female",
+    "pct_female",
+    "mean_age",
+    "min_age",
+    "max_age",
+    "stddev.age",
+    "share._subjects"
+  ],
+  "row_count": 2,
+  "rows": [
+    [
+      "1",
+      "",
+      "1",
+      "38",
+      "",
+      "",
+      "58.470588235",
+      "99",
+      "99",
+      "7.97877808",
+      "0.88372093"
+    ],
+    [
+      "2",
+      "",
+      "2",
+      "12",
+      "",
+      "",
+      "49.8",
+      "99",
+      "99",
+      "11.513470372",
+      "0.279069767"
+    ]
+  ],
+  "funnel": {
+    "people": 43,
+    "scope": 2
+  },
+  "shaped": [
+    "min_age",
+    "max_age"
+  ],
+  "held_back": [
+    "n_female",
+    "pct_female"
+  ]
+}

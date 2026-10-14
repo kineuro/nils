@@ -8,7 +8,10 @@
 //! digest; `list` and `show` read it back.
 //!
 //! The runner: `nils run <pipeline> --select selection:<name>@<v>` is one run
-//! over a frozen selection, a job of kind `pipeline`, queued at `POST
+//! over a frozen selection (or, record 55, over a dataset's or a cohort's
+//! main scans of a role, `--select main:<role>@dataset:<name>`, or of each
+//! role the pipeline needs, `main@dataset:<name>`, frozen the same way:
+//! `crate::main_input`), a job of kind `pipeline`, queued at `POST
 //! /api/jobs` under `pipelines:work` at detail quasi, since a pipeline reads
 //! pixels. Runs whose stacks do not meet go on side by side within the
 //! lane's one budget; a run that would take a stack a running run holds is
@@ -54,15 +57,17 @@ use nils_registry::store::Store;
 use nils_registry::{Param, Registry};
 use serde_json::{Value, json};
 
-use crate::serve::Reply;
+use crate::serve::{Caller, Reply};
 use crate::{Exit, fail, usage};
 
 /// The doors, as the capabilities list them.
-pub(crate) const DOORS: [&str; 4] = [
+pub(crate) const DOORS: [&str; 6] = [
     "GET /api/pipelines",
     "GET /api/pipelines/{id}",
     "GET /api/pipeline-runs",
     "GET /api/pipeline-runs/{id}",
+    "GET /api/pipeline-runs/{id}/log",
+    "GET /api/pipeline-runs/{id}/units/{unit}/log",
 ];
 
 /// Where the registry keeps the operator's choice of runtime.
@@ -114,23 +119,129 @@ pub(crate) fn choice(registry: &mut Registry) -> Choice {
         .unwrap_or(Choice::Auto)
 }
 
-/// What the look for a runtime found, kept half a minute, since the
-/// capabilities are read often and asking podman is not free.
-pub(crate) fn detect_cached(registry: &mut Registry) -> Detected {
-    static CACHE: Mutex<Option<(Instant, Choice, Detected)>> = Mutex::new(None);
+/// How long a runtime found is kept before it is looked for again. Asking
+/// podman is not free: `podman info` took 5 s of a busy laptop's time.
+const LOOK_KEPT: Duration = Duration::from_secs(120);
+
+/// How long a door waits for the first look at the choice in force, where
+/// nothing is known of it yet: a stand-in answers well within it, a real
+/// podman on a busy host does not, and the door answers without it.
+const FIRST_LOOK_WAIT: Duration = Duration::from_secs(1);
+
+/// What the looks for a runtime found, and the look in flight.
+struct Looks {
+    found: Option<(Instant, Choice, Detected)>,
+    looking: Option<Choice>,
+}
+
+static LOOKS: Mutex<Looks> = Mutex::new(Looks {
+    found: None,
+    looking: None,
+});
+static LOOKED: std::sync::Condvar = std::sync::Condvar::new();
+/// Whether this process serves doors, so a look runs behind them.
+static LOOK_BEHIND: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// `nils serve` (2026-10-11): from here on the look for a runtime runs on a
+/// thread of its own and never on a door's, and the first starts now. The
+/// capabilities door ran `podman info` itself whenever its finding was half
+/// a minute old; that took 5 s on a busy laptop, up to the probe's 30 s cap
+/// on a busy host, and the desk, which gives the engine 5 s, said every
+/// half minute that the engine did not answer.
+pub(crate) fn look_behind(registry: &mut Registry) {
+    LOOK_BEHIND.store(true, std::sync::atomic::Ordering::SeqCst);
     let chosen = choice(registry);
-    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some((at, c, d)) = cache.as_ref()
-        && *c == chosen
-        && at.elapsed() < Duration::from_secs(30)
-    {
-        return d.clone();
+    let mut looks = LOOKS.lock().unwrap_or_else(|e| e.into_inner());
+    if looks.looking.is_none() {
+        start_look(&mut looks, chosen);
     }
-    let d = runtime::detect(chosen, std::env::var_os("PATH").as_deref());
-    // a runtime that did not answer in time is not a finding to keep: the
-    // next read looks again (wave 43's proof)
-    *cache = (!d.unknown).then(|| (Instant::now(), chosen, d.clone()));
-    d
+}
+
+/// A look at `chosen` on a thread of its own; what it finds is kept and
+/// whoever waits for it is woken.
+fn start_look(looks: &mut Looks, chosen: Choice) {
+    looks.looking = Some(chosen);
+    let path = std::env::var_os("PATH");
+    let started = std::thread::Builder::new()
+        .name("nils-runtime-look".to_string())
+        .spawn(move || {
+            let d = runtime::detect(chosen, path.as_deref());
+            let mut looks = LOOKS.lock().unwrap_or_else(|e| e.into_inner());
+            looks.found = Some((Instant::now(), chosen, d));
+            looks.looking = None;
+            drop(looks);
+            LOOKED.notify_all();
+        });
+    if started.is_err() {
+        looks.looking = None;
+    }
+}
+
+/// What a door says while the first look has not come back.
+fn still_looking(chosen: Choice) -> Detected {
+    Detected {
+        choice: chosen,
+        runtime: None,
+        reason: Some(
+            "pipelines are off for a moment: the engine is still looking for a container runtime; ask again shortly"
+                .to_string(),
+        ),
+        looked: Vec::new(),
+        unknown: true,
+    }
+}
+
+/// What the look for a runtime found. In `nils serve` this never waits on
+/// a runtime: the last finding is answered and an old or unknown one is
+/// looked at again behind the door, so a capabilities read costs no
+/// subprocess (see [`look_behind`]). At the command line it looks, once.
+pub(crate) fn detect_cached(registry: &mut Registry) -> Detected {
+    let chosen = choice(registry);
+    if !LOOK_BEHIND.load(std::sync::atomic::Ordering::SeqCst) {
+        {
+            let looks = LOOKS.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some((at, c, d)) = looks.found.as_ref()
+                && *c == chosen
+                && !d.unknown
+                && at.elapsed() < LOOK_KEPT
+            {
+                return d.clone();
+            }
+        }
+        let d = runtime::detect(chosen, std::env::var_os("PATH").as_deref());
+        // a runtime that did not answer in time is not a finding to keep:
+        // the next read looks again (wave 43's proof)
+        if !d.unknown {
+            LOOKS.lock().unwrap_or_else(|e| e.into_inner()).found =
+                Some((Instant::now(), chosen, d.clone()));
+        }
+        return d;
+    }
+    let until = Instant::now() + FIRST_LOOK_WAIT;
+    let mut looks = LOOKS.lock().unwrap_or_else(|e| e.into_inner());
+    loop {
+        if let Some((at, c, d)) = looks.found.as_ref()
+            && *c == chosen
+        {
+            let d = d.clone();
+            // an unknown finding, or an old one, is looked at again behind the door
+            if (d.unknown || at.elapsed() >= LOOK_KEPT) && looks.looking.is_none() {
+                start_look(&mut looks, chosen);
+            }
+            return d;
+        }
+        if looks.looking.is_none() {
+            start_look(&mut looks, chosen);
+        }
+        let now = Instant::now();
+        if now >= until {
+            return still_looking(chosen);
+        }
+        looks = LOOKED
+            .wait_timeout(looks, until - now)
+            .unwrap_or_else(|e| e.into_inner())
+            .0;
+    }
 }
 
 /// What `GET /api/capabilities` says of pipelines: on when a runtime and a
@@ -208,7 +319,408 @@ fn capability_base(store: &mut Store, d: &Detected) -> Value {
         "pipelines": catalog,
         "contract": nils_pipeline::CONTRACT,
         "grants": {"see": "pipelines:see", "run": "pipelines:work", "run_detail": "quasi"},
+        // 2026-10-12: the pre-flight takes a run taken up again ({resume:
+        // <run>}), and the jobs door checks one as it checks a new run
+        "preflight": {"door": crate::preflight::DOOR, "resume": true},
     })
+}
+
+/// Add a descriptor's text to the catalog, as `nils pipeline add --json`
+/// and `POST /api/pipelines` do (record 55 H2): parsed and its image's pin
+/// checked, kept as its name's next version unless the catalog holds the
+/// same descriptor, and audited when it is new. The answer is the catalog
+/// entry with `added`, `replaces` (the earlier versions a new run no longer
+/// takes) and `replaces_why`. A descriptor that does not parse, or names an
+/// image not pinned by digest, is a usage error in plain words.
+pub(crate) fn add_descriptor(registry: &mut Registry, text: &str) -> Result<Value, Exit> {
+    let d = descriptor::parse(text).map_err(|e| usage(e.to_string()))?;
+    let digest = d.digest();
+    let who = crate::actor();
+    let now = nils_registry::time::now_iso();
+    let (p, fresh) = rows::add(
+        registry.store(),
+        &rows::New {
+            name: &d.name,
+            tool_version: &d.tool_version,
+            descriptor: &d.document,
+            descriptor_digest: &digest,
+            image: &d.image.reference,
+            image_digest: &d.image.digest,
+            layout: d.layout.name(),
+            level: d.level.name(),
+            added_by: &who,
+            added_at: &now,
+        },
+    )?;
+    if fresh {
+        crate::audit(
+            registry,
+            nils_registry::audit::Action::PipelineAdd,
+            json!({"pipeline": p.id, "name": p.name, "version": p.version}),
+            Some(json!({"descriptor": p.descriptor_digest, "image": p.image_digest})),
+        )?;
+    }
+    // 2026-10-12: the earlier versions it replaces, which a new run no
+    // longer takes
+    let replaced: Vec<String> = rows::versions(registry.store(), &p.name)?
+        .iter()
+        .filter(|q| q.version < p.version && q.state == "active")
+        .filter(|q| d.replaces.as_ref().is_some_and(|r| r.covers(q.version)))
+        .map(Pipeline::label)
+        .collect();
+    let mut v = pipeline_doc_of(registry.store(), &p);
+    v["added"] = json!(fresh);
+    v["replaces"] = json!(replaced);
+    v["replaces_why"] = json!(d.replaces.as_ref().map(|r| r.why.clone()));
+    Ok(v)
+}
+
+/// A change to the lane, as `nils pipeline lane` and `PUT
+/// /api/pipelines/lane` take it: each field left out is kept.
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LaneChange {
+    pub(crate) cores: Option<u32>,
+    pub(crate) memory_gb: Option<u64>,
+    pub(crate) gpu_card: Option<String>,
+    pub(crate) output_place: Option<String>,
+    pub(crate) scratch_place: Option<String>,
+}
+
+/// Set the lane (record 49): its cores and memory, the card a GPU unit
+/// leases, and its output and scratch places, each checked as the command
+/// line checks it, and the change audited. A place is an active working
+/// place by name, or `default` for the first working place.
+pub(crate) fn set_lane(registry: &mut Registry, change: &LaneChange) -> Result<(), Exit> {
+    let mut changed = serde_json::Map::new();
+    if let Some(c) = change.cores {
+        if c == 0 {
+            return Err(usage("the lane's cores are one or more"));
+        }
+        registry.set_meta(LANE_CORES_KEY, &c.to_string())?;
+        changed.insert("cores".into(), json!(c));
+    }
+    if let Some(m) = change.memory_gb {
+        if m == 0 {
+            return Err(usage("the lane's memory is one GB or more"));
+        }
+        registry.set_meta(LANE_MEMORY_KEY, &m.to_string())?;
+        changed.insert("memory_gb".into(), json!(m));
+    }
+    if let Some(card) = &change.gpu_card {
+        let word = card.trim();
+        if word != "none" && word.parse::<u32>().is_err() {
+            return Err(usage(format!(
+                "the GPU card is a card's index, or none, not {word}"
+            )));
+        }
+        registry.set_meta(GPU_CARD_KEY, word)?;
+        changed.insert("gpu_card".into(), json!(word));
+    }
+    for (given, key, flag) in [
+        (&change.output_place, OUTPUT_PLACE_KEY, "output"),
+        (&change.scratch_place, SCRATCH_PLACE_KEY, "scratch"),
+    ] {
+        let Some(name) = given.as_ref().map(|n| n.trim().to_string()) else {
+            continue;
+        };
+        let value = if name == "default" {
+            String::new()
+        } else {
+            let working = nils_registry::place::active(registry.store())
+                .map_err(|e| fail(e.to_string()))?
+                .into_iter()
+                .any(|p| p.name == name && p.role == nils_registry::place::Role::Working);
+            if !working {
+                return Err(usage(format!(
+                    "the {flag} place {name}: no active working place is named so; add one with the working role under Places"
+                )));
+            }
+            name
+        };
+        registry.set_meta(key, &value)?;
+        changed.insert(
+            format!("{flag}_place"),
+            json!(if value.is_empty() {
+                "default"
+            } else {
+                value.as_str()
+            }),
+        );
+    }
+    if !changed.is_empty() {
+        crate::audit(
+            registry,
+            nils_registry::audit::Action::PipelineRuntime,
+            json!({"lane": Value::Object(changed)}),
+            None,
+        )?;
+    }
+    Ok(())
+}
+
+/// The lane as `nils pipeline lane --json` prints it and `GET
+/// /api/pipelines/lane` answers it: cores, memory_gb, set, why, gpu_card,
+/// and its places (or the error that turns pipelines off).
+pub(crate) fn lane_answer(registry: &mut Registry) -> Value {
+    let lane = lane_of(registry);
+    let places = run_places(registry.store());
+    let mut doc = lane.doc();
+    doc["places"] = match &places {
+        Ok(p) => p.doc(),
+        Err(e) => json!({"error": e}),
+    };
+    doc
+}
+
+/// Whether a word is a secret's id: lowercase letters, digits and `_`.
+fn secret_id_ok(id: &str) -> bool {
+    !id.is_empty()
+        && id
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+}
+
+/// Set the file a secret is read from (record 49 R3), as `nils pipeline
+/// secret set` does: the path is kept, never the bytes, and the file is read
+/// now so a file the engine cannot read is said now.
+pub(crate) fn set_secret_file(registry: &mut Registry, id: &str, file: &Path) -> Result<(), Exit> {
+    if !secret_id_ok(id) {
+        return Err(usage(format!(
+            "a secret's id is lowercase letters, digits and _, not {id}"
+        )));
+    }
+    if !file.is_absolute() {
+        return Err(usage(format!(
+            "{} is not an absolute path; the engine reads the file where it runs",
+            file.display()
+        )));
+    }
+    secrets::read(id, file).map_err(usage)?;
+    let path = file.display().to_string();
+    if path.contains(':') || path.contains(',') {
+        return Err(usage(format!(
+            "{path} holds a ':' or a ',', which a runtime's mount syntax splits on"
+        )));
+    }
+    registry.set_meta(&format!("{SECRET_PREFIX}{id}"), &path)?;
+    crate::audit(
+        registry,
+        nils_registry::audit::Action::PipelineRuntime,
+        json!({"secret": id, "set": true}),
+        None,
+    )?;
+    Ok(())
+}
+
+/// Forget a secret's file, as `nils pipeline secret unset` does.
+pub(crate) fn unset_secret(registry: &mut Registry, id: &str) -> Result<(), Exit> {
+    if !secret_id_ok(id) {
+        return Err(usage(format!(
+            "a secret's id is lowercase letters, digits and _, not {id}"
+        )));
+    }
+    registry.set_meta(&format!("{SECRET_PREFIX}{id}"), "")?;
+    crate::audit(
+        registry,
+        nils_registry::audit::Action::PipelineRuntime,
+        json!({"secret": id, "set": false}),
+        None,
+    )?;
+    Ok(())
+}
+
+/// Where a secret given at `PUT /api/pipelines/secrets/{id}` is kept: under
+/// the engine's home, in `secrets/`, readable by the engine alone.
+pub(crate) const SECRETS_DIR: &str = "secrets";
+
+/// Keep a secret's text, given at the door, as a file of the engine's own
+/// (record 55 H2): written to `secrets/<id>` under the engine's home with
+/// mode 0600 in a folder of mode 0700, then set as `nils pipeline secret
+/// set` sets a file. The bytes never enter the registry, the audit or the
+/// answer.
+pub(crate) fn keep_secret_text(
+    registry: &mut Registry,
+    home: &Path,
+    id: &str,
+    content: &str,
+) -> Result<(), Exit> {
+    if !secret_id_ok(id) {
+        return Err(usage(format!(
+            "a secret's id is lowercase letters, digits and _, not {id}"
+        )));
+    }
+    if content.trim().is_empty() {
+        return Err(usage(format!("the secret {id} is empty")));
+    }
+    if content.len() as u64 > secrets::MAX_BYTES {
+        return Err(usage(format!(
+            "the secret {id} is {} bytes, more than a secret file's {}",
+            content.len(),
+            secrets::MAX_BYTES
+        )));
+    }
+    let dir = home.join(SECRETS_DIR);
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| fail(format!("the secrets folder cannot be made: {e}")))?;
+    let file = dir.join(id);
+    let write = || -> std::io::Result<()> {
+        use std::io::Write;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
+            let tmp = dir.join(format!(".{id}.new"));
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&tmp)?;
+            f.write_all(content.as_bytes())?;
+            f.sync_all()?;
+            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
+            std::fs::rename(&tmp, &file)
+        }
+        #[cfg(not(unix))]
+        {
+            std::fs::write(&file, content.as_bytes())
+        }
+    };
+    write().map_err(|e| fail(format!("the secret {id} cannot be written: {e}")))?;
+    set_secret_file(registry, id, &file)
+}
+
+/// The secrets, as `GET /api/pipelines/secrets` answers them: each one an
+/// active pipeline declares or the site has set, with the pipelines that
+/// declare it, whether every declaration is optional, whether it is set and
+/// whether its file can be read now. Never its path or its bytes.
+pub(crate) fn secrets_answer(registry: &mut Registry) -> Result<Value, Exit> {
+    let mut declared: std::collections::BTreeMap<String, (Vec<String>, bool)> =
+        std::collections::BTreeMap::new();
+    for p in rows::list(registry.store())?
+        .iter()
+        .filter(|p| p.state == "active")
+    {
+        for s in p.descriptor["x-nils"]["secrets"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+        {
+            let Some(id) = s["id"].as_str() else { continue };
+            let e = declared
+                .entry(id.to_string())
+                .or_insert_with(|| (Vec::new(), true));
+            e.0.push(p.label());
+            e.1 &= s["optional"] == true;
+        }
+    }
+    for id in secret_ids(registry.store()) {
+        declared.entry(id).or_insert_with(|| (Vec::new(), true));
+    }
+    let mut out = Vec::new();
+    for (id, (by, optional)) in declared {
+        let path = secret_path(registry, &id).filter(|p| !p.trim().is_empty());
+        let readable = path
+            .as_deref()
+            .is_some_and(|p| secrets::read(&id, Path::new(p)).is_ok());
+        out.push(json!({
+            "id": id,
+            "declared_by": by,
+            "optional": optional,
+            "set": path.is_some(),
+            "readable": readable,
+        }));
+    }
+    Ok(json!({ "secrets": out }))
+}
+
+/// The doors that change the catalog and the lane (record 55 H2: no
+/// command line inside a desk flow), as the capabilities list them.
+pub(crate) const SETUP_DOORS: [&str; 6] = [
+    "POST /api/pipelines",
+    "GET /api/pipelines/lane",
+    "PUT /api/pipelines/lane",
+    "GET /api/pipelines/secrets",
+    "PUT /api/pipelines/secrets/{id}",
+    "DELETE /api/pipelines/secrets/{id}",
+];
+
+/// `POST /api/pipelines` (a descriptor's text added to the catalog), `GET`
+/// and `PUT /api/pipelines/lane`, `GET /api/pipelines/secrets`, and `PUT`
+/// and `DELETE /api/pipelines/secrets/{id}`. The grants are the door
+/// table's: pipelines:see to read, install:work to change, since each
+/// brings a container image or a site's file into what runs.
+pub(crate) fn setup_route(
+    home: &Path,
+    registry: &mut Registry,
+    method: &str,
+    segs: &[&str],
+    body: &str,
+) -> Option<Result<Reply, Reply>> {
+    let parsed = |body: &str| -> Result<Value, Reply> {
+        serde_json::from_str(body)
+            .map_err(|e| Reply::error(400, format!("the body is not JSON: {e}")))
+    };
+    Some(match (method, segs) {
+        ("POST", ["api", "pipelines"]) => (|| {
+            let v = parsed(body)?;
+            let Some(text) = v["descriptor"].as_str().filter(|t| !t.trim().is_empty()) else {
+                return Err(Reply::error(
+                    400,
+                    "descriptor is the text of a nils.job.yml",
+                ));
+            };
+            let doc = add_descriptor(registry, text)?;
+            Ok(if doc["added"] == true {
+                Reply::created(doc)
+            } else {
+                Reply::ok(doc)
+            })
+        })(),
+        ("GET", ["api", "pipelines", "lane"]) => Ok(Reply::ok(lane_answer(registry))),
+        ("PUT", ["api", "pipelines", "lane"]) => (|| {
+            let change: LaneChange = serde_json::from_str(body).map_err(|e| {
+                Reply::error(
+                    400,
+                    format!(
+                        "the lane takes cores, memory_gb, gpu_card, output_place and scratch_place: {e}"
+                    ),
+                )
+            })?;
+            set_lane(registry, &change)?;
+            Ok(Reply::ok(lane_answer(registry)))
+        })(),
+        ("GET", ["api", "pipelines", "secrets"]) => {
+            secrets_answer(registry).map(Reply::ok).map_err(Reply::from)
+        }
+        ("PUT", ["api", "pipelines", "secrets", id]) => (|| {
+            let v = parsed(body)?;
+            let Some(content) = v["content"].as_str() else {
+                return Err(Reply::error(400, "content is the secret file's text"));
+            };
+            keep_secret_text(registry, home, id, content)?;
+            let all = secrets_answer(registry)?;
+            Ok(Reply::ok(one_secret(&all, id)))
+        })(),
+        ("DELETE", ["api", "pipelines", "secrets", id]) => (|| {
+            unset_secret(registry, id)?;
+            // the file the door kept goes with it; a file the command line
+            // named is the site's own and stays
+            let _ = std::fs::remove_file(home.join(SECRETS_DIR).join(id));
+            let all = secrets_answer(registry)?;
+            Ok(Reply::ok(one_secret(&all, id)))
+        })(),
+        _ => return None,
+    })
+}
+
+/// One secret's row of the list, or a row that says it is not set.
+fn one_secret(all: &Value, id: &str) -> Value {
+    all["secrets"]
+        .as_array()
+        .and_then(|a| a.iter().find(|s| s["id"] == id).cloned())
+        .unwrap_or_else(|| json!({"id": id, "declared_by": [], "optional": true, "set": false, "readable": false}))
 }
 
 /// A catalog entry as the doors and `--json` answer it.
@@ -228,6 +740,34 @@ pub(crate) fn pipeline_doc(p: &Pipeline) -> Value {
     })
 }
 
+/// Catalog entries as the doors and `--json` answer them, each with how it
+/// stands for a new run (Nima's ruling of 2026-10-12, [`crate::versions`]):
+/// current, selectable, replaced (by which version, and why) or retired.
+pub(crate) fn pipeline_docs(list: &[Pipeline]) -> (Vec<Value>, Value) {
+    let standing = crate::versions::of_catalog(list);
+    let docs = list
+        .iter()
+        .map(|p| {
+            let mut doc = pipeline_doc(p);
+            if let Some(s) = standing.get(&p.id) {
+                s.fields(&mut doc);
+            }
+            doc
+        })
+        .collect();
+    (docs, crate::versions::names(list, &standing))
+}
+
+/// One catalog entry as the doors and `--json` answer it, with its standing
+/// read beside the other versions of its name.
+pub(crate) fn pipeline_doc_of(store: &mut Store, p: &Pipeline) -> Value {
+    let mut doc = pipeline_doc(p);
+    if let Ok(s) = crate::versions::of_one(store, p) {
+        s.fields(&mut doc);
+    }
+    doc
+}
+
 /// A run as the doors and `--json` answer it: the row, the pipeline by its
 /// label, and the derivatives it made.
 pub(crate) fn run_doc(store: &mut Store, r: &Run) -> Value {
@@ -241,6 +781,12 @@ pub(crate) fn run_doc(store: &mut Store, r: &Run) -> Value {
         *by_state.entry(u.state.clone()).or_default() += 1;
     }
     doc["unit_states"] = json!(by_state);
+    // record 55 (rulings of 2026-10-12, item 6): a run over a dataset's or a
+    // cohort's main scans says which, and under which rules they were read
+    doc["main"] = r
+        .handle_id
+        .and_then(|h| crate::main_input::entry_of(store, h))
+        .map_or(Value::Null, |e| crate::main_input::shown(&e));
     doc["units_run"] = json!(
         units
             .iter()
@@ -249,9 +795,19 @@ pub(crate) fn run_doc(store: &mut Store, r: &Run) -> Value {
                 "attempts": u.attempts, "device": u.device, "gpu_card": u.gpu_card,
                 "cores": u.cores, "memory_mb": u.memory_mb, "exit_code": u.exit_code,
                 "started_at": u.started_at, "finished_at": u.finished_at,
+                // 2026-10-12: why a unit failed, beside what it said
+                "error": u.outcome["error"],
+                "failure": crate::failures::of_unit(&u.outcome),
+                // 2026-10-12: what a skipped unit lacked, in a few words
+                "lacks": crate::made::lacks(&u.outcome),
             }))
             .collect::<Vec<_>>()
     );
+    // 2026-10-12: what it made, from its units as they stand, a running
+    // run's too; a run that kept no units is read from its summary
+    if !units.is_empty() {
+        doc["made"] = crate::made::of_units(&units);
+    }
     doc
 }
 
@@ -288,6 +844,17 @@ pub(crate) fn runs_docs(store: &mut Store, runs: &[Run]) -> Vec<Value> {
             let mut v = serde_json::to_value(r).unwrap_or(Value::Null);
             v["pipeline"] = json!(labels.get(&r.pipeline_id));
             v["derivatives"] = json!(made.get(&r.id).cloned().unwrap_or_default());
+            // 2026-10-12: a run that failed before its failure was recorded
+            // is read from its error
+            v["failure"] = crate::failures::of_run_doc(&v);
+            // 2026-10-12: what it made, unit by unit, its skipped units'
+            // reasons read from its units where its summary did not sum them
+            let unsummed = !r.summary["skipped_by_why"].is_array()
+                && r.summary["units"]["skipped"]
+                    .as_u64()
+                    .is_some_and(|n| n > 0);
+            let skipped = unsummed.then(|| crate::made::skipped_of_run(store, r.id));
+            v["made"] = crate::made::of_summary(&r.summary, skipped.as_ref());
             v
         })
         .collect()
@@ -374,6 +941,14 @@ pub(crate) fn summary_totals_only(s: &mut Value) {
         s["numbers"]["checks"]["breaches"] = Value::Null;
         withheld.push("numbers.checks.breaches");
     }
+    // record 48: how many units' breaches a seal left out, a count of scans
+    // held as any is
+    if let Some(n) = s["breaches_withheld_sealed"].as_u64()
+        && held("n", n as usize)["withheld"] == true
+    {
+        s["breaches_withheld_sealed"] = Value::Null;
+        withheld.push("breaches_withheld_sealed");
+    }
     // a cell a table could not read is said as its value: counted by column
     if let Some(list) = s["numbers"]["tables"]["refused_values"].as_array() {
         let mut by_column: BTreeMap<String, usize> = BTreeMap::new();
@@ -435,6 +1010,18 @@ pub(crate) fn summary_totals_only(s: &mut Value) {
         }
     }
     s["failures_by_reason"] = json!(held_list("reason", "units", by_reason));
+    // 2026-10-12: the failures by their cause, each count held as a count
+    // of units is
+    if let Some(list) = s["failures_by_cause"].as_array_mut() {
+        for f in list.iter_mut() {
+            let n = f["units"].as_u64().unwrap_or(0) as usize;
+            let kept = held("units", n);
+            f["units"] = kept["units"].clone();
+            if kept["withheld"] == true {
+                f["withheld"] = json!(true);
+            }
+        }
+    }
     s["detail"] = json!("totals");
     s["withheld"] = json!(withheld);
 }
@@ -443,6 +1030,10 @@ pub(crate) fn summary_totals_only(s: &mut Value) {
 /// [`summary_totals_only`] says, no unit's own row, and no error text.
 pub(crate) fn run_totals_only(doc: &mut Value) {
     summary_totals_only(&mut doc["summary"]);
+    // what it made, its counts held as the summary holds them
+    if doc.get("made").is_some() {
+        doc["made"] = crate::made::held(&doc["made"], &doc["summary"]);
+    }
     if doc.get("units_run").is_some() {
         doc["units_run"] = json!([]);
     }
@@ -476,6 +1067,9 @@ pub(crate) fn job_totals_only(job: &mut Value) {
     }
     if job["result"]["summary"].is_object() {
         summary_totals_only(&mut job["result"]["summary"]);
+        if job.get("made").is_some() {
+            job["made"] = crate::made::held(&job["made"], &job["result"]["summary"]);
+        }
     }
     if job["error"].is_string() {
         job["error"] = json!(WITHHELD);
@@ -562,11 +1156,204 @@ pub(crate) fn hold_count(map: &mut Value, key: &str) {
     }
 }
 
+// ------------------------------------------------------- sealed means sealed
+
+/// Record 48, D1 of the move: of the units of a run named, those holding a
+/// stack of a sample sealed now, by the stacks the run gave each
+/// ([`unit_stacks`], read from the registry, never from a file the run's
+/// container could reach). A unit whose stacks can no longer be told holds
+/// one while a stack of the list the run was frozen over is sealed now, or
+/// while that list is gone as well, as a run's own file does at the
+/// derivative doors. None while no sample is sealed.
+pub(crate) fn sealed_units(
+    store: &mut Store,
+    run_id: i64,
+    names: &[String],
+) -> Result<std::collections::BTreeSet<String>, String> {
+    let mut out = std::collections::BTreeSet::new();
+    if names.is_empty() || !crate::sealed::any(store).map_err(|e| e.to_string())? {
+        return Ok(out);
+    }
+    let units: BTreeMap<String, Vec<i64>> = unit_stacks(store, run_id)?
+        .into_iter()
+        .filter(|(_, stacks)| !stacks.is_empty())
+        .collect();
+    let named: Vec<i64> = names
+        .iter()
+        .filter_map(|n| units.get(n))
+        .flatten()
+        .copied()
+        .collect();
+    let sealed = crate::sealed::now(store, &named).map_err(|e| e.to_string())?;
+    let mut untold = Vec::new();
+    for n in names {
+        match units.get(n) {
+            Some(stacks) if stacks.iter().any(|s| sealed.contains(s)) => {
+                out.insert(n.clone());
+            }
+            Some(_) => {}
+            None => untold.push(n.clone()),
+        }
+    }
+    if !untold.is_empty() {
+        let frozen = frozen_stacks(store, run_id)?;
+        if frozen.is_empty()
+            || !crate::sealed::now(store, &frozen)
+                .map_err(|e| e.to_string())?
+                .is_empty()
+        {
+            out.extend(untold);
+        }
+    }
+    Ok(out)
+}
+
+/// The units a run's summary names in its breaches, each once.
+fn breach_units(s: &Value) -> Vec<String> {
+    let mut out: Vec<String> = s["breaches"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|b| b["unit"].as_str().map(str::to_string))
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// Record 48, D1 of the move: a run's summary as a reader who does not read
+/// what a system said of a stack of a sample sealed now reads it. A unit's
+/// breaches are its checks' values on its stacks, so those of each unit
+/// holding such a stack are left out, and `breaches_withheld_sealed` says
+/// how many units went, never which; the run's counts stay as they are.
+/// Answers how many units went.
+pub(crate) fn summary_unsealed(
+    store: &mut Store,
+    run_id: i64,
+    s: &mut Value,
+) -> Result<usize, String> {
+    let sealed = sealed_units(store, run_id, &breach_units(s))?;
+    if sealed.is_empty() {
+        return Ok(0);
+    }
+    if let Some(list) = s["breaches"].as_array_mut() {
+        list.retain(|b| !b["unit"].as_str().is_some_and(|u| sealed.contains(u)));
+    }
+    s["breaches_withheld_sealed"] = json!(sealed.len());
+    Ok(sealed.len())
+}
+
+/// 2026-10-12, with record 48: the error a unit's pipeline wrote of a unit
+/// holding a stack of a sample sealed now is what a system said of that
+/// stack, so a reader who does not read such stacks reads the unit's
+/// failure by its kind and cause, never its words: on those units of
+/// `units_run`, `error` is null and `sealed` true. Answers how many.
+pub(crate) fn units_run_unsealed(
+    store: &mut Store,
+    run_id: i64,
+    doc: &mut Value,
+) -> Result<usize, String> {
+    let named: Vec<String> = doc["units_run"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|u| u["error"].is_string())
+        .filter_map(|u| u["unit"].as_str().map(str::to_string))
+        .collect();
+    let sealed = sealed_units(store, run_id, &named)?;
+    if sealed.is_empty() {
+        return Ok(0);
+    }
+    for u in doc["units_run"].as_array_mut().into_iter().flatten() {
+        if u["unit"].as_str().is_some_and(|n| sealed.contains(n)) {
+            u["error"] = Value::Null;
+            u["sealed"] = json!(true);
+        }
+    }
+    Ok(sealed.len())
+}
+
+/// A job's document as [`summary_unsealed`] leaves a run's summary: the
+/// result of a pipeline run. Answers how many units went.
+pub(crate) fn job_unsealed(store: &mut Store, job: &mut Value) -> Result<usize, String> {
+    match job["result"]["run"].as_i64() {
+        Some(run) if job["result"]["summary"].is_object() => {
+            summary_unsealed(store, run, &mut job["result"]["summary"])
+        }
+        _ => Ok(0),
+    }
+}
+
+/// What a run's QC summary shows a door's caller of the units holding a
+/// sealed stack: nothing, unless it holds sealed:see, whose read of them
+/// is audited as `sealed.read`, naming the door, the run and how many
+/// units, never which.
+fn shown_unsealed(
+    registry: &mut Registry,
+    caller: &Caller,
+    door: &str,
+    run_id: i64,
+    s: &mut Value,
+) -> Result<(), Reply> {
+    let gone = |e: String| Reply::error(500, e);
+    if !crate::sealed::reads(&caller.access) {
+        summary_unsealed(registry.store(), run_id, s).map_err(gone)?;
+        return Ok(());
+    }
+    let read = sealed_units(registry.store(), run_id, &breach_units(s)).map_err(gone)?;
+    if read.is_empty() {
+        return Ok(());
+    }
+    audit_sealed_run(registry, &caller.principal, door, run_id, read.len())
+}
+
+/// The `sealed.read` row of a reader holding sealed:see shown the QC of
+/// units holding a sealed stack.
+fn audit_sealed_run(
+    registry: &mut Registry,
+    principal: &str,
+    door: &str,
+    run_id: i64,
+    units: usize,
+) -> Result<(), Reply> {
+    nils_registry::audit::record(
+        registry,
+        &nils_registry::audit::Entry {
+            principal,
+            action: nils_registry::audit::Action::SealedRead,
+            scope: json!({"door": door, "run": run_id, "breaches_of_units": units}),
+            policy: None,
+            job_id: None,
+            details: Some(json!({"grant": crate::grants::UNSEALED})),
+        },
+    )
+    .map(|_| ())
+    .map_err(|e| Reply::error(500, e.to_string()))
+}
+
+/// A job's document as the jobs doors show it to `caller`: a pipeline
+/// run's result as [`shown_unsealed`] leaves its summary.
+pub(crate) fn job_shown_unsealed(
+    registry: &mut Registry,
+    caller: &Caller,
+    door: &str,
+    job: &mut Value,
+) -> Result<(), Reply> {
+    let Some(run) = job["result"]["run"].as_i64() else {
+        return Ok(());
+    };
+    if !job["result"]["summary"].is_object() {
+        return Ok(());
+    }
+    shown_unsealed(registry, caller, door, run, &mut job["result"]["summary"])
+}
+
 // ---------------------------------------------------------------- the doors
 
 /// The reading doors: the catalog and the runs.
 pub(crate) fn route(
     registry: &mut Registry,
+    caller: &Caller,
     quasi: bool,
     get: bool,
     segs: &[&str],
@@ -583,9 +1370,10 @@ pub(crate) fn route(
     Some(match segs {
         ["api", "pipelines"] => (|| {
             let list = rows::list(registry.store()).map_err(err)?;
-            let docs: Vec<Value> = list.iter().map(pipeline_doc).collect();
+            let (docs, names) = pipeline_docs(&list);
             Ok(Reply::ok(json!({
                 "pipelines": docs,
+                "names": names,
                 "capability": capability(registry),
             })))
         })(),
@@ -594,7 +1382,7 @@ pub(crate) fn route(
             let p = rows::get(registry.store(), id)
                 .map_err(err)?
                 .ok_or_else(|| Reply::error(404, format!("no pipeline {id}")))?;
-            Ok(Reply::ok(pipeline_doc(&p)))
+            Ok(Reply::ok(pipeline_doc_of(registry.store(), &p)))
         })(),
         ["api", "pipeline-runs"] => (|| {
             let pipeline = query
@@ -609,6 +1397,16 @@ pub(crate) fn route(
                 .clamp(1, RUNS_PAGE_MAX);
             let list = rows::runs(registry.store(), pipeline, limit).map_err(err)?;
             let mut docs = runs_docs(registry.store(), &list);
+            // record 48, D1 of the move: no unit's QC of a sealed stack
+            for (doc, r) in docs.iter_mut().zip(&list) {
+                shown_unsealed(
+                    registry,
+                    caller,
+                    "GET /api/pipeline-runs",
+                    r.id,
+                    &mut doc["summary"],
+                )?;
+            }
             if !quasi {
                 docs.iter_mut().for_each(run_totals_only);
             }
@@ -620,13 +1418,146 @@ pub(crate) fn route(
                 .map_err(err)?
                 .ok_or_else(|| Reply::error(404, format!("no pipeline run {id}")))?;
             let mut doc = run_doc(registry.store(), &r);
+            shown_unsealed(
+                registry,
+                caller,
+                "GET /api/pipeline-runs/{id}",
+                r.id,
+                &mut doc["summary"],
+            )?;
+            // 2026-10-12: nor a unit's own words of a stack of such a sample
+            if !crate::sealed::reads(&caller.access) {
+                units_run_unsealed(registry.store(), r.id, &mut doc)
+                    .map_err(|e| Reply::error(500, e))?;
+            }
             if !quasi {
                 run_totals_only(&mut doc);
             }
             Ok(Reply::ok(doc))
         })(),
+        // record 55 H2, round 5 (A23): what a run's containers printed
+        ["api", "pipeline-runs", id, "log"] => (|| {
+            let id = id_of(id, "run")?;
+            run_log(registry, caller, id, None, query)
+        })(),
+        ["api", "pipeline-runs", id, "units", unit, "log"] => (|| {
+            let id = id_of(id, "run")?;
+            run_log(registry, caller, id, Some(unit), query)
+        })(),
         _ => return None,
     })
+}
+
+/// A run's log, or one unit's, as `GET /api/pipeline-runs/{id}/log` and
+/// `GET /api/pipeline-runs/{id}/units/{unit}/log` read it (record 55 H2,
+/// round 5): a slice of the `log.txt` its containers wrote in its scratch
+/// place. A unit of a run whose units ran together reads the run's one log,
+/// `shared`; a run whose units ran apart keeps one a unit and none of its
+/// own. A log that holds the words of a unit with a stack of a sample sealed
+/// now is read only with sealed:see, and that read is audited as the run's
+/// QC of such units is.
+fn run_log(
+    registry: &mut Registry,
+    caller: &Caller,
+    run_id: i64,
+    unit: Option<&str>,
+    query: &std::collections::HashMap<String, String>,
+) -> Result<Reply, Reply> {
+    let gone = |e: String| Reply::error(500, e);
+    let r = rows::run(registry.store(), run_id)
+        .map_err(|e| gone(e.to_string()))?
+        .ok_or_else(|| Reply::error(404, format!("no pipeline run {run_id}")))?;
+    let units = rows::units(registry.store(), run_id).map_err(|e| gone(e.to_string()))?;
+    let names: Vec<String> = units.iter().map(|u| u.unit.clone()).collect();
+    let apart = r.units.as_deref() == Some("apart");
+    let (rel, shared, read): (PathBuf, bool, Vec<String>) = match unit {
+        None if apart => {
+            return Err(Reply::error(
+                404,
+                format!(
+                    "run {run_id}'s units ran apart, each with a log of its own: read a unit's at /api/pipeline-runs/{run_id}/units/<unit>/log"
+                ),
+            ));
+        }
+        None => (PathBuf::from("log.txt"), false, names),
+        Some(u) => {
+            if !names.iter().any(|n| n == u) {
+                return Err(Reply::error(404, format!("run {run_id} has no unit {u}")));
+            }
+            folder_word(u).map_err(|e| Reply::error(404, e))?;
+            if apart {
+                (
+                    Path::new("units").join(u).join("log.txt"),
+                    false,
+                    vec![u.to_string()],
+                )
+            } else {
+                (PathBuf::from("log.txt"), true, names)
+            }
+        }
+    };
+    let door = match unit {
+        None => "GET /api/pipeline-runs/{id}/log",
+        Some(_) => "GET /api/pipeline-runs/{id}/units/{unit}/log",
+    };
+    // record 48, D1 of the move: no unit's words of a sealed stack
+    let sealed = sealed_units(registry.store(), run_id, &read).map_err(gone)?;
+    if !sealed.is_empty() {
+        if !crate::sealed::reads(&caller.access) {
+            return Err(Reply::error(
+                403,
+                format!(
+                    "this log holds the words of a unit with a stack of a sample sealed for certification; it is read only with {}",
+                    crate::grants::UNSEALED
+                ),
+            ));
+        }
+        audit_sealed_run(registry, &caller.principal, door, run_id, sealed.len())?;
+    }
+    // its scratch where it kept it, as a run taken up again finds it
+    let place = r
+        .scratch_place_id
+        .or(r.place_id)
+        .and_then(|id| {
+            nils_registry::place::show(registry.store(), id)
+                .ok()
+                .flatten()
+        })
+        .ok_or_else(|| {
+            Reply::error(
+                404,
+                format!("run {run_id}'s working place is gone, and its log with it"),
+            )
+        })?;
+    let file = Path::new(&place.path)
+        .join(RUNS)
+        .join(run_id.to_string())
+        .join(&rel);
+    let (from, limit) = crate::logs::asked(query).map_err(|e| Reply::error(400, e))?;
+    match crate::logs::read(&file, from, limit) {
+        Ok(mut doc) => {
+            doc["run"] = json!(run_id);
+            doc["unit"] = json!(unit);
+            doc["shared"] = json!(shared);
+            doc["over"] = json!(r.status != "running");
+            Ok(Reply::ok(doc))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(Reply::error(
+            404,
+            match unit {
+                Some(u) if r.status == "running" => {
+                    format!("unit {u} of run {run_id} has written no log yet: it has not started")
+                }
+                Some(u) => format!(
+                    "unit {u} of run {run_id} kept no log: it never ran, or its log was cleared with the run's scratch"
+                ),
+                None => format!(
+                    "run {run_id} kept no log: it never started its container, or its log was cleared with its scratch"
+                ),
+            },
+        )),
+        Err(e) => Err(gone(format!("run {run_id}'s log could not be read: {e}"))),
+    }
 }
 
 /// A `run` a door queues: the pipeline and the flags a caller may give,
@@ -838,8 +1769,16 @@ pub(crate) struct RunArgs {
         conflicts_with_all = ["pipeline", "select", "handle", "params", "models", "labels", "threshold"]
     )]
     pub(crate) resume: Option<i64>,
-    /// The selection to run over, frozen now into its stacks and pinned
-    #[arg(long, value_name = "selection:NAME@V", conflicts_with = "handle")]
+    /// The selection to run over, frozen now into its stacks and pinned; or
+    /// a dataset's or a cohort's main scans of a role, resolved now and
+    /// frozen the same way: main:ROLE@dataset:NAME or main:ROLE@cohort:NAME;
+    /// or, without a role, the main scans of each role the pipeline needs,
+    /// a visit taken where it has every one: main@dataset:NAME
+    #[arg(
+        long,
+        value_name = "selection:NAME@V|main:ROLE@dataset:NAME|main@dataset:NAME",
+        conflicts_with = "handle"
+    )]
     pub(crate) select: Option<String>,
     /// A frozen list of stacks to run over, by handle id, pinned
     #[arg(long, value_name = "ID")]
@@ -871,10 +1810,16 @@ pub(crate) struct RunArgs {
     #[arg(long, value_name = "N", conflicts_with_all = ["resume", "handle"])]
     pub(crate) chunk: Option<u64>,
     /// Run nothing: say what the run would do (record 49 A3), its units,
-    /// the units missing an input and why, the time, the GPU, and what a
-    /// unit needs against the lane's budget
+    /// the units that cannot run and what they lack, the time, the GPU, and
+    /// what a unit needs against the lane's budget; with --resume, what a
+    /// run taken up again would do, of the units it still has to run
     #[arg(long)]
     pub(crate) preflight: bool,
+    /// Run a version a later one replaces because it fixes it, named by
+    /// name@version or its id (2026-10-12): a new run is otherwise refused
+    /// and the doors never take it
+    #[arg(long, conflicts_with = "resume")]
+    pub(crate) replaced: bool,
     /// Machine-readable output
     #[arg(long)]
     pub(crate) json: bool,
@@ -894,51 +1839,34 @@ pub(crate) fn command(home: &Home, command: PipelineCommand) -> Result<(), Exit>
         PipelineCommand::Add { file, json } => {
             let text = std::fs::read_to_string(&file)
                 .map_err(|e| usage(format!("{}: {e}", file.display())))?;
-            let d =
-                descriptor::parse(&text).map_err(|e| usage(format!("{}: {e}", file.display())))?;
-            let digest = d.digest();
-            let who = crate::actor();
-            let now = nils_registry::time::now_iso();
-            let (p, fresh) = rows::add(
-                registry.store(),
-                &rows::New {
-                    name: &d.name,
-                    tool_version: &d.tool_version,
-                    descriptor: &d.document,
-                    descriptor_digest: &digest,
-                    image: &d.image.reference,
-                    image_digest: &d.image.digest,
-                    layout: d.layout.name(),
-                    level: d.level.name(),
-                    added_by: &who,
-                    added_at: &now,
-                },
-            )?;
-            if fresh {
-                crate::audit(
-                    &mut registry,
-                    nils_registry::audit::Action::PipelineAdd,
-                    json!({"pipeline": p.id, "name": p.name, "version": p.version}),
-                    Some(json!({"descriptor": p.descriptor_digest, "image": p.image_digest})),
-                )?;
-            }
+            let v = add_descriptor(&mut registry, &text)
+                .map_err(|e| usage(format!("{}: {}", file.display(), e.message)))?;
             if json {
-                let mut v = pipeline_doc(&p);
-                v["added"] = json!(fresh);
                 return print(&v);
             }
             println!(
                 "pipeline {}: {} ({}), image {}{}",
-                p.id,
-                p.label(),
-                p.descriptor_digest,
-                p.image,
-                if fresh {
+                v["id"],
+                v["label"].as_str().unwrap_or_default(),
+                v["descriptor_digest"].as_str().unwrap_or_default(),
+                v["image"].as_str().unwrap_or_default(),
+                if v["added"] == true {
                     ""
                 } else {
                     "; the catalog already held this descriptor"
                 }
             );
+            let replaced: Vec<&str> = v["replaces"]
+                .as_array()
+                .map(|a| a.iter().filter_map(Value::as_str).collect())
+                .unwrap_or_default();
+            if !replaced.is_empty() {
+                println!(
+                    "it replaces {}, which a new run no longer takes: {}",
+                    replaced.join(", "),
+                    v["replaces_why"].as_str().unwrap_or_default()
+                );
+            }
             Ok(())
         }
         PipelineCommand::List { json } => {
@@ -948,26 +1876,40 @@ pub(crate) fn command(home: &Home, command: PipelineCommand) -> Result<(), Exit>
                 let extra = lane_doc(&mut registry);
                 capability_with(registry.store(), &d, Some(extra))
             };
+            let (docs, names) = pipeline_docs(&list);
             if json {
                 return print(&json!({
-                    "pipelines": list.iter().map(pipeline_doc).collect::<Vec<_>>(),
+                    "pipelines": docs,
+                    "names": names,
                     "capability": cap,
                 }));
             }
+            // 2026-10-12: each version as a new run takes it: current,
+            // selectable, replaced or retired
             println!(
-                "{:>5}  {:<32} {:<8} {:<11} {:<7} image",
+                "{:>5}  {:<32} {:<8} {:<11} {:<10} image",
                 "id", "pipeline", "layout", "level", "state"
             );
-            for p in &list {
+            for (p, doc) in list.iter().zip(&docs) {
                 println!(
-                    "{:>5}  {:<32} {:<8} {:<11} {:<7} {}",
+                    "{:>5}  {:<32} {:<8} {:<11} {:<10} {}",
                     p.id,
                     p.label(),
                     p.layout,
                     p.level,
-                    p.state,
+                    doc["standing"].as_str().unwrap_or(p.state.as_str()),
                     p.image
                 );
+            }
+            for (p, doc) in list.iter().zip(&docs) {
+                if doc["standing"] == "replaced" {
+                    println!(
+                        "{} is replaced by {}: {}",
+                        p.label(),
+                        doc["replaced_by"].as_str().unwrap_or_default(),
+                        doc["replaced_why"].as_str().unwrap_or_default()
+                    );
+                }
             }
             if cap["enabled"] == true {
                 println!(
@@ -989,11 +1931,20 @@ pub(crate) fn command(home: &Home, command: PipelineCommand) -> Result<(), Exit>
         PipelineCommand::Show { pipeline, json } => {
             let p = rows::resolve(registry.store(), &pipeline)?
                 .ok_or_else(|| usage(format!("no pipeline {pipeline} in the catalog")))?;
-            let doc = pipeline_doc(&p);
+            let doc = pipeline_doc_of(registry.store(), &p);
             if json {
                 return print(&doc);
             }
             println!("pipeline {}: {}", p.id, p.label());
+            match doc["standing"].as_str() {
+                Some("replaced") => println!(
+                    "  standing         replaced by {}: {}",
+                    doc["replaced_by"].as_str().unwrap_or_default(),
+                    doc["replaced_why"].as_str().unwrap_or_default()
+                ),
+                Some(state) => println!("  standing         {state}"),
+                None => {}
+            }
             println!("  tool version     {}", p.tool_version);
             println!("  image            {}", p.image);
             println!("  descriptor       {}", p.descriptor_digest);
@@ -1012,9 +1963,9 @@ pub(crate) fn command(home: &Home, command: PipelineCommand) -> Result<(), Exit>
             }
             for o in doc["outputs"].as_array().into_iter().flatten() {
                 println!(
-                    "  output           {}: a {} at {}",
+                    "  output           {}: {} at {}",
                     o["id"].as_str().unwrap_or_default(),
-                    o["kind"].as_str().unwrap_or_default(),
+                    nils_registry::a_or_an(o["kind"].as_str().unwrap_or_default()),
                     o["path-template"].as_str().unwrap_or_default()
                 );
             }
@@ -1094,70 +2045,16 @@ pub(crate) fn command(home: &Home, command: PipelineCommand) -> Result<(), Exit>
             scratch_place,
             json,
         } => {
-            let mut changed = serde_json::Map::new();
-            if let Some(c) = cores {
-                if c == 0 {
-                    return Err(usage("--cores is one or more"));
-                }
-                registry.set_meta(LANE_CORES_KEY, &c.to_string())?;
-                changed.insert("cores".into(), json!(c));
-            }
-            if let Some(m) = memory_gb {
-                if m == 0 {
-                    return Err(usage("--memory-gb is one or more"));
-                }
-                registry.set_meta(LANE_MEMORY_KEY, &m.to_string())?;
-                changed.insert("memory_gb".into(), json!(m));
-            }
-            if let Some(card) = gpu_card {
-                let word = card.trim();
-                if word != "none" && word.parse::<u32>().is_err() {
-                    return Err(usage(format!(
-                        "--gpu-card is a card's index, or none, not {word}"
-                    )));
-                }
-                registry.set_meta(GPU_CARD_KEY, word)?;
-                changed.insert("gpu_card".into(), json!(word));
-            }
-            for (given, key, flag) in [
-                (output_place, OUTPUT_PLACE_KEY, "output"),
-                (scratch_place, SCRATCH_PLACE_KEY, "scratch"),
-            ] {
-                let Some(name) = given.map(|n| n.trim().to_string()) else {
-                    continue;
-                };
-                let value = if name == "default" {
-                    String::new()
-                } else {
-                    let working = nils_registry::place::active(registry.store())
-                        .map_err(|e| fail(e.to_string()))?
-                        .into_iter()
-                        .any(|p| p.name == name && p.role == nils_registry::place::Role::Working);
-                    if !working {
-                        return Err(usage(format!(
-                            "--{flag}-place {name}: no active working place is named so; nils place add {name} <path> --role working adds one, and nils place list shows them"
-                        )));
-                    }
-                    name
-                };
-                registry.set_meta(key, &value)?;
-                changed.insert(
-                    format!("{flag}_place"),
-                    json!(if value.is_empty() {
-                        "default"
-                    } else {
-                        value.as_str()
-                    }),
-                );
-            }
-            if !changed.is_empty() {
-                crate::audit(
-                    &mut registry,
-                    nils_registry::audit::Action::PipelineRuntime,
-                    json!({"lane": Value::Object(changed)}),
-                    None,
-                )?;
-            }
+            set_lane(
+                &mut registry,
+                &LaneChange {
+                    cores,
+                    memory_gb,
+                    gpu_card,
+                    output_place,
+                    scratch_place,
+                },
+            )?;
             let lane = lane_of(&mut registry);
             let places = run_places(registry.store());
             if json {
@@ -1196,47 +2093,12 @@ pub(crate) fn command(home: &Home, command: PipelineCommand) -> Result<(), Exit>
         }
         PipelineCommand::Secret { command } => match command {
             SecretCommand::Set { id, file } => {
-                if !id
-                    .chars()
-                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
-                    || id.is_empty()
-                {
-                    return Err(usage(format!(
-                        "a secret's id is lowercase letters, digits and _, not {id}"
-                    )));
-                }
-                if !file.is_absolute() {
-                    return Err(usage(format!(
-                        "{} is not an absolute path; the engine reads the file where it runs",
-                        file.display()
-                    )));
-                }
-                // read now, so a file the engine cannot read is said now
-                secrets::read(&id, &file).map_err(usage)?;
-                let path = file.display().to_string();
-                if path.contains(':') || path.contains(',') {
-                    return Err(usage(format!(
-                        "{path} holds a ':' or a ',', which a runtime's mount syntax splits on"
-                    )));
-                }
-                registry.set_meta(&format!("{SECRET_PREFIX}{id}"), &path)?;
-                crate::audit(
-                    &mut registry,
-                    nils_registry::audit::Action::PipelineRuntime,
-                    json!({"secret": id, "set": true}),
-                    None,
-                )?;
+                set_secret_file(&mut registry, &id, &file)?;
                 println!("secret {id} is read from its file at each run that declares it");
                 Ok(())
             }
             SecretCommand::Unset { id } => {
-                registry.set_meta(&format!("{SECRET_PREFIX}{id}"), "")?;
-                crate::audit(
-                    &mut registry,
-                    nils_registry::audit::Action::PipelineRuntime,
-                    json!({"secret": id, "set": false}),
-                    None,
-                )?;
+                unset_secret(&mut registry, &id)?;
                 println!("secret {id} is no longer set");
                 Ok(())
             }
@@ -1387,10 +2249,17 @@ pub(crate) fn command(home: &Home, command: PipelineCommand) -> Result<(), Exit>
             limit,
             json,
         } => {
+            // record 48, D1 of the move: no unit's QC of a sealed stack,
+            // unless --unsealed-access says why
+            let unsealed = crate::sealed::keyboard_reads();
             if let Some(id) = id {
                 let r = rows::run(registry.store(), id)?
                     .ok_or_else(|| usage(format!("no pipeline run {id}")))?;
-                let doc = run_doc(registry.store(), &r);
+                let mut doc = run_doc(registry.store(), &r);
+                if !unsealed {
+                    summary_unsealed(registry.store(), r.id, &mut doc["summary"]).map_err(fail)?;
+                    units_run_unsealed(registry.store(), r.id, &mut doc).map_err(fail)?;
+                }
                 if json {
                     return print(&doc);
                 }
@@ -1406,17 +2275,34 @@ pub(crate) fn command(home: &Home, command: PipelineCommand) -> Result<(), Exit>
                 ),
             };
             let list = rows::runs(registry.store(), pid, limit)?;
-            let docs = runs_docs(registry.store(), &list);
+            let mut docs = runs_docs(registry.store(), &list);
+            if !unsealed {
+                for (doc, r) in docs.iter_mut().zip(&list) {
+                    summary_unsealed(registry.store(), r.id, &mut doc["summary"]).map_err(fail)?;
+                }
+            }
             if json {
                 return print(&json!(docs));
             }
             println!(
-                "{:>5}  {:<28} {:<9} {:<10} {:>6}  started",
-                "run", "pipeline", "status", "runtime", "files"
+                "{:>5}  {:<28} {:<9} {:<10} {:>6}  {:<24}  why",
+                "run", "pipeline", "status", "runtime", "files", "started"
             );
             for d in &docs {
+                // 2026-10-12: a failed run's kind and cause beside it, and a
+                // run that did not make all it was for says what it made
+                let why = match (
+                    d["failure"]["kind"].as_str(),
+                    d["failure"]["cause"].as_str(),
+                ) {
+                    (Some(kind), Some(cause)) => format!("{kind} ({cause})"),
+                    _ if d["made"]["made"] != d["made"]["units"] => {
+                        d["made"]["line"].as_str().unwrap_or_default().to_string()
+                    }
+                    _ => String::new(),
+                };
                 println!(
-                    "{:>5}  {:<28} {:<9} {:<10} {:>6}  {}",
+                    "{:>5}  {:<28} {:<9} {:<10} {:>6}  {:<24}  {why}",
                     d["id"],
                     d["pipeline"].as_str().unwrap_or("-"),
                     d["status"].as_str().unwrap_or_default(),
@@ -1431,17 +2317,29 @@ pub(crate) fn command(home: &Home, command: PipelineCommand) -> Result<(), Exit>
 }
 
 fn print_run(doc: &Value) {
+    // 2026-10-12: its units summed beside its status, never a bare done
     println!(
-        "run {} of {}: {}",
+        "run {} of {}: {}{}",
         doc["id"],
         doc["pipeline"].as_str().unwrap_or("-"),
-        doc["status"].as_str().unwrap_or_default()
+        doc["status"].as_str().unwrap_or_default(),
+        doc["made"]["line"]
+            .as_str()
+            .map(|l| format!(" · {l}"))
+            .unwrap_or_default()
     );
     println!(
         "  over             {} (handle {})",
         doc["selection"].as_str().unwrap_or("a handle"),
         doc["handle_id"]
     );
+    // record 55: a dataset's or a cohort's main scans, and what was read
+    if doc["main"].is_object() {
+        println!(
+            "  main scans       {}",
+            crate::main_input::line(&doc["main"])
+        );
+    }
     println!("  parameters       {}", doc["params"]);
     println!(
         "  runtime          {} {} on {}, {}",
@@ -1464,6 +2362,21 @@ fn print_run(doc: &Value) {
     }
     if let Some(e) = doc["error"].as_str() {
         println!("  error            {e}");
+    }
+    if let Some(f) = crate::failures::line(&doc["failure"]) {
+        println!("  failure          {f}");
+    }
+    for f in doc["summary"]["failures_by_cause"]
+        .as_array()
+        .into_iter()
+        .flatten()
+    {
+        println!(
+            "  units failed     {} for {} ({})",
+            f["units"],
+            f["cause"].as_str().unwrap_or_default(),
+            f["kind"].as_str().unwrap_or_default()
+        );
     }
 }
 
@@ -1664,6 +2577,20 @@ struct Materialised {
     /// apart is given of it (record 49 A1).
     entries: Vec<Value>,
     listed: Vec<Value>,
+    /// With the geometry, the rest of each session the run holds part of
+    /// (record 55 E2, P1b), `stacks.json`'s `context`.
+    context: Vec<Value>,
+    /// With `x-nils.input.rows`, `stacks.json`'s `rows` (record 55 D3);
+    /// null otherwise.
+    rows: Value,
+    /// For the bids layout, the converter its release ran with, where it
+    /// was found and how (2026-10-12); null otherwise.
+    converter: Value,
+    /// Record 55 E5: for a run that declares the slice cache, each entry's
+    /// files in the order `stacks.json` lists them, as `source_file` names
+    /// them with the size and time it holds, so a unit's `read` hashes are
+    /// kept for the right files; empty otherwise.
+    files: Vec<Vec<(i64, String, i64, i64)>>,
 }
 
 /// At most this many folders are bound one by one for a stacks input; a
@@ -1680,21 +2607,29 @@ pub(crate) const MAX_BINDS: usize = 2000;
 /// place, unless the folders are more than [`MAX_BINDS`]. The registry is
 /// read a few hundred stacks at a time, not stack by stack. With `header`
 /// (record 50, `x-nils.input.header`) each entry also carries the stack's
-/// header facts, [`stack_headers`]; without it the file is as it was.
+/// header facts, [`stack_headers`]; with `geometry` (record 55 E2,
+/// `x-nils.input.geometry`) each entry carries the stack's geometry and
+/// each of its files their own, [`stack_geometry`] and [`file_geometry`];
+/// without either the file is as it was.
+#[allow(clippy::too_many_arguments)]
 fn materialise_stacks(
     store: &mut Store,
     stacks: &[i64],
     input: &Path,
     header: bool,
+    geometry: bool,
+    contrast: bool,
+    identity: bool,
+    rows: bool,
 ) -> Result<Materialised, String> {
     let d = store.dialect();
     let err = |e: nils_registry::Error| e.to_string();
     type Info = (i64, i64, String, Option<String>);
     let mut info: BTreeMap<i64, Info> = BTreeMap::new();
     let mut axes: BTreeMap<i64, BTreeMap<String, String>> = BTreeMap::new();
-    // per stack: (source id, source root, path, frames and their count)
-    type File = (i64, String, String, Option<(String, i64)>);
-    let mut files_of: BTreeMap<i64, Vec<File>> = BTreeMap::new();
+    let mut files_of: BTreeMap<i64, Vec<StackFile>> = BTreeMap::new();
+    let mut geometry_of: BTreeMap<i64, Value> = BTreeMap::new();
+    let mut study_uid_of: BTreeMap<i64, String> = BTreeMap::new();
     for chunk in stacks.chunks(500) {
         let list = chunk
             .iter()
@@ -1702,14 +2637,19 @@ fn materialise_stacks(
             .collect::<Vec<_>>()
             .join(", ");
         let sql = format!(
-            "SELECT st.id, st.series_id, se.subject_id, st.modality, st.orientation FROM {} st \
-             JOIN {} se ON se.id = st.series_id WHERE st.id IN ({list})",
+            "SELECT st.id, st.series_id, se.subject_id, st.modality, st.orientation, \
+             st.image_orientation_patient, fp.slice_thickness, fp.spacing_between_slices, \
+             se.study_id, st.image_type, fp.sop_class_uid, st.n_instances FROM {} st \
+             JOIN {} se ON se.id = st.series_id LEFT JOIN {} fp ON fp.stack_id = st.id \
+             WHERE st.id IN ({list})",
             store.qualified("stack"),
             store.qualified("series"),
+            store.qualified("stack_fingerprint"),
         );
         for r in store.query(&sql, &[]).map_err(err)? {
+            let id = r.int(0).map_err(err)?;
             info.insert(
-                r.int(0).map_err(err)?,
+                id,
                 (
                     r.int(1).map_err(err)?,
                     r.int(2).map_err(err)?,
@@ -1717,6 +2657,9 @@ fn materialise_stacks(
                     r.opt_text(4).map_err(err)?.map(str::to_string),
                 ),
             );
+            if geometry {
+                geometry_of.insert(id, stack_facts(&r, 5).map_err(err)?);
+            }
         }
         // the axes an image reads, as the registry holds them now
         let sql = format!(
@@ -1731,47 +2674,52 @@ fn materialise_stacks(
                 .entry(r.text(1).map_err(err)?.to_string())
                 .or_insert(r.text(2).map_err(err)?.to_string());
         }
-        // a multi-frame file's frames first, then the files whose every
-        // frame is the stack's
-        let framed = format!(
-            "SELECT fr.stack_id, so.id, so.root, f.path, fr.frames, fr.n_frames FROM {} fr \
-             JOIN {} i ON i.id = fr.instance_id JOIN {} f ON f.id = i.source_file_id \
-             JOIN {} so ON so.id = f.source_id WHERE fr.stack_id IN ({list}) \
-             ORDER BY fr.stack_id, f.path",
-            store.qualified("instance_frame"),
-            store.qualified("instance"),
-            store.qualified("source_file"),
-            store.qualified("source"),
-        );
-        for r in store.query(&framed, &[]).map_err(err)? {
-            files_of.entry(r.int(0).map_err(err)?).or_default().push((
-                r.int(1).map_err(err)?,
-                r.text(2).map_err(err)?.to_string(),
-                r.text(3).map_err(err)?.to_string(),
-                Some((r.text(4).map_err(err)?.to_string(), r.int(5).map_err(err)?)),
-            ));
-        }
-        let whole = format!(
-            "SELECT i.stack_id, so.id, so.root, f.path FROM {} i \
-             JOIN {} f ON f.id = i.source_file_id JOIN {} so ON so.id = f.source_id \
-             WHERE i.stack_id IN ({list}) ORDER BY i.stack_id, f.path",
-            store.qualified("instance"),
-            store.qualified("source_file"),
-            store.qualified("source"),
-        );
-        for r in store.query(&whole, &[]).map_err(err)? {
-            files_of.entry(r.int(0).map_err(err)?).or_default().push((
-                r.int(1).map_err(err)?,
-                r.text(2).map_err(err)?.to_string(),
-                r.text(3).map_err(err)?.to_string(),
-                None,
-            ));
+        stack_files(store, &list, geometry, identity, &mut files_of)?;
+        // record 55 E5: the session a stack is part of, by its DICOM
+        // identity, which the slice cache names its files by
+        if identity {
+            let sql = format!(
+                "SELECT st.id, stu.study_instance_uid FROM {} st JOIN {} se ON se.id = st.series_id \
+                 JOIN {} stu ON stu.id = se.study_id WHERE st.id IN ({list})",
+                store.qualified("stack"),
+                store.qualified("series"),
+                store.qualified("study"),
+            );
+            for r in store.query(&sql, &[]).map_err(err)? {
+                study_uid_of.insert(r.int(0).map_err(err)?, r.text(1).map_err(err)?.to_string());
+            }
         }
     }
     let _ = d;
+    // a stack of a sample sealed now says so, so an image leaves it out of
+    // its session and answers it `sealed` (record 55 E2, P1b)
+    if geometry {
+        let (sealed, _) =
+            nils_registry::labels::sealed_now(store, stacks, &[]).map_err(|e| e.to_string())?;
+        for id in sealed {
+            if let Some(g) = geometry_of.get_mut(&id) {
+                g["sealed"] = json!(true);
+            }
+        }
+    }
+    // the sessions the run's unsealed stacks are part of
+    let geometry_of_studies: std::collections::BTreeSet<i64> = geometry_of
+        .values()
+        .filter(|g| g["sealed"] != true)
+        .filter_map(|g| g["study"].as_i64())
+        .collect();
     let mut headers = if header {
         let subjects: BTreeMap<i64, i64> = info.iter().map(|(k, v)| (*k, v.1)).collect();
         stack_headers(store, &subjects)?
+    } else {
+        BTreeMap::new()
+    };
+    // record 55 E3: the session facts the post-contrast model reads, and
+    // the datasets that hold a file of each stack
+    let mut contrast_of = if contrast {
+        let ids: Vec<i64> = info.keys().copied().collect();
+        crate::contrast::with_datasets(store, &ids, &mut headers)?;
+        crate::contrast::facts(store, &ids)?
     } else {
         BTreeMap::new()
     };
@@ -1787,7 +2735,7 @@ fn materialise_stacks(
     let mut roots: BTreeMap<i64, String> = BTreeMap::new();
     let (mut widened, mut at_root) = (0usize, 0usize);
     for files in files_of.values() {
-        for (so, root, path, _) in files {
+        for (so, root, path, _, _, _) in files {
             roots.entry(*so).or_insert_with(|| root.clone());
             let dir = folder(root, path)?;
             if let std::collections::btree_map::Entry::Vacant(e) = folders.entry((*so, dir.clone()))
@@ -1833,6 +2781,7 @@ fn materialise_stacks(
         }
     }
     let mut entries: Vec<Value> = Vec::new();
+    let mut entry_files: Vec<Vec<(i64, String, i64, i64)>> = Vec::new();
     let mut units: Vec<Unit> = Vec::new();
     for &stack in stacks {
         let Some((series_id, subject_id, modality, orientation)) = info.remove(&stack) else {
@@ -1842,11 +2791,28 @@ fn materialise_stacks(
         };
         let mut seen: std::collections::BTreeSet<(i64, String)> = Default::default();
         let mut files: Vec<Value> = Vec::new();
+        let mut named: Vec<(i64, String, i64, i64)> = Vec::new();
         let mut slices: i64 = 0;
-        for (so, _, path, frames) in files_of.remove(&stack).unwrap_or_default() {
+        for (so, root, path, frames, geo, ident) in files_of.remove(&stack).unwrap_or_default() {
             if !seen.insert((so, path.clone())) {
                 continue;
             }
+            // record 55 E5: the file's SOP Instance UID, and the sha256 of
+            // its bytes where it is known and the file on the disk still
+            // has the size and time it was learnt at: a stale hash would
+            // read another file's pictures from the cache
+            let identity = ident.map(|i| {
+                let holds = i.sha256.is_some()
+                    && std::fs::metadata(Path::new(&root).join(&path)).is_ok_and(|m| {
+                        i64::try_from(m.len()).ok() == Some(i.size)
+                            && nils_digest::walk::mtime_ns_of(&m) == i.mtime_ns
+                    });
+                named.push((so, path.clone(), i.size, i.mtime_ns));
+                json!({
+                    "sop_instance_uid": i.sop_instance_uid,
+                    "sha256": if holds { i.sha256 } else { None },
+                })
+            });
             let (n, rel) = if by_folder {
                 let root = &roots[&so];
                 let dir = folder(root, &path)?;
@@ -1865,7 +2831,14 @@ fn materialise_stacks(
             // a single-frame file is one slice; a multi-frame file the
             // frames that are the stack's
             slices += frames.as_ref().map_or(1, |(_, n)| *n);
-            files.push(json!({"source": n, "path": rel, "frames": frames.map(|(f, _)| f)}));
+            let mut file = json!({"source": n, "path": rel, "frames": frames.map(|(f, _)| f)});
+            if let Some(geo) = geo {
+                file["geometry"] = geo;
+            }
+            if let Some(identity) = identity {
+                file["identity"] = identity;
+            }
+            files.push(file);
         }
         if files.is_empty() {
             return Err(format!("stack {stack} has no files the registry can read"));
@@ -1881,6 +2854,16 @@ fn materialise_stacks(
         if header && let Some(entry) = entries.last_mut() {
             entry["header"] = headers.remove(&stack).unwrap_or(Value::Null);
         }
+        if geometry && let Some(entry) = entries.last_mut() {
+            entry["geometry"] = geometry_of.remove(&stack).unwrap_or(Value::Null);
+        }
+        if contrast && let Some(entry) = entries.last_mut() {
+            entry["contrast"] = contrast_of.remove(&stack).unwrap_or(Value::Null);
+        }
+        if identity && let Some(entry) = entries.last_mut() {
+            entry["identity"] = json!({"study_instance_uid": study_uid_of.remove(&stack)});
+            entry_files.push(named);
+        }
         units.push(Unit {
             id: unit,
             subject: None,
@@ -1892,11 +2875,30 @@ fn materialise_stacks(
             stacks: vec![stack],
         });
     }
-    let manifest =
-        json!({"contract": nils_pipeline::CONTRACT, "sources": listed, "stacks": entries});
-    std::fs::write(
-        input.join("stacks.json"),
-        serde_json::to_vec_pretty(&manifest).unwrap_or_default(),
+    // the rest of each session the run holds part of, for the student's
+    // session top (record 55 E2, P1b): read, never scored
+    let mut context = if geometry {
+        session_context(store, stacks, &geometry_of_studies)?
+    } else {
+        Vec::new()
+    };
+    // record 55 E3: each context entry with its series, header and session
+    // facts, as the run's own stacks carry them
+    if contrast && !context.is_empty() {
+        crate::contrast::context(store, &mut context)?;
+    }
+    // record 55 D3: the registry's rows a header model reads
+    let rows_doc = if rows {
+        Some(crate::system1::header_rows(store, stacks)?)
+    } else {
+        None
+    };
+    write_stacks_json(
+        &input.join("stacks.json"),
+        &listed,
+        &entries,
+        geometry.then_some(context.as_slice()),
+        rows_doc.as_ref(),
     )
     .map_err(|e| format!("the run's input: {e}"))?;
     let scope = if by_folder {
@@ -1928,7 +2930,100 @@ fn materialise_stacks(
         scope,
         entries,
         listed,
+        context,
+        rows: rows_doc.unwrap_or(Value::Null),
+        converter: Value::Null,
+        files: entry_files,
     })
+}
+
+/// `stacks.json` written from the entries as they are, with no copy of
+/// them: compact where it carries the geometry (`context` is given then),
+/// since the files' geometry makes it three to four times the size,
+/// pretty-printed otherwise as before.
+fn write_stacks_json(
+    path: &Path,
+    sources: &[Value],
+    stacks: &[Value],
+    context: Option<&[Value]>,
+    rows: Option<&Value>,
+) -> std::io::Result<()> {
+    #[derive(serde::Serialize)]
+    struct Doc<'a> {
+        contract: &'a str,
+        sources: &'a [Value],
+        stacks: &'a [Value],
+        #[serde(skip_serializing_if = "Option::is_none")]
+        context: Option<&'a [Value]>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        rows: Option<&'a Value>,
+    }
+    let doc = Doc {
+        contract: nils_pipeline::CONTRACT,
+        sources,
+        stacks,
+        context,
+        rows,
+    };
+    let mut w = std::io::BufWriter::new(std::fs::File::create(path)?);
+    if context.is_some() || rows.is_some() {
+        serde_json::to_writer(&mut w, &doc)?;
+    } else {
+        serde_json::to_writer_pretty(&mut w, &doc)?;
+    }
+    std::io::Write::flush(&mut w)
+}
+
+/// A unit run apart holds one stack of its session (record 55 E2, P1b):
+/// its context is the rest of the session, the run's other stacks of its
+/// study that are MR and not sealed, in the context's shape, and the run's
+/// context of that study. None for a manifest without the geometry.
+fn unit_context(m: &Materialised, i: usize) -> Option<Vec<Value>> {
+    let entry = m.entries.get(i)?;
+    let g = entry.get("geometry").filter(|g| g.is_object())?;
+    let Some(study) = g["study"].as_i64().filter(|_| g["sealed"] != true) else {
+        return Some(Vec::new());
+    };
+    let mut out: Vec<Value> = m
+        .entries
+        .iter()
+        .enumerate()
+        .filter(|(j, e)| {
+            *j != i && e["geometry"]["study"].as_i64() == Some(study) && e["geometry"]["sealed"] != true
+        })
+        .filter_map(|(_, e)| {
+            // the image's modality: the stack's own, else its fingerprint's
+            let modality = e["modality"]
+                .as_str()
+                .filter(|t| !t.is_empty())
+                .or_else(|| e["header"]["fingerprint"]["modality"].as_str())
+                .unwrap_or("");
+            let files: Vec<Value> = e["files"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|f| json!({"geometry": f["geometry"]}))
+                .collect();
+            modality.eq_ignore_ascii_case("MR").then(|| {
+                let mut c = json!({"stack_id": e["stack_id"], "modality": modality, "geometry": e["geometry"], "files": files});
+                // record 55 E3: with the session facts, as the context has them
+                if e.get("contrast").is_some() {
+                    c["series_id"] = e["series_id"].clone();
+                    c["header"] = e["header"].clone();
+                    c["contrast"] = e["contrast"].clone();
+                }
+                c
+            })
+        })
+        .collect();
+    out.extend(
+        m.context
+            .iter()
+            .filter(|c| c["geometry"]["study"].as_i64() == Some(study))
+            .cloned(),
+    );
+    out.sort_by_key(|c| c["stack_id"].as_i64());
+    Some(out)
 }
 
 /// The bids layout: a release of the stacks with the picks applied into
@@ -1949,6 +3044,18 @@ fn materialise_bids(
     let chosen = run_dir.join("selection.txt");
     let list: String = stacks.iter().map(|s| format!("{s}\n")).collect();
     std::fs::write(&chosen, list).map_err(|e| format!("the run's folder: {e}"))?;
+    // record 55 (rulings of 2026-10-12, item 6): a frozen list of a
+    // dataset's or a cohort's main scans is released under the picks it was
+    // resolved from, whatever the scope's rules say now, so the run
+    // reproduces; any other, as a release of picked stacks reads them
+    let reading = rows::run(registry.store(), run_id)
+        .map_err(|e| e.to_string())?
+        .and_then(|r| r.handle_id)
+        .and_then(|h| crate::main_input::reading_of(registry.store(), h));
+    let picks = run_dir.join("picks.json");
+    if let Some(doc) = &reading {
+        std::fs::write(&picks, doc.to_string()).map_err(|e| format!("the run's folder: {e}"))?;
+    }
     let exe = std::env::current_exe().map_err(|e| format!("this binary: {e}"))?;
     let log = std::fs::File::create(run_dir.join("release.log"))
         .map_err(|e| format!("the run's folder: {e}"))?;
@@ -1976,6 +3083,9 @@ fn materialise_bids(
     if let Some(dir) = &args.pack_dir {
         cmd.arg("--pack-dir").arg(dir);
     }
+    if reading.is_some() {
+        cmd.arg("--picks-read").arg(&picks);
+    }
     let mut child = cmd.spawn().map_err(|e| format!("the release: {e}"))?;
     let stdout = child.stdout.take();
     let reader = std::thread::spawn(move || {
@@ -2001,6 +3111,10 @@ fn materialise_bids(
             scope: Value::Null,
             entries: Vec::new(),
             listed: Vec::new(),
+            context: Vec::new(),
+            rows: Value::Null,
+            converter: Value::Null,
+            files: Vec::new(),
         });
     }
     if !status.success() {
@@ -2020,7 +3134,14 @@ fn materialise_bids(
         .as_i64()
         .ok_or("the release's report names no release")?;
     rows::set_input_release(registry.store(), run_id, release_id).map_err(|e| e.to_string())?;
-    released(registry, release_id, level)
+    let mut m = released(registry, release_id, level)?;
+    // 2026-10-12: which converter the release ran, and how it was found
+    m.converter = json!({
+        "version": report["converter"],
+        "path": report["converter_path"],
+        "found_by": report["converter_found_by"],
+    });
+    Ok(m)
 }
 
 /// The units of a run's bids input, read back from the release that wrote
@@ -2031,6 +3152,75 @@ fn released(
     release_id: i64,
     level: Level,
 ) -> Result<Materialised, String> {
+    let units = released_of(registry, release_id, level)?;
+    if units.is_empty() {
+        return Err(
+            "the release of the input holds no subject's images: the selection's stacks were not picked, or went to sourcedata; nils pick run picks them".into(),
+        );
+    }
+    Ok(Materialised {
+        units,
+        mounts: Vec::new(),
+        release_id: Some(release_id),
+        stopped: false,
+        scope: json!({"sources": "release"}),
+        entries: Vec::new(),
+        listed: Vec::new(),
+        context: Vec::new(),
+        rows: Value::Null,
+        converter: Value::Null,
+        files: Vec::new(),
+    })
+}
+
+/// One unit of the bids input a run released before, as a run taken up
+/// again goes on with it (2026-10-12): its name, its subject and its
+/// session's day, its stacks, and the roles it lacks as the runner judges
+/// them ([`units_missing`]).
+pub(crate) struct ReleasedUnit {
+    pub(crate) id: String,
+    pub(crate) subject_id: Option<i64>,
+    pub(crate) session_day: Option<String>,
+    pub(crate) stacks: Vec<i64>,
+    pub(crate) missing: Vec<String>,
+}
+
+/// The units of the bids input a run released, each with the roles it
+/// lacks of those the descriptor names, for the pre-flight of a run taken
+/// up again (2026-10-12): the units [`released`] reads back, judged as the
+/// runner judges them when it goes on. None where the release holds none.
+pub(crate) fn released_units(
+    registry: &mut Registry,
+    release_id: i64,
+    level: Level,
+    roles: &[String],
+    main: Option<&Value>,
+) -> Result<Vec<ReleasedUnit>, String> {
+    let units = released_of(registry, release_id, level)?;
+    let mut missing = if roles.is_empty() {
+        BTreeMap::new()
+    } else {
+        units_missing(registry.store(), Some(release_id), &units, roles, main)?
+    };
+    Ok(units
+        .into_iter()
+        .map(|u| ReleasedUnit {
+            missing: missing.remove(&u.id).unwrap_or_default(),
+            id: u.id,
+            subject_id: u.subject_id,
+            session_day: u.session_day,
+            stacks: u.stacks,
+        })
+        .collect())
+}
+
+/// The units a release placed in its subjects' folders, by the run's name
+/// for each.
+fn released_of(
+    registry: &mut Registry,
+    release_id: i64,
+    level: Level,
+) -> Result<Vec<Unit>, String> {
     let store = registry.store();
     let d = store.dialect();
     let err = |e: nils_registry::Error| e.to_string();
@@ -2081,31 +3271,24 @@ fn released(
         });
         u.stacks.push(stack);
     }
-    if units.is_empty() {
-        return Err(
-            "the release of the input holds no subject's images: the selection's stacks were not picked, or went to sourcedata; nils pick run picks them".into(),
-        );
-    }
-    Ok(Materialised {
-        units: units.into_values().collect(),
-        mounts: Vec::new(),
-        release_id: Some(release_id),
-        stopped: false,
-        scope: json!({"sources": "release"}),
-        entries: Vec::new(),
-        listed: Vec::new(),
-    })
+    Ok(units.into_values().collect())
 }
 
 /// The units of a bids input that lack a role the descriptor names, by
 /// the unit's id, with why (record 49 A3): what the release wrote of the
 /// stacks picked for each role in the unit, judged as the pre-flight
-/// judges it, so the two agree.
+/// judges it, so the two agree. A run over a frozen list of a dataset's or
+/// a cohort's main scans (`main`, what its handle records) takes each of
+/// its stacks as a main scan of the list's role, as it was resolved
+/// (record 55, rulings of 2026-10-12, item 6); of a list of several roles
+/// (2026-10-12), of the role each stack was taken for, as the list records
+/// it.
 fn units_missing(
     store: &mut Store,
     release_id: Option<i64>,
     units: &[Unit],
     roles: &[String],
+    main: Option<&Value>,
 ) -> Result<BTreeMap<String, Vec<String>>, String> {
     let Some(release_id) = release_id else {
         return Ok(BTreeMap::new());
@@ -2133,15 +3316,47 @@ fn units_missing(
         .iter()
         .flat_map(|u| u.stacks.iter().copied())
         .collect();
-    let picks = crate::preflight::pick_roles(store, &all)?;
+    let picks: BTreeMap<i64, std::collections::BTreeSet<String>> = match main {
+        // each stack as the main scan of the role it was taken for: the
+        // list's one role, or of several (2026-10-12) its own
+        Some(m) => crate::main_input::stack_roles(m, &all),
+        // the picks its input release froze when it was made (record 55,
+        // rulings of 2026-10-12, item 6, carried to releases); of a
+        // release from before, the live picks of what it recorded, and
+        // where they are gone, every unit says so
+        None => {
+            let reading = release_reading(store, release_id)?;
+            let Some(picks) = reading.picks() else {
+                let why = reading.gone().unwrap_or_default();
+                return Ok(units
+                    .iter()
+                    .map(|u| {
+                        let unknown = roles
+                            .iter()
+                            .map(|role| {
+                                format!(
+                                    "which of its stacks stands for {role} is not known: the picks its input release read are gone ({why})"
+                                )
+                            })
+                            .collect();
+                        (u.id.clone(), unknown)
+                    })
+                    .collect());
+            };
+            crate::preflight::pick_roles(store, &all, &picks)?
+                .into_iter()
+                .map(|(s, p)| (s, p.roles))
+                .collect()
+        }
+    };
     let mut out = BTreeMap::new();
     for u in units {
         let mut held: BTreeMap<String, Vec<Option<String>>> = BTreeMap::new();
         for s in &u.stacks {
-            let Some(picked) = picks.get(s) else {
+            let Some(roles_of) = picks.get(s) else {
                 continue;
             };
-            for role in &picked.roles {
+            for role in roles_of {
                 held.entry(role.clone())
                     .or_default()
                     .push(stems.get(s).cloned().flatten());
@@ -2153,6 +3368,237 @@ fn units_missing(
         }
     }
     Ok(out)
+}
+
+/// Record 55, decision 6, and its rulings of 2026-10-12, item 6, carried
+/// to releases: the picks a release read, as a reader after it reads them:
+/// the list it froze when it was made; of a release from before, the live
+/// picks of what it recorded (the pack's where it recorded none), unless
+/// they are gone (one place of truth, 2026-10-11).
+pub(crate) fn release_reading(
+    store: &mut Store,
+    release_id: i64,
+) -> Result<nils_registry::pick_truth::OfRelease, String> {
+    Ok(nils_registry::pick_truth::of_release(store, release_id)
+        .map_err(|e| e.to_string())?
+        .unwrap_or(nils_registry::pick_truth::OfRelease::Recorded(
+            nils_registry::pick_truth::Of::Pack,
+        )))
+}
+
+/// Record 48, D1 of the move: each unit of a run by the name the run gave
+/// it, with the stacks it was given, read from the registry and never from
+/// a file the run's container could reach: a stack's unit is its own stack,
+/// a subject's or a session's the stacks the run's release placed in its
+/// folder (`sub-<s>/` or `sub-<s>/ses-<t>/`), none where the release no
+/// longer says. Empty for a run from before its units were kept (record 49).
+pub(crate) fn unit_stacks(
+    store: &mut Store,
+    run_id: i64,
+) -> Result<Vec<(String, Vec<i64>)>, String> {
+    let err = |e: nils_registry::Error| e.to_string();
+    let Some(run) = rows::run(store, run_id).map_err(err)? else {
+        return Ok(Vec::new());
+    };
+    let names: Vec<String> = rows::units(store, run_id)
+        .map_err(err)?
+        .into_iter()
+        .map(|u| u.unit)
+        .collect();
+    let placed = match run.input_release_id {
+        Some(release) if names.iter().any(|n| n.starts_with("sub-")) => {
+            released_stacks(store, release).unwrap_or_default()
+        }
+        _ => Vec::new(),
+    };
+    Ok(names
+        .into_iter()
+        .map(|name| {
+            if let Some(stack) = name
+                .strip_prefix("stack-")
+                .and_then(|s| s.parse::<i64>().ok())
+            {
+                return (name, vec![stack]);
+            }
+            let folder = match name.split_once("_ses-") {
+                Some((subject, session)) => format!("{subject}/ses-{session}/"),
+                None => format!("{name}/"),
+            };
+            let stacks = placed
+                .iter()
+                .filter(|(_, dir, _)| format!("{dir}/").starts_with(&folder))
+                .map(|(s, ..)| *s)
+                .collect();
+            (name, stacks)
+        })
+        .collect())
+}
+
+/// Record 48, D1 of the move: the stacks of the list a run was frozen
+/// over, as long as its handle keeps them; none once it is withdrawn.
+pub(crate) fn frozen_stacks(store: &mut Store, run_id: i64) -> Result<Vec<i64>, String> {
+    let run = rows::run(store, run_id).map_err(|e| e.to_string())?;
+    let Some(handle) = run.and_then(|r| r.handle_id) else {
+        return Ok(Vec::new());
+    };
+    Ok(nils_ask::handle::keys(store, handle)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .map(|(k, _)| k)
+        .collect())
+}
+
+/// Record 55 H3 (section 2.2): where a mask a bids unit made is looked for
+/// its grid scan, from the stacks the run's release placed under the
+/// unit's folder (`sub-<s>/ses-<t>/`, or `sub-<s>/`), each with the NIfTI
+/// the release made of it where it is still in the run's input: with the
+/// output's declared grid role, the stacks picked for that role; without,
+/// every stack of the unit. None where the run released no input.
+pub(crate) fn grid_candidates(
+    store: &mut Store,
+    run_id: i64,
+    path: &str,
+    role: Option<&str>,
+) -> crate::derivatives::Where {
+    use crate::derivatives::Where;
+    let Ok(Some(run)) = rows::run(store, run_id) else {
+        return Where::Unknown;
+    };
+    let Some(release_id) = run.input_release_id else {
+        return Where::Unknown;
+    };
+    let segs: Vec<&str> = path.split('/').collect();
+    let Some(i) = segs
+        .iter()
+        .position(|s| s.starts_with("sub-") && !s.contains('_'))
+    else {
+        return Where::Unknown;
+    };
+    let unit = match segs.get(i + 1).filter(|s| s.starts_with("ses-")) {
+        Some(ses) => format!("{}/{ses}/", segs[i]),
+        None => format!("{}/", segs[i]),
+    };
+    let input = run
+        .scratch_place_id
+        .or(run.place_id)
+        .and_then(|id| nils_registry::place::show(store, id).ok().flatten())
+        .map(|p| {
+            Path::new(&p.path)
+                .join(RUNS)
+                .join(run_id.to_string())
+                .join("input")
+        });
+    let placed = match released_stacks(store, release_id) {
+        Ok(p) => p,
+        Err(_) => return Where::Unknown,
+    };
+    let stacks: Vec<(i64, Option<PathBuf>)> = placed
+        .into_iter()
+        .filter(|(_, dir, _)| format!("{dir}/").starts_with(&unit))
+        .map(|(s, dir, stem)| (s, input_nifti(input.as_deref(), &dir, stem.as_deref())))
+        .collect();
+    by_role(store, release_id, stacks, role)
+}
+
+/// Each stack a release placed, with its folder and its file stem.
+fn released_stacks(
+    store: &mut Store,
+    release_id: i64,
+) -> Result<Vec<(i64, String, Option<String>)>, String> {
+    let err = |e: nils_registry::Error| e.to_string();
+    let d = store.dialect();
+    let sql = format!(
+        "SELECT rs.stack_id, rs.dir, rs.stem FROM {} r \
+         JOIN {} rs ON rs.dataset_id = r.dataset_id WHERE r.id = {} ORDER BY rs.stack_id",
+        store.qualified("release"),
+        store.qualified("release_stack"),
+        d.param(1, Type::Int)
+    );
+    store
+        .query(&sql, &[Param::Int(release_id)])
+        .map_err(err)?
+        .iter()
+        .map(|r| {
+            Ok((
+                r.int(0).map_err(err)?,
+                r.text(1).map_err(err)?.to_string(),
+                r.opt_text(2).map_err(err)?.map(str::to_string),
+            ))
+        })
+        .collect()
+}
+
+/// The NIfTI a release made of a stack in a run's input, where it is.
+fn input_nifti(input: Option<&Path>, dir: &str, stem: Option<&str>) -> Option<PathBuf> {
+    let (input, stem) = (input?, stem?);
+    ["nii.gz", "nii"]
+        .iter()
+        .map(|ext| input.join(dir).join(format!("{stem}.{ext}")))
+        .find(|p| p.is_file())
+}
+
+/// The grid candidates of a unit's stacks: those picked for `role` where
+/// the output declares one, else every one.
+fn by_role(
+    store: &mut Store,
+    release_id: i64,
+    stacks: Vec<(i64, Option<PathBuf>)>,
+    role: Option<&str>,
+) -> crate::derivatives::Where {
+    use crate::derivatives::Where;
+    let Some(role) = role else {
+        return Where::Inputs(stacks);
+    };
+    let ids: Vec<i64> = stacks.iter().map(|(s, _)| *s).collect();
+    // the picks the release froze; of one from before whose picks are
+    // gone, no stack is said to be of the role, and the mask's grid is
+    // the input its file's grid matches
+    let picks = match release_reading(store, release_id) {
+        Ok(reading) => match reading.picks() {
+            Some(picks) => crate::preflight::pick_roles(store, &ids, &picks).unwrap_or_default(),
+            None => return Where::Inputs(stacks),
+        },
+        Err(_) => BTreeMap::new(),
+    };
+    Where::Role(
+        stacks
+            .into_iter()
+            .filter(|(s, _)| picks.get(s).is_some_and(|p| p.roles.contains(role)))
+            .collect(),
+    )
+}
+
+/// Where a mask a unit made is looked for its grid scan (record 55 H3): a
+/// stack unit's own stack; a bids unit's stacks, by the output's grid role
+/// or by matching their NIfTI.
+fn unit_grid(
+    store: &mut Store,
+    x: &Execution<'_>,
+    u: &Unit,
+    role: Option<&str>,
+) -> crate::derivatives::Where {
+    use crate::derivatives::Where;
+    if let Some(s) = u.stack_id {
+        return Where::Own(s);
+    }
+    let Some(release_id) = rows::run(store, x.run_id)
+        .ok()
+        .flatten()
+        .and_then(|r| r.input_release_id)
+    else {
+        return Where::Unknown;
+    };
+    let input = Path::new(&x.scratch.path)
+        .join(RUNS)
+        .join(x.run_id.to_string())
+        .join("input");
+    let placed = released_stacks(store, release_id).unwrap_or_default();
+    let stacks: Vec<(i64, Option<PathBuf>)> = placed
+        .into_iter()
+        .filter(|(s, _, _)| u.stacks.contains(s))
+        .map(|(s, dir, stem)| (s, input_nifti(Some(&input), &dir, stem.as_deref())))
+        .collect();
+    by_role(store, release_id, stacks, role)
 }
 
 /// What became of one unit after the container exited.
@@ -2305,10 +3751,19 @@ fn ask_of(d: &Descriptor) -> lane::Ask {
 
 /// Refuse a pipeline whose unit could never fit in the lane.
 fn fits(d: &Descriptor, p: &Pipeline, lane: &Lane) -> Result<(), Exit> {
-    if lane.ledger.could(ask_of(d)) {
-        return Ok(());
+    match lane_refusal(d, p, lane) {
+        None => Ok(()),
+        Some(words) => Err(usage(words)),
     }
-    Err(usage(format!(
+}
+
+/// Why a unit could never fit in the lane, in the words a refusal says;
+/// none where it could.
+pub(crate) fn lane_refusal(d: &Descriptor, p: &Pipeline, lane: &Lane) -> Option<String> {
+    if lane.ledger.could(ask_of(d)) {
+        return None;
+    }
+    Some(format!(
         "{} asks {} cores and {} GB of memory for each of its {}, and the pipeline lane has {} cores and {} GB{}; nils pipeline lane --cores <n> --memory-gb <n> sets it",
         p.label(),
         d.needs.cores,
@@ -2324,7 +3779,7 @@ fn fits(d: &Descriptor, p: &Pipeline, lane: &Lane) -> Result<(), Exit> {
             .as_deref()
             .map(|w| format!(" ({w})"))
             .unwrap_or_default()
-    )))
+    ))
 }
 
 /// The device a run takes and whether it takes the GPU: a GPU where the
@@ -2444,6 +3899,7 @@ pub(crate) fn take_up_interrupted(store: &mut Store) -> Result<usize, String> {
                     results_digest: None,
                     summary: &json!({"phase": "run"}),
                     error: Some("stopped with its engine; nils run --resume goes on"),
+                    failure: None,
                 },
             )
             .map_err(err)?;
@@ -2539,6 +3995,16 @@ pub(crate) fn run_command(home: &Home, args: RunArgs) -> Result<(), Exit> {
     if p.state != "active" {
         return Err(usage(format!("{} is {}", p.label(), p.state)));
     }
+    // 2026-10-12: a version a later one replaces runs only when asked for
+    // by name at the keyboard
+    if !args.replaced
+        && let Some(refused) = crate::versions::refused(registry.store(), &p)
+    {
+        return Err(usage(format!(
+            "{refused}; nils run {} --replaced runs it still",
+            p.label()
+        )));
+    }
     let d = descriptor::from_value(p.descriptor.clone()).map_err(|e| {
         fail(format!(
             "{}: the catalog's descriptor no longer checks: {e}",
@@ -2557,6 +4023,24 @@ pub(crate) fn run_command(home: &Home, args: RunArgs) -> Result<(), Exit> {
     // the lane it runs in: a unit that could never fit, a GPU it cannot
     // lease and a secret the site has not set are refused before anything
     let lane = lane_of(&mut registry);
+    // 2026-10-12: what the run needs of this machine, checked before
+    // anything is frozen or claimed; a check that fails refuses it by its
+    // kind, and nothing is queued
+    let checked = crate::requirements::checks(
+        &mut registry,
+        home.dir(),
+        &crate::requirements::Asked {
+            pipeline: &p,
+            descriptor: &d,
+            dcm2niix: &args.dcm2niix,
+            units: 1,
+            detected: Some(&detected),
+            releases: true,
+        },
+    );
+    if let Some(failed) = crate::requirements::refusing(&checked) {
+        return Err(fail(failed.refusal()));
+    }
     let (device, gpu) = device_for(&d, &p, &rt, &lane)?;
     fits(&d, &p, &lane)?;
     let given = secrets_for(&mut registry, &d, &p)?;
@@ -2587,8 +4071,14 @@ pub(crate) fn run_command(home: &Home, args: RunArgs) -> Result<(), Exit> {
     for reference in &args.models {
         let m = nils_registry::model::resolve(registry.store(), reference)?
             .ok_or_else(|| usage(format!("no registered model answers to {reference}")))?;
+        // record 55 D4: a retired model's files stay where its card says,
+        // so a past result can be run again; its answers are review items,
+        // never staged, since only an admitted or promoted model's are
         if m.state == "retired" {
-            return Err(usage(format!("model {} is retired", m.label())));
+            eprintln!(
+                "model {} is retired: it runs again to reproduce a past result, and what it proposes is asked, never staged",
+                m.label()
+            );
         }
         // record 43: a run may raise a model's threshold, never lower it
         if let Some(t) = args.threshold {
@@ -2635,7 +4125,7 @@ pub(crate) fn run_command(home: &Home, args: RunArgs) -> Result<(), Exit> {
     let parts: Vec<(i64, Option<String>)> = match (&args.select, args.handle) {
         (Some(spec), _) => {
             drop(registry);
-            let parts = freeze_parts(home, &args, spec)?;
+            let parts = freeze_parts(home, &args, spec, &d.roles)?;
             registry = crate::open(home)?;
             parts.into_iter().map(|h| (h, Some(spec.clone()))).collect()
         }
@@ -2647,11 +4137,12 @@ pub(crate) fn run_command(home: &Home, args: RunArgs) -> Result<(), Exit> {
         (None, Some(h)) => vec![(h, None)],
         (None, None) => {
             return Err(usage(
-                "a run is over a frozen selection: --select selection:<name>@<v>, or --handle <id>",
+                "a run is over a frozen selection: --select selection:<name>@<v>, a dataset's or a cohort's main scans (--select main:<role>@dataset:<name>, or main@dataset:<name> for each role the pipeline needs), or --handle <id>",
             ));
         }
     };
     let count = parts.len();
+    let pack = pack_of_bids(home, &args, &d);
     for (i, (handle_id, selection)) in parts.iter().enumerate() {
         let handle_id = *handle_id;
         let ran = (|| -> Result<(), Exit> {
@@ -2660,6 +4151,28 @@ pub(crate) fn run_command(home: &Home, args: RunArgs) -> Result<(), Exit> {
                 return Err(usage(
                     "the selection holds no stacks; there is nothing to run",
                 ));
+            }
+            // 2026-10-12: the disk its units take, now their count is known
+            if d.layout == Layout::Stacks
+                && let Some(c) = crate::requirements::disk(&mut registry, &d, stacks.len())
+                && !c.ok
+            {
+                return Err(fail(c.refusal()));
+            }
+            // 2026-10-12: a run none of whose units could run would make
+            // nothing: refused before it is made, with why, as its
+            // pre-flight says it
+            if let Some(refused) = crate::preflight::units_refusal(
+                &mut registry,
+                &d,
+                handle_id,
+                pack.as_ref(),
+                None,
+                None,
+            )
+            .map_err(fail)?
+            {
+                return Err(fail(refused.words));
             }
 
             // the job: beside every run whose stacks are not these, and
@@ -2777,8 +4290,27 @@ pub(crate) fn run_command(home: &Home, args: RunArgs) -> Result<(), Exit> {
 /// holds however many, or with `--chunk` one handle per part of at most
 /// that many stacks, in stack order. Each part is frozen from the saved
 /// selection as a page after the last stack of the one before.
-fn freeze_parts(home: &Home, args: &RunArgs, spec: &str) -> Result<Vec<i64>, Exit> {
+fn freeze_parts(
+    home: &Home,
+    args: &RunArgs,
+    spec: &str,
+    needs: &[String],
+) -> Result<Vec<i64>, Exit> {
     use crate::ask_cli::{Freeze, freeze};
+    // record 55 (rulings of 2026-10-12, item 6): a dataset's or a cohort's
+    // main scans, resolved once and split as they are frozen; without a
+    // role, those of each role the pipeline needs (`needs`)
+    if let Some(main) = crate::main_input::Spec::parse(spec) {
+        let main = main.map_err(usage)?;
+        return crate::main_input::freeze_parts(
+            home,
+            &main,
+            args.pack_dir.clone(),
+            &args.pack,
+            args.chunk,
+            needs,
+        );
+    }
     let grain = nils_ask::ast::Grain::Stack;
     let Some(chunk) = args.chunk else {
         let f = freeze(
@@ -2991,6 +4523,39 @@ fn claim_run(store: &mut Store, p: &Pipeline, handle: i64, args: Value) -> Resul
     Ok(id)
 }
 
+/// The pack the release of a bids input names its stacks by, which its
+/// pre-flight plans the units with; none for any other input, which reads
+/// no pack.
+fn pack_of_bids(home: &Home, args: &RunArgs, d: &Descriptor) -> Option<nils_pack::Pack> {
+    if d.layout != Layout::Bids {
+        return None;
+    }
+    crate::pack_dir(home, args.pack_dir.clone())
+        .ok()
+        .and_then(|dir| crate::ask_cli::load_pack(&dir, &args.pack).ok())
+}
+
+/// Why a run cannot be taken up again, where it cannot (record 49 A1): one
+/// that is done or partial has nothing left to run, one that failed after
+/// its containers ended is its review items, and one that runs is running.
+pub(crate) fn resume_refused(store: &mut Store, r: &Run) -> Option<Exit> {
+    match r.status.as_str() {
+        "done" | "partial" => Some(usage(format!(
+            "run {} is {}: nothing is left to run",
+            r.id, r.status
+        ))),
+        "failed" if r.results_digest.is_some() => Some(usage(format!(
+            "run {} failed after its containers ended, and its failures are review items; start a new run",
+            r.id
+        ))),
+        "running" => r.job_id.filter(|j| job_alive(store, *j)).map(|j| Exit {
+            code: crate::BUSY,
+            message: format!("run {} is running, as job {j}", r.id),
+        }),
+        _ => None,
+    }
+}
+
 /// `nils run --resume <run>` (record 49 A1): a run that stopped, was
 /// cancelled or whose engine went away is taken up again with everything
 /// it recorded. The units it finished are kept, with their derivatives and
@@ -2999,29 +4564,8 @@ fn resume_command(home: &Home, args: &RunArgs, run_id: i64) -> Result<(), Exit> 
     let mut registry = crate::open(home)?;
     let r = rows::run(registry.store(), run_id)?
         .ok_or_else(|| usage(format!("no pipeline run {run_id}")))?;
-    match r.status.as_str() {
-        "done" | "partial" => {
-            return Err(usage(format!(
-                "run {run_id} is {}: nothing is left to run",
-                r.status
-            )));
-        }
-        "failed" if r.results_digest.is_some() => {
-            return Err(usage(format!(
-                "run {run_id} failed after its containers ended, and its failures are review items; start a new run"
-            )));
-        }
-        "running" => {
-            if let Some(j) = r.job_id
-                && job_alive(registry.store(), j)
-            {
-                return Err(Exit {
-                    code: crate::BUSY,
-                    message: format!("run {run_id} is running, as job {j}"),
-                });
-            }
-        }
-        _ => {}
+    if let Some(refused) = resume_refused(registry.store(), &r) {
+        return Err(refused);
     }
     let p = rows::get(registry.store(), r.pipeline_id)?
         .ok_or_else(|| fail(format!("run {run_id} names a pipeline the catalog lost")))?;
@@ -3100,6 +4644,52 @@ fn resume_command(home: &Home, args: &RunArgs, run_id: i64) -> Result<(), Exit> 
         .handle_id
         .ok_or_else(|| fail(format!("run {run_id} pinned no handle")))?;
     let stacks = handle_stacks(registry.store(), handle_id)?;
+    // the containers its engine left running are stopped first, as taking
+    // it up always did, so none of them goes on to its end while it is
+    // checked: their units run again either way
+    let left = rows::units(registry.store(), run_id)?;
+    stop_left(
+        &rt,
+        d.units == Units::Together,
+        &left,
+        &PathBuf::from(&place.path)
+            .join(derivative::TREE)
+            .join(&p.name)
+            .join(run_id.to_string()),
+    );
+    // 2026-10-12: taken up again only where it would run, as a new run is
+    // checked: what it needs of this machine (the converter only where its
+    // bids input is still to be released), then the units it still has to
+    // run; where it could run none of them and made nothing, it is refused
+    // before a job is claimed, with why
+    let checked = crate::requirements::checks(
+        &mut registry,
+        home.dir(),
+        &crate::requirements::Asked {
+            pipeline: &p,
+            descriptor: &d,
+            dcm2niix: &args.dcm2niix,
+            units: 1,
+            detected: Some(&detected),
+            releases: r.input_release_id.is_none(),
+        },
+    );
+    if let Some(failed) = crate::requirements::refusing(&checked) {
+        return Err(fail(failed.refusal()));
+    }
+    let pack = pack_of_bids(home, args, &d);
+    if let Some(refused) = crate::preflight::units_refusal(
+        &mut registry,
+        &d,
+        handle_id,
+        pack.as_ref(),
+        None,
+        Some(run_id),
+    )
+    .map_err(fail)?
+    {
+        return Err(fail(refused.words));
+    }
     let who = crate::actor();
     let actor = nils_registry::actor::current();
     let job_id = claim_run(
@@ -3177,6 +4767,10 @@ fn conclude(
         Ok(o) => o,
         Err(e) => ("failed", json!({}), None, None, Some(e)),
     };
+    // 2026-10-12: a run that failed says why, by its kind, beside its error
+    let failure = (status == "failed").then(|| {
+        crate::failures::of_run(error.as_deref().unwrap_or_default(), exit_code, &summary)
+    });
     let finished = nils_registry::time::now_iso();
     rows::finish(
         registry.store(),
@@ -3188,6 +4782,7 @@ fn conclude(
             results_digest: digest.as_deref(),
             summary: &summary,
             error: error.as_deref(),
+            failure: failure.as_ref(),
         },
     )?;
     // record 49 A3: a run that loaded measures changed what the ask
@@ -3226,7 +4821,10 @@ fn conclude(
     let _ = job::set_result(
         registry.store(),
         c.job_id,
-        &json!({"run": run_id, "status": status, "summary": summary, "results_digest": digest}),
+        &json!({
+            "run": run_id, "status": status, "summary": summary, "results_digest": digest,
+            "failure": failure,
+        }),
     );
     job::finish(registry.store(), c.job_id, job_state, error.as_deref())
         .map_err(|e| fail(e.to_string()))?;
@@ -3248,8 +4846,13 @@ fn conclude(
             ),
         }),
         _ => Err(fail(format!(
-            "run {run_id} {}",
-            error.unwrap_or_else(|| "failed".into())
+            "run {run_id} {}{}",
+            error.unwrap_or_else(|| "failed".into()),
+            failure
+                .as_ref()
+                .and_then(crate::failures::line)
+                .map(|l| format!("\n  {l}"))
+                .unwrap_or_default()
         ))),
     }
 }
@@ -3431,7 +5034,12 @@ fn execute_run(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Resul
         }
         Some(r) => {
             let before = rows::units(registry.store(), x.run_id).map_err(err)?;
-            stop_left(x, &before, &out);
+            stop_left(
+                x.runtime,
+                x.descriptor.units == Units::Together,
+                &before,
+                &out,
+            );
             // together, the units are all in flight or all past their
             // container: the first run again from a clean folder, the second
             // taken in from what the container left
@@ -3459,7 +5067,16 @@ fn execute_run(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Resul
 
     let released_before = x.resume.and_then(|r| r.input_release_id);
     let m = match (d.layout, released_before) {
-        (Layout::Stacks, _) => materialise_stacks(registry.store(), x.stacks, &input, d.header)?,
+        (Layout::Stacks, _) => materialise_stacks(
+            registry.store(),
+            x.stacks,
+            &input,
+            d.header,
+            d.geometry,
+            d.contrast,
+            !d.cache.is_empty(),
+            d.rows,
+        )?,
         (Layout::Bids, Some(release)) => released(registry, release, d.level)?,
         (Layout::Bids, None) => {
             // a release is a job of its own kind, one at a time: the runs
@@ -3473,6 +5090,10 @@ fn execute_run(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Resul
                     scope: Value::Null,
                     entries: Vec::new(),
                     listed: Vec::new(),
+                    context: Vec::new(),
+                    rows: Value::Null,
+                    converter: Value::Null,
+                    files: Vec::new(),
                 },
                 Some(lock) => {
                     let m = materialise_bids(
@@ -3565,14 +5186,20 @@ fn execute_run(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Resul
     let mut derivative_doc = serde_json::Map::new();
     let mut derivative_dirs: Vec<(String, PathBuf)> = Vec::new();
     let taken = derivative_inputs(registry.store(), d, x.stacks, &lane_places(x))?;
+    let mut made_by = MadeBy::default();
     for t in d.inputs.iter().filter(|t| t.ty.starts_with("derivative:")) {
         let kind = t.ty.trim_start_matches("derivative:");
         let rows = taken.get(&t.id).cloned().unwrap_or_default();
         if rows.is_empty() && !t.optional {
             return Err(format!(
-                "{} needs {kind} derivatives of the selection's stacks for its input {}, and none is registered",
+                "{} needs {kind} derivatives of the selection's stacks for its input {}, and none is registered that its check leaves {}",
                 p.label(),
-                t.id
+                t.id,
+                match t.checked.as_deref().unwrap_or("not_rejected") {
+                    "accepted" => "it: it takes accepted ones only",
+                    "any" => "it",
+                    _ => "it: a rejected one is not taken",
+                }
             ));
         }
         let into = inputs.join(&t.id);
@@ -3590,11 +5217,13 @@ fn execute_run(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Resul
             if !linked.insert(rel.clone()) {
                 continue;
             }
+            let made = made_by.of(registry.store(), &row);
             listed.push(json!({
                 "id": row.id, "kind": row.kind, "stack_id": row.stack_id,
                 "subject_id": row.subject_id, "model_id": row.model_id,
                 "preprocess_version": row.preprocess_version,
                 "path": rel, "sha256": row.sha256,
+                "made_by": made,
             }));
         }
         derivative_doc.insert(t.id.clone(), json!(listed));
@@ -3631,8 +5260,33 @@ fn execute_run(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Resul
     // record 49 A3: a unit whose input lacks a role the descriptor names,
     // as the release wrote it, is not run: it is over as skipped, missing
     // an input, as the pre-flight said it would be, and no review item
-    if d.layout == Layout::Bids && !d.roles.is_empty() {
-        let missing = units_missing(registry.store(), m.release_id, &m.units, &d.roles)?;
+    let mut missing = if d.layout == Layout::Bids && !d.roles.is_empty() {
+        let main = rows::run(registry.store(), x.run_id)
+            .map_err(err)?
+            .and_then(|r| r.handle_id)
+            .and_then(|h| crate::main_input::entry_of(registry.store(), h));
+        units_missing(
+            registry.store(),
+            m.release_id,
+            &m.units,
+            &d.roles,
+            main.as_ref(),
+        )?
+    } else {
+        BTreeMap::new()
+    };
+    // record 55 H3, section 6.5 (the T33 pipe test): nor is a unit the
+    // inputs hold no derivative of for an input that needs one, its check
+    // having left out every one there is
+    let place_ids: Vec<i64> = lane_places(x).iter().map(|pl| pl.id).collect();
+    let stacks_of: Vec<&[i64]> = m.units.iter().map(|u| u.stacks.as_slice()).collect();
+    let lacking = derivatives_missing(registry.store(), d, &stacks_of, &place_ids)?;
+    for (u, why) in m.units.iter().zip(lacking) {
+        if !why.is_empty() {
+            missing.entry(u.id.clone()).or_default().extend(why);
+        }
+    }
+    if !missing.is_empty() {
         let now = nils_registry::time::now_iso();
         for u in rows::units(registry.store(), x.run_id).map_err(err)? {
             if let Some(why) = missing.get(&u.unit)
@@ -3642,6 +5296,7 @@ fn execute_run(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Resul
                     "status": "skipped",
                     "error": format!("missing an input: {}", why.join("; ")),
                     "missing": why, "metrics": {}, "files": [], "refused": [],
+                    "failure": nils_pipeline::failure::Cause::Input.doc(),
                 });
                 rows::unit_over(registry.store(), u.id, None, &outcome, &now).map_err(err)?;
             }
@@ -3736,7 +5391,7 @@ fn execute_run(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Resul
             .and_then(|u| u.exit_code)
             .and_then(|c| i32::try_from(c).ok());
         let b = batch_of(units)?;
-        take_in(registry, x, &m, &b, code, &row_of, &mut taken_files)?;
+        take_in(registry, x, &m, &b, code, None, &row_of, &mut taken_files)?;
     }
     let mut pending: std::collections::VecDeque<Batch> = Default::default();
     for units in group(&|s| s == "queued" || s == "running") {
@@ -3798,7 +5453,29 @@ fn execute_run(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Resul
         }
         Scheduled::Done => {}
     }
-    finalize(registry, x, &m, &working, &out, &rel_out, &mut taken_files)
+    let mut ended = finalize(registry, x, &m, &working, &out, &rel_out, &mut taken_files)?;
+    // record 55 F2 and F5: a run that proposes the post-contrast axis gives
+    // T1 answers the time rule anchors on, so its subjects are labelled again
+    if x.descriptor.proposals.iter().any(|a| a == "post_contrast") {
+        ended.1["contrast_label"] = crate::contrast::after_answers(home, registry, x.stacks);
+    }
+    // record 55 E5: the slice cache's versions no answering model reads
+    // are dropped once they have gone unread 30 days (ruling R4)
+    if !d.cache.is_empty() {
+        ended.1["slice_cache"] = crate::slice_cache::after_run(registry.store(), &working);
+    }
+    // record 56 section 3: a run that gave System 1's opinions runs the
+    // gate over its stacks of datasets flagged as having damaged headers
+    if !x.descriptor.opinions.is_empty() && matches!(ended.0, "done" | "partial") {
+        ended.1["gate"] = crate::review_rule::after_opinions(home, registry, x.stacks, x.who);
+    }
+    // record 55 E3: what the cascade deferred goes to the full pipeline
+    if x.pipeline.name == crate::operations::POST_CONTRAST_PIPELINE
+        && matches!(ended.0, "done" | "partial")
+    {
+        ended.1["fallback"] = crate::operations::fallback(registry, x.run_id, x.job_id, x.who);
+    }
+    Ok(ended)
 }
 
 /// How the schedule ended.
@@ -4078,7 +5755,16 @@ fn schedule(
                 Ok(Some(status)) => {
                     let r = running.remove(i);
                     ledger.give(ask);
-                    take_in(registry, x, m, &r.batch, status.code(), row_of, taken_files)?;
+                    take_in(
+                        registry,
+                        x,
+                        m,
+                        &r.batch,
+                        status.code(),
+                        signal_of(&status),
+                        row_of,
+                        taken_files,
+                    )?;
                 }
                 Ok(None) => i += 1,
                 Err(e) => return Err(format!("a container of the run: {e}")),
@@ -4088,6 +5774,20 @@ fn schedule(
             return Ok(Scheduled::Done);
         }
         std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// The signal a container's process was ended by, where one ended it: how
+/// the kernel's OOM killer ends a process apptainer runs (2026-10-12).
+fn signal_of(status: &std::process::ExitStatus) -> Option<i32> {
+    #[cfg(unix)]
+    {
+        std::os::unix::process::ExitStatusExt::signal(status)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = status;
+        None
     }
 }
 
@@ -4167,10 +5867,13 @@ fn invocation_of(
                         .filter(|l| l["id"].as_i64().is_some_and(|n| used.contains(&n)))
                         .cloned()
                         .collect();
-                    let doc = json!({"contract": nils_pipeline::CONTRACT, "sources": listed, "stacks": [entry]});
-                    std::fs::write(
-                        uin.join("stacks.json"),
-                        serde_json::to_vec_pretty(&doc).unwrap_or_default(),
+                    let context = unit_context(m, i);
+                    write_stacks_json(
+                        &uin.join("stacks.json"),
+                        &listed,
+                        std::slice::from_ref(&entry),
+                        context.as_deref(),
+                        (!m.rows.is_null()).then_some(&m.rows),
                     )
                     .map_err(|e| format!("the unit's input: {e}"))?;
                     sources = m
@@ -4224,6 +5927,18 @@ fn invocation_of(
             participants = u.subject.iter().cloned().collect();
             env.push(("NILS_UNIT".into(), u.id.clone()));
         }
+    }
+    // record 55 E5: the slice cache, read-write, for a pipeline that
+    // declares the model inputs it keeps there; in the site's working
+    // place, since the pictures are clinical
+    if !d.cache.is_empty() {
+        let dir = crate::slice_cache::folder(Path::new(&x.output.path));
+        std::fs::create_dir_all(&dir).map_err(|e| format!("the slice cache's folder: {e}"))?;
+        mounts.push(Mount {
+            host: dir,
+            container: descriptor::CACHE_PATH.into(),
+            read_only: false,
+        });
     }
     // a secret, read-only, in this pipeline's containers alone
     for g in x.secrets {
@@ -4336,11 +6051,11 @@ fn link_file(from: &Path, to: &Path) -> Result<(), String> {
 /// Stop what a run that went away left running: each unit in flight, by its
 /// container's name, and its process where it is this host's and is still
 /// the unit's (its command line names the container or the unit's folder).
-fn stop_left(x: &Execution<'_>, units: &[rows::Unit], out: &Path) {
+fn stop_left(rt: &runtime::Cli, together: bool, units: &[rows::Unit], out: &Path) {
     let host = job::hostname();
     for u in units.iter().filter(|u| u.state == "running") {
         if let Some(name) = &u.container {
-            x.runtime.stop(&Invocation {
+            rt.stop(&Invocation {
                 name: name.clone(),
                 image: String::new(),
                 argv: Vec::new(),
@@ -4365,7 +6080,7 @@ fn stop_left(x: &Execution<'_>, units: &[rows::Unit], out: &Path) {
         let folder = out.join(&u.unit).display().to_string();
         let ours = u.container.as_deref().is_some_and(|n| line.contains(n))
             || line.contains(&folder)
-            || (x.descriptor.units == Units::Together && line.contains(&out.display().to_string()));
+            || (together && line.contains(&out.display().to_string()));
         if ours {
             // the runtime's process led a group of its own
             if let Ok(leader) = u32::try_from(pid) {
@@ -4652,12 +6367,14 @@ fn sweep_batch(
     Ok((swept, shut))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn take_in(
     registry: &mut Registry,
     x: &Execution<'_>,
     m: &Materialised,
     b: &Batch,
     code: Option<i32>,
+    signal: Option<i32>,
     row_of: &BTreeMap<String, (i64, String)>,
     taken_files: &mut std::collections::BTreeSet<PathBuf>,
 ) -> Result<(), String> {
@@ -4682,6 +6399,20 @@ fn take_in(
             .entry(nils_pipeline::results::normalise(&e.unit_id))
             .or_insert(i);
     }
+    // record 55 E5: what the image read whole is kept as each file's
+    // content, so the next run reads the slice cache instead of the file
+    if !m.files.is_empty()
+        && shut.is_empty()
+        && let Some(r) = &reported
+    {
+        let learnt = learnt_of(x.run_id, m, &b.units, r, &by_unit);
+        if let Err(e) = nils_registry::content::learn(registry.store(), &learnt) {
+            eprintln!(
+                "nils: run {}: what its image read could not be kept: {e}",
+                x.run_id
+            );
+        }
+    }
     let unit_outputs: Vec<descriptor::Output> =
         d.outputs.iter().filter(|o| !o.run_level).cloned().collect();
     let run_outputs: Vec<descriptor::Output> =
@@ -4697,6 +6428,11 @@ fn take_in(
         .strip_prefix(&x.scratch.path)
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|_| format!("{RUNS}/{}/log.txt", x.run_id));
+    // 2026-10-12: a container that failed as a whole is read for its cause
+    // in the end of its log, where the runtime and the tool said it
+    let log_tail = whole
+        .then(|| nils_pipeline::failure::log_tail(&b.log))
+        .flatten();
     for (n, &i) in b.units.iter().enumerate() {
         let u = &m.units[i];
         let o = outcome_of(
@@ -4755,10 +6491,53 @@ fn take_in(
         if n == 0 && !swept.is_empty() {
             doc["swept"] = json!(swept);
         }
+        if whole {
+            crate::failures::mark_unit(&mut doc, exit_code, signal, log_tail.as_deref());
+        } else {
+            crate::failures::mark_unit(&mut doc, None, None, None);
+        }
         rows::unit_over(registry.store(), *row_id, exit_code, &doc, &now)
             .map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+/// Record 55 E5: the files each unit of a batch says its image read whole,
+/// by their place in the unit's list in `stacks.json`, with the sha256 it
+/// gave and the size and time `source_file` held when the run began. A
+/// place past the unit's list is left out.
+fn learnt_of(
+    run_id: i64,
+    m: &Materialised,
+    units: &[usize],
+    reported: &nils_pipeline::Results,
+    by_unit: &HashMap<String, usize>,
+) -> Vec<nils_registry::content::Learnt> {
+    let mut out = Vec::new();
+    for &i in units {
+        let (Some(u), Some(files)) = (m.units.get(i), m.files.get(i)) else {
+            continue;
+        };
+        let Some(e) = by_unit
+            .get(&nils_pipeline::results::normalise(&u.id))
+            .and_then(|k| reported.units.get(*k))
+        else {
+            continue;
+        };
+        for (at, sha) in &e.read {
+            if let Some((source_id, path, size, mtime_ns)) = files.get(*at) {
+                out.push(nils_registry::content::Learnt {
+                    source_id: *source_id,
+                    path: path.clone(),
+                    size: *size,
+                    mtime_ns: *mtime_ns,
+                    sha256: sha.clone(),
+                    run_id: Some(run_id),
+                });
+            }
+        }
+    }
+    out
 }
 
 /// Whether the run registered a file at this path already: a resume that
@@ -4796,6 +6575,7 @@ fn register_unit(
     let mut hashed: Vec<Value> = Vec::new();
     let mut refused: Vec<Value> = Vec::new();
     let mut tables: Vec<Value> = Vec::new();
+    let mut masks: Vec<Value> = Vec::new();
     let (mut registered, mut bytes_total, mut embedded, mut cached) =
         (0usize, 0u64, 0usize, 0usize);
     let Some(belongs) = u.belongs() else {
@@ -4892,6 +6672,29 @@ fn register_unit(
             };
             registered += 1;
             bytes_total += bytes;
+            // record 55 H3: a mask's grid, its scan and its parts, read as
+            // it is registered; a mask that cannot be read so is kept, and
+            // the unit's outcome says why
+            if kind == "mask" {
+                let at = unit_grid(registry.store(), x, u, declared.grid.as_deref());
+                let sets: Vec<crate::mask::SetSpec> = if declared.parts.is_empty() {
+                    vec![crate::mask::SetSpec::whole()]
+                } else {
+                    declared
+                        .parts
+                        .iter()
+                        .map(crate::mask::SetSpec::of)
+                        .collect()
+                };
+                let read = derivative::get(registry.store(), id)
+                    .map_err(|e| e.to_string())
+                    .and_then(|d| d.ok_or_else(|| format!("derivative {id} went")))
+                    .and_then(|d| crate::derivatives::read_mask(registry, &d, at, sets));
+                match read {
+                    Ok(r) => masks.push(json!({"file": rel, "derivative": id, "read": r})),
+                    Err(why) => masks.push(json!({"file": rel, "derivative": id, "why": why})),
+                }
+            }
             // a table's rows are the unit's measures (record 49 A3), read
             // when the run is closed, so a resume reads what it kept
             if declared.table.is_some() {
@@ -4911,6 +6714,7 @@ fn register_unit(
         "status": o.status, "error": o.error, "metrics": o.metrics,
         "files": hashed, "refused": refused, "registered": registered,
         "bytes": bytes_total, "embedded": embedded, "cached": cached, "tables": tables,
+        "masks": masks,
     }))
 }
 
@@ -5267,12 +7071,19 @@ fn finalize(
             .iter()
             .flat_map(|r| r.proposals.iter().cloned())
             .collect();
-        let results_digest = nils_pipeline::sha256(
-            nils_pipeline::canonical(&json!({
-                "units": digest_units, "proposals": proposals, "run": run_files, "seeds": seeds_digest,
-            }))
-            .as_bytes(),
-        );
+        let opinions: Vec<Value> = reports
+            .iter()
+            .flat_map(|r| r.opinions.iter().cloned())
+            .collect();
+        let mut digested = json!({
+            "units": digest_units, "proposals": proposals, "run": run_files, "seeds": seeds_digest,
+        });
+        // record 55 D3: a run's opinions are its results too; a run with
+        // none digests as before
+        if !opinions.is_empty() {
+            digested["opinions"] = json!(opinions);
+        }
+        let results_digest = nils_pipeline::sha256(nils_pipeline::canonical(&digested).as_bytes());
 
         // the units no one can vouch for become review items; a container
         // that failed as a whole, with no results.json to say more, is one
@@ -5488,6 +7299,41 @@ fn finalize(
                 Err(e) => proposed["refused"] = json!(e.to_string()),
             }
         }
+        // record 55 D3: System 1's opinions on the axes it declares, kept
+        // as a second opinion beside the rules' and never a decision
+        if !opinions.is_empty() {
+            let (declared, undeclared): (Vec<Value>, Vec<Value>) =
+                opinions.iter().cloned().partition(|o| {
+                    o["axis"]
+                        .as_str()
+                        .is_some_and(|a| d.opinions.iter().any(|x| x == a))
+                });
+            let mut said = json!({
+                "given": opinions.len(), "declared": declared.len(),
+                "undeclared": undeclared.len(), "written": 0,
+            });
+            let taken = nils_registry::opinion::parse(&json!({ "opinions": declared })).and_then(
+                |parsed| {
+                    nils_registry::opinion::ingest(
+                        registry.store(),
+                        &nils_registry::opinion::Run {
+                            id: Some(x.run_id),
+                            stacks: Some(&ours),
+                            models: Some(&speaks_for),
+                        },
+                        &parsed,
+                    )
+                },
+            );
+            match taken {
+                Ok(done) => {
+                    said["written"] = json!(done.written);
+                    said["ingested"] = done.to_json();
+                }
+                Err(e) => said["refused"] = json!(e.to_string()),
+            }
+            proposed["opinions"] = said;
+        }
         Ok((
             run_files,
             models_made,
@@ -5501,6 +7347,20 @@ fn finalize(
     })?;
 
     let count = |s: &str| statuses.iter().filter(|x| x.1 == s).count();
+    // 2026-10-12: why its units failed, by cause
+    let failures_by_cause = crate::failures::by_cause(
+        unit_rows
+            .iter()
+            .filter(|u| by_name.contains_key(u.unit.as_str()))
+            .map(|u| &u.outcome),
+    );
+    // 2026-10-12: what its skipped units lacked, in a few words, by reason
+    let skipped_by_why = crate::made::skipped_by_why(
+        unit_rows
+            .iter()
+            .filter(|u| by_name.contains_key(u.unit.as_str()))
+            .map(|u| &u.outcome),
+    );
     let first_log = unit_rows
         .first()
         .and_then(|u| u.outcome["log"].as_str().map(str::to_string));
@@ -5510,6 +7370,8 @@ fn finalize(
             "skipped": count("skipped"), "unreported": count("unreported"),
             "missing_input": missing_input,
         },
+        "failures_by_cause": failures_by_cause,
+        "skipped_by_why": skipped_by_why,
         "derivatives": registered,
         "bytes": bytes_total,
         "embeddings": {"registered": embedded, "kept": cached},
@@ -5529,6 +7391,8 @@ fn finalize(
         "numbers": notes.summary(measures_written, d.checks.len()),
         "breaches": breached,
         "input_release_id": m.release_id,
+        // 2026-10-12: the converter a bids input was released with
+        "converter": m.converter,
         // what the container was given of the sources: one bind per folder
         // of the selection's files, or the roots past the limit, and why
         "scope": m.scope,
@@ -5595,6 +7459,18 @@ fn this_account() -> (u32, u32) {
     unsafe { (libc::getuid(), libc::getgid()) }
 }
 
+/// The uid the engine runs as, whose subordinate ids rootless podman
+/// unpacks an image with (2026-10-12).
+#[cfg(unix)]
+pub(crate) fn engine_uid() -> u32 {
+    this_account().0
+}
+
+#[cfg(not(unix))]
+pub(crate) fn engine_uid() -> u32 {
+    0
+}
+
 /// A run's seeds, as the runner kept them: the document of its derivative
 /// of kind seeds, read back from the working place and checked against the
 /// digest the row holds.
@@ -5657,12 +7533,305 @@ const HEADER_FINGERPRINT: [(&str, char); 22] = [
     ("text_body_part_ci", 't'),
 ];
 
+/// A stack's file as the stacks queries read it: its source's id and root,
+/// its path, the frames of a multi-frame file that are the stack's and
+/// how many, the file's geometry where it was asked for, and its identity
+/// where the slice cache was (record 55 E5).
+type StackFile = (
+    i64,
+    String,
+    String,
+    Option<(String, i64)>,
+    Option<Value>,
+    Option<FileIdentity>,
+);
+
+/// A file's identity for the slice cache (record 55 E5): its SOP Instance
+/// UID, the size and time `source_file` holds, and the sha256 of its bytes
+/// where a run learnt it while the file had that size and time.
+#[derive(Debug, Clone, PartialEq)]
+struct FileIdentity {
+    sop_instance_uid: String,
+    size: i64,
+    mtime_ns: i64,
+    sha256: Option<String>,
+}
+
+/// The files of the stacks `list` names (a few hundred ids, comma
+/// separated) into `files_of`, in the order a manifest lists them: a
+/// multi-frame file's frames first, then the files whose every frame is the
+/// stack's, each by path, with its [`file_geometry`] where `geometry` asks
+/// and its [`FileIdentity`] where `identity` does.
+fn stack_files(
+    store: &mut Store,
+    list: &str,
+    geometry: bool,
+    identity: bool,
+    files_of: &mut BTreeMap<i64, Vec<StackFile>>,
+) -> Result<(), String> {
+    let err = |e: nils_registry::Error| e.to_string();
+    // the instance's columns a file's geometry is made of, after the ones
+    // each query reads anyway, then the file's identity
+    let geo_columns = if geometry {
+        FILE_GEOMETRY
+            .iter()
+            .map(|c| format!(", i.{c}"))
+            .collect::<String>()
+    } else {
+        String::new()
+    };
+    let (id_columns, id_join) = if identity {
+        (
+            ", i.sop_instance_uid, f.size, f.mtime_ns, fc.sha256".to_string(),
+            nils_registry::content::join(store, "f", "fc"),
+        )
+    } else {
+        (String::new(), String::new())
+    };
+    let identity_at = |r: &nils_registry::store::Row,
+                       at: usize|
+     -> Result<Option<FileIdentity>, nils_registry::Error> {
+        if !identity {
+            return Ok(None);
+        }
+        Ok(Some(FileIdentity {
+            sop_instance_uid: r.text(at)?.to_string(),
+            size: r.int(at + 1)?,
+            mtime_ns: r.int(at + 2)?,
+            sha256: r.opt_text(at + 3)?.map(str::to_string),
+        }))
+    };
+    let geo_n = if geometry { FILE_GEOMETRY.len() } else { 0 };
+    let framed = format!(
+        "SELECT fr.stack_id, so.id, so.root, f.path, fr.frames, fr.n_frames{geo_columns}{id_columns} FROM {} fr \
+         JOIN {} i ON i.id = fr.instance_id JOIN {} f ON f.id = i.source_file_id \
+         JOIN {} so ON so.id = f.source_id {id_join} WHERE fr.stack_id IN ({list}) \
+         ORDER BY fr.stack_id, f.path",
+        store.qualified("instance_frame"),
+        store.qualified("instance"),
+        store.qualified("source_file"),
+        store.qualified("source"),
+    );
+    for r in store.query(&framed, &[]).map_err(err)? {
+        let geo = if geometry {
+            Some(file_geometry(&r, 6).map_err(err)?)
+        } else {
+            None
+        };
+        files_of.entry(r.int(0).map_err(err)?).or_default().push((
+            r.int(1).map_err(err)?,
+            r.text(2).map_err(err)?.to_string(),
+            r.text(3).map_err(err)?.to_string(),
+            Some((r.text(4).map_err(err)?.to_string(), r.int(5).map_err(err)?)),
+            geo,
+            identity_at(&r, 6 + geo_n).map_err(err)?,
+        ));
+    }
+    let whole = format!(
+        "SELECT i.stack_id, so.id, so.root, f.path{geo_columns}{id_columns} FROM {} i \
+         JOIN {} f ON f.id = i.source_file_id JOIN {} so ON so.id = f.source_id {id_join} \
+         WHERE i.stack_id IN ({list}) ORDER BY i.stack_id, f.path",
+        store.qualified("instance"),
+        store.qualified("source_file"),
+        store.qualified("source"),
+    );
+    for r in store.query(&whole, &[]).map_err(err)? {
+        let geo = if geometry {
+            Some(file_geometry(&r, 4).map_err(err)?)
+        } else {
+            None
+        };
+        files_of.entry(r.int(0).map_err(err)?).or_default().push((
+            r.int(1).map_err(err)?,
+            r.text(2).map_err(err)?.to_string(),
+            r.text(3).map_err(err)?.to_string(),
+            None,
+            geo,
+            identity_at(&r, 4 + geo_n).map_err(err)?,
+        ));
+    }
+    Ok(())
+}
+
+/// A stack's [`stack_geometry`] and the facts the few-slice student reads
+/// beside it (record 55 E2, P1b), from the stacks query's row at `at`:
+/// the orientation, thickness and spacing, then the session it is part of,
+/// what its images are and how many there are; `sealed` is false until the
+/// caller marks it.
+fn stack_facts(r: &nils_registry::store::Row, at: usize) -> Result<Value, nils_registry::Error> {
+    let mut g = stack_geometry(
+        r.opt_text(at)?,
+        r.opt_double(at + 1)?,
+        r.opt_double(at + 2)?,
+    );
+    g["study"] = json!(r.int(at + 3)?);
+    g["image_type"] = json!(r.opt_text(at + 4)?);
+    g["sop_class_uid"] = json!(r.opt_text(at + 5)?);
+    g["n_instances"] = json!(r.opt_int(at + 6)?);
+    g["sealed"] = json!(false);
+    Ok(g)
+}
+
+/// The rest of each session the run holds part of (record 55 E2, P1b),
+/// for `stacks.json`'s `context`: the few-slice student reads a stack's
+/// height against its session's top, the highest box among the study's
+/// unsealed MR stacks, and a run may hold part of a study (a `--chunk`
+/// page, a selection that is not whole studies). So each other stack of
+/// the `studies` that is MR (its own modality, else its fingerprint's) and
+/// not sealed now is listed with its modality, its geometry and its files'
+/// geometry, in the order and shape the run's own stacks have, and no path:
+/// a pipeline computes the top from them and never scores them.
+fn session_context(
+    store: &mut Store,
+    run: &[i64],
+    studies: &std::collections::BTreeSet<i64>,
+) -> Result<Vec<Value>, String> {
+    let err = |e: nils_registry::Error| e.to_string();
+    let own: std::collections::BTreeSet<i64> = run.iter().copied().collect();
+    let studies: Vec<i64> = studies.iter().copied().collect();
+    let mut modality: BTreeMap<i64, String> = BTreeMap::new();
+    for chunk in studies.chunks(500) {
+        let list = chunk
+            .iter()
+            .map(i64::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        // the image's modality: the stack's own, else its fingerprint's
+        let sql = format!(
+            "SELECT st.id, COALESCE(NULLIF(st.modality, ''), fp.modality) FROM {} st \
+             JOIN {} se ON se.id = st.series_id LEFT JOIN {} fp ON fp.stack_id = st.id \
+             WHERE se.study_id IN ({list}) \
+             AND UPPER(COALESCE(NULLIF(st.modality, ''), fp.modality, '')) = 'MR' ORDER BY st.id",
+            store.qualified("stack"),
+            store.qualified("series"),
+            store.qualified("stack_fingerprint"),
+        );
+        for r in store.query(&sql, &[]).map_err(err)? {
+            let id = r.int(0).map_err(err)?;
+            if !own.contains(&id) {
+                modality.insert(
+                    id,
+                    r.opt_text(1).map_err(err)?.unwrap_or_default().to_string(),
+                );
+            }
+        }
+    }
+    let ids: Vec<i64> = modality.keys().copied().collect();
+    let (sealed, _) =
+        nils_registry::labels::sealed_now(store, &ids, &[]).map_err(|e| e.to_string())?;
+    let ids: Vec<i64> = ids.into_iter().filter(|id| !sealed.contains(id)).collect();
+    let mut geometry_of: BTreeMap<i64, Value> = BTreeMap::new();
+    let mut files_of: BTreeMap<i64, Vec<StackFile>> = BTreeMap::new();
+    for chunk in ids.chunks(500) {
+        let list = chunk
+            .iter()
+            .map(i64::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT st.id, st.image_orientation_patient, fp.slice_thickness, fp.spacing_between_slices, \
+             se.study_id, st.image_type, fp.sop_class_uid, st.n_instances FROM {} st \
+             JOIN {} se ON se.id = st.series_id LEFT JOIN {} fp ON fp.stack_id = st.id \
+             WHERE st.id IN ({list})",
+            store.qualified("stack"),
+            store.qualified("series"),
+            store.qualified("stack_fingerprint"),
+        );
+        for r in store.query(&sql, &[]).map_err(err)? {
+            geometry_of.insert(r.int(0).map_err(err)?, stack_facts(&r, 1).map_err(err)?);
+        }
+        stack_files(store, &list, true, false, &mut files_of)?;
+    }
+    let mut out = Vec::with_capacity(ids.len());
+    for id in ids {
+        let mut seen: std::collections::BTreeSet<(i64, String)> = Default::default();
+        let files: Vec<Value> = files_of
+            .remove(&id)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|(so, _, path, _, _, _)| seen.insert((*so, path.clone())))
+            .map(|(_, _, _, _, geo, _)| json!({"geometry": geo.unwrap_or(Value::Null)}))
+            .collect();
+        out.push(json!({
+            "stack_id": id,
+            "modality": modality.remove(&id),
+            "geometry": geometry_of.remove(&id).unwrap_or(Value::Null),
+            "files": files,
+        }));
+    }
+    Ok(out)
+}
+
+/// The columns of `instance` a file's geometry object carries (record 55
+/// E2), in the order the stacks queries read them: where its image sits,
+/// its spacing, its matrix, its number and how many frames it holds.
+const FILE_GEOMETRY: [&str; 6] = [
+    "image_position_patient",
+    "pixel_spacing",
+    "rows",
+    "columns",
+    "instance_number",
+    "number_of_frames",
+];
+
+/// The numbers of a value DICOM writes as `a\b\c`, as a JSON list when
+/// there are exactly `n` and each is finite; null otherwise, so a pipeline
+/// never meets half a position.
+fn dicom_numbers(text: Option<&str>, n: usize) -> Value {
+    let Some(text) = text else {
+        return Value::Null;
+    };
+    let numbers: Option<Vec<f64>> = text
+        .split('\\')
+        .map(|v| v.trim().parse::<f64>().ok().filter(|x| x.is_finite()))
+        .collect();
+    match numbers {
+        Some(v) if v.len() == n => json!(v),
+        _ => Value::Null,
+    }
+}
+
+/// A file's geometry object for `stacks.json` (record 55 E2), from the
+/// instance's [`FILE_GEOMETRY`] columns starting at `at` in the row: as the
+/// registry read them from the file's header, each null where it holds
+/// none. A multi-frame file's position is its first frame's, so a pipeline
+/// reads the per-frame positions from the file itself.
+fn file_geometry(r: &nils_registry::store::Row, at: usize) -> Result<Value, nils_registry::Error> {
+    Ok(json!({
+        "image_position_patient": dicom_numbers(r.opt_text(at)?, 3),
+        "pixel_spacing": dicom_numbers(r.opt_text(at + 1)?, 2),
+        "rows": r.opt_int(at + 2)?,
+        "columns": r.opt_int(at + 3)?,
+        "instance_number": r.opt_int(at + 4)?,
+        "number_of_frames": r.opt_int(at + 5)?,
+    }))
+}
+
+/// A stack's geometry object for `stacks.json` (record 55 E2): the
+/// orientation of its images (the stack's own, six numbers) and the slice
+/// thickness and spacing of its fingerprint row, each null where the
+/// registry holds none (a stack not fingerprinted has neither). The stacks
+/// query adds the stack's facts beside it (P1b): `study`, the series'
+/// study to group a session by, `image_type`, `sop_class_uid` (the
+/// fingerprint's), `n_instances` and whether it is `sealed` now.
+fn stack_geometry(
+    orientation: Option<&str>,
+    thickness: Option<f64>,
+    spacing: Option<f64>,
+) -> Value {
+    json!({
+        "image_orientation_patient": dicom_numbers(orientation, 6),
+        "slice_thickness": thickness.filter(|x| x.is_finite()),
+        "spacing_between_slices": spacing.filter(|x| x.is_finite()),
+    })
+}
+
 /// Each stack's header object for `stacks.json` (record 50): the named
 /// columns of its fingerprint row (null without one), every classification
 /// row by axis, the name of its first ingest batch, and the cohorts its
 /// subject is an open member of. `stacks` maps each stack to its subject.
 /// The registry is read a few hundred stacks at a time.
-fn stack_headers(
+pub(crate) fn stack_headers(
     store: &mut Store,
     stacks: &BTreeMap<i64, i64>,
 ) -> Result<BTreeMap<i64, Value>, String> {
@@ -5833,13 +8002,45 @@ fn derivative_inputs(
     stacks: &[i64],
     places: &[&nils_registry::place::Place],
 ) -> Result<BTreeMap<String, Vec<derivative::Derivative>>, String> {
-    let mut out: BTreeMap<String, Vec<derivative::Derivative>> = BTreeMap::new();
+    let place_ids: Vec<i64> = places.iter().map(|pl| pl.id).collect();
+    let mut out = derivative_candidates(store, d, stacks, &place_ids)?.rows;
+    // record 55 H3, section 6.5: what the input takes of a check's
+    // status; a run is never given a rejected result unless its
+    // descriptor asks for any
+    for t in d.inputs.iter().filter(|t| t.ty.starts_with("derivative:")) {
+        let checked = t.checked.as_deref().unwrap_or("not_rejected");
+        if let Some(rows) = out.get_mut(&t.id) {
+            rows.retain(|r| takes_checked(checked, r.check_status.as_deref()));
+        }
+    }
+    Ok(out)
+}
+
+/// The derivatives each derivative input of a descriptor could take, by
+/// the input's id, before their checks are read, and the session of each
+/// stack they were read for.
+struct Candidates {
+    rows: BTreeMap<String, Vec<derivative::Derivative>>,
+    sessions: BTreeMap<i64, (i64, String)>,
+}
+
+/// What [`derivative_inputs`] reads, its check left to the caller: the
+/// derivatives of the stacks, and those of the stacks' sessions and
+/// subjects, in these places.
+fn derivative_candidates(
+    store: &mut Store,
+    d: &Descriptor,
+    stacks: &[i64],
+    place_ids: &[i64],
+) -> Result<Candidates, String> {
+    let mut rows: BTreeMap<String, Vec<derivative::Derivative>> = BTreeMap::new();
     let wanted = d.inputs.iter().any(|t| t.ty.starts_with("derivative:"));
-    let sessions = if wanted {
-        sessions_of(store, stacks)?
+    let of_stack = if wanted {
+        stack_sessions(store, stacks)?
     } else {
         Default::default()
     };
+    let sessions: std::collections::BTreeSet<(i64, String)> = of_stack.values().cloned().collect();
     let subjects: Vec<i64> = sessions
         .iter()
         .map(|(s, _)| *s)
@@ -5848,13 +8049,13 @@ fn derivative_inputs(
         .collect();
     for t in d.inputs.iter().filter(|t| t.ty.starts_with("derivative:")) {
         let kind = t.ty.trim_start_matches("derivative:");
-        let mut rows = Vec::new();
-        for pl in places {
-            rows.extend(
-                derivative::of_stacks(store, kind, stacks, pl.id).map_err(|e| e.to_string())?,
+        let mut found = Vec::new();
+        for &place in place_ids {
+            found.extend(
+                derivative::of_stacks(store, kind, stacks, place).map_err(|e| e.to_string())?,
             );
             for r in
-                derivative::of_subjects(store, kind, &subjects, pl.id).map_err(|e| e.to_string())?
+                derivative::of_subjects(store, kind, &subjects, place).map_err(|e| e.to_string())?
             {
                 let ours = match (r.scope.as_str(), r.subject_id, &r.session_day) {
                     ("subject", Some(_), _) => true,
@@ -5862,25 +8063,120 @@ fn derivative_inputs(
                     _ => false,
                 };
                 if ours {
-                    rows.push(r);
+                    found.push(r);
                 }
             }
         }
-        out.insert(t.id.clone(), rows);
+        rows.insert(t.id.clone(), found);
+    }
+    Ok(Candidates {
+        rows,
+        sessions: of_stack,
+    })
+}
+
+/// Whether a derivative input that takes `checked` (accepted, not_rejected
+/// or any) takes a result whose check left it so (record 55 H3, section
+/// 6.5). An unchecked result is taken by not_rejected and any.
+pub(crate) fn takes_checked(checked: &str, status: Option<&str>) -> bool {
+    match checked {
+        "any" => true,
+        "accepted" => status == Some("accepted"),
+        _ => status != Some("rejected"),
+    }
+}
+
+/// Record 55 H3, section 6.5, found by the T33 pipe test: why each unit,
+/// given by its stacks, lacks a derivative an input that is not optional
+/// needs, in the order the units are given (nothing for a unit that lacks
+/// none). A derivative is the unit's when it is of one of its stacks, or
+/// of the subject or the session of one of them, as the run's inputs read
+/// them; the unit lacks the input when none is registered, or when its
+/// check leaves out every one there is, so the run's inputs hold none for
+/// it. The pre-flight and the run judge the units by it, so both agree
+/// with the inputs: a unit whose only mask was rejected is not ready, and
+/// is not run.
+pub(crate) fn derivatives_missing(
+    store: &mut Store,
+    d: &Descriptor,
+    units: &[&[i64]],
+    place_ids: &[i64],
+) -> Result<Vec<Vec<String>>, String> {
+    let mut out: Vec<Vec<String>> = vec![Vec::new(); units.len()];
+    let needed: Vec<&descriptor::TypedInput> = d
+        .inputs
+        .iter()
+        .filter(|t| t.ty.starts_with("derivative:") && !t.optional)
+        .collect();
+    if needed.is_empty() || units.is_empty() {
+        return Ok(out);
+    }
+    let stacks: Vec<i64> = units
+        .iter()
+        .flat_map(|u| u.iter().copied())
+        .collect::<std::collections::BTreeSet<i64>>()
+        .into_iter()
+        .collect();
+    let found = derivative_candidates(store, d, &stacks, place_ids)?;
+    for t in needed {
+        let kind = t.ty.trim_start_matches("derivative:");
+        let checked = t.checked.as_deref().unwrap_or("not_rejected");
+        let rows = found.rows.get(&t.id).map(Vec::as_slice).unwrap_or_default();
+        for (u, why) in units.iter().zip(out.iter_mut()) {
+            let sessions: Vec<&(i64, String)> =
+                u.iter().filter_map(|s| found.sessions.get(s)).collect();
+            let own: Vec<&derivative::Derivative> = rows
+                .iter()
+                .filter(|r| match (r.stack_id, r.scope.as_str(), r.subject_id) {
+                    (Some(s), ..) => u.contains(&s),
+                    (None, "subject", Some(subject)) => sessions.iter().any(|(s, _)| *s == subject),
+                    (None, "session", Some(subject)) => r
+                        .session_day
+                        .as_deref()
+                        .is_some_and(|day| sessions.iter().any(|(s, d)| *s == subject && d == day)),
+                    _ => false,
+                })
+                .collect();
+            if own
+                .iter()
+                .any(|r| takes_checked(checked, r.check_status.as_deref()))
+            {
+                continue;
+            }
+            why.push(derivative_lack(own.len(), kind, &t.id, checked));
+        }
     }
     Ok(out)
 }
 
+/// Why a unit lacks a derivative an input needs, given how many of the
+/// kind it has, none of which the input's check takes: the words the
+/// pre-flight and the run say, which [`crate::preflight::brief`] shortens.
+pub(crate) fn derivative_lack(found: usize, kind: &str, input: &str, checked: &str) -> String {
+    match (found, checked) {
+        (0, _) => format!("no {kind} derivative of it for the input {input}"),
+        (_, "accepted") => format!(
+            "no {kind} derivative of it for the input {input} is accepted by a check, and the input takes accepted ones only"
+        ),
+        (1, _) => format!(
+            "its {kind} derivative for the input {input} was rejected by a check, and the input takes no rejected one"
+        ),
+        (n, _) => format!(
+            "its {n} {kind} derivatives for the input {input} were all rejected by a check, and the input takes no rejected one"
+        ),
+    }
+}
+
 /// The sessions of these stacks, each as its subject and its day, the day
-/// a run of the bids layout names a session's derivatives by.
-fn sessions_of(
+/// a run of the bids layout names a session's derivatives by, by stack.
+fn stack_sessions(
     store: &mut Store,
     stacks: &[i64],
-) -> Result<std::collections::BTreeSet<(i64, String)>, String> {
+) -> Result<BTreeMap<i64, (i64, String)>, String> {
     let err = |e: nils_registry::Error| e.to_string();
     let labels = nils_session::labels_by_study(store, &nils_registry::session::Scheme::default())
         .unwrap_or_default();
-    let mut out = std::collections::BTreeSet::new();
+    let mut out = BTreeMap::new();
     for chunk in stacks.chunks(500) {
         let list = chunk
             .iter()
@@ -5888,19 +8184,19 @@ fn sessions_of(
             .collect::<Vec<_>>()
             .join(", ");
         let sql = format!(
-            "SELECT se.subject_id, se.study_id FROM {} st JOIN {} se ON se.id = st.series_id \
+            "SELECT st.id, se.subject_id, se.study_id FROM {} st JOIN {} se ON se.id = st.series_id \
              WHERE st.id IN ({list})",
             store.qualified("stack"),
             store.qualified("series"),
         );
         for r in store.query(&sql, &[]).map_err(err)? {
             let (Some(subject), Some(study)) =
-                (r.opt_int(0).map_err(err)?, r.opt_int(1).map_err(err)?)
+                (r.opt_int(1).map_err(err)?, r.opt_int(2).map_err(err)?)
             else {
                 continue;
             };
             if let Some(l) = labels.get(&study) {
-                out.insert((subject, l.first.to_string()));
+                out.insert(r.int(0).map_err(err)?, (subject, l.first.to_string()));
             }
         }
     }
@@ -5923,6 +8219,65 @@ fn lane_places<'a>(x: &Execution<'a>) -> Vec<&'a nils_registry::place::Place> {
 /// derivatives tree, by a hard link (a copy where the two are not on one
 /// filesystem). The file is taken only where it resolves inside the
 /// working place's derivatives tree. Answers the path under the input.
+/// What made each derivative a run takes (record 57 P11), for the
+/// manifest, so a pipeline can say which result it read: the run, its
+/// pipeline's name and version, the parameters it ran with, and the scan
+/// the derivative's grid is on with the file name the release that run
+/// read gave it (`sub-a_ses-1_acq-Sag+3D+MPRAGE_T1w`, its contrast the
+/// suffix and the `acq-` tokens). Each run and release is read once.
+#[derive(Default)]
+struct MadeBy {
+    runs: BTreeMap<i64, Option<(Value, Option<i64>)>>,
+    stems: BTreeMap<i64, BTreeMap<i64, Option<String>>>,
+}
+
+impl MadeBy {
+    /// Null for a derivative no run made, or a run the registry no longer
+    /// holds; a grid not read yet, or a scan no release named, is null.
+    fn of(&mut self, store: &mut Store, row: &derivative::Derivative) -> Value {
+        let Some(run_id) = row.run_id else {
+            return Value::Null;
+        };
+        let made = self
+            .runs
+            .entry(run_id)
+            .or_insert_with(|| {
+                let run = rows::run(store, run_id).ok().flatten()?;
+                let p = rows::get(store, run.pipeline_id).ok().flatten()?;
+                Some((
+                    json!({
+                        "run": run_id, "pipeline": p.name, "version": p.version,
+                        "params": run.params,
+                    }),
+                    run.input_release_id,
+                ))
+            })
+            .clone();
+        let Some((mut doc, release)) = made else {
+            return Value::Null;
+        };
+        let stem = match (release, row.grid_stack_id) {
+            (Some(release), Some(stack)) => self
+                .stems
+                .entry(release)
+                .or_insert_with(|| {
+                    released_stacks(store, release)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|(s, _, stem)| (s, stem))
+                        .collect()
+                })
+                .get(&stack)
+                .cloned()
+                .flatten(),
+            _ => None,
+        };
+        doc["grid_stack_id"] = json!(row.grid_stack_id);
+        doc["grid_stem"] = json!(stem);
+        doc
+    }
+}
+
 fn link_input(working: &Path, path: &str, into: &Path) -> Result<String, String> {
     let rel = path
         .strip_prefix(&format!("{}/", derivative::TREE))
@@ -6176,6 +8531,108 @@ fn found_for(outputs: &[descriptor::Output], out: &Path, u: &Unit) -> Vec<String
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Record 55 H3, section 6.5: a `derivative:<kind>` input takes what
+    /// its check leaves it: by default any result but a rejected one, with
+    /// `accepted` only the accepted, with `any` every one.
+    #[test]
+    fn a_derivative_input_takes_what_its_check_leaves_it() {
+        let mut store = Store::sqlite_in_memory().unwrap();
+        nils_registry::migrate::migrate(&mut store, nils_registry::migrate::Kind::Registry)
+            .unwrap();
+        let place = nils_registry::place::add(
+            &mut store,
+            &nils_registry::place::New {
+                name: "work",
+                role: nils_registry::place::Role::Working,
+                path: "/nowhere",
+                guarantees: json!({}),
+                probed: json!({}),
+                handling: Value::Null,
+                dataset: Value::Null,
+            },
+        )
+        .unwrap();
+        let pl = nils_registry::place::show(&mut store, place)
+            .unwrap()
+            .unwrap();
+        let t = store.qualified("derivative");
+        for (i, status) in [
+            (1, "'accepted'"),
+            (2, "'rejected'"),
+            (3, "NULL"),
+            (4, "'flagged'"),
+        ] {
+            store
+                .execute(
+                    &format!(
+                        "INSERT INTO {t} (kind, scope, stack_id, place_id, path, bytes, sha256, media_type, created_at, check_status) \
+                         VALUES ('mask', 'stack', 7, {place}, 'p{i}', 1, 's{i}', 'x', '2026-10-11T10:00:00Z', {status})"
+                    ),
+                    &[],
+                )
+                .unwrap();
+        }
+        let yml = |checked: &str| {
+            format!(
+                "name: takes\nschema-version: \"0.5\"\ntool-version: \"1\"\ncontainer-image:\n  type: docker\n  image: \"example.org/takes@sha256:59c45f54a1f1dc69134f63bec91a726e41c71c64a16cc21cda0b54526910a3c3\"\nx-nils:\n  analysis-level: stack\n  input: {{layout: stacks}}\n  inputs:\n    - {{id: prior, type: \"derivative:mask\"{checked}}}\n  outputs:\n    - {{id: out, kind: output, path-template: \"stack-{{stack}}/out.txt\"}}\n"
+            )
+        };
+        for (checked, want) in [
+            ("", vec!["p1", "p3", "p4"]),
+            (", checked: not_rejected", vec!["p1", "p3", "p4"]),
+            (", checked: accepted", vec!["p1"]),
+            (", checked: any", vec!["p1", "p2", "p3", "p4"]),
+        ] {
+            let d = nils_pipeline::descriptor::parse(&yml(checked)).unwrap();
+            let taken = derivative_inputs(&mut store, &d, &[7], &[&pl]).unwrap();
+            let paths: Vec<&str> = taken["prior"].iter().map(|r| r.path.as_str()).collect();
+            assert_eq!(paths, want, "{checked}");
+        }
+        assert!(takes_checked("not_rejected", None));
+        assert!(!takes_checked("not_rejected", Some("rejected")));
+        assert!(!takes_checked("accepted", Some("flagged")));
+    }
+
+    /// Record 55 E2: a geometry value is DICOM's backslash list of numbers
+    /// read whole, with the count it must have, or nothing: a pipeline never
+    /// meets half a position, a word or an infinity.
+    #[test]
+    fn geometry_numbers_are_whole_or_null() {
+        assert_eq!(
+            dicom_numbers(Some("1\\-2.5\\3e1"), 3),
+            json!([1.0, -2.5, 30.0])
+        );
+        assert_eq!(dicom_numbers(Some(" 0.5 \\ 0.5 "), 2), json!([0.5, 0.5]));
+        assert_eq!(
+            dicom_numbers(Some("1\\0\\0\\0\\1\\0"), 6)
+                .as_array()
+                .map(Vec::len),
+            Some(6)
+        );
+        for (text, n) in [
+            ("1\\2", 3),
+            ("1\\2\\3\\4", 3),
+            ("1\\x\\3", 3),
+            ("1\\inf\\3", 3),
+            ("1\\NaN\\3", 3),
+            ("", 2),
+            ("1\\\\2", 2),
+        ] {
+            assert_eq!(dicom_numbers(Some(text), n), Value::Null, "{text:?}");
+        }
+        assert_eq!(dicom_numbers(None, 3), Value::Null);
+        // a stack's thickness and spacing are numbers or null, never NaN
+        let g = stack_geometry(Some("0\\1\\0\\0\\0\\-1"), Some(1.5), Some(f64::NAN));
+        assert_eq!(
+            g["image_orientation_patient"],
+            json!([0.0, 1.0, 0.0, 0.0, 0.0, -1.0])
+        );
+        assert_eq!(g["slice_thickness"], json!(1.5));
+        assert_eq!(g["spacing_between_slices"], Value::Null);
+        let g = stack_geometry(None, None, None);
+        assert!(g.as_object().unwrap().values().all(Value::is_null), "{g}");
+    }
 
     /// The review of record 43: at detail plain a run's document says no
     /// unit by its subject or session, and keeps everything else.

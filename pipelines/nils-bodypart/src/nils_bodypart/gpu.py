@@ -102,6 +102,20 @@ def cuda_available() -> bool:
         return False
 
 
+def torch_cuda_available() -> bool:
+    """Whether this process's torch can run on a card: a CPU build of torch
+    cannot, even where the decoders see one (the image's CPU build on a
+    machine with a card)."""
+    if not cuda_available():
+        return False
+    try:
+        import torch
+
+        return bool(torch.cuda.is_available())
+    except Exception:  # noqa: BLE001 - no torch, or one that cannot ask
+        return False
+
+
 class J2KDecoder:
     """A stack's lossless JPEG 2000 frames decoded in one batch on the card.
 

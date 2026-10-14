@@ -42,9 +42,50 @@ decides: [role]
 collect: true
 tiers: {stated: 1.0}
 
-order: [t1w, flair, t2w]
+# The pick borders study of 2026-10-10, R2b: the five rules that say no
+# role go first, before every rule that sets one.
+order: [angiography_tof, angiography_ce, angiography_pc, dynamic, small_field, t1w, flair, t2w]
 
 rules:
+
+  # The pick borders study of 2026-10-10 (record 55, R2b; the design
+  # repository's `studies/2026-10-10-pick-borders/`): what is never a
+  # session's main scan, whatever its base. An angiography (TOF, contrast
+  # MRA, phase contrast; Nima's ruling of 2026-09-26 keeps a TOF's base
+  # T1w), a series of more than one temporal position as its header states
+  # it (a dynamic: a pituitary run of 5 slices by 11 phases scored as 55
+  # slices), and a slab whose two in-plane fields of view are both under
+  # 175 mm (an inner ear, an orbit). Each decides the role as nothing, so it
+  # runs before the rules that set one, and a stack's classification says
+  # which of them did. They are written as `nils pack apply` writes a typed
+  # `add_rule` with `nothing: true` (patch format 1,
+  # tests/fixtures/patches/never-a-main-scan.yml), so the rehearsal that
+  # measured them measured this.
+  angiography_tof:
+    clauses:
+      - {when: {axis: technique, is: TOF-MRA}, cite: 'technique is TOF-MRA', source: axes, tier: stated}
+    set: {role: null}
+    why: 'an angiography images vessels, not the brain'
+  angiography_ce:
+    clauses:
+      - {when: {axis: technique, is: CE-MRA}, cite: 'technique is CE-MRA', source: axes, tier: stated}
+    set: {role: null}
+    why: 'an angiography images vessels, not the brain'
+  angiography_pc:
+    clauses:
+      - {when: {axis: technique, is: PC-MRA}, cite: 'technique is PC-MRA', source: axes, tier: stated}
+    set: {role: null}
+    why: 'an angiography images vessels, not the brain'
+  dynamic:
+    clauses:
+      - {when: {field: temporal_positions, gt: 1}, cite: 'temporal_positions > 1', source: header, tier: exclusive}
+    set: {role: null}
+    why: 'a series of more than one temporal position is a dynamic run, not one volume to measure on'
+  small_field:
+    clauses:
+      - {when: {all: [{field: fov_x, lt: 175}, {field: fov_y, lt: 175}]}, cite: 'fov_x < 175 and fov_y < 175', source: header, tier: exclusive}
+    set: {role: null}
+    why: 'a slab whose in-plane fields of view are both under 175 mm (an inner ear, an orbit, a pituitary) does not cover a brain'
 
   t1w:
     clauses:

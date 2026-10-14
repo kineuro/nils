@@ -1,0 +1,22 @@
+{
+ "run": "final-cert-grade-code",
+ "purpose": "the final certificate's fetch script (nils-design 35a70a8, the grade's registration) and the drawn stacks' ids, carried to the compute server through Bifrost so the fetch reaches the NILS server from the research copy (sha256 checked), never through the gateway",
+ "study": "studies/2026-10-01-final-certificate-read/grade.md",
+ "created": "2026-10-02T13:06:21Z",
+ "sealed": "2026-10-02T13:06:21Z",
+ "files": 5,
+ "bytes": 33476,
+ "by_folder": {
+  ".": 1,
+  "code": 4
+ },
+ "manifest_sha256": "1ddb6f39b3013cf214b067982e5b00058e9ad770352df12343c030cbececca3c",
+ "per_stack_files_by_folder": {},
+ "sha256": {
+  "RUN.json": "4a6f274e624100e453a94a18e4b87c2383c1c1d774c59689891b03f03ef40d5e",
+  "code/COMMIT": "a11dd1e02009f77f9b284c0f0b79540959bd34f58dea7ef0830c987db1215975",
+  "code/SHA256SUMS": "082e0545e3f6a41cc5d57e37d4dd557656a013342427e87425d89aabf9608e7d",
+  "code/fetch-server-final.sh": "c92947314ea8a2235fa634595a38d9f34e6addd3bb0e944687edeeb3c5664e15",
+  "code/stack-ids.txt": "6e6b62434672404d6a82654fdcd8aa50f44ffc1d579290edaca149cd5c23ad29"
+ }
+}

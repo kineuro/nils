@@ -23,10 +23,12 @@
 //! And it names the **scheme** the session came from, because a session is
 //! derived (§5) and the same studies are one occasion or two depending on it.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use nils_pack::pack::Pack;
 use nils_pack::pick::{self, Candidate, Model, Reference};
+use nils_pack::pick_rules::{self, Chooser, Rules};
+use nils_registry::pick_rules::{Saved, Scope, pick_filter};
 use nils_registry::review;
 use nils_registry::schema::{Type, table};
 use nils_registry::session::{self, Scheme};
@@ -74,7 +76,183 @@ pub struct Picked {
     /// The job the run was, which keeps this report as its result.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub job: Option<i64>,
+    /// Record 55, decision 6: the scopes the run decided, the pack's (made
+    /// with version 1 of the rules, its defaults) and each dataset's or
+    /// cohort's with rules of its own, each with the version it was made
+    /// with and its counts. The counts above are the first one's.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub rules: Vec<ScopeReport>,
+    /// Open `pick.border` items the run closed as settled by the rules:
+    /// no pick asks a person anything (record 56).
+    pub settled: i64,
+    /// The scope's run picks on occasions of the subjects it decided that
+    /// hold no candidate any more, removed.
+    pub removed: i64,
+    /// Record 55, decision 6: the scopes whose run failed or was skipped,
+    /// `{scope, version, error}`; the run went on with the others, and a
+    /// failed scope keeps the picks it was read from before.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub failed: Vec<serde_json::Value>,
     pub seconds: f64,
+    /// 2026-10-12 (Nima, on a dataset whose run "picked for 10 subjects"
+    /// and wrote nothing): the visits the run decided, a subject's day with
+    /// every role together, of the first scope as the counts above.
+    pub visits: i64,
+    /// The visits a pick was written on, and the subjects they are of.
+    pub visits_picked: i64,
+    pub subjects_picked: i64,
+    /// Where nothing was written, why, in a person's words: "none of its 10
+    /// subjects has a scan of a main role", "no visits found for its 10
+    /// subjects, whose studies carry no date".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nothing: Option<String>,
+    /// The run in one line, as a log and the job say it: "Main scans
+    /// picked for 3 visits of 2 subjects", or "No main scans picked: " and
+    /// why.
+    pub said: String,
+    /// The visits decided and those picked on, by subject and day.
+    #[serde(skip)]
+    decided_visits: BTreeSet<(i64, String)>,
+    #[serde(skip)]
+    picked_visits: BTreeSet<(i64, String)>,
+}
+
+/// `n` of a noun, its plural after any count but one.
+fn counted(n: usize, one: &str, many: &str) -> String {
+    format!("{n} {}", if n == 1 { one } else { many })
+}
+
+impl Picked {
+    /// The words of a run that wrote `written` picks on `visits_picked`
+    /// visits of `subjects_picked` subjects, or nothing, and why.
+    fn say(&mut self) {
+        self.said = if self.written > 0 {
+            format!(
+                "Main scans picked for {} of {}",
+                counted(self.visits_picked as usize, "visit", "visits"),
+                counted(self.subjects_picked as usize, "subject", "subjects")
+            )
+        } else {
+            format!(
+                "No main scans picked: {}",
+                self.nothing
+                    .as_deref()
+                    .unwrap_or("the rules allow no scan on any visit")
+            )
+        };
+    }
+}
+
+/// Why a run wrote nothing for the subjects it decided (`covered`, none for
+/// every subject), read from what it read: none of them holds a stack of a
+/// role the pack picks, their stacks of one are on no visit (their studies
+/// carry no date, since the cache was brought up to date first), or the
+/// rules allow none of the scans on their `visits` visits.
+fn nothing_why(
+    pack: &Pack,
+    rows_of: &[Vec<Row>],
+    labels: &HashMap<i64, nils_session::Labelled>,
+    covered: Option<&BTreeSet<i64>>,
+    visits: i64,
+) -> String {
+    if covered.is_some_and(BTreeSet::is_empty) {
+        return "there are no subjects to decide".to_string();
+    }
+    let mut holding: BTreeSet<i64> = BTreeSet::new();
+    let mut on_a_visit = false;
+    for (model, rows) in pack.picks.iter().zip(rows_of) {
+        for role in &model.roles {
+            for r in of_role(model, role, rows) {
+                if covered.is_some_and(|c| !c.contains(&r.subject)) {
+                    continue;
+                }
+                holding.insert(r.subject);
+                on_a_visit |= labels.contains_key(&r.study);
+            }
+        }
+    }
+    if holding.is_empty() {
+        return match covered {
+            Some(c) if c.len() == 1 => "its one subject has no scan of a main role".to_string(),
+            Some(c) => format!("none of its {} subjects has a scan of a main role", c.len()),
+            None => "no subject has a scan of a main role".to_string(),
+        };
+    }
+    if !on_a_visit {
+        return match covered {
+            Some(c) if c.len() == 1 => {
+                "no visits found for its one subject, whose studies carry no date".to_string()
+            }
+            Some(c) => format!(
+                "no visits found for its {} subjects, whose studies carry no date",
+                c.len()
+            ),
+            None => "no visits found for the subjects with a scan of a main role, whose studies carry no date".to_string(),
+        };
+    }
+    format!(
+        "the rules allow no scan on its {}",
+        counted(visits as usize, "visit", "visits")
+    )
+}
+
+/// What a run did for one scope (record 55, decision 6).
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct ScopeReport {
+    /// `{kind, id, name}`; null for the pack's.
+    pub scope: Option<serde_json::Value>,
+    pub version: i64,
+    /// The subjects it decided; null for every subject.
+    pub subjects: Option<usize>,
+    pub sessions: i64,
+    pub written: i64,
+    pub empty: i64,
+    pub standing: i64,
+}
+
+/// One scope a run decides (record 55, decision 6): the pack's, made with
+/// version 1 of the rules, or a dataset's or a cohort's with rules saved,
+/// made with its latest version.
+#[derive(Debug, Clone)]
+pub struct RunScope {
+    /// None for the pack's.
+    pub scope: Option<Scope>,
+    /// The version saved; none for the pack's defaults.
+    pub saved: Option<Saved>,
+    /// The subjects it decides; none for every subject the run reads.
+    pub subjects: Option<BTreeSet<i64>>,
+    /// Whether they are every subject of the scope: a run that decided them
+    /// all makes the version the one the scope is read from.
+    pub whole: bool,
+}
+
+impl RunScope {
+    /// The pack's scope, for these subjects or every one.
+    pub fn pack(subjects: Option<BTreeSet<i64>>) -> RunScope {
+        RunScope {
+            scope: None,
+            saved: None,
+            subjects,
+            whole: false,
+        }
+    }
+}
+
+/// The rules a scope's picks are made with, and their version: the saved
+/// document read against the pick's defaults, or the defaults themselves.
+pub fn rules_of(model: &Model, saved: Option<&Saved>) -> Result<(Rules, i64), Error> {
+    let defaults = Rules::defaults(model);
+    match saved {
+        None => Ok((defaults, 1)),
+        Some(s) => Rules::from_json(&s.rules, &defaults)
+            .map(|r| (r, s.version))
+            .map_err(|e| {
+                Error::Store(StoreError::Message(format!(
+                    "version {} of the rules does not read under {}: {e}",
+                    s.version, model.name
+                )))
+            }),
+    }
 }
 
 /// What a run did for one role (record 55 H2, round 4).
@@ -287,13 +465,30 @@ pub fn run(
 }
 
 /// [`run`] deciding the occasions of `only`'s subjects alone (record 55
-/// H2: a pick run for a dataset or a cohort, as the bring-in runs it).
+/// H2: a pick run for a dataset or a cohort, as the bring-in runs it), in
+/// the pack's scope.
 pub fn run_for(
     registry: &mut Registry,
     pack: &Pack,
     scheme: &Scheme,
     subject: Option<&str>,
     only: Option<&Only>,
+    actor: &str,
+) -> Result<Picked, Error> {
+    let scopes = [RunScope::pack(only.map(|o| o.subjects.clone()))];
+    run_scopes(registry, pack, scheme, subject, only, &scopes, actor)
+}
+
+/// [`run_for`] deciding each of `scopes` in turn, in one job (record 55,
+/// decision 6): every scope is scored against the same population, and
+/// each writes and replaces the run picks of its own scope only.
+pub fn run_scopes(
+    registry: &mut Registry,
+    pack: &Pack,
+    scheme: &Scheme,
+    subject: Option<&str>,
+    only: Option<&Only>,
+    scopes: &[RunScope],
     actor: &str,
 ) -> Result<Picked, Error> {
     let settings = crate::job::Settings {
@@ -304,7 +499,16 @@ pub fn run_for(
         ..crate::job::Settings::default()
     };
     let job_id = crate::job::claim_for(registry, &settings, "pick")?;
-    let mut result = run_pick(registry, pack, scheme, subject, only, actor, Some(job_id));
+    let mut result = run_pick(
+        registry,
+        pack,
+        scheme,
+        subject,
+        only,
+        scopes,
+        actor,
+        Some(job_id),
+    );
     let (state, error) = match &mut result {
         Ok(report) => {
             // record 55 H2 (round 4): the job keeps its report, which the
@@ -321,12 +525,14 @@ pub fn run_for(
     result
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_pick(
     registry: &mut Registry,
     pack: &Pack,
     scheme: &Scheme,
     subject: Option<&str>,
     only: Option<&Only>,
+    scopes: &[RunScope],
     actor: &str,
     job_id: Option<i64>,
 ) -> Result<Picked, Error> {
@@ -338,6 +544,8 @@ fn run_pick(
         report.datasets = o.datasets.clone();
     }
     if pack.picks.is_empty() {
+        report.nothing = Some(format!("{} declares no picks", pack.id()));
+        report.say();
         return Ok(report);
     }
     report.reference = match subject {
@@ -353,23 +561,182 @@ fn run_pick(
     nils_session::ensure(registry, scheme, &anchors, subject, false).map_err(session_err)?;
     let store = registry.store();
     let labels = nils_session::labels_by_study(store, scheme).map_err(session_err)?;
+    // a run for one subject decides that subject alone, in every scope
+    let one: Option<BTreeSet<i64>> = match subject {
+        Some(code) => Some(
+            store
+                .query_opt(
+                    &format!(
+                        "SELECT id FROM {} WHERE code = {}",
+                        store.qualified("subject"),
+                        store.dialect().param(1, Type::Text)
+                    ),
+                    &[Param::from(code)],
+                )?
+                .map(|r| r.int(0))
+                .transpose()?
+                .into_iter()
+                .collect(),
+        ),
+        None => None,
+    };
+    // every stack holding a role, read once for every scope
+    let mut rows_of: Vec<Vec<Row>> = Vec::with_capacity(pack.picks.len());
     for model in &pack.picks {
-        let rows = read_rows(store, model, subject)?;
-        run_one(
-            store,
-            model,
-            pack,
-            scheme,
-            &labels,
-            &rows,
-            only.map(|o| &o.subjects),
-            actor,
-            job_id,
-            &mut report,
-        )?;
+        rows_of.push(read_rows(store, model, subject)?);
     }
+    let scheme_digest = scheme.digest();
+    let mut done: Vec<Picked> = Vec::with_capacity(scopes.len());
+    // the first scope's subjects, which the report's words are of
+    let mut first_covered: Option<Option<BTreeSet<i64>>> = None;
+    for run in scopes {
+        let mut part = Picked {
+            reference: report.reference.clone(),
+            ..Picked::default()
+        };
+        let covered: Option<BTreeSet<i64>> = match (&run.subjects, &one) {
+            (Some(s), Some(o)) => Some(s.intersection(o).copied().collect()),
+            (Some(s), None) => Some(s.clone()),
+            (None, o) => o.clone(),
+        };
+        if first_covered.is_none() {
+            first_covered = Some(covered.clone());
+        }
+        let version = run.saved.as_ref().map_or(1, |s| s.version);
+        // a scope's rules are the first pick's, whose roles they name; the
+        // pack's scope runs every pick with its defaults
+        let models: Vec<(&Model, &Vec<Row>)> = match &run.scope {
+            None => pack.picks.iter().zip(&rows_of).collect(),
+            Some(_) => pack.picks.iter().zip(&rows_of).take(1).collect(),
+        };
+        let started = match &run.scope {
+            Some(s) => Some(nils_registry::pick_rules::run_started(
+                store, s, version, job_id, run.whole,
+            )?),
+            None => None,
+        };
+        let mut error: Option<String> = None;
+        for (model, rows) in models {
+            let decided = rules_of(model, run.saved.as_ref()).and_then(|(rules, version)| {
+                run_one(
+                    store,
+                    model,
+                    pack,
+                    scheme,
+                    &labels,
+                    rows,
+                    &Decide {
+                        scope: run.scope.as_ref(),
+                        rules: &rules,
+                        version,
+                        covered: covered.as_ref(),
+                        scheme_digest: &scheme_digest,
+                    },
+                    actor,
+                    job_id,
+                    &mut part,
+                )
+            });
+            if let Err(e) = decided {
+                // the pack's scope failing fails the run; a scope's is
+                // reported, and the run goes on with the next
+                if run.scope.is_none() {
+                    return Err(e);
+                }
+                error = Some(e.to_string());
+                break;
+            }
+        }
+        if let (Some(row), Some(scope)) = (started, &run.scope) {
+            nils_registry::pick_rules::run_ended(store, row, error.as_deref())?;
+            if error.is_none() && run.whole {
+                part.removed += drop_other_versions(store, scope, version)?;
+            }
+        }
+        if let Some(e) = &error {
+            report.failed.push(serde_json::json!({
+                "scope": run.scope.as_ref().map(Scope::to_json), "version": version, "error": e,
+            }));
+        }
+        report.rules.push(ScopeReport {
+            scope: run.scope.as_ref().map(Scope::to_json),
+            version,
+            subjects: covered.as_ref().map(BTreeSet::len),
+            sessions: part.sessions,
+            written: part.written,
+            empty: part.empty,
+            standing: part.standing,
+        });
+        done.push(part);
+    }
+    let mut parts = done.into_iter();
+    if let Some(first) = parts.next() {
+        report.sessions = first.sessions;
+        report.written = first.written;
+        report.borders = first.borders;
+        report.empty = first.empty;
+        report.standing = first.standing;
+        report.raised = first.raised;
+        report.tied = first.tied;
+        report.roles = first.roles;
+        report.settled = first.settled;
+        report.removed = first.removed;
+        report.visits = first.decided_visits.len() as i64;
+        report.visits_picked = first.picked_visits.len() as i64;
+        report.subjects_picked = first
+            .picked_visits
+            .iter()
+            .map(|(s, _)| *s)
+            .collect::<BTreeSet<_>>()
+            .len() as i64;
+    }
+    for p in parts {
+        report.settled += p.settled;
+        report.removed += p.removed;
+    }
+    if report.written == 0 {
+        report.nothing = Some(nothing_why(
+            pack,
+            &rows_of,
+            &labels,
+            first_covered.flatten().as_ref(),
+            report.visits,
+        ));
+    }
+    report.say();
     report.seconds = started.elapsed().as_secs_f64();
     Ok(report)
+}
+
+/// What one run of one scope decides: the scope (none for the pack's), its
+/// rules and their version, and the subjects (none for every subject).
+struct Decide<'a> {
+    scope: Option<&'a Scope>,
+    rules: &'a Rules,
+    version: i64,
+    covered: Option<&'a BTreeSet<i64>>,
+    /// The scheme the run picks under: its picks are its own, beside those
+    /// of other schemes.
+    scheme_digest: &'a str,
+}
+
+impl Decide<'_> {
+    /// What a pick row and a settled border say of the rules.
+    fn named(&self) -> serde_json::Value {
+        serde_json::json!({
+            "scope": self.scope.map(Scope::to_json), "version": self.version,
+        })
+    }
+}
+
+/// The names a run's candidates carry: what the pick model reads, and what
+/// the rules read beside it (the kind, what they allow, the tie keys).
+pub(crate) fn carried(model: &Model) -> Vec<String> {
+    let mut out = model.reads();
+    out.extend(pick_rules::READS.iter().map(|n| n.to_string()));
+    out.sort();
+    out.dedup();
+    out
 }
 
 /// The day each study happened on, which is what a session is grouped by.
@@ -382,7 +749,34 @@ fn session_err(e: nils_session::Error) -> Error {
 
 /// Every stack that holds a role, with the values this model reads.
 fn read_rows(store: &mut Store, model: &Model, subject: Option<&str>) -> Result<Vec<Row>, Error> {
-    let reads = model.reads();
+    read_named(store, &carried(model), subject, None)
+}
+
+/// Every stack that holds a role, with the values of `reads`: of one
+/// subject by code, of a set of subjects by id, or of every subject.
+pub(crate) fn read_named(
+    store: &mut Store,
+    reads: &[String],
+    subject: Option<&str>,
+    subjects: Option<&BTreeSet<i64>>,
+) -> Result<Vec<Row>, Error> {
+    if let Some(ids) = subjects {
+        let mut out = Vec::new();
+        let ids: Vec<i64> = ids.iter().copied().collect();
+        for chunk in ids.chunks(SCANS_CHUNK) {
+            out.extend(read_some(store, reads, subject, Some(chunk))?);
+        }
+        return Ok(out);
+    }
+    read_some(store, reads, subject, None)
+}
+
+fn read_some(
+    store: &mut Store,
+    reads: &[String],
+    subject: Option<&str>,
+    ids: Option<&[i64]>,
+) -> Result<Vec<Row>, Error> {
     // A name is either a fingerprint column or an axis. The fingerprint half
     // is read in one pass over the table; the axes in one pass over theirs.
     let mut columns = vec![
@@ -391,14 +785,14 @@ fn read_rows(store: &mut Store, model: &Model, subject: Option<&str>) -> Result<
         "f.study_id".to_string(),
     ];
     let mut fields: Vec<String> = Vec::new();
-    for name in &reads {
+    for name in reads {
         let Some(field) = crate::classify::FIELDS.iter().find(|(n, _)| n == name) else {
             continue;
         };
         columns.push(crate::classify::field_sql(store, Some("f"), *field));
         fields.push(name.clone());
     }
-    let filter = match subject {
+    let mut filter = match subject {
         Some(code) => format!(
             " JOIN {} su ON su.id = f.subject_id AND su.code = '{}'",
             store.qualified("subject"),
@@ -406,6 +800,9 @@ fn read_rows(store: &mut Store, model: &Model, subject: Option<&str>) -> Result<
         ),
         None => String::new(),
     };
+    if let Some(ids) = ids {
+        filter.push_str(&format!(" WHERE f.subject_id IN ({})", id_list(ids)));
+    }
     let sql = format!(
         "SELECT {} FROM {} f{filter} ORDER BY f.stack_id",
         columns.join(", "),
@@ -432,14 +829,23 @@ fn read_rows(store: &mut Store, model: &Model, subject: Option<&str>) -> Result<
     }
 
     // The axes, including `role`, which is what says a stack is a candidate.
-    let sql = format!(
-        "SELECT stack_id, axis, value FROM {}",
-        store.qualified("classification_axis")
-    );
     let mut by_stack: HashMap<i64, usize> = HashMap::new();
     for (i, r) in rows.iter().enumerate() {
         by_stack.insert(r.stack, i);
     }
+    let sql = match ids {
+        // the stacks of some subjects, by their own ids
+        Some(_) if rows.is_empty() => return Ok(Vec::new()),
+        Some(_) => format!(
+            "SELECT stack_id, axis, value FROM {} WHERE stack_id IN ({})",
+            store.qualified("classification_axis"),
+            id_list(&rows.iter().map(|r| r.stack).collect::<Vec<_>>())
+        ),
+        None => format!(
+            "SELECT stack_id, axis, value FROM {}",
+            store.qualified("classification_axis")
+        ),
+    };
     for r in store.query(&sql, &[])? {
         let Some(i) = by_stack.get(&r.int(0)?).copied() else {
             continue;
@@ -485,7 +891,7 @@ fn run_one(
     scheme: &Scheme,
     labels: &HashMap<i64, nils_session::Labelled>,
     rows: &[Row],
-    only: Option<&std::collections::BTreeSet<i64>>,
+    decide: &Decide<'_>,
     actor: &str,
     job_id: Option<i64>,
     report: &mut Picked,
@@ -494,15 +900,10 @@ fn run_one(
     let scheme_json = serde_json::to_string(scheme).unwrap_or_default();
     let scheme_name = short_scheme(scheme);
     let scheme_digest = scheme.digest();
-    // record 51 R2: where the run looked, named on every border it raises
-    let origin = Origin {
-        scheme: serde_json::json!({
-            "name": scheme_name, "digest": scheme_digest,
-            "definition": serde_json::to_value(scheme).unwrap_or(serde_json::Value::Null),
-        }),
-        pack: pack.name.clone(),
-        pack_version: pack.version.to_string(),
-    };
+    let chooser = Chooser::new(decide.rules, model);
+    let names = carried(model);
+    // the occasions the run decided, by role, subject and day
+    let mut decided: BTreeSet<(String, i64, String)> = BTreeSet::new();
 
     for role in &model.roles {
         let mine: Vec<&Row> = of_role(model, role, rows);
@@ -517,8 +918,9 @@ fn run_one(
             by_subject.entry(r.subject).or_default().push(r);
         }
         for (subject, subject_rows) in &by_subject {
-            // the population is everyone's; the occasions decided are only's
-            if only.is_some_and(|o| !o.contains(subject)) {
+            // the population is everyone's; the occasions decided are the
+            // scope's
+            if decide.covered.is_some_and(|o| !o.contains(subject)) {
                 continue;
             }
             let mut occasions: BTreeMap<i64, (Day, Vec<&Row>)> = BTreeMap::new();
@@ -532,72 +934,77 @@ fn run_one(
                     .1
                     .push(r);
             }
-            for (first, here) in occasions.values() {
+            // Record 55, decision 6: the kind of each visit is chosen across
+            // the subject's visits, in order, then the scan within it.
+            let mut visits: Vec<(Day, Vec<&Row>)> = occasions.into_values().collect();
+            visits.sort_by_key(|(day, _)| *day);
+            let candidates: Vec<Vec<Candidate>> = visits
+                .iter()
+                .map(|(_, here)| group_with(model, here, &names))
+                .collect();
+            let chosen = chooser.choose(role, &candidates, Some(&reference));
+            for ((first, _), c) in visits.iter().zip(&chosen) {
                 report.sessions += 1;
+                report.decided_visits.insert((*subject, first.to_string()));
                 report.roles.entry(role.clone()).or_default().sessions += 1;
-                let candidates = group(model, here);
-                let picked = pick::pick(model, role, &candidates, &reference);
-                for b in &picked.borders {
-                    *report.borders.entry(b.name().to_string()).or_insert(0) += 1;
-                    *report
-                        .roles
-                        .entry(role.clone())
-                        .or_default()
-                        .borders
-                        .entry(b.name().to_string())
-                        .or_insert(0) += 1;
-                }
-                let tied = is_tied(&picked);
+                decided.insert((role.clone(), *subject, first.to_string()));
+                let tied = c.winner.is_some()
+                    && c.decided.is_none()
+                    && c.considered.len() >= 2
+                    && c.considered[0].1 == c.considered[1].1;
                 if tied {
                     report.tied += 1;
                     report.roles.entry(role.clone()).or_default().tied += 1;
                 }
-                // Record 42 S3: a person's pick on this occasion stands. The
-                // run neither replaces nor withdraws it, and asks nothing
-                // about an occasion a person already answered.
-                let standing = standing_person(store, &model.name, role, *subject, *first)?;
-                let pick_id = if picked.winner.is_none() {
+                // Record 42 S3: a person's pick on this occasion stands in
+                // its scope. The run neither replaces nor withdraws it.
+                let standing =
+                    standing_person(store, &model.name, role, *subject, *first, decide.scope)?;
+                if c.winner.is_none() {
+                    // nothing the rules allow: no run pick stands here now
+                    forget(store, &model.name, role, *subject, *first, decide)?;
                     report.empty += 1;
                     report.roles.entry(role.clone()).or_default().empty += 1;
-                    None
                 } else {
-                    let id = write(
+                    write(
                         store,
                         model,
                         pack,
-                        &picked,
+                        role,
+                        c,
                         *subject,
                         *first,
-                        &scheme_name,
-                        &scheme_json,
-                        &scheme_digest,
-                        &reference.name,
-                        actor,
-                        &now,
-                        standing,
-                        job_id,
+                        &Written {
+                            scheme_name: &scheme_name,
+                            scheme_json: &scheme_json,
+                            scheme_digest: &scheme_digest,
+                            reference: &reference.name,
+                            actor,
+                            now: &now,
+                            standing,
+                            job_id,
+                            decide,
+                        },
                     )?;
                     report.written += 1;
+                    report.picked_visits.insert((*subject, first.to_string()));
                     let r = report.roles.entry(role.clone()).or_default();
                     r.picked += 1;
-                    if picked.borders.is_empty() && !tied && standing.is_none() {
+                    if !tied && standing.is_none() {
                         r.clear += 1;
                     }
-                    Some(id)
-                };
+                }
                 if standing.is_some() {
                     report.standing += 1;
                     report.roles.entry(role.clone()).or_default().standing += 1;
-                    continue;
-                }
-                if border_item(
-                    store, model, &picked, *subject, *first, pick_id, actor, job_id, &origin,
-                )? {
-                    report.raised += 1;
-                    report.roles.entry(role.clone()).or_default().raised += 1;
                 }
             }
         }
+    }
+    report.removed += drop_stale(store, &model.name, decide, &decided)?;
+    // the borders are the pack's, settled by the pack's own run alone
+    if decide.scope.is_none() {
+        report.settled += settle_borders(store, &model.name, decide, actor)?;
     }
     Ok(())
 }
@@ -622,7 +1029,13 @@ fn short_scheme(scheme: &Scheme) -> String {
 
 /// Two stacks of one acquisition are one candidate, and the outputs of one
 /// acquisition are merged back into one after that.
+#[cfg(test)]
 pub(crate) fn group(model: &Model, rows: &[&Row]) -> Vec<Candidate> {
+    group_with(model, rows, &model.reads())
+}
+
+/// [`group`], each candidate carrying the values of `names`.
+pub(crate) fn group_with(model: &Model, rows: &[&Row], names: &[String]) -> Vec<Candidate> {
     let key_of = |r: &Row, ignoring: &[String], over: Option<&str>| -> String {
         model
             .same_acquisition
@@ -674,13 +1087,13 @@ pub(crate) fn group(model: &Model, rows: &[&Row]) -> Vec<Candidate> {
 
     let mut out: Vec<Candidate> = Vec::new();
     for members in plain {
-        out.push(candidate(model, &members, None));
+        out.push(candidate(&members, None, names));
     }
     for ((i, _), parts) in families {
         let f = &model.families[i];
         let all: Vec<&Row> = parts.iter().flatten().copied().collect();
         if all.len() == 1 {
-            out.push(candidate(model, &all, None));
+            out.push(candidate(&all, None, names));
             continue;
         }
         // Within a family, only the variants worth keeping, best first.
@@ -696,12 +1109,12 @@ pub(crate) fn group(model: &Model, rows: &[&Row]) -> Vec<Candidate> {
             }
         }
         if !kept.is_empty() {
-            out.push(candidate(model, &kept, Some(&f.name)));
+            out.push(candidate(&kept, Some(&f.name), names));
         } else if f.apart_without_canonical {
             // v0's MP2RAGE with no labelled output: the acquisitions stand
             // as they were before the merge.
             for members in parts {
-                out.push(candidate(model, &members, None));
+                out.push(candidate(&members, None, names));
             }
         }
         // And otherwise, v0's Dixon: a family with none of them is not a
@@ -746,11 +1159,10 @@ fn one_series_a_moment<'a>(rows: &[&'a Row]) -> Vec<&'a Row> {
 /// One candidate of the rows of one acquisition: what they agree on, each
 /// number at its largest, because a bundle's slice count is the fullest
 /// volume in it, and each stack's own values beside.
-fn candidate(model: &Model, kept: &[&Row], family: Option<&str>) -> Candidate {
+fn candidate(kept: &[&Row], family: Option<&str>, reads: &[String]) -> Candidate {
     let kept = one_series_a_moment(kept);
-    let reads = model.reads();
     let mut values: BTreeMap<String, String> = BTreeMap::new();
-    for name in &reads {
+    for name in reads {
         let mut best: Option<String> = None;
         for r in &kept {
             let Some(v) = r.values.get(name) else {
@@ -844,31 +1256,47 @@ pub(crate) fn build_reference(model: &Model, name: &str, rows: &[&Row]) -> Refer
     }
 }
 
+/// What a run's pick row says beside the pick itself: where it was made,
+/// against what, by whom, and in which scope under which rules.
+struct Written<'a> {
+    scheme_name: &'a str,
+    scheme_json: &'a str,
+    scheme_digest: &'a str,
+    reference: &'a str,
+    actor: &'a str,
+    now: &'a str,
+    standing: Option<i64>,
+    job_id: Option<i64>,
+    decide: &'a Decide<'a>,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn write(
     store: &mut Store,
     model: &Model,
     pack: &Pack,
-    picked: &pick::Picked,
+    role: &str,
+    chosen: &pick_rules::Chosen,
     subject: i64,
     day: Day,
-    scheme_name: &str,
-    scheme_json: &str,
-    scheme_digest: &str,
-    reference: &str,
-    actor: &str,
-    now: &str,
-    standing: Option<i64>,
-    job_id: Option<i64>,
+    w: &Written<'_>,
 ) -> Result<i64, Error> {
-    let winner = picked.winner.as_ref().expect("a pick with a winner");
-    let scored = picked.scored.as_ref().expect("a winner is scored");
+    let winner = chosen.winner.as_ref().expect("a pick with a winner");
+    let scored = chosen.scored.as_ref().expect("a winner is scored");
+    let mut notes = serde_json::Map::new();
+    if let Some(k) = chosen.decided {
+        notes.insert("near_tie".into(), serde_json::Value::from(k.name()));
+    }
     let parts = serde_json::json!({
-        "scheme": serde_json::from_str::<serde_json::Value>(scheme_json)
+        "scheme": serde_json::from_str::<serde_json::Value>(w.scheme_json)
             .unwrap_or(serde_json::Value::Null),
         "penalty": scored.penalty,
-        // Record 51: what each border found, by its name.
-        "notes": notes_json(picked),
+        "notes": notes,
+        // Record 55, decision 6: the rules it was made with, the kind the
+        // visit took, and the tie key that decided within it
+        "rules": w.decide.named(),
+        "kind": chosen.kind,
+        "decided": chosen.decided.map(|k| k.name()),
         "parts": scored
             .parts
             .iter()
@@ -877,47 +1305,19 @@ fn write(
             }))
             .collect::<Vec<_>>(),
     });
-    let considered: Vec<serde_json::Value> = picked
+    let considered: Vec<serde_json::Value> = chosen
         .considered
         .iter()
         .map(|(stacks, score)| serde_json::json!({"stacks": stacks, "score": score}))
         .collect();
-    let borders: Vec<&str> = picked.borders.iter().map(|b| b.name()).collect();
+    let scope = w.decide.scope;
 
     store.begin()?;
     let result = (|| -> Result<i64, StoreError> {
-        // A run replaces what it decided before for this role and occasion.
-        // What a person decided is a withdrawal, not a row this can reach.
-        let d = store.dialect();
-        let sql = format!(
-            "DELETE FROM {} WHERE pick_id IN (SELECT id FROM {} \
-             WHERE model = {} AND role = {} AND subject_id = {} AND session_day = {} \
-               AND author_kind = 'agent')",
-            store.qualified("pick_stack"),
-            store.qualified("pick"),
-            d.param(1, Type::Text),
-            d.param(2, Type::Text),
-            d.param(3, Type::Int),
-            d.param(4, Type::Date),
-        );
-        let key = [
-            Param::from(model.name.as_str()),
-            Param::from(picked.role.as_str()),
-            Param::Int(subject),
-            Param::from(day.to_string()),
-        ];
-        store.execute(&sql, &key)?;
-        let sql = format!(
-            "DELETE FROM {} WHERE model = {} AND role = {} AND subject_id = {} \
-               AND session_day = {} AND author_kind = 'agent'",
-            store.qualified("pick"),
-            d.param(1, Type::Text),
-            d.param(2, Type::Text),
-            d.param(3, Type::Int),
-            d.param(4, Type::Date),
-        );
-        store.execute(&sql, &key)?;
-
+        // A run replaces what it decided before for this role and occasion
+        // in its own scope. What a person decided is a withdrawal, not a
+        // row this can reach.
+        forget(store, &model.name, role, subject, day, w.decide)?;
         let written = store.insert(
             &Insert::new(
                 table("pick"),
@@ -943,44 +1343,47 @@ fn write(
                     "job_id",
                     "withdrawn_at",
                     "overruled_by",
+                    "rules_scope_kind",
+                    "rules_scope_id",
+                    "rules_version",
                 ],
             )
             .returning(&["id"]),
             &[vec![
                 Param::from(model.name.as_str()),
-                Param::from(picked.role.as_str()),
+                Param::from(role),
                 Param::Int(subject),
                 Param::from(day.to_string()),
-                Param::from(scheme_name),
-                Param::from(scheme_digest),
+                Param::from(w.scheme_name),
+                Param::from(w.scheme_digest),
                 Param::Double(scored.score),
-                Param::Double(picked.margin),
-                Param::Double(picked.runner_up_score),
-                if borders.is_empty() {
-                    Param::Null
-                } else {
-                    Param::from(borders.join(","))
-                },
+                Param::Double(chosen.margin),
+                Param::Double(chosen.runner_up_score),
+                // record 56: under the rules no pick asks a person anything
+                Param::Null,
                 Param::from(parts.to_string()),
                 Param::from(serde_json::Value::Array(considered).to_string()),
-                Param::from(reference),
+                Param::from(w.reference),
                 Param::from(pack.name.as_str()),
                 Param::from(pack.version.to_string()),
-                Param::from(actor),
+                Param::from(w.actor),
                 // §10.1: an automatic pick is an agent's, and says so, so that
                 // a person's call is distinguishable from it wherever it is
                 // read.
                 Param::from("agent"),
-                Param::from(now),
-                job_id.map_or(Param::Null, Param::Int),
+                Param::from(w.now),
+                w.job_id.map_or(Param::Null, Param::Int),
                 // Record 42 S3: under a person's pick the run's own is kept
                 // as evidence and does not apply.
-                if standing.is_some() {
-                    Param::from(now)
+                if w.standing.is_some() {
+                    Param::from(w.now)
                 } else {
                     Param::Null
                 },
-                standing.map_or(Param::Null, Param::Int),
+                w.standing.map_or(Param::Null, Param::Int),
+                scope.map_or(Param::Null, |s| Param::from(s.kind.name())),
+                scope.map_or(Param::Null, |s| Param::Int(s.id)),
+                Param::Int(w.decide.version),
             ]],
         )?;
         let id = written.first().map(|r| r.int(0)).transpose()?.unwrap_or(0);
@@ -1006,24 +1409,207 @@ fn write(
     }
 }
 
-/// The person's pick that stands on one role and occasion, if any.
+/// Remove a scope's run pick on one role and occasion, with its stacks.
+fn forget(
+    store: &mut Store,
+    model: &str,
+    role: &str,
+    subject: i64,
+    day: Day,
+    decide: &Decide<'_>,
+) -> Result<(), StoreError> {
+    let d = store.dialect();
+    let on = format!(
+        "model = {} AND role = {} AND subject_id = {} AND session_day = {} \
+           AND author_kind = 'agent' AND {}{}",
+        d.param(1, Type::Text),
+        d.param(2, Type::Text),
+        d.param(3, Type::Int),
+        d.param(4, Type::Date),
+        pick_filter("", decide.scope),
+        same_version(decide),
+    );
+    let key = [
+        Param::from(model),
+        Param::from(role),
+        Param::Int(subject),
+        Param::from(day.to_string()),
+    ];
+    let sql = format!(
+        "DELETE FROM {} WHERE pick_id IN (SELECT id FROM {} WHERE {on})",
+        store.qualified("pick_stack"),
+        store.qualified("pick"),
+    );
+    store.execute(&sql, &key)?;
+    let sql = format!("DELETE FROM {} WHERE {on}", store.qualified("pick"));
+    store.execute(&sql, &key)?;
+    Ok(())
+}
+
+/// For a scope's run, the picks of its own version alone: those of the
+/// version its readers read stay until this one's run is over (record 55,
+/// decision 6). The pack's are of one version.
+fn same_version(decide: &Decide<'_>) -> String {
+    match decide.scope {
+        Some(_) => format!(" AND rules_version = {}", decide.version),
+        None => String::new(),
+    }
+}
+
+/// A scope's whole run of a version done: its run picks of every other
+/// version, removed. Answers how many.
+fn drop_other_versions(store: &mut Store, scope: &Scope, version: i64) -> Result<i64, StoreError> {
+    let on = format!(
+        "author_kind = 'agent' AND {} AND (rules_version IS NULL OR rules_version <> {version})",
+        pick_filter("", Some(scope))
+    );
+    store.execute(
+        &format!(
+            "DELETE FROM {} WHERE pick_id IN (SELECT id FROM {} WHERE {on})",
+            store.qualified("pick_stack"),
+            store.qualified("pick")
+        ),
+        &[],
+    )?;
+    Ok(store.execute(
+        &format!("DELETE FROM {} WHERE {on}", store.qualified("pick")),
+        &[],
+    )? as i64)
+}
+
+/// The scope's run picks on the subjects a run decided whose occasion it
+/// did not decide (the role holds no candidate there now), removed:
+/// answers how many.
+fn drop_stale(
+    store: &mut Store,
+    model: &str,
+    decide: &Decide<'_>,
+    decided: &BTreeSet<(String, i64, String)>,
+) -> Result<i64, StoreError> {
+    let t = table("pick");
+    let d = store.dialect();
+    let sql = format!(
+        "SELECT id, role, subject_id, {} FROM {} WHERE model = {} AND scheme_digest = {} \
+           AND author_kind = 'agent' AND {}{}",
+        d.text_of(t.column("session_day").expect("pick.session_day")),
+        store.qualified("pick"),
+        d.param(1, Type::Text),
+        d.param(2, Type::Text),
+        pick_filter("", decide.scope),
+        same_version(decide),
+    );
+    let mut stale: Vec<i64> = Vec::new();
+    for r in store.query(
+        &sql,
+        &[Param::from(model), Param::from(decide.scheme_digest)],
+    )? {
+        let subject = r.int(2)?;
+        if decide.covered.is_some_and(|c| !c.contains(&subject)) {
+            continue;
+        }
+        let key = (r.text(1)?.to_string(), subject, r.text(3)?.to_string());
+        if !decided.contains(&key) {
+            stale.push(r.int(0)?);
+        }
+    }
+    for chunk in stale.chunks(SCANS_CHUNK) {
+        let list = id_list(chunk);
+        store.execute(
+            &format!(
+                "DELETE FROM {} WHERE pick_id IN ({list})",
+                store.qualified("pick_stack")
+            ),
+            &[],
+        )?;
+        store.execute(
+            &format!(
+                "DELETE FROM {} WHERE id IN ({list})",
+                store.qualified("pick")
+            ),
+            &[],
+        )?;
+    }
+    Ok(stale.len() as i64)
+}
+
+/// Record 56 with the main-scans study, section 3: no pick asks a person
+/// anything. The open `pick.border` items of the pick on the subjects a run
+/// decided are closed as settled by the rules, naming the scope and the
+/// version. Answers how many.
+fn settle_borders(
+    store: &mut Store,
+    model: &str,
+    decide: &Decide<'_>,
+    actor: &str,
+) -> Result<i64, StoreError> {
+    let sql = format!(
+        "SELECT group_key, {} FROM {} WHERE kind = {} AND status = 'open'",
+        store
+            .dialect()
+            .text_of(table("review_item").column("ref").expect("review_item.ref")),
+        store.qualified("review_item"),
+        store.dialect().param(1, Type::Text),
+    );
+    let mut keys: BTreeSet<String> = BTreeSet::new();
+    for r in store.query(&sql, &[Param::from(review::PICK_BORDER_KIND)])? {
+        let reference: serde_json::Value = r
+            .opt_text(1)?
+            .and_then(|t| serde_json::from_str(t).ok())
+            .unwrap_or(serde_json::Value::Null);
+        let (Some(key), Some(subject)) = (r.opt_text(0)?, reference["subject_id"].as_i64()) else {
+            continue;
+        };
+        if reference["model"].as_str() != Some(model)
+            || decide.covered.is_some_and(|c| !c.contains(&subject))
+        {
+            continue;
+        }
+        keys.insert(key.to_string());
+    }
+    let named = decide.named();
+    let why = match decide.scope {
+        None => format!("settled by the pack's rules, version {}", decide.version),
+        Some(s) => format!(
+            "settled by the rules of {} {}, version {}",
+            s.kind.name(),
+            s.name,
+            decide.version
+        ),
+    };
+    let mut n = 0;
+    for key in keys {
+        n += review::close_pick_border(
+            store,
+            &key,
+            review::RESOLVED,
+            actor,
+            &serde_json::json!({"why": why, "rules": named}),
+        )? as i64;
+    }
+    Ok(n)
+}
+
+/// The person's pick that stands on one role and occasion in a scope, if
+/// any.
 fn standing_person(
     store: &mut Store,
     model: &str,
     role: &str,
     subject: i64,
     day: Day,
+    scope: Option<&Scope>,
 ) -> Result<Option<i64>, StoreError> {
     let d = store.dialect();
     let sql = format!(
         "SELECT id FROM {} WHERE model = {} AND role = {} AND subject_id = {} \
            AND session_day = {} AND author_kind = 'person' AND withdrawn_at IS NULL \
-         ORDER BY id DESC LIMIT 1",
+           AND {} ORDER BY id DESC LIMIT 1",
         store.qualified("pick"),
         d.param(1, Type::Text),
         d.param(2, Type::Text),
         d.param(3, Type::Int),
         d.param(4, Type::Date),
+        pick_filter("", scope),
     );
     store
         .query_opt(
@@ -1037,84 +1623,6 @@ fn standing_person(
         )?
         .map(|r| r.int(0))
         .transpose()
-}
-
-/// Where a run looked: the session scheme and the pack.
-struct Origin {
-    scheme: serde_json::Value,
-    pack: String,
-    pack_version: String,
-}
-
-/// Record 42 S3: raise, refresh or close the `pick.border` item of one
-/// occasion. Answers whether one is open after it.
-#[allow(clippy::too_many_arguments)]
-fn border_item(
-    store: &mut Store,
-    model: &Model,
-    picked: &pick::Picked,
-    subject: i64,
-    day: Day,
-    pick_id: Option<i64>,
-    actor: &str,
-    job_id: Option<i64>,
-    origin: &Origin,
-) -> Result<bool, StoreError> {
-    let day = day.to_string();
-    let key = review::pick_border_key(&model.name, &picked.role, subject, &day);
-    if picked.borders.is_empty() {
-        review::close_pick_border(
-            store,
-            &key,
-            review::RESOLVED,
-            actor,
-            &serde_json::json!({"why": "a later run found nothing to doubt", "pick_id": pick_id}),
-        )?;
-        return Ok(false);
-    }
-    let names: Vec<&str> = picked.borders.iter().map(|b| b.name()).collect();
-    let considered = serde_json::Value::Array(
-        picked
-            .considered
-            .iter()
-            .map(|(stacks, score)| serde_json::json!({"stacks": stacks, "score": score}))
-            .collect(),
-    );
-    review::raise_pick_border(
-        store,
-        &review::PickBorder {
-            model: &model.name,
-            role: &picked.role,
-            subject_id: subject,
-            day: &day,
-            borders: &names,
-            pick_id,
-            score: picked.scored.as_ref().map(|s| s.score),
-            margin: picked.winner.as_ref().map(|_| picked.margin),
-            runner_up_score: picked.runner_up.as_ref().map(|_| picked.runner_up_score),
-            considered: &considered,
-            notes: &notes_json(picked),
-            job_id,
-            scheme: &origin.scheme,
-            pack: &origin.pack,
-            pack_version: &origin.pack_version,
-        },
-        &now_iso(),
-    )?;
-    Ok(true)
-}
-
-/// What each border of a pick found, by the border's name: the variant of a
-/// retake, the stacks of a twin or of the plain candidate, the slice count
-/// and its bounds.
-fn notes_json(picked: &pick::Picked) -> serde_json::Value {
-    serde_json::Value::Object(
-        picked
-            .notes
-            .iter()
-            .map(|(k, v)| ((*k).to_string(), serde_json::Value::from(v.as_str())))
-            .collect(),
-    )
 }
 
 // ------------------------------------------------------------- person picks
@@ -1167,6 +1675,14 @@ pub struct PersonPick<'a> {
     /// asked about one (a pick campaign's item): stacks of another are
     /// refused before anything is written.
     pub occasion: Option<(i64, &'a str)>,
+    /// Record 55, decision 6: the scope the pick belongs to, a dataset's or
+    /// a cohort's with rules of its own; none for the pack's. It stands in
+    /// that scope.
+    pub scope: Option<&'a Scope>,
+    /// The scope it was made for while that scope read the pack's picks
+    /// ([`nils_registry::pick_rules::made_in`]): the scope's first save
+    /// carries it in.
+    pub made_in: Option<&'a str>,
 }
 
 /// What a person's pick wrote.
@@ -1199,8 +1715,12 @@ pub fn set_person(
 ) -> Result<PersonPicked, PersonError> {
     // Record 51 R2: a pick of no stack is written only by Keep on a border
     // where the run picked nothing, never by naming stacks.
-    if p.stacks.is_empty() {
-        return Err(refused("a pick names at least one stack"));
+    // Record 55, decision 6: or none, "nothing for this role", on the
+    // occasion it names
+    if p.stacks.is_empty() && p.occasion.is_none() {
+        return Err(refused(
+            "a pick names at least one stack, or, for nothing standing for the role, its subject and day",
+        ));
     }
     if p.why.trim().is_empty() {
         return Err(refused(
@@ -1245,6 +1765,36 @@ pub fn set_person(
             )));
         }
     };
+
+    if p.stacks.is_empty() {
+        let (subject, day) = p.occasion.expect("checked above");
+        let day = day.get(..10).unwrap_or(day).to_string();
+        if Day::parse(&day).is_none() {
+            return Err(refused(format!("{day} is not a day of an occasion")));
+        }
+        let scheme_json = serde_json::to_value(scheme).unwrap_or(serde_json::Value::Null);
+        return write_person(
+            registry,
+            &PersonRow {
+                model: &model.name,
+                role: p.role,
+                subject,
+                day: &day,
+                scheme_name: &short_scheme(scheme),
+                scheme_digest: &scheme.digest(),
+                scheme: &scheme_json,
+                pack: &pack.name,
+                pack_version: &pack.version.to_string(),
+                stacks: &[],
+                why: p.why,
+                actor: p.actor,
+                campaign: p.campaign,
+                kept: None,
+                scope: p.scope,
+                made_in: p.made_in,
+            },
+        );
+    }
 
     // Where each stack sits: its subject and its study, and through the
     // scheme the occasion the study belongs to.
@@ -1333,6 +1883,8 @@ pub fn set_person(
             actor: p.actor,
             campaign: p.campaign,
             kept: None,
+            scope: p.scope,
+            made_in: p.made_in,
         },
     )
 }
@@ -1360,6 +1912,9 @@ struct PersonRow<'a> {
     /// The `pick.border` item this pick keeps, which is marked accepted by
     /// the person as well as answered.
     kept: Option<i64>,
+    /// The scope it belongs to; none for the pack's.
+    scope: Option<&'a Scope>,
+    made_in: Option<&'a str>,
 }
 
 fn write_person(registry: &mut Registry, p: &PersonRow<'_>) -> Result<PersonPicked, PersonError> {
@@ -1377,11 +1932,12 @@ fn write_person(registry: &mut Registry, p: &PersonRow<'_>) -> Result<PersonPick
             Param::from(p.day),
         ];
         let on_key = format!(
-            "model = {} AND role = {} AND subject_id = {} AND session_day = {}",
+            "model = {} AND role = {} AND subject_id = {} AND session_day = {} AND {}",
             d.param(1, Type::Text),
             d.param(2, Type::Text),
             d.param(3, Type::Int),
             d.param(4, Type::Date),
+            pick_filter("", p.scope),
         );
         let ids = |store: &mut Store, filter: &str| -> Result<Vec<i64>, StoreError> {
             let sql = format!(
@@ -1412,6 +1968,8 @@ fn write_person(registry: &mut Registry, p: &PersonRow<'_>) -> Result<PersonPick
                     "why",
                     "parts",
                     "campaign_id",
+                    "rules_scope_kind",
+                    "rules_scope_id",
                 ],
             )
             .returning(&["id"]),
@@ -1431,8 +1989,12 @@ fn write_person(registry: &mut Registry, p: &PersonRow<'_>) -> Result<PersonPick
                 Param::from("person"),
                 Param::from(now.as_str()),
                 Param::from(p.why),
-                Param::from(serde_json::json!({ "scheme": p.scheme }).to_string()),
+                Param::from(
+                    serde_json::json!({ "scheme": p.scheme, "made_in": p.made_in }).to_string(),
+                ),
                 p.campaign.map_or(Param::Null, Param::Int),
+                p.scope.map_or(Param::Null, |s| Param::from(s.kind.name())),
+                p.scope.map_or(Param::Null, |s| Param::Int(s.id)),
             ]],
         )?;
         let id = written
@@ -1533,6 +2095,7 @@ fn write_person(registry: &mut Registry, p: &PersonRow<'_>) -> Result<PersonPick
                 "subject_id": picked.subject_id, "stacks": picked.stacks,
                 "overruled": picked.overruled, "replaced": picked.replaced,
                 "campaign": p.campaign, "kept": p.kept,
+                "rules_scope": p.scope.map(Scope::to_json),
             }),
             policy: None,
             job_id: None,
@@ -1571,8 +2134,8 @@ pub fn keep(
         .ok_or_else(|| refused(format!("no review item {item}")))?;
     if it.kind != review::PICK_BORDER_KIND {
         return Err(refused(format!(
-            "review item {item} is a {}, not a {}",
-            it.kind,
+            "review item {item} is {}, not a {}",
+            nils_registry::a_or_an(&it.kind),
             review::PICK_BORDER_KIND
         )));
     }
@@ -1607,13 +2170,15 @@ pub fn keep(
     let sql = format!(
         "SELECT id, scheme, scheme_digest, pack, pack_version, {} FROM {} \
          WHERE model = {} AND role = {} AND subject_id = {} AND session_day = {} \
-           AND author_kind = 'agent' AND withdrawn_at IS NULL ORDER BY id DESC LIMIT 1",
+           AND author_kind = 'agent' AND withdrawn_at IS NULL AND {} ORDER BY id DESC LIMIT 1",
         d.text_of(t.column("parts").expect("parts")),
         store.qualified("pick"),
         d.param(1, Type::Text),
         d.param(2, Type::Text),
         d.param(3, Type::Int),
         d.param(4, Type::Date),
+        // a border is the pack's, raised before scopes had picks of their own
+        pick_filter("", None),
     );
     let current = store.query_opt(
         &sql,
@@ -1725,6 +2290,8 @@ pub fn keep(
             actor,
             campaign: None,
             kept: Some(item),
+            scope: None,
+            made_in: None,
         },
     )
 }
@@ -1740,24 +2307,34 @@ pub struct PersonWithdrawn {
 /// Withdraw a person's pick. The row stays and stops applying, and the
 /// run's pick it overruled applies again. A run's pick is not withdrawn:
 /// a person overrules it with a pick of their own.
+///
+/// With `scope` (record 55, decision 6), the pick must belong to it: a
+/// person withdraws a pick of the scope they are looking at.
 pub fn withdraw_person(
     registry: &mut Registry,
     id: i64,
     actor: &str,
     why: Option<&str>,
+    scope: Option<Option<&Scope>>,
 ) -> Result<PersonWithdrawn, PersonError> {
     use nils_registry::audit::{self, Action, Entry};
 
     let store = registry.store();
     let d = store.dialect();
     let sql = format!(
-        "SELECT author_kind, withdrawn_at IS NOT NULL FROM {} WHERE id = {}",
+        "SELECT author_kind, withdrawn_at IS NOT NULL, CASE WHEN {} THEN 1 ELSE 0 END FROM {} WHERE id = {}",
+        pick_filter("", scope.flatten()),
         store.qualified("pick"),
         d.param(1, Type::Int)
     );
     let Some(row) = store.query_opt(&sql, &[Param::Int(id)])? else {
         return Err(refused(format!("no pick {id}")));
     };
+    if scope.is_some() && row.int(2)? == 0 {
+        return Err(refused(format!(
+            "pick {id} belongs to another scope than the one named"
+        )));
+    }
     if row.text(0)? != "person" {
         return Err(refused(format!(
             "pick {id} is a run's; a person overrules it with a pick of their own (nils pick set), and the next run keeps that"

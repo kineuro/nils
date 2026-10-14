@@ -1522,7 +1522,11 @@ fn the_summary_the_start_from_resolver_and_the_document_list_answer_on_the_synth
     );
     assert_eq!(status, 200, "{from_doc}");
     assert_eq!(from_doc["set"], yardstick()["out"]["set"]);
-    assert!(from_doc["count"].as_i64().unwrap() > 0, "{from_doc}");
+    // a reader's detail is plain, and the yardstick finds its partners by
+    // windows of days: its answer's count is held back (record 55 K7, small
+    // counts at plain), since its last clause dropped fewer than 5 subjects
+    assert!(from_doc["count"].is_null(), "{from_doc}");
+    assert!(from_doc["subjects"].is_null(), "{from_doc}");
     let (status, ran) = server.request(
         "POST",
         "/api/ask/run",
@@ -2396,9 +2400,10 @@ fn the_catalog_lists_only_the_kinds_the_callers_detail_opens() {
 #[test]
 fn every_door_that_runs_a_question_holds_quasi_fields_to_the_detail() {
     let home = synthetic();
+    // thirteen requests: three runs, three previews, five samples, two jobs
     let server = Server::start(
         &home,
-        12,
+        13,
         &[
             "--auth",
             "token",
@@ -2470,6 +2475,12 @@ fn every_door_that_runs_a_question_holds_quasi_fields_to_the_detail() {
             !raw["rows"].as_array().unwrap().is_empty(),
             "{door}: no rows to compare: {raw}"
         );
+        // the answer says which columns this detail sees as shapes, and
+        // holds nothing back where it reads no group's mean
+        assert_eq!(plain["shaped"], serde_json::json!(held), "{door}");
+        assert_eq!(quasi["shaped"], serde_json::json!([]), "{door}");
+        assert_eq!(plain["held_back"], serde_json::json!([]), "{door}");
+        assert_eq!(quasi["held_back"], serde_json::json!([]), "{door}");
         for name in held {
             let r = column(raw, name);
             assert!(
@@ -2564,6 +2575,27 @@ fn every_door_that_runs_a_question_holds_quasi_fields_to_the_detail() {
         job["result"]["handle"].as_i64().unwrap()
     };
     let handles: Vec<i64> = jobs.iter().map(|j| handle_of(*j)).collect();
+    // a job's result says which columns its detail answered as shapes
+    let shaped_of = |id: i64| {
+        listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|j| j["id"] == id)
+            .map(|j| j["result"]["shaped"].clone())
+            .unwrap_or_default()
+    };
+    assert_eq!(shaped_of(jobs[0]), serde_json::json!(held));
+    assert_eq!(shaped_of(jobs[1]), serde_json::json!([]));
+    for id in jobs {
+        let job = listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|j| j["id"] == id)
+            .unwrap();
+        assert_eq!(job["result"]["held_back"], serde_json::json!([]), "{job}");
+    }
     let server = Server::start(
         &home,
         2,
@@ -2597,6 +2629,299 @@ fn every_door_that_runs_a_question_holds_quasi_fields_to_the_detail() {
     server.finish();
     check("job", &j_plain, &j_quasi, &raw);
 }
+
+/// Record 55 K7 on aggregates (the chat sandbox bench, and the ruling of
+/// 2026-10-12), on each backend: the bench's grouped question, the spread of
+/// the age at the first visit, at every door that answers rows. Below
+/// detail quasi the youngest and the oldest come back as their shapes, the
+/// mean age as the number detail quasi sees, since the group holds 5
+/// subjects or more, and the count of subjects as a number; each answer
+/// says which columns it shaped and which it held back: a fresh run, the
+/// cached run, the preview, the handle and a page of it, and a queued job.
+/// The same question asked per subject, a group of one each, holds the mean
+/// back as null at every door and says why. At detail quasi nothing is
+/// shaped or held. The document as the bench wrote it, the column as an
+/// option, is refused at the draft door with the form to write.
+#[test]
+fn every_door_says_which_columns_of_an_aggregate_it_shaped_or_held_back() {
+    let dsn = std::env::var("NILS_TEST_POSTGRES_DSN")
+        .ok()
+        .filter(|d| !d.is_empty());
+    if dsn.is_none() {
+        eprintln!("NILS_TEST_POSTGRES_DSN is not set; the Postgres half is skipped");
+    }
+    let reader = Some("a-reader-token-of-length");
+    let reviewer = Some("a-reviewer-token-of-leng");
+    let spread = |by: serde_json::Value, youngest: serde_json::Value, oldest: serde_json::Value| {
+        serde_json::json!({
+            "ast_version": 1,
+            "name": "spread of age at the first visit in ms-cohort-a",
+            "params": {"all": {"type": "text", "value": "all"}},
+            "sets": {
+                "scope": {"grain": "cohort", "where": [["=", {}, ["field", {}, "name"], "ms-cohort-a"]]},
+                "people": {"grain": "subject", "of": "scope"},
+                "visits": {"grain": "session", "of": "people", "bind": {
+                    "n": ["ordinal", {}],
+                    "age": ["age_at", {}, ["field", {}, "subject.birth_date"], ["field", {}, "first"]]
+                }},
+                "firsts": {"grain": "session", "from": "visits", "where": [["=", {}, ["field", {}, "n"], 1]]},
+                "spread": {"grain": "group", "group": {"of": "firsts", "by": by}, "bind": {
+                    "n_subjects": ["count", {"set": "firsts"}],
+                    "youngest": youngest,
+                    "oldest": oldest,
+                    "mean_age": ["avg", {"set": "firsts"}, ["field", {}, "age"]]
+                }}
+            },
+            "out": {"set": "spread", "level": "aggregate", "columns": [
+                ["field", {}, "n_subjects"],
+                ["field", {}, "youngest"],
+                ["field", {}, "oldest"],
+                ["field", {}, "mean_age"]
+            ]}
+        })
+    };
+    let min = serde_json::json!(["min", {"set": "firsts"}, ["field", {}, "age"]]);
+    let max = serde_json::json!(["max", {"set": "firsts"}, ["field", {}, "age"]]);
+    let doc = spread(
+        serde_json::json!([["param", {}, "all"]]),
+        min.clone(),
+        max.clone(),
+    );
+    let each = spread(serde_json::json!([["field", {}, "subject.id"]]), min, max);
+    let shaped = serde_json::json!(["youngest", "oldest"]);
+    let none = serde_json::json!([]);
+    let mean_held = serde_json::json!([{"column": "mean_age", "why": "a group under 5 subjects"}]);
+    // a column of an answer, by its name
+    fn column(answer: &serde_json::Value, name: &str) -> Vec<serde_json::Value> {
+        let i = answer["columns"]
+            .as_array()
+            .unwrap_or_else(|| panic!("no columns: {answer}"))
+            .iter()
+            .position(|c| c == name || c["name"] == name)
+            .unwrap_or_else(|| panic!("no column {name} in {answer}"));
+        answer["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r[i].clone())
+            .collect()
+    }
+    for (backend, dsn) in [("sqlite", None), ("postgres", dsn.clone())] {
+        let home = match (backend, &dsn) {
+            ("sqlite", _) => synthetic(),
+            (_, Some(dsn)) => synthetic_postgres(dsn, HELD_SCHEMA),
+            _ => continue,
+        };
+        let server = Server::start(
+            &home,
+            16,
+            &[
+                "--auth",
+                "token",
+                "--token",
+                "a-reader-token-of-length=reader@lab:reader",
+                "--token",
+                "a-reviewer-token-of-leng=rev@lab:reviewer",
+            ],
+        );
+        let ran = |document: &serde_json::Value, token: Option<&str>, fresh: bool| {
+            let (status, answer) = server.request(
+                "POST",
+                "/api/ask/run",
+                Some(&body(
+                    serde_json::json!({"document": document, "fresh": fresh}),
+                )),
+                token,
+            );
+            assert_eq!(status, 200, "{backend}: {answer}");
+            answer
+        };
+        let previewed = |document: &serde_json::Value, token: Option<&str>| {
+            let (status, answer) = server.request(
+                "POST",
+                "/api/ask/preview",
+                Some(&body(serde_json::json!({"document": document, "rows": 50}))),
+                token,
+            );
+            assert_eq!(status, 200, "{backend}: {answer}");
+            answer
+        };
+        let handle = |answer: &serde_json::Value| {
+            let h = answer["handle"].as_i64().unwrap();
+            let (status, page) = server.request(
+                "GET",
+                &format!("/api/ask/handles/{h}/rows?page=0"),
+                None,
+                reader,
+            );
+            assert_eq!(status, 200, "{backend}: {page}");
+            let (status, shown) =
+                server.request("GET", &format!("/api/ask/handles/{h}"), None, reader);
+            assert_eq!(status, 200, "{backend}: {shown}");
+            (page, shown)
+        };
+
+        // the bench's question: one group of 38
+        let plain = ran(&doc, reader, true);
+        let quasi = ran(&doc, reviewer, true);
+        assert_eq!(plain["shaped"], shaped, "{backend}: {plain}");
+        assert_eq!(plain["held_back"], none, "{backend}: {plain}");
+        assert_eq!(quasi["shaped"], none, "{backend}: {quasi}");
+        assert_eq!(quasi["held_back"], none, "{backend}: {quasi}");
+        for name in ["youngest", "oldest"] {
+            let raw = &column(&quasi, name)[0];
+            assert!(raw.is_number(), "{name}: {quasi}");
+            let text = match raw.as_f64() {
+                Some(x) if x.fract() == 0.0 => format!("{}", x as i64),
+                _ => raw.to_string(),
+            };
+            assert_eq!(
+                column(&plain, name)[0],
+                serde_json::json!(nils_ask::validate::shape(&text)),
+                "{backend}: {name}"
+            );
+        }
+        assert!(column(&plain, "mean_age")[0].is_f64(), "{backend}: {plain}");
+        assert_eq!(column(&plain, "mean_age"), column(&quasi, "mean_age"));
+        assert!(column(&plain, "n_subjects")[0].as_i64().unwrap() > 20);
+        assert_eq!(column(&plain, "n_subjects"), column(&quasi, "n_subjects"));
+        let cached = ran(&doc, reader, false);
+        assert_eq!(cached["cached"], true, "{backend}: {cached}");
+        assert_eq!(cached["handle"], plain["handle"]);
+        assert_eq!(cached["shaped"], shaped, "{backend}: {cached}");
+        assert_eq!(cached["held_back"], none, "{backend}: {cached}");
+        assert_eq!(column(&cached, "mean_age"), column(&plain, "mean_age"));
+        let p_plain = previewed(&doc, reader);
+        assert_eq!(p_plain["shaped"], shaped, "{backend}: {p_plain}");
+        assert_eq!(p_plain["held_back"], none, "{backend}: {p_plain}");
+        assert_eq!(column(&p_plain, "oldest"), column(&plain, "oldest"));
+        let p_quasi = previewed(&doc, reviewer);
+        assert_eq!(p_quasi["shaped"], none);
+        assert_eq!(p_quasi["held_back"], none);
+        let (page, shown) = handle(&plain);
+        assert_eq!(page["shaped"], shaped, "{backend}: {page}");
+        assert_eq!(page["held_back"], none, "{backend}: {page}");
+        assert_eq!(column(&page, "mean_age"), column(&plain, "mean_age"));
+        let flagged: Vec<&str> = page["columns"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|c| c["shaped"] == true)
+            .filter_map(|c| c["name"].as_str())
+            .collect();
+        assert_eq!(flagged, vec!["youngest", "oldest"], "{backend}: {page}");
+        assert_eq!(shown["shaped"], shaped, "{backend}: {shown}");
+        assert_eq!(shown["held_back"], none, "{backend}: {shown}");
+
+        // per subject: a group of one each, its mean held back and named
+        let e_plain = ran(&each, reader, true);
+        let e_quasi = ran(&each, reviewer, true);
+        assert_eq!(e_plain["held_back"], mean_held, "{backend}: {e_plain}");
+        assert_eq!(e_plain["shaped"], shaped, "{backend}: {e_plain}");
+        assert_eq!(e_quasi["held_back"], none, "{backend}: {e_quasi}");
+        assert!(
+            column(&e_plain, "mean_age").iter().all(|v| v.is_null()),
+            "{backend}: {e_plain}"
+        );
+        assert!(
+            column(&e_quasi, "mean_age").iter().any(|v| v.is_number()),
+            "{backend}: {e_quasi}"
+        );
+        assert_eq!(
+            column(&e_plain, "n_subjects"),
+            column(&e_quasi, "n_subjects")
+        );
+        let e_cached = ran(&each, reader, false);
+        assert_eq!(e_cached["cached"], true, "{backend}: {e_cached}");
+        assert_eq!(e_cached["held_back"], mean_held, "{backend}: {e_cached}");
+        let e_preview = previewed(&each, reader);
+        assert_eq!(e_preview["held_back"], mean_held, "{backend}: {e_preview}");
+        assert!(column(&e_preview, "mean_age").iter().all(|v| v.is_null()));
+        let (e_page, e_shown) = handle(&e_plain);
+        assert_eq!(e_page["held_back"], mean_held, "{backend}: {e_page}");
+        assert_eq!(e_shown["held_back"], mean_held, "{backend}: {e_shown}");
+        let why: Vec<&serde_json::Value> = e_page["columns"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|c| c.get("held_back"))
+            .collect();
+        assert_eq!(why, vec!["a group under 5 subjects"], "{backend}: {e_page}");
+
+        // the document as the bench wrote it, the column as an option
+        let bench = spread(
+            serde_json::json!([["param", {}, "all"]]),
+            serde_json::json!(["min", {"set": "firsts", "column": ["field", {}, "age"]}]),
+            serde_json::json!(["max", {"set": "firsts", "field": "age"}]),
+        );
+        let (status, drafted) = server.request(
+            "POST",
+            "/api/ask/draft",
+            Some(&body(serde_json::json!({"text": bench.to_string()}))),
+            reader,
+        );
+        assert_eq!(status, 200, "{backend}: {drafted}");
+        assert_eq!(drafted["document"], serde_json::Value::Null, "{drafted}");
+        let issues = drafted["diagnosis"]["issues"].as_array().unwrap();
+        let at = |path: &str| {
+            issues
+                .iter()
+                .find(|i| i["path"] == path)
+                .unwrap_or_else(|| panic!("nothing at {path}: {drafted}"))
+        };
+        assert_eq!(at("sets.spread.bind.youngest")["code"], "unknown_field");
+        assert_eq!(
+            at("sets.spread.bind.youngest")["next"],
+            r#"write ["min", {set: firsts}, ["field",{},"age"]]"#
+        );
+        assert_eq!(
+            at("sets.spread.bind.oldest")["next"],
+            r#"write ["max", {set: firsts}, ["field", {}, "age"]]"#
+        );
+
+        // a queued job runs under the detail its door recorded and says the
+        // same in its result
+        let queued = |document: &serde_json::Value, name: &str| {
+            let (status, q) = server.request(
+                "POST",
+                "/api/ask/jobs",
+                Some(&body(
+                    serde_json::json!({"document": document, "name": name}),
+                )),
+                reader,
+            );
+            assert_eq!(status, 202, "{backend}: {q}");
+            q["job"].as_i64().unwrap()
+        };
+        let jobs = [queued(&each, "held-each"), queued(&doc, "held-spread")];
+        server.finish();
+        for _ in jobs {
+            run(&home, &["jobs", "work", "--once"], None);
+        }
+        let listed: serde_json::Value =
+            serde_json::from_str(&run(&home, &["jobs", "list", "--all", "--json"], None)).unwrap();
+        let result = |id: i64| {
+            let job = listed
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|j| j["id"] == id)
+                .unwrap_or_else(|| panic!("no job {id}: {listed}"));
+            assert_eq!(job["state"], "done", "{backend}: {job}");
+            job["result"].clone()
+        };
+        assert_eq!(result(jobs[0])["held_back"], mean_held, "{backend}");
+        assert_eq!(result(jobs[0])["shaped"], shaped, "{backend}");
+        assert_eq!(result(jobs[1])["held_back"], none, "{backend}");
+        assert_eq!(result(jobs[1])["shaped"], shaped, "{backend}");
+        if let Some(dsn) = &dsn {
+            drop_schema(dsn, HELD_SCHEMA);
+        }
+    }
+}
+
+/// The schema the Postgres half of the held-back door test registers in.
+const HELD_SCHEMA: &str = "nils_ask_serve_held_test";
 
 /// Wave 7a: two datasets planted on a synthetic home, as the ask reads
 /// them. Two source places, each with a digest root and its batch under
@@ -2642,7 +2967,7 @@ fn plant_datasets(home: &TempDir, dir: &TempDir) -> Planted {
         dir.path(),
         serde_json::json!({"kind": "root"}),
     );
-    let mut batches = Vec::new();
+    let (mut batches, mut sources) = (Vec::new(), Vec::new());
     let mut small = 0;
     for name in ["study-big", "study-small"] {
         let tree = dir.path().join(name).join("derivatives/dcm-anon");
@@ -2696,6 +3021,7 @@ fn plant_datasets(home: &TempDir, dir: &TempDir) -> Planted {
             .int(0)
             .unwrap();
         batches.push(batch);
+        sources.push(source);
     }
     // the stacks a stack set sees, with their subject, session, T1w or not
     let seen = |store: &mut nils_registry::Store| -> Vec<(i64, i64, Option<i64>, i64, bool)> {
@@ -2758,6 +3084,13 @@ fn plant_datasets(home: &TempDir, dir: &TempDir) -> Planted {
                 &[],
             )
             .unwrap();
+    }
+    // each tree holds a file of its stacks, as a read records them (record
+    // 55): a dataset is a folder of stacks, and its stacks are the ones it
+    // holds a file of
+    for (source, ids) in [(sources[0], &big), (sources[1], &small_stacks)] {
+        let held: BTreeSet<i64> = ids.iter().copied().collect();
+        nils_registry::location::record(store, source, &held, "2026-10-09T08:00:00Z").unwrap();
     }
     let mut planted = Planted {
         t1w: BTreeMap::new(),
@@ -3017,3 +3350,1242 @@ fn the_dataset_field_answers_at_every_door_that_runs_a_question() {
         "{page}"
     );
 }
+
+/// The schema the Postgres half of a door test registers in.
+const DRAFT_SCHEMA: &str = "nils_ask_serve_draft_test";
+
+fn drop_schema(dsn: &str, schema: &str) {
+    if let Ok(mut store) = nils_registry::Store::connect_postgres(dsn, "public") {
+        let _ = store.batch(&format!(
+            "DROP SCHEMA IF EXISTS {schema} CASCADE; DROP SCHEMA IF EXISTS {schema}_linkage CASCADE"
+        ));
+    }
+}
+
+/// [`synthetic`] on Postgres, in a schema of its own, dropped first so a
+/// run killed mid-test leaves nothing that refuses the next.
+fn synthetic_postgres(dsn: &str, schema: &str) -> TempDir {
+    drop_schema(dsn, schema);
+    let home = TempDir::new("ask-serve-home");
+    run(&home, &["key", "add", "k"], Some("an ask serve test key\n"));
+    run(
+        &home,
+        &[
+            "init",
+            "--backend",
+            "postgres",
+            "--dsn",
+            dsn,
+            "--schema",
+            schema,
+            "--key",
+            "k",
+        ],
+        None,
+    );
+    run(&home, &["synth", "--seed", "11", "--subjects", "48"], None);
+    run(&home, &["session", "rebuild"], None);
+    home
+}
+
+/// The chat sandbox bench (2026-10-12), on each backend: a `bucket` bound
+/// without its unit passed the validator and failed the compiler while the
+/// draft door's diagnosis counted, so the door answered a bare 500. The
+/// draft door refuses it now with the reason and the form to write, as it
+/// refuses any malformed clause; the run door refuses the same document;
+/// the diagnose door refuses what only the compiler refuses (a parameter
+/// without a value) before it counts; and the form named drafts and is
+/// stored.
+#[test]
+fn the_draft_door_refuses_a_bucket_without_its_unit_with_its_form() {
+    let dsn = std::env::var("NILS_TEST_POSTGRES_DSN")
+        .ok()
+        .filter(|d| !d.is_empty());
+    if dsn.is_none() {
+        eprintln!("NILS_TEST_POSTGRES_DSN is not set; the Postgres half is skipped");
+    }
+    let document = |month: serde_json::Value| {
+        serde_json::json!({
+            "ast_version": 1,
+            "name": "visits by month",
+            "sets": {
+                "people": {"grain": "subject"},
+                "visits": {"grain": "session", "of": "people", "bind": {"month": month}},
+                "by_month": {
+                    "grain": "group",
+                    "group": {"of": "visits", "by": [["field", {}, "month"]]},
+                    "bind": {"n": ["count", {"set": "visits"}]}
+                }
+            },
+            "out": {"set": "by_month", "level": "aggregate",
+                    "columns": [["field", {}, "month"], ["field", {}, "n"]]}
+        })
+    };
+    let bench = document(serde_json::json!(["bucket", {}, ["field", {}, "first"]]));
+    let named = document(serde_json::json!(["bucket", {"unit": "month"}, ["field", {}, "first"]]));
+    let mut unbound = document(serde_json::json!([
+        "shift",
+        {},
+        ["field", {}, "first"],
+        ["param", {}, "later"]
+    ]));
+    unbound["params"] = serde_json::json!({"later": {"type": "integer"}});
+    let form = r#"write ["bucket", {unit: month}, ["field",{},"first"]]"#;
+    for (backend, dsn) in [("sqlite", None), ("postgres", dsn)] {
+        let home = match (backend, &dsn) {
+            ("sqlite", _) => synthetic(),
+            (_, Some(dsn)) => synthetic_postgres(dsn, DRAFT_SCHEMA),
+            _ => continue,
+        };
+        let server = Server::start(&home, 5, &[]);
+        let (status, drafted) = server.request(
+            "POST",
+            "/api/ask/draft",
+            Some(&body(serde_json::json!({"text": bench.to_string()}))),
+            None,
+        );
+        assert_eq!(status, 200, "{backend}: {drafted}");
+        let d = &drafted["diagnosis"];
+        assert_eq!(d["valid"], false, "{backend}: {drafted}");
+        assert!(drafted["document"].is_null(), "{backend}: {drafted}");
+        assert_eq!(d["issues"][0]["code"], "not_compilable", "{backend}: {d}");
+        assert_eq!(d["issues"][0]["path"], "sets.visits.bind.month", "{d}");
+        assert_eq!(
+            d["issues"][0]["message"], "bucket needs its unit: year, month or day",
+            "{d}"
+        );
+        assert_eq!(d["issues"][0]["next"], form, "{d}");
+        assert_eq!(d["next"], serde_json::json!([form]), "{d}");
+        // the run door refuses the same document as a document
+        let (status, ran) = server.request(
+            "POST",
+            "/api/ask/run",
+            Some(&body(serde_json::json!({"document": bench}))),
+            None,
+        );
+        assert_eq!(status, 400, "{backend}: {ran}");
+        assert_eq!(ran["error"], "the document is refused", "{ran}");
+        assert_eq!(ran["next"], serde_json::json!([form]), "{ran}");
+        // what only the compiler refuses, the diagnosis refuses before it
+        // counts anything
+        let (status, diagnosed) = server.request(
+            "POST",
+            "/api/ask/diagnose",
+            Some(&body(serde_json::json!({"document": unbound}))),
+            None,
+        );
+        assert_eq!(status, 200, "{backend}: {diagnosed}");
+        assert_eq!(diagnosed["valid"], false, "{backend}: {diagnosed}");
+        assert_eq!(
+            diagnosed["issues"][0]["code"], "not_compilable",
+            "{diagnosed}"
+        );
+        assert_eq!(
+            diagnosed["issues"][0]["path"], "sets.visits.bind.month",
+            "{diagnosed}"
+        );
+        assert_eq!(
+            diagnosed["issues"][0]["message"], "parameter later has no value",
+            "{diagnosed}"
+        );
+        assert_eq!(diagnosed["funnel"], serde_json::json!([]), "{diagnosed}");
+        let (status, drafted) = server.request(
+            "POST",
+            "/api/ask/draft",
+            Some(&body(serde_json::json!({"text": unbound.to_string()}))),
+            None,
+        );
+        assert_eq!(status, 200, "{backend}: {drafted}");
+        assert_eq!(drafted["diagnosis"]["valid"], false, "{drafted}");
+        assert!(drafted["document"].is_null(), "{drafted}");
+        // the form named drafts, and is stored
+        let (status, drafted) = server.request(
+            "POST",
+            "/api/ask/draft",
+            Some(&body(serde_json::json!({"text": named.to_string()}))),
+            None,
+        );
+        assert_eq!(status, 200, "{backend}: {drafted}");
+        assert_eq!(drafted["diagnosis"]["valid"], true, "{backend}: {drafted}");
+        assert!(drafted["document"].is_number(), "{backend}: {drafted}");
+        server.finish();
+        if let Some(dsn) = &dsn
+            && backend == "postgres"
+        {
+            drop_schema(dsn, DRAFT_SCHEMA);
+        }
+    }
+}
+
+/// What only the compiler refuses of a document the validator passes: a
+/// parameter declared without a value, read by a binding.
+fn unbound() -> serde_json::Value {
+    serde_json::json!({
+        "ast_version": 1,
+        "name": "visits shifted by a parameter without a value",
+        "params": {"later": {"type": "integer"}},
+        "sets": {
+            "people": {"grain": "subject"},
+            "visits": {"grain": "session", "of": "people", "bind": {
+                "month": ["shift", {}, ["field", {}, "first"], ["param", {}, "later"]]
+            }}
+        },
+        "out": {"set": "visits", "level": "record", "columns": [["field", {}, "month"]]}
+    })
+}
+
+/// The compiler's refusal of [`unbound`], as every door that runs a
+/// question answers it: 400, as a validation refusal is, with the
+/// compiler's words at the path it names.
+fn refused_as_a_document(backend: &str, door: &str, status: u16, refused: &serde_json::Value) {
+    assert_eq!(status, 400, "{backend} {door}: {refused}");
+    assert_eq!(refused["error"], "the document is refused", "{refused}");
+    assert_eq!(refused["disclosure"], "safe", "{refused}");
+    let issues = refused["issues"].as_array().unwrap();
+    assert_eq!(issues.len(), 1, "{refused}");
+    assert_eq!(issues[0]["code"], "not_compilable", "{refused}");
+    assert_eq!(issues[0]["path"], "sets.visits.bind.month", "{refused}");
+    assert_eq!(
+        issues[0]["message"], "parameter later has no value",
+        "{refused}"
+    );
+    assert_eq!(
+        refused["next"],
+        serde_json::json!([
+            "change the document as the message says; validate compiles what run would"
+        ]),
+        "{refused}"
+    );
+}
+
+/// One door that runs a question, sent [`unbound`] on each backend, the
+/// Postgres half in a schema of its own. The jobs door also queues
+/// nothing.
+fn compile_refusal_at(door: &str, schema: &str, request: serde_json::Value) {
+    let dsn = std::env::var("NILS_TEST_POSTGRES_DSN")
+        .ok()
+        .filter(|d| !d.is_empty());
+    if dsn.is_none() {
+        eprintln!("NILS_TEST_POSTGRES_DSN is not set; the Postgres half is skipped");
+    }
+    for (backend, dsn) in [("sqlite", None), ("postgres", dsn)] {
+        let home = match (backend, &dsn) {
+            ("sqlite", _) => synthetic(),
+            (_, Some(dsn)) => synthetic_postgres(dsn, schema),
+            _ => continue,
+        };
+        let jobs = || -> usize {
+            let listed = run(&home, &["jobs", "list", "--all", "--json"], None);
+            serde_json::from_str::<serde_json::Value>(&listed)
+                .unwrap()
+                .as_array()
+                .map_or(0, Vec::len)
+        };
+        let before = jobs();
+        let server = Server::start(&home, 1, &[]);
+        let (status, refused) = server.request("POST", door, Some(&body(request.clone())), None);
+        refused_as_a_document(backend, door, status, &refused);
+        server.finish();
+        assert_eq!(jobs(), before, "{backend} {door}: nothing is queued");
+        if let Some(dsn) = &dsn
+            && backend == "postgres"
+        {
+            drop_schema(dsn, schema);
+        }
+    }
+}
+
+/// 2026-10-12: what only the compiler refuses, a parameter without a
+/// value, was a bare 500 at the run door; it is refused as a document.
+#[test]
+fn the_run_door_refuses_what_only_the_compiler_refuses() {
+    compile_refusal_at(
+        "/api/ask/run",
+        "nils_ask_serve_compile_run",
+        serde_json::json!({"document": unbound()}),
+    );
+}
+
+/// The same at the preview door, whose answer compiles the document.
+#[test]
+fn the_preview_door_refuses_what_only_the_compiler_refuses() {
+    compile_refusal_at(
+        "/api/ask/preview",
+        "nils_ask_serve_compile_preview",
+        serde_json::json!({"document": unbound()}),
+    );
+}
+
+/// The same at the explain door, which compiles for both backends.
+#[test]
+fn the_explain_door_refuses_what_only_the_compiler_refuses() {
+    compile_refusal_at(
+        "/api/ask/explain",
+        "nils_ask_serve_compile_explain",
+        serde_json::json!({"document": unbound()}),
+    );
+}
+
+/// The jobs door queued such a document, and the worker failed on it; it
+/// refuses it before anything is queued, as it refuses what the validator
+/// refuses (Wave 4c section 6.1).
+#[test]
+fn the_jobs_door_refuses_what_only_the_compiler_refuses_before_it_queues() {
+    compile_refusal_at(
+        "/api/ask/jobs",
+        "nils_ask_serve_compile_jobs",
+        serde_json::json!({"document": unbound(), "name": "never-queued"}),
+    );
+}
+
+/// 2026-10-12: a `picked` whose role the served pack does not pick read no
+/// rows, and the run door answered 200 with none. It is refused as a
+/// document, naming the roles the pack picks, on each backend; a role the
+/// pack picks runs.
+#[test]
+fn the_run_door_refuses_a_picked_role_the_pack_does_not_pick() {
+    let dsn = std::env::var("NILS_TEST_POSTGRES_DSN")
+        .ok()
+        .filter(|d| !d.is_empty());
+    if dsn.is_none() {
+        eprintln!("NILS_TEST_POSTGRES_DSN is not set; the Postgres half is skipped");
+    }
+    let schema = "nils_ask_serve_picked_role";
+    let main_scans = |role: &str| {
+        serde_json::json!({"document": {
+            "ast_version": 1,
+            "name": "main scans of a role",
+            "sets": {"t": {"grain": "stack", "where": [["picked", {"role": role}]]}},
+            "out": {"set": "t", "level": "count"}
+        }})
+    };
+    for (backend, dsn) in [("sqlite", None), ("postgres", dsn)] {
+        let home = match (backend, &dsn) {
+            ("sqlite", _) => synthetic(),
+            (_, Some(dsn)) => synthetic_postgres(dsn, schema),
+            _ => continue,
+        };
+        let server = Server::start(&home, 2, &[]);
+        let (status, refused) =
+            server.request("POST", "/api/ask/run", Some(&body(main_scans("t2"))), None);
+        assert_eq!(status, 400, "{backend}: {refused}");
+        assert_eq!(refused["error"], "the document is refused", "{refused}");
+        let issue = &refused["issues"][0];
+        assert_eq!(issue["code"], "unknown_value", "{refused}");
+        assert_eq!(issue["path"], "sets.t.where[0]", "{refused}");
+        assert_eq!(
+            issue["message"], "picked reads no role named t2; the pack's roles are t1w, flair, t2w",
+            "{refused}"
+        );
+        let (status, ran) =
+            server.request("POST", "/api/ask/run", Some(&body(main_scans("t2w"))), None);
+        assert_eq!(status, 200, "{backend}: {ran}");
+        server.finish();
+        if let Some(dsn) = &dsn
+            && backend == "postgres"
+        {
+            drop_schema(dsn, schema);
+        }
+    }
+}
+
+/// 2026-10-12, found by the chat bench: the catalog door listed cohorts by
+/// name and size only, so the chat could not say which cohort was made
+/// third. Each cohort it lists says when it was made, as the cohorts door
+/// says it, and the cohort level carries the cohort's own dates, made and
+/// retired, as technical fields, on each backend.
+#[test]
+fn the_catalog_door_says_when_each_cohort_was_made() {
+    let dsn = std::env::var("NILS_TEST_POSTGRES_DSN")
+        .ok()
+        .filter(|d| !d.is_empty());
+    if dsn.is_none() {
+        eprintln!("NILS_TEST_POSTGRES_DSN is not set; the Postgres half is skipped");
+    }
+    let schema = "nils_ask_serve_cohort_dates";
+    for (backend, dsn) in [("sqlite", None), ("postgres", dsn)] {
+        let home = match (backend, &dsn) {
+            ("sqlite", _) => synthetic(),
+            (_, Some(dsn)) => synthetic_postgres(dsn, schema),
+            _ => continue,
+        };
+        let server = Server::start(&home, 3, &[]);
+        let (status, catalog) = server.request("GET", "/api/ask/catalog", None, None);
+        assert_eq!(status, 200, "{backend}: {catalog}");
+        let (status, cohorts) = server.request("GET", "/api/cohorts", None, None);
+        assert_eq!(status, 200, "{backend}: {cohorts}");
+        let made: std::collections::BTreeMap<String, String> = cohorts
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| {
+                (
+                    c["name"].as_str().unwrap().to_string(),
+                    c["created_at"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect();
+        let listed = catalog["cohorts"].as_array().unwrap();
+        assert!(!listed.is_empty(), "{backend}: {catalog}");
+        for c in listed {
+            let name = c["name"].as_str().unwrap();
+            assert_eq!(c["created_at"], made[name], "{backend}: {c}");
+        }
+        let (status, level) = server.request("GET", "/api/ask/catalog/cohort", None, None);
+        assert_eq!(status, 200, "{backend}: {level}");
+        for path in ["created_at", "retired_at"] {
+            let f = level["fields"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|f| f["path"] == path)
+                .unwrap_or_else(|| panic!("{backend}: no cohort.{path} in {level}"));
+            assert_eq!(f["class"], "technical", "{backend}: {f}");
+            assert_eq!(f["type"], "timestamp", "{backend}: {f}");
+        }
+        server.finish();
+        if let Some(dsn) = &dsn
+            && backend == "postgres"
+        {
+            drop_schema(dsn, schema);
+        }
+    }
+}
+
+/// The backends a door test runs on, the Postgres half in a schema of its
+/// own when a DSN is set.
+fn backends(schema: &str) -> Vec<(&'static str, TempDir, Option<String>)> {
+    let dsn = std::env::var("NILS_TEST_POSTGRES_DSN")
+        .ok()
+        .filter(|d| !d.is_empty());
+    let mut out = vec![("sqlite", synthetic(), None)];
+    match dsn {
+        Some(dsn) => out.push(("postgres", synthetic_postgres(&dsn, schema), Some(dsn))),
+        None => eprintln!("NILS_TEST_POSTGRES_DSN is not set; the Postgres half is skipped"),
+    }
+    out
+}
+
+/// One count a run answers, at the run door.
+fn counted(server: &Server, backend: &str, document: serde_json::Value) -> i64 {
+    let (status, ran) = server.request(
+        "POST",
+        "/api/ask/run",
+        Some(&body(serde_json::json!({"document": document}))),
+        None,
+    );
+    assert_eq!(status, 200, "{backend}: {ran}");
+    ran["rows"][0][0]
+        .as_i64()
+        .unwrap_or_else(|| panic!("{ran}"))
+}
+
+/// 2026-10-12: Postgres compares no date with text, and the run door
+/// answered `first >= "2020-01-01"` with 500 there, the kind of filter the
+/// chat writes. A date written as text, a day or an instant, is read as a
+/// date wherever it meets one: a comparison, a list, a date function, an
+/// instant of a cohort's. Each answers what a date parameter answers, the
+/// same on both backends.
+#[test]
+fn the_run_door_reads_a_date_written_as_text_as_a_date() {
+    let schema = "nils_ask_serve_dates_as_text";
+    let sessions = |clauses: serde_json::Value| {
+        serde_json::json!({
+            "ast_version": 1,
+            "name": "sessions against a date written as text",
+            "sets": {"s": {"grain": "session", "where": clauses}},
+            "out": {"set": "s", "level": "count"}
+        })
+    };
+    let mut answers: Vec<(&str, Vec<i64>)> = Vec::new();
+    for (backend, home, dsn) in backends(schema) {
+        let server = Server::start(&home, 9, &[]);
+        let mut by_param = sessions(serde_json::json!([[
+            ">=",
+            {},
+            ["field", {}, "first"],
+            ["param", {}, "since"]
+        ]]));
+        by_param["params"] = serde_json::json!({"since": {"type": "date", "value": "2010-01-01"}});
+        let want = counted(&server, backend, by_param);
+        assert!(want > 0, "{backend}: some session is since 2010");
+        let day = counted(
+            &server,
+            backend,
+            sessions(serde_json::json!([[
+                ">=",
+                {},
+                ["field", {}, "first"],
+                "2010-01-01"
+            ]])),
+        );
+        let instant = counted(
+            &server,
+            backend,
+            sessions(serde_json::json!([[
+                ">=",
+                {},
+                ["field", {}, "first"],
+                "2010-01-01T00:00:00Z"
+            ]])),
+        );
+        let flipped = counted(
+            &server,
+            backend,
+            sessions(serde_json::json!([[
+                "<=",
+                {},
+                "2010-01-01",
+                ["field", {}, "first"]
+            ]])),
+        );
+        assert_eq!((day, instant, flipped), (want, want, want), "{backend}");
+        let between = counted(
+            &server,
+            backend,
+            sessions(serde_json::json!([
+                [">=", {}, ["field", {}, "first"], "2010-01-01"],
+                ["<", {}, ["field", {}, "first"], "2015-01-01T00:00:00Z"]
+            ])),
+        );
+        let listed = counted(
+            &server,
+            backend,
+            sessions(serde_json::json!([[
+                "not_in",
+                {},
+                ["field", {}, "first"],
+                ["1990-01-01", "1991-02-02T10:00:00Z"]
+            ]])),
+        );
+        let since = counted(
+            &server,
+            backend,
+            sessions(serde_json::json!([[
+                ">=",
+                {},
+                ["days_between", {}, ["field", {}, "first"], "2010-01-01"],
+                0
+            ]])),
+        );
+        assert_eq!(since, want, "{backend}");
+        // a cohort's instant of making against a day and an instant
+        let cohorts = |clause: serde_json::Value| {
+            serde_json::json!({
+                "ast_version": 1,
+                "sets": {"c": {"grain": "cohort", "where": [clause]}},
+                "out": {"set": "c", "level": "count"}
+            })
+        };
+        let made = counted(
+            &server,
+            backend,
+            cohorts(serde_json::json!([
+                ">=",
+                {},
+                ["field", {}, "created_at"],
+                "2020-01-01"
+            ])),
+        );
+        let before = counted(
+            &server,
+            backend,
+            cohorts(serde_json::json!([
+                "<",
+                {},
+                ["field", {}, "created_at"],
+                "2020-01-01T00:00:00Z"
+            ])),
+        );
+        assert_eq!((made, before), (2, 0), "{backend}");
+        server.finish();
+        answers.push((backend, vec![want, between, listed]));
+        if let Some(dsn) = &dsn {
+            drop_schema(dsn, schema);
+        }
+    }
+    let first = &answers[0].1;
+    for (backend, seen) in &answers {
+        assert_eq!(seen, first, "{backend} answers as {}", answers[0].0);
+    }
+}
+
+/// 2026-10-12: a text that writes no date, met by a date, is refused as a
+/// document at every door, on both backends, where SQLite compared it as
+/// text and Postgres answered 500: at the clause by validate, and where
+/// only the compiler can tell the date it meets (a binding), at the
+/// clause by the compiler; a date parameter holds a date.
+#[test]
+fn a_text_that_writes_no_date_is_refused_where_a_date_meets_it() {
+    let schema = "nils_ask_serve_no_date";
+    let forms = "a date is written YYYY-MM-DD, or YYYY-MM-DDTHH:MM:SSZ in UTC";
+    for (backend, home, dsn) in backends(schema) {
+        let server = Server::start(&home, 4, &[]);
+        let slashed = serde_json::json!({
+            "ast_version": 1,
+            "sets": {"s": {"grain": "session", "where": [[">=", {}, ["field", {}, "first"], "2020/01/01"]]}},
+            "out": {"set": "s", "level": "count"}
+        });
+        for door in ["/api/ask/validate", "/api/ask/run"] {
+            let (status, refused) = server.request(
+                "POST",
+                door,
+                Some(&body(serde_json::json!({"document": slashed}))),
+                None,
+            );
+            assert_eq!(status, 400, "{backend} {door}: {refused}");
+            let issue = &refused["issues"][0];
+            assert_eq!(issue["code"], "unknown_value", "{refused}");
+            assert_eq!(issue["path"], "sets.s.where[0]", "{refused}");
+            assert_eq!(issue["message"], "2020/01/01 is not a date", "{refused}");
+            assert!(
+                issue["next"].as_str().unwrap().starts_with(forms),
+                "{refused}"
+            );
+        }
+        // a binding the validator cannot read as a date, which the compiler can
+        let bound = serde_json::json!({
+            "ast_version": 1,
+            "sets": {"s": {"grain": "session",
+                           "bind": {"due": ["shift", {}, ["field", {}, "first"], 30]},
+                           "where": [[">", {}, ["field", {}, "due"], "soon"]]}},
+            "out": {"set": "s", "level": "count"}
+        });
+        let (status, refused) = server.request(
+            "POST",
+            "/api/ask/run",
+            Some(&body(serde_json::json!({"document": bound}))),
+            None,
+        );
+        assert_eq!(status, 400, "{backend}: {refused}");
+        assert_eq!(refused["issues"][0]["code"], "not_compilable", "{refused}");
+        assert_eq!(refused["issues"][0]["path"], "sets.s.where[0]", "{refused}");
+        assert_eq!(
+            refused["issues"][0]["message"],
+            format!("soon is not a date; {forms}"),
+            "{refused}"
+        );
+        // a date parameter holds a date
+        let mut by_param = slashed.clone();
+        by_param["sets"]["s"]["where"] =
+            serde_json::json!([[">=", {}, ["field", {}, "first"], ["param", {}, "since"]]]);
+        by_param["params"] = serde_json::json!({"since": {"type": "date", "value": "2020-02-30"}});
+        let (status, refused) = server.request(
+            "POST",
+            "/api/ask/run",
+            Some(&body(serde_json::json!({"document": by_param}))),
+            None,
+        );
+        assert_eq!(status, 400, "{backend}: {refused}");
+        assert_eq!(refused["issues"][0]["path"], "params.since", "{refused}");
+        assert_eq!(
+            refused["issues"][0]["message"], "2020-02-30 is not a date",
+            "{refused}"
+        );
+        server.finish();
+        if let Some(dsn) = &dsn {
+            drop_schema(dsn, schema);
+        }
+    }
+}
+
+/// 2026-10-12: a stored document whose session scheme was removed since
+/// it was stored answered 500 at the run door, and at the jobs door once
+/// it checked what the compiler refuses. Every door that reads a stored
+/// document now refuses it with 409, naming the document, the scheme gone
+/// and what to do, and queues nothing; the same document carried in the
+/// request is refused with 400; and the command line, which runs a queued
+/// ask, refuses it with exit 2. On each backend.
+#[test]
+fn a_stored_document_whose_scheme_is_gone_is_refused_with_what_to_do() {
+    let schema = "nils_ask_serve_scheme_gone";
+    let ask = serde_json::json!({
+        "ast_version": 1,
+        "name": "visits under a kept scheme",
+        "scheme": "visits",
+        "sets": {"s": {"grain": "session"}},
+        "out": {"set": "s", "level": "count"}
+    });
+    let doors = [
+        "/api/ask/run",
+        "/api/ask/jobs",
+        "/api/ask/validate",
+        "/api/ask/explain",
+        "/api/ask/preview",
+        "/api/ask/diagnose",
+        "/api/ask/describe",
+        "/api/ask/options",
+        "/api/ask/profile",
+        "/api/ask/documents",
+    ];
+    for (backend, home, dsn) in backends(schema) {
+        let file = home.path().join("visits.yml");
+        std::fs::write(&file, "session:\n  window_days: 30\n").unwrap();
+        run(
+            &home,
+            &["session", "scheme", "add", "visits", file.to_str().unwrap()],
+            None,
+        );
+        let server = Server::start(&home, 1, &[]);
+        let (status, stored) = server.request(
+            "POST",
+            "/api/ask/documents",
+            Some(&body(serde_json::json!({"document": ask}))),
+            None,
+        );
+        assert_eq!(status, 200, "{backend}: {stored}");
+        let id = stored["document"].as_i64().unwrap();
+        server.finish();
+        run(&home, &["session", "scheme", "remove", "visits"], None);
+        let jobs = || -> usize {
+            let listed = run(&home, &["jobs", "list", "--all", "--json"], None);
+            serde_json::from_str::<serde_json::Value>(&listed)
+                .unwrap()
+                .as_array()
+                .map_or(0, Vec::len)
+        };
+        let queued = jobs();
+        let server = Server::start(&home, doors.len() + 2, &[]);
+        let gone = format!(
+            "document {id} reads the session scheme visits, which this registry no longer keeps"
+        );
+        let refused_as_gone = |door: &str, status: u16, refused: &serde_json::Value| {
+            assert_eq!(status, 409, "{backend} {door}: {refused}");
+            assert_eq!(refused["error"], "the document is refused", "{refused}");
+            let issue = &refused["issues"][0];
+            assert_eq!(issue["code"], "scheme_mismatch", "{refused}");
+            assert_eq!(issue["path"], "scheme", "{refused}");
+            assert_eq!(issue["message"], gone.as_str(), "{refused}");
+            let next = issue["next"].as_str().unwrap();
+            assert!(
+                next.starts_with("store the document again with a scheme the registry keeps")
+                    && next.contains("`nils session scheme add visits FILE`"),
+                "{refused}"
+            );
+        };
+        for door in doors {
+            let (status, refused) = server.request(
+                "POST",
+                door,
+                Some(&body(serde_json::json!({"document_id": id}))),
+                None,
+            );
+            refused_as_gone(door, status, &refused);
+        }
+        let (status, refused) = server.request(
+            "POST",
+            "/api/ask/start",
+            Some(&body(serde_json::json!({"from": {"document": id}}))),
+            None,
+        );
+        refused_as_gone("/api/ask/start", status, &refused);
+        // the same document, carried in the request
+        let (status, refused) = server.request(
+            "POST",
+            "/api/ask/run",
+            Some(&body(serde_json::json!({"document": ask}))),
+            None,
+        );
+        assert_eq!(status, 400, "{backend}: {refused}");
+        assert_eq!(refused["issues"][0]["code"], "scheme_mismatch", "{refused}");
+        assert_eq!(
+            refused["issues"][0]["message"], "no session scheme named visits is kept",
+            "{refused}"
+        );
+        server.finish();
+        assert_eq!(jobs(), queued, "{backend}: nothing is queued");
+        // the command line, as the worker runs a queued ask
+        let out = nils()
+            .arg("--registry")
+            .arg(home.path())
+            .args(["ask", "run", "--document", &id.to_string()])
+            .args(["--pack-dir", packs().to_str().unwrap()])
+            .env("USER", "anna")
+            .env("HOSTNAME", "ward-3")
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(2), "{backend}: {stderr}");
+        assert!(
+            stderr.contains(&format!("scheme_mismatch at scheme: {gone}")),
+            "{backend}: {stderr}"
+        );
+        if let Some(dsn) = &dsn {
+            drop_schema(dsn, schema);
+        }
+    }
+}
+
+/// Record 55 K7, small counts at plain (the ruling of 2026-10-12), at every
+/// door on both backends: the subjects per ten-year band of their age at the
+/// first visit hold the band of 2 back, and the band of 8 beside it, at a
+/// run, its cached answer, the preview, the handle and a page of it, and a
+/// queued job; the diagnosis holds the stages an age chose of few, or that
+/// dropped few; the profile of a set an age chose holds its counts; a count
+/// of 2 subjects an age chose is null. At detail quasi every count is a
+/// number.
+#[test]
+fn every_door_holds_a_count_under_five_that_an_age_chose() {
+    let dsn = std::env::var("NILS_TEST_POSTGRES_DSN")
+        .ok()
+        .filter(|d| !d.is_empty());
+    if dsn.is_none() {
+        eprintln!("NILS_TEST_POSTGRES_DSN is not set; the Postgres half is skipped");
+    }
+    let reader = Some("a-reader-token-of-length");
+    let reviewer = Some("a-reviewer-token-of-leng");
+    let sets = serde_json::json!({
+        "people": {"grain": "subject"},
+        "visits": {"grain": "session", "of": "people", "bind": {
+            "n": ["ordinal", {}],
+            "age": ["age_at", {}, ["field", {}, "subject.birth_date"], ["field", {}, "first"]],
+            "band": ["+", {}, ["*", {}, ["round", {"key": true}, ["/", {}, ["-", {}, ["field", {}, "age"], 9.5], 10], 0], 10], 5]
+        }},
+        "firsts": {"grain": "session", "from": "visits", "where": [
+            ["=", {}, ["field", {}, "n"], 1],
+            ["not_null", {}, ["field", {}, "age"]]
+        ]},
+        "bands": {"grain": "group", "group": {"of": "firsts", "by": [["field", {}, "band"]]}},
+        "older": {"grain": "session", "from": "firsts", "where": [[">=", {}, ["field", {}, "age"], 45]]}
+    });
+    let bands = serde_json::json!({
+        "ast_version": 1,
+        "name": "subjects per ten-year band of their age at the first visit",
+        "sets": sets,
+        "out": {"set": "bands", "level": "aggregate",
+            "columns": [["field", {}, "band"], ["field", {}, "_subjects"]],
+            "order": [[["field", {}, "band"], "asc"]]}
+    });
+    let few = serde_json::json!({
+        "ast_version": 1,
+        "name": "subjects 45 or older at their first visit",
+        "sets": sets,
+        "out": {"set": "older", "level": "count"}
+    });
+    let why = nils_ask::validate::held_count_why();
+    let held = serde_json::json!([{"column": "_subjects", "why": why}]);
+    let none = serde_json::json!([]);
+    let subjects = |answer: &serde_json::Value, name: &str| -> Vec<serde_json::Value> {
+        let i = answer["columns"]
+            .as_array()
+            .unwrap_or_else(|| panic!("no columns: {answer}"))
+            .iter()
+            .position(|c| c == name || c["name"] == name)
+            .unwrap_or_else(|| panic!("no column {name} in {answer}"));
+        answer["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r[i].clone())
+            .collect()
+    };
+    for (backend, dsn) in [("sqlite", None), ("postgres", dsn.clone())] {
+        let home = match (backend, &dsn) {
+            ("sqlite", _) => synthetic(),
+            (_, Some(dsn)) => synthetic_postgres(dsn, SMALL_SCHEMA),
+            _ => continue,
+        };
+        let server = Server::start(
+            &home,
+            13,
+            &[
+                "--auth",
+                "token",
+                "--token",
+                "a-reader-token-of-length=reader@lab:reader",
+                "--token",
+                "a-reviewer-token-of-leng=rev@lab:reviewer",
+            ],
+        );
+        let post = |path: &str, b: serde_json::Value, token: Option<&str>| {
+            let (status, answer) = server.request("POST", path, Some(&body(b)), token);
+            assert_eq!(status, 200, "{backend} {path}: {answer}");
+            answer
+        };
+        let get = |path: &str| {
+            let (status, answer) = server.request("GET", path, None, reader);
+            assert_eq!(status, 200, "{backend} {path}: {answer}");
+            answer
+        };
+
+        // the bands: 8, 34 and 2 subjects
+        let quasi = post(
+            "/api/ask/run",
+            serde_json::json!({"document": bands, "fresh": true}),
+            reviewer,
+        );
+        assert_eq!(quasi["held_back"], none, "{backend}: {quasi}");
+        assert_eq!(
+            subjects(&quasi, "_subjects"),
+            vec![
+                serde_json::json!(8),
+                serde_json::json!(34),
+                serde_json::json!(2)
+            ],
+            "{backend}: {quasi}"
+        );
+        let plain = post(
+            "/api/ask/run",
+            serde_json::json!({"document": bands, "fresh": true}),
+            reader,
+        );
+        let shown = vec![
+            serde_json::Value::Null,
+            serde_json::json!(34),
+            serde_json::Value::Null,
+        ];
+        assert_eq!(plain["held_back"], held, "{backend}: {plain}");
+        assert_eq!(subjects(&plain, "_subjects"), shown, "{backend}: {plain}");
+        let cached = post(
+            "/api/ask/run",
+            serde_json::json!({"document": bands}),
+            reader,
+        );
+        assert_eq!(cached["cached"], true, "{backend}: {cached}");
+        assert_eq!(cached["held_back"], held, "{backend}: {cached}");
+        assert_eq!(subjects(&cached, "_subjects"), shown);
+        let previewed = post(
+            "/api/ask/preview",
+            serde_json::json!({"document": bands, "rows": 50}),
+            reader,
+        );
+        assert_eq!(previewed["held_back"], held, "{backend}: {previewed}");
+        assert_eq!(subjects(&previewed, "_subjects"), shown);
+        let h = plain["handle"].as_i64().unwrap();
+        let page = get(&format!("/api/ask/handles/{h}/rows?page=0"));
+        assert_eq!(page["held_back"], held, "{backend}: {page}");
+        assert_eq!(subjects(&page, "_subjects"), shown);
+        assert_eq!(get(&format!("/api/ask/handles/{h}"))["held_back"], held);
+
+        // the count of 2 an age chose, and whether any is
+        let count = post(
+            "/api/ask/run",
+            serde_json::json!({"document": few, "fresh": true}),
+            reader,
+        );
+        assert_eq!(
+            subjects(&count, "subjects"),
+            vec![serde_json::Value::Null],
+            "{backend}: {count}"
+        );
+        let count = post(
+            "/api/ask/run",
+            serde_json::json!({"document": few, "fresh": true}),
+            reviewer,
+        );
+        assert_eq!(
+            subjects(&count, "subjects"),
+            vec![serde_json::json!(2)],
+            "{backend}: {count}"
+        );
+
+        // the diagnosis: the subjects with an age dropped 4 of 48, the
+        // older are 2
+        let stages = |d: &serde_json::Value, set: &str| -> Vec<serde_json::Value> {
+            d["funnel"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|s| s["set"] == set)
+                .cloned()
+                .collect()
+        };
+        let d = post(
+            "/api/ask/diagnose",
+            serde_json::json!({"document": few}),
+            reader,
+        );
+        assert_eq!(
+            stages(&d, "firsts")[2]["subjects"],
+            serde_json::Value::Null,
+            "{backend}: {d}"
+        );
+        assert_eq!(stages(&d, "firsts")[2]["held_back"], why.as_str());
+        assert_eq!(stages(&d, "older")[1]["subjects"], serde_json::Value::Null);
+        assert_eq!(stages(&d, "people")[0]["subjects"], 48);
+        let d = post(
+            "/api/ask/diagnose",
+            serde_json::json!({"document": few}),
+            reviewer,
+        );
+        assert_eq!(stages(&d, "firsts")[2]["subjects"], 44, "{backend}: {d}");
+        assert_eq!(stages(&d, "older")[1]["subjects"], 2);
+
+        // the profile of the set an age chose
+        let p = post(
+            "/api/ask/profile",
+            serde_json::json!({"document": few, "set": "older"}),
+            reader,
+        );
+        assert_eq!(
+            p["counts"]["subjects"],
+            serde_json::Value::Null,
+            "{backend}: {p}"
+        );
+        assert_eq!(
+            p["counts"]["sessions"],
+            serde_json::Value::Null,
+            "{backend}: {p}"
+        );
+        let p = post(
+            "/api/ask/profile",
+            serde_json::json!({"document": few, "set": "older"}),
+            reviewer,
+        );
+        assert_eq!(p["counts"]["subjects"], 2, "{backend}: {p}");
+
+        // a queued job says the same in its result
+        let (status, q) = server.request(
+            "POST",
+            "/api/ask/jobs",
+            Some(&body(
+                serde_json::json!({"document": bands, "name": "small-bands"}),
+            )),
+            reader,
+        );
+        assert_eq!(status, 202, "{backend}: {q}");
+        let job = q["job"].as_i64().unwrap();
+        server.finish();
+        run(&home, &["jobs", "work", "--once"], None);
+        let listed: serde_json::Value =
+            serde_json::from_str(&run(&home, &["jobs", "list", "--all", "--json"], None)).unwrap();
+        let done = listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|j| j["id"] == job)
+            .unwrap_or_else(|| panic!("no job {job}: {listed}"));
+        assert_eq!(done["state"], "done", "{backend}: {done}");
+        assert_eq!(done["result"]["held_back"], held, "{backend}: {done}");
+        if let Some(dsn) = &dsn {
+            drop_schema(dsn, SMALL_SCHEMA);
+        }
+    }
+}
+
+/// The schema the Postgres half of the small counts door test registers in.
+const SMALL_SCHEMA: &str = "nils_ask_serve_small_test";
+
+/// Record 55 K7, small lists at plain (the ruling of 2026-10-13), at every
+/// door on both backends: a list of the first visits of the 2 subjects 45
+/// or older answers no row at plain, names every column as held back and
+/// gives no row count, at a run, its cached answer, the preview, the handle,
+/// the list of handles, a page, a queued job and the CSV export; the handle
+/// is no source, neither for a run nor for a start; the diagnosis with keys
+/// holds the stage. A list of 36 subjects is answered at plain, and the
+/// reviewer at detail quasi lists the 2.
+#[test]
+fn every_door_holds_a_list_of_fewer_than_five_that_an_age_chose() {
+    let dsn = std::env::var("NILS_TEST_POSTGRES_DSN")
+        .ok()
+        .filter(|d| !d.is_empty());
+    if dsn.is_none() {
+        eprintln!("NILS_TEST_POSTGRES_DSN is not set; the Postgres half is skipped");
+    }
+    let reader = Some("a-reader-token-of-length");
+    let reviewer = Some("a-reviewer-token-of-leng");
+    let list = |from: i64| {
+        serde_json::json!({
+            "ast_version": 1,
+            "name": format!("the first visits of the subjects {from} or older"),
+            "sets": {
+                "people": {"grain": "subject"},
+                "visits": {"grain": "session", "of": "people", "bind": {
+                    "n": ["ordinal", {}],
+                    "age": ["age_at", {}, ["field", {}, "subject.birth_date"], ["field", {}, "first"]]
+                }},
+                "older": {"grain": "session", "from": "visits", "where": [
+                    ["=", {}, ["field", {}, "n"], 1],
+                    [">=", {}, ["field", {}, "age"], from]
+                ]}
+            },
+            "out": {"set": "older", "level": "record", "columns": [["field", {}, "n"]]}
+        })
+    };
+    let (few, many) = (list(45), list(35));
+    let why = nils_ask::validate::held_list_why();
+    let held = serde_json::json!([
+        {"column": "_key", "why": why},
+        {"column": "_subject", "why": why},
+        {"column": "n", "why": why}
+    ]);
+    for (backend, dsn) in [("sqlite", None), ("postgres", dsn.clone())] {
+        let home = match (backend, &dsn) {
+            ("sqlite", _) => synthetic(),
+            (_, Some(dsn)) => synthetic_postgres(dsn, LIST_SCHEMA),
+            _ => continue,
+        };
+        let server = Server::start(
+            &home,
+            12,
+            &[
+                "--auth",
+                "token",
+                "--token",
+                "a-reader-token-of-length=reader@lab:reader",
+                "--token",
+                "a-reviewer-token-of-leng=rev@lab:reviewer",
+            ],
+        );
+        let post = |path: &str, b: serde_json::Value, token: Option<&str>, want: u16| {
+            let (status, answer) = server.request("POST", path, Some(&body(b)), token);
+            assert_eq!(status, want, "{backend} {path}: {answer}");
+            answer
+        };
+        let get = |path: &str, want: u16| {
+            let (status, answer) = server.request("GET", path, None, reader);
+            assert_eq!(status, want, "{backend} {path}: {answer}");
+            answer
+        };
+
+        // at detail quasi: the 2 subjects' first visits
+        let quasi = post(
+            "/api/ask/run",
+            serde_json::json!({"document": few, "fresh": true}),
+            reviewer,
+            200,
+        );
+        assert_eq!(quasi["row_count"], 2, "{backend}: {quasi}");
+        assert_eq!(quasi["held_back"], serde_json::json!([]));
+
+        // at detail plain: no row, every column held, no length
+        let plain = post(
+            "/api/ask/run",
+            serde_json::json!({"document": few, "fresh": true}),
+            reader,
+            200,
+        );
+        assert_eq!(plain["rows"], serde_json::json!([]), "{backend}: {plain}");
+        assert_eq!(plain["row_count"], serde_json::Value::Null, "{backend}");
+        assert_eq!(plain["pages"], 0);
+        assert_eq!(plain["truncated"], false);
+        assert_eq!(plain["held_back"], held, "{backend}: {plain}");
+        let cached = post(
+            "/api/ask/run",
+            serde_json::json!({"document": few}),
+            reader,
+            200,
+        );
+        assert_eq!(cached["cached"], true, "{backend}: {cached}");
+        assert_eq!(cached["rows"], serde_json::json!([]));
+        assert_eq!(cached["row_count"], serde_json::Value::Null);
+        assert_eq!(cached["held_back"], held, "{backend}: {cached}");
+        let previewed = post(
+            "/api/ask/preview",
+            serde_json::json!({"document": few, "rows": 50}),
+            reader,
+            200,
+        );
+        assert_eq!(previewed["rows"], serde_json::json!([]), "{backend}");
+        assert_eq!(previewed["held_back"], held, "{backend}: {previewed}");
+
+        // the handle: no length, no page, every column held
+        let h = plain["handle"].as_i64().unwrap();
+        let one = get(&format!("/api/ask/handles/{h}"), 200);
+        assert_eq!(
+            one["row_count"],
+            serde_json::Value::Null,
+            "{backend}: {one}"
+        );
+        assert_eq!(one["pages"], 0);
+        assert_eq!(one["held_back"], held);
+        let all = get("/api/ask/handles?limit=50", 200);
+        let listed = all["handles"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["id"] == h)
+            .unwrap_or_else(|| panic!("{backend}: no handle {h} in {all}"))
+            .clone();
+        assert_eq!(listed["row_count"], serde_json::Value::Null, "{backend}");
+        get(&format!("/api/ask/handles/{h}/rows?page=0"), 404);
+
+        // no source: a start from it, and a set read from it
+        let start = post(
+            "/api/ask/start",
+            serde_json::json!({"from": {"handle": h}}),
+            reader,
+            409,
+        );
+        assert!(
+            start["error"]
+                .as_str()
+                .is_some_and(|e| e.contains("holds no rows")),
+            "{backend}: {start}"
+        );
+        post(
+            "/api/ask/run",
+            serde_json::json!({"document": {
+                "ast_version": 1,
+                "sets": {"t": {"grain": "session", "from": format!("handle:{h}")}},
+                "out": {"set": "t", "level": "count"}
+            }}),
+            reader,
+            409,
+        );
+
+        // the diagnosis with keys holds the stage
+        let d = post(
+            "/api/ask/diagnose",
+            serde_json::json!({"document": few, "keys": true}),
+            reader,
+            200,
+        );
+        let last = d["funnel"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .rfind(|s| s["set"] == "older")
+            .unwrap()
+            .clone();
+        assert_eq!(last["subjects"], serde_json::Value::Null, "{backend}: {d}");
+        assert!(last.get("keys").is_none(), "{backend}: {last}");
+
+        // 36 subjects: listed at plain
+        let listed = post(
+            "/api/ask/run",
+            serde_json::json!({"document": many, "fresh": true}),
+            reader,
+            200,
+        );
+        assert_eq!(listed["row_count"], 36, "{backend}: {listed}");
+        assert_eq!(listed["held_back"], serde_json::json!([]));
+
+        // a queued job says the same in its result
+        let q = post(
+            "/api/ask/jobs",
+            serde_json::json!({"document": few, "name": "small-list"}),
+            reader,
+            202,
+        );
+        let job = q["job"].as_i64().unwrap();
+        server.finish();
+        run(&home, &["jobs", "work", "--once"], None);
+        let jobs: serde_json::Value =
+            serde_json::from_str(&run(&home, &["jobs", "list", "--all", "--json"], None)).unwrap();
+        let done = jobs
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|j| j["id"] == job)
+            .unwrap_or_else(|| panic!("no job {job}: {jobs}"));
+        assert_eq!(done["state"], "done", "{backend}: {done}");
+        assert_eq!(done["result"]["held_back"], held, "{backend}: {done}");
+        assert_eq!(done["result"]["row_count"], serde_json::Value::Null);
+
+        // the CSV export: the header alone
+        let csv = run(
+            &home,
+            &["ask", "handles", "export", "--handle", &h.to_string()],
+            None,
+        );
+        assert_eq!(csv.trim_end(), "_key,_subject,n", "{backend}: {csv}");
+        if let Some(dsn) = &dsn {
+            drop_schema(dsn, LIST_SCHEMA);
+        }
+    }
+}
+
+/// The schema the Postgres half of the small lists door test registers in.
+const LIST_SCHEMA: &str = "nils_ask_serve_list_test";

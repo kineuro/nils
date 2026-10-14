@@ -696,7 +696,7 @@ fn the_catalog_says_what_rows_store_and_its_sampler_and_a_draft_agree() {
                 .iter()
                 .rfind(|st| st.set == "scans")
                 .unwrap_or_else(|| panic!("{}: {:?}", l.name, drafted.diagnosis.funnel));
-            assert_eq!(kept.rows, p.given.len() as i64, "{}: {value}", l.name);
+            assert_eq!(kept.rows, Some(p.given.len() as i64), "{}: {value}", l.name);
         }
     }
 }

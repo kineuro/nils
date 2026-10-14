@@ -68,6 +68,6 @@ excludes:
   # from [P9, MQ6]. Every base value is ruled out, so the answer is none.
   - id: mp2rage-inversion-no-base
     when: {any: [{axis: construct, is: INV1}, {axis: construct, is: INV2}]}
-    excludes: {axis: base, any: [DWI, PWI, SWI, T1rho, T2rho, T2starw, T2w, PDw, T1w, MTw, Unknown]}
+    excludes: {axis: base, any: [DWI, PWI, ASL, SWI, T1rho, T2rho, T2starw, T2w, PDw, T1w, MTw, Unknown]}
     why: 'an MP2RAGE inversion is named by its construct and takes base none; the uniform image is the T1-weighted one'
     sources: [B1, P9, MQ6]

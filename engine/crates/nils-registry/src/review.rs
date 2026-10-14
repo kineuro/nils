@@ -9,7 +9,7 @@
 //! never overwrites what a person said.
 //!
 //! What is measured first (§10.1) is why: at the pack's thresholds the
-//! nmosd corpus asks nothing and the mixed corpus asks 77 items in 9
+//! corpus of study D asks nothing and the mixed corpus asks 77 items in 9
 //! groups; with every axis at 0.95 the two ask 10,791 and 10,725 items,
 //! which are 34 and 108 questions.
 
@@ -405,7 +405,36 @@ pub fn apply(registry: &mut Registry, a: &Apply<'_>) -> Result<Applied, Error> {
 /// are written as one act or none (an import); the caller commits, or
 /// rolls back and re-reads the registry's epoch.
 pub fn apply_within(registry: &mut Registry, a: &Apply<'_>) -> Result<Applied, Error> {
-    apply_as(registry, a, None)
+    apply_as(registry, a, None, None)
+}
+
+/// The scopes a check's decisions are written at (record 55 H3, section
+/// 6.4): a result, by its id, and one part of it, as `<result>:<set>:<label>`.
+pub const CHECK_SCOPES: [&str; 2] = ["derivative", "derivative_part"];
+
+/// The axis a check decides.
+pub const CHECK_AXIS: &str = "check";
+
+/// [`apply_within`] on an item about a result (job type 3, record 55 H3):
+/// a review item of scope `derivative` or `derivative_part`, whose `ref`
+/// names the result (`derivative_id`) and, for a part, its set and label.
+/// `a.scope` says where the decision is written: `derivative` on the
+/// result, or `derivative_part` on the part `part` names (or the item's own
+/// part). The item is closed by the decision written at its own scope; a
+/// part's decision on a result's item leaves it as it is. No stack is
+/// reached, so a sealed sample holds none of them back.
+pub fn apply_check_within(
+    registry: &mut Registry,
+    a: &Apply<'_>,
+    part: Option<(&str, i64)>,
+) -> Result<Applied, Error> {
+    if !CHECK_SCOPES.contains(&a.scope) {
+        return Err(refused(format!(
+            "a check is written on a derivative or a derivative_part, not {}",
+            a.scope
+        )));
+    }
+    apply_as(registry, a, None, Some(part))
 }
 
 /// [`apply_within`] on one axis of an item that asks several (record 45):
@@ -419,7 +448,7 @@ pub fn apply_axis_within(
     a: &Apply<'_>,
     axis: &str,
 ) -> Result<Applied, Error> {
-    apply_as(registry, a, Some(axis))
+    apply_as(registry, a, Some(axis), None)
 }
 
 /// One answer to an item that asks several axes, a decision per axis, in
@@ -443,7 +472,7 @@ pub fn apply_values(
                 value: value.as_deref(),
                 ..a.clone()
             };
-            out.push(apply_as(registry, &one, Some(axis))?);
+            out.push(apply_as(registry, &one, Some(axis), None)?);
         }
         let staged = out.iter().any(|x| x.staged);
         let decisions: serde_json::Map<String, serde_json::Value> = out
@@ -479,10 +508,13 @@ pub fn apply_values(
     }
 }
 
+/// `check` is set for a check's decision (record 55 H3): the part it
+/// names, or none for the result or the item's own part.
 fn apply_as(
     registry: &mut Registry,
     a: &Apply<'_>,
     one_of: Option<&str>,
+    check: Option<Option<(&str, i64)>>,
 ) -> Result<Applied, Error> {
     if !["person", "agent", "model"].contains(&a.author.kind) {
         return Err(refused(format!(
@@ -508,8 +540,8 @@ fn apply_as(
         }
         (_, Some(_)) => {
             return Err(refused(format!(
-                "a {} is not a model; only a model's decision names a model",
-                a.author.kind
+                "{} is not a model; only a model's decision names a model",
+                crate::a_or_an(a.author.kind)
             )));
         }
         _ => None,
@@ -580,14 +612,57 @@ fn apply_as(
             it.id
         )));
     }
-    if it.status != "open" && it.status != "staged" {
+    // record 55 H3: an item about a result, closed by the decision at its
+    // own scope, still takes the check's decisions at the other: a
+    // result's item its parts', a part's item its result's
+    let other_scope = CHECK_SCOPES.contains(&it.scope.as_str()) && a.scope != it.scope;
+    if it.status != "open" && it.status != "staged" && !other_scope {
         return Err(refused(format!(
             "review item {} is already {}; decide the axis again with a new run",
             it.id, it.status
         )));
     }
+    // record 55 H3: a check is about a result, and only a check's apply
+    // writes on one
+    let about_result = CHECK_SCOPES.contains(&it.scope.as_str());
+    if about_result != check.is_some() {
+        return Err(refused(format!(
+            "review item {} is about a {}; {}",
+            it.id,
+            it.scope,
+            if about_result {
+                "a result is checked through its check"
+            } else {
+                "a check is written on an item about a result"
+            }
+        )));
+    }
     // Where the decision is written.
     let (scope, reference, member_stack): (String, String, Option<i64>) = match it.scope.as_str() {
+        "derivative" | "derivative_part" => {
+            let id = it.reference["derivative_id"]
+                .as_i64()
+                .ok_or_else(|| refused(format!("review item {} names no derivative", it.id)))?;
+            match a.scope {
+                "derivative" => ("derivative".to_string(), id.to_string(), None),
+                _ => {
+                    let own = it.reference["part_set"]
+                        .as_str()
+                        .zip(it.reference["label"].as_i64());
+                    let (set, label) = check.flatten().or(own).ok_or_else(|| {
+                        refused(format!(
+                            "a part's check names the part; review item {} is about a whole result",
+                            it.id
+                        ))
+                    })?;
+                    (
+                        "derivative_part".to_string(),
+                        format!("{id}:{set}:{label}"),
+                        None,
+                    )
+                }
+            }
+        }
         "group" => match a.member {
             None => {
                 if a.scope != "stack" {
@@ -655,8 +730,10 @@ fn apply_as(
         let held_by = r.opt_text(1)?.unwrap_or("").to_string();
         if rank(&held_kind) > rank(a.author.kind) {
             return Err(refused(format!(
-                "{} at {scope} {reference} was decided by a {held_kind} ({held_by}); a {} does not override that (C15). Withdraw it first if it was wrong.",
-                axis, a.author.kind
+                "{} at {scope} {reference} was decided by {} ({held_by}); {} does not override that (C15). Withdraw it first if it was wrong.",
+                axis,
+                crate::a_or_an(&held_kind),
+                crate::a_or_an(a.author.kind)
             )));
         }
     }
@@ -799,6 +876,14 @@ fn apply_as(
                     .transpose()?
                     .unwrap_or(0);
                 if left == 0 {
+                    close_item(store, it.id, status, a.author.who, &answer, decision, &now)?;
+                    closed.push(it.id);
+                }
+            }
+            // record 55 H3: the item about a result is closed by the
+            // decision at its own scope, and by no other question's
+            None if about_result => {
+                if scope == it.scope {
                     close_item(store, it.id, status, a.author.who, &answer, decision, &now)?;
                     closed.push(it.id);
                 }
@@ -1960,6 +2045,11 @@ pub fn withdraw_as(
     let Some(row) = store.query_opt(&sql, &[Param::Int(decision)])? else {
         return Err(refused(format!("no decision {decision}")));
     };
+    // record 55 H3: a check's decision is withdrawn as a check is, its
+    // status cleared and nothing asked again
+    if let Some(found) = check_decision(store, decision)? {
+        return withdraw_check(registry, decision, found, who, kind);
+    }
     if kind != "person" {
         let own = row.opt_text(1)? == Some(kind) && row.opt_text(2)? == Some(who);
         if !own || row.int(3)? != 1 {
@@ -2023,6 +2113,119 @@ pub fn withdraw_as(
     Ok(reopened)
 }
 
+/// The result a check's decision is about, where it is one: its scope is
+/// `derivative` or `derivative_part` and its axis `check`.
+fn check_decision(store: &mut Store, decision: i64) -> Result<Option<i64>, Error> {
+    let d = store.dialect();
+    let sql = format!(
+        "SELECT scope, ref, axis FROM {} WHERE id = {}",
+        store.qualified("decision"),
+        d.param(1, Type::Int)
+    );
+    let Some(r) = store.query_opt(&sql, &[Param::Int(decision)])? else {
+        return Ok(None);
+    };
+    if !CHECK_SCOPES.contains(&r.text(0)?) || r.text(2)? != CHECK_AXIS {
+        return Ok(None);
+    }
+    Ok(r.text(1)?.split(':').next().and_then(|id| id.parse().ok()))
+}
+
+/// Withdraw one decision of a check (record 55 H3): a person's act, refused
+/// while an open check holds the result. It stops being in force, the
+/// status it wrote on the result or the part is cleared, and the review
+/// item it closed stays closed, so nothing is asked that no one can answer.
+fn withdraw_check(
+    registry: &mut Registry,
+    decision: i64,
+    derivative: i64,
+    who: &str,
+    kind: &str,
+) -> Result<i64, Error> {
+    if kind != "person" {
+        return Err(Error::Forbidden(format!(
+            "decision {decision} is a check, a person's decision, and is withdrawn by a person"
+        )));
+    }
+    let store = registry.store();
+    if let Some((c, name)) = crate::check::held_by_open(store, derivative).map_err(|e| match e {
+        crate::campaign::Error::Store(s) => Error::Store(s),
+        other => refused(other.to_string()),
+    })? {
+        return Err(refused(format!(
+            "result {derivative} is held by the open check {name} (campaign {c}); the campaign decides it"
+        )));
+    }
+    let d = store.dialect();
+    let withdrawn = store.query_opt(
+        &format!(
+            "SELECT withdrawn_at IS NOT NULL FROM {} WHERE id = {}",
+            store.qualified("decision"),
+            d.param(1, Type::Int)
+        ),
+        &[Param::Int(decision)],
+    )?;
+    if withdrawn.map(|r| r.int(0)).transpose()? == Some(1) {
+        return Err(refused(format!("decision {decision} is already withdrawn")));
+    }
+    let now = now_iso();
+    store.begin()?;
+    let written = (|| -> Result<(), Error> {
+        // the hold read again under the lock (the review of E2, item 8)
+        let held = crate::check::held_locked(store, &[derivative]).map_err(|e| match e {
+            crate::campaign::Error::Store(s) => Error::Store(s),
+            other => refused(other.to_string()),
+        })?;
+        if !held.is_empty() {
+            return Err(refused(format!(
+                "result {derivative} is held by an open check; the campaign decides it"
+            )));
+        }
+        store.update_by_id(
+            table("decision"),
+            &[("withdrawn_at", Param::from(now.as_str()))],
+            "id",
+            decision,
+        )?;
+        store.execute(
+            &format!(
+                "UPDATE {} SET check_status = NULL, check_reasons = NULL, check_decision_id = NULL, checked_at = NULL \
+                 WHERE check_decision_id = {}",
+                store.qualified("derivative"),
+                d.param(1, Type::Int)
+            ),
+            &[Param::Int(decision)],
+        )?;
+        store.execute(
+            &format!(
+                "UPDATE {} SET check_status = NULL, check_reason = NULL, check_decision_id = NULL \
+                 WHERE check_decision_id = {}",
+                store.qualified("derivative_part"),
+                d.param(1, Type::Int)
+            ),
+            &[Param::Int(decision)],
+        )?;
+        Ok(())
+    })();
+    if let Err(e) = written {
+        store.rollback().ok();
+        return Err(e);
+    }
+    store.commit()?;
+    audit::record(
+        registry,
+        &Entry {
+            principal: who,
+            action: Action::Decision,
+            scope: serde_json::json!({ "withdrawn": decision, "reopened": 0, "derivative": derivative, "axis": CHECK_AXIS }),
+            policy: None,
+            job_id: None,
+            details: None,
+        },
+    )?;
+    Ok(0)
+}
+
 // ------------------------------------------------------------ identity items
 
 /// Record 26 §4: the pseudonymiser holds the files of an identifier the
@@ -2057,7 +2260,7 @@ pub fn provisional_key(subject_id: i64) -> String {
 
 /// The open item of a kind under a group key, if there is one: its id and
 /// its evidence as written.
-fn open_item(
+pub(crate) fn open_item(
     store: &mut Store,
     kind: &str,
     key: &str,
@@ -2084,7 +2287,7 @@ fn open_item(
 
 /// Bring an open item up to date: its evidence, its members and the job
 /// that last asked.
-fn refresh_item(
+pub(crate) fn refresh_item(
     store: &mut Store,
     id: i64,
     evidence: &serde_json::Value,
@@ -2106,7 +2309,7 @@ fn refresh_item(
 
 /// Open one item of a kind under a group key. Answers its id.
 #[allow(clippy::too_many_arguments)]
-fn open_new(
+pub(crate) fn open_new(
     store: &mut Store,
     kind: &str,
     scope: &str,
@@ -2334,6 +2537,292 @@ pub fn close_provisional(
             Param::from(provisional_key(subject_id)),
         ],
     )
+}
+
+/// Record 55 (Nima's duplicate policy, 2026-10-10): a file whose instance
+/// UID the registry holds under another subject, study or series is neither
+/// a copy of that instance nor a new one. The digest holds it, quarantined
+/// under this reason, reads it again on every run, and asks once per source
+/// and pair of subjects: `ref` is `{subject_id, code, holder_id,
+/// holder_code}`, the subject the file names and the one the registry holds
+/// the instance under, and `evidence` `{files, differs, first_seen,
+/// batch_id, place_id, place}`, the files by what differs (`subject`,
+/// `study`, `series`), never an identifier. A merge of the two subjects
+/// answers it: the next read files the held files as copies, finds nothing
+/// held under the pair and closes the item as `superseded`.
+pub const SAME_INSTANCE_KIND: &str = "identity.same_instance";
+
+/// What groups the open `identity.same_instance` item of a source and pair.
+pub fn same_instance_key(source_id: i64, subject_id: i64, holder_id: i64) -> String {
+    format!("source:{source_id}|subject:{subject_id}|holder:{holder_id}")
+}
+
+/// The files of one source held under one pair of subjects.
+#[derive(Debug, Clone)]
+pub struct SameInstance<'a> {
+    pub source_id: i64,
+    pub subject_id: i64,
+    pub code: &'a str,
+    pub holder_id: i64,
+    pub holder_code: &'a str,
+    pub files: i64,
+    /// The files by what differs: `{subject: n, study: n, series: n}`.
+    pub differs: &'a serde_json::Value,
+    /// When the first of them was held.
+    pub first_seen: &'a str,
+    pub place_id: Option<i64>,
+    pub place: Option<&'a str>,
+    pub batch_id: Option<i64>,
+    pub job_id: Option<i64>,
+}
+
+/// Open, or bring up to date, the one `identity.same_instance` item of a
+/// source and pair of subjects. Answers the item's id.
+pub fn raise_same_instance(
+    store: &mut Store,
+    s: &SameInstance<'_>,
+    now: &str,
+) -> Result<i64, StoreError> {
+    let key = same_instance_key(s.source_id, s.subject_id, s.holder_id);
+    let reference = serde_json::json!({
+        "subject_id": s.subject_id, "code": s.code,
+        "holder_id": s.holder_id, "holder_code": s.holder_code,
+    });
+    let evidence = serde_json::json!({
+        "files": s.files,
+        "differs": s.differs,
+        "first_seen": s.first_seen,
+        "batch_id": s.batch_id,
+        "place_id": s.place_id,
+        "place": s.place,
+    });
+    if let Some((id, _)) = open_item(store, SAME_INSTANCE_KIND, &key)? {
+        refresh_item(store, id, &evidence, s.files, s.job_id)?;
+        return Ok(id);
+    }
+    open_new(
+        store,
+        SAME_INSTANCE_KIND,
+        "subject",
+        &key,
+        &reference,
+        &evidence,
+        s.files,
+        s.job_id,
+        now,
+    )
+}
+
+/// The group keys of the open `identity.same_instance` items of a source.
+pub fn open_same_instance_keys(
+    store: &mut Store,
+    source_id: i64,
+) -> Result<Vec<String>, StoreError> {
+    let d = store.dialect();
+    let sql = format!(
+        "SELECT group_key FROM {} WHERE kind = {} AND status = 'open' AND group_key LIKE {}",
+        store.qualified("review_item"),
+        d.param(1, Type::Text),
+        d.param(2, Type::Text),
+    );
+    store
+        .query(
+            &sql,
+            &[
+                Param::from(SAME_INSTANCE_KIND),
+                Param::from(format!("source:{source_id}|%")),
+            ],
+        )?
+        .iter()
+        .map(|r| r.text(0).map(str::to_string))
+        .collect()
+}
+
+/// Close the open `identity.same_instance` item under a group key, once a
+/// run of its source holds nothing under the pair: a merge, or files that
+/// changed, answered it. Answers whether one was open.
+pub fn close_same_instance(store: &mut Store, key: &str, now: &str) -> Result<bool, StoreError> {
+    let Some((id, _)) = open_item(store, SAME_INSTANCE_KIND, key)? else {
+        return Ok(false);
+    };
+    store.update_by_id(
+        table("review_item"),
+        &[
+            ("status", Param::from(RESOLVED)),
+            ("decided_at", Param::from(now)),
+        ],
+        "id",
+        id,
+    )?;
+    Ok(true)
+}
+
+/// The reason a held file carries once a person let it go as another
+/// location of its instance: the next read files it as a copy.
+pub const SAME_INSTANCE_KEEP: &str = "identity.same_instance.keep";
+
+/// The reason a held file carries once a person let it go out of the read:
+/// it stays quarantined, and no run reads it again unless the file changes.
+pub const SAME_INSTANCE_DROP: &str = "identity.same_instance.drop";
+
+/// Why a let-go was refused.
+#[derive(Debug)]
+pub enum LetGoError {
+    /// No such item.
+    Missing(String),
+    /// The item is not one a let-go answers.
+    Refused(String),
+    Store(StoreError),
+}
+
+impl From<StoreError> for LetGoError {
+    fn from(e: StoreError) -> Self {
+        LetGoError::Store(e)
+    }
+}
+
+/// What a let-go did: the item it closed and the files it let go.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LetGo {
+    pub item: i64,
+    pub files: i64,
+    pub keep: bool,
+}
+
+/// The subject a merge left `id` as: the one its `merged_into` leads to.
+fn canonical_subject(store: &mut Store, mut id: i64) -> Result<i64, StoreError> {
+    let t = table("subject");
+    let cols = [
+        t.column("id").expect("subject.id"),
+        t.column("merged_into").expect("subject.merged_into"),
+    ];
+    for _ in 0..8 {
+        let rows = store.select_by_ids(t, &cols, "id", &[id])?;
+        match rows.first().map(|r| r.opt_int(1)).transpose()?.flatten() {
+            Some(into) => id = into,
+            None => break,
+        }
+    }
+    Ok(id)
+}
+
+/// Record 55, the duplicate policy's defaults (Nima, 2026-10-10, "agreed"):
+/// the files of one subject held because the registry files their instance
+/// UID under another study or series of that subject are let go by a person,
+/// kept as another location of their instance or left out of the read. A
+/// merge cannot answer that question, so this does: the held files' rows say
+/// the choice ([`SAME_INSTANCE_KEEP`], [`SAME_INSTANCE_DROP`]), the next read
+/// honours it, and the item closes as accepted with the choice in its
+/// evidence. Refused for an item whose two subjects differ, which a merge of
+/// the two answers. The caller holds no transaction and writes the audit row.
+pub fn let_go(
+    store: &mut Store,
+    id: i64,
+    keep: bool,
+    who: &str,
+    now: &str,
+) -> Result<LetGo, LetGoError> {
+    let d = store.dialect();
+    let t = table("review_item");
+    let sql = format!(
+        "SELECT kind, status, group_key, {}, {} FROM {} WHERE id = {}",
+        d.text_of(t.column("ref").expect("ref")),
+        d.text_of(t.column("evidence").expect("evidence")),
+        store.qualified("review_item"),
+        d.param(1, Type::Int),
+    );
+    let Some(row) = store.query_opt(&sql, &[Param::Int(id)])? else {
+        return Err(LetGoError::Missing(format!("no review item {id}")));
+    };
+    let kind = row.text(0)?.to_string();
+    let status = row.text(1)?.to_string();
+    let key = row.opt_text(2)?.unwrap_or_default().to_string();
+    let reference: serde_json::Value = row
+        .opt_text(3)?
+        .and_then(|t| serde_json::from_str(t).ok())
+        .unwrap_or(serde_json::Value::Null);
+    let mut evidence: serde_json::Value = row
+        .opt_text(4)?
+        .and_then(|t| serde_json::from_str(t).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+    if kind != SAME_INSTANCE_KIND {
+        return Err(LetGoError::Refused(format!(
+            "review item {id} is a {kind}; only a question about a scan read under another study or series is let go"
+        )));
+    }
+    if status != "open" {
+        return Err(LetGoError::Refused(format!(
+            "review item {id} is already {status}"
+        )));
+    }
+    let field = |name: &str| {
+        key.split('|')
+            .find_map(|part| part.strip_prefix(name))
+            .and_then(|v| v.parse::<i64>().ok())
+    };
+    let (Some(source_id), Some(subject), Some(holder)) =
+        (field("source:"), field("subject:"), field("holder:"))
+    else {
+        return Err(LetGoError::Refused(format!(
+            "review item {id} names no source and pair of subjects"
+        )));
+    };
+    if canonical_subject(store, subject)? != canonical_subject(store, holder)? {
+        let (a, b) = (
+            reference["code"].as_str().unwrap_or("one subject"),
+            reference["holder_code"].as_str().unwrap_or("another"),
+        );
+        return Err(LetGoError::Refused(format!(
+            "review item {id} is a scan of subject {b} read under subject {a}; a merge of the two subjects answers it, not a let-go"
+        )));
+    }
+    let reason = if keep {
+        SAME_INSTANCE_KEEP
+    } else {
+        SAME_INSTANCE_DROP
+    };
+    let files = store.execute(
+        &format!(
+            "UPDATE {} SET reason = {} WHERE source_id = {} AND status = 'quarantined' \
+             AND reason = {} AND detail LIKE {}",
+            store.qualified("source_file"),
+            d.param(1, Type::Text),
+            d.param(2, Type::Int),
+            d.param(3, Type::Text),
+            d.param(4, Type::Text),
+        ),
+        &[
+            Param::from(reason),
+            Param::Int(source_id),
+            Param::from(SAME_INSTANCE_KIND),
+            Param::from(format!("subject:{subject}|holder:{holder}|%")),
+        ],
+    )? as i64;
+    evidence["let_go"] = serde_json::json!({ "keep": keep, "files": files });
+    let close = format!(
+        "UPDATE {} SET status = 'accepted', accepted_by = {}, accepted_at = {}, decided_at = {}, evidence = {} WHERE id = {}",
+        store.qualified("review_item"),
+        d.param(1, Type::Text),
+        d.param(2, Type::Timestamp),
+        d.param(3, Type::Timestamp),
+        d.param(4, Type::Json),
+        d.param(5, Type::Int),
+    );
+    store.execute(
+        &close,
+        &[
+            Param::from(who),
+            Param::from(now),
+            Param::from(now),
+            Param::from(evidence.to_string()),
+            Param::Int(id),
+        ],
+    )?;
+    Ok(LetGo {
+        item: id,
+        files,
+        keep,
+    })
 }
 
 /// A study row that holds no series. The row is a fact in a file, so it

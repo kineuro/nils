@@ -7,8 +7,11 @@
 # argument, and the outputs are counts and timings, never a value.
 #
 #     tools/wave4a-gate/cohort.sh --nils BIN --source DIR --csv DIR --maps DIR \
-#         --packs DIR --work DIR [--v0-counts FILE] [--workers N] [--release-subjects N]
+#         --packs DIR --work DIR --cohort NAME [--v0-counts FILE] [--workers N] [--release-subjects N]
 #         [--resume-at release|door] [--observation KIND ...]
+#
+# `--cohort NAME` is the cohort the mappings in `--maps` name, which is what
+# is selected and released.
 #
 # `--resume-at release` keeps the registry and the imports of an existing
 # work directory and runs the releases, the handover, the door and the bars
@@ -32,7 +35,7 @@
 # and asserts the bars.
 set -euo pipefail
 
-nils=""; source=""; csv=""; maps=""; packs=""; work=""; v0counts=""; workers=16; release_subjects=0; resume_at=""
+nils=""; source=""; csv=""; maps=""; packs=""; work=""; cohort=""; v0counts=""; workers=16; release_subjects=0; resume_at=""
 observations=()
 
 while [[ $# -gt 0 ]]; do
@@ -43,6 +46,7 @@ while [[ $# -gt 0 ]]; do
     --maps) maps="$2"; shift 2 ;;
     --packs) packs="$2"; shift 2 ;;
     --work) work="$2"; shift 2 ;;
+    --cohort) cohort="$2"; shift 2 ;;
     --v0-counts) v0counts="$2"; shift 2 ;;
     --workers) workers="$2"; shift 2 ;;
     --release-subjects) release_subjects="$2"; shift 2 ;;
@@ -51,7 +55,7 @@ while [[ $# -gt 0 ]]; do
     *) echo "cohort.sh: unknown argument $1" >&2; exit 2 ;;
   esac
 done
-for v in nils source csv maps packs work; do
+for v in nils source csv maps packs work cohort; do
   if [[ -z "${!v}" ]]; then echo "cohort.sh: --$v is required" >&2; exit 2; fi
 done
 if [[ -z "$resume_at" && -e "$work" ]]; then
@@ -115,9 +119,9 @@ fi
 # What is released: the cohort, or its first N members that carry an event
 # of one of the observation kinds named, so the clinical export has
 # something to carry.
-"$nils" select --cohort nmosd --json > "$work/select-cohort.json"
-sel=(--cohort nmosd)
-door_selection='"cohorts": ["nmosd"]'
+"$nils" select --cohort "$cohort" --json > "$work/select-cohort.json"
+sel=(--cohort "$cohort")
+door_selection="\"cohorts\": [\"$cohort\"]"
 if [[ "$release_subjects" -gt 0 ]]; then
   mapfile -t chosen < <(python3 - "$work/select-cohort.json" "$release_subjects" "$work/home/registry.db" "${observations[@]}" <<'PY'
 import json, sqlite3, sys
@@ -178,7 +182,7 @@ rm -rf "$work/door-desc"
 # --- bar 9: a second process through the door does what the command line did
 "$nils" status --json > "$work/status.json"
 "$nils" custody --json > "$work/custody.json"
-"$nils" select --cohort nmosd --json > "$work/select.json"
+"$nils" select --cohort "$cohort" --json > "$work/select.json"
 # Seven requests on a free port, in the background, the port read from the
 # first line the server prints.
 "$nils" serve --bind 127.0.0.1:0 --requests 7 > "$work/serve.out" 2> "$work/serve.err" &
@@ -192,7 +196,7 @@ url="http://127.0.0.1:$port/api"
 curl -s "$url/capabilities" > "$work/door-capabilities.json"
 curl -s "$url/status" > "$work/door-status.json"
 curl -s "$url/custody" > "$work/door-custody.json"
-curl -s -X POST -H 'Content-Type: application/json' -d '{"cohorts": ["nmosd"]}' "$url/select" > "$work/door-select.json"
+curl -s -X POST -H 'Content-Type: application/json' -d "{\"cohorts\": [\"$cohort\"]}" "$url/select" > "$work/door-select.json"
 curl -s "$url/review?status=open" > "$work/door-review.json"
 curl -s "$url/releases" > "$work/door-releases.json"
 # The door's release has a name of its own per run, so a run resumed over

@@ -1,0 +1,25 @@
+{
+ "run": "final-cert-read-corrections",
+ "purpose": "Supplement to final-cert-read (never written): the final correction record (rulings.py build --record final as registered at 57a7b48, with X7-MEAN, X7-MEANMAG, X7-SWIMAG, X7-BAREB and X8-BNR) over the final read's settled reference and packets, with the localizers' record and the audit re-scored; built and sealed before any rule answer on the drawn stacks is read",
+ "study": "studies/2026-10-01-final-certificate-read/plan.md",
+ "created": "2026-10-02T12:58:05Z",
+ "sealed": "2026-10-02T12:58:33Z",
+ "files": 7,
+ "bytes": 107710,
+ "by_folder": {
+  ".": 1,
+  "code": 2,
+  "scoring": 4
+ },
+ "manifest_sha256": "8e408c1e21e8b882c1b86b529e4e5720538747e5da32c27a3f712b69d051bd4a",
+ "per_stack_files_by_folder": {},
+ "sha256": {
+  "RUN.json": "cd4c058fc1ed7a161651de7119086d14ba8484ca264b9bfea22bf3d7d542fe9e",
+  "code/COMMIT": "53975a20d87ef687dd77c0a8f5a32f39acc53d29b7748eb2b1ecdbf97005015c",
+  "code/rulings.py": "669123d57620e65628b695e364fe21c88fc3dfc6cb09550615b619f75f456048",
+  "scoring/audit-rescored.txt": "cab08c12287743480ad473c90bd6cd29dbbb24e9743da4a3f8a7547869eaf89f",
+  "scoring/corrections-localizers.jsonl": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "scoring/corrections-summary.json": "38d268c50092bdbf6f96417f972f10a4e0d14a2a175f8ac154c1ad6097ced883",
+  "scoring/corrections.jsonl": "a9d6d4bf375a253e67e48106500ba72e68a877fdd821952d5c0a1a8415d6566f"
+ }
+}

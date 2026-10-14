@@ -1,0 +1,17 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# The image's pinned set, beside torch and torchvision, which the Dockerfile
+# installs first from the wheel index its TORCH_INDEX build argument names.
+# Each version is the one the research environment that trained and graded
+# the student ran (round 4 of the post-contrast speed study), so the image
+# reads and scores a slice as the study did.
+numpy==2.5.2
+pydicom==3.0.1
+pillow==12.3.0
+pylibjpeg==2.1.0
+pylibjpeg-libjpeg==2.4.0
+pylibjpeg-openjpeg==2.6.0
+pylibjpeg-rle==2.2.0
+safetensors==0.8.0
+timm==1.0.30
+huggingface_hub==0.36.2
+pyyaml==6.0.3

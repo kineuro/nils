@@ -17,7 +17,7 @@
     "slot": {
       "type": "string",
       "pattern": "^(site|(cohort|backend):\\S+)$",
-      "description": "Where the model answers its task. One model is promoted per task and slot. The engine takes site, the one site-wide model per task (record 42 R4), and cohort:<name>, a model of one cohort in a slot of its own; backend:<name> is Kvasir's, whose slot is the backend that serves the model"
+      "description": "Where the model answers its task. Several admitted models may answer a task and slot, and the site chooses the one that does (record 55 D4). The engine takes site, the one site-wide model per task (record 42 R4), and cohort:<name>, a model of one cohort in a slot of its own; backend:<name> is Kvasir's, whose slot is the backend that serves the model"
     },
     "reference": {
       "type": "object",
@@ -28,6 +28,21 @@
         "version": { "type": "string" }
       },
       "description": "Another registered model, by its digest"
+    },
+    "speed": {
+      "type": "object",
+      "required": ["stacks_per_second", "hardware", "evidence"],
+      "properties": {
+        "stacks_per_second": { "type": "number", "exclusiveMinimum": 0 },
+        "hardware": {
+          "type": "string",
+          "minLength": 1,
+          "description": "What it was measured on: the cores, the card, the storage"
+        },
+        "evidence": { "type": "string", "minLength": 1 },
+        "note": { "type": "string" }
+      },
+      "description": "One measured speed, in stacks a second"
     }
   },
   "type": "object",
@@ -60,6 +75,14 @@
       "$ref": "#/$defs/reference",
       "description": "The encoder a head reads the features of. A head names its encoders here or in encoders, at least one: a new encoder makes its heads stale"
     },
+    "parts": {
+      "type": "object",
+      "minProperties": 1,
+      "maxProperties": 16,
+      "propertyNames": { "pattern": "^[a-z][a-z0-9_]*$" },
+      "additionalProperties": { "$ref": "#/$defs/digest" },
+      "description": "Record 55 E2: a cascade, one model that names its parts, each a registered model that is not retired, by digest, under the name of the pipeline input it fills (body part's encoder, head, coarse, student, deferral; post-contrast's student, fusion and arms, record 55 E3); a run of the cascade is given each part, and the cascade itself as its input cascade. Promoting the cascade retires none of its parts"
+    },
     "encoders": {
       "type": "array",
       "minItems": 1,
@@ -72,7 +95,7 @@
       "properties": {
         "label_set": {
           "$ref": "#/$defs/digest",
-          "description": "The digest of the label set the model was fitted on (labels.tsv, record 42 S7): one the registry wrote, and none holding items of a sealed certification sample, or the registration is refused (record 40 R3)"
+          "description": "The digest of the label set the model was fitted on (labels.tsv, record 42 S7): one the registry wrote, or one registered from outside the engine with its rows keyed by DICOM identity (record 55 E6), and none holding items of a sealed certification sample, or the registration is refused (record 40 R3)"
         },
         "name": { "type": "string" },
         "rows": { "type": "integer", "minimum": 0 },
@@ -135,6 +158,94 @@
         "build": { "type": "string" }
       },
       "description": "The runtime a check was run under. A check pinned to a runtime says nothing about another"
+    },
+    "tested": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["claim", "value", "evidence"],
+        "properties": {
+          "claim": {
+            "type": "string",
+            "minLength": 1,
+            "description": "What was measured, in words: the measure, the set and the reference"
+          },
+          "value": { "type": ["number", "string"] },
+          "bound": {
+            "type": ["number", "string", "null"],
+            "description": "Its bound, such as the one-sided exact 95 % lower bound, where the claim has one"
+          },
+          "n": { "type": ["integer", "null"], "minimum": 0 },
+          "evidence": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The evidence run the number comes from"
+          },
+          "note": { "type": "string" }
+        }
+      },
+      "description": "Record 55 D4: the claims its study tested, each with its value, its bound and the evidence run it comes from"
+    },
+    "speed": {
+      "type": "object",
+      "required": ["cpu"],
+      "properties": {
+        "cpu": { "$ref": "#/$defs/speed" },
+        "gpu": {
+          "oneOf": [{ "$ref": "#/$defs/speed" }, { "type": "null" }],
+          "description": "With a GPU; none only for a model whose gpu is none"
+        }
+      },
+      "description": "Record 55 A5: stacks a second on a CPU alone and with a GPU, each with the hardware it was measured on"
+    },
+    "gpu": {
+      "type": "string",
+      "enum": ["none", "optional", "required"],
+      "description": "What the model needs of a GPU: none, optional (it takes one when one is present and free, under the lease) or required"
+    },
+    "equivalence": {
+      "type": "object",
+      "required": ["class", "set", "evidence"],
+      "properties": {
+        "class": {
+          "type": "string",
+          "enum": ["I", "II", "III"],
+          "description": "I, the same answer always; II, the same answer within the tolerance on the model's score; III, every change is between an answer and not sure"
+        },
+        "tolerance": {
+          "type": ["number", "null"],
+          "minimum": 0,
+          "description": "For I and II, the largest calibrated probability difference allowed between the CPU and the GPU answers (0.001 for I where none is given); for III, the largest share of stacks whose answer changes between a value and not sure"
+        },
+        "set": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The fixed equivalence set it was measured on"
+        },
+        "evidence": { "type": "string", "minLength": 1 }
+      },
+      "description": "Record 55 A5: the class of the difference between its CPU and GPU answers its study measured. The admission suite measures it again, and a model whose measured class is worse than this is not admitted. Not needed where gpu is none"
+    },
+    "gate": {
+      "type": "object",
+      "required": ["axes"],
+      "properties": {
+        "axes": {
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": { "pattern": "^[a-z_]+$" },
+          "additionalProperties": {
+            "type": "object",
+            "required": ["lambda1", "lambda2"],
+            "properties": {
+              "lambda1": { "type": "number", "minimum": 0, "maximum": 1, "description": "The least calibrated probability of System 1's answer" },
+              "lambda2": { "type": "number", "minimum": 0, "maximum": 1, "description": "The least reliability of the rules on the header" }
+            }
+          }
+        },
+        "evidence": { "type": "string", "minLength": 1, "description": "The run that chose them by Learn then Test" }
+      },
+      "description": "Record 55 D3 (spec 11.2), a System 1 model's card (task system1): the review gate's thresholds per axis, chosen by Learn then Test on training-family damage and frozen with the model. On a dataset flagged as having damaged headers, the rules' answer is accepted where System 1's answer equals it, its probability is at least lambda1 and the rules' reliability is at least lambda2; the thresholds belong to the round of this model and a rules version"
     }
   }
 }

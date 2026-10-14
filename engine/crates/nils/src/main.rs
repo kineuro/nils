@@ -34,13 +34,18 @@ mod browse;
 mod campaigns;
 mod certainty;
 mod chain;
+mod checks;
+mod cohort_picks;
+mod contrast;
 mod dataset;
 mod dataset_summary;
 mod depends;
 mod derivatives;
 mod disagreements;
 mod door_client;
+mod drawn;
 mod explain;
+mod failures;
 mod file_header;
 mod folders;
 mod gate;
@@ -48,6 +53,11 @@ mod grants;
 mod intake;
 mod linkage_doors;
 mod login;
+mod logs;
+mod made;
+mod main_input;
+mod main_scans;
+mod mask;
 mod mcp;
 mod measures;
 mod model_cli;
@@ -56,7 +66,9 @@ mod originals;
 mod packs;
 mod pair;
 mod pick_after;
+mod pick_scopes;
 mod pipelines;
+mod place_transfer;
 mod places;
 mod preflight;
 mod preview;
@@ -65,19 +77,28 @@ mod pyramid;
 mod reader;
 mod rehearse;
 mod releases;
+mod requirements;
+mod review_rule;
+mod rules;
 mod scans;
 mod schedule;
+mod score;
 mod sealed;
 mod serve;
+mod session_schemes;
 mod setup;
+mod slice_cache;
 mod sources;
 mod starter;
 mod summary;
 mod supervise;
+mod system1;
 mod tilepack;
 mod timeline;
+mod tools;
 mod tui;
 mod update;
+mod versions;
 mod viewer;
 mod worker;
 use nils_digest::{Cancel, Cancelled, DigestError, Filter, Report, Rule, Settings};
@@ -89,7 +110,7 @@ use nils_registry::keys::strip_newline;
 use nils_registry::linkage::{self, Subkeys};
 use nils_registry::schema::{Type, table};
 use nils_registry::session;
-use nils_registry::{Backend, Insert, Param, Registry, Scheme, Store};
+use nils_registry::{Backend, Param, Registry, Scheme, Store};
 
 const FAILED: u8 = 1;
 const USAGE: u8 = 2;
@@ -132,6 +153,15 @@ enum Command {
     /// Bring in what is new: pseudonymise a dataset, then digest, fingerprint
     /// and classify it, as one chain of queued jobs (record 26)
     BringIn(BringInArgs),
+    /// Score a batch's new stacks with the image models that score at
+    /// arrival: the last step of a bring-in (record 55 E5)
+    Score(score::ScoreArgs),
+    /// The slice cache: what it keeps, and the versions no model reads any
+    /// more (record 55 E5)
+    Cache {
+        #[command(subcommand)]
+        command: CacheCommand,
+    },
     /// Derive the per-stack values a classifier reads, once, and store them
     Fingerprint(FingerprintArgs),
     /// Judge every stack with a pack, and write the verdict with its evidence
@@ -292,6 +322,12 @@ enum Command {
         #[command(subcommand)]
         command: derivatives::DerivativeCommand,
     },
+    /// The post-contrast label (record 55 F5): the time rule's session pass
+    /// and the subject step, and one stack's label
+    Contrast {
+        #[command(subcommand)]
+        command: contrast::ContrastCommand,
+    },
     /// The pipeline catalog: descriptors (nils.job.yml) with their images pinned by digest, the runtime, the runs (record 43)
     Pipeline {
         #[command(subcommand)]
@@ -299,6 +335,11 @@ enum Command {
     },
     /// Run a pipeline over a frozen selection: its outputs become derivatives, its failed units review items (record 43)
     Run(Box<pipelines::RunArgs>),
+    /// The tools the engine runs beside itself: dcm2niix, whether it is here, and its install from the pinned release
+    Tools {
+        #[command(subcommand)]
+        command: Option<tools::ToolsCommand>,
+    },
     /// The registry's settings: the timezone and the week start its dates are read under (Wave 5 section 12.6)
     Settings {
         #[command(subcommand)]
@@ -412,7 +453,10 @@ struct ReleaseArgs {
     /// any identifier the registry resolves
     #[arg(long, value_name = "FILE")]
     select: Option<String>,
-    /// Only stacks of these dispositions; by default everything but excluded
+    /// Only stacks of these dispositions. By default everything but what the
+    /// pack ruled out (excluded) and the display composites
+    /// (display_composite, pictures made to be looked at), which a release
+    /// takes only where this, or --axis disposition=..., names them
     #[arg(long, value_name = "KIND")]
     disposition: Vec<String>,
     /// Only stacks holding one of these roles
@@ -495,6 +539,19 @@ struct ReleaseArgs {
     /// folder under its working place, which the runner alone asks for
     #[arg(long = "into-run", value_name = "RUN", hide = true)]
     into_run: Option<i64>,
+    /// Record 55 (rulings of 2026-10-12, item 6): the selection is a run's
+    /// frozen list of a dataset's or a cohort's main scans, and this file
+    /// (JSON) the picks it was resolved from with `main`, the role of its
+    /// stacks, which the runner alone passes: the list is released as it
+    /// was frozen, whatever the picks say now, and the release records
+    /// these picks and freezes each stack as the main scan of the role
+    #[arg(
+        long = "picks-read",
+        value_name = "FILE",
+        hide = true,
+        requires = "picked"
+    )]
+    picks_read: Option<PathBuf>,
 }
 
 #[derive(Debug, Parser)]
@@ -1031,6 +1088,31 @@ enum PlaceCommand {
     },
     /// Retire a place: it binds nothing from now on and stays as history
     Retire { id: i64 },
+    /// Every place in force written to one JSON document, a source place
+    /// with the dataset it is declared as (Wave 7a section 15.3), for nils
+    /// place import to declare in a new registry. Nothing is changed
+    Export {
+        /// The file to write; the standard output where none is named
+        #[arg(long, value_name = "FILE")]
+        out: Option<PathBuf>,
+    },
+    /// Declare the places of a document nils place export wrote, as they
+    /// were written: no folder is looked at, moved or probed. A place this
+    /// registry has by the same name, role and path is kept as it is;
+    /// anything else the import cannot take is said for every place before
+    /// one is declared
+    Import {
+        /// The document nils place export wrote
+        file: PathBuf,
+        /// A place of the document to leave out, by name (repeatable)
+        #[arg(long, value_name = "NAME")]
+        skip: Vec<String>,
+        /// Say what would be declared, and declare nothing
+        #[arg(long)]
+        print: bool,
+        #[arg(long)]
+        json: bool,
+    },
     /// The verbs that take a path and the role each needs, and where @name
     /// points for each dataset
     Bindings {
@@ -1454,6 +1536,12 @@ enum PickCommand {
         /// Only this subject
         #[arg(long, value_name = "CODE")]
         subject: Option<String>,
+        /// A dataset's main scans: its own once a run of its rules finished, else the pack's (the default: each subject's own dataset's)
+        #[arg(long, value_name = "NAME", conflicts_with = "cohort")]
+        dataset: Option<String>,
+        /// A cohort's main scans: its own once a run of its rules finished, else the pack's
+        #[arg(long, value_name = "NAME")]
+        cohort: Option<String>,
         /// Machine-readable output
         #[arg(long)]
         json: bool,
@@ -1512,6 +1600,10 @@ struct PickArgs {
     /// step a sort ends with
     #[arg(long = "after-sort", value_name = "JOB", conflicts_with_all = ["subject", "cohort", "dataset"])]
     after_sort: Option<i64>,
+    /// Decide the cohort's or the dataset's picks with its own saved rules
+    /// alone, and nothing of the pack's: the run saving rules queues
+    #[arg(long = "own-rules", conflicts_with_all = ["subject", "after_sort"])]
+    own_rules: bool,
     /// Machine-readable output
     #[arg(long)]
     json: bool,
@@ -2009,6 +2101,23 @@ struct BringInArgs {
     pack: Option<String>,
 }
 
+/// `nils cache`: the slice cache of each working place (record 55 E5).
+#[derive(Debug, Subcommand)]
+enum CacheCommand {
+    /// What it keeps, version by version, and whether a model reads each
+    Show {
+        /// Machine-readable output
+        #[arg(long)]
+        json: bool,
+    },
+    /// Drop the versions no admitted model has read for 30 days
+    Prune {
+        /// Machine-readable output
+        #[arg(long)]
+        json: bool,
+    },
+}
+
 #[derive(Debug, Subcommand)]
 enum LinkageCommand {
     /// File the identifier map of a CSV, in any shape, creating the subjects it names
@@ -2078,7 +2187,7 @@ enum LinkageCommand {
 struct ImportArgs {
     /// The CSV: a header row, then one subject per row
     csv: PathBuf,
-    /// A column's role: HEADER=identifier:<type>, HEADER=canonical:<type> (the code derives from it; a personnummer column is read as twelve digits and a cell that is no personnummer refuses its row), HEADER=code or HEADER=ignore; without any, the two flags below name the columns
+    /// A column's role: HEADER=identifier:<type>, HEADER=canonical:<type> (the subject code derives from it; a column of IDs that are the same everywhere is read as twelve digits and a cell that is none refuses its row), HEADER=code or HEADER=ignore; without any, the two flags below name the columns
     #[arg(long, value_name = "HEADER=ROLE")]
     column: Vec<String>,
     /// The type the identifiers are filed under, without --column
@@ -2183,6 +2292,11 @@ fn main() -> ExitCode {
         Command::Digest(args) => digest(&home, args),
         Command::Pseudonymize(args) => pseudonymize(&home, args),
         Command::BringIn(args) => bring_in(&home, args),
+        Command::Score(args) => score::command(&home, args),
+        Command::Cache { command } => match command {
+            CacheCommand::Show { json } => slice_cache::command(&home, false, json),
+            CacheCommand::Prune { json } => slice_cache::command(&home, true, json),
+        },
         Command::Fingerprint(args) => fingerprint(&home, args),
         Command::Classify(args) => classify(&home, args),
         Command::Explain {
@@ -2212,8 +2326,10 @@ fn main() -> ExitCode {
         Command::Pyramid { command } => pyramid_command(&home, command),
         Command::Preview { command } => preview_command(&home, command),
         Command::Derivative { command } => derivatives::command(&home, command),
+        Command::Contrast { command } => contrast::command(&home, command),
         Command::Pipeline { command } => pipelines::command(&home, command),
         Command::Run(args) => pipelines::run_command(&home, *args),
+        Command::Tools { command } => tools::command(&home, command),
         Command::Login(args) => login_command(args),
         Command::Logout => {
             if login::logout() {
@@ -3113,8 +3229,8 @@ fn place_command(home: &Home, command: PlaceCommand) -> Result<(), Exit> {
             let asked = dataset.asked()?;
             if dataset::fields_given(&asked) && role != Role::Source {
                 return Err(usage(format!(
-                    "the dataset flags belong to a source place, not a {} place",
-                    role.name()
+                    "the dataset flags belong to a source place, not {} place",
+                    nils_registry::a_or_an(role.name())
                 )));
             }
             let mut found = Vec::new();
@@ -3133,6 +3249,11 @@ fn place_command(home: &Home, command: PlaceCommand) -> Result<(), Exit> {
                     fast,
                     share.as_deref(),
                 );
+                // an ID type the registry lacks is refused when it is declared, never
+                // at the dataset's first run (2026-10-10)
+                if let Some(why) = dataset::id_types_refused(&registry, &asked).map_err(fail)? {
+                    return Err(fail(why));
+                }
                 let (d, under) =
                     dataset::shape_place(registry.store(), &name, &path, &asked, None, &g, true)
                         .map_err(|r| refused(r, json))?;
@@ -3365,6 +3486,11 @@ fn place_command(home: &Home, command: PlaceCommand) -> Result<(), Exit> {
             // Wave 7a: a folder becomes a dataset by a person's act, and
             // only then is its structure read
             let asked = dataset.asked()?;
+            // an ID type the registry lacks is refused when it is declared, never
+            // at the dataset's first run (2026-10-10)
+            if let Some(why) = dataset::id_types_refused(&registry, &asked).map_err(fail)? {
+                return Err(fail(why));
+            }
             let r = dataset::root_named(registry.store(), &root).map_err(|r| fail(r.message))?;
             let f = dataset::add_dataset(registry.store(), &r, &under, name.as_deref(), &asked)
                 .map_err(|r| refused(r, json))?;
@@ -3426,12 +3552,17 @@ fn place_command(home: &Home, command: PlaceCommand) -> Result<(), Exit> {
             // record 26: a dataset's fields, and its folder looked at again
             // when they or its path change
             let asked = dataset.asked()?;
+            // an ID type the registry lacks is refused when it is declared, never
+            // at the dataset's first run (2026-10-10)
+            if let Some(why) = dataset::id_types_refused(&registry, &asked).map_err(fail)? {
+                return Err(fail(why));
+            }
             let dataset_given = dataset::fields_given(&asked);
             if dataset_given && current.role != Role::Source {
                 return Err(usage(format!(
-                    "the dataset flags belong to a source place; {} is a {} place",
+                    "the dataset flags belong to a source place; {} is {} place",
                     current.name,
-                    current.role.name()
+                    nils_registry::a_or_an(current.role.name())
                 )));
             }
             let mut found = Vec::new();
@@ -3666,6 +3797,60 @@ fn place_command(home: &Home, command: PlaceCommand) -> Result<(), Exit> {
                     for line in lines_of(&layout) {
                         println!("  {line}");
                     }
+                }
+            }
+            Ok(())
+        }
+        PlaceCommand::Export { out } => {
+            let doc = place_transfer::export(&mut registry).map_err(fail)?;
+            let text = serde_json::to_string_pretty(&doc).unwrap_or_default();
+            match out {
+                Some(path) => {
+                    fs::write(&path, format!("{text}\n"))
+                        .map_err(|e| fail(format!("{}: {e}", path.display())))?;
+                    eprintln!(
+                        "{} places written to {}{}",
+                        doc["places"].as_array().map_or(0, Vec::len),
+                        path.display(),
+                        match doc["retired_left_out"].as_u64() {
+                            Some(n) if n > 0 => format!(" ({n} retired left out)"),
+                            _ => String::new(),
+                        }
+                    );
+                }
+                None => println!("{text}"),
+            }
+            Ok(())
+        }
+        PlaceCommand::Import {
+            file,
+            skip,
+            print,
+            json,
+        } => {
+            let text =
+                fs::read_to_string(&file).map_err(|e| usage(format!("{}: {e}", file.display())))?;
+            let doc: serde_json::Value = serde_json::from_str(&text)
+                .map_err(|e| usage(format!("{}: {e}", file.display())))?;
+            let done = place_transfer::import(&mut registry, &doc, &skip, print).map_err(fail)?;
+            if json {
+                let doc: Vec<_> = done.iter().map(place_transfer::Planned::as_json).collect();
+                println!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
+            } else {
+                for p in &done {
+                    let id = p.id.map(|i| format!("place {i}: ")).unwrap_or_default();
+                    let what = match (&p.outcome, print) {
+                        (place_transfer::Outcome::Added, true) => "would be added",
+                        (place_transfer::Outcome::Added, false) => "added",
+                        (place_transfer::Outcome::Kept, _) => "already here, kept as it is",
+                        (place_transfer::Outcome::Skipped, _) => "skipped",
+                    };
+                    println!("  {id}{} ({}) at {}: {what}", p.name, p.role, p.path);
+                }
+                if print {
+                    println!("nothing was declared");
+                } else {
+                    println!("measure them with nils place list --probe");
                 }
             }
             Ok(())
@@ -5086,16 +5271,19 @@ fn bring_in(home: &Home, args: BringInArgs) -> Result<(), Exit> {
     let unread = chain::unread_in_tree(registry.store(), &dataset);
     // record 55 H2: a pick run ends the thread where the dataset feeds a
     // cohort and the pack declares picks
-    let picks = pack_dir(home, None)
-        .ok()
-        .is_some_and(|d| chain::pack_has_picks(Some(&d), args.pack.as_deref().unwrap_or("mri")));
+    let packs = pack_dir(home, None).ok();
+    let picks = packs
+        .as_deref()
+        .is_some_and(|d| chain::pack_has_picks(Some(d), args.pack.as_deref().unwrap_or("mri")));
     let (first, then) = chain::bring_in(
         &dataset,
         args.name.as_deref(),
         args.pack.as_deref(),
+        packs.as_deref(),
         unread.is_some(),
         picks,
     );
+    let then = chain::picks_named(then, packs.as_deref());
     let name = first
         .iter()
         .position(|w| w == "--name")
@@ -6655,7 +6843,7 @@ fn review_command(home: &Home, command: ReviewCommand) -> Result<(), Exit> {
             drop(columns);
             keyboard_item(&mut registry, args.id)?;
             keyboard_not_held(&mut registry, args.id)?;
-            review_decide(&mut registry, args)
+            review_decide(home, &mut registry, args)
         }
         ReviewCommand::Commit {
             id,
@@ -7035,7 +7223,8 @@ pub(crate) fn review_accept_as(
     let pick = if kind == nils_registry::review::PICK_BORDER_KIND {
         if author_kind != "person" {
             return Err(AcceptError::Forbidden(format!(
-                "keeping the run's pick on review item {id} writes a person's pick, and a {author_kind} acting for {who} does not write one"
+                "keeping the run's pick on review item {id} writes a person's pick, and {} acting for {who} does not write one",
+                nils_registry::a_or_an(author_kind)
             )));
         }
         Some(
@@ -7082,7 +7271,7 @@ pub(crate) fn review_accept_as(
     Ok(Accepted { id, who, pick })
 }
 
-fn review_decide(registry: &mut Registry, args: DecideArgs) -> Result<(), Exit> {
+fn review_decide(home: &Home, registry: &mut Registry, args: DecideArgs) -> Result<(), Exit> {
     let DecideArgs {
         id,
         member,
@@ -7141,6 +7330,13 @@ fn review_decide(registry: &mut Registry, args: DecideArgs) -> Result<(), Exit> 
         nils_registry::review::Error::Refused(m) => usage(m),
         other => fail(other.to_string()),
     })?;
+    // record 55 F5: a person's read of post-contrast is a T1 anchor
+    let label = (applied.axis == "post_contrast").then(|| {
+        let pack = pack_dir(home, None)
+            .ok()
+            .and_then(|dir| ask_cli::load_pack(&dir, "mri").ok());
+        contrast::after_decisions(registry.store(), pack.as_ref(), &[applied.decision])
+    });
     let store = registry.store();
     let open_sql = format!(
         "SELECT COUNT(*) FROM {} WHERE status = 'open'",
@@ -7159,6 +7355,7 @@ fn review_decide(registry: &mut Registry, args: DecideArgs) -> Result<(), Exit> 
                 "value": value, "scope": applied.scope, "ref": applied.reference,
                 "closed": applied.closed, "members": applied.members,
                 "staged": applied.staged, "actor": who, "open_review_items": open,
+                "contrast_label": label.flatten(),
             }))
             .unwrap_or_default()
         );
@@ -7560,15 +7757,15 @@ fn custody_doc(home: &Home, registry: &mut Registry) -> Result<serde_json::Value
         serde_json::json!({
             "store": "models",
             "owner": "the operator who registered, admitted and promoted each",
-            "what": "the models whose answers become registry facts (record 42, D15): each by the digest of its artifact, with its card, the check that admitted it, its state and every transition; never the artifact itself",
-            "where": "rows of model and model_event in the registry",
+            "what": "the models whose answers become registry facts (record 42, D15): each by the digest of its artifact, with its card, the check that admitted it, its state and every transition, and the model a site chose for each task (record 55 D4); never the artifact itself",
+            "where": "rows of model, model_event and model_choice in the registry",
             "files": [],
-            "holds": ["technical: names, versions, digests, tasks and slots, the metrics a card states, the checks", "who registered, admitted, promoted and retired each"],
+            "holds": ["technical: names, versions, digests, tasks and slots, the metrics, speeds and equivalence a card states, the checks", "who registered, admitted, promoted, chose and retired each"],
             "counts": { "models": models, "promoted": models_promoted },
             "kept": "for good; a retired model is what the decisions it answered name",
             "commands": {
-                "read": ["nils model list", "nils model show <model>"],
-                "change": ["nils model register --card <file>", "nils model admit <model> --check <file>", "nils model promote <model>", "nils model retire <model>"],
+                "read": ["nils model list", "nils model show <model>", "nils model chosen"],
+                "change": ["nils model register --card <file>", "nils model admit <model> --check <file>", "nils model promote <model>", "nils model choose <model>", "nils model retire <model>"],
                 "export": ["nils model show <model> --json"],
                 "delete": "with the registry",
             },
@@ -8278,6 +8475,19 @@ fn read_scheme(path: &Path) -> Result<session::Scheme, Exit> {
 }
 
 pub(crate) fn stored_scheme(registry: &mut Registry, name: &str) -> Result<session::Scheme, Exit> {
+    kept_scheme(registry, name)?.ok_or_else(|| {
+        fail(format!(
+            "no scheme called {name}; `nils session scheme list` says what there is"
+        ))
+    })
+}
+
+/// The session scheme the registry keeps under a name, or none where it
+/// keeps none.
+pub(crate) fn kept_scheme(
+    registry: &mut Registry,
+    name: &str,
+) -> Result<Option<session::Scheme>, Exit> {
     let store = registry.store();
     let row = store
         .query_opt(
@@ -8290,12 +8500,12 @@ pub(crate) fn stored_scheme(registry: &mut Registry, name: &str) -> Result<sessi
         )
         .map_err(|e| fail(e.to_string()))?;
     let Some(row) = row else {
-        return Err(fail(format!(
-            "no scheme called {name}; `nils session scheme list` says what there is"
-        )));
+        return Ok(None);
     };
     let text = row.text(0).map_err(|e| fail(e.to_string()))?.to_string();
-    session::Scheme::from_json(&text).map_err(|e| fail(e.to_string()))
+    session::Scheme::from_json(&text)
+        .map(Some)
+        .map_err(|e| fail(e.to_string()))
 }
 
 fn scheme_command(home: &Home, command: SchemeCommand) -> Result<(), Exit> {
@@ -8308,71 +8518,16 @@ fn scheme_command(home: &Home, command: SchemeCommand) -> Result<(), Exit> {
             force,
         } => {
             let scheme = read_scheme(&file)?;
-            let json = serde_json::to_string(&scheme)
-                .map_err(|e| fail(format!("the scheme will not serialize: {e}")))?;
-            let store = registry.store();
-            let exists = store
-                .query_opt(
-                    &format!(
-                        "SELECT id FROM {} WHERE name = {}",
-                        store.qualified("session_scheme"),
-                        store.dialect().param(1, Type::Text)
-                    ),
-                    &[Param::Text(name.clone())],
-                )
-                .map_err(|e| fail(e.to_string()))?;
-            if exists.is_some() {
-                if !force {
-                    return Err(fail(format!(
-                        "a scheme called {name} is already kept; --force replaces it, and every \
-                         label derived with the old one changes"
-                    )));
-                }
-                store
-                    .execute(
-                        &format!(
-                            "UPDATE {} SET definition = {}, note = {}, created_at = {}, digest = {} WHERE name = {}",
-                            store.qualified("session_scheme"),
-                            store.dialect().param(1, Type::Json),
-                            store.dialect().param(2, Type::Text),
-                            store.dialect().param(3, Type::Timestamp),
-                            store.dialect().param(4, Type::Text),
-                            store.dialect().param(5, Type::Text),
-                        ),
-                        &[
-                            Param::Text(json),
-                            match &note {
-                                Some(n) => Param::Text(n.clone()),
-                                None => Param::Null,
-                            },
-                            Param::Text(nils_registry::time::now_iso()),
-                            Param::Text(scheme.digest()),
-                            Param::Text(name.clone()),
-                        ],
-                    )
-                    .map_err(|e| fail(e.to_string()))?;
-                println!("scheme {name} replaced");
-                return Ok(());
+            match crate::session_schemes::keep(
+                &mut registry,
+                &name,
+                &scheme,
+                note.as_deref(),
+                force,
+            )? {
+                crate::session_schemes::Kept::Replaced => println!("scheme {name} replaced"),
+                crate::session_schemes::Kept::New => println!("scheme {name} kept"),
             }
-            store
-                .insert(
-                    &Insert::new(
-                        table("session_scheme"),
-                        &["name", "definition", "created_at", "note", "digest"],
-                    ),
-                    &[vec![
-                        Param::Text(name.clone()),
-                        Param::Text(json),
-                        Param::Text(nils_registry::time::now_iso()),
-                        match &note {
-                            Some(n) => Param::Text(n.clone()),
-                            None => Param::Null,
-                        },
-                        Param::Text(scheme.digest()),
-                    ]],
-                )
-                .map_err(|e| fail(e.to_string()))?;
-            println!("scheme {name} kept");
             Ok(())
         }
         SchemeCommand::List => {
@@ -8684,8 +8839,17 @@ fn pick_command(home: &Home, command: PickCommand) -> Result<(), Exit> {
             role,
             borders,
             subject,
+            dataset,
+            cohort,
             json,
-        } => pick_list(home, role, borders, subject, json),
+        } => pick_list(
+            home,
+            role,
+            borders,
+            subject,
+            (dataset.as_deref(), cohort.as_deref()),
+            json,
+        ),
         PickCommand::Explain { id, json } => pick_explain(home, id, json),
         PickCommand::Set(args) => pick_set(home, args),
         PickCommand::Withdraw { id, why, json } => pick_withdraw(home, id, why, json),
@@ -8719,6 +8883,8 @@ fn pick_set(home: &Home, args: PickSetArgs) -> Result<(), Exit> {
             actor: &who,
             campaign: None,
             occasion: None,
+            scope: None,
+            made_in: None,
         },
     )
     .map_err(|e| match e {
@@ -8763,11 +8929,12 @@ fn pick_set(home: &Home, args: PickSetArgs) -> Result<(), Exit> {
 /// Record 42 S3: `nils pick withdraw`, a person's pick withdrawn.
 fn pick_withdraw(home: &Home, id: i64, why: Option<String>, json: bool) -> Result<(), Exit> {
     let mut registry = open(home)?;
-    let done = nils_classify::picking::withdraw_person(&mut registry, id, &actor(), why.as_deref())
-        .map_err(|e| match e {
-            nils_classify::picking::PersonError::Refused(m) => usage(m),
-            other => fail(other.to_string()),
-        })?;
+    let done =
+        nils_classify::picking::withdraw_person(&mut registry, id, &actor(), why.as_deref(), None)
+            .map_err(|e| match e {
+                nils_classify::picking::PersonError::Refused(m) => usage(m),
+                other => fail(other.to_string()),
+            })?;
     if json {
         println!(
             "{}",
@@ -8856,12 +9023,26 @@ fn pick_run(home: &Home, args: PickArgs) -> Result<(), Exit> {
         }
         (None, None) => None,
     };
-    let report = nils_classify::picking::run_for(
+    // record 55, decision 6: the scopes the run decides
+    let scopes = crate::pick_scopes::of_run(
+        registry.store(),
+        args.own_rules,
+        args.cohort.as_deref(),
+        args.dataset.as_deref().map(|d| d.trim_start_matches('@')),
+        only.as_ref().map(|o| &o.subjects),
+        args.subject.as_deref(),
+    )
+    .map_err(|e| match e {
+        crate::pick_scopes::Error::Usage(m) => usage(m),
+        crate::pick_scopes::Error::Store(e) => fail(e.to_string()),
+    })?;
+    let report = nils_classify::picking::run_scopes(
         &mut registry,
         &pack,
         &scheme,
         args.subject.as_deref(),
         only.as_ref(),
+        &scopes,
         &format!("pick:{}", pack.id()),
     )
     .map_err(|e| fail(e.to_string()))?;
@@ -8878,6 +9059,8 @@ fn pick_run(home: &Home, args: PickArgs) -> Result<(), Exit> {
     if let (Some(only), Some(n)) = (&report.only, report.subjects) {
         println!("  for              {only} ({n} subject(s))");
     }
+    // 2026-10-12: what was written, or why nothing was
+    println!("  {}", report.said);
     println!("  occasions        {:>12}", report.sessions);
     println!("  picked           {:>12}", report.written);
     println!("  nothing eligible {:>12}", report.empty);
@@ -8885,6 +9068,25 @@ fn pick_run(home: &Home, args: PickArgs) -> Result<(), Exit> {
     println!("  {:<16} {:>12}", "for review", report.raised);
     for (why, n) in &report.borders {
         println!("  {why:<16} {n:>12}   worth a person's eye");
+    }
+    for r in &report.rules {
+        let scope = r.scope.as_ref().map_or("the pack's".to_string(), |s| {
+            format!(
+                "{} {}",
+                s["kind"].as_str().unwrap_or(""),
+                s["name"].as_str().unwrap_or("")
+            )
+        });
+        println!(
+            "  rules            {scope}, version {}: {} picked of {} occasions",
+            r.version, r.written, r.sessions
+        );
+    }
+    if report.settled > 0 {
+        println!(
+            "  {:<16} {:>12}   settled by the rules",
+            "borders closed", report.settled
+        );
     }
     println!("  {:.1} s", report.seconds);
     Ok(())
@@ -8895,11 +9097,30 @@ fn pick_list(
     role: Option<String>,
     borders: bool,
     subject: Option<String>,
+    scope: (Option<&str>, Option<&str>),
     json: bool,
 ) -> Result<(), Exit> {
     let mut registry = open(home)?;
     let store = registry.store();
-    let mut where_parts = vec!["p.withdrawn_at IS NULL".to_string()];
+    // one place of truth (2026-10-11): the main scans as every reader reads
+    // them, a scope's named or each subject's own dataset's
+    let named = match scope {
+        (Some(d), _) => Some(
+            nils_registry::pick_rules::Scope::dataset(store, d)
+                .map_err(|e| fail(e.to_string()))?
+                .ok_or_else(|| usage(format!("no dataset named {d}")))?,
+        ),
+        (None, Some(c)) => Some(
+            nils_registry::pick_rules::Scope::cohort(store, c)
+                .map_err(|e| fail(e.to_string()))?
+                .ok_or_else(|| usage(format!("no cohort named {c}")))?,
+        ),
+        (None, None) => None,
+    };
+    let picks = nils_registry::pick_truth::Of::of_scope(store, named.as_ref())
+        .map_err(|e| fail(e.to_string()))?
+        .picks(store);
+    let mut where_parts = vec!["1 = 1".to_string()];
     if let Some(r) = &role {
         where_parts.push(format!("p.role = '{}'", r.replace('\'', "''")));
     }
@@ -8912,13 +9133,12 @@ fn pick_list(
     let sql = format!(
         "SELECT p.id, su.code, p.role, {}, p.score, p.margin, p.borders, p.actor, \
                 p.author_kind, COUNT(ps.stack_id), p.why \
-         FROM {} p JOIN {} su ON su.id = p.subject_id \
+         FROM {picks} p JOIN {} su ON su.id = p.subject_id \
          LEFT JOIN {} ps ON ps.pick_id = p.id \
          WHERE {} \
          GROUP BY p.id, su.code, p.role, {}, p.score, p.margin, p.borders, p.actor, p.author_kind, p.why \
          ORDER BY su.code, {}, p.role",
         text_of(store, "pick", "session_day"),
-        store.qualified("pick"),
         store.qualified("subject"),
         store.qualified("pick_stack"),
         where_parts.join(" AND "),
@@ -9351,7 +9571,16 @@ fn jobs_command(home: &Home, command: JobsCommand) -> Result<(), Exit> {
         JobsCommand::List { all, limit, json } => {
             let jobs = job::list(store, all, limit).map_err(err)?;
             if json {
-                let doc: Vec<serde_json::Value> = jobs.iter().map(job::Job::as_json).collect();
+                let mut doc: Vec<serde_json::Value> =
+                    jobs.iter().map(crate::failures::job_doc).collect();
+                crate::made::jobs(store, &mut doc);
+                // record 48, D1 of the move: no unit's QC of a sealed stack,
+                // unless --unsealed-access says why
+                if !sealed::keyboard_reads() {
+                    for d in &mut doc {
+                        pipelines::job_unsealed(store, d).map_err(fail)?;
+                    }
+                }
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&doc).map_err(|e| fail(e.to_string()))?
@@ -9393,10 +9622,15 @@ fn jobs_command(home: &Home, command: JobsCommand) -> Result<(), Exit> {
             let Some(j) = job::show(store, id).map_err(err)? else {
                 return Err(usage(format!("no job {id}")));
             };
+            let mut doc = crate::failures::job_doc(&j);
+            crate::made::jobs(store, std::slice::from_mut(&mut doc));
             if json {
+                if !sealed::keyboard_reads() {
+                    pipelines::job_unsealed(store, &mut doc).map_err(fail)?;
+                }
                 println!(
                     "{}",
-                    serde_json::to_string_pretty(&j.as_json()).map_err(|e| fail(e.to_string()))?
+                    serde_json::to_string_pretty(&doc).map_err(|e| fail(e.to_string()))?
                 );
                 return Ok(());
             }
@@ -9416,6 +9650,25 @@ fn jobs_command(home: &Home, command: JobsCommand) -> Result<(), Exit> {
             }
             if let Some(e) = &j.error {
                 println!("  error       {e}");
+            }
+            if let Some(f) = crate::failures::line(&doc["failure"]) {
+                println!("  failure     {f}");
+            }
+            // 2026-10-12: what a run's job made, and the job that took its
+            // run up again
+            if let Some(m) = doc["made"]["line"].as_str() {
+                println!("  made        {m}");
+            }
+            // 2026-10-12: a pick run's words, what it wrote or why nothing
+            if let Some(said) = doc["result"]["said"].as_str() {
+                println!("  said        {said}");
+            }
+            if doc["taken_up"].is_object() {
+                println!(
+                    "  taken up    again as job {} ({})",
+                    doc["taken_up"]["job"],
+                    doc["taken_up"]["state"].as_str().unwrap_or_default()
+                );
             }
             if let Some(p) = &j.progress {
                 println!("  progress    {p}");
@@ -9489,10 +9742,14 @@ fn jobs_command(home: &Home, command: JobsCommand) -> Result<(), Exit> {
         }
         JobsCommand::Prune { keep_days } => {
             let gone = job::prune(store, keep_days).map_err(err)?;
+            // record 55 H2, round 5: a pruned job's log goes with it
+            let mut kept = |id: i64| !matches!(job::show(store, id), Ok(None));
+            let logs = crate::logs::prune(home.dir(), &mut kept)
+                .map_err(|e| fail(format!("could not prune the jobs' logs: {e}")))?;
             audit(
                 &mut registry,
                 nils_registry::audit::Action::JobsPrune,
-                serde_json::json!({ "pruned": gone, "keep_days": keep_days }),
+                serde_json::json!({ "pruned": gone, "logs": logs, "keep_days": keep_days }),
                 None,
             )?;
             println!("pruned {gone} finished job(s) older than {keep_days} day(s)");
@@ -10895,11 +11152,18 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
     // §9.6. Found once, before anything is written, and recorded on the run and
     // in `GeneratedBy`. v0 discovers a missing converter per stack, in a worker
     // process, as N identical failures.
-    let converter = match layout {
+    // 2026-10-12: the default name is looked for on the search path, beside
+    // this binary, where the setup record names it and in the registry's
+    // tools folder; a path is taken as given. Which one ran is reported.
+    let (converter, converter_found_by) = match layout {
         run::Layout::Bids => {
-            Some(nils_release::bids::convert::Converter::find(&args.dcm2niix).map_err(usage)?)
+            let (path, by) = crate::tools::dcm2niix_for(&args.dcm2niix, Some(home.dir()));
+            (
+                Some(nils_release::bids::convert::Converter::find(&path).map_err(usage)?),
+                by,
+            )
         }
-        run::Layout::Descriptive => None,
+        run::Layout::Descriptive => (None, None),
     };
 
     // Before the pack directory is taken out of `args`.
@@ -10949,6 +11213,20 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
     // domain of the same key so that neither can be used to reason about the
     // other.
     let key = registry.pseudonym_key().map_err(|e| fail(e.to_string()))?;
+    // record 55: the picks a run's frozen list of main scans was resolved
+    // from, the list taken as it was frozen
+    let picks = match &args.picks_read {
+        Some(file) => Some(
+            std::fs::read_to_string(file)
+                .map_err(|e| usage(format!("--picks-read {}: {e}", file.display())))
+                .and_then(|text| {
+                    serde_json::from_str::<serde_json::Value>(&text).map_err(|e| {
+                        usage(format!("--picks-read {}: not JSON: {e}", file.display()))
+                    })
+                })?,
+        ),
+        None => None,
+    };
 
     let name = args
         .name
@@ -10971,6 +11249,7 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
             axes: chosen.axes,
             cohorts: chosen.cohorts,
             datasets: args.dataset.clone(),
+            picks,
         },
         scheme: &scheme,
         // §8.4: dropped by default, and back only by name. The pack declares
@@ -10994,10 +11273,15 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
         other => fail(other.to_string()),
     })?;
 
+    let converter_path = converter.as_ref().map(|c| c.path.display().to_string());
     if args.json {
+        let mut doc =
+            serde_json::to_value(&report).map_err(|e| fail(format!("will not serialize: {e}")))?;
+        doc["converter_path"] = serde_json::json!(converter_path);
+        doc["converter_found_by"] = serde_json::json!(converter_found_by);
         println!(
             "{}",
-            serde_json::to_string_pretty(&report)
+            serde_json::to_string_pretty(&doc)
                 .map_err(|e| fail(format!("will not serialize: {e}")))?
         );
         return Ok(());
@@ -11053,6 +11337,20 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
     }
     if let Some(c) = &report.converter {
         println!("  converted by     {c}");
+        if let Some(path) = &converter_path {
+            println!(
+                "                   {path} ({})",
+                match converter_found_by {
+                    Some("given") => "as given",
+                    Some("setup-given") => "as the site gave it to setup",
+                    Some("path") => "on the search path",
+                    Some("beside") => "beside nils",
+                    Some("setup") => "where the setup record names it",
+                    Some("tools") => "in the registry's tools folder",
+                    _ => "as named",
+                }
+            );
+        }
     }
     match &report.previous {
         Some(before) => println!("  since            {before}"),
@@ -11070,6 +11368,18 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
             "  left out         {:>12}   stacks the layout has no name for",
             report.left_out
         );
+    }
+    // Record 55 C3: what the selection reached and the default left out, so
+    // a display composite missing from the tree is never a silent absence.
+    for (disposition, n) in &report.left_out_unless_asked {
+        let what = match disposition.as_str() {
+            "display_composite" => {
+                "display composites, pictures made to be looked at; --disposition names them"
+            }
+            "excluded" => "stacks the pack ruled out; --disposition names them",
+            other => other,
+        };
+        println!("  not asked for    {n:>12}   {what}");
     }
     println!(
         "  files            {:>12}{}",
@@ -11296,6 +11606,7 @@ fn releases_doc(
     let policy = text_of(store, "release", "policy");
     let policies = text_of(store, "release", "policies");
     let scheme = text_of(store, "release", "session_scheme");
+    let pick_rules = text_of(store, "release", "pick_rules");
     let mut wheres = String::new();
     let mut params: Vec<Param> = Vec::new();
     if let Some(name) = name {
@@ -11310,8 +11621,8 @@ fn releases_doc(
     let sql = format!(
         "SELECT id, name, version, root, {started}, files, subjects, unchanged, moved, rewritten, \
          added, removed, layout, actor, {withdrawn}, withdrawn_by, withdrawn_why, {policy}, \
-         {policies}, {scheme}, session_naming, categories, naming, purpose FROM {}{wheres} \
-         ORDER BY id DESC LIMIT {}",
+         {policies}, {scheme}, session_naming, categories, naming, purpose, {pick_rules} \
+         FROM {}{wheres} ORDER BY id DESC LIMIT {}",
         store.qualified("release"),
         limit.max(1)
     );
@@ -11374,6 +11685,12 @@ fn releases_doc(
                 "naming": r.opt_text(22)?,
                 // Record 43: run_input for a pipeline run's bids input.
                 "purpose": r.opt_text(23)?,
+                // Record 55, decision 6: the main scans it read, a scope's
+                // rules at their version or the pack's defaults, null where
+                // it read none; and since the rulings of 2026-10-12, item
+                // 6, carried to releases, `frozen`, what it kept of them,
+                // which every reader of its picks after it reads
+                "picks": json(r.opt_text(24)?),
             }))
         })
         .collect::<Result<_, nils_registry::Error>>()?;
@@ -11436,6 +11753,45 @@ struct Version {
     files: i64,
     /// Unchanged, moved, rewritten, added, removed, in that order.
     counts: [i64; 5],
+    /// Record 55, decision 6: the main scans it read, where it read any.
+    picks: Option<serde_json::Value>,
+}
+
+/// What a release read of the main scans, in words, for its history: the
+/// rules it read, and what it kept of the picks (record 55, rulings of
+/// 2026-10-12, item 6, carried to releases).
+fn picks_line(doc: &serde_json::Value) -> String {
+    let scope = &doc["scope"];
+    let read = match (
+        scope["kind"].as_str(),
+        scope["name"].as_str(),
+        doc["version"].as_i64(),
+    ) {
+        (Some(kind), Some(name), Some(v)) => format!("{kind} {name}'s rules, version {v}"),
+        _ => match doc["datasets"].as_array().map(Vec::len) {
+            Some(n) if n > 0 => format!(
+                "each subject's own dataset's rules ({n} with rules of their own), else the pack's defaults"
+            ),
+            _ => "the pack's defaults".to_string(),
+        },
+    };
+    // of a list over several roles (2026-10-12), each named
+    let read = match doc["main"].as_str() {
+        Some(role) => format!(
+            "a run's list of main {} scans, read under {read}",
+            role.replace('+', " and ")
+        ),
+        None => read,
+    };
+    match doc["frozen"].as_object() {
+        Some(f) => format!(
+            "{read}; kept: {} picks of {} visits, {} stacks",
+            f.get("picks").cloned().unwrap_or_default(),
+            f.get("visits").cloned().unwrap_or_default(),
+            f.get("stacks").cloned().unwrap_or_default()
+        ),
+        None => format!("{read}; not kept (made before releases kept the picks they read)"),
+    }
 }
 
 /// Every version of one dataset, and what each did (§8.6).
@@ -11484,9 +11840,10 @@ fn history(home: &Home, args: &ReleaseArgs) -> Result<(), Exit> {
             .column("started_at")
             .expect("release.started_at is a column"),
     );
+    let pick_rules = text_of(store, "release", "pick_rules");
     let sql = format!(
         "SELECT id, name, version, root, {started}, files, unchanged, moved, rewritten, added, \
-         removed FROM {}{wheres} ORDER BY id",
+         removed, {pick_rules} FROM {}{wheres} ORDER BY id",
         store.qualified("release"),
     );
     let rows = store
@@ -11510,6 +11867,10 @@ fn history(home: &Home, args: &ReleaseArgs) -> Result<(), Exit> {
             started: r.text(4).map_err(|e| fail(e.to_string()))?.to_string(),
             files: r.int(5).map_err(|e| fail(e.to_string()))?,
             counts,
+            picks: r
+                .opt_text(11)
+                .map_err(|e| fail(e.to_string()))?
+                .and_then(|t| serde_json::from_str(t).ok()),
         });
     }
     let mut last_name = String::new();
@@ -11522,6 +11883,9 @@ fn history(home: &Home, args: &ReleaseArgs) -> Result<(), Exit> {
         let when = v.started.split('T').next().unwrap_or(&v.started);
         let (version, files) = (&v.version, v.files);
         println!("  {version:<16} {when}   {files:>9} files in the tree");
+        if let Some(p) = &v.picks {
+            println!("      main scans   {}", picks_line(p));
+        }
         let mut said = false;
         for (n, what) in [
             (v.counts[0], "left alone"),
@@ -11776,6 +12140,7 @@ pub(crate) fn packs_doc(dir: &Path) -> Result<serde_json::Value, Exit> {
         match nils_pack::load(&p, None) {
             Ok(pack) => packs.push(serde_json::json!({
                 "name": pack.name, "version": pack.version.to_string(), "contract": pack.contract,
+                "engine": pack.engine.as_ref().map(|r| r.text().to_string()),
                 "modality": pack.modality, "cases": pack.cases,
                 "lists": pack.lists.len(), "buckets": pack.buckets.len(),
             })),

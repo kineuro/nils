@@ -175,8 +175,8 @@ impl fmt::Display for Why {
             }
             Why::NotPersonnummer { column, invalid } => write!(
                 f,
-                "{column}: not a personnummer ({invalid}); a personnummer column takes ten or \
-                 twelve digits with a valid date and check digit"
+                "{column}: not an ID that is the same everywhere ({invalid}); such a column \
+                 takes ten or twelve digits with a valid date and check digit"
             ),
         }
     }
@@ -1353,7 +1353,7 @@ mod tests {
         assert_eq!(r.conflicts[0].row, 1);
         assert!(!r.written());
         assert_eq!(count(&mut registry, "SELECT COUNT(*) FROM subject"), 0);
-        assert_eq!(count(&mut linkage, "SELECT COUNT(*) FROM id_type"), 3);
+        assert_eq!(count(&mut linkage, "SELECT COUNT(*) FROM id_type"), 4);
         // with it: the fixture code of §7.1 for PID-0001
         let r = run(
             &mut registry,
@@ -1824,7 +1824,7 @@ mod tests {
     #[test]
     fn a_map_naming_a_held_value_under_another_type_releases_its_files() {
         let (mut registry, mut linkage, keys) = stores();
-        linkage::add_id_type(&mut linkage, "personnummer", None).unwrap();
+        linkage::ensure_id_type(&mut linkage, "personnummer", None).unwrap();
         let held = |store: &mut Store, id: i64, id_type: &str, value: &str| {
             store
                 .execute(
@@ -1934,7 +1934,7 @@ mod tests {
     #[test]
     fn a_map_merges_two_subjects_one_digest_joined_and_a_failed_apply_leaves_nothing() {
         let (mut registry, mut linkage, keys) = stores();
-        linkage::add_id_type(&mut linkage, "personnummer", None).unwrap();
+        linkage::ensure_id_type(&mut linkage, "personnummer", None).unwrap();
         // the two subjects as the pseudonymiser would have coded them
         let first = pseudonym::code(Scheme::Blake2b32, KEY, "198501012382", 12).code;
         let second = pseudonym::code(Scheme::Blake2b32, KEY, "200002292399", 12).code;

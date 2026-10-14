@@ -446,6 +446,57 @@ llama.cpp read. Its log is written there too. `kvasir.json` names it under
 `local.runtime`, and where Kvasir runs in a container it also names
 `hostAlias`, the name Kvasir reaches this machine's own loopback by.
 
+### dcm2niix
+
+dcm2niix converts DICOM to NIfTI for a BIDS release and for a pipeline whose
+input is a BIDS tree, so setup provides it. The engine finds it in this
+order: a path a run or a release names with `--dcm2niix`; the one the site
+gave setup with `--dcm2niix`; `dcm2niix` on the engine's search path; beside
+the running `nils`; where the setup record names one setup found or placed;
+and the registry's own `tools/` folder. The first that answers its version is
+taken, so a broken one does not hide a working one. A service of systemd has
+the default search path, which `~/.local/bin` is not on, so a converter beside
+`nils` is found there all the same.
+
+On an install on this machine, setup keeps a `dcm2niix` it finds on the
+search path or beside `nils`. Where there is none, it downloads the build
+this version of `nils` pins, v1.0.20260724 from
+[rordenlab/dcm2niix](https://github.com/rordenlab/dcm2niix/releases), checks
+the archive against the sha256 pinned beside it, and places the binary beside
+`nils`. rordenlab publishes it for Linux on x86_64 and for macOS; a Linux on
+arm has no build to take, and the plan says to install the distribution's
+package or build it from source. `NILS_DCM2NIIX_RELEASES` points at a mirror
+laid out as the releases are (`<version>/dcm2niix_lnx.zip`), held to the same
+digests. A site that keeps its own gives it with `--dcm2niix PATH`: it is
+taken as it is, recorded, and never replaced; given on a later run, an
+update or a repair, it replaces the build setup placed, which goes. Something
+beside `nils` that setup did not place is never replaced: where it does not
+run, the plan says so. `--print` says which of these the install takes.
+
+A converter that cannot be downloaded does not stop the install. The install
+says so, and until dcm2niix is there a BIDS release and a run with a BIDS
+input are refused before they start, with what to do. An admin then
+installs it from the desk, or with:
+
+```
+nils tools install dcm2niix
+```
+
+which downloads the same pinned build into the registry's `tools/` folder,
+checks it and asks its version, and is audited. Where the engine cannot
+reach GitHub, it says so and gives the way by hand: the archive, its sha256,
+and where the binary goes. `nils tools list` says whether dcm2niix is here,
+where, which build, and how it was found.
+
+An update takes the pinned build again when a newer `nils` pins another, a
+repair takes it again when the one setup placed is gone, and an uninstall
+removes the one setup placed with the install's other programs. A converter
+the site gave, or one setup found, is never touched.
+
+The engine's container image does not carry dcm2niix. In a container install
+an admin installs it with `nils tools install dcm2niix` or from the desk; the
+registry's folder is mounted, so it stays across updates.
+
 `<dir>/assistant/assistant.env` holds everything the assistant reads: the
 engine's address, Kvasir's, the key file, the model (`chatgpt` for the
 subscription), the stores and the port. The assistant's key is minted at
@@ -559,13 +610,15 @@ read = true
 ```
 
 A model server named with `--model-server` is recorded by its address and
-the file its key is read from, never the key, which only Kvasir holds:
+the file its key is read from, never the key, which only Kvasir holds, with
+the stations' model and whether it thinks:
 
 ```toml
 [model_server]
 url = "https://models.example.org/v1"
 key_file = "/home/you/model-server.key"
 model = "qwen38-27b"
+thinking = "on"
 ```
 
 Run `nils setup` again and it opens with what is installed, where, in what
@@ -581,6 +634,7 @@ once it runs, under the same id and with the key its key file holds.
 nils update --check
 nils update --all
 nils update --part desk
+nils update --part rules
 ```
 
 The engine, the desk, the assistant and Kvasir each release on their own, so
@@ -621,6 +675,62 @@ changed; remove it and update again to take the release's. `--check` lists
 each pack beside the release's, and the install door's `release.packs` gives
 the desk's Parts page the same.
 
+### Rules releases
+
+The rules ship on their own as well. A first-party pack is released under a
+tag of its own, `pack-mri-v1.0.2`, with no engine release beside it, so a
+rules fix reaches an install the way a desk release does. Its release
+carries `pack-mri.tar.gz`, holding `packs/mri/` as the engine's
+`packs.tar.gz` holds every pack, and `pack-mri.VERSION`, both named in its
+`SHA256SUMS`. `--check` says each pack beside its own newest release,
+`--part rules` takes the newest one this engine reads and nothing else, with
+nothing started again, since the engine reads a pack again whenever its
+files change, and `--all` takes it with the rest. The engine's own release is
+the floor: a pack's own release is put in place where it is at least as new
+as the copy the engine's release carries, and an engine update never puts an
+older copy over it. The pack it replaces is kept in `<dir>.previous`, one
+update deep, as always, and the setup record notes the rules in use
+(`[rules.mri]`, its version and the release it came from).
+
+What a release works with is read from the `pack.yml` it carries. Its
+`contract` is the key every engine checks: an engine that implements a lower
+pack contract refuses the pack. From pack contract 10 a pack may also name
+the engines it works with, `engine: ">=1.0.0-alpha.80, <2.0.0"`, for what a
+contract cannot say, such as an engine fix the rules rely on. A release this
+engine would refuse is never installed, and `--check` says it waits and why;
+a newer engine takes it. The certified rules are MRI pack 1.0.0, the paper's
+named release; production fixes ship as 1.0.1, 1.0.2 and on.
+
+On GitHub the releases are found in the repository's listing by their tags.
+A channel of a deployment's own lays each out as GitHub does, under
+`download/pack-mri-v<version>/`, and names its newest in
+`latest/download/pack-mri.VERSION`; `NILS_RULES_RELEASES` names a channel for
+the rules alone. Where the engine's own release cannot be read, a pack's own
+releases are measured against the pack in place, never below it. An engine in a container reads the packs its image carries,
+so rules releases reach it with the engine's next image.
+
+An install can be pinned to one version of a pack, to reproduce what the
+paper reports with rules 1.0.0, for example:
+
+```
+nils update --pin mri@1.0.0
+```
+
+The pin is written beside the packs, in `.nils-packs.json`, and in the
+setup record (`pinned = "1.0.0"` under `[rules.mri]`). That version is put in
+place from its own release, or from the engine's copy where that is the
+version, whatever is newer; from then on neither a rules update nor an engine
+update replaces it, and `--check` says what the pin holds back. One command
+lifts it, and the rules update that follows takes the newest release this
+engine reads:
+
+```
+nils update --unpin mri
+```
+
+A pin names a version that is in place or a release this install can read;
+anything else is refused and nothing is written.
+
 ### A model server for the stations
 
 ```
@@ -628,14 +738,76 @@ nils setup --update --model-server https://models.example.org/v1 --model-key-fil
 ```
 
 Once Kvasir runs, setup reads the key from the file and seals it in Kvasir,
-reads the models the server offers through Kvasir, admits the one the
-stations use, and maps each of the stations' purposes to it. That model is
-`--model-server-model ID`; with none named the wizard asks, and a run with
-nobody to ask, as every `--update` is, stops before it changes anything and
-says which models the server offers. The key is never shown and never
+reads the models the server offers through Kvasir, admits every one of them
+on the server's one backend on the first add, and maps each of the stations'
+purposes to the one the stations use. Once Kvasir holds the server, as on an
+update or a rerun, setup sends it the stations' model alone, so a model
+removed in the desk stays removed. That model is `--model-server-model ID`; with none
+named the wizard asks, and a run with nobody to ask, as every `--update` is,
+takes the model the server marks as its default, else its only model, and
+otherwise stops before it changes anything and says which models the server
+offers. The stations' model is asked last, so it is the one left loaded on a
+server with one card. Another model that does not answer or does not pass
+admission is said in one line, and setup goes on. A server that offers more
+than eight models, as a big provider does, has the stations' model alone
+admitted; the others are added from Settings > Kvasir in the desk. The key is never shown and never
 written down: the record keeps the address, the file's path and the model,
 so a later update or repair seals it again from the file. `--print` shows
 the plan with all three and without the key.
+
+The stations think before they answer. Setup asks Kvasir for thinking on,
+which Kvasir sends as the chat template's `enable_thinking` to every model
+of the server that reasons, and holds the stations' model with answers of up
+to 16,384 tokens, the thinking included, never more than the server allows.
+That is how the assistant's chat bench measured it: better answers, and no
+words before its tools, for about a second more a turn.
+`--model-thinking off` turns it off:
+
+```
+nils setup --update --model-thinking off
+```
+
+The record keeps the choice, so every update and repair sends it again; a
+record from before reads as on. Kvasir holds a server it holds already again
+in place, so the change asks nothing of the models and loads nothing on the
+server. Setup says what Kvasir holds, beside what the server allows, and a
+Kvasir from before thinking was set per backend leaves the thinking to the
+server's own default, which setup says too.
+
+## Starting again from an empty registry
+
+```
+nils --registry <registry> place export --out places.json
+nils setup --new-registry --reg-key-file /etc/nils/reg-key --print
+nils setup --new-registry --reg-key-file /etc/nils/reg-key --yes
+nils --registry <registry> place import places.json --print
+```
+
+A site that has tried NILS out and now starts its real work keeps its setup
+and starts its registry again. `--new-registry` stops the engine, sets the
+registry aside, makes a new one on the key a key file gives (or a
+passphrase, with `--key-file`), under the subject code generator's scheme
+unless `--scheme` names another, declares the places the setup record names,
+carries the timezone and the week start, and writes and starts every part
+again, as a repair does. The configuration, the sign-in, the desk's people
+and groups, and Kvasir's models and sealed credentials stay as they are.
+Nothing is deleted: on Postgres the registry's two schemas are renamed
+`<schema>_before_<stamp>` and `<schema>_before_<stamp>_linkage`, and on
+SQLite its databases move; either way its `nils.toml` and key store go into
+`before-new-registry-<stamp>/` in the registry's folder, where the old
+registry still opens with `nils --registry <that folder>`. Dump it and keep
+the dump before you remove anything, and drop the renamed schemas yourself
+once you no longer need to go back. With no terminal it runs only with
+`--yes`, and `--print` says every step and changes nothing.
+
+The new registry has no jobs, no data, no ID types and no places but the
+setup's. `nils place export` writes every place in force, a dataset with how
+it is declared, to one file, and `nils place import` declares them in the new
+registry as they were written: it looks into no folder, moves nothing and
+measures nothing, so `nils place list --probe` measures them afterwards. A
+place the registry already has by the same name, role and path is kept as it
+is, `--skip NAME` leaves one out, and anything it cannot take is said for
+every place before one is declared.
 
 ## Removing it
 
@@ -644,7 +816,7 @@ nils uninstall
 ```
 
 It asks what should go. Keeping your data removes the services, the
-programs, the packs, llama.cpp's build and what building Kvasir and the
+programs (the dcm2niix setup placed among them), the packs, llama.cpp's build and what building Kvasir and the
 assistant made, and keeps the registry and its key, the backups, the desk's
 people, the assistant's history, and Kvasir's models, its store with their
 keys and the sealed credentials, its seal key and pepper and the assistant's
@@ -712,9 +884,12 @@ directory is NILS's.
 | `--yes`, `-y` | Take every default without asking |
 | `--print` | Say what it would do, with every command and unit, and change nothing |
 | `--update` | Straight to the installs, for the parts already there |
+| `--new-registry` | Set the registry aside and start an empty one under the same setup; with `--reg-key-file` or `--key-file`, `--print` and `--yes` |
 | `--channel URL` | Where releases come from |
 | `--model-server URL`, `--model-key-file FILE` | A model server the stations use, such as a Kvasir serving a card: on an install or with `--update`, Kvasir seals the key from the file and holds the server as one backend |
-| `--model-server-model ID` | With `--model-server`: the model the stations use; asked where there is a terminal, needed where there is none |
+| `--model-server-model ID` | With `--model-server`: the model the stations use; asked where there is a terminal, else the server's default or only model. On the first add, every model the server offers is admitted beside it, up to eight |
+| `--model-thinking on\|off` | Whether the stations' models on the model server think before they answer: `on`, the default, with up to 16,384 tokens an answer, or `off`. Recorded; with `--update` alone it changes the server on record |
+| `--dcm2niix PATH` | The site's own dcm2niix, taken as it is and recorded; without it, setup keeps one it finds or places the pinned build beside `nils` |
 
 Windows is not supported yet; the wizard says so and points at the
 documentation.

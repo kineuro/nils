@@ -621,10 +621,12 @@ fn an_enhanced_file_whose_frames_hold_two_orientations_becomes_two_stacks() {
     }
 }
 
-/// A file whose instance another file holds under another series is filed
-/// as a duplicate, and the series and stacks it alone made are gone at the
-/// end of the run (a real registry held 203 such stacks): every stack and
-/// series left holds an instance, and the report counts what went.
+/// A file whose instance another file holds under another series leaves no
+/// empty stack or series behind (a real registry held 203 such stacks).
+/// Since record 55 (Nima's duplicate policy, 2026-10-10) such a file is no
+/// copy of the instance: it is held before any row of it is written, so
+/// its series and stacks are never made, and every run that reads it again
+/// makes none either.
 #[test]
 fn a_series_made_only_of_duplicates_leaves_no_empty_stack_or_series() {
     for lab in labs() {
@@ -641,12 +643,16 @@ fn a_series_made_only_of_duplicates_leaves_no_empty_stack_or_series() {
         dir.file("b/2", &mr("A", "A.2", "A.1.2", "P1", &[echo_time("30")]));
         let report = digest(&s, &mut reg).unwrap_or_else(|e| panic!("{name}: {e}"));
         let w = report.written.clone().unwrap();
-        assert_eq!((w.ingested, w.duplicate), (0, 2), "{name}");
+        assert_eq!(
+            (w.ingested, w.duplicate, w.same_instance),
+            (0, 0, 2),
+            "{name}"
+        );
         assert_eq!((w.series_created, w.stacks_created), (0, 0), "{name}");
         assert_eq!(
             (w.empty_series_removed, w.empty_stacks_removed),
-            (1, 2),
-            "{name}"
+            (0, 0),
+            "{name}: nothing was made for them"
         );
         assert_eq!(
             one(
@@ -673,6 +679,7 @@ fn a_series_made_only_of_duplicates_leaves_no_empty_stack_or_series() {
         let again = digest(&s, &mut reg).unwrap_or_else(|e| panic!("{name}: {e}"));
         let w = again.written.unwrap();
         assert_eq!((w.stacks_created, w.empty_stacks_removed), (0, 0), "{name}");
+        assert_eq!(w.same_instance, 2, "{name}: read again, held again");
         assert_eq!(one(&mut reg, "SELECT COUNT(*) FROM {stack}"), 1, "{name}");
     }
 }
@@ -1050,6 +1057,9 @@ fn old_shape(reg: &mut nils_registry::Registry, frames: u32) -> Vec<i64> {
         reg,
         &format!("UPDATE {{series}} SET n_stacks = {}", frames + 1),
     );
+    // the locations as migration 87 fills them for a registry from before
+    exec(reg, "DELETE FROM {source_stack}");
+    nils_registry::location::backfill(reg.store()).unwrap();
     counts_add_up(reg, "the old shape");
     out
 }
@@ -1118,6 +1128,15 @@ fn a_registry_digested_before_takes_the_fold_from_a_re_read_of_its_series() {
         let frames = old_shape(&mut reg, 8);
         counts_add_up(&mut reg, name);
         assert_eq!(one(&mut reg, "SELECT COUNT(*) FROM {stack}"), 9, "{name}");
+        // record 55: the source holds a file of every one of them
+        assert_eq!(
+            ints(
+                &mut reg,
+                "SELECT stack_id FROM {source_stack} ORDER BY stack_id"
+            ),
+            ints(&mut reg, "SELECT id FROM {stack} ORDER BY id"),
+            "{name}"
+        );
 
         // an ordinary run reads nothing again and leaves it
         let report = digest(&settings(&dir), &mut reg).unwrap_or_else(|e| panic!("{name}: {e}"));
@@ -1168,6 +1187,16 @@ fn a_registry_digested_before_takes_the_fold_from_a_re_read_of_its_series() {
                 )
             ),
             1,
+            "{name}"
+        );
+        // and the source holds a file of the stacks left, of none that went
+        // (record 55: a fold moves the locations with the instances)
+        assert_eq!(
+            ints(
+                &mut reg,
+                "SELECT stack_id FROM {source_stack} ORDER BY stack_id"
+            ),
+            ints(&mut reg, "SELECT id FROM {stack} ORDER BY id"),
             "{name}"
         );
     }

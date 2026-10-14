@@ -474,10 +474,11 @@ fn import_digest_show_and_link_go_round() {
         "hospital number",
     ]);
     assert!(out.status.success(), "{}", stderr(&out));
-    assert_eq!(stdout(&out), "added id type mrn (id 4)\n");
+    // after the four seeded types, the generator's the last of them
+    assert_eq!(stdout(&out), "added id type mrn (id 5)\n");
     let out = run(&["linkage", "id-type", "list"]);
     assert!(
-        stdout(&out).contains("  4  mrn                      hospital number"),
+        stdout(&out).contains("  5  mrn                      hospital number"),
         "{}",
         stdout(&out)
     );
@@ -1556,7 +1557,7 @@ fn custody_quarantine_review_and_purge_go_round() {
         stdout(&out)
     );
     let rows = store.query("SELECT COUNT(*) FROM id_type", &[]).unwrap();
-    assert_eq!(rows[0].int(0).unwrap(), 3);
+    assert_eq!(rows[0].int(0).unwrap(), 4);
     // status lists the purges as the jobs they were
     let out = run(&["status", "--json"]);
     let doc = json(&out);
@@ -1785,7 +1786,7 @@ fn pack_list_and_show_read_the_pack_directory() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|p| p["pack"] == "mri@1.0.2"),
+            .any(|p| p["pack"] == "mri@1.2.0"),
         "{listed}"
     );
 
@@ -1797,10 +1798,10 @@ fn pack_list_and_show_read_the_pack_directory() {
     assert!(out.status.success(), "{}", stderr(&out));
     let shown: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(shown["modality"], "MR");
-    assert_eq!(shown["flags"], 584);
+    assert_eq!(shown["flags"], 588);
     assert_eq!(
-        shown["contract"], 9,
-        "pack 1.0.2: review.by_model (contract 9), after record 53's session pass, fallback \
+        shown["contract"], 10,
+        "pack 1.1.0: the engines it works with (contract 10), after review.by_model (contract 9), after record 53's session pass, fallback \
          border over several values and private elements a reader is shown (contract 8)"
     );
     // record 53: what a packet must carry to replay the pack: the private
@@ -4615,6 +4616,28 @@ fn a_dataset_is_declared_at_the_keyboard_and_digested_by_its_name() {
     );
     let elsewhere = TempDir::new("cli-dataset-out");
     let registry = ["--registry", home.path().to_str().unwrap()];
+    // a type the rule names is the registry's before the dataset declares
+    // it: a declaration naming a type it lacks is refused (2026-10-10)
+    let refused = nils()
+        .args(registry)
+        .args(["place", "add", "ds-early"])
+        .arg(dir.path())
+        .args(["--role", "source", "--identity"])
+        .arg(&rule)
+        .output()
+        .unwrap();
+    assert!(!refused.status.success());
+    assert!(
+        stderr(&refused).contains("no ID type named study-id"),
+        "{}",
+        stderr(&refused)
+    );
+    let made = nils()
+        .args(registry)
+        .args(["linkage", "id-type", "add", "study-id"])
+        .output()
+        .unwrap();
+    assert!(made.status.success(), "{}", stderr(&made));
 
     // the rule file is a loose entry too, and moves with the rest
     let added = nils()
@@ -4674,7 +4697,7 @@ fn a_dataset_is_declared_at_the_keyboard_and_digested_by_its_name() {
     // for its originals
     assert!(
         text.contains("as subject-code")
-            && text.contains("the value read is the code itself")
+            && text.contains("the value read is the subject code itself")
             && text.contains("from the pseudonymised tree of the dataset ds"),
         "{text}"
     );
@@ -5183,7 +5206,9 @@ fn a_dataset_is_pseudonymised_at_the_keyboard_and_brought_in_as_a_chain() {
         text.contains("6 seen   6 written   0 unchanged   0 held   0 refused"),
         "{text}"
     );
-    assert!(text.contains("2 seen   2 new   2 provisional"), "{text}");
+    // the dataset codes what no map names: each subject code is made from
+    // its ID and final, so none is provisional (2026-10-10)
+    assert!(text.contains("2 seen   2 new   0 provisional"), "{text}");
     assert!(
         !text.contains("199001011234") && !text.contains("Doe"),
         "{text}"
@@ -5296,11 +5321,24 @@ fn a_dataset_is_pseudonymised_at_the_keyboard_and_brought_in_as_a_chain() {
     let (ran, listed) = chain_of("second");
     assert_eq!(kinds(&ran), ["pseudonymize", "digest"], "{listed}");
     assert!(ran.iter().all(|j| j["state"] == "done"), "{listed}");
-    assert_eq!(ran[0]["then"].as_array().unwrap().len(), 3, "{listed}");
+    assert_eq!(ran[0]["then"].as_array().unwrap().len(), 4, "{listed}");
     let ended = &ran[1]["result"]["chain_ended"];
+    // the sort names the packs the keyboard's nils found (the T33 pipe
+    // test): the worker that runs it knows none of its own
     assert_eq!(
         ended["skipped"],
-        serde_json::json!([["fingerprint"], ["classify", "--pack", "mri"]]),
+        serde_json::json!([
+            ["fingerprint"],
+            ["classify", "--pack", "mri", "--pack-dir", packs_dir()],
+            [
+                "score",
+                "@ds",
+                "--name",
+                "second",
+                "--pack-dir",
+                packs_dir()
+            ]
+        ]),
         "{listed}"
     );
     assert!(
@@ -5325,7 +5363,14 @@ fn a_dataset_is_pseudonymised_at_the_keyboard_and_brought_in_as_a_chain() {
     // step of its own that the chain did not name
     assert_eq!(
         kinds(&ran),
-        ["pseudonymize", "digest", "fingerprint", "classify", "pick"],
+        [
+            "pseudonymize",
+            "digest",
+            "fingerprint",
+            "classify",
+            "pick",
+            "score"
+        ],
         "{listed}"
     );
     assert!(ran.iter().all(|j| j["state"] == "done"), "{listed}");
@@ -5335,10 +5380,134 @@ fn a_dataset_is_pseudonymised_at_the_keyboard_and_brought_in_as_a_chain() {
         "{listed}"
     );
     assert!(
-        ran[4]["chain"]["before"].is_i64() && ran[4]["chain"]["after"].is_null(),
+        ran[4]["chain"]["before"].is_i64() && ran[4]["chain"]["after"].is_i64(),
+        "{listed}"
+    );
+    // record 55 E5: the score, last; the new file joined a stack read
+    // before, so the batch brought no new stack to score
+    assert!(ran[5]["chain"]["after"].is_null(), "{listed}");
+    assert_eq!(ran[5]["result"]["new_stacks"], 0, "{listed}");
+    assert!(
+        ran[5]["result"]["why"]
+            .as_str()
+            .unwrap()
+            .contains("no new stack"),
         "{listed}"
     );
     assert!(ran[1]["result"]["chain_ended"].is_null(), "{listed}");
+
+    // T7 (Wave 7a §6.3): every file of the pseudonymised dataset, and every
+    // file of a release of it, carries the four marks, with the options its
+    // writer's policy names: the pseudonymiser keeps the UIDs (113110), and a
+    // release that remaps them does not say so
+    let anon_files = dicom_files(&anon);
+    assert_eq!(anon_files.len(), 7, "{anon_files:?}");
+    for f in &anon_files {
+        let (removed, method, longitudinal, codes) = marks_of(f);
+        assert_eq!(removed, "YES", "{}", f.display());
+        assert_eq!(
+            method,
+            format!("NILS {} pseudonymise", env!("CARGO_PKG_VERSION")),
+            "{}",
+            f.display()
+        );
+        assert_eq!(longitudinal, "UNMODIFIED", "{}", f.display());
+        assert!(
+            codes.contains(&"113100".to_string()) && codes.contains(&"113110".to_string()),
+            "{}: {codes:?}",
+            f.display()
+        );
+    }
+    let out = TempDir::new("cli-pseudonymize-release");
+    let tree = out.path().join("t7");
+    run(&[
+        "place",
+        "add",
+        "out",
+        out.path().to_str().unwrap(),
+        "--role",
+        "export",
+    ]);
+    run(&[
+        "release",
+        "--out",
+        tree.to_str().unwrap(),
+        "--name",
+        "t7",
+        "--layout",
+        "descriptive",
+        "--json",
+    ]);
+    let released = dicom_files(&tree);
+    assert_eq!(released.len(), 7, "{released:?}");
+    let mut options = std::collections::BTreeSet::new();
+    for f in &released {
+        let (removed, method, longitudinal, codes) = marks_of(f);
+        assert_eq!(removed, "YES", "{}", f.display());
+        assert_eq!(
+            method,
+            format!("NILS {} release", env!("CARGO_PKG_VERSION")),
+            "{}",
+            f.display()
+        );
+        assert_eq!(longitudinal, "UNMODIFIED", "{}", f.display());
+        assert!(codes.contains(&"113100".to_string()), "{codes:?}");
+        assert!(!codes.contains(&"113110".to_string()), "{codes:?}");
+        options.insert(codes);
+    }
+    assert_eq!(options.len(), 1, "one policy, one option list: {options:?}");
+}
+
+/// Every DICOM file under a tree, by its preamble.
+fn dicom_files(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for e in std::fs::read_dir(&dir).unwrap().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if std::fs::read(&p)
+                .map(|b| b.len() > 132 && &b[128..132] == b"DICM")
+                .unwrap_or(false)
+            {
+                out.push(p);
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// The four marks of Wave 7a §6.1 a file carries: PatientIdentityRemoved,
+/// DeidentificationMethod, LongitudinalTemporalInformationModified and the
+/// code values of DeidentificationMethodCodeSequence.
+fn marks_of(path: &std::path::Path) -> (String, String, String, Vec<String>) {
+    use dicom_dictionary_std::tags;
+    let object = dicom_object::open_file(path).unwrap();
+    let text = |o: &dicom_object::InMemDicomObject, tag| {
+        o.element(tag)
+            .unwrap_or_else(|_| panic!("{} has no {tag}", path.display()))
+            .value()
+            .to_str()
+            .unwrap()
+            .trim()
+            .to_string()
+    };
+    let codes = object
+        .element(tags::DEIDENTIFICATION_METHOD_CODE_SEQUENCE)
+        .unwrap_or_else(|_| panic!("{} has no code sequence", path.display()))
+        .items()
+        .unwrap()
+        .iter()
+        .map(|i| text(i, tags::CODE_VALUE))
+        .collect();
+    (
+        text(&object, tags::PATIENT_IDENTITY_REMOVED),
+        text(&object, tags::DEIDENTIFICATION_METHOD),
+        text(&object, tags::LONGITUDINAL_TEMPORAL_INFORMATION_MODIFIED),
+        codes,
+    )
 }
 
 fn packs_dir() -> std::path::PathBuf {
@@ -5513,7 +5682,8 @@ fn a_model_is_registered_by_digest_and_named_where_it_answered() {
     assert_eq!(admitted["check"]["passed"], true, "{admitted}");
     ok(&["model", "promote", "base-head@1"]);
 
-    // a second head in the slot: its promotion retires the first
+    // a second head in the slot: since record 55 D4 its promotion retires
+    // none, and the first is retired by hand
     ok(&[
         "model",
         "register",
@@ -5530,7 +5700,12 @@ fn a_model_is_registered_by_digest_and_named_where_it_answered() {
         "--json",
     ]));
     assert_eq!(promoted["model"]["state"], "promoted", "{promoted}");
-    assert_eq!(promoted["retired"]["version"], "1", "{promoted}");
+    assert_eq!(
+        promoted["retired_models"],
+        serde_json::json!([]),
+        "{promoted}"
+    );
+    ok(&["model", "retire", "base-head@1", "--why", "replaced"]);
     let task = format!("axis:{asked_axis}");
     let listed = doc(ok(&[
         "model", "list", "--task", &task, "--state", "promoted", "--json",
@@ -6044,6 +6219,17 @@ fn repair_closes_the_review_items_on_sealed_stacks_and_audits_them() {
 /// Record 53 S3: `nils pack replay` reads packets as a file of lines or a
 /// directory of files, and says what the pack decides of each, the private
 /// elements it shows included.
+/// The version a pack folder ships, as its `pack.yml` names it, so a test of
+/// a replay does not name a release the pack has moved past.
+fn shipped_version(pack: &std::path::Path) -> String {
+    std::fs::read_to_string(pack.join("pack.yml"))
+        .unwrap()
+        .lines()
+        .find_map(|l| l.strip_prefix("version:"))
+        .map(|v| v.trim().trim_matches('"').to_string())
+        .expect("pack.yml names its version")
+}
+
 #[test]
 fn a_pack_is_replayed_over_header_packets() {
     let packs = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packs/mri");
@@ -6080,7 +6266,8 @@ fn a_pack_is_replayed_over_header_packets() {
         assert_eq!(got[0]["stack"], 1);
         assert_eq!(got[0]["values"]["provenance"], "EPIMix", "{}", got[0]);
         assert_ne!(got[1]["values"]["provenance"], "EPIMix", "{}", got[1]);
-        assert!(stderr(&out).contains("2 packets replayed through mri@1.0.2"));
+        let want = format!("2 packets replayed through mri@{}", shipped_version(&packs));
+        assert!(stderr(&out).contains(&want), "{}", stderr(&out));
     }
     let bad = dir.file("bad.jsonl", b"{not json\n");
     let out = nils()

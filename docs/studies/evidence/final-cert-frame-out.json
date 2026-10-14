@@ -1,0 +1,26 @@
+{
+ "run": "final-cert-frame-out",
+ "purpose": "The final certificate's frame as computed in the research container: every production MR stack's stratum (registered and with today's disposition), localizer flag, cell parts and exclusion flags; counts and cell tables for the plan",
+ "study": "studies/2026-09-30-final-certificate/plan-draft.md",
+ "created": "2026-09-30T18:22:45Z",
+ "sealed": "2026-09-30T18:22:46Z",
+ "files": 8,
+ "bytes": 62052505,
+ "by_folder": {
+  ".": 2,
+  "logs": 2,
+  "scoring": 4
+ },
+ "manifest_sha256": "689536a9539b3c2c4cbe4cd64aae7cb1d0c36d412abb7cf680552a59acb54cd3",
+ "per_stack_files_by_folder": {},
+ "sha256": {
+  "RUN.json": "e539595bc745a1ec3b3ee0500d33ccd7c3393ab266a1d03061ec30f484916cb0",
+  "SHA256SUMS": "635b06513ca812ddf3b38f34ac1206bdf794b13f27cba8619ecd60ae234c3e09",
+  "logs/frame_final.log": "a3aa7044eb5e3c34d891f1b30574e3ac44bc5b09e5a475ce32e9d716f5796191",
+  "logs/run.md": "e463688082d61f5978208070219cd7d6721fac46def2ec1bcd8e2087492b7a47",
+  "scoring/cells-prod.tsv": "73f8119708a169cbccadbc0dd2a9eaf94859d1718be930039c97826b4ee46675",
+  "scoring/cells-registered.tsv": "edffa40f66c3dcd283fd98149e84a97d789e919d9e3e0fe64e7982a8baad59b6",
+  "scoring/counts.json": "66719215291cb2d7817d8edda74e9f49a1ed28a65862a41a6cd14ecab1ab456f",
+  "scoring/frame.tsv": "1f81d9842ee448fd757d8268046285875dc8ef3dfc169d1b6d1ee37e05a96845"
+ }
+}

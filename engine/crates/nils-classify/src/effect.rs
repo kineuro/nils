@@ -1495,7 +1495,8 @@ fn picks(
     let mut standing: HashSet<(String, String, i64, String)> = HashSet::new();
     for r in store.query(
         &format!(
-            "SELECT model, role, subject_id, {day} FROM {} WHERE author_kind = 'person' AND withdrawn_at IS NULL",
+            "SELECT model, role, subject_id, {day} FROM {} WHERE author_kind = 'person' AND withdrawn_at IS NULL \
+             AND rules_scope_kind IS NULL",
             store.qualified("pick")
         ),
         &[],
@@ -1565,7 +1566,11 @@ fn picks(
             base.picks.iter().find(|m| m.name == name),
             after.picks.iter().find(|m| m.name == name),
         ];
-        let mut reads: Vec<String> = pair.iter().flatten().flat_map(|m| m.reads()).collect();
+        let mut reads: Vec<String> = pair
+            .iter()
+            .flatten()
+            .flat_map(|m| crate::picking::carried(m))
+            .collect();
         reads.sort();
         reads.dedup();
         // the fields either side reads, for every stack
@@ -1651,36 +1656,70 @@ fn picks(
             let Some(model) = pair[si] else {
                 continue;
             };
+            // record 55, decision 6: a run picks with the rules, the pack's
+            // defaults (version 1) in the pack's scope, so the rehearsal
+            // does: each subject's visits in order, the kind across them,
+            // then the scan within it. An occasion where the rules allow
+            // nothing has no pick, as a run writes none.
+            let rules = nils_pack::pick_rules::Rules::defaults(model);
+            let chooser = nils_pack::pick_rules::Chooser::new(&rules, model);
+            let names = crate::picking::carried(model);
             for role in &model.roles {
                 let mine = crate::picking::of_role(model, role, &sides[si]);
                 let reference = crate::picking::build_reference(model, "registry", &mine);
-                let mut occasions: BTreeMap<(i64, i64), Vec<&crate::picking::Row>> =
-                    BTreeMap::new();
+                let mut by_subject: BTreeMap<
+                    i64,
+                    BTreeMap<i64, (nils_registry::day::Day, Vec<&crate::picking::Row>)>,
+                > = BTreeMap::new();
                 for r in &mine {
-                    if !scoped_studies.contains(&r.study) {
-                        continue;
-                    }
                     let Some(l) = labels.get(&r.study) else {
                         continue;
                     };
-                    occasions
-                        .entry((r.subject, l.session_id))
+                    by_subject
+                        .entry(r.subject)
                         .or_default()
+                        .entry(l.session_id)
+                        .or_insert_with(|| (l.first, Vec::new()))
+                        .1
                         .push(r);
                 }
-                for ((subject, session), here) in occasions {
-                    let candidates = crate::picking::group(model, &here);
-                    let picked = nils_pack::pick::pick(model, role, &candidates, &reference);
-                    let winner = picked.winner.as_ref().map(|w| w.stacks.clone());
-                    let mut borders: Vec<String> = picked
-                        .borders
-                        .iter()
-                        .map(|b| b.name().to_string())
-                        .collect();
-                    if crate::picking::is_tied(&picked) {
-                        borders.push("tie".into());
+                for (subject, occasions) in by_subject {
+                    let in_scope = |rows: &[&crate::picking::Row]| {
+                        rows.iter().any(|r| scoped_studies.contains(&r.study))
+                    };
+                    if !occasions.values().any(|(_, rows)| in_scope(rows)) {
+                        continue;
                     }
-                    result[si].insert((role.clone(), subject, session), (winner, borders));
+                    let mut visits: Vec<(i64, nils_registry::day::Day, Vec<&crate::picking::Row>)> =
+                        occasions
+                            .into_iter()
+                            .map(|(s, (d, rows))| (s, d, rows))
+                            .collect();
+                    visits.sort_by_key(|(_, day, _)| *day);
+                    let candidates: Vec<Vec<nils_pack::pick::Candidate>> = visits
+                        .iter()
+                        .map(|(_, _, rows)| crate::picking::group_with(model, rows, &names))
+                        .collect();
+                    let chosen = chooser.choose(role, &candidates, Some(&reference));
+                    for ((session, _, rows), c) in visits.iter().zip(&chosen) {
+                        let Some(w) = &c.winner else {
+                            continue;
+                        };
+                        if !in_scope(rows) {
+                            continue;
+                        }
+                        let mut borders: Vec<String> = Vec::new();
+                        if c.decided.is_none()
+                            && c.considered.len() >= 2
+                            && c.considered[0].1 == c.considered[1].1
+                        {
+                            borders.push("tie".into());
+                        }
+                        result[si].insert(
+                            (role.clone(), subject, *session),
+                            (Some(w.stacks.clone()), borders),
+                        );
+                    }
                 }
             }
         }
