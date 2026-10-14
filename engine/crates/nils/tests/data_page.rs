@@ -2824,3 +2824,165 @@ fn a_dataset_is_a_folder_of_stacks_on_postgres_too() {
     folders(Some((dsn.clone(), schema.to_string())));
     drop();
 }
+
+/// 2026-10-14: the found count is a probe's, which reads a page's worth of
+/// entries and stops short of a large tree: a production dataset's card
+/// said 49,836 files where its read saw 1,112,026. The found step says when
+/// its count stopped short (`partial`), and once a read has run the step
+/// and the card count what the read saw (`counted_by` read), its bytes
+/// where it measured every file; a read that found its files unchanged
+/// measured none of them, and says no bytes.
+fn found_counts(pg: Option<(String, String)>) {
+    let home = Home {
+        dir: TempDir::new("data-page-found"),
+        pg,
+    };
+    let (good, _, err) = home.run(&["key", "add", "k"], Some("a data page test key\n"));
+    assert!(good, "{err}");
+    match &home.pg {
+        Some((dsn, schema)) => {
+            home.ok(&[
+                "init",
+                "--backend",
+                "postgres",
+                "--dsn",
+                dsn,
+                "--schema",
+                schema,
+                "--key",
+                "k",
+            ]);
+        }
+        None => {
+            home.ok(&["init", "--key", "k"]);
+        }
+    }
+    // four files of one subject, in the tree NILS reads
+    let tree = TempDir::new("data-page-found-ds");
+    for n in 1..=4 {
+        scan_file(
+            &tree,
+            "S-0001",
+            "1.2.14.F",
+            &format!("1.2.14.F.{n}"),
+            "20261014",
+            "t1 mprage",
+        );
+    }
+    let bytes: i64 = ["derivatives/dcm-anon/1.2.14.F"]
+        .iter()
+        .flat_map(|d| std::fs::read_dir(tree.path().join(d)).unwrap())
+        .map(|e| e.unwrap().metadata().unwrap().len() as i64)
+        .sum();
+    home.ok(&[
+        "place",
+        "add",
+        "found",
+        tree.path().to_str().unwrap(),
+        "--role",
+        "source",
+        "--patient-id",
+        "id-type:patient-id",
+        "--subjects",
+        "generated",
+    ]);
+    // the probe counted the four; a bounded probe of a large tree stops
+    // short, as it would have here had the tree been large
+    {
+        let mut store = home.store();
+        let place = store.qualified("place");
+        let probed = probed_of(&mut store, &place, "found");
+        let mut doc: Value = serde_json::from_str(&probed).unwrap();
+        assert_eq!(doc["trees"]["anon"]["files"], 4, "{doc}");
+        assert_eq!(doc["trees"]["anon"]["partial"], false, "{doc}");
+        doc["trees"]["anon"]["files"] = json!(2);
+        doc["trees"]["anon"]["bytes"] = json!(100);
+        doc["trees"]["anon"]["partial"] = json!(true);
+        let d = store.dialect();
+        store
+            .execute(
+                &format!(
+                    "UPDATE {place} SET probed = {} WHERE name = 'found'",
+                    d.param(1, nils_registry::schema::Type::Json)
+                ),
+                &[nils_registry::store::Param::from(doc.to_string())],
+            )
+            .unwrap();
+    }
+    let found = |home: &Home| -> (Value, Value) {
+        let server = Worked::serve(home, false);
+        let s = server.get("/api/datasets/found/summary", READS);
+        (step(&s, "found"), s["files"].clone())
+    };
+    // before a read: the probe's count, which says it stopped short
+    let (step_before, files_before) = found(&home);
+    assert_eq!(step_before["files"], 2, "{step_before}");
+    assert_eq!(step_before["bytes"], 100, "{step_before}");
+    assert_eq!(step_before["partial"], true, "{step_before}");
+    assert_eq!(step_before["counted_by"], "probe", "{step_before}");
+    assert_eq!(files_before["found"], 2, "{files_before}");
+    assert_eq!(files_before["found_partial"], true, "{files_before}");
+    // a read counts the tree whole
+    home.ok(&["digest", "--name", "found", "--no-private", "@found"]);
+    let (step_read, files_read) = found(&home);
+    assert_eq!(step_read["files"], 4, "{step_read}");
+    assert_eq!(step_read["bytes"], bytes, "{step_read}");
+    assert_eq!(step_read["partial"], false, "{step_read}");
+    assert_eq!(step_read["counted_by"], "read", "{step_read}");
+    assert_eq!(step_read["state"], "done", "{step_read}");
+    assert_eq!(files_read["found"], 4, "{files_read}");
+    assert_eq!(files_read["bytes"], bytes, "{files_read}");
+    assert_eq!(files_read["found_partial"], false, "{files_read}");
+    // a read again, every file unchanged: seen, its bytes not measured,
+    // and the probe that stopped short says none either
+    home.ok(&["digest", "--name", "found-again", "--no-private", "@found"]);
+    let (step_again, files_again) = found(&home);
+    assert_eq!(step_again["files"], 4, "{step_again}");
+    assert_eq!(step_again["bytes"], Value::Null, "{step_again}");
+    assert_eq!(step_again["counted_by"], "read", "{step_again}");
+    assert_eq!(files_again["found"], 4, "{files_again}");
+    assert_eq!(files_again["found_partial"], false, "{files_again}");
+}
+
+/// The place's stored probe, as text.
+fn probed_of(store: &mut Store, place: &str, name: &str) -> String {
+    let t = nils_registry::schema::table("place");
+    let probed = store.dialect().text_of(t.column("probed").expect("probed"));
+    store
+        .query(
+            &format!("SELECT {probed} FROM {place} WHERE name = '{name}'"),
+            &[],
+        )
+        .unwrap()[0]
+        .text(0)
+        .unwrap()
+        .to_string()
+}
+
+#[test]
+fn a_found_count_that_stopped_short_says_so_until_a_read_counts_the_tree() {
+    found_counts(None);
+}
+
+#[test]
+fn a_found_count_that_stopped_short_says_so_on_postgres_too() {
+    let Some(dsn) = std::env::var("NILS_TEST_POSTGRES_DSN")
+        .ok()
+        .filter(|d| !d.is_empty())
+    else {
+        eprintln!("NILS_TEST_POSTGRES_DSN is not set; the Postgres half is skipped");
+        return;
+    };
+    let schema = "nils_data_page_found";
+    let drop = || {
+        let mut store = Store::connect_postgres(&dsn, schema).expect("connect");
+        store
+            .batch(&format!(
+                "DROP SCHEMA IF EXISTS {schema} CASCADE; DROP SCHEMA IF EXISTS {schema}_linkage CASCADE"
+            ))
+            .expect("drop");
+    };
+    drop();
+    found_counts(Some((dsn.clone(), schema.to_string())));
+    drop();
+}

@@ -8351,6 +8351,290 @@ third|S-0003|1.2.9.G|1.2.9.G.1|20260701|t1 late|Philips";
     assert_eq!(made, LIMIT, "the sweep made {made} requests");
 }
 
+/// Families (2026-10-14): each scan of the scans doors, a dataset's and
+/// Browse's, carries the acquisition family the pack's routes recognised in
+/// it, from the rule set its evidence cites, so an acquisition's own images
+/// are grouped with what was made of them: SyMRI's multi-dynamic multi-echo
+/// acquisition (RawRecon, a working scan) with its synthetic contrast, and
+/// an SWI's magnitude and phase (RawRecon) and minIP (ProjectionDerived, a
+/// reformat) with its processed image. SyMRI's acquisition is shown in
+/// `anat`, in `anat/SyMRI`, never under other (record 55 C4). Classified by
+/// the MRI pack itself, on SQLite and on Postgres where a test DSN is set.
+#[test]
+fn an_acquisition_s_own_images_are_in_its_family_on_every_scans_door() {
+    families_sweep(None);
+}
+
+#[test]
+fn an_acquisition_s_own_images_are_in_its_family_on_postgres_too() {
+    let Some(dsn) = std::env::var("NILS_TEST_POSTGRES_DSN")
+        .ok()
+        .filter(|d| !d.is_empty())
+    else {
+        eprintln!("NILS_TEST_POSTGRES_DSN is not set; the Postgres half is skipped");
+        return;
+    };
+    families_sweep(Some(&dsn));
+    nils_registry::Store::connect_postgres(&dsn, FAMILIES_SCHEMA)
+        .unwrap()
+        .batch(&format!(
+            "DROP SCHEMA IF EXISTS {FAMILIES_SCHEMA} CASCADE; DROP SCHEMA IF EXISTS {FAMILIES_SCHEMA}_linkage CASCADE"
+        ))
+        .unwrap();
+}
+
+const FAMILIES_SCHEMA: &str = "nils_families_door";
+
+fn families_sweep(dsn: Option<&str>) {
+    let home = TempDir::new("families-home");
+    let tree = TempDir::new("families-exam");
+    // one visit: an MPRAGE; SyMRI's acquisition and a synthetic contrast
+    // made from it; an SWI's magnitude, phase, processed image and minIP.
+    // Description, image type, sequence name.
+    let series: [(&str, &str, &str, Option<&str>); 7] = [
+        (
+            "t1 mprage",
+            "MPRAGE",
+            "ORIGINAL\\PRIMARY\\M\\ND",
+            Some("*tfl3d1_16ns"),
+        ),
+        (
+            "symri mdme",
+            "SyMRI",
+            "ORIGINAL\\PRIMARY\\M\\ND",
+            Some("*mdme2d"),
+        ),
+        (
+            "symri t1w synthetic",
+            "SyMRI",
+            "DERIVED\\PRIMARY\\T1W_SYNTHETIC",
+            None,
+        ),
+        ("swi mag", "SWI", "ORIGINAL\\PRIMARY\\M\\ND", None),
+        ("swi pha", "SWI", "ORIGINAL\\PRIMARY\\P\\ND", None),
+        ("swi", "SWI", "DERIVED\\PRIMARY\\SWI\\ND", None),
+        ("swi minip", "SWI", "DERIVED\\PRIMARY\\MNIP\\ND", None),
+    ];
+    for (i, (description, protocol, image_type, sequence)) in series.iter().enumerate() {
+        let study = "1.2.14.A";
+        let uid = format!("{study}.{}", i + 1);
+        let sop = format!("{uid}.1");
+        let mut e = synth::minimal_mr(study, &uid, &sop);
+        e.extend([
+            synth::text(tags::PATIENT_ID, VR::LO, "S-0001"),
+            synth::text(tags::STUDY_DATE, VR::DA, "20261014"),
+            synth::text(tags::SERIES_DESCRIPTION, VR::LO, description),
+            synth::text(tags::PROTOCOL_NAME, VR::LO, protocol),
+            synth::text(tags::IMAGE_TYPE, VR::CS, image_type),
+            synth::text(tags::MANUFACTURER, VR::LO, "SIEMENS"),
+            synth::text(tags::MR_ACQUISITION_TYPE, VR::CS, "2D"),
+        ]);
+        if let Some(name) = sequence {
+            e.push(synth::text(tags::SEQUENCE_NAME, VR::SH, name));
+        }
+        tree.file(
+            &format!("derivatives/dcm-anon/{study}/{sop}"),
+            &synth::part10(&MetaFields::mr(&sop), &e, true),
+        );
+    }
+    run(&home, &["key", "add", "k"], Some("a serve test key\n"));
+    match dsn {
+        Some(dsn) => {
+            nils_registry::Store::connect_postgres(dsn, FAMILIES_SCHEMA)
+                .unwrap()
+                .batch(&format!(
+                    "DROP SCHEMA IF EXISTS {FAMILIES_SCHEMA} CASCADE; DROP SCHEMA IF EXISTS {FAMILIES_SCHEMA}_linkage CASCADE"
+                ))
+                .unwrap();
+            run(
+                &home,
+                &[
+                    "init",
+                    "--backend",
+                    "postgres",
+                    "--dsn",
+                    dsn,
+                    "--schema",
+                    FAMILIES_SCHEMA,
+                    "--key",
+                    "k",
+                ],
+                None,
+            );
+        }
+        None => {
+            run(&home, &["init", "--key", "k"], None);
+        }
+    }
+    run(
+        &home,
+        &[
+            "place",
+            "add",
+            "exam",
+            tree.path().to_str().unwrap(),
+            "--role",
+            "source",
+            "--patient-id",
+            "id-type:patient-id",
+            "--subjects",
+            "map",
+        ],
+        None,
+    );
+    let map = home.file("map.csv", b"PatientID,subject_code\nS-0001,fam-0001\n");
+    run(
+        &home,
+        &[
+            "linkage",
+            "import",
+            map.to_str().unwrap(),
+            "--id-column",
+            "PatientID",
+            "--code-column",
+            "subject_code",
+        ],
+        None,
+    );
+    run(
+        &home,
+        &["digest", "--name", "exam", "--no-private", "@exam"],
+        None,
+    );
+    run(&home, &["fingerprint"], None);
+    run(
+        &home,
+        &["classify", "--pack-dir", packs().to_str().unwrap()],
+        None,
+    );
+    run(&home, &["session", "rebuild"], None);
+
+    let server = Server::start(
+        &home,
+        4,
+        &[
+            "--auth",
+            "token",
+            "--token",
+            "a-reviewer-token-of-len=rev@lab:reader,reviewer",
+        ],
+        &[],
+    );
+    let reviewer = Some("a-reviewer-token-of-len");
+    let by_series =
+        |doc: &serde_json::Value| -> std::collections::BTreeMap<String, serde_json::Value> {
+            doc["scans"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|s| {
+                    (
+                        s["series_description"].as_str().unwrap().to_string(),
+                        s.clone(),
+                    )
+                })
+                .collect()
+        };
+    // the dataset's door and Browse's, every scan of the registry
+    let (status, dataset) = server.request("GET", "/api/datasets/exam/scans", None, reviewer);
+    assert_eq!(status, 200, "{dataset}");
+    let (status, browse) = server.request("GET", "/api/scans", None, reviewer);
+    assert_eq!(status, 200, "{browse}");
+    // and Browse's door of one session's stacks
+    let session = dataset["scans"][0]["session"]["id"]
+        .as_i64()
+        .unwrap_or_else(|| panic!("a session: {dataset}"));
+    let (status, visit) = server.request(
+        "GET",
+        &format!("/api/sessions/{session}/stacks"),
+        None,
+        reviewer,
+    );
+    assert_eq!(status, 200, "{visit}");
+    // and the subject's visits, whose kinds line counts SyMRI's acquisition
+    // with SyMRI, as its folder holds it, never as Other (2026-10-14)
+    let subject = dataset["scans"][0]["subject"]["id"]
+        .as_i64()
+        .unwrap_or_else(|| panic!("a subject: {dataset}"));
+    let (status, visits) = server.request(
+        "GET",
+        &format!("/api/datasets/exam/subjects/{subject}/visits"),
+        None,
+        reviewer,
+    );
+    assert_eq!(status, 200, "{visits}");
+    server.finish();
+    let one = &visits["visits"][0];
+    let kinds: std::collections::BTreeMap<String, i64> = one["kinds"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|k| {
+            (
+                k["kind"].as_str().unwrap().to_string(),
+                k["scans"].as_i64().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(kinds.get("SyMRI"), Some(&2), "{visits}");
+    assert_eq!(one["symri"], 2, "{visits}");
+    // every scan once: the acquisition is no Other (the SWI's phase, which
+    // has no weighting, is the one Other here)
+    assert_eq!(kinds.values().sum::<i64>(), 7, "{visits}");
+    assert_eq!(kinds.get("Other"), Some(&1), "{visits}");
+
+    for doc in [&dataset, &browse, &visit] {
+        let scans = by_series(doc);
+        assert_eq!(scans.len(), 7, "{doc}");
+        let said = |series: &str, key: &str| scans[series][key].clone();
+        // what the pack made of each, as the release reads it
+        assert_eq!(
+            said("symri mdme", "axes")["disposition"],
+            "working_scan",
+            "{doc}"
+        );
+        assert_eq!(
+            said("symri mdme", "axes")["provenance"],
+            "RawRecon",
+            "{doc}"
+        );
+        assert_eq!(
+            said("swi minip", "axes")["provenance"],
+            "ProjectionDerived",
+            "{doc}"
+        );
+        assert_eq!(said("swi mag", "axes")["provenance"], "RawRecon", "{doc}");
+        for (series, family) in [
+            ("symri mdme", "symri"),
+            ("symri t1w synthetic", "symri"),
+            ("swi mag", "swi"),
+            ("swi pha", "swi"),
+            ("swi", "swi"),
+            ("swi minip", "swi"),
+        ] {
+            assert_eq!(
+                said(series, "acquisition_family"),
+                family,
+                "{series}: {doc}"
+            );
+            assert_eq!(said(series, "family"), family, "{series}: {doc}");
+        }
+        assert_eq!(
+            said("t1 mprage", "acquisition_family"),
+            serde_json::Value::Null,
+            "{doc}"
+        );
+        assert_eq!(said("t1 mprage", "family"), "plain", "{doc}");
+        // SyMRI's acquisition is anatomical, in SyMRI's folder, as its
+        // synthetic contrast is (record 55 C4); never under other
+        for series in ["symri mdme", "symri t1w synthetic"] {
+            assert_eq!(said(series, "datatype"), "anat", "{series}: {doc}");
+            assert_eq!(said(series, "folder"), "anat/SyMRI", "{series}: {doc}");
+        }
+        assert_eq!(said("swi minip", "datatype"), "anat", "{doc}");
+    }
+}
+
 /// Record 55 H3 (Nima's ruling of 2026-10-09): what the pack decided without
 /// asking is kept on the stack and shown at the explain and why doors; what
 /// the pack cannot rank has a door of its own for whoever tunes the pack;

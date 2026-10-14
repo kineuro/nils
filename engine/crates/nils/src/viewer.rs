@@ -378,13 +378,19 @@ pub(crate) const KINDS: [&str; 13] = [
 /// scout first (whatever else it is), then what made it (SyMRI), then its
 /// datatype (diffusion, perfusion, functional, a field map), then FLAIR and
 /// SWI, then its weighting.
-pub(crate) fn kind_of(a: &Axes) -> &'static str {
+///
+/// `folder` is the folder of its own the pack gives the stack under `anat/`
+/// ([`own_folder`]): a scan in SyMRI's is SyMRI's, as a release and the
+/// Browse folders place it, so SyMRI's multi-dynamic multi-echo or QALAS
+/// acquisition, a working scan the pack calls RawRecon, counts with SyMRI
+/// and not as Other (2026-10-14).
+pub(crate) fn kind_of(a: &Axes, folder: Option<&str>) -> &'static str {
     if has(a, "disposition", "scout")
         || has(a, "directory_type", "localizer")
         || has(a, "provenance", "Localizer")
     {
         "Scout"
-    } else if has(a, "provenance", "SyMRI") {
+    } else if is_symri(a, folder) {
         "SyMRI"
     } else if has(a, "directory_type", "dwi") || has(a, "base", "DWI") {
         "DWI"
@@ -411,20 +417,57 @@ pub(crate) fn kind_of(a: &Axes) -> &'static str {
     }
 }
 
-/// The family a scan is grouped in inside its datatype's folder, as the
-/// desk's tree groups it: what made it (SyMRI, a mix sequence, STAGE, a
-/// scanner's SWI), a derived image, a scan of the spine or the neck, or
-/// none of these (`plain`).
-pub(crate) fn family_of(a: &Axes) -> &'static str {
+/// The pack's routes whose acquisitions are grouped as a family, by the
+/// name of the rule set (a route is a rule set with an entry condition,
+/// spec section 6.5), and the family each makes: SyMRI's, SWI's, the mix
+/// sequences' (EPIMix and NeuroMix, one route) and STAGE's. Every axis a
+/// route's rule decides cites the route on its evidence.
+pub(crate) const ROUTE_FAMILIES: [(&str, &str); 4] = [
+    ("symri", "symri"),
+    ("swi", "swi"),
+    ("epimix", "mix"),
+    ("stage", "stage"),
+];
+
+/// The acquisition family the pack's routes recognised in a stack
+/// (2026-10-14): the family of the route whose rules decided one of its
+/// axes, as its evidence cites the rule set (`routes`), so an acquisition's
+/// own images join the family too (SyMRI's multi-dynamic multi-echo
+/// images, an SWI's magnitude and phase, which the route calls RawRecon,
+/// and its minIP, which it calls ProjectionDerived); else of the route its
+/// provenance enters (SyMRI, SWIRecon, EPIMix or NeuroMix, STAGE), since a
+/// route that entered and had nothing left to decide, as on a display
+/// composite, is cited by no evidence; else none.
+pub(crate) fn acquisition_family(routes: &[String], a: &Axes) -> Option<&'static str> {
+    if let Some((_, family)) = ROUTE_FAMILIES
+        .iter()
+        .find(|(set, _)| routes.iter().any(|r| r == set))
+    {
+        return Some(family);
+    }
     let made = |p: &str| has(a, "provenance", p);
     if made("SyMRI") {
-        "symri"
+        Some("symri")
     } else if made("EPIMix") || made("NeuroMix") {
-        "mix"
+        Some("mix")
     } else if made("STAGE") {
-        "stage"
+        Some("stage")
     } else if made("SWIRecon") {
-        "swi"
+        Some("swi")
+    } else {
+        None
+    }
+}
+
+/// The family a scan is grouped in inside its datatype's folder, as the
+/// desk's tree groups it: its acquisition's ([`acquisition_family`]:
+/// SyMRI, a mix sequence, STAGE, an SWI, whatever the image is, so a
+/// projection or a reformat of one stays with it), a derived image, a scan
+/// of the spine or the neck, or none of these (`plain`).
+pub(crate) fn family_of(acquisition: Option<&'static str>, a: &Axes) -> &'static str {
+    let made = |p: &str| has(a, "provenance", p);
+    if let Some(family) = acquisition {
+        family
     } else if made("ProjectionDerived")
         || made("SubtractionDerived")
         || has(a, "disposition", "reformat")
@@ -435,6 +478,58 @@ pub(crate) fn family_of(a: &Axes) -> &'static str {
     } else {
         "plain"
     }
+}
+
+/// The routes of [`ROUTE_FAMILIES`] that decided an axis of each of
+/// `stacks`, as their evidence cites them.
+fn routes_of(store: &mut Store, stacks: &[i64]) -> Result<HashMap<i64, Vec<String>>, StoreError> {
+    let named = ROUTE_FAMILIES
+        .iter()
+        .map(|(set, _)| format!("'{set}'"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut out: HashMap<i64, Vec<String>> = HashMap::new();
+    for chunk in stacks.chunks(IN_CHUNKS) {
+        for r in store.query(
+            &format!(
+                "SELECT DISTINCT stack_id, rule_set FROM {} WHERE stack_id IN ({}) \
+                 AND rule_set IN ({named})",
+                store.qualified("classification_evidence"),
+                list(chunk)
+            ),
+            &[],
+        )? {
+            out.entry(r.int(0)?)
+                .or_default()
+                .push(r.text(1)?.to_string());
+        }
+    }
+    Ok(out)
+}
+
+/// Whether a scan is SyMRI's: made by it (provenance SyMRI), or in its
+/// folder, as its acquisition is (record 55 C4).
+fn is_symri(a: &Axes, folder: Option<&str>) -> bool {
+    has(a, "provenance", "SyMRI") || folder == Some("SyMRI")
+}
+
+/// The folder of its own the pack gives a stack under `anat/` (record 55
+/// C4, its BIDS mapping's `folders`): SyMRI's, for its maps and synthetic
+/// images by their provenance and for its acquisition by its technique (MDME
+/// or QALAS), as a release and the scans doors place it
+/// (`nils_release::run::name_of`). None with no pack served.
+pub(crate) fn own_folder<'p>(pack: Option<&'p nils_pack::Pack>, a: &Axes) -> Option<&'p str> {
+    let pack = pack?;
+    let id = |axis: &str| -> Option<String> {
+        let stored = a.get(axis)?.first()?;
+        pack.axes
+            .iter()
+            .find(|x| x.name == axis)?
+            .id_of_stored(stored)
+            .map(str::to_string)
+    };
+    pack.bids
+        .folder_of(id("provenance").as_deref(), id("technique").as_deref())
 }
 
 /// Whether a contrast agent was given: the label the pack stores for
@@ -451,7 +546,7 @@ fn axes_of(store: &mut Store, stacks: &[i64]) -> Result<HashMap<i64, Axes>, Stor
             &format!(
                 "SELECT stack_id, axis, value FROM {} WHERE stack_id IN ({}) \
                  AND value IS NOT NULL AND axis IN ('body_part', 'provenance', 'post_contrast', \
-                 'base', 'modifier', 'directory_type', 'disposition') ORDER BY id",
+                 'base', 'modifier', 'directory_type', 'disposition', 'technique') ORDER BY id",
                 store.qualified("classification_axis"),
                 list(chunk)
             ),
@@ -1226,12 +1321,15 @@ pub(crate) fn visits(
         let mut main: Vec<(String, i64)> = Vec::new();
         for (stack, _) in &v.stacks {
             let a = axes.get(stack).unwrap_or(&empty);
-            *kinds.entry(kind_of(a)).or_default() += 1;
+            // SyMRI's acquisition is SyMRI's here as in its folder (record
+            // 55 C4, 2026-10-14), for the kinds and for `symri`
+            let folder = own_folder(pack, a);
+            *kinds.entry(kind_of(a, folder)).or_default() += 1;
             for part in a.get("body_part").into_iter().flatten() {
                 regions.extend(regions_of(part));
             }
             contrast |= contrast_of(a);
-            if has(a, "provenance", "SyMRI") {
+            if is_symri(a, folder) {
                 symri += 1;
             }
             if looks.contains(stack) {
@@ -1335,8 +1433,10 @@ pub(crate) fn visits(
     }))
 }
 
-/// The dataset viewer's facts on each scan of a page: `family`, the group
-/// it is shown in inside its datatype's folder; `te`, `tr`, `ti` and `fa`,
+/// The dataset viewer's facts on each scan of a page: `acquisition_family`,
+/// the family the pack's routes recognised in it (symri, swi, mix, stage
+/// or null, 2026-10-14); `family`, the group it is shown in inside its
+/// datatype's folder, that family first; `te`, `tr`, `ti` and `fa`,
 /// the echo, repetition and inversion times (milliseconds) and the flip
 /// angle (degrees) from its fingerprint, or null; and `main`, the roles of
 /// the live picks naming it. None of it is quasi-identifying.
@@ -1376,6 +1476,7 @@ pub(crate) fn with_facts(
         }
     }
     let picks = picked(store, &stacks, Some(scope)).map_err(failed)?;
+    let routes = routes_of(store, &stacks).map_err(failed)?;
     if let Some(scans) = doc["scans"].as_array_mut() {
         for scan in scans {
             let stack = scan["stack"].as_i64().unwrap_or_default();
@@ -1399,7 +1500,10 @@ pub(crate) fn with_facts(
                         .collect()
                 })
                 .unwrap_or_default();
-            scan["family"] = json!(family_of(&axes));
+            let acquisition =
+                acquisition_family(routes.get(&stack).map_or(&[][..], Vec::as_slice), &axes);
+            scan["acquisition_family"] = json!(acquisition);
+            scan["family"] = json!(family_of(acquisition, &axes));
             let [te, tr, ti, fa] = physics.get(&stack).copied().unwrap_or([None; 4]);
             scan["te"] = json!(te);
             scan["tr"] = json!(tr);
@@ -1450,80 +1554,212 @@ mod tests {
 
     #[test]
     fn a_scan_is_told_by_one_kind() {
-        assert_eq!(kind_of(&axes(&[("base", "T1w")])), "T1w");
+        assert_eq!(kind_of(&axes(&[("base", "T1w")]), None), "T1w");
         assert_eq!(
-            kind_of(&axes(&[("base", "T2w"), ("modifier", "FLAIR")])),
+            kind_of(&axes(&[("base", "T2w"), ("modifier", "FLAIR")]), None),
             "FLAIR"
         );
         assert_eq!(
-            kind_of(&axes(&[
-                ("base", "T2w"),
-                ("modifier", "FatSat"),
-                ("modifier", "FLAIR")
-            ])),
+            kind_of(
+                &axes(&[
+                    ("base", "T2w"),
+                    ("modifier", "FatSat"),
+                    ("modifier", "FLAIR")
+                ]),
+                None
+            ),
             "FLAIR"
         );
-        assert_eq!(kind_of(&axes(&[("base", "T2*w")])), "T2*w");
-        assert_eq!(kind_of(&axes(&[("base", "SWI")])), "SWI");
+        assert_eq!(kind_of(&axes(&[("base", "T2*w")]), None), "T2*w");
+        assert_eq!(kind_of(&axes(&[("base", "SWI")]), None), "SWI");
         assert_eq!(
-            kind_of(&axes(&[("provenance", "SWIRecon"), ("base", "T2*w")])),
+            kind_of(&axes(&[("provenance", "SWIRecon"), ("base", "T2*w")]), None),
             "SWI"
         );
-        assert_eq!(kind_of(&axes(&[("base", "DWI")])), "DWI");
+        assert_eq!(kind_of(&axes(&[("base", "DWI")]), None), "DWI");
         assert_eq!(
-            kind_of(&axes(&[("directory_type", "dwi"), ("base", "T2w")])),
+            kind_of(&axes(&[("directory_type", "dwi"), ("base", "T2w")]), None),
             "DWI"
         );
-        assert_eq!(kind_of(&axes(&[("directory_type", "perf")])), "Perfusion");
-        assert_eq!(kind_of(&axes(&[("directory_type", "func")])), "fMRI");
-        assert_eq!(kind_of(&axes(&[("directory_type", "fmap")])), "Field map");
+        assert_eq!(
+            kind_of(&axes(&[("directory_type", "perf")]), None),
+            "Perfusion"
+        );
+        assert_eq!(kind_of(&axes(&[("directory_type", "func")]), None), "fMRI");
+        assert_eq!(
+            kind_of(&axes(&[("directory_type", "fmap")]), None),
+            "Field map"
+        );
         // what made it before what it weighs, a scout before anything
         assert_eq!(
-            kind_of(&axes(&[("provenance", "SyMRI"), ("base", "T1w")])),
+            kind_of(&axes(&[("provenance", "SyMRI"), ("base", "T1w")]), None),
             "SyMRI"
         );
         assert_eq!(
-            kind_of(&axes(&[("disposition", "scout"), ("base", "T1w")])),
+            kind_of(&axes(&[("disposition", "scout"), ("base", "T1w")]), None),
             "Scout"
         );
-        assert_eq!(kind_of(&axes(&[("directory_type", "localizer")])), "Scout");
-        assert_eq!(kind_of(&axes(&[])), "Other");
-        assert_eq!(kind_of(&axes(&[("base", "MTw")])), "Other");
+        assert_eq!(
+            kind_of(&axes(&[("directory_type", "localizer")]), None),
+            "Scout"
+        );
+        assert_eq!(kind_of(&axes(&[]), None), "Other");
+        assert_eq!(kind_of(&axes(&[("base", "MTw")]), None), "Other");
         // every kind a scan can be is one the visit lists
         for a in [
             axes(&[("base", "PDw")]),
             axes(&[("base", "T2w")]),
             axes(&[]),
         ] {
-            assert!(KINDS.contains(&kind_of(&a)));
+            assert!(KINDS.contains(&kind_of(&a, None)));
         }
+    }
+
+    /// The MRI pack as the repository holds it.
+    fn mri() -> &'static nils_pack::Pack {
+        static PACK: std::sync::OnceLock<nils_pack::Pack> = std::sync::OnceLock::new();
+        PACK.get_or_init(|| {
+            let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packs/mri");
+            nils_pack::load(&dir, None).expect("the MRI pack loads")
+        })
+    }
+
+    #[test]
+    fn symri_s_acquisition_counts_with_symri_as_its_folder_holds_it() {
+        // 2026-10-14: the pack calls SyMRI's multi-dynamic multi-echo or
+        // QALAS acquisition RawRecon and a working scan; it is in SyMRI's
+        // folder (record 55 C4), and a visit counts it with SyMRI, not as
+        // Other
+        let kind = |a: &Axes| kind_of(a, own_folder(Some(mri()), a));
+        for technique in ["MDME", "QALAS"] {
+            let acquisition = axes(&[
+                ("provenance", "RawRecon"),
+                ("technique", technique),
+                ("directory_type", "anat"),
+                ("disposition", "working_scan"),
+            ]);
+            assert_eq!(own_folder(Some(mri()), &acquisition), Some("SyMRI"));
+            assert_eq!(kind(&acquisition), "SyMRI", "{technique}");
+            assert!(is_symri(
+                &acquisition,
+                own_folder(Some(mri()), &acquisition)
+            ));
+        }
+        // its maps and synthetic images, by their provenance as before
+        let synthetic = axes(&[
+            ("provenance", "SyMRI"),
+            ("technique", "MDME"),
+            ("base", "T1w"),
+        ]);
+        assert_eq!(kind(&synthetic), "SyMRI");
+        // a scout is a scout first, a working scan no folder claims is Other
+        let scout = axes(&[("technique", "MDME"), ("disposition", "scout")]);
+        assert_eq!(kind(&scout), "Scout");
+        let calibration = axes(&[
+            ("provenance", "Calibration"),
+            ("disposition", "working_scan"),
+        ]);
+        assert_eq!(own_folder(Some(mri()), &calibration), None);
+        assert_eq!(kind(&calibration), "Other");
+        // an SWI's magnitude keeps its weighting; no folder of its own
+        let magnitude = axes(&[
+            ("provenance", "RawRecon"),
+            ("technique", "GRE-EPI"),
+            ("base", "T2*w"),
+        ]);
+        assert_eq!(kind(&magnitude), "T2*w");
+        // with no pack served nothing knows SyMRI's folder by its technique
+        let mdme = axes(&[("provenance", "RawRecon"), ("technique", "MDME")]);
+        assert_eq!(own_folder(None, &mdme), None);
+        assert_eq!(kind_of(&mdme, None), "Other");
     }
 
     #[test]
     fn a_scan_is_grouped_in_one_family_as_the_desk_groups_it() {
-        assert_eq!(family_of(&axes(&[("provenance", "SyMRI")])), "symri");
-        assert_eq!(family_of(&axes(&[("provenance", "EPIMix")])), "mix");
-        assert_eq!(family_of(&axes(&[("provenance", "NeuroMix")])), "mix");
-        assert_eq!(family_of(&axes(&[("provenance", "STAGE")])), "stage");
-        assert_eq!(family_of(&axes(&[("provenance", "SWIRecon")])), "swi");
+        // by its axes alone, as before any route cited: what made it
+        let family = |a: &Axes| family_of(acquisition_family(&[], a), a);
+        assert_eq!(family(&axes(&[("provenance", "SyMRI")])), "symri");
+        assert_eq!(family(&axes(&[("provenance", "EPIMix")])), "mix");
+        assert_eq!(family(&axes(&[("provenance", "NeuroMix")])), "mix");
+        assert_eq!(family(&axes(&[("provenance", "STAGE")])), "stage");
+        assert_eq!(family(&axes(&[("provenance", "SWIRecon")])), "swi");
         assert_eq!(
-            family_of(&axes(&[("provenance", "ProjectionDerived")])),
+            family(&axes(&[("provenance", "ProjectionDerived")])),
             "derived"
         );
         assert_eq!(
-            family_of(&axes(&[("provenance", "SubtractionDerived")])),
+            family(&axes(&[("provenance", "SubtractionDerived")])),
             "derived"
         );
-        assert_eq!(family_of(&axes(&[("disposition", "reformat")])), "derived");
-        assert_eq!(family_of(&axes(&[("body_part", "spine")])), "body");
-        assert_eq!(family_of(&axes(&[("body_part", "neck")])), "body");
+        assert_eq!(family(&axes(&[("disposition", "reformat")])), "derived");
+        assert_eq!(family(&axes(&[("body_part", "spine")])), "body");
+        assert_eq!(family(&axes(&[("body_part", "neck")])), "body");
         // what made it before where it is
         assert_eq!(
-            family_of(&axes(&[("provenance", "SyMRI"), ("body_part", "spine")])),
+            family(&axes(&[("provenance", "SyMRI"), ("body_part", "spine")])),
             "symri"
         );
-        assert_eq!(family_of(&axes(&[("body_part", "brain")])), "plain");
-        assert_eq!(family_of(&axes(&[("provenance", "RawRecon")])), "plain");
+        assert_eq!(family(&axes(&[("body_part", "brain")])), "plain");
+        assert_eq!(family(&axes(&[("provenance", "RawRecon")])), "plain");
+        assert_eq!(acquisition_family(&[], &axes(&[("base", "T1w")])), None);
+    }
+
+    #[test]
+    fn an_acquisition_s_own_images_join_the_family_of_the_route_that_decided_them() {
+        // 2026-10-14: the routes call what an acquisition's scanner acquired
+        // RawRecon and an SWI's minIP ProjectionDerived; the rule set their
+        // evidence cites says which acquisition made them.
+        let routes = |sets: &[&str]| sets.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let family = |sets: &[&str], a: &Axes| {
+            let acquisition = acquisition_family(&routes(sets), a);
+            (acquisition, family_of(acquisition, a))
+        };
+        // SyMRI's multi-dynamic multi-echo acquisition, a working scan
+        let mdme = axes(&[
+            ("provenance", "RawRecon"),
+            ("technique", "MDME"),
+            ("disposition", "working_scan"),
+        ]);
+        assert_eq!(
+            family(&["symri", "disposition"], &mdme),
+            (Some("symri"), "symri")
+        );
+        // an SWI's magnitude, its phase, its minIP and its processed image
+        let magnitude = axes(&[("provenance", "RawRecon"), ("base", "T2*w")]);
+        let phase = axes(&[("provenance", "RawRecon")]);
+        let minip = axes(&[
+            ("provenance", "ProjectionDerived"),
+            ("construct", "MinIP"),
+            ("base", "SWI"),
+            ("disposition", "reformat"),
+        ]);
+        let swi = axes(&[("provenance", "SWIRecon"), ("construct", "SWI")]);
+        for a in [&magnitude, &phase, &minip, &swi] {
+            assert_eq!(
+                family(&["swi", "body_part"], a),
+                (Some("swi"), "swi"),
+                "{a:?}"
+            );
+        }
+        // a SyMRI or STAGE projection or reformat stays with its acquisition
+        let reformat = axes(&[
+            ("provenance", "ProjectionDerived"),
+            ("disposition", "reformat"),
+        ]);
+        assert_eq!(family(&["symri"], &reformat), (Some("symri"), "symri"));
+        assert_eq!(family(&["stage"], &reformat), (Some("stage"), "stage"));
+        // the mix sequences are one route
+        assert_eq!(family(&["epimix"], &magnitude), (Some("mix"), "mix"));
+        // what no route decided is grouped as before
+        assert_eq!(family(&["base", "construct"], &minip), (None, "derived"));
+        assert_eq!(family(&[], &phase), (None, "plain"));
+        // a route that entered and had nothing left to decide (a display
+        // composite) is told by the provenance it entered on
+        let composite = axes(&[
+            ("provenance", "SyMRI"),
+            ("disposition", "display_composite"),
+        ]);
+        assert_eq!(family(&["display"], &composite), (Some("symri"), "symri"));
     }
 
     #[test]

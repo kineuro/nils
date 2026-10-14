@@ -969,15 +969,24 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
             // stack is left alone. Without this, every re-run rewrites every
             // stack that ever fell back, which is the incremental promise
             // broken for exactly the stacks that cost the most.
-            let fell_back = was
-                .as_ref()
-                .is_some_and(|w| w.content == planned.content && w.route == "sourcedata");
+            // Only a stack planned to be converted can have fallen back: one
+            // planned as DICOM owns its directory (no stem) and was never
+            // refused, whatever route its last state named (a folder's
+            // working scan was `sourcedata` before 2026-10-14).
+            let fell_back = planned.place.stem.is_some()
+                && was
+                    .as_ref()
+                    .is_some_and(|w| w.content == planned.content && w.route == "sourcedata");
             if fell_back && route != "sourcedata" {
                 route = "sourcedata".to_string();
                 place = planned.fallback.clone();
             }
             *report.routes.entry(route.clone()).or_insert(0) += 1;
+            // the folders of their own the raw tree holds, which `.bidsignore`
+            // lists: a converted stack's directory (a folder's working scan
+            // is in the DICOM export, which the validator does not read)
             if route == "folder"
+                && place.stem.is_some()
                 && let Some((_, name)) = place.dir.rsplit_once('/')
             {
                 report.folders.insert(name.to_string());
@@ -1025,7 +1034,11 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
             // Record 55 C4 (2026-10-09): a stack whose DICOM export the last
             // version wrote and this one does not, or the other way round,
             // is written again, because its files are not the same files.
-            let dicom = settings.layout == Layout::Bids && settings.places.dicom.carries(&route);
+            // Only a converted stack is exported: one written as DICOM owns
+            // its directory and is its own.
+            let dicom = settings.layout == Layout::Bids
+                && place.stem.is_some()
+                && settings.places.dicom.carries(&route);
             if (!change.is_work() || change == crate::version::Change::Moved)
                 && was.as_ref().is_some_and(|w| w.has_dicom() != dicom)
             {
@@ -1091,8 +1104,13 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
                     digest: String::new(),
                     extensions: Vec::new(),
                 });
+                // the files are the last version's; the route is this
+                // version's word for where they are, which a stack whose
+                // place stayed can change (a folder's working scan, named
+                // `sourcedata` before 2026-10-14 and `folder` since)
                 State {
                     place: job.place.clone(),
+                    route: job.route.clone(),
                     ..was
                 }
             }
@@ -2057,23 +2075,20 @@ impl Planner<'_> {
         if let crate::bids::place::Route::Nowhere(why) = route {
             return Decision::Nowhere { unjudged, why };
         }
-        let mut place = place_of(&route, self.layout, code, &label, &folder, &stem, placed);
-        // Record 55 C4 (2026-10-09): the working scan of a stack set in a
-        // folder of its own, SyMRI's multi-dynamic multi-echo acquisition,
-        // is not an image to convert and is what SyMRI's pipeline reads. It
-        // is kept as DICOM where the export puts the rest of SyMRI.
-        if route == crate::bids::place::Route::SourceData
-            && self.options.synthetic == crate::bids::place::Synthetic::Folder
-            && placed.and_then(|p| p.disposition.as_deref()) == Some("working_scan")
-            && let Some(name) = placed.and_then(|p| p.folder.as_deref())
-        {
-            // By its descriptive name, which §9.1 made unique in the
-            // session: a working scan takes no part in a BIDS name conflict.
-            place = Place::dir(crate::bids::place::dicom_dir(
-                &format!("sub-{code}/ses-{label}/anat/{name}"),
-                &unofficial(code, &label, &stem),
-            ));
-        }
+        // The earlier synthetic choices use no folder of their own (record 55
+        // C4), so a stack they keep as DICOM is under its datatype, not
+        // under the folder the descriptive layout gives it (SyMRI's).
+        let folder = match (self.layout, self.options.synthetic, placed) {
+            (Layout::Bids, crate::bids::place::Synthetic::Anat, Some(p))
+            | (Layout::Bids, crate::bids::place::Synthetic::Derivatives, Some(p)) => {
+                match p.folder.as_deref() {
+                    Some(own) if folder == format!("anat/{own}") => "anat".to_string(),
+                    _ => folder,
+                }
+            }
+            _ => folder,
+        };
+        let place = place_of(&route, self.layout, code, &label, &folder, &stem, placed);
         let fallback = match (&route, &place.stem) {
             // Record 55 C4 (2026-10-09): a stack in a folder of its own that
             // the converter refuses is DICOM where the export would have put
@@ -2082,7 +2097,9 @@ impl Planner<'_> {
             (crate::bids::place::Route::Folder(_), Some(name)) => {
                 Place::dir(crate::bids::place::dicom_dir(&place.dir, name))
             }
-            (crate::bids::place::Route::SourceData, None) => place.clone(),
+            // DICOM already: nothing for a converter to refuse
+            (crate::bids::place::Route::SourceData, None)
+            | (crate::bids::place::Route::FolderSource(_), None) => place.clone(),
             _ => place_of(
                 &crate::bids::place::Route::SourceData,
                 self.layout,
@@ -2343,6 +2360,15 @@ fn place_of(
             format!("{session}/anat/{name}"),
             folder_stem(code, label, stem, placed),
         ),
+        // Record 55 C4 (2026-10-09): the folder's working scan, SyMRI's
+        // acquisition, kept as DICOM in the folder's place of the DICOM
+        // export, beside the slices of the folder's converted stacks. By
+        // its descriptive name, which §9.1 made unique in the session: a
+        // working scan takes no part in a BIDS name conflict.
+        Route::FolderSource(name) => Place::dir(crate::bids::place::dicom_dir(
+            &format!("{session}/anat/{name}"),
+            &unofficial(code, label, stem),
+        )),
         // Outside the standard, so the entity set is ours and a `.bidsignore`
         // line says the standard does not know it.
         Route::Beside(what) => Place::file(
@@ -3551,8 +3577,10 @@ fn write_bids(
     if std::fs::create_dir_all(&staging).is_err() {
         return vec![Err("no directory to stage into".to_string())];
     }
-    // `sourcedata` is the source, so the scrub is the whole of the work.
-    if job.route == "sourcedata" {
+    // `sourcedata` is the source, so the scrub is the whole of the work; so
+    // is a folder's working scan (record 55 C4), which owns its directory as
+    // every stack kept as DICOM does, where a converted one has a file stem.
+    if job.route == "sourcedata" || job.place.stem.is_none() {
         std::fs::remove_dir_all(&staging).ok();
         return write_dicom(job, plan, root, &job.place.dir);
     }
@@ -4060,9 +4088,12 @@ pub struct ScanName {
     pub bids: Option<String>,
     /// The BIDS datatype: `anat`, `dwi`, `func`, `perf`, `fmap`, or `other`
     /// for everything else (scouts, working scans, what nothing sorted).
+    /// The working scan of a folder of its own, SyMRI's acquisition, is
+    /// `anat`, in its folder (record 55 C4).
     pub datatype: &'static str,
     /// The folder the descriptive layout puts it in (`anat`, `anat/SyMRI`,
-    /// `dwi`, `localizer`, `misc`, ...).
+    /// `dwi`, `localizer`, `misc`, ...): SyMRI's images, its acquisition
+    /// among them, in `anat/SyMRI`.
     pub folder: String,
     /// Every decided axis, as the registry stores it, joined by `,`.
     pub axes: BTreeMap<String, String>,
@@ -4219,7 +4250,21 @@ pub fn name_of(
         dwi_directions: facts.dwi_directions,
     };
     let descriptive = name::describe(&fields, true, true);
-    let folder = folder_of(get("directory_type"), get("provenance"));
+    // the folder of its own the pack gives it under `anat/` (record 55 C4):
+    // SyMRI's, which holds its acquisition too, told by its technique
+    let own = pack.and_then(|pack| {
+        pack.bids
+            .folder_of(
+                get("provenance")
+                    .and_then(|v| id_of("provenance", v))
+                    .as_deref(),
+                get("technique")
+                    .and_then(|v| id_of("technique", v))
+                    .as_deref(),
+            )
+            .map(str::to_string)
+    });
+    let folder = folder_of(get("directory_type"), get("provenance"), own.as_deref());
     let built = match pack {
         Some(pack) => {
             let constructs = ids_of("construct", get("construct"));
@@ -4287,6 +4332,11 @@ pub fn name_of(
         None => None,
     };
     let datatype = match get("disposition") {
+        // Record 55 C4 (2026-10-09): the working scan of a folder of its own,
+        // SyMRI's acquisition, is anatomical and in the folder with the rest
+        // of SyMRI (`anat/SyMRI`), as a release keeps it; any other working
+        // scan, and a scout, is shown under other (2026-10-14)
+        Some("working_scan") if own.is_some() => "anat",
         Some("scout" | "working_scan") => "other",
         _ => datatype_of(built.as_ref().map(|(d, _)| *d), get("directory_type")),
     };
@@ -4410,7 +4460,6 @@ fn places(
         let empty = BTreeMap::new();
         let a = axes.get(&stack).unwrap_or(&empty);
         let get = |k: &str| a.get(k).map(String::as_str).filter(|v| !v.is_empty());
-        let folder = folder_of(get("directory_type"), get("provenance"));
         // §9.2. Every axis value is read as an **identity** and not as what a
         // row stores: `base` stores `T2*w` and its identity is `T2starw`,
         // `post_contrast` stores `1` and its identity is `given`. Both names
@@ -4539,6 +4588,11 @@ fn places(
             .bids
             .folder_of(provenance.as_deref(), technique.as_deref())
             .map(str::to_string);
+        let folder = folder_of(
+            get("directory_type"),
+            get("provenance"),
+            own_folder.as_deref(),
+        );
         extra.insert(
             stack,
             (
@@ -5050,7 +5104,16 @@ fn first_int(text: &str) -> Option<i64> {
 /// v0 sends a SyMRI to `anat/SyMRI` under a flag, and an SWI, a STAGE and a
 /// projection to `anat` whatever their intent says. The grouping is kept
 /// because it is what people have on disk.
-fn folder_of(datatype: Option<&str>, provenance: Option<&str>) -> String {
+///
+/// `own` is the folder of its own the pack gives the stack under `anat/`
+/// (its BIDS mapping's `folders`, record 55 C4), which also claims SyMRI's
+/// acquisition by its technique: the pack calls the images the scanner
+/// acquired `RawRecon` since MRI pack 0.9.0, and v0, which called them
+/// SyMRI, kept them in `anat/SyMRI` with the rest (2026-10-14).
+fn folder_of(datatype: Option<&str>, provenance: Option<&str>, own: Option<&str>) -> String {
+    if let Some(own) = own {
+        return format!("anat/{own}");
+    }
     match provenance {
         Some("SyMRI") => "anat/SyMRI".to_string(),
         Some("SWIRecon") | Some("STAGE") | Some("ProjectionDerived") => "anat".to_string(),
@@ -5385,6 +5448,77 @@ fn raise_shared(store: &mut Store, report: &Report, groups: &[SharedGroup]) -> R
 mod tests {
     use super::*;
     use nils_dicom::synth::TempDir;
+
+    /// The MRI pack as the repository holds it.
+    fn mri() -> &'static nils_pack::pack::Pack {
+        static PACK: std::sync::OnceLock<nils_pack::pack::Pack> = std::sync::OnceLock::new();
+        PACK.get_or_init(|| {
+            let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packs/mri");
+            nils_pack::load(&dir, None).expect("the MRI pack loads")
+        })
+    }
+
+    fn stored(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn symri_s_acquisition_is_shown_in_anat_in_its_folder() {
+        // Record 55 C4 (2026-10-09): SyMRI stays together, its acquisition
+        // included. The pack calls the acquisition RawRecon and a working
+        // scan, which the scans door showed under other, in `anat`
+        // (2026-10-14): it is anatomical, in `anat/SyMRI` with the rest.
+        let facts = nils_classify::effect::NameFacts {
+            orientation: Some("AXIAL".into()),
+            mr_acquisition_type: Some("2D".into()),
+            ..Default::default()
+        };
+        let acquisition = stored(&[
+            ("provenance", "RawRecon"),
+            ("technique", "MDME"),
+            ("construct", "Magnitude,ND"),
+            ("directory_type", "anat"),
+            ("disposition", "working_scan"),
+            ("convertible", "no"),
+        ]);
+        let n = name_of(Some(mri()), &acquisition, &facts);
+        assert_eq!((n.datatype, n.folder.as_str()), ("anat", "anat/SyMRI"));
+        // a working scan never takes its BIDS name
+        assert_eq!(n.bids, None);
+        // and QALAS's, told by its technique as well
+        let mut qalas = acquisition.clone();
+        qalas.insert("technique".into(), "QALAS".into());
+        let n = name_of(Some(mri()), &qalas, &facts);
+        assert_eq!((n.datatype, n.folder.as_str()), ("anat", "anat/SyMRI"));
+        // its synthetic contrast, in the same folder, under its BIDS name
+        let synthetic = stored(&[
+            ("provenance", "SyMRI"),
+            ("technique", "MDME"),
+            ("base", "T1w"),
+            ("construct", "SyntheticT1w"),
+            ("directory_type", "anat"),
+            ("disposition", "scanner_derived"),
+        ]);
+        let n = name_of(Some(mri()), &synthetic, &facts);
+        assert_eq!((n.datatype, n.folder.as_str()), ("anat", "anat/SyMRI"));
+        assert!(n.bids.is_some_and(|b| b.ends_with("_T1w")));
+        // any other working scan, and a scout, is shown under other
+        let calibration = stored(&[
+            ("provenance", "Calibration"),
+            ("directory_type", "anat"),
+            ("disposition", "working_scan"),
+        ]);
+        let n = name_of(Some(mri()), &calibration, &facts);
+        assert_eq!((n.datatype, n.folder.as_str()), ("other", "anat"));
+        let scout = stored(&[("directory_type", "localizer"), ("disposition", "scout")]);
+        assert_eq!(name_of(Some(mri()), &scout, &facts).datatype, "other");
+        // with no pack served nothing knows SyMRI's folder by its technique
+        let n = name_of(None, &acquisition, &facts);
+        assert_eq!((n.datatype, n.folder.as_str()), ("other", "anat"));
+    }
 
     fn state(place: Place, extensions: &[&str]) -> State {
         let files = match extensions.is_empty() {

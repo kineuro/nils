@@ -679,22 +679,64 @@ fn symri_is_anatomical_in_its_own_folder_and_its_dicom_is_exported() {
         !written.iter().any(|f| f.starts_with("derivatives/")),
         "{written:?}"
     );
-    assert_eq!(report.routes.get("folder"), Some(&2), "{report:?}");
     // The multi-dynamic multi-echo acquisition is a working scan, not an
-    // image to convert, and it is what SyMRI's pipeline reads: its slices are
+    // image to convert, and it is what SyMRI's pipeline reads: it goes to
+    // SyMRI's folder with the two synthetic contrasts (2026-10-14: the
+    // folder route, where it was sourcedata's before), and its slices are
     // DICOM in SyMRI's folder of the export, never in the descriptive
     // `sourcedata/` tree.
+    assert_eq!(report.routes.get("folder"), Some(&3), "{report:?}");
+    assert_eq!(report.routes.get("sourcedata"), None, "{report:?}");
     let acquisition: Vec<&String> = written
         .iter()
         .filter(|f| {
-            f.starts_with("sourcedata/dicom/")
+            f.starts_with("sourcedata/dicom/sub-")
+                && f.contains("/ses-")
                 && f.contains("/anat/SyMRI/")
                 // MRI pack 1.2.0 (ruling 17): its stored component, Magnitude
                 && f.contains("MDMEMagnitudeND/")
         })
         .collect();
     assert_eq!(acquisition.len(), 4, "{written:?}");
+    assert!(
+        acquisition.iter().all(|f| f.ends_with(".dcm")),
+        "{acquisition:?}"
+    );
+    // converted nowhere: no image or sidecar of it in the raw tree
+    assert!(
+        !written
+            .iter()
+            .any(|f| f.starts_with("sub-") && f.contains("MDMEMagnitudeND")),
+        "{written:?}"
+    );
     assert!(!written.iter().any(|f| kept_as_dicom(f)), "{written:?}");
+    // and the release's state says where it went: the folder, as DICOM
+    {
+        let store = reg.store();
+        let rows = store
+            .query(
+                &format!(
+                    "SELECT route, dir, stem FROM {} WHERE dir LIKE '%MDMEMagnitudeND%'",
+                    store.qualified("release_stack")
+                ),
+                &[],
+            )
+            .unwrap();
+        assert_eq!(rows.len(), 1, "one acquisition");
+        assert_eq!(rows[0].text(0).unwrap(), "folder");
+        assert!(
+            rows[0]
+                .text(1)
+                .unwrap()
+                .starts_with("sourcedata/dicom/sub-")
+        );
+        assert!(rows[0].text(1).unwrap().contains("/anat/SyMRI/"));
+        assert_eq!(
+            rows[0].opt_text(2).unwrap(),
+            None,
+            "DICOM owns its directory"
+        );
+    }
 
     // The DICOM export: each NIfTI's file name, without the extension, is a
     // folder under `sourcedata/dicom/` at the NIfTI's path, holding its four
@@ -817,7 +859,7 @@ fn the_earlier_synthetic_choices_still_place_symri_without_a_folder() {
             },
             Some(&converter),
         );
-        run::run(&mut reg, &s).unwrap();
+        let report = run::run(&mut reg, &s).unwrap();
         let written = files_under(out.path());
         assert!(
             !written.iter().any(|f| f.contains("/SyMRI/")),
@@ -829,7 +871,114 @@ fn the_earlier_synthetic_choices_still_place_symri_without_a_folder() {
                 && f.contains("rec-SyMRI")),
             "{choice:?}: {written:?}"
         );
+        // the acquisition is the source, under its datatype, in no folder
+        assert_eq!(report.routes.get("folder"), None, "{report:?}");
+        assert_eq!(report.routes.get("sourcedata"), Some(&1), "{report:?}");
+        // under its descriptive name, as every stack in `sourcedata` is
+        assert!(
+            written
+                .iter()
+                .any(|f| f.starts_with("sourcedata/dicom/sub-")
+                    && f.contains("/anat/Ax_2D_MDME_Magnitude-ND/")
+                    && f.ends_with(".dcm")),
+            "{choice:?}: {written:?}"
+        );
     }
+}
+
+#[test]
+fn a_release_made_before_names_symri_s_acquisition_in_its_folder_without_writing_it_again() {
+    // Until 2026-10-14 a release planned SyMRI's acquisition as a working
+    // scan in `sourcedata` and put its slices in SyMRI's folder of the
+    // DICOM export all the same. Its files are where they were; a re-run
+    // writes nothing and its state names the folder.
+    let Some(converter) = converter() else { return };
+    let source = symri_tree();
+    let home_dir = TempDir::new("bids-home");
+    let out = TempDir::new("bids-out");
+    let (_home, mut reg) = registry(&home_dir, &source);
+    let policy = Policy::default();
+    let scheme = SessionScheme::default();
+    let s = settings(
+        out.path(),
+        &policy,
+        &scheme,
+        Options::default(),
+        Some(&converter),
+    );
+    run::run(&mut reg, &s).unwrap();
+    let written = files_under(out.path());
+    let route_of_acquisition = |reg: &mut Registry| -> String {
+        let store = reg.store();
+        let rows = store
+            .query(
+                &format!(
+                    "SELECT route FROM {} WHERE dir LIKE '%MDMEMagnitudeND%'",
+                    store.qualified("release_stack")
+                ),
+                &[],
+            )
+            .unwrap();
+        rows[0].text(0).unwrap().to_string()
+    };
+    // the state as the release before this one wrote it
+    {
+        let store = reg.store();
+        store
+            .execute(
+                &format!(
+                    "UPDATE {} SET route = 'sourcedata' WHERE dir LIKE '%MDMEMagnitudeND%'",
+                    store.qualified("release_stack")
+                ),
+                &[],
+            )
+            .unwrap();
+    }
+    assert_eq!(route_of_acquisition(&mut reg), "sourcedata");
+    let again = run::run(&mut reg, &s).unwrap();
+    assert_eq!(again.written, 0, "{again:?}");
+    assert_eq!(again.rewritten, 0, "{again:?}");
+    assert_eq!(again.routes.get("folder"), Some(&3), "{again:?}");
+    assert_eq!(files_under(out.path()), written);
+    assert_eq!(route_of_acquisition(&mut reg), "folder");
+}
+
+#[test]
+fn symri_s_acquisition_is_with_symri_in_the_descriptive_layout_too() {
+    // v0's grouping, which the descriptive layout keeps: SyMRI's images in
+    // `anat/SyMRI`, its acquisition among them, though the pack has called
+    // what the scanner acquired RawRecon since MRI pack 0.9.0.
+    let source = symri_tree();
+    let home_dir = TempDir::new("bids-home");
+    let out = TempDir::new("bids-out");
+    let (_home, mut reg) = registry(&home_dir, &source);
+    let policy = Policy::default();
+    let scheme = SessionScheme::default();
+    let mut s = settings(out.path(), &policy, &scheme, Options::default(), None);
+    s.layout = Layout::Descriptive;
+    run::run(&mut reg, &s).unwrap();
+    let written = files_under(out.path());
+    let in_symri: std::collections::BTreeSet<String> = written
+        .iter()
+        .filter(|f| f.starts_with("sub-") && f.contains("/anat/SyMRI/"))
+        .map(|f| f.rsplit_once('/').unwrap().0.to_string())
+        .collect();
+    // the acquisition and its two synthetic contrasts, a folder of slices each
+    assert_eq!(in_symri.len(), 3, "{written:?}");
+    assert!(
+        in_symri
+            .iter()
+            .any(|d| d.contains("MDME") && d.contains("Magnitude")),
+        "{in_symri:?}"
+    );
+    // the MPRAGE is in `anat` as before
+    assert!(
+        written.iter().any(|f| f.starts_with("sub-")
+            && f.contains("/anat/")
+            && f.contains("MPRAGE")
+            && !f.contains("/SyMRI/")),
+        "{written:?}"
+    );
 }
 
 #[test]
