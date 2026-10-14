@@ -234,7 +234,10 @@ mod tests {
     #[test]
     fn a_new_tree_names_its_series_folders_by_number_and_description() {
         let f = series(Some(7), Some("t1_mprage_sag 1mm"));
-        assert_eq!(series_folder(SeriesFolders::Description, &f), "007-t1-mprage-sag-1mm");
+        assert_eq!(
+            series_folder(SeriesFolders::Description, &f),
+            "007-t1-mprage-sag-1mm"
+        );
         let rel = relative("abc", &f, SeriesFolders::Description);
         assert!(rel.ends_with("/007-t1-mprage-sag-1mm/00001.dcm"), "{rel}");
         // punctuation runs become one hyphen, none at either end
@@ -248,17 +251,30 @@ mod tests {
         assert_eq!(series_folder(SeriesFolders::Number, &f), "007");
         assert!(relative("abc", &f, SeriesFolders::Number).ends_with("/007/00001.dcm"));
         assert_eq!(SeriesFolders::of("number"), Some(SeriesFolders::Number));
-        assert_eq!(SeriesFolders::of("description"), Some(SeriesFolders::Description));
-        assert_eq!(SeriesFolders::of(SeriesFolders::Description.name()), Some(SeriesFolders::Description));
+        assert_eq!(
+            SeriesFolders::of("description"),
+            Some(SeriesFolders::Description)
+        );
+        assert_eq!(
+            SeriesFolders::of(SeriesFolders::Description.name()),
+            Some(SeriesFolders::Description)
+        );
         assert_eq!(SeriesFolders::of("other"), None);
     }
 
     #[test]
     fn an_empty_description_leaves_the_number_alone() {
         for d in [None, Some(""), Some("   "), Some("***"), Some("磁気共鳴")] {
-            assert_eq!(series_folder(SeriesFolders::Description, &series(Some(12), d)), "012", "{d:?}");
+            assert_eq!(
+                series_folder(SeriesFolders::Description, &series(Some(12), d)),
+                "012",
+                "{d:?}"
+            );
         }
-        assert_eq!(series_folder(SeriesFolders::Description, &series(None, Some("x"))), "000-x");
+        assert_eq!(
+            series_folder(SeriesFolders::Description, &series(None, Some("x"))),
+            "000-x"
+        );
     }
 
     #[test]
@@ -266,7 +282,11 @@ mod tests {
         assert_eq!(reduced("Före kontrast ÅÄÖ"), "Fore-kontrast-AAO");
         assert_eq!(reduced("Straße Æble"), "Strasse-AEble");
         assert_eq!(reduced("T2 тест ax"), "T2-ax");
-        assert!(reduced("ηλ ü ☃ é").chars().all(|c| c.is_ascii_alphanumeric() || c == '-'));
+        assert!(
+            reduced("ηλ ü ☃ é")
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-')
+        );
     }
 
     #[test]
@@ -276,7 +296,10 @@ mod tests {
         assert_eq!(r, "a".repeat(39), "the cut fell on a hyphen, which goes");
         let r = reduced(&"x".repeat(100));
         assert_eq!(r.chars().count(), DESCRIPTION_CHARS);
-        let folder = series_folder(SeriesFolders::Description, &series(Some(3), Some(&"ö".repeat(60))));
+        let folder = series_folder(
+            SeriesFolders::Description,
+            &series(Some(3), Some(&"ö".repeat(60))),
+        );
         assert_eq!(folder, format!("003-{}", "o".repeat(40)));
     }
 }

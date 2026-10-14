@@ -1985,7 +1985,12 @@ fn k9_a_new_tree_names_its_series_by_description_and_a_resumed_run_keeps_the_sch
         ]
     );
     let args = rows(&mut registry, "SELECT args FROM job ORDER BY id DESC");
-    assert!(args[0].text(0).unwrap().contains("\"series_folders\":\"description\""));
+    assert!(
+        args[0]
+            .text(0)
+            .unwrap()
+            .contains("\"series_folders\":\"description\"")
+    );
 
     // resumed: a new series of the same tree is named the same way, and
     // nothing written before moves
@@ -2020,7 +2025,12 @@ fn k9_a_tree_begun_before_keeps_its_numbered_folders() {
     assert_eq!(report.files.written, 1, "{report}");
     assert_eq!(series_folders(&anon), vec!["002", "003"]);
     let args = rows(&mut registry, "SELECT args FROM job ORDER BY id DESC");
-    assert!(args[0].text(0).unwrap().contains("\"series_folders\":\"number\""));
+    assert!(
+        args[0]
+            .text(0)
+            .unwrap()
+            .contains("\"series_folders\":\"number\"")
+    );
 
     // and a later run keeps the number, whatever the description
     add_original(&dir, "a/IM_0002", 8, "flair");
