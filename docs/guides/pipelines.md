@@ -507,7 +507,9 @@ A dataset's bring-in ends with `score` (record 55 E5): the image models answer i
 
    The result names each queued run, and each step it skipped with its reason: its pipeline does not score at arrival (`not_on_arrival`), nothing here runs it (`no_pipeline`, `no_model`, `no_runtime`, `no_place`), the machine lacks what it needs (`requirements`), or the person who brought the dataset in may not run a pipeline (`no_grant`: a run reads pixels, so it needs Pipelines work at detail quasi). The bring-in itself never fails because of it, and a bring-in that read nothing new queues no score.
 
-A pipeline scores at arrival with `x-nils.on-arrival: true`, or with the parameters such a run is given, `x-nils.on-arrival: {params: {cache_fill: touched}}`.
+A pipeline scores at arrival with `x-nils.on-arrival: true`, or with the parameters such a run is given, `x-nils.on-arrival: {params: {cache: /cache, overlap: "off", cache_fill: touched}}`, as body part's does: at arrival its stages run one after the other with the slice cache, and a pass over scans the registry holds already runs them overlapped without it.
+
+A unit may ask for every core of the lane, `x-nils.needs: {cores: lane, cores-input: threads}`: the run is given as many as the lane's budget holds (`nils pipeline lane`), its threads parameter is set to them, never above the parameter's maximum, and the pre-flight shows the number. Body part's pipeline does, so a lane of 48 cores runs it with 48 workers.
 
 ## Re-score from the slice cache
 
@@ -519,7 +521,15 @@ The slice cache keeps the small pictures a model reads of each scan (record 55 E
    nils model choose bodypart-fusion@r8 --why "the new calibration"
    ```
 
-2. Run the step over the dataset again, from the desk's dataset page or its door (`POST /api/datasets/{name}/steps/body_part/run`). The run reads each scan's inputs from the cache where it holds them and reads the files of the rest.
+2. Run the model over the dataset's scans again with the cache:
+
+   ```sh
+   nils run bodypart-infer-fusion --select selection:<the dataset's stacks>@1 --param cache=/cache \
+     --model bodypart-tiny@r7 --model bodypart-fusion@r7 --model bodypart-fusion-coarse@r7 \
+     --model bodypart-student@s1-r7 --model bodypart-defer@d3-r7 --model bodypart-cascade@r7-fast
+   ```
+
+   The models are the cascade and its parts, in the order the body-part step gives them. The run reads each scan's inputs from the cache where it holds them and reads the files of the rest. A run from the desk's dataset page or its door (`POST /api/datasets/{name}/steps/body_part/run`) is a pass over scans the registry holds: it takes body part's fast path, the stages overlapped in one worker pool with a worker a core of the lane, and reads no cache (record 55 T24; the cache is filled at arrival, for new data only).
 
 3. See what the cache holds:
 

@@ -993,12 +993,15 @@ pub(crate) fn check(registry: &mut Registry, asked: &Asked<'_>) -> Result<Value,
             asked.pipeline
         ));
     }
-    let d = descriptor::from_value(p.descriptor.clone()).map_err(|e| {
-        format!(
-            "{}: the catalog's descriptor no longer checks: {e}",
-            p.label()
-        )
-    })?;
+    let d = descriptor::from_value(p.descriptor.clone())
+        .map_err(|e| {
+            format!(
+                "{}: the catalog's descriptor no longer checks: {e}",
+                p.label()
+            )
+        })?
+        // record 55 T24: as the run sizes it, to this lane's cores
+        .sized_to(crate::pipelines::lane_of(registry).ledger.cores);
     let mut blockers: Vec<String> = Vec::new();
     // a run taken up again goes on with its pipeline whatever the catalog
     // says of it since, and with the parameters it recorded

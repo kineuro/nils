@@ -3781,6 +3781,116 @@ fn an_optional_gpu_need_takes_the_leased_card_under_apptainer_and_else_the_cpu()
     );
 }
 
+/// Record 55 T24: a unit that asks every core of the lane (`cores: lane`)
+/// is given the lane's cores: the lane counts that many, the container is
+/// told them as NILS_CORES, and its threads parameter is set to them; a
+/// run that asks for more threads than the lane has is refused.
+#[test]
+fn a_unit_that_asks_the_lane_s_cores_is_given_them() {
+    if !have("python3") {
+        eprintln!(
+            "python3 is not installed; the stand-in podman needs it, so this test is skipped"
+        );
+        return;
+    }
+    let lab = Lab::new("pipelines-lane-cores");
+    lab.add_descriptor(
+        "wide",
+        &format!(
+            r#"name: wide
+schema-version: "0.5"
+tool-version: "1"
+container-image:
+  type: docker
+  image: "example.org/wide@sha256:{hex}"
+inputs:
+  - id: threads
+    name: Threads
+    type: Number
+    integer: true
+    minimum: 1
+    maximum: 64
+    value-key: "[THREADS]"
+    optional: true
+command-line: |
+  python3 -c '
+  import json, os, sys
+  m = json.load(open(sys.argv[1])); out = sys.argv[2]
+  units = []
+  for s in m["stacks"]:
+      u = s["unit"]; d = os.path.join(out, u); os.makedirs(d, exist_ok=True)
+      open(os.path.join(d, "out.txt"), "w").write("%s %s\n" % (sys.argv[3], os.environ["NILS_CORES"]))
+      units.append({{"unit_id": u, "status": "succeeded", "derivatives": [u + "/out.txt"]}})
+  json.dump({{"schema_version": "1", "units": units}}, open(os.path.join(out, "results.json"), "w"))
+  ' [Manifest] [OutputLocation] [THREADS]
+x-nils:
+  analysis-level: stack
+  input: {{layout: stacks}}
+  outputs:
+    - id: o
+      kind: output
+      path-template: "stack-{{stack}}/out.txt"
+      media-type: text/plain
+  needs: {{cores: lane, memory-gb: 1, cores-input: threads}}
+"#,
+            hex = "e".repeat(64)
+        ),
+    );
+    let told = |run: i64| -> BTreeSet<String> {
+        let dir = lab.work.path().join(format!("derivatives/wide/{run}"));
+        std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .filter_map(|e| std::fs::read_to_string(e.path().join("out.txt")).ok())
+            .map(|s| s.trim().to_string())
+            .collect()
+    };
+    for (cores, run) in [(2, 1), (1, 2)] {
+        lab.ok(
+            &[
+                "pipeline",
+                "lane",
+                "--cores",
+                &cores.to_string(),
+                "--memory-gb",
+                "4",
+            ],
+            None,
+        );
+        let pre = lab.json(&[
+            "run",
+            "wide",
+            "--select",
+            "selection:every@1",
+            "--preflight",
+            "--json",
+        ]);
+        assert_eq!(pre["needs"]["cores"], f64::from(cores), "{pre}");
+        let r = lab.json(&["run", "wide", "--select", "selection:every@1", "--json"]);
+        assert_eq!(r["status"], "done", "{r}");
+        assert_eq!(r["params"]["threads"], cores, "{r}");
+        assert_eq!(
+            told(run),
+            BTreeSet::from([format!("{cores} {cores}")]),
+            "the threads and NILS_CORES of every unit"
+        );
+    }
+    // more threads than the lane's one core: refused before anything runs
+    let (ok, _, err) = lab.run(
+        &[
+            "run",
+            "wide",
+            "--select",
+            "selection:every@1",
+            "--param",
+            "threads=2",
+        ],
+        None,
+    );
+    assert!(!ok);
+    assert!(err.contains("above the 1 cores"), "{err}");
+}
+
 /// Record 55 A5: a release ships the descriptors of its model pipelines,
 /// each naming the image that release built (`pipelines.tar.gz`, checked
 /// by its SHA256SUMS), and `nils pipeline add --release <name>` takes one

@@ -59,18 +59,28 @@
 # the engine lists the rest of each session the run holds part of under
 # stacks.json's context, so a stack's input is the same in any run.
 #
-# Since 0.6.0 (record 55 E5) it keeps the inputs it read in the slice
-# cache and reads them from there before it reads a file: the engine gives
-# a run the site's working place's slice-cache/ at /cache ([Cache]) and
-# names each file's SOP Instance UID and, where a run learnt it, the
-# sha256 of its bytes in stacks.json. The student's slice, the 24-frame
-# planes and the touched planes are found by those identities, so a
-# re-score after a head or calibration update reads no file where the
-# cache holds a stack's inputs, and a miss reads the files as before. Each
-# unit names the sha256 of the files it read whole (`read`), which the
-# engine keeps. A dataset's bring-in runs it over its new stacks without a
-# manual run (x-nils.on-arrival), with the touched planes filled for the
-# cache (cache_fill touched, ruling R5).
+# Since 0.6.0 (record 55 E5) it can keep the inputs it read in the slice
+# cache and read them from there before it reads a file: the engine gives
+# a run the site's working place's slice-cache/ at /cache and names each
+# file's SOP Instance UID and, where a run learnt it, the sha256 of its
+# bytes in stacks.json. The student's slice, the 24-frame planes and the
+# touched planes are found by those identities, so a re-score after a head
+# or calibration update reads no file where the cache holds a stack's
+# inputs, and a miss reads the files as before. Each unit names the sha256
+# of the files it read whole (`read`), which the engine keeps.
+#
+# Two modes (record 55 T24 and E5, 2026-10-14). A pass over stacks the
+# registry holds already runs the graded fast path: the stages overlapped in
+# one worker pool (overlap on), as many workers as the lane has cores
+# (x-nils.needs.cores lane, at most 64, the threads maximum), and no cache,
+# since the overlapped pool reads none. A dataset's bring-in scores its new
+# stacks without a manual run (x-nils.on-arrival) with the slice cache: the
+# stages one after the other (overlap off), the cache read and written at
+# /cache, and the touched planes filled for it (cache_fill touched, ruling
+# R5), as E5 ruled (the cache is filled at arrival for new data only). A
+# re-score that should read the cache asks cache=/cache. Both modes give the
+# same answers (A5.2.3d: the overlap is class I against the sequential
+# path).
 #
 # One image runs it on the CPU and on a card (record 55 A5). Where the lane
 # leases a card (x-nils.needs.gpu optional) the runner gives the container
@@ -133,6 +143,31 @@ inputs:
     value-choices: [none, touched]
     default-value: none
     optional: true
+  - id: overlap
+    name: Overlap
+    type: String
+    description: >-
+      on runs the cascade's stages overlapped in one worker pool, the
+      graded fast path of a pass over stacks the registry holds; off runs
+      them one after the other, which the slice cache needs. With the cache
+      a run goes the sequential way whatever this says.
+    value-key: "[OVERLAP]"
+    command-line-flag: --overlap
+    value-choices: ["on", "off"]
+    default-value: "on"
+    optional: true
+  - id: cache
+    name: Slice cache
+    type: String
+    description: >-
+      /cache reads and keeps the inputs the stages read in the site's
+      slice cache, as scoring at arrival does and a re-score after a head
+      or calibration update may; left out, the run reads and keeps none, as
+      a pass over stacks the registry holds does.
+    value-key: "[CACHE]"
+    command-line-flag: --cache
+    value-choices: ["/cache"]
+    optional: true
   - id: readahead
     name: Read-ahead
     type: Number
@@ -145,7 +180,7 @@ inputs:
     default-value: 4
     optional: true
 
-command-line: "nils-bodypart infer-fusion --stacks [Manifest] --inputs [Inputs] --output [OutputLocation] --cache [Cache] --device auto [THREADS] [READER] [READAHEAD] [CACHE_FILL]"
+command-line: "nils-bodypart infer-fusion --stacks [Manifest] --inputs [Inputs] --output [OutputLocation] --device auto [THREADS] [READER] [READAHEAD] [OVERLAP] [CACHE] [CACHE_FILL]"
 
 output-files:
   - id: scores
@@ -160,10 +195,12 @@ suggested-resources:
 x-nils:
   contract: 1
   analysis-level: stack
-  # record 55 E5: a dataset's new stacks are scored as they arrive, and
-  # the touched planes kept for the cache (ruling R5)
+  # record 55 E5: a dataset's new stacks are scored as they arrive, with
+  # the slice cache, and the touched planes kept for it (ruling R5)
   on-arrival:
     params:
+      cache: /cache
+      overlap: "off"
       cache_fill: touched
   cache:
     inputs:
@@ -233,16 +270,19 @@ x-nils:
   needs:
     # a card where the lane leases one, else the CPU; on a card the run
     # held at most 1.45 GB of it (A5.2.3d, every sample of every card run),
-    # and 4 holds it with a margin
+    # and this image at 48 workers 2.2 GB in both modes; 4 holds it with a
+    # margin
     gpu: optional
     gpu-memory-gb: 4
-    # measured (2026-10-12): the cascade over 19,275 stacks at 32 workers,
-    # twice the cores below, peaked at 10.4 GiB (the PSS of all the run's
-    # processes): the main process 2.2 GiB with stage 1 streamed, a worker
-    # at most 3.3 GiB on its largest stack; 12 holds it with a margin
-    memory-gb: 12
-    cores: 16
+    # every core of the lane, as many workers (at most 64, the threads
+    # maximum): a lane of 48 cores runs 48 workers
+    cores: lane
     cores-input: threads
+    # measured (2026-10-14, this image, 48 workers, the PSS of all the
+    # run's processes): 8.3 GiB on the CPU and 9.9 on a card for a pass,
+    # 8.7 and 9.4 at arrival; earlier 10.4 GiB at 32 workers (2026-10-12).
+    # 16 holds the 64 workers a lane may give with a margin
+    memory-gb: 16
   proposals:
     - axis: body_part
       description: Fine mode, a value of the pack's body_part per stack with the six calibrated probabilities, by the head's digest (by the cascade's, when the run had one)

@@ -30,6 +30,11 @@ pub const UNITS: [&str; 2] = ["together", "apart"];
 /// What a unit is taken to need where the descriptor says nothing: one core
 /// and 2 GB of memory; a GPU unit 8 GB of the card's memory.
 pub const DEFAULT_CORES: u32 = 1;
+
+/// The word of `x-nils.needs.cores` for every core of the lane (record 55
+/// T24): a run sized to the machine it runs on, such as body part's pass
+/// over a registry, whose workers are its cores.
+pub const LANE_CORES: &str = "lane";
 pub const DEFAULT_MEMORY_GB: f64 = 2.0;
 pub const DEFAULT_GPU_MEMORY_GB: f64 = 8.0;
 
@@ -190,6 +195,11 @@ impl Units {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Needs {
     pub cores: u32,
+    /// `cores: lane` (record 55 T24, 2026-10-14): a unit takes every core
+    /// of the lane it runs in, and its `cores-input` is told that many
+    /// (never above the parameter's maximum). Until the descriptor is
+    /// [`Descriptor::sized_to`] a lane, `cores` holds 1.
+    pub lane_cores: bool,
     pub memory_gb: f64,
     /// Of the card's memory, for a unit that takes the GPU.
     pub gpu_memory_gb: f64,
@@ -1068,17 +1078,23 @@ pub fn from_value(document: Value) -> Result<Descriptor, String> {
     if !n.is_null() && !n.is_object() {
         return Err("x-nils.needs is a mapping: gpu, cores, memory-gb, gpu-memory-gb".into());
     }
-    let cores = match &n["cores"] {
-        Value::Null => DEFAULT_CORES,
+    let (cores, lane_cores) = match &n["cores"] {
+        Value::Null => (DEFAULT_CORES, false),
         Value::Number(c) => match c.as_u64() {
-            Some(c) if (1..=4096).contains(&c) => c as u32,
+            Some(c) if (1..=4096).contains(&c) => (c as u32, false),
             _ => {
                 return Err(format!(
-                    "x-nils.needs.cores is a whole number from 1, not {c}"
+                    "x-nils.needs.cores is a whole number from 1, or lane, not {c}"
                 ));
             }
         },
-        other => return Err(format!("x-nils.needs.cores is a whole number, not {other}")),
+        // record 55 T24: every core of the lane the run is given
+        Value::String(s) if s == LANE_CORES => (DEFAULT_CORES, true),
+        other => {
+            return Err(format!(
+                "x-nils.needs.cores is a whole number, or lane, not {other}"
+            ));
+        }
     };
     let positive = |key: &str, default: f64| -> Result<f64, String> {
         match opt_number(n, key, "x-nils.needs.")? {
@@ -1089,6 +1105,7 @@ pub fn from_value(document: Value) -> Result<Descriptor, String> {
     };
     let needs = Needs {
         cores,
+        lane_cores,
         memory_gb: positive("memory-gb", DEFAULT_MEMORY_GB)?,
         gpu_memory_gb: positive("gpu-memory-gb", DEFAULT_GPU_MEMORY_GB)?,
         cores_input: opt_text(n, "cores-input", "x-nils.needs.")?,
@@ -1825,6 +1842,25 @@ impl Descriptor {
     /// same descriptor written with its keys in another order is the same.
     pub fn digest(&self) -> String {
         crate::sha256(crate::canonical(&self.document).as_bytes())
+    }
+
+    /// The descriptor as a lane of `lane_cores` cores runs it (record 55
+    /// T24): one that asks every core of the lane (`cores: lane`) asks that
+    /// many, never above the maximum of the parameter its threads are told
+    /// by, and at least one; any other is as it is.
+    pub fn sized_to(&self, lane_cores: u32) -> Descriptor {
+        let mut d = self.clone();
+        if d.needs.lane_cores {
+            let most = d
+                .needs
+                .cores_input
+                .as_ref()
+                .and_then(|id| d.params.iter().find(|p| &p.id == id))
+                .and_then(|p| p.maximum)
+                .map_or(u32::MAX, |m| m.max(1.0).min(f64::from(u32::MAX)) as u32);
+            d.needs.cores = lane_cores.min(most).max(1);
+        }
+        d
     }
 
     /// Every declared parameter with its value: what was given as
@@ -2594,6 +2630,7 @@ x-nils:
             d.needs,
             Needs {
                 cores: 4,
+                lane_cores: false,
                 memory_gb: 12.0,
                 gpu_memory_gb: 6.0,
                 cores_input: None,
@@ -2700,6 +2737,49 @@ x-nils:
             let e = parse(&with(needs)).unwrap_err();
             assert!(e.contains(words), "{needs}: {e}");
         }
+    }
+
+    /// Record 55 T24: a unit that asks every core of the lane (`cores:
+    /// lane`) asks the lane's cores once the descriptor is sized to the
+    /// lane, its threads parameter told as many, never above the
+    /// parameter's own maximum; a descriptor that names a number stays as
+    /// it is.
+    #[test]
+    fn a_unit_that_asks_the_lane_s_cores_is_sized_to_the_lane() {
+        let base = doc(&format!("antsx/ants@sha256:{HEX}"));
+        let with =
+            |needs: &str| base.replace("  needs: {gpu: optional}", &format!("  needs: {needs}"));
+        let d = parse(&with("{cores: lane, memory-gb: 6, cores-input: dimension}")).unwrap();
+        assert!(d.needs.lane_cores);
+        assert_eq!(d.needs.cores, 1, "unsized, a lane's unit holds one core");
+        // the parameter's maximum is 4: a lane of 48 cores gives it 4, a
+        // lane of 3 gives it 3
+        let big = d.sized_to(48);
+        assert_eq!(big.needs.cores, 4);
+        assert_eq!(big.resolve(&[]).unwrap()["dimension"], 4);
+        let small = d.sized_to(3);
+        assert_eq!(small.needs.cores, 3);
+        assert_eq!(small.resolve(&[]).unwrap()["dimension"], 3);
+        let e = small
+            .resolve(&[("dimension".into(), "4".into())])
+            .unwrap_err();
+        assert!(e.contains("3 cores"), "{e}");
+        assert_eq!(d.sized_to(0).needs.cores, 1);
+        // with no threads parameter, every core of the lane
+        assert_eq!(
+            parse(&with("{cores: lane}"))
+                .unwrap()
+                .sized_to(48)
+                .needs
+                .cores,
+            48
+        );
+        // a number is not sized
+        let fixed = parse(&with("{cores: 2}")).unwrap();
+        assert!(!fixed.needs.lane_cores);
+        assert_eq!(fixed.sized_to(48).needs.cores, 2);
+        let e = parse(&with("{cores: all}")).unwrap_err();
+        assert!(e.contains("or lane"), "{e}");
     }
 
     /// Record 49 A3: a table output declares its format and typed columns,

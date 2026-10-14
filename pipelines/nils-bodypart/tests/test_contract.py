@@ -67,18 +67,18 @@ def entrypoint() -> list[str]:
     return words
 
 
-def container_argv(doc: dict) -> list[str]:
+def container_argv(doc: dict, params: dict | None = None) -> list[str]:
     """What the container runs for a descriptor, as the engine writes it:
     the image's entry point, then the command line with the engine's
-    folders in place and every parameter at its default (one without a
-    default left out)."""
+    folders in place and every parameter at its value in ``params``, else
+    its default (one without either left out)."""
     import shlex
 
     line = doc["command-line"]
     for key, at in {"[Manifest]": "/input/stacks.json", "[Inputs]": "/inputs", "[OutputLocation]": "/output", "[Cache]": "/cache"}.items():
         line = line.replace(key, at)
     for p in doc.get("inputs", []):
-        given = p.get("default-value")
+        given = (params or {}).get(p["id"], p.get("default-value"))
         word = "" if given is None else f"{p.get('command-line-flag', '')} {given}".strip()
         line = line.replace(p["value-key"], word)
     return entrypoint() + shlex.split(line)
@@ -227,7 +227,7 @@ def test_the_fusion_descriptor_declares_its_models_table_and_axes():
     assert {p["axis"] for p in x["proposals"]} == {"body_part", "body_region"}
     # record 55 A5: one image on the CPU and on a card, a card under the
     # lane's lease where it has one
-    assert x["needs"] == {"gpu": "optional", "gpu-memory-gb": 4, "memory-gb": 12, "cores": 16, "cores-input": "threads"}
+    assert x["needs"] == {"gpu": "optional", "gpu-memory-gb": 4, "cores": "lane", "cores-input": "threads", "memory-gb": 16}
     (table,) = x["outputs"]
     assert (table["kind"], table["format"], table["path-template"]) == ("table", "json", "bodypart-fusion/{stack}.json")
     cols = {c["name"]: c.get("type", "number") for c in table["columns"]}
@@ -245,7 +245,7 @@ def test_the_fusion_descriptor_declares_its_models_table_and_axes():
     assert doc["tool-version"] == "0.6.0"
     # record 55 E5: scored at arrival with the touched planes filled, and
     # the slice cache's three input versions, read and written at /cache
-    assert x["on-arrival"] == {"params": {"cache_fill": "touched"}}
+    assert x["on-arrival"] == {"params": {"cache": "/cache", "overlap": "off", "cache_fill": "touched"}}
     assert x["cache"] == {"inputs": ["bodypart-slice-192:v1", "bodypart-planes-b24:v1", "bodypart-planes-touched:v1"]}
     from nils_bodypart import slicecache
 
@@ -256,7 +256,13 @@ def test_the_fusion_descriptor_declares_its_models_table_and_axes():
     a = cli.parser().parse_args(container_argv(doc)[1:])
     assert (a.entry, str(a.inputs), a.threads) == ("infer-fusion", "/inputs", 16)
     assert (a.reader, a.readahead) == ("reduced:touched", 4)
-    assert (str(a.cache), a.cache_fill) == ("/cache", "none")
+    # record 55 T24: a pass over the registry's stacks runs the graded
+    # fast path, the stages overlapped, and reads no cache
+    assert (a.cache, a.overlap, a.cache_fill) == (None, "on", "none")
+    # record 55 E5: at arrival, the stages one after the other, the slice
+    # cache read and written, and the touched planes filled for it
+    b = cli.parser().parse_args(container_argv(doc, x["on-arrival"]["params"])[1:])
+    assert (str(b.cache), b.overlap, b.cache_fill) == ("/cache", "off", "touched")
     # record 55 A5: the card where the runner gives the container one, the
     # CPU where it gives none (the entry point's own default is the CPU)
     assert a.device == "auto"

@@ -4160,6 +4160,9 @@ pub(crate) fn run_command(home: &Home, args: RunArgs) -> Result<(), Exit> {
             p.label()
         ))
     })?;
+    // record 55 T24: a unit that asks every core of the lane asks this
+    // lane's, and its threads parameter is told as many
+    let d = d.sized_to(lane_of(&mut registry).ledger.cores);
     let params = d.resolve(&pairs(&args.params)?).map_err(usage)?;
 
     // where it goes and what runs it; either absent is the capability off
@@ -4718,12 +4721,14 @@ fn resume_command(home: &Home, args: &RunArgs, run_id: i64) -> Result<(), Exit> 
     }
     let p = rows::get(registry.store(), r.pipeline_id)?
         .ok_or_else(|| fail(format!("run {run_id} names a pipeline the catalog lost")))?;
-    let d = descriptor::from_value(p.descriptor.clone()).map_err(|e| {
-        fail(format!(
-            "{}: the catalog's descriptor no longer checks: {e}",
-            p.label()
-        ))
-    })?;
+    let d = descriptor::from_value(p.descriptor.clone())
+        .map_err(|e| {
+            fail(format!(
+                "{}: the catalog's descriptor no longer checks: {e}",
+                p.label()
+            ))
+        })?
+        .sized_to(lane_of(&mut registry).ledger.cores);
     let params = r
         .params
         .as_object()
