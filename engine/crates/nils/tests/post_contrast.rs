@@ -146,50 +146,49 @@ x-nils:
     )
 }
 
-/// The full pipeline's stand-in: its two model inputs, the fusion and the
-/// arms, and a `given` for every stack it is given.
-fn full_stand_in() -> String {
-    format!(
-        r#"# SPDX-License-Identifier: AGPL-3.0-only
-name: postcontrast-full
-schema-version: "0.5"
-tool-version: "1"
-container-image:
-  type: docker
-  image: "example.org/postcontrast-full-stand-in@sha256:{}"
-command-line: |
-  python3 -c '
-  import json, os, sys
-  m = json.load(open(sys.argv[1])); out = sys.argv[2]
-  man = json.load(open(sys.argv[3] + "/manifest.json"))
-  ids = {{x["input"]: x["model_id"] for x in man["models"]}}
-  assert list(ids) == ["fusion", "arms", "cascade"], ids
-  units, proposals = [], []
-  for s in m["stacks"]:
-      u = s["unit"]; d = os.path.join(out, u); os.makedirs(d, exist_ok=True)
-      open(os.path.join(d, "answer.json"), "w").write("{{}}")
-      units.append({{"unit_id": u, "status": "succeeded", "derivatives": [u + "/answer.json"]}})
-      proposals.append({{"stack_id": s["stack_id"], "axis": "post_contrast", "value": "given", "probabilities": {{"given": 0.99, "not_given": 0.01}}, "model_id": ids["cascade"]}})
-  json.dump({{"schema_version": "1", "units": units, "proposals": proposals}}, open(os.path.join(out, "results.json"), "w"))
-  ' [Manifest] [OutputLocation] [Inputs]
-x-nils:
-  analysis-level: stack
-  input: {{layout: stacks, header: true}}
-  inputs:
-    - {{id: fusion, type: model}}
-    - {{id: arms, type: model}}
-    - {{id: cascade, type: model}}
-  outputs:
-    - id: answer
-      kind: output
-      path-template: "stack-{{stack}}/answer.json"
-      media-type: application/json
-  needs: {{gpu: none}}
-  proposals: [{{axis: post_contrast}}]
-"#,
-        "d".repeat(64)
+/// The full pipeline as it ships (`pipelines/nils-postcontrast/postcontrast-full`),
+/// its descriptor unchanged but for the memory and cores it asks, which a
+/// test machine may not have (the runner refuses a unit that asks more
+/// than the machine holds); the image's program is the stand-in
+/// `nils-postcontrast` on the search path ([`FULL_PROGRAM`]).
+fn full_shipped() -> String {
+    let text = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../pipelines/nils-postcontrast/postcontrast-full/nils.job.yml"),
     )
+    .unwrap();
+    assert!(
+        text.contains("    memory-gb: 96\n"),
+        "the shipped need moved"
+    );
+    assert!(text.contains("    cores: 16\n"), "the shipped need moved");
+    text.replace("    memory-gb: 96\n", "    memory-gb: 1\n")
+        .replace("    cores: 16\n", "    cores: 1\n")
+        .replace("  cpu-cores: 16\n", "  cpu-cores: 1\n")
 }
+
+/// A stand-in for the full image's program: it takes the shipped command
+/// line, checks the model inputs it is given are the fusion, the arms and
+/// the cascade in that order, and answers `given` for every stack.
+const FULL_PROGRAM: &str = r#"#!/usr/bin/env python3
+import json, os, sys
+a = sys.argv[1:]
+assert a[0] == "full", a
+arg = lambda k: a[a.index(k) + 1]
+m = json.load(open(arg("--stacks"))); out = arg("--output")
+man = json.load(open(os.path.join(arg("--inputs"), "manifest.json")))
+ids = {x["input"]: x["model_id"] for x in man["models"]}
+assert list(ids) == ["fusion", "arms", "cascade"], ids
+for k in ("--threads", "--memory-gb", "--synthseg-procs"):
+    assert k in a, a
+units, proposals = [], []
+for s in m["stacks"]:
+    u = s["unit"]; d = os.path.join(out, "postcontrast"); os.makedirs(d, exist_ok=True)
+    open(os.path.join(d, f"{s['stack_id']}.json"), "w").write("{}")
+    units.append({"unit_id": u, "status": "succeeded", "derivatives": [f"postcontrast/{s['stack_id']}.json"]})
+    proposals.append({"stack_id": s["stack_id"], "axis": "post_contrast", "value": "given", "probabilities": {"given": 0.99, "not_given": 0.01}, "model_id": ids["cascade"]})
+json.dump({"schema_version": "1", "units": units, "proposals": proposals}, open(os.path.join(out, "results.json"), "w"))
+"#;
 
 struct Home {
     dir: TempDir,
@@ -375,10 +374,11 @@ fn step(doc: &Value, name: &str) -> Value {
 fn fake_path(bin: &TempDir) -> OsString {
     let fake = bin.file("podman", FAKE_PODMAN.as_bytes());
     let no_gpu = bin.file("nvidia-smi", b"#!/bin/sh\nexit 1\n");
+    let full = bin.file("nils-postcontrast", FULL_PROGRAM.as_bytes());
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        for f in [&fake, &no_gpu] {
+        for f in [&fake, &no_gpu, &full] {
             std::fs::set_permissions(f, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
     }
@@ -589,7 +589,7 @@ fn round(pg: Option<(String, String)>) {
     // the cascade and the full pipeline in the catalog
     for (name, text) in [
         ("postcontrast-cascade", cascade_stand_in()),
-        ("postcontrast-full", full_stand_in()),
+        ("postcontrast-full", full_shipped()),
     ] {
         let descriptor = work.file(&format!("{name}.yml"), text.as_bytes());
         let added = home.json(&["pipeline", "add", descriptor.to_str().unwrap(), "--json"]);

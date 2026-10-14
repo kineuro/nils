@@ -1,0 +1,9 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SynthSeg on a card (/opt/tf): FreeSurfer 8.2.0's script and weights in a
+# current TensorFlow, as the post-contrast speed study's round 2 ran it.
+tensorflow[and-cuda]==2.21.0
+tf_keras==2.21.0
+numpy==2.2.6
+scipy==1.18.1
+nibabel==5.4.2
+surfa==0.6.3

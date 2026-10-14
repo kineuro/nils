@@ -1,0 +1,8 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SynthStrip on a card (/opt/st): FreeSurfer 8.2.0's script and weights in
+# PyTorch 2.8.0 with CUDA 12.8 (kernels for current cards), as the
+# post-contrast speed study's round 2 ran it. torch comes from its own index.
+numpy==1.26.4
+scipy==1.13.1
+nibabel==5.4.2
+surfa==0.6.3

@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# The full image's feature environment (/opt/feat): model r1's feature
+# libraries at the versions its study ran them, and the Frangi filter's
+# card port (requirements-card.txt) as the speed study's round 2 ran it.
+numpy==2.2.6
+scipy==1.15.3
+scikit-image==0.25.2
+nibabel==5.3.2
+SimpleITK==2.5.2
+pydicom==3.0.1
