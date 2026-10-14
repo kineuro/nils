@@ -507,9 +507,51 @@ impl<'a> Writer<'a> {
             Unmapped::Subject | Unmapped::Code => Make::Subject,
             Unmapped::Hold => Make::Nothing,
         };
-        let mut resolved = self.resolve_who(&who, now, make)?;
+        // Wave 7a §5.4 and §18: a pseudonymised tree read by its declaration
+        // files no value it cannot read under a study UID. A file whose
+        // PatientID holds one finds only a subject already met, and
+        // otherwise waits, held, for a map or a person, whatever the dataset
+        // says of an identifier no map names
+        let unread: Vec<bool> = parsed
+            .iter()
+            .map(|p| self.resolver.holds(&p.ident))
+            .collect();
+        let mut resolved = match make == Make::Subject && unread.iter().any(|u| *u) {
+            false => self.resolve_who(&who, now, make)?,
+            true => {
+                let (mut read, mut read_at, mut not, mut not_at) =
+                    (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+                for (i, w) in who.into_iter().enumerate() {
+                    match unread[i] {
+                        false => {
+                            read.push(w);
+                            read_at.push(i);
+                        }
+                        true => {
+                            not.push(w);
+                            not_at.push(i);
+                        }
+                    }
+                }
+                let first = self.resolve_who(&read, now, Make::Subject)?;
+                let second = self.resolve_who(&not, now, Make::Nothing)?;
+                let mut found = vec![Found::Unknown; parsed.len()];
+                for (k, i) in read_at.into_iter().enumerate() {
+                    found[i] = first.found[k];
+                }
+                for (k, i) in not_at.into_iter().enumerate() {
+                    found[i] = second.found[k];
+                }
+                Resolved {
+                    found,
+                    matched: first.matched + second.matched,
+                    created: first.created + second.created,
+                    attached: first.attached + second.attached,
+                }
+            }
+        };
         // where it holds, the files a person asked to be coded anyway
-        if make == Make::Nothing && !self.prior_held.is_empty() {
+        if (make == Make::Nothing || unread.iter().any(|u| *u)) && !self.prior_held.is_empty() {
             let anyway: Vec<usize> = (0..parsed.len())
                 .filter(|&i| {
                     resolved.found[i].id().is_none()
@@ -1994,7 +2036,13 @@ impl<'a> Writer<'a> {
                         // detail is the shape of the identifier, which is
                         // what the review item asks about; never the
                         // identifier itself
-                        let shape = nils_dicom::diagnostic::shape(&p.ident.value);
+                        // a file held because its PatientID could not be
+                        // read is asked about by the shape of what PatientID
+                        // holds, which is what a person answers
+                        let shape = match (self.resolver.holds(&p.ident), &p.ident.probe) {
+                            (true, Some(read)) => nils_dicom::diagnostic::shape(read),
+                            _ => nils_dicom::diagnostic::shape(&p.ident.value),
+                        };
                         rows.push(row(
                             &p.path,
                             &p.dir,

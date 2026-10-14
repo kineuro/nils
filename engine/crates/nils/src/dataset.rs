@@ -1898,8 +1898,10 @@ pub(crate) fn identity_from_file(path: &Path) -> Result<Value, String> {
 /// subject holds is that subject's, one of the shape this registry makes
 /// stands as its own code, and one that is neither is no code of this
 /// registry, so a code is derived from it as from any identifier. A value
-/// outside the alphabet falls back to the study UID, as any identifier the
-/// rule cannot read does.
+/// outside the alphabet, or a personnummer, is no code: the rule cannot read
+/// it, and [`stored_rule`] holds such a file rather than filing it under its
+/// study UID. An empty PatientID falls back to the study UID, as v0 filed
+/// it.
 pub(crate) fn anon_rule() -> String {
     "identity:\n  id_type: subject-code\n  from:\n    - field: PatientID\n      pattern: '^(?<id>[0-9a-hjkmnp-tv-z]+)$'\n  code: verbatim\n".to_string()
 }
@@ -1944,6 +1946,10 @@ pub(crate) fn stored_rule(
                 nils_digest::Rule::parse(&id_type_rule(&name)).map_err(|e| e.to_string())?
             }
         };
+        // a value the declaration cannot read is held, never filed under
+        // its study (Wave 7a §5.4 and §18: an unknown subject's files are
+        // held); an empty PatientID falls back to the study as before
+        rule.holds_unread = true;
         rule.source = Some(format!("the pseudonymised tree of the dataset {}", p.name));
         return Ok(Some(rule));
     }

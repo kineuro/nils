@@ -1359,3 +1359,88 @@ fn a_map_releases_the_files_a_digest_held_and_the_next_digest_reads_them_again()
         assert_eq!(items_of(&mut reg, "identity.unmapped").len(), 0, "{name}");
     }
 }
+
+#[test]
+fn a_tree_read_by_its_declaration_holds_what_it_cannot_read() {
+    // Wave 7a §5.4 and §18, found on the development install: a dataset
+    // declared to hold subject codes in PatientID, whose files held another
+    // identifier, had every file filed under its study UID, so one person
+    // with four studies became four subjects. Under the rule the engine
+    // writes for a declaration, a code is read as a code; a PatientID that
+    // holds something else (another ID, a personnummer) finds no subject and
+    // is held under the shape of what it holds, asked about once per shape,
+    // even where the dataset codes what no map names; an empty PatientID
+    // still falls back to its study, as v0 filed it; and a person who has
+    // the held files coded anyway still gets them coded.
+    let mut rule = Rule::parse(
+        "identity:\n  id_type: subject-code\n  from:\n    - field: PatientID\n      pattern: '^(?<id>[0-9a-hjkmnp-tv-z]+)$'\n  code: verbatim\n",
+    )
+    .unwrap();
+    rule.holds_unread = true;
+    for lab in labs() {
+        let name = lab.name;
+        let dir = TempDir::new("identity-unread");
+        dir.file("a/IM_0001", &mr("A", "A.1", "A.1.1", "k7m2p9x4q8r3", &[]));
+        dir.file("b/IM_0001", &mr("B", "B.1", "B.1.1", "SITE-0042", &[]));
+        dir.file("c/IM_0001", &mr("C", "C.1", "C.1.1", "SITE-0042", &[]));
+        dir.file("d/IM_0001", &mr("D", "D.1", "D.1.1", "201501012395", &[]));
+        dir.file("e/IM_0001", &mr("E", "E.1", "E.1.1", "", &[]));
+        let mut s = settings(&dir);
+        s.identity = rule.clone();
+        s.unmapped = nils_digest::Unmapped::Code;
+        let mut reg = lab.open();
+        in_place_dataset(&mut reg, &dir, "coded-set", "code");
+
+        let report = digest(&s, &mut reg).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let w = report.written.clone().unwrap();
+        // the code, and the study whose PatientID is empty
+        assert_eq!(w.subjects_created, 2, "{name}");
+        assert_eq!(w.held, 3, "{name}");
+        assert_eq!(
+            one(
+                &mut reg,
+                "SELECT COUNT(*) FROM {subject} WHERE code = 'k7m2p9x4q8r3'"
+            ),
+            1,
+            "{name}"
+        );
+        assert_eq!(
+            one(
+                &mut reg,
+                "SELECT COUNT(*) FROM {subject} WHERE code = '201501012395'"
+            ),
+            0,
+            "{name}"
+        );
+        assert_eq!(one(&mut reg, "SELECT COUNT(*) FROM {study}"), 2, "{name}");
+        assert_eq!(
+            texts(
+                &mut reg,
+                "SELECT detail FROM {source_file} WHERE status = 'quarantined' \
+                 AND reason = 'identity.unmapped' ORDER BY detail"
+            ),
+            ["999999999999", "AAAA-9999", "AAAA-9999"],
+            "{name}"
+        );
+        let items = items_of(&mut reg, "identity.unmapped");
+        assert_eq!(items.len(), 2, "{name}: {items:?}");
+        assert_eq!(
+            items.iter().map(|i| i.1).sum::<i64>(),
+            3,
+            "{name}: {items:?}"
+        );
+
+        // a person has the two files of one ID coded anyway
+        let sql = rows_sql(
+            &mut reg,
+            "UPDATE {pseudonym_file} SET code_anyway = 1 WHERE shape = 'AAAA-9999'",
+        );
+        reg.store().execute(&sql, &[]).unwrap();
+        let coded = digest(&s, &mut reg).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let w = coded.written.clone().unwrap();
+        assert_eq!(w.held, 1, "{name}");
+        assert_eq!(one(&mut reg, "SELECT COUNT(*) FROM {study}"), 4, "{name}");
+        let items = items_of(&mut reg, "identity.unmapped");
+        assert_eq!(items.len(), 1, "{name}: {items:?}");
+    }
+}
