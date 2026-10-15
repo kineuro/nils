@@ -51,6 +51,16 @@ pub struct Ask<'a> {
     /// Stacks the caller is not shown (of a sample sealed now): no part of
     /// any visit.
     pub withheld: &'a BTreeSet<i64>,
+    /// The stacks the scope holds, where it holds some and not every stack
+    /// of its subjects: a dataset's, those its folder holds a file of
+    /// (Nima, 2026-10-12: a dataset holds stacks, never a subject's
+    /// membership). The visits, candidates, scans taken and layer are read
+    /// from these alone; none for a cohort, which holds its members' every
+    /// stack.
+    pub held: Option<&'a BTreeSet<i64>>,
+    /// Whether a layer will be read over the visits, so that what it needs
+    /// of the session cache is kept.
+    pub layered: bool,
 }
 
 /// A pick stored on a visit, applying: a person's or a run's.
@@ -81,8 +91,11 @@ struct Subject {
 pub struct Read {
     subjects: Vec<Subject>,
     datasets: HashMap<i64, Vec<String>>,
-    /// Each study's visit under the scheme, by the study's id.
+    /// Each study's visit under the scheme, by the study's id, of the
+    /// scope's subjects.
     sessions: HashMap<i64, i64>,
+    /// The stacks the scope holds, where it holds some ([`Ask::held`]).
+    held: Option<BTreeSet<i64>>,
     /// The layer asked, read over the same visits ([`Read::add_layer`]).
     layer: Option<Layered>,
 }
@@ -135,7 +148,9 @@ pub fn read(registry: &mut Registry, ask: &Ask<'_>) -> Result<Read, Error> {
     names.sort();
     names.dedup();
     let mut rows = picking::read_named(store, &names, None, Some(ask.subjects))?;
-    rows.retain(|r| !ask.withheld.contains(&r.stack));
+    rows.retain(|r| {
+        !ask.withheld.contains(&r.stack) && ask.held.is_none_or(|h| h.contains(&r.stack))
+    });
     let mine: Vec<&Row> = picking::of_role(ask.model, ask.role, &rows);
     let mut by_subject: BTreeMap<i64, BTreeMap<i64, (Day, Vec<&Row>)>> = BTreeMap::new();
     for r in &mine {
@@ -173,10 +188,13 @@ pub fn read(registry: &mut Registry, ask: &Ask<'_>) -> Result<Read, Error> {
     Ok(Read {
         subjects,
         datasets: ask.datasets.clone(),
+        // the visits of the scope's subjects alone, which a layer reads
         sessions: labels
             .iter()
+            .filter(|(_, l)| ask.layered && ask.subjects.contains(&l.subject_id))
             .map(|(study, l)| (*study, l.session_id))
             .collect(),
+        held: ask.held.cloned(),
         layer: None,
     })
 }
@@ -318,15 +336,14 @@ pub fn reference(
 
 impl Read {
     /// Read a layer over the visits (record 55, decision 6): every MR stack
-    /// of the subjects, or of `only` those (a page of them), that `held_by`
-    /// holds where it is given (a dataset's stacks), a stack in `withheld`
-    /// left out. Reads only.
+    /// of the subjects, or of `only` those (a page of them), that the scope
+    /// holds (a dataset's own stacks, as the visits were read), a stack in
+    /// `withheld` left out. Reads only.
     pub fn add_layer(
         &mut self,
         store: &mut Store,
         layer: Layer,
         withheld: &BTreeSet<i64>,
-        held_by: Option<&str>,
         only: Option<&BTreeSet<i64>>,
     ) -> Result<(), StoreError> {
         self.layer = Some(layered(
@@ -335,7 +352,7 @@ impl Read {
             &self.subjects,
             &self.sessions,
             withheld,
-            held_by,
+            self.held.as_ref(),
             only,
         )?);
         Ok(())
@@ -945,42 +962,44 @@ fn members(
     found
 }
 
-/// The subjects of one page of `POST /api/picks/map/subjects`, by id: the
-/// ones a layer is read for on that door.
-pub fn page_subjects(
-    read: &Read,
-    cmp: &Compare,
-    by: Columns,
-    group: &Group,
-    by_changes: bool,
-    page: usize,
-    per_page: usize,
-) -> BTreeSet<i64> {
-    let labels = columns(read, &cmp.shown().taken, by).visits;
-    members(read, cmp, &labels, group, by_changes)
-        .iter()
-        .skip(page.saturating_mul(per_page))
-        .take(per_page)
-        .map(|(si, _, _)| read.subjects[*si].id)
-        .collect()
+/// A group's subjects in the subjects door's order, worked out once: each
+/// visit's columns, and the members by their place in the read.
+pub struct Members {
+    labels: Vec<Vec<(Vec<String>, String)>>,
+    found: Vec<(usize, usize, usize)>,
+}
+
+impl Members {
+    pub fn of(read: &Read, cmp: &Compare, by: Columns, group: &Group, by_changes: bool) -> Members {
+        let labels = columns(read, &cmp.shown().taken, by).visits;
+        let found = members(read, cmp, &labels, group, by_changes);
+        Members { labels, found }
+    }
+
+    /// The subjects of one page, by id: the ones a layer is read for on
+    /// the subjects door.
+    pub fn page(&self, read: &Read, page: usize, per_page: usize) -> BTreeSet<i64> {
+        self.found
+            .iter()
+            .skip(page.saturating_mul(per_page))
+            .take(per_page)
+            .map(|(si, _, _)| read.subjects[*si].id)
+            .collect()
+    }
 }
 
 /// `POST /api/picks/map/subjects`: one page of a group's subjects, each
 /// with its visits as the shown side takes them. `order` is `changes`
 /// (the visits the draft changes, then the kinds' breaks) or `visits`.
-#[allow(clippy::too_many_arguments)]
 pub fn subjects(
     read: &Read,
     cmp: &Compare,
-    by: Columns,
-    group: &Group,
-    by_changes: bool,
+    members: &Members,
     page: usize,
     per_page: usize,
 ) -> Value {
     let shown = cmp.shown();
-    let labels = columns(read, &shown.taken, by).visits;
-    let found = members(read, cmp, &labels, group, by_changes);
+    let (labels, found) = (&members.labels, &members.found);
     let total = found.len();
     let page_of: Vec<Value> = found
         .iter()
@@ -1273,84 +1292,116 @@ pub struct LayerRow {
 
 /// Every MR stack of these subjects on a layer, each once, in stack order:
 /// the axis's value for the body layers; for post-contrast the label's
-/// state, else what the `post_contrast` axis says. With `held`, a condition
-/// on a stack aliased `x`, only the stacks it holds (a dataset's: the
-/// stacks its folder holds a file of, never every stack of its subjects).
-/// Where an axis has several rows for a stack, the one read is the same on
-/// either backend: a value before none, then the highest confidence, then
-/// by tier and value. Reads only.
+/// state, else what the `post_contrast` axis says. With `held`, only those
+/// stacks (a dataset's: the stacks its folder holds a file of, never every
+/// stack of its subjects). Where an axis has several rows for a stack, the
+/// one read is the same on either backend: a value before none, then the
+/// highest confidence, then by tier and value in byte order. Reads only.
 pub fn layer_rows(
     store: &mut Store,
     layer: Layer,
     subjects: &[i64],
-    held: Option<&str>,
+    held: Option<&BTreeSet<i64>>,
 ) -> Result<Vec<LayerRow>, StoreError> {
-    let held = held.map(|h| format!(" AND ({h})")).unwrap_or_default();
-    let order = "ORDER BY x.id, CASE WHEN a.value IS NULL OR a.value = '' THEN 1 ELSE 0 END, \
-                 a.confidence DESC, a.tier, a.value";
     let (stack, series, axis, label) = (
         store.qualified("stack"),
         store.qualified("series"),
         store.qualified("classification_axis"),
         store.qualified("contrast_label"),
     );
-    let mut out = Vec::new();
-    let mut seen: BTreeSet<i64> = BTreeSet::new();
+    // each stack's axis rows, chosen among in Rust so that both backends
+    // choose alike: a value before none, then the highest confidence, then
+    // by tier and value in byte order (no collation)
+    struct Seen {
+        row: LayerRow,
+        axis: Option<(String, f64, String)>,
+        state: Option<String>,
+    }
+    let mut by_stack: BTreeMap<i64, Seen> = BTreeMap::new();
     for chunk in subjects.chunks(500) {
         let sql = match layer {
             Layer::PostContrast => format!(
-                "SELECT x.id, se.subject_id, se.study_id, a.value, cl.contrast_state, \
-                 cl.contrast_prior_72h FROM {stack} x JOIN {series} se ON se.id = x.series_id \
+                "SELECT x.id, se.subject_id, se.study_id, a.value, a.confidence, a.tier, \
+                 cl.contrast_state, cl.contrast_prior_72h FROM {stack} x \
+                 JOIN {series} se ON se.id = x.series_id \
                  LEFT JOIN {label} cl ON cl.stack_id = x.id \
                  LEFT JOIN {axis} a ON a.stack_id = x.id AND a.axis = 'post_contrast' \
-                 WHERE x.modality = 'MR' AND se.subject_id IN ({}){held} {order}",
+                 WHERE x.modality = 'MR' AND se.subject_id IN ({})",
                 list(chunk)
             ),
             _ => format!(
-                "SELECT x.id, se.subject_id, se.study_id, a.value FROM {stack} x \
-                 JOIN {series} se ON se.id = x.series_id \
+                "SELECT x.id, se.subject_id, se.study_id, a.value, a.confidence, a.tier \
+                 FROM {stack} x JOIN {series} se ON se.id = x.series_id \
                  LEFT JOIN {axis} a ON a.stack_id = x.id AND a.axis = '{}' \
-                 WHERE x.modality = 'MR' AND se.subject_id IN ({}){held} {order}",
+                 WHERE x.modality = 'MR' AND se.subject_id IN ({})",
                 layer.name(),
                 list(chunk)
             ),
         };
         for r in store.query(&sql, &[])? {
             let id = r.int(0)?;
-            // one row a stack: an axis of one value has one row (Wave 4a
-            // §6.1), and a stack read once is not counted again
-            if !seen.insert(id) {
+            if held.is_some_and(|h| !h.contains(&id)) {
                 continue;
             }
-            let axis_value = r
+            let value = r
                 .opt_text(3)?
                 .map(str::trim)
                 .filter(|v| !v.is_empty())
                 .map(str::to_string);
-            let (value, prior_72h) = match layer {
-                Layer::PostContrast => {
-                    let state = r
-                        .opt_text(4)?
+            let confidence = r.opt_double(4)?.unwrap_or(0.0);
+            let tier = r.opt_text(5)?.unwrap_or("").to_string();
+            let (state, flagged) = match layer {
+                Layer::PostContrast => (
+                    r.opt_text(6)?
                         .map(str::trim)
                         .filter(|v| !v.is_empty())
-                        .map(str::to_string);
-                    let flagged = r.opt_text(5)?.is_some_and(|f| f.trim() == "yes");
-                    let value = state
-                        .or_else(|| axis_value.as_deref().and_then(stated).map(str::to_string));
-                    (value, flagged)
-                }
-                _ => (axis_value, false),
+                        .map(str::to_string),
+                    r.opt_text(7)?.is_some_and(|f| f.trim() == "yes"),
+                ),
+                _ => (None, false),
             };
-            out.push(LayerRow {
-                stack: id,
-                subject: r.int(1)?,
-                study: r.int(2)?,
-                value,
-                prior_72h,
+            let candidate = value.map(|v| (v, confidence, tier));
+            let seen = by_stack.entry(id).or_insert_with(|| Seen {
+                row: LayerRow {
+                    stack: id,
+                    subject: 0,
+                    study: 0,
+                    value: None,
+                    prior_72h: flagged,
+                },
+                axis: None,
+                state: state.clone(),
             });
+            seen.row.subject = r.int(1)?;
+            seen.row.study = r.int(2)?;
+            let better = match (&seen.axis, &candidate) {
+                (_, None) => false,
+                (None, Some(_)) => true,
+                (Some((av, ac, at)), Some((bv, bc, bt))) => bc
+                    .partial_cmp(ac)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| at.cmp(bt))
+                    .then_with(|| av.cmp(bv))
+                    .is_gt(),
+            };
+            if better {
+                seen.axis = candidate;
+            }
         }
     }
-    Ok(out)
+    Ok(by_stack
+        .into_values()
+        .map(|mut s| {
+            let axis_value = s.axis.map(|(v, _, _)| v);
+            s.row.value = match layer {
+                Layer::PostContrast => s
+                    .state
+                    .or_else(|| axis_value.as_deref().and_then(stated).map(str::to_string)),
+                _ => axis_value,
+            };
+            s.row
+        })
+        .collect())
 }
 
 /// The value of a scan made of these stacks, as the map and the cohort's
@@ -1387,7 +1438,7 @@ fn layered(
     subjects: &[Subject],
     sessions: &HashMap<i64, i64>,
     withheld: &BTreeSet<i64>,
-    held_by: Option<&str>,
+    own: Option<&BTreeSet<i64>>,
     only: Option<&BTreeSet<i64>>,
 ) -> Result<Layered, StoreError> {
     let mut at: HashMap<(i64, i64), (usize, usize)> = HashMap::new();
@@ -1406,7 +1457,7 @@ fn layered(
         .map(|s| s.id)
         .filter(|id| only.is_none_or(|o| o.contains(id)))
         .collect();
-    for r in layer_rows(store, layer, &ids, held_by)? {
+    for r in layer_rows(store, layer, &ids, own)? {
         if withheld.contains(&r.stack) {
             continue;
         }
@@ -1671,6 +1722,7 @@ mod tests {
             subjects,
             datasets,
             sessions: HashMap::new(),
+            held: None,
             layer: None,
         };
         let laid = columns(&read, &taken, Columns::Dataset);

@@ -154,6 +154,7 @@ impl Home {
 
 const OPS: &str = "an-operator-token-of-length";
 const SEALED: &str = "a-sealed-token-of-its-length";
+const REVIEWER: &str = "a-review-only-token-of-length";
 
 /// A `nils serve`, killed when dropped; with its worker where jobs must
 /// run, without it where nothing else may write while a door is watched.
@@ -175,6 +176,7 @@ impl Served {
         let tokens = [
             format!("{OPS}=ops@lab:operator"),
             format!("{SEALED}=sid@lab:operator,sealed:see"),
+            format!("{REVIEWER}=rin@lab:review:see"),
         ]
         .join(",");
         let mut command = nils();
@@ -673,6 +675,23 @@ fn cohort_layers(pg: Option<(String, String)>) {
     assert!(step["refusal"]["reason"].is_string(), "{map}");
     // no answer waits to be put in force
     assert_eq!(step["staged"], 0, "{map}");
+    // the step alone, for a page to ask while it runs: the map's, and read
+    // by one who may read only the cohort's heatmap
+    for token in [OPS, REVIEWER] {
+        let (status, alone) = server.call(
+            "GET",
+            "/api/picks/layer-step?cohort=quad&layer=body_region",
+            None,
+            token,
+        );
+        assert_eq!(status, 200, "{alone}");
+        assert_eq!(alone["operation"], "body_part", "{alone}");
+        assert_eq!(alone["step"]["state"], step["state"], "{alone}");
+        assert_eq!(alone["step"]["of"], step["of"], "{alone}");
+    }
+    let (status, refused) = server.call("GET", "/api/picks/layer-step?cohort=quad", None, OPS);
+    assert_eq!(status, 400, "{refused}");
+    assert_eq!(refused["field"], "layer", "{refused}");
 
     // a draft: what it takes, beside what the saved rules take
     let (_, rules) = server.call("GET", "/api/picks/rules?cohort=quad", None, OPS);
@@ -982,6 +1001,17 @@ fn dataset_layers(pg: Option<(String, String)>) {
             assert_eq!(step[key], mine[key], "{layer} {key}: {step} against {mine}");
         }
         assert!(step["of"].as_i64().unwrap() > 0, "{step}");
+        // the step alone, as a page asks it while it runs
+        let (status, alone) = server.call(
+            "GET",
+            &format!("/api/picks/layer-step?dataset=fresh&layer={layer}"),
+            None,
+            OPS,
+        );
+        assert_eq!(status, 200, "{alone}");
+        for key in ["step", "state", "of", "answered", "label"] {
+            assert_eq!(alone["step"][key], mine[key], "{layer} {key}: {alone}");
+        }
         let strips = server.post(
             "/api/picks/map/strips",
             json!({"scope": scope, "role": "t1w", "layer": layer}),

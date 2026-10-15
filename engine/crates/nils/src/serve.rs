@@ -4743,6 +4743,11 @@ fn routed(
         // Record 55, decision 6: a dataset's or a cohort's own main-scan
         // rules, read, as text and saved; saving queues the scope's run
         ["api", "picks", "rules"] if get => crate::main_scans::rules(doors, registry, query),
+        // record 55, decision 6: a layer's step alone, which a page asks
+        // while it waits or runs, instead of the whole map
+        ["api", "picks", "layer-step"] if get => {
+            crate::main_scans::layer_step_door(registry, caller, query)
+        }
         ["api", "picks", "rules", "text"] if get => crate::main_scans::text(doors, registry, query),
         ["api", "picks", "rules"] if post => {
             crate::main_scans::sized(body)?;
@@ -5281,6 +5286,11 @@ pub(crate) fn door(method: &str, segs: &[&str]) -> (Need, Detail) {
             (Need::AnyOf(&["data:see", "pipelines:see"]), Plain)
         }
         ("POST", ["api", "picks", "rules"]) => (Need::One("pipelines:work"), Plain),
+        // a layer's step over a scope: read by whoever reads the map or a
+        // cohort's heatmap
+        ("GET", ["api", "picks", "layer-step"]) => {
+            (Need::AnyOf(&["data:see", "pipelines:see", "review:see"]), Plain)
+        }
         // 2026-10-10: a step's run is a pipeline run queued, which reads
         // pixels: Pipelines work at detail quasi, as `run` at the jobs door
         ("POST", ["api", "datasets" | "cohorts", _, "steps", _, "run"]) => {

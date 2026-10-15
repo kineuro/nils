@@ -1087,17 +1087,20 @@ fn held_twice(pg: Option<(String, String)>) {
     assert_eq!(strips["shared_visits"], 1, "{strips}");
     assert_eq!(strips["columns"], map["columns"], "{strips}");
 
-    // the second dataset's subjects, S-ONE and S-THREE: S-ONE's visits in
-    // the first are its own too, the copied one in both
+    // the second dataset's subjects, S-ONE and S-THREE, on the stacks the
+    // second holds alone (the second review of the map's layers,
+    // 2026-10-15; Nima, 2026-10-12: a dataset holds stacks, never a
+    // subject's membership): S-ONE's copied visit, under both datasets, and
+    // S-THREE's, never S-ONE's visit the first holds alone
     let map = map_of("second");
     assert_eq!(map["metrics"]["subjects"], 2, "{map}");
-    assert_eq!(map["metrics"]["visits"], 3, "{map}");
+    assert_eq!(map["metrics"]["visits"], 2, "{map}");
     let ((_, first_key), (_, second_key)) = (key(&map, "first"), key(&map, "second"));
     assert_eq!(
         map["columns"],
         json!([
-            {"key": first_key, "visits": 2, "shared": 1},
             {"key": second_key, "visits": 2, "shared": 1},
+            {"key": first_key, "visits": 1, "shared": 1},
         ]),
         "{map}"
     );
