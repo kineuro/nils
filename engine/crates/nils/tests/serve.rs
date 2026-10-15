@@ -8971,6 +8971,89 @@ fn the_split_note_is_shown_on_the_scans_and_counted_beside_the_questions() {
     server.finish();
 }
 
+/// #451: a rehearsal over more stacks than the door answers at once is a
+/// job whose result is the report the door would have answered; a scope
+/// over the cap is refused, naming it; and a queued rehearsal is cancelled
+/// like any job.
+#[test]
+fn a_large_rehearsal_is_a_job_and_one_over_the_cap_is_refused() {
+    let home = registry();
+    let ops = r#"{"operations": [
+        {"op": "add_words", "axis": "post_contrast", "value": "given", "words": ["mprage"],
+         "reason": "a test word", "evidence": "this test"}
+    ], "examples": 3}"#;
+    let server = Server::start(&home, 1, &[], &[]);
+    let (status, at_once) = server.request("POST", "/api/packs/mri/rehearse", Some(ops), None);
+    assert_eq!(status, 200, "{at_once}");
+    server.finish();
+
+    let server = Server::start(&home, 1, &[], &[("NILS_REHEARSE_CAP", "1")]);
+    let (status, refused) = server.request("POST", "/api/packs/mri/rehearse", Some(ops), None);
+    assert_eq!(status, 422, "{refused}");
+    assert_eq!(refused["cap"], 1, "{refused}");
+    assert_eq!(refused["stacks"], 2, "{refused}");
+    assert!(
+        refused["error"]
+            .as_str()
+            .unwrap()
+            .contains("the 1 one rehearsal replays"),
+        "{refused}"
+    );
+    server.finish();
+
+    let server = Server::start(&home, 2, &[], &[("NILS_REHEARSE_AT_ONCE", "1")]);
+    let (status, queued) = server.request("POST", "/api/packs/mri/rehearse", Some(ops), None);
+    assert_eq!(status, 202, "{queued}");
+    assert_eq!(queued["state"], "queued", "{queued}");
+    assert_eq!(queued["stacks"], 2, "{queued}");
+    let job = queued["job"].as_i64().unwrap();
+    let (status, dropped) = server.request("POST", "/api/packs/mri/rehearse", Some(ops), None);
+    assert_eq!(status, 202, "{dropped}");
+    let dropped = dropped["job"].as_i64().unwrap();
+    server.finish();
+    run(&home, &["jobs", "cancel", &dropped.to_string()], None);
+    let packs = packs();
+    let mut worker = nils();
+    let out = worker
+        .arg("--registry")
+        .arg(home.path())
+        .args(["jobs", "work", "--once"])
+        .env("USER", "anna")
+        .env("HOSTNAME", "ward-3")
+        .env("NILS_PACK_DIR", &packs)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let mut store = nils_registry::Store::open_sqlite(&home.path().join("registry.db")).unwrap();
+    let row = |store: &mut nils_registry::Store, id: i64| -> (String, serde_json::Value) {
+        let r = &store
+            .query(
+                &format!("SELECT state, result FROM job WHERE id = {id}"),
+                &[],
+            )
+            .unwrap()[0];
+        (
+            r.text(0).unwrap().to_string(),
+            r.opt_text(1)
+                .unwrap()
+                .map(|t| serde_json::from_str(t).unwrap())
+                .unwrap_or(serde_json::Value::Null),
+        )
+    };
+    let (state, result) = row(&mut store, job);
+    assert_eq!(state, "done", "{result}");
+    for key in [
+        "pack", "patch", "ships", "scope", "moved", "axes", "names", "picks", "review", "answers",
+    ] {
+        assert_eq!(result[key], at_once[key], "{key}");
+    }
+    assert_eq!(row(&mut store, dropped).0, "cancelled");
+}
+
 /// Record 56 §5.4, §5.5: a rule change's effect on the sorting, at the door
 /// and at the keyboard. The operations are applied to a copy of the pack and
 /// the registry is sorted both ways; nothing is written, and an operation

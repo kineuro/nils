@@ -2922,8 +2922,15 @@ enum PackCommand {
         /// The patch: `patch: 1`, the pack, its operations (each with its
         /// scope, reason and evidence); or an overlay document, read as
         /// the word edits it is
-        #[arg(long, value_name = "FILE")]
-        ops: PathBuf,
+        #[arg(long, value_name = "FILE", required_unless_present = "patch_json")]
+        ops: Option<PathBuf>,
+        /// The patch as the rehearse door takes it, in JSON: what the door
+        /// queues a rehearsal with (#451)
+        #[arg(long, value_name = "JSON", conflicts_with = "ops")]
+        patch_json: Option<String>,
+        /// The most stacks it replays; a scope holding more is refused
+        #[arg(long, value_name = "N")]
+        cap: Option<usize>,
         /// The stacks replayed and counted: pack, site:NAME,
         /// dataset:NAME[,NAME], scanner:KEY=VALUE[,KEY=VALUE] or batch:ID;
         /// the operations' own scopes when not given
@@ -4587,13 +4594,23 @@ fn pack_command(home: &Home, command: PackCommand) -> Result<(), Exit> {
         }
         PackCommand::Rehearse {
             ops,
+            patch_json,
+            cap,
             scope,
             pack_dir: d,
             examples,
             workers,
             json,
         } => {
-            let patch = rehearse::patch_file(&ops).map_err(usage)?;
+            let patch = match (&ops, &patch_json) {
+                (Some(ops), _) => rehearse::patch_file(ops).map_err(usage)?,
+                (None, Some(text)) => {
+                    let doc: serde_json::Value = serde_json::from_str(text)
+                        .map_err(|e| usage(format!("--patch-json is not JSON: {e}")))?;
+                    rehearse::patch_of("--patch-json", None, &doc).map_err(usage)?
+                }
+                (None, None) => return Err(usage("rehearse takes --ops FILE or --patch-json")),
+            };
             let root = pack_dir(home, d)?;
             let dir = packs_in(&root)?
                 .into_iter()
@@ -4611,16 +4628,82 @@ fn pack_command(home: &Home, command: PackCommand) -> Result<(), Exit> {
                 .transpose()
                 .map_err(usage)?;
             let mut registry = open(home)?;
+            // #451: queued by the rehearse door, it runs as a job that beats
+            // between its chunks, can be cancelled there, and keeps its
+            // report as the job's result, shaped for the detail it was
+            // queued under
+            let queued = std::env::var_os(nils_registry::job::ADOPT_VAR).is_some();
+            let job = if queued {
+                Some(
+                    nils_registry::job::claim(
+                        registry.store(),
+                        &nils_registry::job::Claim {
+                            kind: "pack",
+                            name: &format!("rehearse {}", patch.pack),
+                            args: serde_json::json!({
+                                "pack": patch.pack, "scope": scope.as_ref().map(|s| s.text()),
+                                "cap": cap, "examples": examples,
+                            }),
+                        },
+                    )
+                    .map_err(|e| fail(e.to_string()))?,
+                )
+            } else {
+                None
+            };
+            let progress: Option<nils_classify::effect::Progress> = job.map(|id| {
+                let home = home.clone();
+                let beat = move |done: usize, total: usize| -> bool {
+                    let Ok(mut r) = home.open() else {
+                        return true;
+                    };
+                    !matches!(
+                        nils_registry::job::beat(
+                            r.store(),
+                            id,
+                            Some(&serde_json::json!({"done": done, "total": total})),
+                        ),
+                        Ok(nils_registry::job::Asked::Cancel)
+                    )
+                };
+                std::sync::Arc::new(beat) as nils_classify::effect::Progress
+            });
             let settings = nils_classify::effect::Settings {
                 scope,
                 examples,
                 workers,
+                cap,
+                progress,
             };
-            let doc =
-                rehearse::report(&mut registry, &dir, &patch, &settings).map_err(|e| match e {
-                    nils_classify::effect::Error::Refused(m) => usage(m),
-                    other => fail(other.to_string()),
-                })?;
+            let made = rehearse::report(&mut registry, &dir, &patch, &settings);
+            if let Some(id) = job {
+                let store = registry.store();
+                let (state, error) = match &made {
+                    Ok(doc) => {
+                        let mut doc = doc.clone();
+                        let detail = std::env::var("NILS_JOB_DETAIL")
+                            .ok()
+                            .map(|d| crate::grants::Detail::parse(d.trim()).unwrap_or_default());
+                        // record 55 K7: below detail quasi a scanner is its shape
+                        if detail.is_some_and(|d| d < crate::grants::Detail::Quasi) {
+                            rehearse::shape_scanners(&mut doc);
+                        }
+                        nils_registry::job::set_result(store, id, &doc)
+                            .map_err(|e| fail(e.to_string()))?;
+                        (nils_registry::job::State::Done, None)
+                    }
+                    Err(nils_classify::effect::Error::Stopped) => {
+                        (nils_registry::job::State::Cancelled, None)
+                    }
+                    Err(e) => (nils_registry::job::State::Failed, Some(e.to_string())),
+                };
+                nils_registry::job::finish(store, id, state, error.as_deref())
+                    .map_err(|e| fail(e.to_string()))?;
+            }
+            let doc = made.map_err(|e| match e {
+                nils_classify::effect::Error::Refused(m) => usage(m),
+                other => fail(other.to_string()),
+            })?;
             if json {
                 println!(
                     "{}",

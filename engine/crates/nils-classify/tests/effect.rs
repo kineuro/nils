@@ -481,6 +481,7 @@ fn the_report_s_moves_and_questions_equal_a_full_re_sort_and_a_sealed_stack_is_n
             scope: None,
             examples: 10,
             workers: 2,
+            ..Default::default()
         };
         let doc = nils_classify::effect::run(reg.store(), &mri(), &pack, &p, &settings, &names)
             .unwrap_or_else(|e| panic!("{name}: {e}"));
@@ -788,6 +789,7 @@ fn a_change_to_the_pick_file_is_scored_by_the_patched_pick_and_equals_two_pick_r
             scope: None,
             examples: 50,
             workers: 2,
+            ..Default::default()
         };
         let doc = nils_classify::effect::run(reg.store(), &mri(), &pack, &p, &settings, &names)
             .unwrap_or_else(|e| panic!("{name}: {e}"));
@@ -862,6 +864,7 @@ fn a_decision_of_nothing_answers_the_axis_in_a_sort_and_in_the_replay() {
         scope: None,
         examples: 10,
         workers: 2,
+        ..Default::default()
     };
     for lab in labs() {
         let name = lab.name;
@@ -922,5 +925,46 @@ fn a_decision_of_nothing_answers_the_axis_in_a_sort_and_in_the_replay() {
             before_decision - 1,
             "{name}: the replay asks nothing about it either"
         );
+
+        // #451: the stacks a report would replay, a cap that refuses more,
+        // naming it, and a report its progress stops between chunks
+        let n = nils_classify::effect::scope_size(reg.store(), &pack, &p, None)
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert!(n >= 2, "{name}: {n}");
+        let capped = nils_classify::effect::Settings {
+            cap: Some(n - 1),
+            ..Default::default()
+        };
+        match nils_classify::effect::run(reg.store(), &mri(), &pack, &p, &capped, &names) {
+            Err(nils_classify::effect::Error::Refused(m)) => {
+                assert!(
+                    m.contains(&format!("the {} one rehearsal", n - 1)),
+                    "{name}: {m}"
+                );
+            }
+            other => panic!("{name}: refused over the cap, not {other:?}"),
+        }
+        let fits = nils_classify::effect::Settings {
+            cap: Some(n),
+            ..Default::default()
+        };
+        assert!(
+            nils_classify::effect::run(reg.store(), &mri(), &pack, &p, &fits, &names).is_ok(),
+            "{name}"
+        );
+        let told = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let heard = told.clone();
+        let stopped = nils_classify::effect::Settings {
+            progress: Some(std::sync::Arc::new(move |done, total| {
+                heard.lock().unwrap().push((done, total));
+                false
+            })),
+            ..Default::default()
+        };
+        assert!(matches!(
+            nils_classify::effect::run(reg.store(), &mri(), &pack, &p, &stopped, &names),
+            Err(nils_classify::effect::Error::Stopped)
+        ));
+        assert_eq!(*told.lock().unwrap(), [(0, n)], "{name}");
     }
 }

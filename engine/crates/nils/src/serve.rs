@@ -2187,6 +2187,71 @@ fn routed(
                 .as_u64()
                 .map(|n| (n as usize).clamp(1, 50))
                 .unwrap_or(5);
+            // #451: a rehearsal over more than a few thousand stacks is a
+            // job, as the other heavy doors' work is, and over the cap it is
+            // refused; a small one is answered at once
+            let base = nils_pack::load(&dir, None)
+                .map_err(|e| Reply::error(500, format!("the pack {name}: {e}")))?;
+            let stacks = match nils_classify::effect::scope_size(
+                registry.store(),
+                &base,
+                &patch,
+                scope.clone(),
+            ) {
+                Ok(n) => n,
+                Err(nils_classify::effect::Error::Refused(m)) => return Err(Reply::error(400, m)),
+                Err(e) => return Err(Reply::error(500, e.to_string())),
+            };
+            if stacks > crate::rehearse::cap() {
+                let mut r = Reply::error(
+                    422,
+                    nils_classify::effect::over_cap(stacks, crate::rehearse::cap()),
+                );
+                r.body["stacks"] = serde_json::json!(stacks);
+                r.body["cap"] = serde_json::json!(crate::rehearse::cap());
+                return Err(r);
+            }
+            if stacks > crate::rehearse::at_once() {
+                let mut whole = doc.clone();
+                if whole.get("pack").is_none() {
+                    whole["pack"] = serde_json::json!(name);
+                }
+                if let Some(o) = whole.as_object_mut() {
+                    o.remove("scope");
+                    o.remove("examples");
+                }
+                let mut command = vec![
+                    "pack".to_string(),
+                    "rehearse".to_string(),
+                    "--patch-json".to_string(),
+                    whole.to_string(),
+                    "--examples".to_string(),
+                    examples.to_string(),
+                    "--cap".to_string(),
+                    crate::rehearse::cap().to_string(),
+                    "--json".to_string(),
+                ];
+                if let Some(s) = &scope {
+                    command.extend(["--scope".to_string(), s.text()]);
+                }
+                if let Some(d) = &doors.pack_dir {
+                    command.extend(["--pack-dir".to_string(), d.display().to_string()]);
+                }
+                let id = nils_registry::job::enqueue_with(
+                    registry.store(),
+                    &command,
+                    Some(&format!("rehearse {name}")),
+                    Some(&caller.principal),
+                    queued_by(caller),
+                )
+                .map_err(job_err)?;
+                return Ok(Reply::accepted(serde_json::json!({
+                    "job": id, "state": "queued", "stacks": stacks,
+                    "message": format!(
+                        "{stacks} stacks are rehearsed as job {id}; its result is the report"
+                    ),
+                })));
+            }
             // the replay shares the machine with the doors that serve: half
             // its threads at most
             let workers = std::thread::available_parallelism().map_or(2, |n| (n.get() / 2).max(1));
@@ -2194,6 +2259,8 @@ fn routed(
                 scope,
                 examples,
                 workers,
+                cap: Some(crate::rehearse::at_once()),
+                progress: None,
             };
             match crate::rehearse::report(registry, &dir, &patch, &settings) {
                 Ok(mut answer) => {
