@@ -541,6 +541,125 @@ fn a_reader_of_the_manifest_has_its_build_queued_before_the_pyramid_exists() {
     server.finish();
 }
 
+/// #454: a build a stop cut short (its job failed by the next claim, for a
+/// heartbeat gone stale or a process gone) is queued again when its picture
+/// is next asked for, once per stack in a process, and gets built; a build
+/// that failed with a class of its own stays 422 and queues nothing.
+#[test]
+fn a_picture_whose_build_a_restart_cut_short_is_built_again() {
+    use nils_registry::store::{Param, Store};
+    let (home, _src) = registry();
+    let work = TempDir::new("instances-work-cut");
+    ok(
+        &home,
+        &[
+            "place",
+            "add",
+            "scratch",
+            work.path().to_str().unwrap(),
+            "--role",
+            "working",
+        ],
+        None,
+    );
+    let fail = |job: i64, words: &str| {
+        let mut store = Store::open_sqlite(&home.path().join("registry.db")).unwrap();
+        store
+            .execute(
+                "UPDATE job SET state = 'failed', finished_at = '2026-10-15T00:00:00Z', error = ?1 WHERE id = ?2",
+                &[Param::from(words), Param::Int(job)],
+            )
+            .unwrap();
+    };
+    let jobs = || {
+        let mut store = Store::open_sqlite(&home.path().join("registry.db")).unwrap();
+        store
+            .query("SELECT COUNT(*) FROM job WHERE kind = 'pyramid'", &[])
+            .unwrap()[0]
+            .int(0)
+            .unwrap()
+    };
+    let server = Server::start(
+        &home,
+        6,
+        &[
+            "--auth",
+            "token",
+            "--token",
+            &format!("{REVIEWER}=rev@lab:reviewer"),
+        ],
+    );
+    let (status, doc) = server.json("/api/instances/1/manifest", REVIEWER);
+    assert_eq!(status, 202, "{doc}");
+    let first = doc["job"].as_i64().unwrap();
+    // the engine stopped while it built: the next claim failed its job
+    fail(first, "stale: no heartbeat since 2026-10-15T00:00:00Z");
+    let (status, doc) = server.json("/api/instances/1/manifest", REVIEWER);
+    assert_eq!(status, 202, "queued again: {doc}");
+    let again = doc["job"].as_i64().unwrap();
+    assert_ne!(again, first, "{doc}");
+    assert_eq!(doc["state"], "queued", "{doc}");
+    // cut short twice in one process: said, not built over and over
+    fail(
+        again,
+        "process 4242 is gone; no heartbeat since 2026-10-15T00:00:00Z",
+    );
+    let (status, doc) = server.json("/api/instances/1/manifest", REVIEWER);
+    assert_eq!(status, 422, "{doc}");
+    // a build that failed on the stack's own account stays failed
+    let (status, doc) = server.json("/api/instances/2/manifest", REVIEWER);
+    assert_eq!(status, 202, "{doc}");
+    let other = doc["job"].as_i64().unwrap();
+    fail(other, "stack 2: its pyramid was not built (unreadable)");
+    let before = jobs();
+    let (status, doc) = server.json("/api/instances/2/manifest", REVIEWER);
+    assert_eq!(status, 422, "{doc}");
+    assert_eq!(doc["reason"], "unreadable", "{doc}");
+    assert_eq!(jobs(), before, "nothing queued");
+    let (status, doc) = server.json("/api/instances/2/manifest", REVIEWER);
+    assert_eq!(status, 422, "{doc}");
+    server.finish();
+    // the build queued again is a build of the stack, and it builds
+    let mut store = Store::open_sqlite(&home.path().join("registry.db")).unwrap();
+    store
+        .execute(
+            "UPDATE job SET state = 'queued', finished_at = NULL, error = NULL WHERE id = ?1",
+            &[Param::Int(again)],
+        )
+        .unwrap();
+    ok(
+        &home,
+        &["jobs", "work", "--once", "--lane", "pictures"],
+        None,
+    );
+    let state = store
+        .query(&format!("SELECT state FROM job WHERE id = {again}"), &[])
+        .unwrap()[0]
+        .text(0)
+        .unwrap()
+        .to_string();
+    assert_eq!(state, "done");
+    assert!(
+        walk_has_manifest(work.path()),
+        "the picture is built into the working place"
+    );
+}
+
+fn walk_has_manifest(dir: &Path) -> bool {
+    std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .any(|e| {
+            let p = e.path();
+            if p.is_dir() {
+                walk_has_manifest(&p)
+            } else {
+                p.file_name().is_some_and(|n| n == "manifest.json")
+            }
+        })
+}
+
 /// E6: turn a packed level back into the layout before, a file per tile
 /// (`<level>/<plane>/<row>_<column>.j2c`), as a pyramid built before E6
 /// was kept: the packed file's index read as its header says.

@@ -3203,6 +3203,22 @@ pub(crate) fn failed_class(error: Option<&str>) -> Option<String> {
         .then(|| class.to_string())
 }
 
+/// Whether a failed job was cut short rather than failed: the words a
+/// claim writes on a job whose process went away or whose heartbeat went
+/// stale, and no reason class of a build's own.
+pub(crate) fn interrupted(error: Option<&str>) -> bool {
+    let Some(e) = error else {
+        return false;
+    };
+    failed_class(Some(e)).is_none()
+        && ((e.starts_with("process ") && e.contains(" is gone; no heartbeat since "))
+            || e.starts_with("stale: no heartbeat since "))
+}
+
+/// The stacks whose interrupted build this process queued again (#454).
+static RETRIED: std::sync::LazyLock<std::sync::Mutex<std::collections::BTreeSet<i64>>> =
+    std::sync::LazyLock::new(Default::default);
+
 /// Wait up to `limit` for a pyramid's manifest, where a place among the
 /// held requests is free; none when there is none, or the time ran out.
 fn hold_for_manifest(root: &Path, limit: std::time::Duration) -> Result<Option<Manifest>, Reply> {
@@ -3225,7 +3241,8 @@ fn hold_for_manifest(root: &Path, limit: std::time::Duration) -> Result<Option<M
 /// queued or running already is answered, and a build that failed is said
 /// (422) and not queued again by the door, so a stack that cannot be read
 /// is not built over and over; `pyramid build --stack N` at the jobs door
-/// queues it again.
+/// queues it again. A build a stop cut short is no failure of the stack's:
+/// it is queued again, once per stack in a process (#454).
 pub(crate) fn on_demand(
     store: &mut Store,
     caller: &Caller,
@@ -3268,12 +3285,24 @@ pub(crate) fn on_demand(
         r
     };
     use nils_registry::job::State;
+    // #454: a build a stop cut short (its job failed by the next claim, for
+    // a process gone or a heartbeat gone stale) is queued again, once per
+    // stack in this process so that a crash loop cannot rebuild forever; a
+    // build that failed on its own stays failed
+    let again = job.as_ref().is_some_and(|j| {
+        j.state == State::Failed
+            && interrupted(j.error.as_deref())
+            && RETRIED
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(stack)
+    });
     match &job {
         Some(j) if matches!(j.state, State::Queued | State::Running | State::Cancelling) => {
             building.insert(stack, (j.id, since));
             return Ok(answer(j));
         }
-        Some(j) if j.state == State::Failed => {
+        Some(j) if j.state == State::Failed && !again => {
             building.remove(&stack);
             let reason = failed_class(j.error.as_deref());
             let mut r = Reply::error(
