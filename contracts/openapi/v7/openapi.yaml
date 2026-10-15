@@ -416,7 +416,7 @@
 # a person's decision is final evidence, never a rule). A decision made on
 # one scan with the rules' answer in view (the answer door's, and the apply
 # door's where the question's suggestions showed) keeps that answer as
-# `rules_in_view`; a sort raises `<axis>:decision` about it only when the
+# `rules_in_view` (registry schema 101); a sort raises `<axis>:decision` about it only when the
 # rules' answer it reaches differs from the one the person saw, as a newer
 # rules version may. A decision with no answer kept is asked about as
 # before.
