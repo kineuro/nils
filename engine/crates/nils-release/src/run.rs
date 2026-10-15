@@ -874,6 +874,10 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
                     .iter()
                     .map(|i| (i.id, i.size, i.mtime))
                     .collect::<Vec<_>>(),
+                &instances
+                    .iter()
+                    .filter_map(|i| i.frames.as_deref().map(|f| (i.id, f)))
+                    .collect::<Vec<_>>(),
             );
             people.insert(code.clone());
             subjects_seen.insert(code.clone(), subject);
@@ -1059,25 +1063,6 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
             });
         }
     }
-    // Record 55 C4: the sidecar's `NILS` object of each stack this version
-    // writes, built for those alone (#450): the names are settled over the
-    // whole registry, and the cards are not, nor are the tiers they read.
-    let cards: HashMap<i64, serde_json::Value> = match settings.layout {
-        Layout::Bids => cards_of(
-            registry.store(),
-            &facts,
-            &named,
-            jobs.iter()
-                .filter(|j| {
-                    !matches!(
-                        j.change,
-                        crate::version::Change::Unchanged | crate::version::Change::Moved
-                    )
-                })
-                .map(|j| j.stack),
-        )?,
-        Layout::Descriptive => HashMap::new(),
-    };
     // What the state holds and this version does not.
     let gone = gone_stacks(registry.store(), dataset, report.release_id)?;
 
@@ -1096,6 +1081,25 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
         }
     }
     let moved = move_them(settings.root, &jobs);
+    // Record 55 C4: the sidecar's `NILS` object of each stack this version
+    // writes, built for those alone (#450): the names are settled over the
+    // whole registry, and the cards are not, nor are the tiers they read. A
+    // move whose source is gone is written again below, and has its card.
+    let cards: HashMap<i64, serde_json::Value> = match settings.layout {
+        Layout::Bids => cards_of(
+            registry.store(),
+            &facts,
+            &named,
+            jobs.iter()
+                .filter(|j| match j.change {
+                    crate::version::Change::Unchanged => false,
+                    crate::version::Change::Moved => !moved.contains(&j.stack),
+                    _ => true,
+                })
+                .map(|j| j.stack),
+        )?,
+        Layout::Descriptive => HashMap::new(),
+    };
 
     // And only now is anything written.
     let mut rows: Vec<Vec<Param>> = Vec::new();
@@ -3369,8 +3373,10 @@ fn selection_bytes(store: &mut Store, selection: &Selection, picks: &Picks) -> R
     let filter = selection_where(store, selection, picks);
     // Cast, because a sum of bigints is a numeric on Postgres and the store
     // reads a numeric only as text.
-    let rows = both_ways(store, "UNION ALL", |from| {
-        format!("SELECT sf.size AS b {from} WHERE 1 = 1{filter}")
+    // a file split between stacks is read once, whichever of its stacks
+    // the selection takes (#463)
+    let rows = both_ways(store, "UNION", |from| {
+        format!("SELECT sf.id AS f, sf.size AS b {from} WHERE 1 = 1{filter}")
     });
     let sql = format!("SELECT CAST(COALESCE(SUM(b), 0) AS BIGINT) FROM ({rows}) u");
     Ok(store
@@ -3398,12 +3404,17 @@ pub fn preview(store: &mut Store, selection: &Selection) -> Result<Preview, Erro
     let filter = selection_where(store, selection, &Picks::Live(reading));
     let rows = both_ways(store, "UNION ALL", |from| {
         format!(
-            "SELECT su.id AS a, se.study_id AS b, k.id AS c, sf.size AS d {from} WHERE 1 = 1{filter}"
+            "SELECT su.id AS a, se.study_id AS b, k.id AS c, sf.id AS e, sf.size AS d {from} \
+             WHERE 1 = 1{filter}"
         )
     });
+    // a file split between stacks is one file of its bytes, whichever of
+    // its stacks are taken (#463)
     let sql = format!(
-        "SELECT COUNT(DISTINCT a), COUNT(DISTINCT b), COUNT(DISTINCT c), COUNT(*), \
-         CAST(COALESCE(SUM(d), 0) AS BIGINT) FROM ({rows}) u"
+        "WITH u AS ({rows}) SELECT (SELECT COUNT(DISTINCT a) FROM u), \
+         (SELECT COUNT(DISTINCT b) FROM u), (SELECT COUNT(DISTINCT c) FROM u), \
+         (SELECT COUNT(*) FROM (SELECT DISTINCT e, d FROM u) f), \
+         (SELECT CAST(COALESCE(SUM(d), 0) AS BIGINT) FROM (SELECT DISTINCT e, d FROM u) f)"
     );
     let r = store.query(&sql, &[])?;
     let Some(r) = r.first() else {
@@ -3925,6 +3936,11 @@ fn stage_one(
 ) -> Result<(PathBuf, scrub::Applied), String> {
     let mut object = open(Path::new(&instance.path))?;
     let applied = scrub::apply(&mut object, plan);
+    // a file the digest split between stacks is converted, and exported, as
+    // this stack's frames alone (#463)
+    if let Some(frames) = &instance.frames {
+        keep_frames(&mut object, frames, instance.stack, plan.remap)?;
+    }
     let path = staging.join(format!("{:08}.dcm", instance.id));
     object
         .write_to_file(&path)

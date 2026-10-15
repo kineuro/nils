@@ -151,19 +151,61 @@ pub fn keep_frames(object: &mut InMemDicomObject, frames: &[u32], ts: &str) -> R
     }
 
     // the pixel data, a frame's worth each
+    let geometry = Geometry::of(object);
+    let mut one_fragment_frames: Option<Vec<(u64, u64)>> = None;
     if let Ok(e) = object.element(tags::PIXEL_DATA) {
         let vr = e.vr();
         let kept = match e.value() {
             DicomValue::Primitive(PrimitiveValue::U8(bytes)) => {
-                let each = per_frame(bytes.len(), count)?;
-                let mut out = Vec::with_capacity(each * frames.len());
-                for i in picked(frames.len()) {
-                    out.extend_from_slice(&bytes[i * each..(i + 1) * each]);
+                let out = match geometry.filter(|g| g.bits_allocated == 1) {
+                    // 1-bit data packs its frames end to end in bits, a
+                    // frame not starting on a byte
+                    Some(g) => {
+                        let each = g.pixels();
+                        if bytes.len() * 8 < each * count as usize {
+                            return Err(format!(
+                                "1-bit pixel data of {} bytes is short of {count} frames",
+                                bytes.len()
+                            ));
+                        }
+                        let mut out = vec![0u8; (each * frames.len()).div_ceil(8)];
+                        let mut to = 0usize;
+                        for i in picked(frames.len()) {
+                            for b in i * each..(i + 1) * each {
+                                if bytes[b / 8] >> (b % 8) & 1 == 1 {
+                                    out[to / 8] |= 1 << (to % 8);
+                                }
+                                to += 1;
+                            }
+                        }
+                        out
+                    }
+                    None => {
+                        let each = match geometry {
+                            Some(g) => g.bytes(),
+                            None => per_frame(bytes.len(), count)?,
+                        };
+                        fits(bytes.len(), each, count)?;
+                        let mut out = Vec::with_capacity(each * frames.len() + 1);
+                        for i in picked(frames.len()) {
+                            out.extend_from_slice(&bytes[i * each..(i + 1) * each]);
+                        }
+                        out
+                    }
+                };
+                // a value of an odd length is padded to an even one
+                let mut out = out;
+                if out.len() % 2 == 1 {
+                    out.push(0);
                 }
                 DicomValue::Primitive(PrimitiveValue::U8(out.into()))
             }
             DicomValue::Primitive(PrimitiveValue::U16(words)) => {
-                let each = per_frame(words.len(), count)?;
+                let each = match geometry.filter(|g| g.bits_allocated == 16) {
+                    Some(g) => g.pixels(),
+                    None => per_frame(words.len(), count)?,
+                };
+                fits(words.len(), each, count)?;
                 let mut out = Vec::with_capacity(each * frames.len());
                 for i in picked(frames.len()) {
                     out.extend_from_slice(&words[i * each..(i + 1) * each]);
@@ -181,14 +223,24 @@ pub fn keep_frames(object: &mut InMemDicomObject, frames: &[u32], ts: &str) -> R
                 let ranges = fragment_ranges(fragments, seq.offset_table(), count as usize, ts)?;
                 let mut out: Vec<Vec<u8>> = Vec::new();
                 let mut table: Vec<u32> = Vec::new();
+                let mut extended: Option<Vec<(u64, u64)>> = Some(Vec::new());
                 let mut at = 0u64;
                 for i in picked(frames.len()) {
                     table.push(u32::try_from(at).map_err(|_| "the pixel data is too large")?);
-                    for f in &fragments[ranges[i].clone()] {
+                    let range = ranges[i].clone();
+                    if range.len() == 1 {
+                        if let Some(x) = extended.as_mut() {
+                            x.push((at, fragments[range.start].len() as u64));
+                        }
+                    } else {
+                        extended = None;
+                    }
+                    for f in &fragments[range] {
                         at += f.len() as u64 + 8;
                         out.push(f.clone());
                     }
                 }
+                one_fragment_frames = extended;
                 // a table is written where the object had one
                 if seq.offset_table().is_empty() {
                     table.clear();
@@ -199,6 +251,33 @@ pub fn keep_frames(object: &mut InMemDicomObject, frames: &[u32], ts: &str) -> R
         };
         object.put(DataElement::new(tags::PIXEL_DATA, vr, kept));
     }
+    // the Extended Offset Table and its lengths name every frame of the
+    // object: written again for the frames kept, one fragment each, else
+    // let go, the Basic Offset Table or the fragments' own starts telling
+    // a reader where a frame begins
+    if object.element(tags::EXTENDED_OFFSET_TABLE).is_ok()
+        || object.element(tags::EXTENDED_OFFSET_TABLE_LENGTHS).is_ok()
+    {
+        match one_fragment_frames {
+            Some(x) if !x.is_empty() => {
+                let (offsets, lengths): (Vec<u64>, Vec<u64>) = x.into_iter().unzip();
+                object.put(DataElement::new(
+                    tags::EXTENDED_OFFSET_TABLE,
+                    VR::OV,
+                    PrimitiveValue::U64(offsets.into()),
+                ));
+                object.put(DataElement::new(
+                    tags::EXTENDED_OFFSET_TABLE_LENGTHS,
+                    VR::OV,
+                    PrimitiveValue::U64(lengths.into()),
+                ));
+            }
+            _ => {
+                object.remove_element(tags::EXTENDED_OFFSET_TABLE);
+                object.remove_element(tags::EXTENDED_OFFSET_TABLE_LENGTHS);
+            }
+        }
+    }
     object.put(DataElement::new(
         tags::NUMBER_OF_FRAMES,
         VR::IS,
@@ -207,9 +286,65 @@ pub fn keep_frames(object: &mut InMemDicomObject, frames: &[u32], ts: &str) -> R
     Ok(())
 }
 
+/// What one frame of native pixel data is, from the object's own words:
+/// rows, columns, samples per pixel and bits allocated.
+#[derive(Debug, Clone, Copy)]
+struct Geometry {
+    rows: usize,
+    columns: usize,
+    samples: usize,
+    bits_allocated: usize,
+}
+
+impl Geometry {
+    fn of(object: &InMemDicomObject) -> Option<Geometry> {
+        let n = |tag| -> Option<usize> {
+            object
+                .element(tag)
+                .ok()?
+                .to_int::<u32>()
+                .ok()
+                .map(|v| v as usize)
+        };
+        let g = Geometry {
+            rows: n(tags::ROWS)?,
+            columns: n(tags::COLUMNS)?,
+            samples: n(tags::SAMPLES_PER_PIXEL).unwrap_or(1),
+            bits_allocated: n(tags::BITS_ALLOCATED)?,
+        };
+        (g.rows > 0 && g.columns > 0 && g.samples > 0 && g.bits_allocated > 0).then_some(g)
+    }
+
+    /// The samples of one frame.
+    fn pixels(&self) -> usize {
+        self.rows * self.columns * self.samples
+    }
+
+    /// The bytes of one frame, bits allocated a whole number of bytes.
+    fn bytes(&self) -> usize {
+        self.pixels() * self.bits_allocated.div_ceil(8)
+    }
+}
+
+/// Whether `total` values hold `frames` frames of `each`: exactly, or with
+/// the one byte that pads a value of an odd length to an even one.
+fn fits(total: usize, each: usize, frames: u32) -> Result<(), String> {
+    let need = each * frames as usize;
+    if total == need || total == need + 1 {
+        return Ok(());
+    }
+    Err(format!(
+        "pixel data of {total} values does not hold {frames} frames of {each}"
+    ))
+}
+
 /// How many values one frame holds of `total` over `frames`.
 fn per_frame(total: usize, frames: u32) -> Result<usize, String> {
     let frames = frames as usize;
+    // a value of an odd length carries one byte of padding
+    if frames > 0 && !total.is_multiple_of(frames) && (total - 1).is_multiple_of(frames) {
+        return Ok((total - 1) / frames);
+    }
     if frames == 0 || !total.is_multiple_of(frames) {
         return Err(format!(
             "pixel data of {total} values does not divide into {frames} frames"
@@ -339,5 +474,110 @@ mod tests {
         // no pixels: the groups and the count alone
         keep_frames(&mut again, &[1], "1.2.840.10008.1.2.1").unwrap();
         assert_eq!(orientations(&again), ["1\\0\\0\\0\\1\\0"]);
+    }
+
+    fn with_geometry(o: &mut InMemDicomObject, rows: u16, columns: u16, bits: u16) {
+        for (tag, v) in [
+            (tags::ROWS, rows),
+            (tags::COLUMNS, columns),
+            (tags::BITS_ALLOCATED, bits),
+            (tags::SAMPLES_PER_PIXEL, 1),
+        ] {
+            o.put(DataElement::new(tag, VR::US, PrimitiveValue::from(v)));
+        }
+    }
+
+    fn bytes_of(o: &InMemDicomObject) -> Vec<u8> {
+        o.element(tags::PIXEL_DATA)
+            .unwrap()
+            .to_bytes()
+            .unwrap()
+            .to_vec()
+    }
+
+    /// 8-bit native data of an odd length carries a pad byte, which is no
+    /// frame's; what is kept is padded again to an even length.
+    #[test]
+    fn eight_bit_data_with_its_pad_byte_keeps_its_frames() {
+        // three frames of one row of three, each frame its number, a pad
+        let mut bytes: Vec<u8> = (1..=3u8).flat_map(|f| [f; 3]).collect();
+        bytes.push(0);
+        let mut o = object(
+            3,
+            Some(DicomValue::Primitive(PrimitiveValue::U8(bytes.into()))),
+        );
+        with_geometry(&mut o, 1, 3, 8);
+        keep_frames(&mut o, &[2], "1.2.840.10008.1.2.1").unwrap();
+        assert_eq!(bytes_of(&o), [2, 2, 2, 0]);
+        // without the object's geometry the pad is told apart too
+        let mut bytes: Vec<u8> = (1..=3u8).flat_map(|f| [f; 3]).collect();
+        bytes.push(0);
+        let mut bare = object(
+            3,
+            Some(DicomValue::Primitive(PrimitiveValue::U8(bytes.into()))),
+        );
+        keep_frames(&mut bare, &[3], "1.2.840.10008.1.2.1").unwrap();
+        assert_eq!(bytes_of(&bare), [3, 3, 3, 0]);
+    }
+
+    /// 1-bit data packs its frames end to end in bits; the frames kept are
+    /// packed again from the first bit.
+    #[test]
+    fn one_bit_data_keeps_its_frames_bit_by_bit() {
+        // three frames of two by two: 1111, 0000, 1010 from the first bit
+        let bits = [1u8, 1, 1, 1, 0, 0, 0, 0, 1, 0, 1, 0];
+        let mut packed = vec![0u8; 2];
+        for (i, b) in bits.iter().enumerate() {
+            packed[i / 8] |= b << (i % 8);
+        }
+        let mut o = object(
+            3,
+            Some(DicomValue::Primitive(PrimitiveValue::U8(packed.into()))),
+        );
+        with_geometry(&mut o, 2, 2, 1);
+        keep_frames(&mut o, &[1, 3], "1.2.840.10008.1.2.1").unwrap();
+        // 1111 then 1010: 0b0101_1111, padded to two bytes
+        assert_eq!(bytes_of(&o), [0b0101_1111, 0]);
+    }
+
+    /// The Extended Offset Table and its lengths are written again for the
+    /// frames kept, one fragment each, and let go where a frame is more.
+    #[test]
+    fn the_extended_offset_table_follows_the_frames_kept() {
+        let fragments: Vec<Vec<u8>> = (1..=4u8).map(|f| vec![0xFF, 0xD8, f, f, f, f]).collect();
+        let seq = PixelFragmentSequence::new(Vec::<u32>::new(), fragments);
+        let mut o = object(4, Some(DicomValue::PixelSequence(seq)));
+        let eot = |o: &mut InMemDicomObject| {
+            o.put(DataElement::new(
+                tags::EXTENDED_OFFSET_TABLE,
+                VR::OV,
+                PrimitiveValue::U64(vec![0u64, 14, 28, 42].into()),
+            ));
+            o.put(DataElement::new(
+                tags::EXTENDED_OFFSET_TABLE_LENGTHS,
+                VR::OV,
+                PrimitiveValue::U64(vec![6u64; 4].into()),
+            ));
+        };
+        eot(&mut o);
+        keep_frames(&mut o, &[2, 4], "1.2.840.10008.1.2.4.50").unwrap();
+        let u64s = |o: &InMemDicomObject, tag| -> Vec<u64> {
+            match o.element(tag).unwrap().value() {
+                DicomValue::Primitive(PrimitiveValue::U64(v)) => v.to_vec(),
+                other => panic!("{other:?}"),
+            }
+        };
+        assert_eq!(u64s(&o, tags::EXTENDED_OFFSET_TABLE), [0, 14]);
+        assert_eq!(u64s(&o, tags::EXTENDED_OFFSET_TABLE_LENGTHS), [6, 6]);
+        // native data has no fragments: the tables go
+        let words: Vec<u16> = (1..=4u16).flat_map(|f| [f; 4]).collect();
+        let mut native = object(
+            4,
+            Some(DicomValue::Primitive(PrimitiveValue::U16(words.into()))),
+        );
+        eot(&mut native);
+        keep_frames(&mut native, &[1], "1.2.840.10008.1.2.1").unwrap();
+        assert!(native.element(tags::EXTENDED_OFFSET_TABLE).is_err());
+        assert!(native.element(tags::EXTENDED_OFFSET_TABLE_LENGTHS).is_err());
     }
 }

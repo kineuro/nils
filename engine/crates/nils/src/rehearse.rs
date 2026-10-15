@@ -119,6 +119,33 @@ pub(crate) fn report(
     effect::run(registry.store(), dir, &base, patch, settings, &names)
 }
 
+/// [`report`] over a scope the caller read already ([`effect::scope`]), so
+/// that a door that counted it does not read it again (#451).
+pub(crate) fn report_scoped(
+    registry: &mut Registry,
+    dir: &Path,
+    patch: &Patch,
+    settings: &Settings,
+    scoped: effect::Scoping,
+) -> Result<Value, effect::Error> {
+    let base = nils_pack::load(dir, None)?;
+    if base.name != patch.pack {
+        return Err(effect::Error::Refused(format!(
+            "the patch amends {}, and the pack here is {}",
+            patch.pack, base.name
+        )));
+    }
+    effect::run_scoped(
+        registry.store(),
+        dir,
+        &base,
+        patch,
+        settings,
+        &names,
+        scoped,
+    )
+}
+
 /// Record 55 K7: each transition's scanners, by station name, answered as
 /// their shapes, as the value sampler shows a quasi-identifying field.
 pub(crate) fn shape_scanners(doc: &mut Value) {

@@ -1401,17 +1401,68 @@ pub(crate) fn save_stacks(
 }
 
 /// The lock one step's door over one scope holds from its busy check to
-/// its insert (#455), one per scope and step, kept for the process.
-fn door_turn(target: &str, step: &str) -> std::sync::Arc<std::sync::Mutex<()>> {
-    static TURNS: std::sync::OnceLock<
-        std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<std::sync::Mutex<()>>>>,
-    > = std::sync::OnceLock::new();
-    let turns = TURNS.get_or_init(Default::default);
-    let mut turns = turns.lock().unwrap_or_else(|e| e.into_inner());
-    turns
-        .entry(format!("{target}\u{0}{step}"))
-        .or_default()
-        .clone()
+/// its insert (#455), one per scope and step while a request holds or
+/// waits for it: the last to let it go drops it, so the table holds the
+/// turns being taken and no more.
+struct DoorTurn {
+    key: String,
+    lock: std::sync::Arc<std::sync::Mutex<()>>,
+}
+
+type Turns =
+    std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<std::sync::Mutex<()>>>>;
+
+fn turns() -> &'static Turns {
+    static TURNS: std::sync::OnceLock<Turns> = std::sync::OnceLock::new();
+    TURNS.get_or_init(Default::default)
+}
+
+impl DoorTurn {
+    fn take(target: &str, step: &str) -> DoorTurn {
+        let key = format!("{target}\u{0}{step}");
+        let mut all = turns().lock().unwrap_or_else(|e| e.into_inner());
+        let lock = all.entry(key.clone()).or_default().clone();
+        DoorTurn { key, lock }
+    }
+
+    /// Whether the table holds a turn for this scope and step, for the
+    /// tests.
+    #[cfg(test)]
+    fn held(target: &str, step: &str) -> bool {
+        turns()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains_key(&format!("{target}\u{0}{step}"))
+    }
+}
+
+impl Drop for DoorTurn {
+    fn drop(&mut self) {
+        let mut all = turns().lock().unwrap_or_else(|e| e.into_inner());
+        // the table's own reference and this one: nobody else holds or
+        // waits for it
+        if std::sync::Arc::strong_count(&self.lock) <= 2 {
+            all.remove(&self.key);
+        }
+    }
+}
+
+/// Delete a handle this door froze and nothing reads: its members, its
+/// pages and its row.
+fn drop_handle(store: &mut Store, handle: i64) -> Result<(), StoreError> {
+    for (table, column) in [
+        ("handle_member", "handle_id"),
+        ("handle_page", "handle_id"),
+        ("handle", "id"),
+    ] {
+        let sql = format!(
+            "DELETE FROM {} WHERE {column} = {}",
+            store.qualified(table),
+            store.dialect().param(1, nils_registry::schema::Type::Int)
+        );
+        store.execute(&sql, &[nils_registry::store::Param::Int(handle)])?;
+    }
+    Ok(())
 }
 
 /// The oldest job a door queued for the step over the scope, still open,
@@ -1481,8 +1532,8 @@ pub(crate) fn run_door(
     // #455: the busy check and the insert are one step: a second request
     // for the same step over the same scope waits here until the first has
     // queued its job, then finds it and is refused
-    let turn = door_turn(&target, step);
-    let _held = turn.lock().unwrap_or_else(|e| e.into_inner());
+    let turn = DoorTurn::take(&target, step);
+    let _held = turn.lock.lock().unwrap_or_else(|e| e.into_inner());
     let planned = plan(registry, step).map_err(failed)?;
     let epoch = registry.meta().epoch;
     let ids;
@@ -1555,6 +1606,8 @@ pub(crate) fn run_door(
     if let Some(winner) = earlier_open(store, step, &target, id).map_err(failed)?
         && withdraw_queued(store, id).map_err(failed)?
     {
+        // the scans this door froze for it are nobody's now
+        drop_handle(store, handle).map_err(failed)?;
         return Err(Refused::new(
             409,
             "running",
@@ -1574,6 +1627,67 @@ pub(crate) fn run_door(
 #[cfg(test)]
 mod tests {
     use super::{Plan, Refused, owner, refusal};
+
+    /// A run withdrawn as the younger of two takes the scans it froze with
+    /// it: its handle, members and pages are gone.
+    #[test]
+    fn a_withdrawn_run_s_handle_goes_with_it() {
+        use nils_registry::store::{Cell, Row, Store};
+        let mut store = Store::sqlite_in_memory().unwrap();
+        nils_registry::migrate::migrate(&mut store, nils_registry::migrate::Kind::Registry)
+            .unwrap();
+        let rows = vec![
+            Row(vec![Cell::Int(1), Cell::Int(10)]),
+            Row(vec![Cell::Int(2), Cell::Int(10)]),
+        ];
+        let (handle, n) =
+            super::save_stacks(&mut store, rows, "ops@lab", 1, &super::Pinned::default()).unwrap();
+        assert_eq!(n, 2);
+        let count =
+            |store: &mut Store, sql: &str| store.query(sql, &[]).unwrap()[0].int(0).unwrap();
+        assert_eq!(
+            count(
+                &mut store,
+                &format!("SELECT COUNT(*) FROM handle WHERE id = {handle}")
+            ),
+            1
+        );
+        super::drop_handle(&mut store, handle).unwrap();
+        for table in ["handle_member", "handle_page"] {
+            assert_eq!(
+                count(
+                    &mut store,
+                    &format!("SELECT COUNT(*) FROM {table} WHERE handle_id = {handle}")
+                ),
+                0,
+                "{table}"
+            );
+        }
+        assert_eq!(
+            count(
+                &mut store,
+                &format!("SELECT COUNT(*) FROM handle WHERE id = {handle}")
+            ),
+            0
+        );
+    }
+
+    /// #455's lock per scope and step is held while a request takes or
+    /// waits for it, and the last to let it go drops it from the table.
+    #[test]
+    fn a_door_s_turn_is_dropped_once_nobody_takes_it() {
+        use super::DoorTurn;
+        let first = DoorTurn::take("dataset:turns", "body_part");
+        let second = DoorTurn::take("dataset:turns", "body_part");
+        assert!(std::sync::Arc::ptr_eq(&first.lock, &second.lock));
+        drop(first);
+        assert!(
+            DoorTurn::held("dataset:turns", "body_part"),
+            "one still holds it"
+        );
+        drop(second);
+        assert!(!DoorTurn::held("dataset:turns", "body_part"));
+    }
 
     #[test]
     fn an_operation_owns_its_axes() {

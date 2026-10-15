@@ -23,7 +23,10 @@ use blake2::Digest;
 /// The **naming** grammar needs no such constant, because a name is recomputed
 /// from scratch on every run and compared as a path: a grammar change moves
 /// files, and moving is what the comparison is looking for.
-pub const SCRUB: u32 = 1;
+///
+/// 2 (2026-10-15, #463): a file the digest split between stacks is written
+/// as each stack's own frames, and its frames are an input of the content.
+pub const SCRUB: u32 = 2;
 
 /// A release's version: `YYYY.MM.DD.N`.
 ///
@@ -107,6 +110,7 @@ pub fn content_of(
     private: &str,
     pack: &str,
     instances: &[(i64, i64, i64)],
+    frames: &[(i64, &str)],
 ) -> String {
     let mut h = blake2::Blake2s256::new();
     h.update(SCRUB.to_be_bytes());
@@ -124,6 +128,15 @@ pub fn content_of(
         h.update(id.to_be_bytes());
         h.update(size.to_be_bytes());
         h.update(mtime.to_be_bytes());
+    }
+    // Of a file the digest split between stacks, the frames this stack is
+    // written from (#463): the same file under another split is other bytes.
+    let mut split = frames.to_vec();
+    split.sort_unstable();
+    for (id, list) in split {
+        h.update(id.to_be_bytes());
+        h.update((list.len() as u64).to_be_bytes());
+        h.update(list.as_bytes());
     }
     hex::encode(h.finalize())
 }
@@ -176,8 +189,8 @@ mod tests {
     fn the_content_digest_does_not_depend_on_where_the_file_goes() {
         // The whole reason a move can be a move. A name is a rendering of the
         // decided axes and none of them touches a byte.
-        let a = content_of("p", "c", "v", "mri@1", &[(1, 100, 5)]);
-        let b = content_of("p", "c", "v", "mri@1", &[(1, 100, 5)]);
+        let a = content_of("p", "c", "v", "mri@1", &[(1, 100, 5)], &[]);
+        let b = content_of("p", "c", "v", "mri@1", &[(1, 100, 5)], &[]);
         assert_eq!(a, b);
         assert_eq!(
             compare(
@@ -194,15 +207,15 @@ mod tests {
 
     #[test]
     fn a_change_to_any_input_of_the_bytes_is_a_rewrite() {
-        let base = content_of("p", "c", "v", "mri@1", &[(1, 100, 5)]);
+        let base = content_of("p", "c", "v", "mri@1", &[(1, 100, 5)], &[]);
         for other in [
-            content_of("another policy", "c", "v", "mri@1", &[(1, 100, 5)]),
-            content_of("p", "fewer", "v", "mri@1", &[(1, 100, 5)]),
-            content_of("p", "c", "another list", "mri@1", &[(1, 100, 5)]),
-            content_of("p", "c", "v", "mri@2", &[(1, 100, 5)]),
-            content_of("p", "c", "v", "mri@1", &[(1, 101, 5)]),
-            content_of("p", "c", "v", "mri@1", &[(1, 100, 6)]),
-            content_of("p", "c", "v", "mri@1", &[(1, 100, 5), (2, 100, 5)]),
+            content_of("another policy", "c", "v", "mri@1", &[(1, 100, 5)], &[]),
+            content_of("p", "fewer", "v", "mri@1", &[(1, 100, 5)], &[]),
+            content_of("p", "c", "another list", "mri@1", &[(1, 100, 5)], &[]),
+            content_of("p", "c", "v", "mri@2", &[(1, 100, 5)], &[]),
+            content_of("p", "c", "v", "mri@1", &[(1, 101, 5)], &[]),
+            content_of("p", "c", "v", "mri@1", &[(1, 100, 6)], &[]),
+            content_of("p", "c", "v", "mri@1", &[(1, 100, 5), (2, 100, 5)], &[]),
         ] {
             assert_ne!(base, other);
             assert_eq!(
@@ -219,11 +232,22 @@ mod tests {
         }
     }
 
+    /// #463: the frames a stack is written from are an input: one file
+    /// written whole and as one stack's frames are two contents.
+    #[test]
+    fn the_frames_of_a_split_file_are_an_input() {
+        let whole = content_of("p", "c", "v", "m", &[(1, 1, 1)], &[]);
+        let first = content_of("p", "c", "v", "m", &[(1, 1, 1)], &[(1, "1-4")]);
+        let second = content_of("p", "c", "v", "m", &[(1, 1, 1)], &[(1, "5-8")]);
+        assert_ne!(whole, first);
+        assert_ne!(first, second);
+    }
+
     #[test]
     fn the_order_the_instances_arrive_in_is_not_an_input() {
         assert_eq!(
-            content_of("p", "c", "v", "m", &[(1, 1, 1), (2, 2, 2)]),
-            content_of("p", "c", "v", "m", &[(2, 2, 2), (1, 1, 1)])
+            content_of("p", "c", "v", "m", &[(1, 1, 1), (2, 2, 2)], &[]),
+            content_of("p", "c", "v", "m", &[(2, 2, 2), (1, 1, 1)], &[])
         );
     }
 
@@ -249,6 +273,6 @@ mod tests {
         h.update(1i64.to_be_bytes());
         h.update(1i64.to_be_bytes());
         let later = hex::encode(h.finalize());
-        assert_ne!(content_of("p", "c", "v", "m", &[(1, 1, 1)]), later);
+        assert_ne!(content_of("p", "c", "v", "m", &[(1, 1, 1)], &[]), later);
     }
 }

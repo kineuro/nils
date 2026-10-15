@@ -551,7 +551,7 @@ pub struct Renamed {
 
 /// Where every stack sits, what is sealed, the operations' scopes as the
 /// registry names them, and the stacks a report replays.
-struct Scoping {
+pub struct Scoping {
     ds: Datasets,
     place: BTreeMap<i64, Place>,
     sealed: BTreeSet<i64>,
@@ -631,6 +631,29 @@ fn scoping(
     })
 }
 
+impl Scoping {
+    /// How many stacks the report replays.
+    pub fn stacks(&self) -> usize {
+        self.in_scope.len()
+    }
+}
+
+/// Where everything sits and what a report of the patch would replay, read
+/// once: a door counts it to answer at once, queue a job or refuse over the
+/// cap, and hands it to [`run_scoped`] rather than reading it again.
+pub fn scope(
+    store: &mut Store,
+    base: &Pack,
+    patch: &Patch,
+    scope: Option<Scope>,
+) -> Result<Scoping, Error> {
+    let settings = Settings {
+        scope,
+        ..Settings::default()
+    };
+    scoping(store, base, patch, &settings)
+}
+
 /// How many stacks a report of a patch would replay (#451): what a door
 /// reads to answer at once, queue a job, or refuse over the cap.
 pub fn scope_size(
@@ -662,6 +685,21 @@ pub fn run(
     settings: &Settings,
     namer: Namer<'_>,
 ) -> Result<Value, Error> {
+    let scoped = scoping(store, base, patch, settings)?;
+    run_scoped(store, dir, base, patch, settings, namer, scoped)
+}
+
+/// [`run`] over a scope [`scope`] read already, with the same settings'
+/// scope.
+pub fn run_scoped(
+    store: &mut Store,
+    dir: &Path,
+    base: &Pack,
+    patch: &Patch,
+    settings: &Settings,
+    namer: Namer<'_>,
+    scoped: Scoping,
+) -> Result<Value, Error> {
     let started = Instant::now();
     let mut seconds: BTreeMap<&str, f64> = BTreeMap::new();
     let mut lap = Instant::now();
@@ -682,7 +720,7 @@ pub fn run(
         op_scopes,
         in_scope,
         scope_text,
-    } = scoping(store, base, patch, settings)?;
+    } = scoped;
     if let Some(cap) = settings.cap
         && in_scope.len() > cap
     {

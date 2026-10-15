@@ -2547,6 +2547,11 @@ fn both_stacks_of_an_enhanced_file_are_released() {
         .map(|r| r.int(0).unwrap())
         .collect();
     assert_eq!(stacks.len(), 2, "the digest made two stacks of the file");
+    // the file is one file of its bytes, whichever of its stacks are taken
+    let reached = run::preview(reg.store(), &Selection::default()).unwrap();
+    assert_eq!((reached.stacks, reached.files), (2, 1), "{reached:?}");
+    let size = std::fs::metadata(source.path().join("E/1")).unwrap().len() as i64;
+    assert_eq!(reached.bytes, size);
     let policy = Policy::default();
     let scheme = SessionScheme::default();
 

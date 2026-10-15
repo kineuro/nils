@@ -551,6 +551,46 @@ fn a_qc_decision_renames_a_bids_file_rather_than_writing_it_again() {
     }
 }
 
+/// A rename whose files are gone (somebody emptied the tree) is written
+/// again, and its sidecar carries its `NILS` card like any written stack's.
+#[test]
+fn a_move_written_again_carries_its_card() {
+    let Some(converter) = converter() else { return };
+    let source = tree();
+    let home_dir = TempDir::new("bids-home");
+    let out = TempDir::new("bids-out");
+    let (_home, mut reg) = registry(&home_dir, &source);
+    let policy = Policy::default();
+    let scheme = SessionScheme::default();
+    let s = settings(
+        out.path(),
+        &policy,
+        &scheme,
+        Options::default(),
+        Some(&converter),
+    );
+    run::run(&mut reg, &s).unwrap();
+    // the tree emptied, then a decision that renames every stack
+    for f in files_under(out.path()) {
+        if f.starts_with("sub-") {
+            std::fs::remove_file(out.path().join(&f)).unwrap();
+        }
+    }
+    decide(&mut reg, "body_part", "spine");
+    let after = run::run(&mut reg, &s).unwrap();
+    assert!(after.written > 0, "the moves became writes: {after:?}");
+    let sidecars: Vec<String> = files_under(out.path())
+        .into_iter()
+        .filter(|f| f.starts_with("sub-") && f.ends_with(".json"))
+        .collect();
+    assert!(!sidecars.is_empty());
+    for f in &sidecars {
+        let doc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(out.path().join(f)).unwrap()).unwrap();
+        assert!(doc["NILS"].is_object(), "{f}: {doc}");
+    }
+}
+
 /// Where the DICOM export keeps a NIfTI's slices (record 55 C4, 2026-10-09).
 fn export_of(nifti: &str) -> String {
     let stem = nifti.trim_end_matches(".nii.gz").trim_end_matches(".nii");
@@ -2266,4 +2306,120 @@ fn two_rescans_beside_a_different_scan_stay_runs_and_the_third_says_why() {
     assert_eq!(report.repeats, 2, "{report:?}");
     assert_eq!(report.numbered, 0, "{report:?}");
     assert!(shared_differs(&mut reg).is_empty());
+}
+
+/// #463: in the BIDS layout an enhanced file whose frames hold two stacks
+/// (two orientations) is converted as each stack's own frames: dcm2niix is
+/// handed each stack's file alone and makes one image of four slices each,
+/// never one image of the whole file, and the DICOM export beside it holds
+/// each stack's frames alone.
+#[test]
+fn each_stack_of_an_enhanced_file_is_converted_from_its_own_frames() {
+    let Some(converter) = converter() else { return };
+    let source = TempDir::new("bids-enhanced");
+    let fg = |seq, elems| synth::fg(seq, elems);
+    // two stacks of 24 planes of 64 by 64, one axial and one sagittal
+    const N: u16 = 24;
+    const M: u16 = 64;
+    let per_frame: Vec<Vec<synth::Elem>> = (0..2 * N)
+        .map(|i| {
+            let (iop, ipp) = if i < N {
+                ("1\\0\\0\\0\\1\\0".to_string(), format!("0\\0\\{i}"))
+            } else {
+                ("0\\1\\0\\0\\0\\-1".to_string(), format!("{}\\0\\0", i - N))
+            };
+            vec![
+                synth::fg_orientation(&iop),
+                fg(
+                    tags::PLANE_POSITION_SEQUENCE,
+                    vec![synth::text(tags::IMAGE_POSITION_PATIENT, VR::DS, &ipp)],
+                ),
+            ]
+        })
+        .collect();
+    let shared = vec![fg(
+        tags::PIXEL_MEASURES_SEQUENCE,
+        vec![
+            synth::text(tags::PIXEL_SPACING, VR::DS, "1\\1"),
+            synth::text(tags::SLICE_THICKNESS, VR::DS, "1"),
+        ],
+    )];
+    let mut e = synth::enhanced_mr("E.1", "E.1.1", "E.1.1.1", shared, per_frame);
+    // each frame its number, times a hundred
+    let pixels: Vec<u8> = (1..=2 * N)
+        .flat_map(|f| std::iter::repeat_n(f * 100, usize::from(M) * usize::from(M)))
+        .flat_map(u16::to_le_bytes)
+        .collect();
+    e.extend([
+        synth::text(tags::PATIENT_ID, VR::LO, "P-E"),
+        synth::text(tags::STUDY_DATE, VR::DA, "20220115"),
+        synth::text(tags::SERIES_TIME, VR::TM, "031415"),
+        synth::text(tags::SERIES_DESCRIPTION, VR::LO, "t1 mprage"),
+        synth::text(tags::PROTOCOL_NAME, VR::LO, "t1 mprage"),
+        synth::text(tags::MR_ACQUISITION_TYPE, VR::CS, "3D"),
+        synth::text(tags::IMAGE_TYPE, VR::CS, "ORIGINAL\\PRIMARY\\M\\ND"),
+        synth::text(tags::BURNED_IN_ANNOTATION, VR::CS, "NO"),
+        synth::text(tags::MANUFACTURER, VR::LO, "SYNTHETIC"),
+        synth::text(tags::PHOTOMETRIC_INTERPRETATION, VR::CS, "MONOCHROME2"),
+        synth::us(tags::ROWS, M),
+        synth::us(tags::COLUMNS, M),
+        synth::us(tags::BITS_ALLOCATED, 16),
+        synth::us(tags::BITS_STORED, 16),
+        synth::us(tags::HIGH_BIT, 15),
+        synth::us(tags::PIXEL_REPRESENTATION, 0),
+        synth::us(tags::SAMPLES_PER_PIXEL, 1),
+        synth::bytes(tags::PIXEL_DATA, VR::OW, pixels),
+    ]);
+    source.file(
+        "E/1",
+        &synth::part10(&synth::enhanced_meta("E.1.1.1"), &e, true),
+    );
+    let home_dir = TempDir::new("bids-home");
+    let (_home, mut reg) = registry(&home_dir, &source);
+    let stacks: i64 = reg
+        .store()
+        .query("SELECT COUNT(*) FROM stack", &[])
+        .unwrap()[0]
+        .int(0)
+        .unwrap();
+    assert_eq!(stacks, 2, "the digest made two stacks of the file");
+    // a file of one object reads to the rules as a planning scan; what is
+    // tested here is its conversion, so it is decided an acquisition
+    decide(&mut reg, "disposition", "acquisition");
+    let policy = Policy::default();
+    let scheme = SessionScheme::default();
+    let out = TempDir::new("bids-enhanced-out");
+    let mut s = settings(
+        out.path(),
+        &policy,
+        &scheme,
+        Options::default(),
+        Some(&converter),
+    );
+    s.compress = false;
+    let report = run::run(&mut reg, &s).unwrap();
+    assert_eq!(report.stacks, 2, "{report:?}");
+    let files = files_under(out.path());
+    let images: Vec<&String> = files
+        .iter()
+        .filter(|f| f.starts_with("sub-") && f.ends_with(".nii"))
+        .collect();
+    assert_eq!(images.len(), 2, "one image a stack: {files:?} {report:?}");
+    for f in &images {
+        let bytes = std::fs::read(out.path().join(f)).unwrap();
+        let dim = |i: usize| i16::from_le_bytes([bytes[40 + 2 * i], bytes[41 + 2 * i]]);
+        // its own planes, whichever way the converter turned them: never
+        // the file's 48
+        let mut dims = [dim(1), dim(2), dim(3)];
+        dims.sort_unstable();
+        assert_eq!(dims, [N as i16, M as i16, M as i16], "{f}: its own planes");
+    }
+    for f in files.iter().filter(|f| f.ends_with(".dcm")) {
+        let o = dicom_object::open_file(out.path().join(f)).unwrap();
+        assert_eq!(
+            o.element(tags::NUMBER_OF_FRAMES).unwrap().to_str().unwrap(),
+            N.to_string(),
+            "{f}: the stack's frames alone"
+        );
+    }
 }

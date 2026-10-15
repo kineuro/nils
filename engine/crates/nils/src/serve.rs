@@ -1990,22 +1990,29 @@ fn route(
     query: &HashMap<String, String>,
     body: &str,
 ) -> Reply {
-    // #458: a write to a place or a dataset (a declaration, an explore, a
-    // move, a pseudonymise run asked for) can change what a folder holds or
-    // how it is read: the kept layouts are read again
-    if *method != Method::Get
-        && (path.starts_with("/api/places") || path.starts_with("/api/datasets"))
-    {
-        crate::dataset::forget_layouts();
-    }
-    // any write at a door may change what the sources door reads
-    if *method != Method::Get {
-        crate::sources::forget();
-    }
-    match routed(doors, registry, ask, caller, method, path, query, body) {
+    let reply = match routed(doors, registry, ask, caller, method, path, query, body) {
         Ok(r) => r,
         Err(r) => r,
+    };
+    // #458 and the Data page's speed: a write to a place or a dataset (a
+    // declaration, an explore, a move, the originals' act, a step's run
+    // asked for) can change what a folder holds or how it is read, and what
+    // the sources door answers. Once the door has written (its answer a
+    // success, its writes committed), the kept layouts and the kept sources
+    // document are read again; a read, or a door that refused, forgets
+    // nothing.
+    if writes_a_place(method, path) && (200..300).contains(&reply.status) {
+        crate::dataset::forget_layouts();
+        crate::sources::forget();
     }
+    reply
+}
+
+/// Whether a request is one of the doors that write a place or a dataset.
+fn writes_a_place(method: &Method, path: &str) -> bool {
+    *method != Method::Get
+        && *method != Method::Head
+        && (path.starts_with("/api/places") || path.starts_with("/api/datasets"))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2239,16 +2246,18 @@ fn routed(
             // refused; a small one is answered at once
             let base = nils_pack::load(&dir, None)
                 .map_err(|e| Reply::error(500, format!("the pack {name}: {e}")))?;
-            let stacks = match nils_classify::effect::scope_size(
+            // the scope read once: counted here, and replayed from it below
+            let scoped = match nils_classify::effect::scope(
                 registry.store(),
                 &base,
                 &patch,
                 scope.clone(),
             ) {
-                Ok(n) => n,
+                Ok(s) => s,
                 Err(nils_classify::effect::Error::Refused(m)) => return Err(Reply::error(400, m)),
                 Err(e) => return Err(Reply::error(500, e.to_string())),
             };
+            let stacks = scoped.stacks();
             if stacks > crate::rehearse::cap() {
                 let mut r = Reply::error(
                     422,
@@ -2309,7 +2318,7 @@ fn routed(
                 cap: Some(crate::rehearse::at_once()),
                 progress: None,
             };
-            match crate::rehearse::report(registry, &dir, &patch, &settings) {
+            match crate::rehearse::report_scoped(registry, &dir, &patch, &settings, scoped) {
                 Ok(mut answer) => {
                     // record 55 K7: a station name is quasi-identifying, and
                     // below detail quasi a scanner is answered as its shape
@@ -8342,5 +8351,27 @@ mod query_tests {
         assert_eq!(decoded("100%"), "100%");
         assert_eq!(decoded("%zz"), "%zz");
         assert_eq!(decoded("%25zz"), "%zz");
+    }
+}
+
+#[cfg(test)]
+mod forgets {
+    use super::{Method, writes_a_place};
+
+    /// The kept layouts and sources document are forgotten by the doors that
+    /// write a place or a dataset, never by a read or another door's write.
+    #[test]
+    fn only_a_place_s_or_a_dataset_s_write_forgets_what_is_kept() {
+        assert!(writes_a_place(&Method::Post, "/api/places"));
+        assert!(writes_a_place(&Method::Put, "/api/places/3"));
+        assert!(writes_a_place(&Method::Post, "/api/places/explore"));
+        assert!(writes_a_place(
+            &Method::Post,
+            "/api/datasets/ds/steps/body_part/run"
+        ));
+        assert!(!writes_a_place(&Method::Get, "/api/places"));
+        assert!(!writes_a_place(&Method::Get, "/api/sources"));
+        assert!(!writes_a_place(&Method::Post, "/api/picks/map"));
+        assert!(!writes_a_place(&Method::Post, "/api/ask"));
     }
 }

@@ -849,8 +849,10 @@ pub fn make_many(
 /// many files went. `keep` is read when the prune runs, and `started` is
 /// when the build that prunes began (#456): a preview written since is
 /// kept whatever its stack (a sort or a door made it meanwhile), and a part
-/// file goes only when it is older than that or the process its name
-/// carries is gone, so a writer still filling one is never cut short.
+/// file goes only when it is older than that by [`PART_GRACE`] as well: a
+/// writer on another machine sharing the storage cannot be seen from here,
+/// so a part file is judged by its age alone, never by a process this
+/// machine does not run.
 pub fn prune(working: &Path, keep: &BTreeSet<i64>, started: std::time::SystemTime) -> usize {
     let mut gone = 0;
     let Ok(shards) = std::fs::read_dir(working.join("previews")) else {
@@ -869,10 +871,14 @@ pub fn prune(working: &Path, keep: &BTreeSet<i64>, started: std::time::SystemTim
                 .metadata()
                 .and_then(|m| m.modified())
                 .is_ok_and(|at| at < started);
-            let litter = match part_pid(&name) {
-                // a part file left by a build that died is litter too
-                Some(pid) => old || !alive(pid),
-                None => old && !keep.contains(&id),
+            let litter = if name.contains(".part.") {
+                // a part file left by a build that died is litter too, once
+                // no writer can still be filling it
+                f.metadata()
+                    .and_then(|m| m.modified())
+                    .is_ok_and(|at| at + PART_GRACE < started)
+            } else {
+                old && !keep.contains(&id)
             };
             if litter && std::fs::remove_file(f.path()).is_ok() {
                 gone += 1;
@@ -882,25 +888,9 @@ pub fn prune(working: &Path, keep: &BTreeSet<i64>, started: std::time::SystemTim
     gone
 }
 
-/// The process a part file's name carries (`<stack>....part.<pid>.<n>`),
-/// none where the name is no part file's.
-fn part_pid(name: &str) -> Option<u32> {
-    let (_, rest) = name.split_once(".part.")?;
-    rest.split('.').next()?.parse().ok()
-}
-
-/// Whether a process of this id runs on this machine; one that cannot be
-/// told counts as running, so its file is left to age.
-fn alive(pid: u32) -> bool {
-    if pid == std::process::id() {
-        return true;
-    }
-    if cfg!(target_os = "linux") {
-        Path::new("/proc").join(pid.to_string()).exists()
-    } else {
-        true
-    }
-}
+/// How much older than the build a part file must be to be litter: longer
+/// than any one preview takes to write.
+const PART_GRACE: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 
 /// Every stack of the registry, by id.
 pub fn every_stack(store: &mut Store) -> Result<Vec<i64>, String> {
@@ -2047,36 +2037,40 @@ mod tests {
         let dir = nils_dicom::synth::TempDir::new("preview-prune");
         let shard = dir.path().join("previews/00");
         std::fs::create_dir_all(&shard).unwrap();
-        let write = |name: &str| {
+        let started = std::time::SystemTime::now();
+        let write = |name: &str, ago: std::time::Duration| {
             let p = shard.join(name);
             std::fs::write(&p, b"x").unwrap();
+            std::fs::File::options()
+                .write(true)
+                .open(&p)
+                .unwrap()
+                .set_modified(started - ago)
+                .unwrap();
             p
         };
-        let me = std::process::id();
-        // a pid no process holds: above the kernel's pid_max ceiling
-        let gone_pid = 4_194_305u32;
-        let removed = write("7.nlp");
-        let kept = write("1.nlp");
-        let old_part = write(&format!("2.nlp.part.{me}.0"));
-        std::thread::sleep(std::time::Duration::from_millis(20));
-        let started = std::time::SystemTime::now();
-        std::thread::sleep(std::time::Duration::from_millis(20));
-        let new_stack = write("9.nlp");
-        let running_part = write(&format!("3.nlp.part.{me}.1"));
-        let dead_part = write(&format!("4.nlp.part.{gone_pid}.0"));
+        let minutes = |m: u64| std::time::Duration::from_secs(m * 60);
+        let removed = write("7.nlp", minutes(1));
+        let kept = write("1.nlp", minutes(1));
+        let new_stack = write("9.nlp", std::time::Duration::ZERO);
+        // part files by age alone: a writer on another machine is not seen
+        let stale_part = write("2.nlp.part.4194305.0", minutes(20));
+        let recent_part = write("3.nlp.part.4194305.1", minutes(2));
+        let new_part = write("4.nlp.part.4194305.2", std::time::Duration::ZERO);
         let keep: BTreeSet<i64> = [1, 2, 3, 4].into_iter().collect();
-        assert_eq!(prune(dir.path(), &keep, started), 3);
+        assert_eq!(prune(dir.path(), &keep, started), 2);
         assert!(!removed.exists(), "a removed stack's preview goes");
         assert!(kept.exists());
-        assert!(!old_part.exists(), "a part file older than the build goes");
         assert!(
             new_stack.exists(),
             "a preview made since the build began stays"
         );
-        assert!(running_part.exists(), "a running writer's part file stays");
-        assert!(!dead_part.exists(), "a part file of a process gone goes");
-        assert_eq!(part_pid("12.nlp.part.77.3"), Some(77));
-        assert_eq!(part_pid("12.nlp"), None);
+        assert!(
+            !stale_part.exists(),
+            "a part file older than the build by the grace goes"
+        );
+        assert!(recent_part.exists(), "one a writer may still fill stays");
+        assert!(new_part.exists());
     }
 
     use super::*;
