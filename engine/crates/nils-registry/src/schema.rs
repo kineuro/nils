@@ -1277,6 +1277,12 @@ fn build_registry() -> Vec<Table> {
                 col("blind", Type::Int),
                 col("seconds", Type::Double),
                 col("mode", Type::Text),
+                // Record 56 §5.2 (2026-10-15): the rules' answer on the axis
+                // as the person saw it when they decided ("" where the
+                // rules gave none); null where it was not in view. A sort
+                // asks about the decision again only when the rules' answer
+                // has moved from it.
+                col("rules_in_view", Type::Text),
             ],
         )
         .index(&["scope", "ref", "axis"]),

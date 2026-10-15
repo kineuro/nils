@@ -4555,6 +4555,29 @@ fn routed(
                 &doc,
                 &[applied.decision],
             )?;
+            // record 56 §5.2: a decision on one scan made with the rules'
+            // answer in view keeps that answer, so a sort does not ask
+            // about it again until the rules move from it
+            let shown = marked["mode"] != "blind_first"
+                || nils_registry::blind::was_revealed(registry.store(), id, principal)?;
+            if shown
+                && applied.scope == "stack"
+                && let Ok(stack) = applied.reference.parse::<i64>()
+                && let Some(pack) =
+                    crate::reader::served_pack(doors.pack_dir.as_deref(), &doors.ask_pack)
+                && let Some(rules) = crate::review_questions::rules_answer(
+                    registry.store(),
+                    &pack,
+                    stack,
+                    &applied.axis,
+                )
+            {
+                nils_registry::review::note_rules_in_view(
+                    registry.store(),
+                    applied.decision,
+                    &rules,
+                )?;
+            }
             Ok(Reply::ok(serde_json::json!({
                 "decision": applied.decision, "axis": applied.axis, "scope": applied.scope,
                 "ref": applied.reference, "closed": applied.closed, "members": applied.members,

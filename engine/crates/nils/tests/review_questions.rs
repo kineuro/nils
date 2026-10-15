@@ -735,13 +735,15 @@ fn round(pg: Option<(String, String)>) {
     assert!(decided.contains(&(b, "PDw".to_string())), "{done}");
     // one decision a scan, at the stack's scope, a person's, in force
     let rows = home.rows(
-        "SELECT scope, ref, value, author_kind, actor FROM {decision} WHERE withdrawn_at IS NULL ORDER BY id",
+        "SELECT scope, ref, value, author_kind, actor, rules_in_view FROM {decision} WHERE withdrawn_at IS NULL ORDER BY id",
     );
     assert_eq!(rows.len(), 2, "{rows:?}");
     for r in &rows {
         assert_eq!(r[0], "stack", "{rows:?}");
         assert_eq!(r[3], "person", "{rows:?}");
         assert_eq!(r[4], "ops@lab", "{rows:?}");
+        // the rules' answer the person saw: none, which a sort compares with
+        assert_eq!(r[5], "", "{rows:?}");
     }
     // re-sorted at once: their base is the person's, by a classify job over
     // those two stacks alone
@@ -876,8 +878,12 @@ fn round(pg: Option<(String, String)>) {
     assert_eq!(done["blind"], 1, "{done}");
     assert_eq!(done["decisions"][0]["value"], "T2*w", "{done}");
     let marked = home.rows(&format!(
-        "SELECT blind, mode, value FROM {{decision}} WHERE ref = '{d}' AND withdrawn_at IS NULL"
+        "SELECT blind, mode, value, rules_in_view FROM {{decision}} WHERE ref = '{d}' AND withdrawn_at IS NULL"
     ));
+    assert!(
+        marked[0][3].is_null(),
+        "the rules' answer was hidden: {marked:?}"
+    );
     assert_eq!(marked[0][0], 1, "{marked:?}");
     assert_eq!(marked[0][1], "blind_first", "{marked:?}");
     assert_eq!(marked[0][2], "T2*w", "{marked:?}");

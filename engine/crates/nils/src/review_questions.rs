@@ -1588,21 +1588,33 @@ fn answer(
     let store = registry.store();
     let mut blind_given = 0usize;
     for w in &wrote {
+        // the rules' answer was in view unless every question on the scan
+        // hid it from the caller
+        let mut in_view = false;
         for (item, kind_of) in &w.items {
             let mode = blind::mode_of(store, *item, kind_of, &salt, share).map_err(failed)?;
             let seconds = blind::seconds_since_read(store, *item, principal).map_err(failed)?;
-            let blind_now = if mode == blind::BLIND_FIRST {
+            let (blind_now, hidden) = if mode == blind::BLIND_FIRST {
                 match blind::provisional(store, *item, principal).map_err(failed)? {
-                    Some(p) => blind::same_answer(&p.answer, &w.given.as_json()),
-                    None => !blind::was_revealed(store, *item, principal).map_err(failed)?,
+                    Some(p) => (blind::same_answer(&p.answer, &w.given.as_json()), false),
+                    None => {
+                        let shown = blind::was_revealed(store, *item, principal).map_err(failed)?;
+                        (!shown, !shown)
+                    }
                 }
             } else {
-                false
+                (false, false)
             };
+            in_view |= !hidden;
             blind::mark_decision(store, &[w.decision], blind_now, seconds, mode).map_err(failed)?;
             if blind_now {
                 blind_given += 1;
             }
+        }
+        // record 56 §5.2: the rules' answer the person saw, so a sort does
+        // not ask about the decision again until the rules move from it
+        if in_view && let Some(rules) = rules_answer(store, &pack, w.stack, &key.axis) {
+            nils_registry::review::note_rules_in_view(store, w.decision, &rules).map_err(failed)?;
         }
     }
     let stacks: Vec<i64> = wrote.iter().map(|w| w.stack).collect();
@@ -1636,6 +1648,27 @@ fn answer(
         "picks": resort.1,
         "left": left,
     })))
+}
+
+/// The rules' own answer on an axis of a stack, as the pack served judges
+/// it now ("" where they give none): what a sort compares a person's
+/// decision with. None where the stack has no fingerprint.
+pub(crate) fn rules_answer(
+    store: &mut Store,
+    pack: &nils_pack::Pack,
+    stack: i64,
+    axis: &str,
+) -> Option<String> {
+    let (s, private) = nils_classify::classify::stack_of(store, pack, stack).ok()??;
+    let verdict = nils_pack::Evaluated::with_private(pack, &s, private).classify();
+    Some(
+        verdict
+            .axes
+            .iter()
+            .find(|a| a.axis == axis)
+            .map(|a| a.stored())
+            .unwrap_or_default(),
+    )
 }
 
 /// Re-sort the scans an answer decided, at once (record 56 §5.2): a

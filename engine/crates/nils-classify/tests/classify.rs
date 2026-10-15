@@ -3191,3 +3191,90 @@ fn a_re_sort_of_some_scans_judges_them_alone_and_loses_no_question() {
         assert_eq!(waiting, two, "{name}");
     }
 }
+
+/// Record 56 §5.2 (Nima's ruling of 2026-10-15): a person's decision is
+/// final evidence and never a rule. A sort does not ask about a decision
+/// again when the person made it with the rules' answer in view and the
+/// rules still give that answer; it asks again only when a newer rules
+/// version moves the rules' answer from what the person saw. A decision
+/// with no rules' answer noted keeps C15's question.
+#[test]
+fn a_decision_made_with_the_rules_answer_in_view_is_asked_again_only_when_the_rules_move() {
+    let pack = nils_pack::load(&packs(), None).expect("the MRI pack loads");
+    for lab in labs() {
+        let name = lab.name;
+        let dir = tree();
+        let mut reg = prepare(&lab, &dir);
+        nils_classify::classify::classify(&mut reg, &pack, &Default::default(), &Cancel::new())
+            .unwrap();
+        let stack = one(&mut reg, "SELECT stack_id FROM {classification}");
+        let open = |reg: &mut Registry| {
+            one(
+                reg,
+                "SELECT COUNT(*) FROM {review_item} WHERE kind = 'base:decision' AND status = 'open'",
+            )
+        };
+        // a person answers T2w, as System 1 said, where the rules say T1w
+        reg.store()
+            .insert(
+                &Insert::new(
+                    nils_registry::schema::table("decision"),
+                    &[
+                        "scope",
+                        "ref",
+                        "axis",
+                        "value",
+                        "actor",
+                        "author_kind",
+                        "decided_at",
+                    ],
+                ),
+                &[vec![
+                    Param::from("stack"),
+                    Param::from(stack.to_string()),
+                    Param::from("base"),
+                    Param::from("T2w"),
+                    Param::from("a person"),
+                    Param::from("person"),
+                    Param::from(nils_registry::time::now_iso()),
+                ]],
+            )
+            .unwrap();
+        let decision = one(&mut reg, "SELECT MAX(id) FROM {decision}");
+
+        // with no rules' answer noted, C15 asks as before
+        nils_classify::classify::classify(&mut reg, &pack, &Default::default(), &Cancel::new())
+            .unwrap();
+        assert_eq!(open(&mut reg), 1, "{name}: C15 without the rules in view");
+
+        // made with the rules' T1w in view: the re-sort asks nothing, and
+        // the scan holds the person's answer
+        nils_registry::review::note_rules_in_view(reg.store(), decision, "T1w").unwrap();
+        let settings = nils_classify::job::Settings {
+            only: Some(vec![stack]),
+            ..Default::default()
+        };
+        nils_classify::classify::classify(&mut reg, &pack, &settings, &Cancel::new()).unwrap();
+        assert_eq!(
+            open(&mut reg),
+            0,
+            "{name}: no question about a final answer"
+        );
+        assert_eq!(axis_of(&mut reg, "base").0, "T2w", "{name}");
+        // and a whole sort says the same
+        nils_classify::classify::classify(&mut reg, &pack, &Default::default(), &Cancel::new())
+            .unwrap();
+        assert_eq!(open(&mut reg), 0, "{name}");
+
+        // made under an older rules version whose answer was PDw: the rules
+        // have moved since, so the sort asks again
+        nils_registry::review::note_rules_in_view(reg.store(), decision, "PDw").unwrap();
+        nils_classify::classify::classify(&mut reg, &pack, &Default::default(), &Cancel::new())
+            .unwrap();
+        assert_eq!(
+            open(&mut reg),
+            1,
+            "{name}: the rules moved, so a person is asked"
+        );
+    }
+}

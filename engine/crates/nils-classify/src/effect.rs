@@ -277,7 +277,7 @@ fn classify(
             .flatten()
         {
             let decided = d.value.clone().unwrap_or_default();
-            if decided != value && !pack.review.by_model.contains(&a.axis) {
+            if decided != value && !pack.review.by_model.contains(&a.axis) && !d.saw(&value) {
                 c.questions.push(format!("{}:decision", a.axis));
             }
             value = decided;

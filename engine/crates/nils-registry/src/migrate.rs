@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 100;
+pub const SCHEMA_VERSION: i64 = 101;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -454,6 +454,10 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 100,
         apply: a_rule_change_is_proposed_and_decided,
     },
+    Migration {
+        version: 101,
+        apply: a_decision_keeps_the_rules_answer_in_view,
+    },
 ];
 
 /// Record 55 ruling 22 (b): a certificate may cite its graded run (the
@@ -484,6 +488,17 @@ fn a_rule_change_is_proposed_and_decided(store: &mut Store, kind: Kind) -> Resul
         crate::rule_proposal::adopt_overlays(store)?;
     }
     Ok(())
+}
+
+/// Record 56 §5.2 (2026-10-15): a decision keeps the rules' answer the
+/// person saw when they made it (`decision.rules_in_view`), so a sort asks
+/// about it again only when a newer rules version moves that answer. Only
+/// a column is added; no row is touched.
+fn a_decision_keeps_the_rules_answer_in_view(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_columns(store, "decision", &["rules_in_view"])
 }
 
 /// Record 55 F2 and F5 (spec §12.3): the post-contrast label of each stack,

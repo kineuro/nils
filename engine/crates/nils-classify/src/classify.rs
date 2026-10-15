@@ -620,6 +620,20 @@ pub struct Decided {
     /// How far the call reached: `stack`, `series`, `subject` or `origin`.
     pub scope: String,
     pub author: Author,
+    /// Record 56 §5.2 (2026-10-15): the rules' answer the person saw when
+    /// they decided, "" where the rules gave none; none where it was not
+    /// in view.
+    pub rules_in_view: Option<String>,
+}
+
+impl Decided {
+    /// Whether the rules' answer now is one the person decided over with
+    /// it in view: a person's decision is final evidence, never a rule, so
+    /// a sort asks about it again only when a newer rules version moves
+    /// the rules' answer from what the person saw.
+    pub fn saw(&self, rules: &str) -> bool {
+        self.rules_in_view.as_deref() == Some(rules)
+    }
 }
 
 /// Who made a decision.
@@ -673,7 +687,7 @@ impl Decisions {
     /// later one, which is the order they are read in.
     pub(crate) fn load(store: &mut Store) -> Result<Decisions, Error> {
         let sql = format!(
-            "SELECT scope, ref, axis, value, actor, author_kind, author_version, id, model_id, campaign_id FROM {} \
+            "SELECT scope, ref, axis, value, actor, author_kind, author_version, id, model_id, campaign_id, rules_in_view FROM {} \
              WHERE withdrawn_at IS NULL AND (staged_at IS NULL OR committed_at IS NOT NULL) \
              ORDER BY id",
             store.qualified("decision")
@@ -718,6 +732,7 @@ impl Decisions {
                 value: r.opt_text(3)?.map(str::to_string),
                 scope: scope.to_string(),
                 author,
+                rules_in_view: r.opt_text(10)?.map(str::to_string),
             };
             let id = || reference.parse::<i64>().unwrap_or(0);
             match scope {
@@ -1601,7 +1616,8 @@ fn run(
                     // Record 55 H3: no question at all on an axis an image
                     // model answers; its decision standing over the rules is
                     // how that axis is answered.
-                    if decided != value && !pack.review.by_model.contains(&a.axis) {
+                    if decided != value && !pack.review.by_model.contains(&a.axis) && !d.saw(&value)
+                    {
                         // The rule's answer is computed as usual and the
                         // decision wins; the disagreement is the review item,
                         // not the decision.

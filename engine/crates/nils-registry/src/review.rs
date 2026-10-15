@@ -349,6 +349,20 @@ pub fn supersede_judged(
     Ok(opened)
 }
 
+/// Record 56 §5.2 (2026-10-15): note on a decision the rules' answer the
+/// person saw when they made it ("" where the rules gave none). A sort
+/// that finds the rules still giving that answer does not ask about the
+/// decision again; one whose rules moved does.
+pub fn note_rules_in_view(store: &mut Store, decision: i64, rules: &str) -> Result<(), StoreError> {
+    store.update_by_id(
+        table("decision"),
+        &[("rules_in_view", Param::from(rules))],
+        "id",
+        decision,
+    )?;
+    Ok(())
+}
+
 /// One member of a grouped item.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Member {
