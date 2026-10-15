@@ -4509,10 +4509,40 @@ fn routed(
             }
             unsealed_item(registry, caller, id)?;
             not_held(registry, id)?;
-            let asked_kind = nils_registry::review::item(registry.store(), id)
-                .map_err(review_err)?
-                .map(|i| i.kind)
-                .unwrap_or_default();
+            let asked = nils_registry::review::item(registry.store(), id).map_err(review_err)?;
+            let asked_kind = asked.as_ref().map(|i| i.kind.clone()).unwrap_or_default();
+            // record 56 section 5.2: the rules' answer the question showed,
+            // read before the decision is written: the stored
+            // classification's value, as the last sort wrote it with its
+            // overlay and scoped changes, and for a question about a
+            // decision, the rules' value it names
+            let rules_shown = match &asked {
+                Some(i) => {
+                    let member = doc["member"].as_i64();
+                    let stack = member.or_else(|| i.reference["stack_id"].as_i64());
+                    let axis = i.kind.split_once(':').map(|(a, _)| a.to_string());
+                    let mut named = i.evidence["rule"].as_str().map(str::to_string);
+                    if let Some(m) = member {
+                        let own = nils_registry::review::members(registry.store(), id)
+                            .map_err(review_err)?
+                            .into_iter()
+                            .find(|x| x.stack_id == m)
+                            .and_then(|x| x.evidence["rule"].as_str().map(str::to_string));
+                        named = own.or(named);
+                    }
+                    match (stack, axis) {
+                        (Some(s), Some(a)) => crate::review_questions::rules_seen(
+                            registry.store(),
+                            s,
+                            &a,
+                            named.as_deref(),
+                        )?
+                        .map(|v| (s, a, v)),
+                        _ => None,
+                    }
+                }
+                None => None,
+            };
             let (kind, version, model) = author_at_apply(registry, caller, &doc)?;
             let applied = nils_registry::review::apply(
                 registry,
@@ -4563,19 +4593,14 @@ fn routed(
             if shown
                 && applied.scope == "stack"
                 && let Ok(stack) = applied.reference.parse::<i64>()
-                && let Some(pack) =
-                    crate::reader::served_pack(doors.pack_dir.as_deref(), &doors.ask_pack)
-                && let Some(rules) = crate::review_questions::rules_answer(
-                    registry.store(),
-                    &pack,
-                    stack,
-                    &applied.axis,
-                )
+                && let Some((_, _, rules)) = rules_shown
+                    .as_ref()
+                    .filter(|(s, a, _)| *s == stack && *a == applied.axis)
             {
                 nils_registry::review::note_rules_in_view(
                     registry.store(),
                     applied.decision,
-                    &rules,
+                    rules,
                 )?;
             }
             Ok(Reply::ok(serde_json::json!({

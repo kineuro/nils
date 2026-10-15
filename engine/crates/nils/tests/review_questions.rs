@@ -90,22 +90,18 @@ impl Home {
         }
     }
 
+    /// Run a statement over the registry, `{table}` named as in [`rows`].
+    fn exec(&self, sql: &str) {
+        let mut store = self.store();
+        let text = qualified(&store, sql);
+        store.execute(&text, &[]).unwrap();
+    }
+
     /// The rows of a query over the registry, `{table}` named as the store
     /// qualifies it.
     fn rows(&self, sql: &str) -> Vec<Vec<Value>> {
         let mut store = self.store();
-        let mut text = sql.to_string();
-        for t in [
-            "classification_axis",
-            "classification",
-            "stack_fingerprint",
-            "review_item",
-            "review_member",
-            "decision",
-            "job",
-        ] {
-            text = text.replace(&format!("{{{t}}}"), &store.qualified(t));
-        }
+        let text = qualified(&store, sql);
         store
             .query(&text, &[])
             .unwrap()
@@ -123,6 +119,23 @@ impl Home {
             })
             .collect()
     }
+}
+
+/// A statement's `{table}` names, as the store qualifies them.
+fn qualified(store: &Store, sql: &str) -> String {
+    let mut text = sql.to_string();
+    for t in [
+        "classification_axis",
+        "classification",
+        "stack_fingerprint",
+        "review_item",
+        "review_member",
+        "decision",
+        "job",
+    ] {
+        text = text.replace(&format!("{{{t}}}"), &store.qualified(t));
+    }
+    text
 }
 
 const OPS: &str = "an-operator-token-of-length";
@@ -432,7 +445,7 @@ fn round(pg: Option<(String, String)>) {
         "--subjects",
         "generated",
     ]);
-    // another dataset, with one such scan of its own
+    // another dataset, with two such scans of its own
     let other = TempDir::new("review-questions-other");
     series(
         &other,
@@ -441,6 +454,15 @@ fn round(pg: Option<(String, String)>) {
         "1.2.826.0.1.3680043.8.499.3.1",
         1,
         "zzqx d",
+        &[],
+    );
+    series(
+        &other,
+        "sub-3",
+        "S-FOUR",
+        "1.2.826.0.1.3680043.8.499.4.1",
+        1,
+        "zzqx e",
         &[],
     );
     home.ok(&[
@@ -492,19 +514,20 @@ fn round(pg: Option<(String, String)>) {
             assert_eq!(j["state"], "done", "{j}");
         }
     }
-    let (t1, a, b, c, d) = (
+    let (t1, a, b, c, d, e) = (
         stack_named(&home, "t1 mprage"),
         stack_named(&home, "zzqx a"),
         stack_named(&home, "zzqx b"),
         stack_named(&home, "zzqx c"),
         stack_named(&home, "zzqx d"),
+        stack_named(&home, "zzqx e"),
     );
     assert_eq!(
         base_of(&home, t1).unwrap().0,
         "T1w",
         "the rules know the T1"
     );
-    for s in [a, b, c, d] {
+    for s in [a, b, c, d, e] {
         assert!(
             base_of(&home, s).is_none_or(|(v, _)| v.is_empty()),
             "no rule weights stack {s}"
@@ -552,10 +575,10 @@ fn round(pg: Option<(String, String)>) {
     assert_eq!(list["held"]["scans"], 0, "{list}");
     // the other dataset's, and the registry's
     let theirs = server.get("/api/review/questions?dataset=other", REVIEWS);
-    assert_eq!(theirs["questions"][0]["scans"], 1, "{theirs}");
+    assert_eq!(theirs["questions"][0]["scans"], 2, "{theirs}");
     let all = server.get("/api/review/questions", REVIEWS);
     assert_eq!(all["scope"]["kind"], "registry", "{all}");
-    assert_eq!(all["questions"][0]["scans"], 4, "{all}");
+    assert_eq!(all["questions"][0]["scans"], 5, "{all}");
     // a scan the rules know asks nothing; one they do not asks this
     let none = server.get(
         &format!("/api/review/questions?dataset=ds&stack={t1}"),
@@ -794,7 +817,7 @@ fn round(pg: Option<(String, String)>) {
     assert_eq!(summary["need_a_look"], 1, "{summary}");
     let theirs = server.get("/api/review/questions?dataset=other", REVIEWS);
     assert_eq!(
-        theirs["questions"][0]["scans"], 1,
+        theirs["questions"][0]["scans"], 2,
         "the other dataset's waits as it did: {theirs}"
     );
     // answered again from a stale page: refused, nothing written
@@ -810,7 +833,14 @@ fn round(pg: Option<(String, String)>) {
         2
     );
 
-    // a reviewer answers the rest, nothing on the axis; no pick run is theirs
+    // a reviewer answers the rest, nothing on the axis; no pick run is
+    // theirs. The scan was last sorted by another version of the pack than
+    // the one served: it is not re-sorted by this one, and the answer says
+    // why
+    let c_job = sorted_by(&home, c);
+    home.exec(&format!(
+        "UPDATE {{classification}} SET pack_version = '0.0.1' WHERE stack_id = {c}"
+    ));
     let (status, done) = server.call(
         "POST",
         &answer,
@@ -821,9 +851,23 @@ fn round(pg: Option<(String, String)>) {
     assert_eq!(done["answered"], 1, "{done}");
     assert_eq!(done["left"], 0, "{done}");
     assert!(done["picks"]["why"].is_string(), "{done}");
+    assert_eq!(done["resort"]["state"], "refused", "{done}");
+    assert!(
+        done["resort"]["why"]
+            .as_str()
+            .is_some_and(|w| w.contains("0.0.1") && w.contains("decisions stand")),
+        "{done}"
+    );
     assert_eq!(
-        base_of(&home, c).unwrap().1,
-        "decision",
+        sorted_by(&home, c),
+        c_job,
+        "not re-sorted by another version"
+    );
+    assert_eq!(
+        home.rows(&format!(
+            "SELECT COUNT(*) FROM {{decision}} WHERE ref = '{c}' AND withdrawn_at IS NULL AND value IS NULL"
+        ))[0][0],
+        1,
         "no value, by a person"
     );
     let list = server.get("/api/review/questions?dataset=ds", REVIEWS);
@@ -839,31 +883,53 @@ fn round(pg: Option<(String, String)>) {
         ADMIN,
     );
     assert_eq!(status, 200, "{said}");
-    // the scan of the other dataset waits on what is left of the one
-    // grouped question the second sort asked of all four, whose mode was
+    // the scans of the other dataset wait on what is left of the one
+    // grouped question the second sort asked of all five, whose mode was
     // drawn routine when ds's page was first read and kept through the
     // split; it is drawn again here, as a question first read now is
-    {
-        let mut store = home.store();
-        let t = store.qualified("review_item");
-        store
-            .execute(
-                &format!(
-                    "UPDATE {t} SET mode = NULL WHERE status = 'open' AND kind = 'base:missing'"
-                ),
-                &[],
-            )
-            .unwrap();
-    }
+    home.exec(
+        "UPDATE {review_item} SET mode = NULL WHERE status = 'open' AND kind = 'base:missing'",
+    );
+    // scan d is asked twice on the axis: by that grouped question, drawn
+    // blind first, and by a question about it alone kept routine
+    home.exec(&format!(
+        "INSERT INTO {{review_item}} (kind, scope, ref, evidence, status, created_at, mode) \
+         VALUES ('base:missing', 'stack', '{{\"stack_id\": {d}}}', '{{\"axis\": \"base\"}}', 'open', '2026-10-15T10:00:00Z', 'routine')"
+    ));
+    // a blind-first question's keys give nothing away: the axis's first
+    // values, not the T1w the dataset and the registry hold most
+    let theirs = server.get("/api/review/questions?dataset=other", OPS);
+    let vocabulary: Vec<Value> = theirs["vocabularies"]["base"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .take(2)
+        .map(|v| v["value"].clone())
+        .collect();
+    assert_eq!(
+        theirs["questions"][0]["values"],
+        json!(vocabulary),
+        "{theirs}"
+    );
     let path = format!(
         "/api/review/questions/{}/scans?dataset=other",
         key("base:missing")
     );
     let page = server.get(&path, OPS);
-    let tile = &page["scans"][0];
-    assert_eq!(tile["stack"], d, "{page}");
+    assert_eq!(page["values"], json!(vocabulary), "{page}");
+    let tile = page["scans"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["stack"] == d)
+        .unwrap_or_else(|| panic!("{page}"))
+        .clone();
+    assert_eq!(tile["items"].as_array().map(Vec::len), Some(2), "{tile}");
     assert_eq!(tile["mode"], "blind_first", "{tile}");
-    assert_eq!(tile["blind"], true, "{tile}");
+    assert_eq!(
+        tile["blind"], true,
+        "hidden where any question hides: {tile}"
+    );
     for k in ["nils", "rules", "system1", "staged", "name", "axes"] {
         assert!(tile[k].is_null(), "{k}: {tile}");
     }
@@ -871,26 +937,162 @@ fn round(pg: Option<(String, String)>) {
         tile["series_description"].is_string(),
         "the header text a reader needs stays: {tile}"
     );
+    let answer_other = format!("/api/review/questions/{}/answer", key("base:missing"));
     let (status, done) = server.call(
         "POST",
-        &format!("/api/review/questions/{}/answer", key("base:missing")),
+        &answer_other,
         // a value named by the pack's name for it, stored as the axis stores it
-        Some(json!({"dataset": "other", "value": "T2starw"})),
+        Some(json!({"dataset": "other", "value": "T2starw", "stacks": [d]})),
         OPS,
     );
     assert_eq!(status, 200, "{done}");
-    assert_eq!(done["blind"], 1, "{done}");
+    assert_eq!(done["blind"], 1, "one scan, counted once: {done}");
     assert_eq!(done["decisions"][0]["value"], "T2*w", "{done}");
-    let marked = home.rows(&format!(
-        "SELECT blind, mode, value, rules_in_view FROM {{decision}} WHERE ref = '{d}' AND withdrawn_at IS NULL"
-    ));
-    assert!(
-        marked[0][3].is_null(),
-        "the rules' answer was hidden: {marked:?}"
+    assert_eq!(
+        done["decisions"][0]["items"].as_array().map(Vec::len),
+        Some(2),
+        "{done}"
     );
-    assert_eq!(marked[0][0], 1, "{marked:?}");
+    // every decision the scan's questions wrote carries the one mark the
+    // tile decided: blind, blind first, and no rules' answer in view
+    let marked = home.rows(&format!(
+        "SELECT blind, mode, value, rules_in_view FROM {{decision}} WHERE ref = '{d}' ORDER BY id"
+    ));
+    assert_eq!(marked.len(), 2, "{marked:?}");
+    for m in &marked {
+        assert_eq!(m[0], 1, "{marked:?}");
+        assert_eq!(m[1], "blind_first", "{marked:?}");
+        assert_eq!(m[2], "T2*w", "{marked:?}");
+        assert!(m[3].is_null(), "the rules' answer was hidden: {marked:?}");
+    }
+
+    // the dataset viewer reads a scan's questions beside its names, which
+    // say NILS's answer: the scan's mode comes with them, its questions are
+    // shown from then on, and an answer to them is not blind
+    let viewer = server.get(
+        &format!("/api/review/questions?dataset=other&stack={e}"),
+        OPS,
+    );
+    let row = &viewer["questions"][0];
+    assert_eq!(row["key"], "base:missing", "{viewer}");
+    assert_eq!(row["mode"], "blind_first", "{viewer}");
+    assert_eq!(row["blind"], false, "{viewer}");
+    let page = server.get(&path, OPS);
+    let tile = &page["scans"][0];
+    assert_eq!(tile["stack"], e, "{page}");
+    assert_eq!(tile["mode"], "blind_first", "{tile}");
+    assert_eq!(tile["blind"], false, "shown since the viewer: {tile}");
+    assert!(tile["rules"].is_object(), "{tile}");
+    let (status, done) = server.call(
+        "POST",
+        &answer_other,
+        Some(json!({"dataset": "other", "value": "T2w", "stacks": [e]})),
+        OPS,
+    );
+    assert_eq!(status, 200, "{done}");
+    assert_eq!(done["blind"], 0, "{done}");
+    let marked = home.rows(&format!(
+        "SELECT blind, mode, rules_in_view FROM {{decision}} WHERE ref = '{e}' AND withdrawn_at IS NULL"
+    ));
+    assert_eq!(marked[0][0], 0, "{marked:?}");
     assert_eq!(marked[0][1], "blind_first", "{marked:?}");
-    assert_eq!(marked[0][2], "T2*w", "{marked:?}");
+    assert_eq!(
+        marked[0][2], "",
+        "the rules gave none, as shown: {marked:?}"
+    );
+
+    // --- the rules' answer in view is the one the tile showed: an adopted
+    // scoped change makes zzqx a PDw word in the other dataset alone,
+    // which the plain pack does not know
+    let (status, proposed) = server.call(
+        "POST",
+        "/api/packs/mri/proposals",
+        Some(json!({
+            "title": "zzqx is PDw in the other dataset",
+            "operations": [{
+                "op": "add_words", "axis": "base", "value": "PDw", "words": ["zzqx"],
+                "scope": "dataset:other",
+            }],
+            "reason": "the other dataset writes zzqx for PDw",
+            "evidence": {"dataset": "other", "found": "this test"},
+        })),
+        OPS,
+    );
+    assert_eq!(status, 201, "{proposed}");
+    let id = proposed["id"].as_i64().unwrap();
+    let (status, adopted) = server.call(
+        "POST",
+        &format!("/api/packs/mri/proposals/{id}/decide"),
+        Some(json!({"decision": "adopt", "why": "their habit"})),
+        OPS,
+    );
+    assert_eq!(status, 202, "{adopted}");
+    server.settled(0, 0);
+    // the rules moved from what the person saw on e ("") and nothing was
+    // seen on d: both decisions are asked about again, PDw the rules'
+    let classified = home.rows(&format!(
+        "SELECT overlay FROM {{classification}} WHERE stack_id = {d}"
+    ));
+    assert_eq!(classified[0][0], format!("proposal:{id}"), "{classified:?}");
+    let asked = server.get("/api/review/questions?dataset=other", OPS);
+    let keys: Vec<&str> = asked["questions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|q| q["key"].as_str().unwrap())
+        .collect();
+    assert!(keys.contains(&"base:PDw|T2*w"), "{asked}");
+    assert!(keys.contains(&"base:PDw|T2w"), "{asked}");
+    // a question whose words name the rules' answer is never read blind,
+    // whatever its mode
+    let pair = format!(
+        "/api/review/questions/{}/scans?dataset=other",
+        key("base:PDw|T2*w")
+    );
+    let page = server.get(&pair, OPS);
+    let tile = &page["scans"][0];
+    assert_eq!(tile["stack"], d, "{page}");
+    assert_eq!(tile["mode"], "blind_first", "{tile}");
+    assert_eq!(tile["blind"], false, "{tile}");
+    assert_eq!(tile["nils"], "T2*w", "{tile}");
+    assert_eq!(tile["other"], "PDw", "{tile}");
+    // the person keeps their answer with the rules' PDw on screen
+    let (status, done) = server.call(
+        "POST",
+        &format!("/api/review/questions/{}/answer", key("base:PDw|T2*w")),
+        Some(json!({"dataset": "other", "value": "T2*w"})),
+        OPS,
+    );
+    assert_eq!(status, 200, "{done}");
+    assert_eq!(done["blind"], 0, "{done}");
+    let kept = home.rows(&format!(
+        "SELECT blind, rules_in_view FROM {{decision}} WHERE ref = '{d}' AND withdrawn_at IS NULL"
+    ));
+    assert_eq!(kept[0][0], 0, "{kept:?}");
+    assert_eq!(
+        kept[0][1], "PDw",
+        "the rules' answer as the tile showed it, with the scoped change: {kept:?}"
+    );
+    // its re-sort applies the scoped change again, finds the rules still
+    // at PDw, and asks nothing about the decision
+    assert_eq!(done["resort"]["state"], "done", "{done}");
+    assert!(
+        done["resort"]["questions"].get("base:decision").is_none(),
+        "{done}"
+    );
+    let left = server.get("/api/review/questions?dataset=other", OPS);
+    assert!(
+        left["questions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|q| q["key"] != "base:PDw|T2*w"),
+        "{left}"
+    );
+    assert_eq!(
+        base_of(&home, d).unwrap(),
+        ("T2*w".to_string(), "decision".to_string())
+    );
 
     // the doors are listed, each with its grant
     let caps = server.get("/api/capabilities", REVIEWS);

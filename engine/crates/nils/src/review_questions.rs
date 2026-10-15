@@ -537,6 +537,10 @@ struct Scan {
     /// The items, whether each is a group's, and its kind, in the order an
     /// answer reaches them: a question about the stack alone first.
     reach: Vec<(i64, bool, String)>,
+    /// The rules' own value a question about a person's decision names
+    /// ("" where they gave none): what the tile showed of the rules where a
+    /// decision stands in the stored classification.
+    rules_named: Option<String>,
 }
 
 /// The questions of a scope, gathered: each key with its scans.
@@ -545,6 +549,8 @@ struct Gathered {
     questions: BTreeMap<Key, BTreeMap<i64, Scan>>,
     /// The scans of questions about several axes, by kind.
     elsewhere: BTreeMap<String, BTreeSet<i64>>,
+    /// Those questions' items, by scan.
+    elsewhere_items: BTreeMap<i64, BTreeSet<i64>>,
     /// The scans an open campaign holds a question of, and the campaigns.
     held: BTreeSet<i64>,
     campaigns: BTreeMap<i64, String>,
@@ -603,6 +609,10 @@ fn questions_of(
                 .entry(a.kind.clone())
                 .or_default()
                 .insert(a.stack);
+            out.elsewhere_items
+                .entry(a.stack)
+                .or_default()
+                .insert(a.item);
             continue;
         };
         let on = decided
@@ -627,6 +637,9 @@ fn questions_of(
         }
         if scan.staged.is_none() {
             scan.staged = on.staged.clone();
+        }
+        if a.axis_why().is_some_and(|(_, why)| why == "decision") && scan.rules_named.is_none() {
+            scan.rules_named = Some(text_of(&a.evidence["rule"]).unwrap_or_default());
         }
         // a question about the stack alone first: its decision closes the
         // stack's other questions on the axis with it
@@ -773,7 +786,10 @@ fn system1_on(
 /// The two answers a question's keys 1 and 2 give: the pair, NILS's more
 /// frequent answer first; else the answers staged and System 1's, the most
 /// frequent first; else the values the axis holds most often in the scope,
-/// then anywhere; else its first values.
+/// then anywhere; else its first values. A question read blind first
+/// (`neutral`) takes the axis's first two values in its vocabulary's order,
+/// never one staged, System 1's or the rules', which would give NILS's
+/// answer away before the person gave theirs (spec 11.4).
 #[allow(clippy::too_many_arguments)]
 fn keys_of(
     store: &mut Store,
@@ -784,7 +800,15 @@ fn keys_of(
     nils: &HashMap<i64, Option<String>>,
     s1: &HashMap<i64, opinion::Opinion>,
     vocabulary: &[Value],
+    neutral: bool,
 ) -> Result<Vec<String>, StoreError> {
+    if neutral {
+        return Ok(vocabulary
+            .iter()
+            .filter_map(|v| text_of(&v["value"]))
+            .take(2)
+            .collect());
+    }
     if key.shape == Shape::Pair {
         let count = |v: &str| {
             scans
@@ -903,12 +927,16 @@ fn row_of(
     key: &Key,
     scans: &BTreeMap<i64, Scan>,
     pack: Option<&nils_pack::Pack>,
+    modes: &HashMap<i64, &'static str>,
 ) -> Result<Value, StoreError> {
     let stacks: Vec<i64> = scans.keys().copied().collect();
     let nils = answers_on(store, &stacks, &key.axis)?;
     let (model, s1) = system1_on(store, &stacks, &key.axis)?;
     let vocab = vocabulary(pack, &key.axis);
-    let values = keys_of(store, access, scope, key, scans, &nils, &s1, &vocab)?;
+    let neutral = read_blind(key, scans.values(), modes);
+    let values = keys_of(
+        store, access, scope, key, scans, &nils, &s1, &vocab, neutral,
+    )?;
     let mut kinds: BTreeMap<String, i64> = BTreeMap::new();
     for scan in scans.values() {
         for k in &scan.kinds {
@@ -927,6 +955,153 @@ fn row_of(
         "staged": scans.values().filter(|s| s.status_staged).count(),
         "kinds": kinds,
     }))
+}
+
+// ------------------------------------------------------- blind first
+
+/// Each question's mode on these scans, drawn where none is kept yet
+/// (spec 11.4: one in five by default).
+fn modes_of<'a>(
+    store: &mut Store,
+    scans: impl Iterator<Item = &'a Scan>,
+    salt: &str,
+    share: f64,
+) -> Result<HashMap<i64, &'static str>, StoreError> {
+    let mut out = HashMap::new();
+    for scan in scans {
+        for (item, _, kind) in &scan.reach {
+            if !out.contains_key(item) {
+                out.insert(*item, blind::mode_of(store, *item, kind, salt, share)?);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Whether a question can be read blind at all: only one whose words name
+/// no answer. A pair (`T2w or FLAIR?`) or a value in doubt (`T2w?`) names
+/// the rules' answer in the question itself, so none of its scans is read
+/// blind, whatever their mode.
+fn may_be_blind(key: &Key) -> bool {
+    key.shape == Shape::Missing
+}
+
+/// Whether a question is read blind first: its words name no answer and a
+/// question on one of its scans was drawn blind first. Its keys are then
+/// neutral.
+fn read_blind<'a>(
+    key: &Key,
+    mut scans: impl Iterator<Item = &'a Scan>,
+    modes: &HashMap<i64, &'static str>,
+) -> bool {
+    may_be_blind(key)
+        && scans.any(|s| {
+            s.items
+                .iter()
+                .any(|i| modes.get(i) == Some(&blind::BLIND_FIRST))
+        })
+}
+
+/// What one scan's tile shows a person, decided once from every question
+/// waiting on it: its mode (blind first where any of them is), and whether
+/// NILS's answers are hidden. They are hidden where the question may be
+/// read blind, a question on the scan drawn blind first has no provisional
+/// answer from the person yet, and none of the scan's questions has shown
+/// them its suggestions (in the queue, or beside the scan in the dataset
+/// viewer, whose names say NILS's answer).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Tile {
+    mode: &'static str,
+    hidden: bool,
+}
+
+fn tile_of(
+    store: &mut Store,
+    key: &Key,
+    scan: &Scan,
+    modes: &HashMap<i64, &'static str>,
+    principal: &str,
+) -> Result<Tile, StoreError> {
+    let first: Vec<i64> = scan
+        .items
+        .iter()
+        .copied()
+        .filter(|i| modes.get(i) == Some(&blind::BLIND_FIRST))
+        .collect();
+    let mode = if first.is_empty() {
+        blind::ROUTINE
+    } else {
+        blind::BLIND_FIRST
+    };
+    if !may_be_blind(key) || first.is_empty() {
+        return Ok(Tile {
+            mode,
+            hidden: false,
+        });
+    }
+    for item in &scan.items {
+        if blind::was_revealed(store, *item, principal)? {
+            return Ok(Tile {
+                mode,
+                hidden: false,
+            });
+        }
+    }
+    let mut hidden = false;
+    for item in &first {
+        if blind::provisional(store, *item, principal)?.is_none() {
+            hidden = true;
+            break;
+        }
+    }
+    Ok(Tile { mode, hidden })
+}
+
+/// The rules' answer on a stack's axis as a tile shows it now: the stored
+/// classification's value, as the last sort wrote it with the pack, the
+/// overlay and the adopted scoped changes it applied ("" where it gave
+/// none), the value a sort compares a person's decision with. Where a
+/// decision already stands in its place, the rules' value the question
+/// about that decision names (`named`). None where neither says it: the
+/// stack was never sorted, or a decision stands and no question names the
+/// rules' value.
+pub(crate) fn rules_seen(
+    store: &mut Store,
+    stack: i64,
+    axis: &str,
+    named: Option<&str>,
+) -> Result<Option<String>, StoreError> {
+    let d = store.dialect();
+    let sorted = store.query_opt(
+        &format!(
+            "SELECT 1 FROM {} WHERE stack_id = {}",
+            store.qualified("classification"),
+            d.param(1, Type::Int)
+        ),
+        &[Param::Int(stack)],
+    )?;
+    if sorted.is_none() {
+        return Ok(None);
+    }
+    let rows = store.query(
+        &format!(
+            "SELECT value, tier FROM {} WHERE stack_id = {} AND axis = {} ORDER BY id",
+            store.qualified("classification_axis"),
+            d.param(1, Type::Int),
+            d.param(2, Type::Text)
+        ),
+        &[Param::Int(stack), Param::from(axis)],
+    )?;
+    let mut values = Vec::new();
+    for r in &rows {
+        if r.text(1)? == "decision" {
+            return Ok(named.map(str::to_string));
+        }
+        if let Some(v) = r.opt_text(0)?.map(str::trim).filter(|v| !v.is_empty()) {
+            values.push(v.to_string());
+        }
+    }
+    Ok(Some(values.join(",")))
 }
 
 /// `GET /api/review/questions`: the scope's questions, the most scans
@@ -951,16 +1126,48 @@ fn list(
     };
     let gathered = questions_of(registry, &caller.access, &scope)?;
     let pack = crate::reader::served_pack(doors.pack_dir.as_deref(), &doors.ask_pack);
+    let (share, salt) = crate::review_rule::blind_setting(registry)?;
     let store = registry.store();
+    // record 56 section 6.3, finding of 2026-10-15: read for one scan, the
+    // questions are read beside it in the dataset viewer, whose names and
+    // frame say NILS's answer. Each question on the scan is noted as shown
+    // to the caller, so no answer to it is ever a blind label.
+    if let Some(s) = only {
+        let mut items: BTreeSet<i64> = BTreeSet::new();
+        for scans in gathered.questions.values() {
+            if let Some(scan) = scans.get(&s) {
+                items.extend(scan.items.iter().copied());
+            }
+        }
+        items.extend(gathered.elsewhere_items.get(&s).into_iter().flatten());
+        for item in items {
+            blind::revealed(store, item, &caller.principal).map_err(failed)?;
+        }
+    }
     let mut rows = Vec::new();
     let mut vocabularies = serde_json::Map::new();
     for (key, scans) in &gathered.questions {
         if only.is_some_and(|s| !scans.contains_key(&s)) {
             continue;
         }
-        rows.push(
-            row_of(store, &caller.access, &scope, key, scans, pack.as_deref()).map_err(failed)?,
-        );
+        let modes = modes_of(store, scans.values(), &salt, share).map_err(failed)?;
+        let mut row = row_of(
+            store,
+            &caller.access,
+            &scope,
+            key,
+            scans,
+            pack.as_deref(),
+            &modes,
+        )
+        .map_err(failed)?;
+        // the scan's own mode on the question, as its tile would say it
+        if let Some(scan) = only.and_then(|s| scans.get(&s)) {
+            let tile = tile_of(store, key, scan, &modes, &caller.principal).map_err(failed)?;
+            row["mode"] = json!(tile.mode);
+            row["blind"] = json!(tile.hidden);
+        }
+        rows.push(row);
         if !vocabularies.contains_key(&key.axis) {
             vocabularies.insert(
                 key.axis.clone(),
@@ -1171,10 +1378,21 @@ fn scans(
         ));
     };
     let pack = crate::reader::served_pack(doors.pack_dir.as_deref(), &doors.ask_pack);
+    let (share, salt) = crate::review_rule::blind_setting(registry)?;
     let store = registry.store();
     let all: Vec<i64> = asked.keys().copied().collect();
-    let row =
-        row_of(store, &caller.access, &scope, &key, &asked, pack.as_deref()).map_err(failed)?;
+    // each question's mode, drawn the first time it is read
+    let modes = modes_of(store, asked.values(), &salt, share).map_err(failed)?;
+    let row = row_of(
+        store,
+        &caller.access,
+        &scope,
+        &key,
+        &asked,
+        pack.as_deref(),
+        &modes,
+    )
+    .map_err(failed)?;
     // the order: the subject, the day, the stack
     let mut known = facts(store, &all, quasi).map_err(failed)?;
     let mut order: Vec<i64> = all.clone();
@@ -1204,22 +1422,14 @@ fn scans(
     for item in &items {
         blind::read(store, *item, &caller.principal).map_err(failed)?;
     }
-    // each item's mode, and whether its NILS answers are hidden from the caller
-    let (share, salt) = crate::review_rule::blind_setting(registry)?;
-    let store = registry.store();
-    let mut modes: HashMap<i64, (&'static str, bool)> = HashMap::new();
-    for item in &items {
-        let kind = asked
-            .values()
-            .find(|s| s.items.contains(item))
-            .and_then(|s| s.reach.iter().find(|r| r.0 == *item).map(|r| r.2.clone()))
-            .unwrap_or_default();
-        let mode = blind::mode_of(store, *item, &kind, &salt, share).map_err(failed)?;
-        let hidden = mode == blind::BLIND_FIRST
-            && blind::provisional(store, *item, &caller.principal)
-                .map_err(failed)?
-                .is_none();
-        modes.insert(*item, (mode, hidden));
+    // each scan's tile, decided once from every question on it: what the
+    // answer to it is later marked by
+    let mut shown_tiles: HashMap<i64, Tile> = HashMap::new();
+    for s in &shown {
+        if let Some(scan) = asked.get(s) {
+            let tile = tile_of(store, &key, scan, &modes, &caller.principal).map_err(failed)?;
+            shown_tiles.insert(*s, tile);
+        }
     }
     let nils = answers_on(store, &shown, &key.axis).map_err(failed)?;
     let (model, s1) = system1_on(store, &shown, &key.axis).map_err(failed)?;
@@ -1240,16 +1450,10 @@ fn scans(
         let Some(scan) = asked.get(&stack) else {
             continue;
         };
-        let mode = if scan
-            .items
-            .iter()
-            .any(|i| modes.get(i).is_some_and(|m| m.0 == blind::BLIND_FIRST))
-        {
-            blind::BLIND_FIRST
-        } else {
-            blind::ROUTINE
-        };
-        let hidden = scan.items.iter().any(|i| modes.get(i).is_some_and(|m| m.1));
+        let Tile { mode, hidden } = shown_tiles.get(&stack).copied().unwrap_or(Tile {
+            mode: blind::ROUTINE,
+            hidden: false,
+        });
         tile["items"] = json!(scan.items);
         tile["status"] = json!(if scan.status_staged { "staged" } else { "open" });
         tile["mode"] = json!(mode);
@@ -1503,11 +1707,37 @@ fn answer(
     }
     let (kind, version, model) = crate::serve::author_at_apply(registry, caller, &doc)?;
     let principal = caller.principal.as_str();
+    // what each scan's tile showed as the person answered, decided once a
+    // scan from every question on it, before anything is written: its
+    // mode, whether NILS's answers were hidden, and the rules' answer it
+    // showed, as stored
+    let (share, salt) = crate::review_rule::blind_setting(registry)?;
+    let store = registry.store();
+    let answered: Vec<&Scan> = each
+        .iter()
+        .filter(|(_, g)| **g != Given::Skip)
+        .map(|(s, _)| &asked[s])
+        .collect();
+    let modes = modes_of(store, answered.iter().copied(), &salt, share).map_err(failed)?;
+    let mut tiles: HashMap<i64, (Tile, Option<String>)> = HashMap::new();
+    for (stack, given) in &each {
+        if *given == Given::Skip {
+            continue;
+        }
+        let scan = &asked[stack];
+        let tile = tile_of(store, &key, scan, &modes, principal).map_err(failed)?;
+        let seen =
+            rules_seen(store, *stack, &key.axis, scan.rules_named.as_deref()).map_err(failed)?;
+        tiles.insert(*stack, (tile, seen));
+    }
     // the decisions, one a scan, in one transaction
     struct Wrote {
         stack: i64,
         given: Given,
         decision: i64,
+        /// Every decision written for the scan, one a question it closed,
+        /// the last in force.
+        decisions: Vec<i64>,
         items: Vec<(i64, String)>,
         staged: bool,
     }
@@ -1552,6 +1782,7 @@ fn answer(
                 match &mut wrote {
                     Some(w) => {
                         w.decision = applied.decision;
+                        w.decisions.push(applied.decision);
                         w.items.push((*item, kind_of.clone()));
                     }
                     None => {
@@ -1559,6 +1790,7 @@ fn answer(
                             stack: *stack,
                             given: given.clone(),
                             decision: applied.decision,
+                            decisions: vec![applied.decision],
                             items: vec![(*item, kind_of.clone())],
                             staged: applied.staged,
                         });
@@ -1582,39 +1814,66 @@ fn answer(
             return Err(e);
         }
     };
-    // each decision marked with its question's mode, the seconds it took
-    // and whether it was given blind
-    let (share, salt) = crate::review_rule::blind_setting(registry)?;
+    // each scan's decisions marked once, from what its tile showed: its
+    // mode, the seconds since its first question was first read, and
+    // whether the answer was given blind (spec 11.4: a blind label is never
+    // written where NILS's answer was on screen)
     let store = registry.store();
     let mut blind_given = 0usize;
     for w in &wrote {
-        // the rules' answer was in view unless every question on the scan
-        // hid it from the caller
-        let mut in_view = false;
-        for (item, kind_of) in &w.items {
-            let mode = blind::mode_of(store, *item, kind_of, &salt, share).map_err(failed)?;
-            let seconds = blind::seconds_since_read(store, *item, principal).map_err(failed)?;
-            let (blind_now, hidden) = if mode == blind::BLIND_FIRST {
-                match blind::provisional(store, *item, principal).map_err(failed)? {
-                    Some(p) => (blind::same_answer(&p.answer, &w.given.as_json()), false),
-                    None => {
-                        let shown = blind::was_revealed(store, *item, principal).map_err(failed)?;
-                        (!shown, !shown)
-                    }
-                }
-            } else {
-                (false, false)
-            };
-            in_view |= !hidden;
-            blind::mark_decision(store, &[w.decision], blind_now, seconds, mode).map_err(failed)?;
-            if blind_now {
-                blind_given += 1;
+        let scan = &asked[&w.stack];
+        let (tile, seen) = tiles.get(&w.stack).cloned().unwrap_or((
+            Tile {
+                mode: blind::ROUTINE,
+                hidden: false,
+            },
+            None,
+        ));
+        let mut seconds: Option<f64> = None;
+        let mut read_all = true;
+        for item in &scan.items {
+            match blind::seconds_since_read(store, *item, principal).map_err(failed)? {
+                Some(t) => seconds = Some(seconds.map_or(t, |s: f64| s.max(t))),
+                None => read_all = false,
             }
         }
-        // record 56 §5.2: the rules' answer the person saw, so a sort does
-        // not ask about the decision again until the rules move from it
-        if in_view && let Some(rules) = rules_answer(store, &pack, w.stack, &key.axis) {
-            nils_registry::review::note_rules_in_view(store, w.decision, &rules).map_err(failed)?;
+        let blind_now = if tile.hidden {
+            // hidden on the tile, and every question on the scan read
+            // through a door that hid NILS's answers (none was shown since:
+            // a shown one leaves the tile not hidden)
+            read_all
+        } else if tile.mode == blind::BLIND_FIRST {
+            // shown: blind only where every question on the scan is blind
+            // first and the answer is the provisional one the person gave
+            // each before its suggestions showed, as the queue marks it
+            let mut all = true;
+            for item in &scan.items {
+                let kept = modes.get(item) == Some(&blind::BLIND_FIRST)
+                    && blind::provisional(store, *item, principal)
+                        .map_err(failed)?
+                        .is_some_and(|p| blind::same_answer(&p.answer, &w.given.as_json()));
+                if !kept {
+                    all = false;
+                    break;
+                }
+            }
+            all
+        } else {
+            false
+        };
+        blind::mark_decision(store, &w.decisions, blind_now, seconds, tile.mode).map_err(failed)?;
+        if blind_now {
+            blind_given += 1;
+        }
+        // record 56 section 5.2: the rules' answer the person saw, exactly
+        // as the tile showed it, so a sort does not ask about the decision
+        // again until the rules move from it; none where it was hidden
+        if !(tile.hidden && blind_now)
+            && let Some(rules) = &seen
+        {
+            for d in &w.decisions {
+                nils_registry::review::note_rules_in_view(store, *d, rules).map_err(failed)?;
+            }
         }
     }
     let stacks: Vec<i64> = wrote.iter().map(|w| w.stack).collect();
@@ -1650,27 +1909,6 @@ fn answer(
     })))
 }
 
-/// The rules' own answer on an axis of a stack, as the pack served judges
-/// it now ("" where they give none): what a sort compares a person's
-/// decision with. None where the stack has no fingerprint.
-pub(crate) fn rules_answer(
-    store: &mut Store,
-    pack: &nils_pack::Pack,
-    stack: i64,
-    axis: &str,
-) -> Option<String> {
-    let (s, private) = nils_classify::classify::stack_of(store, pack, stack).ok()??;
-    let verdict = nils_pack::Evaluated::with_private(pack, &s, private).classify();
-    Some(
-        verdict
-            .axes
-            .iter()
-            .find(|a| a.axis == axis)
-            .map(|a| a.stored())
-            .unwrap_or_default(),
-    )
-}
-
 /// Re-sort the scans an answer decided, at once (record 56 §5.2): a
 /// classify job over those stacks alone, by the pack each was sorted with;
 /// the gate again over those of a dataset flagged as damaged; and the pick
@@ -1691,13 +1929,13 @@ fn resort(
         );
     }
     let started = std::time::Instant::now();
-    // the pack each stack was sorted with, of those served here
-    let mut by_pack: BTreeMap<String, Vec<i64>> = BTreeMap::new();
+    // the pack, its version and the overlay each stack was last sorted with
+    let mut by_pack: BTreeMap<(String, String, Option<String>), Vec<i64>> = BTreeMap::new();
     {
         let store = registry.store();
         for chunk in stacks.chunks(500) {
             let sql = format!(
-                "SELECT stack_id, pack FROM {} WHERE stack_id IN ({})",
+                "SELECT stack_id, pack, pack_version, overlay FROM {} WHERE stack_id IN ({})",
                 store.qualified("classification"),
                 chunk
                     .iter()
@@ -1708,8 +1946,13 @@ fn resort(
             match store.query(&sql, &[]) {
                 Ok(rows) => {
                     for r in rows {
-                        if let (Ok(s), Ok(p)) = (r.int(0), r.text(1)) {
-                            by_pack.entry(p.to_string()).or_default().push(s);
+                        if let (Ok(s), Ok(p), Ok(v), Ok(o)) =
+                            (r.int(0), r.text(1), r.text(2), r.opt_text(3))
+                        {
+                            by_pack
+                                .entry((p.to_string(), v.to_string(), o.map(str::to_string)))
+                                .or_default()
+                                .push(s);
                         }
                     }
                 }
@@ -1728,18 +1971,18 @@ fn resort(
     let mut questions: BTreeMap<String, i64> = BTreeMap::new();
     let mut sorted = 0i64;
     let mut picks = Vec::new();
-    for (name, list) in by_pack {
-        let Some(pack) = doors
-            .pack_dir
-            .as_ref()
-            .and_then(|dir| nils_pack::load(&dir.join(&name), None).ok())
-        else {
-            states.push("waiting");
-            why.push(format!(
-                "pack {name}, which sorted {} of them, is not served here; the next sort with it re-sorts them",
-                list.len()
-            ));
-            continue;
+    for ((name, sorted_version, overlay), list) in by_pack {
+        let pack = match pack_as_sorted(doors, registry, &name, &sorted_version, overlay.as_deref())
+        {
+            Ok(p) => p,
+            Err(refused) => {
+                states.push("refused");
+                why.push(format!(
+                    "{} of them not re-sorted: {refused}; the decisions stand, and the next sort re-sorts them",
+                    list.len()
+                ));
+                continue;
+            }
         };
         let settings = nils_classify::Settings {
             name: format!("re-sort after {} answered {}", caller.principal, key.text()),
@@ -1767,9 +2010,21 @@ fn resort(
                 states.push("done");
                 sorted += report.written;
                 // a question the re-sort asked of them, by kind
-                if let Ok(asked) = asked_by(registry.store(), report.job_id) {
-                    for (k, n) in asked {
-                        *questions.entry(k).or_insert(0) += n;
+                match asked_by(registry.store(), report.job_id) {
+                    Ok(asked) => {
+                        for (k, n) in asked {
+                            *questions.entry(k).or_insert(0) += n;
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "nils: the questions re-sort job {} asked could not be counted: {e}",
+                            report.job_id
+                        );
+                        why.push(format!(
+                            "the questions re-sort job {} asked could not be counted: {e}",
+                            report.job_id
+                        ));
                     }
                 }
                 // the pick run a sort is followed by, for their subjects
@@ -1808,6 +2063,8 @@ fn resort(
     };
     let state = if states.contains(&"failed") {
         "failed"
+    } else if states.contains(&"refused") {
+        "refused"
     } else if states.contains(&"waiting") {
         "waiting"
     } else {
@@ -1831,6 +2088,59 @@ fn resort(
     (resort, picks)
 }
 
+/// The pack a stack was last sorted with, loaded to sort it again the same
+/// way: the same pack, at the same version, under the same overlay. The
+/// adopted scoped changes it was sorted with (`proposal:<id>`) every sort
+/// applies by itself, to the stacks their scope holds. Refused, with why,
+/// where the pack served here is not that version or the overlay is not
+/// one the registry keeps: a re-sort by another pack would judge the scan
+/// by rules it was not sorted with.
+fn pack_as_sorted(
+    doors: &Doors,
+    registry: &mut Registry,
+    name: &str,
+    version: &str,
+    overlay: Option<&str>,
+) -> Result<nils_pack::Pack, String> {
+    let dir = doors
+        .pack_dir
+        .as_ref()
+        .ok_or_else(|| format!("pack {name} is not served here"))?;
+    // an overlay the sort was read under, by its `name@version`; scoped
+    // changes are named `proposal:<id>` and come back by themselves
+    let named = overlay
+        .map(str::trim)
+        .filter(|o| !o.is_empty() && !o.split(',').all(|p| p.trim().starts_with("proposal:")));
+    let document = match named {
+        None => None,
+        Some(id) => {
+            let kept = nils_registry::overlay::list(registry.store())
+                .map_err(|e| e.to_string())?
+                .into_iter()
+                .find(|o| format!("{}@{}", o.name, o.version) == id)
+                .ok_or_else(|| {
+                    format!("they were sorted under overlay {id}, which the registry does not keep")
+                })?;
+            Some(
+                nils_pack::Overlay::parse(
+                    &format!("overlay {}", kept.id),
+                    &kept.document.to_string(),
+                )
+                .map_err(|e| format!("overlay {id} does not load: {e}"))?,
+            )
+        }
+    };
+    let pack = nils_pack::load(&dir.join(name), document.as_ref())
+        .map_err(|e| format!("pack {name} is not served here ({e})"))?;
+    let served = pack.version.to_string();
+    if served != version {
+        return Err(format!(
+            "they were sorted with pack {name} {version}, and the pack served here is {served}"
+        ));
+    }
+    Ok(pack)
+}
+
 /// The questions a sort job asked, by kind: its own groups and items.
 fn asked_by(store: &mut Store, job: i64) -> Result<BTreeMap<String, i64>, StoreError> {
     let mut out = BTreeMap::new();
@@ -1846,7 +2156,7 @@ fn asked_by(store: &mut Store, job: i64) -> Result<BTreeMap<String, i64>, StoreE
     }
     for r in store.query(
         &format!(
-            "SELECT kind, SUM(members) FROM {} WHERE job_id = {} AND status = 'open' AND scope = 'group' GROUP BY kind",
+            "SELECT kind, CAST(SUM(members) AS BIGINT) FROM {} WHERE job_id = {} AND status = 'open' AND scope = 'group' GROUP BY kind",
             store.qualified("review_item"),
             store.dialect().param(1, Type::Int)
         ),
@@ -1930,6 +2240,152 @@ pub(crate) fn route(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A registry in `dir`, on SQLite or, with a DSN, in a schema of its own.
+    fn registry(dir: &std::path::Path, postgres: Option<(&str, &str)>) -> Registry {
+        use nils_registry::{Backend, Home, InitOptions, Scheme};
+        let home = Home::new(dir);
+        home.keys(None).add("nils", b"a test passphrase").unwrap();
+        home.init(&InitOptions {
+            backend: if postgres.is_some() {
+                Backend::Postgres
+            } else {
+                Backend::Sqlite
+            },
+            dsn: postgres.map(|(dsn, _)| dsn.to_string()),
+            schema: postgres.map(|(_, schema)| schema.to_string()),
+            scheme: Scheme::DEFAULT,
+            key: "nils".into(),
+            display_length: 12,
+            session_scheme: None,
+        })
+        .unwrap()
+    }
+
+    /// The questions a sort job asked are counted by kind, a group by its
+    /// members, on both backends: Postgres sums an integer column as a
+    /// NUMERIC, which is cast back to a whole number.
+    fn questions_asked_are_counted(postgres: Option<&str>) {
+        use nils_registry::store::Insert;
+        let dir = std::env::temp_dir().join(format!(
+            "nils-review-questions-asked-{}-{}",
+            postgres.is_some(),
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let schema = "nils_review_questions_asked";
+        if let Some(dsn) = postgres {
+            Store::connect_postgres(dsn, schema)
+                .unwrap()
+                .batch(&format!(
+                    "DROP SCHEMA IF EXISTS {schema} CASCADE; DROP SCHEMA IF EXISTS {schema}_linkage CASCADE"
+                ))
+                .unwrap();
+        }
+        let mut r = registry(&dir.join("reg"), postgres.map(|d| (d, schema)));
+        let store = r.store();
+        let row = |kind: &str, scope: &str, status: &str, job: i64, members: Option<i64>| {
+            vec![
+                Param::from(kind),
+                Param::from(scope),
+                Param::from(r#"{"stack_id": 1}"#),
+                Param::from("{}"),
+                Param::from(status),
+                Param::from("2026-10-15T10:00:00Z"),
+                Param::Int(job),
+                members.map_or(Param::Null, Param::Int),
+            ]
+        };
+        store
+            .insert(
+                &Insert::new(
+                    table("review_item"),
+                    &[
+                        "kind",
+                        "scope",
+                        "ref",
+                        "evidence",
+                        "status",
+                        "created_at",
+                        "job_id",
+                        "members",
+                    ],
+                ),
+                &[
+                    row("base:missing", "group", "open", 7, Some(3)),
+                    row("base:missing", "group", "open", 7, Some(2)),
+                    row("base:missing", "stack", "open", 7, None),
+                    row("base:decision", "stack", "open", 7, None),
+                    // another job's, and one answered
+                    row("base:missing", "group", "open", 8, Some(9)),
+                    row("base:missing", "group", "decided", 7, Some(4)),
+                ],
+            )
+            .unwrap();
+        let asked = asked_by(store, 7).unwrap();
+        assert_eq!(
+            asked,
+            [
+                ("base:decision".to_string(), 1),
+                ("base:missing".to_string(), 6)
+            ]
+            .into_iter()
+            .collect::<BTreeMap<_, _>>()
+        );
+        assert!(asked_by(store, 9).unwrap().is_empty());
+        drop(r);
+        if let Some(dsn) = postgres {
+            Store::connect_postgres(dsn, schema)
+                .unwrap()
+                .batch(&format!(
+                    "DROP SCHEMA IF EXISTS {schema} CASCADE; DROP SCHEMA IF EXISTS {schema}_linkage CASCADE"
+                ))
+                .unwrap();
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_questions_a_re_sort_asked_are_counted() {
+        questions_asked_are_counted(None);
+    }
+
+    #[test]
+    fn the_questions_a_re_sort_asked_are_counted_on_postgres() {
+        match std::env::var("NILS_TEST_POSTGRES_DSN") {
+            Ok(dsn) if !dsn.is_empty() => questions_asked_are_counted(Some(&dsn)),
+            _ => eprintln!("NILS_TEST_POSTGRES_DSN is not set; the Postgres test is skipped"),
+        }
+    }
+
+    /// A question read blind first is neutral: its keys are the axis's
+    /// first values, never what the rules, a stage or System 1 say; and a
+    /// question whose words name a value is never read blind.
+    #[test]
+    fn a_blind_first_question_gives_nothing_away() {
+        let scan = |items: &[i64]| Scan {
+            items: items.iter().copied().collect(),
+            ..Scan::default()
+        };
+        let modes: HashMap<i64, &'static str> = [(1, blind::BLIND_FIRST), (2, blind::ROUTINE)]
+            .into_iter()
+            .collect();
+        let missing = Key::missing("base");
+        assert!(read_blind(
+            &missing,
+            [scan(&[2]), scan(&[1, 2])].iter(),
+            &modes
+        ));
+        assert!(!read_blind(&missing, [scan(&[2])].iter(), &modes));
+        for named in [Key::doubt("base", "T2w"), Key::pair("base", "FLAIR", "T2w")] {
+            assert!(
+                !read_blind(&named, [scan(&[1])].iter(), &modes),
+                "{named:?}"
+            );
+            assert!(!may_be_blind(&named));
+        }
+    }
 
     #[test]
     fn a_key_reads_as_it_is_written() {

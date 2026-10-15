@@ -632,7 +632,22 @@ impl Decided {
     /// a sort asks about it again only when a newer rules version moves
     /// the rules' answer from what the person saw.
     pub fn saw(&self, rules: &str) -> bool {
-        self.rules_in_view.as_deref() == Some(rules)
+        // the values of a multi-valued axis, whatever order they were
+        // stored or read in
+        let set = |v: &str| {
+            let mut words: Vec<String> = v
+                .split(',')
+                .map(str::trim)
+                .filter(|w| !w.is_empty())
+                .map(str::to_string)
+                .collect();
+            words.sort();
+            words.dedup();
+            words
+        };
+        self.rules_in_view
+            .as_deref()
+            .is_some_and(|seen| set(seen) == set(rules))
     }
 }
 
