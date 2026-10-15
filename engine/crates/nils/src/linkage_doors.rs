@@ -44,6 +44,7 @@ pub(crate) const DOORS: &[&str] = &[
     "POST /api/linkage/held/code",
     "POST /api/linkage/held/reveal",
     "POST /api/linkage/merge",
+    "POST /api/linkage/resolve",
 ];
 
 /// The most rows one call to the imports door takes; a larger map goes in
@@ -82,6 +83,7 @@ pub(crate) fn route(
         ["api", "linkage", "held", "code"] if post => held_code(registry, caller, body),
         ["api", "linkage", "held", "reveal"] if post => held_reveal(registry, caller, body),
         ["api", "linkage", "merge"] if post => merge(registry, caller, body),
+        ["api", "linkage", "resolve"] if post => resolve(registry, caller, body),
         _ => return None,
     })
 }
@@ -1157,6 +1159,156 @@ fn held_reveal(registry: &mut Registry, caller: &Caller, body: &str) -> Result<R
     Ok(Reply::ok(serde_json::Value::from(out)))
 }
 
+/// The longest value the resolve door takes: an ID, never a document.
+const RESOLVE_MAX: usize = 256;
+
+/// `POST /api/linkage/resolve {id_type, value}` (record 55, ruling 24): one
+/// ID of a known type, given by the caller, turned into the subject code it
+/// stands for, `{id_type, known, subject_code, datasets}`, or `{id_type,
+/// known: false}` when no subject of a scan the caller may see holds it. It
+/// answers no identifier it was not given: not even the value back. The
+/// value is looked up by its keyed hash, as the digest filed it, so no
+/// ciphertext is opened; a merged subject answers the subject it was merged
+/// into, and a stack of a sample sealed now is not counted without the
+/// unsealed grant. Each match writes one read audit row.
+fn resolve(registry: &mut Registry, caller: &Caller, body: &str) -> Result<Reply, Reply> {
+    let doc = json_body(body)?;
+    let id_type = doc["id_type"]
+        .as_str()
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .ok_or_else(|| Reply::error(400, "id_type: the ID type's name, like ctrl-id"))?
+        .to_string();
+    let value = doc["value"]
+        .as_str()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| Reply::error(400, "value: the ID, as the person gave it"))?
+        .to_string();
+    if value.len() > RESOLVE_MAX {
+        return Err(Reply::error(
+            400,
+            format!("value: an ID of at most {RESOLVE_MAX} characters"),
+        ));
+    }
+    let mut linkage = open_linkage(registry)?;
+    let Some(type_id) = linkage::id_type_id(&mut linkage, &id_type)? else {
+        let names: Vec<String> = linkage::id_types(&mut linkage)?
+            .into_iter()
+            .map(|t| t.name)
+            .collect();
+        return Err(Reply::error(
+            404,
+            format!(
+                "no ID type named {id_type}; the types are {}",
+                names.join(", ")
+            ),
+        ));
+    };
+    let (_, keys) = keys_of(registry)?;
+    let lookup = keys.lookup(&id_type, &value);
+    let found: Vec<linkage::Identity> = linkage::identities_by_lookup(&mut linkage, &[lookup])?
+        .into_iter()
+        .filter(|i| i.id_type_id == type_id)
+        .collect();
+    let unknown = || Reply::ok(serde_json::json!({ "id_type": id_type, "known": false }));
+    let Some(identity) = found.first() else {
+        return Ok(unknown());
+    };
+    // a merged subject is answered by the one it was merged into
+    let store = registry.store();
+    let mut subject_id = identity.subject_id;
+    let mut seen = BTreeSet::new();
+    let subject = loop {
+        let Some(s) = linkage::subjects_by_id(store, &[subject_id])?
+            .into_iter()
+            .next()
+        else {
+            return Ok(unknown());
+        };
+        match s.merged_into {
+            Some(next) if seen.insert(s.id) => subject_id = next,
+            _ => break s,
+        }
+    };
+    // the subject holds a scan the caller may see, in some dataset or none
+    let sealed = if crate::sealed::reads(&caller.access) {
+        String::new()
+    } else {
+        format!(
+            " AND NOT EXISTS (SELECT 1 FROM {} sst WHERE sst.stack_id = st.id AND sst.unsealed_at IS NULL)",
+            store.qualified("sealed_stack")
+        )
+    };
+    let stacks_sql = format!(
+        "SELECT st.id FROM {} st JOIN {} se ON se.id = st.series_id WHERE se.subject_id = {}{sealed}",
+        store.qualified("stack"),
+        store.qualified("series"),
+        subject.id
+    );
+    let stacks: Vec<i64> = store
+        .query(&stacks_sql, &[])?
+        .iter()
+        .map(|r| r.int(0))
+        .collect::<Result<_, _>>()?;
+    if stacks.is_empty() {
+        return Ok(unknown());
+    }
+    // the datasets that hold a file of one of those scans
+    let mut datasets: Vec<String> = Vec::new();
+    for p in place::list(store)? {
+        if p.role != place::Role::Source || p.retired_at.is_some() {
+            continue;
+        }
+        let sources = crate::sources::source_ids(store, &p)?;
+        if sources.is_empty() {
+            continue;
+        }
+        let list = sources
+            .iter()
+            .map(i64::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let held = format!(
+            "SELECT 1 FROM {} ss JOIN {} st ON st.id = ss.stack_id JOIN {} se ON se.id = st.series_id \
+             WHERE ss.source_id IN ({list}) AND se.subject_id = {}{sealed}",
+            store.qualified("source_stack"),
+            store.qualified("stack"),
+            store.qualified("series"),
+            subject.id
+        );
+        if !store.query(&held, &[])?.is_empty() {
+            datasets.push(p.name.clone());
+        }
+    }
+    let now = nils_registry::time::now_iso();
+    let audit = vec![vec![
+        Param::from(now.as_str()),
+        Param::from(caller.principal.as_str()),
+        Param::Int(identity.id),
+        Param::from("resolve an ID to its subject code"),
+    ]];
+    linkage.begin()?;
+    let written = linkage.insert(
+        &nils_registry::Insert::all(nils_registry::schema::table("read_audit")),
+        &audit,
+    );
+    match written {
+        Ok(_) => linkage.commit()?,
+        Err(e) => {
+            let _ = linkage.rollback();
+            return Err(e.into());
+        }
+    }
+    Ok(Reply::ok(serde_json::json!({
+        "id_type": id_type,
+        "known": true,
+        "subject_code": subject.code,
+        "scans": stacks.len(),
+        "datasets": datasets,
+    })))
+}
+
 /// `POST /api/linkage/merge {canonical, alias, why}`: a `linkage merge`
 /// job, refused here when the codes are not two subjects.
 fn merge(registry: &mut Registry, caller: &Caller, body: &str) -> Result<Reply, Reply> {
@@ -1258,6 +1410,15 @@ mod tests {
         assert_eq!(
             need("POST", "/api/linkage/merge"),
             ("the data:work grant".to_string(), Detail::Sensitive)
+        );
+        // record 55, ruling 24: whoever uses the data, at the detail that
+        // shows a subject code
+        assert_eq!(
+            need("POST", "/api/linkage/resolve"),
+            (
+                "one of the grants data:see, query:see".to_string(),
+                Detail::Quasi
+            )
         );
         // every door here is in the capabilities and the policy
         let policy = crate::serve::policy();
