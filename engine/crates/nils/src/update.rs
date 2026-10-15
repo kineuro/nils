@@ -468,9 +468,27 @@ fn listed_as(listing: &str, prefix: Option<&str>) -> Vec<String> {
     out
 }
 
-/// What a fetched file that is not the one its release's sums name says,
-/// so a caller can tell an integrity failure from a file that is missing.
-pub(crate) const CHECKSUM_MISMATCH: &str = "does not match the release's checksum";
+/// Why a release's file could not be taken: it is not the file the
+/// release's sums name (an integrity failure), or it could not be had.
+pub(crate) enum Fetched {
+    Mismatch {
+        file: String,
+        got: String,
+        want: String,
+    },
+    Failed(Exit),
+}
+
+impl Fetched {
+    fn exit(self) -> Exit {
+        match self {
+            Fetched::Mismatch { file, got, want } => fail(format!(
+                "{file} does not match the release's checksum: {got} against {want}"
+            )),
+            Fetched::Failed(e) => e,
+        }
+    }
+}
 
 /// Fetch one file of a release and check it against that release's sums.
 pub(crate) fn fetch_checked(base: &str, version: &str, file: &str) -> Result<Vec<u8>, Exit> {
@@ -479,22 +497,33 @@ pub(crate) fn fetch_checked(base: &str, version: &str, file: &str) -> Result<Vec
 
 /// Fetch one file of the release a tag names, checked against its sums.
 pub(crate) fn fetch_checked_at(base: &str, tag: &str, file: &str) -> Result<Vec<u8>, Exit> {
+    fetch_checked_typed(base, tag, file).map_err(Fetched::exit)
+}
+
+/// [`fetch_checked_at`], telling a file that is not its release's from one
+/// that could not be had.
+pub(crate) fn fetch_checked_typed(base: &str, tag: &str, file: &str) -> Result<Vec<u8>, Fetched> {
     let sums = fetch(&asset_at(base, tag, "SHA256SUMS"))
-        .map_err(|e| fail(format!("the release names no checksums: {e}")))?;
+        .map_err(|e| Fetched::Failed(fail(format!("the release names no checksums: {e}"))))?;
     let sums = String::from_utf8_lossy(&sums).to_string();
-    let want = sum_for(&sums, file).ok_or_else(|| match tag.strip_prefix('v') {
-        // an engine release names a binary for each platform it was built for
-        Some(version) => fail(format!(
-            "the release {version} has no {file}: this platform is not one it was built for"
-        )),
-        None => fail(format!("the release {tag} names no {file} in its sums")),
+    let want = sum_for(&sums, file).ok_or_else(|| {
+        Fetched::Failed(match tag.strip_prefix('v') {
+            // an engine release names a binary for each platform it was built for
+            Some(version) => fail(format!(
+                "the release {version} has no {file}: this platform is not one it was built for"
+            )),
+            None => fail(format!("the release {tag} names no {file} in its sums")),
+        })
     })?;
-    let bytes = fetch(&asset_at(base, tag, file)).map_err(|e| fail(e.to_string()))?;
+    let bytes =
+        fetch(&asset_at(base, tag, file)).map_err(|e| Fetched::Failed(fail(e.to_string())))?;
     let got = sha256_hex(&bytes);
     if got != want {
-        return Err(fail(format!(
-            "{file} {CHECKSUM_MISMATCH}: {got} against {want}"
-        )));
+        return Err(Fetched::Mismatch {
+            file: file.to_string(),
+            got,
+            want: want.to_string(),
+        });
     }
     Ok(bytes)
 }

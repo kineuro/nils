@@ -1863,25 +1863,59 @@ impl Descriptor {
         d
     }
 
-    /// The cores a unit takes at its start (record 55 T24, after review):
-    /// one that asks the lane's (`cores: lane`) takes what the lane has
-    /// free, at least one and at most what it was sized to, so units that
-    /// share the lane never wait for all of it; any other its number.
-    pub fn cores_at_start(&self, free: u32) -> u32 {
-        if self.needs.lane_cores {
-            free.min(self.needs.cores).max(1)
-        } else {
-            self.needs.cores
+    /// A run's parameters as it records them (record 55 T24, second
+    /// review): a unit that asks the lane's cores, whose threads parameter
+    /// the caller did not set, has it recorded as null, since each unit is
+    /// told the cores it takes at its own start (the unit's row keeps
+    /// them); a value the caller set is kept, and wins.
+    pub fn open_lane_threads(&self, params: &mut Map<String, Value>, given: &[(String, String)]) {
+        if self.needs.lane_cores
+            && let Some(id) = &self.needs.cores_input
+            && !given.iter().any(|(g, _)| g == id)
+        {
+            params.insert(id.clone(), Value::Null);
         }
     }
 
+    /// The cores a unit takes at its start, or none while it waits for
+    /// them (record 55 T24, second review). A unit that names a number
+    /// takes it, as does one whose caller set its threads; a unit that asks
+    /// the lane's takes those free, at most what it was sized to. A unit
+    /// that runs alone (`together`) waits for at least half of that, so it
+    /// never locks in one core for hours, unless it has `waited` the
+    /// lane's grace; units that run apart take one core and up.
+    pub fn cores_at_start(
+        &self,
+        params: &Map<String, Value>,
+        free: u32,
+        together: bool,
+        waited: bool,
+    ) -> Option<u32> {
+        if !self.needs.lane_cores {
+            return Some(self.needs.cores);
+        }
+        if let Some(n) = self
+            .needs
+            .cores_input
+            .as_ref()
+            .and_then(|id| params.get(id))
+            .and_then(Value::as_f64)
+        {
+            return Some((n.max(1.0).min(f64::from(u32::MAX))) as u32);
+        }
+        let most = self.needs.cores.max(1);
+        let least = if together { most.div_ceil(2) } else { 1 };
+        (free >= least || (waited && free >= 1)).then(|| free.min(most))
+    }
+
     /// A unit's parameters for a start with `cores` cores: a unit that asks
-    /// the lane's has its threads parameter told the cores it was given at
-    /// that start, whatever the run recorded (a resumed run's included).
+    /// the lane's, whose threads parameter is open (null), is told the
+    /// cores it was given at that start; a value the caller set stays.
     pub fn params_for_cores(&self, params: &Map<String, Value>, cores: u32) -> Map<String, Value> {
         let mut out = params.clone();
         if self.needs.lane_cores
             && let Some(id) = &self.needs.cores_input
+            && out.get(id).is_none_or(Value::is_null)
         {
             out.insert(id.clone(), Value::from(cores));
         }
@@ -2823,20 +2857,33 @@ x-nils:
                 .cores,
             48
         );
-        // at a start it takes the lane's free cores, at least one, at most
-        // what it was sized to, and its threads parameter is told them
-        assert_eq!(big.cores_at_start(48), 4);
-        assert_eq!(big.cores_at_start(2), 2);
-        assert_eq!(big.cores_at_start(0), 1);
-        let recorded = big.resolve(&[]).unwrap();
-        assert_eq!(big.params_for_cores(&recorded, 2)["dimension"], 2);
+        // at a start it takes the lane's free cores, at most what it was
+        // sized to: units apart from one core up, a unit alone waits for
+        // half unless it has waited the grace
+        let mut open = big.resolve(&[]).unwrap();
+        big.open_lane_threads(&mut open, &[]);
+        assert!(open["dimension"].is_null());
+        assert_eq!(big.cores_at_start(&open, 48, false, false), Some(4));
+        assert_eq!(big.cores_at_start(&open, 1, false, false), Some(1));
+        assert_eq!(big.cores_at_start(&open, 0, false, true), None);
+        assert_eq!(big.cores_at_start(&open, 1, true, false), None);
+        assert_eq!(big.cores_at_start(&open, 2, true, false), Some(2));
+        assert_eq!(big.cores_at_start(&open, 1, true, true), Some(1));
+        assert_eq!(big.params_for_cores(&open, 2)["dimension"], 2);
+        // threads the caller set win, and are what is recorded
+        let given = vec![("dimension".to_string(), "3".to_string())];
+        let mut set = big.resolve(&given).unwrap();
+        big.open_lane_threads(&mut set, &given);
+        assert_eq!(set["dimension"], 3);
+        assert_eq!(big.cores_at_start(&set, 48, true, false), Some(3));
+        assert_eq!(big.params_for_cores(&set, 4)["dimension"], 3);
         // a number is not sized
         let fixed = parse(&with("{cores: 2}")).unwrap();
         assert!(!fixed.needs.lane_cores);
         assert_eq!(fixed.sized_to(48).needs.cores, 2);
-        assert_eq!(fixed.cores_at_start(1), 2);
         let mut kept = Map::new();
         kept.insert("dimension".into(), Value::from(3));
+        assert_eq!(fixed.cores_at_start(&kept, 1, true, false), Some(2));
         assert_eq!(fixed.params_for_cores(&kept, 1)["dimension"], 3);
         let e = parse(&with("{cores: all}")).unwrap_err();
         assert!(e.contains("or lane"), "{e}");

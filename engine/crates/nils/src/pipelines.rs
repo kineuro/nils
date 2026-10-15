@@ -424,21 +424,17 @@ pub(crate) fn descriptors_in(bytes: &[u8]) -> Result<BTreeMap<String, String>, S
 /// ships, from `base`, checked against the release's sums, and named as
 /// its folder says.
 pub(crate) fn release_descriptor(base: &str, version: &str, name: &str) -> Result<String, Exit> {
-    let bytes =
-        crate::update::fetch_checked(base, version, RELEASE_DESCRIPTORS).map_err(|e| {
-            if e.message.contains(crate::update::CHECKSUM_MISMATCH) {
-                // an integrity failure, never a reason to take another
-                // descriptor: nothing is added
-                fail(format!(
-                    "the release {version}'s descriptors failed their integrity check ({}): the file is not the one the release published, so nothing was added",
-                    e.message
-                ))
-            } else {
-                usage(format!(
-                    "the release {version} ships no descriptors that can be read here ({}); a build that is not a release adds a descriptor from its checkout: nils pipeline add <nils.job.yml>",
-                    e.message
-                ))
-            }
+    let bytes = crate::update::fetch_checked_typed(base, &format!("v{version}"), RELEASE_DESCRIPTORS)
+        .map_err(|e| match e {
+            // an integrity failure, never a reason to take another
+            // descriptor: nothing is added
+            crate::update::Fetched::Mismatch { file, got, want } => fail(format!(
+                "the release {version}'s descriptors failed their integrity check ({file} does not match the release's checksum: {got} against {want}): the file is not the one the release published, so nothing was added"
+            )),
+            crate::update::Fetched::Failed(e) => usage(format!(
+                "the release {version} ships no descriptors that can be read here ({}); a build that is not a release adds a descriptor from its checkout: nils pipeline add <nils.job.yml>",
+                e.message
+            )),
         })?;
     let mut all = descriptors_in(&bytes).map_err(usage)?;
     let Some(text) = all.remove(name) else {
@@ -4060,6 +4056,17 @@ fn card_grace() -> Duration {
     Duration::from_secs(s)
 }
 
+/// How long a unit that runs alone and asks the lane's cores waits for half
+/// of them before it takes what is free (record 55 T24, second review):
+/// 120 s, or `NILS_LANE_GRACE_S`.
+fn lane_grace() -> Duration {
+    let s = std::env::var("NILS_LANE_GRACE_S")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(120);
+    Duration::from_secs(s)
+}
+
 /// Remove every apptainer work folder of a run (its own and each unit's):
 /// what a stopped, cancelled or interrupted unit left in its `/tmp`.
 pub(crate) fn drop_workdirs(run_dir: &Path) {
@@ -4079,27 +4086,56 @@ fn run_folder(store: &mut Store, r: &Run) -> Option<PathBuf> {
     Some(PathBuf::from(place.path).join(RUNS).join(r.id.to_string()))
 }
 
-/// At an engine's start: the work folders of every run that no longer
-/// runs, whatever ended it, are removed.
+/// The registry key that holds when the pipeline lane last swept the work
+/// folders of runs that ended.
+const SWEPT_KEY: &str = "pipelines.workdirs_swept_at";
+
+/// At an engine's start: the work folders of every run that ended since the
+/// last sweep (one query), whatever ended it, are removed, and the sweep's
+/// time is kept so the next one visits only the runs that end after it.
 pub(crate) fn sweep_workdirs(store: &mut Store) -> Result<usize, String> {
     let err = |e: nils_registry::Error| e.to_string();
+    let meta = store.qualified("registry_meta");
+    let d = store.dialect();
+    let since = store
+        .query_opt(
+            &format!(
+                "SELECT value FROM {meta} WHERE key = {}",
+                d.param(1, Type::Text)
+            ),
+            &[Param::from(SWEPT_KEY)],
+        )
+        .map_err(err)?
+        .and_then(|r| r.text(0).ok().map(str::to_string));
+    let now = nils_registry::time::now_iso();
+    let runs = rows::runs_ended_since(store, since.as_deref()).map_err(err)?;
+    let mut places: BTreeMap<i64, Option<String>> = BTreeMap::new();
     let mut swept = 0;
-    for status in [
-        "cancelled",
-        "interrupted",
-        "failed",
-        "succeeded",
-        "breach",
-        "refused",
-        "unreported",
-    ] {
-        for r in rows::runs_in(store, status).map_err(err)? {
-            if let Some(dir) = run_folder(store, &r) {
-                drop_workdirs(&dir);
-                swept += 1;
-            }
+    for r in &runs {
+        let Some(id) = r.scratch_place_id.or(r.place_id) else {
+            continue;
+        };
+        let path = places.entry(id).or_insert_with(|| {
+            nils_registry::place::show(store, id)
+                .ok()
+                .flatten()
+                .map(|p| p.path)
+        });
+        if let Some(path) = path {
+            drop_workdirs(&PathBuf::from(&*path).join(RUNS).join(r.id.to_string()));
+            swept += 1;
         }
     }
+    store
+        .execute(
+            &format!(
+                "INSERT INTO {meta} (key, value) VALUES ({}, {}) ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+                d.param(1, Type::Text),
+                d.param(2, Type::Text)
+            ),
+            &[Param::from(SWEPT_KEY), Param::from(now.as_str())],
+        )
+        .map_err(err)?;
     Ok(swept)
 }
 
@@ -4251,7 +4287,11 @@ pub(crate) fn run_command(home: &Home, args: RunArgs) -> Result<(), Exit> {
     // record 55 T24: a unit that asks every core of the lane asks this
     // lane's, and its threads parameter is told as many
     let d = d.sized_to(lane_of(&mut registry).ledger.cores);
-    let params = d.resolve(&pairs(&args.params)?).map_err(usage)?;
+    let given = pairs(&args.params)?;
+    let mut params = d.resolve(&given).map_err(usage)?;
+    // record 55 T24, second review: threads the caller set win; else each
+    // unit is told the cores it takes at its start, and the run records none
+    d.open_lane_threads(&mut params, &given);
 
     // where it goes and what runs it; either absent is the capability off
     let places = run_places(registry.store()).map_err(usage)?;
@@ -4852,7 +4892,12 @@ fn resume_command(home: &Home, args: &RunArgs, run_id: i64) -> Result<(), Exit> 
         )));
     }
     let lane = lane_of(&mut registry);
-    let (device, gpu) = device_for(&d, &p, &rt, &lane)?;
+    let (mut device, mut gpu) = device_for(&d, &p, &rt, &lane)?;
+    // a run that went to the CPU off a full optional card goes on there,
+    // so a run never mixes devices
+    if r.device == "cpu" && d.gpu == Gpu::Optional {
+        (device, gpu) = ("cpu".to_string(), false);
+    }
     if (r.device == "cpu") != (device == "cpu") {
         return Err(usage(format!(
             "run {run_id} ran on {}, and would go on on {device}; start a new run",
@@ -5805,14 +5850,20 @@ struct Lanes {
     looked: Option<Instant>,
     card_asked: Option<Instant>,
     waiting: Option<String>,
-    /// A unit that asks the lane's cores takes what is free at its start.
-    lane_cores: bool,
     /// The card is optional: a unit that cannot lease it within `grace`
     /// runs on the CPU rather than wait (record 55, after review).
     optional: bool,
     grace: Duration,
     /// Since when the card has been too full for a unit.
     card_short: Option<Instant>,
+    /// A unit of the run started on the card: the run never leaves it.
+    on_card: bool,
+    /// Why the whole run went to the CPU, where it did; each unit's log
+    /// says so.
+    to_cpu: Option<String>,
+    /// Since when a unit that runs alone has waited for half its cores.
+    lane_short: Option<Instant>,
+    lane_grace: Duration,
 }
 
 /// Start the next batch if it fits the lane as every run holds it, under
@@ -5836,14 +5887,29 @@ fn start_next(
     l.seen.held_cores = held.cores;
     l.seen.held_memory_mib = held.memory_mib;
     // record 55 T24, after review: a unit that asks the lane's cores takes
-    // those free now, so units that share the lane never wait for all of it
+    // those free now, so units that share the lane never wait for all of
+    // it; one that runs alone waits a while for half of it first
     let free = l.seen.cores.saturating_sub(l.seen.held_cores);
+    let together = pending.front().is_some_and(|b| b.key.is_none());
+    let waited = l
+        .lane_short
+        .is_some_and(|since| since.elapsed() >= l.lane_grace);
+    let Some(cores) = x
+        .descriptor
+        .cores_at_start(x.params, free, together, waited)
+    else {
+        l.lane_short.get_or_insert_with(Instant::now);
+        l.waiting = Some(format!(
+            "the lane's budget: {} of {} cores held; a unit that runs alone waits up to {} s for half of the {} it may take",
+            l.seen.held_cores,
+            l.seen.cores,
+            l.lane_grace.as_secs(),
+            x.descriptor.needs.cores
+        ));
+        return Ok(None);
+    };
     let ask = lane::Ask {
-        cores: if l.lane_cores && free == 0 {
-            l.ask.cores
-        } else {
-            x.descriptor.cores_at_start(free)
-        },
+        cores,
         memory_mib: l.ask.memory_mib,
     };
     if !l.seen.fits(ask) {
@@ -5862,7 +5928,6 @@ fn start_next(
         return Ok(None);
     }
     let mut gpu_mib = None;
-    let mut note = None;
     if let Some(need) = l.gpu_need {
         l.card_asked = Some(Instant::now());
         let card = l.card;
@@ -5871,38 +5936,55 @@ fn start_next(
             None => Err("nvidia-smi is not on the search path".into()),
         };
         let held_gpu = held.gpu_mib;
+        // what keeps the lease: none, the lane's own leases (which end
+        // with their units), or memory another tenant holds
         let short = match free {
-            Ok(free) if lane::lease_fits(free, held_gpu, need) => {
-                gpu_mib = Some(need);
-                None
-            }
-            Ok(free) => Some(format!(
-                "card {card}: {free} MiB free, {held_gpu} MiB held by the lane's running units, and a unit needs {need} MiB"
+            Ok(free) if lane::lease_fits(free, held_gpu, need) => None,
+            Ok(free) if held_gpu > 0 && free.saturating_add(held_gpu) >= need => Some((
+                false,
+                format!(
+                    "card {card}: {free} MiB free and {held_gpu} MiB held by the lane's own running units, and a unit needs {need} MiB: it waits for them"
+                ),
             )),
-            Err(e) => Some(format!("card {card}: {e}")),
+            Ok(free) => Some((
+                true,
+                format!(
+                    "card {card}: {free} MiB free, {held_gpu} MiB of it the lane's own, and a unit needs {need} MiB: another tenant holds the rest"
+                ),
+            )),
+            Err(e) => Some((true, format!("card {card}: {e}"))),
         };
         match short {
-            None => l.card_short = None,
-            // record 55, after review: an optional card that stays too full
-            // (a shared card another tenant holds) gives the unit to the CPU
-            // after a short wait, and the unit's log says why
-            Some(why) if l.optional => {
+            None => {
+                l.card_short = None;
+                gpu_mib = Some(need);
+                l.on_card = true;
+            }
+            // record 55, second review: an optional card another tenant
+            // keeps too full sends the whole run to the CPU, before its
+            // first unit starts, after a short wait; once a unit runs on the
+            // card the run waits for it, so a run never mixes devices
+            Some((true, why)) if l.optional && !l.on_card => {
                 let since = *l.card_short.get_or_insert_with(Instant::now);
                 if since.elapsed() < l.grace {
                     l.waiting = Some(why);
                     return Ok(None);
                 }
-                note = Some(format!(
-                    "{why}, for {} s: this unit runs on the CPU",
+                let words = format!(
+                    "{why}, for {} s: the run runs on the CPU",
                     since.elapsed().as_secs()
-                ));
+                );
+                rows::set_device(registry.store(), x.run_id, "cpu").map_err(|e| e.to_string())?;
+                l.gpu_need = None;
+                l.to_cpu = Some(words);
             }
-            Some(why) => {
+            Some((_, why)) => {
                 l.waiting = Some(why);
                 return Ok(None);
             }
         }
     }
+    let note = l.to_cpu.clone();
     let Some(b) = pending.pop_front() else {
         return Ok(None);
     };
@@ -5937,6 +6019,7 @@ fn start_next(
     }
     l.seen.take(ask);
     l.waiting = None;
+    l.lane_short = None;
     Ok(Some(Running {
         batch: b,
         child,
@@ -5985,10 +6068,13 @@ fn schedule(
         looked: None,
         card_asked: None,
         waiting: None,
-        lane_cores: d.needs.lane_cores,
         optional: d.gpu == Gpu::Optional,
         grace: card_grace(),
         card_short: None,
+        on_card: false,
+        to_cpu: None,
+        lane_short: None,
+        lane_grace: lane_grace(),
     };
     loop {
         // start what fits
@@ -8860,6 +8946,120 @@ fn found_for(outputs: &[descriptor::Output], out: &Path, u: &Unit) -> Vec<String
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Record 55, second review: the lane's start sweeps the work folders
+    /// of the runs that ended (done, partial, failed, cancelled,
+    /// interrupted), never a running one's, and the next sweep visits only
+    /// those that ended after it.
+    #[test]
+    fn the_sweep_clears_ended_runs_once_and_never_a_running_one() {
+        let base = std::env::temp_dir().join(format!("nils-sweep-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let mut store = Store::sqlite_in_memory().unwrap();
+        nils_registry::migrate::migrate(&mut store, nils_registry::migrate::Kind::Registry)
+            .unwrap();
+        let place = nils_registry::place::add(
+            &mut store,
+            &nils_registry::place::New {
+                name: "work",
+                role: nils_registry::place::Role::Working,
+                path: base.to_str().unwrap(),
+                guarantees: json!({}),
+                probed: json!({}),
+                handling: Value::Null,
+                dataset: Value::Null,
+            },
+        )
+        .unwrap();
+        let doc = json!({});
+        let (pl, _) = rows::add(
+            &mut store,
+            &rows::New {
+                name: "swept",
+                tool_version: "1",
+                descriptor: &doc,
+                descriptor_digest: "d1",
+                image: "example.org/swept",
+                image_digest: "sha256:00",
+                layout: "stacks",
+                level: "stack",
+                added_by: "test",
+                added_at: "2026-10-15T10:00:00Z",
+            },
+        )
+        .unwrap();
+        let params = json!({});
+        let mut start = |status: Option<&str>| -> i64 {
+            let id = rows::start(
+                &mut store,
+                &rows::NewRun {
+                    pipeline_id: pl.id,
+                    job_id: None,
+                    handle_id: None,
+                    selection: None,
+                    params: &params,
+                    runtime: "apptainer",
+                    runtime_version: "1",
+                    host: "h",
+                    device: "cpu",
+                    model_ids: &[],
+                    label_set_id: None,
+                    place_id: Some(place),
+                    scratch_place_id: None,
+                    principal: "t",
+                    actor: None,
+                    started_at: "2026-10-15T10:00:00Z",
+                },
+            )
+            .unwrap();
+            if let Some(s) = status {
+                rows::finish(
+                    &mut store,
+                    id,
+                    &rows::Finish {
+                        status: s,
+                        finished_at: &nils_registry::time::now_iso(),
+                        exit_code: None,
+                        results_digest: None,
+                        summary: &json!({}),
+                        error: None,
+                        failure: None,
+                    },
+                )
+                .unwrap();
+            }
+            id
+        };
+        let ids: Vec<i64> = [
+            Some("done"),
+            Some("partial"),
+            Some("failed"),
+            Some("cancelled"),
+            None,
+        ]
+        .into_iter()
+        .map(&mut start)
+        .collect();
+        let tmp = |id: i64| {
+            base.join(RUNS)
+                .join(id.to_string())
+                .join("units/stack-1")
+                .join(WORKDIR)
+        };
+        for id in &ids {
+            std::fs::create_dir_all(tmp(*id)).unwrap();
+        }
+        // times are whole seconds: the sweep comes a second after the ends
+        std::thread::sleep(Duration::from_millis(1100));
+        assert_eq!(sweep_workdirs(&mut store).unwrap(), 4);
+        for id in &ids[..4] {
+            assert!(!tmp(*id).exists(), "run {id}");
+        }
+        assert!(tmp(ids[4]).exists(), "a running run keeps its own");
+        // the next sweep visits none of those again
+        assert_eq!(sweep_workdirs(&mut store).unwrap(), 0);
+        let _ = std::fs::remove_dir_all(&base);
+    }
 
     /// Record 55, after review: what apptainer units left in their /tmp
     /// (clinical-derived volumes) goes when a run stops, is cancelled or

@@ -3788,10 +3788,23 @@ fn an_optional_gpu_need_takes_the_leased_card_under_apptainer_and_else_the_cpu()
         "{pre}"
     );
 
-    // a card large enough but full (another tenant holds it): the units
-    // wait the grace, then run on the CPU, and their logs and the
-    // pre-flight say why; they never wait for it to empty
+    // a card large enough whose room is the lane's own leases: the units
+    // wait for one another and all run on it, whatever the grace
     std::fs::write(&total, "98304").unwrap();
+    std::fs::write(&free, "6000").unwrap();
+    let (ok, r, err, execs) = run("gpu-optional", &[]);
+    assert!(ok, "{err}");
+    assert_eq!(r["device"], "cuda:Stand-in Card", "{r}");
+    assert_eq!(execs.len(), 4, "{execs:?}");
+    assert!(
+        execs.iter().all(|e| e.iter().any(|w| w == "--nv")),
+        "{execs:?}"
+    );
+
+    // a card large enough but full, another tenant holding it: the whole
+    // run waits the grace before its first unit, then runs on the CPU, its
+    // recorded device the CPU's, and each unit's log and the pre-flight say
+    // why; no unit runs on the card
     std::fs::write(&free, "1000").unwrap();
     let pre = preflight("gpu-optional");
     let why = pre["gpu"]["why"].as_str().unwrap_or_default();
@@ -3801,6 +3814,7 @@ fn an_optional_gpu_need_takes_the_leased_card_under_apptainer_and_else_the_cpu()
     );
     let (ok, r, err, execs) = run("gpu-optional", &[]);
     assert!(ok, "{err}");
+    assert_eq!(r["device"], "cpu", "{r}");
     assert_eq!(execs.len(), 4, "{execs:?}");
     for e in &execs {
         assert!(!e.iter().any(|w| w == "--nv"), "{e:?}");
@@ -3821,7 +3835,9 @@ fn an_optional_gpu_need_takes_the_leased_card_under_apptainer_and_else_the_cpu()
     assert_eq!(logs.len(), 4, "{logs:?}");
     for l in &logs {
         assert!(
-            l.starts_with("nils: card 1: 1000 MiB free") && l.contains("this unit runs on the CPU"),
+            l.starts_with("nils: card 1: 1000 MiB free")
+                && l.contains("another tenant holds the rest")
+                && l.contains("the run runs on the CPU"),
             "{l}"
         );
     }
@@ -4095,13 +4111,44 @@ x-nils:
         assert_eq!(pre["needs"]["cores"], f64::from(cores), "{pre}");
         let r = lab.json(&["run", "wide", "--select", "selection:every@1", "--json"]);
         assert_eq!(r["status"], "done", "{r}");
-        assert_eq!(r["params"]["threads"], cores, "{r}");
+        // the run records no threads of its own: each unit is told the
+        // cores it took at its start, which its row keeps
+        assert!(r["params"]["threads"].is_null(), "{r}");
+        for u in r["units_run"].as_array().unwrap() {
+            assert_eq!(u["cores"], cores, "{u}");
+        }
         assert_eq!(
             told(run),
             BTreeSet::from([format!("{cores} {cores}")]),
             "the threads and NILS_CORES of every unit"
         );
     }
+    // threads the caller sets win over the lane's cores, and the run
+    // records what the container was given
+    lab.ok(
+        &["pipeline", "lane", "--cores", "4", "--memory-gb", "4"],
+        None,
+    );
+    let r = lab.json(&[
+        "run",
+        "wide",
+        "--select",
+        "selection:every@1",
+        "--param",
+        "threads=2",
+        "--json",
+    ]);
+    assert_eq!(r["status"], "done", "{r}");
+    assert_eq!(r["params"]["threads"], 2, "{r}");
+    assert_eq!(
+        told(r["id"].as_i64().unwrap()),
+        BTreeSet::from(["2 2".to_string()]),
+        "the threads the caller set, and as many cores"
+    );
+    lab.ok(
+        &["pipeline", "lane", "--cores", "1", "--memory-gb", "4"],
+        None,
+    );
     // more threads than the lane's one core: refused before anything runs
     let (ok, _, err) = lab.run(
         &[
