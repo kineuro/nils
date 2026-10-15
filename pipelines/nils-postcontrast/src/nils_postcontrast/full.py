@@ -15,12 +15,14 @@ calibrated per site, as the cascade's first stage uses it.
 Who is a candidate is the cascade's rule (T1-type brain at a calibrated
 site); every other stack is "not sure" with its reason. A stack whose
 tools fail keeps the arms it has, as model r1 does; but a stack left with
-no image arm at all because it has no usable volume (no conversion, fewer
-than 3 slices, 4D) or no segmentation after the card, its retry and the
-CPU is "not sure" (``no-usable-volume``, ``no-segmentation``): model r1
-would answer it from its header evidence alone, which no test has compared
-with a reference, and the model answers only where it is certified
-(record 55 E3, 2026-10-14). The change is class III by construction.
+no image arm at all, for any reason, is "not sure": no usable volume (no
+conversion, fewer than 3 slices, 4D, ``no-usable-volume``), no
+segmentation after the card, its retry and the CPU (``no-segmentation``),
+or no arm its features could feed (a failed feature step, too few voxels,
+``no-image-arm``, 2026-10-15). Model r1 would answer it from its header
+evidence alone, which no test has compared with a reference, and the model
+answers only where it is certified (record 55 E3). The change is class III
+by construction.
 
 **Where it runs.** With a card, the tools run in waves on it (``tools.wave``)
 while worker processes convert the stacks before and compute the features
@@ -63,20 +65,22 @@ from .results import FAILED, SKIPPED, Run, Unit
 
 logger = logging.getLogger("nils_postcontrast.full")
 VALUE = {"given": GIVEN, "not given": NOT_GIVEN}
-NO_VOLUME, NO_SEGMENTATION = "no-usable-volume", "no-segmentation"
+NO_VOLUME, NO_SEGMENTATION, NO_ARM = "no-usable-volume", "no-segmentation", "no-image-arm"
 
 
 def no_arm_reason(arms: str, convert_failed: bool, segmented: bool) -> str | None:
     """Why a candidate is "not sure" though model r1 could answer it from
-    its header evidence alone: no image arm at all, and no usable volume or
-    no segmentation; none where it keeps an arm, or its tools did not fail."""
+    its header evidence alone: no image arm at all, for any reason (record
+    55 E3, 2026-10-15): no usable volume, no segmentation, or else no arm
+    its features could feed (a failed feature step, too few voxels); none
+    where it keeps an arm."""
     if arms:
         return None
     if convert_failed:
         return NO_VOLUME
     if not segmented:
         return NO_SEGMENTATION
-    return None
+    return NO_ARM
 CPU_SYNTHSEG_GB = 96  # the most one CPU SynthSeg process was seen to hold: 85 GB on a large deferred volume
 
 

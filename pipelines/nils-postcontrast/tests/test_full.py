@@ -358,7 +358,8 @@ def test_only_a_stack_its_tools_left_with_no_image_arm_abstains():
     with its tools done, is r1's as before."""
     assert full.no_arm_reason("", convert_failed=True, segmented=False) == full.NO_VOLUME == "no-usable-volume"
     assert full.no_arm_reason("", convert_failed=False, segmented=False) == full.NO_SEGMENTATION == "no-segmentation"
-    assert full.no_arm_reason("", convert_failed=False, segmented=True) is None
+    # any other way to no arm (a failed feature step, too few voxels): not sure as well
+    assert full.no_arm_reason("", convert_failed=False, segmented=True) == full.NO_ARM == "no-image-arm"
     assert full.no_arm_reason("U", convert_failed=False, segmented=False) is None
     assert full.no_arm_reason("TUV", convert_failed=True, segmented=False) is None
 
