@@ -1868,7 +1868,7 @@ fn answer(
         // record 56 section 5.2: the rules' answer the person saw, exactly
         // as the tile showed it, so a sort does not ask about the decision
         // again until the rules move from it; none where it was hidden
-        if !(tile.hidden && blind_now)
+        if !tile.hidden
             && let Some(rules) = &seen
         {
             for d in &w.decisions {
