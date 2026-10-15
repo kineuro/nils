@@ -185,6 +185,14 @@ def _nvidia_libs(site: str) -> str:
     return ":".join(sorted(os.path.join(site, n, "lib") for n in os.listdir(site) if os.path.isdir(os.path.join(site, n, "lib"))))
 
 
+def _with_libs(site: str) -> str:
+    """The CUDA libraries beside a tool's Python ahead of the library path the
+    process has: under apptainer --nv that path holds the card's driver
+    (libcuda), and a tool given only its own libraries finds no card and
+    runs on the CPU (2026-10-15, the fallback's image)."""
+    return ":".join(p for p in (_nvidia_libs(site), os.environ.get("LD_LIBRARY_PATH", "")) if p)
+
+
 def _site_nvidia(python: str) -> str:
     """The pip CUDA libraries beside a Python environment's interpreter."""
     root = Path(python).absolute().parent.parent  # the environment's root; its interpreter may link elsewhere
@@ -265,7 +273,7 @@ def wave(env: Env, card: Card, sids: list, work: str, atlas: dict, logdir: str, 
     try:
         if n_ss:
             tf_site = _site_nvidia(env.tf_python)
-            tenv = dict(os.environ, LD_LIBRARY_PATH=_nvidia_libs(tf_site), TF_USE_LEGACY_KERAS="1", TF_CPP_MIN_LOG_LEVEL="2",
+            tenv = dict(os.environ, LD_LIBRARY_PATH=_with_libs(tf_site), TF_USE_LEGACY_KERAS="1", TF_CPP_MIN_LOG_LEVEL="2",
                         TF_CUDNN_USE_AUTOTUNE="0", FREESURFER_HOME=env.fs_home, CUDA_VISIBLE_DEVICES=card.device, OMP_NUM_THREADS="4",
                         NILS_PC_TF_MEM_MB=str(ss_mem_mib), PYTHONPATH=str(HERE / "tfcap"))
             tenv.pop("TF_FORCE_GPU_ALLOW_GROWTH", None)
@@ -284,7 +292,7 @@ def wave(env: Env, card: Card, sids: list, work: str, atlas: dict, logdir: str, 
             Path(jf).write_text("".join(json.dumps(j) + "\n" for j in jm))
             # FreeSurfer's TensorFlow takes the whole card unless it grows into it (the study ran it so)
             menv = dict(os.environ, CUDA_VISIBLE_DEVICES=card.device, OMP_NUM_THREADS="4", FREESURFER_HOME=env.fs_home,
-                        LD_LIBRARY_PATH=_nvidia_libs(env.cu118), TF_FORCE_GPU_ALLOW_GROWTH="true")
+                        LD_LIBRARY_PATH=_with_libs(env.cu118), TF_FORCE_GPU_ALLOW_GROWTH="true")
             lf1 = open(f"{logdir}/{tag}.synthmorph.log", "a")
             pm = (subprocess.Popen([*env.fspython, str(HERE / "synth_batch.py"), jf, f"{logdir}/{tag}.synthmorph.out.jsonl"], stdout=lf1,
                                    stderr=lf1, env=menv), lf1)
@@ -341,7 +349,7 @@ def synthseg_retry(env: Env, card: Card, sids: list, work: str, logdir: str, mem
     Path(fo).write_text("".join(paths(f"{work}/stacks/{s}")["ss"] + "\n" for s in miss))
     _take(card, mem_mib, lock, keep_free)
     try:
-        tenv = dict(os.environ, LD_LIBRARY_PATH=_nvidia_libs(_site_nvidia(env.tf_python)), TF_USE_LEGACY_KERAS="1", TF_CPP_MIN_LOG_LEVEL="2",
+        tenv = dict(os.environ, LD_LIBRARY_PATH=_with_libs(_site_nvidia(env.tf_python)), TF_USE_LEGACY_KERAS="1", TF_CPP_MIN_LOG_LEVEL="2",
                     TF_CUDNN_USE_AUTOTUNE="0", FREESURFER_HOME=env.fs_home, CUDA_VISIBLE_DEVICES=card.device, OMP_NUM_THREADS="4",
                     NILS_PC_TF_MEM_MB=str(mem_mib), PYTHONPATH=str(HERE / "tfcap"))
         with open(f"{logdir}/{tag}.ss.log", "a") as lf:

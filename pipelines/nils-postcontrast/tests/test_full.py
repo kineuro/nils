@@ -408,6 +408,17 @@ def test_a_card_s_budget_sizes_its_waves_and_places_the_frangi_filter(tmp_path):
     assert small.reserved == 0 and not list(tmp_path.glob("*.log"))
 
 
+def test_the_tools_keep_the_library_path_the_card_s_driver_is_on(monkeypatch, tmp_path):
+    """Under apptainer --nv the driver (libcuda) is on the process's library
+    path; a tool given only its own CUDA libraries finds no card."""
+    (tmp_path / "cudnn" / "lib").mkdir(parents=True)
+    monkeypatch.setenv("LD_LIBRARY_PATH", "/.singularity.d/libs")
+    assert tools._with_libs(str(tmp_path)) == f"{tmp_path}/cudnn/lib:/.singularity.d/libs"
+    monkeypatch.delenv("LD_LIBRARY_PATH")
+    assert tools._with_libs(str(tmp_path)) == f"{tmp_path}/cudnn/lib"
+    assert tools._with_libs("") == ""
+
+
 def test_the_card_budget_is_what_the_engine_leased(monkeypatch):
     """The engine tells a unit on a card the memory it leased it
     (NILS_GPU_MEMORY_GB); the run plans within it unless told otherwise."""
