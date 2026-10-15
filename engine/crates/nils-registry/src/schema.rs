@@ -3272,7 +3272,7 @@ pub const SUBJECT_CODE_TYPE: &str = "subject-code";
 /// Record 55, ruling 24: the built-in types whose IDs identify a person
 /// wherever they are met: what PatientID held as written, a study's DICOM
 /// UID and the ID that is the same everywhere. Seeded with the flag set, and
-/// set on a store from before by migration 99.
+/// set on a store from before by migration 102.
 pub const IDENTIFYING_ID_TYPES: [&str; 3] = ["patient-id", "study-instance-uid", GENERATOR_ID_TYPE];
 
 pub const ID_TYPES: [(&str, &str); 4] = [

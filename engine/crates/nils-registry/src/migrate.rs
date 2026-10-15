@@ -3183,16 +3183,18 @@ mod tests {
             assert!(names.contains(&t.name), "{} missing", t.name);
         }
         // a store from the future is refused
-        let ahead = SCHEMA_VERSION + 1;
+        let future = SCHEMA_VERSION + 1;
         store
             .execute(
-                &format!("UPDATE registry_meta SET value = '{ahead}' WHERE key = 'schema_version'"),
+                &format!(
+                    "UPDATE registry_meta SET value = '{future}' WHERE key = 'schema_version'"
+                ),
                 &[],
             )
             .unwrap();
         assert_eq!(
             standing(&mut store, Kind::Registry).unwrap(),
-            Standing::Ahead(ahead)
+            Standing::Ahead(future)
         );
         let err = migrate(&mut store, Kind::Registry).unwrap_err().to_string();
         assert!(err.contains("ahead of this binary"), "{err}");
@@ -3224,7 +3226,7 @@ mod tests {
     /// A linkage store from before migration 86 gains the type of an ID
     /// that is the same everywhere once; one where a person had made it
     /// keeps theirs (2026-10-10: a dataset declared one and its run failed).
-    /// Record 55, ruling 24: a linkage store from before migration 99
+    /// Record 55, ruling 24: a linkage store from before migration 102
     /// learns which of its types identify a person: the built-in ones, and
     /// none a person made.
     #[test]
