@@ -13,10 +13,14 @@ image of 1.0.0-alpha.71, and its own was pinned one commit after it).
         argument ENCODER_DIGESTS, so the image's build fails where the
         weights it bakes are other ones
     release-descriptors.py write --refs <dir> --out <dir> [--tag <tag>]
+                                 [--expect <image>,...]
         <dir>/<image>.ref holds `ghcr.io/kineuro/<image>@sha256:<hex>`, one
         for each image the release pushed; writes <out>/pipelines/<package>/
         <name>/nils.job.yml for every descriptor of this tree that names one
-        of them, pinned to it, and <out>/IMAGES (`<pipeline>\\t<image>`)
+        of them, pinned to it, and <out>/IMAGES (`<pipeline>\\t<image>`).
+        An expected image the release did not push (its job failed) ships no
+        descriptor; <out>/NOT-SHIPPED says which, for the release's notes,
+        and the binaries and packs go out regardless.
     release-descriptors.py added <out>/IMAGES < <nils pipeline add --json>
         the release's own binary took a descriptor into a catalog: the image
         it keeps is the one IMAGES names for that pipeline
@@ -91,9 +95,10 @@ def cmd_write(a: argparse.Namespace) -> None:
         if not m:
             fail(f"{f.name} holds {ref!r}, not ghcr.io/kineuro/<image>@sha256:<hex>")
         built[m.group(1)] = ref
-    if not built:
-        fail(f"no image reference in {a.refs}")
     out = Path(a.out)
+    (out / "pipelines").mkdir(parents=True, exist_ok=True)
+    expected = [x.strip() for x in (a.expect or "").split(",") if x.strip()]
+    missing = sorted(x for x in expected if REGISTRY + x not in built)
     shipped: dict[str, str] = {}
     named: set[str] = set()
     left: list[str] = []
@@ -140,6 +145,12 @@ def cmd_write(a: argparse.Namespace) -> None:
         print(f"{n}\t{r}")
     for line in left:
         print(f"not shipped: {line}", file=sys.stderr)
+    notes = []
+    for image in missing:
+        lost = sorted(Path(x.split(" (", 1)[0]).parent.name for x in left if f"({REGISTRY}{image}," in x)
+        notes.append(f"- `{image}`: its image was not built by this release, so it ships no descriptor"
+                     + (f" ({', '.join(lost)})" if lost else "") + "\n")
+    (out / "NOT-SHIPPED").write_text("".join(notes))
 
 
 def cmd_added(a: argparse.Namespace) -> None:
@@ -163,6 +174,7 @@ def main() -> None:
     w.add_argument("--refs", required=True)
     w.add_argument("--out", required=True)
     w.add_argument("--tag", default="being made")
+    w.add_argument("--expect", default="", help="the images the release builds, as a comma list")
     w.set_defaults(fn=cmd_write)
     d = sub.add_parser("added")
     d.add_argument("images")

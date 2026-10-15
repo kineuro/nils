@@ -107,12 +107,16 @@ jobs:
     # The descriptors the release ships: every one of this tree that names a
     # model image this run built, pinned to the digest the run pushed, then
     # taken into a catalog by the tag's own binary, which must keep that image.
+    # An image job that failed ships no descriptor and is named in the notes
+    # (NOT-SHIPPED); it never holds back the binaries and the packs.
     needs: [built, build, model-images]
-    if: ${{ !cancelled() && needs.built.result == 'success' && (needs.build.result == 'success' || needs.build.result == 'skipped') && needs.model-images.result == 'success' }}
+    if: ${{ !cancelled() && needs.built.result == 'success' && (needs.build.result == 'success' || needs.build.result == 'skipped') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
+        # none where every image job failed
+        continue-on-error: true
         with:
           pattern: image-*
           path: refs
@@ -125,7 +129,11 @@ jobs:
           run-id: ${{ needs.built.outputs.run || github.run_id }}
           github-token: ${{ github.token }}
       - name: the descriptors, pinned to the images this release built
-        run: python3 scripts/release-descriptors.py write --refs refs --out out --tag "$GITHUB_REF_NAME"
+        run: |
+          mkdir -p refs
+          python3 scripts/release-descriptors.py write --refs refs --out out --tag "$GITHUB_REF_NAME" \
+            --expect nils-bodypart,nils-postcontrast,nils-system1
+          cat out/NOT-SHIPPED >> "$GITHUB_STEP_SUMMARY"
       - name: taken by the tag's binary as a catalog takes them
         run: |
           chmod +x bin/nils-linux-x86_64
@@ -138,12 +146,14 @@ jobs:
           done
           tar -czf pipelines.tar.gz -C out pipelines
           cp out/IMAGES IMAGES
+          cp out/NOT-SHIPPED NOT-SHIPPED
       - uses: actions/upload-artifact@v7
         with:
           name: release-descriptors
           path: |
             pipelines.tar.gz
             IMAGES
+            NOT-SHIPPED
 
   release:
     needs: [built, build, descriptors]
@@ -179,6 +189,9 @@ jobs:
           v=${GITHUB_REF_NAME#v}
           awk -v v="$v" '/^## \[/{p = index($0, "[" v "]") > 0} p' CHANGELOG.md | sed '1d' > notes.md
           [ -s notes.md ] || echo "NILS $v" > notes.md
+          if [ -s bin/NOT-SHIPPED ]; then
+            { echo; echo "### Model images this release did not build"; echo; cat bin/NOT-SHIPPED; } >> notes.md
+          fi
       - uses: softprops/action-gh-release@v3
         with:
           name: NILS ${{ github.ref_name }}
