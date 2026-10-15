@@ -13,7 +13,9 @@
 //! Post-contrast reads the body part's answers (it answers only on brain),
 //! so where both are queued the post-contrast step is queued after the
 //! body part's run ends done: `score ... --step post_contrast` is that
-//! run's `then`.
+//! run's `then`. The cascade answers only T1-type brain, so the stacks sent
+//! to it are those that can be, by their stored axes (`can_be_t1_brain`);
+//! the others are not sent, and the result counts them in `left_out`.
 //!
 //! A step it cannot run is skipped and the result says why (`skipped`,
 //! each with the step, a reason a client tells apart and the words): its
@@ -81,6 +83,73 @@ pub(crate) fn new_stacks(
         .map(|r| Ok((r.int(0)?, r.opt_int(1)?)))
         .collect::<Result<_, nils_registry::store::Error>>()
         .map_err(|e| e.to_string())
+}
+
+/// Why a stack is not sent to post-contrast's cascade.
+pub(crate) const NOT_T1_BRAIN: &str = "not T1-type brain by the stored axes";
+
+/// Whether a stack can be T1-type brain, read from its stored axes with the
+/// test the post-contrast cascade applies before it scores (its `family`
+/// and `brain` in `nils_postcontrast`): the base, taken as the greatest
+/// value as the cascade takes it, is T1w and the technique is not TOF or PC;
+/// and the body part says brain, or the body region says head, or the body
+/// part is not answered yet (the body-part step may still say brain). A
+/// stack this leaves out is never answered by that: it is not sent.
+pub(crate) fn can_be_t1_brain(
+    base: &[String],
+    technique: &[String],
+    body_part: &[String],
+    body_region: &[String],
+) -> bool {
+    let greatest = |v: &[String]| v.iter().max().cloned().unwrap_or_default();
+    let t1 = greatest(base) == "T1w" && !matches!(greatest(technique).as_str(), "TOF" | "PC");
+    // kept where neither body axis is answered yet, or where one says the head
+    let brain = (body_part.is_empty() && body_region.is_empty())
+        || greatest(body_part).contains("brain")
+        || body_region.iter().any(|r| r == "head");
+    t1 && brain
+}
+
+/// The stacks of `stacks` that can be T1-type brain by their stored axes
+/// (`can_be_t1_brain`), in their order.
+pub(crate) fn t1_brain_of(
+    store: &mut Store,
+    stacks: &[(i64, Option<i64>)],
+) -> Result<Vec<(i64, Option<i64>)>, String> {
+    use std::collections::HashMap;
+    let mut axes: HashMap<i64, [Vec<String>; 4]> = HashMap::new();
+    for chunk in stacks.chunks(500) {
+        let ids = chunk
+            .iter()
+            .map(|(s, _)| s.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT stack_id, axis, value FROM {} WHERE axis IN \
+             ('base', 'technique', 'body_part', 'body_region') \
+             AND value IS NOT NULL AND value <> '' AND stack_id IN ({ids})",
+            store.qualified("classification_axis"),
+        );
+        for r in store.query(&sql, &[]).map_err(|e| e.to_string())? {
+            let slot = match r.text(1).map_err(|e| e.to_string())? {
+                "base" => 0,
+                "technique" => 1,
+                "body_part" => 2,
+                _ => 3,
+            };
+            axes.entry(r.int(0).map_err(|e| e.to_string())?)
+                .or_default()[slot]
+                .push(r.text(2).map_err(|e| e.to_string())?.to_string());
+        }
+    }
+    Ok(stacks
+        .iter()
+        .filter(|(s, _)| {
+            let [b, t, p, g] = axes.get(s).cloned().unwrap_or_default();
+            can_be_t1_brain(&b, &t, &p, &g)
+        })
+        .copied()
+        .collect())
 }
 
 /// One step's arrival run as planned: the step, the run's command line and
@@ -297,13 +366,37 @@ fn score(
     let epoch = registry.meta().epoch;
     let target = format!("dataset:{}", place.name);
     let mut queued: Vec<Value> = Vec::new();
+    let mut left_out: Vec<Value> = Vec::new();
     for p in planned {
         if after_body_part && p.step == "post_contrast" {
             queued.push(json!({"step": p.step, "after": "body_part"}));
             continue;
         }
+        // post-contrast's cascade answers only T1-type brain: the others
+        // are not sent (nothing is answered for them)
+        let sent = if p.step == "post_contrast" {
+            t1_brain_of(registry.store(), &stacks)?
+        } else {
+            stacks.clone()
+        };
+        if sent.len() < stacks.len() {
+            left_out.push(json!({
+                "step": p.step, "stacks": stacks.len() - sent.len(), "why": NOT_T1_BRAIN,
+            }));
+        }
+        if sent.is_empty() {
+            skips.push(skipped(
+                p.step,
+                "not_t1_brain",
+                format!(
+                    "none of the {} new stacks is T1-type brain by the stored axes, so nothing is queued",
+                    stacks.len()
+                ),
+            ));
+            continue;
+        }
         let store = registry.store();
-        let rows: Vec<Row> = stacks
+        let rows: Vec<Row> = sent
             .iter()
             .map(|(s, subject)| Row(vec![Cell::Int(*s), subject.map_or(Cell::Null, Cell::Int)]))
             .collect();
@@ -357,9 +450,106 @@ fn score(
         }));
     }
     doc["queued"] = json!(queued);
+    if !left_out.is_empty() {
+        doc["left_out"] = json!(left_out);
+    }
     if !skips.is_empty() {
         doc["score_skipped"] = json!(skips.clone());
     }
     doc["skipped"] = json!(skips);
     Ok(doc)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn w(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn put(store: &mut Store, stack: i64, axis: &str, value: &str) {
+        let sql = format!(
+            "INSERT INTO {} (stack_id, axis, value, confidence, tier) VALUES ({stack}, '{axis}', '{value}', 1.0, 'rule')",
+            store.qualified("classification_axis")
+        );
+        store.execute(&sql, &[]).unwrap();
+    }
+
+    /// 2026-10-16: a batch of T1 brain, T2 brain and T1 spine sends only
+    /// the T1 brain stack; a stack whose body part is not answered yet is
+    /// kept; TOF is left out; a head region keeps a stack whose part is
+    /// another.
+    fn scope_case(mut store: Store) {
+        nils_registry::migrate::migrate(&mut store, nils_registry::migrate::Kind::Registry)
+            .unwrap();
+        // 1 T1 brain, 2 T2 brain, 3 T1 spine, 4 T1 no body part yet,
+        // 5 T1 TOF brain, 6 T1 head region with another part, 7 no base
+        for (s, base, part, region, tech) in [
+            (1, "T1w", Some("brain"), Some("head"), "MPRAGE"),
+            (2, "T2w", Some("brain"), Some("head"), "TSE"),
+            (3, "T1w", Some("spine-cervical"), Some("spine"), "TSE"),
+            (4, "T1w", None, None, "TSE"),
+            (5, "T1w", Some("brain"), Some("head"), "TOF"),
+            (6, "T1w", Some("orbit"), Some("head"), "TSE"),
+        ] {
+            put(&mut store, s, "base", base);
+            put(&mut store, s, "technique", tech);
+            if let Some(p) = part {
+                put(&mut store, s, "body_part", p);
+            }
+            if let Some(r) = region {
+                put(&mut store, s, "body_region", r);
+            }
+        }
+        let stacks: Vec<(i64, Option<i64>)> = (1..=7).map(|s| (s, Some(s * 10))).collect();
+        let sent: Vec<i64> = t1_brain_of(&mut store, &stacks)
+            .unwrap()
+            .iter()
+            .map(|(s, _)| *s)
+            .collect();
+        assert_eq!(sent, vec![1, 4, 6]);
+        // the batch of three: only the T1 brain stack
+        let three: Vec<(i64, Option<i64>)> = stacks[..3].to_vec();
+        let sent = t1_brain_of(&mut store, &three).unwrap();
+        assert_eq!(sent, vec![(1, Some(10))]);
+    }
+
+    #[test]
+    fn only_stacks_that_can_be_t1_brain_are_sent_to_post_contrast() {
+        scope_case(Store::sqlite_in_memory().unwrap());
+        let Some(dsn) = std::env::var("NILS_TEST_POSTGRES_DSN")
+            .ok()
+            .filter(|d| !d.is_empty())
+        else {
+            eprintln!("NILS_TEST_POSTGRES_DSN is not set; the Postgres half is skipped");
+            return;
+        };
+        let schema = "nils_pc_scope_test";
+        let mut admin = Store::connect_postgres(&dsn, "public").unwrap();
+        admin
+            .batch(&format!(
+                "DROP SCHEMA IF EXISTS {schema} CASCADE; CREATE SCHEMA {schema}"
+            ))
+            .unwrap();
+        drop(admin);
+        scope_case(Store::connect_postgres(&dsn, schema).unwrap());
+        let mut admin = Store::connect_postgres(&dsn, "public").unwrap();
+        admin
+            .batch(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+            .unwrap();
+    }
+
+    #[test]
+    fn the_cascades_own_test_is_applied_to_the_axes() {
+        let ok = |b: &[&str], t: &[&str], p: &[&str], g: &[&str]| {
+            can_be_t1_brain(&w(b), &w(t), &w(p), &w(g))
+        };
+        assert!(ok(&["T1w"], &["MPRAGE"], &["brain"], &["head"]));
+        assert!(ok(&["T1w"], &[], &[], &[]));
+        assert!(!ok(&[], &[], &["brain"], &[]));
+        assert!(!ok(&["T1w"], &["PC"], &["brain"], &[]));
+        assert!(!ok(&["T2w"], &[], &[], &[]));
+        assert!(!ok(&["T1w"], &[], &["spine"], &["spine"]));
+    }
 }
