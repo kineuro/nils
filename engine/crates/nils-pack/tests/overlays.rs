@@ -3,38 +3,14 @@
 //! An overlay amends a pack's editable buckets at load, and is refused when
 //! it reaches for anything else.
 
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+mod common;
 
-static N: AtomicU64 = AtomicU64::new(0);
-
-struct Dir(PathBuf);
-
-impl Dir {
-    fn new() -> Dir {
-        let n = N.fetch_add(1, Ordering::Relaxed);
-        let p = std::env::temp_dir().join(format!("nils-overlay-test-{}-{n}", std::process::id()));
-        std::fs::create_dir_all(p.join("corpus")).unwrap();
-        Dir(p)
-    }
-    fn file(&self, name: &str, body: &str) -> &Dir {
-        std::fs::write(self.0.join(name), body).unwrap();
-        self
-    }
-    fn path(&self) -> &Path {
-        &self.0
-    }
-}
-
-impl Drop for Dir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
+use common::Dir;
+use std::path::PathBuf;
 
 /// A pack whose one predicate reads an editable bucket.
 fn pack() -> Dir {
-    let d = Dir::new();
+    let d = Dir::new("overlay-test");
     d.file(
         "pack.yml",
         "\
@@ -77,7 +53,7 @@ cases:
 }
 
 fn overlay(d: &Dir, body: &str) -> PathBuf {
-    let p = d.0.join("overlay.yml");
+    let p = d.path().join("overlay.yml");
     std::fs::write(&p, body).unwrap();
     p
 }
@@ -265,7 +241,7 @@ cases:
 /// A pack with an axis of its own rules (`kind`), a vocabulary axis a
 /// longhand set decides by words (`mood`), and one bucket.
 fn axis_pack() -> Dir {
-    let d = Dir::new();
+    let d = Dir::new("overlay-test");
     std::fs::create_dir_all(d.path().join("axes")).unwrap();
     std::fs::create_dir_all(d.path().join("rules")).unwrap();
     d.file(

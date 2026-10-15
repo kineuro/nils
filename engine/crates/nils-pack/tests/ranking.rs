@@ -7,41 +7,14 @@
 //! ranks are a defect of the pack. These are the facts the evaluator hands
 //! the classifier for both, and for the axes no rule answered.
 
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+mod common;
 
-static N: AtomicU64 = AtomicU64::new(0);
-
-struct Dir(PathBuf);
-
-impl Dir {
-    fn new() -> Dir {
-        let n = N.fetch_add(1, Ordering::Relaxed);
-        let p = std::env::temp_dir().join(format!("nils-rank-test-{}-{n}", std::process::id()));
-        std::fs::create_dir_all(p.join("corpus")).unwrap();
-        std::fs::create_dir_all(p.join("axes")).unwrap();
-        std::fs::create_dir_all(p.join("rules")).unwrap();
-        Dir(p)
-    }
-    fn file(&self, name: &str, body: &str) -> &Dir {
-        std::fs::write(self.0.join(name), body).unwrap();
-        self
-    }
-    fn path(&self) -> &Path {
-        &self.0
-    }
-}
-
-impl Drop for Dir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
+use common::Dir;
 
 /// A pack whose rules decide over each other in every way the pack can
 /// rank, and in the ways it cannot.
 fn pack() -> Dir {
-    let d = Dir::new();
+    let d = Dir::new("rank-test");
     d.file(
         "pack.yml",
         "\
@@ -347,7 +320,7 @@ fn an_axis_no_rule_answered_is_unresolved_and_one_decided_to_nothing_is_not() {
 /// default and are not left to an image model.
 #[test]
 fn a_missing_answer_is_asked_only_where_the_axis_matters() {
-    let d = Dir::new();
+    let d = Dir::new("rank-test");
     d.file(
         "pack.yml",
         "\
@@ -398,7 +371,7 @@ review:
 
 #[test]
 fn an_image_model_s_axis_must_be_an_axis_of_the_pack() {
-    let d = Dir::new();
+    let d = Dir::new("rank-test");
     d.file(
         "pack.yml",
         "pack: m\nversion: 1.0.0\ncontract: 1\nmodality: MR\naxes: [axes/base.yml]\nreview:\n  by_model: [body_part]\n",

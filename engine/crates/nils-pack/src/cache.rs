@@ -280,11 +280,22 @@ mod tests {
         assert_eq!(packs[0].version, packs[1].version);
     }
 
+    /// A temporary pack copy, removed however the test ends.
+    struct Scratch(PathBuf);
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
     /// A pack's files changed after a load are read again, and a pack whose
     /// corpus then fails does not load from what was kept.
     #[test]
     fn a_changed_file_or_a_new_case_is_read_again() {
-        let tmp = std::env::temp_dir().join(format!("nils-pack-cache-{}", std::process::id()));
+        let scratch =
+            Scratch(std::env::temp_dir().join(format!("nils-pack-cache-{}", std::process::id())));
+        let tmp = scratch.0.clone();
         let _ = std::fs::remove_dir_all(&tmp);
         copy(&pack_dir(), &tmp);
         let first = crate::load(&tmp, None).unwrap();
@@ -328,6 +339,5 @@ mod tests {
             "{} is not newer than {version}",
             moved.version
         );
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

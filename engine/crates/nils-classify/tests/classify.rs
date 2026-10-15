@@ -3,8 +3,10 @@
 //! Classifying a digested registry: the verdict, the evidence that made it,
 //! and the decision that outranks it.
 
+mod common;
+
 use std::env;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard};
 
 use dicom_core::VR;
@@ -110,7 +112,7 @@ fn one(reg: &mut Registry, sql: &str) -> i64 {
 }
 
 fn packs() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packs/mri")
+    common::shipped_mri()
 }
 
 fn elem(tag: dicom_core::Tag, vr: VR, v: &str) -> synth::Elem {

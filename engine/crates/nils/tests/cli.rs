@@ -6234,7 +6234,7 @@ fn shipped_version(pack: &std::path::Path) -> String {
 
 #[test]
 fn a_pack_is_replayed_over_header_packets() {
-    let packs = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packs/mri");
+    let packs = common::shipped_mri();
     let dir = nils_dicom::synth::TempDir::new("cli-replay");
     let packet = |stack: i64, psd: &str| {
         serde_json::json!({

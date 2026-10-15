@@ -143,8 +143,12 @@ impl Picked {
     }
 }
 
-/// Why a run wrote nothing for the subjects it decided (`covered`, none for
-/// every subject), read from what it read: none of them holds a stack of a
+/// A scope's subjects and the stacks it held (none for all of them).
+type Explain = (Option<BTreeSet<i64>>, Option<BTreeSet<i64>>);
+
+/// Why a run wrote nothing for the subjects it decided (each scope's
+/// `covered`, none for every subject, and the stacks it `held`), read from
+/// what it read, every scope from its own sets: none of them holds a stack of a
 /// role the pack picks, their stacks of one are on no visit (their studies
 /// carry no date, since the cache was brought up to date first), or the
 /// rules allow none of the scans on their `visits` visits.
@@ -152,25 +156,40 @@ fn nothing_why(
     pack: &Pack,
     rows_of: &[Vec<Row>],
     labels: &HashMap<i64, nils_session::Labelled>,
-    covered: Option<&BTreeSet<i64>>,
-    held: Option<&BTreeSet<i64>>,
+    scopes: &[Explain],
     visits: i64,
 ) -> String {
+    // the subjects the scopes cover together (none when one covers all)
+    let covered_all: Option<BTreeSet<i64>> =
+        scopes
+            .iter()
+            .map(|(c, _)| c.as_ref())
+            .try_fold(BTreeSet::new(), |mut all, c| {
+                all.extend(c?.iter().copied());
+                Some(all)
+            });
+    // a run whose every scope failed has none to explain from
+    let covered_all = covered_all.filter(|_| !scopes.is_empty());
+    let covered = covered_all.as_ref();
     if covered.is_some_and(BTreeSet::is_empty) {
         return "there are no subjects to decide".to_string();
     }
     let mut holding: BTreeSet<i64> = BTreeSet::new();
     let mut on_a_visit = false;
-    for (model, rows) in pack.picks.iter().zip(rows_of) {
-        for role in &model.roles {
-            for r in of_role(model, role, rows) {
-                if covered.is_some_and(|c| !c.contains(&r.subject))
-                    || held.is_some_and(|h| !h.contains(&r.stack))
-                {
-                    continue;
+    for (scope_covered, held) in scopes {
+        for (model, rows) in pack.picks.iter().zip(rows_of) {
+            for role in &model.roles {
+                for r in of_role(model, role, rows) {
+                    if scope_covered
+                        .as_ref()
+                        .is_some_and(|c| !c.contains(&r.subject))
+                        || held.as_ref().is_some_and(|h| !h.contains(&r.stack))
+                    {
+                        continue;
+                    }
+                    holding.insert(r.subject);
+                    on_a_visit |= labels.contains_key(&r.study);
                 }
-                holding.insert(r.subject);
-                on_a_visit |= labels.contains_key(&r.study);
             }
         }
     }
@@ -595,10 +614,9 @@ fn run_pick(
     }
     let scheme_digest = scheme.digest();
     let mut done: Vec<Picked> = Vec::with_capacity(scopes.len());
-    // the first scope's subjects, which the report's words are of
-    let mut first_covered: Option<Option<BTreeSet<i64>>> = None;
-    // and the stacks it chose among, which say why nothing was written
-    let mut first_held: Option<Option<BTreeSet<i64>>> = None;
+    // each scope's own subjects and the stacks it chose among, which say
+    // why nothing was written
+    let mut explain: Vec<Explain> = Vec::new();
     for run in scopes {
         let mut part = Picked {
             reference: report.reference.clone(),
@@ -609,9 +627,6 @@ fn run_pick(
             (Some(s), None) => Some(s.clone()),
             (None, o) => o.clone(),
         };
-        if first_covered.is_none() {
-            first_covered = Some(covered.clone());
-        }
         let version = run.saved.as_ref().map_or(1, |s| s.version);
         // a dataset's run chooses among the stacks the dataset holds alone,
         // as its map reads them (Nima, 2026-10-12: a dataset holds stacks,
@@ -630,9 +645,7 @@ fn run_pick(
                 }
             },
         };
-        if first_held.is_none() {
-            first_held = Some(held.clone());
-        }
+        explain.push((covered.clone(), held.clone()));
         // a scope's rules are the first pick's, whose roles they name; the
         // pack's scope runs every pick with its defaults
         let models: Vec<(&Model, &Vec<Row>)> = match &run.scope {
@@ -730,8 +743,7 @@ fn run_pick(
             pack,
             &rows_of,
             &labels,
-            first_covered.flatten().as_ref(),
-            first_held.flatten().as_ref(),
+            &explain,
             report.visits,
         ));
     }

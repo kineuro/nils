@@ -8,6 +8,8 @@
 //! standard PulseSequenceName (0018,9005), which Siemens XA writes where it
 //! leaves SequenceName empty, reaches the pack as `pulse_sequence_name`.
 
+mod common;
+
 use std::env;
 use std::sync::{Mutex, MutexGuard};
 
@@ -675,7 +677,7 @@ fn a_reread_reads_only_the_named_manufacturers_mr_files() {
 /// field of the stack.
 #[test]
 fn the_mri_pack_declares_what_this_test_collects() {
-    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packs/mri");
+    let dir = common::shipped_mri();
     let pack = nils_pack::load(&dir, None).expect("the MRI pack loads");
     let want: Vec<(String, u16, u8, String)> = INGEST
         .lines()

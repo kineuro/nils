@@ -8,8 +8,10 @@
 //! session after an earlier injection undetermined before its first post
 //! T1. Synthetic headers only.
 
+mod common;
+
 use std::env;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard};
 
 use dicom_core::VR;
@@ -91,7 +93,7 @@ fn labs() -> Vec<Lab> {
 }
 
 fn packs() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packs/mri")
+    common::shipped_mri()
 }
 
 fn rows(reg: &mut Registry, sql: &str) -> Vec<Row> {

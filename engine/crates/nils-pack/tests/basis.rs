@@ -4,41 +4,14 @@
 //! evidence row says whether the header or the name decided it, from the tier
 //! it records.
 
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+mod common;
 
-static N: AtomicU64 = AtomicU64::new(0);
-
-struct Dir(PathBuf);
-
-impl Dir {
-    fn new() -> Dir {
-        let n = N.fetch_add(1, Ordering::Relaxed);
-        let p = std::env::temp_dir().join(format!("nils-basis-test-{}-{n}", std::process::id()));
-        std::fs::create_dir_all(p.join("axes")).unwrap();
-        std::fs::create_dir_all(p.join("rules")).unwrap();
-        std::fs::create_dir_all(p.join("corpus")).unwrap();
-        Dir(p)
-    }
-    fn file(&self, name: &str, body: &str) -> &Dir {
-        std::fs::write(self.0.join(name), body).unwrap();
-        self
-    }
-    fn path(&self) -> &Path {
-        &self.0
-    }
-}
-
-impl Drop for Dir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
+use common::Dir;
 
 /// `kind` decided by a keyword in the series name, `agent` by a flag, and
 /// `mood` left to its default.
 fn pack() -> Dir {
-    let d = Dir::new();
+    let d = Dir::new("basis-test");
     d.file(
         "pack.yml",
         "\

@@ -5,45 +5,13 @@
 
 mod common;
 
-use std::fs;
-use std::path::{Path, PathBuf};
-
-struct Dir(PathBuf);
-
-impl Dir {
-    fn new() -> Dir {
-        let n = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("a clock")
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!("nils-shape-{}-{n}", std::process::id()));
-        fs::create_dir_all(&path).expect("a directory");
-        Dir(path)
-    }
-
-    fn file(&self, name: &str, body: &str) -> &Dir {
-        let at = self.0.join(name);
-        fs::create_dir_all(at.parent().expect("a parent")).expect("a directory");
-        fs::write(at, body).expect("a file");
-        self
-    }
-
-    fn path(&self) -> &Path {
-        &self.0
-    }
-}
-
-impl Drop for Dir {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
-    }
-}
+use common::Dir;
 
 /// A small pack with one of each thing planted: a value no rule names, a
 /// value only a rule gated on that one names, a value its exclusion group
 /// always beats, an implication and a clause that looks like one and is not.
 fn planted() -> Dir {
-    let d = Dir::new();
+    let d = Dir::new("shape");
     d.file(
         "pack.yml",
         "\

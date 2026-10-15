@@ -5,39 +5,9 @@
 //! A pack is written by someone who writes vocabulary, so every refusal here
 //! is checked for naming the file, the line and the path, not just failing.
 
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+mod common;
 
-static N: AtomicU64 = AtomicU64::new(0);
-
-/// A pack directory built for one test and removed after it.
-struct Dir(PathBuf);
-
-impl Dir {
-    fn new() -> Dir {
-        let n = N.fetch_add(1, Ordering::Relaxed);
-        let p = std::env::temp_dir().join(format!("nils-pack-test-{}-{n}", std::process::id()));
-        std::fs::create_dir_all(p.join("corpus")).unwrap();
-        Dir(p)
-    }
-
-    fn file(&self, name: &str, body: &str) -> &Dir {
-        let path = self.0.join(name);
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(path, body).unwrap();
-        self
-    }
-
-    fn path(&self) -> &Path {
-        &self.0
-    }
-}
-
-impl Drop for Dir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
+use common::Dir;
 
 const MANIFEST: &str = "\
 pack: t
@@ -71,7 +41,7 @@ cases:
 ";
 
 fn good() -> Dir {
-    let d = Dir::new();
+    let d = Dir::new("pack-test");
     d.file("pack.yml", MANIFEST)
         .file("parsers.yml", PARSERS)
         .file("flags.yml", FLAGS)
@@ -179,7 +149,7 @@ fn a_version_that_is_not_semantic_is_refused() {
 
 #[test]
 fn a_pack_with_no_corpus_does_not_load() {
-    let d = Dir::new();
+    let d = Dir::new("pack-test");
     d.file("pack.yml", MANIFEST)
         .file("parsers.yml", PARSERS)
         .file("flags.yml", FLAGS);

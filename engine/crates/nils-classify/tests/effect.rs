@@ -7,9 +7,11 @@
 //! leaves open; a stack of a sealed sample is never counted; and the
 //! answers people settled say what the change fixes and breaks.
 
+mod common;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard};
 
 use dicom_core::VR;
@@ -95,7 +97,7 @@ fn labs() -> Vec<Lab> {
 }
 
 fn mri() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packs/mri")
+    common::shipped_mri()
 }
 
 /// The version a rules release of the shipped MRI pack ships as: its own
