@@ -83,6 +83,7 @@ pub(crate) fn of_run(
         })?;
         let members = subjects_of(store, &scope)?;
         return Ok(vec![RunScope {
+            sources: sources_of(store, &scope)?,
             whole: only.is_none_or(|o| *o == members),
             scope: Some(scope),
             saved: Some(saved),
@@ -125,6 +126,7 @@ pub(crate) fn of_run(
             continue;
         };
         out.push(RunScope {
+            sources: sources_of(store, &scope)?,
             whole: subjects.len() == members_n,
             scope: Some(scope),
             saved: Some(saved),
@@ -132,4 +134,20 @@ pub(crate) fn of_run(
         });
     }
     Ok(out)
+}
+
+/// A dataset's `source` rows, resolved once a run as its Data page resolves
+/// them (`crate::sources::source_ids`, the rows under its folder), which its
+/// run chooses its stacks by; none for a cohort.
+pub(crate) fn sources_of(
+    store: &mut nils_registry::Store,
+    scope: &Scope,
+) -> Result<Option<Vec<i64>>, nils_registry::store::Error> {
+    if scope.kind == nils_registry::pick_rules::ScopeKind::Cohort {
+        return Ok(None);
+    }
+    Ok(Some(match nils_registry::place::show(store, scope.id)? {
+        Some(place) => crate::sources::source_ids(store, &place)?,
+        None => Vec::new(),
+    }))
 }

@@ -153,6 +153,7 @@ fn nothing_why(
     rows_of: &[Vec<Row>],
     labels: &HashMap<i64, nils_session::Labelled>,
     covered: Option<&BTreeSet<i64>>,
+    held: Option<&BTreeSet<i64>>,
     visits: i64,
 ) -> String {
     if covered.is_some_and(BTreeSet::is_empty) {
@@ -163,7 +164,9 @@ fn nothing_why(
     for (model, rows) in pack.picks.iter().zip(rows_of) {
         for role in &model.roles {
             for r in of_role(model, role, rows) {
-                if covered.is_some_and(|c| !c.contains(&r.subject)) {
+                if covered.is_some_and(|c| !c.contains(&r.subject))
+                    || held.is_some_and(|h| !h.contains(&r.stack))
+                {
                     continue;
                 }
                 holding.insert(r.subject);
@@ -224,6 +227,10 @@ pub struct RunScope {
     /// Whether they are every subject of the scope: a run that decided them
     /// all makes the version the one the scope is read from.
     pub whole: bool,
+    /// A dataset's `source` rows, resolved once as its Data page resolves
+    /// them: its run chooses among the stacks they hold alone. None for a
+    /// cohort's and the pack's, which keep every stack of their subjects.
+    pub sources: Option<Vec<i64>>,
 }
 
 impl RunScope {
@@ -234,6 +241,7 @@ impl RunScope {
             saved: None,
             subjects,
             whole: false,
+            sources: None,
         }
     }
 }
@@ -309,7 +317,6 @@ pub struct Only {
 }
 
 /// One stack, as the picks need it.
-#[derive(Clone)]
 pub(crate) struct Row {
     pub(crate) stack: i64,
     pub(crate) subject: i64,
@@ -590,6 +597,8 @@ fn run_pick(
     let mut done: Vec<Picked> = Vec::with_capacity(scopes.len());
     // the first scope's subjects, which the report's words are of
     let mut first_covered: Option<Option<BTreeSet<i64>>> = None;
+    // and the stacks it chose among, which say why nothing was written
+    let mut first_held: Option<Option<BTreeSet<i64>>> = None;
     for run in scopes {
         let mut part = Picked {
             reference: report.reference.clone(),
@@ -606,33 +615,29 @@ fn run_pick(
         let version = run.saved.as_ref().map_or(1, |s| s.version);
         // a dataset's run chooses among the stacks the dataset holds alone,
         // as its map reads them (Nima, 2026-10-12: a dataset holds stacks,
-        // never a subject's membership; the third review of the map's
-        // layers, 2026-10-15); a cohort's keeps every member's stacks
-        let held = match &run.scope {
-            Some(s) => nils_registry::pick_rules::held_stacks(store, s)?,
+        // never a subject's membership); a cohort's keeps every member's
+        // stacks. A failure to read them is this scope's, and the run goes on
+        let held = match &run.sources {
             None => None,
+            Some(ids) => match nils_registry::pick_rules::stacks_of_sources(store, ids) {
+                Ok(h) => Some(h),
+                Err(e) => {
+                    report.failed.push(serde_json::json!({
+                        "scope": run.scope.as_ref().map(Scope::to_json), "version": version,
+                        "error": e.to_string(),
+                    }));
+                    continue;
+                }
+            },
         };
-        let own: Vec<Vec<Row>>;
-        let rows_here: &[Vec<Row>] = match &held {
-            Some(h) => {
-                own = rows_of
-                    .iter()
-                    .map(|rows| {
-                        rows.iter()
-                            .filter(|r| h.contains(&r.stack))
-                            .cloned()
-                            .collect()
-                    })
-                    .collect();
-                &own
-            }
-            None => &rows_of,
-        };
+        if first_held.is_none() {
+            first_held = Some(held.clone());
+        }
         // a scope's rules are the first pick's, whose roles they name; the
         // pack's scope runs every pick with its defaults
         let models: Vec<(&Model, &Vec<Row>)> = match &run.scope {
-            None => pack.picks.iter().zip(rows_here).collect(),
-            Some(_) => pack.picks.iter().zip(rows_here).take(1).collect(),
+            None => pack.picks.iter().zip(&rows_of).collect(),
+            Some(_) => pack.picks.iter().zip(&rows_of).take(1).collect(),
         };
         let started = match &run.scope {
             Some(s) => Some(nils_registry::pick_rules::run_started(
@@ -655,6 +660,7 @@ fn run_pick(
                         rules: &rules,
                         version,
                         covered: covered.as_ref(),
+                        held: held.as_ref(),
                         scheme_digest: &scheme_digest,
                     },
                     actor,
@@ -725,6 +731,7 @@ fn run_pick(
             &rows_of,
             &labels,
             first_covered.flatten().as_ref(),
+            first_held.flatten().as_ref(),
             report.visits,
         ));
     }
@@ -740,6 +747,8 @@ struct Decide<'a> {
     rules: &'a Rules,
     version: i64,
     covered: Option<&'a BTreeSet<i64>>,
+    /// The stacks a dataset's run chooses among; none for every stack.
+    held: Option<&'a BTreeSet<i64>>,
     /// The scheme the run picks under: its picks are its own, beside those
     /// of other schemes.
     scheme_digest: &'a str,
@@ -931,7 +940,10 @@ fn run_one(
     let mut decided: BTreeSet<(String, i64, String)> = BTreeSet::new();
 
     for role in &model.roles {
-        let mine: Vec<&Row> = of_role(model, role, rows);
+        let mut mine: Vec<&Row> = of_role(model, role, rows);
+        if let Some(h) = decide.held {
+            mine.retain(|r| h.contains(&r.stack));
+        }
         // The population is every stack of this role, a fragment no
         // candidate is made of included, and it is named on every row it
         // decided.

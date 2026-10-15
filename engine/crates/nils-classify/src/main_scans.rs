@@ -1313,21 +1313,22 @@ pub fn layer_rows(
         state: Option<String>,
     }
     let mut by_stack: BTreeMap<i64, Seen> = BTreeMap::new();
-    // the condition each query reads by: the subjects in chunks, or, where
-    // the scope holds some stacks alone, those stacks in chunks, a stack
-    // of another subject left out after
+    // the condition each query reads by, whichever list is the shorter: the
+    // subjects in chunks (a page of them, or a cohort), or the stacks the
+    // scope holds in chunks; the other is applied to each row after
     let wanted: BTreeSet<i64> = subjects.iter().copied().collect();
+    let by_stacks = held.is_some_and(|h| h.len() < subjects.len());
     let conditions: Vec<String> = match held {
-        None => subjects
-            .chunks(500)
-            .map(|c| format!("se.subject_id IN ({})", list(c)))
-            .collect(),
-        Some(h) => h
+        Some(h) if by_stacks => h
             .iter()
             .copied()
             .collect::<Vec<_>>()
             .chunks(500)
             .map(|c| format!("x.id IN ({})", list(c)))
+            .collect(),
+        _ => subjects
+            .chunks(500)
+            .map(|c| format!("se.subject_id IN ({})", list(c)))
             .collect(),
     };
     for condition in conditions {
@@ -1350,7 +1351,12 @@ pub fn layer_rows(
         };
         for r in store.query(&sql, &[])? {
             let id = r.int(0)?;
-            if held.is_some() && !wanted.contains(&r.int(1)?) {
+            let kept = if by_stacks {
+                wanted.contains(&r.int(1)?)
+            } else {
+                held.is_none_or(|h| h.contains(&id))
+            };
+            if !kept {
                 continue;
             }
             let value = r

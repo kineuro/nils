@@ -591,8 +591,14 @@ pub(crate) fn map(
     // (Nima, 2026-10-12: a dataset holds stacks, never a subject's
     // membership); a cohort holds every stack of its open members. Its
     // `source` rows are read once, for these and for the layer's step.
-    let sources = scope_sources(registry, &scope)?;
-    let held = nils_registry::pick_rules::held_stacks(registry.store(), &scope).map_err(failed)?;
+    let ids = crate::pick_scopes::sources_of(registry.store(), &scope).map_err(failed)?;
+    let held = match &ids {
+        Some(ids) => Some(
+            nils_registry::pick_rules::stacks_of_sources(registry.store(), ids).map_err(failed)?,
+        ),
+        None => None,
+    };
+    let sources = ids.as_deref().map(comma);
     // the scope's visits, in the cache before the map reads them
     visits_cached(registry, &scheme, &subjects)?;
     let mut read = main_scans::read(
@@ -740,26 +746,20 @@ pub(crate) fn layer_named(word: Option<&str>) -> Result<Option<Layer>, Reply> {
     })
 }
 
-/// A dataset's `source` rows, as its Data page counts its scans by them (the
-/// stacks the rows under its folder hold a file of), as a comma list; none
-/// for a cohort.
+/// A dataset's `source` rows, resolved once a request as its Data page
+/// resolves them, as a comma list; none for a cohort.
 fn scope_sources(registry: &mut Registry, scope: &Scope) -> Result<Option<String>, Reply> {
-    use nils_registry::pick_rules::ScopeKind;
-    if scope.kind == ScopeKind::Cohort {
-        return Ok(None);
-    }
-    let store = registry.store();
-    Ok(Some(
-        match nils_registry::place::show(store, scope.id).map_err(failed)? {
-            Some(place) => crate::sources::source_ids(store, &place)
-                .map_err(failed)?
-                .iter()
-                .map(i64::to_string)
-                .collect::<Vec<_>>()
-                .join(", "),
-            None => String::new(),
-        },
-    ))
+    Ok(crate::pick_scopes::sources_of(registry.store(), scope)
+        .map_err(failed)?
+        .as_deref()
+        .map(comma))
+}
+
+fn comma(ids: &[i64]) -> String {
+    ids.iter()
+        .map(i64::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// The step of the operation that answers a layer, over the scope's scans,

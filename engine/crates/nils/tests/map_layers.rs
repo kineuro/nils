@@ -916,7 +916,7 @@ fn dataset_layers(pg: Option<(String, String)>) {
                     e.push(synth::text(tags::SERIES_DESCRIPTION, VR::LO, description));
                     root.file(
                         &format!(
-                            "fresh/derivatives/dcm-anon/sub-{s}/ses-{v}/IM_{number}_{instance:04}"
+                            "batch/fresh/derivatives/dcm-anon/sub-{s}/ses-{v}/IM_{number}_{instance:04}"
                         ),
                         &synth::part10(&MetaFields::mr(&sop), &e, true),
                     );
@@ -937,7 +937,7 @@ fn dataset_layers(pg: Option<(String, String)>) {
         "POST",
         "/api/places",
         Some(json!({
-            "role": "source", "root": "data", "folder": "fresh",
+            "role": "source", "root": "data", "folder": "batch/fresh",
             "patient_id": "id-type:patient-id", "subjects": "generated",
         })),
         OPS,
