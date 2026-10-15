@@ -269,7 +269,7 @@ fn a_certificate_cites_its_graded_run_on_both_backends() {
         );
         // it reads back the same, newest first, and names the model
         let listed = labels::certificates(reg.store()).unwrap();
-        assert_eq!(listed, [cert.clone()], "{name}");
+        assert_eq!(listed, std::slice::from_ref(&cert), "{name}");
         assert_eq!(
             labels::certified(reg.store()).unwrap().get(&s1.id),
             Some(&cert),
