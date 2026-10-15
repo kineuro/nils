@@ -1947,6 +1947,14 @@ fn route(
     query: &HashMap<String, String>,
     body: &str,
 ) -> Reply {
+    // #458: a write to a place or a dataset (a declaration, an explore, a
+    // move, a pseudonymise run asked for) can change what a folder holds or
+    // how it is read: the kept layouts are read again
+    if *method != Method::Get
+        && (path.starts_with("/api/places") || path.starts_with("/api/datasets"))
+    {
+        crate::dataset::forget_layouts();
+    }
     match routed(doors, registry, ask, caller, method, path, query, body) {
         Ok(r) => r,
         Err(r) => r,
@@ -2790,6 +2798,7 @@ fn routed(
             }
             let mut rows = place::list(registry.store())?;
             if refresh {
+                crate::dataset::forget_layouts();
                 let mut fresh = Vec::with_capacity(rows.len());
                 for p in rows {
                     if p.retired_at.is_some() {
@@ -2820,6 +2829,10 @@ fn routed(
                 .chain(std::iter::once(("registry", doors.home.dir())))
                 .collect();
             let scheme = registry.meta().pseudonym_scheme;
+            // #458: each dataset's layout from its kept copy, read again only
+            // where its folder changed, and the looks into loose entries
+            // bounded by one budget for the whole request
+            let mut budget = crate::dataset::Budget::per_request();
             let places: Vec<serde_json::Value> = rows
                 .iter()
                 .map(|p| {
@@ -2850,7 +2863,7 @@ fn routed(
                         } else {
                             doc["layout"] = crate::dataset::layout_doc_listed(
                                 folder,
-                                &crate::dataset::detect(folder),
+                                &crate::dataset::layout_kept(p, &mut budget),
                             );
                         }
                         // what keeps it from being read, in words; null when
