@@ -236,7 +236,17 @@ mod tests {
         let version = first.version.to_string();
         let bumped = text.replacen(
             &format!("version: {version}"),
-            &format!("version: {}", version.replace('0', "9")),
+            &format!(
+                "version: {}",
+                version
+                    .chars()
+                    .map(|c| match c {
+                        '9' => '8',
+                        d if d.is_ascii_digit() => '9',
+                        o => o,
+                    })
+                    .collect::<String>()
+            ),
             1,
         );
         assert_ne!(text, bumped, "the manifest names its version");
