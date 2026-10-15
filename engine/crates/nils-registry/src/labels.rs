@@ -2449,40 +2449,64 @@ pub fn record_cited_certificate(
         )));
     }
     let sample = format!("{EVIDENCE}{run}");
-    if let Some(c) = certificates(store)?
-        .into_iter()
-        .find(|c| c.sample == sample && c.model_ids.contains(&m.id))
-    {
-        return Err(Error::Refused(format!(
-            "certificate {} already cites the graded run {run} for {}",
-            c.id,
+    let already = |store: &mut Store| -> Result<Option<i64>, Error> {
+        let d = store.dialect();
+        let sql = format!(
+            "SELECT id FROM {} WHERE sample = {} AND model_id = {}",
+            store.qualified("certificate"),
+            d.param(1, Type::Text),
+            d.param(2, Type::Int),
+        );
+        Ok(store
+            .query_opt(&sql, &[Param::from(sample.as_str()), Param::Int(m.id)])?
+            .map(|r| r.int(0))
+            .transpose()?)
+    };
+    let twice = |id: i64| {
+        Error::Refused(format!(
+            "certificate {id} already cites the graded run {run} for {}",
             m.label()
-        )));
+        ))
+    };
+    if let Some(id) = already(store)? {
+        return Err(twice(id));
     }
     let now = now_iso();
-    let id = store
-        .insert(
-            &Insert::new(
-                table("certificate"),
-                &[
-                    "sample",
-                    "model_ids",
-                    "result",
-                    "created_by",
-                    "created_at",
-                    "evidence",
-                ],
-            )
-            .returning(&["id"]),
-            &[vec![
-                Param::from(sample.as_str()),
-                Param::from(json!([m.id]).to_string()),
-                Param::from(result.to_string()),
-                Param::from(who),
-                Param::from(now.as_str()),
-                Param::from(evidence.to_string()),
-            ]],
-        )?
+    let written = store.insert(
+        &Insert::new(
+            table("certificate"),
+            &[
+                "sample",
+                "model_ids",
+                "result",
+                "created_by",
+                "created_at",
+                "evidence",
+                "model_id",
+            ],
+        )
+        .returning(&["id"]),
+        &[vec![
+            Param::from(sample.as_str()),
+            Param::from(json!([m.id]).to_string()),
+            Param::from(result.to_string()),
+            Param::from(who),
+            Param::from(now.as_str()),
+            Param::from(evidence.to_string()),
+            Param::Int(m.id),
+        ]],
+    );
+    // the unique key holds against one recorded beside this one
+    let rows = match written {
+        Ok(rows) => rows,
+        Err(e) => {
+            return Err(match already(store)? {
+                Some(id) => twice(id),
+                None => Error::Store(e),
+            });
+        }
+    };
+    let id = rows
         .first()
         .ok_or_else(|| StoreError::Message("the certificate was not written back".into()))?
         .int(0)?;

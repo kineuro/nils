@@ -296,6 +296,21 @@ pub struct Gated {
     pub questions: Vec<Question>,
     /// What [`stage`] did with System 1's confident answers.
     pub staged: Staged,
+    /// Questions holding an answer of System 1's that the gate no longer
+    /// asks, for [`retire`] to withdraw as the model and close.
+    pub retire: Vec<(i64, StagedAnswer)>,
+    /// Stacks and axes left as they were, since an answer someone else
+    /// staged waits there for a person.
+    pub held: i64,
+}
+
+/// An answer of System 1's model staged on a gate question: the decision,
+/// its value and the principal it was staged under.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StagedAnswer {
+    pub decision: i64,
+    pub value: Option<String>,
+    pub actor: String,
 }
 
 impl Gated {
@@ -304,7 +319,7 @@ impl Gated {
             "outcomes": self.outcomes, "accepted_stacks": self.accepted_stacks,
             "stacks": self.stacks, "raised": self.raised, "closed": self.closed,
             "skipped": self.skipped, "waiting": self.waiting,
-            "staged": self.staged.to_json(),
+            "staged": self.staged.to_json(), "held": self.held,
         })
     }
 }
@@ -323,8 +338,8 @@ pub struct Question {
     pub value: Option<String>,
     pub p: f64,
     pub lambda1: f64,
-    /// The staged decision on the question and its value.
-    pub staged: Option<(i64, Option<String>)>,
+    /// System 1's answer staged on the question now, where one is.
+    pub staged: Option<StagedAnswer>,
 }
 
 /// System 1's answers staged for a person to confirm (record 55, ruling
@@ -421,6 +436,17 @@ pub fn rules_answers(store: &mut Store, stacks: &[i64]) -> Result<RulesAnswers, 
                     .1 = true;
             }
         }
+        // and one in force at a wider scope that reaches the stack: its
+        // series, its subject, its origin or a group holding it
+        let wider = crate::review::wider_decisions(store, chunk, None).map_err(|e| match e {
+            crate::review::Error::Store(s) => s,
+            other => StoreError::Message(other.to_string()),
+        })?;
+        for (stack, found) in wider {
+            for (axis, ..) in found {
+                rows.entry(stack).or_default().entry(axis).or_default().1 = true;
+            }
+        }
     }
     Ok(rows
         .into_iter()
@@ -444,8 +470,16 @@ pub fn kind(axis: &str, why: &str) -> String {
     format!("{axis}:{why}")
 }
 
+/// How the gate's questions' group keys begin.
+pub const GATE_KEY: &str = "gate:";
+
 fn key(axis: &str, stack: i64) -> String {
-    format!("gate:{axis}:stack:{stack}")
+    format!("{GATE_KEY}{axis}:stack:{stack}")
+}
+
+/// Whether a review item's kind is one of the gate's questions on an axis.
+pub fn is_gate_kind(item_kind: &str, axis: &str) -> bool {
+    item_kind == kind(axis, DISAGREE) || item_kind == kind(axis, UNSURE)
 }
 
 /// Run the gate over stacks of a dataset flagged as having damaged headers
@@ -459,7 +493,7 @@ pub fn gate(
     store: &mut Store,
     round: &Round,
     stacks: &[i64],
-    who: &str,
+    _who: &str,
 ) -> Result<Gated, StoreError> {
     let mut out = Gated::default();
     let Some(model) = round.model_id else {
@@ -512,38 +546,48 @@ pub fn gate(
                     all = false;
                 }
                 let item = match outcome {
-                    DISAGREE | UNSURE => {
-                        let (id, staged) = raise(
-                            store,
-                            round,
-                            stack,
-                            axis,
-                            outcome,
-                            rule.as_deref(),
-                            o,
-                            l1,
-                            l2,
-                            &now,
-                        )?;
-                        out.questions.push(Question {
-                            item: id,
-                            stack,
-                            axis: axis.clone(),
-                            kind: if outcome == DISAGREE {
-                                DISAGREE
-                            } else {
-                                UNSURE
-                            },
-                            rule: rule.clone(),
-                            value: o.and_then(|o| o.value.clone()),
-                            p: o.map_or(0.0, |o| o.p),
-                            lambda1: l1,
+                    DISAGREE | UNSURE => match raise(
+                        store,
+                        round,
+                        model,
+                        stack,
+                        axis,
+                        outcome,
+                        rule.as_deref(),
+                        o,
+                        l1,
+                        l2,
+                        &now,
+                    )? {
+                        Raised::Held(id) => {
+                            out.held += 1;
+                            Some(id)
+                        }
+                        Raised::Asked {
+                            item,
                             staged,
-                        });
-                        Some(id)
-                    }
+                            retire,
+                        } => {
+                            out.retire.extend(retire);
+                            out.questions.push(Question {
+                                item,
+                                stack,
+                                axis: axis.clone(),
+                                kind: outcome,
+                                rule: rule.clone(),
+                                value: o.and_then(|o| o.value.clone()),
+                                p: o.map_or(0.0, |o| o.p),
+                                lambda1: l1,
+                                staged,
+                            });
+                            Some(item)
+                        }
+                    },
                     _ => {
-                        out.closed += close(store, stack, axis, who, &now)?;
+                        let (closed, retire, held) = close(store, model, stack, axis, &now)?;
+                        out.closed += closed;
+                        out.retire.extend(retire);
+                        out.held += held;
                         None
                     }
                 };
@@ -605,10 +649,24 @@ pub fn outcome_of(
     }
 }
 
+/// What the gate did with a question it asks.
+enum Raised {
+    /// Someone else's staged answer waits on the stack and axis; left.
+    Held(i64),
+    /// Raised or brought up to date, with System 1's answer staged on it,
+    /// and the questions of the other kind it replaces that hold one.
+    Asked {
+        item: i64,
+        staged: Option<StagedAnswer>,
+        retire: Vec<(i64, StagedAnswer)>,
+    },
+}
+
 #[allow(clippy::too_many_arguments)]
 fn raise(
     store: &mut Store,
     round: &Round,
+    model: i64,
     stack: i64,
     axis: &str,
     why: &str,
@@ -617,9 +675,18 @@ fn raise(
     lambda1: f64,
     lambda2: f64,
     now: &str,
-) -> Result<Pending, StoreError> {
+) -> Result<Raised, StoreError> {
     let k = kind(axis, why);
     let group = key(axis, stack);
+    let other = kind(axis, if why == DISAGREE { UNSURE } else { DISAGREE });
+    let mine = pending(store, &k, &group, model)?;
+    let theirs = pending(store, &other, &group, model)?;
+    // an answer someone else staged waits for a person: nothing is touched
+    for p in [&mine, &theirs] {
+        if let Some(Pending::Other(id)) = p {
+            return Ok(Raised::Held(*id));
+        }
+    }
     let evidence = json!({
         "gate": {"round_id": round.id, "rules": format!("{}@{}", round.pack, round.pack_version),
                  "model_id": round.model_id, "lambda1": lambda1, "lambda2": lambda2},
@@ -629,36 +696,67 @@ fn raise(
         "value": rule,
         "confidence": o.map(|o| o.p),
     });
-    // a question of the other kind on the same stack and axis is replaced,
-    // and an answer staged on it withdrawn
-    let other = kind(axis, if why == DISAGREE { UNSURE } else { DISAGREE });
-    if let Some((id, staged)) = pending(store, &other, &group)? {
-        supersede(store, id, staged.map(|(d, _)| d), now)?;
+    // a question of the other kind on the same stack and axis is replaced;
+    // an answer of System 1's staged on it is withdrawn by [`retire`]
+    let mut retire = Vec::new();
+    match theirs {
+        Some(Pending::Open(id)) => supersede(store, id, now)?,
+        Some(Pending::System1(id, a)) => retire.push((id, a)),
+        _ => {}
     }
-    if let Some((id, staged)) = pending(store, &k, &group)? {
-        crate::review::refresh_item(store, id, &evidence, 1, None)?;
-        return Ok((id, staged));
+    match mine {
+        Some(Pending::Open(id)) => {
+            crate::review::refresh_item(store, id, &evidence, 1, None)?;
+            Ok(Raised::Asked {
+                item: id,
+                staged: None,
+                retire,
+            })
+        }
+        Some(Pending::System1(id, a)) => {
+            crate::review::refresh_item(store, id, &evidence, 1, None)?;
+            Ok(Raised::Asked {
+                item: id,
+                staged: Some(a),
+                retire,
+            })
+        }
+        _ => {
+            let id = crate::review::open_new(
+                store,
+                &k,
+                "stack",
+                &group,
+                &json!({"stack_id": stack}),
+                &evidence,
+                1,
+                None,
+                now,
+            )?;
+            Ok(Raised::Asked {
+                item: id,
+                staged: None,
+                retire,
+            })
+        }
     }
-    let id = crate::review::open_new(
-        store,
-        &k,
-        "stack",
-        &group,
-        &json!({"stack_id": stack}),
-        &evidence,
-        1,
-        None,
-        now,
-    )?;
-    Ok((id, None))
 }
 
 /// The gate's question of a kind on a stack and axis that still waits for
-/// a person: open, or staged with an answer of System 1's (record 55,
-/// ruling 20). Its id and, where staged, the staged decision and its value.
-type Pending = (i64, Option<(i64, Option<String>)>);
+/// a person: open, staged with an answer of System 1's model (record 55,
+/// ruling 20), or staged with someone else's, which the gate never touches.
+enum Pending {
+    Open(i64),
+    System1(i64, StagedAnswer),
+    Other(i64),
+}
 
-fn pending(store: &mut Store, kind: &str, group: &str) -> Result<Option<Pending>, StoreError> {
+fn pending(
+    store: &mut Store,
+    kind: &str,
+    group: &str,
+    model: i64,
+) -> Result<Option<Pending>, StoreError> {
     let d = store.dialect();
     let sql = format!(
         "SELECT id, status, decision_id FROM {} WHERE kind = {} AND group_key = {} \
@@ -672,26 +770,35 @@ fn pending(store: &mut Store, kind: &str, group: &str) -> Result<Option<Pending>
     };
     let id = r.int(0)?;
     if r.text(1)? != "staged" {
-        return Ok(Some((id, None)));
+        return Ok(Some(Pending::Open(id)));
     }
     let Some(decision) = r.opt_int(2)? else {
-        return Ok(Some((id, None)));
+        return Ok(Some(Pending::Other(id)));
     };
     let sql = format!(
-        "SELECT value FROM {} WHERE id = {} AND withdrawn_at IS NULL AND committed_at IS NULL",
+        "SELECT value, actor, author_kind, model_id FROM {} WHERE id = {} \
+         AND withdrawn_at IS NULL AND committed_at IS NULL",
         store.qualified("decision"),
         d.param(1, Type::Int),
     );
-    let value = store
-        .query_opt(&sql, &[Param::Int(decision)])?
-        .map(|r| r.opt_text(0).map(|v| v.map(str::to_string)))
-        .transpose()?;
-    Ok(Some((id, value.map(|v| (decision, v)))))
+    let Some(r) = store.query_opt(&sql, &[Param::Int(decision)])? else {
+        return Ok(Some(Pending::Other(id)));
+    };
+    if r.opt_text(2)? != Some("model") || r.opt_int(3)? != Some(model) {
+        return Ok(Some(Pending::Other(id)));
+    }
+    Ok(Some(Pending::System1(
+        id,
+        StagedAnswer {
+            decision,
+            value: r.opt_text(0)?.map(str::to_string),
+            actor: r.text(1)?.to_string(),
+        },
+    )))
 }
 
-/// Close a question as superseded; an answer staged on it that nobody
-/// committed is withdrawn with it.
-fn supersede(store: &mut Store, id: i64, staged: Option<i64>, now: &str) -> Result<(), StoreError> {
+/// Close a question that holds no staged answer as superseded.
+fn supersede(store: &mut Store, id: i64, now: &str) -> Result<(), StoreError> {
     store.update_by_id(
         table("review_item"),
         &[
@@ -701,41 +808,108 @@ fn supersede(store: &mut Store, id: i64, staged: Option<i64>, now: &str) -> Resu
         "id",
         id,
     )?;
-    if let Some(decision) = staged {
-        let d = store.dialect();
-        store.execute(
-            &format!(
-                "UPDATE {} SET withdrawn_at = {} WHERE id = {} AND withdrawn_at IS NULL \
-                 AND staged_at IS NOT NULL AND committed_at IS NULL",
-                store.qualified("decision"),
-                d.param(1, Type::Timestamp),
-                d.param(2, Type::Int),
-            ),
-            &[Param::from(now), Param::Int(decision)],
-        )?;
+    Ok(())
+}
+
+/// Close the gate's questions on a stack and axis the gate accepts now:
+/// an open one at once, one holding System 1's staged answer by
+/// [`retire`]; one holding someone else's is left. Answers how many it
+/// closed, those to retire, and how many it left.
+type Closed = (i64, Vec<(i64, StagedAnswer)>, i64);
+
+fn close(
+    store: &mut Store,
+    model: i64,
+    stack: i64,
+    axis: &str,
+    now: &str,
+) -> Result<Closed, StoreError> {
+    let group = key(axis, stack);
+    let (mut n, mut retire, mut held) = (0, Vec::new(), 0);
+    for why in [DISAGREE, UNSURE] {
+        match pending(store, &kind(axis, why), &group, model)? {
+            Some(Pending::Open(id)) => {
+                supersede(store, id, now)?;
+                n += 1;
+            }
+            Some(Pending::System1(id, a)) => retire.push((id, a)),
+            Some(Pending::Other(_)) => held += 1,
+            None => {}
+        }
+    }
+    Ok((n, retire, held))
+}
+
+/// Withdraw an answer of System 1's staged on a question, as the model
+/// that staged it, with its audit row (`withdraw_as`); the question opens
+/// again. Never another author's.
+fn withdraw_mine(registry: &mut Registry, a: &StagedAnswer) -> Result<(), crate::review::Error> {
+    crate::review::withdraw_as(registry, a.decision, &a.actor, "model").map(|_| ())
+}
+
+/// Close the questions the gate no longer asks that hold an answer of
+/// System 1's: the answer is withdrawn as the model, audited, and the
+/// question closed as superseded. Counted in `staged.withdrawn`.
+pub fn retire(registry: &mut Registry, gated: &mut Gated) -> Result<(), StoreError> {
+    let now = now_iso();
+    for (item, a) in std::mem::take(&mut gated.retire) {
+        match withdraw_mine(registry, &a) {
+            Ok(()) => {
+                supersede(registry.store(), item, &now)?;
+                gated.staged.withdrawn += 1;
+                gated.closed += 1;
+            }
+            Err(crate::review::Error::Store(e)) => return Err(e),
+            Err(other) => {
+                *gated
+                    .staged
+                    .not_staged
+                    .entry(other.to_string())
+                    .or_default() += 1
+            }
+        }
     }
     Ok(())
 }
 
-/// Close the gate's questions on a stack and axis the gate accepts now,
-/// open or staged, withdrawing an answer staged on one. Answers how many
-/// it closed.
-fn close(
+/// Whether an answer someone other than System 1's model staged waits on
+/// the stack and axis, at the stack's own key: a staging would replace it.
+fn staged_by_another(
     store: &mut Store,
     stack: i64,
     axis: &str,
-    _who: &str,
-    now: &str,
-) -> Result<i64, StoreError> {
-    let group = key(axis, stack);
-    let mut n = 0;
-    for why in [DISAGREE, UNSURE] {
-        if let Some((id, staged)) = pending(store, &kind(axis, why), &group)? {
-            supersede(store, id, staged.map(|(d, _)| d), now)?;
-            n += 1;
-        }
-    }
-    Ok(n)
+    model: i64,
+) -> Result<bool, StoreError> {
+    let d = store.dialect();
+    let sql = format!(
+        "SELECT 1 FROM {} WHERE scope = 'stack' AND ref = {} AND axis = {} AND withdrawn_at IS NULL \
+         AND staged_at IS NOT NULL AND committed_at IS NULL \
+         AND NOT (author_kind = 'model' AND model_id = {}) LIMIT 1",
+        store.qualified("decision"),
+        d.param(1, Type::Text),
+        d.param(2, Type::Text),
+        d.param(3, Type::Int),
+    );
+    Ok(store
+        .query_opt(
+            &sql,
+            &[
+                Param::from(stack.to_string()),
+                Param::from(axis),
+                Param::Int(model),
+            ],
+        )?
+        .is_some())
+}
+
+/// Whether [`stage`] would stage a question's answer, as far as it can be
+/// told without the pack: a disagreement where System 1 names a value at
+/// its λ1 or above and the rules store none.
+pub fn would_stage(q: &Question) -> bool {
+    q.kind == DISAGREE
+        && q.value.as_deref().is_some_and(|v| !v.is_empty())
+        && q.p >= q.lambda1
+        && q.rule.is_none()
 }
 
 /// Stage System 1's answers where the rules name nothing (record 55,
@@ -780,7 +954,12 @@ pub fn stage(
             None
         };
         match (stored, &q.staged) {
-            (Some(s), Some((_, Some(v)))) if *v == s => out.kept += 1,
+            (Some(s), Some(a)) if a.value.as_deref() == Some(s.as_str()) => out.kept += 1,
+            (Some(_), _) if staged_by_another(registry.store(), q.stack, &q.axis, model)? => {
+                *out.not_staged
+                    .entry("an answer someone else staged waits for a person".into())
+                    .or_default() += 1;
+            }
             (Some(s), _) => {
                 let why = format!(
                     "System 1 (model {model}) names {} at {:.3} where the rules name nothing; staged for a person to confirm (record 55, ruling 20)",
@@ -811,13 +990,11 @@ pub fn stage(
                     Err(other) => *out.not_staged.entry(other.to_string()).or_default() += 1,
                 }
             }
-            (None, Some((decision, _))) => {
-                match crate::review::withdraw(registry, *decision, who) {
-                    Ok(_) => out.withdrawn += 1,
-                    Err(crate::review::Error::Store(e)) => return Err(e),
-                    Err(other) => *out.not_staged.entry(other.to_string()).or_default() += 1,
-                }
-            }
+            (None, Some(a)) => match withdraw_mine(registry, a) {
+                Ok(()) => out.withdrawn += 1,
+                Err(crate::review::Error::Store(e)) => return Err(e),
+                Err(other) => *out.not_staged.entry(other.to_string()).or_default() += 1,
+            },
             (None, None) => {}
         }
     }

@@ -149,6 +149,7 @@ impl Home {
         let mut sql = sql.to_string();
         for t in [
             "decision",
+            "opinion",
             "review_item",
             "classification_axis",
             "stack_fingerprint",
@@ -157,6 +158,16 @@ impl Home {
             sql = sql.replace(&format!("{{{t}}}"), &store.qualified(t));
         }
         store.query(&sql, &[]).unwrap()
+    }
+
+    /// A statement whose `{table}` names are qualified here.
+    fn exec(&self, sql: &str) {
+        let mut store = self.store();
+        let mut sql = sql.to_string();
+        for t in ["opinion", "decision"] {
+            sql = sql.replace(&format!("{{{t}}}"), &store.qualified(t));
+        }
+        store.execute(&sql, &[]).unwrap();
     }
 
     fn int(&self, sql: &str) -> i64 {
@@ -1027,6 +1038,83 @@ fn flow(pg: Option<(String, String)>) {
         questions(&home, bare_d),
         [("base:disagree".to_string(), "accepted".to_string())]
     );
+
+    // a person's staged answer is never withdrawn or replaced by the gate:
+    // flagged now, the other dataset's bare stack gets System 1's answer
+    // staged, a person stages another in its place, and the gate run again,
+    // System 1 confident and then not, leaves the person's answer
+    server.ok(
+        "PUT",
+        "/api/datasets/ok/headers",
+        Some(json!({"damaged": true, "why": "the same export"})),
+        OPS,
+    );
+    let gated = server.ok("POST", "/api/review/gate", Some(json!({})), OPS);
+    assert_eq!(
+        questions(&home, bare_n),
+        [("base:disagree".to_string(), "staged".to_string())],
+        "{gated}"
+    );
+    let item = home.int(&format!(
+        "SELECT id FROM {{review_item}} WHERE group_key = 'gate:base:stack:{bare_n}'"
+    ));
+    let (status, mine) = server.call(
+        "POST",
+        &format!("/api/review/{item}/apply"),
+        Some(json!({"value": "PDw", "stage": true})),
+        OPS,
+    );
+    assert_eq!(status, 200, "{mine}");
+    let person = mine["decision"].as_i64().unwrap();
+    let persons = |home: &Home| {
+        home.rows(&format!(
+            "SELECT CASE WHEN withdrawn_at IS NULL THEN 0 ELSE 1 END, value FROM {{decision}} WHERE id = {person}"
+        ))[0]
+            .int(0)
+            .unwrap()
+    };
+    let system1_pending = |home: &Home| {
+        home.int(&format!(
+            "SELECT COUNT(*) FROM {{decision}} WHERE ref = '{bare_n}' AND author_kind = 'model' \
+             AND withdrawn_at IS NULL AND committed_at IS NULL"
+        ))
+    };
+    assert_eq!(
+        system1_pending(&home),
+        0,
+        "the person's answer replaced System 1's"
+    );
+    for p in [0.97, 0.3] {
+        home.exec(&format!(
+            "UPDATE {{opinion}} SET p = {p} WHERE stack_id = {bare_n} AND axis = 'base'"
+        ));
+        let again = server.ok("POST", "/api/review/gate", Some(json!({})), OPS);
+        let g = again["rounds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["gated"]["held"].as_i64().unwrap_or(0))
+            .sum::<i64>();
+        assert_eq!(g, 1, "p {p}: {again}");
+        assert_eq!(persons(&home), 0, "p {p}: the person's answer stays");
+        assert_eq!(system1_pending(&home), 0, "p {p}: nothing restaged");
+        assert_eq!(
+            questions(&home, bare_n),
+            [("base:disagree".to_string(), "staged".to_string())],
+            "p {p}"
+        );
+    }
+    // the one answer waiting on the stack and axis is the person's
+    let waiting: Vec<String> = home
+        .rows(&format!(
+            "SELECT author_kind FROM {{decision}} WHERE ref = '{bare_n}' AND axis = 'base' \
+             AND withdrawn_at IS NULL AND committed_at IS NULL"
+        ))
+        .iter()
+        .map(|r| r.text(0).unwrap().to_string())
+        .collect();
+    assert_eq!(waiting, ["person"]);
+
     drop(server);
 
     // a certificate on a sealed sample still takes two people

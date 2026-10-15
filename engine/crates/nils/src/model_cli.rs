@@ -32,6 +32,18 @@ use crate::{Exit, actor, fail, open, usage};
 #[derive(Debug, Subcommand)]
 #[allow(clippy::large_enum_variant)]
 pub(crate) enum ModelCommand {
+    #[command(flatten)]
+    Registry(RegistryCommand),
+    /// Record a certificate that cites the graded run that measured a model
+    /// (record 55 ruling 22 b), at the engine's door under a person's token.
+    /// It unseals nothing, so one person records it; the audit keeps it
+    Certify(CertifyArgs),
+}
+
+/// The verbs that work in a registry opened here.
+#[derive(Debug, Subcommand)]
+#[allow(clippy::large_enum_variant)]
+pub(crate) enum RegistryCommand {
     /// Register a model by its card: identified by the digest of its
     /// canonical artifact, neither admitted nor promoted
     Register {
@@ -182,10 +194,6 @@ pub(crate) enum ModelCommand {
         #[arg(long)]
         json: bool,
     },
-    /// Record a certificate that cites the graded run that measured a model
-    /// (record 55 ruling 22 b), at the engine's door under a person's token.
-    /// It unseals nothing, so one person records it; the audit keeps it
-    Certify(CertifyArgs),
 }
 
 /// `nils model certify`: the model, the graded run it cites, and its result.
@@ -335,16 +343,19 @@ fn print_json(doc: &serde_json::Value) {
 }
 
 pub(crate) fn model_command(home: &Home, cmd: ModelCommand) -> Result<(), Exit> {
-    // a certificate is recorded at the engine's door, never in a registry
-    // opened here
-    if let ModelCommand::Certify(args) = cmd {
-        return certify(&args);
+    match cmd {
+        // a certificate is recorded at the engine's door, never in a
+        // registry opened here
+        ModelCommand::Certify(args) => certify(&args),
+        ModelCommand::Registry(cmd) => registry_command(home, cmd),
     }
+}
+
+fn registry_command(home: &Home, cmd: RegistryCommand) -> Result<(), Exit> {
     let mut registry = open(home)?;
     let who = actor();
     match cmd {
-        ModelCommand::Certify(_) => unreachable!("recorded at the door above"),
-        ModelCommand::Register {
+        RegistryCommand::Register {
             card,
             artifact,
             json,
@@ -371,7 +382,7 @@ pub(crate) fn model_command(home: &Home, cmd: ModelCommand) -> Result<(), Exit> 
             }
             Ok(())
         }
-        ModelCommand::Admit {
+        RegistryCommand::Admit {
             model,
             check,
             cpu,
@@ -413,7 +424,7 @@ pub(crate) fn model_command(home: &Home, cmd: ModelCommand) -> Result<(), Exit> 
             }
             Ok(())
         }
-        ModelCommand::Equivalence {
+        RegistryCommand::Equivalence {
             model,
             cpu,
             gpu,
@@ -440,7 +451,7 @@ pub(crate) fn model_command(home: &Home, cmd: ModelCommand) -> Result<(), Exit> 
             }
             Ok(())
         }
-        ModelCommand::Choose {
+        RegistryCommand::Choose {
             model,
             default,
             task,
@@ -474,7 +485,7 @@ pub(crate) fn model_command(home: &Home, cmd: ModelCommand) -> Result<(), Exit> 
             }
             Ok(())
         }
-        ModelCommand::Chosen { task, json } => {
+        RegistryCommand::Chosen { task, json } => {
             let doc = model::tasks_json(registry.store(), task.as_deref())?;
             if json {
                 print_json(&doc);
@@ -496,7 +507,7 @@ pub(crate) fn model_command(home: &Home, cmd: ModelCommand) -> Result<(), Exit> 
             }
             Ok(())
         }
-        ModelCommand::Promote {
+        RegistryCommand::Promote {
             model,
             review_item,
             why,
@@ -516,7 +527,7 @@ pub(crate) fn model_command(home: &Home, cmd: ModelCommand) -> Result<(), Exit> 
             }
             Ok(())
         }
-        ModelCommand::Retire { model, why, json } => {
+        RegistryCommand::Retire { model, why, json } => {
             let m = resolved(&mut registry, &model)?;
             let m = model::retire(&mut registry, m.id, &who, why.as_deref()).map_err(model_err)?;
             if json {
@@ -526,7 +537,7 @@ pub(crate) fn model_command(home: &Home, cmd: ModelCommand) -> Result<(), Exit> 
             }
             Ok(())
         }
-        ModelCommand::Keep {
+        RegistryCommand::Keep {
             model,
             artifact,
             json,
@@ -555,7 +566,7 @@ pub(crate) fn model_command(home: &Home, cmd: ModelCommand) -> Result<(), Exit> 
             }
             Ok(())
         }
-        ModelCommand::List {
+        RegistryCommand::List {
             task,
             slot,
             state,
@@ -583,7 +594,7 @@ pub(crate) fn model_command(home: &Home, cmd: ModelCommand) -> Result<(), Exit> 
             }
             Ok(())
         }
-        ModelCommand::Show { model, json } => {
+        RegistryCommand::Show { model, json } => {
             let m = resolved(&mut registry, &model)?;
             let events = model::events(registry.store(), m.id)?;
             let certified = model::certified(registry.store())?;

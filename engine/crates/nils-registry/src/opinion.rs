@@ -506,13 +506,12 @@ pub fn chosen(store: &mut Store) -> Result<Option<model::Chosen>, StoreError> {
 /// datasets raises nothing and stages nothing, and Review shows its opinion
 /// as not yet confirmed.
 pub fn confirmed(store: &mut Store, model_id: i64) -> Result<Option<i64>, StoreError> {
-    let certs = crate::labels::certificates(store).map_err(|e| match e {
-        crate::labels::Error::Store(s) => s,
-        other => StoreError::Message(other.to_string()),
-    })?;
-    Ok(certs
-        .iter()
-        .find(|c| c.model_ids.contains(&model_id))
+    Ok(crate::labels::certified(store)
+        .map_err(|e| match e {
+            crate::labels::Error::Store(s) => s,
+            other => StoreError::Message(other.to_string()),
+        })?
+        .get(&model_id)
         .map(|c| c.id))
 }
 

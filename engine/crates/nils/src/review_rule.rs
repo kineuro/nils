@@ -850,7 +850,6 @@ impl round::Words for PackWords {
         match words.len() {
             0 => Err(format!("System 1 names no {axis} value")),
             1 => Ok(words.remove(0)),
-            _ if a.multi => Ok(words.join(",")),
             _ => Err(format!(
                 "{axis} takes one value, and System 1 names {value}"
             )),
@@ -875,28 +874,43 @@ fn gate_over(
         let store = registry.store();
         let r = round::current(store, &pack, &version, who)?;
         let mut done = round::gate(store, &r, &stacks, who)?;
+        // what the gate no longer asks: System 1's staged answers withdrawn
+        // as the model, audited
+        round::retire(registry, &mut done)?;
         if !done.questions.is_empty() {
-            match crate::reader::served_pack(pack_dir, &pack) {
-                Some(p) => {
-                    done.staged = round::stage(registry, &r, &done.questions, &PackWords(p), who)?;
-                }
-                None => {
-                    let confident = done
-                        .questions
-                        .iter()
-                        .filter(|q| {
-                            q.kind == round::DISAGREE && q.value.is_some() && q.p >= q.lambda1
-                        })
-                        .count() as i64;
-                    if confident > 0 {
-                        done.staged.not_staged.insert(
-                            format!(
-                                "the pack {pack} is not served here, so System 1's words are not read as its values"
-                            ),
-                            confident,
-                        );
+            // the words of the round's own rules version, never another's
+            let served = crate::reader::served_pack(pack_dir, &pack);
+            let why_not = match &served {
+                None => Some(format!(
+                    "the pack {pack} is not served here, so System 1's words are not read as its values"
+                )),
+                Some(p) if p.version.to_string() != version => Some(format!(
+                    "the served pack {pack} is {} and the round's rules are {version}, so System 1's words are not read as the round's values",
+                    p.version
+                )),
+                Some(_) => None,
+            };
+            match (served, why_not) {
+                (Some(p), None) => {
+                    let st = round::stage(registry, &r, &done.questions, &PackWords(p), who)?;
+                    done.staged.staged = st.staged;
+                    done.staged.kept = st.kept;
+                    done.staged.withdrawn += st.withdrawn;
+                    for (why, n) in st.not_staged {
+                        *done.staged.not_staged.entry(why).or_default() += n;
                     }
                 }
+                (_, Some(why)) => {
+                    let would = done
+                        .questions
+                        .iter()
+                        .filter(|q| round::would_stage(q))
+                        .count() as i64;
+                    if would > 0 {
+                        done.staged.not_staged.insert(why, would);
+                    }
+                }
+                (None, None) => {}
             }
         }
         rounds.push(json!({"round": r.as_json(), "gated": done.to_json()}));
@@ -910,8 +924,14 @@ pub(crate) fn after_opinions(
     registry: &mut Registry,
     stacks: &[i64],
     who: &str,
+    pack_dir: Option<&std::path::Path>,
 ) -> Value {
-    let packs = crate::pack_dir(home, None).ok();
+    // the server's pack folder where the run was given one, else the
+    // registry's
+    let packs = match pack_dir {
+        Some(d) => Some(d.to_path_buf()),
+        None => crate::pack_dir(home, None).ok(),
+    };
     gate_over(registry, Some(stacks), None, who, packs.as_deref())
         .unwrap_or_else(|e| json!({"error": e.to_string()}))
 }

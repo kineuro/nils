@@ -351,13 +351,16 @@ fn migration_99_lets_a_certificate_cite_its_graded_run_on_both_backends() {
     }
     for (name, _guard, mut store) in stores {
         migrate::migrate(&mut store, Kind::Registry).unwrap();
-        let (c, meta) = (
+        let (c, meta, ix) = (
             store.qualified("certificate"),
             store.qualified("registry_meta"),
+            store.qualified("uq_certificate_cited"),
         );
         store
             .batch(&format!(
-                "ALTER TABLE {c} DROP COLUMN evidence;
+                "DROP INDEX {ix};
+                 ALTER TABLE {c} DROP COLUMN model_id;
+                 ALTER TABLE {c} DROP COLUMN evidence;
                  INSERT INTO {c} (sample, model_ids, result, created_by, created_at)
                    VALUES ('selection:s@1', '[3]', '{{\"risk\": 0.05, \"n\": 300, \"errors\": 0}}', 'anna', '2026-10-01T00:00:00Z');
                  UPDATE {meta} SET value = '98' WHERE key = 'schema_version'"
@@ -373,13 +376,22 @@ fn migration_99_lets_a_certificate_cite_its_graded_run_on_both_backends() {
             "{name}"
         );
         assert!(
-            migrate::column_exists(&mut store, "certificate", "evidence").unwrap(),
+            migrate::column_exists(&mut store, "certificate", "evidence").unwrap()
+                && migrate::column_exists(&mut store, "certificate", "model_id").unwrap(),
             "{name}"
         );
+        // a run certifies a model once, by the unique key
+        let dup = format!(
+            "INSERT INTO {c} (sample, model_ids, result, created_by, created_at, model_id)
+               VALUES ('evidence:r', '[3]', '{{}}', 'anna', '2026-10-01T00:00:00Z', 3)"
+        );
+        store.execute(&dup, &[]).unwrap();
+        assert!(store.execute(&dup, &[]).is_err(), "{name}");
         let old = labels::certificates(&mut store).unwrap();
-        assert_eq!(old.len(), 1, "{name}");
-        assert!(!old[0].cites_evidence(), "{name}");
-        assert_eq!(old[0].as_json()["unseals"], true, "{name}");
+        assert_eq!(old.len(), 2, "{name}");
+        let sealed = old.iter().find(|c| c.sample == "selection:s@1").unwrap();
+        assert!(!sealed.cites_evidence(), "{name}");
+        assert_eq!(sealed.as_json()["unseals"], true, "{name}");
         assert!(
             migrate::migrate(&mut store, Kind::Registry)
                 .unwrap()

@@ -454,13 +454,16 @@ pub static MIGRATIONS: &[Migration] = &[
 
 /// Record 55 ruling 22 (b): a certificate may cite its graded run (the
 /// run, its manifest's sha256, the plan's commit and the model's artifact
-/// digest) instead of a sample sealed in this registry. Only a column is
-/// added; a certificate from before measured a sealed sample.
+/// digest) instead of a sample sealed in this registry, and names its one
+/// model, a run certifying a model once (a unique key on the sample and
+/// the model where it names one). Only columns and that key are added; a
+/// certificate from before measured a sealed sample.
 fn a_certificate_may_cite_its_graded_run(store: &mut Store, kind: Kind) -> Result<(), Error> {
     if kind != Kind::Registry {
         return Ok(());
     }
-    add_columns(store, "certificate", &["evidence"])
+    add_columns(store, "certificate", &["evidence", "model_id"])?;
+    add_indexes(store, "certificate")
 }
 
 /// Record 55 F2 and F5 (spec §12.3): the post-contrast label of each stack,

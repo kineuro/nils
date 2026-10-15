@@ -2947,9 +2947,13 @@ fn build_registry() -> Vec<Table> {
                 // the commit that registered the plan and the artifact
                 // digest of the model it graded; none on a sealed sample
                 col("evidence", Type::Json),
+                // the one model a certificate citing its graded run names;
+                // a run certifies a model once
+                col("model_id", Type::Int),
             ],
         )
-        .index(&["sample"]),
+        .index(&["sample"])
+        .unique_where("cited", &["sample", "model_id"], "model_id IS NOT NULL"),
         // Record 43 S1: the pipeline catalog. One row per version of a
         // descriptor (`contracts/job/v1`), kept whole with its digest; a
         // name's next version is a descriptor that differs, and the same
