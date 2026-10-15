@@ -11,7 +11,45 @@ fn the_mri_pack_loads_and_its_corpus_holds() {
         Err(e) => panic!("the MRI pack does not load:\n{e}"),
     };
     assert_eq!(pack.name, "mri");
-    assert_eq!(pack.id(), format!("mri@{}", common::shipped_mri_version()));
+    // the version is the release's: the newest MRI rules release the
+    // CHANGELOG names and the newest row of the pack's provenance, so a
+    // change that forgets to raise it, or raises it without saying so, fails
+    let changelog =
+        std::fs::read_to_string(common::shipped_mri().join("../../CHANGELOG.md")).unwrap();
+    let released = changelog
+        .lines()
+        .find_map(|l| l.strip_prefix("## [pack-mri-v")?.split(']').next())
+        .expect("the CHANGELOG names an MRI rules release");
+    let provenance = std::fs::read_to_string(common::shipped_mri().join("PROVENANCE.md")).unwrap();
+    let rows: Vec<&str> = provenance
+        .lines()
+        .filter_map(|l| {
+            let v = l.strip_prefix("| ")?.split(" |").next()?;
+            (v.split('.').count() == 3 && v.split('.').all(|n| n.parse::<u32>().is_ok()))
+                .then_some(v)
+        })
+        .collect();
+    let newest_row = rows
+        .iter()
+        .copied()
+        .reduce(|a, b| {
+            if nils_pack::engines::newer(b, a) {
+                b
+            } else {
+                a
+            }
+        })
+        .expect("the provenance has version rows");
+    assert_eq!(
+        pack.id(),
+        format!("mri@{released}"),
+        "the CHANGELOG's newest MRI rules release"
+    );
+    assert_eq!(
+        pack.id(),
+        format!("mri@{newest_row}"),
+        "the provenance's newest row"
+    );
     assert_eq!(pack.modality, "MR");
     assert_eq!(
         pack.parsers.len(),

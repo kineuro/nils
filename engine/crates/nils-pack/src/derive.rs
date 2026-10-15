@@ -273,14 +273,9 @@ pub fn derive(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
 
     fn mri() -> Pack {
-        crate::load(
-            &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packs/mri"),
-            None,
-        )
-        .expect("the MRI pack loads")
+        crate::load(&crate::shipped_mri(), None).expect("the MRI pack loads")
     }
 
     fn words(list: &[&str]) -> Vec<String> {

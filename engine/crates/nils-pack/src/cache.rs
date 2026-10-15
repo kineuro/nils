@@ -193,7 +193,7 @@ mod tests {
     use super::*;
 
     fn pack_dir() -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packs/mri")
+        crate::shipped_mri()
     }
 
     fn copy(from: &Path, to: &Path) {
@@ -234,15 +234,16 @@ mod tests {
         let manifest = tmp.join("pack.yml");
         let text = std::fs::read_to_string(&manifest).unwrap();
         let version = first.version.to_string();
-        // its last digit one up (9 to 0), so the length stays and only the version moves
-        let mut digits: Vec<char> = version.chars().collect();
-        let last = digits.last_mut().expect("a version");
-        *last = char::from_digit(
-            (last.to_digit(10).expect("a version ends in a digit") + 1) % 10,
-            10,
-        )
-        .expect("a digit");
-        let next: String = digits.into_iter().collect();
+        // every digit a 9: the same length, so only the version's bytes
+        // change, and never lower, whatever its pre-release or build part
+        let next: String = version
+            .chars()
+            .map(|c| if c.is_ascii_digit() { '9' } else { c })
+            .collect();
+        assert_ne!(
+            next, version,
+            "a version of only nines cannot be raised in place"
+        );
         let bumped = text.replacen(
             &format!("version: {version}"),
             &format!("version: {next}"),
@@ -251,7 +252,11 @@ mod tests {
         assert_ne!(text, bumped, "the manifest names its version");
         std::fs::write(&manifest, &bumped).unwrap();
         let moved = crate::load(&tmp, None).unwrap();
-        assert_ne!(moved.version.to_string(), version);
+        assert!(
+            crate::engines::newer(&moved.version.to_string(), &version),
+            "{} is not newer than {version}",
+            moved.version
+        );
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }

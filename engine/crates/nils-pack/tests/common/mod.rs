@@ -10,19 +10,10 @@ pub fn shipped_mri() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packs/mri")
 }
 
-/// The version the shipped MRI pack's `pack.yml` states.
+/// The version of the shipped MRI pack, as the loader reads it.
 pub fn shipped_mri_version() -> String {
-    let text = std::fs::read_to_string(shipped_mri().join("pack.yml"))
-        .expect("the MRI pack has a manifest");
-    text.lines()
-        .find_map(|l| l.strip_prefix("version:"))
-        .map(|v| {
-            v.split('#')
-                .next()
-                .unwrap_or("")
-                .trim()
-                .trim_matches(['"', '\''])
-                .to_string()
-        })
-        .expect("the manifest states its version")
+    nils_pack::load(&shipped_mri(), None)
+        .expect("the MRI pack loads")
+        .version
+        .to_string()
 }

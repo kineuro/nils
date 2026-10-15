@@ -396,10 +396,7 @@ fn the_mri_pack_s_manifest_keeps_to_the_contract() {
     // The shipped pack's manifest, key by key, against the schema's
     // properties and required keys, without a validator: a key the schema
     // does not know is a contract violation.
-    let manifest = std::fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packs/mri/pack.yml"),
-    )
-    .unwrap();
+    let manifest = std::fs::read_to_string(common::shipped_mri().join("pack.yml")).unwrap();
     // Against the version the pack declares, which is what the loader holds
     // it to.
     let declared: u32 = manifest
@@ -577,18 +574,27 @@ fn the_patch_contract_s_example_applies_to_the_mri_pack() {
     let text =
         std::fs::read_to_string(contracts().join(format!("patch/v{}/example.yml", version.trim())))
             .expect("the example of the published version exists");
-    // the example names a version of the pack; it is read against the one shipped now
-    let stated = text
-        .lines()
-        .find(|l| l.starts_with("version:"))
-        .expect("the example names the pack's version")
-        .to_string();
-    let text = text.replacen(
-        &stated,
-        &format!("version: {}", common::shipped_mri_version()),
-        1,
-    );
     let p = nils_pack::patch::Patch::parse("example.yml", &text).unwrap_or_else(|e| panic!("{e}"));
+    // the published example is kept to the pack the repository ships: a
+    // rules release that leaves it behind fails here, and it names a newer
+    // version to ship as
+    let shipped = common::shipped_mri_version();
+    let version = p
+        .version
+        .clone()
+        .expect("the example names the pack's version");
+    assert_eq!(
+        version, shipped,
+        "contracts/patch example.yml names MRI pack {version}, and the pack shipped is {shipped}: bring the example up to it"
+    );
+    let ships = p
+        .ships
+        .clone()
+        .expect("the example names the version it ships as");
+    assert!(
+        nils_pack::engines::newer(&ships, &version),
+        "the example ships as {ships}, which is not newer than {version}"
+    );
     let kinds: std::collections::BTreeSet<&str> =
         p.operations.iter().map(|o| o.kind.as_str()).collect();
     assert!(kinds.len() >= 7, "the example shows most kinds: {kinds:?}");
