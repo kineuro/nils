@@ -209,6 +209,13 @@ impl Place {
     /// the deepest of its folder and its trees the path lies under, none
     /// where it lies under neither. [`Place::holds_path`] asks the same.
     fn depth_holding(&self, theirs: &Path) -> Option<usize> {
+        depth_under(&self.resolved(), theirs)
+    }
+
+    /// Its folder and its trees, each resolved: what [`Place::holds_path`]
+    /// compares a path with, resolved once where many paths are compared
+    /// (#461).
+    fn resolved(&self) -> Vec<std::path::PathBuf> {
         std::iter::once(Path::new(&self.path).to_path_buf())
             .chain(
                 ["originals", "anon"]
@@ -216,10 +223,17 @@ impl Place {
                     .filter_map(|tree| self.tree_path(tree)),
             )
             .map(|mine| canonical_prefix(&mine))
-            .filter(|mine| theirs.starts_with(mine))
-            .map(|mine| mine.components().count())
-            .max()
+            .collect()
     }
+}
+
+/// The depth of the deepest of a place's resolved folders a resolved path
+/// lies under, none where it lies under none.
+fn depth_under(mine: &[std::path::PathBuf], theirs: &Path) -> Option<usize> {
+    mine.iter()
+        .filter(|m| theirs.starts_with(m))
+        .map(|m| m.components().count())
+        .max()
 }
 
 /// A dataset a stack can be of (Wave 7a): an active source place that is a
@@ -257,11 +271,13 @@ pub fn dataset_sources(store: &mut Store) -> Result<Vec<DatasetSources>, Error> 
         "SELECT id, root_canonical FROM {} ORDER BY id",
         store.qualified("source")
     );
+    // each place's folder and trees resolved once, not once per row (#461)
+    let resolved: Vec<Vec<std::path::PathBuf>> = places.iter().map(Place::resolved).collect();
     for r in &store.query(&sql, &[])? {
         let theirs = canonical_prefix(Path::new(r.text(1)?));
         let mut best: Option<(usize, usize)> = None;
-        for (i, p) in places.iter().enumerate() {
-            if let Some(depth) = p.depth_holding(&theirs)
+        for (i, mine) in resolved.iter().enumerate() {
+            if let Some(depth) = depth_under(mine, &theirs)
                 && best.is_none_or(|(d, _)| depth > d)
             {
                 best = Some((depth, i));
@@ -1281,13 +1297,15 @@ fn of(r: &crate::store::Row) -> Result<Place, Error> {
 /// a path; none when no active dataset's tree does. A dataset reading its
 /// folder itself has no originals, and its `anon` tree is the folder.
 pub fn tree_holding(store: &mut Store, tree: &str, path: &Path) -> Result<Option<Place>, Error> {
+    // the path resolved once, not once per place (#461)
+    let theirs = canonical_prefix(path);
     Ok(active(store)?
         .into_iter()
         .filter(|p| p.role == Role::Source)
         .find(|p| {
             p.tree_path(tree).is_some_and(|t| {
                 let real = std::fs::canonicalize(&t).unwrap_or(t);
-                canonical_prefix(path).starts_with(&real)
+                theirs.starts_with(&real)
             })
         }))
 }
@@ -1382,6 +1400,112 @@ mod tests {
     };
     use crate::pseudonym::Scheme;
     use serde_json::json;
+
+    /// #461: matching sources to datasets with each place resolved once
+    /// answers what matching each row against each place resolved again
+    /// answers, a linked tree and a dataset inside another included.
+    #[cfg(unix)]
+    #[test]
+    fn sources_match_datasets_as_each_row_alone_would() {
+        use crate::schema::table;
+        use crate::store::{Insert, Param, Store};
+        let dir = nils_dicom::synth::TempDir::new("place-sources");
+        let base = dir.path();
+        for d in ["a/c", "b/derivatives", "elsewhere/b-anon", "unrelated"] {
+            std::fs::create_dir_all(base.join(d)).unwrap();
+        }
+        std::os::unix::fs::symlink(
+            base.join("elsewhere/b-anon"),
+            base.join("b/derivatives/dcm-anon"),
+        )
+        .unwrap();
+        let mut store = Store::sqlite_in_memory().unwrap();
+        crate::migrate::migrate(&mut store, crate::migrate::Kind::Registry).unwrap();
+        let folder = r#"{"kind": "dataset", "arrives": "deidentified", "state": "anonymised", "trees": {"originals": null, "anon": "."}}"#;
+        let linked = r#"{"kind": "dataset", "arrives": "deidentified", "state": "anonymised", "trees": {"originals": null, "anon": "derivatives/dcm-anon"}}"#;
+        let spec = Insert::new(
+            table("place"),
+            &[
+                "name",
+                "role",
+                "path",
+                "guarantees",
+                "created_at",
+                "dataset",
+            ],
+        );
+        let at = |p: &str| base.join(p).to_string_lossy().into_owned();
+        let row = |name: &str, path: String, dataset: &str| {
+            vec![
+                Param::from(name),
+                Param::from("source"),
+                Param::from(path.as_str()),
+                Param::from("{}"),
+                Param::from("2026-10-15T00:00:00Z"),
+                Param::from(dataset),
+            ]
+        };
+        store
+            .insert(
+                &spec,
+                &[
+                    row("a", at("a"), folder),
+                    row("c", at("a/c"), folder),
+                    row("b", at("b"), linked),
+                ],
+            )
+            .unwrap();
+        let roots = [
+            "a/x",
+            "a/c/y",
+            "a/c",
+            "elsewhere/b-anon/z",
+            "b/derivatives/dcm-anon/w",
+            "unrelated/q",
+            "a",
+            "ab/not-a",
+        ];
+        for n in 0..40 {
+            let root = at(&format!("{}/{n}", roots[n % roots.len()]));
+            store
+                .execute(
+                    "INSERT INTO source (root, root_canonical, first_seen_at) VALUES (?1, ?1, '2026-10-15T00:00:00Z')",
+                    &[Param::from(root.as_str())],
+                )
+                .unwrap();
+        }
+        let got = super::dataset_sources(&mut store).unwrap();
+        // the per-row form: each row resolved, each place resolved again
+        let places: Vec<super::Place> = super::active(&mut store)
+            .unwrap()
+            .into_iter()
+            .filter(|p| p.role == super::Role::Source)
+            .collect();
+        let mut want: Vec<Vec<i64>> = vec![Vec::new(); places.len()];
+        for r in store
+            .query("SELECT id, root_canonical FROM source ORDER BY id", &[])
+            .unwrap()
+        {
+            let theirs = super::canonical_prefix(std::path::Path::new(r.text(1).unwrap()));
+            let mut best: Option<(usize, usize)> = None;
+            for (i, p) in places.iter().enumerate() {
+                if let Some(depth) = p.depth_holding(&theirs)
+                    && best.is_none_or(|(d, _)| depth > d)
+                {
+                    best = Some((depth, i));
+                }
+            }
+            if let Some((_, i)) = best {
+                want[i].push(r.int(0).unwrap());
+            }
+        }
+        let got_ids: Vec<Vec<i64>> = got.iter().map(|d| d.sources.clone()).collect();
+        assert_eq!(got_ids, want);
+        // and the answer is what it should be: c takes its own rows from a,
+        // b its linked tree's under either spelling, nobody the rest
+        let count = |name: &str| got.iter().find(|d| d.name == name).unwrap().sources.len();
+        assert_eq!((count("a"), count("c"), count("b")), (10, 10, 10));
+    }
 
     #[test]
     fn a_dataset_whose_codes_the_generator_makes_is_not_read_on_another_scheme() {
