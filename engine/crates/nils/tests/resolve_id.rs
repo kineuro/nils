@@ -205,73 +205,218 @@ const REVIEWER: &str = "a-reviewer-token-of-leng";
 const READER: &str = "a-reader-token-of-length";
 const RATER: &str = "a-rater-token-of-lengthx";
 
-fn the_door_on(backend: &str, pg: Option<(&str, &str)>) {
-    let home = synthetic(pg);
-    // a subject with scans, and how many stacks it holds
-    let (code, stacks) = {
-        let mut s = store(&home, pg);
-        let sql = format!(
-            "SELECT su.code, COUNT(st.id) FROM {} su JOIN {} se ON se.subject_id = su.id \
-             JOIN {} st ON st.series_id = se.id WHERE su.merged_into IS NULL \
-             GROUP BY su.id, su.code ORDER BY su.id",
-            s.qualified("subject"),
-            s.qualified("series"),
-            s.qualified("stack"),
+/// Three subjects with scans: their codes and stack ids, oldest first.
+fn subjects(home: &TempDir, pg: Option<(&str, &str)>) -> Vec<(i64, String, Vec<i64>)> {
+    let mut s = store(home, pg);
+    let sql = format!(
+        "SELECT su.id, su.code, st.id FROM {} su JOIN {} se ON se.subject_id = su.id \
+         JOIN {} st ON st.series_id = se.id WHERE su.merged_into IS NULL ORDER BY su.id, st.id",
+        s.qualified("subject"),
+        s.qualified("series"),
+        s.qualified("stack"),
+    );
+    let mut out: Vec<(i64, String, Vec<i64>)> = Vec::new();
+    for r in s.query(&sql, &[]).unwrap() {
+        let (id, code, stack) = (
+            r.int(0).unwrap(),
+            r.text(1).unwrap().to_string(),
+            r.int(2).unwrap(),
         );
-        let rows = s.query(&sql, &[]).unwrap();
-        (
-            rows[0].text(0).unwrap().to_string(),
-            rows[0].int(1).unwrap(),
-        )
-    };
-    // the site's ctrl-id map: Ctrl0042 is that subject; Ctrl0043 names a
-    // subject the map makes and no scan is of
-    run(&home, &["linkage", "id-type", "add", "ctrl-id"], None);
-    let map = home.path().join("ctrl-map.csv");
-    std::fs::write(
-        &map,
-        format!("identifier,code\nCtrl0042,{code}\nCtrl0043,ctrl-only-0012\n"),
+        match out.last_mut() {
+            Some(last) if last.0 == id => last.2.push(stack),
+            _ => out.push((id, code, vec![stack])),
+        }
+    }
+    out.truncate(3);
+    out
+}
+
+/// A dataset `controls` whose tree holds a file of each of these stacks;
+/// and every stack of another subject sealed in a sample now.
+fn plant(home: &TempDir, pg: Option<(&str, &str)>, held: &[i64], sealed: (i64, &[i64])) {
+    use nils_registry::place::{self, New, Role};
+    use nils_registry::schema::table;
+    use nils_registry::{Insert, Param};
+    let dir = home.path().join("controls");
+    std::fs::create_dir_all(&dir).unwrap();
+    let root = dir.canonicalize().unwrap().display().to_string();
+    let mut s = store(home, pg);
+    place::add(
+        &mut s,
+        &New {
+            name: "controls",
+            role: Role::Source,
+            path: &root,
+            guarantees: serde_json::json!({}),
+            probed: serde_json::Value::Null,
+            handling: serde_json::Value::Null,
+            dataset: serde_json::Value::Null,
+        },
     )
     .unwrap();
+    let now = "2026-10-15T08:00:00Z";
+    let source = s
+        .insert(
+            &Insert::new(
+                table("source"),
+                &["root", "root_canonical", "first_seen_at"],
+            )
+            .returning(&["id"]),
+            &[vec![
+                Param::from(root.as_str()),
+                Param::from(root.as_str()),
+                Param::from(now),
+            ]],
+        )
+        .unwrap()[0]
+        .int(0)
+        .unwrap();
+    let rows: Vec<Vec<Param>> = held
+        .iter()
+        .map(|st| vec![Param::Int(source), Param::Int(*st), Param::from(now)])
+        .collect();
+    s.insert(
+        &Insert::new(
+            table("source_stack"),
+            &["source_id", "stack_id", "first_seen_at"],
+        ),
+        &rows,
+    )
+    .unwrap();
+    let (subject, stacks) = sealed;
+    let rows: Vec<Vec<Param>> = stacks
+        .iter()
+        .map(|st| {
+            vec![
+                Param::from("cert-sample@1"),
+                Param::Int(*st),
+                Param::Int(subject),
+                Param::from("anna"),
+                Param::from(now),
+            ]
+        })
+        .collect();
+    s.insert(
+        &Insert::new(
+            table("sealed_stack"),
+            &["sample", "stack_id", "subject_id", "sealed_by", "sealed_at"],
+        ),
+        &rows,
+    )
+    .unwrap();
+}
+
+fn map(home: &TempDir, id_type: &str, rows: &[(&str, &str)]) {
+    let csv = home.path().join("map.csv");
+    let body: String = rows
+        .iter()
+        .map(|(id, code)| format!("{id},{code}\n"))
+        .collect();
+    std::fs::write(&csv, format!("identifier,code\n{body}")).unwrap();
+    run(
+        home,
+        &[
+            "linkage",
+            "import",
+            csv.to_str().unwrap(),
+            "--id-type",
+            id_type,
+        ],
+        None,
+    );
+    std::fs::remove_file(&csv).unwrap();
+}
+
+fn the_door_on(backend: &str, pg: Option<(&str, &str)>) {
+    let home = synthetic(pg);
+    let three = subjects(&home, pg);
+    let (a, b, c) = (&three[0], &three[1], &three[2]);
+    plant(&home, pg, &a.2[..1], (c.0, &c.2));
+    // the site's ctrl-id map: Ctrl0042 is subject a, Ctrl0043 a subject the
+    // map makes and no scan is of, Ctrl0044 subject b, later merged into a,
+    // and Ctrl0045 subject c, every scan of whom is sealed now
+    run(&home, &["linkage", "id-type", "add", "ctrl-id"], None);
+    map(
+        &home,
+        "ctrl-id",
+        &[
+            ("Ctrl0042", &a.1),
+            ("Ctrl0043", "ctrl-only-0012"),
+            ("Ctrl0044", &b.1),
+            ("Ctrl0045", &c.1),
+        ],
+    );
+    // and an ID that identifies a person anywhere, as PatientID held it
+    map(&home, "patient-id", &[("PX-0077", &a.1)]);
     run(
         &home,
         &[
             "linkage",
-            "import",
-            map.to_str().unwrap(),
-            "--id-type",
-            "ctrl-id",
+            "merge",
+            &a.1,
+            &b.1,
+            "--why",
+            "one person, two codes",
         ],
         None,
     );
-    std::fs::remove_file(&map).unwrap();
 
-    let server = Server::start(&home, 8);
+    let server = Server::start(&home, 13);
     let ask = |value: &str| serde_json::json!({"id_type": "ctrl-id", "value": value});
-    // the admin asks Nima's question's first step: Ctrl0042 is that subject
+    // the admin asks Nima's question's first step: Ctrl0042 is subject a
     let (status, found) = server.post("/api/linkage/resolve", &ask("Ctrl0042"), ADMIN);
     assert_eq!(status, 200, "{backend}: {found}");
     assert_eq!(found["known"], true, "{backend}: {found}");
-    assert_eq!(found["subject_code"], code.as_str(), "{backend}: {found}");
-    assert_eq!(found["scans"], stacks, "{backend}: {found}");
+    assert_eq!(found["subject_code"], a.1.as_str(), "{backend}: {found}");
+    // a's own scans and the merged b's
+    assert_eq!(found["scans"], a.2.len() + b.2.len(), "{backend}: {found}");
     assert_eq!(found["id_type"], "ctrl-id", "{backend}: {found}");
+    // the dataset whose tree holds a file of one of them is named
+    assert_eq!(
+        found["datasets"],
+        serde_json::json!(["controls"]),
+        "{backend}: {found}"
+    );
     // never an identifier it was not given, nor the value back
     assert!(!found.to_string().contains("Ctrl"), "{backend}: {found}");
     // a reviewer, who uses the data at detail quasi, gets the same
     let (status, same) = server.post("/api/linkage/resolve", &ask("  Ctrl0042 "), REVIEWER);
     assert_eq!(status, 200, "{backend}: {same}");
-    assert_eq!(same["subject_code"], code.as_str(), "{backend}: {same}");
-    // a value no map names, and one whose subject holds no scan: not known
-    let (status, none) = server.post("/api/linkage/resolve", &ask("Ctrl9999"), ADMIN);
-    assert_eq!(status, 200, "{backend}: {none}");
+    assert_eq!(same["subject_code"], a.1.as_str(), "{backend}: {same}");
     assert_eq!(
-        none,
+        same["datasets"],
+        serde_json::json!(["controls"]),
+        "{backend}"
+    );
+    // a merged subject answers the one it was merged into
+    let (status, merged) = server.post("/api/linkage/resolve", &ask("Ctrl0044"), ADMIN);
+    assert_eq!(status, 200, "{backend}: {merged}");
+    assert_eq!(merged["subject_code"], a.1.as_str(), "{backend}: {merged}");
+    // a subject every scan of whom is sealed now is not known without the
+    // unsealed grant, which no admin holds
+    let (status, sealed) = server.post("/api/linkage/resolve", &ask("Ctrl0045"), ADMIN);
+    assert_eq!(status, 200, "{backend}: {sealed}");
+    assert_eq!(
+        sealed,
         serde_json::json!({"id_type": "ctrl-id", "known": false}),
         "{backend}"
     );
+    // a value no map names, and one whose subject holds no scan: not known
+    let (status, none) = server.post("/api/linkage/resolve", &ask("Ctrl9999"), ADMIN);
+    assert_eq!(status, 200, "{backend}: {none}");
+    assert_eq!(none["known"], false, "{backend}: {none}");
     let (status, bare) = server.post("/api/linkage/resolve", &ask("Ctrl0043"), ADMIN);
     assert_eq!(status, 200, "{backend}: {bare}");
     assert_eq!(bare["known"], false, "{backend}: {bare}");
+    // an ID that identifies a person anywhere is a re-identification: a
+    // reviewer at quasi is refused, an admin, who holds everything, is not
+    let pid = serde_json::json!({"id_type": "patient-id", "value": "PX-0077"});
+    let (status, refused) = server.post("/api/linkage/resolve", &pid, REVIEWER);
+    assert_eq!(status, 403, "{backend}: {refused}");
+    assert!(!refused.to_string().contains("PX-0077"), "{backend}");
+    let (status, admin) = server.post("/api/linkage/resolve", &pid, ADMIN);
+    assert_eq!(status, 200, "{backend}: {admin}");
+    assert_eq!(admin["subject_code"], a.1.as_str(), "{backend}: {admin}");
     // an ID type that is not there names the types
     let (status, why) = server.post(
         "/api/linkage/resolve",
@@ -286,33 +431,62 @@ fn the_door_on(backend: &str, pg: Option<(&str, &str)>) {
     assert_eq!(status, 403, "{backend}");
     let (status, _) = server.post("/api/linkage/resolve", &ask("Ctrl0042"), RATER);
     assert_eq!(status, 403, "{backend}");
-    // a value that is no ID
+    // a value that is no ID, and one longer than an ID, counted in characters
     let (status, _) = server.post(
         "/api/linkage/resolve",
         &serde_json::json!({"id_type": "ctrl-id"}),
         ADMIN,
     );
     assert_eq!(status, 400, "{backend}");
+    let (status, _) = server.post("/api/linkage/resolve", &ask(&"Ö".repeat(200)), ADMIN);
+    assert_eq!(
+        status, 200,
+        "{backend}: 200 characters are 400 bytes and one ID"
+    );
     server.finish();
 
-    // each answer that found a subject left one read audit row
+    // every lookup that reached the store is audited, found or not: seven
+    // ctrl-id lookups and the admin's patient-id one
     let mut linkage = match pg {
         Some((dsn, schema)) => Store::connect_postgres(dsn, &format!("{schema}_linkage")).unwrap(),
         None => Store::open_sqlite(&home.path().join("linkage.db")).unwrap(),
     };
-    let audited = linkage
+    let read = linkage
         .query(
             &format!(
-                "SELECT COUNT(*) FROM {} WHERE why = 'resolve an ID to its subject code'",
+                "SELECT why, COUNT(*) FROM {} WHERE why LIKE 'resolve:%' GROUP BY why ORDER BY why",
                 linkage.qualified("read_audit")
+            ),
+            &[],
+        )
+        .unwrap()
+        .iter()
+        .map(|r| (r.text(0).unwrap().to_string(), r.int(1).unwrap()))
+        .collect::<Vec<_>>();
+    drop(linkage);
+    assert_eq!(
+        read,
+        [
+            ("resolve: found".to_string(), 4),
+            ("resolve: no scan to see".to_string(), 2),
+            ("resolve: not known".to_string(), 2),
+        ],
+        "{backend}"
+    );
+    let mut s = store(&home, pg);
+    let logged = s
+        .query(
+            &format!(
+                "SELECT COUNT(*) FROM {} WHERE action = 'linkage.resolve'",
+                s.qualified("audit")
             ),
             &[],
         )
         .unwrap()[0]
         .int(0)
         .unwrap();
-    drop(linkage);
-    assert_eq!(audited, 2, "{backend}");
+    drop(s);
+    assert_eq!(logged, 8, "{backend}");
     if let Some((dsn, schema)) = pg {
         drop_schema(dsn, schema);
     }

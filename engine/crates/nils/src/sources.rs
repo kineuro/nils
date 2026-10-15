@@ -51,7 +51,7 @@ fn held(store: &mut Store, place_id: i64) -> Result<Value, StoreError> {
 }
 
 /// Every `source` row with its canonical root.
-fn roots(store: &mut Store) -> Result<Vec<(i64, String)>, StoreError> {
+pub(crate) fn roots(store: &mut Store) -> Result<Vec<(i64, String)>, StoreError> {
     store
         .query(
             &format!(
@@ -65,7 +65,7 @@ fn roots(store: &mut Store) -> Result<Vec<(i64, String)>, StoreError> {
         .collect()
 }
 
-fn ids_under(p: &Place, roots: &[(i64, String)]) -> Vec<i64> {
+pub(crate) fn ids_under(p: &Place, roots: &[(i64, String)]) -> Vec<i64> {
     roots
         .iter()
         .filter(|(_, root)| p.holds_path(Path::new(root)))

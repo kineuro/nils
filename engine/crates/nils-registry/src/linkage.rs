@@ -212,6 +212,23 @@ impl TypeCount {
     }
 }
 
+/// Record 55, ruling 24: the identifier types that identify a person
+/// wherever they are met, whose resolve to a subject code is a
+/// re-identification: the ID that is the same everywhere (the
+/// personnummer), what PatientID held as it was (`patient-id`) and a
+/// study's DICOM UID. A study's or a site's own ID a map files (ctrl-id and
+/// the like) is none of them.
+pub const IDENTIFYING_TYPES: &[&str] = &[
+    crate::personnummer::ID_TYPE,
+    "patient-id",
+    "study-instance-uid",
+];
+
+/// Whether resolving an identifier of this type re-identifies a person.
+pub fn identifying_type(name: &str) -> bool {
+    IDENTIFYING_TYPES.contains(&name)
+}
+
 /// Every identifier type with how many identifiers and subjects it holds.
 pub fn id_type_counts(store: &mut Store) -> Result<Vec<TypeCount>, Error> {
     let identity = store.qualified("identity");

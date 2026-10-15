@@ -1164,13 +1164,19 @@ const RESOLVE_MAX: usize = 256;
 
 /// `POST /api/linkage/resolve {id_type, value}` (record 55, ruling 24): one
 /// ID of a known type, given by the caller, turned into the subject code it
-/// stands for, `{id_type, known, subject_code, datasets}`, or `{id_type,
+/// stands for, `{id_type, known, subject_code, scans, datasets}`, or `{id_type,
 /// known: false}` when no subject of a scan the caller may see holds it. It
-/// answers no identifier it was not given: not even the value back. The
+/// answers no identifier it was not given: not even the value back. A study's
+/// own ID (a map's type) is open to whoever uses the data at detail quasi; an
+/// ID that identifies a person wherever it is met
+/// ([`linkage::identifying_type`]) is a re-identification and needs
+/// `data:work` at detail sensitive, as the held reveal and the merge do. The
 /// value is looked up by its keyed hash, as the digest filed it, so no
 /// ciphertext is opened; a merged subject answers the subject it was merged
-/// into, and a stack of a sample sealed now is not counted without the
-/// unsealed grant. Each match writes one read audit row.
+/// into; a stack of a sample sealed now is not counted without the unsealed
+/// grant; the datasets are named only to a caller who may see them
+/// (`data:see` or `places:see`). Every lookup, found or not, writes one read
+/// audit row and one `linkage.resolve` row in the registry's audit log.
 fn resolve(registry: &mut Registry, caller: &Caller, body: &str) -> Result<Reply, Reply> {
     let doc = json_body(body)?;
     let id_type = doc["id_type"]
@@ -1185,11 +1191,19 @@ fn resolve(registry: &mut Registry, caller: &Caller, body: &str) -> Result<Reply
         .filter(|v| !v.is_empty())
         .ok_or_else(|| Reply::error(400, "value: the ID, as the person gave it"))?
         .to_string();
-    if value.len() > RESOLVE_MAX {
+    if value.chars().count() > RESOLVE_MAX {
         return Err(Reply::error(
             400,
             format!("value: an ID of at most {RESOLVE_MAX} characters"),
         ));
+    }
+    // an ID that identifies a person anywhere is a re-identification
+    if linkage::identifying_type(&id_type) {
+        caller.allowed(
+            &format!("resolving a {id_type}"),
+            Need::One("data:work"),
+            Detail::Sensitive,
+        )?;
     }
     let mut linkage = open_linkage(registry)?;
     let Some(type_id) = linkage::id_type_id(&mut linkage, &id_type)? else {
@@ -1207,86 +1221,26 @@ fn resolve(registry: &mut Registry, caller: &Caller, body: &str) -> Result<Reply
     };
     let (_, keys) = keys_of(registry)?;
     let lookup = keys.lookup(&id_type, &value);
-    let found: Vec<linkage::Identity> = linkage::identities_by_lookup(&mut linkage, &[lookup])?
+    let identity = linkage::identities_by_lookup(&mut linkage, &[lookup])?
         .into_iter()
-        .filter(|i| i.id_type_id == type_id)
-        .collect();
-    let unknown = || Reply::ok(serde_json::json!({ "id_type": id_type, "known": false }));
-    let Some(identity) = found.first() else {
-        return Ok(unknown());
+        .find(|i| i.id_type_id == type_id);
+    let found = match &identity {
+        Some(i) => resolved(registry, caller, i.subject_id)?,
+        None => None,
     };
-    // a merged subject is answered by the one it was merged into
-    let store = registry.store();
-    let mut subject_id = identity.subject_id;
-    let mut seen = BTreeSet::new();
-    let subject = loop {
-        let Some(s) = linkage::subjects_by_id(store, &[subject_id])?
-            .into_iter()
-            .next()
-        else {
-            return Ok(unknown());
-        };
-        match s.merged_into {
-            Some(next) if seen.insert(s.id) => subject_id = next,
-            _ => break s,
-        }
+    // every lookup is audited, a miss and a sealed-only subject included
+    let outcome = match (&identity, &found) {
+        (_, Some(_)) => "found",
+        (Some(_), None) => "no scan to see",
+        (None, None) => "not known",
     };
-    // the subject holds a scan the caller may see, in some dataset or none
-    let sealed = if crate::sealed::reads(&caller.access) {
-        String::new()
-    } else {
-        format!(
-            " AND NOT EXISTS (SELECT 1 FROM {} sst WHERE sst.stack_id = st.id AND sst.unsealed_at IS NULL)",
-            store.qualified("sealed_stack")
-        )
-    };
-    let stacks_sql = format!(
-        "SELECT st.id FROM {} st JOIN {} se ON se.id = st.series_id WHERE se.subject_id = {}{sealed}",
-        store.qualified("stack"),
-        store.qualified("series"),
-        subject.id
-    );
-    let stacks: Vec<i64> = store
-        .query(&stacks_sql, &[])?
-        .iter()
-        .map(|r| r.int(0))
-        .collect::<Result<_, _>>()?;
-    if stacks.is_empty() {
-        return Ok(unknown());
-    }
-    // the datasets that hold a file of one of those scans
-    let mut datasets: Vec<String> = Vec::new();
-    for p in place::list(store)? {
-        if p.role != place::Role::Source || p.retired_at.is_some() {
-            continue;
-        }
-        let sources = crate::sources::source_ids(store, &p)?;
-        if sources.is_empty() {
-            continue;
-        }
-        let list = sources
-            .iter()
-            .map(i64::to_string)
-            .collect::<Vec<_>>()
-            .join(", ");
-        let held = format!(
-            "SELECT 1 FROM {} ss JOIN {} st ON st.id = ss.stack_id JOIN {} se ON se.id = st.series_id \
-             WHERE ss.source_id IN ({list}) AND se.subject_id = {}{sealed}",
-            store.qualified("source_stack"),
-            store.qualified("stack"),
-            store.qualified("series"),
-            subject.id
-        );
-        if !store.query(&held, &[])?.is_empty() {
-            datasets.push(p.name.clone());
-        }
-    }
     let now = nils_registry::time::now_iso();
     let audit = vec![vec![
         Param::from(now.as_str()),
         Param::from(caller.principal.as_str()),
-        Param::Int(identity.id),
-        Param::from("resolve an ID to its subject code"),
+        // a miss has no identity; 0 stands for none, as no identity has it
+        Param::Int(identity.as_ref().map_or(0, |i| i.id)),
+        Param::from(format!("resolve: {outcome}").as_str()),
     ]];
     linkage.begin()?;
     let written = linkage.insert(
@@ -1300,13 +1254,120 @@ fn resolve(registry: &mut Registry, caller: &Caller, body: &str) -> Result<Reply
             return Err(e.into());
         }
     }
-    Ok(Reply::ok(serde_json::json!({
+    nils_registry::audit::record(
+        registry,
+        &nils_registry::audit::Entry {
+            principal: &caller.principal,
+            action: nils_registry::audit::Action::LinkageResolve,
+            scope: serde_json::json!({
+                "id_type": id_type,
+                "outcome": outcome,
+                "subject": found.as_ref().map(|f| f.code.clone()),
+            }),
+            policy: None,
+            job_id: None,
+            details: None,
+        },
+    )?;
+    let Some(f) = found else {
+        return Ok(Reply::ok(
+            serde_json::json!({ "id_type": id_type, "known": false }),
+        ));
+    };
+    let mut answer = serde_json::json!({
         "id_type": id_type,
         "known": true,
-        "subject_code": subject.code,
-        "scans": stacks.len(),
-        "datasets": datasets,
-    })))
+        "subject_code": f.code,
+        "scans": f.scans,
+    });
+    // a dataset's name is Data's or Places' to see; a reader of questions
+    // alone gets the counts
+    if names_datasets(&caller.access) {
+        answer["datasets"] = serde_json::Value::from(f.datasets);
+    }
+    Ok(Reply::ok(answer))
+}
+
+/// Whether a resolve names the datasets: they are Data's or Places' to see.
+fn names_datasets(access: &crate::grants::Access) -> bool {
+    access.holds("data:see") || access.holds("places:see")
+}
+
+/// A subject an ID resolved to, as the caller may see it.
+struct Resolved {
+    code: String,
+    scans: usize,
+    datasets: Vec<String>,
+}
+
+/// The subject an identity names, followed through merges to the one it
+/// was merged into, with the scans of theirs the caller may see and the
+/// datasets that hold a file of one; none when it holds no such scan.
+fn resolved(
+    registry: &mut Registry,
+    caller: &Caller,
+    subject_id: i64,
+) -> Result<Option<Resolved>, Reply> {
+    let store = registry.store();
+    let mut id = subject_id;
+    let mut seen = BTreeSet::new();
+    let subject = loop {
+        let Some(s) = linkage::subjects_by_id(store, &[id])?.into_iter().next() else {
+            return Ok(None);
+        };
+        match s.merged_into {
+            Some(next) if seen.insert(s.id) => id = next,
+            _ => break s,
+        }
+    };
+    let stacks_sql = format!(
+        "SELECT st.id FROM {} st JOIN {} se ON se.id = st.series_id WHERE se.subject_id = {} ORDER BY st.id",
+        store.qualified("stack"),
+        store.qualified("series"),
+        subject.id
+    );
+    let all: Vec<i64> = store
+        .query(&stacks_sql, &[])?
+        .iter()
+        .map(|r| r.int(0))
+        .collect::<Result<_, _>>()?;
+    // the shared sealed rule: a scan of a sample sealed now is withheld
+    let withheld = crate::sealed::withheld(store, &caller.access, &all)?;
+    let stacks: Vec<i64> = all.into_iter().filter(|s| !withheld.contains(s)).collect();
+    if stacks.is_empty() {
+        return Ok(None);
+    }
+    let list = stacks
+        .iter()
+        .map(i64::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    // the source roots read once, each dataset's sources found among them
+    let roots = crate::sources::roots(store)?;
+    let mut datasets: Vec<String> = Vec::new();
+    for p in place::list(store)? {
+        if p.role != place::Role::Source || p.retired_at.is_some() {
+            continue;
+        }
+        let sources = crate::sources::ids_under(&p, &roots)
+            .iter()
+            .map(i64::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let held = crate::operations::held_by(store, "st", &sources);
+        let sql = format!(
+            "SELECT 1 FROM {} st WHERE st.id IN ({list}) AND {held}",
+            store.qualified("stack"),
+        );
+        if !store.query(&sql, &[])?.is_empty() {
+            datasets.push(p.name.clone());
+        }
+    }
+    Ok(Some(Resolved {
+        code: subject.code,
+        scans: stacks.len(),
+        datasets,
+    }))
 }
 
 /// `POST /api/linkage/merge {canonical, alias, why}`: a `linkage merge`
@@ -1441,6 +1502,19 @@ mod tests {
             verb(&["linkage", "merge", "a", "b"]),
             Some(("data:work", Detail::Sensitive))
         );
+    }
+
+    /// Record 55, ruling 24: a resolve names datasets to whoever may see
+    /// Data or Places, and gives a reader of questions alone the counts.
+    #[test]
+    fn a_resolve_names_datasets_only_to_those_who_see_them() {
+        assert!(!names_datasets(&caller("query:see,quasi").access));
+        assert!(names_datasets(&caller("data:see,quasi").access));
+        assert!(names_datasets(&caller("places:see").access));
+        assert!(names_datasets(&caller("admin").access));
+        assert!(linkage::identifying_type("personnummer"));
+        assert!(linkage::identifying_type("patient-id"));
+        assert!(!linkage::identifying_type("ctrl-id"));
     }
 
     /// A caller holding the listed grants, at the detail named beside

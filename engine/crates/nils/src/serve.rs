@@ -5458,7 +5458,9 @@ pub(crate) fn door(method: &str, segs: &[&str]) -> (Need, Detail) {
         }
         // record 55, ruling 24: one ID a caller gives, turned into its
         // subject code, for anyone who may use the data that subject is in;
-        // a subject code is quasi-identifying
+        // a subject code is quasi-identifying. An ID that identifies a person
+        // anywhere needs data:work at detail sensitive, checked at the door
+        // itself since the type is in the body
         ("POST", ["api", "linkage", "resolve"]) => {
             (Need::AnyOf(&["data:see", "query:see"]), Quasi)
         }
@@ -7739,7 +7741,7 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
         ),
         row(
             "POST /api/linkage/resolve",
-            false,
+            true,
             false,
             "bounded",
             "one subject code",

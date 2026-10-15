@@ -33,6 +33,9 @@ pub enum Action {
     LinkageUnlink,
     LinkagePurge,
     LinkageReveal,
+    /// Record 55, ruling 24: an ID a caller gave turned into its subject
+    /// code, or not; every lookup, found or not.
+    LinkageResolve,
     /// Wave 4c §6.5: an archive was written.
     Backup,
     /// Wave 4c §6.6: an overlay proposed as a registry object, and one
@@ -195,6 +198,7 @@ impl Action {
             Action::LinkageUnlink => "linkage.unlink",
             Action::LinkagePurge => "linkage.purge",
             Action::LinkageReveal => "linkage.reveal",
+            Action::LinkageResolve => "linkage.resolve",
             Action::Backup => "backup",
             Action::OverlayPropose => "overlay.propose",
             Action::OverlayAdopt => "overlay.adopt",
@@ -273,6 +277,7 @@ impl Action {
             self,
             Action::ReviewAccept
                 | Action::LinkageReveal
+                | Action::LinkageResolve
                 | Action::JobsPrune
                 | Action::Backup
                 | Action::OverlayPropose
