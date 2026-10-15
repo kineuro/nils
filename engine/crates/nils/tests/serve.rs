@@ -3,6 +3,8 @@
 //! `nils serve` (Wave 4a §11.1): the one door, driven as a second process
 //! would drive it, over plain HTTP.
 
+mod common;
+
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::path::Path;
@@ -6035,7 +6037,7 @@ fn a_list_on_an_axis_value_rehearses_adopts_and_is_named_on_the_pack() {
         None,
     );
     let classified: serde_json::Value = serde_json::from_str(&classified).unwrap();
-    assert_eq!(classified["pack"], "mri@1.2.0", "{classified}");
+    assert_eq!(classified["pack"], common::shipped_mri_id(), "{classified}");
 }
 
 /// Record 42 S1: the author of a decision is the verified actor, never the

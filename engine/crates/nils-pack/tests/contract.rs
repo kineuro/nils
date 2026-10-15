@@ -5,6 +5,8 @@
 //! implements is the version the contract publishes, and every manifest key
 //! the loader reads is a property the schema declares.
 
+mod common;
+
 use std::path::Path;
 
 fn contracts() -> std::path::PathBuf {
@@ -190,7 +192,7 @@ fn mri_at_contract_5() -> std::path::PathBuf {
             }
         }
     }
-    let mri = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packs/mri");
+    let mri = common::shipped_mri();
     let to = std::env::temp_dir().join(format!("nils-contract-5-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&to);
     copy(&mri, &to);
@@ -234,7 +236,7 @@ fn a_pack_of_an_earlier_contract_loads_under_this_one() {
     assert!(pack.contract < nils_pack::CONTRACT);
     assert!(pack.excludes.is_empty() && pack.hints.is_empty());
     let _ = std::fs::remove_dir_all(&dir);
-    let mri = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packs/mri");
+    let mri = common::shipped_mri();
     let pack = nils_pack::load(&mri, None).expect("the MRI pack loads");
     // The shipped pack declares 9 since 1.0.2, whose review block names the
     // axes an operation of their own answers (`review.by_model`); it writes
@@ -282,7 +284,7 @@ fn mri_copy(name: &str) -> std::path::PathBuf {
             }
         }
     }
-    let mri = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packs/mri");
+    let mri = common::shipped_mri();
     let to = std::env::temp_dir().join(format!("nils-contract-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&to);
     copy(&mri, &to);
@@ -373,7 +375,7 @@ fn a_pack_names_the_engines_it_works_with_from_contract_10() {
 /// so an engine outside it refuses the pack rather than reading it.
 #[test]
 fn the_mri_pack_names_the_engines_it_works_with() {
-    let mri = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packs/mri");
+    let mri = common::shipped_mri();
     let pack = nils_pack::load(&mri, None).expect("the MRI pack loads in this engine");
     assert_eq!(pack.contract, nils_pack::CONTRACT);
     let range = pack
@@ -394,10 +396,7 @@ fn the_mri_pack_s_manifest_keeps_to_the_contract() {
     // The shipped pack's manifest, key by key, against the schema's
     // properties and required keys, without a validator: a key the schema
     // does not know is a contract violation.
-    let manifest = std::fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packs/mri/pack.yml"),
-    )
-    .unwrap();
+    let manifest = std::fs::read_to_string(common::shipped_mri().join("pack.yml")).unwrap();
     // Against the version the pack declares, which is what the loader holds
     // it to.
     let declared: u32 = manifest
@@ -576,10 +575,50 @@ fn the_patch_contract_s_example_applies_to_the_mri_pack() {
         std::fs::read_to_string(contracts().join(format!("patch/v{}/example.yml", version.trim())))
             .expect("the example of the published version exists");
     let p = nils_pack::patch::Patch::parse("example.yml", &text).unwrap_or_else(|e| panic!("{e}"));
+    // the example states one fixed version of the pack and a newer one to
+    // ship as, and stays as published: it is applied to a copy of the
+    // shipped pack set to its version, so a rules release never edits it
+    let version = p
+        .version
+        .clone()
+        .expect("the example names the pack's version");
+    let ships = p
+        .ships
+        .clone()
+        .expect("the example names the version it ships as");
+    assert!(
+        nils_pack::engines::newer(&ships, &version),
+        "the example ships as {ships}, which is not newer than {version}"
+    );
     let kinds: std::collections::BTreeSet<&str> =
         p.operations.iter().map(|o| o.kind.as_str()).collect();
     assert!(kinds.len() >= 7, "the example shows most kinds: {kinds:?}");
-    let mri = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packs/mri");
-    let patched = nils_pack::patch::apply(&mri, &p, &|_| true).unwrap_or_else(|e| panic!("{e}"));
+    // a copy, removed however the test ends
+    struct Copy(std::path::PathBuf);
+    impl Drop for Copy {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let mri = Copy(mri_copy("patch-example"));
+    let manifest = mri.0.join("pack.yml");
+    let text = std::fs::read_to_string(&manifest).unwrap();
+    let shipped = common::shipped_mri_version();
+    std::fs::write(
+        &manifest,
+        text.replacen(
+            &format!("version: {shipped}"),
+            &format!("version: {version}"),
+            1,
+        ),
+    )
+    .unwrap();
+    let copy = nils_pack::load(&mri.0, None).unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(
+        copy.version.to_string(),
+        version,
+        "the copy is at the example's version"
+    );
+    let patched = nils_pack::patch::apply(&mri.0, &p, &|_| true).unwrap_or_else(|e| panic!("{e}"));
     assert_eq!(patched.applied.len(), p.operations.len());
 }

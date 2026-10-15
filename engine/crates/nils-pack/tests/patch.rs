@@ -5,13 +5,15 @@
 //! wrote; one that cannot apply is refused with a plain why; a patched pack
 //! is written as a diff of the pack and loads from where it is written.
 
-use std::path::{Path, PathBuf};
+mod common;
+
+use std::path::PathBuf;
 
 use nils_pack::patch::{self, Patch};
 use nils_pack::{Evaluated, Stack};
 
 fn mri() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packs/mri")
+    common::shipped_mri()
 }
 
 fn patch_of(ops: &str) -> Patch {

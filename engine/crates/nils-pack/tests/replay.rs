@@ -7,16 +7,12 @@
 //! withheld; the session list of a packet exercises the session pass. Every
 //! packet is invented.
 
-use std::path::Path;
+mod common;
 
 use serde_json::{Value, json};
 
 fn mri() -> nils_pack::Pack {
-    nils_pack::load(
-        &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packs/mri"),
-        None,
-    )
-    .expect("the MRI pack loads")
+    nils_pack::load(&common::shipped_mri(), None).expect("the MRI pack loads")
 }
 
 /// A GE EPIMix block whose words do not say EPIMix, as 5 archive stacks were.

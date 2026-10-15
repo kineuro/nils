@@ -538,7 +538,7 @@ mod tests {
     use super::*;
 
     fn mri() -> Pack {
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packs/mri");
+        let dir = crate::shipped_mri();
         crate::load(&dir, None).expect("the MRI pack loads")
     }
 

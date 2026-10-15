@@ -5,13 +5,15 @@
 //! runs over the registry and a replay runs over packets; and pack contract
 //! 8's three additions refused where a pack gets them wrong.
 
+mod common;
+
 use std::path::{Path, PathBuf};
 
 use nils_pack::session::{InForce, Sib, decide};
 use nils_pack::stack::{Stack, Value};
 
 fn mri() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packs/mri")
+    common::shipped_mri()
 }
 
 fn stack(fields: &[(&str, &str)]) -> Stack {

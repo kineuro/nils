@@ -58,3 +58,10 @@ pub use verdict::{
     voters,
 };
 pub use version::Version;
+
+/// The MRI pack the repository ships, for the crate's own unit tests (the
+/// integration tests have the same in `tests/common`).
+#[cfg(test)]
+pub(crate) fn shipped_mri() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packs/mri")
+}

@@ -4,6 +4,8 @@
 //! SQLite home, `digest --dry-run` over a small tree, `--describe`, the exit
 //! codes.
 
+mod common;
+
 use std::io::Write as _;
 use std::process::{Command, Stdio};
 
@@ -1786,7 +1788,7 @@ fn pack_list_and_show_read_the_pack_directory() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|p| p["pack"] == "mri@1.2.0"),
+            .any(|p| p["pack"] == common::shipped_mri_id()),
         "{listed}"
     );
 
