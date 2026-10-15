@@ -4186,6 +4186,16 @@ fn overlay_command(home: &Home, command: OverlayCommand) -> Result<(), Exit> {
             let retired = rule_changes::in_one(&mut registry, |registry| {
                 let failed =
                     |e: nils_registry::store::Error| serve::Reply::error(500, e.to_string());
+                // another process (the server) may have decided it since it
+                // was read: what was planned holds only if the overlay is
+                // still as it was, else nothing is written
+                let now = nils_registry::overlay::show(registry.store(), id).map_err(failed)?;
+                if now.as_ref().map(|n| n.status.as_str()) != Some(o.status.as_str()) {
+                    return Err(serve::Reply::error(
+                        409,
+                        format!("overlay {id} was decided meanwhile; look at it and refuse again"),
+                    ));
+                }
                 nils_registry::overlay::decide(
                     registry.store(),
                     id,
@@ -4220,7 +4230,38 @@ fn overlay_command(home: &Home, command: OverlayCommand) -> Result<(), Exit> {
                             format!("the re-sort could not be queued, so it is not withdrawn: {e}"),
                         )
                     })?;
-                    depends::invalidate(registry, closure, &reason, &by)?;
+                    let handles = depends::invalidate(registry, closure, &reason, &by)?;
+                    nils_registry::audit::record(
+                        registry,
+                        &nils_registry::audit::Entry {
+                            principal: &by,
+                            action: nils_registry::audit::Action::OverlayWithdraw,
+                            scope: serde_json::json!({"overlay": id, "scope": o.scope}),
+                            policy: None,
+                            job_id: Some(job),
+                            details: Some(serde_json::json!({
+                                "name": o.name, "version": o.version, "pack": o.pack,
+                                "closure": closure.counts(),
+                                "proposal": p.id,
+                                "why": why,
+                            })),
+                        },
+                    )
+                    .map_err(failed)?;
+                    if !handles.is_empty() {
+                        nils_registry::audit::record(
+                            registry,
+                            &nils_registry::audit::Entry {
+                                principal: &by,
+                                action: nils_registry::audit::Action::HandleInvalidate,
+                                scope: serde_json::json!({"overlay": id, "handles": handles.len()}),
+                                policy: None,
+                                job_id: Some(job),
+                                details: Some(serde_json::json!({"handles": handles})),
+                            },
+                        )
+                        .map_err(failed)?;
+                    }
                     return Ok((kept, Some(job)));
                 }
                 Ok((kept, None))

@@ -39,6 +39,9 @@ pub enum Action {
     /// adopted, which queues the reclassify that changes judgements.
     OverlayPropose,
     OverlayAdopt,
+    /// An adopted overlay withdrawn (`nils overlay refuse`): its scoped
+    /// change retired, which changes what the sort answers.
+    OverlayWithdraw,
     /// Record 56: a rule change proposed with its effect report, adopted
     /// by a person (a pack's next version, or a scoped change) or rejected.
     RulesPropose,
@@ -195,6 +198,7 @@ impl Action {
             Action::Backup => "backup",
             Action::OverlayPropose => "overlay.propose",
             Action::OverlayAdopt => "overlay.adopt",
+            Action::OverlayWithdraw => "overlay.withdraw",
             Action::RulesPropose => "rules.propose",
             Action::RulesAdopt => "rules.adopt",
             Action::RulesReject => "rules.reject",

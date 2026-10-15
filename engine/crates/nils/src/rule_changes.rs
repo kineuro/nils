@@ -1720,6 +1720,24 @@ pub(crate) fn decide_door(
                     format!("proposal {id} was decided already"),
                 ));
             }
+            // the proposal an overlay is rejects the overlay with it, or the
+            // next adopt would rehearse and adopt what a person turned down
+            if rp::made_of_overlay(&p)
+                && let Some(oid) = p.evidence["overlay"].as_i64()
+            {
+                let o = nils_registry::overlay::show(registry.store(), oid).map_err(failed)?;
+                if o.is_some_and(|o| o.status == nils_registry::overlay::PROPOSED) {
+                    nils_registry::overlay::decide(
+                        registry.store(),
+                        oid,
+                        nils_registry::overlay::REFUSED,
+                        principal,
+                        None,
+                        why,
+                    )
+                    .map_err(failed)?;
+                }
+            }
             nils_registry::audit::record(
                 registry,
                 &nils_registry::audit::Entry {
@@ -1959,6 +1977,20 @@ pub(crate) fn decide_door(
                         invalidated.push(h);
                     }
                 }
+            }
+            if !invalidated.is_empty() {
+                nils_registry::audit::record(
+                    registry,
+                    &nils_registry::audit::Entry {
+                        principal,
+                        action: nils_registry::audit::Action::HandleInvalidate,
+                        scope: json!({"overlay": o.id, "handles": invalidated.len()}),
+                        policy: None,
+                        job_id: Some(job),
+                        details: Some(json!({"handles": invalidated})),
+                    },
+                )
+                .map_err(failed)?;
             }
             for x in older {
                 let why = format!("the overlay {} {} was adopted after it", o.name, o.version);

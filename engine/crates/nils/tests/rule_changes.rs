@@ -1394,6 +1394,40 @@ fn round(pg: Option<(String, String)>) {
         "retired"
     );
     assert_eq!(jobs(&mut store, &format!("withdraw overlay {gate}")), 1);
+    // the withdrawal is audited, in the transaction that made it
+    let audited = home.ok(&["audit", "list", "--action", "overlay.withdraw", "--json"]);
+    assert!(
+        audited.contains("\"overlay.withdraw\"") && audited.contains("gate words"),
+        "{audited}"
+    );
+
+    // rejecting the proposal an overlay is refuses the overlay with it, so
+    // the next adopt cannot rehearse and adopt what a person turned down
+    let (status, proposed) = server.call(
+        "POST",
+        "/api/overlays",
+        Some(
+            json!({"name": "reject words", "overlay": fresh("reject-words", alpha_batch, "zzf5"),
+                    "scope": format!("batch:{alpha_batch}")}),
+        ),
+        REV,
+    );
+    assert_eq!(status, 201, "{proposed}");
+    let turned = proposed["overlay"]["id"].as_i64().unwrap();
+    let turned_p = proposed["proposal"].as_i64().unwrap();
+    let (status, doc) = server.call(
+        "POST",
+        &format!("/api/packs/mri/proposals/{turned_p}/decide"),
+        Some(json!({"decision": "reject", "why": "no"})),
+        OPS,
+    );
+    assert_eq!(status, 200, "{doc}");
+    assert_eq!(
+        server.get(&format!("/api/overlays/{turned}"), REV)["status"],
+        "refused"
+    );
+    let (status, _) = server.call("POST", &format!("/api/overlays/{turned}/adopt"), None, OPS);
+    assert_eq!(status, 409);
 
     drop(server);
 }

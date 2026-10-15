@@ -1135,7 +1135,7 @@ fn audit_produced(action: &str, scope: &Value) -> Value {
             Some(c) => produced("cohort", c),
             None => json!({ "kind": "cohort", "name": scope["cohort"] }),
         },
-        "overlay.adopt" | "overlay.propose" => scope["overlay"]
+        "overlay.adopt" | "overlay.propose" | "overlay.withdraw" => scope["overlay"]
             .as_i64()
             .map_or(Value::Null, |o| produced("overlay", o)),
         "decision" => scope["decision"]
