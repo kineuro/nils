@@ -501,17 +501,17 @@ pub fn chosen(store: &mut Store) -> Result<Option<model::Chosen>, StoreError> {
 }
 
 /// Whether System 1 is confirmed (record 56 section 3, record 55 D2): a
-/// recorded certificate names the model. Until then its gate on flagged
-/// datasets raises nothing, and Review shows its opinion as not yet
-/// confirmed.
+/// recorded certificate names the model, on a sample sealed here or citing
+/// its graded run (record 55 ruling 22 b). Until then its gate on flagged
+/// datasets raises nothing and stages nothing, and Review shows its opinion
+/// as not yet confirmed.
 pub fn confirmed(store: &mut Store, model_id: i64) -> Result<Option<i64>, StoreError> {
-    let certs = crate::labels::certificates(store).map_err(|e| match e {
-        crate::labels::Error::Store(s) => s,
-        other => StoreError::Message(other.to_string()),
-    })?;
-    Ok(certs
-        .iter()
-        .find(|c| c.model_ids.contains(&model_id))
+    Ok(crate::labels::certified(store)
+        .map_err(|e| match e {
+            crate::labels::Error::Store(s) => s,
+            other => StoreError::Message(other.to_string()),
+        })?
+        .get(&model_id)
         .map(|c| c.id))
 }
 

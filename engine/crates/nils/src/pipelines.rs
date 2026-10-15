@@ -5467,7 +5467,13 @@ fn execute_run(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Resul
     // record 56 section 3: a run that gave System 1's opinions runs the
     // gate over its stacks of datasets flagged as having damaged headers
     if !x.descriptor.opinions.is_empty() && matches!(ended.0, "done" | "partial") {
-        ended.1["gate"] = crate::review_rule::after_opinions(home, registry, x.stacks, x.who);
+        ended.1["gate"] = crate::review_rule::after_opinions(
+            home,
+            registry,
+            x.stacks,
+            x.who,
+            x.args.pack_dir.as_deref(),
+        );
     }
     // record 55 E3: what the cascade deferred goes to the full pipeline
     if x.pipeline.name == crate::operations::POST_CONTRAST_PIPELINE

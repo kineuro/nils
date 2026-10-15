@@ -2024,18 +2024,19 @@ pub(crate) fn route(
                 let list = labels::certificates(registry.store()).map_err(labels_err)?;
                 Ok(Reply::ok(json!({
                     "count": list.len(),
-                    "certificates": list.iter().map(labels::Certificate::as_json).collect::<Vec<_>>(),
+                    "certificates": list
+                        .iter()
+                        .map(|c| {
+                            let mut v = c.as_json();
+                            v["words"] = json!(c.words());
+                            v
+                        })
+                        .collect::<Vec<_>>(),
                 })))
             }
             ["api", "certificates"] if post => {
                 person_only(doors, caller, "recording a certificate")?;
                 let doc = json_body(body)?;
-                let sample = doc["sample"].as_str().ok_or_else(|| {
-                    Reply::error(
-                        400,
-                        "sample: the sealed sample it measured, as nils labels seal named it",
-                    )
-                })?;
                 let mut ids = Vec::new();
                 for m in doc["models"].as_array().into_iter().flatten() {
                     let reference = match m {
@@ -2049,16 +2050,42 @@ pub(crate) fn route(
                         })?;
                     ids.push(found.id);
                 }
-                let cert = labels::record_certificate(
-                    registry,
-                    sample,
-                    &ids,
-                    &doc["result"],
-                    principal,
-                    kind_of(caller),
-                )
+                // record 55 ruling 22 (b): a certificate measures a sample
+                // sealed here, or cites the graded run that measured it
+                let cert = match (doc["sample"].as_str(), &doc["evidence"]) {
+                    (Some(sample), Value::Null) => labels::record_certificate(
+                        registry,
+                        sample,
+                        &ids,
+                        &doc["result"],
+                        principal,
+                        kind_of(caller),
+                    ),
+                    (None, Value::Null) => {
+                        return Err(Reply::error(
+                            400,
+                            "sample: the sealed sample it measured, as nils labels seal named it; or evidence: the graded run it cites",
+                        ));
+                    }
+                    (None, evidence) => labels::record_cited_certificate(
+                        registry,
+                        &ids,
+                        evidence,
+                        &doc["result"],
+                        principal,
+                        kind_of(caller),
+                    ),
+                    (Some(_), _) => {
+                        return Err(Reply::error(
+                            400,
+                            "a certificate measures a sample sealed here or cites its graded run, not both",
+                        ));
+                    }
+                }
                 .map_err(labels_err)?;
-                Ok(Reply::created(cert.as_json()))
+                let mut v = cert.as_json();
+                v["words"] = json!(cert.words());
+                Ok(Reply::created(v))
             }
             ["api", "certificates", id, "unseal"] if post => {
                 person_only(doors, caller, "unsealing a certified sample")?;
@@ -6168,7 +6195,7 @@ pub(crate) fn labels_command(home: &Home, cmd: LabelsCommand) -> Result<(), Exit
         // record 48 R2: two people are told apart by the identity the
         // engine verified at its door, never by a local user name
         LabelsCommand::Certificate { .. } => Err(usage(
-            "a certificate is recorded at the engine's door by a person's token, POST /api/certificates, so the two people of a certificate are told apart by a verified identity",
+            "a certificate is recorded at the engine's door by a person's token, POST /api/certificates, so the two people of a certificate are told apart by a verified identity; one that cites its graded run is recorded there too, or with nils model certify --server",
         )),
         LabelsCommand::Certificates { json } => {
             let mut registry = crate::open(home)?;
@@ -6185,20 +6212,27 @@ pub(crate) fn labels_command(home: &Home, cmd: LabelsCommand) -> Result<(), Exit
                 println!("no certificates");
             }
             for c in &list {
+                let models = c
+                    .model_ids
+                    .iter()
+                    .map(i64::to_string)
+                    .collect::<Vec<_>>()
+                    .join(",");
+                // record 55 ruling 22 (b): one that cites its graded run
+                // holds no sample here
+                if c.cites_evidence() {
+                    println!(
+                        "  {:>4}  {:<28} model(s) {:<10} cites its graded run  {}",
+                        c.id, c.sample, models, c.created_at
+                    );
+                    println!("        {}", c.words());
+                    continue;
+                }
                 let (sealed, unsealed) =
                     labels::sample_counts(registry.store(), &c.sample).map_err(lerr)?;
                 println!(
                     "  {:>4}  {:<28} model(s) {:<10} {} sealed, {} unsealed  {}",
-                    c.id,
-                    c.sample,
-                    c.model_ids
-                        .iter()
-                        .map(i64::to_string)
-                        .collect::<Vec<_>>()
-                        .join(","),
-                    sealed,
-                    unsealed,
-                    c.created_at
+                    c.id, c.sample, models, sealed, unsealed, c.created_at
                 );
             }
             Ok(())

@@ -25,6 +25,13 @@
 //! `labels.tsv` ([`outside_canonical`]), like a set the engine wrote, and a
 //! set any row of which is of a sample sealed now is refused
 //! ([`outside_sealed`]). A card's `trained_on` may then name it.
+//!
+//! Record 55 ruling 22 (b): a certificate may cite its graded run instead of
+//! a sample sealed in the same registry ([`record_cited_certificate`]): the
+//! run and its manifest's sha256, the graded result (its bar, its counts and
+//! the exact bound the engine works out again from them), the commit that
+//! registered the plan, and the artifact digest of the one model it graded.
+//! It unseals nothing, so it is one person's act; the audit keeps it.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -1817,7 +1824,9 @@ pub fn drop_not_blind(store: &mut Store, labels: Vec<Label>) -> Result<(Vec<Labe
 
 // ------------------------------------------------------ the certificates
 
-/// Record 48 R2: what a certification measured on a sealed sample.
+/// Record 48 R2: what a certification measured on a sealed sample. Record
+/// 55 ruling 22 (b): or what a graded run measured, which the certificate
+/// cites instead (`evidence`); its `sample` is then `evidence:<run>`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Certificate {
     pub id: i64,
@@ -1826,14 +1835,83 @@ pub struct Certificate {
     pub result: Value,
     pub created_by: String,
     pub created_at: String,
+    /// The graded run it cites (`run`, `manifest_sha256`, `plan_commit`,
+    /// `model_digest`, and `plan` and `equivalence` where given); none for
+    /// a certificate on a sample sealed here.
+    pub evidence: Option<Value>,
 }
 
 impl Certificate {
+    /// Whether it cites a graded run rather than a sample sealed here.
+    pub fn cites_evidence(&self) -> bool {
+        self.evidence.is_some()
+    }
+
     pub fn as_json(&self) -> Value {
         json!({
             "id": self.id, "sample": self.sample, "model_ids": self.model_ids,
             "result": self.result, "created_by": self.created_by, "created_at": self.created_at,
+            "cites": if self.cites_evidence() { "evidence" } else { "sample" },
+            "evidence": self.evidence,
+            "unseals": !self.cites_evidence(),
         })
+    }
+
+    /// What it certified, in a line: the graded run and its numbers, or
+    /// the sealed sample and its counts.
+    pub fn words(&self) -> String {
+        let r = &self.result;
+        match &self.evidence {
+            Some(e) => format!(
+                "certificate {} cites the graded run {} (manifest {}, plan {}): {} of {} wrong, bound {} at bar {}",
+                self.id,
+                e["run"].as_str().unwrap_or("?"),
+                short_hash(e["manifest_sha256"].as_str().unwrap_or("")),
+                e["plan_commit"]
+                    .as_str()
+                    .map(|c| &c[..c.len().min(12)])
+                    .unwrap_or("?"),
+                r["errors"],
+                r["n"],
+                percent(r["bound"].as_f64()),
+                percent(r["bar"].as_f64()),
+            ),
+            None => format!(
+                "certificate {} on the sealed sample {}: {} of {} wrong, risk {}",
+                self.id,
+                self.sample,
+                r["errors"],
+                r["n"],
+                percent(r["risk"].as_f64()),
+            ),
+        }
+    }
+}
+
+/// A digest shortened for a line: `sha256:` and twelve hex digits.
+fn short_hash(digest: &str) -> String {
+    let hex = digest.strip_prefix("sha256:").unwrap_or(digest);
+    format!("sha256:{}", &hex[..hex.len().min(12)])
+}
+
+/// A share as a percentage for a line: a decimal for a tenth of a
+/// percent or more, three below, and no trailing zeros (1 %, 0.087 %).
+fn percent(share: Option<f64>) -> String {
+    match share {
+        None => "?".into(),
+        Some(s) => {
+            let p = s * 100.0;
+            let digits = if p >= 10.0 {
+                1
+            } else if p >= 1.0 {
+                2
+            } else {
+                3
+            };
+            let text = format!("{p:.digits$}");
+            let text = text.trim_end_matches('0').trim_end_matches('.');
+            format!("{text} %")
+        }
     }
 }
 
@@ -1851,6 +1929,10 @@ fn certificate_of(r: &Row) -> Result<Certificate, StoreError> {
             .unwrap_or(Value::Null),
         created_by: r.text(4)?.to_string(),
         created_at: r.text(5)?.to_string(),
+        evidence: r
+            .opt_text(6)?
+            .and_then(|t| serde_json::from_str::<Value>(t).ok())
+            .filter(Value::is_object),
     })
 }
 
@@ -1864,6 +1946,7 @@ fn select_certificates(store: &Store) -> String {
         "result",
         "created_by",
         "created_at",
+        "evidence",
     ]
     .iter()
     .map(|c| d.text_of(t.column(c).expect("a certificate column")))
@@ -1896,6 +1979,18 @@ pub fn certificates(store: &mut Store) -> Result<Vec<Certificate>, Error> {
         .iter()
         .map(certificate_of)
         .collect::<Result<_, _>>()?)
+}
+
+/// The newest certificate naming each model, by model id: what a model's
+/// card shows as its certificate, and what confirms System 1.
+pub fn certified(store: &mut Store) -> Result<BTreeMap<i64, Certificate>, Error> {
+    let mut out: BTreeMap<i64, Certificate> = BTreeMap::new();
+    for c in certificates(store)? {
+        for id in &c.model_ids {
+            out.entry(*id).or_insert_with(|| c.clone());
+        }
+    }
+    Ok(out)
 }
 
 /// The samples sealed under a name, with how many of their stacks are
@@ -2056,6 +2151,385 @@ pub fn record_certificate(
         .ok_or_else(|| Error::NotFound(format!("no certificate {id}")))
 }
 
+/// Record 55 ruling 22 (b): the name a certificate that cites its graded
+/// run takes in place of a sealed sample's, `evidence:<run>`. No seal takes
+/// it: a seal names `selection:NAME@V` or `handle:ID`.
+pub const EVIDENCE: &str = "evidence:";
+
+/// The bound a certificate that cites a graded run is held to, which the
+/// engine works out again from the run's counts.
+pub const BOUND_METHOD: &str = "exact one-sided Clopper-Pearson";
+
+/// How far a stated bound may sit from the one the counts give.
+pub const BOUND_TOLERANCE: f64 = 1e-6;
+
+/// The confidence of the bound where the result names none.
+pub const BOUND_CONFIDENCE: f64 = 0.95;
+
+/// The members a cited graded result may hold.
+const CITED_RESULT: [&str; 8] = [
+    "bar",
+    "n",
+    "errors",
+    "bound",
+    "confidence",
+    "coverage",
+    "test",
+    "claim",
+];
+
+/// The members a citation may hold.
+const CITATION: [&str; 6] = [
+    "run",
+    "manifest_sha256",
+    "plan_commit",
+    "plan",
+    "model_digest",
+    "equivalence",
+];
+
+/// An evidence run's name, as the evidence archive names its folders.
+fn run_name_ok(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars.next().is_some_and(|c| c.is_ascii_alphanumeric())
+        && name.len() <= 128
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+}
+
+/// A manifest's sha256, as `sha256:` and 64 lowercase hex digits; the
+/// prefix may be left out and the digits given in upper case.
+fn manifest_hash(text: &str) -> Option<String> {
+    let text = text.trim().to_ascii_lowercase();
+    let hex = text.strip_prefix("sha256:").unwrap_or(&text);
+    (hex.len() == 64 && hex.chars().all(|c| c.is_ascii_hexdigit())).then(|| format!("sha256:{hex}"))
+}
+
+/// A git commit, abbreviated to at least seven hex digits or whole.
+fn commit_ok(text: &str) -> Option<String> {
+    let c = text.trim().to_ascii_lowercase();
+    ((7..=40).contains(&c.len()) && c.chars().all(|x| x.is_ascii_hexdigit())).then_some(c)
+}
+
+/// The citation of a graded run as it is kept: refused unless it names the
+/// run, its manifest's sha256, the plan's commit and the model's artifact
+/// digest, each as it is written.
+pub fn citation(evidence: &Value) -> Result<Value, Error> {
+    let doc = evidence.as_object().ok_or_else(|| {
+        Error::Invalid(
+            "evidence: the graded run a certificate cites, {run, manifest_sha256, plan_commit, model_digest}".into(),
+        )
+    })?;
+    if let Some(k) = doc.keys().find(|k| !CITATION.contains(&k.as_str())) {
+        return Err(Error::Invalid(format!(
+            "evidence.{k} is not part of a citation, which names {}",
+            CITATION.join(", ")
+        )));
+    }
+    let run = doc
+        .get("run")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|r| run_name_ok(r))
+        .ok_or_else(|| {
+            Error::Invalid(
+                "evidence.run: the evidence run's name, letters, digits, '.', '-' and '_'".into(),
+            )
+        })?;
+    let manifest = doc
+        .get("manifest_sha256")
+        .and_then(Value::as_str)
+        .and_then(manifest_hash)
+        .ok_or_else(|| {
+            Error::Invalid(
+                "evidence.manifest_sha256: the sha256 of the run's MANIFEST.json, sha256:<64 hex>"
+                    .into(),
+            )
+        })?;
+    let commit = doc
+        .get("plan_commit")
+        .and_then(Value::as_str)
+        .and_then(commit_ok)
+        .ok_or_else(|| {
+            Error::Invalid(
+                "evidence.plan_commit: the commit that registered the plan before the run was drawn, 7 to 40 hex digits".into(),
+            )
+        })?;
+    let digest = doc
+        .get("model_digest")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|d| crate::model::is_digest(d))
+        .ok_or_else(|| {
+            Error::Invalid(
+                "evidence.model_digest: the artifact digest of the model the run graded, sha256:<64 hex>".into(),
+            )
+        })?;
+    let plan = match doc.get("plan") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(p)) if !p.trim().is_empty() && p.len() <= 500 => Some(p.trim()),
+        Some(_) => {
+            return Err(Error::Invalid(
+                "evidence.plan: where the plan is written, in a few words".into(),
+            ));
+        }
+    };
+    let equivalence = match doc.get("equivalence") {
+        None | Some(Value::Null) => Value::Null,
+        Some(e) => {
+            let run = e["run"].as_str().map(str::trim).filter(|r| run_name_ok(r));
+            let manifest = e["manifest_sha256"].as_str().and_then(manifest_hash);
+            let class = e["class"]
+                .as_str()
+                .filter(|c| crate::model::class_rank(c).is_some());
+            match (run, manifest, class) {
+                (Some(run), Some(manifest), Some(class))
+                    if e.as_object().is_some_and(|o| o.len() == 3) =>
+                {
+                    json!({"run": run, "manifest_sha256": manifest, "class": class})
+                }
+                _ => {
+                    return Err(Error::Invalid(
+                        "evidence.equivalence: the run that showed the artifact registered here answers as the graded one did, {run, manifest_sha256, class: I, II or III}".into(),
+                    ));
+                }
+            }
+        }
+    };
+    let mut out = json!({
+        "run": run, "manifest_sha256": manifest, "plan_commit": commit, "model_digest": digest,
+    });
+    if let Some(p) = plan {
+        out["plan"] = json!(p);
+    }
+    if !equivalence.is_null() {
+        out["equivalence"] = equivalence;
+    }
+    Ok(out)
+}
+
+/// A graded result as a certificate that cites its run keeps it: the bar,
+/// the stacks graded and how many were wrong, the confidence, and the
+/// exact bound the counts give, which a stated bound must match. Refused
+/// for a result that misses its bar: a run that failed certifies nothing.
+pub fn graded(result: &Value) -> Result<Value, Error> {
+    let doc = result.as_object().ok_or_else(|| {
+        Error::Invalid(
+            "result: what the graded run measured, {bar, n, errors}, with bound, confidence, coverage, test and claim where known".into(),
+        )
+    })?;
+    if let Some(k) = doc.keys().find(|k| !CITED_RESULT.contains(&k.as_str())) {
+        return Err(Error::Invalid(format!(
+            "result.{k} is not part of a graded result, which names {}",
+            CITED_RESULT.join(", ")
+        )));
+    }
+    let share = |k: &str| doc.get(k).and_then(Value::as_f64);
+    let bar = share("bar")
+        .filter(|b| *b > 0.0 && *b < 1.0)
+        .ok_or_else(|| {
+            Error::Invalid(
+                "result.bar: the most wrong the plan allowed, a share between 0 and 1".into(),
+            )
+        })?;
+    let n = doc
+        .get("n")
+        .and_then(Value::as_i64)
+        .filter(|n| *n > 0)
+        .ok_or_else(|| Error::Invalid("result.n: how many stacks the run graded".into()))?;
+    let errors = doc
+        .get("errors")
+        .and_then(Value::as_i64)
+        .filter(|e| (0..=n).contains(e))
+        .ok_or_else(|| {
+            Error::Invalid("result.errors: how many of those were wrong, from 0 to n".into())
+        })?;
+    let confidence = match doc.get("confidence") {
+        None | Some(Value::Null) => BOUND_CONFIDENCE,
+        Some(c) => c.as_f64().filter(|c| *c > 0.5 && *c < 1.0).ok_or_else(|| {
+            Error::Invalid("result.confidence: the bound's confidence, such as 0.95".into())
+        })?,
+    };
+    let bound = crate::audit_draw::clopper_pearson_upper(errors as u64, n as u64, confidence);
+    if let Some(stated) = doc.get("bound").filter(|b| !b.is_null()) {
+        let stated = stated.as_f64().ok_or_else(|| {
+            Error::Invalid("result.bound: the bound the run reported, a share".into())
+        })?;
+        if (stated - bound).abs() > BOUND_TOLERANCE {
+            return Err(Error::Invalid(format!(
+                "result.bound is {stated}, and {errors} wrong of {n} gives {bound:.10} by the {BOUND_METHOD} bound at {confidence}; the bound is worked out from the counts"
+            )));
+        }
+    }
+    if bound > bar {
+        return Err(Error::Refused(format!(
+            "{errors} wrong of {n} gives a bound of {bound:.6} at {confidence}, above the bar {bar}: a run that missed its bar certifies nothing"
+        )));
+    }
+    let mut out = json!({
+        "bar": bar, "n": n, "errors": errors, "confidence": confidence,
+        "bound": bound, "method": BOUND_METHOD, "passes": true,
+    });
+    match doc.get("coverage") {
+        None | Some(Value::Null) => {}
+        Some(c) => {
+            let c = c
+                .as_f64()
+                .filter(|c| (0.0..=1.0).contains(c))
+                .ok_or_else(|| {
+                    Error::Invalid(
+                        "result.coverage: the share of stacks the model accepted, from 0 to 1"
+                            .into(),
+                    )
+                })?;
+            out["coverage"] = json!(c);
+        }
+    }
+    for (k, most) in [("test", 64usize), ("claim", 500)] {
+        match doc.get(k) {
+            None | Some(Value::Null) => {}
+            Some(Value::String(t)) if !t.trim().is_empty() && t.len() <= most => {
+                out[k] = json!(t.trim());
+            }
+            Some(_) => {
+                return Err(Error::Invalid(format!(
+                    "result.{k}: words, at most {most} characters"
+                )));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Record 55 ruling 22 (b): record a certificate that cites its graded run
+/// instead of a sample sealed in this registry. It certifies the one
+/// registered model whose artifact digest the citation names (`model_ids`,
+/// where given, must name that model and no other), and it keeps the run,
+/// its manifest's sha256, the plan's commit and the result as [`graded`]
+/// holds it. A person's act: it unseals nothing, so no second person is
+/// needed, and the audit keeps it as `labels.certificate`. Refused for an
+/// agent or a model, for a result that missed its bar, and for a run this
+/// model already has a certificate citing.
+pub fn record_cited_certificate(
+    registry: &mut Registry,
+    model_ids: &[i64],
+    evidence: &Value,
+    result: &Value,
+    who: &str,
+    author_kind: &str,
+) -> Result<Certificate, Error> {
+    if author_kind != "person" {
+        return Err(Error::Refused(format!(
+            "a certificate is a person's act, and {who} acts as {}",
+            crate::a_or_an(author_kind)
+        )));
+    }
+    let evidence = citation(evidence)?;
+    let result = graded(result)?;
+    let run = evidence["run"].as_str().unwrap_or_default().to_string();
+    let digest = evidence["model_digest"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    let store = registry.store();
+    let m = crate::model::resolve(store, &digest)?.ok_or_else(|| {
+            Error::NotFound(format!(
+                "no registered model has the artifact digest {digest}: register the model the run graded first"
+            ))
+        })?;
+    if !model_ids.is_empty() && model_ids != [m.id] {
+        return Err(Error::Invalid(format!(
+            "a certificate citing a graded run certifies the one model whose artifact the run graded: evidence.model_digest names model {} ({}), and models names {}",
+            m.id,
+            m.label(),
+            model_ids
+                .iter()
+                .map(i64::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )));
+    }
+    let sample = format!("{EVIDENCE}{run}");
+    let already = |store: &mut Store| -> Result<Option<i64>, Error> {
+        let d = store.dialect();
+        let sql = format!(
+            "SELECT id FROM {} WHERE model_id IS NOT NULL AND sample = {} AND model_id = {} \
+             ORDER BY id LIMIT 1",
+            store.qualified("certificate"),
+            d.param(1, Type::Text),
+            d.param(2, Type::Int),
+        );
+        Ok(store
+            .query_opt(&sql, &[Param::from(sample.as_str()), Param::Int(m.id)])?
+            .map(|r| r.int(0))
+            .transpose()?)
+    };
+    let twice = |id: i64| {
+        Error::Refused(format!(
+            "certificate {id} already cites the graded run {run} for {}",
+            m.label()
+        ))
+    };
+    if let Some(id) = already(store)? {
+        return Err(twice(id));
+    }
+    let now = now_iso();
+    let written = store.insert(
+        &Insert::new(
+            table("certificate"),
+            &[
+                "sample",
+                "model_ids",
+                "result",
+                "created_by",
+                "created_at",
+                "evidence",
+                "model_id",
+            ],
+        )
+        .returning(&["id"]),
+        &[vec![
+            Param::from(sample.as_str()),
+            Param::from(json!([m.id]).to_string()),
+            Param::from(result.to_string()),
+            Param::from(who),
+            Param::from(now.as_str()),
+            Param::from(evidence.to_string()),
+            Param::Int(m.id),
+        ]],
+    );
+    // the unique key holds against one recorded beside this one
+    let rows = match written {
+        Ok(rows) => rows,
+        Err(e) => {
+            return Err(match already(store)? {
+                Some(id) => twice(id),
+                None => Error::Store(e),
+            });
+        }
+    };
+    let id = rows
+        .first()
+        .ok_or_else(|| StoreError::Message("the certificate was not written back".into()))?
+        .int(0)?;
+    audit::record(
+        registry,
+        &Entry {
+            principal: who,
+            action: Action::LabelsCertificate,
+            scope: json!({"certificate": id, "evidence": run, "models": [m.id]}),
+            policy: None,
+            job_id: None,
+            details: Some(json!({
+                "evidence": evidence, "result": result, "model": m.named(),
+                "unseals": false,
+                "second_person": "none: a certificate citing its graded run unseals nothing",
+            })),
+        },
+    )?;
+    certificate(registry.store(), id)?
+        .ok_or_else(|| Error::NotFound(format!("no certificate {id}")))
+}
+
 /// What an unseal did.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Unsealed {
@@ -2142,6 +2616,14 @@ pub fn unseal(
             "no certificate {certificate_id}: a sealed sample is unsealed only once the certificate it was drawn for is recorded"
         ))
     })?;
+    // record 55 ruling 22 (b): a certificate citing its graded run names
+    // no sample sealed here
+    if let Some(e) = &cert.evidence {
+        return Err(Error::Refused(format!(
+            "certificate {certificate_id} cites the graded run {} and no sample sealed here: it unseals nothing",
+            e["run"].as_str().unwrap_or("?")
+        )));
+    }
     if cert.created_by == who {
         return Err(Error::Refused(format!(
             "{who} recorded certificate {certificate_id}; another person unseals its sample"

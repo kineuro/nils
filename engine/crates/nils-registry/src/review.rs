@@ -362,19 +362,15 @@ fn resolve_scope(store: &mut Store, scope: &str, stack: i64) -> Result<(String, 
                 store.qualified("stack_fingerprint"),
                 d.param(1, Type::Int)
             );
-            let made_by = store
+            let key = store
                 .query_opt(&sql, &[Param::Int(stack)])?
-                .and_then(|r| r.opt_text(0).ok().flatten().map(str::to_string))
-                .filter(|m| !m.is_empty())
+                .and_then(|r| r.opt_text(0).ok().flatten().and_then(origin_key))
                 .ok_or_else(|| {
                     refused(format!(
                         "stack {stack} names no manufacturer, so there is no origin to decide about"
                     ))
                 })?;
-            Ok((
-                "origin".to_string(),
-                format!("manufacturer={}", made_by.to_lowercase()),
-            ))
+            Ok(("origin".to_string(), key))
         }
         other => Err(refused(format!(
             "{other} is not a scope: stack, series, subject or origin"
@@ -406,6 +402,144 @@ pub fn apply(registry: &mut Registry, a: &Apply<'_>) -> Result<Applied, Error> {
 /// rolls back and re-reads the registry's epoch.
 pub fn apply_within(registry: &mut Registry, a: &Apply<'_>) -> Result<Applied, Error> {
     apply_as(registry, a, None, None)
+}
+
+/// The origin key a stack's manufacturer gives, as a decision at origin
+/// scope names it: one rule for writing a decision and for finding what
+/// reaches a stack.
+pub fn origin_key(made_by: &str) -> Option<String> {
+    (!made_by.trim().is_empty()).then(|| format!("manufacturer={}", made_by.to_lowercase()))
+}
+
+/// A review item's group key, where it has one.
+fn item_group_key(store: &mut Store, id: i64) -> Result<Option<String>, Error> {
+    let sql = format!(
+        "SELECT group_key FROM {} WHERE id = {}",
+        store.qualified("review_item"),
+        store.dialect().param(1, Type::Int)
+    );
+    Ok(store
+        .query_opt(&sql, &[Param::Int(id)])?
+        .and_then(|r| r.opt_text(0).ok().flatten().map(str::to_string)))
+}
+
+/// The keys wider than the stack itself that a decision reaches it by:
+/// its series, its subject, its origin and the groups holding it, by stack.
+pub fn keys_reaching(
+    store: &mut Store,
+    stacks: &[i64],
+) -> Result<BTreeMap<i64, Vec<(String, String)>>, Error> {
+    let mut out: BTreeMap<i64, Vec<(String, String)>> = BTreeMap::new();
+    for chunk in stacks.chunks(500) {
+        if chunk.is_empty() {
+            continue;
+        }
+        let list = id_list(chunk);
+        let sql = format!(
+            "SELECT k.id, k.series_id, r.subject_id, f.manufacturer FROM {} k JOIN {} r ON r.id = k.series_id \
+             LEFT JOIN {} f ON f.stack_id = k.id WHERE k.id IN ({list})",
+            store.qualified("stack"),
+            store.qualified("series"),
+            store.qualified("stack_fingerprint"),
+        );
+        for r in store.query(&sql, &[])? {
+            let e = out.entry(r.int(0)?).or_default();
+            e.push(("series".into(), r.int(1)?.to_string()));
+            if let Some(subject) = r.opt_int(2)? {
+                e.push(("subject".into(), subject.to_string()));
+            }
+            if let Some(key) = r.opt_text(3)?.and_then(origin_key) {
+                e.push(("origin".into(), key));
+            }
+        }
+        let sql = format!(
+            "SELECT stack_id, item_id FROM {} WHERE stack_id IN ({list})",
+            store.qualified("review_member"),
+        );
+        for r in store.query(&sql, &[])? {
+            out.entry(r.int(0)?)
+                .or_default()
+                .push(("group".into(), r.int(1)?.to_string()));
+        }
+    }
+    Ok(out)
+}
+
+/// A decision in force that reaches a stack by a wider key: its axis, its
+/// author kind, who made it and where.
+pub type Wider = (String, String, String, String);
+
+/// The decisions in force on an axis that reach these stacks by a wider
+/// key than their own (see [`keys_reaching`]): by stack, each one's author
+/// kind, who made it and where.
+pub fn wider_decisions(
+    store: &mut Store,
+    stacks: &[i64],
+    axis: Option<&str>,
+) -> Result<BTreeMap<i64, Vec<Wider>>, Error> {
+    let keys = keys_reaching(store, stacks)?;
+    let mut by_key: BTreeMap<(String, String), Vec<i64>> = BTreeMap::new();
+    for (stack, ks) in &keys {
+        for k in ks {
+            by_key.entry(k.clone()).or_default().push(*stack);
+        }
+    }
+    let mut out: BTreeMap<i64, Vec<Wider>> = BTreeMap::new();
+    let refs: Vec<String> = by_key
+        .keys()
+        .map(|(_, r)| r.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let d = store.dialect();
+    for chunk in refs.chunks(500) {
+        let quoted = chunk
+            .iter()
+            .map(|r| format!("'{}'", r.replace('\'', "''")))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let by_axis = match axis {
+            Some(_) => format!(" AND axis = {}", d.param(1, Type::Text)),
+            None => String::new(),
+        };
+        let sql = format!(
+            "SELECT scope, ref, axis, author_kind, actor FROM {} WHERE scope IN ('series', 'subject', 'origin', 'group') \
+             AND ref IN ({quoted}) AND withdrawn_at IS NULL AND (staged_at IS NULL OR committed_at IS NOT NULL){by_axis}",
+            store.qualified("decision"),
+        );
+        let params: Vec<Param> = axis.map(Param::from).into_iter().collect();
+        for r in store.query(&sql, &params)? {
+            let key = (r.text(0)?.to_string(), r.text(1)?.to_string());
+            let Some(stacks) = by_key.get(&key) else {
+                continue;
+            };
+            let found = (
+                r.text(2)?.to_string(),
+                r.opt_text(3)?.unwrap_or("person").to_string(),
+                r.opt_text(4)?.unwrap_or("").to_string(),
+                format!("{} {}", key.0, key.1),
+            );
+            for s in stacks {
+                out.entry(*s).or_default().push(found.clone());
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// The decisions in force on one stack's axis at a wider key: author
+/// kind, who made it, and where.
+fn wider_in_force(
+    store: &mut Store,
+    stack: i64,
+    axis: &str,
+) -> Result<Vec<(String, String, String)>, Error> {
+    Ok(wider_decisions(store, &[stack], Some(axis))?
+        .remove(&stack)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(_, kind, by, at)| (kind, by, at))
+        .collect())
 }
 
 /// The scopes a check's decisions are written at (record 55 H3, section
@@ -600,9 +734,23 @@ fn apply_as(
                 ))
             })?,
     };
-    // A model answers the task it was registered for, and no other.
+    // A model answers the task it was registered for, and no other; System
+    // 1 (task `system1`) answers an axis its card's gate covers on the
+    // gate's own questions only, where its answer is staged for a person to
+    // confirm (record 55, ruling 20), never in a campaign or another queue.
+    let gate_answer = |store: &mut Store, m: &crate::model::Model| -> Result<bool, Error> {
+        if m.task != crate::opinion::TASK
+            || a.campaign.is_some()
+            || !crate::opinion::thresholds(m).contains_key(&axis)
+            || !crate::round::is_gate_kind(&it.kind, &axis)
+        {
+            return Ok(false);
+        }
+        Ok(item_group_key(store, it.id)?.is_some_and(|k| k.starts_with(crate::round::GATE_KEY)))
+    };
     if let Some(m) = &model
         && m.task != format!("axis:{axis}")
+        && !gate_answer(store, m)?
     {
         return Err(refused(format!(
             "model {} ({}) answers {}, and review item {} asks about the axis {axis}",
@@ -706,6 +854,22 @@ fn apply_as(
     }
     let now = now_iso();
     let d = store.dialect();
+    // C15 on a stack: a decision in force by a higher rank at a wider scope
+    // that reaches the stack (its series, its subject, its origin, a group
+    // holding it) is not overridden from below either
+    if scope == "stack"
+        && let Ok(stack) = reference.parse::<i64>()
+    {
+        for (held_kind, held_by, at) in wider_in_force(store, stack, &axis)? {
+            if rank(&held_kind) > rank(a.author.kind) {
+                return Err(refused(format!(
+                    "{axis} of stack {stack} was decided by {} ({held_by}) at {at}; {} does not override that (C15). Withdraw it first if it was wrong.",
+                    crate::a_or_an(&held_kind),
+                    crate::a_or_an(a.author.kind)
+                )));
+            }
+        }
+    }
     // C15: a person over an agent over a model. A decision in force on this
     // key by a higher rank is not overridden by a lower one; it is refused,
     // and the lower author is told who decided.
@@ -3407,5 +3571,18 @@ mod identity_items {
         assert_eq!(row.text(1).unwrap(), "anna@lab");
         assert!(row.text(2).unwrap().contains("sub-y"));
         assert_eq!(status_of(&mut store, other), "open");
+    }
+}
+
+#[cfg(test)]
+mod origin_tests {
+    #[test]
+    fn an_origin_key_is_the_manufacturer_lowercased_and_none_for_blank() {
+        assert_eq!(
+            super::origin_key("SIEMENS").as_deref(),
+            Some("manufacturer=siemens")
+        );
+        assert_eq!(super::origin_key(""), None);
+        assert_eq!(super::origin_key("   "), None);
     }
 }

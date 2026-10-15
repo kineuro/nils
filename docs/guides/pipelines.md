@@ -663,6 +663,8 @@ A sealed sample trains nothing until the certificate it was drawn for is recorde
 
 2. Another person unseals the sample with `POST /api/certificates/{id}/unseal`. The seal's rows stay, naming the certificate.
 
+A certificate may instead cite the graded run that measured the model, where the sample was never sealed in this registry (record 55, ruling 22 b). It names the run, the sha256 of its `MANIFEST.json`, the commit that registered the plan and the artifact digest of the model, with the graded result: `{models, evidence: {run, manifest_sha256, plan_commit, model_digest}, result: {bar, n, errors, bound}}`, or `nils model certify --server`. It unseals nothing, so one person records it.
+
 3. Write the development labels a training tool reads: every person's decision in force, and nothing of a sample still sealed:
 
    ```sh

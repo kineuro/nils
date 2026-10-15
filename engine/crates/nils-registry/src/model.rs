@@ -1750,11 +1750,48 @@ pub fn to_json_with(m: &Model, chosen: &std::collections::BTreeSet<i64>) -> Valu
     v
 }
 
+/// The newest certificate naming each model, by model id (record 48 R2;
+/// record 55 ruling 22 b: on a sealed sample or citing its graded run).
+pub fn certified(
+    store: &mut Store,
+) -> Result<std::collections::BTreeMap<i64, crate::labels::Certificate>, StoreError> {
+    crate::labels::certified(store).map_err(|e| match e {
+        crate::labels::Error::Store(s) => s,
+        other => StoreError::Message(other.to_string()),
+    })
+}
+
+/// A model's certificate as its card shows it: the certificate, with what
+/// it certified in a line; null where none names the model.
+pub fn certificate_json(
+    m: &Model,
+    certified: &std::collections::BTreeMap<i64, crate::labels::Certificate>,
+) -> Value {
+    certified.get(&m.id).map_or(Value::Null, |c| {
+        let mut v = c.as_json();
+        v["words"] = Value::from(c.words());
+        v
+    })
+}
+
+/// A model as the doors answer it, with whether it is chosen now and the
+/// certificate that names it.
+pub fn to_json_full(
+    m: &Model,
+    chosen: &std::collections::BTreeSet<i64>,
+    certified: &std::collections::BTreeMap<i64, crate::labels::Certificate>,
+) -> Value {
+    let mut v = to_json_with(m, chosen);
+    v["certificate"] = certificate_json(m, certified);
+    v
+}
+
 /// Every task and slot with the model chosen there and every model
 /// registered there, newest first, retired included (record 55 D4): what
 /// `GET /api/models/tasks` and `nils model chosen` answer.
 pub fn tasks_json(store: &mut Store, only: Option<&str>) -> Result<Value, StoreError> {
     let mut out = Vec::new();
+    let certs = certified(store)?;
     for (task, slot) in tasks(store)? {
         if only.is_some_and(|t| t != task) {
             continue;
@@ -1774,7 +1811,7 @@ pub fn tasks_json(store: &mut Store, only: Option<&str>) -> Result<Value, StoreE
             "task": task,
             "slot": slot,
             "chosen": chosen.as_ref().map(Chosen::as_json),
-            "models": models.iter().map(|m| to_json_with(m, &ids)).collect::<Vec<_>>(),
+            "models": models.iter().map(|m| to_json_full(m, &ids, &certs)).collect::<Vec<_>>(),
         }));
     }
     Ok(json!({ "tasks": out }))

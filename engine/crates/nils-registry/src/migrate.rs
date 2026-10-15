@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 98;
+pub const SCHEMA_VERSION: i64 = 99;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -446,7 +446,25 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 98,
         apply: system_one_beside_the_rules,
     },
+    Migration {
+        version: 99,
+        apply: a_certificate_may_cite_its_graded_run,
+    },
 ];
+
+/// Record 55 ruling 22 (b): a certificate may cite its graded run (the
+/// run, its manifest's sha256, the plan's commit and the model's artifact
+/// digest) instead of a sample sealed in this registry, and names its one
+/// model, a run certifying a model once (a unique key on the sample and
+/// the model where it names one). Only columns and that key are added; a
+/// certificate from before measured a sealed sample.
+fn a_certificate_may_cite_its_graded_run(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_columns(store, "certificate", &["evidence", "model_id"])?;
+    add_indexes(store, "certificate")
+}
 
 /// Record 55 F2 and F5 (spec §12.3): the post-contrast label of each stack,
 /// the time rule's and the subject step's (`contrast_label`). Only a table
@@ -3050,15 +3068,16 @@ mod tests {
             assert!(names.contains(&t.name), "{} missing", t.name);
         }
         // a store from the future is refused
+        let ahead = SCHEMA_VERSION + 1;
         store
             .execute(
-                "UPDATE registry_meta SET value = '99' WHERE key = 'schema_version'",
+                &format!("UPDATE registry_meta SET value = '{ahead}' WHERE key = 'schema_version'"),
                 &[],
             )
             .unwrap();
         assert_eq!(
             standing(&mut store, Kind::Registry).unwrap(),
-            Standing::Ahead(99)
+            Standing::Ahead(ahead)
         );
         let err = migrate(&mut store, Kind::Registry).unwrap_err().to_string();
         assert!(err.contains("ahead of this binary"), "{err}");
