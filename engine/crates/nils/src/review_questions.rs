@@ -1441,7 +1441,7 @@ fn scans(
         "scans": shown.iter().map(|s| known.remove(s).unwrap_or_else(|| json!({"stack": s}))).collect::<Vec<_>>(),
     });
     crate::scans::with_names(registry, pack.as_deref(), &mut doc)?;
-    crate::scans::with_pictures(registry, caller, &doors.home, &mut doc)?;
+    crate::scans::with_pictures(registry, caller, &doors.home, &mut doc, false)?;
     let store = registry.store();
     let stored_pairs = nils_registry::round::rules_answers(store, &shown).map_err(failed)?;
     let mut tiles = Vec::new();
