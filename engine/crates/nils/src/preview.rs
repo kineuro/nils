@@ -846,8 +846,12 @@ pub fn make_many(
 }
 
 /// Remove the previews of stacks the registry no longer holds; answers how
-/// many files went.
-pub fn prune(working: &Path, keep: &BTreeSet<i64>) -> usize {
+/// many files went. `keep` is read when the prune runs, and `started` is
+/// when the build that prunes began (#456): a preview written since is
+/// kept whatever its stack (a sort or a door made it meanwhile), and a part
+/// file goes only when it is older than that or the process its name
+/// carries is gone, so a writer still filling one is never cut short.
+pub fn prune(working: &Path, keep: &BTreeSet<i64>, started: std::time::SystemTime) -> usize {
     let mut gone = 0;
     let Ok(shards) = std::fs::read_dir(working.join("previews")) else {
         return 0;
@@ -861,15 +865,41 @@ pub fn prune(working: &Path, keep: &BTreeSet<i64>) -> usize {
             let Some(id) = name.split('.').next().and_then(|s| s.parse::<i64>().ok()) else {
                 continue;
             };
-            // a part file left by a build that died is litter too
-            if (!keep.contains(&id) || name.contains(".part."))
-                && std::fs::remove_file(f.path()).is_ok()
-            {
+            let old = f
+                .metadata()
+                .and_then(|m| m.modified())
+                .is_ok_and(|at| at < started);
+            let litter = match part_pid(&name) {
+                // a part file left by a build that died is litter too
+                Some(pid) => old || !alive(pid),
+                None => old && !keep.contains(&id),
+            };
+            if litter && std::fs::remove_file(f.path()).is_ok() {
                 gone += 1;
             }
         }
     }
     gone
+}
+
+/// The process a part file's name carries (`<stack>....part.<pid>.<n>`),
+/// none where the name is no part file's.
+fn part_pid(name: &str) -> Option<u32> {
+    let (_, rest) = name.split_once(".part.")?;
+    rest.split('.').next()?.parse().ok()
+}
+
+/// Whether a process of this id runs on this machine; one that cannot be
+/// told counts as running, so its file is left to age.
+fn alive(pid: u32) -> bool {
+    if pid == std::process::id() {
+        return true;
+    }
+    if cfg!(target_os = "linux") {
+        Path::new("/proc").join(pid.to_string()).exists()
+    } else {
+        true
+    }
 }
 
 /// Every stack of the registry, by id.
@@ -2009,6 +2039,46 @@ fn stack_exists(store: &mut Store, stack: i64) -> Result<bool, Reply> {
 
 #[cfg(test)]
 mod tests {
+    /// #456: a prune keeps what was written after the build began and the
+    /// part files of a running writer; an old part file, one of a process
+    /// gone, and the preview of a stack the registry no longer holds go.
+    #[test]
+    fn a_prune_keeps_what_was_written_since_the_build_began() {
+        let dir = nils_dicom::synth::TempDir::new("preview-prune");
+        let shard = dir.path().join("previews/00");
+        std::fs::create_dir_all(&shard).unwrap();
+        let write = |name: &str| {
+            let p = shard.join(name);
+            std::fs::write(&p, b"x").unwrap();
+            p
+        };
+        let me = std::process::id();
+        // a pid no process holds: above the kernel's pid_max ceiling
+        let gone_pid = 4_194_305u32;
+        let removed = write("7.nlp");
+        let kept = write("1.nlp");
+        let old_part = write(&format!("2.nlp.part.{me}.0"));
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let started = std::time::SystemTime::now();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let new_stack = write("9.nlp");
+        let running_part = write(&format!("3.nlp.part.{me}.1"));
+        let dead_part = write(&format!("4.nlp.part.{gone_pid}.0"));
+        let keep: BTreeSet<i64> = [1, 2, 3, 4].into_iter().collect();
+        assert_eq!(prune(dir.path(), &keep, started), 3);
+        assert!(!removed.exists(), "a removed stack's preview goes");
+        assert!(kept.exists());
+        assert!(!old_part.exists(), "a part file older than the build goes");
+        assert!(
+            new_stack.exists(),
+            "a preview made since the build began stays"
+        );
+        assert!(running_part.exists(), "a running writer's part file stays");
+        assert!(!dead_part.exists(), "a part file of a process gone goes");
+        assert_eq!(part_pid("12.nlp.part.77.3"), Some(77));
+        assert_eq!(part_pid("12.nlp"), None);
+    }
+
     use super::*;
 
     fn volume(nz: u32, ny: u32, nx: u32, burned_in: bool) -> Volume {

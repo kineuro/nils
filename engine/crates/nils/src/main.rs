@@ -5679,6 +5679,8 @@ fn preview_command(home: &Home, command: PreviewCommand) -> Result<(), Exit> {
         return Ok(());
     }
     let store = registry.store();
+    // when the build began: a prune keeps what was written after it (#456)
+    let began = std::time::SystemTime::now();
     let (stacks, name) = match (&dataset, all) {
         (Some(n), _) => {
             let p = nils_registry::place::by_name(store, n)
@@ -5732,8 +5734,13 @@ fn preview_command(home: &Home, command: PreviewCommand) -> Result<(), Exit> {
     };
     let mut many = crate::preview::make_many(store, &root, &stacks, force, workers, &mut go_on);
     if all && !many.stopped {
-        let keep: std::collections::BTreeSet<i64> = stacks.iter().copied().collect();
-        many.pruned = crate::preview::prune(&root, &keep);
+        // #456: the stacks the registry holds now, not those it held when
+        // the build began, and nothing written since it began
+        let keep: std::collections::BTreeSet<i64> = crate::preview::every_stack(store)
+            .map_err(fail)?
+            .into_iter()
+            .collect();
+        many.pruned = crate::preview::prune(&root, &keep, began);
     }
     let result = many.as_json(&working.name);
     nils_registry::job::set_result(store, job, &result).map_err(|e| fail(e.to_string()))?;
