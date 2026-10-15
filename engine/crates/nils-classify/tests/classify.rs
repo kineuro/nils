@@ -2939,3 +2939,346 @@ fn a_sort_leaves_the_questions_of_other_operations_open() {
         );
     }
 }
+
+/// Record 56 §6.3 (2026-10-14): a re-sort of the scans a person just
+/// answered judges those stacks alone. Three scans nothing weights wait on
+/// one grouped question about their base, beside a scan the rules know; a
+/// person answers one of the three, and the re-sort of that one writes its
+/// base as the person's, asks it nothing, writes no row of another stack,
+/// leaves the batch's diagnostics as the whole sort wrote them, and splits
+/// the grouped question so the other two still wait on it, as a group of
+/// their own named after the one it came from.
+#[test]
+fn a_re_sort_of_some_scans_judges_them_alone_and_loses_no_question() {
+    let pack = nils_pack::load(&packs(), None).expect("the MRI pack loads");
+    let se: Elements = &[(tags::SCANNING_SEQUENCE, VR::CS, "SE")];
+    for lab in labs() {
+        let name = lab.name;
+        let dir = some_stacks(&[
+            ("ax mystery one", se),
+            ("ax mystery two", se),
+            ("ax mystery three", se),
+            (
+                "sag T1 mprage",
+                &[
+                    (tags::SCANNING_SEQUENCE, VR::CS, "GR"),
+                    (tags::SEQUENCE_VARIANT, VR::CS, "SK\\SP\\MP"),
+                    (tags::SEQUENCE_NAME, VR::SH, "*tfl3d1_16"),
+                    (tags::MR_ACQUISITION_TYPE, VR::CS, "3D"),
+                ],
+            ),
+        ]);
+        let mut reg = prepare(&lab, &dir);
+        let whole =
+            nils_classify::classify::classify(&mut reg, &pack, &Default::default(), &Cancel::new())
+                .unwrap();
+        assert_eq!(whole.written, 4, "{name}");
+        let stack_of = |reg: &mut Registry, description: &str| -> i64 {
+            one(
+                reg,
+                &format!(
+                    "SELECT stack_id FROM {{stack_fingerprint}} WHERE text_series_description = '{description}'"
+                ),
+            )
+        };
+        let (first, second, third, known) = (
+            stack_of(&mut reg, "ax mystery one"),
+            stack_of(&mut reg, "ax mystery two"),
+            stack_of(&mut reg, "ax mystery three"),
+            stack_of(&mut reg, "sag T1 mprage"),
+        );
+        let group = rows(
+            &mut reg,
+            "SELECT id FROM {review_item} WHERE kind = 'base:missing' AND status = 'open' AND scope = 'group'",
+        );
+        assert_eq!(group.len(), 1, "{name}: one grouped question");
+        let group = group[0].int(0).unwrap();
+        let members = |reg: &mut Registry, item: i64| -> Vec<i64> {
+            rows(
+                reg,
+                &format!(
+                    "SELECT stack_id FROM {{review_member}} WHERE item_id = {item} ORDER BY stack_id"
+                ),
+            )
+            .iter()
+            .map(|r| r.int(0).unwrap())
+            .collect()
+        };
+        let mut three = vec![first, second, third];
+        three.sort_unstable();
+        assert_eq!(members(&mut reg, group), three, "{name}");
+
+        // a person answers the first, as a member of the group
+        nils_registry::review::apply(
+            &mut reg,
+            &nils_registry::review::Apply {
+                item: group,
+                member: Some(first),
+                scope: "stack",
+                value: Some("T2w"),
+                author: nils_registry::review::Author {
+                    who: "anna@ward-3",
+                    kind: "person",
+                    version: None,
+                    model: None,
+                },
+                stage: false,
+                why: None,
+                campaign: None,
+            },
+        )
+        .unwrap();
+
+        // what the whole sort wrote of every other stack, and the batch's
+        // diagnostics
+        let others = |reg: &mut Registry| -> Vec<String> {
+            rows(
+                reg,
+                &format!(
+                    "SELECT stack_id, axis, COALESCE(value, ''), tier FROM {{classification_axis}} \
+                     WHERE stack_id <> {first} ORDER BY stack_id, axis, value"
+                ),
+            )
+            .iter()
+            .map(|r| {
+                format!(
+                    "{} {} {} {}",
+                    r.int(0).unwrap(),
+                    r.text(1).unwrap(),
+                    r.text(2).unwrap(),
+                    r.text(3).unwrap()
+                )
+            })
+            .collect()
+        };
+        let sorted_by = |reg: &mut Registry| -> Vec<(i64, i64)> {
+            rows(
+                reg,
+                "SELECT stack_id, job_id FROM {classification} ORDER BY stack_id",
+            )
+            .iter()
+            .map(|r| (r.int(0).unwrap(), r.int(1).unwrap()))
+            .collect()
+        };
+        let diagnostics = |reg: &mut Registry| -> Vec<String> {
+            rows(
+                reg,
+                "SELECT batch_id, kind, count FROM {diagnostic} ORDER BY batch_id, kind",
+            )
+            .iter()
+            .map(|r| {
+                format!(
+                    "{} {} {}",
+                    r.int(0).unwrap(),
+                    r.text(1).unwrap(),
+                    r.int(2).unwrap()
+                )
+            })
+            .collect()
+        };
+        let before = others(&mut reg);
+        let jobs_before = sorted_by(&mut reg);
+        let diagnosed = diagnostics(&mut reg);
+        assert!(
+            !diagnosed.is_empty(),
+            "{name}: the whole sort counted its batch"
+        );
+
+        // the re-sort of the scan answered, and no other
+        let settings = nils_classify::job::Settings {
+            stacks: nils_classify::job::Stacks::Only(std::sync::Arc::new([first].into())),
+            scope: vec![format!("handle:{first}")],
+            ..Default::default()
+        };
+        let re =
+            nils_classify::classify::classify(&mut reg, &pack, &settings, &Cancel::new()).unwrap();
+        assert_eq!(re.written, 1, "{name}: {re:?}");
+        assert_ne!(re.job_id, whole.job_id, "{name}");
+        let base = rows(
+            &mut reg,
+            &format!(
+                "SELECT value, tier FROM {{classification_axis}} WHERE stack_id = {first} AND axis = 'base'"
+            ),
+        );
+        assert_eq!(base.len(), 1, "{name}");
+        assert_eq!(
+            base[0].text(0).unwrap(),
+            "T2w",
+            "{name}: the person's answer"
+        );
+        assert_eq!(base[0].text(1).unwrap(), "decision", "{name}");
+        assert_eq!(others(&mut reg), before, "{name}: no other stack's rows");
+        let jobs_after = sorted_by(&mut reg);
+        for (stack, job) in &jobs_after {
+            let was = jobs_before.iter().find(|(s, _)| s == stack).unwrap().1;
+            if *stack == first {
+                assert_eq!(
+                    *job, re.job_id,
+                    "{name}: the scan answered is the re-sort's"
+                );
+            } else {
+                assert_eq!(*job, was, "{name}: stack {stack} is the whole sort's still");
+            }
+        }
+        assert_eq!(
+            diagnostics(&mut reg),
+            diagnosed,
+            "{name}: the batch's diagnostics are the whole sort's"
+        );
+        let job_t = reg.store().qualified("job");
+        let job = rows(
+            &mut reg,
+            &format!(
+                "SELECT CAST(args AS TEXT) FROM {job_t} WHERE id = {}",
+                re.job_id
+            ),
+        );
+        let args: serde_json::Value = serde_json::from_str(job[0].text(0).unwrap()).unwrap();
+        assert_eq!(
+            args["scope"][0],
+            format!("handle:{first}"),
+            "{name}: {args}"
+        );
+
+        // the group is split: the two still waiting ask on in a group of
+        // their own, and the scan answered is asked nothing
+        let status = rows(
+            &mut reg,
+            &format!("SELECT status FROM {{review_item}} WHERE id = {group}"),
+        );
+        assert_eq!(status[0].text(0).unwrap(), "superseded", "{name}");
+        let split = rows(
+            &mut reg,
+            "SELECT id, CAST(evidence AS TEXT), members FROM {review_item} \
+             WHERE kind = 'base:missing' AND status = 'open' AND scope = 'group'",
+        );
+        assert_eq!(split.len(), 1, "{name}: one group waits");
+        let split_id = split[0].int(0).unwrap();
+        let mut two = vec![second, third];
+        two.sort_unstable();
+        assert_eq!(members(&mut reg, split_id), two, "{name}");
+        assert_eq!(split[0].int(2).unwrap(), 2, "{name}");
+        let ev: serde_json::Value = serde_json::from_str(split[0].text(1).unwrap()).unwrap();
+        assert_eq!(ev["split_from"], group, "{name}: {ev}");
+        assert_eq!(
+            one(
+                &mut reg,
+                &format!(
+                    "SELECT COUNT(*) FROM {{review_member}} m JOIN {{review_item}} i ON i.id = m.item_id \
+                     WHERE m.stack_id = {first} AND i.status = 'open'"
+                ),
+            ),
+            0,
+            "{name}: nothing waits on the scan answered"
+        );
+        // and the scan the rules know is the whole sort's, base and all
+        let t1 = rows(
+            &mut reg,
+            &format!(
+                "SELECT value FROM {{classification_axis}} WHERE stack_id = {known} AND axis = 'base'"
+            ),
+        );
+        assert_eq!(t1[0].text(0).unwrap(), "T1w", "{name}");
+
+        // a whole sort after it reads the decision and asks the two again,
+        // as one question
+        nils_classify::classify::classify(&mut reg, &pack, &Default::default(), &Cancel::new())
+            .unwrap();
+        let waiting = rows(
+            &mut reg,
+            "SELECT m.stack_id FROM {review_member} m JOIN {review_item} i ON i.id = m.item_id \
+             WHERE i.kind = 'base:missing' AND i.status = 'open' ORDER BY m.stack_id",
+        )
+        .iter()
+        .map(|r| r.int(0).unwrap())
+        .collect::<Vec<_>>();
+        assert_eq!(waiting, two, "{name}");
+    }
+}
+
+/// Record 56 §5.2 (Nima's ruling of 2026-10-15): a person's decision is
+/// final evidence and never a rule. A sort does not ask about a decision
+/// again when the person made it with the rules' answer in view and the
+/// rules still give that answer; it asks again only when a newer rules
+/// version moves the rules' answer from what the person saw. A decision
+/// with no rules' answer noted keeps C15's question.
+#[test]
+fn a_decision_made_with_the_rules_answer_in_view_is_asked_again_only_when_the_rules_move() {
+    let pack = nils_pack::load(&packs(), None).expect("the MRI pack loads");
+    for lab in labs() {
+        let name = lab.name;
+        let dir = tree();
+        let mut reg = prepare(&lab, &dir);
+        nils_classify::classify::classify(&mut reg, &pack, &Default::default(), &Cancel::new())
+            .unwrap();
+        let stack = one(&mut reg, "SELECT stack_id FROM {classification}");
+        let open = |reg: &mut Registry| {
+            one(
+                reg,
+                "SELECT COUNT(*) FROM {review_item} WHERE kind = 'base:decision' AND status = 'open'",
+            )
+        };
+        // a person answers T2w, as System 1 said, where the rules say T1w
+        reg.store()
+            .insert(
+                &Insert::new(
+                    nils_registry::schema::table("decision"),
+                    &[
+                        "scope",
+                        "ref",
+                        "axis",
+                        "value",
+                        "actor",
+                        "author_kind",
+                        "decided_at",
+                    ],
+                ),
+                &[vec![
+                    Param::from("stack"),
+                    Param::from(stack.to_string()),
+                    Param::from("base"),
+                    Param::from("T2w"),
+                    Param::from("a person"),
+                    Param::from("person"),
+                    Param::from(nils_registry::time::now_iso()),
+                ]],
+            )
+            .unwrap();
+        let decision = one(&mut reg, "SELECT MAX(id) FROM {decision}");
+
+        // with no rules' answer noted, C15 asks as before
+        nils_classify::classify::classify(&mut reg, &pack, &Default::default(), &Cancel::new())
+            .unwrap();
+        assert_eq!(open(&mut reg), 1, "{name}: C15 without the rules in view");
+
+        // made with the rules' T1w in view: the re-sort asks nothing, and
+        // the scan holds the person's answer
+        nils_registry::review::note_rules_in_view(reg.store(), decision, "T1w").unwrap();
+        let settings = nils_classify::job::Settings {
+            stacks: nils_classify::job::Stacks::Only(std::sync::Arc::new([stack].into())),
+            ..Default::default()
+        };
+        nils_classify::classify::classify(&mut reg, &pack, &settings, &Cancel::new()).unwrap();
+        assert_eq!(
+            open(&mut reg),
+            0,
+            "{name}: no question about a final answer"
+        );
+        assert_eq!(axis_of(&mut reg, "base").0, "T2w", "{name}");
+        // and a whole sort says the same
+        nils_classify::classify::classify(&mut reg, &pack, &Default::default(), &Cancel::new())
+            .unwrap();
+        assert_eq!(open(&mut reg), 0, "{name}");
+
+        // made under an older rules version whose answer was PDw: the rules
+        // have moved since, so the sort asks again
+        nils_registry::review::note_rules_in_view(reg.store(), decision, "PDw").unwrap();
+        nils_classify::classify::classify(&mut reg, &pack, &Default::default(), &Cancel::new())
+            .unwrap();
+        assert_eq!(
+            open(&mut reg),
+            1,
+            "{name}: the rules moved, so a person is asked"
+        );
+    }
+}

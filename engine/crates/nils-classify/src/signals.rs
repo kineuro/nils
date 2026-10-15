@@ -367,13 +367,55 @@ pub fn texts(store: &mut Store, pack: &Pack, scope: &Scope, sample: usize) -> Re
     // and how many stacks those are per axis
     let mut resolved: BTreeMap<String, BTreeMap<String, BTreeMap<String, Cover>>> = BTreeMap::new();
     let mut resolved_stacks: BTreeMap<String, i64> = BTreeMap::new();
+    // record 56 §6.5: each stack read as the registry sorted it, with the
+    // pack's adopted scoped changes whose scope holds it, and no other
+    let scoped_err = |e: crate::scoped::Error| Error::Message(e.to_string());
+    let adopted = crate::scoped::adopted(store, pack).map_err(scoped_err)?;
+    let resolver = if adopted.is_empty() {
+        None
+    } else {
+        Some(crate::scoped::Resolver::load(store, &pack.modality).map_err(scoped_err)?)
+    };
+    let scopes: Vec<nils_pack::patch::Scope> = match &resolver {
+        Some(r) => adopted
+            .ops
+            .iter()
+            .map(|a| r.kept(&a.op.scope, store))
+            .collect(),
+        None => Vec::new(),
+    };
+    let mut variants: BTreeMap<BTreeSet<usize>, Option<Pack>> = BTreeMap::new();
+    let mut applied: BTreeSet<i64> = BTreeSet::new();
     for r in rows.iter().take(sample) {
-        let (_, stack, private) =
+        let (ids, stack, private) =
             to_stack(r, false, pack).map_err(|e| Error::Message(e.to_string()))?;
         // whose the stack is, for the subject threshold, from the sampled
         // row itself rather than from every stack in scope
         let subject = subject_of(r);
-        let evaluated = Evaluated::with_private(pack, &stack, private);
+        let key: BTreeSet<usize> = match &resolver {
+            Some(res) => scopes
+                .iter()
+                .enumerate()
+                .filter(|(_, s)| res.holds(s, ids.stack))
+                .map(|(i, _)| i)
+                .collect(),
+            None => BTreeSet::new(),
+        };
+        let mine = if key.is_empty() {
+            pack
+        } else {
+            let built = variants
+                .entry(key.clone())
+                .or_insert_with(|| crate::scoped::variant(pack, &adopted, &key).ok());
+            match built {
+                Some(v) => {
+                    applied.extend(key.iter().map(|i| adopted.ops[*i].proposal));
+                    v
+                }
+                None => pack,
+            }
+        };
+        let evaluated = Evaluated::with_private(mine, &stack, private);
         let verdict = evaluated.classify();
         let text = evaluated.derived_text("search_text").unwrap_or_default();
         let axes: BTreeSet<&str> = verdict
@@ -418,6 +460,7 @@ pub fn texts(store: &mut Store, pack: &Pack, scope: &Scope, sample: usize) -> Re
         json!({
             "pack": format!("{}@{}", pack.name, pack.version),
             "overlay": pack.overlay,
+            "scoped": applied.iter().collect::<Vec<_>>(),
             "text": "search_text",
             "sample": sample,
             "read": read,

@@ -22,7 +22,11 @@
 //! An operation scoped to a site, a dataset or a scanner (an overlay) moves
 //! only the stacks in its scope: each stack is sorted after by the pack with
 //! the pack-wide operations and those whose scope holds it (record 56 §5.6,
-//! an overlay never leaves its scope).
+//! an overlay never leaves its scope). The registry is read as it is sorted
+//! (record 56 §6.5): the pack's adopted scoped changes are applied on both
+//! sides, each to the stacks its scope holds, and the patch's operations
+//! after them; where a scope holds a stack is [`crate::scoped`]'s answer,
+//! the one a scoped re-sort and every sort read too.
 //!
 //! A stack of a sample sealed now is never read (record 48, D1 of the move):
 //! it is in no scope, no pool, no session and no answer set, and the report
@@ -126,6 +130,10 @@ pub struct Settings {
     /// Told the stacks replayed and in scope after each chunk; answering
     /// false stops the report, which then fails with [`Error::Stopped`].
     pub progress: Option<Progress>,
+    /// Name every answer the change breaks (right to wrong), not only the
+    /// first examples: a proposal's approval card says each one (record 56
+    /// section 5.6).
+    pub all_breaks: bool,
 }
 
 /// What a report says between its chunks (#451), and whether it goes on.
@@ -139,6 +147,7 @@ impl Default for Settings {
             workers: 0,
             cap: None,
             progress: None,
+            all_breaks: false,
         }
     }
 }
@@ -151,199 +160,15 @@ const BROKEN: f64 = crate::classify::BROKEN_CONFIDENCE;
 const CHUNK: usize = 2_048;
 
 // ---------------------------------------------------------------------------
-// The registry, as the report reads it.
+// The registry, as the report reads it: where each stack sits, and what a
+// scope holds, as `crate::scoped` answers it for every reader.
 
-/// One stack of the pack's modality, as everything but the rules need it.
-#[derive(Debug, Clone, Default)]
-struct Place {
-    series: i64,
-    subject: i64,
-    study: i64,
-    batch: i64,
-    frame: Option<String>,
-    dataset: Option<usize>,
-    site: Option<usize>,
-    make: String,
-    model: String,
-    station: String,
-}
+type Place = crate::scoped::Where;
 
-/// The datasets and sites a stack can belong to, by the source roots
-/// under their paths.
-struct Datasets {
-    /// dataset name, its site's name, the source ids under it
-    datasets: Vec<(String, Option<String>, Vec<i64>)>,
-    sites: Vec<String>,
-}
-
-fn datasets(store: &mut Store) -> Result<Datasets, Error> {
-    let places: Vec<nils_registry::place::Place> = nils_registry::place::list(store)?
-        .into_iter()
-        .filter(|p| p.role == nils_registry::place::Role::Source && p.retired_at.is_none())
-        .collect();
-    let roots: Vec<(i64, String)> = store
-        .query(
-            &format!(
-                "SELECT id, root_canonical FROM {}",
-                store.qualified("source")
-            ),
-            &[],
-        )?
-        .iter()
-        .map(|r| Ok((r.int(0)?, r.text(1)?.to_string())))
-        .collect::<Result<_, nils_registry::store::Error>>()?;
-    let under = |p: &nils_registry::place::Place| -> Vec<i64> {
-        roots
-            .iter()
-            .filter(|(_, root)| p.holds_path(Path::new(root)))
-            .map(|(id, _)| *id)
-            .collect()
-    };
-    let is_root = |p: &nils_registry::place::Place| p.dataset["kind"] == "root";
-    let sites: Vec<String> = places
-        .iter()
-        .filter(|p| is_root(p))
-        .map(|p| p.name.clone())
-        .collect();
-    let mut out = Vec::new();
-    for p in places.iter().filter(|p| !is_root(p)) {
-        let site = p.dataset["root"].as_str().map(str::to_string).or_else(|| {
-            places
-                .iter()
-                .filter(|r| is_root(r) && r.holds_path(Path::new(&p.path)))
-                .map(|r| r.name.clone())
-                .next()
-        });
-        out.push((p.name.clone(), site, under(p)));
-    }
-    Ok(Datasets {
-        datasets: out,
-        sites,
-    })
-}
-
-/// Every stack of the modality with where it sits: its series, subject,
-/// study and frame, its first batch and the dataset and site that batch's
-/// source belongs to, and its maker, model and station.
-fn places(store: &mut Store, modality: &str, ds: &Datasets) -> Result<BTreeMap<i64, Place>, Error> {
-    let d = store.dialect();
-    let fp = table("stack_fingerprint");
-    let text = |c: &str| d.text_of_qualified(Some("f"), fp.column(c).expect("a column"));
-    let sql = format!(
-        "SELECT f.stack_id, f.series_id, f.subject_id, f.study_id, k.first_batch_id, b.source_id, \
-         {}, {}, {}, s.frame_of_reference_uid FROM {} f JOIN {} k ON k.id = f.stack_id \
-         JOIN {} s ON s.id = f.series_id LEFT JOIN {} b ON b.id = k.first_batch_id \
-         WHERE f.modality = {} ORDER BY f.stack_id",
-        text("manufacturer"),
-        text("manufacturer_model_name"),
-        text("station_name"),
-        store.qualified("stack_fingerprint"),
-        store.qualified("stack"),
-        store.qualified("series"),
-        store.qualified("ingest_batch"),
-        d.param(1, Type::Text),
-    );
-    let mut by_source: HashMap<i64, usize> = HashMap::new();
-    for (i, (_, _, ids)) in ds.datasets.iter().enumerate() {
-        for id in ids {
-            by_source.entry(*id).or_insert(i);
-        }
-    }
-    let mut out = BTreeMap::new();
-    for r in store.query(&sql, &[Param::from(modality)])? {
-        let source = r.opt_int(5)?;
-        let dataset = source.and_then(|s| by_source.get(&s).copied());
-        let site = dataset
-            .and_then(|i| ds.datasets[i].1.as_ref())
-            .and_then(|s| ds.sites.iter().position(|x| x == s));
-        out.insert(
-            r.int(0)?,
-            Place {
-                series: r.opt_int(1)?.unwrap_or(0),
-                subject: r.opt_int(2)?.unwrap_or(0),
-                study: r.opt_int(3)?.unwrap_or(0),
-                batch: r.opt_int(4)?.unwrap_or(0),
-                frame: r.opt_text(9)?.filter(|f| !f.is_empty()).map(str::to_string),
-                dataset,
-                site,
-                make: r.opt_text(6)?.unwrap_or("").trim().to_string(),
-                model: r.opt_text(7)?.unwrap_or("").trim().to_string(),
-                station: r.opt_text(8)?.unwrap_or("").trim().to_string(),
-            },
-        );
-    }
-    Ok(out)
-}
-
-/// Whether a stack is in a scope.
-fn holds(scope: &Scope, p: &Place, ds: &Datasets) -> bool {
-    match scope {
-        Scope::Pack => true,
-        Scope::Site(s) => p.site.is_some_and(|i| ds.sites[i] == *s),
-        Scope::Dataset(names) => p
-            .dataset
-            .is_some_and(|i| names.iter().any(|n| *n == ds.datasets[i].0)),
-        Scope::Scanner(keys) => keys.iter().all(|(k, v)| {
-            let have = match k.as_str() {
-                "manufacturer" => &p.make,
-                "model" => &p.model,
-                "station" => &p.station,
-                "batch" => return v.parse::<i64>().ok() == Some(p.batch),
-                _ => return false,
-            };
-            have.eq_ignore_ascii_case(v.trim())
-        }),
-    }
-}
-
-/// A scope named by what the registry holds: a site or a dataset it does
-/// not know is refused, with what it knows.
-fn known(scope: &Scope, ds: &Datasets, store: &mut Store) -> Result<Scope, Error> {
-    match scope {
-        Scope::Site(s) => {
-            let by_id = s
-                .parse::<i64>()
-                .ok()
-                .and_then(|id| nils_registry::place::show(store, id).ok().flatten())
-                .map(|p| p.name);
-            let name = by_id.unwrap_or_else(|| s.clone());
-            if ds.sites.contains(&name) {
-                Ok(Scope::Site(name))
-            } else {
-                Err(Error::Refused(format!(
-                    "no site named {s}: a site is the source root its datasets arrive under, and the registry's are {}",
-                    if ds.sites.is_empty() {
-                        "none".to_string()
-                    } else {
-                        ds.sites.join(", ")
-                    }
-                )))
-            }
-        }
-        Scope::Dataset(names) => {
-            let mut out = Vec::new();
-            for n in names {
-                let by_id = n
-                    .parse::<i64>()
-                    .ok()
-                    .and_then(|id| nils_registry::place::show(store, id).ok().flatten())
-                    .map(|p| p.name);
-                let name = by_id.unwrap_or_else(|| n.clone());
-                if !ds.datasets.iter().any(|(d, _, _)| *d == name) {
-                    return Err(Error::Refused(format!(
-                        "no dataset named {n}; the registry's are {}",
-                        ds.datasets
-                            .iter()
-                            .map(|(d, _, _)| d.as_str())
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    )));
-                }
-                out.push(name);
-            }
-            Ok(Scope::Dataset(out))
-        }
-        other => Ok(other.clone()),
+fn scoped_error(e: crate::scoped::Error) -> Error {
+    match e {
+        crate::scoped::Error::Refused(m) => Error::Refused(m),
+        crate::scoped::Error::Store(m) => Error::Store(m),
     }
 }
 
@@ -452,7 +277,7 @@ fn classify(
             .flatten()
         {
             let decided = d.value.clone().unwrap_or_default();
-            if decided != value && !pack.review.by_model.contains(&a.axis) {
+            if decided != value && !pack.review.by_model.contains(&a.axis) && !d.saw(&value) {
                 c.questions.push(format!("{}:decision", a.axis));
             }
             value = decided;
@@ -509,8 +334,10 @@ fn classify(
 /// One stack, both ways.
 struct Two {
     id: i64,
-    /// Which patched pack sorts it after.
-    key: usize,
+    /// Which pack sorts it, before and after: the pack with the adopted
+    /// scoped changes whose scope holds it, then also the patch's
+    /// operations whose scope holds it.
+    keys: [usize; 2],
     before: Class,
     after: Class,
     /// Its fields and private elements, kept where a session pass may
@@ -552,10 +379,12 @@ pub struct Renamed {
 /// Where every stack sits, what is sealed, the operations' scopes as the
 /// registry names them, and the stacks a report replays.
 pub struct Scoping {
-    ds: Datasets,
+    resolver: crate::scoped::Resolver,
     place: BTreeMap<i64, Place>,
     sealed: BTreeSet<i64>,
     op_scopes: Vec<Scope>,
+    adopted: crate::scoped::Adopted,
+    adopted_scopes: Vec<Scope>,
     in_scope: Vec<i64>,
     scope_text: String,
 }
@@ -566,8 +395,11 @@ fn scoping(
     patch: &Patch,
     settings: &Settings,
 ) -> Result<Scoping, Error> {
-    let ds = datasets(store)?;
-    let mut place = places(store, &base.modality, &ds)?;
+    let adopted = crate::scoped::adopted(store, base).map_err(scoped_error)?;
+
+    // --- where everything sits, and what is sealed
+    let resolver = crate::scoped::Resolver::load(store, &base.modality).map_err(scoped_error)?;
+    let mut place = resolver.at.clone();
     let all: Vec<i64> = place.keys().copied().collect();
     let (sealed, _) = nils_registry::labels::sealed_now(store, &all, &[])
         .map_err(|e| Error::Store(e.to_string()))?;
@@ -577,10 +409,10 @@ fn scoping(
     // the operations' scopes, named as the registry knows them
     let mut op_scopes: Vec<Scope> = Vec::new();
     for op in &patch.operations {
-        op_scopes.push(known(&op.scope, &ds, store)?);
+        op_scopes.push(resolver.known(&op.scope, store).map_err(scoped_error)?);
     }
     let report_scope = match &settings.scope {
-        Some(s) => known(s, &ds, store)?,
+        Some(s) => resolver.known(s, store).map_err(scoped_error)?,
         None => {
             if op_scopes.iter().any(Scope::is_pack) {
                 Scope::Pack
@@ -602,9 +434,9 @@ fn scoping(
         .iter()
         .filter(|(_, p)| {
             if union_only {
-                op_scopes.iter().any(|s| holds(s, p, &ds))
+                op_scopes.iter().any(|s| resolver.holds_at(s, p))
             } else {
-                holds(&report_scope, p, &ds)
+                resolver.holds_at(&report_scope, p)
             }
         })
         .map(|(id, _)| *id)
@@ -621,11 +453,18 @@ fn scoping(
         report_scope.text()
     };
 
+    let adopted_scopes: Vec<Scope> = adopted
+        .ops
+        .iter()
+        .map(|a| resolver.kept(&a.op.scope, store))
+        .collect();
     Ok(Scoping {
-        ds,
+        resolver,
         place,
         sealed,
         op_scopes,
+        adopted,
+        adopted_scopes,
         in_scope,
         scope_text,
     })
@@ -714,68 +553,87 @@ pub fn run_scoped(
 
     // --- where everything sits, what is sealed, and what is in scope
     let Scoping {
-        ds,
+        resolver,
         place,
         sealed,
         op_scopes,
+        adopted,
+        adopted_scopes,
         in_scope,
         scope_text,
     } = scoped;
+    // record 56 §6.5: the registry is sorted with the pack's adopted scoped
+    // changes, each on the stacks its scope holds; both sides apply them,
+    // and the patch's operations come after them
+    let combined = adopted.with(&base.name, Some(patch));
+    let first = adopted.ops.len();
     if let Some(cap) = settings.cap
         && in_scope.len() > cap
     {
         return Err(Error::Refused(over_cap(in_scope.len(), cap)));
     }
 
-    // --- which pack sorts each stack after: the pack-wide operations and
-    // those whose scope holds it
-    let mut keys: Vec<BTreeSet<usize>> = Vec::new();
-    let mut key_of: HashMap<i64, usize> = HashMap::new();
+    // --- which pack sorts each stack, before and after: before, the pack
+    // with the adopted scoped changes whose scope holds it; after, those and
+    // the patch's operations whose scope holds it (the pack-wide ones hold
+    // every stack)
+    let mut keys: [Vec<BTreeSet<usize>>; 2] = Default::default();
+    let mut key_of: HashMap<i64, [usize; 2]> = HashMap::new();
     let mut by_op: Vec<i64> = vec![0; patch.operations.len()];
     for id in &in_scope {
         let p = &place[id];
-        let set: BTreeSet<usize> = op_scopes
+        let before: BTreeSet<usize> = adopted_scopes
             .iter()
             .enumerate()
-            .filter(|(_, s)| holds(s, p, &ds))
+            .filter(|(_, s)| resolver.holds_at(s, p))
             .map(|(i, _)| i)
             .collect();
-        for i in &set {
-            by_op[*i] += 1;
-        }
-        let k = match keys.iter().position(|k| *k == set) {
-            Some(k) => k,
-            None => {
-                keys.push(set);
-                keys.len() - 1
+        let mut after = before.clone();
+        for (j, s) in op_scopes.iter().enumerate() {
+            if resolver.holds_at(s, p) {
+                by_op[j] += 1;
+                after.insert(first + j);
             }
-        };
+        }
+        let mut k = [0usize; 2];
+        for (side, set) in [before, after].into_iter().enumerate() {
+            k[side] = match keys[side].iter().position(|x| *x == set) {
+                Some(i) => i,
+                None => {
+                    keys[side].push(set);
+                    keys[side].len() - 1
+                }
+            };
+        }
         key_of.insert(*id, k);
     }
-    let mut packs: Vec<Pack> = Vec::with_capacity(keys.len());
-    for set in &keys {
-        // a stack no operation reaches is sorted after as before
+    let build = |set: &BTreeSet<usize>| -> Result<Pack, Error> {
+        // a stack nothing reaches is sorted as the pack is
         if set.is_empty() {
-            packs.push(base.clone());
-            continue;
+            return Ok(base.clone());
         }
-        if set.len() == patch.operations.len() {
-            packs.push(whole.pack.clone());
-            continue;
+        if first == 0 && set.len() == patch.operations.len() {
+            return Ok(whole.pack.clone());
         }
-        let kept = |op: &nils_pack::patch::Op| set.contains(&(op.at - 1));
-        let p = nils_pack::patch::apply(dir, patch, &kept).map_err(|e| {
-            Error::Refused(format!(
-                "the operations do not apply apart, as their scopes would apply them to some stacks: {e}"
-            ))
-        })?;
-        packs.push(p.pack);
-    }
+        nils_pack::patch::apply(dir, &combined, &|op| set.contains(&(op.at - 1)))
+            .map(|p| p.pack)
+            .map_err(|e| {
+                Error::Refused(format!(
+                    "the operations do not apply apart, as their scopes would apply them to some stacks: {e}"
+                ))
+            })
+    };
+    let bpacks: Vec<Pack> = keys[0].iter().map(build).collect::<Result<_, _>>()?;
+    let packs: Vec<Pack> = keys[1].iter().map(build).collect::<Result<_, _>>()?;
+    let sides: [&[Pack]; 2] = [&bpacks, &packs];
     tick(&mut seconds, "packs", &mut lap);
 
     // --- the rules and the decisions, both ways, in parallel chunks
     let decisions = Decisions::load(store)?;
-    let constraints_before = nils_pack::legal::class_constraints(base);
+    let constraints_before: Vec<Value> = bpacks
+        .iter()
+        .map(nils_pack::legal::class_constraints)
+        .collect();
     let constraints_after: Vec<Value> = packs
         .iter()
         .map(nils_pack::legal::class_constraints)
@@ -810,6 +668,7 @@ pub fn run_scoped(
                 .chunks(per)
                 .map(|part| {
                     let packs = &packs;
+                    let bpacks = &bpacks;
                     let constraints_after = &constraints_after;
                     let constraints_before = &constraints_before;
                     let decisions = &decisions;
@@ -817,12 +676,18 @@ pub fn run_scoped(
                     scope.spawn(move || {
                         part.iter()
                             .map(|(ids, s, private)| {
-                                let key = key_of[&ids.stack];
-                                let before =
-                                    classify(base, constraints_before, decisions, *ids, s, private);
+                                let k = key_of[&ids.stack];
+                                let before = classify(
+                                    &bpacks[k[0]],
+                                    &constraints_before[k[0]],
+                                    decisions,
+                                    *ids,
+                                    s,
+                                    private,
+                                );
                                 let after = classify(
-                                    &packs[key],
-                                    &constraints_after[key],
+                                    &packs[k[1]],
+                                    &constraints_after[k[1]],
                                     decisions,
                                     *ids,
                                     s,
@@ -831,7 +696,7 @@ pub fn run_scoped(
                                 let keep = !before.targets.is_empty() || !after.targets.is_empty();
                                 Two {
                                     id: ids.stack,
-                                    key,
+                                    keys: k,
                                     before,
                                     after,
                                     kept: keep.then(|| (s.clone(), private.clone())),
@@ -867,19 +732,13 @@ pub fn run_scoped(
             .map(|t| side(t, s).axes.iter().map(|a| a.values.clone()).collect())
             .collect();
         for pi in 0..pass_count {
-            let pass_of = |k: Option<usize>| -> &nils_pack::pass::Pass {
-                match k {
-                    None => &base.passes[pi],
-                    Some(k) => &packs[k].passes[pi],
-                }
-            };
-            if pass_of(None).session().is_some() {
+            if base.passes[pi].session().is_some() {
                 session_pass(
                     store,
                     s,
                     pi,
                     base,
-                    &packs,
+                    sides,
                     &place,
                     &sealed,
                     &mut two,
@@ -887,15 +746,15 @@ pub fn run_scoped(
                     &mut filled,
                     &mut written,
                 )?;
-            } else if pass_of(None).vote().is_some() {
+            } else if base.passes[pi].vote().is_some() {
                 vote_pass(
-                    s, pi, base, &packs, &place, &stored, &pre, &mut two, &filled, store,
+                    s, pi, sides, &place, &stored, &pre, &mut two, &filled, store,
                 )?;
             }
         }
         // the questions a missing answer asks, once the passes had their say
         for t in two.iter_mut() {
-            let pack = if s == 0 { base } else { &packs[t.key] };
+            let pack = &sides[s][t.keys[s]];
             let asked = nils_pack::matters::missing_asked(pack);
             let c = side(t, s);
             if c.silent {
@@ -924,15 +783,22 @@ pub fn run_scoped(
     let mut finals: HashMap<i64, [BTreeMap<String, String>; 2]> = HashMap::new();
     let mut renamed: Vec<Renamed> = Vec::new();
     let (mut descriptive_changed, mut bids_changed) = (0i64, 0i64);
-    let site_of = |p: &Place| -> String {
-        p.site
-            .map(|i| ds.sites[i].clone())
-            .unwrap_or_else(|| "(none)".into())
+    // a stack with files in two datasets counts in both, one in none under
+    // `(none)`
+    let sites_of = |p: &Place| -> Vec<String> {
+        if p.sites.is_empty() {
+            return vec!["(none)".into()];
+        }
+        p.sites.iter().map(|i| resolver.sites[*i].clone()).collect()
     };
-    let dataset_of = |p: &Place| -> String {
-        p.dataset
-            .map(|i| ds.datasets[i].0.clone())
-            .unwrap_or_else(|| "(none)".into())
+    let datasets_of = |p: &Place| -> Vec<String> {
+        if p.datasets.is_empty() {
+            return vec!["(none)".into()];
+        }
+        p.datasets
+            .iter()
+            .map(|i| resolver.datasets[*i].0.clone())
+            .collect()
     };
     for chunk in in_scope.chunks(CHUNK) {
         let rows = store.query(&select_stacks(store, chunk), &[])?;
@@ -954,7 +820,6 @@ pub fn run_scoped(
                 .map(|part| {
                     let two = &two;
                     let at = &at;
-                    let packs = &packs;
                     let facts = &facts;
                     scope.spawn(move || {
                         part.iter()
@@ -962,7 +827,7 @@ pub fn run_scoped(
                                 let t = &two[at[id]];
                                 let mut maps: [BTreeMap<String, String>; 2] = Default::default();
                                 for (si, c) in [&t.before, &t.after].into_iter().enumerate() {
-                                    let pack = if si == 0 { base } else { &packs[t.key] };
+                                    let pack = &sides[si][t.keys[si]];
                                     let seed: Vec<Vec<String>> =
                                         c.axes.iter().map(|a| a.values.clone()).collect();
                                     let e = Evaluated::with_private(pack, s, private.clone());
@@ -1011,8 +876,8 @@ pub fn run_scoped(
                                         .map(str::to_string)
                                     };
                                 let families = [
-                                    family(base, &t.before, &maps[0]),
-                                    family(&packs[t.key], &t.after, &maps[1]),
+                                    family(&sides[0][t.keys[0]], &t.before, &maps[0]),
+                                    family(&sides[1][t.keys[1]], &t.after, &maps[1]),
                                 ];
                                 // a name moves by a word alone too: the
                                 // patched pack's word for a value it holds
@@ -1033,7 +898,8 @@ pub fn run_scoped(
                                 };
                                 let moved = maps[0] != maps[1]
                                     || families[0] != families[1]
-                                    || words(base, &maps[0]) != words(&packs[t.key], &maps[1]);
+                                    || words(&sides[0][t.keys[0]], &maps[0])
+                                        != words(&sides[1][t.keys[1]], &maps[1]);
                                 let names = moved.then(|| {
                                     let f = facts.get(id).cloned().unwrap_or_default();
                                     let [fb, fa] = families.map(|acquisition_family| NameFacts {
@@ -1041,8 +907,8 @@ pub fn run_scoped(
                                         ..f.clone()
                                     });
                                     [
-                                        namer(base, &maps[0], &fb),
-                                        namer(&packs[t.key], &maps[1], &fa),
+                                        namer(&sides[0][t.keys[0]], &maps[0], &fb),
+                                        namer(&sides[1][t.keys[1]], &maps[1], &fa),
                                     ]
                                 });
                                 (*id, maps, names)
@@ -1124,13 +990,20 @@ pub fn run_scoped(
                         Some(a) => a.words_of_stored(&text),
                         None => text,
                     };
-                let (from, to) = (read(base, from), read(&packs[t.key], to));
+                let (from, to) = (
+                    read(&sides[0][t.keys[0]], from),
+                    read(&sides[1][t.keys[1]], to),
+                );
                 let am = axes_moves.entry(axis.clone()).or_default();
                 am.moved += 1;
                 let row = am.rows.entry((from, to)).or_default();
                 row.stacks += 1;
-                *row.datasets.entry(dataset_of(p)).or_insert(0) += 1;
-                *row.sites.entry(site_of(p)).or_insert(0) += 1;
+                for d in datasets_of(p) {
+                    *row.datasets.entry(d).or_insert(0) += 1;
+                }
+                for s in sites_of(p) {
+                    *row.sites.entry(s).or_insert(0) += 1;
+                }
                 let make = if p.make.is_empty() {
                     "(none)".to_string()
                 } else {
@@ -1167,7 +1040,7 @@ pub fn run_scoped(
     tick(&mut seconds, "picks", &mut lap);
 
     // --- the settled answers
-    let answers = answers(base, &packs, &two, &at, &finals, settled, settings);
+    let answers = answers(base, sides, &two, &at, &finals, settled, settings);
     tick(&mut seconds, "answers", &mut lap);
 
     // --- the report
@@ -1260,6 +1133,12 @@ pub fn run_scoped(
             })).collect::<Vec<_>>(),
         },
         "replay": "the rules, the decisions in force, the session passes, the physics vote, the questions a sort asks, the disposition and the main-scan picks; each stack sorted after by the pack with the pack-wide operations and those whose scope holds it; the vote's pool and the pick's population outside the scope as the registry holds them",
+        "adopted": {
+            "changes": adopted.ops.iter().zip(&adopted_scopes).map(|(a, s)| json!({
+                "proposal": a.proposal, "at": a.at, "op": a.op.kind, "scope": s.text(),
+            })).collect::<Vec<_>>(),
+            "skipped": adopted.skipped,
+        },
         "moved": {"stacks": moved_stacks},
         "axes": axes_doc,
         "names": {
@@ -1385,7 +1264,7 @@ fn session_pass(
     s: usize,
     pi: usize,
     base: &Pack,
-    packs: &[Pack],
+    sides: [&[Pack]; 2],
     place: &BTreeMap<i64, Place>,
     sealed: &BTreeSet<i64>,
     two: &mut [Two],
@@ -1400,7 +1279,7 @@ fn session_pass(
         let Some((stack, private)) = &t.kept else {
             continue;
         };
-        let pack = if s == 0 { base } else { &packs[t.key] };
+        let pack = &sides[s][t.keys[s]];
         let c = if s == 0 { &t.before } else { &t.after };
         let holds = if written.contains(&t.id) {
             nils_pack::session::targets(
@@ -1441,8 +1320,7 @@ fn session_pass(
     for i in targets {
         let id = two[i].id;
         let me = &place[&id];
-        let key = two[i].key;
-        let pack = if s == 0 { base } else { &packs[key] };
+        let pack = &sides[s][two[i].keys[s]];
         let pass = &pack.passes[pi];
         let Some(session) = pass.session() else {
             continue;
@@ -1537,8 +1415,7 @@ fn corpus_fields(
 fn vote_pass(
     s: usize,
     pi: usize,
-    base: &Pack,
-    packs: &[Pack],
+    sides: [&[Pack]; 2],
     place: &BTreeMap<i64, Place>,
     stored: &Stored,
     pre: &[Vec<Vec<String>>],
@@ -1549,20 +1426,14 @@ fn vote_pass(
     let at: HashMap<i64, usize> = two.iter().enumerate().map(|(i, t)| (t.id, i)).collect();
     // each pack in play answers for its own stacks: its target and the
     // fields it reads are its own
-    let keys: Vec<Option<usize>> = if s == 0 {
-        vec![None]
-    } else {
-        two.iter()
-            .map(|t| Some(t.key))
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect()
-    };
+    let keys: Vec<usize> = two
+        .iter()
+        .map(|t| t.keys[s])
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
     for key in keys {
-        let pack = match key {
-            None => base,
-            Some(k) => &packs[k],
-        };
+        let pack = &sides[s][key];
         let pass = &pack.passes[pi];
         let Some(vote) = pass.vote() else { continue };
         // the corpus: every unsealed stack of the modality, the scope's as
@@ -1602,7 +1473,7 @@ fn vote_pass(
             let Some(i) = at.get(&id).copied() else {
                 continue;
             };
-            if key.is_some_and(|k| two[i].key != k) {
+            if two[i].keys[s] != key {
                 continue;
             }
             let confidence = a.outcome.confidence();
@@ -2111,7 +1982,7 @@ fn settled(
 
 fn answers(
     base: &Pack,
-    packs: &[Pack],
+    sides: [&[Pack]; 2],
     two: &[Two],
     at: &HashMap<i64, usize>,
     finals: &HashMap<i64, [BTreeMap<String, String>; 2]>,
@@ -2156,7 +2027,7 @@ fn answers(
                     .unwrap_or_default()
             }
         };
-        let pack_of = |si: usize| if si == 0 { base } else { &packs[t.key] };
+        let pack_of = |si: usize| &sides[si][t.keys[si]];
         let want = ids_of(base, &axis.name, &split(l.value.as_deref().unwrap_or("")));
         let status = |si: usize| -> &'static str {
             let got = own(si);
@@ -2195,7 +2066,10 @@ fn answers(
                 "after": own(1).join(","),
             })
         };
-        if b == "right" && a != "right" && breaks.len() < settings.examples.max(1) * 4 {
+        if b == "right"
+            && a != "right"
+            && (settings.all_breaks || breaks.len() < settings.examples.max(1) * 4)
+        {
             breaks.push(example());
         }
         if b != "right" && a == "right" && fixes.len() < settings.examples.max(1) * 4 {

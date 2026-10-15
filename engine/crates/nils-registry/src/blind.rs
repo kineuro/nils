@@ -234,6 +234,25 @@ pub fn revealed(store: &mut Store, item: i64, principal: &str) -> Result<(), Sto
     Ok(())
 }
 
+/// Whether a question's suggestions were shown to a person (record 56
+/// §6.3: a blind-first question answered in a grid that never showed them
+/// is answered blind).
+pub fn was_revealed(store: &mut Store, item: i64, principal: &str) -> Result<bool, StoreError> {
+    let d = store.dialect();
+    let sql = format!(
+        "SELECT COUNT(*) FROM {} WHERE item_id = {} AND principal = {} AND revealed_at IS NOT NULL",
+        store.qualified("review_read"),
+        d.param(1, Type::Int),
+        d.param(2, Type::Text)
+    );
+    Ok(store
+        .query_opt(&sql, &[Param::Int(item), Param::from(principal)])?
+        .map(|r| r.int(0))
+        .transpose()?
+        .unwrap_or(0)
+        > 0)
+}
+
 /// A provisional answer to a blind-first question.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Provisional {

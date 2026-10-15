@@ -78,7 +78,9 @@ mod reader;
 mod rehearse;
 mod releases;
 mod requirements;
+mod review_questions;
 mod review_rule;
+mod rule_changes;
 mod rules;
 mod scans;
 mod schedule;
@@ -925,11 +927,17 @@ enum OverlayCommand {
         #[arg(long, value_name = "DIR")]
         to: PathBuf,
     },
-    /// Refuse a proposed overlay, closing the review item beside it
+    /// Refuse a proposed overlay (closing the review item beside it), or
+    /// withdraw an adopted one: its scoped change retires and its scope is
+    /// sorted again
     Refuse {
         id: i64,
         #[arg(long)]
         why: Option<String>,
+        /// The packs, where a withdrawn overlay's scope is queued to be
+        /// sorted again (else the usual places)
+        #[arg(long, value_name = "DIR")]
+        pack_dir: Option<PathBuf>,
     },
 }
 
@@ -2224,6 +2232,10 @@ enum IdTypeCommand {
         name: String,
         #[arg(long, value_name = "TEXT")]
         description: Option<String>,
+        /// Its IDs identify a person wherever they are met (a hospital's
+        /// record number), so resolving one is a re-identification
+        #[arg(long)]
+        identifying: bool,
     },
     /// The identifier types, by id
     List,
@@ -2557,6 +2569,16 @@ struct ClassifyArgs {
     /// build` makes them later
     #[arg(long)]
     no_previews: bool,
+    /// Judge only the stacks a scope holds (record 56, a scoped re-sort):
+    /// site:NAME, dataset:NAME[,NAME], scanner:KEY=VALUE[,KEY=VALUE],
+    /// batch:ID or handle:ID; repeated, their union. Nothing about any
+    /// other stack is written
+    #[arg(long, value_name = "SCOPE")]
+    scope: Vec<String>,
+    /// The adopted rule change this re-sort applies: what it did is written
+    /// on the proposal when it ends (the decide door queues it)
+    #[arg(long, value_name = "ID")]
+    proposal: Option<i64>,
     /// Machine-readable output
     #[arg(long)]
     json: bool,
@@ -2667,19 +2689,67 @@ fn classify(home: &Home, args: ClassifyArgs) -> Result<(), Exit> {
 
     let cancel = stop_on_signal()?;
     let mut registry = open(home)?;
+    // record 56 §6.5: a scoped re-sort judges the stacks its scope holds
+    if !args.scope.is_empty() {
+        let stacks = classify_scope(&mut registry, &pack.modality, &args.scope)?;
+        settings.stacks = nils_classify::job::Stacks::Only(std::sync::Arc::new(stacks));
+        settings.scope = args.scope.clone();
+    }
+    // record 56 §6.5: the re-sort after an adopted rule change, which says
+    // on the proposal what it did
+    let watched = match args.proposal {
+        Some(id) => {
+            let p = nils_registry::rule_proposal::get(registry.store(), id)
+                .map_err(|e| fail(e.to_string()))?
+                .ok_or_else(|| usage(format!("no proposal {id}")))?;
+            if p.status != nils_registry::rule_proposal::ADOPTED {
+                return Err(usage(format!(
+                    "proposal {id} is {}, and only an adopted one is applied",
+                    p.status
+                )));
+            }
+            let only = match &settings.stacks {
+                nils_classify::job::Stacks::Only(s) => Some(s.as_ref().clone()),
+                _ => None,
+            };
+            let before = rule_changes::snapshot(registry.store(), only.as_ref())
+                .map_err(|e| fail(e.to_string()))?;
+            Some((id, only, before))
+        }
+        None => None,
+    };
     // record 55 H2: the stacks judged get their previews in the same run,
     // while the sort is still the job, so no picture waits for a queue; the
     // job stays running until they are made, so it is never shown done
     // while they run and a cancel reaches them (review of 2026-10-10)
     settings.leave_open = !args.no_previews;
-    let report = nils_classify::classify::classify(&mut registry, &pack, &settings, &cancel)
-        .map_err(|e| match e {
-            nils_classify::Error::Busy { .. } => Exit {
-                code: BUSY,
-                message: e.to_string(),
-            },
-            other => fail(other.to_string()),
-        })?;
+    let result = nils_classify::classify::classify(&mut registry, &pack, &settings, &cancel);
+    // a sort that could not start (another holds the registry) did nothing
+    // to record; the proposal says its job's state until one runs
+    let started = !matches!(result, Err(nils_classify::Error::Busy { .. }));
+    if let Some((id, only, before)) = watched.as_ref().filter(|_| started) {
+        let (state, stacks, job) = match &result {
+            Ok(r) if r.cancelled => ("cancelled", r.written, r.job_id),
+            Ok(r) => ("done", r.written, r.job_id),
+            Err(_) => ("failed", 0, 0),
+        };
+        let after = rule_changes::snapshot(registry.store(), only.as_ref())
+            .map_err(|e| fail(e.to_string()))?;
+        let mut m =
+            rule_changes::measured(before, &after, stacks as usize, &settings.scope, job, state);
+        if let Err(e) = &result {
+            m["error"] = serde_json::json!(e.to_string());
+        }
+        nils_registry::rule_proposal::set_measured(registry.store(), *id, &m)
+            .map_err(|e| fail(e.to_string()))?;
+    }
+    let report = result.map_err(|e| match e {
+        nils_classify::Error::Busy { .. } => Exit {
+            code: BUSY,
+            message: e.to_string(),
+        },
+        other => fail(other.to_string()),
+    })?;
     let printed = if args.json {
         serde_json::to_string_pretty(&report)
             .map(|text| println!("{text}"))
@@ -2712,6 +2782,47 @@ fn classify(home: &Home, args: ClassifyArgs) -> Result<(), Exit> {
         return Ok(());
     }
     printed
+}
+
+/// The stacks a classify's `--scope` words hold, their union (record 56
+/// §6.5): a site, a dataset, a scanner or a batch as the rehearsal reads
+/// them, or a frozen handle's stacks.
+fn classify_scope(
+    registry: &mut Registry,
+    modality: &str,
+    scopes: &[String],
+) -> Result<std::collections::BTreeSet<i64>, Exit> {
+    let mut out = std::collections::BTreeSet::new();
+    let mut resolver: Option<nils_classify::scoped::Resolver> = None;
+    for s in scopes {
+        if let Some(h) = s.trim().strip_prefix("handle:") {
+            let id: i64 = h
+                .trim()
+                .parse()
+                .map_err(|_| usage(format!("--scope {s}: handle:ID names a handle by its id")))?;
+            out.extend(crate::pipelines::handle_stacks(registry.store(), id)?);
+            continue;
+        }
+        let scope =
+            nils_pack::patch::Scope::parse(s).map_err(|e| usage(format!("--scope {s}: {e}")))?;
+        if scope.is_pack() {
+            return Err(usage(
+                "--scope pack is every stack, which a classify without --scope judges",
+            ));
+        }
+        if resolver.is_none() {
+            resolver = Some(
+                nils_classify::scoped::Resolver::load(registry.store(), modality)
+                    .map_err(|e| fail(e.to_string()))?,
+            );
+        }
+        let r = resolver.as_ref().expect("loaded");
+        let scope = r
+            .known(&scope, registry.store())
+            .map_err(|e| usage(format!("--scope {s}: {e}")))?;
+        out.extend(r.stacks(&scope));
+    }
+    Ok(out)
 }
 
 /// The preview step of a classify run (record 55 H2): the previews of the
@@ -4033,25 +4144,144 @@ fn overlay_command(home: &Home, command: OverlayCommand) -> Result<(), Exit> {
             println!("wrote {}", path.display());
             Ok(())
         }
-        OverlayCommand::Refuse { id, why } => {
+        OverlayCommand::Refuse { id, why, pack_dir } => {
+            // under the lock the doors adopt with, and in one transaction:
+            // the decision, the scoped change's retirement and, for an
+            // adopted overlay withdrawn, the re-sort of its scope
+            let _one = rule_changes::adopting();
             let o = nils_registry::overlay::show(registry.store(), id)
                 .map_err(|e| fail(e.to_string()))?
                 .ok_or_else(|| fail(format!("no overlay {id}")))?;
-            if o.status != nils_registry::overlay::PROPOSED {
+            let adopted = o.status == nils_registry::overlay::ADOPTED;
+            if !adopted && o.status != nils_registry::overlay::PROPOSED {
                 return Err(fail(format!(
-                    "overlay {id} is {}, and only a proposed one is refused",
+                    "overlay {id} is {}, and only a proposed or an adopted one is refused",
                     o.status
                 )));
             }
-            nils_registry::overlay::decide(
-                registry.store(),
-                id,
-                nils_registry::overlay::REFUSED,
-                &actor(),
-                None,
-                why.as_deref(),
-            )
-            .map_err(|e| fail(e.to_string()))?;
+            let by = actor();
+            let reason = format!("overlay {id} withdrawn");
+            // an adopted overlay: what its scope holds, and what reads it
+            let withdrawn = if adopted {
+                let change = nils_registry::rule_proposal::of_overlay(registry.store(), &o)
+                    .map_err(|e| fail(e.to_string()))?
+                    .filter(|p| p.status == nils_registry::rule_proposal::ADOPTED);
+                match change {
+                    Some(p) => {
+                        let dir = self::pack_dir(home, pack_dir.clone())?;
+                        let modality = nils_pack::load(&dir.join(&o.pack), None)
+                            .map_or_else(|_| "MR".to_string(), |p| p.modality);
+                        let stacks =
+                            rule_changes::scoped_stacks(registry.store(), &modality, &p.scopes)
+                                .map_err(|r| {
+                                    fail(r.body["error"].as_str().unwrap_or("scope").to_string())
+                                })?;
+                        let closure =
+                            depends::of_stacks(&mut registry, "overlay", &id.to_string(), stacks)
+                                .map_err(|r| {
+                                fail(r.body["error"].as_str().unwrap_or("closure").to_string())
+                            })?;
+                        Some((p, dir, closure))
+                    }
+                    None => None,
+                }
+            } else {
+                None
+            };
+            let retired = rule_changes::in_one(&mut registry, |registry| {
+                let failed =
+                    |e: nils_registry::store::Error| serve::Reply::error(500, e.to_string());
+                // another process (the server) may have decided it since it
+                // was read: what was planned holds only if the overlay is
+                // still as it was, else nothing is written
+                let now = nils_registry::overlay::show(registry.store(), id).map_err(failed)?;
+                if now.as_ref().map(|n| n.status.as_str()) != Some(o.status.as_str()) {
+                    return Err(serve::Reply::error(
+                        409,
+                        format!("overlay {id} was decided meanwhile; look at it and refuse again"),
+                    ));
+                }
+                nils_registry::overlay::decide(
+                    registry.store(),
+                    id,
+                    nils_registry::overlay::REFUSED,
+                    &by,
+                    None,
+                    why.as_deref(),
+                )
+                .map_err(failed)?;
+                // record 56 section 5.6: a refused overlay is applied by no
+                // sort, so a scoped change made of it retires with it
+                let kept = nils_registry::rule_proposal::retire_overlay(registry.store(), &o, &by)
+                    .map_err(failed)?;
+                if let Some((p, dir, closure)) = &withdrawn {
+                    let mut command = vec!["classify".to_string(), "--pack".into(), o.pack.clone()];
+                    for s in &p.scopes {
+                        command.push("--scope".into());
+                        command.push(s.clone());
+                    }
+                    command.push("--pack-dir".into());
+                    command.push(dir.display().to_string());
+                    let job = nils_registry::job::enqueue_with(
+                        registry.store(),
+                        &command,
+                        Some(&format!("withdraw overlay {id}")),
+                        Some(&by),
+                        serde_json::json!({"overlay": id, "proposal": p.id}),
+                    )
+                    .map_err(|e| {
+                        serve::Reply::error(
+                            500,
+                            format!("the re-sort could not be queued, so it is not withdrawn: {e}"),
+                        )
+                    })?;
+                    let handles = depends::invalidate(registry, closure, &reason, &by)?;
+                    nils_registry::audit::record(
+                        registry,
+                        &nils_registry::audit::Entry {
+                            principal: &by,
+                            action: nils_registry::audit::Action::OverlayWithdraw,
+                            scope: serde_json::json!({"overlay": id, "scope": o.scope}),
+                            policy: None,
+                            job_id: Some(job),
+                            details: Some(serde_json::json!({
+                                "name": o.name, "version": o.version, "pack": o.pack,
+                                "closure": closure.counts(),
+                                "proposal": p.id,
+                                "why": why,
+                            })),
+                        },
+                    )
+                    .map_err(failed)?;
+                    if !handles.is_empty() {
+                        nils_registry::audit::record(
+                            registry,
+                            &nils_registry::audit::Entry {
+                                principal: &by,
+                                action: nils_registry::audit::Action::HandleInvalidate,
+                                scope: serde_json::json!({"overlay": id, "handles": handles.len()}),
+                                policy: None,
+                                job_id: Some(job),
+                                details: Some(serde_json::json!({"handles": handles})),
+                            },
+                        )
+                        .map_err(failed)?;
+                    }
+                    return Ok((kept, Some(job)));
+                }
+                Ok((kept, None))
+            })
+            .map_err(|r| fail(r.body["error"].as_str().unwrap_or("refused").to_string()))?;
+            match retired {
+                (Some((kept, true)), job) => {
+                    println!("its scoped change, proposal {kept}, retired");
+                    if let Some(job) = job {
+                        println!("queued job {job}: its scope is sorted again");
+                    }
+                }
+                (Some((kept, false)), _) => println!("its proposal {kept} rejected"),
+                _ => {}
+            }
             println!("overlay {id} refused");
             Ok(())
         }
@@ -4674,6 +4904,7 @@ fn pack_command(home: &Home, command: PackCommand) -> Result<(), Exit> {
                 workers,
                 cap,
                 progress,
+                all_breaks: false,
             };
             let made = rehearse::report(&mut registry, &dir, &patch, &settings);
             if let Some(id) = job {
@@ -6219,9 +6450,34 @@ fn linkage_command(home: &Home, command: LinkageCommand) -> Result<(), Exit> {
     match command {
         LinkageCommand::Import(args) => import(&mut registry, &mut store, args),
         LinkageCommand::IdType { command } => match command {
-            IdTypeCommand::Add { name, description } => {
-                let t = linkage::add_id_type(&mut store, &name, description.as_deref())?;
-                println!("added id type {} (id {})", t.name, t.id);
+            IdTypeCommand::Add {
+                name,
+                description,
+                identifying,
+            } => {
+                // record 55, ruling 24: --identifying on a type that exists
+                // marks it, as the types door does; without it a name that
+                // exists is refused as ever
+                if !identifying {
+                    let t = linkage::add_id_type(&mut store, &name, description.as_deref())?;
+                    println!("added id type {} (id {})", t.name, t.id);
+                    return Ok(());
+                }
+                let (t, made) = linkage::ensure_id_type(&mut store, &name, description.as_deref())?;
+                if !t.identifying {
+                    linkage::set_identifying(&mut store, &t.name, true)?;
+                    audit(
+                        &mut registry,
+                        nils_registry::audit::Action::LinkageTypeFlag,
+                        serde_json::json!({"id_type": t.name, "identifying": true, "made": made}),
+                        None,
+                    )?;
+                }
+                if made {
+                    println!("added id type {} (id {}), identifying", t.name, t.id);
+                } else {
+                    println!("id type {} (id {}) identifies a person", t.name, t.id);
+                }
                 Ok(())
             }
             IdTypeCommand::List => {

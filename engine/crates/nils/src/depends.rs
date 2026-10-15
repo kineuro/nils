@@ -166,6 +166,32 @@ pub(crate) fn of(
     }))
 }
 
+/// Record 56 §6.5: the closure of a change whose stacks are known, an
+/// adopted scoped rule change's: the stacks its scope holds, the open
+/// questions on them, and the handles and releases that read them.
+pub(crate) fn of_stacks(
+    registry: &mut Registry,
+    kind: &str,
+    id: &str,
+    stacks: Vec<i64>,
+) -> Result<Closure, Reply> {
+    let closes = open_items_on(registry.store(), &stacks)?;
+    let subjects = subjects_of(registry.store(), &stacks)?;
+    let handles = handles_reading(registry.store(), &stacks, &subjects, kind)?;
+    let releases = releases_over(registry.store(), &stacks)?;
+    Ok(Closure {
+        kind: kind.to_string(),
+        id: id.to_string(),
+        stacks: Stacks {
+            count: stacks.len(),
+            sample: stacks.iter().take(SAMPLE).copied().collect(),
+        },
+        review: Review { opens: 0, closes },
+        handles,
+        releases,
+    })
+}
+
 /// Wave 5 §12.8: the handles a closure names stop reproducing. One row
 /// each, once; the ids written are returned.
 pub(crate) fn invalidate(
@@ -386,6 +412,7 @@ fn handles_reading(
     let what = match kind {
         "overlay" => "stacks the overlay moves",
         "pack" => "stacks the pack bump reclassifies",
+        "proposal" => "stacks the scoped rule change re-sorts",
         "subject" => "the subject erased",
         _ => "the stack erased",
     };

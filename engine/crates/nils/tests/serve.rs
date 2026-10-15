@@ -1782,6 +1782,9 @@ fn the_knob_engine_rehearses_proposes_adopts_and_probes() {
     let (status, adopted) = server.request("POST", &format!("/api/overlays/{id}/adopt"), None, ops);
     assert_eq!(status, 202, "{adopted}");
     let adopt_job = adopted["job"].as_i64().unwrap();
+    // record 56 §5.6: kept as the scoped change it is
+    let kept_id = adopted["proposal"].as_i64().unwrap();
+    let kept = format!("proposal:{kept_id}");
     let (status, doc) = server.request("POST", &format!("/api/overlays/{id}/adopt"), None, ops);
     assert_eq!(status, 409, "{doc}");
 
@@ -1864,8 +1867,9 @@ fn the_knob_engine_rehearses_proposes_adopts_and_probes() {
         .iter()
         .find(|d| !cites(d))
         .expect("and one does not");
-    assert_eq!(moved["overlay"], "site@1.0.0", "{moved}");
-    assert_eq!(still["overlay"], "site@1.0.0", "{still}");
+    // both stacks are of the overlay's maker, so its scoped change sorted both
+    assert_eq!(moved["overlay"], kept.as_str(), "{moved}");
+    assert_eq!(still["overlay"], kept.as_str(), "{still}");
     let value_of = |doc: &serde_json::Value, axis: &str| -> String {
         doc["axes"]
             .as_array()
@@ -1909,7 +1913,14 @@ fn the_knob_engine_rehearses_proposes_adopts_and_probes() {
     server.finish();
     assert_eq!(status, 200, "{signals}");
     let unresolved = &signals["unresolved_texts"];
-    assert_eq!(unresolved["overlay"], "site@1.0.0", "{signals}");
+    // record 56 §6.5: read with the adopted overlay's scoped change on the
+    // stacks of its origin, as the registry was sorted
+    assert!(unresolved["overlay"].is_null(), "{signals}");
+    assert_eq!(
+        unresolved["scoped"],
+        serde_json::json!([kept_id]),
+        "{signals}"
+    );
     assert_eq!(
         unresolved["axes"]["post_contrast"]["stacks"], 1,
         "{signals}"
@@ -1917,7 +1928,14 @@ fn the_knob_engine_rehearses_proposes_adopts_and_probes() {
     // and the stack the site's word resolved is the resolved sample's, under
     // the value the word reached
     let resolved = &signals["resolved_texts"];
-    assert_eq!(resolved["overlay"], "site@1.0.0", "{signals}");
+    // record 56 §6.5: read with the adopted overlay's scoped change on the
+    // stacks of its origin, as the registry was sorted
+    assert!(resolved["overlay"].is_null(), "{signals}");
+    assert_eq!(
+        resolved["scoped"],
+        serde_json::json!([kept_id]),
+        "{signals}"
+    );
     assert_eq!(
         resolved["axes"]["post_contrast"]["values"]["1"]["stacks"], 1,
         "{signals}"
@@ -5870,6 +5888,7 @@ fn a_list_on_an_axis_value_rehearses_adopts_and_is_named_on_the_pack() {
     let (status, adopted) = server.request("POST", &format!("/api/overlays/{id}/adopt"), None, ops);
     assert_eq!(status, 202, "{adopted}");
     let adopt_job = adopted["job"].as_i64().unwrap();
+    let kept = format!("proposal:{}", adopted["proposal"].as_i64().unwrap());
     // 5: the packs door names the site's term on the list, on the value and
     // per list, and the overlay it came from
     let (status, pack) = server.request("GET", "/api/packs/mri", None, reviewer);
@@ -5965,9 +5984,9 @@ fn a_list_on_an_axis_value_rehearses_adopts_and_is_named_on_the_pack() {
         .find(|d| !cites(d))
         .expect("and one does not");
     assert_eq!(technique_of(moved), "TSE", "{moved}");
-    assert_eq!(moved["overlay"], "site-lists@1.0.0", "{moved}");
+    assert_eq!(moved["overlay"], kept.as_str(), "{moved}");
     assert_ne!(technique_of(still), "TSE", "{still}");
-    assert_eq!(still["overlay"], "site-lists@1.0.0", "{still}");
+    assert_eq!(still["overlay"], kept.as_str(), "{still}");
 
     // `nils overlay show` prints the list, and the export loads on the
     // command line as `nils classify --overlay` loads it

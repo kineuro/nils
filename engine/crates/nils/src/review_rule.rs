@@ -494,7 +494,7 @@ fn similar(store: &mut Store, stack: i64, axis: &str) -> Result<Vec<Value>, Stor
 /// reader's evidence line (record 48 R1): the value in force, who set it,
 /// the rule, the clause, the fields it read and their values, the text it
 /// matched at detail quasi, the other rules that voted and the line.
-fn rules_reason(why: &Value, axis: &str) -> Value {
+pub(crate) fn rules_reason(why: &Value, axis: &str) -> Value {
     let Some(entry) = why["axes"]
         .as_array()
         .and_then(|a| a.iter().find(|e| e["axis"] == axis))
@@ -711,6 +711,16 @@ fn signs(store: &mut Store, sources: &[i64]) -> Result<Value, StoreError> {
 
 /// The share of nameless scans at which the signs flag a dataset.
 const SIGNS_SHARE: f64 = 0.5;
+
+/// Whether one dataset is held to the full gate, as its flag says (record
+/// 56 §6.3: an answer's re-sort runs the gate again only there).
+pub(crate) fn damaged(
+    store: &mut Store,
+    place: &Place,
+    sources: &[i64],
+) -> Result<bool, StoreError> {
+    Ok(flag_of(store, place, sources)?["damaged"].as_bool() == Some(true))
+}
 
 /// A dataset's flag: a person's where one was set, else the signs'.
 fn flag_of(store: &mut Store, place: &Place, sources: &[i64]) -> Result<Value, StoreError> {

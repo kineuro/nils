@@ -74,7 +74,7 @@ pub(crate) fn route(
     let post = method == "POST";
     Some(match segs {
         ["api", "linkage", "types"] if get => types(registry),
-        ["api", "linkage", "types"] if post => add_type(registry, body),
+        ["api", "linkage", "types"] if post => add_type(registry, caller, body),
         ["api", "linkage", "imports"] if post => imports(home, registry, caller, body),
         ["api", "linkage", "held"] if get => held(registry, query.get("place").map(String::as_str)),
         ["api", "linkage", "held", "ids"] if get => {
@@ -112,7 +112,7 @@ fn types(registry: &mut Registry) -> Result<Reply, Reply> {
 }
 
 /// `POST /api/linkage/types {name, description}`: made once, found after.
-fn add_type(registry: &mut Registry, body: &str) -> Result<Reply, Reply> {
+fn add_type(registry: &mut Registry, caller: &Caller, body: &str) -> Result<Reply, Reply> {
     let doc = json_body(body)?;
     let name = doc["name"]
         .as_str()
@@ -125,9 +125,19 @@ fn add_type(registry: &mut Registry, body: &str) -> Result<Reply, Reply> {
             )
         })?;
     let description = doc["description"].as_str().map(str::trim);
+    // record 55, ruling 24: whether its IDs identify a person anywhere
+    let identifying = match &doc["identifying"] {
+        serde_json::Value::Null => None,
+        serde_json::Value::Bool(b) => Some(*b),
+        _ => return Err(Reply::error(400, "identifying: true or false")),
+    };
+    let unflag = doc["unflag"] == serde_json::Value::Bool(true);
     let mut store = open_linkage(registry)?;
     let (t, made) = linkage::ensure_id_type(&mut store, name, description)
         .map_err(|e| Reply::error(400, e.to_string()))?;
+    if let Some(flag) = identifying {
+        flag_type(registry, &mut store, caller, &t, made, flag, unflag)?;
+    }
     let counts = linkage::id_type_counts(&mut store)?;
     let mut answer = counts
         .into_iter()
@@ -142,6 +152,60 @@ fn add_type(registry: &mut Registry, body: &str) -> Result<Reply, Reply> {
     } else {
         Reply::ok(answer)
     })
+}
+
+/// Record 55, ruling 24: a type said to identify a person anywhere, or no
+/// longer to. A type made by this call takes the flag as given. Changing it
+/// on a type that exists, either way, is the reach of a re-identification:
+/// data:work at detail sensitive. Taking it away must be asked for in so
+/// many words (`unflag: true`), and a built-in identifying type keeps it:
+/// naming one again with `identifying: false` alone changes nothing, as it
+/// always did. Every change writes a `linkage.type.flag` audit row.
+pub(crate) fn flag_type(
+    registry: &mut Registry,
+    store: &mut Store,
+    caller: &Caller,
+    t: &linkage::IdType,
+    made: bool,
+    flag: bool,
+    unflag: bool,
+) -> Result<(), Reply> {
+    if t.identifying == flag {
+        return Ok(());
+    }
+    let builtin = nils_registry::schema::IDENTIFYING_ID_TYPES.contains(&t.name.as_str());
+    if !flag && !unflag {
+        if builtin {
+            return Ok(());
+        }
+        return Err(Reply::error(
+            409,
+            format!(
+                "{} identifies a person anywhere; say unflag: true to say it no longer does",
+                t.name
+            ),
+        ));
+    }
+    if !made {
+        caller.allowed(
+            &format!("changing whether {} identifies a person", t.name),
+            Need::One("data:work"),
+            Detail::Sensitive,
+        )?;
+    }
+    linkage::set_identifying(store, &t.name, flag).map_err(|e| Reply::error(409, e.to_string()))?;
+    nils_registry::audit::record(
+        registry,
+        &nils_registry::audit::Entry {
+            principal: &caller.principal,
+            action: nils_registry::audit::Action::LinkageTypeFlag,
+            scope: serde_json::json!({ "id_type": t.name, "identifying": flag, "made": made }),
+            policy: None,
+            job_id: None,
+            details: None,
+        },
+    )?;
+    Ok(())
 }
 
 /// The columns a body names: `[{header, role, id_type?}]`.
@@ -1164,13 +1228,20 @@ const RESOLVE_MAX: usize = 256;
 
 /// `POST /api/linkage/resolve {id_type, value}` (record 55, ruling 24): one
 /// ID of a known type, given by the caller, turned into the subject code it
-/// stands for, `{id_type, known, subject_code, datasets}`, or `{id_type,
+/// stands for, `{id_type, known, subject_code, scans, datasets}`, or `{id_type,
 /// known: false}` when no subject of a scan the caller may see holds it. It
-/// answers no identifier it was not given: not even the value back. The
+/// answers no identifier it was not given: not even the value back. A study's
+/// own ID (a map's type) is open to whoever uses the data at detail quasi; an
+/// ID that identifies a person wherever it is met
+/// (the type's stored flag, [`linkage::identifying_type`]) is a re-identification and needs
+/// `data:work` at detail sensitive, as the held reveal and the merge do. The
 /// value is looked up by its keyed hash, as the digest filed it, so no
 /// ciphertext is opened; a merged subject answers the subject it was merged
-/// into, and a stack of a sample sealed now is not counted without the
-/// unsealed grant. Each match writes one read audit row.
+/// into; a stack of a sample sealed now is not counted without the unsealed
+/// grant; the datasets are named only to a caller who may see them
+/// (`data:see` or `places:see`). Every lookup, found or not, writes one
+/// `linkage.resolve` row in the registry's audit log, and a match one read
+/// audit row in the linkage store for the identity row it opened.
 fn resolve(registry: &mut Registry, caller: &Caller, body: &str) -> Result<Reply, Reply> {
     let doc = json_body(body)?;
     let id_type = doc["id_type"]
@@ -1185,14 +1256,14 @@ fn resolve(registry: &mut Registry, caller: &Caller, body: &str) -> Result<Reply
         .filter(|v| !v.is_empty())
         .ok_or_else(|| Reply::error(400, "value: the ID, as the person gave it"))?
         .to_string();
-    if value.len() > RESOLVE_MAX {
+    if value.chars().count() > RESOLVE_MAX {
         return Err(Reply::error(
             400,
             format!("value: an ID of at most {RESOLVE_MAX} characters"),
         ));
     }
     let mut linkage = open_linkage(registry)?;
-    let Some(type_id) = linkage::id_type_id(&mut linkage, &id_type)? else {
+    let Some(kind) = linkage::id_type_named(&mut linkage, &id_type)? else {
         let names: Vec<String> = linkage::id_types(&mut linkage)?
             .into_iter()
             .map(|t| t.name)
@@ -1205,108 +1276,166 @@ fn resolve(registry: &mut Registry, caller: &Caller, body: &str) -> Result<Reply
             ),
         ));
     };
+    // an ID of a type flagged identifying is a re-identification
+    if kind.identifying {
+        caller.allowed(
+            &format!("resolving a {id_type}"),
+            Need::One("data:work"),
+            Detail::Sensitive,
+        )?;
+    }
     let (_, keys) = keys_of(registry)?;
     let lookup = keys.lookup(&id_type, &value);
-    let found: Vec<linkage::Identity> = linkage::identities_by_lookup(&mut linkage, &[lookup])?
+    let identity = linkage::identities_by_lookup(&mut linkage, &[lookup])?
         .into_iter()
-        .filter(|i| i.id_type_id == type_id)
-        .collect();
-    let unknown = || Reply::ok(serde_json::json!({ "id_type": id_type, "known": false }));
-    let Some(identity) = found.first() else {
-        return Ok(unknown());
+        .find(|i| i.id_type_id == kind.id);
+    let found = match &identity {
+        Some(i) => resolved(registry, caller, i.subject_id)?,
+        None => None,
     };
-    // a merged subject is answered by the one it was merged into
+    // every lookup is audited in the registry's log, a miss and a
+    // sealed-only subject included; the linkage store's read audit only
+    // when an identity row was opened, a match
+    let outcome = match (&identity, &found) {
+        (_, Some(_)) => "found",
+        (Some(_), None) => "no scan to see",
+        (None, None) => "not known",
+    };
+    if let Some(i) = &identity {
+        let now = nils_registry::time::now_iso();
+        let audit = vec![vec![
+            Param::from(now.as_str()),
+            Param::from(caller.principal.as_str()),
+            Param::Int(i.id),
+            Param::from(format!("resolve: {outcome}").as_str()),
+        ]];
+        linkage.begin()?;
+        let written = linkage.insert(
+            &nils_registry::Insert::all(nils_registry::schema::table("read_audit")),
+            &audit,
+        );
+        match written {
+            Ok(_) => linkage.commit()?,
+            Err(e) => {
+                let _ = linkage.rollback();
+                return Err(e.into());
+            }
+        }
+    }
+    nils_registry::audit::record(
+        registry,
+        &nils_registry::audit::Entry {
+            principal: &caller.principal,
+            action: nils_registry::audit::Action::LinkageResolve,
+            scope: serde_json::json!({
+                "id_type": id_type,
+                "outcome": outcome,
+                "subject": found.as_ref().map(|f| f.code.clone()),
+            }),
+            policy: None,
+            job_id: None,
+            details: None,
+        },
+    )?;
+    let Some(f) = found else {
+        return Ok(Reply::ok(
+            serde_json::json!({ "id_type": id_type, "known": false }),
+        ));
+    };
+    let mut answer = serde_json::json!({
+        "id_type": id_type,
+        "known": true,
+        "subject_code": f.code,
+        "scans": f.scans,
+    });
+    // a dataset's name is Data's or Places' to see; a reader of questions
+    // alone gets the counts
+    if names_datasets(&caller.access) {
+        answer["datasets"] = serde_json::Value::from(f.datasets);
+    }
+    Ok(Reply::ok(answer))
+}
+
+/// Whether a resolve names the datasets: they are Data's or Places' to see.
+fn names_datasets(access: &crate::grants::Access) -> bool {
+    access.holds("data:see") || access.holds("places:see")
+}
+
+/// A subject an ID resolved to, as the caller may see it.
+struct Resolved {
+    code: String,
+    scans: usize,
+    datasets: Vec<String>,
+}
+
+/// The subject an identity names, followed through merges to the one it
+/// was merged into, with the scans of theirs the caller may see and the
+/// datasets that hold a file of one; none when it holds no such scan.
+fn resolved(
+    registry: &mut Registry,
+    caller: &Caller,
+    subject_id: i64,
+) -> Result<Option<Resolved>, Reply> {
     let store = registry.store();
-    let mut subject_id = identity.subject_id;
+    let mut id = subject_id;
     let mut seen = BTreeSet::new();
     let subject = loop {
-        let Some(s) = linkage::subjects_by_id(store, &[subject_id])?
-            .into_iter()
-            .next()
-        else {
-            return Ok(unknown());
+        let Some(s) = linkage::subjects_by_id(store, &[id])?.into_iter().next() else {
+            return Ok(None);
         };
         match s.merged_into {
-            Some(next) if seen.insert(s.id) => subject_id = next,
+            Some(next) if seen.insert(s.id) => id = next,
             _ => break s,
         }
     };
-    // the subject holds a scan the caller may see, in some dataset or none
-    let sealed = if crate::sealed::reads(&caller.access) {
-        String::new()
-    } else {
-        format!(
-            " AND NOT EXISTS (SELECT 1 FROM {} sst WHERE sst.stack_id = st.id AND sst.unsealed_at IS NULL)",
-            store.qualified("sealed_stack")
-        )
-    };
     let stacks_sql = format!(
-        "SELECT st.id FROM {} st JOIN {} se ON se.id = st.series_id WHERE se.subject_id = {}{sealed}",
+        "SELECT st.id FROM {} st JOIN {} se ON se.id = st.series_id WHERE se.subject_id = {} ORDER BY st.id",
         store.qualified("stack"),
         store.qualified("series"),
         subject.id
     );
-    let stacks: Vec<i64> = store
+    let all: Vec<i64> = store
         .query(&stacks_sql, &[])?
         .iter()
         .map(|r| r.int(0))
         .collect::<Result<_, _>>()?;
+    // the shared sealed rule: a scan of a sample sealed now is withheld
+    let withheld = crate::sealed::withheld(store, &caller.access, &all)?;
+    let stacks: Vec<i64> = all.into_iter().filter(|s| !withheld.contains(s)).collect();
     if stacks.is_empty() {
-        return Ok(unknown());
+        return Ok(None);
     }
-    // the datasets that hold a file of one of those scans
+    let list = stacks
+        .iter()
+        .map(i64::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    // the source roots read once, each dataset's sources found among them
+    let roots = crate::sources::roots(store)?;
     let mut datasets: Vec<String> = Vec::new();
     for p in place::list(store)? {
         if p.role != place::Role::Source || p.retired_at.is_some() {
             continue;
         }
-        let sources = crate::sources::source_ids(store, &p)?;
-        if sources.is_empty() {
-            continue;
-        }
-        let list = sources
+        let sources = crate::sources::ids_under(&p, &roots)
             .iter()
             .map(i64::to_string)
             .collect::<Vec<_>>()
             .join(", ");
-        let held = format!(
-            "SELECT 1 FROM {} ss JOIN {} st ON st.id = ss.stack_id JOIN {} se ON se.id = st.series_id \
-             WHERE ss.source_id IN ({list}) AND se.subject_id = {}{sealed}",
-            store.qualified("source_stack"),
+        let held = crate::operations::held_by(store, "st", &sources);
+        let sql = format!(
+            "SELECT 1 FROM {} st WHERE st.id IN ({list}) AND {held}",
             store.qualified("stack"),
-            store.qualified("series"),
-            subject.id
         );
-        if !store.query(&held, &[])?.is_empty() {
+        if !store.query(&sql, &[])?.is_empty() {
             datasets.push(p.name.clone());
         }
     }
-    let now = nils_registry::time::now_iso();
-    let audit = vec![vec![
-        Param::from(now.as_str()),
-        Param::from(caller.principal.as_str()),
-        Param::Int(identity.id),
-        Param::from("resolve an ID to its subject code"),
-    ]];
-    linkage.begin()?;
-    let written = linkage.insert(
-        &nils_registry::Insert::all(nils_registry::schema::table("read_audit")),
-        &audit,
-    );
-    match written {
-        Ok(_) => linkage.commit()?,
-        Err(e) => {
-            let _ = linkage.rollback();
-            return Err(e.into());
-        }
-    }
-    Ok(Reply::ok(serde_json::json!({
-        "id_type": id_type,
-        "known": true,
-        "subject_code": subject.code,
-        "scans": stacks.len(),
-        "datasets": datasets,
-    })))
+    Ok(Some(Resolved {
+        code: subject.code,
+        scans: stacks.len(),
+        datasets,
+    }))
 }
 
 /// `POST /api/linkage/merge {canonical, alias, why}`: a `linkage merge`
@@ -1441,6 +1570,16 @@ mod tests {
             verb(&["linkage", "merge", "a", "b"]),
             Some(("data:work", Detail::Sensitive))
         );
+    }
+
+    /// Record 55, ruling 24: a resolve names datasets to whoever may see
+    /// Data or Places, and gives a reader of questions alone the counts.
+    #[test]
+    fn a_resolve_names_datasets_only_to_those_who_see_them() {
+        assert!(!names_datasets(&caller("query:see,quasi").access));
+        assert!(names_datasets(&caller("data:see,quasi").access));
+        assert!(names_datasets(&caller("places:see").access));
+        assert!(names_datasets(&caller("admin").access));
     }
 
     /// A caller holding the listed grants, at the detail named beside
@@ -1585,6 +1724,87 @@ mod tests {
             r#"{"name": "Study Id"}"#,
         );
         assert_eq!(bad.status, 400);
+        // record 55, ruling 24: a type says whether its IDs identify a
+        // person anywhere; the built-in ones do, a study's own does not
+        // until it is said, and a built-in one stays identifying
+        let r = call(&home, &mut registry, &anna, "GET", "/api/linkage/types", "");
+        let flag = |name: &str| {
+            r.body
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|t| t["name"] == name)
+                .map(|t| t["identifying"].clone())
+                .unwrap()
+        };
+        assert_eq!(flag("patient-id"), true);
+        assert_eq!(flag("personnummer"), true);
+        assert_eq!(flag("study-instance-uid"), true);
+        assert_eq!(flag("subject-code"), false);
+        assert_eq!(flag("study-id"), false);
+        let hospital = call(
+            &home,
+            &mut registry,
+            &anna,
+            "POST",
+            "/api/linkage/types",
+            r#"{"name": "hospital-id", "identifying": true}"#,
+        );
+        assert_eq!(hospital.status, 201, "{}", hospital.body);
+        let mut store = registry.open_linkage().unwrap();
+        assert!(linkage::identifying_type(&mut store, "hospital-id").unwrap());
+        assert!(!linkage::identifying_type(&mut store, "study-id").unwrap());
+        drop(store);
+        let post = |registry: &mut Registry, who: &Caller, body: &str| {
+            call(&home, registry, who, "POST", "/api/linkage/types", body)
+        };
+        // naming a built-in identifying type again changes nothing, as ever
+        let kept = post(
+            &mut registry,
+            &anna,
+            r#"{"name": "patient-id", "identifying": false}"#,
+        );
+        assert_eq!(kept.status, 200, "{}", kept.body);
+        assert_eq!(kept.body["identifying"], true);
+        // changing the flag of a type that exists, either way, needs data:work
+        // at detail sensitive
+        let chief = caller("data:work,sensitive");
+        let mark = r#"{"name": "study-id", "identifying": true}"#;
+        assert_eq!(post(&mut registry, &anna, mark).status, 403);
+        let marked = post(&mut registry, &chief, mark);
+        assert_eq!(marked.status, 200, "{}", marked.body);
+        assert_eq!(marked.body["identifying"], true);
+        // taking it away is asked for in so many words
+        let quiet = post(
+            &mut registry,
+            &chief,
+            r#"{"name": "hospital-id", "identifying": false}"#,
+        );
+        assert_eq!(quiet.status, 409, "{}", quiet.body);
+        let unflag = r#"{"name": "hospital-id", "identifying": false, "unflag": true}"#;
+        assert_eq!(post(&mut registry, &anna, unflag).status, 403);
+        let gone = post(&mut registry, &chief, unflag);
+        assert_eq!(gone.status, 200, "{}", gone.body);
+        assert_eq!(gone.body["identifying"], false);
+        // and a built-in one keeps it even then
+        let builtin = post(
+            &mut registry,
+            &chief,
+            r#"{"name": "patient-id", "identifying": false, "unflag": true}"#,
+        );
+        assert_eq!(builtin.status, 409, "{}", builtin.body);
+        // every change is in the audit log: hospital-id made so, study-id
+        // marked, hospital-id unmarked
+        let flagged = registry
+            .store()
+            .query(
+                "SELECT COUNT(*) FROM audit WHERE action = 'linkage.type.flag'",
+                &[],
+            )
+            .unwrap()[0]
+            .int(0)
+            .unwrap();
+        assert_eq!(flagged, 3);
     }
 
     #[test]

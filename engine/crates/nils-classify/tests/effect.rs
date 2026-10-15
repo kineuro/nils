@@ -970,3 +970,220 @@ fn a_decision_of_nothing_answers_the_axis_in_a_sort_and_in_the_replay() {
         assert_eq!(*told.lock().unwrap(), [(0, n)], "{name}");
     }
 }
+
+/// Three subjects, each a study of a spin echo from a Siemens named a word
+/// no rule reads, and a study of two from ACME named another; no echo or
+/// repetition time anywhere, so every stack has the vote's one key and no
+/// base the rules can find.
+fn vote_tree() -> TempDir {
+    let dir = TempDir::new("effect-vote");
+    for (s, patient) in ["V1", "V2", "V3"].iter().enumerate() {
+        let study = |n: u32| format!("1.2.8.{}.{n}", s + 1);
+        series(
+            &dir,
+            &study(1),
+            1,
+            patient,
+            &spin_echo("SIEMENS", "ax foo"),
+            false,
+        );
+        series(
+            &dir,
+            &study(2),
+            1,
+            patient,
+            &spin_echo("ACME MR", "ax zqzq"),
+            false,
+        );
+        series(
+            &dir,
+            &study(2),
+            2,
+            patient,
+            &spin_echo("ACME MR", "ax zqzq two"),
+            false,
+        );
+    }
+    dir
+}
+
+/// A patch adopted as a scoped change, as the decide door keeps it.
+fn adopt_scoped(reg: &mut Registry, p: &Patch) -> i64 {
+    use nils_registry::rule_proposal as rp;
+    let patch = serde_json::json!({"patch": 1, "pack": p.pack, "operations": p.written()});
+    let scopes: Vec<String> = p.scopes().iter().map(|s| s.text()).collect();
+    let empty = serde_json::json!({});
+    let id = rp::create(
+        reg.store(),
+        &rp::New {
+            pack: &p.pack,
+            title: "a scoped change",
+            kind: rp::SCOPED,
+            on_version: "",
+            scopes: &scopes,
+            patch: &patch,
+            reason: None,
+            evidence: &empty,
+            datasets: &[],
+            report: &empty,
+            card: &empty,
+            author: "a person",
+            author_kind: "person",
+            actor: &empty,
+        },
+    )
+    .unwrap();
+    assert!(
+        rp::decide(
+            reg.store(),
+            id,
+            &rp::Decided {
+                status: rp::ADOPTED,
+                by: "an operator",
+                why: None,
+                job: None,
+                version: &Value::Null,
+                applied: &empty,
+                at: None,
+            },
+        )
+        .unwrap()
+    );
+    id
+}
+
+/// The base a stack holds, as stored.
+fn base_of(reg: &mut Registry, stack: i64) -> String {
+    stored(reg)
+        .get(&stack)
+        .and_then(|m| m.get("base").cloned())
+        .unwrap_or_default()
+}
+
+#[test]
+fn a_sort_with_scoped_changes_is_the_one_rehearsed_whatever_order_its_groups_run_in() {
+    // Record 56 §6.5: the stacks an adopted change reaches are sorted by
+    // the pack with it, the rest by the pack; every group's rules write
+    // before any group's passes, so the vote's pool outside the change
+    // holds the change's stacks as it left them, as the rehearsal counts.
+    let pack = nils_pack::load(&mri(), None).expect("the MRI pack loads");
+    let p = Patch::parse(
+        "ops",
+        "patch: 1\npack: mri\nreason: r\nevidence: e\noperations:\n  - {op: add_words, axis: base, value: T2w, words: [zqzq], scope: 'scanner:manufacturer=ACME MR'}\n",
+    )
+    .unwrap();
+    for lab in labs() {
+        let name = lab.name;
+        let dir = vote_tree();
+        let mut reg = prepare(&lab, &dir);
+        nils_classify::classify::classify(&mut reg, &pack, &Default::default(), &Cancel::new())
+            .unwrap();
+        let foo: Vec<i64> = (0..3)
+            .map(|i| stack_named(&mut reg, "SIEMENS", "foo", i))
+            .collect();
+        let acme: Vec<i64> = (0..6)
+            .map(|i| stack_named(&mut reg, "ACME MR", "zqzq", i))
+            .collect();
+        for s in foo.iter().chain(&acme) {
+            assert_eq!(
+                base_of(&mut reg, *s),
+                "",
+                "{name}: stack {s} has no base before"
+            );
+        }
+        let before = stored(&mut reg);
+        // the rehearsal over every stack, the change on ACME's alone
+        let settings = nils_classify::effect::Settings {
+            scope: Some(nils_pack::patch::Scope::Pack),
+            examples: 10,
+            workers: 2,
+            ..Default::default()
+        };
+        let doc = nils_classify::effect::run(reg.store(), &mri(), &pack, &p, &settings, &names)
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+
+        // adopted, and the whole registry sorted again
+        let id = adopt_scoped(&mut reg, &p);
+        let report =
+            nils_classify::classify::classify(&mut reg, &pack, &Default::default(), &Cancel::new())
+                .unwrap();
+        assert_eq!(report.scoped[0]["proposal"], id, "{name}");
+        assert!(report.scoped_skipped.is_empty(), "{name}");
+        let after = stored(&mut reg);
+        assert_eq!(
+            report_moves(&doc),
+            diff(&before, &after, &BTreeSet::new()),
+            "{name}: the sort is the one rehearsed"
+        );
+        // the word gives ACME's stacks their base, and the vote outside the
+        // change reads them as the change left them
+        for s in &acme {
+            assert_eq!(base_of(&mut reg, *s), "T2w", "{name}: ACME's {s}");
+        }
+        for s in &foo {
+            assert_eq!(
+                base_of(&mut reg, *s),
+                "T2w",
+                "{name}: the Siemens {s} voted from ACME's"
+            );
+        }
+        // a second sort changes nothing: the order of its groups is no input
+        nils_classify::classify::classify(&mut reg, &pack, &Default::default(), &Cancel::new())
+            .unwrap();
+        assert_eq!(stored(&mut reg), after, "{name}");
+
+        // Record 56 §6.5: a scoped re-sort writes the post-contrast label of
+        // its own stacks and of no other, though it reads their sessions
+        // whole
+        let labels = reg.store().qualified("contrast_label");
+        let count = |reg: &mut Registry, stack: i64| -> i64 {
+            reg.store()
+                .query(
+                    &format!("SELECT COUNT(*) FROM {labels} WHERE stack_id = {stack}"),
+                    &[],
+                )
+                .unwrap()[0]
+                .int(0)
+                .unwrap()
+        };
+        assert_eq!(count(&mut reg, foo[0]), 1, "{name}: labelled");
+        assert_eq!(count(&mut reg, acme[0]), 1, "{name}: labelled");
+        reg.store()
+            .execute(
+                &format!(
+                    "UPDATE {labels} SET reason = 'as it was' WHERE stack_id IN ({}, {})",
+                    foo[0], acme[0]
+                ),
+                &[],
+            )
+            .unwrap();
+        let only: BTreeSet<i64> = acme.iter().copied().collect();
+        let scoped = nils_classify::Settings {
+            stacks: nils_classify::job::Stacks::Only(std::sync::Arc::new(only)),
+            scope: vec!["scanner:manufacturer=ACME MR".into()],
+            ..Default::default()
+        };
+        nils_classify::classify::classify(&mut reg, &pack, &scoped, &Cancel::new()).unwrap();
+        let reason = |reg: &mut Registry, stack: i64| -> Option<String> {
+            reg.store()
+                .query(
+                    &format!("SELECT reason FROM {labels} WHERE stack_id = {stack}"),
+                    &[],
+                )
+                .unwrap()
+                .first()
+                .and_then(|r| r.opt_text(0).unwrap().map(str::to_string))
+        };
+        assert_eq!(
+            reason(&mut reg, foo[0]).as_deref(),
+            Some("as it was"),
+            "{name}: a stack outside the scope keeps its label row"
+        );
+        assert_ne!(
+            reason(&mut reg, acme[0]).as_deref(),
+            Some("as it was"),
+            "{name}: a stack in the scope is labelled again"
+        );
+        assert_eq!(count(&mut reg, acme[0]), 1, "{name}: once");
+    }
+}

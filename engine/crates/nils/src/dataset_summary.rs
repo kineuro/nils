@@ -1110,6 +1110,19 @@ pub(crate) fn document(
             })
             .collect()
     };
+    // record 56 §5.3 ("3 proposed rule fixes from this read"): the
+    // proposed rule changes of every pack that touch the dataset, by status
+    let mut proposals = serde_json::Map::new();
+    for s in nils_registry::rule_proposal::STATUSES {
+        proposals.insert(s.to_string(), json!(0));
+    }
+    for p in nils_registry::rule_proposal::list(registry.store(), None).map_err(failed)? {
+        if p.touches(&dataset.name)
+            && let Some(n) = proposals.get_mut(&p.status)
+        {
+            *n = json!(n.as_i64().unwrap_or(0) + 1);
+        }
+    }
     Ok(json!({
         "dataset": dataset.name,
         "dataset_id": dataset.id,
@@ -1151,6 +1164,7 @@ pub(crate) fn document(
             },
             "held": held,
         },
+        "proposals": proposals,
         "pictures_place": working.map(|w| w.name),
         "steps": steps,
     }))

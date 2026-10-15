@@ -125,6 +125,11 @@ fn consider(
         {
             continue;
         }
+        // record 56 §6.5: a scoped re-sort targets its own stacks alone;
+        // their siblings are read as the registry holds them
+        if !settings.stacks.holds(ids.stack) {
+            continue;
+        }
         let in_force = forces
             .remove(&ids.stack)
             .unwrap_or_else(|| vec![InForce::default(); pack.axes.len()]);
@@ -195,7 +200,23 @@ pub fn run(
         .as_ref()
         .map(|t| t.required_axes())
         .unwrap_or_default();
-    if required.is_empty() {
+    if let crate::job::Stacks::Only(only) = &settings.stacks {
+        // a scoped re-sort reads its own stacks, not every window
+        let ids: Vec<i64> = only.iter().copied().collect();
+        for chunk in ids.chunks(500) {
+            if cancel.stop() {
+                return Ok(ran);
+            }
+            let rows = store.query(&select_stacks(store, chunk), &[])?;
+            let mut forces = in_force_of(
+                store,
+                pack,
+                &format!("stack_id IN ({})", list(chunk.iter().copied())),
+                &[],
+            )?;
+            consider(pack, pass, settings, &rows, &mut forces, &mut targets)?;
+        }
+    } else if required.is_empty() {
         let sql = select(store, settings.modality.as_deref(), false);
         let window = settings.window.max(1) as i64;
         let mut after = 0i64;

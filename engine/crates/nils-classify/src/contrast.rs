@@ -139,6 +139,20 @@ pub fn subjects_of(store: &mut Store, stacks: &[i64]) -> Result<Vec<i64>, Error>
 /// Label every session of the subjects named, or of every subject with an
 /// MR stack, and write their rows.
 pub fn label(store: &mut Store, pack: &Pack, subjects: Option<&[i64]>) -> Result<Labelled, Error> {
+    label_in(store, pack, subjects, None)
+}
+
+/// As [`label`], writing the rows of the stacks `only` names and of no
+/// other (record 56 §6.5: a scoped re-sort writes nothing about a stack
+/// outside its scope). Each session is still read whole, since the rule
+/// reads a stack beside its siblings; a sibling outside the scope keeps the
+/// row it had until a sort that judges it labels it again.
+pub fn label_in(
+    store: &mut Store,
+    pack: &Pack,
+    subjects: Option<&[i64]>,
+    only: Option<&BTreeSet<i64>>,
+) -> Result<Labelled, Error> {
     let started = Instant::now();
     let mut done = Labelled::default();
     // a pack without the post-contrast axis labels nothing
@@ -155,7 +169,19 @@ pub fn label(store: &mut Store, pack: &Pack, subjects: Option<&[i64]>) -> Result
         let studies = read(store, &vocab, chunk)?;
         let mut rows: Vec<(i64, i64, Label)> = Vec::new();
         let mut by_subject: BTreeMap<i64, Vec<Study>> = BTreeMap::new();
+        // the stacks whose rows this chunk replaces: every stack its
+        // sessions hold, or those of them the scope holds
+        let mut replaced: Vec<i64> = Vec::new();
         for (subject, study) in studies {
+            if let Some(o) = only {
+                replaced.extend(
+                    study
+                        .scans
+                        .iter()
+                        .map(|x| x.stack)
+                        .filter(|x| o.contains(x)),
+                );
+            }
             by_subject.entry(subject).or_default().push(study);
         }
         for (subject, studies) in &by_subject {
@@ -170,7 +196,13 @@ pub fn label(store: &mut Store, pack: &Pack, subjects: Option<&[i64]>) -> Result
             }
         }
         done.subjects += by_subject.len();
-        write(store, chunk, &rows)?;
+        match only {
+            None => write(store, chunk, None, &rows)?,
+            Some(o) => {
+                rows.retain(|(_, _, l)| o.contains(&l.stack));
+                write(store, chunk, Some(&replaced), &rows)?;
+            }
+        }
         for (_, _, l) in &rows {
             done.stacks += 1;
             if l.anchored {
@@ -598,8 +630,14 @@ fn scan_of(cfg: &Config, vocab: &Vocabulary, raw: Raw, study_day: Option<i64>) -
     }
 }
 
-/// Replace the rows of the subjects named with the labels given.
-fn write(store: &mut Store, subjects: &[i64], rows: &[(i64, i64, Label)]) -> Result<(), Error> {
+/// Replace the rows of the subjects named with the labels given; of the
+/// stacks named alone where `stacks` names them.
+fn write(
+    store: &mut Store,
+    subjects: &[i64],
+    stacks: Option<&[i64]>,
+    rows: &[(i64, i64, Label)],
+) -> Result<(), Error> {
     let t = table("contrast_label");
     let columns = [
         "stack_id",
@@ -659,11 +697,22 @@ fn write(store: &mut Store, subjects: &[i64], rows: &[(i64, i64, Label)]) -> Res
         .collect();
     store.begin()?;
     let result = (|| {
-        store.batch(&format!(
-            "DELETE FROM {} WHERE subject_id IN ({})",
-            store.qualified("contrast_label"),
-            ids(subjects)
-        ))?;
+        match stacks {
+            None => store.batch(&format!(
+                "DELETE FROM {} WHERE subject_id IN ({})",
+                store.qualified("contrast_label"),
+                ids(subjects)
+            ))?,
+            Some(stacks) => {
+                for chunk in stacks.chunks(500) {
+                    store.batch(&format!(
+                        "DELETE FROM {} WHERE stack_id IN ({})",
+                        store.qualified("contrast_label"),
+                        ids(chunk)
+                    ))?;
+                }
+            }
+        }
         for chunk in params.chunks(500) {
             store.insert(&insert, chunk)?;
         }

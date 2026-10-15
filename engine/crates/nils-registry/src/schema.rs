@@ -1277,6 +1277,12 @@ fn build_registry() -> Vec<Table> {
                 col("blind", Type::Int),
                 col("seconds", Type::Double),
                 col("mode", Type::Text),
+                // Record 56 §5.2 (2026-10-15): the rules' answer on the axis
+                // as the person saw it when they decided ("" where the
+                // rules gave none); null where it was not in view. A sort
+                // asks about the decision again only when the rules' answer
+                // has moved from it.
+                col("rules_in_view", Type::Text),
             ],
         )
         .index(&["scope", "ref", "axis"]),
@@ -3126,6 +3132,54 @@ fn build_registry() -> Vec<Table> {
         .index(&["run_id"])
         .index(&["subject_id"])
         .index(&["stack_id"]),
+        // Record 56 (sections 5.3 to 5.6, 6.4 and 6.5): a proposed rule
+        // change, typed operations with their reason, evidence and scope,
+        // kept with the effect report it was rehearsed into and decided by
+        // a person. Adopted, a pack edit is the pack's next version (the
+        // rules version written, `version`) and a scoped one a change every
+        // sort applies to the stacks its scope holds; `applied` is what the
+        // re-sort after it did.
+        Table::new(
+            "rule_proposal",
+            vec![
+                col("id", Type::Id),
+                req("pack", Type::Text),
+                req("title", Type::Text),
+                // pack (a pack edit) or scoped (a site's, a dataset's, a
+                // scanner's or a batch's)
+                req("kind", Type::Text),
+                // the pack version it was last rehearsed against
+                req("on_version", Type::Text),
+                // the scopes of its operations, as their text
+                req("scopes", Type::Json),
+                // the patch as rehearsed: its operations as written, each
+                // with its scope, reason and evidence, its cases and ships
+                req("patch", Type::Json),
+                col("reason", Type::Text),
+                col("evidence", Type::Json),
+                // the datasets it touches, by name
+                col("datasets", Type::Json),
+                // proposed, adopted or rejected
+                req("status", Type::Text),
+                col("report", Type::Json),
+                col("card", Type::Json),
+                col("rehearsed_at", Type::Timestamp),
+                req("author", Type::Text),
+                req("author_kind", Type::Text),
+                col("actor", Type::Json),
+                req("created_at", Type::Timestamp),
+                col("decided_at", Type::Timestamp),
+                col("decided_by", Type::Text),
+                col("why", Type::Text),
+                // the re-sort an adoption queued
+                col("job_id", Type::Int),
+                // the rules version an adopted pack edit wrote
+                col("version", Type::Json),
+                // what the re-sort did: expected (the report's) and measured
+                col("applied", Type::Json),
+            ],
+        )
+        .index(&["pack", "status"]),
     ]
 }
 
@@ -3154,6 +3208,10 @@ fn build_linkage() -> Vec<Table> {
                 col("id", Type::Id),
                 req("name", Type::Text),
                 col("description", Type::Text),
+                // record 55, ruling 24: 1 when an ID of the type identifies
+                // a person wherever it is met, so resolving one to a subject
+                // code is a re-identification; null or 0 for a study's own
+                col("identifying", Type::Int),
             ],
         )
         .unique(&["name"]),
@@ -3211,6 +3269,12 @@ pub const SUBJECT_CODE_TYPE: &str = "subject-code";
 /// (2026-10-10: a dataset whose PatientID held such an ID failed at its
 /// first run on a registry that lacked the type). Its internal name stays
 /// the one the rules, the maps and the generator read.
+/// Record 55, ruling 24: the built-in types whose IDs identify a person
+/// wherever they are met: what PatientID held as written, a study's DICOM
+/// UID and the ID that is the same everywhere. Seeded with the flag set, and
+/// set on a store from before by migration 102.
+pub const IDENTIFYING_ID_TYPES: [&str; 3] = ["patient-id", "study-instance-uid", GENERATOR_ID_TYPE];
+
 pub const ID_TYPES: [(&str, &str); 4] = [
     ("patient-id", "PatientID (0010,0020) as written, trimmed"),
     (

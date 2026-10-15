@@ -174,6 +174,19 @@ pub struct Classified {
     /// (`crate::contrast::Labelled`).
     #[serde(default)]
     pub contrast: Option<serde_json::Value>,
+    /// Record 56 §6.5: a scoped re-sort's scope, {named, stacks}: what it was
+    /// named by and the stacks it held. None for every stack.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<serde_json::Value>,
+    /// The adopted scoped changes the sort applied, an operation each:
+    /// {proposal, at, op, scope, stacks}, the stacks of the sort its scope
+    /// held.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scoped: Vec<serde_json::Value>,
+    /// The adopted scoped changes it left out, each with why: one that no
+    /// longer applies to the pack.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scoped_skipped: Vec<serde_json::Value>,
     pub seconds: f64,
     pub peak_rss: Option<u64>,
     pub cancelled: bool,
@@ -211,8 +224,65 @@ impl Classified {
             seconds: 0.0,
             peak_rss: None,
             contrast: None,
+            scope: None,
+            scoped: Vec::new(),
+            scoped_skipped: Vec::new(),
             cancelled: false,
         }
+    }
+
+    /// Another group of the same run added in (record 56 §6.5: the stacks a
+    /// scoped change reaches are judged in a group of their own): every
+    /// count summed, each pass's beside the same pass's.
+    pub fn merge(&mut self, o: Classified) {
+        fn add(
+            into: &mut std::collections::BTreeMap<String, i64>,
+            from: std::collections::BTreeMap<String, i64>,
+        ) {
+            for (k, v) in from {
+                *into.entry(k).or_insert(0) += v;
+            }
+        }
+        self.disposed += o.disposed;
+        self.read += o.read;
+        self.written += o.written;
+        self.no_pack += o.no_pack;
+        self.evidence += o.evidence;
+        self.decided += o.decided;
+        self.silent += o.silent;
+        for p in o.passes {
+            match self.passes.iter_mut().find(|x| x.pass == p.pass) {
+                Some(x) => {
+                    x.pool = x.pool.max(p.pool);
+                    x.targets += p.targets;
+                    x.decided += p.decided;
+                    x.review_items += p.review_items;
+                    x.at_threshold += p.at_threshold;
+                    add(&mut x.by_method, p.by_method);
+                }
+                None => self.passes.push(p),
+            }
+        }
+        add(&mut self.by_tier, o.by_tier);
+        self.review_items += o.review_items;
+        self.review_stacks += o.review_stacks;
+        self.review_groups += o.review_groups;
+        add(&mut self.at_threshold, o.at_threshold);
+        add(&mut self.diagnostics, o.diagnostics);
+        add(&mut self.broken, o.broken);
+        self.broken_stacks += o.broken_stacks;
+        add(&mut self.overrides, o.overrides);
+        add(&mut self.below, o.below);
+        add(&mut self.unresolved, o.unresolved);
+        add(&mut self.missing, o.missing);
+        for a in o.asks_missing {
+            if !self.asks_missing.contains(&a) {
+                self.asks_missing.push(a);
+            }
+        }
+        add(&mut self.disagreements, o.disagreements);
+        self.split_notes += o.split_notes;
+        self.cancelled |= o.cancelled;
     }
 
     pub fn rate(&self) -> f64 {

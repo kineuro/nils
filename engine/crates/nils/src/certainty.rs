@@ -239,6 +239,13 @@ impl Asks {
         })
     }
 
+    /// The condition that picks these questions out of `review_item`
+    /// aliased `ri`, none where no question of the asker waits: what the
+    /// questions doors gather by (record 56 §6.3).
+    pub(crate) fn condition(&self) -> Option<&str> {
+        self.cond.as_deref()
+    }
+
     /// The scans of a scope these questions ask about, by id: `holds` is
     /// the condition a stack aliased `x` meets to be in it (record 55 D7:
     /// the audit's frame leaves them out).

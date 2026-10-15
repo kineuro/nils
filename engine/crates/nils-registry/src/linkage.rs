@@ -122,6 +122,9 @@ pub struct IdType {
     pub id: i64,
     pub name: String,
     pub description: Option<String>,
+    /// Record 55, ruling 24: an ID of this type identifies a person
+    /// wherever it is met.
+    pub identifying: bool,
 }
 
 /// A name for an identifier type: lower case letters, digits and hyphens,
@@ -140,7 +143,7 @@ pub fn valid_id_type_name(name: &str) -> bool {
 pub fn id_types(store: &mut Store) -> Result<Vec<IdType>, Error> {
     let t = store.qualified("id_type");
     let rows = store.query(
-        &format!("SELECT id, name, description FROM {t} ORDER BY id"),
+        &format!("SELECT id, name, description, identifying FROM {t} ORDER BY id"),
         &[],
     )?;
     rows.iter()
@@ -149,6 +152,7 @@ pub fn id_types(store: &mut Store) -> Result<Vec<IdType>, Error> {
                 id: r.int(0)?,
                 name: r.text(1)?.to_string(),
                 description: r.opt_text(2)?.map(str::to_string),
+                identifying: r.opt_int(3)?.unwrap_or(0) != 0,
             })
         })
         .collect()
@@ -193,6 +197,7 @@ pub struct TypeCount {
     pub id: i64,
     pub name: String,
     pub description: Option<String>,
+    pub identifying: bool,
     pub identifiers: i64,
     pub subjects: i64,
 }
@@ -206,10 +211,60 @@ impl TypeCount {
             // the same everywhere, every other type by its name (2026-10-10)
             "label": crate::schema::id_type_label(&self.name),
             "description": self.description,
+            // record 55, ruling 24: resolving one of its IDs re-identifies
+            "identifying": self.identifying,
             "identifiers": self.identifiers,
             "subjects": self.subjects,
         })
     }
+}
+
+/// One type by its name, read once: its id, its name and whether it
+/// identifies; none when there is no such type.
+pub fn id_type_named(store: &mut Store, name: &str) -> Result<Option<IdType>, Error> {
+    let t = store.qualified("id_type");
+    let sql = format!(
+        "SELECT id, name, description, identifying FROM {t} WHERE name = {}",
+        store.dialect().param(1, crate::schema::Type::Text)
+    );
+    match store.query_opt(&sql, &[Param::from(name)])? {
+        Some(r) => Ok(Some(IdType {
+            id: r.int(0)?,
+            name: r.text(1)?.to_string(),
+            description: r.opt_text(2)?.map(str::to_string),
+            identifying: r.opt_int(3)?.unwrap_or(0) != 0,
+        })),
+        None => Ok(None),
+    }
+}
+
+/// Record 55, ruling 24: whether an ID of this type identifies a person
+/// wherever it is met (the type's stored flag), which makes resolving one
+/// to a subject code a re-identification. A type that is not there is none.
+pub fn identifying_type(store: &mut Store, name: &str) -> Result<bool, Error> {
+    Ok(id_type_named(store, name)?.is_some_and(|t| t.identifying))
+}
+
+/// Record 55, ruling 24: say whether a type's IDs identify a person. A
+/// built-in identifying type stays identifying.
+pub fn set_identifying(store: &mut Store, name: &str, identifying: bool) -> Result<(), Error> {
+    if !identifying && crate::schema::IDENTIFYING_ID_TYPES.contains(&name) {
+        return Err(Error::Message(format!(
+            "{name} identifies a person wherever it is met, and stays so"
+        )));
+    }
+    let t = store.qualified("id_type");
+    let d = store.dialect();
+    let sql = format!(
+        "UPDATE {t} SET identifying = {} WHERE name = {}",
+        d.param(1, crate::schema::Type::Int),
+        d.param(2, crate::schema::Type::Text)
+    );
+    store.execute(
+        &sql,
+        &[Param::Int(i64::from(identifying)), Param::from(name)],
+    )?;
+    Ok(())
 }
 
 /// Every identifier type with how many identifiers and subjects it holds.
@@ -233,6 +288,7 @@ pub fn id_type_counts(store: &mut Store) -> Result<Vec<TypeCount>, Error> {
                 id: t.id,
                 name: t.name,
                 description: t.description,
+                identifying: t.identifying,
                 identifiers,
                 subjects,
             }
@@ -263,6 +319,7 @@ pub fn add_id_type(
         id: rows[0].int(0)?,
         name: name.to_string(),
         description: description.map(str::to_string),
+        identifying: false,
     })
 }
 

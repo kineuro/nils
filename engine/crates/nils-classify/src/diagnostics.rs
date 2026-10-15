@@ -66,6 +66,35 @@ impl Tallies {
         self.by_batch.entry(batch).or_default();
     }
 
+    /// Another group's tallies of the same run added in (record 56 §6.5).
+    pub fn absorb(&mut self, other: Tallies) {
+        for (batch, o) in other.by_batch {
+            let t = self.by_batch.entry(batch).or_default();
+            t.conflict.count += o.conflict.count;
+            for s in o.conflict.samples {
+                if t.conflict.samples.len() < SAMPLE_MAX && !t.conflict.samples.contains(&s) {
+                    t.conflict.samples.push(s);
+                }
+            }
+            t.unresolved.count += o.unresolved.count;
+            for s in o.unresolved.samples {
+                if t.unresolved.samples.len() < SAMPLE_MAX && !t.unresolved.samples.contains(&s) {
+                    t.unresolved.samples.push(s);
+                }
+            }
+            for (k, (n, sample)) in o.shadowed {
+                t.shadowed.entry(k).or_insert((0, sample)).0 += n;
+            }
+            t.cited.extend(o.cited);
+        }
+    }
+
+    /// Keep only the batches `keep` holds: a scoped re-sort replaces the
+    /// diagnostics of the batches it judged whole, and no other's.
+    pub fn retain(&mut self, keep: impl Fn(i64) -> bool) {
+        self.by_batch.retain(|b, _| keep(*b));
+    }
+
     /// Note one stack's verdict against its batch.
     pub fn note(&mut self, batch: i64, verdict: &Verdict) {
         let t = self.by_batch.entry(batch).or_default();
