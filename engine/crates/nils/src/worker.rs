@@ -194,10 +194,20 @@ pub(crate) fn lower_priority(n: i32) {
 #[cfg(not(unix))]
 pub(crate) fn lower_priority(_n: i32) {}
 
+/// A reader's single-stack pyramid build, as a queued job asks it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AskedBuild {
+    stack: i64,
+    /// The working place it names, none for the default one.
+    place: Option<String>,
+    /// Built again where it has its pyramid (`--force`).
+    force: bool,
+}
+
 /// Whether a queued job is a reader's single-stack pyramid build, `pyramid
 /// build --stack N`, which the pictures lane runs before a background
-/// build: answers the stack and the place named, if any.
-fn asked_stack(job: &job::Job) -> Option<(i64, Option<String>)> {
+/// build: answers the stack, the place named, if any, and `--force`.
+fn asked_stack(job: &job::Job) -> Option<AskedBuild> {
     let words = job.queued()?;
     if job.kind != "pyramid" || words.first()? != "pyramid" || words.get(1)? != "build" {
         return None;
@@ -208,8 +218,11 @@ fn asked_stack(job: &job::Job) -> Option<(i64, Option<String>)> {
             .find(|w| w[0] == flag)
             .map(|w| w[1].clone())
     };
-    let stack = value("--stack")?.parse().ok()?;
-    Some((stack, value("--place")))
+    Some(AskedBuild {
+        stack: value("--stack")?.parse().ok()?,
+        place: value("--place"),
+        force: words.iter().any(|w| w == "--force"),
+    })
 }
 
 /// The next job a lane runs: the oldest, but on the pictures lane a
@@ -229,25 +242,43 @@ fn next_for(store: &mut Store, lane: job::Lane) -> Result<Option<job::Job>, job:
 /// Record 55 H2: the pyramids readers asked for (queued `pyramid build
 /// --stack N` jobs for this working place) built now, in this process,
 /// between two stacks of a background build; each job's row ends as the
-/// verb's would.
-pub(crate) fn build_asked_pyramids(store: &mut Store, working: &std::path::Path, workers: usize) {
+/// verb's would. A job is taken only where its `--place` names the
+/// background build's place, or names none and that place is the default
+/// working place (#460): any other is the lane's to run, so a picture is
+/// never written into another place's folder. `--force` builds again a
+/// stack that has its pyramid, as the verb does.
+pub(crate) fn build_asked_pyramids(
+    store: &mut Store,
+    working: &nils_registry::place::Place,
+    workers: usize,
+) {
     let Ok(queued) = job::queued_in(store, job::Lane::Pictures, 16) else {
         return;
     };
-    let place = crate::pyramid::working_place(store, None).ok();
+    let default = crate::pyramid::working_place(store, None).ok();
+    let is_default = default.as_ref().is_some_and(|p| p.id == working.id);
+    let folder = std::path::Path::new(&working.path);
     for j in queued {
-        let Some((stack, named)) = asked_stack(&j) else {
+        let Some(AskedBuild {
+            stack,
+            place: named,
+            force,
+        }) = asked_stack(&j)
+        else {
             continue;
         };
-        // a build for another working place is the lane's to run
-        if named.is_some() && named.as_deref() != place.as_ref().map(|p| p.name.as_str()) {
+        let ours = match named.as_deref() {
+            Some(name) => name == working.name,
+            None => is_default,
+        };
+        if !ours {
             continue;
         }
         if !matches!(job::take(store, j.id), Ok(true)) {
             continue;
         }
-        let root = crate::pyramid::dir(working, stack);
-        let built = if matches!(crate::pyramid::manifest(&root), Ok(Some(_))) {
+        let root = crate::pyramid::dir(folder, stack);
+        let built = if !force && matches!(crate::pyramid::manifest(&root), Ok(Some(_))) {
             Ok(serde_json::json!({"stack": stack, "skipped": true}))
         } else {
             crate::pyramid::read_volume(store, stack)

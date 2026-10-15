@@ -5575,7 +5575,6 @@ fn pyramid_many(
     )
     .map_err(|e| fail(e.to_string()))?;
     let total = stacks.len();
-    let root = std::path::PathBuf::from(&working.path);
     let mut go_on = |store: &mut nils_registry::Store, so_far: &crate::pyramid::Many| {
         let done = so_far.built.len() + so_far.skipped.len() + so_far.failed.len();
         let progress = serde_json::json!({
@@ -5586,7 +5585,7 @@ fn pyramid_many(
         // in the background is built now, between two of its stacks, rather
         // than after all of them
         if classified.is_some() {
-            crate::worker::build_asked_pyramids(store, &root, workers);
+            crate::worker::build_asked_pyramids(store, working, workers);
         }
         !matches!(
             nils_registry::job::beat(store, job, Some(&progress)),

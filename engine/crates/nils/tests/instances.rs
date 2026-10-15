@@ -645,6 +645,109 @@ fn a_picture_whose_build_a_restart_cut_short_is_built_again() {
     );
 }
 
+/// #460: between two stacks of a background build, a reader's build that
+/// names the background build's place is built there, `--force` building a
+/// stack that has its pyramid again; one for another working place is left
+/// to the lane and lands in its own place's folder.
+#[test]
+fn a_build_asked_during_a_background_build_keeps_its_place_and_force() {
+    use nils_registry::store::Store;
+    let (home, _src) = registry();
+    let first = TempDir::new("instances-work-first");
+    let second = TempDir::new("instances-work-second");
+    for (name, dir) in [("first", &first), ("second", &second)] {
+        ok(
+            &home,
+            &[
+                "place",
+                "add",
+                name,
+                dir.path().to_str().unwrap(),
+                "--role",
+                "working",
+            ],
+            None,
+        );
+    }
+    let classified = Store::open_sqlite(&home.path().join("registry.db"))
+        .unwrap()
+        .query("SELECT MAX(id) FROM job WHERE kind = 'classify'", &[])
+        .unwrap()[0]
+        .int(0)
+        .unwrap();
+    // stack 1 has its pyramid in the second place
+    ok(
+        &home,
+        &["pyramid", "build", "--stack", "1", "--place", "second"],
+        None,
+    );
+    let manifest = |dir: &TempDir, stack: i64| -> Option<serde_json::Value> {
+        std::fs::read(dir.path().join(format!("pyramids/{stack}/manifest.json")))
+            .ok()
+            .map(|b| serde_json::from_slice(&b).unwrap())
+    };
+    let built_at = manifest(&second, 1).unwrap()["built_at"].clone();
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let queue = |words: &[&str]| -> i64 {
+        let mut args = vec!["jobs", "enqueue", "--"];
+        args.extend_from_slice(words);
+        let out = ok(&home, &args, None);
+        out.split(|c: char| !c.is_ascii_digit())
+            .find(|w| !w.is_empty())
+            .and_then(|w| w.parse().ok())
+            .unwrap_or_else(|| panic!("no job id in {out}"))
+    };
+    let forced = queue(&[
+        "pyramid", "build", "--stack", "1", "--place", "second", "--force",
+    ]);
+    let elsewhere = queue(&["pyramid", "build", "--stack", "2"]);
+    // the background build on the second place
+    ok(
+        &home,
+        &[
+            "pyramid",
+            "build",
+            "--classified",
+            &classified.to_string(),
+            "--place",
+            "second",
+        ],
+        None,
+    );
+    let mut store = Store::open_sqlite(&home.path().join("registry.db")).unwrap();
+    let row = |store: &mut Store, id: i64| -> (String, Option<String>) {
+        let r = &store
+            .query(
+                &format!("SELECT state, result FROM job WHERE id = {id}"),
+                &[],
+            )
+            .unwrap()[0];
+        (
+            r.text(0).unwrap().to_string(),
+            r.opt_text(1).unwrap().map(str::to_string),
+        )
+    };
+    let (state, result) = row(&mut store, forced);
+    assert_eq!(state, "done", "{result:?}");
+    let result: serde_json::Value = serde_json::from_str(&result.unwrap()).unwrap();
+    assert!(result.get("skipped").is_none(), "built again: {result}");
+    assert_ne!(
+        manifest(&second, 1).unwrap()["built_at"],
+        built_at,
+        "a new pyramid"
+    );
+    // the default place's build was not taken, nor written into the second
+    assert_eq!(row(&mut store, elsewhere).0, "queued");
+    assert!(manifest(&first, 2).is_none());
+    ok(
+        &home,
+        &["jobs", "work", "--once", "--lane", "pictures"],
+        None,
+    );
+    assert_eq!(row(&mut store, elsewhere).0, "done");
+    assert!(manifest(&first, 2).is_some(), "built into its own place");
+}
+
 fn walk_has_manifest(dir: &Path) -> bool {
     std::fs::read_dir(dir)
         .into_iter()
