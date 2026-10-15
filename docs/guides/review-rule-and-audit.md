@@ -36,15 +36,26 @@ A bundle that brings its own code runs only with the pipeline input
 `trust_code` true, after its bytes match. The run's opinions are kept beside
 the rules' answers; they never become decisions.
 
-> **Warning: the gate waits for a certificate.** On a dataset flagged as
+> **Warning: the gate waits for a chosen model.** On a dataset flagged as
 > having damaged headers the gate accepts the rules' answer only where System
-> 1 agrees above its thresholds. Until a recorded certificate names the chosen
-> model, the gate raises nothing and Review shows System 1's opinion marked as
-> not confirmed.
+> 1 agrees above its thresholds. The gate runs once a System 1 model is
+> admitted and chosen for its task: its admission stands for it (record 55,
+> ruling 27), and no certificate is required. With no model chosen the gate
+> raises nothing.
 
-## 2. Record System 1's certificate
+Once System 1 stands, the gate on a flagged dataset stages System 1's
+answer where the rules name nothing and System 1 is confident (at its λ1 or
+above), on a single-valued axis its card gates and in a value of the pack's
+vocabulary. The answer waits in Review as a staged decision of System 1's
+model: a person confirms it with one commit, or answers otherwise. System 1
+never fills an answer on its own, and a dataset without the flag stages
+nothing.
 
-A model graded on research evidence is certified by citing its graded run,
+## 2. Record System 1's certificate (for the paper)
+
+A certificate is not required for System 1 to stage answers (record 55,
+ruling 27); it serves the paper, and the model's page shows it where one is
+recorded. A model graded on research evidence is certified by citing its graded run,
 since the site's registry holds no sample sealed for it (record 55, ruling 22
 b). One person records it, under their own sign-in and models:work: nothing is
 unsealed, so no second person is needed. The audit keeps it as
@@ -70,7 +81,7 @@ unsealed, so no second person is needed. The audit keeps it as
    instead of `--evidence`. In the desk the same is Pipelines, Models, the
    model's page, Record a certificate.
 
-3. Check that System 1 is confirmed:
+3. Check that the certificate is shown beside the chosen model:
 
    ```
    GET /api/review/settings
@@ -86,14 +97,6 @@ the plan's commit.
 > Where the served artifact is a repackaging of the file the run graded, cite
 > the run that showed it answers the same with `--equivalence MANIFEST.json
 > --equivalence-class I`.
-
-Once System 1 is confirmed, the gate on a flagged dataset stages System 1's
-answer where the rules name nothing and System 1 is confident (at its λ1 or
-above), on a single-valued axis its card gates and in a value of the pack's
-vocabulary. The answer waits in Review as a staged decision of System 1's
-model: a person confirms it with one commit, or answers otherwise. System 1
-never fills an answer on its own, and a dataset without the flag stages
-nothing.
 
 ## 3. Review blind first
 

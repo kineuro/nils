@@ -4,6 +4,14 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [1.0.0-alpha.84] - 2026-10-15
+
+Ruling 27: a model stages on its admission; certificates serve the paper.
+
+### Changed
+
+- A System 1 model that is admitted and chosen for its task stages its answers without a recorded certificate (record 55, ruling 27). Its admission, and for the rules their replay, is what stands for it in production. On a dataset flagged as damaged, the gate runs and System 1's answer is staged where the rules name nothing and it is confident at its threshold, for a person to commit, as before; the gate no longer waits for a certificate, and Review no longer shows the chosen model's opinion as not confirmed. A model neither admitted nor chosen stages nothing. Certificates stay: recording one works as before, and the model's page, the review settings and the suggestions show one where it exists (the questions door now names it too as `system1.certificate_id`). Seals, the person-only unseal and a person over an agent over a model are unchanged.
+
 ## [1.0.0-alpha.83] - 2026-10-15
 
 A fix to 1.0.0-alpha.82 on the night it reached production.

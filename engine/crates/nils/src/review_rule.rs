@@ -9,9 +9,10 @@
 //!   axis the rules resolved), and System 1's answer with its probability,
 //!   the rules' reliability on the header, the fields that mattered and up
 //!   to five similar settled stacks, drawn only from stacks outside every
-//!   sealed sample and shown for display, never as votes. Until a recorded
-//!   certificate names the System 1 model (D2) its opinion is shown marked
-//!   as not confirmed (record 55, T20 as changed on 2026-10-10).
+//!   sealed sample and shown for display, never as votes. A System 1 model
+//!   admitted and chosen for its task stands (record 55, ruling 27): its
+//!   opinion is shown as confirmed, with the recorded certificate that
+//!   names it where one exists; a certificate is no longer required.
 //! - **Blind first** (§11.4): a question about an axis carries a mode drawn
 //!   once from the site's share (one in five by default); on a blind-first
 //!   question the item and list doors hide NILS's own answers (never the
@@ -281,13 +282,17 @@ pub(crate) fn set_share(registry: &mut Registry, share: f64, who: &str) -> Resul
 pub(crate) fn settings_doc(registry: &mut Registry) -> Result<Value, Reply> {
     let (share, _) = blind_setting(registry)?;
     let chosen = opinion::chosen(registry.store()).map_err(failed)?;
-    let confirmed = match &chosen {
-        Some(c) => opinion::confirmed(registry.store(), c.model.id).map_err(failed)?,
-        None => None,
+    let (confirmed, certified) = match &chosen {
+        Some(c) => (
+            opinion::confirmed(registry.store(), c.model.id).map_err(failed)?,
+            opinion::certificate(registry.store(), c.model.id).map_err(failed)?,
+        ),
+        None => (false, None),
     };
-    // record 55 ruling 22 (b): what confirms it, a sealed sample or a
-    // graded run
-    let certificate = match confirmed {
+    // record 55 ruling 27: the model stands on its admission and choice; a
+    // certificate, where one names it, is shown (ruling 22 b: on a sealed
+    // sample or citing its graded run) and no longer required
+    let certificate = match certified {
         Some(id) => nils_registry::labels::certificate(registry.store(), id)
             .map_err(|e| Reply::error(500, e.to_string()))?
             .map(|c| json!({"id": c.id, "cites": if c.cites_evidence() { "evidence" } else { "sample" }, "words": c.words()})),
@@ -298,7 +303,7 @@ pub(crate) fn settings_doc(registry: &mut Registry) -> Result<Value, Reply> {
         "system1": {
             "task": opinion::TASK,
             "chosen": chosen.as_ref().map(nils_registry::model::Chosen::as_json),
-            "confirmed": confirmed.is_some(), "certificate_id": confirmed,
+            "confirmed": confirmed, "certificate_id": certified,
             "certificate": certificate,
         },
         "audit_share": audit_draw::DEFAULT_SHARE,
@@ -567,9 +572,12 @@ fn suggestions(
     let axes = axes_asked(&json!(it.kind), &it.evidence);
     let chosen = opinion::chosen(store).map_err(failed)?;
     let model = chosen.as_ref().map(|c| c.model.clone());
-    let certificate = match &model {
-        Some(m) => opinion::confirmed(store, m.id).map_err(failed)?,
-        None => None,
+    let (confirmed, certificate) = match &model {
+        Some(m) => (
+            opinion::confirmed(store, m.id).map_err(failed)?,
+            opinion::certificate(store, m.id).map_err(failed)?,
+        ),
+        None => (false, None),
     };
     let said = opinion::newest(store, &stacks, model.as_ref().map(|m| m.id)).map_err(failed)?;
     let pack = crate::reader::served_pack(doors.pack_dir.as_deref(), &doors.ask_pack);
@@ -609,10 +617,10 @@ fn suggestions(
         out.push(json!({"stack_id": stack, "axes": per_axis, "header": why["header"]}));
     }
     blind::revealed(store, item, &caller.principal).map_err(failed)?;
-    let status = match (&model, certificate) {
+    let status = match (&model, confirmed) {
         (None, _) => "no_model",
-        (Some(_), Some(_)) => "confirmed",
-        (Some(_), None) => "not_confirmed",
+        (Some(_), true) => "confirmed",
+        (Some(_), false) => "not_confirmed",
     };
     Ok(Reply::ok(json!({
         "item": item, "kind": it.kind, "mode": mode,
@@ -622,8 +630,9 @@ fn suggestions(
             "certificate_id": certificate,
             "why": match status {
                 "no_model" => "no System 1 model is chosen for its task",
-                "not_confirmed" => "System 1 is not yet confirmed: no recorded certificate names it (D2); its opinion is a research model's",
-                _ => "System 1 is confirmed by a recorded certificate",
+                "not_confirmed" => "System 1 does not stand: its model is not admitted and chosen for its task; its opinion is a research model's",
+                _ if certificate.is_some() => "System 1 stands on its admission and is chosen for its task; a recorded certificate also names it",
+                _ => "System 1 stands on its admission and is chosen for its task (record 55, ruling 27)",
             },
         },
         "stacks": out, "total_stacks": total, "sealed_left_out": sealed.len(),
@@ -1045,7 +1054,7 @@ fn current_doc(doors: &Doors, registry: &mut Registry) -> Result<Value, StoreErr
     let pack = crate::reader::served_pack(doors.pack_dir.as_deref(), &doors.ask_pack);
     let chosen = opinion::chosen(registry.store())?;
     let confirmed = match &chosen {
-        Some(c) => opinion::confirmed(registry.store(), c.model.id)?.is_some(),
+        Some(c) => opinion::confirmed(registry.store(), c.model.id)?,
         None => false,
     };
     Ok(json!({

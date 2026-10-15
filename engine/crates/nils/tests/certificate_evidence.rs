@@ -701,18 +701,63 @@ fn flow(pg: Option<(String, String)>) {
     );
     assert_eq!(flagged["damaged"], true, "{flagged}");
 
-    // not confirmed yet: the gate waits, and nothing is staged
-    let gated = server.ok("POST", "/api/review/gate", Some(json!({})), OPS);
-    assert!(
-        gated["rounds"][0]["gated"]["waiting"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("not confirmed"),
-        "{gated}"
-    );
-    assert!(model_decisions(&home).is_empty());
+    // record 55 ruling 27: admitted and chosen, System 1 stands on its
+    // admission with no certificate recorded
     let settings = server.ok("GET", "/api/review/settings", None, OPS);
-    assert_eq!(settings["system1"]["confirmed"], false, "{settings}");
+    assert_eq!(settings["system1"]["confirmed"], true, "{settings}");
+    assert_eq!(
+        settings["system1"]["certificate"],
+        Value::Null,
+        "{settings}"
+    );
+    assert_eq!(
+        settings["system1"]["certificate_id"],
+        Value::Null,
+        "{settings}"
+    );
+    // the gate acts on the flagged dataset: the T1 is accepted, and where
+    // the rules name nothing System 1's answer is staged, as the pack
+    // stores it, for a person to confirm
+    let gated = server.ok("POST", "/api/review/gate", Some(json!({})), OPS);
+    let rounds = gated["rounds"].as_array().unwrap();
+    assert_eq!(
+        rounds.len(),
+        1,
+        "only the flagged dataset is gated: {gated}"
+    );
+    let g = &rounds[0]["gated"];
+    assert_eq!(g["waiting"], Value::Null, "{gated}");
+    assert_eq!(g["outcomes"]["accepted"], 1, "{gated}");
+    assert_eq!(g["outcomes"]["disagree"], 1, "{gated}");
+    assert_eq!(g["staged"]["count"], 1, "{gated}");
+    let staged = model_decisions(&home);
+    assert_eq!(staged.len(), 1, "{staged:?}");
+    let (decision, at, value, committed, withdrawn) = staged[0].clone();
+    assert_eq!(
+        (at.as_str(), value.as_deref(), committed, withdrawn),
+        (bare_d.to_string().as_str(), Some("T2*w"), false, false),
+        "{staged:?}"
+    );
+    assert_eq!(
+        home.int(&format!(
+            "SELECT model_id FROM {{decision}} WHERE id = {decision}"
+        )),
+        s1
+    );
+    assert_eq!(
+        questions(&home, bare_d),
+        [("base:disagree".to_string(), "staged".to_string())]
+    );
+    // the dataset without the flag: no question, nothing staged
+    assert!(questions(&home, bare_n).is_empty());
+    assert!(questions(&home, t1_n).is_empty());
+    assert!(base_of(&home, bare_n).is_none());
+    // a gate run again keeps what it staged
+    let again = server.ok("POST", "/api/review/gate", Some(json!({})), OPS);
+    assert_eq!(again["rounds"][0]["gated"]["staged"]["count"], 0, "{again}");
+    assert_eq!(again["rounds"][0]["gated"]["staged"]["kept"], 1, "{again}");
+    assert_eq!(model_decisions(&home).len(), 1);
+    assert_eq!(questions(&home, bare_d).len(), 1);
 
     // the graded run's manifest, as the evidence archive writes one
     let evidence_dir = TempDir::new("cert-evidence");
@@ -961,12 +1006,17 @@ fn flow(pg: Option<(String, String)>) {
     );
     let all = home.ok(&["labels", "certificates"]);
     assert!(all.contains("cites its graded run"), "{all}");
+    // the certificate is shown where it exists, and changes nothing staged
     let settings = server.ok("GET", "/api/review/settings", None, OPS);
     assert_eq!(settings["system1"]["confirmed"], true, "{settings}");
     assert_eq!(
         settings["system1"]["certificate"]["cites"], "evidence",
         "{settings}"
     );
+    assert_eq!(settings["system1"]["certificate_id"], id, "{settings}");
+    let again = server.ok("POST", "/api/review/gate", Some(json!({})), OPS);
+    assert_eq!(again["rounds"][0]["gated"]["staged"]["count"], 0, "{again}");
+    assert_eq!(again["rounds"][0]["gated"]["staged"]["kept"], 1, "{again}");
 
     // the audit keeps it: who, the citation and the result
     let audit = home.rows(
@@ -980,50 +1030,6 @@ fn flow(pg: Option<(String, String)>) {
     assert_eq!(details["unseals"], false, "{details}");
     assert_eq!(details["evidence"]["plan_commit"], plan_commit, "{details}");
     assert_eq!(details["result"]["errors"], 1, "{details}");
-
-    // confirmed, the gate acts on the flagged dataset: the T1 is accepted,
-    // and where the rules name nothing System 1's answer is staged, as the
-    // pack stores it, for a person to confirm
-    let gated = server.ok("POST", "/api/review/gate", Some(json!({})), OPS);
-    let rounds = gated["rounds"].as_array().unwrap();
-    assert_eq!(
-        rounds.len(),
-        1,
-        "only the flagged dataset is gated: {gated}"
-    );
-    let g = &rounds[0]["gated"];
-    assert_eq!(g["waiting"], Value::Null, "{gated}");
-    assert_eq!(g["outcomes"]["accepted"], 1, "{gated}");
-    assert_eq!(g["outcomes"]["disagree"], 1, "{gated}");
-    assert_eq!(g["staged"]["count"], 1, "{gated}");
-    let staged = model_decisions(&home);
-    assert_eq!(staged.len(), 1, "{staged:?}");
-    let (decision, at, value, committed, withdrawn) = staged[0].clone();
-    assert_eq!(
-        (at.as_str(), value.as_deref(), committed, withdrawn),
-        (bare_d.to_string().as_str(), Some("T2*w"), false, false),
-        "{staged:?}"
-    );
-    assert_eq!(
-        home.int(&format!(
-            "SELECT model_id FROM {{decision}} WHERE id = {decision}"
-        )),
-        s1
-    );
-    assert_eq!(
-        questions(&home, bare_d),
-        [("base:disagree".to_string(), "staged".to_string())]
-    );
-    // the dataset without the flag: no question, nothing staged
-    assert!(questions(&home, bare_n).is_empty());
-    assert!(questions(&home, t1_n).is_empty());
-    assert!(base_of(&home, bare_n).is_none());
-    // a gate run again keeps what it staged
-    let again = server.ok("POST", "/api/review/gate", Some(json!({})), OPS);
-    assert_eq!(again["rounds"][0]["gated"]["staged"]["count"], 0, "{again}");
-    assert_eq!(again["rounds"][0]["gated"]["staged"]["kept"], 1, "{again}");
-    assert_eq!(model_decisions(&home).len(), 1);
-    assert_eq!(questions(&home, bare_d).len(), 1);
 
     // a person confirms it; the gate asks no more about it
     let committed = server.ok(
@@ -1062,7 +1068,8 @@ fn flow(pg: Option<(String, String)>) {
         "{gated}"
     );
     // an answer an earlier System 1 model staged is System 1's own: once
-    // another model is chosen and certified, its answer takes the place
+    // another model is chosen, its answer takes the place (its certificate,
+    // recorded here, is shown and not required)
     home.ok(&[
         "model",
         "keep",
@@ -1378,5 +1385,52 @@ fn flow(pg: Option<(String, String)>) {
             "labels.unseal"
         ]
     );
+    drop(server);
+
+    // record 55 ruling 27: a model with neither admission nor a choice
+    // stages nothing, even with confident opinions on a flagged dataset.
+    // The admitted models retire, a model only registered holds the
+    // opinions, and choosing it is refused
+    for m in [s1, other] {
+        home.ok(&["model", "retire", &m.to_string(), "--why", "replaced"]);
+    }
+    let (idle, _) = register(
+        &home,
+        &files,
+        json!({"name": "idle", "version": "t1", "kind": "pass", "task": "system1", "gate": gate}),
+        b"a system one never admitted",
+    );
+    home.exec(&format!(
+        "UPDATE {{opinion}} SET model_id = {idle}, p = 0.99 WHERE stack_id = {bare_n} AND axis = 'base'"
+    ));
+    let server = Served::start(&home, &path, true);
+    let (status, refused) = server.call(
+        "POST",
+        "/api/models/choose",
+        Some(json!({"model": idle, "why": "not admitted"})),
+        ADMIN,
+    );
+    assert_eq!(status, 409, "{refused}");
+    let settings = server.ok("GET", "/api/review/settings", None, OPS);
+    assert_eq!(settings["system1"]["chosen"], Value::Null, "{settings}");
+    assert_eq!(settings["system1"]["confirmed"], false, "{settings}");
+    let before = model_decisions(&home).len();
+    let gated = server.ok(
+        "POST",
+        "/api/review/gate",
+        Some(json!({"dataset": "ok"})),
+        OPS,
+    );
+    let g = &gated["rounds"][0]["gated"];
+    assert!(
+        g["waiting"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("no System 1 model is chosen"),
+        "{gated}"
+    );
+    assert_eq!(g["staged"]["count"].as_i64().unwrap_or(0), 0, "{gated}");
+    assert_eq!(model_decisions(&home).len(), before, "nothing staged");
+    assert!(waiting_by(&home).is_empty(), "{gated}");
     drop(server);
 }
