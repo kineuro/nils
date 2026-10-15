@@ -311,6 +311,8 @@ pub struct StagedAnswer {
     pub decision: i64,
     pub value: Option<String>,
     pub actor: String,
+    /// The System 1 model that staged it, the round's or an earlier one.
+    pub model_id: i64,
 }
 
 impl Gated {
@@ -436,16 +438,16 @@ pub fn rules_answers(store: &mut Store, stacks: &[i64]) -> Result<RulesAnswers, 
                     .1 = true;
             }
         }
-        // and one in force at a wider scope that reaches the stack: its
-        // series, its subject, its origin or a group holding it
-        let wider = crate::review::wider_decisions(store, chunk, None).map_err(|e| match e {
-            crate::review::Error::Store(s) => s,
-            other => StoreError::Message(other.to_string()),
-        })?;
-        for (stack, found) in wider {
-            for (axis, ..) in found {
-                rows.entry(stack).or_default().entry(axis).or_default().1 = true;
-            }
+    }
+    // and one in force at a wider scope that reaches the stack: its series,
+    // its subject, its origin or a group holding it, read once for them all
+    let wider = crate::review::wider_decisions(store, stacks, None).map_err(|e| match e {
+        crate::review::Error::Store(s) => s,
+        other => StoreError::Message(other.to_string()),
+    })?;
+    for (stack, found) in wider {
+        for (axis, ..) in found {
+            rows.entry(stack).or_default().entry(axis).or_default().1 = true;
         }
     }
     Ok(rows
@@ -549,7 +551,6 @@ pub fn gate(
                     DISAGREE | UNSURE => match raise(
                         store,
                         round,
-                        model,
                         stack,
                         axis,
                         outcome,
@@ -559,9 +560,11 @@ pub fn gate(
                         l2,
                         &now,
                     )? {
-                        Raised::Held(id) => {
+                        Raised::Held => {
+                            // someone else's answer waits: no question of
+                            // the gate's and no outcome row against it
                             out.held += 1;
-                            Some(id)
+                            continue;
                         }
                         Raised::Asked {
                             item,
@@ -584,7 +587,7 @@ pub fn gate(
                         }
                     },
                     _ => {
-                        let (closed, retire, held) = close(store, model, stack, axis, &now)?;
+                        let (closed, retire, held) = close(store, stack, axis, &now)?;
                         out.closed += closed;
                         out.retire.extend(retire);
                         out.held += held;
@@ -652,7 +655,7 @@ pub fn outcome_of(
 /// What the gate did with a question it asks.
 enum Raised {
     /// Someone else's staged answer waits on the stack and axis; left.
-    Held(i64),
+    Held,
     /// Raised or brought up to date, with System 1's answer staged on it,
     /// and the questions of the other kind it replaces that hold one.
     Asked {
@@ -666,7 +669,6 @@ enum Raised {
 fn raise(
     store: &mut Store,
     round: &Round,
-    model: i64,
     stack: i64,
     axis: &str,
     why: &str,
@@ -679,13 +681,14 @@ fn raise(
     let k = kind(axis, why);
     let group = key(axis, stack);
     let other = kind(axis, if why == DISAGREE { UNSURE } else { DISAGREE });
-    let mine = pending(store, &k, &group, model)?;
-    let theirs = pending(store, &other, &group, model)?;
+    let mine = pending(store, &k, stack, axis)?;
+    let theirs = pending(store, &other, stack, axis)?;
     // an answer someone else staged waits for a person: nothing is touched
-    for p in [&mine, &theirs] {
-        if let Some(Pending::Other(id)) = p {
-            return Ok(Raised::Held(*id));
-        }
+    if [&mine, &theirs]
+        .iter()
+        .any(|p| matches!(p, Some(Pending::Other)))
+    {
+        return Ok(Raised::Held);
     }
     let evidence = json!({
         "gate": {"round_id": round.id, "rules": format!("{}@{}", round.pack, round.pack_version),
@@ -748,51 +751,57 @@ fn raise(
 enum Pending {
     Open(i64),
     System1(i64, StagedAnswer),
-    Other(i64),
+    Other,
 }
 
 fn pending(
     store: &mut Store,
     kind: &str,
-    group: &str,
-    model: i64,
+    stack: i64,
+    axis: &str,
 ) -> Result<Option<Pending>, StoreError> {
     let d = store.dialect();
     let sql = format!(
-        "SELECT id, status, decision_id FROM {} WHERE kind = {} AND group_key = {} \
+        "SELECT id, status FROM {} WHERE kind = {} AND group_key = {} \
          AND status IN ('open', 'staged') ORDER BY id DESC LIMIT 1",
         store.qualified("review_item"),
         d.param(1, Type::Text),
         d.param(2, Type::Text),
     );
-    let Some(r) = store.query_opt(&sql, &[Param::from(kind), Param::from(group)])? else {
+    let group = key(axis, stack);
+    let Some(r) = store.query_opt(&sql, &[Param::from(kind), Param::from(group.as_str())])? else {
         return Ok(None);
     };
     let id = r.int(0)?;
     if r.text(1)? != "staged" {
         return Ok(Some(Pending::Open(id)));
     }
-    let Some(decision) = r.opt_int(2)? else {
-        return Ok(Some(Pending::Other(id)));
-    };
+    // the answer staged there now: the newest staged one nobody committed
+    // or withdrew on the stack and axis, whichever item it was written on
     let sql = format!(
-        "SELECT value, actor, author_kind, model_id FROM {} WHERE id = {} \
-         AND withdrawn_at IS NULL AND committed_at IS NULL",
+        "SELECT id, value, actor, model_id, CASE WHEN {} THEN 1 ELSE 0 END FROM {} \
+         WHERE scope = 'stack' AND ref = {} AND axis = {} AND staged_at IS NOT NULL \
+         AND withdrawn_at IS NULL AND committed_at IS NULL ORDER BY id DESC LIMIT 1",
+        system1_author(store),
         store.qualified("decision"),
-        d.param(1, Type::Int),
+        d.param(1, Type::Text),
+        d.param(2, Type::Text),
     );
-    let Some(r) = store.query_opt(&sql, &[Param::Int(decision)])? else {
-        return Ok(Some(Pending::Other(id)));
+    let Some(r) = store.query_opt(&sql, &[Param::from(stack.to_string()), Param::from(axis)])?
+    else {
+        // staged once, its answer gone since: it waits as an open question
+        return Ok(Some(Pending::Open(id)));
     };
-    if r.opt_text(2)? != Some("model") || r.opt_int(3)? != Some(model) {
-        return Ok(Some(Pending::Other(id)));
+    if r.int(4)? != 1 {
+        return Ok(Some(Pending::Other));
     }
     Ok(Some(Pending::System1(
         id,
         StagedAnswer {
-            decision,
-            value: r.opt_text(0)?.map(str::to_string),
-            actor: r.text(1)?.to_string(),
+            decision: r.int(0)?,
+            value: r.opt_text(1)?.map(str::to_string),
+            actor: r.text(2)?.to_string(),
+            model_id: r.int(3)?,
         },
     )))
 }
@@ -817,23 +826,16 @@ fn supersede(store: &mut Store, id: i64, now: &str) -> Result<(), StoreError> {
 /// closed, those to retire, and how many it left.
 type Closed = (i64, Vec<(i64, StagedAnswer)>, i64);
 
-fn close(
-    store: &mut Store,
-    model: i64,
-    stack: i64,
-    axis: &str,
-    now: &str,
-) -> Result<Closed, StoreError> {
-    let group = key(axis, stack);
+fn close(store: &mut Store, stack: i64, axis: &str, now: &str) -> Result<Closed, StoreError> {
     let (mut n, mut retire, mut held) = (0, Vec::new(), 0);
     for why in [DISAGREE, UNSURE] {
-        match pending(store, &kind(axis, why), &group, model)? {
+        match pending(store, &kind(axis, why), stack, axis)? {
             Some(Pending::Open(id)) => {
                 supersede(store, id, now)?;
                 n += 1;
             }
             Some(Pending::System1(id, a)) => retire.push((id, a)),
-            Some(Pending::Other(_)) => held += 1,
+            Some(Pending::Other) => held += 1,
             None => {}
         }
     }
@@ -872,44 +874,34 @@ pub fn retire(registry: &mut Registry, gated: &mut Gated) -> Result<(), StoreErr
     Ok(())
 }
 
+/// The condition a decision row meets when System 1's model staged it,
+/// the round's or an earlier one: a model's, naming a model of the task
+/// `system1`. A row with no author kind is a person's and one with no
+/// model another author's, so neither ever meets it.
+fn system1_author(store: &Store) -> String {
+    format!(
+        "(author_kind IS NOT NULL AND author_kind = 'model' AND model_id IS NOT NULL \
+         AND model_id IN (SELECT id FROM {} WHERE task = '{}'))",
+        store.qualified("model"),
+        opinion::TASK
+    )
+}
+
 /// Whether an answer someone other than System 1's model staged waits on
 /// the stack and axis, at the stack's own key: a staging would replace it.
-fn staged_by_another(
-    store: &mut Store,
-    stack: i64,
-    axis: &str,
-    model: i64,
-) -> Result<bool, StoreError> {
+fn staged_by_another(store: &mut Store, stack: i64, axis: &str) -> Result<bool, StoreError> {
     let d = store.dialect();
     let sql = format!(
         "SELECT 1 FROM {} WHERE scope = 'stack' AND ref = {} AND axis = {} AND withdrawn_at IS NULL \
-         AND staged_at IS NOT NULL AND committed_at IS NULL \
-         AND NOT (author_kind = 'model' AND model_id = {}) LIMIT 1",
+         AND staged_at IS NOT NULL AND committed_at IS NULL AND NOT ({}) LIMIT 1",
         store.qualified("decision"),
         d.param(1, Type::Text),
         d.param(2, Type::Text),
-        d.param(3, Type::Int),
+        system1_author(store),
     );
     Ok(store
-        .query_opt(
-            &sql,
-            &[
-                Param::from(stack.to_string()),
-                Param::from(axis),
-                Param::Int(model),
-            ],
-        )?
+        .query_opt(&sql, &[Param::from(stack.to_string()), Param::from(axis)])?
         .is_some())
-}
-
-/// Whether [`stage`] would stage a question's answer, as far as it can be
-/// told without the pack: a disagreement where System 1 names a value at
-/// its λ1 or above and the rules store none.
-pub fn would_stage(q: &Question) -> bool {
-    q.kind == DISAGREE
-        && q.value.as_deref().is_some_and(|v| !v.is_empty())
-        && q.p >= q.lambda1
-        && q.rule.is_none()
 }
 
 /// Stage System 1's answers where the rules name nothing (record 55,
@@ -927,7 +919,8 @@ pub fn stage(
     registry: &mut Registry,
     round: &Round,
     questions: &[Question],
-    words: &dyn Words,
+    words: Option<&dyn Words>,
+    blocked: Option<&str>,
     who: &str,
 ) -> Result<Staged, StoreError> {
     let mut out = Staged::default();
@@ -938,67 +931,103 @@ pub fn stage(
         return Ok(out);
     }
     for q in questions {
+        // the rules name nothing: as the pack says, else where they store
+        // no value
+        let nothing = match words {
+            Some(w) => w.names_nothing(&q.axis, q.rule.as_deref()),
+            None => q.rule.is_none(),
+        };
         let confident = q.kind == DISAGREE
             && q.value.as_deref().is_some_and(|v| !v.is_empty())
             && q.p >= q.lambda1
-            && words.names_nothing(&q.axis, q.rule.as_deref());
-        let stored = if confident {
-            match words.stored(&q.axis, q.value.as_deref().unwrap_or_default()) {
-                Ok(s) => Some(s),
-                Err(why) => {
-                    *out.not_staged.entry(why).or_default() += 1;
-                    None
+            && nothing;
+        if !confident {
+            // System 1 no longer gives it, or the rules decide now
+            if let Some(a) = &q.staged {
+                withdraw_counted(registry, a, &mut out)?;
+            }
+            continue;
+        }
+        // staging waits (no pack, or another rules version): an answer
+        // staged before stays as it is, and only a new one is counted
+        let (Some(words), None) = (words, blocked) else {
+            match &q.staged {
+                Some(_) => out.kept += 1,
+                None => {
+                    let why = blocked.unwrap_or("the pack's words are not at hand");
+                    *out.not_staged.entry(why.to_string()).or_default() += 1;
                 }
             }
-        } else {
-            None
+            continue;
         };
-        match (stored, &q.staged) {
-            (Some(s), Some(a)) if a.value.as_deref() == Some(s.as_str()) => out.kept += 1,
-            (Some(_), _) if staged_by_another(registry.store(), q.stack, &q.axis, model)? => {
-                *out.not_staged
-                    .entry("an answer someone else staged waits for a person".into())
-                    .or_default() += 1;
-            }
-            (Some(s), _) => {
-                let why = format!(
-                    "System 1 (model {model}) names {} at {:.3} where the rules name nothing; staged for a person to confirm (record 55, ruling 20)",
-                    q.value.as_deref().unwrap_or_default(),
-                    q.p
-                );
-                let done = crate::review::apply(
-                    registry,
-                    &crate::review::Apply {
-                        item: q.item,
-                        member: None,
-                        scope: "stack",
-                        value: Some(s.as_str()),
-                        author: crate::review::Author {
-                            who,
-                            kind: "model",
-                            version: None,
-                            model: Some(model),
-                        },
-                        stage: true,
-                        why: Some(why.as_str()),
-                        campaign: None,
-                    },
-                );
-                match done {
-                    Ok(applied) => out.staged.push(applied.decision),
-                    Err(crate::review::Error::Store(e)) => return Err(e),
-                    Err(other) => *out.not_staged.entry(other.to_string()).or_default() += 1,
+        let s = match words.stored(&q.axis, q.value.as_deref().unwrap_or_default()) {
+            Ok(s) => s,
+            Err(why) => {
+                *out.not_staged.entry(why).or_default() += 1;
+                if let Some(a) = &q.staged {
+                    withdraw_counted(registry, a, &mut out)?;
                 }
+                continue;
             }
-            (None, Some(a)) => match withdraw_mine(registry, a) {
-                Ok(()) => out.withdrawn += 1,
-                Err(crate::review::Error::Store(e)) => return Err(e),
-                Err(other) => *out.not_staged.entry(other.to_string()).or_default() += 1,
+        };
+        if let Some(a) = &q.staged
+            && a.model_id == model
+            && a.value.as_deref() == Some(s.as_str())
+        {
+            out.kept += 1;
+            continue;
+        }
+        if staged_by_another(registry.store(), q.stack, &q.axis)? {
+            *out.not_staged
+                .entry("an answer someone else staged waits for a person".into())
+                .or_default() += 1;
+            continue;
+        }
+        // the round's model stages it, in place of an earlier one's
+        let why = format!(
+            "System 1 (model {model}) names {} at {:.3} where the rules name nothing; staged for a person to confirm (record 55, ruling 20)",
+            q.value.as_deref().unwrap_or_default(),
+            q.p
+        );
+        let done = crate::review::apply(
+            registry,
+            &crate::review::Apply {
+                item: q.item,
+                member: None,
+                scope: "stack",
+                value: Some(s.as_str()),
+                author: crate::review::Author {
+                    who,
+                    kind: "model",
+                    version: None,
+                    model: Some(model),
+                },
+                stage: true,
+                why: Some(why.as_str()),
+                campaign: None,
             },
-            (None, None) => {}
+        );
+        match done {
+            Ok(applied) => out.staged.push(applied.decision),
+            Err(crate::review::Error::Store(e)) => return Err(e),
+            Err(other) => *out.not_staged.entry(other.to_string()).or_default() += 1,
         }
     }
     Ok(out)
+}
+
+/// Withdraw an answer of System 1's as its model and count it.
+fn withdraw_counted(
+    registry: &mut Registry,
+    a: &StagedAnswer,
+    out: &mut Staged,
+) -> Result<(), StoreError> {
+    match withdraw_mine(registry, a) {
+        Ok(()) => out.withdrawn += 1,
+        Err(crate::review::Error::Store(e)) => return Err(e),
+        Err(other) => *out.not_staged.entry(other.to_string()).or_default() += 1,
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]

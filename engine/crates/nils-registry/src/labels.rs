@@ -2452,7 +2452,8 @@ pub fn record_cited_certificate(
     let already = |store: &mut Store| -> Result<Option<i64>, Error> {
         let d = store.dialect();
         let sql = format!(
-            "SELECT id FROM {} WHERE sample = {} AND model_id = {}",
+            "SELECT id FROM {} WHERE model_id IS NOT NULL AND sample = {} AND model_id = {} \
+             ORDER BY id LIMIT 1",
             store.qualified("certificate"),
             d.param(1, Type::Text),
             d.param(2, Type::Int),

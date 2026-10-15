@@ -220,6 +220,11 @@ impl Drop for Served {
 
 impl Served {
     fn start(home: &Home, path: &OsStr, worker: bool) -> Served {
+        Served::start_at(home, path, worker, &packs())
+    }
+
+    /// A server whose pack folder is `packs_at`.
+    fn start_at(home: &Home, path: &OsStr, worker: bool, packs_at: &str) -> Served {
         use std::io::BufRead as _;
         let tokens = [
             format!("{OPS}=ops@lab:operator"),
@@ -233,9 +238,9 @@ impl Served {
             .arg(home.dir.path())
             .args(["serve", "--bind", "127.0.0.1:0", "--workers", "1"])
             .args(if worker { &["--worker"][..] } else { &[][..] })
-            .args(["--auth", "token", "--pack-dir", &packs()])
+            .args(["--auth", "token", "--pack-dir", packs_at])
             .env("NILS_TOKENS", tokens)
-            .env("NILS_PACK_DIR", packs())
+            .env("NILS_PACK_DIR", packs_at)
             .env("PATH", path)
             .env("USER", "anna")
             .env("HOSTNAME", "ward-3")
@@ -1055,6 +1060,89 @@ fn flow(pg: Option<(String, String)>) {
         [("base:disagree".to_string(), "staged".to_string())],
         "{gated}"
     );
+    // an answer an earlier System 1 model staged is System 1's own: once
+    // another model is chosen and certified, its answer takes the place
+    home.ok(&[
+        "model",
+        "keep",
+        &other.to_string(),
+        "--artifact",
+        files.path().join("other.bin").to_str().unwrap(),
+    ]);
+    server.ok(
+        "POST",
+        "/api/models/choose",
+        Some(json!({"model": other, "why": "the next model"})),
+        ADMIN,
+    );
+    server.ok(
+        "POST",
+        "/api/certificates",
+        Some(json!({"models": [other], "evidence": cited("s1e-other", &other_digest), "result": result})),
+        NIMA,
+    );
+    let (status, started) = server.call("POST", "/api/datasets/ok/steps/system1/run", None, OPS);
+    assert_eq!(status, 202, "{started}");
+    let done = server.over(started["job"].as_i64().unwrap());
+    assert_eq!(done["state"], "done", "{done}");
+    let gated = server.ok(
+        "POST",
+        "/api/review/gate",
+        Some(json!({"dataset": "ok"})),
+        OPS,
+    );
+    let waiting_by = |home: &Home| -> Vec<(String, Option<i64>)> {
+        home.rows(&format!(
+            "SELECT author_kind, model_id FROM {{decision}} WHERE ref = '{bare_n}' AND axis = 'base' \
+             AND withdrawn_at IS NULL AND committed_at IS NULL"
+        ))
+        .iter()
+        .map(|r| (r.text(0).unwrap().to_string(), r.opt_int(1).unwrap()))
+        .collect()
+    };
+    assert_eq!(
+        waiting_by(&home),
+        [("model".to_string(), Some(other))],
+        "{gated}"
+    );
+    assert_eq!(gated["rounds"][0]["gated"]["held"], 0, "{gated}");
+    // with the pack not served, nothing new is staged, and an answer System 1
+    // no longer gives confidently is still withdrawn, audited as the model
+    drop(server);
+    let nopacks = TempDir::new("cert-nopacks");
+    let server = Served::start_at(&home, &path, false, nopacks.path().to_str().unwrap());
+    home.exec(&format!(
+        "UPDATE {{opinion}} SET p = 0.3 WHERE stack_id = {bare_n} AND axis = 'base'"
+    ));
+    let gated = server.ok(
+        "POST",
+        "/api/review/gate",
+        Some(json!({"dataset": "ok"})),
+        OPS,
+    );
+    assert_eq!(
+        gated["rounds"][0]["gated"]["staged"]["withdrawn"], 1,
+        "{gated}"
+    );
+    assert!(waiting_by(&home).is_empty(), "{gated}");
+    let withdrawals = home.int(
+        "SELECT COUNT(*) FROM {audit} WHERE action = 'decision' AND CAST(scope AS TEXT) LIKE '%withdrawn%'",
+    );
+    assert!(withdrawals >= 1);
+    // confident again with the pack served: staged again
+    home.exec(&format!(
+        "UPDATE {{opinion}} SET p = 0.97 WHERE stack_id = {bare_n} AND axis = 'base'"
+    ));
+    drop(server);
+    let server = Served::start(&home, &path, true);
+    let gated = server.ok(
+        "POST",
+        "/api/review/gate",
+        Some(json!({"dataset": "ok"})),
+        OPS,
+    );
+    assert_eq!(gated["rounds"][0]["gated"]["staged"]["count"], 1, "{gated}");
+    assert_eq!(waiting_by(&home), [("model".to_string(), Some(other))]);
     let item = home.int(&format!(
         "SELECT id FROM {{review_item}} WHERE group_key = 'gate:base:stack:{bare_n}'"
     ));
@@ -1164,7 +1252,8 @@ fn flow(pg: Option<(String, String)>) {
     );
     assert_eq!(done["stacks"], 1, "{done}");
     let listed = server.ok("GET", "/api/certificates", None, OPS);
-    assert_eq!(listed["count"], 2, "{listed}");
+    // the run's certificate of each System 1 model, and the sealed one
+    assert_eq!(listed["count"], 3, "{listed}");
     let actions: Vec<String> = home
         .rows("SELECT action FROM {audit} WHERE action IN ('labels.certificate', 'labels.unseal') ORDER BY id")
         .iter()
@@ -1172,7 +1261,12 @@ fn flow(pg: Option<(String, String)>) {
         .collect();
     assert_eq!(
         actions,
-        ["labels.certificate", "labels.certificate", "labels.unseal"]
+        [
+            "labels.certificate",
+            "labels.certificate",
+            "labels.certificate",
+            "labels.unseal"
+        ]
     );
     drop(server);
 }

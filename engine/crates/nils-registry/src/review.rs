@@ -362,19 +362,15 @@ fn resolve_scope(store: &mut Store, scope: &str, stack: i64) -> Result<(String, 
                 store.qualified("stack_fingerprint"),
                 d.param(1, Type::Int)
             );
-            let made_by = store
+            let key = store
                 .query_opt(&sql, &[Param::Int(stack)])?
-                .and_then(|r| r.opt_text(0).ok().flatten().map(str::to_string))
-                .filter(|m| !m.is_empty())
+                .and_then(|r| r.opt_text(0).ok().flatten().and_then(origin_key))
                 .ok_or_else(|| {
                     refused(format!(
                         "stack {stack} names no manufacturer, so there is no origin to decide about"
                     ))
                 })?;
-            Ok((
-                "origin".to_string(),
-                format!("manufacturer={}", made_by.to_lowercase()),
-            ))
+            Ok(("origin".to_string(), key))
         }
         other => Err(refused(format!(
             "{other} is not a scope: stack, series, subject or origin"
@@ -406,6 +402,13 @@ pub fn apply(registry: &mut Registry, a: &Apply<'_>) -> Result<Applied, Error> {
 /// rolls back and re-reads the registry's epoch.
 pub fn apply_within(registry: &mut Registry, a: &Apply<'_>) -> Result<Applied, Error> {
     apply_as(registry, a, None, None)
+}
+
+/// The origin key a stack's manufacturer gives, as a decision at origin
+/// scope names it: one rule for writing a decision and for finding what
+/// reaches a stack.
+pub fn origin_key(made_by: &str) -> Option<String> {
+    (!made_by.is_empty()).then(|| format!("manufacturer={}", made_by.to_lowercase()))
 }
 
 /// A review item's group key, where it has one.
@@ -445,11 +448,8 @@ pub fn keys_reaching(
             if let Some(subject) = r.opt_int(2)? {
                 e.push(("subject".into(), subject.to_string()));
             }
-            if let Some(made_by) = r.opt_text(3)?.filter(|m| !m.trim().is_empty()) {
-                e.push((
-                    "origin".into(),
-                    format!("manufacturer={}", made_by.to_lowercase()),
-                ));
+            if let Some(key) = r.opt_text(3)?.and_then(origin_key) {
+                e.push(("origin".into(), key));
             }
         }
         let sql = format!(

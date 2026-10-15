@@ -890,27 +890,22 @@ fn gate_over(
                 )),
                 Some(_) => None,
             };
-            match (served, why_not) {
-                (Some(p), None) => {
-                    let st = round::stage(registry, &r, &done.questions, &PackWords(p), who)?;
-                    done.staged.staged = st.staged;
-                    done.staged.kept = st.kept;
-                    done.staged.withdrawn += st.withdrawn;
-                    for (why, n) in st.not_staged {
-                        *done.staged.not_staged.entry(why).or_default() += n;
-                    }
-                }
-                (_, Some(why)) => {
-                    let would = done
-                        .questions
-                        .iter()
-                        .filter(|q| round::would_stage(q))
-                        .count() as i64;
-                    if would > 0 {
-                        done.staged.not_staged.insert(why, would);
-                    }
-                }
-                (None, None) => {}
+            // staging waits where the words are not the round's, and
+            // System 1's earlier answers are checked again all the same
+            let words = served.map(PackWords);
+            let st = round::stage(
+                registry,
+                &r,
+                &done.questions,
+                words.as_ref().map(|w| w as &dyn round::Words),
+                why_not.as_deref(),
+                who,
+            )?;
+            done.staged.staged = st.staged;
+            done.staged.kept = st.kept;
+            done.staged.withdrawn += st.withdrawn;
+            for (why, n) in st.not_staged {
+                *done.staged.not_staged.entry(why).or_default() += n;
             }
         }
         rounds.push(json!({"round": r.as_json(), "gated": done.to_json()}));
