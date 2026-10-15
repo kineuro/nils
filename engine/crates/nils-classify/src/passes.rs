@@ -46,11 +46,134 @@ pub struct Ran {
     pub by_method: std::collections::BTreeMap<String, i64>,
 }
 
+/// What the rules and the people decided on every stack, without what a
+/// pass wrote: the axes the vote's corpus reads, by stack and axis name.
+///
+/// A pass never reads a pass. `classification_axis` holds whatever decided
+/// a value, and on any run after the first that includes answers an earlier
+/// run's pass wrote, so taking the table as it stands would let the vote
+/// count its own guesses as evidence. Measured on the live corpus: with the
+/// pass's answers in the reference, sorting the same archive again from two
+/// different ingest histories agrees on 14 of 9,014 answers, and without
+/// them on 31,880 of 31,880 (spec section 7.4). The evidence row says which
+/// it was: `pass` is null exactly when a rule or a person decided.
+///
+/// Read once for a run whose stacks are judged in groups (record 56 §6.5),
+/// after every group's rules wrote and before any group's passes, so each
+/// group's vote reads the same pool, whatever order the groups run in.
+pub struct Pool {
+    /// The axes named, each once.
+    names: Vec<String>,
+    /// stack → value per axis of `names` (empty where none was decided)
+    decided: HashMap<i64, Vec<String>>,
+}
+
+impl Pool {
+    /// The pool as the registry holds it now, of one modality where named.
+    pub fn read(store: &mut Store, modality: Option<&str>) -> Result<Pool, Error> {
+        // Read as two queries rather than one anti-join: what a pass wrote
+        // is a small set, most runs have none of it, and a correlated
+        // subquery over every axis of every stack costs more than the set
+        // does.
+        let mut by_a_pass: HashSet<(i64, String)> = HashSet::new();
+        let sql_pass = format!(
+            "SELECT stack_id, axis FROM {} WHERE pass IS NOT NULL",
+            store.qualified("classification_evidence")
+        );
+        for r in store.query(&sql_pass, &[])? {
+            by_a_pass.insert((r.int(0)?, r.text(1)?.to_string()));
+        }
+        let of_modality: Option<HashSet<i64>> = match modality {
+            Some(m) => Some(
+                store
+                    .query(
+                        &format!(
+                            "SELECT stack_id FROM {} WHERE modality = '{}'",
+                            store.qualified("stack_fingerprint"),
+                            m.replace('\'', "''")
+                        ),
+                        &[],
+                    )?
+                    .iter()
+                    .map(|r| r.int(0))
+                    .collect::<Result<_, _>>()?,
+            ),
+            None => None,
+        };
+        let mut names: Vec<String> = Vec::new();
+        let mut decided: HashMap<i64, Vec<String>> = HashMap::new();
+        let sql_axes = format!(
+            "SELECT stack_id, axis, value FROM {} ORDER BY id",
+            store.qualified("classification_axis")
+        );
+        for r in store.query(&sql_axes, &[])? {
+            let id = r.int(0)?;
+            if of_modality.as_ref().is_some_and(|m| !m.contains(&id)) {
+                continue;
+            }
+            let name = r.text(1)?;
+            if !by_a_pass.is_empty() && by_a_pass.contains(&(id, name.to_string())) {
+                continue;
+            }
+            let value = r.opt_text(2)?.unwrap_or("");
+            if value.is_empty() {
+                continue;
+            }
+            // One row per value; the pass's corpus reads an axis as one
+            // joined string, so the rows of a multi-valued axis are joined
+            // back here.
+            let at = match names.iter().position(|n| n == name) {
+                Some(i) => i,
+                None => {
+                    names.push(name.to_string());
+                    names.len() - 1
+                }
+            };
+            let row = decided.entry(id).or_default();
+            if row.len() <= at {
+                row.resize(at + 1, String::new());
+            }
+            let slot = &mut row[at];
+            if !slot.is_empty() {
+                slot.push(',');
+            }
+            slot.push_str(value);
+        }
+        Ok(Pool { names, decided })
+    }
+
+    /// Where each axis of a pack sits among the pool's, where it does.
+    fn places(&self, pack: &Pack) -> Vec<Option<usize>> {
+        pack.axes
+            .iter()
+            .map(|a| self.names.iter().position(|n| *n == a.name))
+            .collect()
+    }
+
+    /// One stack's axes, in the pack's order (`places` from [`Pool::places`]).
+    fn axes(&self, places: &[Option<usize>], id: i64) -> Vec<String> {
+        let row = self.decided.get(&id);
+        places
+            .iter()
+            .map(|p| {
+                p.and_then(|i| row.and_then(|r| r.get(i)))
+                    .cloned()
+                    .unwrap_or_default()
+            })
+            .collect()
+    }
+}
+
 /// The corpus, read once: only the fields the passes name, and the axes the
-/// rules decided. A pass that reads five columns does not pay for
-/// forty-three, which is the difference between tens of megabytes and
-/// gigabytes on half a million stacks.
-fn read_corpus(store: &mut Store, pack: &Pack, modality: Option<&str>) -> Result<Corpus, Error> {
+/// rules decided (`pool`'s where it is given, else read now). A pass that
+/// reads five columns does not pay for forty-three, which is the difference
+/// between tens of megabytes and gigabytes on half a million stacks.
+fn read_corpus(
+    store: &mut Store,
+    pack: &Pack,
+    modality: Option<&str>,
+    pool: Option<&Pool>,
+) -> Result<Corpus, Error> {
     let mut corpus = Corpus::new(pack);
     let needed = corpus.needed();
     if needed.is_empty() {
@@ -72,68 +195,22 @@ fn read_corpus(store: &mut Store, pack: &Pack, modality: Option<&str>) -> Result
         columns.join(", "),
         store.qualified("stack_fingerprint"),
     );
-
     // The axes first, so a stack arrives complete.
-    //
-    // A pass never reads a pass. `classification_axis` holds whatever decided
-    // a value, and on any run after the first that includes answers an earlier
-    // run's pass wrote, so taking the table as it stands would let the vote
-    // count its own guesses as evidence. Measured on the live corpus: with the
-    // pass's answers in the reference, sorting the same archive again from two
-    // different ingest histories agrees on 14 of 9,014 answers, and without
-    // them on 31,880 of 31,880 (spec section 7.4). The evidence row says which
-    // it was: `pass` is null exactly when a rule or a person decided.
-    //
-    // Read as two queries rather than one anti-join: what a pass wrote is a
-    // small set, most runs have none of it, and a correlated subquery over
-    // every axis of every stack costs more than the set does.
-    let mut by_a_pass: HashSet<(i64, String)> = HashSet::new();
-    let sql_pass = format!(
-        "SELECT stack_id, axis FROM {} WHERE pass IS NOT NULL",
-        store.qualified("classification_evidence")
-    );
-    for r in store.query(&sql_pass, &[])? {
-        by_a_pass.insert((r.int(0)?, r.text(1)?.to_string()));
-    }
-
-    let mut decided: HashMap<i64, Vec<String>> = HashMap::new();
-    let sql_axes = format!(
-        "SELECT stack_id, axis, value FROM {}",
-        store.qualified("classification_axis")
-    );
-    for r in store.query(&sql_axes, &[])? {
-        let name = r.text(1)?;
-        let Some(a) = pack.axes.iter().position(|x| x.name == name) else {
-            continue;
-        };
-        let id = r.int(0)?;
-        if !by_a_pass.is_empty() && by_a_pass.contains(&(id, name.to_string())) {
-            continue;
+    let read;
+    let pool = match pool {
+        Some(p) => p,
+        None => {
+            read = Pool::read(store, modality)?;
+            &read
         }
-        let value = r.opt_text(2)?.unwrap_or("").to_string();
-        if value.is_empty() {
-            continue;
-        }
-        // One row per value; the pass's corpus reads an axis as one joined
-        // string, so the rows of a multi-valued axis are joined back here.
-        let slot = &mut decided
-            .entry(id)
-            .or_insert_with(|| vec![String::new(); pack.axes.len()])[a];
-        if slot.is_empty() {
-            *slot = value;
-        } else {
-            slot.push(',');
-            slot.push_str(&value);
-        }
-    }
-
-    let empty: Vec<String> = vec![String::new(); pack.axes.len()];
+    };
+    let places = pool.places(pack);
     for r in store.query(&sql, &[])? {
         let id = r.int(0)?;
         let cells: Vec<String> = (0..needed.len())
             .map(|i| crate::classify::cell_text(r.get(i + 1)).unwrap_or_default())
             .collect();
-        let axes = decided.get(&id).unwrap_or(&empty);
+        let axes = pool.axes(&places, id);
         corpus.push(
             id,
             |f| {
@@ -158,6 +235,20 @@ pub fn run(
     phase: Phase,
     job_id: i64,
 ) -> Result<Vec<Ran>, Error> {
+    run_over(store, pack, settings, cancel, phase, job_id, None)
+}
+
+/// As [`run`], the vote reading `pool` where it is given (a run judged in
+/// groups reads it once for every group), else the registry as it is now.
+pub fn run_over(
+    store: &mut Store,
+    pack: &Pack,
+    settings: &crate::job::Settings,
+    cancel: &nils_digest::Cancel,
+    phase: Phase,
+    job_id: i64,
+    pool: Option<&Pool>,
+) -> Result<Vec<Ran>, Error> {
     let wanted: Vec<&Pass> = pack.passes.iter().filter(|p| p.phase == phase).collect();
     if wanted.is_empty() {
         return Ok(Vec::new());
@@ -168,7 +259,7 @@ pub fn run(
     // vote filled a base and a technique on CT stacks from the MR pool
     // (record 56's effect report found 5 on record 34).
     let modality = settings.modality.as_deref().unwrap_or(&pack.modality);
-    let corpus = read_corpus(store, pack, Some(modality))?;
+    let corpus = read_corpus(store, pack, Some(modality), pool)?;
     let mut out = Vec::new();
     // Record 53: what a session pass wrote in this run, which a vote read
     // from the corpus before it must not fill again.

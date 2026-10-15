@@ -499,6 +499,45 @@ fn round(pg: Option<(String, String)>) {
     assert_eq!(p1["ships"]["as"], "scoped change", "{p1}");
     assert_eq!(p1["report"]["scope"]["stacks"], 4, "{p1}");
     assert_eq!(p1["operations"][0]["scope"], "dataset:alpha", "{p1}");
+    // what the rehearsal began on: the version and the changes in force
+    assert_eq!(
+        p1["report"]["rehearsed_on"],
+        json!({"version": "1.2.1", "in_force": []}),
+        "{p1}"
+    );
+    // the card counts what adoption re-sorts: a proposal names no scope of
+    // its own, and a rehearsal over a narrower one is a preview, never kept
+    let (status, doc) = server.call(
+        "POST",
+        "/api/packs/mri/proposals",
+        Some(json!({
+            "operations": [{"op": "add_words", "axis": "modifier", "value": "MT", "words": ["zzqx"], "scope": "dataset:alpha"}],
+            "reason": "r", "evidence": "e", "scope": "dataset:beta",
+        })),
+        REV,
+    );
+    assert_eq!(status, 400, "{doc}");
+    assert!(
+        doc["error"]
+            .as_str()
+            .unwrap()
+            .contains("names no scope of its own"),
+        "{doc}"
+    );
+    let (status, preview) = server.call(
+        "POST",
+        &format!("/api/packs/mri/proposals/{id1}/rehearse"),
+        Some(json!({"scope": "dataset:beta"})),
+        REV,
+    );
+    assert_eq!(status, 200, "{preview}");
+    assert_eq!(preview["preview"], true, "{preview}");
+    assert_eq!(preview["report"]["scope"]["stacks"], 6, "{preview}");
+    assert_eq!(preview["card"]["moved"], 0, "{preview}");
+    let kept = server.get(&format!("/api/packs/mri/proposals/{id1}"), REV);
+    assert_eq!(kept["report"]["scope"]["stacks"], 4, "kept whole: {kept}");
+    assert_eq!(kept["card"]["moved"], 2, "{kept}");
+    assert_eq!(kept["rehearsed_at"], p1["rehearsed_at"], "{kept}");
     assert!(p1["version"].is_null() && p1["job"].is_null(), "{p1}");
     // a proposal that mixes a pack edit and a scoped change is two
     let (status, doc) = server.call(
@@ -542,7 +581,7 @@ fn round(pg: Option<(String, String)>) {
     assert_eq!(status, 400);
     assert_eq!(
         server.get("/api/datasets/alpha/summary", READS)["proposals"],
-        json!({"proposed": 1, "adopted": 0, "rejected": 0})
+        json!({"proposed": 1, "adopted": 0, "rejected": 0, "retired": 0})
     );
     assert_eq!(
         server.get("/api/datasets/beta/summary", READS)["proposals"]["proposed"],
@@ -787,7 +826,7 @@ fn round(pg: Option<(String, String)>) {
     let list = server.get("/api/packs/mri/proposals", REV);
     assert_eq!(
         list["counts"],
-        json!({"proposed": 0, "adopted": 2, "rejected": 1}),
+        json!({"proposed": 0, "adopted": 2, "rejected": 1, "retired": 0}),
         "{list}"
     );
 
@@ -868,9 +907,29 @@ fn round(pg: Option<(String, String)>) {
     );
     assert_eq!(status, 201, "{proposed}");
     let oid = proposed["overlay"]["id"].as_i64().unwrap();
+    // a person's proposal that cites the overlay as its evidence is theirs,
+    // never taken for the change the overlays door makes
+    let (status, cites) = server.call(
+        "POST",
+        "/api/packs/mri/proposals",
+        Some(json!({
+            "operations": [{"op": "add_words", "axis": "modifier", "value": "MoCo", "words": ["zzqx"],
+                            "scope": format!("batch:{beta_batch}")}],
+            "reason": "a person's change citing the overlay", "evidence": {"overlay": oid},
+        })),
+        REV,
+    );
+    assert_eq!(status, 201, "{cites}");
+    let cites = cites["id"].as_i64().unwrap();
     let (status, adopted) = server.call("POST", &format!("/api/overlays/{oid}/adopt"), None, OPS);
     assert_eq!(status, 202, "{adopted}");
     let kept = adopted["proposal"].as_i64().unwrap();
+    assert_ne!(kept, cites, "{adopted}");
+    assert_eq!(adopted["retired"], json!([]), "{adopted}");
+    assert_eq!(
+        server.get(&format!("/api/packs/mri/proposals/{cites}"), REV)["status"],
+        "proposed"
+    );
     assert_eq!(
         server.over(adopted["job"].as_i64().unwrap())["state"],
         "done"
@@ -881,6 +940,7 @@ fn round(pg: Option<(String, String)>) {
     assert_eq!(p["status"], "adopted", "{p}");
     assert_eq!(p["scopes"], json!([format!("batch:{beta_batch}")]), "{p}");
     assert_eq!(p["evidence"]["overlay"], oid, "{p}");
+    assert_eq!(p["evidence"]["made_by"], "overlay.adopt", "{p}");
     assert_eq!(
         p["applied"]["measured"]["stacks"], 6,
         "only the batch's stacks: {p}"
@@ -895,6 +955,70 @@ fn round(pg: Option<(String, String)>) {
     home.ok(&["classify", "--pack-dir", home.packs(), "--no-previews"]);
     assert_eq!(moco(&mut store, &beta_z), 2, "a later sort keeps it");
     assert_eq!(moco(&mut store, &alpha_z), 0);
+    let (status, _) = server.call(
+        "POST",
+        &format!("/api/packs/mri/proposals/{cites}/decide"),
+        Some(json!({"decision": "reject"})),
+        OPS,
+    );
+    assert_eq!(status, 200);
+
+    // a later version of the same overlay replaces the earlier: the earlier
+    // one's scoped change retires, so the word the new version no longer
+    // holds goes, and the two never collide in a sort
+    let v2 = json!({
+        "overlay": "beta-words", "version": "2.0.0", "pack": "mri",
+        "scope": {"batch": beta_batch.to_string()},
+        "lists": {"modifier.MoCo": {"add": ["zzqy"]}},
+        "cases": [{"name": "the batch's new word", "stack": {"text_series_description": "zzqy"},
+                   "axes": {"modifier": "MoCo"}}],
+    });
+    let (status, proposed) = server.call(
+        "POST",
+        "/api/overlays",
+        Some(json!({"name": "beta words", "overlay": v2, "scope": format!("batch:{beta_batch}")})),
+        REV,
+    );
+    assert_eq!(status, 201, "{proposed}");
+    let oid2 = proposed["overlay"]["id"].as_i64().unwrap();
+    let (status, adopted) = server.call("POST", &format!("/api/overlays/{oid2}/adopt"), None, OPS);
+    assert_eq!(status, 202, "{adopted}");
+    assert_eq!(adopted["retired"], json!([kept]), "{adopted}");
+    let kept2 = adopted["proposal"].as_i64().unwrap();
+    assert_eq!(
+        server.over(adopted["job"].as_i64().unwrap())["state"],
+        "done"
+    );
+    server.quiet();
+    let old = server.get(&format!("/api/packs/mri/proposals/{kept}"), REV);
+    assert_eq!(old["status"], "retired", "{old}");
+    assert_eq!(old["applied"]["retired"]["by"]["proposal"], kept2, "{old}");
+    assert_eq!(
+        server.get(&format!("/api/packs/mri/proposals/{kept2}"), REV)["status"],
+        "adopted"
+    );
+    assert_eq!(
+        moco(&mut store, &beta_z),
+        0,
+        "the old word went with its version"
+    );
+    let report = home.json(&[
+        "classify",
+        "--pack-dir",
+        home.packs(),
+        "--no-previews",
+        "--json",
+    ]);
+    assert!(report.get("scoped_skipped").is_none(), "{report}");
+    assert!(
+        !report["scoped"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["proposal"] == kept),
+        "{report}"
+    );
+    assert_eq!(moco(&mut store, &beta_z), 0);
 
     // an overlay adopted before (the old adoption sorted the whole registry
     // under it once) becomes its scoped change as the registry migrates
@@ -958,9 +1082,120 @@ fn round(pg: Option<(String, String)>) {
             "beta's {s} is outside it"
         );
     }
-    assert_eq!(moco(&mut store, &beta_z), 2);
+    assert_eq!(moco(&mut store, &beta_z), 0);
     for s in alpha.iter().chain(&beta).filter(|s| !zzqx.contains(s)) {
         assert!(!modifier_holds(&mut store, *s, "MoCo"), "{s} has no word");
+    }
+
+    // --- a proposal is stale once the scoped changes in force are not the
+    // ones it was rehearsed with, however soon after the adoption came
+    let make = |words: &str, scope: &str| -> i64 {
+        let (status, doc) = server.call(
+            "POST",
+            "/api/packs/mri/proposals",
+            Some(json!({
+                "operations": [{"op": "add_words", "axis": "modifier", "value": "MT", "words": [words], "scope": scope}],
+                "reason": "r", "evidence": "e",
+            })),
+            REV,
+        );
+        assert_eq!(status, 201, "{doc}");
+        doc["id"].as_i64().unwrap()
+    };
+    let x = make("wwqq", "dataset:alpha");
+    let y = make("vvqq", "dataset:beta");
+    let (status, doc) = server.call(
+        "POST",
+        &format!("/api/packs/mri/proposals/{y}/decide"),
+        Some(json!({"decision": "adopt"})),
+        OPS,
+    );
+    assert_eq!(status, 202, "{doc}");
+    server.over(doc["job"].as_i64().unwrap());
+    server.quiet();
+    let px = server.get(&format!("/api/packs/mri/proposals/{x}"), REV);
+    assert_eq!(px["stale"], true, "{px}");
+    let decide_x = format!("/api/packs/mri/proposals/{x}/decide");
+    let (status, doc) = server.call("POST", &decide_x, Some(json!({"decision": "adopt"})), OPS);
+    assert_eq!(status, 409, "{doc}");
+    let (status, px) = server.call(
+        "POST",
+        &format!("/api/packs/mri/proposals/{x}/rehearse"),
+        Some(json!({})),
+        REV,
+    );
+    assert_eq!(status, 200, "{px}");
+    assert_eq!(px["stale"], false, "{px}");
+
+    // every check that can refuse comes before the adoption: a scope that
+    // no longer holds its dataset refuses it, and it stays proposed
+    let place = store.qualified("place");
+    store
+        .execute(
+            &format!("UPDATE {place} SET retired_at = '2026-10-15T00:00:00Z' WHERE name = 'alpha'"),
+            &[],
+        )
+        .unwrap();
+    let (status, doc) = server.call("POST", &decide_x, Some(json!({"decision": "adopt"})), OPS);
+    store
+        .execute(
+            &format!("UPDATE {place} SET retired_at = NULL WHERE name = 'alpha'"),
+            &[],
+        )
+        .unwrap();
+    assert_eq!(status, 409, "{doc}");
+    let px = server.get(&format!("/api/packs/mri/proposals/{x}"), REV);
+    assert_eq!(px["status"], "proposed", "{px}");
+    assert!(px["job"].is_null() && px["decided_at"].is_null(), "{px}");
+
+    // a pack edit is recorded before its version is put in place: where the
+    // version cannot be put in place, nothing is adopted
+    let (status, z) = server.call(
+        "POST",
+        "/api/packs/mri/proposals",
+        Some(json!({
+            "operations": [{"op": "add_words", "axis": "modifier", "value": "MT", "words": ["ppqq"]}],
+            "reason": "r", "evidence": "e",
+        })),
+        REV,
+    );
+    assert_eq!(status, 201, "{z}");
+    let z = z["id"].as_i64().unwrap();
+    use std::os::unix::fs::PermissionsExt as _;
+    let lock = |mode: u32| {
+        std::fs::set_permissions(&home.packs, std::fs::Permissions::from_mode(mode)).unwrap();
+    };
+    lock(0o555);
+    // a test run as root writes anyway, and there is nothing to see
+    let held = std::fs::write(home.packs.join(".probe"), b"").is_err();
+    let (status, doc) = if held {
+        server.call(
+            "POST",
+            &format!("/api/packs/mri/proposals/{z}/decide"),
+            Some(json!({"decision": "adopt"})),
+            OPS,
+        )
+    } else {
+        (409, Value::Null)
+    };
+    lock(0o755);
+    std::fs::remove_file(home.packs.join(".probe")).ok();
+    if held {
+        assert_eq!(status, 409, "{doc}");
+        let pz = server.get(&format!("/api/packs/mri/proposals/{z}"), REV);
+        assert_eq!(pz["status"], "proposed", "{pz}");
+        assert!(pz["version"].is_null() && pz["job"].is_null(), "{pz}");
+        let manifest = std::fs::read_to_string(home.packs.join("mri/pack.yml")).unwrap();
+        assert!(manifest.contains("version: 1.2.2"), "{manifest}");
+        let left = home.packs.with_file_name("packs.versions").join("mri");
+        assert!(
+            !std::fs::read_dir(&left).unwrap().any(|e| e
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".incoming")),
+            "the new version written for it is gone"
+        );
     }
     drop(server);
 }

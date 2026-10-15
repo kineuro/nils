@@ -4143,15 +4143,24 @@ fn overlay_command(home: &Home, command: OverlayCommand) -> Result<(), Exit> {
                     o.status
                 )));
             }
+            let by = actor();
             nils_registry::overlay::decide(
                 registry.store(),
                 id,
                 nils_registry::overlay::REFUSED,
-                &actor(),
+                &by,
                 None,
                 why.as_deref(),
             )
             .map_err(|e| fail(e.to_string()))?;
+            // record 56 §5.6: a refused overlay is applied by no sort, so a
+            // scoped change made of it retires with it
+            if let Some(kept) =
+                nils_registry::rule_proposal::retire_overlay(registry.store(), &o, &by)
+                    .map_err(|e| fail(e.to_string()))?
+            {
+                println!("its scoped change, proposal {kept}, retired");
+            }
             println!("overlay {id} refused");
             Ok(())
         }

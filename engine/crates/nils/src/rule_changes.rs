@@ -985,18 +985,35 @@ fn patch_from(name: &str, doc: &Value) -> Result<Patch, Reply> {
     Ok(patch)
 }
 
+/// A narrower scope a body names, for a preview only: a proposal's report
+/// is always rehearsed over the whole scope its adoption re-sorts.
+fn preview_scope(doc: &Value) -> Result<Option<Scope>, Reply> {
+    match doc.get("scope").filter(|v| !v.is_null()) {
+        None => Ok(None),
+        Some(v) => Scope::of(v).map(Some).map_err(|e| Reply::error(400, e)),
+    }
+}
+
+/// What a rehearsal read the registry under, taken before it reads: the
+/// pack version served and the scoped changes in force. A proposal is
+/// adopted only while both are still what they were (see [`stale`]).
+fn mark(store: &mut Store, dir: &Path, pack: &str) -> Result<(String, Value), Reply> {
+    let on = version_in(dir).unwrap_or_default();
+    let in_force = rp::in_force(store, pack).map_err(failed)?;
+    Ok((on.clone(), json!({"version": on, "in_force": in_force})))
+}
+
 /// The effect report of a patch on the pack served now, every answer it
-/// breaks named.
+/// breaks named: over the operations' own scopes (the whole registry for a
+/// pack edit), which is what adopting it re-sorts, unless `scope` narrows
+/// it for a preview that is never kept on a proposal.
 fn rehearsed(
     registry: &mut Registry,
     dir: &Path,
     patch: &Patch,
     doc: &Value,
+    scope: Option<Scope>,
 ) -> Result<Value, Reply> {
-    let scope = match doc.get("scope").filter(|v| !v.is_null()) {
-        None => None,
-        Some(v) => Some(Scope::of(v).map_err(|e| Reply::error(400, e))?),
-    };
     let examples = doc["examples"]
         .as_u64()
         .map(|n| (n as usize).clamp(1, 50))
@@ -1027,16 +1044,31 @@ fn kept_patch(patch: &Patch, doc: &Value) -> Value {
     if let Some(s) = &patch.ships {
         out["ships"] = json!(s);
     }
-    // the cases as the body wrote them, which the patch reads again
-    if let Some(c) = doc.get("cases").or_else(|| doc["patch"].get("cases")) {
+    // the cases as the body wrote them, which the patch reads again: a
+    // patch's, an overlay document's (given whole or under `overlay`), or
+    // the body's own beside its operations
+    if let Some(c) = cases_in(doc) {
         out["cases"] = c.clone();
     }
     out
 }
 
+/// Where a body keeps its cases, as [`crate::rehearse::patch_of`] reads it:
+/// under `patch` or `overlay` where the body names one, else its own.
+fn cases_in(doc: &Value) -> Option<&Value> {
+    let within = |k: &str| doc.get(k).filter(|v| v.is_object());
+    within("patch")
+        .or_else(|| within("overlay"))
+        .unwrap_or(doc)
+        .get("cases")
+        .filter(|c| !c.is_null())
+}
+
 /// Whether a proposed one no longer reads the pack and the registry as they
-/// are: the pack served is another version, or a scoped change was
-/// adopted since it was rehearsed.
+/// are: the pack served is another version than the one its rehearsal
+/// began on, or the scoped changes in force are not the ones in force when
+/// it began (one adopted or retired since, however soon after). A proposal
+/// with no such mark (rehearsed before marks were kept) is stale too.
 fn stale(doors: &Doors, store: &mut Store, p: &Proposal) -> Result<bool, StoreError> {
     if p.status != rp::PROPOSED {
         return Ok(false);
@@ -1045,12 +1077,15 @@ fn stale(doors: &Doors, store: &mut Store, p: &Proposal) -> Result<bool, StoreEr
     if served.as_deref() != Some(p.on_version.as_str()) {
         return Ok(true);
     }
-    let last = rp::last_scoped_adoption(store, &p.pack)?;
-    Ok(match (last, &p.rehearsed_at) {
-        (Some(l), Some(r)) => l > *r,
-        (Some(_), None) => true,
-        _ => false,
-    })
+    let mark = &p.report["rehearsed_on"];
+    if mark["version"].as_str() != Some(p.on_version.as_str()) {
+        return Ok(true);
+    }
+    let Some(then) = mark["in_force"].as_array() else {
+        return Ok(true);
+    };
+    let then: Vec<i64> = then.iter().filter_map(Value::as_i64).collect();
+    Ok(then != rp::in_force(store, &p.pack)?)
 }
 
 /// What adopting a proposal makes of it.
@@ -1147,7 +1182,7 @@ fn list_door(
         Some(s) => {
             return Err(Reply::error(
                 400,
-                format!("status is proposed, adopted or rejected, not {s}"),
+                format!("status is proposed, adopted, rejected or retired, not {s}"),
             ));
         }
     };
@@ -1211,10 +1246,21 @@ fn create_door(
     let doc = json_body(body)?;
     let dir =
         pack_dir(doors, name).ok_or_else(|| Reply::error(404, format!("no pack named {name}")))?;
+    // record 56 section 5.4: the card counts what adoption re-sorts, every
+    // stack of the operations' scopes, and never a part of them
+    if preview_scope(&doc)?.is_some() {
+        return Err(Reply::error(
+            400,
+            format!(
+                "a proposal is rehearsed over the whole scope its adoption re-sorts, so it names no scope of its own; preview a narrower one at POST /api/packs/{name}/rehearse"
+            ),
+        ));
+    }
     let patch = patch_from(name, &doc)?;
     let kind = kind_of(&patch)?;
-    let report = rehearsed(registry, &dir, &patch, &doc)?;
-    let on = version_in(&dir).unwrap_or_default();
+    let (on, began) = mark(registry.store(), &dir, name)?;
+    let mut report = rehearsed(registry, &dir, &patch, &doc, None)?;
+    report["rehearsed_on"] = began;
     let scopes = scopes_of(&patch, &report);
     let card = card_of(&report, kind, &scopes);
     let evidence = doc.get("evidence").cloned().unwrap_or(Value::Null);
@@ -1302,8 +1348,26 @@ fn rehearse_door(
         pack_dir(doors, name).ok_or_else(|| Reply::error(404, format!("no pack named {name}")))?;
     let patch = nils_classify::scoped::patch_of(&p).map_err(|e| Reply::error(400, e))?;
     let patch = with_cases(patch, &p)?;
-    let report = rehearsed(registry, &dir, &patch, &doc)?;
-    let on = version_in(&dir).unwrap_or_default();
+    // a narrower scope is a preview: answered, never kept on the proposal,
+    // and never what it is adopted on
+    if let Some(scope) = preview_scope(&doc)? {
+        let mut report = rehearsed(registry, &dir, &patch, &doc, Some(scope))?;
+        let card = card_of(&report, &p.kind, &p.scopes);
+        if !is_quasi(caller) {
+            crate::rehearse::shape_scanners(&mut report);
+        }
+        return Ok(Reply::ok(json!({
+            "preview": true,
+            "proposal": id,
+            "scope": report["scope"]["replayed"].clone(),
+            "card": card,
+            "report": report,
+            "why": "a preview over a narrower scope; the proposal keeps the report over the whole scope its adoption re-sorts",
+        })));
+    }
+    let (on, began) = mark(registry.store(), &dir, name)?;
+    let mut report = rehearsed(registry, &dir, &patch, &doc, None)?;
+    report["rehearsed_on"] = began;
     let card = card_of(&report, &p.kind, &p.scopes);
     let store = registry.store();
     let datasets = datasets_touched(store, &patch, &p.evidence, &report);
@@ -1339,8 +1403,14 @@ fn with_cases(mut patch: Patch, p: &Proposal) -> Result<Patch, Reply> {
 // ------------------------------------------------------------ deciding
 
 /// One adoption at a time: a pack's next version is written and swapped in
-/// whole, and two adoptions at once would both write the same version.
+/// whole, and two adoptions at once would both write the same version, or
+/// both read the scoped changes in force as they were before the other.
 static ADOPTING: Mutex<()> = Mutex::new(());
+
+/// Held while a rule change or an overlay is adopted.
+pub(crate) fn adopting() -> std::sync::MutexGuard<'static, ()> {
+    ADOPTING.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 /// Where the versions a pack edit replaced are kept: beside the deployment's
 /// pack directory, one folder per pack and version (record 56 section 5.6:
@@ -1352,10 +1422,62 @@ fn versions_dir(packs: &Path) -> PathBuf {
     packs.with_file_name(format!("{name}.versions"))
 }
 
-/// The pack edit's operations written as the pack's next version where the
-/// engine reads its packs, the version they replace kept whole beside it.
-/// Answers the rules version recorded.
-fn write_version(doors: &Doors, name: &str, p: &Proposal) -> Result<Value, Reply> {
+/// A pack edit's next version, written beside the pack and checked to load,
+/// and not yet in place: the adoption is recorded first, and only then is
+/// the version swapped in ([`Prepared::swap`]); a failure on either side
+/// undoes the other.
+struct Prepared {
+    /// The pack directory the engine reads.
+    dir: PathBuf,
+    /// The new version, written whole.
+    incoming: PathBuf,
+    /// Where the version in use goes when the new one takes its place.
+    kept: PathBuf,
+    /// The rules version recorded.
+    version: Value,
+}
+
+impl Prepared {
+    /// The swap: the version in use moves aside whole and the new one
+    /// takes its place; a failure puts the old one back.
+    fn swap(&self) -> Result<(), Reply> {
+        std::fs::rename(&self.dir, &self.kept).map_err(|e| {
+            Reply::error(
+                409,
+                format!("the pack directory cannot take a new version: {e}"),
+            )
+        })?;
+        if let Err(e) = std::fs::rename(&self.incoming, &self.dir) {
+            std::fs::rename(&self.kept, &self.dir).ok();
+            return Err(Reply::error(
+                409,
+                format!("the new version could not be put in place: {e}"),
+            ));
+        }
+        Ok(())
+    }
+
+    /// The swap undone: the version before goes back in place, the new one
+    /// back where it was written.
+    fn unswap(&self) {
+        if std::fs::rename(&self.dir, &self.incoming).is_ok() {
+            std::fs::rename(&self.kept, &self.dir).ok();
+        }
+    }
+
+    /// The new version, never put in place, removed.
+    fn discard(&self) {
+        if self.incoming.exists() {
+            std::fs::remove_dir_all(&self.incoming).ok();
+        }
+    }
+}
+
+/// The pack edit's operations written as the pack's next version beside
+/// the pack directory, checked by the pack's loader and its cases; the
+/// version they replace is named for keeping. Nothing the engine reads
+/// changes yet.
+fn prepare_version(doors: &Doors, name: &str, p: &Proposal) -> Result<Prepared, Reply> {
     let packs = doors.pack_dir.clone().ok_or_else(|| {
         Reply::error(
             409,
@@ -1432,22 +1554,7 @@ fn write_version(doors: &Doors, name: &str, p: &Proposal) -> Result<Value, Reply
         kept = keep_root.join(format!("{from}.{n}"));
         n += 1;
     }
-    // the swap: the version in use moves aside whole, the new one takes its
-    // place; a failure puts the old one back
-    std::fs::rename(&dir, &kept).map_err(|e| {
-        Reply::error(
-            409,
-            format!("the pack directory cannot take a new version: {e}"),
-        )
-    })?;
-    if let Err(e) = std::fs::rename(&incoming, &dir) {
-        std::fs::rename(&kept, &dir).ok();
-        return Err(Reply::error(
-            409,
-            format!("the new version could not be put in place: {e}"),
-        ));
-    }
-    Ok(json!({
+    let version = json!({
         "pack": name,
         "version": loaded.version.to_string(),
         "from": from.to_string(),
@@ -1455,7 +1562,37 @@ fn write_version(doors: &Doors, name: &str, p: &Proposal) -> Result<Value, Reply
         "state": "to_release",
         "kept": kept.display().to_string(),
         "files": patched.docs.changed(),
-    }))
+    });
+    Ok(Prepared {
+        dir,
+        incoming,
+        kept,
+        version,
+    })
+}
+
+/// Run `write` inside one registry transaction: committed whole, or rolled
+/// back whole on any failure, with the registry's epoch read again.
+pub(crate) fn in_one<T>(
+    registry: &mut Registry,
+    write: impl FnOnce(&mut Registry) -> Result<T, Reply>,
+) -> Result<T, Reply> {
+    registry.store().begin().map_err(failed)?;
+    match write(registry) {
+        Ok(t) => match registry.store().commit() {
+            Ok(()) => Ok(t),
+            Err(e) => {
+                registry.store().rollback().ok();
+                registry.refresh_meta().ok();
+                Err(failed(e))
+            }
+        },
+        Err(r) => {
+            registry.store().rollback().ok();
+            registry.refresh_meta().ok();
+            Err(r)
+        }
+    }
 }
 
 fn decide_door(
@@ -1483,7 +1620,7 @@ fn decide_door(
             ),
         ));
     }
-    let _one = ADOPTING.lock().unwrap_or_else(|e| e.into_inner());
+    let _one = adopting();
     let p = rp::get(registry.store(), id)
         .map_err(failed)?
         .filter(|p| p.pack == name)
@@ -1496,37 +1633,41 @@ fn decide_door(
     }
     let principal = caller.principal.as_str();
     if decision == "reject" {
-        let done = rp::decide(
-            registry.store(),
-            id,
-            &rp::Decided {
-                status: rp::REJECTED,
-                by: principal,
-                why,
-                job: None,
-                version: &Value::Null,
-                applied: &Value::Null,
-            },
-        )
-        .map_err(failed)?;
-        if !done {
-            return Err(Reply::error(
-                409,
-                format!("proposal {id} was decided already"),
-            ));
-        }
-        nils_registry::audit::record(
-            registry,
-            &nils_registry::audit::Entry {
-                principal,
-                action: nils_registry::audit::Action::RulesReject,
-                scope: json!({"proposal": id, "pack": name}),
-                policy: None,
-                job_id: None,
-                details: Some(json!({"why": why})),
-            },
-        )
-        .map_err(failed)?;
+        in_one(registry, |registry| {
+            let done = rp::decide(
+                registry.store(),
+                id,
+                &rp::Decided {
+                    status: rp::REJECTED,
+                    by: principal,
+                    why,
+                    job: None,
+                    version: &Value::Null,
+                    applied: &Value::Null,
+                    at: None,
+                },
+            )
+            .map_err(failed)?;
+            if !done {
+                return Err(Reply::error(
+                    409,
+                    format!("proposal {id} was decided already"),
+                ));
+            }
+            nils_registry::audit::record(
+                registry,
+                &nils_registry::audit::Entry {
+                    principal,
+                    action: nils_registry::audit::Action::RulesReject,
+                    scope: json!({"proposal": id, "pack": name}),
+                    policy: None,
+                    job_id: None,
+                    details: Some(json!({"why": why})),
+                },
+            )
+            .map_err(failed)?;
+            Ok(())
+        })?;
         let store = registry.store();
         let p = rp::get(store, id).map_err(failed)?.expect("kept");
         return Ok(Reply::ok(json!({
@@ -1534,12 +1675,17 @@ fn decide_door(
             "status": rp::REJECTED,
         })));
     }
-    // adopt: it reads the pack and the registry as they are
+    // adopt. First every check that can refuse, while nothing has changed:
+    // it reads the pack and the registry as they are, its cases hold, the
+    // pack edit's version is written and loads, and what stops reproducing
+    // is known. Then the adoption, its re-sort and its record in one
+    // transaction; a pack edit's version is put in place before it commits
+    // and taken back where it cannot.
     if stale(doors, registry.store(), &p).map_err(failed)? {
         return Err(Reply::error(
             409,
             format!(
-                "proposal {id} was rehearsed against {name} {} or before a scoped change adopted since; rehearse it again before it is adopted",
+                "proposal {id} was rehearsed against {name} {} or the scoped changes in force before one adopted or retired since; rehearse it again before it is adopted",
                 p.on_version
             ),
         ));
@@ -1561,115 +1707,142 @@ fn decide_door(
         "review": p.report["review"]["stacks_asked"],
     });
     let applied = json!({"state": "queued", "expected": expected, "measured": null});
-    let (version, scopes, command) = if p.kind == rp::PACK {
-        let version = write_version(doors, name, &p)?;
-        let mut command = vec![
-            "classify".to_string(),
-            "--pack".into(),
-            name.to_string(),
-            "--proposal".into(),
-            id.to_string(),
-        ];
-        if let Some(dir) = &doors.pack_dir {
-            command.push("--pack-dir".into());
-            command.push(dir.display().to_string());
-        }
-        (version, vec!["pack".to_string()], command)
+    let mut command = vec!["classify".to_string(), "--pack".into(), name.to_string()];
+    let prepared = if p.kind == rp::PACK {
+        Some(prepare_version(doors, name, &p)?)
     } else {
-        let mut command = vec!["classify".to_string(), "--pack".into(), name.to_string()];
         for s in &p.scopes {
             command.push("--scope".into());
             command.push(s.clone());
         }
-        command.push("--proposal".into());
-        command.push(id.to_string());
-        if let Some(dir) = &doors.pack_dir {
-            command.push("--pack-dir".into());
-            command.push(dir.display().to_string());
-        }
-        (Value::Null, p.scopes.clone(), command)
+        None
     };
-    if !rp::decide(
-        registry.store(),
-        id,
-        &rp::Decided {
-            status: rp::ADOPTED,
-            by: principal,
-            why,
-            job: None,
-            version: &version,
-            applied: &applied,
-        },
-    )
-    .map_err(failed)?
-    {
-        return Err(Reply::error(
-            409,
-            format!("proposal {id} was decided already"),
-        ));
+    command.push("--proposal".into());
+    command.push(id.to_string());
+    if let Some(dir) = &doors.pack_dir {
+        command.push("--pack-dir".into());
+        command.push(dir.display().to_string());
     }
+    let (version, scopes) = match &prepared {
+        Some(v) => (v.version.clone(), vec!["pack".to_string()]),
+        None => (Value::Null, p.scopes.clone()),
+    };
     // what stops reproducing: the handles over what is re-sorted
-    let closure = if p.kind == rp::PACK {
-        let v = version["version"].as_str().unwrap_or("").to_string();
-        match crate::depends::of(doors, registry, "pack", &format!("{name}@{v}"))? {
-            crate::depends::Outcome::Closure(c) => Some(c),
-            _ => None,
+    let closure = (|| -> Result<Option<crate::depends::Closure>, Reply> {
+        if p.kind == rp::PACK {
+            let v = version["version"].as_str().unwrap_or("").to_string();
+            Ok(
+                match crate::depends::of(doors, registry, "pack", &format!("{name}@{v}"))? {
+                    crate::depends::Outcome::Closure(c) => Some(c),
+                    _ => None,
+                },
+            )
+        } else {
+            let modality = pack_dir(doors, name)
+                .and_then(|d| manifest_says(&d, "modality"))
+                .unwrap_or_else(|| "MR".into());
+            let stacks = scoped_stacks(registry.store(), &modality, &p.scopes)?;
+            Ok(Some(crate::depends::of_stacks(
+                registry,
+                "proposal",
+                &id.to_string(),
+                stacks,
+            )?))
         }
-    } else {
-        let modality = pack_dir(doors, name)
-            .and_then(|d| manifest_says(&d, "modality"))
-            .unwrap_or_else(|| "MR".into());
-        let stacks = scoped_stacks(registry.store(), &modality, &p.scopes)?;
-        Some(crate::depends::of_stacks(
-            registry,
-            "proposal",
-            &id.to_string(),
-            stacks,
-        )?)
+    })();
+    let closure = match closure {
+        Ok(c) => c,
+        Err(r) => {
+            if let Some(v) = &prepared {
+                v.discard();
+            }
+            return Err(r);
+        }
     };
-    let job = nils_registry::job::enqueue_with(
-        registry.store(),
-        &command,
-        Some(&format!("adopt rule change {id}")),
-        Some(principal),
-        json!({
-            "detail": caller.access.detail.name(),
-            "actor": caller.actor,
-            "proposal": id,
-        }),
-    )
-    .map_err(|e| {
-        Reply::error(
-            500,
-            format!("adopted, and the re-sort could not be queued: {e}"),
+    let mut swapped = false;
+    let written = in_one(registry, |registry| {
+        if !rp::decide(
+            registry.store(),
+            id,
+            &rp::Decided {
+                status: rp::ADOPTED,
+                by: principal,
+                why,
+                job: None,
+                version: &version,
+                applied: &applied,
+                at: None,
+            },
         )
-    })?;
-    rp::set_job(registry.store(), id, job).map_err(failed)?;
-    nils_registry::audit::record(
-        registry,
-        &nils_registry::audit::Entry {
-            principal,
-            action: nils_registry::audit::Action::RulesAdopt,
-            scope: json!({"proposal": id, "pack": name, "scopes": scopes}),
-            policy: None,
-            job_id: Some(job),
-            details: Some(json!({
-                "why": why,
-                "version": version,
-                "closure": closure.as_ref().map(crate::depends::Closure::counts),
-            })),
-        },
-    )
-    .map_err(failed)?;
-    let mut invalidated = Vec::new();
-    if let Some(c) = &closure {
-        invalidated = crate::depends::invalidate(
+        .map_err(failed)?
+        {
+            return Err(Reply::error(
+                409,
+                format!("proposal {id} was decided already"),
+            ));
+        }
+        let job = nils_registry::job::enqueue_with(
+            registry.store(),
+            &command,
+            Some(&format!("adopt rule change {id}")),
+            Some(principal),
+            json!({
+                "detail": caller.access.detail.name(),
+                "actor": caller.actor,
+                "proposal": id,
+            }),
+        )
+        .map_err(|e| {
+            Reply::error(
+                500,
+                format!("the re-sort could not be queued, so it is not adopted: {e}"),
+            )
+        })?;
+        rp::set_job(registry.store(), id, job).map_err(failed)?;
+        nils_registry::audit::record(
             registry,
-            c,
-            &format!("rule change {id} adopted"),
-            principal,
-        )?;
-    }
+            &nils_registry::audit::Entry {
+                principal,
+                action: nils_registry::audit::Action::RulesAdopt,
+                scope: json!({"proposal": id, "pack": name, "scopes": scopes}),
+                policy: None,
+                job_id: Some(job),
+                details: Some(json!({
+                    "why": why,
+                    "version": version,
+                    "closure": closure.as_ref().map(crate::depends::Closure::counts),
+                })),
+            },
+        )
+        .map_err(failed)?;
+        let mut invalidated = Vec::new();
+        if let Some(c) = &closure {
+            invalidated = crate::depends::invalidate(
+                registry,
+                c,
+                &format!("rule change {id} adopted"),
+                principal,
+            )?;
+        }
+        // the pack edit's version in place last, once all of it is written
+        if let Some(v) = &prepared {
+            v.swap()?;
+            swapped = true;
+        }
+        Ok((job, invalidated))
+    });
+    let (job, invalidated) = match written {
+        Ok(w) => w,
+        Err(r) => {
+            if let Some(v) = &prepared {
+                if swapped {
+                    v.unswap();
+                }
+                v.discard();
+            }
+            return Err(r);
+        }
+    };
     let store = registry.store();
     let p = rp::get(store, id).map_err(failed)?.expect("kept");
     Ok(Reply::accepted(json!({
@@ -1683,7 +1856,11 @@ fn decide_door(
 }
 
 /// The stacks a scoped change's scopes hold now.
-fn scoped_stacks(store: &mut Store, modality: &str, scopes: &[String]) -> Result<Vec<i64>, Reply> {
+pub(crate) fn scoped_stacks(
+    store: &mut Store,
+    modality: &str,
+    scopes: &[String],
+) -> Result<Vec<i64>, Reply> {
     let resolver = nils_classify::scoped::Resolver::load(store, modality).map_err(failed)?;
     let mut out: BTreeSet<i64> = BTreeSet::new();
     for s in scopes {
@@ -1886,6 +2063,88 @@ pub(crate) fn measured(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_adoption_that_fails_part_way_leaves_nothing_adopted() {
+        // record 56 §6.5: the overlays door and the decide door write the
+        // scoped change, the job, the decision and the audit in one
+        // transaction, so a failure after the change is made undoes it
+        let dir = nils_dicom::synth::TempDir::new("rule-changes");
+        let home = nils_registry::Home::new(dir.path().join("registry"));
+        home.keys(None).add("k", b"nils-fixture-key").unwrap();
+        let mut registry = home
+            .init(&nils_registry::InitOptions {
+                backend: nils_registry::Backend::Sqlite,
+                dsn: None,
+                schema: None,
+                scheme: nils_registry::pseudonym::Scheme::Blake2b32,
+                key: "k".to_string(),
+                display_length: nils_registry::pseudonym::DEFAULT_DISPLAY_LENGTH,
+                session_scheme: None,
+            })
+            .unwrap();
+        let (id, _) = nils_registry::overlay::propose(
+            registry.store(),
+            &nils_registry::overlay::Proposal {
+                name: "site words",
+                version: "1.0.0",
+                pack: "mri",
+                author: "rev@lab",
+                author_kind: "person",
+                actor: json!({}),
+                scope: json!({"over": "batch:1"}),
+                document: json!({
+                    "overlay": "site", "version": "1.0.0", "pack": "mri",
+                    "scope": {"batch": "1"},
+                    "lists": {"modifier.MT": {"add": ["zzqx"]}},
+                }),
+                tried: json!({}),
+                why: None,
+            },
+        )
+        .unwrap();
+        let o = nils_registry::overlay::show(registry.store(), id)
+            .unwrap()
+            .unwrap();
+        let epoch = registry.meta().epoch;
+        let undone: Result<(), Reply> = in_one(&mut registry, |registry| {
+            let kept = rp::from_overlay(registry.store(), &o, "ops@lab", None)
+                .map_err(failed)?
+                .unwrap();
+            assert!(kept.made);
+            nils_registry::audit::record(
+                registry,
+                &nils_registry::audit::Entry {
+                    principal: "ops@lab",
+                    action: nils_registry::audit::Action::OverlayAdopt,
+                    scope: json!({"overlay": id}),
+                    policy: None,
+                    job_id: None,
+                    details: None,
+                },
+            )
+            .map_err(failed)?;
+            Err(Reply::error(500, "the job could not be queued"))
+        });
+        assert!(undone.is_err());
+        assert!(rp::list(registry.store(), None).unwrap().is_empty());
+        assert!(rp::in_force(registry.store(), "mri").unwrap().is_empty());
+        assert_eq!(
+            nils_registry::overlay::show(registry.store(), id)
+                .unwrap()
+                .unwrap()
+                .status,
+            nils_registry::overlay::PROPOSED
+        );
+        assert_eq!(registry.meta().epoch, epoch, "the epoch read again");
+        // and one that succeeds keeps all of it
+        let Ok(Some(kept)) = in_one(&mut registry, |registry| {
+            rp::from_overlay(registry.store(), &o, "ops@lab", None).map_err(failed)
+        }) else {
+            panic!("the adoption is kept");
+        };
+        assert_eq!(rp::in_force(registry.store(), "mri").unwrap(), [kept.id]);
+    }
 
     #[test]
     fn a_card_names_every_break_first_and_says_what_moves() {

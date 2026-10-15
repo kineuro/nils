@@ -31,9 +31,18 @@ use crate::time::now_iso;
 pub const PROPOSED: &str = "proposed";
 pub const ADOPTED: &str = "adopted";
 pub const REJECTED: &str = "rejected";
+/// An adopted scoped change a later one replaced: a newer version of the
+/// same overlay adopted after it, or its overlay refused. No sort applies
+/// it any more; the row stays, as every adoption does.
+pub const RETIRED: &str = "retired";
 
 /// Every status, in the order a list counts them.
-pub const STATUSES: [&str; 3] = [PROPOSED, ADOPTED, REJECTED];
+pub const STATUSES: [&str; 4] = [PROPOSED, ADOPTED, REJECTED, RETIRED];
+
+/// What the evidence of a scoped change the overlays door made says it was
+/// made by (`made_by`): the door's own mark, so a person's proposal that
+/// cites an overlay as its evidence is never taken for it.
+pub const OVERLAY_MARK: &str = "overlay.adopt";
 
 /// A pack edit, which ships as a rules release.
 pub const PACK: &str = "pack";
@@ -292,14 +301,15 @@ pub fn adopted_scoped(store: &mut Store, pack: &str) -> Result<Vec<Proposal>, Er
         .collect()
 }
 
-/// When the newest of a pack's scoped changes was adopted, where one was:
-/// a proposal rehearsed before it no longer reads the registry as it is
-/// sorted.
-pub fn last_scoped_adoption(store: &mut Store, pack: &str) -> Result<Option<String>, Error> {
-    Ok(adopted_scoped(store, pack)?
-        .into_iter()
-        .filter_map(|p| p.decided_at)
-        .max())
+/// The scoped changes of a pack in force now, by id in order: the mark a
+/// rehearsal takes before it reads the registry. A proposal whose mark is
+/// not the one in force when it is decided was rehearsed against another
+/// set of changes (one adopted or retired since, even within the same
+/// second), and is rehearsed again before it is adopted.
+pub fn in_force(store: &mut Store, pack: &str) -> Result<Vec<i64>, Error> {
+    let mut ids: Vec<i64> = adopted_scoped(store, pack)?.iter().map(|p| p.id).collect();
+    ids.sort_unstable();
+    Ok(ids)
 }
 
 /// A proposal rehearsed again: its report and card, the version and the
@@ -350,6 +360,10 @@ pub struct Decided<'a> {
     pub version: &'a Value,
     /// What the re-sort is expected to do, before it ran.
     pub applied: &'a Value,
+    /// When it was decided, where that was before now: an overlay adopted
+    /// before record 56's scoped changes keeps its own adoption time, so
+    /// the order of adoption stays the real one.
+    pub at: Option<&'a str>,
 }
 
 /// Decide a proposal that is still proposed, and nothing else: two people
@@ -380,7 +394,7 @@ pub fn decide(store: &mut Store, id: i64, d: &Decided<'_>) -> Result<bool, Error
         &sql,
         &[
             Param::from(d.status),
-            Param::from(now_iso().as_str()),
+            Param::from(d.at.map_or_else(now_iso, str::to_string).as_str()),
             Param::from(d.by),
             opt(d.why),
             d.job.map_or(Param::Null, Param::Int),
@@ -506,38 +520,163 @@ pub fn overlay_patch(id: i64, pack: &str, document: &Value) -> Option<(String, V
     if operations.is_empty() {
         return None;
     }
-    Some((
-        scope,
-        serde_json::json!({
-            "patch": 1, "pack": pack, "operations": operations,
-            "reason": reason, "evidence": evidence,
-        }),
-    ))
+    let mut patch = serde_json::json!({
+        "patch": 1, "pack": pack, "operations": operations,
+        "reason": reason, "evidence": evidence,
+    });
+    // the overlay's own cases, which a rehearsal of it judges again
+    if let Some(c) = document.get("cases").filter(|c| !c.is_null()) {
+        patch["cases"] = c.clone();
+    }
+    Some((scope, patch))
+}
+
+/// The overlay a document is, by its own name (`overlay:`), else the name
+/// its proposal was given: two versions of one overlay share it.
+fn overlay_name(o: &crate::overlay::Overlay) -> String {
+    o.document["overlay"]
+        .as_str()
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+        .unwrap_or(&o.name)
+        .to_string()
+}
+
+/// Whether a proposal is the scoped change the overlays door made of an
+/// adopted overlay: its kind, its pack and its door's mark, never only an
+/// evidence that cites the overlay (a person's proposal may).
+fn made_of_overlay(p: &Proposal) -> bool {
+    p.kind == SCOPED && p.evidence["made_by"].as_str() == Some(OVERLAY_MARK)
+}
+
+/// The scoped change the overlays door made of an overlay, where it made
+/// one.
+pub fn of_overlay(
+    store: &mut Store,
+    o: &crate::overlay::Overlay,
+) -> Result<Option<Proposal>, Error> {
+    Ok(list(store, Some(&o.pack))?
+        .into_iter()
+        .find(|p| made_of_overlay(p) && p.evidence["overlay"].as_i64() == Some(o.id)))
+}
+
+/// The adopted scoped changes an adoption of this overlay retires: those
+/// the overlays door made of another version of the same overlay (its own
+/// name, on the same pack). The newer adopted version replaces the older
+/// whole: its words are the overlay's words now, and an older one kept
+/// beside it would collide with it (the same word added twice) and keep a
+/// word the newer one took away.
+pub fn superseded_by(
+    store: &mut Store,
+    o: &crate::overlay::Overlay,
+) -> Result<Vec<Proposal>, Error> {
+    let name = overlay_name(o);
+    Ok(adopted_scoped(store, &o.pack)?
+        .into_iter()
+        .filter(|p| {
+            made_of_overlay(p)
+                && p.evidence["overlay"].as_i64() != Some(o.id)
+                && p.evidence["name"].as_str() == Some(name.as_str())
+        })
+        .collect())
+}
+
+/// Retire an adopted scoped change: no sort applies it from now on. What
+/// retired it is kept on its `applied` (`retired`: by, at, why). Answers
+/// whether it was adopted.
+pub fn retire(store: &mut Store, id: i64, by: &Value, why: &str) -> Result<bool, Error> {
+    let Some(p) = get(store, id)? else {
+        return Ok(false);
+    };
+    if p.status != ADOPTED {
+        return Ok(false);
+    }
+    let mut applied = match p.applied {
+        Value::Object(m) => Value::Object(m),
+        _ => serde_json::json!({}),
+    };
+    applied["retired"] = serde_json::json!({"by": by, "at": now_iso(), "why": why});
+    let d = store.dialect();
+    let sql = format!(
+        "UPDATE {} SET status = {}, applied = {} WHERE id = {} AND status = {}",
+        store.qualified("rule_proposal"),
+        d.param(1, Type::Text),
+        d.param(2, Type::Json),
+        d.param(3, Type::Int),
+        d.param(4, Type::Text),
+    );
+    let n = store.execute(
+        &sql,
+        &[
+            Param::from(RETIRED),
+            Param::from(applied.to_string()),
+            Param::Int(id),
+            Param::from(ADOPTED),
+        ],
+    )?;
+    Ok(n > 0)
+}
+
+/// An overlay refused: the scoped change the overlays door made of it, where
+/// one is adopted, retires with it. Answers the change retired.
+pub fn retire_overlay(
+    store: &mut Store,
+    o: &crate::overlay::Overlay,
+    by: &str,
+) -> Result<Option<i64>, Error> {
+    let Some(p) = of_overlay(store, o)? else {
+        return Ok(None);
+    };
+    let why = format!("the overlay {} {} was refused by {by}", o.name, o.version);
+    Ok(retire(store, p.id, &serde_json::json!({"overlay": o.id}), &why)?.then_some(p.id))
+}
+
+/// What keeping an overlay as its scoped change did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Kept {
+    /// The scoped change.
+    pub id: i64,
+    /// Whether it was made now (else the one made before is answered).
+    pub made: bool,
+    /// The scoped changes of the overlay's earlier versions it retired.
+    pub retired: Vec<i64>,
 }
 
 /// The scoped change an adopted word overlay is (record 56 section 5.6: an
 /// overlay never leaves its scope, and is applied by every sort, not by the
 /// one re-sort its adoption queued): an adopted proposal of kind scoped
-/// whose operations are the overlay's words, its evidence the overlay.
-/// Answers the proposal's id; the one made before for the same overlay
-/// where there is one; none where the overlay changes no word.
+/// whose operations are the overlay's words, its evidence the overlay and
+/// the door's mark. Made once: the one made before for the same overlay is
+/// answered where there is one; none where the overlay changes no word.
+///
+/// The overlay's earlier versions adopted before (the same overlay name on
+/// the same pack) are retired by it: the newer version is the overlay now.
+/// `at` is when it was adopted, where that was before now (a migration
+/// keeps the real order of adoption); the caller holds the transaction.
 pub fn from_overlay(
     store: &mut Store,
     o: &crate::overlay::Overlay,
     by: &str,
-) -> Result<Option<i64>, Error> {
-    if let Some(p) = list(store, Some(&o.pack))?
-        .into_iter()
-        .find(|p| p.evidence["overlay"].as_i64() == Some(o.id))
-    {
-        return Ok(Some(p.id));
+    at: Option<&str>,
+) -> Result<Option<Kept>, Error> {
+    if let Some(p) = of_overlay(store, o)? {
+        return Ok(Some(Kept {
+            id: p.id,
+            made: false,
+            retired: Vec::new(),
+        }));
     }
     let Some((scope, patch)) = overlay_patch(o.id, &o.pack, &o.document) else {
         return Ok(None);
     };
+    let older = superseded_by(store, o)?;
     let title = format!("the overlay {} {}", o.name, o.version);
     let scopes = vec![scope];
-    let evidence = serde_json::json!({"overlay": o.id});
+    let name = overlay_name(o);
+    let evidence = serde_json::json!({
+        "overlay": o.id, "made_by": OVERLAY_MARK,
+        "name": name, "version": o.document["version"].as_str().unwrap_or(&o.version),
+    });
     let id = create(
         store,
         &New {
@@ -557,8 +696,10 @@ pub fn from_overlay(
             actor: &o.actor,
         },
     )?;
-    let applied =
-        serde_json::json!({"state": "queued", "expected": null, "measured": null, "overlay": o.id});
+    let applied = serde_json::json!({
+        "state": "queued", "expected": null, "measured": null, "overlay": o.id,
+        "supersedes": older.iter().map(|p| p.id).collect::<Vec<_>>(),
+    });
     decide(
         store,
         id,
@@ -569,27 +710,54 @@ pub fn from_overlay(
             job: o.job_id,
             version: &Value::Null,
             applied: &applied,
+            at,
         },
     )?;
-    Ok(Some(id))
+    let mut retired = Vec::new();
+    for p in older {
+        let why = format!(
+            "the overlay {name} {} was adopted after it",
+            evidence["version"].as_str().unwrap_or("")
+        );
+        if retire(
+            store,
+            p.id,
+            &serde_json::json!({"proposal": id, "overlay": o.id}),
+            &why,
+        )? {
+            retired.push(p.id);
+        }
+    }
+    Ok(Some(Kept {
+        id,
+        made: true,
+        retired,
+    }))
 }
 
 /// Every adopted overlay, as the scoped change it is, made once: what a
 /// registry from before record 56's scoped changes takes when it migrates,
 /// so the overlays it adopted stay in their scope and survive every sort.
-/// Answers the proposals made now.
+/// They are taken in the order they were adopted, each keeping its own
+/// adoption time, so a later version of an overlay retires the earlier one
+/// as its adoption did. Answers the proposals made now.
 pub fn adopt_overlays(store: &mut Store) -> Result<Vec<i64>, Error> {
-    let before: Vec<i64> = list(store, None)?.iter().map(|p| p.id).collect();
-    let mut made = Vec::new();
-    for o in crate::overlay::list(store)?
+    let mut adopted: Vec<crate::overlay::Overlay> = crate::overlay::list(store)?
         .into_iter()
         .filter(|o| o.status == crate::overlay::ADOPTED)
-    {
+        .collect();
+    adopted.sort_by(|a, b| {
+        a.decided_at
+            .cmp(&b.decided_at)
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    let mut made = Vec::new();
+    for o in adopted {
         let by = o.decided_by.clone().unwrap_or_else(|| o.author.clone());
-        if let Some(id) = from_overlay(store, &o, &by)?
-            && !before.contains(&id)
+        if let Some(k) = from_overlay(store, &o, &by, o.decided_at.as_deref())?
+            && k.made
         {
-            made.push(id);
+            made.push(k.id);
         }
     }
     Ok(made)
@@ -668,6 +836,7 @@ mod tests {
             job: Some(7),
             version: &Value::Null,
             applied: &applied,
+            at: None,
         };
         assert!(decide(&mut s, id, &d).unwrap());
         // the second decision finds it decided
@@ -676,7 +845,7 @@ mod tests {
         assert!(!rehearsed(&mut s, id, "1.2.2", &empty, &empty, &datasets).unwrap());
         let scoped = adopted_scoped(&mut s, "mri").unwrap();
         assert_eq!(scoped.len(), 1);
-        assert!(last_scoped_adoption(&mut s, "mri").unwrap().is_some());
+        assert_eq!(in_force(&mut s, "mri").unwrap(), [id]);
 
         assert!(set_measured(&mut s, id, &json!({"state": "done", "stacks": 3})).unwrap());
         let p = get(&mut s, id).unwrap().unwrap();
@@ -743,5 +912,133 @@ mod tests {
         // once
         assert!(adopt_overlays(&mut s).unwrap().is_empty());
         assert_eq!(adopted_scoped(&mut s, "mri").unwrap().len(), 1);
+    }
+
+    /// An overlay version as an overlay row, adopted at `at` where given.
+    fn overlay_row(s: &mut Store, version: &str, words: &[&str], at: Option<&str>) -> i64 {
+        let doc = json!({
+            "overlay": "site", "version": version, "pack": "mri",
+            "scope": {"batch": "1"},
+            "lists": {"technique.TSE": {"add": words}},
+            "cases": [{"name": "c", "stack": {"text_series_description": words[0]}, "axes": {"technique": "TSE"}}],
+        });
+        let p = crate::overlay::Proposal {
+            name: "the site's words",
+            version,
+            pack: "mri",
+            author: "rev@lab",
+            author_kind: "person",
+            actor: json!({}),
+            scope: json!({"over": "batch:1"}),
+            document: doc,
+            tried: json!({}),
+            why: None,
+        };
+        let (id, _) = crate::overlay::propose(s, &p).unwrap();
+        if let Some(at) = at {
+            crate::overlay::decide(s, id, crate::overlay::ADOPTED, "ops@lab", None, None).unwrap();
+            let o = s.qualified("overlay");
+            s.execute(
+                &format!("UPDATE {o} SET decided_at = '{at}' WHERE id = {id}"),
+                &[],
+            )
+            .unwrap();
+        }
+        id
+    }
+
+    #[test]
+    fn a_later_version_of_an_overlay_retires_the_earlier_in_the_order_adopted() {
+        let mut s = store();
+        // 2.0.0 is proposed first and adopted last: the order of adoption,
+        // not of the rows or of the migration, decides which is in force
+        let v2 = overlay_row(&mut s, "2.0.0", &["zzturbo"], Some("2026-02-01T00:00:00Z"));
+        let v1 = overlay_row(
+            &mut s,
+            "1.0.0",
+            &["zzturbo", "oldword"],
+            Some("2026-01-01T00:00:00Z"),
+        );
+        // a person's proposal citing the first version is not the door's
+        let patch = json!({"patch": 1, "pack": "mri", "operations": [{"op": "add_words"}]});
+        let scopes = vec!["batch:1".to_string()];
+        let cites = json!({"overlay": v1});
+        let empty = json!({});
+        let mut person = new(SCOPED, &scopes, &patch, &[], &empty);
+        person.evidence = &cites;
+        let theirs = create(&mut s, &person).unwrap();
+        let d = Decided {
+            status: ADOPTED,
+            by: "ops@lab",
+            why: None,
+            job: None,
+            version: &Value::Null,
+            applied: &empty,
+            at: Some("2025-12-01T00:00:00Z"),
+        };
+        assert!(decide(&mut s, theirs, &d).unwrap());
+
+        let made = adopt_overlays(&mut s).unwrap();
+        assert_eq!(made.len(), 2, "{made:?}");
+        let by_overlay = |s: &mut Store, o: i64| {
+            list(s, Some("mri"))
+                .unwrap()
+                .into_iter()
+                .find(|p| made_of_overlay(p) && p.evidence["overlay"] == o)
+                .unwrap()
+        };
+        let one = by_overlay(&mut s, v1);
+        let two = by_overlay(&mut s, v2);
+        assert_eq!(one.status, RETIRED, "the earlier version is retired");
+        assert_eq!(one.applied["retired"]["by"]["proposal"], two.id);
+        assert_eq!(two.status, ADOPTED);
+        assert_eq!(two.applied["supersedes"], json!([one.id]));
+        // each keeps its own time of adoption
+        assert!(
+            two.decided_at.as_deref().unwrap().starts_with("2026-02-01"),
+            "{:?}",
+            two.decided_at
+        );
+        // the overlay's cases are kept with its words
+        assert_eq!(two.patch["cases"][0]["name"], "c");
+        // the person's proposal is theirs: neither taken for the overlay's
+        // nor retired
+        assert_eq!(get(&mut s, theirs).unwrap().unwrap().status, ADOPTED);
+        assert_eq!(in_force(&mut s, "mri").unwrap(), [theirs, two.id]);
+        assert_eq!(
+            adopted_scoped(&mut s, "mri")
+                .unwrap()
+                .iter()
+                .map(|p| p.id)
+                .collect::<Vec<_>>(),
+            [theirs, two.id],
+            "in the order adopted"
+        );
+
+        // a third version adopted at the door now retires the second
+        let v3 = overlay_row(&mut s, "3.0.0", &["zzturbo3"], None);
+        let o3 = crate::overlay::show(&mut s, v3).unwrap().unwrap();
+        assert_eq!(
+            superseded_by(&mut s, &o3)
+                .unwrap()
+                .iter()
+                .map(|p| p.id)
+                .collect::<Vec<_>>(),
+            [two.id]
+        );
+        let k = from_overlay(&mut s, &o3, "ops@lab", None).unwrap().unwrap();
+        assert!(k.made);
+        assert_eq!(k.retired, [two.id]);
+        assert_eq!(in_force(&mut s, "mri").unwrap(), [theirs, k.id]);
+        // once: the same overlay answers the change made before
+        let again = from_overlay(&mut s, &o3, "ops@lab", None).unwrap().unwrap();
+        assert_eq!((again.id, again.made), (k.id, false));
+
+        // a refused overlay retires the change made of it, and nothing else
+        assert_eq!(retire_overlay(&mut s, &o3, "ops@lab").unwrap(), Some(k.id));
+        assert_eq!(get(&mut s, k.id).unwrap().unwrap().status, RETIRED);
+        assert_eq!(retire_overlay(&mut s, &o3, "ops@lab").unwrap(), None);
+        assert_eq!(in_force(&mut s, "mri").unwrap(), [theirs]);
+        assert!(!retire(&mut s, k.id, &json!({}), "twice").unwrap());
     }
 }

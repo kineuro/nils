@@ -1274,7 +1274,11 @@ fn run_groups(
     let epoch = registry.meta().epoch;
     let mut report = crate::report::Classified::new(job_id, epoch, pack.id());
     let mut tallies = crate::diagnostics::Tallies::default();
-    for (variant, group, changes) in &groups {
+    // record 56 §6.5: every group's rules first, then every group's passes,
+    // as the rehearsal counts them: a vote's pool holds every stack as the
+    // rules left it this run, whichever group judged it
+    let mut ruled: Vec<(usize, crate::report::Classified, Later)> = Vec::new();
+    for (g, (variant, group, changes)) in groups.iter().enumerate() {
         if cancel.stop() {
             report.cancelled = true;
             break;
@@ -1283,7 +1287,7 @@ fn run_groups(
         if matches!(&group.stacks, crate::job::Stacks::Only(s) if s.is_empty()) {
             continue;
         }
-        let (one, t) = run(
+        let (one, t, later) = run(
             registry,
             variant.as_ref().unwrap_or(pack),
             group,
@@ -1291,11 +1295,38 @@ fn run_groups(
             cancel,
             job_id,
         )?;
-        report.merge(one);
         tallies.absorb(t);
-        if report.cancelled {
+        let stop = one.cancelled;
+        ruled.push((g, one, later));
+        if stop {
+            report.cancelled = true;
             break;
         }
+    }
+    let pool = if !report.cancelled && ruled.len() > 1 {
+        let modality = settings.modality.as_deref().unwrap_or(&pack.modality);
+        Some(crate::passes::Pool::read(registry.store(), Some(modality))?)
+    } else {
+        None
+    };
+    for (g, mut one, later) in ruled {
+        if cancel.stop() {
+            report.cancelled = true;
+        }
+        if !report.cancelled {
+            let (variant, group, _) = &groups[g];
+            finish(
+                registry.store(),
+                variant.as_ref().unwrap_or(pack),
+                group,
+                cancel,
+                job_id,
+                &mut one,
+                later,
+                pool.as_ref(),
+            )?;
+        }
+        report.merge(one);
     }
     report.scoped = applied;
     report.scoped_skipped = skipped;
@@ -1313,17 +1344,20 @@ fn run_groups(
     }
     // Record 55 F2 and F5: the post-contrast label, the time rule's session
     // pass and the subject step after it, from what the rules and the
-    // passes decided and the certified T1 answers in the registry; a scoped
-    // re-sort labels its stacks' subjects
+    // passes decided and the certified T1 answers in the registry. A scoped
+    // re-sort reads its stacks' subjects' sessions whole, as the rule reads
+    // a stack beside its siblings, and writes the labels of its own stacks
+    // and of no other (record 56 §5.6: a change never leaves its scope)
     if !report.cancelled {
-        let subjects = match &settings.stacks {
+        let labelled = match &settings.stacks {
             crate::job::Stacks::Only(s) => {
                 let ids: Vec<i64> = s.iter().copied().collect();
-                Some(crate::contrast::subjects_of(store, &ids)?)
+                let subjects = crate::contrast::subjects_of(store, &ids)?;
+                crate::contrast::label_in(store, pack, Some(&subjects), Some(s))?
             }
-            _ => None,
+            _ => crate::contrast::label(store, pack, None)?,
         };
-        report.contrast = Some(crate::contrast::label(store, pack, subjects.as_deref())?.to_json());
+        report.contrast = Some(labelled.to_json());
     }
     if !settings.scope.is_empty() {
         let stacks = match &settings.stacks {
@@ -1364,11 +1398,11 @@ fn whole_batches(
     Ok(seen.difference(&partial).copied().collect())
 }
 
-/// One group of a run: the stacks `settings.stacks` names, judged by
-/// `pack`, which carries the scoped changes `changes` names (written on
-/// each stack's classification), then its passes, its missing questions
-/// and its disposition. Answers what it did and the diagnostics it
-/// tallied, which the run writes once.
+/// The rules of one group of a run: the stacks `settings.stacks` names,
+/// judged by `pack`, which carries the scoped changes `changes` names
+/// (written on each stack's classification). Answers what it did, the
+/// diagnostics it tallied, which the run writes once, and what [`finish`]
+/// takes once every group's rules have written.
 fn run(
     registry: &mut Registry,
     pack: &Pack,
@@ -1376,7 +1410,14 @@ fn run(
     changes: &[String],
     cancel: &nils_digest::Cancel,
     job_id: i64,
-) -> Result<(crate::report::Classified, crate::diagnostics::Tallies), Error> {
+) -> Result<
+    (
+        crate::report::Classified,
+        crate::diagnostics::Tallies,
+        Later,
+    ),
+    Error,
+> {
     let epoch = registry.meta().epoch;
     let mut report = crate::report::Classified::new(job_id, epoch, pack.id());
     let store = registry.store();
@@ -1961,16 +2002,54 @@ fn run(
         crate::job::beat(store, job_id, cancel)?;
     }
 
+    Ok((
+        report,
+        tallies,
+        Later {
+            pending_missing,
+            now,
+            voters,
+        },
+    ))
+}
+
+/// What a group's rules leave for after every group's rules have run: the
+/// stacks found missing an answer that matters, and what the disposition
+/// reads.
+struct Later {
+    pending_missing: Vec<(i64, String)>,
+    now: String,
+    voters: Option<Voters>,
+}
+
+/// The rest of one group's run, once every group's rules have written: its
+/// passes, its missing questions and its disposition. `pool` is the vote's
+/// corpus as every group's rules left it, read once for all of them, so no
+/// group's vote reads another's stacks before or after that group's own
+/// passes (record 56 §6.5: the sort is the one the rehearsal counted, in
+/// whatever order its groups run).
+#[allow(clippy::too_many_arguments)]
+fn finish(
+    store: &mut Store,
+    pack: &Pack,
+    settings: &crate::job::Settings,
+    cancel: &nils_digest::Cancel,
+    job_id: i64,
+    report: &mut crate::report::Classified,
+    later: Later,
+    pool: Option<&crate::passes::Pool>,
+) -> Result<(), Error> {
     // The passes: the phases that read more than one stack. They run once,
     // after every stack has a verdict, against the reference the pack named.
     if !report.cancelled {
-        report.passes = crate::passes::run(
+        report.passes = crate::passes::run_over(
             store,
             pack,
             settings,
             cancel,
             nils_pack::pass::Phase::After,
             job_id,
+            pool,
         )?;
         for p in &report.passes {
             report.review_items += p.review_items;
@@ -1982,8 +2061,9 @@ fn run(
     // Asked now, after the passes, because a pass fills what the rules left
     // (the physics vote a base, the session pass a construct) and a question
     // it answered would only be asked to be superseded.
-    if !report.cancelled && !pending_missing.is_empty() {
-        let (raised, by_axis) = ask_missing(store, pack, &pending_missing, &now, job_id)?;
+    if !report.cancelled && !later.pending_missing.is_empty() {
+        let (raised, by_axis) =
+            ask_missing(store, pack, &later.pending_missing, &later.now, job_id)?;
         report.review_items += raised;
         report.missing = by_axis;
     }
@@ -1991,9 +2071,9 @@ fn run(
     // And last, what to do with each stack (Wave 3 §7), from what the rules
     // and the passes between them decided.
     if !report.cancelled {
-        report.disposed = dispose(store, pack, settings, cancel, job_id, voters.as_ref())?;
+        report.disposed = dispose(store, pack, settings, cancel, job_id, later.voters.as_ref())?;
     }
-    Ok((report, tallies))
+    Ok(())
 }
 
 /// §7: the disposition of every stack, decided after the passes.
