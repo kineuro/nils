@@ -1012,6 +1012,15 @@ fn dataset_layers(pg: Option<(String, String)>) {
         for key in ["step", "state", "of", "answered", "label"] {
             assert_eq!(alone["step"][key], mine[key], "{layer} {key}: {alone}");
         }
+        // a dataset's step is read as its Data page is: review:see alone
+        // reads a cohort's, never a dataset's
+        let (status, refused) = server.call(
+            "GET",
+            &format!("/api/picks/layer-step?dataset=fresh&layer={layer}"),
+            None,
+            REVIEWER,
+        );
+        assert_eq!(status, 403, "{refused}");
         let strips = server.post(
             "/api/picks/map/strips",
             json!({"scope": scope, "role": "t1w", "layer": layer}),

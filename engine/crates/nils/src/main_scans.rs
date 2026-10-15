@@ -592,10 +592,7 @@ pub(crate) fn map(
     // membership); a cohort holds every stack of its open members. Its
     // `source` rows are read once, for these and for the layer's step.
     let sources = scope_sources(registry, &scope)?;
-    let held = match &sources {
-        Some(ids) => Some(held_stacks(registry, ids)?),
-        None => None,
-    };
+    let held = nils_registry::pick_rules::held_stacks(registry.store(), &scope).map_err(failed)?;
     // the scope's visits, in the cache before the map reads them
     visits_cached(registry, &scheme, &subjects)?;
     let mut read = main_scans::read(
@@ -609,7 +606,6 @@ pub(crate) fn map(
             datasets: &datasets,
             withheld: &withheld,
             held: held.as_ref(),
-            layered: layer.is_some(),
         },
     )
     .map_err(failed)?;
@@ -643,8 +639,14 @@ pub(crate) fn map(
         let only = paging
             .as_ref()
             .map(|(members, page, per_page)| members.page(&read, *page, *per_page));
-        read.add_layer(registry.store(), layer, &withheld, only.as_ref())
-            .map_err(failed)?;
+        read.add_layer(
+            registry.store(),
+            layer,
+            &withheld,
+            held.as_ref(),
+            only.as_ref(),
+        )
+        .map_err(failed)?;
     }
     let mut out = match door {
         Door::Map => main_scans::map(&read, &cmp, model, role, by, version),
@@ -684,22 +686,6 @@ pub(crate) fn map(
     Ok(Reply::ok(out))
 }
 
-/// The stacks a dataset's `source` rows hold a file of.
-fn held_stacks(registry: &mut Registry, sources: &str) -> Result<BTreeSet<i64>, Reply> {
-    let store = registry.store();
-    let sql = format!(
-        "SELECT x.id FROM {} x WHERE {}",
-        store.qualified("stack"),
-        crate::operations::held_by(store, "x", sources)
-    );
-    Ok(store
-        .query(&sql, &[])
-        .map_err(failed)?
-        .iter()
-        .filter_map(|r| r.int(0).ok())
-        .collect())
-}
-
 /// `GET /api/picks/layer-step?cohort=NAME&layer=L` (or `dataset=`): the
 /// step that answers a layer over a scope alone, as the map door gives it,
 /// for a page to ask while the step waits or runs instead of the whole map
@@ -711,6 +697,17 @@ pub(crate) fn layer_step_door(
     query: &HashMap<String, String>,
 ) -> Result<Reply, Reply> {
     let scope = scope_of(registry, query, None)?;
+    // a dataset's step is read as its Data page is, with data:see or
+    // pipelines:see; review:see reads a cohort's, as its heatmap is read
+    if scope.kind == nils_registry::pick_rules::ScopeKind::Dataset
+        && !caller.access.holds("data:see")
+        && !caller.access.holds("pipelines:see")
+    {
+        return Err(Reply::error(
+            403,
+            "a dataset's step is read with data:see or pipelines:see",
+        ));
+    }
     let layer = layer_named(query.get("layer").map(String::as_str))?.ok_or_else(|| {
         let mut r = Reply::error(400, "layer: body_region, body_part or post_contrast");
         r.body["field"] = Value::from("layer");

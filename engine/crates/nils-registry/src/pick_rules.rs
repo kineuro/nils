@@ -14,6 +14,8 @@
 //! What the rules say is `nils_pack::pick_rules`'s; this keeps them. Which
 //! picks a reader reads is `crate::pick_truth`'s.
 
+use std::collections::BTreeSet;
+
 use serde_json::{Value, json};
 
 use crate::schema::{Type, table};
@@ -101,6 +103,40 @@ impl Scope {
     pub fn to_json(&self) -> Value {
         json!({"kind": self.kind.name(), "id": self.id, "name": self.name})
     }
+}
+
+/// The stacks a scope holds where it holds some and not every stack of its
+/// subjects: a dataset's, those its `source` rows hold a file of (Nima,
+/// 2026-10-12: a dataset holds stacks, never a subject's membership); none
+/// for a cohort, which holds every stack of its open members. Its pick run
+/// chooses among these, and its map reads them.
+pub fn held_stacks(store: &mut Store, scope: &Scope) -> Result<Option<BTreeSet<i64>>, StoreError> {
+    if scope.kind == ScopeKind::Cohort {
+        return Ok(None);
+    }
+    let sources = crate::place::dataset_sources(store)?
+        .into_iter()
+        .find(|d| d.id == scope.id)
+        .map(|d| d.sources)
+        .unwrap_or_default();
+    if sources.is_empty() {
+        return Ok(Some(BTreeSet::new()));
+    }
+    let sql = format!(
+        "SELECT DISTINCT stack_id FROM {} WHERE source_id IN ({})",
+        store.qualified("source_stack"),
+        sources
+            .iter()
+            .map(i64::to_string)
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    store
+        .query(&sql, &[])?
+        .iter()
+        .map(|r| r.int(0))
+        .collect::<Result<BTreeSet<i64>, StoreError>>()
+        .map(Some)
 }
 
 /// One saved version of a scope's rules.

@@ -309,6 +309,7 @@ pub struct Only {
 }
 
 /// One stack, as the picks need it.
+#[derive(Clone)]
 pub(crate) struct Row {
     pub(crate) stack: i64,
     pub(crate) subject: i64,
@@ -603,11 +604,35 @@ fn run_pick(
             first_covered = Some(covered.clone());
         }
         let version = run.saved.as_ref().map_or(1, |s| s.version);
+        // a dataset's run chooses among the stacks the dataset holds alone,
+        // as its map reads them (Nima, 2026-10-12: a dataset holds stacks,
+        // never a subject's membership; the third review of the map's
+        // layers, 2026-10-15); a cohort's keeps every member's stacks
+        let held = match &run.scope {
+            Some(s) => nils_registry::pick_rules::held_stacks(store, s)?,
+            None => None,
+        };
+        let own: Vec<Vec<Row>>;
+        let rows_here: &[Vec<Row>] = match &held {
+            Some(h) => {
+                own = rows_of
+                    .iter()
+                    .map(|rows| {
+                        rows.iter()
+                            .filter(|r| h.contains(&r.stack))
+                            .cloned()
+                            .collect()
+                    })
+                    .collect();
+                &own
+            }
+            None => &rows_of,
+        };
         // a scope's rules are the first pick's, whose roles they name; the
         // pack's scope runs every pick with its defaults
         let models: Vec<(&Model, &Vec<Row>)> = match &run.scope {
-            None => pack.picks.iter().zip(&rows_of).collect(),
-            Some(_) => pack.picks.iter().zip(&rows_of).take(1).collect(),
+            None => pack.picks.iter().zip(rows_here).collect(),
+            Some(_) => pack.picks.iter().zip(rows_here).take(1).collect(),
         };
         let started = match &run.scope {
             Some(s) => Some(nils_registry::pick_rules::run_started(

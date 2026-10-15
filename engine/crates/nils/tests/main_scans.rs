@@ -1122,6 +1122,59 @@ fn held_twice(pg: Option<(String, String)>) {
         .map(|c| c["visits"].as_i64().unwrap())
         .sum();
     assert_eq!(shown, 3, "{map}");
+
+    // the third review of the map's layers (2026-10-15): a dataset's own
+    // pick run chooses among the stacks it holds, as its map reads them, so
+    // its saved picks name none of S-ONE's visit the first holds alone, and
+    // the saved side agrees with a draft that says the rules again
+    let (status, rules) = server.call("GET", "/api/picks/rules?dataset=second", None, OPS);
+    assert_eq!(status, 200, "{rules}");
+    let current = rules["current"]["rules"].clone();
+    let (status, saved) = server.call(
+        "POST",
+        "/api/picks/rules?dataset=second",
+        Some(json!({"rules": current, "reason": "the second's own picks", "based_on": 1})),
+        OPS,
+    );
+    assert_eq!(status, 201, "{saved}");
+    let job = server.over(saved["job"].as_i64().unwrap());
+    assert_eq!(job["state"], "done", "{job}");
+    let mut store = home.store();
+    let sql = format!(
+        "SELECT COUNT(*) FROM {pick} p JOIN {ps} s ON s.pick_id = p.id \
+         WHERE p.rules_scope_kind = 'dataset' AND p.withdrawn_at IS NULL \
+         AND s.stack_id NOT IN (SELECT ss.stack_id FROM {src} ss JOIN {source} so ON so.id = ss.source_id \
+         WHERE so.root_canonical LIKE '{root}%')",
+        root = second.path().canonicalize().unwrap().display(),
+        pick = store.qualified("pick"),
+        ps = store.qualified("pick_stack"),
+        src = store.qualified("source_stack"),
+        source = store.qualified("source"),
+    );
+    assert_eq!(
+        store.query(&sql, &[]).unwrap()[0].int(0).unwrap(),
+        0,
+        "the second's picks name only its own stacks"
+    );
+    let own = format!(
+        "SELECT COUNT(*) FROM {} WHERE rules_scope_kind = 'dataset' AND withdrawn_at IS NULL",
+        store.qualified("pick")
+    );
+    assert_eq!(
+        store.query(&own, &[]).unwrap()[0].int(0).unwrap(),
+        2,
+        "a pick a visit of the second"
+    );
+    drop(store);
+    let (status, map) = server.call(
+        "POST",
+        "/api/picks/map",
+        Some(json!({"scope": {"dataset": "second"}, "role": "t1w", "rules": current})),
+        OPS,
+    );
+    assert_eq!(status, 200, "{map}");
+    assert_eq!(map["metrics"]["visits_taken"], 2, "{map}");
+    assert_eq!(map["effect"]["visits_changed"], 0, "{map}");
 }
 
 /// 2026-10-12 (Nima on the development build): a dataset's run of its main

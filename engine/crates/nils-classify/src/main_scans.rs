@@ -58,9 +58,6 @@ pub struct Ask<'a> {
     /// from these alone; none for a cohort, which holds its members' every
     /// stack.
     pub held: Option<&'a BTreeSet<i64>>,
-    /// Whether a layer will be read over the visits, so that what it needs
-    /// of the session cache is kept.
-    pub layered: bool,
 }
 
 /// A pick stored on a visit, applying: a person's or a run's.
@@ -94,8 +91,6 @@ pub struct Read {
     /// Each study's visit under the scheme, by the study's id, of the
     /// scope's subjects.
     sessions: HashMap<i64, i64>,
-    /// The stacks the scope holds, where it holds some ([`Ask::held`]).
-    held: Option<BTreeSet<i64>>,
     /// The layer asked, read over the same visits ([`Read::add_layer`]).
     layer: Option<Layered>,
 }
@@ -191,10 +186,9 @@ pub fn read(registry: &mut Registry, ask: &Ask<'_>) -> Result<Read, Error> {
         // the visits of the scope's subjects alone, which a layer reads
         sessions: labels
             .iter()
-            .filter(|(_, l)| ask.layered && ask.subjects.contains(&l.subject_id))
+            .filter(|(_, l)| ask.subjects.contains(&l.subject_id))
             .map(|(study, l)| (*study, l.session_id))
             .collect(),
-        held: ask.held.cloned(),
         layer: None,
     })
 }
@@ -336,14 +330,15 @@ pub fn reference(
 
 impl Read {
     /// Read a layer over the visits (record 55, decision 6): every MR stack
-    /// of the subjects, or of `only` those (a page of them), that the scope
-    /// holds (a dataset's own stacks, as the visits were read), a stack in
-    /// `withheld` left out. Reads only.
+    /// of the subjects, or of `only` those (a page of them), of `held` alone
+    /// where it is given (a dataset's own stacks, the set the visits were
+    /// read with), a stack in `withheld` left out. Reads only.
     pub fn add_layer(
         &mut self,
         store: &mut Store,
         layer: Layer,
         withheld: &BTreeSet<i64>,
+        held: Option<&BTreeSet<i64>>,
         only: Option<&BTreeSet<i64>>,
     ) -> Result<(), StoreError> {
         self.layer = Some(layered(
@@ -352,7 +347,7 @@ impl Read {
             &self.subjects,
             &self.sessions,
             withheld,
-            self.held.as_ref(),
+            held,
             only,
         )?);
         Ok(())
@@ -1318,7 +1313,24 @@ pub fn layer_rows(
         state: Option<String>,
     }
     let mut by_stack: BTreeMap<i64, Seen> = BTreeMap::new();
-    for chunk in subjects.chunks(500) {
+    // the condition each query reads by: the subjects in chunks, or, where
+    // the scope holds some stacks alone, those stacks in chunks, a stack
+    // of another subject left out after
+    let wanted: BTreeSet<i64> = subjects.iter().copied().collect();
+    let conditions: Vec<String> = match held {
+        None => subjects
+            .chunks(500)
+            .map(|c| format!("se.subject_id IN ({})", list(c)))
+            .collect(),
+        Some(h) => h
+            .iter()
+            .copied()
+            .collect::<Vec<_>>()
+            .chunks(500)
+            .map(|c| format!("x.id IN ({})", list(c)))
+            .collect(),
+    };
+    for condition in conditions {
         let sql = match layer {
             Layer::PostContrast => format!(
                 "SELECT x.id, se.subject_id, se.study_id, a.value, a.confidence, a.tier, \
@@ -1326,21 +1338,19 @@ pub fn layer_rows(
                  JOIN {series} se ON se.id = x.series_id \
                  LEFT JOIN {label} cl ON cl.stack_id = x.id \
                  LEFT JOIN {axis} a ON a.stack_id = x.id AND a.axis = 'post_contrast' \
-                 WHERE x.modality = 'MR' AND se.subject_id IN ({})",
-                list(chunk)
+                 WHERE x.modality = 'MR' AND {condition}"
             ),
             _ => format!(
                 "SELECT x.id, se.subject_id, se.study_id, a.value, a.confidence, a.tier \
                  FROM {stack} x JOIN {series} se ON se.id = x.series_id \
                  LEFT JOIN {axis} a ON a.stack_id = x.id AND a.axis = '{}' \
-                 WHERE x.modality = 'MR' AND se.subject_id IN ({})",
-                layer.name(),
-                list(chunk)
+                 WHERE x.modality = 'MR' AND {condition}",
+                layer.name()
             ),
         };
         for r in store.query(&sql, &[])? {
             let id = r.int(0)?;
-            if held.is_some_and(|h| !h.contains(&id)) {
+            if held.is_some() && !wanted.contains(&r.int(1)?) {
                 continue;
             }
             let value = r
@@ -1722,7 +1732,6 @@ mod tests {
             subjects,
             datasets,
             sessions: HashMap::new(),
-            held: None,
             layer: None,
         };
         let laid = columns(&read, &taken, Columns::Dataset);
