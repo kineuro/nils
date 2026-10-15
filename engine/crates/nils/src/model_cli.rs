@@ -30,6 +30,7 @@ use nils_registry::model::{self, Error, Filter, Model};
 use crate::{Exit, actor, fail, open, usage};
 
 #[derive(Debug, Subcommand)]
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum ModelCommand {
     /// Register a model by its card: identified by the digest of its
     /// canonical artifact, neither admitted nor promoted
