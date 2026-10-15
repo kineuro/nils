@@ -19,7 +19,8 @@ image of 1.0.0-alpha.71, and its own was pinned one commit after it).
         <name>/nils.job.yml for every descriptor of this tree that names one
         of them, pinned to it, and <out>/IMAGES (`<pipeline>\\t<image>`).
         A kineuro image the release does not build at all (not in --expect)
-        ships with the digest the tree pins. An expected image the release
+        ships with the digest the tree pins, where anyone may pull it (the
+        registry asked anonymously); else NOT-SHIPPED names it. An expected image the release
         did not push (its job failed) ships no
         descriptor; <out>/NOT-SHIPPED says which, for the release's notes,
         and the binaries and packs go out regardless.
@@ -35,8 +36,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -49,6 +53,37 @@ NAME_LINE = re.compile(r'^name:\s*"?([A-Za-z0-9._-]+)"?\s*$')
 
 def fail(words: str) -> None:
     sys.exit(f"release-descriptors: {words}")
+
+
+MANIFESTS = ", ".join([
+    "application/vnd.oci.image.index.v1+json",
+    "application/vnd.oci.image.manifest.v1+json",
+    "application/vnd.docker.distribution.manifest.list.v2+json",
+    "application/vnd.docker.distribution.manifest.v2+json",
+])
+
+
+def pullable(ref: str) -> bool:
+    """Whether anyone may pull `ghcr.io/<path>@sha256:<hex>`, asked of the
+    registry with no credentials: an anonymous token for the repository,
+    then the manifest by its digest. NILS_RELEASE_PULLABLE, a comma list of
+    references, answers instead where it is set (the tests, offline)."""
+    given = os.environ.get("NILS_RELEASE_PULLABLE")
+    if given is not None:
+        return ref in [x.strip() for x in given.split(",") if x.strip()]
+    m = REF.fullmatch(ref)
+    if not m:
+        return False
+    path = m.group(1)[len("ghcr.io/"):]
+    try:
+        with urllib.request.urlopen(f"https://ghcr.io/token?scope=repository:{path}:pull&service=ghcr.io", timeout=30) as r:
+            token = json.load(r).get("token") or ""
+        req = urllib.request.Request(f"https://ghcr.io/v2/{path}/manifests/{m.group(2)}", method="HEAD",
+                                     headers={"Authorization": f"Bearer {token}", "Accept": MANIFESTS})
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return r.status == 200
+    except (urllib.error.URLError, OSError, ValueError):
+        return False
 
 
 def image_line(lines: list[str]) -> int | None:
@@ -101,6 +136,7 @@ def cmd_write(a: argparse.Namespace) -> None:
     (out / "pipelines").mkdir(parents=True, exist_ok=True)
     expected = [x.strip() for x in (a.expect or "").split(",") if x.strip()]
     missing = sorted(x for x in expected if REGISTRY + x not in built)
+    unpullable: list[str] = []
     shipped: dict[str, str] = {}
     named: set[str] = set()
     left: list[str] = []
@@ -119,6 +155,11 @@ def cmd_write(a: argparse.Namespace) -> None:
                      and repository[len(REGISTRY):] not in expected)
         if published and not REF.fullmatch(current):
             fail(f"{path.relative_to(ROOT)} names {current}, which no release builds and no digest pins")
+        if published and not pullable(current):
+            # a pin no one may pull would ship a pipeline no site can run
+            unpullable.append(f"- `{repository[len(REGISTRY):]}`: {path.parent.name}'s pinned image {current} cannot be pulled "
+                              "without credentials, so its descriptor is not shipped\n")
+            continue
         if repository not in built and not published:
             if repository.startswith(REGISTRY):
                 left.append(f"{path.relative_to(ROOT)} ({repository}, which this release does not build)")
@@ -162,7 +203,7 @@ def cmd_write(a: argparse.Namespace) -> None:
         lost = sorted(Path(x.split(" (", 1)[0]).parent.name for x in left if f"({REGISTRY}{image}," in x)
         notes.append(f"- `{image}`: its image was not built by this release, so it ships no descriptor"
                      + (f" ({', '.join(lost)})" if lost else "") + "\n")
-    (out / "NOT-SHIPPED").write_text("".join(notes))
+    (out / "NOT-SHIPPED").write_text("".join(notes + unpullable))
 
 
 def cmd_added(a: argparse.Namespace) -> None:

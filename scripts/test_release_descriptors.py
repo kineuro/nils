@@ -4,6 +4,7 @@
 partly fail still writes the descriptors of the images it pushed, and names
 the ones it did not. Standard library only: python3 scripts/test_release_descriptors.py"""
 
+import os
 import subprocess
 import sys
 import tempfile
@@ -14,12 +15,21 @@ SCRIPT = Path(__file__).resolve().parent / "release-descriptors.py"
 EXPECT = "nils-bodypart,nils-postcontrast,nils-system1"
 
 
-def write(refs: dict[str, str], out: Path, refs_dir: Path) -> subprocess.CompletedProcess:
+FULL = "pipelines/nils-postcontrast/postcontrast-full/nils.job.yml"
+
+
+def full_pin() -> str:
+    text = (SCRIPT.parent.parent / FULL).read_text()
+    return next(line.split('"')[1] for line in text.splitlines() if line.strip().startswith("image:"))
+
+
+def write(refs: dict[str, str], out: Path, refs_dir: Path, pullable: bool = True) -> subprocess.CompletedProcess:
     refs_dir.mkdir(parents=True, exist_ok=True)
     for image, digest in refs.items():
         (refs_dir / f"{image}.ref").write_text(f"ghcr.io/kineuro/{image}@sha256:{digest * 64}\n")
+    env = dict(os.environ, NILS_RELEASE_PULLABLE=full_pin() if pullable else "")
     return subprocess.run([sys.executable, str(SCRIPT), "write", "--refs", str(refs_dir), "--out", str(out), "--tag", "v1.0.0-test",
-                           "--expect", EXPECT], capture_output=True, text=True)
+                           "--expect", EXPECT], capture_output=True, text=True, env=env)
 
 
 class Write(unittest.TestCase):
@@ -53,6 +63,18 @@ class Write(unittest.TestCase):
             # only the image published apart
             self.assertEqual([line.split("\t")[0] for line in (d / "out" / "IMAGES").read_text().splitlines()], ["postcontrast-full"])
             self.assertEqual(len((d / "out" / "NOT-SHIPPED").read_text().splitlines()), 3)
+
+    def test_a_pin_no_one_may_pull_is_not_shipped(self):
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            r = write({"nils-bodypart": "b", "nils-postcontrast": "c", "nils-system1": "a"}, d / "out", d / "refs", pullable=False)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            shipped = {p.parent.name for p in (d / "out" / "pipelines").rglob("nils.job.yml")}
+            self.assertNotIn("postcontrast-full", shipped)
+            self.assertIn("postcontrast-cascade", shipped)
+            notes = (d / "out" / "NOT-SHIPPED").read_text()
+            self.assertIn("nils-postcontrast-full", notes)
+            self.assertIn("cannot be pulled without credentials", notes)
 
     def test_every_image_pushed_names_none(self):
         with tempfile.TemporaryDirectory() as d:
