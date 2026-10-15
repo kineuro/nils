@@ -22,6 +22,28 @@ use nils_pack::patch::Patch;
 use nils_registry::Registry;
 use serde_json::Value;
 
+/// The most stacks the rehearse door answers inside the request (#451);
+/// a scope holding more is rehearsed as a job. `NILS_REHEARSE_AT_ONCE`
+/// sets another bound.
+pub(crate) fn at_once() -> usize {
+    bound("NILS_REHEARSE_AT_ONCE", 2_000)
+}
+
+/// The most stacks one rehearsal replays (#451): two sorts of a scope this
+/// size take minutes on a site's machine; a larger change is rehearsed
+/// over a part of the registry at a time, or measured with `nils pack
+/// replay`. `NILS_REHEARSE_CAP` sets another.
+pub(crate) fn cap() -> usize {
+    bound("NILS_REHEARSE_CAP", 200_000)
+}
+
+fn bound(var: &str, default: usize) -> usize {
+    std::env::var(var)
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(default)
+}
+
 /// A patch from a document: a patch (`patch: 1`), an overlay document
 /// (pack contract 5), or a door's body naming one of them or a list of
 /// `operations` for `pack`.
@@ -95,6 +117,33 @@ pub(crate) fn report(
         )));
     }
     effect::run(registry.store(), dir, &base, patch, settings, &names)
+}
+
+/// [`report`] over a scope the caller read already ([`effect::scope`]), so
+/// that a door that counted it does not read it again (#451).
+pub(crate) fn report_scoped(
+    registry: &mut Registry,
+    dir: &Path,
+    patch: &Patch,
+    settings: &Settings,
+    scoped: effect::Scoping,
+) -> Result<Value, effect::Error> {
+    let base = nils_pack::load(dir, None)?;
+    if base.name != patch.pack {
+        return Err(effect::Error::Refused(format!(
+            "the patch amends {}, and the pack here is {}",
+            patch.pack, base.name
+        )));
+    }
+    effect::run_scoped(
+        registry.store(),
+        dir,
+        &base,
+        patch,
+        settings,
+        &names,
+        scoped,
+    )
 }
 
 /// Record 55 K7: each transition's scanners, by station name, answered as

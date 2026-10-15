@@ -402,6 +402,10 @@ struct Instance {
     /// what the digest trusts and no more (§8.6).
     size: i64,
     mtime: i64,
+    /// Of an enhanced file the digest split between stacks, this stack's
+    /// frames as ranges (`1-4,9`): the file is written with those alone
+    /// (#463). None where the file is one stack's whole.
+    frames: Option<String>,
 }
 
 /// What one stack's release is, once the plan and the state have been joined
@@ -625,6 +629,7 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
     let Placements {
         by_stack: named,
         mut shared,
+        facts,
     } = places(registry.store(), &by_study, settings.pack, settings.naming)?;
     let named_by = std::mem::take(&mut shared.decided);
     // §9.4 with record 37 S6: where in the body, for the sidecar, by stack.
@@ -634,12 +639,7 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
         .iter()
         .filter_map(|(stack, p)| p.body_part.clone().map(|b| (*stack, b)))
         .collect();
-    // Record 55 C4: the sidecar's `NILS` object and the descriptive name, by
-    // stack, whatever the name spells.
-    let cards: HashMap<i64, serde_json::Value> = named
-        .iter()
-        .map(|(stack, p)| (*stack, p.card.clone()))
-        .collect();
+    // Record 55 C4: the descriptive name, by stack, whatever the name spells
     let nils_names: HashMap<i64, String> = named
         .iter()
         .map(|(stack, p)| (*stack, p.descriptive.name.clone()))
@@ -874,6 +874,10 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
                     .iter()
                     .map(|i| (i.id, i.size, i.mtime))
                     .collect::<Vec<_>>(),
+                &instances
+                    .iter()
+                    .filter_map(|i| i.frames.as_deref().map(|f| (i.id, f)))
+                    .collect::<Vec<_>>(),
             );
             people.insert(code.clone());
             subjects_seen.insert(code.clone(), subject);
@@ -1077,6 +1081,25 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
         }
     }
     let moved = move_them(settings.root, &jobs);
+    // Record 55 C4: the sidecar's `NILS` object of each stack this version
+    // writes, built for those alone (#450): the names are settled over the
+    // whole registry, and the cards are not, nor are the tiers they read. A
+    // move whose source is gone is written again below, and has its card.
+    let cards: HashMap<i64, serde_json::Value> = match settings.layout {
+        Layout::Bids => cards_of(
+            registry.store(),
+            &facts,
+            &named,
+            jobs.iter()
+                .filter(|j| match j.change {
+                    crate::version::Change::Unchanged => false,
+                    crate::version::Change::Moved => !moved.contains(&j.stack),
+                    _ => true,
+                })
+                .map(|j| j.stack),
+        )?,
+        Layout::Descriptive => HashMap::new(),
+    };
 
     // And only now is anything written.
     let mut rows: Vec<Vec<Param>> = Vec::new();
@@ -2938,15 +2961,17 @@ fn left_out_unless_asked(
     if selection.names_dispositions() {
         return Ok(out);
     }
-    let from = selection_from(store);
     let filter = filter_of(store, selection, picks, false);
-    let sql = format!(
-        "SELECT a.value, COUNT(DISTINCT k.id) {from} \
-         JOIN {} a ON a.stack_id = k.id AND a.axis = 'disposition' \
-         WHERE a.value IN ({}){filter} GROUP BY a.value ORDER BY a.value",
-        store.qualified("classification_axis"),
-        quoted(LEFT_OUT_UNLESS_ASKED)
-    );
+    let axis = store.qualified("classification_axis");
+    let left = quoted(LEFT_OUT_UNLESS_ASKED);
+    let rows = both_ways(store, "UNION ALL", |from| {
+        format!(
+            "SELECT a.value AS v, k.id AS s {from} \
+             JOIN {axis} a ON a.stack_id = k.id AND a.axis = 'disposition' \
+             WHERE a.value IN ({left}){filter}"
+        )
+    });
+    let sql = format!("SELECT v, COUNT(DISTINCT s) FROM ({rows}) u GROUP BY v ORDER BY v");
     for r in store.query(&sql, &[])? {
         out.insert(r.text(0)?.to_string(), r.int(1)?);
     }
@@ -2998,9 +3023,10 @@ fn freeze_picks(
 ) -> Result<nils_registry::pick_truth::Frozen, Error> {
     let taken: Vec<(i64, i64)> = {
         let store = registry.store();
-        let from = selection_from(store);
         let filter = selection_where(store, &settings.selection, live);
-        let sql = format!("SELECT DISTINCT k.id, se.subject_id {from} WHERE 1 = 1{filter}");
+        let sql = both_ways(store, "UNION", |from| {
+            format!("SELECT DISTINCT k.id, se.subject_id {from} WHERE 1 = 1{filter}")
+        });
         store
             .query(&sql, &[])?
             .iter()
@@ -3181,9 +3207,10 @@ impl Policies {
         };
         // the source roots the selection reaches, and the dataset holding
         // each
-        let from = selection_from(store);
         let filter = selection_where(store, &settings.selection, picks);
-        let sql = format!("SELECT DISTINCT so.root, so.root_canonical {from} WHERE 1 = 1{filter}");
+        let sql = both_ways(store, "UNION", |from| {
+            format!("SELECT DISTINCT so.root, so.root_canonical {from} WHERE 1 = 1{filter}")
+        });
         let roots: Vec<(String, String)> = store
             .query(&sql, &[])?
             .iter()
@@ -3261,7 +3288,9 @@ impl Policies {
     }
 }
 
-/// The joined tables every selection reader walks.
+/// The joined tables every selection reader walks: each instance under the
+/// stack its row names. A stack that lives only in later frames of an
+/// enhanced file is reached through [`selection_from_frames`] beside it.
 fn selection_from(store: &mut Store) -> String {
     format!(
         "FROM {instance} i \
@@ -3279,17 +3308,59 @@ fn selection_from(store: &mut Store) -> String {
     )
 }
 
+/// The same tables for the stacks an enhanced file holds in frames beyond
+/// its first stack (#463): each such stack with the instance whose frames
+/// it lives in, which `instance.stack_id` names under the file's first
+/// stack. The aliases are [`selection_from`]'s, so a reader's columns and
+/// filter read both alike.
+fn selection_from_frames(store: &mut Store) -> String {
+    format!(
+        "FROM {instance_frame} fr \
+         JOIN {instance} i ON i.id = fr.instance_id AND i.stack_id <> fr.stack_id \
+         JOIN {stack} k ON k.id = fr.stack_id \
+         JOIN {series} se ON se.id = i.series_id \
+         JOIN {subject} su ON su.id = se.subject_id \
+         JOIN {source_file} sf ON sf.instance_id = i.id \
+         JOIN {source} so ON so.id = sf.source_id",
+        instance_frame = store.qualified("instance_frame"),
+        instance = store.qualified("instance"),
+        stack = store.qualified("stack"),
+        series = store.qualified("series"),
+        subject = store.qualified("subject"),
+        source_file = store.qualified("source_file"),
+        source = store.qualified("source"),
+    )
+}
+
+/// A reader's query over both ways a stack reaches its files, `q` written
+/// once for a FROM clause: the rows through `instance.stack_id`, then those
+/// of the stacks that live in an enhanced file's later frames (#463), each
+/// half on its own indexes.
+fn both_ways(store: &mut Store, op: &str, q: impl Fn(&str) -> String) -> String {
+    let (plain, framed) = (selection_from(store), selection_from_frames(store));
+    format!("{} {op} {}", q(&plain), q(&framed))
+}
+
+/// The frames of a file a row's stack is written from: of a file the
+/// digest split between stacks, this stack's frames as ranges; null for a
+/// file that is one stack's whole.
+fn frames_column(store: &mut Store) -> String {
+    format!(
+        "(SELECT f.frames FROM {} f WHERE f.instance_id = i.id AND f.stack_id = k.id)",
+        store.qualified("instance_frame")
+    )
+}
+
 /// The subjects the selection reaches, in a fixed order.
 fn selected_subjects(
     store: &mut Store,
     selection: &Selection,
     picks: &Picks,
 ) -> Result<Vec<(i64, String)>, Error> {
-    let from = selection_from(store);
     let filter = selection_where(store, selection, picks);
-    let sql = format!(
-        "SELECT DISTINCT se.subject_id, su.code {from} WHERE 1 = 1{filter} ORDER BY se.subject_id"
-    );
+    let sql = both_ways(store, "UNION", |from| {
+        format!("SELECT DISTINCT se.subject_id, su.code {from} WHERE 1 = 1{filter}")
+    }) + " ORDER BY 1";
     let mut out = Vec::new();
     for r in store.query(&sql, &[])? {
         out.push((r.int(0)?, r.text(1)?.to_string()));
@@ -3299,12 +3370,15 @@ fn selected_subjects(
 
 /// How much source the selection is, for the preflight.
 fn selection_bytes(store: &mut Store, selection: &Selection, picks: &Picks) -> Result<i64, Error> {
-    let from = selection_from(store);
     let filter = selection_where(store, selection, picks);
     // Cast, because a sum of bigints is a numeric on Postgres and the store
     // reads a numeric only as text.
-    let sql =
-        format!("SELECT CAST(COALESCE(SUM(sf.size), 0) AS BIGINT) {from} WHERE 1 = 1{filter}");
+    // a file split between stacks is read once, whichever of its stacks
+    // the selection takes (#463)
+    let rows = both_ways(store, "UNION", |from| {
+        format!("SELECT sf.id AS f, sf.size AS b {from} WHERE 1 = 1{filter}")
+    });
+    let sql = format!("SELECT CAST(COALESCE(SUM(b), 0) AS BIGINT) FROM ({rows}) u");
     Ok(store
         .query_opt(&sql, &[])?
         .map(|r| r.int(0))
@@ -3327,10 +3401,20 @@ pub struct Preview {
 
 pub fn preview(store: &mut Store, selection: &Selection) -> Result<Preview, Error> {
     let (reading, _) = picks_read(store, selection, "", "")?;
-    let from = selection_from(store);
     let filter = selection_where(store, selection, &Picks::Live(reading));
+    let rows = both_ways(store, "UNION ALL", |from| {
+        format!(
+            "SELECT su.id AS a, se.study_id AS b, k.id AS c, sf.id AS e, sf.size AS d {from} \
+             WHERE 1 = 1{filter}"
+        )
+    });
+    // a file split between stacks is one file of its bytes, whichever of
+    // its stacks are taken (#463)
     let sql = format!(
-        "SELECT COUNT(DISTINCT su.id), COUNT(DISTINCT se.study_id), COUNT(DISTINCT k.id),                 COUNT(*), CAST(COALESCE(SUM(sf.size), 0) AS BIGINT)          {from} WHERE 1 = 1{filter}"
+        "WITH u AS ({rows}) SELECT (SELECT COUNT(DISTINCT a) FROM u), \
+         (SELECT COUNT(DISTINCT b) FROM u), (SELECT COUNT(DISTINCT c) FROM u), \
+         (SELECT COUNT(*) FROM (SELECT DISTINCT e, d FROM u) f), \
+         (SELECT CAST(COALESCE(SUM(d), 0) AS BIGINT) FROM (SELECT DISTINCT e, d FROM u) f)"
     );
     let r = store.query(&sql, &[])?;
     let Some(r) = r.first() else {
@@ -3355,30 +3439,30 @@ fn select_subject(
     subject: i64,
     picks: &Picks,
 ) -> Result<Vec<Instance>, Error> {
-    let from = selection_from(store);
     let filter = selection_where(store, selection, picks);
-    let sql = format!(
-        // The stored path is relative to the batch root it was walked from,
-        // which is what makes a registry portable; the root is on `source`.
-        "SELECT i.id, k.id, se.study_id, so.root, sf.path, \
-                sf.size, sf.mtime_ns \
-         {from} WHERE se.subject_id = {}{filter} \
-         ORDER BY se.study_id, k.id, i.id",
-        store.dialect().param(1, Type::Int),
-    );
-    rows_to_instances(store.query(&sql, &[Param::Int(subject)])?)
+    let frames = frames_column(store);
+    // The stored path is relative to the batch root it was walked from,
+    // which is what makes a registry portable; the root is on `source`.
+    // The id is a number, written into both halves of the text.
+    let sql = both_ways(store, "UNION ALL", |from| {
+        format!(
+            "SELECT i.id, k.id, se.study_id, so.root, sf.path, sf.size, sf.mtime_ns, {frames} \
+             {from} WHERE se.subject_id = {subject}{filter}"
+        )
+    }) + " ORDER BY 3, 2, 1";
+    rows_to_instances(store.query(&sql, &[])?)
 }
 
 /// One stack's instances, read only when the stack is written.
 fn instances_of(store: &mut Store, stack: i64) -> Result<Vec<Instance>, Error> {
-    let from = selection_from(store);
-    let sql = format!(
-        "SELECT i.id, k.id, se.study_id, so.root, sf.path, \
-                sf.size, sf.mtime_ns \
-         {from} WHERE k.id = {} ORDER BY i.id",
-        store.dialect().param(1, Type::Int),
-    );
-    rows_to_instances(store.query(&sql, &[Param::Int(stack)])?)
+    let frames = frames_column(store);
+    let sql = both_ways(store, "UNION ALL", |from| {
+        format!(
+            "SELECT i.id, k.id, se.study_id, so.root, sf.path, sf.size, sf.mtime_ns, {frames} \
+             {from} WHERE k.id = {stack}"
+        )
+    }) + " ORDER BY 1";
+    rows_to_instances(store.query(&sql, &[])?)
 }
 
 fn rows_to_instances(rows: Vec<nils_registry::store::Row>) -> Result<Vec<Instance>, Error> {
@@ -3386,19 +3470,22 @@ fn rows_to_instances(rows: Vec<nils_registry::store::Row>) -> Result<Vec<Instanc
     let mut seen = std::collections::HashSet::new();
     for r in rows {
         let id = r.int(0)?;
+        let stack = r.int(1)?;
         // An instance may sit under more than one path (Wave 1's duplicate
-        // handling); one copy of it is written.
-        if !seen.insert(id) {
+        // handling); one copy of it is written. An enhanced file split
+        // between stacks is one instance under each of them (#463).
+        if !seen.insert((id, stack)) {
             continue;
         }
         out.push(Instance {
             id,
-            stack: r.int(1)?,
+            stack,
             study: r.int(2)?,
             root: r.text(3)?.to_string(),
             path: Path::new(r.text(3)?).join(r.text(4)?).display().to_string(),
             size: r.int(5)?,
             mtime: r.int(6)?,
+            frames: r.opt_text(7)?.map(str::to_string),
         });
     }
     Ok(out)
@@ -3493,6 +3580,9 @@ struct Written {
 fn write_one(instance: &Instance, plan: &Plan, root: &Path, dir: &str) -> Result<Written, String> {
     let mut object = open(Path::new(&instance.path))?;
     let applied = scrub::apply(&mut object, plan);
+    if let Some(frames) = &instance.frames {
+        keep_frames(&mut object, frames, instance.stack, plan.remap)?;
+    }
 
     let relative = PathBuf::from(dir).join(format!("{:08}.dcm", instance.id));
     let target = root.join(&relative);
@@ -3521,6 +3611,53 @@ fn write_one(instance: &Instance, plan: &Plan, root: &Path, dir: &str) -> Result
         applied,
     })
 }
+
+/// Write an enhanced file the digest split between stacks as one stack's
+/// (#463): its frames alone kept, and a SOP Instance UID of its own, since
+/// the object written is no longer the one the file held and the file's
+/// other stack is written beside it. The UID is the file's, as the plan
+/// wrote it, remapped with the stack under the release's key where UIDs
+/// are remapped, and under the `2.25` arc otherwise; the same for ever.
+fn keep_frames(
+    object: &mut dicom_object::DefaultDicomObject,
+    frames: &str,
+    stack: i64,
+    remap: Option<&crate::uid::Remap>,
+) -> Result<(), String> {
+    let list = nils_dicom::split::frame_list(frames)?;
+    let ts = object
+        .meta()
+        .transfer_syntax()
+        .trim_end_matches('\0')
+        .to_string();
+    nils_dicom::split::keep_frames(object, &list, &ts)?;
+    let was = object
+        .element(dicom_dictionary_std::tags::SOP_INSTANCE_UID)
+        .ok()
+        .and_then(|e| {
+            e.to_str()
+                .ok()
+                .map(|s| s.trim_end_matches('\0').trim().to_string())
+        })
+        .unwrap_or_default();
+    let part = format!("{was}.frames.{stack}");
+    let new = match remap {
+        Some(r) => r.of(&part),
+        None => crate::uid::Remap::new(crate::uid::Root::default(), FRAMES_KEY).of(&part),
+    };
+    object.put(dicom_core::DataElement::new(
+        dicom_dictionary_std::tags::SOP_INSTANCE_UID,
+        dicom_core::VR::UI,
+        dicom_core::PrimitiveValue::from(new.clone()),
+    ));
+    object.update_meta(|m| m.media_storage_sop_instance_uid = new);
+    Ok(())
+}
+
+/// The key a split file's UID is made under where a release keeps UIDs:
+/// not a secret, only a domain, so that the UID is the same for ever and
+/// no other's.
+const FRAMES_KEY: &[u8] = b"nils/release/frames of a split file";
 
 /// Add one field to the sidecar the converter wrote, if it wrote one.
 ///
@@ -3799,6 +3936,11 @@ fn stage_one(
 ) -> Result<(PathBuf, scrub::Applied), String> {
     let mut object = open(Path::new(&instance.path))?;
     let applied = scrub::apply(&mut object, plan);
+    // a file the digest split between stacks is converted, and exported, as
+    // this stack's frames alone (#463)
+    if let Some(frames) = &instance.frames {
+        keep_frames(&mut object, frames, instance.stack, plan.remap)?;
+    }
     let path = staging.join(format!("{:08}.dcm", instance.id));
     object
         .write_to_file(&path)
@@ -4389,7 +4531,6 @@ fn places(
     naming: crate::name::Naming,
 ) -> Result<Placements, Error> {
     let axes = axis_values(store)?;
-    let tiers = axis_tiers(store)?;
     // record 55, ruling 23: each stack's acquisition family, as the
     // classification stands, which its names and its sidecar carry
     let families_now = crate::family::families_of(store, Some(pack), None, &|s| {
@@ -4814,37 +4955,22 @@ fn places(
     for bucket in bids_buckets.values_mut() {
         bucket.sort();
         let order: Vec<i64> = bucket.iter().map(|(_, stack, _)| *stack).collect();
-        let stem_of =
-            |bids: &HashMap<i64, Result<crate::bids::name::Name, crate::bids::name::Why>>,
-             stack: &i64|
-             -> Option<String> {
-                bids.get(stack)
-                    .and_then(|b| b.as_ref().ok())
-                    .map(|n| n.stem("s", "s"))
-            };
-        // Each round settles at least one group for good or adds a mark that
-        // splits it, and a stack carries at most one mark per axis and per
-        // property, so this ends; the bound is a guard, not a rule.
-        let mut first = true;
-        for _ in 0..64 {
-            let mut groups: BTreeMap<String, Vec<i64>> = BTreeMap::new();
-            for stack in &order {
-                if let Some(stem) = stem_of(&bids, stack) {
-                    groups.entry(stem).or_default().push(*stack);
-                }
+        settle_rounds(&order, &mut bids, &mut shared, |group, first, bids, shared| {
+            if first {
+                shared.name_groups.push(group.to_vec());
             }
-            let colliding: Vec<Vec<i64>> = groups.into_values().filter(|g| g.len() > 1).collect();
-            if colliding.is_empty() {
-                break;
-            }
-            for group in colliding {
-                if first {
-                    shared.name_groups.push(group.clone());
-                }
-                settle(&group, &acquisitions, &stated, pack, &mut bids, &mut shared);
-            }
-            first = false;
-        }
+            settle(group, &acquisitions, &stated, pack, bids, shared);
+        })
+        .map_err(|stacks| {
+            Error::Refused(format!(
+                "stacks {} would be written under one name, which is a fault of the release's naming and never an overwrite; nothing was written",
+                stacks
+                    .iter()
+                    .map(i64::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ))
+        })?;
     }
 
     let mut out = HashMap::new();
@@ -4870,13 +4996,6 @@ fn places(
             out.insert(
                 n.stack,
                 Placed {
-                    card: crate::bids::card::card(
-                        &n.name,
-                        stated.get(&n.stack),
-                        tiers.get(&n.stack),
-                        acquisitions.get(&n.stack),
-                        families.get(&n.stack).copied(),
-                    ),
                     descriptive: n.clone(),
                     bids: bids
                         .remove(&n.stack)
@@ -4895,7 +5014,63 @@ fn places(
     Ok(Placements {
         by_stack: out,
         shared,
+        facts: CardFacts {
+            stated,
+            acquisitions,
+            families,
+        },
     })
+}
+
+/// What [`places`] read of every stack that a card is built from: the axes
+/// as they are said and the acquisition as the fingerprint measured it.
+struct CardFacts {
+    stated: HashMap<i64, BTreeMap<String, Vec<String>>>,
+    acquisitions: HashMap<i64, crate::bids::repeat::Acquisition>,
+    /// record 55, ruling 23: each stack's acquisition family, as the
+    /// classification stands
+    families: HashMap<i64, &'static str>,
+}
+
+/// The sidecar's `NILS` object of each of these stacks (record 55 C4), with
+/// the tiers read for them alone, in chunks (#450).
+fn cards_of(
+    store: &mut Store,
+    facts: &CardFacts,
+    named: &HashMap<i64, Placed>,
+    stacks: impl Iterator<Item = i64>,
+) -> Result<HashMap<i64, serde_json::Value>, Error> {
+    let stacks: Vec<i64> = stacks.filter(|s| named.contains_key(s)).collect();
+    let tiers = axis_tiers(store, &stacks)?;
+    CARDS_BUILT.with(|n| n.set(n.get() + stacks.len()));
+    Ok(stacks
+        .iter()
+        .map(|s| {
+            (
+                *s,
+                crate::bids::card::card(
+                    &named[s].descriptive.name,
+                    facts.stated.get(s),
+                    tiers.get(s),
+                    facts.acquisitions.get(s),
+                    facts.families.get(s).copied(),
+                ),
+            )
+        })
+        .collect())
+}
+
+thread_local! {
+    /// How many cards releases on this thread built (#450).
+    static CARDS_BUILT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// How many sidecar cards the releases run on this thread have built: what
+/// a test reads to see that a release builds the cards of the stacks it
+/// writes and no others (#450).
+#[doc(hidden)]
+pub fn cards_built() -> usize {
+    CARDS_BUILT.with(std::cell::Cell::get)
 }
 
 /// What [`places`] keeps of a stack beside its names: whether it is a
@@ -4916,6 +5091,7 @@ type Extra = (
 struct Placements {
     by_stack: HashMap<i64, Placed>,
     shared: Shared,
+    facts: CardFacts,
 }
 
 /// What the collision test of record 37 S2 found, for the report and the
@@ -4978,6 +5154,72 @@ struct SharedGroup {
     differs: Vec<String>,
     /// The same thing as a sentence, which is what a person reads.
     why: String,
+}
+
+/// The groups of a bucket's stacks that build one BIDS stem, in the
+/// bucket's order; a group of one is none.
+fn sharing(
+    order: &[i64],
+    bids: &HashMap<i64, Result<crate::bids::name::Name, crate::bids::name::Why>>,
+) -> Vec<Vec<i64>> {
+    let mut groups: BTreeMap<String, Vec<i64>> = BTreeMap::new();
+    for stack in order {
+        if let Some(Ok(n)) = bids.get(stack) {
+            groups.entry(n.stem("s", "s")).or_default().push(*stack);
+        }
+    }
+    groups.into_values().filter(|g| g.len() > 1).collect()
+}
+
+/// Settle the names a bucket's stacks share, in rounds: each round groups
+/// the bucket by stem and settles each group (`settle_group`, told whether
+/// it is the first round), and the bucket is grouped again. Each round
+/// settles at least one group for good or adds a mark that splits it, and a
+/// stack carries at most one mark per axis and per property, so this ends;
+/// the bound of 64 rounds is a guard, not a rule. Should a stem still be
+/// shared when the rounds run out (#462), each stack of such a group takes
+/// the plain number in the group's order, and a stem shared even then is a
+/// fault: its stacks are answered, for the release to refuse before it
+/// writes anything, never to write two stacks to one name.
+fn settle_rounds(
+    order: &[i64],
+    bids: &mut HashMap<i64, Result<crate::bids::name::Name, crate::bids::name::Why>>,
+    shared: &mut Shared,
+    mut settle_group: impl FnMut(
+        &[i64],
+        bool,
+        &mut HashMap<i64, Result<crate::bids::name::Name, crate::bids::name::Why>>,
+        &mut Shared,
+    ),
+) -> Result<(), Vec<i64>> {
+    let mut first = true;
+    for _ in 0..64 {
+        let colliding = sharing(order, bids);
+        if colliding.is_empty() {
+            return Ok(());
+        }
+        for group in colliding {
+            settle_group(&group, first, bids, shared);
+        }
+        first = false;
+    }
+    for group in sharing(order, bids) {
+        for (n, stack) in group.iter().enumerate() {
+            record(
+                bids,
+                shared,
+                *stack,
+                Some(crate::bids::separate::Mark::number(n as i64 + 1)),
+                &[],
+            );
+            shared.numbered.insert(*stack);
+        }
+    }
+    let left: Vec<i64> = sharing(order, bids).concat();
+    match left.is_empty() {
+        true => Ok(()),
+        false => Err(left),
+    }
 }
 
 /// Settle one group of stacks that built one BIDS name (Wave 7a §8.1): a true
@@ -5145,9 +5387,6 @@ struct Placed {
     /// keeps the fact in the sidecar, as `BodyPart`, and that is where a
     /// reader looks it up (record 37 S6).
     body_part: Option<String>,
-    /// The sidecar's `NILS` object: every axis, the descriptive name and the
-    /// acquisition (record 55 C4).
-    card: serde_json::Value,
 }
 
 /// `EchoNumbers` may carry several values; the first is this stack's.
@@ -5271,21 +5510,31 @@ fn axis_values(store: &mut Store) -> Result<HashMap<i64, BTreeMap<String, String
     Ok(out)
 }
 
-/// How each stack's axes were decided: the tier and the confidence, by axis
-/// (record 55 C4), for the sidecar's `NILS` object. One row per value; the
-/// first row of an axis speaks for it, since every value of one axis is
-/// decided at once.
-fn axis_tiers(store: &mut Store) -> Result<HashMap<i64, crate::bids::card::Tiers>, Error> {
-    let sql = format!(
-        "SELECT stack_id, axis, tier, confidence FROM {} ORDER BY id",
-        store.qualified("classification_axis")
-    );
+/// How these stacks' axes were decided: the tier and the confidence, by
+/// axis (record 55 C4), for the sidecar's `NILS` object. One row per value;
+/// the first row of an axis speaks for it, since every value of one axis is
+/// decided at once. Read for the stacks asked alone, in chunks (#450).
+fn axis_tiers(
+    store: &mut Store,
+    stacks: &[i64],
+) -> Result<HashMap<i64, crate::bids::card::Tiers>, Error> {
     let mut out: HashMap<i64, crate::bids::card::Tiers> = HashMap::new();
-    for r in store.query(&sql, &[])? {
-        out.entry(r.int(0)?)
-            .or_default()
-            .entry(r.text(1)?.to_string())
-            .or_insert((r.text(2)?.to_string(), r.double(3)?));
+    for chunk in stacks.chunks(500) {
+        let list = chunk
+            .iter()
+            .map(i64::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT stack_id, axis, tier, confidence FROM {} WHERE stack_id IN ({list}) ORDER BY id",
+            store.qualified("classification_axis")
+        );
+        for r in store.query(&sql, &[])? {
+            out.entry(r.int(0)?)
+                .or_default()
+                .entry(r.text(1)?.to_string())
+                .or_insert((r.text(2)?.to_string(), r.double(3)?));
+        }
     }
     Ok(out)
 }
@@ -5589,6 +5838,71 @@ mod tests {
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect()
+    }
+
+    /// #462: rounds whose marks never split a group (a separator that marks
+    /// every member alike) run out, and the last step numbers the group:
+    /// every planned stem is one stack's, and each stack is counted as
+    /// told apart by the number.
+    #[test]
+    fn name_rounds_that_run_out_end_with_distinct_names() {
+        use crate::bids::separate::{By, Mark};
+        let name = crate::bids::name::Name {
+            datatype: "anat",
+            suffix: "T1w",
+            entities: vec![("subject", "s".to_string()), ("session", "s".to_string())],
+            refused: Vec::new(),
+            aslcontext: None,
+            acq: Vec::new(),
+        };
+        let mut bids: HashMap<i64, Result<crate::bids::name::Name, crate::bids::name::Why>> =
+            HashMap::new();
+        for stack in [11, 12, 13, 20] {
+            bids.insert(stack, Ok(name.clone()));
+        }
+        // stack 20 is apart from the start: a name of its own
+        bids.insert(
+            20,
+            Ok(name.marked(&Mark {
+                by: By::Number,
+                property: "own".into(),
+                value: "own".into(),
+                token: "own".into(),
+                slot: crate::bids::name::SLOT_NUMBER,
+            })),
+        );
+        let mut shared = Shared::default();
+        let mut rounds = 0;
+        let order = [11, 12, 13, 20];
+        settle_rounds(&order, &mut bids, &mut shared, |group, _, bids, _| {
+            rounds += 1;
+            for stack in group {
+                let Some(Ok(n)) = bids.get(stack) else {
+                    continue;
+                };
+                let same = Mark {
+                    by: By::Number,
+                    property: "same".into(),
+                    value: "x".into(),
+                    token: "x".into(),
+                    slot: crate::bids::name::SLOT_NUMBER,
+                };
+                let marked = n.marked(&same);
+                bids.insert(*stack, Ok(marked));
+            }
+        })
+        .unwrap();
+        assert_eq!(rounds, 64, "the stub never splits the group");
+        let stems: std::collections::BTreeSet<String> = order
+            .iter()
+            .map(|s| bids[s].as_ref().unwrap().stem("s", "s"))
+            .collect();
+        assert_eq!(stems.len(), order.len(), "{stems:?}");
+        assert!(sharing(&order, &bids).is_empty());
+        assert_eq!(
+            shared.numbered.iter().copied().collect::<Vec<_>>(),
+            [11, 12, 13]
+        );
     }
 
     #[test]

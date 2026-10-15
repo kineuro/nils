@@ -150,6 +150,13 @@ const KEEP: usize = 4;
 
 static KEPT: Mutex<Vec<Kept>> = Mutex::new(Vec::new());
 
+/// The packs a thread is building now, by directory, and the signal that
+/// one was built.
+static BUILDING: std::sync::LazyLock<
+    Mutex<std::collections::HashMap<PathBuf, std::thread::ThreadId>>,
+> = std::sync::LazyLock::new(Default::default);
+static BUILT: std::sync::Condvar = std::sync::Condvar::new();
+
 /// The pack in `dir` as its author wrote it: the one kept, when every file
 /// it read still reads the same, and otherwise `build`'s, kept for next
 /// time when it loads.
@@ -157,19 +164,51 @@ pub(crate) fn load(
     dir: &Path,
     build: impl FnOnce() -> crate::error::R<Pack>,
 ) -> crate::error::R<Pack> {
-    {
-        let mut kept = KEPT.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(i) = kept.iter().position(|k| k.dir == dir) {
-            if kept[i].read.iter().all(Seen::holds) {
-                // the most recently used last, the first to go first
-                let k = kept.remove(i);
-                let pack = k.pack.clone();
-                kept.push(k);
-                return Ok(pack);
+    loop {
+        {
+            let mut kept = KEPT.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(i) = kept.iter().position(|k| k.dir == dir) {
+                if kept[i].read.iter().all(Seen::holds) {
+                    // the most recently used last, the first to go first
+                    let k = kept.remove(i);
+                    let pack = k.pack.clone();
+                    kept.push(k);
+                    return Ok(pack);
+                }
+                kept.remove(i);
             }
-            kept.remove(i);
+        }
+        // a load of the same pack on another thread (a server warming its
+        // packs as it starts, 2026-10-15) is waited for and its pack taken,
+        // rather than built twice; on this thread it is built here
+        let mut building = BUILDING.lock().unwrap_or_else(|e| e.into_inner());
+        match building.get(dir) {
+            Some(by) if *by != std::thread::current().id() => {
+                drop(
+                    BUILT
+                        .wait_while(building, |b| b.contains_key(dir))
+                        .unwrap_or_else(|e| e.into_inner()),
+                );
+                continue;
+            }
+            Some(_) => break,
+            None => {
+                building.insert(dir.to_path_buf(), std::thread::current().id());
+                break;
+            }
         }
     }
+    struct Done<'a>(&'a Path);
+    impl Drop for Done<'_> {
+        fn drop(&mut self) {
+            let mut building = BUILDING.lock().unwrap_or_else(|e| e.into_inner());
+            if building.get(self.0) == Some(&std::thread::current().id()) {
+                building.remove(self.0);
+            }
+            BUILT.notify_all();
+        }
+    }
+    let _done = Done(dir);
     let recording = Recording(Some(READ.with(|r| r.borrow_mut().replace(Vec::new()))));
     let built = build();
     let read = READ.with(|r| r.borrow_mut().take()).unwrap_or_default();
@@ -207,6 +246,38 @@ mod tests {
                 std::fs::copy(e.path(), &at).unwrap();
             }
         }
+    }
+
+    /// Two loads of one pack at once build it once: the second waits for
+    /// the first and takes its pack (a server warming its packs as it
+    /// starts while a request asks for one).
+    #[test]
+    fn a_pack_loading_on_another_thread_is_waited_for() {
+        let dir = pack_dir();
+        let built = std::sync::atomic::AtomicUsize::new(0);
+        let started = std::sync::Barrier::new(2);
+        let packs: Vec<Pack> = std::thread::scope(|s| {
+            let first = s.spawn(|| {
+                load(&dir.join("..").join("mri"), || {
+                    started.wait();
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                    built.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    crate::pack::build_for_tests(&dir)
+                })
+                .unwrap()
+            });
+            let second = s.spawn(|| {
+                started.wait();
+                load(&dir.join("..").join("mri"), || {
+                    built.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    crate::pack::build_for_tests(&dir)
+                })
+                .unwrap()
+            });
+            vec![first.join().unwrap(), second.join().unwrap()]
+        });
+        assert_eq!(built.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(packs[0].version, packs[1].version);
     }
 
     /// A pack's files changed after a load are read again, and a pack whose

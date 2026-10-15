@@ -846,8 +846,14 @@ pub fn make_many(
 }
 
 /// Remove the previews of stacks the registry no longer holds; answers how
-/// many files went.
-pub fn prune(working: &Path, keep: &BTreeSet<i64>) -> usize {
+/// many files went. `keep` is read when the prune runs, and `started` is
+/// when the build that prunes began (#456): a preview written since is
+/// kept whatever its stack (a sort or a door made it meanwhile), and a part
+/// file goes only when it is older than that by [`PART_GRACE`] as well: a
+/// writer on another machine sharing the storage cannot be seen from here,
+/// so a part file is judged by its age alone, never by a process this
+/// machine does not run.
+pub fn prune(working: &Path, keep: &BTreeSet<i64>, started: std::time::SystemTime) -> usize {
     let mut gone = 0;
     let Ok(shards) = std::fs::read_dir(working.join("previews")) else {
         return 0;
@@ -861,16 +867,30 @@ pub fn prune(working: &Path, keep: &BTreeSet<i64>) -> usize {
             let Some(id) = name.split('.').next().and_then(|s| s.parse::<i64>().ok()) else {
                 continue;
             };
-            // a part file left by a build that died is litter too
-            if (!keep.contains(&id) || name.contains(".part."))
-                && std::fs::remove_file(f.path()).is_ok()
-            {
+            let old = f
+                .metadata()
+                .and_then(|m| m.modified())
+                .is_ok_and(|at| at < started);
+            let litter = if name.contains(".part.") {
+                // a part file left by a build that died is litter too, once
+                // no writer can still be filling it
+                f.metadata()
+                    .and_then(|m| m.modified())
+                    .is_ok_and(|at| at + PART_GRACE < started)
+            } else {
+                old && !keep.contains(&id)
+            };
+            if litter && std::fs::remove_file(f.path()).is_ok() {
                 gone += 1;
             }
         }
     }
     gone
 }
+
+/// How much older than the build a part file must be to be litter: longer
+/// than any one preview takes to write.
+const PART_GRACE: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 
 /// Every stack of the registry, by id.
 pub fn every_stack(store: &mut Store) -> Result<Vec<i64>, String> {
@@ -2009,6 +2029,50 @@ fn stack_exists(store: &mut Store, stack: i64) -> Result<bool, Reply> {
 
 #[cfg(test)]
 mod tests {
+    /// #456: a prune keeps what was written after the build began and the
+    /// part files of a running writer; an old part file, one of a process
+    /// gone, and the preview of a stack the registry no longer holds go.
+    #[test]
+    fn a_prune_keeps_what_was_written_since_the_build_began() {
+        let dir = nils_dicom::synth::TempDir::new("preview-prune");
+        let shard = dir.path().join("previews/00");
+        std::fs::create_dir_all(&shard).unwrap();
+        let started = std::time::SystemTime::now();
+        let write = |name: &str, ago: std::time::Duration| {
+            let p = shard.join(name);
+            std::fs::write(&p, b"x").unwrap();
+            std::fs::File::options()
+                .write(true)
+                .open(&p)
+                .unwrap()
+                .set_modified(started - ago)
+                .unwrap();
+            p
+        };
+        let minutes = |m: u64| std::time::Duration::from_secs(m * 60);
+        let removed = write("7.nlp", minutes(1));
+        let kept = write("1.nlp", minutes(1));
+        let new_stack = write("9.nlp", std::time::Duration::ZERO);
+        // part files by age alone: a writer on another machine is not seen
+        let stale_part = write("2.nlp.part.4194305.0", minutes(20));
+        let recent_part = write("3.nlp.part.4194305.1", minutes(2));
+        let new_part = write("4.nlp.part.4194305.2", std::time::Duration::ZERO);
+        let keep: BTreeSet<i64> = [1, 2, 3, 4].into_iter().collect();
+        assert_eq!(prune(dir.path(), &keep, started), 2);
+        assert!(!removed.exists(), "a removed stack's preview goes");
+        assert!(kept.exists());
+        assert!(
+            new_stack.exists(),
+            "a preview made since the build began stays"
+        );
+        assert!(
+            !stale_part.exists(),
+            "a part file older than the build by the grace goes"
+        );
+        assert!(recent_part.exists(), "one a writer may still fill stays");
+        assert!(new_part.exists());
+    }
+
     use super::*;
 
     fn volume(nz: u32, ny: u32, nx: u32, burned_in: bool) -> Volume {

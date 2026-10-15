@@ -54,12 +54,15 @@ use crate::classify::{Decisions, FIELDS, Ids, cell_text, field_sql, select_stack
 pub enum Error {
     Refused(String),
     Store(String),
+    /// Its progress asked it to stop, between two chunks.
+    Stopped,
 }
 
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Error::Refused(m) | Error::Store(m) => f.write_str(m),
+            Error::Stopped => f.write_str("the rehearsal was stopped"),
         }
     }
 }
@@ -117,7 +120,16 @@ pub struct Settings {
     pub examples: usize,
     /// Threads for the replay; 0 is the machine's.
     pub workers: usize,
+    /// The most stacks one report replays; a scope holding more is refused,
+    /// naming the cap (#451). None: no cap.
+    pub cap: Option<usize>,
+    /// Told the stacks replayed and in scope after each chunk; answering
+    /// false stops the report, which then fails with [`Error::Stopped`].
+    pub progress: Option<Progress>,
 }
+
+/// What a report says between its chunks (#451), and whether it goes on.
+pub type Progress = std::sync::Arc<dyn Fn(usize, usize) -> bool + Send + Sync>;
 
 impl Default for Settings {
     fn default() -> Self {
@@ -125,6 +137,8 @@ impl Default for Settings {
             scope: None,
             examples: 5,
             workers: 0,
+            cap: None,
+            progress: None,
         }
     }
 }
@@ -535,28 +549,23 @@ pub struct Renamed {
     pub after: Value,
 }
 
-/// The effect of a patch: the report, as a document.
-pub fn run(
+/// Where every stack sits, what is sealed, the operations' scopes as the
+/// registry names them, and the stacks a report replays.
+pub struct Scoping {
+    ds: Datasets,
+    place: BTreeMap<i64, Place>,
+    sealed: BTreeSet<i64>,
+    op_scopes: Vec<Scope>,
+    in_scope: Vec<i64>,
+    scope_text: String,
+}
+
+fn scoping(
     store: &mut Store,
-    dir: &Path,
     base: &Pack,
     patch: &Patch,
     settings: &Settings,
-    namer: Namer<'_>,
-) -> Result<Value, Error> {
-    let started = Instant::now();
-    let mut seconds: BTreeMap<&str, f64> = BTreeMap::new();
-    let mut lap = Instant::now();
-    fn tick(seconds: &mut BTreeMap<&str, f64>, name: &'static str, lap: &mut Instant) {
-        seconds.insert(name, lap.elapsed().as_secs_f64());
-        *lap = Instant::now();
-    }
-
-    // --- the patch, whole: it applies and the loader builds it
-    let whole = nils_pack::patch::apply(dir, patch, &|_| true)?;
-    tick(&mut seconds, "patch", &mut lap);
-
-    // --- where everything sits, and what is sealed
+) -> Result<Scoping, Error> {
     let ds = datasets(store)?;
     let mut place = places(store, &base.modality, &ds)?;
     let all: Vec<i64> = place.keys().copied().collect();
@@ -611,6 +620,112 @@ pub fn run(
     } else {
         report_scope.text()
     };
+
+    Ok(Scoping {
+        ds,
+        place,
+        sealed,
+        op_scopes,
+        in_scope,
+        scope_text,
+    })
+}
+
+impl Scoping {
+    /// How many stacks the report replays.
+    pub fn stacks(&self) -> usize {
+        self.in_scope.len()
+    }
+}
+
+/// Where everything sits and what a report of the patch would replay, read
+/// once: a door counts it to answer at once, queue a job or refuse over the
+/// cap, and hands it to [`run_scoped`] rather than reading it again.
+pub fn scope(
+    store: &mut Store,
+    base: &Pack,
+    patch: &Patch,
+    scope: Option<Scope>,
+) -> Result<Scoping, Error> {
+    let settings = Settings {
+        scope,
+        ..Settings::default()
+    };
+    scoping(store, base, patch, &settings)
+}
+
+/// How many stacks a report of a patch would replay (#451): what a door
+/// reads to answer at once, queue a job, or refuse over the cap.
+pub fn scope_size(
+    store: &mut Store,
+    base: &Pack,
+    patch: &Patch,
+    scope: Option<Scope>,
+) -> Result<usize, Error> {
+    let settings = Settings {
+        scope,
+        ..Settings::default()
+    };
+    Ok(scoping(store, base, patch, &settings)?.in_scope.len())
+}
+
+/// The refusal of a scope over the cap, in words.
+pub fn over_cap(stacks: usize, cap: usize) -> String {
+    format!(
+        "{stacks} stacks are in scope, more than the {cap} one rehearsal replays; narrow the scope (a site, a dataset, a scanner or a batch)"
+    )
+}
+
+/// The effect of a patch: the report, as a document.
+pub fn run(
+    store: &mut Store,
+    dir: &Path,
+    base: &Pack,
+    patch: &Patch,
+    settings: &Settings,
+    namer: Namer<'_>,
+) -> Result<Value, Error> {
+    let scoped = scoping(store, base, patch, settings)?;
+    run_scoped(store, dir, base, patch, settings, namer, scoped)
+}
+
+/// [`run`] over a scope [`scope`] read already, with the same settings'
+/// scope.
+pub fn run_scoped(
+    store: &mut Store,
+    dir: &Path,
+    base: &Pack,
+    patch: &Patch,
+    settings: &Settings,
+    namer: Namer<'_>,
+    scoped: Scoping,
+) -> Result<Value, Error> {
+    let started = Instant::now();
+    let mut seconds: BTreeMap<&str, f64> = BTreeMap::new();
+    let mut lap = Instant::now();
+    fn tick(seconds: &mut BTreeMap<&str, f64>, name: &'static str, lap: &mut Instant) {
+        seconds.insert(name, lap.elapsed().as_secs_f64());
+        *lap = Instant::now();
+    }
+
+    // --- the patch, whole: it applies and the loader builds it
+    let whole = nils_pack::patch::apply(dir, patch, &|_| true)?;
+    tick(&mut seconds, "patch", &mut lap);
+
+    // --- where everything sits, what is sealed, and what is in scope
+    let Scoping {
+        ds,
+        place,
+        sealed,
+        op_scopes,
+        in_scope,
+        scope_text,
+    } = scoped;
+    if let Some(cap) = settings.cap
+        && in_scope.len() > cap
+    {
+        return Err(Error::Refused(over_cap(in_scope.len(), cap)));
+    }
 
     // --- which pack sorts each stack after: the pack-wide operations and
     // those whose scope holds it
@@ -673,6 +788,11 @@ pub fn run(
     let mut two: Vec<Two> = Vec::with_capacity(in_scope.len());
     let mut read_s = 0.0;
     for chunk in in_scope.chunks(CHUNK) {
+        if let Some(go_on) = &settings.progress
+            && !go_on(two.len(), in_scope.len())
+        {
+            return Err(Error::Stopped);
+        }
         let t = Instant::now();
         let rows = store.query(&select_stacks(store, chunk), &[])?;
         let mut stacks: Vec<(Ids, Stack, Vec<String>)> = Vec::with_capacity(rows.len());

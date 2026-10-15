@@ -81,6 +81,102 @@ pub(crate) fn source_ids(store: &mut Store, p: &Place) -> Result<Vec<i64>, Store
 
 /// The sources document: each active source place with its digests, the
 /// newest `recent` of them in full, and its totals.
+/// The sources door's answer kept (the Data page's speed, 2026-10-15): the
+/// document is a reading of the registry and the places, and the page asks
+/// it on every visit, where computing it reads every dataset's counts
+/// (some 400 to 600 ms on a registry of a few hundred scans on slow
+/// storage). It is kept under what it was read from, the registry's epoch,
+/// the places' rows, the digests' and the pseudonymised files' counts, and
+/// answered again while those are the same, for a minute, or a few seconds
+/// while a digest runs, whose counts move without the epoch; any write at
+/// a door forgets it, and the engine reads it once as it starts.
+struct KeptSources {
+    key: String,
+    at: std::time::Instant,
+    ttl: std::time::Duration,
+    doc: Value,
+}
+
+static KEPT: std::sync::Mutex<Option<KeptSources>> = std::sync::Mutex::new(None);
+
+/// How many times the document was read from the registry rather than
+/// answered from the kept one, for the tests.
+static READS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// What the kept document was read under, and whether a digest runs now.
+fn stamp(store: &mut Store, recent: usize) -> Result<(String, bool), StoreError> {
+    let meta = store.qualified("registry_meta");
+    let epoch = store
+        .query(
+            &format!("SELECT value FROM {meta} WHERE key = 'epoch'"),
+            &[],
+        )?
+        .first()
+        .map(|r| r.opt_text(0).map(|t| t.unwrap_or_default().to_string()))
+        .transpose()?
+        .unwrap_or_default();
+    let places: Vec<Value> = place::list(store)?.iter().map(Place::as_json).collect();
+    let batch = store.qualified("ingest_batch");
+    let b = &store.query(
+        &format!(
+            "SELECT COUNT(*), COALESCE(MAX(id), 0), \
+             COALESCE(SUM(CASE WHEN finished_at IS NULL THEN 1 ELSE 0 END), 0) FROM {batch}"
+        ),
+        &[],
+    )?[0];
+    let (batches, last, running) = (b.int(0)?, b.int(1)?, b.int(2)?);
+    let files = store.qualified("pseudonym_file");
+    let f = &store.query(
+        &format!(
+            "SELECT COUNT(*), COALESCE(MAX(id), 0), \
+             COALESCE(SUM(CASE WHEN state = 'written' THEN 1 ELSE 0 END), 0) FROM {files}"
+        ),
+        &[],
+    )?[0];
+    let key = format!(
+        "{epoch}|{recent}|{batches}|{last}|{running}|{}|{}|{}|{}",
+        f.int(0)?,
+        f.int(1)?,
+        f.int(2)?,
+        Value::Array(places)
+    );
+    Ok((key, running > 0))
+}
+
+/// The sources door's document, from the kept one where it holds.
+pub fn document_kept(registry: &mut Registry, recent: usize) -> Result<Value, StoreError> {
+    let (key, running) = stamp(registry.store(), recent)?;
+    {
+        let kept = KEPT.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(k) = kept.as_ref()
+            && k.key == key
+            && k.at.elapsed() < k.ttl
+        {
+            return Ok(k.doc.clone());
+        }
+    }
+    READS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let doc = document(registry, recent)?;
+    *KEPT.lock().unwrap_or_else(|e| e.into_inner()) = Some(KeptSources {
+        key,
+        at: std::time::Instant::now(),
+        ttl: std::time::Duration::from_secs(if running { 3 } else { 60 }),
+        doc: doc.clone(),
+    });
+    Ok(doc)
+}
+
+/// Forget the kept document: a write at a door may have changed it.
+pub fn forget() {
+    *KEPT.lock().unwrap_or_else(|e| e.into_inner()) = None;
+}
+
+/// How many times the document was read from the registry.
+#[cfg(test)]
+pub fn reads() -> usize {
+    READS.load(std::sync::atomic::Ordering::SeqCst)
+}
+
 pub fn document(registry: &mut Registry, recent: usize) -> Result<Value, StoreError> {
     let store = registry.store();
     // record 26: the sessions counted are the ones the cache holds, under
@@ -352,6 +448,43 @@ fn source(
 #[cfg(test)]
 mod tests {
     use super::list;
+
+    /// The sources door's document is read once and kept while the
+    /// registry's epoch and the places are the same; a write (the epoch
+    /// moves) or a forget reads it again.
+    #[test]
+    fn the_sources_document_is_kept_until_the_registry_changes() {
+        use nils_registry::home::{Home, InitOptions};
+        let dir = nils_dicom::synth::TempDir::new("sources-kept");
+        let home = Home::new(dir.path().join("registry"));
+        home.keys(None).add("k", b"nils-fixture-key").unwrap();
+        let mut registry = home
+            .init(&InitOptions {
+                backend: nils_registry::Backend::Sqlite,
+                dsn: None,
+                schema: None,
+                scheme: nils_registry::pseudonym::Scheme::Blake2b32,
+                key: "k".to_string(),
+                display_length: nils_registry::pseudonym::DEFAULT_DISPLAY_LENGTH,
+                session_scheme: None,
+            })
+            .unwrap();
+        let read = |registry: &mut nils_registry::Registry| {
+            let before = super::reads();
+            let doc = super::document_kept(registry, 12).unwrap();
+            (doc, super::reads() - before)
+        };
+        let (first, n) = read(&mut registry);
+        assert_eq!(n, 1);
+        assert_eq!(first["count"], 0);
+        let (again, n) = read(&mut registry);
+        assert_eq!((n, &again), (0, &first), "kept");
+        registry.next_epoch().unwrap();
+        assert_eq!(read(&mut registry).1, 1, "the epoch moved");
+        assert_eq!(read(&mut registry).1, 0);
+        super::forget();
+        assert_eq!(read(&mut registry).1, 1, "forgotten");
+    }
 
     #[test]
     fn an_id_list_is_the_ids_joined() {

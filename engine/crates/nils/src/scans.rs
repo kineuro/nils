@@ -416,11 +416,20 @@ pub const STILLS_BUDGET: std::time::Duration = std::time::Duration::from_millis(
 /// `instance.open` audit row a stack in the window, and the band held
 /// below detail sensitive where the stack carries burned-in annotation;
 /// below that every `picture` is null and `pictures.shown` false with why.
+///
+/// With `links` (the Data page's speed, 2026-10-15) a picture carries no
+/// pixels: `{url, width, height, digest, held, partial}`, `url` the preview
+/// door's middle plane, named by its digest and held state so a browser
+/// keeps it for good, or for a scan with no preview yet the door's first
+/// picture (`partial`, never kept). The page answers without reading a
+/// still, the pictures are fetched beside it, and each is opened, and
+/// audited, by the door that serves it.
 pub(crate) fn with_pictures(
     registry: &mut Registry,
     caller: &crate::serve::Caller,
     home: &nils_registry::home::Home,
     doc: &mut Value,
+    links: bool,
 ) -> Result<(), Reply> {
     let stacks: Vec<i64> = doc["scans"]
         .as_array()
@@ -462,6 +471,24 @@ pub(crate) fn with_pictures(
         }
         for (stack, o) in stacks.iter().zip(opened) {
             match o.as_ref().and_then(|o| o.middle("axial").map(|m| (o, m))) {
+                Some((o, (_, b))) if links => {
+                    let held = o.header.held;
+                    pictures.insert(
+                        *stack,
+                        json!({
+                            "url": format!(
+                                "/api/instances/{stack}/preview?plane=axial&v={}&held={}",
+                                o.header.digest,
+                                u8::from(held)
+                            ),
+                            "width": b.width,
+                            "height": b.height,
+                            "digest": o.header.digest,
+                            "held": held,
+                            "partial": false,
+                        }),
+                    );
+                }
                 Some((o, (jpeg, b))) => {
                     crate::pyramid::note_open(registry, caller, *stack, None, 0, "list")
                         .map_err(|e| Reply::error(500, e))?;
@@ -479,6 +506,27 @@ pub(crate) fn with_pictures(
                 }
                 None => missing.push(*stack),
             }
+        }
+        // with links, a scan with no preview yet is the door's first
+        // picture, decoded when the browser asks for it, and its preview is
+        // made on a thread of the engine meanwhile
+        if links {
+            for stack in &missing {
+                pictures.insert(
+                    *stack,
+                    json!({
+                        "url": format!("/api/instances/{stack}/preview?plane=axial"),
+                        "width": null,
+                        "height": null,
+                        "digest": null,
+                        "held": null,
+                        "partial": true,
+                    }),
+                );
+            }
+            partial += missing.len();
+            crate::preview::warm(home, root, &missing);
+            missing.clear();
         }
         // a scan with no preview yet: its middle plane from one file, as
         // many as are decoded within the page's budget; the rest are

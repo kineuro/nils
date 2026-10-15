@@ -2922,8 +2922,15 @@ enum PackCommand {
         /// The patch: `patch: 1`, the pack, its operations (each with its
         /// scope, reason and evidence); or an overlay document, read as
         /// the word edits it is
-        #[arg(long, value_name = "FILE")]
-        ops: PathBuf,
+        #[arg(long, value_name = "FILE", required_unless_present = "patch_json")]
+        ops: Option<PathBuf>,
+        /// The patch as the rehearse door takes it, in JSON: what the door
+        /// queues a rehearsal with (#451)
+        #[arg(long, value_name = "JSON", conflicts_with = "ops")]
+        patch_json: Option<String>,
+        /// The most stacks it replays; a scope holding more is refused
+        #[arg(long, value_name = "N")]
+        cap: Option<usize>,
         /// The stacks replayed and counted: pack, site:NAME,
         /// dataset:NAME[,NAME], scanner:KEY=VALUE[,KEY=VALUE] or batch:ID;
         /// the operations' own scopes when not given
@@ -4587,13 +4594,23 @@ fn pack_command(home: &Home, command: PackCommand) -> Result<(), Exit> {
         }
         PackCommand::Rehearse {
             ops,
+            patch_json,
+            cap,
             scope,
             pack_dir: d,
             examples,
             workers,
             json,
         } => {
-            let patch = rehearse::patch_file(&ops).map_err(usage)?;
+            let patch = match (&ops, &patch_json) {
+                (Some(ops), _) => rehearse::patch_file(ops).map_err(usage)?,
+                (None, Some(text)) => {
+                    let doc: serde_json::Value = serde_json::from_str(text)
+                        .map_err(|e| usage(format!("--patch-json is not JSON: {e}")))?;
+                    rehearse::patch_of("--patch-json", None, &doc).map_err(usage)?
+                }
+                (None, None) => return Err(usage("rehearse takes --ops FILE or --patch-json")),
+            };
             let root = pack_dir(home, d)?;
             let dir = packs_in(&root)?
                 .into_iter()
@@ -4611,16 +4628,82 @@ fn pack_command(home: &Home, command: PackCommand) -> Result<(), Exit> {
                 .transpose()
                 .map_err(usage)?;
             let mut registry = open(home)?;
+            // #451: queued by the rehearse door, it runs as a job that beats
+            // between its chunks, can be cancelled there, and keeps its
+            // report as the job's result, shaped for the detail it was
+            // queued under
+            let queued = std::env::var_os(nils_registry::job::ADOPT_VAR).is_some();
+            let job = if queued {
+                Some(
+                    nils_registry::job::claim(
+                        registry.store(),
+                        &nils_registry::job::Claim {
+                            kind: "pack",
+                            name: &format!("rehearse {}", patch.pack),
+                            args: serde_json::json!({
+                                "pack": patch.pack, "scope": scope.as_ref().map(|s| s.text()),
+                                "cap": cap, "examples": examples,
+                            }),
+                        },
+                    )
+                    .map_err(|e| fail(e.to_string()))?,
+                )
+            } else {
+                None
+            };
+            let progress: Option<nils_classify::effect::Progress> = job.map(|id| {
+                let home = home.clone();
+                let beat = move |done: usize, total: usize| -> bool {
+                    let Ok(mut r) = home.open() else {
+                        return true;
+                    };
+                    !matches!(
+                        nils_registry::job::beat(
+                            r.store(),
+                            id,
+                            Some(&serde_json::json!({"done": done, "total": total})),
+                        ),
+                        Ok(nils_registry::job::Asked::Cancel)
+                    )
+                };
+                std::sync::Arc::new(beat) as nils_classify::effect::Progress
+            });
             let settings = nils_classify::effect::Settings {
                 scope,
                 examples,
                 workers,
+                cap,
+                progress,
             };
-            let doc =
-                rehearse::report(&mut registry, &dir, &patch, &settings).map_err(|e| match e {
-                    nils_classify::effect::Error::Refused(m) => usage(m),
-                    other => fail(other.to_string()),
-                })?;
+            let made = rehearse::report(&mut registry, &dir, &patch, &settings);
+            if let Some(id) = job {
+                let store = registry.store();
+                let (state, error) = match &made {
+                    Ok(doc) => {
+                        let mut doc = doc.clone();
+                        let detail = std::env::var("NILS_JOB_DETAIL")
+                            .ok()
+                            .map(|d| crate::grants::Detail::parse(d.trim()).unwrap_or_default());
+                        // record 55 K7: below detail quasi a scanner is its shape
+                        if detail.is_some_and(|d| d < crate::grants::Detail::Quasi) {
+                            rehearse::shape_scanners(&mut doc);
+                        }
+                        nils_registry::job::set_result(store, id, &doc)
+                            .map_err(|e| fail(e.to_string()))?;
+                        (nils_registry::job::State::Done, None)
+                    }
+                    Err(nils_classify::effect::Error::Stopped) => {
+                        (nils_registry::job::State::Cancelled, None)
+                    }
+                    Err(e) => (nils_registry::job::State::Failed, Some(e.to_string())),
+                };
+                nils_registry::job::finish(store, id, state, error.as_deref())
+                    .map_err(|e| fail(e.to_string()))?;
+            }
+            let doc = made.map_err(|e| match e {
+                nils_classify::effect::Error::Refused(m) => usage(m),
+                other => fail(other.to_string()),
+            })?;
             if json {
                 println!(
                     "{}",
@@ -5575,7 +5658,6 @@ fn pyramid_many(
     )
     .map_err(|e| fail(e.to_string()))?;
     let total = stacks.len();
-    let root = std::path::PathBuf::from(&working.path);
     let mut go_on = |store: &mut nils_registry::Store, so_far: &crate::pyramid::Many| {
         let done = so_far.built.len() + so_far.skipped.len() + so_far.failed.len();
         let progress = serde_json::json!({
@@ -5586,7 +5668,7 @@ fn pyramid_many(
         // in the background is built now, between two of its stacks, rather
         // than after all of them
         if classified.is_some() {
-            crate::worker::build_asked_pyramids(store, &root, workers);
+            crate::worker::build_asked_pyramids(store, working, workers);
         }
         !matches!(
             nils_registry::job::beat(store, job, Some(&progress)),
@@ -5679,6 +5761,8 @@ fn preview_command(home: &Home, command: PreviewCommand) -> Result<(), Exit> {
         return Ok(());
     }
     let store = registry.store();
+    // when the build began: a prune keeps what was written after it (#456)
+    let began = std::time::SystemTime::now();
     let (stacks, name) = match (&dataset, all) {
         (Some(n), _) => {
             let p = nils_registry::place::by_name(store, n)
@@ -5732,8 +5816,13 @@ fn preview_command(home: &Home, command: PreviewCommand) -> Result<(), Exit> {
     };
     let mut many = crate::preview::make_many(store, &root, &stacks, force, workers, &mut go_on);
     if all && !many.stopped {
-        let keep: std::collections::BTreeSet<i64> = stacks.iter().copied().collect();
-        many.pruned = crate::preview::prune(&root, &keep);
+        // #456: the stacks the registry holds now, not those it held when
+        // the build began, and nothing written since it began
+        let keep: std::collections::BTreeSet<i64> = crate::preview::every_stack(store)
+            .map_err(fail)?
+            .into_iter()
+            .collect();
+        many.pruned = crate::preview::prune(&root, &keep, began);
     }
     let result = many.as_json(&working.name);
     nils_registry::job::set_result(store, job, &result).map_err(|e| fail(e.to_string()))?;
@@ -8480,6 +8569,22 @@ pub(crate) fn stored_scheme(registry: &mut Registry, name: &str) -> Result<sessi
             "no scheme called {name}; `nils session scheme list` says what there is"
         ))
     })
+}
+
+/// The session scheme a door names (#453): 404 `no scheme called NAME`
+/// where the registry keeps none, 500 only where the store fails.
+pub(crate) fn scheme_named(
+    registry: &mut Registry,
+    name: &str,
+) -> Result<session::Scheme, crate::serve::Reply> {
+    kept_scheme(registry, name)
+        .map_err(crate::serve::Reply::from)?
+        .ok_or_else(|| {
+            crate::serve::Reply::error(
+                404,
+                format!("no scheme called {name}; GET /api/session-schemes says what there is"),
+            )
+        })
 }
 
 /// The session scheme the registry keeps under a name, or none where it

@@ -139,6 +139,10 @@ pub(crate) struct Layout {
     pub(crate) renamed: bool,
     /// The loose entries a confirmed move put into a tree just now.
     pub(crate) moved: Option<(&'static str, usize)>,
+    /// The look ran out of the request's budget before it had looked into
+    /// every loose entry (#458): those it did not look into count as
+    /// holding DICOM, as an unfinished look does.
+    pub(crate) partial: bool,
 }
 
 /// What a dataset's structure says (Wave 7a, Nima 2026-10-08: "NILS should
@@ -236,8 +240,13 @@ const DATASET_TREES: [&str; 3] = [ANON_TREE, RAW_TREE, ORIGINALS_TREE];
 /// that found none in a tree that is not empty: a dataset with a filled
 /// tree is never said to hold no DICOM.
 pub(crate) fn look_for_dicom(path: &Path) -> Dicom {
+    look_for_dicom_within(path, Instant::now() + LOOK_FOR, LOOK_ENTRIES).0
+}
+
+/// [`look_for_dicom`] bounded by a time and a count of entries given, with
+/// how many entries it read.
+fn look_for_dicom_within(path: &Path, until: Instant, entries: usize) -> (Dicom, usize) {
     use std::io::Read as _;
-    let until = Instant::now() + LOOK_FOR;
     let mut seen = 0usize;
     let trees: Vec<PathBuf> = DATASET_TREES
         .iter()
@@ -255,8 +264,8 @@ pub(crate) fn look_for_dicom(path: &Path) -> Dicom {
             continue;
         };
         seen += 1;
-        if seen > LOOK_ENTRIES || Instant::now() >= until {
-            return Dicom::Unknown;
+        if seen > entries || Instant::now() >= until {
+            return (Dicom::Unknown, seen);
         }
         if meta.is_dir() {
             // a folder met twice (a tree inside the folder, or a link back
@@ -277,32 +286,65 @@ pub(crate) fn look_for_dicom(path: &Path) -> Dicom {
             .extension()
             .is_some_and(|e| e.eq_ignore_ascii_case("dcm"))
         {
-            return Dicom::Yes;
+            return (Dicom::Yes, seen);
         }
         let mut head = [0u8; 132];
         if let Ok(mut f) = std::fs::File::open(&at)
             && f.read_exact(&mut head).is_ok()
             && &head[128..132] == b"DICM"
         {
-            return Dicom::Yes;
+            return (Dicom::Yes, seen);
         }
     }
     if trees
         .iter()
         .any(|t| std::fs::read_dir(t).is_ok_and(|mut d| d.next().is_some()))
     {
-        return Dicom::Unknown;
+        return (Dicom::Unknown, seen);
     }
-    Dicom::No
-}
-
-/// Whether a loose entry may hold DICOM: what the look did not see it
-/// cannot vouch for, so an unfinished look counts.
-fn holds_dicom(path: &Path) -> bool {
-    look_for_dicom(path) != Dicom::No
+    (Dicom::No, seen)
 }
 
 pub(crate) fn detect(path: &Path) -> Layout {
+    detect_within(path, &mut Budget::unbounded())
+}
+
+/// What the looks into loose entries may spend, across every folder one
+/// request reads (#458): a time and a count of entries, each loose entry's
+/// look bounded as before and by what is left.
+pub(crate) struct Budget {
+    until: Option<Instant>,
+    entries: Option<usize>,
+}
+
+impl Budget {
+    /// Each entry's own bound alone, as a look at one folder has it.
+    pub(crate) fn unbounded() -> Budget {
+        Budget {
+            until: None,
+            entries: None,
+        }
+    }
+
+    /// The budget of one request that reads many folders.
+    pub(crate) fn per_request() -> Budget {
+        Budget {
+            until: Some(Instant::now() + REQUEST_LOOK_FOR),
+            entries: Some(REQUEST_LOOK_ENTRIES),
+        }
+    }
+
+    fn spent(&self) -> bool {
+        self.until.is_some_and(|u| Instant::now() >= u) || self.entries == Some(0)
+    }
+}
+
+/// What the looks of one request that reads every dataset may spend.
+const REQUEST_LOOK_FOR: Duration = Duration::from_millis(1_500);
+const REQUEST_LOOK_ENTRIES: usize = 10_000;
+
+/// [`detect`] under a budget shared with the other folders of a request.
+pub(crate) fn detect_within(path: &Path, budget: &mut Budget) -> Layout {
     let mut layout = Layout {
         derivatives: path.join("derivatives").is_dir(),
         originals: path.join(ORIGINALS_TREE).is_dir(),
@@ -323,13 +365,112 @@ pub(crate) fn detect(path: &Path) -> Layout {
         }
     }
     layout.loose.sort_unstable();
-    layout.loose_dicom = layout
-        .loose
-        .iter()
-        .filter(|n| holds_dicom(&path.join(n)))
-        .cloned()
-        .collect();
+    let mut dicom = Vec::new();
+    for n in &layout.loose {
+        if budget.spent() {
+            // not looked into: it may hold DICOM, as an unfinished look says
+            layout.partial = true;
+            dicom.push(n.clone());
+            continue;
+        }
+        let until = match budget.until {
+            Some(u) => u.min(Instant::now() + LOOK_FOR),
+            None => Instant::now() + LOOK_FOR,
+        };
+        let entries = budget.entries.map_or(LOOK_ENTRIES, |e| e.min(LOOK_ENTRIES));
+        let (found, seen) = look_for_dicom_within(&path.join(n), until, entries);
+        if let Some(e) = budget.entries.as_mut() {
+            *e = e.saturating_sub(seen);
+        }
+        if found != Dicom::No {
+            dicom.push(n.clone());
+        }
+    }
+    layout.loose_dicom = dicom;
     layout
+}
+
+/// A dataset's layout as a door last read it (#458), kept by place id with
+/// what it was read under: the folder and the declaration, and the times its
+/// folder and trees last changed. A copy is answered while those are the
+/// same and it is younger than [`LAYOUT_KEPT`] (a partial one, younger than
+/// [`PARTIAL_KEPT`]); the acts that change a folder forget every copy.
+struct KeptLayout {
+    key: String,
+    stamps: Vec<Option<std::time::SystemTime>>,
+    at: Instant,
+    layout: Layout,
+}
+
+const LAYOUT_KEPT: Duration = Duration::from_secs(300);
+const PARTIAL_KEPT: Duration = Duration::from_secs(30);
+
+static LAYOUTS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<i64, KeptLayout>>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// How many times a door read a dataset's folder for its layout, for the
+/// tests (#458).
+static LAYOUT_READS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(test)]
+pub(crate) fn layout_reads() -> usize {
+    LAYOUT_READS.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// When a folder and its trees last changed: what tells a kept layout it
+/// is old, read in a few stats rather than a listing.
+fn stamps(path: &Path) -> Vec<Option<std::time::SystemTime>> {
+    [
+        path.to_path_buf(),
+        path.join("derivatives"),
+        path.join(ANON_TREE),
+        path.join(RAW_TREE),
+        path.join(ORIGINALS_TREE),
+    ]
+    .iter()
+    .map(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok())
+    .collect()
+}
+
+/// A dataset place's layout: the kept copy where it holds, else read under
+/// the request's budget and kept.
+pub(crate) fn layout_kept(p: &Place, budget: &mut Budget) -> Layout {
+    let folder = Path::new(&p.path);
+    let key = format!("{}\u{0}{}", p.path, p.dataset);
+    let now = stamps(folder);
+    {
+        let kept = LAYOUTS.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(k) = kept.get(&p.id)
+            && k.key == key
+            && k.stamps == now
+            && k.at.elapsed()
+                < if k.layout.partial {
+                    PARTIAL_KEPT
+                } else {
+                    LAYOUT_KEPT
+                }
+        {
+            return k.layout.clone();
+        }
+    }
+    LAYOUT_READS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let layout = detect_within(folder, budget);
+    LAYOUTS.lock().unwrap_or_else(|e| e.into_inner()).insert(
+        p.id,
+        KeptLayout {
+            key,
+            stamps: now,
+            at: Instant::now(),
+            layout: layout.clone(),
+        },
+    );
+    layout
+}
+
+/// Forget every kept layout: a declaration, an explore, a probe or a
+/// pseudonymise run changed what a folder holds or how it is read.
+pub(crate) fn forget_layouts() {
+    LAYOUTS.lock().unwrap_or_else(|e| e.into_inner()).clear();
 }
 
 /// What a folder a source place names is (Wave 7a).
@@ -529,6 +670,8 @@ fn layout_doc_with(path: &Path, layout: &Layout, counted: bool) -> Value {
         "loose_dicom": layout.loose_dicom.iter().take(NAMED_ENTRIES).collect::<Vec<_>>(),
         "entry_names": "names",
         "question": state == State::Unknown,
+        // #458: the looks into loose entries ran out of the request's budget
+        "partial": layout.partial,
         "move_into": (state == State::Unknown).then(|| json!({
             "choices": MOVE_INTO.iter().map(|(w, _)| *w).collect::<Vec<_>>(),
             "trees": {"originals": ORIGINALS_TREE, "anon": ANON_TREE},
@@ -1993,6 +2136,65 @@ pub(crate) fn unmapped_of(store: &mut Store, path: &Path) -> nils_digest::Unmapp
 mod tests {
     use super::*;
     use nils_dicom::synth::TempDir;
+
+    /// #458: a dataset's layout is read from its folder once and kept; a
+    /// second read reads nothing, and a change of the folder, of its
+    /// declaration or a forget (a declaration or an explore at the doors)
+    /// reads it again. A budget spent before an entry is looked into says
+    /// partial and counts the entry as one that may hold DICOM.
+    #[test]
+    fn a_dataset_s_layout_is_read_once_until_its_folder_changes() {
+        let dir = TempDir::new("layout-kept");
+        dir.file("loose/a.txt", b"no dicom here");
+        std::fs::create_dir_all(dir.path().join(ANON_TREE)).unwrap();
+        let mut place = Place {
+            id: -458,
+            name: "kept".into(),
+            role: Role::Source,
+            path: dir.path().to_string_lossy().into_owned(),
+            guarantees: json!({}),
+            probed: json!({}),
+            probed_at: None,
+            created_at: "2026-10-15T00:00:00Z".into(),
+            updated_at: None,
+            retired_at: None,
+            handling: Value::Null,
+            dataset: json!({"arrives": "deidentified"}),
+        };
+        let read = |place: &Place| {
+            let before = layout_reads();
+            let layout = layout_kept(place, &mut Budget::per_request());
+            (layout, layout_reads() - before)
+        };
+        let (first, n) = read(&place);
+        assert_eq!(n, 1);
+        assert_eq!(first.loose, ["loose"]);
+        assert!(first.loose_dicom.is_empty() && !first.partial);
+        assert_eq!(read(&place).1, 0, "kept");
+        // the folder changes: read again
+        std::thread::sleep(Duration::from_millis(20));
+        dir.file("second/b.txt", b"x");
+        let (second, n) = read(&place);
+        assert_eq!(n, 1);
+        assert_eq!(second.loose, ["loose", "second"]);
+        assert_eq!(read(&place).1, 0);
+        // its declaration changes: read again
+        place.dataset = json!({"arrives": "identified"});
+        assert_eq!(read(&place).1, 1);
+        assert_eq!(read(&place).1, 0);
+        // forgotten, as a door's write forgets: read again
+        forget_layouts();
+        assert_eq!(read(&place).1, 1);
+        // a budget spent: partial, and the entry counts as maybe DICOM
+        let mut spent = Budget {
+            until: Some(Instant::now()),
+            entries: Some(0),
+        };
+        let layout = detect_within(dir.path(), &mut spent);
+        assert!(layout.partial);
+        assert_eq!(layout.loose_dicom, ["loose", "second"]);
+        assert_eq!(layout_doc_listed(dir.path(), &layout)["partial"], true);
+    }
 
     /// Lab 26c, finding 4: what became of a dataset's originals is what an
     /// act did to them. A declaration naming it is refused, and the

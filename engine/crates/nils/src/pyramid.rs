@@ -319,23 +319,7 @@ impl StackFile {
 
 /// The frames a digest wrote down, `1-4,9,12-20`, as frame numbers.
 pub fn frame_list(list: &str) -> Result<Vec<u32>, String> {
-    let bad = || format!("the frame list {list:?} is not ranges of frame numbers");
-    let mut out = Vec::new();
-    for part in list.split(',').map(str::trim).filter(|p| !p.is_empty()) {
-        let (a, b) = part.split_once('-').unwrap_or((part, part));
-        let (a, b): (u32, u32) = (
-            a.trim().parse().map_err(|_| bad())?,
-            b.trim().parse().map_err(|_| bad())?,
-        );
-        if a == 0 || b < a {
-            return Err(bad());
-        }
-        out.extend(a..=b);
-    }
-    if out.is_empty() {
-        return Err(bad());
-    }
-    Ok(out)
+    nils_dicom::split::frame_list(list)
 }
 
 /// Read a stack's files from the registry and make them one volume. A
@@ -479,9 +463,6 @@ const LOSSY: [&str; 8] = [
 /// JPEG-LS, lossless and near-lossless, which the pyramid decodes itself.
 const JPEG_LS: [&str; 2] = ["1.2.840.10008.1.2.4.80", "1.2.840.10008.1.2.4.81"];
 
-/// RLE Lossless, whose every frame is one fragment by the standard.
-const RLE: &str = "1.2.840.10008.1.2.5";
-
 fn lossy_syntax(ts: &str) -> bool {
     // the DCT processes .52 to .65 are retired lossy JPEG, the .100s video
     LOSSY.contains(&ts)
@@ -522,57 +503,8 @@ fn frame_fragments(
     frames: usize,
     ts: &str,
 ) -> Result<Vec<std::ops::Range<usize>>, String> {
-    if frames <= 1 {
-        return Ok(std::iter::once(0..fragments.len()).collect());
-    }
-    if fragments.len() == frames {
-        return Ok((0..frames).map(|i| i..i + 1).collect());
-    }
-    let apart = || {
-        undecodable(
-            ts,
-            &format!(
-                "{} fragments could not be told apart into {frames} frames",
-                fragments.len()
-            ),
-        )
-    };
-    let starts: Vec<usize> = if table.len() == frames {
-        // an offset is from the first fragment's item tag, eight bytes of
-        // item header before every fragment
-        let mut at = Vec::with_capacity(fragments.len());
-        let mut offset = 0u64;
-        for f in fragments {
-            at.push(offset);
-            offset += f.len() as u64 + 8;
-        }
-        table
-            .iter()
-            .map(|&o| at.iter().position(|&a| a == u64::from(o)).ok_or_else(apart))
-            .collect::<Result<_, _>>()?
-    } else if ts == RLE {
-        return Err(apart());
-    } else {
-        let marker: &[u8] = if ts.starts_with("1.2.840.10008.1.2.4.9")
-            || ts.starts_with("1.2.840.10008.1.2.4.20")
-        {
-            &[0xFF, 0x4F]
-        } else {
-            &[0xFF, 0xD8]
-        };
-        fragments
-            .iter()
-            .enumerate()
-            .filter(|(_, f)| f.starts_with(marker))
-            .map(|(i, _)| i)
-            .collect()
-    };
-    if starts.len() != frames || starts.first() != Some(&0) || !starts.is_sorted() {
-        return Err(apart());
-    }
-    Ok((0..frames)
-        .map(|i| starts[i]..starts.get(i + 1).copied().unwrap_or(fragments.len()))
-        .collect())
+    nils_dicom::split::fragment_ranges(fragments, table, frames, ts)
+        .map_err(|why| undecodable(ts, &why))
 }
 
 /// One frame's codestream, decoded by the registry's codec for `ts` (or
@@ -3271,6 +3203,22 @@ pub(crate) fn failed_class(error: Option<&str>) -> Option<String> {
         .then(|| class.to_string())
 }
 
+/// Whether a failed job was cut short rather than failed: the words a
+/// claim writes on a job whose process went away or whose heartbeat went
+/// stale, and no reason class of a build's own.
+pub(crate) fn interrupted(error: Option<&str>) -> bool {
+    let Some(e) = error else {
+        return false;
+    };
+    failed_class(Some(e)).is_none()
+        && ((e.starts_with("process ") && e.contains(" is gone; no heartbeat since "))
+            || e.starts_with("stale: no heartbeat since "))
+}
+
+/// The stacks whose interrupted build this process queued again (#454).
+static RETRIED: std::sync::LazyLock<std::sync::Mutex<std::collections::BTreeSet<i64>>> =
+    std::sync::LazyLock::new(Default::default);
+
 /// Wait up to `limit` for a pyramid's manifest, where a place among the
 /// held requests is free; none when there is none, or the time ran out.
 fn hold_for_manifest(root: &Path, limit: std::time::Duration) -> Result<Option<Manifest>, Reply> {
@@ -3293,7 +3241,8 @@ fn hold_for_manifest(root: &Path, limit: std::time::Duration) -> Result<Option<M
 /// queued or running already is answered, and a build that failed is said
 /// (422) and not queued again by the door, so a stack that cannot be read
 /// is not built over and over; `pyramid build --stack N` at the jobs door
-/// queues it again.
+/// queues it again. A build a stop cut short is no failure of the stack's:
+/// it is queued again, once per stack in a process (#454).
 pub(crate) fn on_demand(
     store: &mut Store,
     caller: &Caller,
@@ -3336,12 +3285,24 @@ pub(crate) fn on_demand(
         r
     };
     use nils_registry::job::State;
+    // #454: a build a stop cut short (its job failed by the next claim, for
+    // a process gone or a heartbeat gone stale) is queued again, once per
+    // stack in this process so that a crash loop cannot rebuild forever; a
+    // build that failed on its own stays failed
+    let again = job.as_ref().is_some_and(|j| {
+        j.state == State::Failed
+            && interrupted(j.error.as_deref())
+            && RETRIED
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(stack)
+    });
     match &job {
         Some(j) if matches!(j.state, State::Queued | State::Running | State::Cancelling) => {
             building.insert(stack, (j.id, since));
             return Ok(answer(j));
         }
-        Some(j) if j.state == State::Failed => {
+        Some(j) if j.state == State::Failed && !again => {
             building.remove(&stack);
             let reason = failed_class(j.error.as_deref());
             let mut r = Reply::error(

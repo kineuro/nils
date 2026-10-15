@@ -1022,8 +1022,9 @@ fn place_of_root(
     Ok(found)
 }
 
-/// The releases whose selection named the cohort, newest first.
-fn releases_naming(store: &mut Store, name: &str) -> Result<Vec<Value>, StoreError> {
+/// The releases whose selection named each cohort, newest first, by the
+/// cohort's name: every release read once (#452).
+fn releases_by_cohort(store: &mut Store) -> Result<HashMap<String, Vec<Value>>, StoreError> {
     let selection = text_of(store, "release", "selection");
     // Wave 7a (2026-10-09): when it was made, for the cohort's timeline
     let finished = text_of(store, "release", "finished_at");
@@ -1034,19 +1035,20 @@ fn releases_naming(store: &mut Store, name: &str) -> Result<Vec<Value>, StoreErr
         store.qualified("handover"),
         store.qualified("release")
     );
-    let mut out = Vec::new();
+    let mut out: HashMap<String, Vec<Value>> = HashMap::new();
     for r in store.query(&sql, &[])? {
         let selection: Value = r
             .opt_text(5)?
             .and_then(|t| serde_json::from_str(t).ok())
             .unwrap_or(Value::Null);
-        let named = selection["cohorts"]
+        let named: BTreeSet<&str> = selection["cohorts"]
             .as_array()
-            .is_some_and(|a| a.iter().any(|c| c.as_str() == Some(name)));
-        if !named {
+            .map(|a| a.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default();
+        if named.is_empty() {
             continue;
         }
-        out.push(json!({
+        let doc = json!({
             "id": r.int(0)?,
             "name": r.text(1)?,
             "version": r.text(2)?,
@@ -1054,9 +1056,24 @@ fn releases_naming(store: &mut Store, name: &str) -> Result<Vec<Value>, StoreErr
             "subjects": r.opt_int(4)?,
             "handed_over": r.int(6)? > 0,
             "finished_at": r.opt_text(7)?,
-        }));
+        });
+        for name in named {
+            out.entry(name.to_string()).or_default().push(doc.clone());
+        }
     }
     Ok(out)
+}
+
+/// ` AND <alias>.cohort_id = N` where one cohort is asked, nothing where
+/// every cohort is: the id is a number, written into the text.
+fn one_cohort(alias: &str, only: Option<i64>) -> String {
+    let at = if alias.is_empty() {
+        String::new()
+    } else {
+        format!("{alias}.")
+    };
+    only.map(|id| format!(" AND {at}cohort_id = {id}"))
+        .unwrap_or_default()
 }
 
 /// One interval as read, for the provenance and the joins.
@@ -1072,32 +1089,52 @@ struct Interval {
     reason: Option<String>,
 }
 
-fn intervals(store: &mut Store, cohort_id: i64) -> Result<Vec<Interval>, StoreError> {
-    let d = store.dialect();
+/// Every cohort's intervals, or one cohort's, in the order they were
+/// written, by cohort: one query (#452).
+fn intervals_of(
+    store: &mut Store,
+    only: Option<i64>,
+) -> Result<HashMap<i64, Vec<Interval>>, StoreError> {
     let sql = format!(
-        "SELECT subject_id, source, batch_id, handle_id, actor, {}, {}, left_by, reason \
-         FROM {} WHERE cohort_id = {} ORDER BY id",
+        "SELECT cohort_id, subject_id, source, batch_id, handle_id, actor, {}, {}, \
+         left_by, reason FROM {} WHERE 1 = 1{} ORDER BY id",
         text_of(store, "cohort_member", "joined_at"),
         text_of(store, "cohort_member", "left_at"),
         store.qualified("cohort_member"),
-        d.param(1, Type::Int)
+        one_cohort("", only),
+    );
+    let mut out: HashMap<i64, Vec<Interval>> = HashMap::new();
+    for r in store.query(&sql, &[])? {
+        out.entry(r.int(0)?).or_default().push(Interval {
+            subject: r.int(1)?,
+            source: r.opt_text(2)?.unwrap_or("import").to_string(),
+            batch: r.opt_int(3)?,
+            handle: r.opt_int(4)?,
+            actor: r.opt_text(5)?.map(str::to_string),
+            joined_at: r.opt_text(6)?.unwrap_or_default().to_string(),
+            left_at: r.opt_text(7)?.map(str::to_string),
+            left_by: r.opt_text(8)?.map(str::to_string),
+            reason: r.opt_text(9)?.map(str::to_string),
+        });
+    }
+    Ok(out)
+}
+
+/// The root each batch that brought a member read, for every cohort or
+/// one: one query (#452).
+fn batch_roots(store: &mut Store, only: Option<i64>) -> Result<HashMap<i64, String>, StoreError> {
+    let sql = format!(
+        "SELECT DISTINCT b.id, so.root_canonical FROM {} m \
+         JOIN {} b ON b.id = m.batch_id JOIN {} so ON so.id = b.source_id WHERE 1 = 1{}",
+        store.qualified("cohort_member"),
+        store.qualified("ingest_batch"),
+        store.qualified("source"),
+        one_cohort("m", only),
     );
     store
-        .query(&sql, &[Param::Int(cohort_id)])?
+        .query(&sql, &[])?
         .iter()
-        .map(|r| {
-            Ok(Interval {
-                subject: r.int(0)?,
-                source: r.opt_text(1)?.unwrap_or("import").to_string(),
-                batch: r.opt_int(2)?,
-                handle: r.opt_int(3)?,
-                actor: r.opt_text(4)?.map(str::to_string),
-                joined_at: r.opt_text(5)?.unwrap_or_default().to_string(),
-                left_at: r.opt_text(6)?.map(str::to_string),
-                left_by: r.opt_text(7)?.map(str::to_string),
-                reason: r.opt_text(8)?.map(str::to_string),
-            })
-        })
+        .map(|r| Ok((r.int(0)?, r.text(1)?.to_string())))
         .collect()
 }
 
@@ -1105,29 +1142,19 @@ fn intervals(store: &mut Store, cohort_id: i64) -> Result<Vec<Interval>, StoreEr
 fn dataset_of_batch(
     store: &mut Store,
     cache: &mut HashMap<String, Option<String>>,
+    roots: &HashMap<i64, String>,
     batch: i64,
 ) -> Result<Option<String>, StoreError> {
-    let d = store.dialect();
-    let sql = format!(
-        "SELECT so.root_canonical FROM {} b JOIN {} so ON so.id = b.source_id WHERE b.id = {}",
-        store.qualified("ingest_batch"),
-        store.qualified("source"),
-        d.param(1, Type::Int)
-    );
-    let Some(root) = store
-        .query_opt(&sql, &[Param::Int(batch)])?
-        .map(|r| r.text(0).map(str::to_string))
-        .transpose()?
-    else {
-        return Ok(None);
-    };
-    place_of_root(store, cache, &root)
+    match roots.get(&batch) {
+        Some(root) => place_of_root(store, cache, root),
+        None => Ok(None),
+    }
 }
 
-/// Where the cohort came from: what opened its first interval.
 fn from_of(
     store: &mut Store,
     cache: &mut HashMap<String, Option<String>>,
+    roots: &HashMap<i64, String>,
     cohort: &Cohort,
     first: Option<&Interval>,
 ) -> Result<Value, StoreError> {
@@ -1136,7 +1163,7 @@ fn from_of(
         Some(i) => match i.source.as_str() {
             "digest" => {
                 let dataset = match i.batch {
-                    Some(b) => dataset_of_batch(store, cache, b)?,
+                    Some(b) => dataset_of_batch(store, cache, roots, b)?,
                     None => None,
                 };
                 json!({"kind": "source", "detail": {"dataset": dataset, "batch": i.batch}})
@@ -1246,50 +1273,56 @@ pub fn built_window(store: &mut Store) -> Result<Option<i64>, StoreError> {
     }
 }
 
-/// The counts of a cohort's open members: subjects, the sessions the cache
-/// holds for them under the window it was built with, stacks. The sessions
-/// are none where the cache is empty.
-fn counts_of(store: &mut Store, cohort_id: i64) -> Result<(i64, Option<i64>, i64), StoreError> {
-    let d = store.dialect();
+/// The counts of each cohort's open members, or of one cohort's: subjects,
+/// the sessions the cache holds for them under the window it was built
+/// with, stacks. The sessions are none where the cache is empty. Three
+/// queries whatever the cohorts (#452); a cohort with no open member is
+/// none of them, and counts nothing.
+fn counts(store: &mut Store, only: Option<i64>) -> Result<Counts, StoreError> {
     let member = store.qualified("cohort_member");
-    let current = format!(
-        "{member} m WHERE m.cohort_id = {} AND m.left_at IS NULL",
-        d.param(1, Type::Int)
-    );
-    let subjects = store.query(
-        &format!("SELECT COUNT(DISTINCT m.subject_id) FROM {current}"),
-        &[Param::Int(cohort_id)],
-    )?[0]
-        .int(0)?;
-    // the window is written into the text rather than bound: a placeholder
-    // on SQLite is positional, so a second parameter before the first in
-    // the text takes the first one's value, which asked every cohort for
-    // the sessions of the cohort whose id is the window
-    let sessions = match built_window(store)? {
-        None => None,
-        Some(window) => Some(
-            store.query(
-                &format!(
-                    "SELECT COUNT(DISTINCT sc.id) FROM {} sc WHERE sc.window_days = {window} \
-                     AND sc.subject_id IN (SELECT m.subject_id FROM {current})",
-                    store.qualified("session_cache"),
-                ),
-                &[Param::Int(cohort_id)],
-            )?[0]
-                .int(0)?,
-        ),
-    };
-    let stacks = store.query(
+    let open = format!("m.left_at IS NULL{}", one_cohort("m", only));
+    let window = built_window(store)?;
+    let mut out: Counts = HashMap::new();
+    for r in store.query(
         &format!(
-            "SELECT COUNT(DISTINCT st.id) FROM {} st JOIN {} se ON se.id = st.series_id \
-                 WHERE se.subject_id IN (SELECT m.subject_id FROM {current})",
-            store.qualified("stack"),
-            store.qualified("series"),
+            "SELECT m.cohort_id, COUNT(DISTINCT m.subject_id) FROM {member} m WHERE {open} \
+             GROUP BY m.cohort_id"
         ),
-        &[Param::Int(cohort_id)],
-    )?[0]
-        .int(0)?;
-    Ok((subjects, sessions, stacks))
+        &[],
+    )? {
+        out.insert(r.int(0)?, (r.int(1)?, window.map(|_| 0), 0));
+    }
+    // the window is written into the text: it is a number the cache holds
+    if let Some(window) = window {
+        for r in store.query(
+            &format!(
+                "SELECT m.cohort_id, COUNT(DISTINCT sc.id) FROM {member} m \
+                 JOIN {} sc ON sc.subject_id = m.subject_id \
+                 WHERE sc.window_days = {window} AND {open} GROUP BY m.cohort_id",
+                store.qualified("session_cache"),
+            ),
+            &[],
+        )? {
+            if let Some(c) = out.get_mut(&r.int(0)?) {
+                c.1 = Some(r.int(1)?);
+            }
+        }
+    }
+    for r in store.query(
+        &format!(
+            "SELECT m.cohort_id, COUNT(DISTINCT st.id) FROM {member} m \
+             JOIN {} se ON se.subject_id = m.subject_id JOIN {} st ON st.series_id = se.id \
+             WHERE {open} GROUP BY m.cohort_id",
+            store.qualified("series"),
+            store.qualified("stack"),
+        ),
+        &[],
+    )? {
+        if let Some(c) = out.get_mut(&r.int(0)?) {
+            c.2 = r.int(1)?;
+        }
+    }
+    Ok(out)
 }
 
 /// The sources holding the members' files, by the place of each member's
@@ -1339,6 +1372,7 @@ fn sources_holding(
 fn parts_of(
     store: &mut Store,
     cache: &mut HashMap<String, Option<String>>,
+    roots: &HashMap<i64, String>,
     intervals: &[Interval],
 ) -> Result<Vec<Value>, StoreError> {
     let mut of_batch: HashMap<i64, Option<String>> = HashMap::new();
@@ -1350,7 +1384,7 @@ fn parts_of(
                     Some(b) => match of_batch.get(&b) {
                         Some(d) => d.clone(),
                         None => {
-                            let d = dataset_of_batch(store, cache, b)?;
+                            let d = dataset_of_batch(store, cache, roots, b)?;
                             of_batch.insert(b, d.clone());
                             d
                         }
@@ -1378,6 +1412,64 @@ fn parts_of(
     Ok(out.into_iter().map(|(_, v)| v).collect())
 }
 
+/// The roots holding scans of each cohort's open members, or of one
+/// cohort's, by subject with their stacks: one query (#452).
+fn holding_rows(store: &mut Store, only: Option<i64>) -> Result<Holding, StoreError> {
+    let sql = format!(
+        "SELECT m.cohort_id, so.root_canonical, se.subject_id, COUNT(DISTINCT st.id) FROM {} m \
+         JOIN {} se ON se.subject_id = m.subject_id \
+         JOIN {} st ON st.series_id = se.id \
+         JOIN {} b ON b.id = st.first_batch_id \
+         JOIN {} so ON so.id = b.source_id \
+         WHERE m.left_at IS NULL{} \
+         GROUP BY m.cohort_id, so.root_canonical, se.subject_id",
+        store.qualified("cohort_member"),
+        store.qualified("series"),
+        store.qualified("stack"),
+        store.qualified("ingest_batch"),
+        store.qualified("source"),
+        one_cohort("m", only),
+    );
+    let mut out: HashMap<i64, Vec<(String, i64, i64)>> = HashMap::new();
+    for r in store.query(&sql, &[])? {
+        out.entry(r.int(0)?)
+            .or_default()
+            .push((r.text(1)?.to_string(), r.int(2)?, r.int(3)?));
+    }
+    Ok(out)
+}
+
+/// Each cohort's open members, sessions and stacks, by cohort id.
+type Counts = HashMap<i64, (i64, Option<i64>, i64)>;
+
+/// Each cohort's roots holding its members' scans, with the subject and
+/// the stacks, by cohort id.
+type Holding = HashMap<i64, Vec<(String, i64, i64)>>;
+
+/// What the list and the one cohort's door read of every cohort, or of
+/// one, in a fixed number of queries whatever the cohorts (#452).
+struct Gathered {
+    window: Option<i64>,
+    counts: Counts,
+    intervals: HashMap<i64, Vec<Interval>>,
+    roots: HashMap<i64, String>,
+    releases: HashMap<String, Vec<Value>>,
+    holding: Holding,
+}
+
+impl Gathered {
+    fn read(store: &mut Store, only: Option<i64>) -> Result<Gathered, StoreError> {
+        Ok(Gathered {
+            window: built_window(store)?,
+            counts: counts(store, only)?,
+            intervals: intervals_of(store, only)?,
+            roots: batch_roots(store, only)?,
+            releases: releases_by_cohort(store)?,
+            holding: holding_rows(store, only)?,
+        })
+    }
+}
+
 /// Wave 7a, the Data page (2026-10-09): the datasets holding scans of the
 /// open members, each with how many members have scans there, those scans,
 /// and whether the dataset feeds the cohort; a dataset that feeds it and
@@ -1387,33 +1479,13 @@ fn holding_of(
     cache: &mut HashMap<String, Option<String>>,
     places: &[place::Place],
     cohort: &Cohort,
+    rows: &[(String, i64, i64)],
 ) -> Result<Vec<Value>, StoreError> {
-    let d = store.dialect();
-    let sql = format!(
-        "SELECT so.root_canonical, se.subject_id, COUNT(DISTINCT st.id) FROM {} m \
-         JOIN {} se ON se.subject_id = m.subject_id \
-         JOIN {} st ON st.series_id = se.id \
-         JOIN {} b ON b.id = st.first_batch_id \
-         JOIN {} so ON so.id = b.source_id \
-         WHERE m.cohort_id = {} AND m.left_at IS NULL \
-         GROUP BY so.root_canonical, se.subject_id",
-        store.qualified("cohort_member"),
-        store.qualified("series"),
-        store.qualified("stack"),
-        store.qualified("ingest_batch"),
-        store.qualified("source"),
-        d.param(1, Type::Int)
-    );
-    let rows: Vec<(String, i64, i64)> = store
-        .query(&sql, &[Param::Int(cohort.id)])?
-        .iter()
-        .map(|r| Ok((r.text(0)?.to_string(), r.int(1)?, r.int(2)?)))
-        .collect::<Result<_, StoreError>>()?;
     let mut by: BTreeMap<String, (BTreeSet<i64>, i64)> = BTreeMap::new();
     for (root, subject, scans) in rows {
-        if let Some(name) = place_of_root(store, cache, &root)? {
+        if let Some(name) = place_of_root(store, cache, root)? {
             let held = by.entry(name).or_default();
-            held.0.insert(subject);
+            held.0.insert(*subject);
             held.1 += scans;
         }
     }
@@ -1469,11 +1541,19 @@ fn document(
     cache: &mut HashMap<String, Option<String>>,
     places: &[place::Place],
     items: &[OpenItem],
+    gathered: &Gathered,
     cohort: &Cohort,
     detail: bool,
 ) -> Result<Value, StoreError> {
-    let (subjects, sessions, stacks) = counts_of(store, cohort.id)?;
-    let all = intervals(store, cohort.id)?;
+    let (subjects, sessions, stacks) =
+        gathered
+            .counts
+            .get(&cohort.id)
+            .copied()
+            .unwrap_or((0, gathered.window.map(|_| 0), 0));
+    let none = Vec::new();
+    let all = gathered.intervals.get(&cohort.id).unwrap_or(&none);
+    let roots = &gathered.roots;
     let open: HashSet<i64> = all
         .iter()
         .filter(|i| i.left_at.is_none())
@@ -1483,8 +1563,12 @@ fn document(
         .iter()
         .filter(|it| it.subjects.iter().any(|s| open.contains(s)))
         .count();
-    let releases = releases_naming(store, &cohort.name)?;
-    let from = from_of(store, cache, cohort, all.first())?;
+    let releases = gathered
+        .releases
+        .get(&cohort.name)
+        .cloned()
+        .unwrap_or_default();
+    let from = from_of(store, cache, roots, cohort, all.first())?;
     let last_joined = all.iter().map(|i| i.joined_at.as_str()).max();
     let mut doc = json!({
         "id": cohort.id,
@@ -1504,16 +1588,21 @@ fn document(
     });
     // Wave 7a, the Data page (2026-10-09): what brought its members, and
     // the datasets holding their scans
-    doc["parts"] = Value::Array(parts_of(store, cache, &all)?);
-    doc["datasets"] = Value::Array(holding_of(store, cache, places, cohort)?);
+    doc["parts"] = Value::Array(parts_of(store, cache, roots, all)?);
+    let held = gathered
+        .holding
+        .get(&cohort.id)
+        .unwrap_or(&Vec::new())
+        .clone();
+    doc["datasets"] = Value::Array(holding_of(store, cache, places, cohort, &held)?);
     if detail {
-        let mut joins = joins_of(&all);
+        let mut joins = joins_of(all);
         // a dataset's digest names the dataset that fed it
         for j in joins.iter_mut() {
             if j["what"] == "digest"
                 && let Some(batch) = j["batch"].as_i64()
             {
-                j["dataset"] = json!(dataset_of_batch(store, cache, batch)?);
+                j["dataset"] = json!(dataset_of_batch(store, cache, roots, batch)?);
             }
         }
         doc["joins"] = Value::Array(joins);
@@ -1530,9 +1619,10 @@ pub fn list(store: &mut Store) -> Result<Vec<Value>, StoreError> {
     let places = place::active(store)?;
     let items = open_items(store)?;
     let mut cache = HashMap::new();
+    let gathered = Gathered::read(store, None)?;
     all(store)?
         .iter()
-        .map(|c| document(store, &mut cache, &places, &items, c, false))
+        .map(|c| document(store, &mut cache, &places, &items, &gathered, c, false))
         .collect()
 }
 
@@ -1545,8 +1635,9 @@ pub fn show(store: &mut Store, name: &str) -> Result<Option<Value>, StoreError> 
     let places = place::active(store)?;
     let items = open_items(store)?;
     let mut cache = HashMap::new();
+    let gathered = Gathered::read(store, Some(c.id))?;
     Ok(Some(document(
-        store, &mut cache, &places, &items, &c, true,
+        store, &mut cache, &places, &items, &gathered, &c, true,
     )?))
 }
 

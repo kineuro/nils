@@ -354,6 +354,12 @@ pub fn load_patched(
     })
 }
 
+/// [`build`], for the cache's tests.
+#[cfg(test)]
+pub(crate) fn build_for_tests(dir: &Path) -> R<Pack> {
+    build(dir, None)
+}
+
 fn build(dir: &Path, overlay: Option<&Overlay>) -> R<Pack> {
     let mut pack = build_unjudged(dir, overlay)?;
     // The pack's own corpus is the last thing between it and use, and it

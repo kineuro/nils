@@ -541,6 +541,228 @@ fn a_reader_of_the_manifest_has_its_build_queued_before_the_pyramid_exists() {
     server.finish();
 }
 
+/// #454: a build a stop cut short (its job failed by the next claim, for a
+/// heartbeat gone stale or a process gone) is queued again when its picture
+/// is next asked for, once per stack in a process, and gets built; a build
+/// that failed with a class of its own stays 422 and queues nothing.
+#[test]
+fn a_picture_whose_build_a_restart_cut_short_is_built_again() {
+    use nils_registry::store::{Param, Store};
+    let (home, _src) = registry();
+    let work = TempDir::new("instances-work-cut");
+    ok(
+        &home,
+        &[
+            "place",
+            "add",
+            "scratch",
+            work.path().to_str().unwrap(),
+            "--role",
+            "working",
+        ],
+        None,
+    );
+    let fail = |job: i64, words: &str| {
+        let mut store = Store::open_sqlite(&home.path().join("registry.db")).unwrap();
+        store
+            .execute(
+                "UPDATE job SET state = 'failed', finished_at = '2026-10-15T00:00:00Z', error = ?1 WHERE id = ?2",
+                &[Param::from(words), Param::Int(job)],
+            )
+            .unwrap();
+    };
+    let jobs = || {
+        let mut store = Store::open_sqlite(&home.path().join("registry.db")).unwrap();
+        store
+            .query("SELECT COUNT(*) FROM job WHERE kind = 'pyramid'", &[])
+            .unwrap()[0]
+            .int(0)
+            .unwrap()
+    };
+    let server = Server::start(
+        &home,
+        6,
+        &[
+            "--auth",
+            "token",
+            "--token",
+            &format!("{REVIEWER}=rev@lab:reviewer"),
+        ],
+    );
+    let (status, doc) = server.json("/api/instances/1/manifest", REVIEWER);
+    assert_eq!(status, 202, "{doc}");
+    let first = doc["job"].as_i64().unwrap();
+    // the engine stopped while it built: the next claim failed its job
+    fail(first, "stale: no heartbeat since 2026-10-15T00:00:00Z");
+    let (status, doc) = server.json("/api/instances/1/manifest", REVIEWER);
+    assert_eq!(status, 202, "queued again: {doc}");
+    let again = doc["job"].as_i64().unwrap();
+    assert_ne!(again, first, "{doc}");
+    assert_eq!(doc["state"], "queued", "{doc}");
+    // cut short twice in one process: said, not built over and over
+    fail(
+        again,
+        "process 4242 is gone; no heartbeat since 2026-10-15T00:00:00Z",
+    );
+    let (status, doc) = server.json("/api/instances/1/manifest", REVIEWER);
+    assert_eq!(status, 422, "{doc}");
+    // a build that failed on the stack's own account stays failed
+    let (status, doc) = server.json("/api/instances/2/manifest", REVIEWER);
+    assert_eq!(status, 202, "{doc}");
+    let other = doc["job"].as_i64().unwrap();
+    fail(other, "stack 2: its pyramid was not built (unreadable)");
+    let before = jobs();
+    let (status, doc) = server.json("/api/instances/2/manifest", REVIEWER);
+    assert_eq!(status, 422, "{doc}");
+    assert_eq!(doc["reason"], "unreadable", "{doc}");
+    assert_eq!(jobs(), before, "nothing queued");
+    let (status, doc) = server.json("/api/instances/2/manifest", REVIEWER);
+    assert_eq!(status, 422, "{doc}");
+    server.finish();
+    // the build queued again is a build of the stack, and it builds
+    let mut store = Store::open_sqlite(&home.path().join("registry.db")).unwrap();
+    store
+        .execute(
+            "UPDATE job SET state = 'queued', finished_at = NULL, error = NULL WHERE id = ?1",
+            &[Param::Int(again)],
+        )
+        .unwrap();
+    ok(
+        &home,
+        &["jobs", "work", "--once", "--lane", "pictures"],
+        None,
+    );
+    let state = store
+        .query(&format!("SELECT state FROM job WHERE id = {again}"), &[])
+        .unwrap()[0]
+        .text(0)
+        .unwrap()
+        .to_string();
+    assert_eq!(state, "done");
+    assert!(
+        walk_has_manifest(work.path()),
+        "the picture is built into the working place"
+    );
+}
+
+/// #460: between two stacks of a background build, a reader's build that
+/// names the background build's place is built there, `--force` building a
+/// stack that has its pyramid again; one for another working place is left
+/// to the lane and lands in its own place's folder.
+#[test]
+fn a_build_asked_during_a_background_build_keeps_its_place_and_force() {
+    use nils_registry::store::Store;
+    let (home, _src) = registry();
+    let first = TempDir::new("instances-work-first");
+    let second = TempDir::new("instances-work-second");
+    for (name, dir) in [("first", &first), ("second", &second)] {
+        ok(
+            &home,
+            &[
+                "place",
+                "add",
+                name,
+                dir.path().to_str().unwrap(),
+                "--role",
+                "working",
+            ],
+            None,
+        );
+    }
+    let classified = Store::open_sqlite(&home.path().join("registry.db"))
+        .unwrap()
+        .query("SELECT MAX(id) FROM job WHERE kind = 'classify'", &[])
+        .unwrap()[0]
+        .int(0)
+        .unwrap();
+    // stack 1 has its pyramid in the second place
+    ok(
+        &home,
+        &["pyramid", "build", "--stack", "1", "--place", "second"],
+        None,
+    );
+    let manifest = |dir: &TempDir, stack: i64| -> Option<serde_json::Value> {
+        std::fs::read(dir.path().join(format!("pyramids/{stack}/manifest.json")))
+            .ok()
+            .map(|b| serde_json::from_slice(&b).unwrap())
+    };
+    let built_at = manifest(&second, 1).unwrap()["built_at"].clone();
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let queue = |words: &[&str]| -> i64 {
+        let mut args = vec!["jobs", "enqueue", "--"];
+        args.extend_from_slice(words);
+        let out = ok(&home, &args, None);
+        out.split(|c: char| !c.is_ascii_digit())
+            .find(|w| !w.is_empty())
+            .and_then(|w| w.parse().ok())
+            .unwrap_or_else(|| panic!("no job id in {out}"))
+    };
+    let forced = queue(&[
+        "pyramid", "build", "--stack", "1", "--place", "second", "--force",
+    ]);
+    let elsewhere = queue(&["pyramid", "build", "--stack", "2"]);
+    // the background build on the second place
+    ok(
+        &home,
+        &[
+            "pyramid",
+            "build",
+            "--classified",
+            &classified.to_string(),
+            "--place",
+            "second",
+        ],
+        None,
+    );
+    let mut store = Store::open_sqlite(&home.path().join("registry.db")).unwrap();
+    let row = |store: &mut Store, id: i64| -> (String, Option<String>) {
+        let r = &store
+            .query(
+                &format!("SELECT state, result FROM job WHERE id = {id}"),
+                &[],
+            )
+            .unwrap()[0];
+        (
+            r.text(0).unwrap().to_string(),
+            r.opt_text(1).unwrap().map(str::to_string),
+        )
+    };
+    let (state, result) = row(&mut store, forced);
+    assert_eq!(state, "done", "{result:?}");
+    let result: serde_json::Value = serde_json::from_str(&result.unwrap()).unwrap();
+    assert!(result.get("skipped").is_none(), "built again: {result}");
+    assert_ne!(
+        manifest(&second, 1).unwrap()["built_at"],
+        built_at,
+        "a new pyramid"
+    );
+    // the default place's build was not taken, nor written into the second
+    assert_eq!(row(&mut store, elsewhere).0, "queued");
+    assert!(manifest(&first, 2).is_none());
+    ok(
+        &home,
+        &["jobs", "work", "--once", "--lane", "pictures"],
+        None,
+    );
+    assert_eq!(row(&mut store, elsewhere).0, "done");
+    assert!(manifest(&first, 2).is_some(), "built into its own place");
+}
+
+fn walk_has_manifest(dir: &Path) -> bool {
+    std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .any(|e| {
+            let p = e.path();
+            if p.is_dir() {
+                walk_has_manifest(&p)
+            } else {
+                p.file_name().is_some_and(|n| n == "manifest.json")
+            }
+        })
+}
+
 /// E6: turn a packed level back into the layout before, a file per tile
 /// (`<level>/<plane>/<row>_<column>.j2c`), as a pyramid built before E6
 /// was kept: the packed file's index read as its header says.

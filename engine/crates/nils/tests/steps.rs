@@ -628,9 +628,51 @@ fn round(pg: Option<(String, String)>) {
     assert_eq!(status, 409, "{doc}");
     assert_eq!(doc["reason"], "no_scans", "{doc}");
 
-    let (status, started) = server.run("datasets/ds", "body_part", OPS);
-    assert_eq!(status, 202, "{started}");
+    // #455: two runs asked at once (a double click) queue one job; the
+    // other is refused, naming it
+    let barrier = std::sync::Barrier::new(2);
+    let both: Vec<(u16, Value)> = std::thread::scope(|s| {
+        let asks: Vec<_> = (0..2)
+            .map(|_| {
+                s.spawn(|| {
+                    barrier.wait();
+                    server.run("datasets/ds", "body_part", OPS)
+                })
+            })
+            .collect();
+        asks.into_iter().map(|a| a.join().unwrap()).collect()
+    });
+    let mut statuses: Vec<u16> = both.iter().map(|(status, _)| *status).collect();
+    statuses.sort_unstable();
+    assert_eq!(statuses, [202, 409], "{both:?}");
+    let (_, started) = both
+        .iter()
+        .find(|(status, _)| *status == 202)
+        .unwrap()
+        .clone();
+    let (_, lost) = both.iter().find(|(status, _)| *status == 409).unwrap();
     let job = started["job"].as_i64().unwrap();
+    assert_eq!(lost["reason"], "running", "{lost}");
+    assert!(
+        lost["error"]
+            .as_str()
+            .unwrap()
+            .contains(&format!("job {job}")),
+        "{lost}"
+    );
+    {
+        let mut store = home.store();
+        let jobs = store.qualified("job");
+        let queued = store
+            .query(
+                &format!("SELECT COUNT(*) FROM {jobs} WHERE kind = 'pipeline'"),
+                &[],
+            )
+            .unwrap()[0]
+            .int(0)
+            .unwrap();
+        assert_eq!(queued, 1, "one job row");
+    }
     assert_eq!(started["state"], "queued", "{started}");
     assert_eq!(started["step"], "body_part", "{started}");
     assert_eq!(started["for"], "dataset:ds", "{started}");

@@ -1082,6 +1082,11 @@ pub fn serve(home: &Home, args: ServeArgs) -> Result<(), Exit> {
     // where an installer leaves them; without any, the engine still serves
     // and the doors that need a pack say so.
     let pack_dir = crate::pack_dir(home, args.pack_dir.clone()).ok();
+    // the Data page's speed (2026-10-15): every pack is loaded, its corpus
+    // run, before the doors open, so that no request pays for it
+    if let Some(d) = &pack_dir {
+        warm_packs(d, &args.ask_pack);
+    }
     let server =
         listen(&args.bind).map_err(|e| fail(format!("cannot listen on {}: {e}", args.bind)))?;
     let bound = server
@@ -1172,6 +1177,16 @@ pub fn serve(home: &Home, args: ServeArgs) -> Result<(), Exit> {
         backup_dir: args.backup_dir.clone(),
         pick_references: Default::default(),
     });
+    // and the sources door's document read once behind the doors, so the
+    // Data page's first visit after a start finds it kept
+    {
+        let home = home.clone();
+        std::thread::spawn(move || {
+            if let Ok(mut registry) = home.open() {
+                let _ = crate::sources::document_kept(&mut registry, SOURCES_RECENT);
+            }
+        });
+    }
     let limit = args.requests;
     // A job a door queues runs without anyone starting a worker by hand. A
     // registry's queue has one worker, so where another already holds it,
@@ -1621,6 +1636,34 @@ impl Watchdog {
     }
 }
 
+/// How many recent digests the desk's Data page asks the sources door for,
+/// which the engine reads once as it starts.
+const SOURCES_RECENT: usize = 12;
+
+/// Load every pack in the folder, each on a thread of its own, and the
+/// served one as the reader keeps it: a pack's load runs its whole corpus,
+/// a second or more, which the first request after a start paid before
+/// (the Data page's speed, 2026-10-15). A pack that does not load is said
+/// by the door that needs it, as before.
+fn warm_packs(dir: &std::path::Path, served: &str) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let packs: Vec<std::path::PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.join("pack.yml").is_file())
+        .collect();
+    std::thread::scope(|s| {
+        for p in &packs {
+            s.spawn(move || {
+                let _ = nils_pack::load(p, None);
+            });
+        }
+    });
+    let _ = crate::reader::served_pack(Some(dir), served);
+}
+
 /// How long a handler's registry connection may sit idle before the next
 /// request asks it whether it still answers: one round trip, and a burst
 /// of requests (a gallery's pictures, a volume's slabs) asks once.
@@ -1947,10 +1990,29 @@ fn route(
     query: &HashMap<String, String>,
     body: &str,
 ) -> Reply {
-    match routed(doors, registry, ask, caller, method, path, query, body) {
+    let reply = match routed(doors, registry, ask, caller, method, path, query, body) {
         Ok(r) => r,
         Err(r) => r,
+    };
+    // #458 and the Data page's speed: a write to a place or a dataset (a
+    // declaration, an explore, a move, the originals' act, a step's run
+    // asked for) can change what a folder holds or how it is read, and what
+    // the sources door answers. Once the door has written (its answer a
+    // success, its writes committed), the kept layouts and the kept sources
+    // document are read again; a read, or a door that refused, forgets
+    // nothing.
+    if writes_a_place(method, path) && (200..300).contains(&reply.status) {
+        crate::dataset::forget_layouts();
+        crate::sources::forget();
     }
+    reply
+}
+
+/// Whether a request is one of the doors that write a place or a dataset.
+fn writes_a_place(method: &Method, path: &str) -> bool {
+    *method != Method::Get
+        && *method != Method::Head
+        && (path.starts_with("/api/places") || path.starts_with("/api/datasets"))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2179,6 +2241,73 @@ fn routed(
                 .as_u64()
                 .map(|n| (n as usize).clamp(1, 50))
                 .unwrap_or(5);
+            // #451: a rehearsal over more than a few thousand stacks is a
+            // job, as the other heavy doors' work is, and over the cap it is
+            // refused; a small one is answered at once
+            let base = nils_pack::load(&dir, None)
+                .map_err(|e| Reply::error(500, format!("the pack {name}: {e}")))?;
+            // the scope read once: counted here, and replayed from it below
+            let scoped = match nils_classify::effect::scope(
+                registry.store(),
+                &base,
+                &patch,
+                scope.clone(),
+            ) {
+                Ok(s) => s,
+                Err(nils_classify::effect::Error::Refused(m)) => return Err(Reply::error(400, m)),
+                Err(e) => return Err(Reply::error(500, e.to_string())),
+            };
+            let stacks = scoped.stacks();
+            if stacks > crate::rehearse::cap() {
+                let mut r = Reply::error(
+                    422,
+                    nils_classify::effect::over_cap(stacks, crate::rehearse::cap()),
+                );
+                r.body["stacks"] = serde_json::json!(stacks);
+                r.body["cap"] = serde_json::json!(crate::rehearse::cap());
+                return Err(r);
+            }
+            if stacks > crate::rehearse::at_once() {
+                let mut whole = doc.clone();
+                if whole.get("pack").is_none() {
+                    whole["pack"] = serde_json::json!(name);
+                }
+                if let Some(o) = whole.as_object_mut() {
+                    o.remove("scope");
+                    o.remove("examples");
+                }
+                let mut command = vec![
+                    "pack".to_string(),
+                    "rehearse".to_string(),
+                    "--patch-json".to_string(),
+                    whole.to_string(),
+                    "--examples".to_string(),
+                    examples.to_string(),
+                    "--cap".to_string(),
+                    crate::rehearse::cap().to_string(),
+                    "--json".to_string(),
+                ];
+                if let Some(s) = &scope {
+                    command.extend(["--scope".to_string(), s.text()]);
+                }
+                if let Some(d) = &doors.pack_dir {
+                    command.extend(["--pack-dir".to_string(), d.display().to_string()]);
+                }
+                let id = nils_registry::job::enqueue_with(
+                    registry.store(),
+                    &command,
+                    Some(&format!("rehearse {name}")),
+                    Some(&caller.principal),
+                    queued_by(caller),
+                )
+                .map_err(job_err)?;
+                return Ok(Reply::accepted(serde_json::json!({
+                    "job": id, "state": "queued", "stacks": stacks,
+                    "message": format!(
+                        "{stacks} stacks are rehearsed as job {id}; its result is the report"
+                    ),
+                })));
+            }
             // the replay shares the machine with the doors that serve: half
             // its threads at most
             let workers = std::thread::available_parallelism().map_or(2, |n| (n.get() / 2).max(1));
@@ -2186,8 +2315,10 @@ fn routed(
                 scope,
                 examples,
                 workers,
+                cap: Some(crate::rehearse::at_once()),
+                progress: None,
             };
-            match crate::rehearse::report(registry, &dir, &patch, &settings) {
+            match crate::rehearse::report_scoped(registry, &dir, &patch, &settings, scoped) {
                 Ok(mut answer) => {
                     // record 55 K7: a station name is quasi-identifying, and
                     // below detail quasi a scanner is answered as its shape
@@ -2627,9 +2758,12 @@ fn routed(
                         place::set(registry.store(), p.id, None, None, Some(&probed))?;
                     }
                 }
+                crate::sources::forget();
             }
+            // kept while what it was read from is the same (the Data page's
+            // speed, 2026-10-15)
             Ok(Reply::ok(
-                crate::sources::document(registry, recent)
+                crate::sources::document_kept(registry, recent)
                     .map_err(|e| Reply::error(500, e.to_string()))?,
             ))
         }
@@ -2790,6 +2924,7 @@ fn routed(
             }
             let mut rows = place::list(registry.store())?;
             if refresh {
+                crate::dataset::forget_layouts();
                 let mut fresh = Vec::with_capacity(rows.len());
                 for p in rows {
                     if p.retired_at.is_some() {
@@ -2820,6 +2955,10 @@ fn routed(
                 .chain(std::iter::once(("registry", doors.home.dir())))
                 .collect();
             let scheme = registry.meta().pseudonym_scheme;
+            // #458: each dataset's layout from its kept copy, read again only
+            // where its folder changed, and the looks into loose entries
+            // bounded by one budget for the whole request
+            let mut budget = crate::dataset::Budget::per_request();
             let places: Vec<serde_json::Value> = rows
                 .iter()
                 .map(|p| {
@@ -2850,7 +2989,7 @@ fn routed(
                         } else {
                             doc["layout"] = crate::dataset::layout_doc_listed(
                                 folder,
-                                &crate::dataset::detect(folder),
+                                &crate::dataset::layout_kept(p, &mut budget),
                             );
                         }
                         // what keeps it from being read, in words; null when
@@ -4701,7 +4840,7 @@ fn routed(
                 .map_err(|e| Reply::error(500, format!("the pack {name}: {e}")))?;
             let scheme = match doc["scheme"].as_str() {
                 None | Some("default" | "day") => nils_registry::session::Scheme::default(),
-                Some(n) => crate::stored_scheme(registry, n).map_err(Reply::from)?,
+                Some(n) => crate::scheme_named(registry, n)?,
             };
             // record 55, decision 6: a pick made for a dataset or a cohort
             // belongs to the scope whose picks it reads; one of no stack
@@ -4904,7 +5043,7 @@ fn routed(
                 && n != "default"
                 && n != "day"
             {
-                crate::stored_scheme(registry, &n).map_err(Reply::from)?;
+                crate::scheme_named(registry, &n)?;
                 command.extend(["--scheme-name".to_string(), n]);
             }
             let command = located(doors, registry.store(), command)?;
@@ -5160,7 +5299,12 @@ fn scans_door(
     // record 55 H2: each scan's picture inline and its open questions, so
     // a page of the grid is one request
     if pictures {
-        crate::scans::with_pictures(registry, caller, &doors.home, &mut doc)?;
+        // with `links=1` each picture is the address of the preview door's
+        // middle plane rather than its bytes (the Data page's speed)
+        let links = query
+            .get("links")
+            .is_some_and(|p| matches!(p.as_str(), "1" | "true"));
+        crate::scans::with_pictures(registry, caller, &doors.home, &mut doc, links)?;
     }
     Ok(Reply::ok(doc))
 }
@@ -8207,5 +8351,27 @@ mod query_tests {
         assert_eq!(decoded("100%"), "100%");
         assert_eq!(decoded("%zz"), "%zz");
         assert_eq!(decoded("%25zz"), "%zz");
+    }
+}
+
+#[cfg(test)]
+mod forgets {
+    use super::{Method, writes_a_place};
+
+    /// The kept layouts and sources document are forgotten by the doors that
+    /// write a place or a dataset, never by a read or another door's write.
+    #[test]
+    fn only_a_place_s_or_a_dataset_s_write_forgets_what_is_kept() {
+        assert!(writes_a_place(&Method::Post, "/api/places"));
+        assert!(writes_a_place(&Method::Put, "/api/places/3"));
+        assert!(writes_a_place(&Method::Post, "/api/places/explore"));
+        assert!(writes_a_place(
+            &Method::Post,
+            "/api/datasets/ds/steps/body_part/run"
+        ));
+        assert!(!writes_a_place(&Method::Get, "/api/places"));
+        assert!(!writes_a_place(&Method::Get, "/api/sources"));
+        assert!(!writes_a_place(&Method::Post, "/api/picks/map"));
+        assert!(!writes_a_place(&Method::Post, "/api/ask"));
     }
 }

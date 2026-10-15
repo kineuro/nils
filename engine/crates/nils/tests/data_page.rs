@@ -1948,6 +1948,105 @@ fn a_removed_dataset_s_name_is_free_for_its_folder_again() {
     assert_eq!(status, 409, "{taken}");
 }
 
+/// #459: every key `GET /api/places` answers is named in the contract's
+/// shape of its 200, on a root with a dataset under it, a dataset with
+/// loose entries whose state is a question, and a legacy tree.
+#[test]
+fn every_field_the_places_door_answers_is_in_its_contract() {
+    let home = Home {
+        dir: TempDir::new("data-page-contract-home"),
+        pg: None,
+    };
+    let (good, _, err) = home.run(&["key", "add", "k"], Some("a data page test key\n"));
+    assert!(good, "{err}");
+    home.ok(&["init", "--key", "k"]);
+    let root = TempDir::new("data-page-contract-root");
+    std::fs::create_dir_all(root.path().join("fresh/derivatives/dcm-anon")).unwrap();
+    let old = TempDir::new("data-page-contract-legacy");
+    std::fs::create_dir_all(old.path().join("derivatives/dcm-anon")).unwrap();
+    home.ok(&[
+        "place",
+        "add",
+        "data-test",
+        root.path().to_str().unwrap(),
+        "--role",
+        "source",
+    ]);
+    home.ok(&[
+        "place",
+        "add",
+        "legacy",
+        old.path().join("derivatives/dcm-anon").to_str().unwrap(),
+        "--role",
+        "source",
+    ]);
+    let server = Worked::serve(&home, false);
+    let (status, made) = server.call(
+        "POST",
+        "/api/places",
+        Some(json!({"role": "source", "root": "data-test", "folder": "fresh"})),
+        OPS,
+    );
+    assert_eq!(status, 201, "{made}");
+    // its tree goes and an entry lies loose: its state is a question
+    std::fs::remove_dir(root.path().join("fresh/derivatives/dcm-anon")).unwrap();
+    std::fs::create_dir_all(root.path().join("fresh/a-folder")).unwrap();
+    let places = server.get("/api/places", OPS);
+    let kinds: Vec<&str> = places["places"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|p| p["dataset"]["kind"].as_str())
+        .collect();
+    for kind in ["root", "dataset", "legacy"] {
+        assert!(kinds.contains(&kind), "{kind}: {places}");
+    }
+    assert!(
+        places["places"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["layout"]["move_into"].is_object()),
+        "a dataset whose state is a question: {places}"
+    );
+    // the contract's words for the door
+    let contract = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../contracts/openapi/v7/openapi.yaml"),
+    )
+    .unwrap();
+    let at = contract
+        .find("\n  /api/places:\n")
+        .expect("the places entry");
+    let entry = &contract[at..];
+    let entry = &entry[..entry[1..].find("\n  /api/").unwrap()];
+    let shape = &entry[entry.find("\"200\":").unwrap()..];
+    let shape = &shape[..shape.find('\n').unwrap()];
+    let words: std::collections::BTreeSet<&str> = shape
+        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .filter(|w| !w.is_empty())
+        .collect();
+    fn keys(v: &Value, out: &mut std::collections::BTreeSet<String>) {
+        match v {
+            Value::Object(m) => {
+                for (k, v) in m {
+                    out.insert(k.clone());
+                    keys(v, out);
+                }
+            }
+            Value::Array(a) => a.iter().for_each(|v| keys(v, out)),
+            _ => {}
+        }
+    }
+    let mut answered = std::collections::BTreeSet::new();
+    keys(&places, &mut answered);
+    let missing: Vec<&String> = answered
+        .iter()
+        .filter(|k| !words.contains(k.as_str()))
+        .collect();
+    assert!(missing.is_empty(), "not in the contract: {missing:?}");
+}
+
 /// Record 55 (Nima's duplicate policy, 2026-10-10): a dataset holds every
 /// scan its tree has a file of, whoever read it first. A second dataset
 /// holding copies of one subject's scans (one of them twice) and a file
