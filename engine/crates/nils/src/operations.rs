@@ -1400,6 +1400,46 @@ pub(crate) fn save_stacks(
     }
 }
 
+/// The lock one step's door over one scope holds from its busy check to
+/// its insert (#455), one per scope and step, kept for the process.
+fn door_turn(target: &str, step: &str) -> std::sync::Arc<std::sync::Mutex<()>> {
+    static TURNS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<std::sync::Mutex<()>>>>,
+    > = std::sync::OnceLock::new();
+    let turns = TURNS.get_or_init(Default::default);
+    let mut turns = turns.lock().unwrap_or_else(|e| e.into_inner());
+    turns
+        .entry(format!("{target}\u{0}{step}"))
+        .or_default()
+        .clone()
+}
+
+/// The oldest job a door queued for the step over the scope, still open,
+/// queued before `mine`: none where `mine` is the first.
+fn earlier_open(
+    store: &mut Store,
+    step: &str,
+    target: &str,
+    mine: i64,
+) -> Result<Option<i64>, StoreError> {
+    Ok(asked(store, step, target)?
+        .into_iter()
+        .filter(|j| j.id < mine && j.open())
+        .map(|j| j.id)
+        .min())
+}
+
+/// Remove a job this door queued, while no worker has taken it: whether it
+/// went (a job taken already runs and is answered as queued).
+fn withdraw_queued(store: &mut Store, id: i64) -> Result<bool, StoreError> {
+    let sql = format!(
+        "DELETE FROM {} WHERE id = {} AND state = 'queued'",
+        store.qualified("job"),
+        store.dialect().param(1, nils_registry::schema::Type::Int)
+    );
+    Ok(store.execute(&sql, &[nils_registry::store::Param::Int(id)])? > 0)
+}
+
 /// `POST /api/datasets/{name}/steps/{step}/run` and `POST
 /// /api/cohorts/{name}/steps/{step}/run`: the step's run over the scans it
 /// counts, frozen now into a handle, queued for the dataset or the cohort
@@ -1438,6 +1478,11 @@ pub(crate) fn run_door(
         .reply(step));
     };
     let target = format!("{}:{}", scope.kind(), scope.name());
+    // #455: the busy check and the insert are one step: a second request
+    // for the same step over the same scope waits here until the first has
+    // queued its job, then finds it and is refused
+    let turn = door_turn(&target, step);
+    let _held = turn.lock().unwrap_or_else(|e| e.into_inner());
     let planned = plan(registry, step).map_err(failed)?;
     let epoch = registry.meta().epoch;
     let ids;
@@ -1505,6 +1550,21 @@ pub(crate) fn run_door(
         extra,
     )
     .map_err(crate::serve::job_err)?;
+    // and where another process queued the same step meanwhile, the older
+    // job is the one that runs: this one goes while it is still queued
+    if let Some(winner) = earlier_open(store, step, &target, id).map_err(failed)?
+        && withdraw_queued(store, id).map_err(failed)?
+    {
+        return Err(Refused::new(
+            409,
+            "running",
+            format!(
+                "{} runs already over these scans, as job {winner}",
+                title(step)
+            ),
+        )
+        .reply(step));
+    }
     Ok(Reply::accepted(json!({
         "job": id, "state": "queued", "step": step, "for": target,
         "scans": frozen, "handle": handle, "command": command,
