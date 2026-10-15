@@ -633,10 +633,14 @@ pub(crate) fn map(
             page
         }
     };
-    if let Some(layer) = layer {
+    if let Some(layer) = layer
+        && door == Door::Map
+    {
         // whether the step that answers the layer has run over the scope,
         // as the scope's Data page says it, with why a run of it would be
-        // refused now
+        // refused now: on the map door alone, the scope's summary, since
+        // the subjects and strips doors are asked beside it and its cost
+        // was measured on each (2026-10-15)
         out["layer"]["step"] = layer_step(registry, &scope, caller, layer)?;
     }
     Ok(Reply::ok(out))

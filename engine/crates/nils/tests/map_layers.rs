@@ -691,7 +691,10 @@ fn cohort_layers(pg: Option<(String, String)>) {
         .map(|v| v.as_str().unwrap().to_string())
         .collect();
     assert_eq!(values, ["head", "spine"], "{strips}");
-    assert_eq!(strips["layer"]["step"]["step"], "body_part", "{strips}");
+    assert!(
+        strips["layer"].get("step").is_none(),
+        "the step is the map door's: {strips}"
+    );
     let mine = strips["subjects"]
         .as_array()
         .unwrap()
@@ -991,9 +994,10 @@ fn dataset_layers(pg: Option<(String, String)>) {
 /// How much time a layer adds to the map doors (record 55, decision 6:
 /// they "should answer in about a second for a scope of 5,000 visits"), on
 /// a synthetic registry of `NILS_LAYER_SUBJECTS` subjects (default 2,000),
-/// each door asked five times without a layer and five times with each,
-/// the median of each printed. Run by hand:
-/// `cargo test -p nils --test map_layers -- --ignored --nocapture`.
+/// each door asked nine times in pairs, without a layer and then with
+/// one, the medians and the median of the pairs' differences printed. Run
+/// by hand, in a release build:
+/// `cargo test --release -p nils --test map_layers -- --ignored --nocapture`.
 #[test]
 #[ignore]
 fn a_layer_adds_little_time() {
@@ -1041,7 +1045,10 @@ fn a_layer_adds_little_time() {
     let ingest = TempDir::new("map-layers-time-ingest");
     let server = Served::start(&home, ingest.path(), false);
     let scope = json!({"cohort": "all"});
-    let median = |path: &str, layer: Option<&str>| {
+    // each layer is timed against the door without one in pairs taken one
+    // after the other, so that the machine's load, which drifts, falls on
+    // both; the median of the pairs' differences is what the layer adds
+    let body_of = |path: &str, layer: Option<&str>| {
         let mut body = json!({"scope": scope, "role": "t1w"});
         if path.ends_with("subjects") {
             body["group"] = json!({"by": "breaks"});
@@ -1049,17 +1056,16 @@ fn a_layer_adds_little_time() {
         if let Some(l) = layer {
             body["layer"] = json!(l);
         }
-        // once to warm
+        body
+    };
+    let timed = |path: &str, body: &Value| {
+        let at = std::time::Instant::now();
         server.post(path, body.clone(), OPS);
-        let mut times: Vec<f64> = (0..5)
-            .map(|_| {
-                let at = std::time::Instant::now();
-                server.post(path, body.clone(), OPS);
-                at.elapsed().as_secs_f64() * 1000.0
-            })
-            .collect();
-        times.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        times[2]
+        at.elapsed().as_secs_f64() * 1000.0
+    };
+    let median = |mut v: Vec<f64>| {
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        v[v.len() / 2]
     };
     let map = server.post(
         "/api/picks/map",
@@ -1075,11 +1081,27 @@ fn a_layer_adds_little_time() {
         "/api/picks/map/subjects",
         "/api/picks/map/strips",
     ] {
-        let plain = median(path, None);
-        let mut line = format!("{path}: no layer {plain:.0} ms");
+        let plain = body_of(path, None);
+        let mut line = String::from(path);
         for layer in ["body_region", "body_part", "post_contrast"] {
-            let with = median(path, Some(layer));
-            line.push_str(&format!(", {layer} {with:.0} ms (+{:.0})", with - plain));
+            let with = body_of(path, Some(layer));
+            // once each to warm
+            timed(path, &plain);
+            timed(path, &with);
+            let (mut a, mut b, mut d) = (Vec::new(), Vec::new(), Vec::new());
+            for _ in 0..9 {
+                let x = timed(path, &plain);
+                let y = timed(path, &with);
+                a.push(x);
+                b.push(y);
+                d.push(y - x);
+            }
+            line.push_str(&format!(
+                "; {layer}: without {:.0} ms, with {:.0} ms, added {:+.0} ms",
+                median(a),
+                median(b),
+                median(d)
+            ));
         }
         eprintln!("{line}");
     }
