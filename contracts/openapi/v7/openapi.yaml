@@ -899,6 +899,7 @@ paths:
       responses:
         "201": {description: "{id, model, role, subject_id, stacks, overruled, replaced, answered, scope}; amended in place on 2026-10-11: `scope`, {kind, id, name}, is the dataset or cohort whose own picks the pick belongs to (null for the pack's), and no date leaves the door, so `session_day` is gone"}
         "403": {description: "No review:work, or an agent or a model acting for the principal"}
+        "404": {description: "No stored scheme of the name `scheme` gives (added in place 2026-10-15)"}
         "409": {description: "Refused in words: a role no pick declares, a stack the fingerprint has not read, stacks of more than one subject or occasion, no why, or no pack served"}
   /api/picks/{id}/withdraw:
     post:
@@ -992,7 +993,7 @@ paths:
         "200": {description: "{role, rules_version, kinds: [{key, visits_with, visits_taken, allowed, used, new}], metrics: {visits, visits_taken, subjects, subjects_taken, alike_data: {kind, visits}, alike_within: {subjects, of}, series_complete: {subjects, of}}, columns: [{key, visits, shared}], shared_visits, matrix: [{kind, cells}], series: [{steps, subjects}], single_visit_subjects, by_visit: [{visit, visits, kinds}], effect?: {visits_changed, subjects_changed, before}, layer?: {layer, operation, values: [{value, visits_with, visits_taken, visits_taken_before?, scans}], none: {visits, scans, taken, taken_before?}, prior_72h?, step: {step, state, job, run, started_at, finished_at, progress, served, answered, look, of, jobs, refusal, label}}}"}
         "400": {description: "No scope or role, a role the pick does not declare, columns other than scanner or dataset, a layer other than body_region, body_part or post_contrast (`field`: layer), a draft that does not pass the checks (`field`), or a root named as a dataset"}
         "403": {description: Neither data:see nor pipelines:see}
-        "404": {description: No such cohort or dataset}
+        "404": {description: "No such cohort, dataset or stored scheme (the scheme added in place 2026-10-15)"}
   /api/picks/map/subjects:
     post:
       summary: One page of a group's subjects with their visits as the rules take them (added in place 2026-10-11; data:see or pipelines:see)
@@ -1002,7 +1003,7 @@ paths:
         "200": {description: "{total, page, per_page, subjects: [{subject_id, subject, visits: [{session_id, visit, column, columns, field, kind, stack, stacks, by, changed, pick, why, candidates: [{stacks, kind, score, layer?}], layer?: {taken, scans: {value: count}, none, prior_72h?}}]}], layer?: {layer, operation, values: [value]}}"}
         "400": {description: "As at /api/picks/map, or a group or order that does not read"}
         "403": {description: Neither data:see nor pipelines:see}
-        "404": {description: No such cohort or dataset}
+        "404": {description: "No such cohort, dataset or stored scheme (the scheme added in place 2026-10-15)"}
   /api/picks/map/strips:
     post:
       summary: Every subject's kinds per visit, compactly (added in place 2026-10-11; data:see or pipelines:see)
@@ -1012,7 +1013,7 @@ paths:
         "200": {description: "{kinds: [key], columns: [{key, visits, shared}], shared_visits, subjects: [{subject_id, column, visits: [kind index, -1 for no pick], layer?: {taken: [value index], held: [value index]}}], layer?: {layer, operation, values: [value]}}; a subject's column is the one most of its visits are shown under (added in place 2026-10-12: `shared` and `shared_visits` as at /api/picks/map)"}
         "400": {description: As at /api/picks/map}
         "403": {description: Neither data:see nor pipelines:see}
-        "404": {description: No such cohort or dataset}
+        "404": {description: "No such cohort, dataset or stored scheme (the scheme added in place 2026-10-15)"}
   /api/picks/layer-step:
     get:
       summary: The step that answers a map layer over a dataset or a cohort, alone (added in place 2026-10-15; data:see or pipelines:see, and for a cohort review:see too)

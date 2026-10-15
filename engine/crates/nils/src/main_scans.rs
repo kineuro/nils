@@ -551,7 +551,7 @@ pub(crate) fn map(
     };
     let scheme = match doc["scheme"].as_str() {
         None | Some("default" | "day") => nils_registry::session::Scheme::default(),
-        Some(n) => crate::stored_scheme(registry, n).map_err(Reply::from)?,
+        Some(n) => crate::scheme_named(registry, n)?,
     };
     let layer = layer_of(doc)?;
     let (saved, stored) = current(registry, model, &scope)?;

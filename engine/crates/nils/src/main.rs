@@ -8482,6 +8482,22 @@ pub(crate) fn stored_scheme(registry: &mut Registry, name: &str) -> Result<sessi
     })
 }
 
+/// The session scheme a door names (#453): 404 `no scheme called NAME`
+/// where the registry keeps none, 500 only where the store fails.
+pub(crate) fn scheme_named(
+    registry: &mut Registry,
+    name: &str,
+) -> Result<session::Scheme, crate::serve::Reply> {
+    kept_scheme(registry, name)
+        .map_err(crate::serve::Reply::from)?
+        .ok_or_else(|| {
+            crate::serve::Reply::error(
+                404,
+                format!("no scheme called {name}; GET /api/session-schemes says what there is"),
+            )
+        })
+}
+
 /// The session scheme the registry keeps under a name, or none where it
 /// keeps none.
 pub(crate) fn kept_scheme(

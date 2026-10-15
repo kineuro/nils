@@ -489,6 +489,47 @@ fn cohort_rules(pg: Option<(String, String)>) {
     // a person's pick of nothing on a visit, in the cohort's scope
     let subject_id = subject["subject_id"].as_i64().unwrap();
     let session_id = visit["session_id"].as_i64().unwrap();
+    // #453: a scheme the registry does not keep is not there (404, naming
+    // it), at each door that takes one; nothing failed
+    for (door, body, token) in [
+        (
+            "/api/picks/run",
+            json!({"cohort": "quad", "scheme": "nope"}),
+            OPS,
+        ),
+        (
+            "/api/picks/map",
+            json!({"scope": {"cohort": "quad"}, "role": "t1w", "scheme": "nope"}),
+            OPS,
+        ),
+        (
+            "/api/picks/map/subjects",
+            json!({"scope": {"cohort": "quad"}, "role": "t1w", "scheme": "nope",
+                   "group": {"by": "breaks"}}),
+            OPS,
+        ),
+        (
+            "/api/picks/map/strips",
+            json!({"scope": {"cohort": "quad"}, "role": "t1w", "scheme": "nope"}),
+            OPS,
+        ),
+        (
+            "/api/picks",
+            json!({
+                "role": "t1w", "stacks": [], "why": "no usable T1w on this visit",
+                "cohort": "quad", "subject_id": subject_id, "session_id": session_id,
+                "scheme": "nope",
+            }),
+            CURATOR,
+        ),
+    ] {
+        let (status, refused) = server.call("POST", door, Some(body), token);
+        assert_eq!(status, 404, "{door}: {refused}");
+        assert!(
+            refused.to_string().contains("no scheme called nope"),
+            "{door}: {refused}"
+        );
+    }
     let (status, person) = server.call(
         "POST",
         "/api/picks",

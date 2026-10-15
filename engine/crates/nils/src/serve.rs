@@ -4701,7 +4701,7 @@ fn routed(
                 .map_err(|e| Reply::error(500, format!("the pack {name}: {e}")))?;
             let scheme = match doc["scheme"].as_str() {
                 None | Some("default" | "day") => nils_registry::session::Scheme::default(),
-                Some(n) => crate::stored_scheme(registry, n).map_err(Reply::from)?,
+                Some(n) => crate::scheme_named(registry, n)?,
             };
             // record 55, decision 6: a pick made for a dataset or a cohort
             // belongs to the scope whose picks it reads; one of no stack
@@ -4904,7 +4904,7 @@ fn routed(
                 && n != "default"
                 && n != "day"
             {
-                crate::stored_scheme(registry, &n).map_err(Reply::from)?;
+                crate::scheme_named(registry, &n)?;
                 command.extend(["--scheme-name".to_string(), n]);
             }
             let command = located(doors, registry.store(), command)?;
