@@ -578,7 +578,7 @@ pub(crate) fn map(
     };
     // the scope's visits, in the cache before the map reads them
     visits_cached(registry, &scheme, &subjects)?;
-    let read = main_scans::read(
+    let mut read = main_scans::read(
         registry,
         &Ask {
             model,
@@ -588,7 +588,6 @@ pub(crate) fn map(
             picks: &picks,
             datasets: &datasets,
             withheld: &withheld,
-            layer,
         },
     )
     .map_err(failed)?;
@@ -602,18 +601,42 @@ pub(crate) fn map(
         _ => None,
     };
     let cmp = Compare::new(&read, model, role, saved, draft, reference.as_ref());
+    // the subjects door's page, which a layer is read for alone there
+    let paging = if door == Door::Subjects {
+        let group = Group::parse(&doc["group"]).map_err(|m| Reply::error(400, m))?;
+        let by_changes = match doc["order"].as_str() {
+            None | Some("changes") => true,
+            Some("visits") => false,
+            Some(_) => return Err(Reply::error(400, "order: changes or visits")),
+        };
+        let page = doc["page"].as_u64().unwrap_or(0) as usize;
+        let per_page = doc["per_page"].as_u64().unwrap_or(24).clamp(1, 48) as usize;
+        Some((group, by_changes, page, per_page))
+    } else {
+        None
+    };
+    if let Some(layer) = layer {
+        // a dataset's layer reads the stacks its folder holds a file of, never
+        // every stack of its subjects (Nima, 2026-10-12: a dataset holds
+        // stacks); a cohort's, every stack of its open members
+        let ids = scope_sources(registry, &scope)?;
+        let store = registry.store();
+        let held = ids
+            .as_deref()
+            .map(|ids| crate::operations::held_by(store, "x", ids));
+        let only = paging.as_ref().map(|(group, by_changes, page, per_page)| {
+            main_scans::page_subjects(&read, &cmp, by, group, *by_changes, *page, *per_page)
+        });
+        read.add_layer(store, layer, &withheld, held.as_deref(), only.as_ref())
+            .map_err(failed)?;
+    }
     let mut out = match door {
         Door::Map => main_scans::map(&read, &cmp, model, role, by, version),
         Door::Strips => main_scans::strips(&read, &cmp, model, role, by),
         Door::Subjects => {
-            let group = Group::parse(&doc["group"]).map_err(|m| Reply::error(400, m))?;
-            let by_changes = match doc["order"].as_str() {
-                None | Some("changes") => true,
-                Some("visits") => false,
-                Some(_) => return Err(Reply::error(400, "order: changes or visits")),
+            let Some((group, by_changes, page, per_page)) = paging else {
+                return Err(Reply::error(500, "the subjects door's page was not read"));
             };
-            let page = doc["page"].as_u64().unwrap_or(0) as usize;
-            let per_page = doc["per_page"].as_u64().unwrap_or(24).clamp(1, 48) as usize;
             let mut page =
                 main_scans::subjects(&read, &cmp, by, &group, by_changes, page, per_page);
             // below detail quasi a subject's code and a person's words are
@@ -651,13 +674,41 @@ pub(crate) fn map(
 fn layer_of(doc: &Value) -> Result<Option<Layer>, Reply> {
     match &doc["layer"] {
         Value::Null => Ok(None),
-        Value::String(w) if w.is_empty() => Ok(None),
-        v => v.as_str().and_then(Layer::parse).map(Some).ok_or_else(|| {
-            let mut r = Reply::error(400, "layer: body_region, body_part or post_contrast");
-            r.body["field"] = Value::from("layer");
-            r
-        }),
+        Value::String(w) => layer_named(Some(w)),
+        _ => layer_named(Some("?")),
     }
+}
+
+/// A layer as a door names it, the same words for every door that takes
+/// one: 400 naming the field where it is no layer.
+pub(crate) fn layer_named(word: Option<&str>) -> Result<Option<Layer>, Reply> {
+    Layer::from_word(word).map_err(|words| {
+        let mut r = Reply::error(400, words);
+        r.body["field"] = Value::from("layer");
+        r
+    })
+}
+
+/// A dataset's `source` rows, as its Data page counts its scans by them (the
+/// stacks the rows under its folder hold a file of), as a comma list; none
+/// for a cohort.
+fn scope_sources(registry: &mut Registry, scope: &Scope) -> Result<Option<String>, Reply> {
+    use nils_registry::pick_rules::ScopeKind;
+    if scope.kind == ScopeKind::Cohort {
+        return Ok(None);
+    }
+    let store = registry.store();
+    Ok(Some(
+        match nils_registry::place::show(store, scope.id).map_err(failed)? {
+            Some(place) => crate::sources::source_ids(store, &place)
+                .map_err(failed)?
+                .iter()
+                .map(i64::to_string)
+                .collect::<Vec<_>>()
+                .join(", "),
+            None => String::new(),
+        },
+    ))
 }
 
 /// The step of the operation that answers a layer, over the scope's scans,
@@ -674,23 +725,7 @@ fn layer_step(
     layer: Layer,
 ) -> Result<Value, Reply> {
     use nils_registry::pick_rules::ScopeKind;
-    // a dataset's scans as its Data page counts them: the stacks the
-    // `source` rows under its folder hold a file of
-    let ids = match scope.kind {
-        ScopeKind::Dataset => {
-            let store = registry.store();
-            match nils_registry::place::show(store, scope.id).map_err(failed)? {
-                Some(place) => crate::sources::source_ids(store, &place)
-                    .map_err(failed)?
-                    .iter()
-                    .map(i64::to_string)
-                    .collect::<Vec<_>>()
-                    .join(", "),
-                None => String::new(),
-            }
-        }
-        ScopeKind::Cohort => String::new(),
-    };
+    let ids = scope_sources(registry, scope)?.unwrap_or_default();
     let (held, hide_sealed) = match scope.kind {
         ScopeKind::Dataset => (crate::operations::Scope::Sources(&ids), false),
         ScopeKind::Cohort => (

@@ -51,9 +51,6 @@ pub struct Ask<'a> {
     /// Stacks the caller is not shown (of a sample sealed now): no part of
     /// any visit.
     pub withheld: &'a BTreeSet<i64>,
-    /// A layer over the map, where one is asked: what each visit's scans
-    /// are by one operation's answers.
-    pub layer: Option<Layer>,
 }
 
 /// A pick stored on a visit, applying: a person's or a run's.
@@ -84,7 +81,9 @@ struct Subject {
 pub struct Read {
     subjects: Vec<Subject>,
     datasets: HashMap<i64, Vec<String>>,
-    /// The layer asked, read over the same visits.
+    /// Each study's visit under the scheme, by the study's id.
+    sessions: HashMap<i64, i64>,
+    /// The layer asked, read over the same visits ([`Read::add_layer`]).
     layer: Option<Layered>,
 }
 
@@ -171,14 +170,14 @@ pub fn read(registry: &mut Registry, ask: &Ask<'_>) -> Result<Read, Error> {
             visits,
         });
     }
-    let layer = ask
-        .layer
-        .map(|layer| layered(store, layer, &subjects, &labels, ask.withheld))
-        .transpose()?;
     Ok(Read {
         subjects,
         datasets: ask.datasets.clone(),
-        layer,
+        sessions: labels
+            .iter()
+            .map(|(study, l)| (*study, l.session_id))
+            .collect(),
+        layer: None,
     })
 }
 
@@ -318,6 +317,30 @@ pub fn reference(
 }
 
 impl Read {
+    /// Read a layer over the visits (record 55, decision 6): every MR stack
+    /// of the subjects, or of `only` those (a page of them), that `held_by`
+    /// holds where it is given (a dataset's stacks), a stack in `withheld`
+    /// left out. Reads only.
+    pub fn add_layer(
+        &mut self,
+        store: &mut Store,
+        layer: Layer,
+        withheld: &BTreeSet<i64>,
+        held_by: Option<&str>,
+        only: Option<&BTreeSet<i64>>,
+    ) -> Result<(), StoreError> {
+        self.layer = Some(layered(
+            store,
+            layer,
+            &self.subjects,
+            &self.sessions,
+            withheld,
+            held_by,
+            only,
+        )?);
+        Ok(())
+    }
+
     /// What each visit takes under `rules`: a person's pick where one
     /// stands, else the rules' choice; the scan within the kind when a
     /// reference is given. With `stored`, the saved side: what the picks
@@ -880,21 +903,16 @@ impl Group {
     }
 }
 
-/// `POST /api/picks/map/subjects`: one page of a group's subjects, each
-/// with its visits as the shown side takes them. `order` is `changes`
-/// (the visits the draft changes, then the kinds' breaks) or `visits`.
-#[allow(clippy::too_many_arguments)]
-pub fn subjects(
+/// A group's subjects in the page's order, each by its place in the read,
+/// with how many of its visits the draft changes and how many kinds it takes.
+fn members(
     read: &Read,
     cmp: &Compare,
-    by: Columns,
+    labels: &[Vec<(Vec<String>, String)>],
     group: &Group,
     by_changes: bool,
-    page: usize,
-    per_page: usize,
-) -> Value {
+) -> Vec<(usize, usize, usize)> {
     let shown = cmp.shown();
-    let labels = columns(read, &shown.taken, by).visits;
     let mut found: Vec<(usize, usize, usize)> = Vec::new();
     for (si, (s, t)) in read.subjects.iter().zip(&shown.taken).enumerate() {
         let kinds: BTreeSet<&String> = t.iter().filter_map(|x| x.kind.as_ref()).collect();
@@ -924,6 +942,45 @@ pub fn subjects(
                 .then_with(|| sa.code.cmp(&sb.code))
         }
     });
+    found
+}
+
+/// The subjects of one page of `POST /api/picks/map/subjects`, by id: the
+/// ones a layer is read for on that door.
+pub fn page_subjects(
+    read: &Read,
+    cmp: &Compare,
+    by: Columns,
+    group: &Group,
+    by_changes: bool,
+    page: usize,
+    per_page: usize,
+) -> BTreeSet<i64> {
+    let labels = columns(read, &cmp.shown().taken, by).visits;
+    members(read, cmp, &labels, group, by_changes)
+        .iter()
+        .skip(page.saturating_mul(per_page))
+        .take(per_page)
+        .map(|(si, _, _)| read.subjects[*si].id)
+        .collect()
+}
+
+/// `POST /api/picks/map/subjects`: one page of a group's subjects, each
+/// with its visits as the shown side takes them. `order` is `changes`
+/// (the visits the draft changes, then the kinds' breaks) or `visits`.
+#[allow(clippy::too_many_arguments)]
+pub fn subjects(
+    read: &Read,
+    cmp: &Compare,
+    by: Columns,
+    group: &Group,
+    by_changes: bool,
+    page: usize,
+    per_page: usize,
+) -> Value {
+    let shown = cmp.shown();
+    let labels = columns(read, &shown.taken, by).visits;
+    let found = members(read, cmp, &labels, group, by_changes);
     let total = found.len();
     let page_of: Vec<Value> = found
         .iter()
@@ -1066,6 +1123,17 @@ pub enum Layer {
 }
 
 impl Layer {
+    /// A layer a door names, none where it names none or names it empty;
+    /// the words of the refusal where it names one that is no layer.
+    pub fn from_word(word: Option<&str>) -> Result<Option<Layer>, &'static str> {
+        match word.map(str::trim) {
+            None | Some("") => Ok(None),
+            Some(w) => Layer::parse(w)
+                .map(Some)
+                .ok_or("layer: body_region, body_part or post_contrast"),
+        }
+    }
+
     pub fn parse(word: &str) -> Option<Layer> {
         match word {
             "body_region" => Some(Layer::BodyRegion),
@@ -1120,13 +1188,14 @@ impl Layer {
             .collect::<BTreeSet<String>>()
             .into_iter()
             .collect();
-        out.sort_by_key(|v| self.position(v));
+        out.sort_by_cached_key(|v| self.key(v));
         out
     }
 
-    /// A value's place for sorting: its position, then its name.
-    fn rank(self, value: &str) -> (usize, &str) {
-        (self.position(value), value)
+    /// The one key values are ordered by: their place in the layer's
+    /// order, then their name.
+    pub fn key(self, value: &str) -> (usize, String) {
+        (self.position(value), value.to_string())
     }
 }
 
@@ -1185,7 +1254,7 @@ impl Held {
             .filter(|(_, n)| **n > 0)
             .max_by(|a, b| {
                 a.1.cmp(b.1)
-                    .then_with(|| layer.rank(b.0).cmp(&layer.rank(a.0)))
+                    .then_with(|| layer.key(b.0).cmp(&layer.key(a.0)))
             })
             .map(|(v, _)| v)
     }
@@ -1204,12 +1273,21 @@ pub struct LayerRow {
 
 /// Every MR stack of these subjects on a layer, each once, in stack order:
 /// the axis's value for the body layers; for post-contrast the label's
-/// state, else what the `post_contrast` axis says. Reads only.
+/// state, else what the `post_contrast` axis says. With `held`, a condition
+/// on a stack aliased `x`, only the stacks it holds (a dataset's: the
+/// stacks its folder holds a file of, never every stack of its subjects).
+/// Where an axis has several rows for a stack, the one read is the same on
+/// either backend: a value before none, then the highest confidence, then
+/// by tier and value. Reads only.
 pub fn layer_rows(
     store: &mut Store,
     layer: Layer,
     subjects: &[i64],
+    held: Option<&str>,
 ) -> Result<Vec<LayerRow>, StoreError> {
+    let held = held.map(|h| format!(" AND ({h})")).unwrap_or_default();
+    let order = "ORDER BY x.id, CASE WHEN a.value IS NULL OR a.value = '' THEN 1 ELSE 0 END, \
+                 a.confidence DESC, a.tier, a.value";
     let (stack, series, axis, label) = (
         store.qualified("stack"),
         store.qualified("series"),
@@ -1225,14 +1303,14 @@ pub fn layer_rows(
                  cl.contrast_prior_72h FROM {stack} x JOIN {series} se ON se.id = x.series_id \
                  LEFT JOIN {label} cl ON cl.stack_id = x.id \
                  LEFT JOIN {axis} a ON a.stack_id = x.id AND a.axis = 'post_contrast' \
-                 WHERE x.modality = 'MR' AND se.subject_id IN ({}) ORDER BY x.id",
+                 WHERE x.modality = 'MR' AND se.subject_id IN ({}){held} {order}",
                 list(chunk)
             ),
             _ => format!(
                 "SELECT x.id, se.subject_id, se.study_id, a.value FROM {stack} x \
                  JOIN {series} se ON se.id = x.series_id \
                  LEFT JOIN {axis} a ON a.stack_id = x.id AND a.axis = '{}' \
-                 WHERE x.modality = 'MR' AND se.subject_id IN ({}) ORDER BY x.id",
+                 WHERE x.modality = 'MR' AND se.subject_id IN ({}){held} {order}",
                 layer.name(),
                 list(chunk)
             ),
@@ -1275,6 +1353,19 @@ pub fn layer_rows(
     Ok(out)
 }
 
+/// The value of a scan made of these stacks, as the map and the cohort's
+/// heatmap both say it: that of the lowest stack that carries one.
+pub fn value_of_stacks<'a, 's>(
+    of: &'a HashMap<i64, String>,
+    stacks: impl IntoIterator<Item = &'s i64>,
+) -> Option<&'a String> {
+    stacks
+        .into_iter()
+        .filter_map(|s| of.get(s).map(|v| (*s, v)))
+        .min_by_key(|(s, _)| *s)
+        .map(|(_, v)| v)
+}
+
 /// A layer read over the map's visits.
 struct Layered {
     layer: Layer,
@@ -1294,8 +1385,10 @@ fn layered(
     store: &mut Store,
     layer: Layer,
     subjects: &[Subject],
-    labels: &HashMap<i64, nils_session::Labelled>,
+    sessions: &HashMap<i64, i64>,
     withheld: &BTreeSet<i64>,
+    held_by: Option<&str>,
+    only: Option<&BTreeSet<i64>>,
 ) -> Result<Layered, StoreError> {
     let mut at: HashMap<(i64, i64), (usize, usize)> = HashMap::new();
     for (si, s) in subjects.iter().enumerate() {
@@ -1308,15 +1401,19 @@ fn layered(
         .map(|s| vec![Held::default(); s.visits.len()])
         .collect();
     let mut of: HashMap<i64, String> = HashMap::new();
-    let ids: Vec<i64> = subjects.iter().map(|s| s.id).collect();
-    for r in layer_rows(store, layer, &ids)? {
+    let ids: Vec<i64> = subjects
+        .iter()
+        .map(|s| s.id)
+        .filter(|id| only.is_none_or(|o| o.contains(id)))
+        .collect();
+    for r in layer_rows(store, layer, &ids, held_by)? {
         if withheld.contains(&r.stack) {
             continue;
         }
-        let Some(l) = labels.get(&r.study) else {
+        let Some(session) = sessions.get(&r.study) else {
             continue;
         };
-        let Some(&(si, vi)) = at.get(&(r.subject, l.session_id)) else {
+        let Some(&(si, vi)) = at.get(&(r.subject, *session)) else {
             continue;
         };
         let h = &mut held[si][vi];
@@ -1337,7 +1434,7 @@ fn layered(
 impl Layered {
     /// The value of a scan made of these stacks: the first that carries one.
     fn value_of(&self, stacks: &[i64]) -> Option<&String> {
-        stacks.iter().find_map(|s| self.of.get(s))
+        value_of_stacks(&self.of, stacks)
     }
 
     /// The value of the scan a visit takes; none where it takes none.
@@ -1573,6 +1670,7 @@ mod tests {
         let read = Read {
             subjects,
             datasets,
+            sessions: HashMap::new(),
             layer: None,
         };
         let laid = columns(&read, &taken, Columns::Dataset);

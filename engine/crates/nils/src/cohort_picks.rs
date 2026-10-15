@@ -26,12 +26,13 @@
 //! page's sessions carries its MR scans by the layer's value, and each role
 //! the value of the scan picked; the answer carries the layer, its values
 //! on the page and the step that answers it over the cohort, as the
-//! cohort's own document carries it. A stack of a sample sealed now is in
+//! cohort's own document carries it, on the first page alone (a later
+//! page, asked with `after`, says none). A stack of a sample sealed now is in
 //! no count for a caller who may not read it. Read only.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use nils_classify::main_scans::{Held, Layer, layer_rows};
+use nils_classify::main_scans::{Held, layer_rows, value_of_stacks};
 use nils_registry::Registry;
 use nils_registry::pick_truth::Of;
 use nils_registry::store::Error as StoreError;
@@ -99,14 +100,7 @@ pub(crate) fn door(
         ),
         None => None,
     };
-    let layer = match query.get("layer").filter(|l| !l.is_empty()) {
-        None => None,
-        Some(l) => Some(Layer::parse(l).ok_or_else(|| {
-            let mut r = Reply::error(400, "layer: body_region, body_part or post_contrast");
-            r.body["field"] = Value::from("layer");
-            r
-        })?),
-    };
+    let layer = crate::main_scans::layer_named(query.get("layer").map(String::as_str))?;
     let store = registry.store();
     let cohort = nils_registry::cohort::by_name(store, name)
         .map_err(failed)?
@@ -308,7 +302,7 @@ pub(crate) fn door(
             .iter()
             .flat_map(|(session, list)| list.iter().map(move |study| (*study, *session)))
             .collect();
-        let rows = layer_rows(store, layer, &page).map_err(failed)?;
+        let rows = layer_rows(store, layer, &page, None).map_err(failed)?;
         let stacks: Vec<i64> = rows.iter().map(|r| r.stack).collect();
         let hidden = crate::sealed::withheld(store, &caller.access, &stacks).map_err(failed)?;
         for r in rows {
@@ -352,8 +346,14 @@ pub(crate) fn door(
                             v["withheld"] = json!(true);
                         }
                         if layer.is_some() {
-                            // the value of the scan picked, none where it is withheld
-                            v["layer"] = json!(stack.and_then(|s| valued.get(&s)));
+                            // the value of the scan picked, as the map says it
+                            // (the lowest of its stacks that carries one), none
+                            // where it is withheld
+                            v["layer"] = json!(if hidden {
+                                None
+                            } else {
+                                p.and_then(|p| value_of_stacks(&valued, &p.stacks))
+                            });
                         }
                         by_role.insert(role.clone(), v);
                     }
@@ -394,14 +394,20 @@ pub(crate) fn door(
                 held.values()
                     .flat_map(|h| h.values().map(|(v, _)| v.clone())),
             );
-            let step = crate::operations::step_of(
-                registry,
-                crate::operations::Scope::Cohort(cohort.id),
-                &format!("cohort:{}", cohort.name),
-                layer.step(),
-                !crate::sealed::reads(&caller.access),
-            )
-            .map_err(failed)?;
+            // the step is the cohort's, the same on every page: given with the
+            // first page alone
+            let step = if after.is_none() {
+                crate::operations::step_of(
+                    registry,
+                    crate::operations::Scope::Cohort(cohort.id),
+                    &format!("cohort:{}", cohort.name),
+                    layer.step(),
+                    !crate::sealed::reads(&caller.access),
+                )
+                .map_err(failed)?
+            } else {
+                None
+            };
             Some(json!({
                 "layer": layer.name(), "operation": layer.step(), "values": values, "step": step,
             }))

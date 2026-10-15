@@ -504,6 +504,16 @@ fn cohort_layers(pg: Option<(String, String)>) {
         format!(
             "UPDATE {{classification_axis}} SET value = 'spine' WHERE axis = 'body_region' AND stack_id = {taken}"
         ),
+        // beside it a weaker answer and a row of no value, which neither
+        // backend reads in its place: a value first, then the confidence
+        format!(
+            "INSERT INTO {{classification_axis}} (stack_id, axis, value, confidence, tier) \
+             VALUES ({taken}, 'body_region', 'chest', 0.1, 'model')"
+        ),
+        format!(
+            "INSERT INTO {{classification_axis}} (stack_id, axis, value, confidence, tier) \
+             VALUES ({taken}, 'body_region', NULL, 1.0, 'rule')"
+        ),
         format!(
             "UPDATE {{contrast_label}} SET contrast_state = 'post', contrast_prior_72h = 'yes' WHERE stack_id = {taken}"
         ),
@@ -661,6 +671,8 @@ fn cohort_layers(pg: Option<(String, String)>) {
         "no body-part model is served here: {map}"
     );
     assert!(step["refusal"]["reason"].is_string(), "{map}");
+    // no answer waits to be put in force
+    assert_eq!(step["staged"], 0, "{map}");
 
     // a draft: what it takes, beside what the saved rules take
     let (_, rules) = server.call("GET", "/api/picks/rules?cohort=quad", None, OPS);
@@ -737,6 +749,17 @@ fn cohort_layers(pg: Option<(String, String)>) {
     assert_eq!(heat["layer"]["operation"], "body_part", "{heat}");
     assert_eq!(heat["layer"]["values"], json!(["head", "spine"]), "{heat}");
     assert_eq!(heat["layer"]["step"]["state"], "off", "{heat}");
+    // the cohort's step is given with the first page alone
+    let first = heat["subjects"][0]["id"].as_i64().unwrap();
+    let (status, later) = server.call(
+        "GET",
+        &format!("/api/cohorts/quad/picks?layer=body_region&limit=1&after={first}"),
+        None,
+        OPS,
+    );
+    assert_eq!(status, 200, "{later}");
+    assert!(later["layer"]["step"].is_null(), "{later}");
+    assert!(later["layer"]["values"].is_array(), "{later}");
     let sessions: Vec<&Value> = heat["subjects"]
         .as_array()
         .unwrap()

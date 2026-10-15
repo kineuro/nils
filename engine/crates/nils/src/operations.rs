@@ -1186,8 +1186,10 @@ pub(crate) fn steps(
 /// gives it on their pages (the dataset's summary, the cohort's document),
 /// for a page that shows the operation's answers: the Main scans map's
 /// layers (record 55, decision 6). Its state, its run and job, what its
-/// model answered, and why a run of it would be refused now; none for a
-/// step that is no operation of its own.
+/// model answered, how many of those answers are staged and not yet put in
+/// force (`staged`, which the layer does not show yet), and why a run of
+/// it would be refused now; none for a step that is no operation of its
+/// own.
 pub(crate) fn step_of(
     registry: &mut Registry,
     scope: Scope<'_>,
@@ -1195,7 +1197,7 @@ pub(crate) fn step_of(
     step: &str,
     hide_sealed: bool,
 ) -> Result<Option<Value>, StoreError> {
-    let Some((name, _)) = OPERATIONS.iter().find(|(n, _)| *n == step) else {
+    let Some((name, axes)) = OPERATIONS.iter().find(|(n, _)| *n == step) else {
         return Ok(None);
     };
     let plans: Plans = vec![(*name, plan(registry, name)?)];
@@ -1208,9 +1210,29 @@ pub(crate) fn step_of(
             store.qualified("stack")
         ),
     )?;
+    // the scans its model answered whose answers are staged and not yet put
+    // in force: counted in `answered`, but no part of the stored axes a
+    // layer reads, so a page that shows the layer says how many wait
+    let groups: Vec<String> = axes.iter().map(|a| format!("{a}:model")).collect();
+    let staged = count(
+        store,
+        &format!(
+            "SELECT COUNT(DISTINCT rm.stack_id) FROM {} rm JOIN {} ri ON ri.id = rm.item_id \
+             JOIN {} x ON x.id = rm.stack_id WHERE ri.kind IN ({}) AND ri.status = 'staged' \
+             AND {holds}",
+            store.qualified("review_member"),
+            store.qualified("review_item"),
+            store.qualified("stack"),
+            quoted(&groups)
+        ),
+    )?;
     Ok(steps(store, scope, target, scans, &plans, hide_sealed)?
         .into_iter()
-        .next())
+        .next()
+        .map(|mut doc| {
+            doc["staged"] = json!(staged);
+            doc
+        }))
 }
 
 /// A cohort's steps, as its document carries them: its members' scans
