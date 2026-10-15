@@ -425,46 +425,16 @@ pub(crate) fn kind_of(a: &Axes, folder: Option<&str>, acquisition: Option<&str>)
     }
 }
 
-/// The pack's routes whose acquisitions are grouped as a family, by the
-/// name of the rule set (a route is a rule set with an entry condition,
-/// spec section 6.5), and the family each makes: SyMRI's, SWI's, the mix
-/// sequences' (EPIMix and NeuroMix, one route) and STAGE's. Every axis a
-/// route's rule decides cites the route on its evidence.
-pub(crate) const ROUTE_FAMILIES: [(&str, &str); 4] = [
-    ("symri", "symri"),
-    ("swi", "swi"),
-    ("epimix", "mix"),
-    ("stage", "stage"),
-];
-
 /// The acquisition family the pack's routes recognised in a stack
-/// (2026-10-14): the family of the route whose rules decided one of its
-/// axes, as its evidence cites the rule set (`routes`), so an acquisition's
-/// own images join the family too (SyMRI's multi-dynamic multi-echo
-/// images, an SWI's magnitude and phase, which the route calls RawRecon,
-/// and its minIP, which it calls ProjectionDerived); else of the route its
-/// provenance enters (SyMRI, SWIRecon, EPIMix or NeuroMix, STAGE), since a
-/// route that entered and had nothing left to decide, as on a display
-/// composite, is cited by no evidence; else none.
+/// (2026-10-14), as [`nils_release::family::acquisition_family`] reads it:
+/// the route its evidence cites, else the one its provenance enters.
 pub(crate) fn acquisition_family(routes: &[String], a: &Axes) -> Option<&'static str> {
-    if let Some((_, family)) = ROUTE_FAMILIES
-        .iter()
-        .find(|(set, _)| routes.iter().any(|r| r == set))
-    {
-        return Some(family);
-    }
-    let made = |p: &str| has(a, "provenance", p);
-    if made("SyMRI") {
-        Some("symri")
-    } else if made("EPIMix") || made("NeuroMix") {
-        Some("mix")
-    } else if made("STAGE") {
-        Some("stage")
-    } else if made("SWIRecon") {
-        Some("swi")
-    } else {
-        None
-    }
+    nils_release::family::acquisition_family(
+        routes,
+        a.get("provenance")
+            .and_then(|v| v.first())
+            .map(String::as_str),
+    )
 }
 
 /// The family a scan is grouped in inside its datatype's folder, as the
@@ -488,31 +458,10 @@ pub(crate) fn family_of(acquisition: Option<&'static str>, a: &Axes) -> &'static
     }
 }
 
-/// The routes of [`ROUTE_FAMILIES`] that decided an axis of each of
-/// `stacks`, as their evidence cites them.
+/// The routes that decided an axis of each of `stacks`, as their evidence
+/// cites them ([`nils_release::family::routes_of`]).
 fn routes_of(store: &mut Store, stacks: &[i64]) -> Result<HashMap<i64, Vec<String>>, StoreError> {
-    let named = ROUTE_FAMILIES
-        .iter()
-        .map(|(set, _)| format!("'{set}'"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let mut out: HashMap<i64, Vec<String>> = HashMap::new();
-    for chunk in stacks.chunks(IN_CHUNKS) {
-        for r in store.query(
-            &format!(
-                "SELECT DISTINCT stack_id, rule_set FROM {} WHERE stack_id IN ({}) \
-                 AND rule_set IN ({named})",
-                store.qualified("classification_evidence"),
-                list(chunk)
-            ),
-            &[],
-        )? {
-            out.entry(r.int(0)?)
-                .or_default()
-                .push(r.text(1)?.to_string());
-        }
-    }
-    Ok(out)
+    nils_release::family::routes_of(store, Some(stacks))
 }
 
 /// Whether a scan is SyMRI's: made by it (provenance SyMRI), or in its

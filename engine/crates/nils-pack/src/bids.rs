@@ -20,12 +20,15 @@ use std::collections::BTreeMap;
 
 /// The stack's own fields a name may be built from beside the pack's axes.
 ///
-/// Two, and both because the fingerprint measures them rather than a rule
+/// The first two because the fingerprint measures them rather than a rule
 /// deciding them: the plane the slices lie in, and whether the acquisition was
-/// two- or three-dimensional. Everything else a name carries is an axis, and
-/// an axis is the pack's to declare, which is why the engine keeps no list of
-/// those (record 37 S6).
-pub const FIELDS: &[&str] = &["orientation", "acquisition_type"];
+/// two- or three-dimensional. The third because the evidence says it: the
+/// acquisition family whose route decided the stack (`symri`, `swi`, `mix`,
+/// `stage`; record 55, ruling 23), given only where nothing else in the name
+/// says it. Everything else a name carries is an axis, and an axis is the
+/// pack's to declare, which is why the engine keeps no list of those (record
+/// 37 S6).
+pub const FIELDS: &[&str] = &["orientation", "acquisition_type", "acquisition_family"];
 
 /// What one of our values says a file is called.
 #[derive(Debug, Clone, PartialEq, Eq)]

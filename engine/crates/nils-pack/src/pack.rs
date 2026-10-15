@@ -2227,6 +2227,10 @@ fn load_axis(
                 Some(l) => f.blame(yaml::text(l, &at))?,
                 None => id.clone(),
             },
+            stored: match v.get("stored") {
+                Some(s) => Some(f.blame(yaml::text(s, &format!("{at}.stored")))?),
+                None => None,
+            },
             family: match v.get("family") {
                 Some(x) => Some(f.blame(yaml::text(x, &at))?),
                 None => None,
@@ -2286,6 +2290,31 @@ fn load_axis(
             }
         },
     };
+    // Record 55, ruling 23: a value's stored spelling, kept when its label
+    // changes, is the spelling of one value alone, and only an axis that
+    // stores labels has one: an axis that stores identities never moved.
+    for v in &values {
+        let Some(s) = &v.stored else { continue };
+        if !stores_label {
+            return Err(Error::at(
+                format!("values.{}.stored", v.id),
+                format!(
+                    "{name} stores identities, so a row holds {} and nothing else",
+                    v.id
+                ),
+            )
+            .in_file(&f.path, Some(&f.source)));
+        }
+        if values.iter().any(|w| {
+            w.id != v.id && (w.stored.as_deref().unwrap_or(&w.label) == s || w.label == *s)
+        }) {
+            return Err(Error::at(
+                format!("values.{}.stored", v.id),
+                format!("{s} already names another value of {name}"),
+            )
+            .in_file(&f.path, Some(&f.source)));
+        }
+    }
 
     // --- one rule per value, three clauses in v0's order
     // v0 tries the priority order first and then every remaining value in

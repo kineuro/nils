@@ -4173,6 +4173,8 @@ pub fn scan_names(
         store.qualified("stack_fingerprint"),
     );
     let empty = BTreeMap::new();
+    // record 55, ruling 23: the routes that decided each, for its family
+    let routes = crate::family::routes_of(store, Some(stacks))?;
     for r in store.query(&sql, &[])? {
         let stack = r.int(0)?;
         let facts = nils_classify::effect::NameFacts {
@@ -4184,6 +4186,13 @@ pub fn scan_names(
             dwi_b_value: r.double(6).ok(),
             dwi_directions: r.opt_int(7)?,
             series_number: r.opt_int(8)?,
+            acquisition_family: crate::family::acquisition_family(
+                routes.get(&stack).map_or(&[][..], Vec::as_slice),
+                axes.get(&stack)
+                    .and_then(|a| a.get("provenance"))
+                    .map(String::as_str),
+            )
+            .map(str::to_string),
         };
         out.insert(
             stack,
@@ -4233,23 +4242,6 @@ pub fn name_of(
         }
         None => get("post_contrast") == Some("1"),
     };
-    let fields = name::Fields {
-        body_part: get("body_part"),
-        spinal_cord: get("body_part") == Some("spine"),
-        orientation,
-        base: get("base"),
-        acquisition_type,
-        modifier: get("modifier"),
-        technique: get("technique"),
-        acceleration: get("acceleration"),
-        construct: get("construct"),
-        post_contrast: contrast,
-        datatype: get("directory_type"),
-        dwi_b_value: facts.dwi_b_value,
-        dwi_pe_direction: pe_direction,
-        dwi_directions: facts.dwi_directions,
-    };
-    let descriptive = name::describe(&fields, true, true);
     // the folder of its own the pack gives it under `anat/` (record 55 C4):
     // SyMRI's, which holds its acquisition too, told by its technique
     let own = pack.and_then(|pack| {
@@ -4264,6 +4256,38 @@ pub fn name_of(
             )
             .map(str::to_string)
     });
+    // record 55, ruling 23: the technique's word, and the acquisition family
+    // where nothing in the name says it already
+    let technique_word = get("technique").map(|v| word_of(pack, "technique", v));
+    let spelled = crate::family::spelled(
+        facts.acquisition_family.as_deref(),
+        get("provenance"),
+        own.as_deref(),
+        &[
+            get("base").unwrap_or(""),
+            get("construct").unwrap_or(""),
+            get("technique").unwrap_or(""),
+            get("modifier").unwrap_or(""),
+        ],
+    );
+    let fields = name::Fields {
+        body_part: get("body_part"),
+        spinal_cord: get("body_part") == Some("spine"),
+        orientation,
+        base: get("base"),
+        acquisition_type,
+        modifier: get("modifier"),
+        family: spelled.map(crate::family::word),
+        technique: technique_word.as_deref(),
+        acceleration: get("acceleration"),
+        construct: get("construct"),
+        post_contrast: contrast,
+        datatype: get("directory_type"),
+        dwi_b_value: facts.dwi_b_value,
+        dwi_pe_direction: pe_direction,
+        dwi_directions: facts.dwi_directions,
+    };
+    let descriptive = name::describe(&fields, true, true);
     let folder = folder_of(get("directory_type"), get("provenance"), own.as_deref());
     let built = match pack {
         Some(pack) => {
@@ -4287,6 +4311,13 @@ pub fn name_of(
                     said.insert(field.to_string(), vec![v.to_string()]);
                 }
             }
+            let mut spells: BTreeMap<&str, Vec<&str>> = said
+                .iter()
+                .map(|(axis, values)| (axis.as_str(), values.iter().map(String::as_str).collect()))
+                .collect();
+            if let Some(f) = spelled {
+                spells.insert("acquisition_family", vec![f]);
+            }
             let facts = crate::bids::name::Facts {
                 intent: get("directory_type"),
                 constructs: constructs.iter().map(String::as_str).collect(),
@@ -4294,12 +4325,7 @@ pub fn name_of(
                 modifiers: modifiers.iter().map(String::as_str).collect(),
                 base: base.as_deref(),
                 provenance: provenance.as_deref(),
-                axes: said
-                    .iter()
-                    .map(|(axis, values)| {
-                        (axis.as_str(), values.iter().map(String::as_str).collect())
-                    })
-                    .collect(),
+                axes: spells,
                 post_contrast: contrast,
                 task: get("task"),
                 echo: match facts.stacks_in_series.unwrap_or(1) > 1 {
@@ -4345,7 +4371,12 @@ pub fn name_of(
         bids: built.map(|(_, label)| label),
         datatype,
         folder,
-        axes: a.clone(),
+        // as stored, a value the pack has since given a new word read by
+        // it (record 55, ruling 23: `FLASH` reads `SPGRE`)
+        axes: a
+            .iter()
+            .map(|(axis, v)| (axis.clone(), word_of(pack, axis, v)))
+            .collect(),
         series_number: facts.series_number,
     }
 }
@@ -4367,6 +4398,9 @@ fn places(
 ) -> Result<Placements, Error> {
     let axes = axis_values(store)?;
     let tiers = axis_tiers(store)?;
+    // record 55, ruling 23: the route that decided each stack, for the
+    // acquisition family its names and its sidecar carry
+    let routes = crate::family::routes_of(store, None)?;
     let t = table("stack_fingerprint");
     let d = store.dialect();
     let text = |c: &str| {
@@ -4454,6 +4488,8 @@ fn places(
     // stacks that turn out to collide, which is the only place it is asked.
     let mut acquisitions: HashMap<i64, crate::bids::repeat::Acquisition> = HashMap::new();
     let mut stated: HashMap<i64, BTreeMap<String, Vec<String>>> = HashMap::new();
+    // record 55, ruling 23: each stack's acquisition family, for its sidecar
+    let mut families: HashMap<i64, &'static str> = HashMap::new();
 
     for r in &rows {
         let stack = r.int(0)?;
@@ -4483,6 +4519,41 @@ fn places(
         };
         let contrast = get("post_contrast").and_then(|v| id_of("post_contrast", v));
         let contrast = contrast.as_deref() == Some("given");
+        // record 55, ruling 23: the word a person reads for the technique,
+        // which a row may store under an older spelling (`SP-GRE`, stored
+        // `FLASH`, named `SPGRE`)
+        let technique_word = get("technique").map(|v| word_of(Some(pack), "technique", v));
+        // and the acquisition family the route recognised, which the names
+        // spell where nothing in them says it already
+        let family = crate::family::acquisition_family(
+            routes.get(&stack).map_or(&[][..], Vec::as_slice),
+            get("provenance"),
+        );
+        if let Some(f) = family {
+            families.insert(stack, f);
+        }
+        let own_folder_now = pack
+            .bids
+            .folder_of(
+                get("provenance")
+                    .and_then(|v| id_of("provenance", v))
+                    .as_deref(),
+                get("technique")
+                    .and_then(|v| id_of("technique", v))
+                    .as_deref(),
+            )
+            .map(str::to_string);
+        let spelled = crate::family::spelled(
+            family,
+            get("provenance"),
+            own_folder_now.as_deref(),
+            &[
+                get("base").unwrap_or(""),
+                get("construct").unwrap_or(""),
+                get("technique").unwrap_or(""),
+                get("modifier").unwrap_or(""),
+            ],
+        );
         let fields = name::Fields {
             body_part: get("body_part"),
             spinal_cord: get("body_part") == Some("spine"),
@@ -4490,7 +4561,8 @@ fn places(
             base: get("base"),
             acquisition_type: r.opt_text(9)?,
             modifier: get("modifier"),
-            technique: get("technique"),
+            family: spelled.map(crate::family::word),
+            technique: technique_word.as_deref(),
             acceleration: get("acceleration"),
             construct: get("construct"),
             post_contrast: contrast,
@@ -4538,6 +4610,16 @@ fn places(
                 said.insert(field.to_string(), vec![v.to_string()]);
             }
         }
+        // what the BIDS name may spell: everything the stack says, and the
+        // acquisition family where nothing in the name says it already
+        // (record 55, ruling 23)
+        let mut spells: BTreeMap<&str, Vec<&str>> = said
+            .iter()
+            .map(|(axis, values)| (axis.as_str(), values.iter().map(String::as_str).collect()))
+            .collect();
+        if let Some(f) = spelled {
+            spells.insert("acquisition_family", vec![f]);
+        }
         let facts = crate::bids::name::Facts {
             intent: get("directory_type"),
             constructs: constructs.iter().map(String::as_str).collect(),
@@ -4545,10 +4627,7 @@ fn places(
             modifiers: modifiers.iter().map(String::as_str).collect(),
             base: base.as_deref(),
             provenance: provenance.as_deref(),
-            axes: said
-                .iter()
-                .map(|(axis, values)| (axis.as_str(), values.iter().map(String::as_str).collect()))
-                .collect(),
+            axes: spells,
             post_contrast: contrast,
             // The one fact no rule sets: a person answers it per study (§9.2).
             task: get("task"),
@@ -4815,6 +4894,7 @@ fn places(
                         stated.get(&n.stack),
                         tiers.get(&n.stack),
                         acquisitions.get(&n.stack),
+                        families.get(&n.stack).copied(),
                     ),
                     descriptive: n.clone(),
                     bids: bids
@@ -5097,6 +5177,24 @@ fn first_int(text: &str) -> Option<i64> {
         .parse()
         .ok()
         .filter(|n: &i64| *n > 0)
+}
+
+/// The word a person reads for what a row stores on an axis: the value's
+/// label where the pack gave it a new one after rows were written (record
+/// 55, ruling 23: `SP-GRE`, stored `FLASH`, reads `SPGRE`), else the row's
+/// text. Each of a multi-valued axis's comma-joined values is read so.
+pub fn word_of(pack: Option<&nils_pack::pack::Pack>, axis: &str, stored: &str) -> String {
+    let Some(a) = pack.and_then(|p| p.axes.iter().find(|x| x.name == axis)) else {
+        return stored.to_string();
+    };
+    if !a.stores_label {
+        return stored.to_string();
+    }
+    stored
+        .split(',')
+        .map(|v| a.label_of_stored(v.trim()))
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 /// Where a stack lands, which is its intent with v0's provenance routing.

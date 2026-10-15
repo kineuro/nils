@@ -1650,6 +1650,7 @@ fn an_axis_value_is_named_by_any_of_its_names_and_held_in_any_form() {
         id: id.into(),
         label: label.into(),
         aliases: aliases.iter().map(|a| a.to_string()).collect(),
+        stored: None,
     };
     let id_of = |a: &AxisNames, t: &str| a.named(t).map(|x| x.id.clone());
     let pair = |a: &str, b: &str| (a.to_string(), b.to_string());

@@ -18,7 +18,7 @@
 names = [
   "ses-20220115/anat/Ax_T1w_3D_MPRAGE_ND_1",
   "ses-20220115/anat/Ax_T1w_3D_MPRAGE_ND_2",
-  "ses-20220115/anat/Ax_T2starw_3D_GRE_Magnitude-ND",
+  "ses-20220115/anat/Ax_T2starw_3D_SWI_GRE_Magnitude-ND",
   "ses-20220115/anat/Ax_T2w_2D_FLAIR_TIRM_ND",
   "ses-20220115/dwi/Ax_DWI_2D_DWI-EPI_ADC_b1000",
   "ses-20220115/dwi/Ax_DWI_2D_DWI-EPI_Trace_b1000",
@@ -28,6 +28,12 @@ names = [
   "ses-20220715/misc/Ax_T1w_2D_GRE_ND_e1",
   "ses-20220715/misc/Ax_T1w_2D_GRE_ND_e2",
 ]
+
+# Amended 2026-10-14, record 55, ruling 23 (Nima: "on SWI we need the SWI in
+# the name too"): the SWI's magnitude, which the SWI route decided and calls
+# RawRecon and T2*w, says its acquisition, `SWI`, before its technique, in the
+# descriptive name. Nothing else here is a
+# family's acquisition, so nothing else moved.
 
 # Amended 2026-09-29, MRI pack 0.14.0. The BOLD series, whose file states no
 # readout (no ScanningSequence, no sequence name) at a short echo time, is

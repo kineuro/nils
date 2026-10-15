@@ -24,12 +24,15 @@ use super::repeat::Acquisition;
 /// How each axis was decided: the tier and the confidence, by axis.
 pub type Tiers = BTreeMap<String, (String, f64)>;
 
-/// The `NILS` object of one stack.
+/// The `NILS` object of one stack. `family` is the acquisition family the
+/// pack's routes recognised in it (record 55, ruling 23), written whether or
+/// not its name spells it.
 pub fn card(
     descriptive: &str,
     said: Option<&BTreeMap<String, Vec<String>>>,
     tiers: Option<&Tiers>,
     acquisition: Option<&Acquisition>,
+    family: Option<&str>,
 ) -> Value {
     let mut axes = Map::new();
     for (axis, values) in said.into_iter().flatten() {
@@ -43,6 +46,9 @@ pub fn card(
     }
     let mut out = Map::new();
     out.insert("DescriptiveName".into(), json!(descriptive));
+    if let Some(family) = family {
+        out.insert("AcquisitionFamily".into(), json!(family));
+    }
     out.insert("Axes".into(), Value::Object(axes));
     if let Some(a) = acquisition {
         out.insert("Acquisition".into(), Value::Object(details(a)));
@@ -158,8 +164,25 @@ mod tests {
             protocol: Some("a protocol".into()),
             ..Acquisition::default()
         };
-        let c = card("Sag_T1w_3D_MPRAGE_CE", Some(&said), Some(&tiers), Some(&a));
+        let c = card(
+            "Sag_T1w_3D_MPRAGE_CE",
+            Some(&said),
+            Some(&tiers),
+            Some(&a),
+            None,
+        );
         assert_eq!(c["DescriptiveName"], "Sag_T1w_3D_MPRAGE_CE");
+        assert!(c.get("AcquisitionFamily").is_none(), "{c}");
+        // an SWI's image says its acquisition, its name or not (record 55,
+        // ruling 23)
+        let swi = card(
+            "Ax_T2starw_3D_SWI_GRE_Magnitude",
+            None,
+            None,
+            None,
+            Some("swi"),
+        );
+        assert_eq!(swi["AcquisitionFamily"], "swi");
         assert_eq!(c["Axes"]["post_contrast"]["values"], json!(["given"]));
         assert_eq!(c["Axes"]["post_contrast"]["tier"], "rule");
         assert_eq!(c["Acquisition"]["FieldOfViewMm"], json!([256.0, 216.0]));

@@ -97,6 +97,9 @@ pub struct NameFacts {
     pub dwi_b_value: Option<f64>,
     pub dwi_directions: Option<i64>,
     pub series_number: Option<i64>,
+    /// The acquisition family the pack's routes recognised (record 55,
+    /// ruling 23), which a name spells where nothing else in it says it.
+    pub acquisition_family: Option<String>,
 }
 
 /// A stack's names from its axes as stored and its facts: the descriptive
@@ -1443,6 +1446,9 @@ fn name_facts(store: &mut Store, stacks: &[i64]) -> Result<HashMap<i64, NameFact
                     dwi_directions: r.opt_int(6)?,
                     series_number: r.opt_int(7)?,
                     stacks_in_series: r.opt_int(8)?,
+                    // an effect report reads both sides with no family, so
+                    // a rule change moves no name by it
+                    acquisition_family: None,
                 },
             );
         }
