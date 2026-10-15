@@ -154,6 +154,7 @@ impl Home {
             "classification_axis",
             "stack_fingerprint",
             "audit",
+            "gate_outcome",
         ] {
             sql = sql.replace(&format!("{{{t}}}"), &store.qualified(t));
         }
@@ -1111,6 +1112,21 @@ fn flow(pg: Option<(String, String)>) {
     drop(server);
     let nopacks = TempDir::new("cert-nopacks");
     let server = Served::start_at(&home, &path, false, nopacks.path().to_str().unwrap());
+    // System 1 still gives it: the answer staged stays, counted as kept with
+    // the reason, and a fallback word is never read as the rules' value
+    let gated = server.ok(
+        "POST",
+        "/api/review/gate",
+        Some(json!({"dataset": "ok"})),
+        OPS,
+    );
+    let st = &gated["rounds"][0]["gated"]["staged"];
+    assert_eq!((st["kept"].clone(), st["withdrawn"].clone()), (json!(1), json!(0)), "{gated}");
+    assert!(
+        st["waiting"].as_str().unwrap_or_default().contains("not served"),
+        "{gated}"
+    );
+    assert_eq!(waiting_by(&home), [("model".to_string(), Some(other))], "{gated}");
     home.exec(&format!(
         "UPDATE {{opinion}} SET p = 0.3 WHERE stack_id = {bare_n} AND axis = 'base'"
     ));
@@ -1133,6 +1149,33 @@ fn flow(pg: Option<(String, String)>) {
     home.exec(&format!(
         "UPDATE {{opinion}} SET p = 0.97 WHERE stack_id = {bare_n} AND axis = 'base'"
     ));
+    drop(server);
+    let server = Served::start(&home, &path, true);
+    let gated = server.ok(
+        "POST",
+        "/api/review/gate",
+        Some(json!({"dataset": "ok"})),
+        OPS,
+    );
+    assert_eq!(gated["rounds"][0]["gated"]["staged"]["count"], 1, "{gated}");
+    assert_eq!(waiting_by(&home), [("model".to_string(), Some(other))]);
+    // an answer an earlier model staged is withdrawn at once, as its model,
+    // where the round's words are not at hand; the round's model restages
+    drop(server);
+    let server = Served::start_at(&home, &path, false, nopacks.path().to_str().unwrap());
+    home.exec(&format!(
+        "UPDATE {{decision}} SET model_id = {s1} WHERE ref = '{bare_n}' AND axis = 'base' \
+         AND withdrawn_at IS NULL AND committed_at IS NULL"
+    ));
+    let gated = server.ok(
+        "POST",
+        "/api/review/gate",
+        Some(json!({"dataset": "ok"})),
+        OPS,
+    );
+    let st = &gated["rounds"][0]["gated"]["staged"];
+    assert_eq!((st["withdrawn"].clone(), st["kept"].clone()), (json!(1), json!(0)), "{gated}");
+    assert!(waiting_by(&home).is_empty(), "{gated}");
     drop(server);
     let server = Served::start(&home, &path, true);
     let gated = server.ok(
@@ -1184,6 +1227,20 @@ fn flow(pg: Option<(String, String)>) {
             .map(|r| r["gated"]["held"].as_i64().unwrap_or(0))
             .sum::<i64>();
         assert_eq!(g, 1, "p {p}: {again}");
+        // a held question is no outcome, and leaves no outcome row
+        let counted = again["rounds"][0]["gated"]["outcomes"].clone();
+        assert!(
+            counted["disagree"].is_null() && counted["unsure"].is_null(),
+            "p {p}: {again}"
+        );
+        assert_eq!(
+            home.int(&format!(
+                "SELECT COUNT(*) FROM {{gate_outcome}} WHERE stack_id = {bare_n} AND axis = 'base' \
+                 AND round_id = (SELECT MAX(round_id) FROM {{gate_outcome}})"
+            )),
+            0,
+            "p {p}: no outcome row in the current round against a held stack"
+        );
         assert_eq!(persons(&home), 0, "p {p}: the person's answer stays");
         assert_eq!(system1_pending(&home), 0, "p {p}: nothing restaged");
         assert_eq!(
@@ -1202,6 +1259,40 @@ fn flow(pg: Option<(String, String)>) {
         .map(|r| r.text(0).unwrap().to_string())
         .collect();
     assert_eq!(waiting, ["person"]);
+
+    // the person's answer is gone while the gate's item still says staged,
+    // and the pack's words are not at hand: the item is open again, with no
+    // decision, and nothing new is staged
+    drop(server);
+    home.exec(&format!(
+        "UPDATE {{decision}} SET withdrawn_at = staged_at WHERE id = {person}"
+    ));
+    home.exec(&format!(
+        "UPDATE {{opinion}} SET p = 0.97 WHERE stack_id = {bare_n} AND axis = 'base'"
+    ));
+    let server = Served::start_at(&home, &path, false, nopacks.path().to_str().unwrap());
+    let gated = server.ok(
+        "POST",
+        "/api/review/gate",
+        Some(json!({"dataset": "ok"})),
+        OPS,
+    );
+    let st = &gated["rounds"][0]["gated"]["staged"];
+    assert_eq!(st["count"], 0, "{gated}");
+    assert_eq!(st["not_staged"].as_object().map(|m| m.len()), Some(1), "{gated}");
+    assert_eq!(
+        questions(&home, bare_n),
+        [("base:disagree".to_string(), "open".to_string())],
+        "{gated}"
+    );
+    assert_eq!(
+        home.int(&format!(
+            "SELECT COUNT(*) FROM {{review_item}} WHERE group_key = 'gate:base:stack:{bare_n}' \
+             AND decision_id IS NULL"
+        )),
+        1
+    );
+    assert!(waiting_by(&home).is_empty(), "{gated}");
 
     drop(server);
 

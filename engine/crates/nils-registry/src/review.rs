@@ -408,7 +408,7 @@ pub fn apply_within(registry: &mut Registry, a: &Apply<'_>) -> Result<Applied, E
 /// scope names it: one rule for writing a decision and for finding what
 /// reaches a stack.
 pub fn origin_key(made_by: &str) -> Option<String> {
-    (!made_by.is_empty()).then(|| format!("manufacturer={}", made_by.to_lowercase()))
+    (!made_by.trim().is_empty()).then(|| format!("manufacturer={}", made_by.to_lowercase()))
 }
 
 /// A review item's group key, where it has one.
@@ -3571,5 +3571,18 @@ mod identity_items {
         assert_eq!(row.text(1).unwrap(), "anna@lab");
         assert!(row.text(2).unwrap().contains("sub-y"));
         assert_eq!(status_of(&mut store, other), "open");
+    }
+}
+
+#[cfg(test)]
+mod origin_tests {
+    #[test]
+    fn an_origin_key_is_the_manufacturer_lowercased_and_none_for_blank() {
+        assert_eq!(
+            super::origin_key("SIEMENS").as_deref(),
+            Some("manufacturer=siemens")
+        );
+        assert_eq!(super::origin_key(""), None);
+        assert_eq!(super::origin_key("   "), None);
     }
 }

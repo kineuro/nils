@@ -890,20 +890,26 @@ fn gate_over(
                 )),
                 Some(_) => None,
             };
-            // staging waits where the words are not the round's, and
-            // System 1's earlier answers are checked again all the same
-            let words = served.map(PackWords);
+            // the round's own words only: another version's are never read
+            let words = match (served, why_not) {
+                (Some(p), None) => Ok(PackWords(p)),
+                (_, Some(why)) => Err(why),
+                (None, None) => Err(format!("the pack {pack} is not served here")),
+            };
             let st = round::stage(
                 registry,
                 &r,
                 &done.questions,
-                words.as_ref().map(|w| w as &dyn round::Words),
-                why_not.as_deref(),
+                match &words {
+                    Ok(w) => Ok(w as &dyn round::Words),
+                    Err(why) => Err(why.as_str()),
+                },
                 who,
             )?;
             done.staged.staged = st.staged;
             done.staged.kept = st.kept;
             done.staged.withdrawn += st.withdrawn;
+            done.staged.waiting = st.waiting;
             for (why, n) in st.not_staged {
                 *done.staged.not_staged.entry(why).or_default() += n;
             }
