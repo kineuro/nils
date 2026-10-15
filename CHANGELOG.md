@@ -50,6 +50,14 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 - The body-part descriptors pin the `nils-bodypart` 0.3.0 image that 1.0.0-alpha.65 published, so `bodypart-infer-fusion` 0.3.0 runs the code its descriptor describes. Its baked encoder weights verify with the same two digests as before, so those pins stay (kineuro/nils#323).
 - The body-part descriptors pin the `nils-bodypart` image that 1.0.0-alpha.62 published, a new build of the same 0.2.0 sources. Its baked encoder weights verify with the same two digests as before, so those pins stay (kineuro/nils#308).
 
+## [pack-mri-v1.2.2] - 2026-10-15
+
+The MRI pack 1.2.2, a rules fix released on its own: an install on engine 1.0.0-alpha.80 or later takes it with `nils update --part rules`, or with Update on the MRI rules row of the desk's Settings › Parts, with no engine release and nothing started again. It works with engines `>=1.0.0-alpha.80, <2.0.0` and pack contract 10. `nils update --pin mri@1.2.1` goes back to the version before.
+
+### Fixed
+
+- Seven values are no longer read from the words of a gradient-echo scout (an image typed LOCALIZER or SCOUT, or a Siemens position display, on a gradient echo), whose name is that of the series it plans: STIR, FatSat, FLAIR and DIR on the modifier axis, and Trace, ADC and Velocity on the construct axis. A value the header states still stands (ImageType, ScanOptions, an inversion time, a diffusion private element, GE's coil label), and Velocity also stands where the scout's own sequence name states a phase contrast. Replayed before release over a production archive of 546,440 MR stacks against 1.2.1, with engine 1.0.0-alpha.81: 210 stacks move, 208 explained by the registered check and 2 missed by it and judged right by reading their headers; the values lost are Trace 157, ADC 32, STIR 37 and FLAIR 15 (above its sized 13, reported as a miss of the estimate), and 140 of the stacks also move the base's basis from physics to name beside a lost Trace or ADC, the base itself unchanged; none newly breaks a pack constraint. Four corpus cases (`packs/mri/corpus/axes-122.yml`).
+
 ## [pack-mri-v1.2.1] - 2026-10-15
 
 The MRI pack 1.2.1, a rules fix released on its own: an install on engine 1.0.0-alpha.80 or later takes it with `nils update --part rules`, or with Update on the MRI rules row of the desk's Settings › Parts, with no engine release and nothing started again. It works with engines `>=1.0.0-alpha.80, <2.0.0` and pack contract 10. `nils update --pin mri@1.2.0` goes back to the version before.
