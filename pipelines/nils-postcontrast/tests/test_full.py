@@ -185,6 +185,9 @@ if tool != "dcm2niix" and no_tools and any(f"/stacks/{no_tools}/" in w for w in 
     sys.exit(1)
 if tool == "dcm2niix":
     o, lk = a[a.index("-o") + 1], a[-1]
+    # STANDIN_CONVERT_KILLED=<stack id>: dcm2niix ends as the memory limit ends it, every time
+    if os.environ.get("STANDIN_CONVERT_KILLED") and os.path.basename(o) == os.environ["STANDIN_CONVERT_KILLED"]:
+        os._exit(137)
     flag = os.path.join(o, ".failed-once")
     if os.environ.get("STANDIN_FAIL_ONCE") and os.path.basename(o) == os.environ["STANDIN_FAIL_ONCE"] and not os.path.exists(flag):
         open(flag, "w").close(); sys.exit(1)
@@ -344,10 +347,13 @@ def test_a_tool_the_kernel_kills_does_not_end_the_run(standin_env, monkeypatch):
     rc, out = run(standin_env)
     assert rc == 0
     T = tables(out)
-    # without a segmentation the stack keeps the arms it has, as model r1
+    # without a segmentation the stack keeps the arms it has, as model r1;
+    # one left with none says the run failed on it, not the data
     for s in (1, 2):
-        assert T[s]["stage"] == "full" and T[s]["failed_steps"], T[s]
+        assert T[s]["stage"] == "full" and "tools" in T[s]["failed_steps"], T[s]
         assert "V" not in (T[s]["arms"] or "")
+        if not T[s]["arms"]:
+            assert T[s]["reason"] == "worker-died", T[s]
 
 
 def test_a_stack_with_no_image_arm_abstains_and_says_whether_the_run_or_the_data_failed():
@@ -367,6 +373,10 @@ def test_a_stack_with_no_image_arm_abstains_and_says_whether_the_run_or_the_data
     assert r("", None, segmented=True, died=True) == "worker-died"
     assert r("", None, segmented=False, died=True) == "worker-died"
     assert r("", "convert: MemoryError", segmented=False) == full.STEP_FAILED == "step-failed"
+    # a CPU tool step that raised: the run's, before the segmentation it left missing
+    assert r("", None, segmented=False, step_failed=True) == "step-failed"
+    # the kernel or a signal ending a tool, never the tool judging its input
+    assert [full.killed(c) for c in (-9, 137, 143, 1, 2, 0, 127, None)] == [True, True, True, False, False, False, False, False]
     assert r("U", None, segmented=False) is None
     assert r("TUV", "dcm2niix", segmented=False, died=True) is None
 
@@ -384,6 +394,17 @@ def test_a_stack_with_no_image_arm_is_not_sure_and_says_why(standin_env, monkeyp
     res = json.loads((out / "results.json").read_text())
     assert not res.get("proposals")
     assert res["metrics"]["by_outcome"] == {"no-segmentation": 1, "no-usable-volume": 1, "not-t1-brain": 1, "sealed": 1, "no-calibration": 1}
+
+
+def test_dcm2niix_the_kernel_ends_is_the_run_s_failure(standin_env, monkeypatch):
+    """dcm2niix ended by a signal or the memory limit (a negative code, or
+    137) says nothing of the data: the stack is worker-died, not
+    no-usable-volume."""
+    monkeypatch.setenv("STANDIN_CONVERT_KILLED", "2")
+    rc, out = run(standin_env)
+    assert rc == 0
+    T = tables(out)
+    assert (T[2]["reason"], T[2]["answers"]) == ("worker-died", 0), T[2]
 
 
 def test_a_card_s_budget_sizes_its_waves_and_places_the_frangi_filter(tmp_path):

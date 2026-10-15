@@ -73,7 +73,15 @@ WORKER_DIED, STEP_FAILED = "worker-died", "step-failed"
 DATA_FAILS = ("dcm2niix", "4D", "fewer than 3 slices")
 
 
-def no_arm_reason(arms: str, convert_fail: str | None, segmented: bool, died: bool = False) -> str | None:
+def killed(rc) -> bool:
+    """A tool's return code says the kernel or a signal ended it (a
+    negative code from Python, or the shell's 128 and up, 137 the memory
+    limit's), not that it judged its input."""
+    return isinstance(rc, int) and (rc < 0 or rc >= 128) and rc != 127
+
+
+def no_arm_reason(arms: str, convert_fail: str | None, segmented: bool, died: bool = False,
+                  step_failed: bool = False) -> str | None:
     """Why a candidate is "not sure" though model r1 could answer it from
     its header evidence alone: no image arm at all, for any reason (record
     55 E3). The run's own failures are told from the data's: a worker that
@@ -81,13 +89,17 @@ def no_arm_reason(arms: str, convert_fail: str | None, segmented: bool, died: bo
     that raised is ``step-failed``; only what the data itself lacks is
     ``no-usable-volume`` (no conversion, fewer than 3 slices, 4D) or
     ``no-segmentation``; else ``no-image-arm`` (no arm its features could
-    feed). None where it keeps an arm."""
+    feed). A tool the kernel or a signal ended (dcm2niix, a CPU Synth tool)
+    is a dead worker's; a CPU tool step that raised is ``step-failed``,
+    before any missing segmentation it caused. None where it keeps an arm."""
     if arms:
         return None
     if died or convert_fail == WORKER_DIED:
         return WORKER_DIED
     if convert_fail:
         return NO_VOLUME if convert_fail in DATA_FAILS else STEP_FAILED
+    if step_failed:
+        return STEP_FAILED
     if not segmented:
         return NO_SEGMENTATION
     return NO_ARM
@@ -163,7 +175,10 @@ def _convert(sid: int, d: str, files: list) -> dict:
     t0 = time.time()
     try:
         info = tools.convert(_W["env"], d, files)
-        why = tools.check_native(d) if info.get("ok") else "dcm2niix"
+        # dcm2niix the kernel or a signal ended (its memory) is the run's
+        # failure, not the data's
+        ended = any(killed(info.get(k)) for k in ("rc1", "rc2"))
+        why = tools.check_native(d) if info.get("ok") else (WORKER_DIED if ended else "dcm2niix")
     except Exception as e:  # noqa: BLE001
         info, why = {"ok": False}, f"convert: {type(e).__name__}"
     return {"stack_id": sid, "convert": info, "fail": why, "s": round(time.time() - t0, 2)}
@@ -421,6 +436,11 @@ def features_of(todo: list, work: Path, atlas: dict, hpn: dict, vxn: dict, env: 
         for sid, r in out:
             progressed = True
             rec[sid]["stage"]["cpu_tools"] = r.get("s")
+            cpu = r.get("cpu") or {}
+            if cpu.get("error"):
+                rec[sid]["tools_error"] = cpu["error"]
+            if any(killed(v) for v in (cpu.get("rc") or {}).values()):
+                rec[sid]["tools_killed"] = True
             lane_c.submit(sid, _finish, sid, sd[sid], hpn, vxn)
         for sid in dead:
             rec[sid]["tools_died"] = True
@@ -571,13 +591,13 @@ def cmd_full(a) -> int:
         if sid in why:
             continue
         armset = "".join(k for k in "TUV" if probs[k][i] == probs[k][i])
-        failed = [k for k, v in (("convert", r.get("fail")), ("tools", r.get("tools_died")),
+        failed = [k for k, v in (("convert", r.get("fail")), ("tools", r.get("tools_died") or r.get("tools_killed") or r.get("tools_error")),
                                  ("base", r.get("base_fail")), ("tail", r.get("t_fail")), ("features", r.get("features_died"))) if v]
         pi = float(p[i])
         a_ = str(ans[i])
         segmented = os.path.exists(tools.paths(str(work / "stacks" / str(sid)))["ss"])
-        died = bool(r.get("tools_died") or r.get("features_died"))
-        lost = no_arm_reason(armset, r.get("fail") or None, segmented, died)
+        died = bool(r.get("tools_died") or r.get("features_died") or r.get("tools_killed"))
+        lost = no_arm_reason(armset, r.get("fail") or None, segmented, died, bool(r.get("tools_error")))
         if lost:
             # record 55 E3: no image arm, so not where model r1 is certified
             tables[sid] = _table(sid, P, stage="full", reason=lost, arms=armset, failed_steps=failed or None, seconds=r["stage"])
