@@ -988,10 +988,24 @@ fn patch_from(name: &str, doc: &Value) -> Result<Patch, Reply> {
 /// A narrower scope a body names, for a preview only: a proposal's report
 /// is always rehearsed over the whole scope its adoption re-sorts.
 fn preview_scope(doc: &Value) -> Result<Option<Scope>, Reply> {
+    // an overlay document given whole carries its own scope (the overlay's,
+    // keyed by batch or scanner), which is no preview narrowing
+    if is_whole_overlay(doc) {
+        return Ok(None);
+    }
     match doc.get("scope").filter(|v| !v.is_null()) {
         None => Ok(None),
         Some(v) => Scope::of(v).map(Some).map_err(|e| Reply::error(400, e)),
     }
+}
+
+/// Whether a body is an overlay document itself (`overlay` names it, and no
+/// `patch` object wraps it), as [`crate::rehearse::patch_of`] reads it: its
+/// `scope` is the overlay's own, and a nested `{"overlay": {...}}` is not
+/// this, so a top-level `scope` beside that one is still a preview's.
+fn is_whole_overlay(doc: &Value) -> bool {
+    doc.get("overlay").is_some_and(|o| !o.is_object())
+        && !doc.get("patch").is_some_and(Value::is_object)
 }
 
 /// What a rehearsal read the registry under, taken before it reads: the
@@ -1322,6 +1336,58 @@ fn create_door(
     ))
 }
 
+/// Record 56 section 5.6, and Nima's ruling of 2026-10-15: an overlay is
+/// adopted through the same proposal and rehearsal as every other rule
+/// change. This keeps the proposal an overlay is, rehearsed now over the
+/// overlay's own origin with the scoped changes in force, and answers its id;
+/// the one kept before is answered where there is one. `None` where the
+/// overlay changes no word, which has no scoped change to adopt.
+pub(crate) fn propose_overlay(
+    doors: &Doors,
+    registry: &mut Registry,
+    o: &nils_registry::overlay::Overlay,
+) -> Result<Option<i64>, Reply> {
+    if let Some(p) = rp::of_overlay(registry.store(), o).map_err(failed)? {
+        return Ok((p.status == rp::PROPOSED).then_some(p.id));
+    }
+    let Some((_, kept, evidence, title)) = rp::overlay_kept(o) else {
+        return Ok(None);
+    };
+    let dir = pack_dir(doors, &o.pack)
+        .ok_or_else(|| Reply::error(404, format!("no pack named {}", o.pack)))?;
+    let patch =
+        Patch::of_value("the overlay", &kept).map_err(|e| Reply::error(400, e.to_string()))?;
+    let kind = kind_of(&patch)?;
+    let (on, began) = mark(registry.store(), &dir, &o.pack)?;
+    let mut report = rehearsed(registry, &dir, &patch, &Value::Null, None)?;
+    report["rehearsed_on"] = began;
+    let scopes = scopes_of(&patch, &report);
+    let card = card_of(&report, kind, &scopes);
+    let store = registry.store();
+    let datasets = datasets_touched(store, &patch, &evidence, &report);
+    let id = rp::create(
+        store,
+        &rp::New {
+            pack: &o.pack,
+            title: &title,
+            kind,
+            on_version: &on,
+            scopes: &scopes,
+            patch: &kept,
+            reason: o.why.as_deref(),
+            evidence: &evidence,
+            datasets: &datasets,
+            report: &report,
+            card: &card,
+            author: &o.author,
+            author_kind: &o.author_kind,
+            actor: &o.actor,
+        },
+    )
+    .map_err(failed)?;
+    Ok(Some(id))
+}
+
 fn rehearse_door(
     doors: &Doors,
     registry: &mut Registry,
@@ -1595,7 +1661,7 @@ pub(crate) fn in_one<T>(
     }
 }
 
-fn decide_door(
+pub(crate) fn decide_door(
     doors: &Doors,
     registry: &mut Registry,
     caller: &Caller,
@@ -1706,12 +1772,47 @@ fn decide_door(
         },
         "review": p.report["review"]["stacks_asked"],
     });
-    let applied = json!({"state": "queued", "expected": expected, "measured": null});
+    // an overlay's scoped change is adopted with the overlay (Nima, 2026-10-15:
+    // no adoption bypasses the proposal): the overlay must still be proposed,
+    // and it retires the scoped change of its earlier versions, whose origin
+    // is re-sorted too
+    let overlay = if rp::made_of_overlay(&p) {
+        let oid = p.evidence["overlay"].as_i64().unwrap_or(0);
+        let o = nils_registry::overlay::show(registry.store(), oid)
+            .map_err(failed)?
+            .ok_or_else(|| Reply::error(409, format!("the overlay of proposal {id} is gone")))?;
+        if o.status != nils_registry::overlay::PROPOSED {
+            return Err(Reply::error(
+                409,
+                format!(
+                    "overlay {oid} is {}, and only a proposed one is adopted",
+                    o.status
+                ),
+            ));
+        }
+        let older = rp::superseded_by(registry.store(), &o).map_err(failed)?;
+        Some((o, older))
+    } else {
+        None
+    };
+    let mut applied = json!({"state": "queued", "expected": expected, "measured": null});
+    if let Some((o, older)) = &overlay {
+        applied["overlay"] = json!(o.id);
+        applied["supersedes"] = json!(older.iter().map(|x| x.id).collect::<Vec<_>>());
+    }
     let mut command = vec!["classify".to_string(), "--pack".into(), name.to_string()];
     let prepared = if p.kind == rp::PACK {
         Some(prepare_version(doors, name, &p)?)
     } else {
-        for s in &p.scopes {
+        let mut all = p.scopes.clone();
+        for old in overlay.iter().flat_map(|(_, older)| older) {
+            for s in &old.scopes {
+                if !all.contains(s) {
+                    all.push(s.clone());
+                }
+            }
+        }
+        for s in &all {
             command.push("--scope".into());
             command.push(s.clone());
         }
@@ -1737,6 +1838,14 @@ fn decide_door(
                     _ => None,
                 },
             )
+        } else if let Some((o, _)) = &overlay {
+            // an overlay's closure is read as the overlay's, as it always was
+            Ok(
+                match crate::depends::of(doors, registry, "overlay", &o.id.to_string())? {
+                    crate::depends::Outcome::Closure(c) => Some(c),
+                    _ => None,
+                },
+            )
         } else {
             let modality = pack_dir(doors, name)
                 .and_then(|d| manifest_says(&d, "modality"))
@@ -1758,6 +1867,26 @@ fn decide_door(
             }
             return Err(r);
         }
+    };
+    // what the earlier versions' retirement stops reproducing
+    let retiring = match &overlay {
+        Some((o, older)) if !older.is_empty() => {
+            let modality = pack_dir(doors, name)
+                .and_then(|d| manifest_says(&d, "modality"))
+                .unwrap_or_else(|| "MR".into());
+            let old_scopes: Vec<String> = older
+                .iter()
+                .flat_map(|x| x.scopes.iter().cloned())
+                .collect();
+            let stacks = scoped_stacks(registry.store(), &modality, &old_scopes)?;
+            Some(crate::depends::of_stacks(
+                registry,
+                "overlay",
+                &o.id.to_string(),
+                stacks,
+            )?)
+        }
+        _ => None,
     };
     let mut swapped = false;
     let written = in_one(registry, |registry| {
@@ -1816,13 +1945,57 @@ fn decide_door(
         )
         .map_err(failed)?;
         let mut invalidated = Vec::new();
+        let reason = match &overlay {
+            Some((o, _)) => format!("overlay {} {} adopted as {}", o.name, o.version, o.id),
+            None => format!("rule change {id} adopted"),
+        };
         if let Some(c) = &closure {
-            invalidated = crate::depends::invalidate(
-                registry,
-                c,
-                &format!("rule change {id} adopted"),
+            invalidated = crate::depends::invalidate(registry, c, &reason, principal)?;
+        }
+        if let Some((o, older)) = &overlay {
+            if let Some(r) = &retiring {
+                for h in crate::depends::invalidate(registry, r, &reason, principal)? {
+                    if !invalidated.contains(&h) {
+                        invalidated.push(h);
+                    }
+                }
+            }
+            for x in older {
+                let why = format!("the overlay {} {} was adopted after it", o.name, o.version);
+                rp::retire(
+                    registry.store(),
+                    x.id,
+                    &json!({"proposal": id, "overlay": o.id}),
+                    &why,
+                )
+                .map_err(failed)?;
+            }
+            nils_registry::overlay::decide(
+                registry.store(),
+                o.id,
+                nils_registry::overlay::ADOPTED,
                 principal,
-            )?;
+                Some(job),
+                None,
+            )
+            .map_err(failed)?;
+            nils_registry::audit::record(
+                registry,
+                &nils_registry::audit::Entry {
+                    principal,
+                    action: nils_registry::audit::Action::OverlayAdopt,
+                    scope: json!({"overlay": o.id, "scope": o.scope}),
+                    policy: None,
+                    job_id: Some(job),
+                    details: Some(json!({
+                        "name": o.name, "version": o.version, "pack": o.pack,
+                        "closure": closure.as_ref().map(crate::depends::Closure::counts),
+                        "proposal": id,
+                        "retired": older.iter().map(|x| x.id).collect::<Vec<_>>(),
+                    })),
+                },
+            )
+            .map_err(failed)?;
         }
         // the pack edit's version in place last, once all of it is written
         if let Some(v) = &prepared {
@@ -1851,6 +2024,7 @@ fn decide_door(
         "job": job,
         "version": version,
         "scopes": scopes,
+        "closure": closure.as_ref().map(crate::depends::Closure::counts),
         "invalidated": invalidated,
     })))
 }

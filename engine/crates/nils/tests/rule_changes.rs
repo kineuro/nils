@@ -1197,6 +1197,204 @@ fn round(pg: Option<(String, String)>) {
             "the new version written for it is gone"
         );
     }
+
+    // words not held by an overlay adopted above
+    let fresh = |name: &str, batch: i64, word: &str| {
+        json!({
+            "overlay": name, "version": "1.0.0", "pack": "mri",
+            "scope": {"batch": batch.to_string()},
+            "lists": {"modifier.MoCo": {"add": [word]}},
+            "cases": [{"name": "the batch's word", "stack": {"text_series_description": word},
+                       "axes": {"modifier": "MoCo"}}],
+        })
+    };
+    // --- an overlay document is a body of the create door as it is: its
+    // `scope` is the overlay's own, and its cases are kept; nested under
+    // `overlay` a top-level `scope` would still be a preview's, so refused
+    let whole = fresh("form-whole", alpha_batch, "zzf1");
+    let (status, doc) = server.call("POST", "/api/packs/mri/proposals", Some(whole), REV);
+    assert_eq!(status, 201, "whole document: {doc}");
+    assert_eq!(
+        doc["scopes"],
+        json!([format!("batch:{alpha_batch}")]),
+        "{doc}"
+    );
+    let kept_cases = |store: &mut Store, id: i64| {
+        nils_registry::rule_proposal::get(store, id)
+            .unwrap()
+            .unwrap()
+            .patch["cases"]
+            .clone()
+    };
+    assert_eq!(
+        kept_cases(&mut store, doc["id"].as_i64().unwrap())[0]["name"],
+        "the batch's word",
+        "the whole document keeps its cases"
+    );
+    let (status, doc) = server.call(
+        "POST",
+        "/api/packs/mri/proposals",
+        Some(json!({"overlay": fresh("form-nested", alpha_batch, "zzf2")})),
+        REV,
+    );
+    assert_eq!(status, 201, "nested: {doc}");
+    assert_eq!(
+        doc["scopes"],
+        json!([format!("batch:{alpha_batch}")]),
+        "{doc}"
+    );
+    assert_eq!(
+        kept_cases(&mut store, doc["id"].as_i64().unwrap())[0]["name"],
+        "the batch's word"
+    );
+    let (status, doc) = server.call(
+        "POST",
+        "/api/packs/mri/proposals",
+        Some(
+            json!({"overlay": fresh("form-nested", alpha_batch, "zzf2"), "scope": "dataset:beta"}),
+        ),
+        REV,
+    );
+    assert_eq!(status, 400, "{doc}");
+    assert!(
+        doc["error"]
+            .as_str()
+            .unwrap()
+            .contains("names no scope of its own"),
+        "{doc}"
+    );
+
+    // --- an overlay is adopted through the proposal it is: rehearsed when
+    // proposed, stale once a scoped change was adopted since, adopted only
+    // by the rule change's own decide path
+    let (status, proposed) = server.call(
+        "POST",
+        "/api/overlays",
+        Some(
+            json!({"name": "gate words", "overlay": fresh("gate-words", alpha_batch, "zzf3"),
+                    "scope": format!("batch:{alpha_batch}")}),
+        ),
+        REV,
+    );
+    assert_eq!(status, 201, "{proposed}");
+    let gate = proposed["overlay"]["id"].as_i64().unwrap();
+    let gate_p = proposed["proposal"].as_i64().expect("its proposal");
+    let pg = server.get(&format!("/api/packs/mri/proposals/{gate_p}"), REV);
+    assert_eq!(pg["status"], "proposed", "{pg}");
+    assert_eq!(pg["kind"], "scoped", "{pg}");
+    assert_eq!(pg["evidence"]["overlay"], gate, "{pg}");
+    assert!(pg["card"]["moved"].is_number(), "its card: {pg}");
+    // another scoped change adopted after its rehearsal
+    let other = make("gatewd", "dataset:beta");
+    let (status, doc) = server.call(
+        "POST",
+        &format!("/api/packs/mri/proposals/{other}/decide"),
+        Some(json!({"decision": "adopt"})),
+        OPS,
+    );
+    assert_eq!(status, 202, "{doc}");
+    server.over(doc["job"].as_i64().unwrap());
+    server.quiet();
+    let (status, doc) = server.call("POST", &format!("/api/overlays/{gate}/adopt"), None, OPS);
+    assert_eq!(status, 409, "stale: {doc}");
+    assert!(
+        doc["error"].as_str().unwrap().contains("rehearse it again"),
+        "{doc}"
+    );
+    assert_eq!(
+        server.get(&format!("/api/overlays/{gate}"), REV)["status"],
+        "proposed"
+    );
+    // the proposal's own decide path refuses it alike
+    let (status, _) = server.call(
+        "POST",
+        &format!("/api/packs/mri/proposals/{gate_p}/decide"),
+        Some(json!({"decision": "adopt"})),
+        OPS,
+    );
+    assert_eq!(status, 409);
+    let (status, doc) = server.call(
+        "POST",
+        &format!("/api/packs/mri/proposals/{gate_p}/rehearse"),
+        Some(json!({})),
+        REV,
+    );
+    assert_eq!(status, 200, "{doc}");
+    let (status, doc) = server.call("POST", &format!("/api/overlays/{gate}/adopt"), None, OPS);
+    assert_eq!(status, 202, "{doc}");
+    assert_eq!(doc["proposal"], gate_p, "{doc}");
+    server.over(doc["job"].as_i64().unwrap());
+    server.quiet();
+    assert_eq!(
+        server.get(&format!("/api/packs/mri/proposals/{gate_p}"), REV)["status"],
+        "adopted"
+    );
+    assert_eq!(
+        server.get(&format!("/api/overlays/{gate}"), REV)["status"],
+        "adopted"
+    );
+
+    // --- refusing an overlay: a proposed one rejects its proposal; an
+    // adopted one is withdrawn, which retires its scoped change and queues
+    // its scope's re-sort; a refused one is refused no more
+    let (status, proposed) = server.call(
+        "POST",
+        "/api/overlays",
+        Some(
+            json!({"name": "refuse words", "overlay": fresh("refuse-words", alpha_batch, "zzf4"),
+                    "scope": format!("batch:{alpha_batch}")}),
+        ),
+        REV,
+    );
+    assert_eq!(status, 201, "{proposed}");
+    let refuse = proposed["overlay"]["id"].as_i64().unwrap();
+    let refuse_p = proposed["proposal"].as_i64().unwrap();
+    home.ok(&[
+        "overlay",
+        "refuse",
+        &refuse.to_string(),
+        "--why",
+        "not wanted",
+    ]);
+    assert_eq!(
+        server.get(&format!("/api/overlays/{refuse}"), REV)["status"],
+        "refused"
+    );
+    assert_eq!(
+        server.get(&format!("/api/packs/mri/proposals/{refuse_p}"), REV)["status"],
+        "rejected"
+    );
+    let (good, _, err) = home.run(&["overlay", "refuse", &refuse.to_string()], None);
+    assert!(!good && err.contains("is refused"), "{err}");
+    let jobs = |store: &mut Store, name: &str| -> usize {
+        let t = store.qualified("job");
+        store
+            .query(&format!("SELECT id FROM {t} WHERE name = '{name}'"), &[])
+            .unwrap()
+            .len()
+    };
+    assert_eq!(jobs(&mut store, &format!("withdraw overlay {gate}")), 0);
+    let out = home.ok(&[
+        "overlay",
+        "refuse",
+        &gate.to_string(),
+        "--pack-dir",
+        home.packs(),
+    ]);
+    assert!(
+        out.contains("retired") && out.contains("sorted again"),
+        "{out}"
+    );
+    assert_eq!(
+        server.get(&format!("/api/overlays/{gate}"), REV)["status"],
+        "refused"
+    );
+    assert_eq!(
+        server.get(&format!("/api/packs/mri/proposals/{gate_p}"), REV)["status"],
+        "retired"
+    );
+    assert_eq!(jobs(&mut store, &format!("withdraw overlay {gate}")), 1);
+
     drop(server);
 }
 

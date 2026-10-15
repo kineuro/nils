@@ -926,11 +926,17 @@ enum OverlayCommand {
         #[arg(long, value_name = "DIR")]
         to: PathBuf,
     },
-    /// Refuse a proposed overlay, closing the review item beside it
+    /// Refuse a proposed overlay (closing the review item beside it), or
+    /// withdraw an adopted one: its scoped change retires and its scope is
+    /// sorted again
     Refuse {
         id: i64,
         #[arg(long)]
         why: Option<String>,
+        /// The packs, where a withdrawn overlay's scope is queued to be
+        /// sorted again (else the usual places)
+        #[arg(long, value_name = "DIR")]
+        pack_dir: Option<PathBuf>,
     },
 }
 
@@ -4133,33 +4139,102 @@ fn overlay_command(home: &Home, command: OverlayCommand) -> Result<(), Exit> {
             println!("wrote {}", path.display());
             Ok(())
         }
-        OverlayCommand::Refuse { id, why } => {
+        OverlayCommand::Refuse { id, why, pack_dir } => {
+            // under the lock the doors adopt with, and in one transaction:
+            // the decision, the scoped change's retirement and, for an
+            // adopted overlay withdrawn, the re-sort of its scope
+            let _one = rule_changes::adopting();
             let o = nils_registry::overlay::show(registry.store(), id)
                 .map_err(|e| fail(e.to_string()))?
                 .ok_or_else(|| fail(format!("no overlay {id}")))?;
-            if o.status != nils_registry::overlay::PROPOSED {
+            let adopted = o.status == nils_registry::overlay::ADOPTED;
+            if !adopted && o.status != nils_registry::overlay::PROPOSED {
                 return Err(fail(format!(
-                    "overlay {id} is {}, and only a proposed one is refused",
+                    "overlay {id} is {}, and only a proposed or an adopted one is refused",
                     o.status
                 )));
             }
             let by = actor();
-            nils_registry::overlay::decide(
-                registry.store(),
-                id,
-                nils_registry::overlay::REFUSED,
-                &by,
-                None,
-                why.as_deref(),
-            )
-            .map_err(|e| fail(e.to_string()))?;
-            // record 56 §5.6: a refused overlay is applied by no sort, so a
-            // scoped change made of it retires with it
-            if let Some(kept) =
-                nils_registry::rule_proposal::retire_overlay(registry.store(), &o, &by)
+            let reason = format!("overlay {id} withdrawn");
+            // an adopted overlay: what its scope holds, and what reads it
+            let withdrawn = if adopted {
+                let change = nils_registry::rule_proposal::of_overlay(registry.store(), &o)
                     .map_err(|e| fail(e.to_string()))?
-            {
-                println!("its scoped change, proposal {kept}, retired");
+                    .filter(|p| p.status == nils_registry::rule_proposal::ADOPTED);
+                match change {
+                    Some(p) => {
+                        let dir = self::pack_dir(home, pack_dir.clone())?;
+                        let modality = nils_pack::load(&dir.join(&o.pack), None)
+                            .map_or_else(|_| "MR".to_string(), |p| p.modality);
+                        let stacks =
+                            rule_changes::scoped_stacks(registry.store(), &modality, &p.scopes)
+                                .map_err(|r| {
+                                    fail(r.body["error"].as_str().unwrap_or("scope").to_string())
+                                })?;
+                        let closure =
+                            depends::of_stacks(&mut registry, "overlay", &id.to_string(), stacks)
+                                .map_err(|r| {
+                                fail(r.body["error"].as_str().unwrap_or("closure").to_string())
+                            })?;
+                        Some((p, dir, closure))
+                    }
+                    None => None,
+                }
+            } else {
+                None
+            };
+            let retired = rule_changes::in_one(&mut registry, |registry| {
+                let failed =
+                    |e: nils_registry::store::Error| serve::Reply::error(500, e.to_string());
+                nils_registry::overlay::decide(
+                    registry.store(),
+                    id,
+                    nils_registry::overlay::REFUSED,
+                    &by,
+                    None,
+                    why.as_deref(),
+                )
+                .map_err(failed)?;
+                // record 56 section 5.6: a refused overlay is applied by no
+                // sort, so a scoped change made of it retires with it
+                let kept = nils_registry::rule_proposal::retire_overlay(registry.store(), &o, &by)
+                    .map_err(failed)?;
+                if let Some((p, dir, closure)) = &withdrawn {
+                    let mut command = vec!["classify".to_string(), "--pack".into(), o.pack.clone()];
+                    for s in &p.scopes {
+                        command.push("--scope".into());
+                        command.push(s.clone());
+                    }
+                    command.push("--pack-dir".into());
+                    command.push(dir.display().to_string());
+                    let job = nils_registry::job::enqueue_with(
+                        registry.store(),
+                        &command,
+                        Some(&format!("withdraw overlay {id}")),
+                        Some(&by),
+                        serde_json::json!({"overlay": id, "proposal": p.id}),
+                    )
+                    .map_err(|e| {
+                        serve::Reply::error(
+                            500,
+                            format!("the re-sort could not be queued, so it is not withdrawn: {e}"),
+                        )
+                    })?;
+                    depends::invalidate(registry, closure, &reason, &by)?;
+                    return Ok((kept, Some(job)));
+                }
+                Ok((kept, None))
+            })
+            .map_err(|r| fail(r.body["error"].as_str().unwrap_or("refused").to_string()))?;
+            match retired {
+                (Some((kept, true)), job) => {
+                    println!("its scoped change, proposal {kept}, retired");
+                    if let Some(job) = job {
+                        println!("queued job {job}: its scope is sorted again");
+                    }
+                }
+                (Some((kept, false)), _) => println!("its proposal {kept} rejected"),
+                _ => {}
             }
             println!("overlay {id} refused");
             Ok(())

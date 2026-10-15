@@ -1740,7 +1740,7 @@ paths:
       description: The overlay document may carry lists beside buckets (pack contract 5); it is rehearsed as POST /api/classify/try rehearses it and stored as written, so GET /api/overlays/{id} answers document.lists and nils overlay show and export print and write them. Adoption re-sorts the scope as before.
       requestBody: {content: {application/json: {schema: {type: object, required: [name, overlay, scope], properties: {name: {type: string}, overlay: {type: object, description: "{overlay, version, pack, scope, buckets?, lists?, cases}"}, scope: {type: string}, sample: {type: integer}, why: {type: string}}}}}}
       responses:
-        "201": {description: "{overlay, review_item, status: proposed}"}
+        "201": {description: "{overlay, proposal, review_item, status: proposed}; `proposal` is the scoped change the overlay is adopted through, rehearsed now over the overlay's own origin with the scoped changes in force (null where the overlay changes no word)"}
         "400": {description: "The overlay is refused, and the answer says why"}
   /api/overlays/{id}:
     get:
@@ -1753,12 +1753,12 @@ paths:
   /api/overlays/{id}/adopt:
     post:
       summary: Adopt a proposed overlay and queue a reclassify over its scope (Wave 4c section 6.6; review:work and data:work)
-      description: "Amended in place on 2026-10-15 by record 56 (section 5.6, an overlay never leaves its scope): the adopted overlay is kept as the scoped change it is, an adopted proposal of the pack (GET /api/packs/{name}/proposals/{id}, its operations the overlay's word edits scoped to its origin, its evidence the overlay), which every sort from then on applies to the stacks its origin holds and to no other; the reclassify queued is that scope's re-sort (`classify --scope ... --proposal ...`), not the whole registry under the overlay. A registry migrating to schema 100 keeps each overlay it adopted before the same way."
+      description: "Amended in place on 2026-10-15 by record 56 (section 5.6, an overlay never leaves its scope): the adopted overlay is kept as the scoped change it is, an adopted proposal of the pack (GET /api/packs/{name}/proposals/{id}, its operations the overlay's word edits scoped to its origin, its evidence the overlay), which every sort from then on applies to the stacks its origin holds and to no other; the reclassify queued is that scope's re-sort (`classify --scope ... --proposal ...`), not the whole registry under the overlay. A registry migrating to schema 100 keeps each overlay it adopted before the same way. Amended in place on 2026-10-15: an overlay is adopted through the proposal it is, by the rule change's own decide path (the same stale check, transaction and approval card), and by no other. It is rehearsed when it is proposed; where the pack served or the scoped changes in force have changed since, adoption is refused with 409 until the proposal is rehearsed again (POST /api/packs/{name}/proposals/{id}/rehearse). An overlay proposed before this had no proposal is rehearsed on its first adoption call, which answers 409 so its card is read before the next one adopts. Only a person decides, as for every rule change."
       parameters:
         - {name: id, in: path, required: true, schema: {type: integer}}
       responses:
         "202": {description: "{job, overlay, proposal, retired, scopes, status: adopted, closure, invalidated}: `proposal` the scoped change it is kept as; added in place on 2026-10-15, `retired` the scoped changes of the same overlay's earlier versions it replaces (retired, so they never apply beside it), and `scopes` what the re-sort covers: the overlay's origin and the origins of those it retires. The scoped change, the job, the decision and the audit are written in one transaction, after every check that can refuse; a refused adoption leaves nothing adopted. A refused overlay (nils overlay refuse) retires the scoped change made of it, where there is one."}
-        "409": {description: "A lower author than the one who decided, or not proposed"}
+        "409": {description: "A lower author than the one who decided, not proposed, no rehearsed proposal yet, or the proposal stale"}
   /api/ingest/probe:
     post:
       summary: Candidate identity rules probed over a sample of a dataset's originals or of a pre-registered ingest location, as a job, shapes only (Wave 4c section 6.6; data:work, and detail quasi for a dataset)

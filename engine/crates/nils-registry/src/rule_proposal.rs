@@ -545,7 +545,7 @@ fn overlay_name(o: &crate::overlay::Overlay) -> String {
 /// Whether a proposal is the scoped change the overlays door made of an
 /// adopted overlay: its kind, its pack and its door's mark, never only an
 /// evidence that cites the overlay (a person's proposal may).
-fn made_of_overlay(p: &Proposal) -> bool {
+pub fn made_of_overlay(p: &Proposal) -> bool {
     p.kind == SCOPED && p.evidence["made_by"].as_str() == Some(OVERLAY_MARK)
 }
 
@@ -555,9 +555,23 @@ pub fn of_overlay(
     store: &mut Store,
     o: &crate::overlay::Overlay,
 ) -> Result<Option<Proposal>, Error> {
-    Ok(list(store, Some(&o.pack))?
-        .into_iter()
-        .find(|p| made_of_overlay(p) && p.evidence["overlay"].as_i64() == Some(o.id)))
+    Ok(list(store, Some(&o.pack))?.into_iter().find(|p| {
+        made_of_overlay(p) && p.status != REJECTED && p.evidence["overlay"].as_i64() == Some(o.id)
+    }))
+}
+
+/// The scoped change of a proposed overlay, as the proposal the overlays
+/// door keeps beside it: the patch and the evidence an overlay is kept
+/// with, or none where the overlay changes no word.
+pub fn overlay_kept(o: &crate::overlay::Overlay) -> Option<(String, Value, Value, String)> {
+    let (scope, patch) = overlay_patch(o.id, &o.pack, &o.document)?;
+    let name = overlay_name(o);
+    let evidence = serde_json::json!({
+        "overlay": o.id, "made_by": OVERLAY_MARK,
+        "name": name, "version": o.document["version"].as_str().unwrap_or(&o.version),
+    });
+    let title = format!("the overlay {} {}", o.name, o.version);
+    Some((scope, patch, evidence, title))
 }
 
 /// The adopted scoped changes an adoption of this overlay retires: those
@@ -617,18 +631,36 @@ pub fn retire(store: &mut Store, id: i64, by: &Value, why: &str) -> Result<bool,
     Ok(n > 0)
 }
 
-/// An overlay refused: the scoped change the overlays door made of it, where
-/// one is adopted, retires with it. Answers the change retired.
+/// An overlay refused or withdrawn: the scoped change the overlays door
+/// made of it retires with it where it is adopted, and is rejected where it
+/// is still proposed. Answers the change retired or rejected, and whether it
+/// had been adopted.
 pub fn retire_overlay(
     store: &mut Store,
     o: &crate::overlay::Overlay,
     by: &str,
-) -> Result<Option<i64>, Error> {
+) -> Result<Option<(i64, bool)>, Error> {
     let Some(p) = of_overlay(store, o)? else {
         return Ok(None);
     };
     let why = format!("the overlay {} {} was refused by {by}", o.name, o.version);
-    Ok(retire(store, p.id, &serde_json::json!({"overlay": o.id}), &why)?.then_some(p.id))
+    if p.status == PROPOSED {
+        let done = decide(
+            store,
+            p.id,
+            &Decided {
+                status: REJECTED,
+                by,
+                why: Some(&why),
+                job: None,
+                version: &Value::Null,
+                applied: &Value::Null,
+                at: None,
+            },
+        )?;
+        return Ok(done.then_some((p.id, false)));
+    }
+    Ok(retire(store, p.id, &serde_json::json!({"overlay": o.id}), &why)?.then_some((p.id, true)))
 }
 
 /// What keeping an overlay as its scoped change did.
@@ -660,6 +692,25 @@ pub fn from_overlay(
     at: Option<&str>,
 ) -> Result<Option<Kept>, Error> {
     if let Some(p) = of_overlay(store, o)? {
+        // the proposal an overlay was kept with, for an overlay adopted by
+        // other means (a registry from before record 56): superseded by the
+        // adopted scoped change made now
+        if p.status == PROPOSED {
+            decide(
+                store,
+                p.id,
+                &Decided {
+                    status: REJECTED,
+                    by,
+                    why: Some("the overlay was adopted without it"),
+                    job: None,
+                    version: &Value::Null,
+                    applied: &Value::Null,
+                    at,
+                },
+            )?;
+            return from_overlay(store, o, by, at);
+        }
         return Ok(Some(Kept {
             id: p.id,
             made: false,
@@ -1035,7 +1086,10 @@ mod tests {
         assert_eq!((again.id, again.made), (k.id, false));
 
         // a refused overlay retires the change made of it, and nothing else
-        assert_eq!(retire_overlay(&mut s, &o3, "ops@lab").unwrap(), Some(k.id));
+        assert_eq!(
+            retire_overlay(&mut s, &o3, "ops@lab").unwrap(),
+            Some((k.id, true))
+        );
         assert_eq!(get(&mut s, k.id).unwrap().unwrap().status, RETIRED);
         assert_eq!(retire_overlay(&mut s, &o3, "ops@lab").unwrap(), None);
         assert_eq!(in_force(&mut s, "mri").unwrap(), [theirs]);

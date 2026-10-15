@@ -3604,8 +3604,15 @@ fn routed(
                 },
             )?;
             let row = nils_registry::overlay::show(registry.store(), id)?;
+            // the proposal the overlay is adopted through, rehearsed now
+            // over the overlay's own origin
+            let proposal = match &row {
+                Some(o) => crate::rule_changes::propose_overlay(doors, registry, o)?,
+                None => None,
+            };
             Ok(Reply::created(serde_json::json!({
                 "overlay": row.map(|o| o.as_json(true)),
+                "proposal": proposal,
                 "review_item": item,
                 "status": nils_registry::overlay::PROPOSED,
             })))
@@ -3619,9 +3626,9 @@ fn routed(
         }
         ["api", "overlays", _, "adopt"] if post => {
             let id = id_at(2)?;
-            // one adoption at a time, rule changes and overlays alike: each
-            // reads the scoped changes in force before it changes them
-            let _one = crate::rule_changes::adopting();
+            // Nima, 2026-10-15: an overlay is adopted through the proposal
+            // it is, by the rule change's own decide path (the same stale
+            // check, transaction and card), never around it.
             let Some(o) = nils_registry::overlay::show(registry.store(), id)? else {
                 return Err(Reply::error(404, format!("no overlay {id}")));
             };
@@ -3631,6 +3638,21 @@ fn routed(
                     format!(
                         "overlay {id} is {}, and only a proposed one is adopted",
                         o.status
+                    ),
+                ));
+            }
+            let had = nils_registry::rule_proposal::of_overlay(registry.store(), &o)?.is_some();
+            let Some(proposal) = crate::rule_changes::propose_overlay(doors, registry, &o)? else {
+                return Err(Reply::error(409, format!("overlay {id} changes no word")));
+            };
+            if !had {
+                // an overlay proposed before its card was kept: rehearsed
+                // now, and adopted once its card has been read
+                return Err(Reply::error(
+                    409,
+                    format!(
+                        "overlay {id} had no rehearsed proposal; it is rehearsed now as proposal {proposal} of {}, so read its card and adopt again",
+                        o.pack
                     ),
                 ));
             }
@@ -3647,149 +3669,26 @@ fn routed(
                     ),
                 ));
             }
-            // record 56 §5.6: the overlay is kept as the scoped change it
-            // is, which every sort applies to the stacks its origin holds
-            // and to no other, and only its scope is re-sorted now; it
-            // retires the scoped change of an earlier version of the same
-            // overlay, whose origin is re-sorted too. Every check that can
-            // refuse comes first, while nothing has changed.
-            let Some((origin, _)) =
-                nils_registry::rule_proposal::overlay_patch(o.id, &o.pack, &o.document)
-            else {
-                return Err(Reply::error(409, format!("overlay {id} changes no word")));
-            };
-            let older = nils_registry::rule_proposal::superseded_by(registry.store(), &o)?;
-            let mut scopes = vec![origin];
-            for p in &older {
-                for s in &p.scopes {
-                    if !scopes.contains(s) {
-                        scopes.push(s.clone());
-                    }
-                }
-            }
-            // Wave 5 §12.4, §12.8: the closure is computed before anything
-            // moves; the handles it names stop reproducing, and the audit
-            // row keeps the counts.
-            let closure = match crate::depends::of(doors, registry, "overlay", &id.to_string())? {
-                crate::depends::Outcome::Closure(c) => c,
-                _ => return Err(Reply::error(404, format!("no overlay {id}"))),
-            };
-            let retiring = if older.is_empty() {
-                None
-            } else {
-                let modality = doors
-                    .pack_dir
-                    .as_ref()
-                    .and_then(|d| nils_pack::load(&d.join(&o.pack), None).ok())
-                    .map_or_else(|| "MR".to_string(), |p| p.modality);
-                let old_scopes: Vec<String> = older
-                    .iter()
-                    .flat_map(|p| p.scopes.iter().cloned())
-                    .collect();
-                let stacks =
-                    crate::rule_changes::scoped_stacks(registry.store(), &modality, &old_scopes)?;
-                Some(crate::depends::of_stacks(
-                    registry,
-                    "overlay",
-                    &id.to_string(),
-                    stacks,
-                )?)
-            };
-            // Then the scoped change, the re-sort, the decision and their
-            // record in one transaction: a failure leaves nothing adopted.
-            let (job, kept, invalidated) = crate::rule_changes::in_one(registry, |registry| {
-                let kept = nils_registry::rule_proposal::from_overlay(
-                    registry.store(),
-                    &o,
-                    principal,
-                    None,
-                )?
-                .ok_or_else(|| Reply::error(409, format!("overlay {id} changes no word")))?;
-                let mut command = vec!["classify".to_string(), "--pack".into(), o.pack.clone()];
-                for s in &scopes {
-                    command.push("--scope".into());
-                    command.push(s.clone());
-                }
-                command.push("--proposal".into());
-                command.push(kept.id.to_string());
-                // The worker runs where this engine runs, but knows no pack
-                // directory of its own: the one this engine serves is named.
-                if let Some(dir) = &doors.pack_dir {
-                    command.push("--pack-dir".into());
-                    command.push(dir.display().to_string());
-                }
-                let job = nils_registry::job::enqueue_with(
-                    registry.store(),
-                    &command,
-                    Some(&format!("adopt overlay {id}")),
-                    Some(principal),
-                    serde_json::json!({
-                        "detail": caller.access.detail.name(),
-                        "actor": caller.actor,
-                        "overlay": id,
-                        "proposal": kept.id,
-                    }),
-                )
-                .map_err(job_err)?;
-                nils_registry::rule_proposal::set_job(registry.store(), kept.id, job)?;
-                nils_registry::overlay::decide(
-                    registry.store(),
-                    id,
-                    nils_registry::overlay::ADOPTED,
-                    principal,
-                    Some(job),
-                    None,
-                )?;
-                nils_registry::audit::record(
-                    registry,
-                    &nils_registry::audit::Entry {
-                        principal,
-                        action: nils_registry::audit::Action::OverlayAdopt,
-                        scope: serde_json::json!({"overlay": id, "scope": o.scope}),
-                        policy: None,
-                        job_id: Some(job),
-                        details: Some(serde_json::json!({
-                            "name": o.name, "version": o.version, "pack": o.pack,
-                            "closure": closure.counts(),
-                            "proposal": kept.id, "retired": kept.retired,
-                        })),
-                    },
-                )?;
-                let reason = format!("overlay {} {} adopted as {id}", o.name, o.version);
-                let mut invalidated =
-                    crate::depends::invalidate(registry, &closure, &reason, principal)?;
-                if let Some(r) = &retiring {
-                    for h in crate::depends::invalidate(registry, r, &reason, principal)? {
-                        if !invalidated.contains(&h) {
-                            invalidated.push(h);
-                        }
-                    }
-                }
-                if !invalidated.is_empty() {
-                    nils_registry::audit::record(
-                        registry,
-                        &nils_registry::audit::Entry {
-                            principal,
-                            action: nils_registry::audit::Action::HandleInvalidate,
-                            scope: serde_json::json!({"overlay": id, "handles": invalidated.len()}),
-                            policy: None,
-                            job_id: Some(job),
-                            details: Some(serde_json::json!({"handles": invalidated})),
-                        },
-                    )?;
-                }
-                Ok((job, kept, invalidated))
-            })?;
-            Ok(Reply::accepted(serde_json::json!({
-                "job": job,
-                "overlay": id,
-                "proposal": kept.id,
-                "retired": kept.retired,
-                "scopes": scopes,
-                "status": nils_registry::overlay::ADOPTED,
-                "closure": closure.counts(),
-                "invalidated": invalidated,
-            })))
+            let decided = crate::rule_changes::decide_door(
+                doors,
+                registry,
+                caller,
+                &o.pack,
+                proposal,
+                &serde_json::json!({"decision": "adopt"}).to_string(),
+            )?;
+            let mut out = decided.body.clone();
+            let kept = nils_registry::rule_proposal::get(registry.store(), proposal)?;
+            let retired = kept
+                .as_ref()
+                .map(|p| p.applied["supersedes"].clone())
+                .filter(|v| !v.is_null())
+                .unwrap_or_else(|| serde_json::json!([]));
+            out["overlay"] = serde_json::json!(id);
+            out["proposal"] = serde_json::json!(proposal);
+            out["retired"] = retired;
+            out["status"] = serde_json::json!(nils_registry::overlay::ADOPTED);
+            Ok(Reply::accepted(out))
         }
         // The desk's picker: the folders inside a folder of an ingest root, a
         // page at a time, and what a few of them hold, each named as
