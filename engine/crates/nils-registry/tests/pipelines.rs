@@ -1799,3 +1799,115 @@ fn a_model_that_disagrees_with_a_person_is_asked_and_never_applied() {
         );
     }
 }
+
+/// Record 55, third review: the runs a host's lane sweeps, on both
+/// backends (the time is cast for Postgres): every ended status on that
+/// host, interrupted only on the first sweep, then only those that ended
+/// at or after the last sweep's time; never a running run or another
+/// host's.
+#[test]
+fn the_runs_ended_since_a_sweep_on_both_backends() {
+    use nils_registry::pipeline as rows;
+    for mut l in labs() {
+        let store = l.registry.store();
+        let doc = serde_json::json!({});
+        let (pl, _) = rows::add(
+            store,
+            &rows::New {
+                name: "swept",
+                tool_version: "1",
+                descriptor: &doc,
+                descriptor_digest: "d1",
+                image: "example.org/swept",
+                image_digest: "sha256:00",
+                layout: "stacks",
+                level: "stack",
+                added_by: "test",
+                added_at: "2026-10-15T10:00:00Z",
+            },
+        )
+        .unwrap();
+        let params = serde_json::json!({});
+        let mut start = |host: &str| -> i64 {
+            rows::start(
+                store,
+                &rows::NewRun {
+                    pipeline_id: pl.id,
+                    job_id: None,
+                    handle_id: None,
+                    selection: None,
+                    params: &params,
+                    runtime: "apptainer",
+                    runtime_version: "1",
+                    host,
+                    device: "cpu",
+                    model_ids: &[],
+                    label_set_id: None,
+                    place_id: None,
+                    scratch_place_id: None,
+                    principal: "t",
+                    actor: None,
+                    started_at: "2026-10-15T10:00:00Z",
+                },
+            )
+            .unwrap()
+        };
+        let ids: Vec<i64> = ["h", "h", "h", "h", "h", "other"]
+            .iter()
+            .map(|h| start(h))
+            .collect();
+        let store = l.registry.store();
+        let finish = |store: &mut Store, id: i64, status: &str, at: &str| {
+            rows::finish(
+                store,
+                id,
+                &rows::Finish {
+                    status,
+                    finished_at: at,
+                    exit_code: None,
+                    results_digest: None,
+                    summary: &serde_json::json!({}),
+                    error: None,
+                    failure: None,
+                },
+            )
+            .unwrap();
+        };
+        finish(store, ids[0], "done", "2026-10-15T10:00:00Z");
+        finish(store, ids[1], "failed", "2026-10-15T12:00:00Z");
+        assert!(rows::interrupt(store, ids[2], "went away").unwrap());
+        finish(store, ids[3], "partial", "2026-10-15T13:00:00Z");
+        // ids[4] still runs; ids[5] ended on another host
+        finish(store, ids[5], "done", "2026-10-15T13:00:00Z");
+        let got = |store: &mut Store, since: Option<&str>| -> Vec<i64> {
+            rows::runs_ended_since(store, "h", since)
+                .unwrap()
+                .iter()
+                .map(|r| r.id)
+                .collect()
+        };
+        assert_eq!(
+            got(store, None),
+            vec![ids[0], ids[1], ids[2], ids[3]],
+            "{}",
+            l.name
+        );
+        assert_eq!(
+            got(store, Some("2026-10-15T11:00:00Z")),
+            vec![ids[1], ids[3]],
+            "{}",
+            l.name
+        );
+        assert_eq!(
+            got(store, Some("2026-10-15T13:00:00Z")),
+            vec![ids[3]],
+            "{}",
+            l.name
+        );
+        assert!(
+            got(store, Some("2026-10-15T14:00:00Z")).is_empty(),
+            "{}",
+            l.name
+        );
+    }
+}

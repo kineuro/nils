@@ -3644,13 +3644,15 @@ fn an_optional_gpu_need_takes_the_leased_card_under_apptainer_and_else_the_cpu()
             None,
         );
     };
-    let env: [(&str, &Path); 5] = [
+    let env: [(&str, &Path); 6] = [
         ("FAKE_APPTAINER_ARGS", &calls),
         ("FAKE_GPU_FREE", &free),
         ("FAKE_GPU_TOTAL", &total),
         ("FAKE_GPU_ASKED", &asked),
-        // a full card gives way to the CPU after one second here, not 60
+        // a full card gives way to the CPU after one second here, not 60,
+        // and a run that must stay on it gives up after two, not 1,800
         ("NILS_CARD_GRACE_S", Path::new("1")),
+        ("NILS_CARD_STALL_S", Path::new("2")),
     ];
     // a run, and the containers it started: the `run` calls since the last
     let seen = std::cell::Cell::new(0usize);
@@ -3827,6 +3829,17 @@ fn an_optional_gpu_need_takes_the_leased_card_under_apptainer_and_else_the_cpu()
         assert!(u["gpu_card"].is_null(), "{u}");
     }
     let run_id = r["id"].as_i64().unwrap();
+    // its summary's needs and its audit say the CPU too
+    assert!(
+        r["summary"]["needs"].is_object() && r["summary"]["needs"]["gpu_memory_gb"].is_null(),
+        "{r}"
+    );
+    assert_eq!(
+        lab.count(&format!(
+            "SELECT COUNT(*) FROM audit WHERE action = 'pipeline.run' AND scope LIKE '%\"run\":{run_id},%' AND details LIKE '%\"device\":\"cpu\"%'"
+        )),
+        1
+    );
     let logs: Vec<String> = std::fs::read_dir(runs.join(run_id.to_string()).join("units"))
         .unwrap()
         .flatten()
@@ -3836,11 +3849,23 @@ fn an_optional_gpu_need_takes_the_leased_card_under_apptainer_and_else_the_cpu()
     for l in &logs {
         assert!(
             l.starts_with("nils: card 1: 1000 MiB free")
-                && l.contains("another tenant holds the rest")
+                && l.contains("another tenant or run holds the rest")
                 && l.contains("the run runs on the CPU"),
             "{l}"
         );
     }
+
+    // a run that must have the card, the card full of another tenant's: it
+    // waits a bounded time, then fails and says why; it never waits forever
+    let (ok, r, err, execs) = run("gpu-required", &[]);
+    assert!(!ok, "{r}");
+    assert!(execs.is_empty(), "{execs:?}");
+    let why = format!("{err} {r}");
+    assert!(
+        why.contains("another tenant or run holds the rest")
+            && why.contains("gives up on the card"),
+        "{why}"
+    );
 
     // no card on the machine: the CPU
     std::fs::write(&total, "98304").unwrap();

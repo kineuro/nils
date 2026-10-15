@@ -175,9 +175,10 @@ def _convert(sid: int, d: str, files: list) -> dict:
     t0 = time.time()
     try:
         info = tools.convert(_W["env"], d, files)
-        # dcm2niix the kernel or a signal ended (its memory) is the run's
-        # failure, not the data's
-        ended = any(killed(info.get(k)) for k in ("rc1", "rc2"))
+        # dcm2niix the kernel or a signal ended (its memory) on its last
+        # attempt is the run's failure, not the data's
+        last = info.get("rc2", info.get("rc1"))
+        ended = killed(last)
         why = tools.check_native(d) if info.get("ok") else (WORKER_DIED if ended else "dcm2niix")
     except Exception as e:  # noqa: BLE001
         info, why = {"ok": False}, f"convert: {type(e).__name__}"

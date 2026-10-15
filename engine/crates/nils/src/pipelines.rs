@@ -4067,6 +4067,17 @@ fn lane_grace() -> Duration {
     Duration::from_secs(s)
 }
 
+/// How long a run that runs on the card waits for room another tenant
+/// holds before it fails, saying why (record 55, third review): 30 minutes,
+/// or `NILS_CARD_STALL_S`.
+fn card_stall() -> Duration {
+    let s = std::env::var("NILS_CARD_STALL_S")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(1800);
+    Duration::from_secs(s)
+}
+
 /// Remove every apptainer work folder of a run (its own and each unit's):
 /// what a stopped, cancelled or interrupted unit left in its `/tmp`.
 pub(crate) fn drop_workdirs(run_dir: &Path) {
@@ -4086,56 +4097,31 @@ fn run_folder(store: &mut Store, r: &Run) -> Option<PathBuf> {
     Some(PathBuf::from(place.path).join(RUNS).join(r.id.to_string()))
 }
 
-/// The registry key that holds when the pipeline lane last swept the work
-/// folders of runs that ended.
+/// The registry key, with this host's name after it, that holds when the
+/// pipeline lane last swept the work folders of this host's runs that
+/// ended: lanes and their work folders are each host's own.
 const SWEPT_KEY: &str = "pipelines.workdirs_swept_at";
 
-/// At an engine's start: the work folders of every run that ended since the
-/// last sweep (one query), whatever ended it, are removed, and the sweep's
-/// time is kept so the next one visits only the runs that end after it.
+/// At the pipeline lane's start: the work folders of this host's runs that
+/// ended since the last sweep (one query), whatever ended them, are
+/// removed, and the sweep's time is kept so the next one visits only the
+/// runs that end after it. The first sweep also visits the interrupted
+/// runs, whose end has no time; after it, the lane that marks a run
+/// interrupted clears its folders then.
 pub(crate) fn sweep_workdirs(store: &mut Store) -> Result<usize, String> {
-    let err = |e: nils_registry::Error| e.to_string();
-    let meta = store.qualified("registry_meta");
-    let d = store.dialect();
-    let since = store
-        .query_opt(
-            &format!(
-                "SELECT value FROM {meta} WHERE key = {}",
-                d.param(1, Type::Text)
-            ),
-            &[Param::from(SWEPT_KEY)],
-        )
-        .map_err(err)?
-        .and_then(|r| r.text(0).ok().map(str::to_string));
+    let host = job::hostname();
+    let key = format!("{SWEPT_KEY}.{host}");
+    let since = meta_text(store, &key)?;
     let now = nils_registry::time::now_iso();
-    let runs = rows::runs_ended_since(store, since.as_deref()).map_err(err)?;
-    let mut places: BTreeMap<i64, Option<String>> = BTreeMap::new();
+    let runs = rows::runs_ended_since(store, &host, since.as_deref()).map_err(|e| e.to_string())?;
     let mut swept = 0;
     for r in &runs {
-        let Some(id) = r.scratch_place_id.or(r.place_id) else {
-            continue;
-        };
-        let path = places.entry(id).or_insert_with(|| {
-            nils_registry::place::show(store, id)
-                .ok()
-                .flatten()
-                .map(|p| p.path)
-        });
-        if let Some(path) = path {
-            drop_workdirs(&PathBuf::from(&*path).join(RUNS).join(r.id.to_string()));
+        if let Some(dir) = run_folder(store, r) {
+            drop_workdirs(&dir);
             swept += 1;
         }
     }
-    store
-        .execute(
-            &format!(
-                "INSERT INTO {meta} (key, value) VALUES ({}, {}) ON CONFLICT (key) DO UPDATE SET value = excluded.value",
-                d.param(1, Type::Text),
-                d.param(2, Type::Text)
-            ),
-            &[Param::from(SWEPT_KEY), Param::from(now.as_str())],
-        )
-        .map_err(err)?;
+    nils_registry::home::set_meta(store, &key, &now).map_err(|e| e.to_string())?;
     Ok(swept)
 }
 
@@ -5072,6 +5058,11 @@ fn conclude(
             failure: failure.as_ref(),
         },
     )?;
+    // the device it ran on, as recorded: a run sent to the CPU says so
+    let device = rows::run(registry.store(), run_id)
+        .ok()
+        .flatten()
+        .map_or_else(|| c.device.to_string(), |r| r.device);
     // record 49 A3: a run that loaded measures changed what the ask
     // answers, so it moves the epoch and the ask's catalog is built again
     let measures_loaded = summary["numbers"]["measures"].as_u64().unwrap_or(0) > 0;
@@ -5090,7 +5081,7 @@ fn conclude(
                 policy: None,
                 job_id: Some(c.job_id),
                 details: Some(json!({
-                    "status": status, "runtime": c.runtime, "device": c.device,
+                    "status": status, "runtime": c.runtime, "device": device,
                     "results": digest, "review_items": summary["review_items"],
                     "measures": summary["numbers"]["measures"],
                 })),
@@ -5795,6 +5786,8 @@ struct LaneHeld {
     cores: u32,
     memory_mib: u64,
     gpu_mib: u64,
+    /// Of `gpu_mib`, what this run's own units hold.
+    own_gpu_mib: u64,
     runs: usize,
 }
 
@@ -5832,6 +5825,9 @@ fn lane_held(store: &mut Store, run_id: i64, host: &str, card: u32) -> Result<La
             .saturating_add(n(2)?.min(u64::from(u32::MAX)) as u32);
         held.memory_mib += n(3)?;
         held.gpu_mib += n(4)?;
+        if run == run_id {
+            held.own_gpu_mib += n(4)?;
+        }
         held.runs += 1;
     }
     Ok(held)
@@ -5864,6 +5860,8 @@ struct Lanes {
     /// Since when a unit that runs alone has waited for half its cores.
     lane_short: Option<Instant>,
     lane_grace: Duration,
+    /// How long a run on the card waits for room another tenant holds.
+    card_stall: Duration,
 }
 
 /// Start the next batch if it fits the lane as every run holds it, under
@@ -5900,11 +5898,18 @@ fn start_next(
     else {
         l.lane_short.get_or_insert_with(Instant::now);
         l.waiting = Some(format!(
-            "the lane's budget: {} of {} cores held; a unit that runs alone waits up to {} s for half of the {} it may take",
-            l.seen.held_cores,
+            "the lane's budget: {free} of {} cores free; {}",
             l.seen.cores,
-            l.lane_grace.as_secs(),
-            x.descriptor.needs.cores
+            if together {
+                format!(
+                    "a unit that runs alone waits up to {} s for {} of the {} it may take",
+                    l.lane_grace.as_secs(),
+                    x.descriptor.needs.cores.max(1).div_ceil(2),
+                    x.descriptor.needs.cores
+                )
+            } else {
+                "a unit waits for one".to_string()
+            }
         ));
         return Ok(None);
     };
@@ -5936,20 +5941,32 @@ fn start_next(
             None => Err("nvidia-smi is not on the search path".into()),
         };
         let held_gpu = held.gpu_mib;
-        // what keeps the lease: none, the lane's own leases (which end
-        // with their units), or memory another tenant holds
+        let own = held.own_gpu_mib;
+        // leases whose memory the card already shows in use are not counted
+        // twice: only what the leases hold beyond the memory in use is
+        // still to come (record 55, third review)
+        let total = l
+            .smi
+            .as_ref()
+            .and_then(|smi| lane::gpu_total_mib(smi, card).ok());
+        let to_come = |free: u64| match total {
+            Some(total) => held_gpu.saturating_sub(total.saturating_sub(free)),
+            None => held_gpu,
+        };
+        // what keeps the lease: none, this run's own leases (which end with
+        // its units), or memory another tenant or another run holds
         let short = match free {
-            Ok(free) if lane::lease_fits(free, held_gpu, need) => None,
-            Ok(free) if held_gpu > 0 && free.saturating_add(held_gpu) >= need => Some((
+            Ok(free) if lane::lease_fits(free, to_come(free), need) => None,
+            Ok(free) if own > 0 && free.saturating_add(own) >= need => Some((
                 false,
                 format!(
-                    "card {card}: {free} MiB free and {held_gpu} MiB held by the lane's own running units, and a unit needs {need} MiB: it waits for them"
+                    "card {card}: {free} MiB free and {own} MiB held by this run's own units, and a unit needs {need} MiB: it waits for them"
                 ),
             )),
             Ok(free) => Some((
                 true,
                 format!(
-                    "card {card}: {free} MiB free, {held_gpu} MiB of it the lane's own, and a unit needs {need} MiB: another tenant holds the rest"
+                    "card {card}: {free} MiB free, {own} MiB of it this run's, and a unit needs {need} MiB: another tenant or run holds the rest"
                 ),
             )),
             Err(e) => Some((true, format!("card {card}: {e}"))),
@@ -5960,10 +5977,9 @@ fn start_next(
                 gpu_mib = Some(need);
                 l.on_card = true;
             }
-            // record 55, second review: an optional card another tenant
-            // keeps too full sends the whole run to the CPU, before its
-            // first unit starts, after a short wait; once a unit runs on the
-            // card the run waits for it, so a run never mixes devices
+            // an optional card another tenant keeps too full sends the
+            // whole run to the CPU, before its first unit starts, after a
+            // short wait; a run never mixes devices
             Some((true, why)) if l.optional && !l.on_card => {
                 let since = *l.card_short.get_or_insert_with(Instant::now);
                 if since.elapsed() < l.grace {
@@ -5978,7 +5994,22 @@ fn start_next(
                 l.gpu_need = None;
                 l.to_cpu = Some(words);
             }
-            Some((_, why)) => {
+            // once on the card (or the card required), another tenant's
+            // shortfall is waited for a bounded time, then the run fails
+            // and says why
+            Some((true, why)) => {
+                let since = *l.card_short.get_or_insert_with(Instant::now);
+                if since.elapsed() >= l.card_stall {
+                    return Err(format!(
+                        "{why}, for {} s: the run gives up on the card (NILS_CARD_STALL_S); start it again when the card has room",
+                        since.elapsed().as_secs()
+                    ));
+                }
+                l.waiting = Some(why);
+                return Ok(None);
+            }
+            Some((false, why)) => {
+                l.card_short = None;
                 l.waiting = Some(why);
                 return Ok(None);
             }
@@ -6071,10 +6102,15 @@ fn schedule(
         optional: d.gpu == Gpu::Optional,
         grace: card_grace(),
         card_short: None,
-        on_card: false,
+        // a resumed run whose units ran on the card stays there
+        on_card: x.gpu
+            && rows::units(registry.store(), x.run_id)
+                .map(|us| us.iter().any(|u| u.gpu_card.is_some()))
+                .unwrap_or(false),
         to_cpu: None,
         lane_short: None,
         lane_grace: lane_grace(),
+        card_stall: card_stall(),
     };
     loop {
         // start what fits
@@ -7149,6 +7185,13 @@ fn finalize(
     let d = x.descriptor;
     let now = nils_registry::time::now_iso();
     let unit_rows = rows::units(registry.store(), x.run_id).map_err(|e| e.to_string())?;
+    // the device the run ran on, as recorded: a full optional card may
+    // have sent it to the CPU before its first unit
+    let on_card = x.gpu
+        && rows::run(registry.store(), x.run_id)
+            .ok()
+            .flatten()
+            .is_some_and(|r| r.device != "cpu");
     let by_name: BTreeMap<&str, &rows::Unit> =
         unit_rows.iter().map(|u| (u.unit.as_str(), u)).collect();
     let apart = d.units == Units::Apart;
@@ -7816,7 +7859,7 @@ fn finalize(
         // again, and the secrets it read, by id alone
         "units_mode": d.units.name(),
         "lane": x.lane.doc(),
-        "needs": {"cores": d.needs.cores, "memory_gb": d.needs.memory_gb, "gpu_memory_gb": x.gpu.then_some(d.needs.gpu_memory_gb)},
+        "needs": {"cores": d.needs.cores, "memory_gb": d.needs.memory_gb, "gpu_memory_gb": on_card.then_some(d.needs.gpu_memory_gb)},
         "resumed": x.resume.is_some(),
         "secrets": x.secrets.iter().map(|g| g.secret.id.clone()).collect::<Vec<_>>(),
     });
@@ -8953,9 +8996,34 @@ mod tests {
     /// those that ended after it.
     #[test]
     fn the_sweep_clears_ended_runs_once_and_never_a_running_one() {
-        let base = std::env::temp_dir().join(format!("nils-sweep-{}", std::process::id()));
+        sweep_case(Store::sqlite_in_memory().unwrap(), "sqlite");
+        // and on Postgres, where the time is cast to a timestamp
+        let Some(dsn) = std::env::var("NILS_TEST_POSTGRES_DSN")
+            .ok()
+            .filter(|d| !d.is_empty())
+        else {
+            eprintln!("NILS_TEST_POSTGRES_DSN is not set; the Postgres half is skipped");
+            return;
+        };
+        let schema = "nils_sweep_test";
+        let mut admin = Store::connect_postgres(&dsn, "public").unwrap();
+        admin
+            .batch(&format!(
+                "DROP SCHEMA IF EXISTS {schema} CASCADE; CREATE SCHEMA {schema}"
+            ))
+            .unwrap();
+        drop(admin);
+        sweep_case(Store::connect_postgres(&dsn, schema).unwrap(), "postgres");
+        let mut admin = Store::connect_postgres(&dsn, "public").unwrap();
+        admin
+            .batch(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+            .unwrap();
+    }
+
+    fn sweep_case(mut store: Store, backend: &str) {
+        let base =
+            std::env::temp_dir().join(format!("nils-sweep-{}-{backend}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
-        let mut store = Store::sqlite_in_memory().unwrap();
         nils_registry::migrate::migrate(&mut store, nils_registry::migrate::Kind::Registry)
             .unwrap();
         let place = nils_registry::place::add(
@@ -8989,6 +9057,7 @@ mod tests {
         )
         .unwrap();
         let params = json!({});
+        let host = job::hostname();
         let mut start = |status: Option<&str>| -> i64 {
             let id = rows::start(
                 &mut store,
@@ -9000,7 +9069,7 @@ mod tests {
                     params: &params,
                     runtime: "apptainer",
                     runtime_version: "1",
-                    host: "h",
+                    host: &host,
                     device: "cpu",
                     model_ids: &[],
                     label_set_id: None,
@@ -9030,7 +9099,7 @@ mod tests {
             }
             id
         };
-        let ids: Vec<i64> = [
+        let mut ids: Vec<i64> = [
             Some("done"),
             Some("partial"),
             Some("failed"),
@@ -9040,6 +9109,10 @@ mod tests {
         .into_iter()
         .map(&mut start)
         .collect();
+        // a run whose engine went away: interrupted, its end without a time
+        let gone = start(None);
+        assert!(rows::interrupt(&mut store, gone, "went away").unwrap());
+        ids.insert(4, gone);
         let tmp = |id: i64| {
             base.join(RUNS)
                 .join(id.to_string())
@@ -9051,13 +9124,21 @@ mod tests {
         }
         // times are whole seconds: the sweep comes a second after the ends
         std::thread::sleep(Duration::from_millis(1100));
-        assert_eq!(sweep_workdirs(&mut store).unwrap(), 4);
-        for id in &ids[..4] {
+        assert_eq!(sweep_workdirs(&mut store).unwrap(), 5);
+        for id in &ids[..5] {
             assert!(!tmp(*id).exists(), "run {id}");
         }
-        assert!(tmp(ids[4]).exists(), "a running run keeps its own");
-        // the next sweep visits none of those again
+        assert!(tmp(ids[5]).exists(), "a running run keeps its own");
+        // the next sweep visits none of those again, the interrupted one
+        // included, and the marker is this host's
+        std::fs::create_dir_all(tmp(gone)).unwrap();
         assert_eq!(sweep_workdirs(&mut store).unwrap(), 0);
+        assert!(tmp(gone).exists());
+        assert!(
+            meta_text(&mut store, &format!("{SWEPT_KEY}.{host}"))
+                .unwrap()
+                .is_some()
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 

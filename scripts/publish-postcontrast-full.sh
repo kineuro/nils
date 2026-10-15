@@ -6,7 +6,7 @@
 # ghcr.io/kineuro/nils-postcontrast-full, tagged with the package's version;
 # print the digest the push reported, which postcontrast-full's descriptor
 # pins, and say whether anyone may pull it. A version is published once: a
-# tag that already names another image is refused (raise the version).
+# tag already there is refused before anything is built (raise the version).
 #
 # The release does not build this image: its build pulls FreeSurfer's whole
 # image (41 GB unpacked) and writes 34 GB, more than a hosted runner holds.
@@ -28,27 +28,20 @@ if [ -n "$(git -C "$ROOT" status --porcelain -- pipelines/nils-postcontrast)" ];
   echo "pipelines/nils-postcontrast has changes not committed: an image is published from a commit" >&2
   exit 1
 fi
-# a version is published once: a tag already there names its own image, and
-# a changed image needs the package's version raised first
-there=$(docker buildx imagetools inspect "$REPO:$version" --format '{{json .Manifest.Digest}}' 2>/dev/null | tr -d '"' || true)
+# a version is published once: where its tag is already there, nothing is
+# built and the package's version must be raised first
+if there=$(docker buildx imagetools inspect "$REPO:$version" --format '{{json .Manifest.Digest}}' 2>/dev/null); then
+  echo "$REPO:$version is already published as $(echo "$there" | tr -d '"'): raise the version in $PKG/pyproject.toml first" >&2
+  exit 1
+fi
 docker build -f "$PKG/Dockerfile.full" -t "$REPO:$version" \
   --label "org.opencontainers.image.source=https://github.com/kineuro/nils" \
   --label "org.opencontainers.image.revision=$revision" \
   --label "org.opencontainers.image.version=$version" \
   "$PKG" >&2
-if [ -n "$there" ]; then
-  if docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$REPO:$version" | grep -qx "$REPO@$there"; then
-    echo "$REPO:$version is already this image ($there): nothing to push" >&2
-    pushed=$there
-  else
-    echo "$REPO:$version is already published as $there, another image: raise the version in $PKG/pyproject.toml first" >&2
-    exit 1
-  fi
-else
-  # the digest the push itself reports
-  pushed=$(docker push "$REPO:$version" | tee /dev/stderr | sed -n 's/.*digest: \(sha256:[0-9a-f]\{64\}\).*/\1/p' | tail -1)
-  [ -n "$pushed" ] || { echo "the push reported no digest" >&2; exit 1; }
-fi
+# the digest the push itself reports
+pushed=$(docker push "$REPO:$version" | tee /dev/stderr | sed -n 's/.*digest: \(sha256:[0-9a-f]\{64\}\).*/\1/p' | tail -1)
+[ -n "$pushed" ] || { echo "the push reported no digest" >&2; exit 1; }
 ref="$REPO@$pushed"
 echo "$ref"
 # anyone must be able to pull it: a site pulls without credentials

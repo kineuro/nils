@@ -84,5 +84,41 @@ class Write(unittest.TestCase):
             self.assertEqual((d / "out" / "NOT-SHIPPED").read_text(), "")
 
 
+class Pullable(unittest.TestCase):
+    """Only a clear 401, 403 or 404 says a pin is not public; a network
+    error is tried again and then fails the step, never read as private."""
+
+    def setUp(self):
+        import importlib.util
+        import unittest.mock
+        spec = importlib.util.spec_from_file_location("release_descriptors", SCRIPT)
+        self.m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.m)
+        self.mock = unittest.mock
+        self.env = self.mock.patch.dict(os.environ, {}, clear=False)
+        self.env.start()
+        os.environ.pop("NILS_RELEASE_PULLABLE", None)
+        self.ref = "ghcr.io/kineuro/x@sha256:" + "a" * 64
+
+    def tearDown(self):
+        self.env.stop()
+
+    def answer(self, error):
+        return self.mock.patch.object(self.m.urllib.request, "urlopen", side_effect=error)
+
+    def test_a_clear_refusal_is_not_public(self):
+        import urllib.error
+        for code in (401, 403, 404):
+            with self.answer(urllib.error.HTTPError("u", code, "no", None, None)):
+                self.assertFalse(self.m.pullable(self.ref, wait=0), code)
+
+    def test_a_network_error_fails_the_step_after_its_tries(self):
+        import urllib.error
+        for error in (urllib.error.URLError("down"), urllib.error.HTTPError("u", 503, "busy", None, None)):
+            with self.answer(error) as called, self.assertRaises(SystemExit):
+                self.m.pullable(self.ref, tries=3, wait=0)
+            self.assertEqual(called.call_count, 3)
+
+
 if __name__ == "__main__":
     unittest.main()

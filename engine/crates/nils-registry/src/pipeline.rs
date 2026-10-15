@@ -619,10 +619,16 @@ pub fn set_device(store: &mut Store, id: i64, device: &str) -> Result<(), Error>
     Ok(())
 }
 
-/// The runs that ended, in one query: every status of [`RUN_STATUSES`]
-/// but running, and where `since` is given only those that ended at or
-/// after it (an interrupted run, whose end carries no time, always).
-pub fn runs_ended_since(store: &mut Store, since: Option<&str>) -> Result<Vec<Run>, Error> {
+/// The runs on `host` that ended, in one query: every status of
+/// [`RUN_STATUSES`] but running. Where `since` is given, only those that
+/// ended at or after it; an interrupted run, whose end carries no time, is
+/// taken only with no `since` (the first sweep), since the lane that marks
+/// a run interrupted clears its work folders then.
+pub fn runs_ended_since(
+    store: &mut Store,
+    host: &str,
+    since: Option<&str>,
+) -> Result<Vec<Run>, Error> {
     let d = store.dialect();
     let ended: Vec<String> = RUN_STATUSES
         .iter()
@@ -630,15 +636,16 @@ pub fn runs_ended_since(store: &mut Store, since: Option<&str>) -> Result<Vec<Ru
         .map(|s| format!("'{s}'"))
         .collect();
     let mut sql = format!(
-        "{} WHERE status IN ({})",
+        "{} WHERE status IN ({}) AND host = {}",
         select_runs(store),
-        ended.join(", ")
+        ended.join(", "),
+        d.param(1, Type::Text)
     );
-    let mut params = Vec::new();
+    let mut params = vec![Param::from(host)];
     if let Some(since) = since {
         sql.push_str(&format!(
-            " AND (finished_at IS NULL OR finished_at >= {})",
-            d.param(1, Type::Text)
+            " AND finished_at >= {}",
+            d.param(2, Type::Timestamp)
         ));
         params.push(Param::from(since));
     }

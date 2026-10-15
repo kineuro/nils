@@ -185,9 +185,14 @@ if tool != "dcm2niix" and no_tools and any(f"/stacks/{no_tools}/" in w for w in 
     sys.exit(1)
 if tool == "dcm2niix":
     o, lk = a[a.index("-o") + 1], a[-1]
-    # STANDIN_CONVERT_KILLED=<stack id>: dcm2niix ends as the memory limit ends it, every time
+    # STANDIN_CONVERT_KILLED=<stack id>: dcm2niix ends as the memory limit ends it, every time;
+    # STANDIN_CONVERT_KILLED_ONCE=<stack id>: only the first time, then it judges the data unusable
     if os.environ.get("STANDIN_CONVERT_KILLED") and os.path.basename(o) == os.environ["STANDIN_CONVERT_KILLED"]:
         os._exit(137)
+    if os.environ.get("STANDIN_CONVERT_KILLED_ONCE") and os.path.basename(o) == os.environ["STANDIN_CONVERT_KILLED_ONCE"]:
+        if not os.path.exists(os.path.join(o, ".killed-once")):
+            open(os.path.join(o, ".killed-once"), "w").close(); os._exit(137)
+        sys.exit(1)
     flag = os.path.join(o, ".failed-once")
     if os.environ.get("STANDIN_FAIL_ONCE") and os.path.basename(o) == os.environ["STANDIN_FAIL_ONCE"] and not os.path.exists(flag):
         open(flag, "w").close(); sys.exit(1)
@@ -405,6 +410,16 @@ def test_dcm2niix_the_kernel_ends_is_the_run_s_failure(standin_env, monkeypatch)
     assert rc == 0
     T = tables(out)
     assert (T[2]["reason"], T[2]["answers"]) == ("worker-died", 0), T[2]
+
+
+def test_dcm2niix_s_last_attempt_decides(standin_env, monkeypatch):
+    """A first attempt the kernel ended and a second that ran and found no
+    volume: the data's, no-usable-volume."""
+    monkeypatch.setenv("STANDIN_CONVERT_KILLED_ONCE", "2")
+    rc, out = run(standin_env)
+    assert rc == 0
+    T = tables(out)
+    assert (T[2]["reason"], T[2]["answers"]) == ("no-usable-volume", 0), T[2]
 
 
 def test_a_card_s_budget_sizes_its_waves_and_places_the_frangi_filter(tmp_path):

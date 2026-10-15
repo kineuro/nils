@@ -39,6 +39,7 @@ import json
 import os
 import re
 import sys
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -63,11 +64,17 @@ MANIFESTS = ", ".join([
 ])
 
 
-def pullable(ref: str) -> bool:
+NOT_PUBLIC = (401, 403, 404)
+
+
+def pullable(ref: str, tries: int = 4, wait: float = 5.0) -> bool:
     """Whether anyone may pull `ghcr.io/<path>@sha256:<hex>`, asked of the
     registry with no credentials: an anonymous token for the repository,
-    then the manifest by its digest. NILS_RELEASE_PULLABLE, a comma list of
-    references, answers instead where it is set (the tests, offline)."""
+    then the manifest by its digest. Only a clear 401, 403 or 404 says it is
+    not public; a network error or any other answer is tried again, and
+    after `tries` the step fails rather than guess. NILS_RELEASE_PULLABLE,
+    a comma list of references, answers instead where it is set (the
+    tests, offline)."""
     given = os.environ.get("NILS_RELEASE_PULLABLE")
     if given is not None:
         return ref in [x.strip() for x in given.split(",") if x.strip()]
@@ -75,15 +82,27 @@ def pullable(ref: str) -> bool:
     if not m:
         return False
     path = m.group(1)[len("ghcr.io/"):]
-    try:
-        with urllib.request.urlopen(f"https://ghcr.io/token?scope=repository:{path}:pull&service=ghcr.io", timeout=30) as r:
-            token = json.load(r).get("token") or ""
-        req = urllib.request.Request(f"https://ghcr.io/v2/{path}/manifests/{m.group(2)}", method="HEAD",
-                                     headers={"Authorization": f"Bearer {token}", "Accept": MANIFESTS})
-        with urllib.request.urlopen(req, timeout=30) as r:
-            return r.status == 200
-    except (urllib.error.URLError, OSError, ValueError):
-        return False
+    last = ""
+    for attempt in range(tries):
+        try:
+            with urllib.request.urlopen(f"https://ghcr.io/token?scope=repository:{path}:pull&service=ghcr.io", timeout=30) as r:
+                token = json.load(r).get("token") or ""
+            req = urllib.request.Request(f"https://ghcr.io/v2/{path}/manifests/{m.group(2)}", method="HEAD",
+                                         headers={"Authorization": f"Bearer {token}", "Accept": MANIFESTS})
+            with urllib.request.urlopen(req, timeout=30) as r:
+                if r.status == 200:
+                    return True
+                last = f"HTTP {r.status}"
+        except urllib.error.HTTPError as e:
+            if e.code in NOT_PUBLIC:
+                return False
+            last = f"HTTP {e.code}"
+        except (urllib.error.URLError, OSError, ValueError) as e:
+            last = str(e)
+        if attempt + 1 < tries:
+            time.sleep(wait * (attempt + 1))
+    fail(f"the registry did not say whether {ref} is public after {tries} tries ({last})")
+    return False
 
 
 def image_line(lines: list[str]) -> int | None:
