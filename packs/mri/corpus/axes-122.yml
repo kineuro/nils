@@ -1,0 +1,78 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# MRI pack 1.2.2: a gradient-echo scout (`gre_scout_readout`) carries the
+# name of the series it plans, so STIR, FatSat, FLAIR, DIR, Trace, ADC and
+# Velocity are not read from its words; each stands where the header states
+# it (flags.yml, section 29). Every stack here is invented from the pattern;
+# none is a real header.
+
+cases:
+
+  - name: a Siemens position display named for the diffusion trace it plans is no trace
+    stack:
+      image_type: 'DERIVED\SECONDARY\POSDISP\M\ND\NORM'
+      scanning_sequence: GR
+      sequence_variant: SP
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_sequence_name: '*fl2d1'
+      text_series_description: 'PosDisp: [4] ep2d_diff_3scan_trace_p2'
+      n_slices: 1
+      repetition_time: 8.6
+      echo_time: 4.0
+      flip_angle: 20
+    flags:
+      gre_scout_readout: true
+      scout_trace_stated: false
+    axes:
+      construct: ND
+
+  - name: a Siemens position display named for the TIRM it plans is no STIR
+    stack:
+      image_type: 'DERIVED\SECONDARY\POSDISP\M\ND'
+      scanning_sequence: GR
+      sequence_variant: SP
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_sequence_name: '*fl2d1'
+      text_series_description: 'PosDisp: [5] t2_tirm_cor'
+      n_slices: 1
+      repetition_time: 8.6
+      echo_time: 4.0
+      flip_angle: 20
+    flags:
+      gre_scout_readout: true
+    axes:
+      modifier: ''
+
+  - name: a Philips SmartPlan localizer named for the ADC it plans is no ADC
+    stack:
+      image_type: 'LOCALIZER'
+      scanning_sequence: GR
+      mr_acquisition_type: 2D
+      manufacturer: Philips Medical Systems
+      text_series_description: 'dADC iso'
+      n_slices: 1
+      repetition_time: 3.0
+      echo_time: 1.4
+      flip_angle: 8
+    flags:
+      gre_scout_readout: true
+    axes:
+      construct: ''
+
+  - name: a scout whose own sequence is a phase contrast keeps its velocity image
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\SCOUT'
+      scanning_sequence: GR
+      mr_acquisition_type: 2D
+      manufacturer: FONAR Corp.
+      text_sequence_name: 'PC2Da'
+      text_series_description: 'PRE CSF AX velocity'
+      n_slices: 1
+      repetition_time: 30
+      echo_time: 6
+      flip_angle: 20
+    flags:
+      gre_scout_readout: true
+      scout_velocity_stated: true

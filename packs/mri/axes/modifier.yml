@@ -57,7 +57,9 @@ values:
     # `*tfl3d1` view named `Ax Flair`); nor the magnitude of nothing: a
     # real (R) inversion recovery is PSIR by DR3, whatever its name (Siemens,
     # and Philips `R_IR` since the sweep's disputes, section 26e).
-    requires: {all: [{not: flair_named_dual_echo}, {not: ir_far_from_csf_null}, {not: flair_named_not_inverted}, {not: is_asl}, {not: {all: [{not: is_flair}, {any: [{axis: technique, is: MPRAGE}, {axis: technique, is: MEMPRAGE}, {axis: technique, is: MP2RAGE}, {axis: technique, is: FSP-GRE}]}]}}, {not: real_ir}]}
+    # MRI pack 1.2.2: never from the words of a gradient-echo scout, whose
+    # name is the series it plans (flags.yml, section 29); the header still decides.
+    requires: {all: [{any: [scout_flair_stated, {not: gre_scout_readout}]}, {not: flair_named_dual_echo}, {not: ir_far_from_csf_null}, {not: flair_named_not_inverted}, {not: is_asl}, {not: {all: [{not: is_flair}, {any: [{axis: technique, is: MPRAGE}, {axis: technique, is: MEMPRAGE}, {axis: technique, is: MP2RAGE}, {axis: technique, is: FSP-GRE}]}]}}, {not: real_ir}]}
     keywords:
       - flair
       - t2 flair
@@ -86,7 +88,9 @@ values:
     # header states no inversion (flags.yml, section 26d), nor a Siemens
     # real (R) inversion recovery, Siemens or Philips (section 26e), which
     # DR3 makes PSIR whatever its name.
-    requires: {all: [{not: {axis: technique, is: MDME}}, {not: siemens_stir_named_without_inversion}, {not: real_ir}]}
+    # MRI pack 1.2.2: never from the words of a gradient-echo scout, whose
+    # name is the series it plans (flags.yml, section 29); the header still decides.
+    requires: {all: [{any: [scout_stir_stated, {not: gre_scout_readout}]}, {not: {axis: technique, is: MDME}}, {not: siemens_stir_named_without_inversion}, {not: real_ir}]}
     keywords:
       - stir
       - short tau
@@ -102,7 +106,9 @@ values:
     priority: 3
     # MRI pack 0.25.0: never the `dirs` of a diffusion's directions
     # (`DTI15dirs`; flags.yml, section 26c).
-    requires: {any: [is_dir, {not: dir_word_is_directions}]}
+    # MRI pack 1.2.2: never from the words of a gradient-echo scout, whose
+    # name is the series it plans (flags.yml, section 29); the header still decides.
+    requires: {all: [{any: [is_dir, {not: gre_scout_readout}]}, {any: [is_dir, {not: dir_word_is_directions}]}]}
     keywords:
       - dir
       - double ir
@@ -204,7 +210,9 @@ values:
       - fat supp
     # MRI pack 0.25.0 (the protocol sweep): never from words that switch it
     # off (`no fatsat`); the header's token still decides.
-    requires: {not: {all: [fat_sat_negated, {not: has_fat_sat}]}}
+    # MRI pack 1.2.2: never from the words of a gradient-echo scout, whose
+    # name is the series it plans (flags.yml, section 29); ScanOptions FS still decides.
+    requires: {all: [{any: [has_fat_sat, {not: gre_scout_readout}]}, {not: {all: [fat_sat_negated, {not: has_fat_sat}]}}]}
     # MRI pack 0.25.0: or a Siemens name with `fs` as a word of its own, the
     # name over the physics as `SFS` is (Nima, 2026-10-03; flags.yml, section
     # 26f).

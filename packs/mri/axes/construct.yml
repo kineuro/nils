@@ -82,7 +82,9 @@ values:
     # its own name, says ADC (sealed-1 A11).
     # MRI pack 0.25.0: nor GE's AvDC written with an ADC image type, its
     # tensor's mean diffusivity (flags.yml, section 26c).
-    requires: {all: [{not: has_eadc}, {not: eadc_words}, {not: siemens_acquired_diffusion}, {not: adc_only_in_protocol}, {not: ge_average_dc_named}]}
+    # MRI pack 1.2.2: never from the words of a gradient-echo scout, whose
+    # name is the series it plans (flags.yml, section 29); the header still decides.
+    requires: {all: [{any: [scout_adc_stated, {not: gre_scout_readout}]}, {not: has_eadc}, {not: eadc_words}, {not: siemens_acquired_diffusion}, {not: adc_only_in_protocol}, {not: ge_average_dc_named}]}
     keywords:
       - adc
       - apparent diffusion coefficient
@@ -123,7 +125,9 @@ values:
     # (flags.yml, section 22).
     # MRI pack 1.0.1 (Q3): nor a GE output whose ReceiveCoilName label names
     # another image (flags.yml, section 27).
-    requires: {all: [{not: {any: [has_adc, has_eadc, has_fa]}}, {not: b0_image_trace_named}, {not: ge_coil_label_not_isodwi}]}
+    # MRI pack 1.2.2: never from the words of a gradient-echo scout, whose
+    # name is the series it plans (flags.yml, section 29); the header still decides.
+    requires: {all: [{any: [scout_trace_stated, {not: gre_scout_readout}]}, {not: {any: [has_adc, has_eadc, has_fa]}}, {not: b0_image_trace_named}, {not: ge_coil_label_not_isodwi}]}
     keywords:
       - trace
       - tracew
@@ -567,6 +571,9 @@ values:
   # nothing more stays Phase.
   Velocity:
     terms: ['velocity', 'velocity image', 'velocity map', 'flow velocity', 'VENC image']
+    # MRI pack 1.2.2: never from the words of a gradient-echo scout, whose
+    # name is the series it plans (flags.yml, section 29); the header still decides.
+    requires: {any: [scout_velocity_stated, {not: gre_scout_readout}]}
     description: 'the velocity image of a phase-contrast acquisition: the phase difference scaled to velocity by the encoding velocity'
     detection:
       exclusive: velocity_image

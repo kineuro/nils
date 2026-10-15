@@ -75,7 +75,7 @@ fn the_mri_pack_loads_and_its_corpus_holds() {
     );
     assert_eq!(
         pack.flags.len(),
-        588,
+        593,
         "v0's 138 flags and the seven helpers it keeps as context methods: \
          record 37 removed four that said the Dixon part twice and added \
          four that say what is wrong with an image, pack 0.9.0 added the \
@@ -185,7 +185,8 @@ fn the_mri_pack_loads_and_its_corpus_holds() {
          vendor's), a real STIR (six), a pituitary dynamic (three) and GE's \
          output labels in ReceiveCoilName (nine), and the 4 of pack 1.2.0: \
          ruling 17's acquired image, a component other than the magnitude, \
-         an ASL label or control image and an SWI-type EPI with SWI off"
+         an ASL label or control image and an SWI-type EPI with SWI off, and the five of pack 1.2.2: what a \
+         gradient-echo scout's header states (STIR, FLAIR, Trace, ADC, Velocity)"
     );
     assert!(pack.cases >= 15, "{} cases", pack.cases);
     assert!(pack.overlay.is_none());

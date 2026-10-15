@@ -4650,3 +4650,22 @@ flags:
       - image_type.is_original
       - {not: has_swi}
       - has_magnitude
+
+  # === 29. MRI pack 1.2.2: what a gradient-echo scout's header states =====
+  #
+  # A gradient-echo scout (`gre_scout_readout`) carries the name of the
+  # series it plans, so a value read from its words is that series' and not
+  # its own (1.2.1's replay sized the class: STIR, FatSat, FLAIR, DIR, and
+  # Trace, ADC and Velocity constructs). Each value is kept on a scout only
+  # where the header itself states it, by these.
+  scout_stir_stated: {any: [has_stir, is_stir_by_ti]}
+  scout_flair_stated: {any: [is_flair, is_flair_by_ti]}
+  scout_trace_stated: {any: [has_trace, philips_trace_projection, philips_isotropic_private, isotropic_stated, ge_coil_label_isodwi]}
+  scout_adc_stated: {any: [has_adc, ge_coil_label_isoadc]}
+  # A phase-contrast readout the sequence name states is the stack's own
+  # (a FONAR flow scout typed SCOUT, `PC2Da`), not a planned series' word.
+  scout_velocity_stated:
+    any:
+      - {parser: image_type, any_token: [VELOCITY, VEL, VELOCITY_MAP]}
+      - {all: [siemens_velocity_encoded, has_phase]}
+      - sequence_name.is_pc
