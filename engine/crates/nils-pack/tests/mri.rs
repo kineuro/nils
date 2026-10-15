@@ -411,3 +411,63 @@ fn an_asl_suffix_says_its_volume_type_and_nothing_else_may() {
         }
     }
 }
+
+/// Record 55: an echo STAGE acquired enters the STAGE route, so its evidence
+/// names the acquisition (a name says STAGE), and the route makes it RawRecon
+/// again, as pack 0.21.0 did (dev-6's A8); its other axes stay the axes' own.
+/// A computed STAGE map is entered on as before, and a multi-echo gradient
+/// echo outside STAGE never is.
+#[test]
+fn an_echo_stage_acquired_enters_its_route_and_stays_raw() {
+    use nils_pack::stack::Value;
+    let pack = nils_pack::load(&common::shipped_mri(), None).expect("the MRI pack loads");
+    let stack = |image_type: &str, description: &str, sequence: &str| {
+        let mut s = nils_pack::Stack::new();
+        for (field, text) in [
+            ("image_type", image_type),
+            ("scanning_sequence", "GR"),
+            ("sequence_variant", "SP"),
+            ("mr_acquisition_type", "3D"),
+            ("manufacturer", "SIEMENS"),
+            ("text_series_description", description),
+            ("text_sequence_name", sequence),
+        ] {
+            s.set(field, Value::Text(Some(text))).unwrap();
+        }
+        s.set("repetition_time", Value::Num(Some(25.0))).unwrap();
+        s.set("echo_time", Value::Num(Some(18.75))).unwrap();
+        s.set("flip_angle", Value::Num(Some(24.0))).unwrap();
+        s
+    };
+    let classify = |s: &nils_pack::Stack| nils_pack::Evaluated::new(&pack, s).classify();
+
+    let phase = classify(&stack(
+        "ORIGINAL\\PRIMARY\\P\\ND",
+        "STAGE_t1_fl3d_tra_ND",
+        "*fl3d2r",
+    ));
+    assert!(
+        phase.entered.iter().any(|r| r == "stage"),
+        "{:?}",
+        phase.entered
+    );
+    assert_eq!(phase.stored("provenance"), "RawRecon");
+    assert_eq!(phase.stored("technique"), "MEGRE");
+    assert_eq!(phase.stored("construct"), "ND,Phase");
+
+    let magnitude = classify(&stack(
+        "ORIGINAL\\PRIMARY\\M\\NORM\\DIS3D\\DIS2D",
+        "STAGE_pd_fl3d_tra",
+        "*fl3d2r",
+    ));
+    assert!(magnitude.entered.iter().any(|r| r == "stage"));
+    assert_eq!(magnitude.stored("provenance"), "RawRecon");
+    assert_eq!(magnitude.stored("base"), "PDw");
+
+    let map = classify(&stack("DERIVED\\PRIMARY\\T1MAP", "STAGE_T1map", ""));
+    assert!(map.entered.iter().any(|r| r == "stage"));
+    assert_eq!(map.stored("provenance"), "STAGE");
+
+    let other = classify(&stack("ORIGINAL\\PRIMARY\\M\\ND", "gre_me_pd", "*fl3d6"));
+    assert!(!other.entered.iter().any(|r| r == "stage"));
+}

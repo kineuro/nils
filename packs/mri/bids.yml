@@ -231,6 +231,22 @@ acq:
       BlackBlood: BlackBlood
       BrightBlood: BrightBlood
       MoCo: MoCo
+  # Record 55, ruling 23 (Nima, 2026-10-14: "on SWI we need the SWI in the
+  # name too ... if we can do this on systematic level (like adding the
+  # acquistion type) it would be good too"): the acquisition family whose
+  # route decided the stack, in both styles, before the technique. The
+  # engine gives it only where nothing else in the name says it: never on a
+  # product of the route (`rec-SyMRI`, `rec-SWIRecon`, `rec-STAGE`,
+  # `rec-EPIMix`), in a folder of its own (`anat/SyMRI/`) or beside a value
+  # that names it (an SWI's minIP, base SWI). So an SWI's magnitude reads
+  # `acq-Ax+3D+SWI+GRE_part-mag_T2starw`. The sidecar's `NILS` object says
+  # the family on every stack of one.
+  - from: acquisition_family
+    tokens:
+      swi: SWI
+      symri: SyMRI
+      stage: STAGE
+      mix: Mix
   - from: technique
     tokens:
       'MS-EPI': MSEPI

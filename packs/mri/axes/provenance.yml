@@ -81,8 +81,10 @@ values:
   STAGE:
     terms: ['strategically acquired gradient echo']
     # MRI pack 0.21.0: only STAGE's computed outputs; an echo it acquired,
-    # written ORIGINAL, is RawRecon (dev-6's A8).
-    requires: {not: image_type.is_original}
+    # written ORIGINAL, is RawRecon (dev-6's A8). Record 55: and the echoes
+    # STAGE acquired, which its route enters on and makes RawRecon again, so
+    # the route's evidence names the acquisition (rules/stage.yml).
+    requires: {any: [{not: image_type.is_original}, stage_acquired_echo]}
     keywords:
       - stage
   # MRI pack 0.18.0: never a DSC EPI, whatever its words say (flags.yml,

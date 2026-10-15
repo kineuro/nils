@@ -116,8 +116,10 @@ values:
   MS-EPI:
     # MUSE and IRIS are interleaved multishot EPI, RESOLVE readout-segmented;
     # the value covers both, its label only the second [P50, V2]
-    terms: ['readout-segmented EPI', 'readout segmented', 'IRIS', 'MUSE', 'rs-EPI', 'segmented EPI DWI']
-    label: RESOLVE
+    terms: ['RESOLVE', 'readout-segmented EPI', 'readout segmented', 'IRIS', 'MUSE', 'rs-EPI', 'segmented EPI DWI']
+    # Ruling 23: a generic word, not a vendor's (PROVENANCE.md); rows keep the old one.
+    label: rsEPI
+    stored: RESOLVE
     family: EPI
     keywords:
       - resolve
@@ -357,6 +359,10 @@ values:
   # image it also writes says so on the construct axis instead. Ahead of the
   # TSE values because it is the narrower claim and they would take it first.
   MAVRIC:
+    terms: ['MAVRIC', 'multispectral imaging', 'MSI']
+    # Ruling 23: a generic word, not a vendor's (PROVENANCE.md); rows keep the old one.
+    label: MSI
+    stored: MAVRIC
     family: SE
     keywords:
       - mavric
@@ -365,6 +371,8 @@ values:
       exclusive: is_mavric
   '3D-TSE':
     terms: ['SPACE', 'CUBE', 'VISTA', '3D TSE', '3D FSE', 'MVOX', 'isoFSE', '3D FLAIR TSE', 'spc']
+    # Ruling 23: SPACE stays its word, by Nima's ruling of 2026-10-15
+    # (PROVENANCE.md): it is very widespread and well known.
     label: SPACE
     family: SE
     # MRI pack 0.24.0: never where the header states a readout of another
@@ -392,7 +400,9 @@ values:
       combination: [is_3d_tse]
   SS-TSE:
     terms: ['HASTE', 'SSFSE', 'SSh TSE', 'single shot TSE', 'FASE', 'single-shot FSE']
-    label: HASTE
+    # Ruling 23: a generic word, not a vendor's (PROVENANCE.md); rows keep the old one.
+    label: SSTSE
+    stored: HASTE
     family: SE
     requires: {all: [{not: readout_not_spin_echo}, {not: siemens_plain_se_named_turbo}]}
     keywords:
@@ -408,7 +418,9 @@ values:
     # GE's name is FastIR [V1, V2, M1, IM4]; FSE-IR is IMAIOS' alone, and
     # TIR also names a true (phase-sensitive) IR in V1 and V2
     terms: ['TIRM', 'FSE-IR', 'IR TSE', 'TSE-IR', 'turbo inversion recovery', 'TIR', 'FastIR', 'Fast IR', 'FIR']
-    label: TIRM
+    # Ruling 23: a generic word, not a vendor's (PROVENANCE.md); rows keep the old one.
+    label: IRTSE
+    stored: TIRM
     family: SE
     # MRI pack 0.16.0: never a dual-echo spin echo that only its name calls
     # FLAIR (flags.yml, dev-4 H3), where `flair tse2` holds `ir tse`.
@@ -462,7 +474,9 @@ values:
   # [MQ14, V1], and is gone.
   VFA-TSE:
     terms: ['RESTORE', 'FRFSE', 'DRIVE', 'T2 Plus', 'driven equilibrium', 'fast recovery FSE', 'DE-FSE', 'DE-FIR', 'Driven Equilibrium FSE']
-    label: RESTORE
+    # Ruling 23: a generic word, not a vendor's (PROVENANCE.md); rows keep the old one.
+    label: DETSE
+    stored: RESTORE
     description: '90-degree flip-back (driven equilibrium) turbo spin echo'
     family: SE
     # MRI pack 0.21.0: on GE only with `FR_GEMS`; its FRFSE pulse sequence or
@@ -631,7 +645,9 @@ values:
       combination: [ge_inhance_velocity]
   comb-ME-GRE:
     terms: ['MEDIC', 'MERGE', 'mFFE', 'M-FFE', 'combined multi-echo GRE', 'mEcho', 'ADAGE']  # [MQ9, V2, V1]
-    label: MEDIC
+    # Ruling 23: a generic word, not a vendor's (PROVENANCE.md); rows keep the old one.
+    label: combMEGRE
+    stored: MEDIC
     family: GRE
     keywords:
       - medic
@@ -683,6 +699,9 @@ values:
   # shows phase cycling, which no Philips field does).
   CISS:
     terms: ['CISS', 'FIESTA-C', 'PBSG', 'Phase Balanced SARGE']
+    # Ruling 23: a generic word, not a vendor's (PROVENANCE.md); rows keep the old one.
+    label: pcbSSFP
+    stored: CISS
     family: GRE
     requires: {not: philips_balanced}
     keywords:
@@ -692,7 +711,9 @@ values:
       combination: [fiesta_c_named]
   bSSFP:
     terms: ['TrueFISP', 'FIESTA', 'balanced FFE', 'bFFE', 'True SSFP', 'balanced SSFP', 'trufi', 'BASG']  # BASG: Hitachi [V1, V2]
-    label: FIESTA
+    # Ruling 23: a generic word, not a vendor's (PROVENANCE.md); rows keep the old one.
+    label: bSSFP
+    stored: FIESTA
     family: GRE
     keywords:
       - bssfp
@@ -719,7 +740,9 @@ values:
       exclusive: is_dess
   SSFP:
     terms: ['PSIF', 'T2-FFE', 'CE-FAST', 'reversed FISP', 'TRSG']  # TRSG: Hitachi [V1, V2]
-    label: PSIF
+    # Ruling 23: a generic word, not a vendor's (PROVENANCE.md); rows keep the old one.
+    label: SSFPecho
+    stored: PSIF
     family: GRE
     keywords:
       - ssfp
@@ -741,7 +764,9 @@ values:
       combination: [is_multi_fa, has_gre, is_3d]
   VI-GRE:
     terms: ['VIBE', 'LAVA', 'THRIVE', 'Quick 3D', 'TIGRE', 'volumetric interpolated']
-    label: VIBE
+    # Ruling 23: a generic word, not a vendor's (PROVENANCE.md); rows keep the old one.
+    label: VIGRE
+    stored: VIBE
     family: GRE
     keywords:
       - vibe
@@ -754,7 +779,9 @@ values:
     # combination this value had took every 3D FLASH, T1-FFE and SPGR first.
   FSP-GRE:
     terms: ['TurboFLASH', 'FSPGR', 'TFE', 'turbo field echo', 'fast SPGR', 'TFL', 'Fast FE', 'FastFE', 'RGE']  # Fast FE: Canon, RGE: Hitachi [V1, M1, IM4]
-    label: TurboFLASH
+    # Ruling 23: a generic word, not a vendor's (PROVENANCE.md); rows keep the old one.
+    label: FSPGRE
+    stored: TurboFLASH
     family: GRE
     keywords:
       - turboflash
@@ -770,7 +797,14 @@ values:
       combination: [ge_fspgr]
   SP-GRE:
     terms: ['FLASH', 'SPGR', 'T1-FFE', 'spoiled gradient echo', 'spoiled GRE', 'RSSG']
-    label: FLASH
+    # Record 55, ruling 23 (Nima, 2026-10-14: "yes we should use generic name
+    # not FLASH"): shown and named by a generic word, spelled as the pack
+    # spells its technique tokens (`SPGRE`, as ME-GRE is `MEGRE`), not by
+    # Siemens' name. Rows keep the spelling v0 stored, so nothing is sorted
+    # again.
+    label: SPGRE
+    stored: FLASH
+    description: 'a spoiled gradient echo'
     family: GRE
     keywords:
       - flash
@@ -791,7 +825,9 @@ values:
       combination: [has_spoiled, has_gre]
   SS-GRE:
     terms: ['FISP', 'GRASS', 'FFE', 'steady state GRE', 'SARGE', 'Rephased SARGE']  # Hitachi [V1, V2, M1]
-    label: FISP
+    # Ruling 23: a generic word, not a vendor's (PROVENANCE.md); rows keep the old one.
+    label: SSFPFID
+    stored: FISP
     family: GRE
     keywords:
       - fisp

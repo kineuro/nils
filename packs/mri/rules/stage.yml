@@ -9,12 +9,23 @@
 
 rule_set: stage
 enter_when: {axis: provenance, is: STAGE}
-decides: [construct, technique, directory_type]
+decides: [construct, technique, directory_type, provenance]
+# Record 55: an echo STAGE acquired (written ORIGINAL) enters the route too,
+# so its evidence says which acquisition it belongs to and a name can say
+# STAGE; the route decides its provenance again, RawRecon as pack 0.21.0
+# made it (dev-6's A8), and leaves every other axis to the axes' own rules.
+redecides: [provenance]
 tiers: {exclusive: 0.9, stated: 0.85}
 
-order: [phase, magnitude]
+order: [acquired_echo, phase, magnitude]
 
 rules:
+
+  acquired_echo:
+    clauses:
+      - {flag: stage_acquired_echo, tier: exclusive}
+    set: {provenance: RawRecon}
+    why: 'an echo STAGE acquired is its own image, not one it computed'
 
   phase:
     clauses:

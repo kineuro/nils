@@ -4,6 +4,17 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [pack-mri-v1.2.3] - 2026-10-15
+
+The MRI pack 1.2.3, a rules release on its own: an install on engine 1.0.0-alpha.82 or later takes it with `nils update --part rules`, or with Update on the MRI rules row of the desk's Settings › Parts, with no engine release and nothing started again. It works with engines `>=1.0.0-alpha.82, <2.0.0` and pack contract 10, since it relies on the engine that reads a value's `stored:` spelling and the acquisition family. `nils update --pin mri@1.2.2` goes back to the version before.
+
+### Changed
+
+- The pack shows and names every technique by a vendor-neutral word from the MR literature, not by one maker's product name (record 55, ruling 23): `SPGRE` for FLASH, `FSPGRE` for TurboFLASH, `VIGRE` for VIBE, `combMEGRE` for MEDIC, `SSFPFID` for FISP, `SSFPecho` for PSIF, `bSSFP` for FIESTA, `pcbSSFP` for CISS, `SSTSE` for HASTE, `IRTSE` for TIRM, `DETSE` for RESTORE, `rsEPI` for RESOLVE and `MSI` for MAVRIC. Rows keep the old word (`stored:`), so no stack moves and a rule, pick or campaign that wrote it still names the value; descriptive names change (`Ax_T2w_2D_FLAIR_IRTSE_ND`), BIDS technique tokens do not. Kept: MPRAGE, MP2RAGE, MEMPRAGE, DESS, GRASE, MDME, QALAS and the words that are generic already, and SPACE by Nima's ruling of 2026-10-15 (very widespread and well known). The table and its sources are in the pack's PROVENANCE.
+- The BIDS names of a family's images (SWI, SyMRI, STAGE, a mix sequence) spell the acquisition family before the technique, in both styles.
+- An echo Siemens' STAGE acquired (written ORIGINAL) enters the STAGE route, which makes it RawRecon again as before and leaves its other axes alone, so its evidence names the acquisition and its names say STAGE.
+- Replayed before release over a production archive of 546,440 MR stacks against 1.2.2: 0 stacks move on any axis; with the STAGE change, still no value moves and 79 acquired STAGE echoes gain an evidence tier on provenance.
+
 ## [1.0.0-alpha.82] - 2026-10-15
 
 Wave 7a's remaining work after the beta: the rules engine, Review in bulk, plain admin access, body part and post-contrast as layers of the Main scans map, one lookup from an ID to its subject code, and the acquisition family in names. Goes with desk 1.0.0-alpha.65. The assistant pin moves to 1.0.0-alpha.29; the Kvasir pin is unchanged.

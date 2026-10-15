@@ -30,7 +30,7 @@ rules:
     clauses:
       - when:
           all:
-            - {axis: technique, is: MEDIC}
+            - {axis: technique, is: comb-ME-GRE}
             # (the provenance RawRecon is a default, filled after the rules)
             - {not: {axis: provenance, is: Localizer}}
             - {not: {axis: provenance, is: ProjectionDerived}}

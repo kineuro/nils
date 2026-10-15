@@ -65,7 +65,7 @@ rules:
         cite: 't2 flair on a single-shot readout'
         source: text
         tier: keywords
-    set: {base: 'T2w', base_basis: physics, contrast_mix: null, modifier: [FLAIR], technique: HASTE, directory_type: anat}
+    set: {base: 'T2w', base_basis: physics, contrast_mix: null, modifier: [FLAIR], technique: SS-TSE, directory_type: anat}
     confidence: 0.9
 
   t2_flair_epi:
@@ -128,7 +128,7 @@ rules:
         cite: 't2 on a single-shot readout'
         source: text
         tier: keywords
-    set: {base: 'T2w', base_basis: physics, contrast_mix: null, technique: HASTE, directory_type: anat}
+    set: {base: 'T2w', base_basis: physics, contrast_mix: null, technique: SS-TSE, directory_type: anat}
     confidence: 0.9
 
   t2w_fse:
