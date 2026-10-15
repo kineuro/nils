@@ -8638,6 +8638,70 @@ fn families_sweep(dsn: Option<&str>) {
         }
         assert_eq!(said("swi minip", "datatype"), "anat", "{doc}");
     }
+
+    // the review of 2026-10-15: a person corrects the SWI's phase on an axis
+    // its route decided (its construct is the magnitude's, say); the route
+    // no longer makes it the SWI's, in the kinds line and the boxes alike,
+    // as the classification stands with the decision in force
+    let phase = by_series(&dataset)["swi pha"]["stack"]
+        .as_i64()
+        .unwrap_or_else(|| panic!("the phase's stack: {dataset}"));
+    let mut store = match dsn {
+        Some(dsn) => nils_registry::Store::connect_postgres(dsn, FAMILIES_SCHEMA).unwrap(),
+        None => nils_registry::Store::open_sqlite(&home.path().join("registry.db")).unwrap(),
+    };
+    store
+        .batch(&format!(
+            "INSERT INTO {} (scope, ref, axis, value, actor, author_kind, decided_at) \
+             VALUES ('stack', '{phase}', 'construct', 'Magnitude', 'a person', 'person', \
+             '2026-10-15T00:00:00Z')",
+            store.qualified("decision")
+        ))
+        .unwrap();
+    drop(store);
+    let server = Server::start(
+        &home,
+        2,
+        &[
+            "--auth",
+            "token",
+            "--token",
+            "a-reviewer-token-of-len=rev@lab:reader,reviewer",
+        ],
+        &[],
+    );
+    let (status, visits) = server.request(
+        "GET",
+        &format!("/api/datasets/exam/subjects/{subject}/visits"),
+        None,
+        reviewer,
+    );
+    assert_eq!(status, 200, "{visits}");
+    let (status, dataset) = server.request("GET", "/api/datasets/exam/scans", None, reviewer);
+    assert_eq!(status, 200, "{dataset}");
+    server.finish();
+    let kinds: std::collections::BTreeMap<String, i64> = visits["visits"][0]["kinds"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|k| {
+            (
+                k["kind"].as_str().unwrap().to_string(),
+                k["scans"].as_i64().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(kinds.get("SWI"), Some(&2), "{visits}");
+    assert_eq!(kinds.get("Other"), Some(&1), "{visits}");
+    let scans = by_series(&dataset);
+    assert_eq!(
+        scans["swi pha"]["acquisition_family"],
+        serde_json::Value::Null,
+        "{dataset}"
+    );
+    assert_eq!(scans["swi pha"]["family"], "plain", "{dataset}");
+    // its siblings no person corrected stay the SWI's
+    assert_eq!(scans["swi mag"]["acquisition_family"], "swi", "{dataset}");
 }
 
 /// Record 55 H3 (Nima's ruling of 2026-10-09): what the pack decided without

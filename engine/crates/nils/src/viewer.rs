@@ -358,7 +358,7 @@ fn has(a: &Axes, axis: &str, value: &str) -> bool {
 }
 
 /// The kinds of scan a visit is told by, in the order they are listed.
-pub(crate) const KINDS: [&str; 13] = [
+pub(crate) const KINDS: [&str; 15] = [
     "SyMRI",
     "DWI",
     "Perfusion",
@@ -367,6 +367,8 @@ pub(crate) const KINDS: [&str; 13] = [
     "Scout",
     "FLAIR",
     "SWI",
+    "STAGE",
+    "Mix",
     "T1w",
     "T2w",
     "PDw",
@@ -386,17 +388,20 @@ pub(crate) const KINDS: [&str; 13] = [
 /// and not as Other (2026-10-14).
 ///
 /// `acquisition` is the acquisition family the pack's routes recognised
-/// ([`acquisition_family`]): an SWI's own image with no weighting, its
-/// phase (or a map the route made with none), counts as SWI and not as
-/// Other, as the SWI box holds it (2026-10-14). One with a weighting is
-/// told by it, as the magnitude's T2*w.
+/// ([`acquisition_family`]). One rule for every family: an image of the
+/// acquisition with no weighting (no base), an SWI's phase, a STAGE echo's
+/// phase or a map a route made with none, counts under its family (SWI,
+/// SyMRI, STAGE, Mix) and not as Other, as the family's box holds it
+/// (2026-10-14, the review of 2026-10-15). One with a weighting is told by
+/// it, as an SWI magnitude's T2*w; SyMRI's images are SyMRI's whatever they
+/// are, as its folder holds them.
 pub(crate) fn kind_of(a: &Axes, folder: Option<&str>, acquisition: Option<&str>) -> &'static str {
     if has(a, "disposition", "scout")
         || has(a, "directory_type", "localizer")
         || has(a, "provenance", "Localizer")
     {
         "Scout"
-    } else if is_symri(a, folder) {
+    } else if is_symri(a, folder, acquisition) {
         "SyMRI"
     } else if has(a, "directory_type", "dwi") || has(a, "base", "DWI") {
         "DWI"
@@ -418,10 +423,27 @@ pub(crate) fn kind_of(a: &Axes, folder: Option<&str>, acquisition: Option<&str>)
         "PDw"
     } else if has(a, "base", "T2*w") || has(a, "base", "T2starw") {
         "T2*w"
-    } else if acquisition == Some("swi") {
-        "SWI"
+    } else if let Some(family) = acquisition.filter(|_| !weighted(a)) {
+        kind_of_family(family)
     } else {
         "Other"
+    }
+}
+
+/// Whether a scan has a weighting: a base value.
+fn weighted(a: &Axes) -> bool {
+    a.get("base")
+        .is_some_and(|v| v.iter().any(|x| !x.is_empty()))
+}
+
+/// The kind an acquisition family's image with no weighting counts as.
+fn kind_of_family(family: &str) -> &'static str {
+    match family {
+        "symri" => "SyMRI",
+        "swi" => "SWI",
+        "stage" => "STAGE",
+        "mix" => "Mix",
+        _ => "Other",
     }
 }
 
@@ -438,19 +460,24 @@ pub(crate) const ROUTE_FAMILIES: [(&str, &str); 4] = [
 ];
 
 /// The acquisition family the pack's routes recognised in a stack
-/// (2026-10-14): the family of the route whose rules decided one of its
-/// axes, as its evidence cites the rule set (`routes`), so an acquisition's
-/// own images join the family too (SyMRI's multi-dynamic multi-echo
-/// images, an SWI's magnitude and phase, which the route calls RawRecon,
-/// and its minIP, which it calls ProjectionDerived); else of the route its
-/// provenance enters (SyMRI, SWIRecon, EPIMix or NeuroMix, STAGE), since a
-/// route that entered and had nothing left to decide, as on a display
-/// composite, is cited by no evidence; else none.
+/// (2026-10-14): the family of the route that entered it and decided one
+/// of its axes, as its evidence cites the rule set (`routes`, in the order
+/// [`scans_of`] gives them: the route the classifier answered by first,
+/// with any route a person's decision overrode left out), so an
+/// acquisition's own images join the family too (SyMRI's multi-dynamic
+/// multi-echo images, an SWI's magnitude and phase, which the route calls
+/// RawRecon, and its minIP, which it calls ProjectionDerived); else of the
+/// route its provenance enters (SyMRI, SWIRecon, EPIMix or NeuroMix,
+/// STAGE), since a route that entered and had nothing left to decide, as
+/// on a display composite, is cited by no evidence; else none. `a` is the
+/// classification as it stands, decisions applied.
 pub(crate) fn acquisition_family(routes: &[String], a: &Axes) -> Option<&'static str> {
-    if let Some((_, family)) = ROUTE_FAMILIES
-        .iter()
-        .find(|(set, _)| routes.iter().any(|r| r == set))
-    {
+    if let Some(family) = routes.iter().find_map(|r| {
+        ROUTE_FAMILIES
+            .iter()
+            .find(|(set, _)| set == r)
+            .map(|(_, family)| *family)
+    }) {
         return Some(family);
     }
     let made = |p: &str| has(a, "provenance", p);
@@ -488,37 +515,143 @@ pub(crate) fn family_of(acquisition: Option<&'static str>, a: &Axes) -> &'static
     }
 }
 
-/// The routes of [`ROUTE_FAMILIES`] that decided an axis of each of
-/// `stacks`, as their evidence cites them.
-fn routes_of(store: &mut Store, stacks: &[i64]) -> Result<HashMap<i64, Vec<String>>, StoreError> {
+/// What the viewer reads of a scan: its axes as the classification stands,
+/// a person's decisions in force over them, and its acquisition family.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Scan {
+    pub(crate) axes: Axes,
+    pub(crate) family: Option<&'static str>,
+}
+
+/// The axes the viewer reads.
+const VIEWER_AXES: [&str; 8] = [
+    "body_part",
+    "provenance",
+    "post_contrast",
+    "base",
+    "modifier",
+    "directory_type",
+    "disposition",
+    "technique",
+];
+
+fn value_set(v: Option<&str>) -> BTreeSet<String> {
+    v.into_iter()
+        .flat_map(|v| v.split(','))
+        .map(str::trim)
+        .filter(|x| !x.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// Each of these scans as the viewer reads it, in one pass (the review of
+/// 2026-10-15): its axes ([`axes_of`]) with every decision in force put
+/// over the rules' answer, so a person's correction is what the kinds and
+/// the boxes read; and its acquisition family ([`acquisition_family`]) from
+/// the routes whose rules decided its axes. A route counts only where no
+/// decision in force says otherwise on an axis it decided: one a person
+/// corrected the scan against is no longer the scan's family. Of the routes
+/// left, the one the classifier answered by first (its earliest evidence)
+/// is the one that entered: a route enters on its own provenance, so a
+/// stack enters one family's route, and the evidence, not a fixed list,
+/// settles the rare stack two cite.
+pub(crate) fn scans_of(store: &mut Store, stacks: &[i64]) -> Result<HashMap<i64, Scan>, Reply> {
+    let mut axes = axes_of(store, stacks).map_err(failed)?;
+    // what each family's route said of each stack, per axis, in the order
+    // the classifier wrote it
     let named = ROUTE_FAMILIES
         .iter()
         .map(|(set, _)| format!("'{set}'"))
         .collect::<Vec<_>>()
         .join(", ");
-    let mut out: HashMap<i64, Vec<String>> = HashMap::new();
+    type Said = Vec<(String, BTreeMap<String, BTreeSet<String>>)>;
+    let mut said: HashMap<i64, Said> = HashMap::new();
+    let mut cited: BTreeSet<String> = VIEWER_AXES.iter().map(|a| a.to_string()).collect();
     for chunk in stacks.chunks(IN_CHUNKS) {
-        for r in store.query(
-            &format!(
-                "SELECT DISTINCT stack_id, rule_set FROM {} WHERE stack_id IN ({}) \
-                 AND rule_set IN ({named})",
-                store.qualified("classification_evidence"),
-                list(chunk)
-            ),
-            &[],
-        )? {
-            out.entry(r.int(0)?)
-                .or_default()
-                .push(r.text(1)?.to_string());
+        for r in store
+            .query(
+                &format!(
+                    "SELECT stack_id, rule_set, axis, value FROM {} WHERE stack_id IN ({}) \
+                     AND rule_set IN ({named}) AND author IS NULL ORDER BY id",
+                    store.qualified("classification_evidence"),
+                    list(chunk)
+                ),
+                &[],
+            )
+            .map_err(failed)?
+        {
+            let (stack, set, axis) = (
+                r.int(0).map_err(failed)?,
+                r.text(1).map_err(failed)?.to_string(),
+                r.text(2).map_err(failed)?.to_string(),
+            );
+            let values = value_set(r.opt_text(3).map_err(failed)?);
+            let routes = said.entry(stack).or_default();
+            let at = match routes.iter().position(|(s, _)| *s == set) {
+                Some(i) => i,
+                None => {
+                    routes.push((set, BTreeMap::new()));
+                    routes.len() - 1
+                }
+            };
+            routes[at].1.entry(axis.clone()).or_default().extend(values);
+            cited.insert(axis);
         }
+    }
+    // the decisions in force on these stacks, on every axis read or cited
+    let mut decided: HashMap<(i64, String), BTreeSet<String>> = HashMap::new();
+    for axis in &cited {
+        let labels = nils_registry::labels::decision_labels(
+            store,
+            &nils_registry::labels::DecisionQuery {
+                axis,
+                stacks: Some(stacks),
+                ..Default::default()
+            },
+        )
+        .map_err(failed)?;
+        for l in labels {
+            if let Some(stack) = l.stack_id {
+                decided.insert((stack, axis.clone()), value_set(l.value.as_deref()));
+            }
+        }
+    }
+    let mut out = HashMap::new();
+    for &stack in stacks {
+        let mut a = axes.remove(&stack).unwrap_or_default();
+        for axis in VIEWER_AXES {
+            if let Some(v) = decided.get(&(stack, axis.to_string())) {
+                if v.is_empty() {
+                    a.remove(axis);
+                } else {
+                    a.insert(axis.to_string(), v.iter().cloned().collect());
+                }
+            }
+        }
+        let routes: Vec<String> = said
+            .remove(&stack)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|(_, by_axis)| {
+                by_axis.iter().all(|(axis, values)| {
+                    decided
+                        .get(&(stack, axis.clone()))
+                        .is_none_or(|d| d == values)
+                })
+            })
+            .map(|(set, _)| set)
+            .collect();
+        let family = acquisition_family(&routes, &a);
+        out.insert(stack, Scan { axes: a, family });
     }
     Ok(out)
 }
 
-/// Whether a scan is SyMRI's: made by it (provenance SyMRI), or in its
-/// folder, as its acquisition is (record 55 C4).
-fn is_symri(a: &Axes, folder: Option<&str>) -> bool {
-    has(a, "provenance", "SyMRI") || folder == Some("SyMRI")
+/// Whether a scan is SyMRI's: of its acquisition family, made by it
+/// (provenance SyMRI), or in its folder, as its acquisition is (record 55
+/// C4). The kinds and `symri` read this one source.
+fn is_symri(a: &Axes, folder: Option<&str>, acquisition: Option<&str>) -> bool {
+    acquisition == Some("symri") || has(a, "provenance", "SyMRI") || folder == Some("SyMRI")
 }
 
 /// The folder of its own the pack gives a stack under `anat/` (record 55
@@ -1277,9 +1410,8 @@ pub(crate) fn visits(
 
     // what each of the scope's scans is
     let ids: Vec<i64> = stacks.iter().map(|(s, _)| *s).collect();
-    let axes = axes_of(store, &ids).map_err(failed)?;
-    // the routes that decided each scan, for its acquisition family
-    let routes = routes_of(store, &ids).map_err(failed)?;
+    // each scan's axes, decisions applied, and its acquisition family
+    let read = scans_of(store, &ids)?;
     let looks: HashSet<i64> = match &holds {
         Some(holds) => looked(store, holds, Some(subject))
             .map_err(failed)?
@@ -1313,7 +1445,7 @@ pub(crate) fn visits(
             }
         }
     }
-    let empty = Axes::new();
+    let empty = Scan::default();
     let shaped = |v: String| if quasi { v } else { shape(&v) };
 
     let mut built = Vec::new();
@@ -1330,19 +1462,20 @@ pub(crate) fn visits(
         let (mut contrast, mut symri, mut looking) = (false, 0usize, 0usize);
         let mut main: Vec<(String, i64)> = Vec::new();
         for (stack, _) in &v.stacks {
-            let a = axes.get(stack).unwrap_or(&empty);
+            let scan = read.get(stack).unwrap_or(&empty);
+            let a = &scan.axes;
             // SyMRI's acquisition is SyMRI's here as in its folder (record
-            // 55 C4, 2026-10-14), for the kinds and for `symri`; an SWI's
-            // phase is the SWI's, as its box holds it
+            // 55 C4, 2026-10-14), for the kinds and for `symri`; an image
+            // of a family with no weighting is the family's, as its box
+            // holds it
             let folder = own_folder(pack, a);
-            let acquisition =
-                acquisition_family(routes.get(stack).map_or(&[][..], Vec::as_slice), a);
+            let acquisition = scan.family;
             *kinds.entry(kind_of(a, folder, acquisition)).or_default() += 1;
             for part in a.get("body_part").into_iter().flatten() {
                 regions.extend(regions_of(part));
             }
             contrast |= contrast_of(a);
-            if is_symri(a, folder) {
+            if is_symri(a, folder, acquisition) {
                 symri += 1;
             }
             if looks.contains(stack) {
@@ -1489,34 +1622,17 @@ pub(crate) fn with_facts(
         }
     }
     let picks = picked(store, &stacks, Some(scope)).map_err(failed)?;
-    let routes = routes_of(store, &stacks).map_err(failed)?;
+    // each scan's family from the classification as it stands, as the
+    // visits' kinds read it
+    let read = scans_of(store, &stacks)?;
+    let empty = Scan::default();
     if let Some(scans) = doc["scans"].as_array_mut() {
         for scan in scans {
             let stack = scan["stack"].as_i64().unwrap_or_default();
-            // the axes the names step put on the scan, each `a,b` split
-            let axes: Axes = scan["axes"]
-                .as_object()
-                .map(|o| {
-                    o.iter()
-                        .filter_map(|(k, v)| {
-                            v.as_str().map(|v| {
-                                (
-                                    k.clone(),
-                                    v.split(',')
-                                        .map(str::trim)
-                                        .filter(|x| !x.is_empty())
-                                        .map(str::to_string)
-                                        .collect(),
-                                )
-                            })
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-            let acquisition =
-                acquisition_family(routes.get(&stack).map_or(&[][..], Vec::as_slice), &axes);
+            let read = read.get(&stack).unwrap_or(&empty);
+            let acquisition = read.family;
             scan["acquisition_family"] = json!(acquisition);
-            scan["family"] = json!(family_of(acquisition, &axes));
+            scan["family"] = json!(family_of(acquisition, &read.axes));
             let [te, tr, ti, fa] = physics.get(&stack).copied().unwrap_or([None; 4]);
             scan["te"] = json!(te);
             scan["tr"] = json!(tr);
@@ -1675,7 +1791,8 @@ mod tests {
             assert_eq!(kind(&acquisition), "SyMRI", "{technique}");
             assert!(is_symri(
                 &acquisition,
-                own_folder(Some(mri()), &acquisition)
+                own_folder(Some(mri()), &acquisition),
+                None
             ));
         }
         // its maps and synthetic images, by their provenance as before
@@ -1731,10 +1848,8 @@ mod tests {
             ("disposition", "reformat"),
         ]);
         assert_eq!(kind_of(&minip, None, Some("swi")), "SWI");
-        // what no route recognised, or another route's image with no
-        // weighting, is Other as before
+        // what no route recognised is Other as before
         assert_eq!(kind_of(&phase, None, None), "Other");
-        assert_eq!(kind_of(&phase, None, Some("stage")), "Other");
         // the family the visits door reads it by, from the route its
         // evidence cites, or the provenance a route enters on
         let routes = vec!["swi".to_string(), "body_part".to_string()];
@@ -1743,6 +1858,35 @@ mod tests {
             kind_of(&phase, None, acquisition_family(&routes, &phase)),
             "SWI"
         );
+    }
+
+    #[test]
+    fn an_image_with_no_weighting_counts_under_its_family_and_one_with_a_base_never_does() {
+        // the review of 2026-10-15: one rule for every family, so the kinds
+        // line and the boxes agree
+        let phase = axes(&[("provenance", "RawRecon"), ("technique", "ME-GRE")]);
+        assert_eq!(kind_of(&phase, None, Some("swi")), "SWI");
+        assert_eq!(kind_of(&phase, None, Some("stage")), "STAGE");
+        assert_eq!(kind_of(&phase, None, Some("mix")), "Mix");
+        assert_eq!(kind_of(&phase, None, Some("symri")), "SyMRI");
+        // a scan with any base is told by it, or is Other: never the family
+        for base in ["MTw", "T1rho", "Unknown"] {
+            let a = axes(&[("provenance", "RawRecon"), ("base", base)]);
+            for family in ["swi", "stage", "mix"] {
+                assert_eq!(kind_of(&a, None, Some(family)), "Other", "{base} {family}");
+            }
+        }
+        let t1 = axes(&[("provenance", "RawRecon"), ("base", "T1w")]);
+        assert_eq!(kind_of(&t1, None, Some("stage")), "T1w");
+        // a family's kind is one of the kinds listed
+        for family in ["swi", "stage", "mix", "symri"] {
+            assert!(KINDS.contains(&kind_of(&phase, None, Some(family))));
+        }
+        // the family is the route the evidence gives first, not a fixed list
+        let both = vec!["stage".to_string(), "swi".to_string()];
+        assert_eq!(acquisition_family(&both, &phase), Some("stage"));
+        let both = vec!["swi".to_string(), "stage".to_string()];
+        assert_eq!(acquisition_family(&both, &phase), Some("swi"));
     }
 
     #[test]
