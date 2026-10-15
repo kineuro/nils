@@ -1711,13 +1711,14 @@ paths:
         "200": {description: "[{id, name, label, description, identifying, identifiers, subjects}]"}
     post:
       summary: Make an identifier type, once (nils linkage id-type add; data:work)
-      description: "Idempotent by name: a name that exists answers 200 with the type as it is, a new one 201. A name is lower case letters, digits and hyphens, like study-id. Added in place (record 55, ruling 24): `identifying`, when given, sets whether the type's IDs identify a person wherever they are met, on a new type or one that exists; a built-in identifying type stays so."
-      requestBody: {content: {application/json: {schema: {type: object, required: [name], properties: {name: {type: string}, description: {type: string}, identifying: {type: boolean}}}}}}
+      description: "Idempotent by name: a name that exists answers 200 with the type as it is, a new one 201. A name is lower case letters, digits and hyphens, like study-id. Added in place (record 55, ruling 24): `identifying`, when given, says whether the type's IDs identify a person wherever they are met. A type this call makes takes it as given. Changing it on a type that exists, either way, needs data:work at detail sensitive, as resolving one does; taking it away also needs `unflag: true`, and without it is refused with 409; a built-in identifying type (personnummer, patient-id, study-instance-uid) keeps it, so naming one again with `identifying: false` alone answers 200 unchanged, and with `unflag: true` 409. Every change writes a linkage.type.flag row in the audit log."
+      requestBody: {content: {application/json: {schema: {type: object, required: [name], properties: {name: {type: string}, description: {type: string}, identifying: {type: boolean}, unflag: {type: boolean, description: "Asked for in so many words when identifying is false on a type that identifies"}}}}}}
       responses:
         "200": {description: "{id, name, description, identifying, identifiers, subjects, created: false}"}
         "201": {description: "{id, name, description, identifying, identifiers, subjects, created: true}"}
         "400": {description: "Not a name, or identifying not true or false"}
-        "409": {description: A built-in identifying type said not to identify}
+        "403": {description: "Changing identifying on a type that exists without data:work at detail sensitive"}
+        "409": {description: "identifying false on a type that identifies without unflag true, or unflag on a built-in identifying type"}
   /api/linkage/imports:
     post:
       summary: Provide the identifier map, in any shape (nils linkage import; data:work, detail sensitive to apply)

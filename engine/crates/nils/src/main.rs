@@ -6455,11 +6455,29 @@ fn linkage_command(home: &Home, command: LinkageCommand) -> Result<(), Exit> {
                 description,
                 identifying,
             } => {
-                let t = linkage::add_id_type(&mut store, &name, description.as_deref())?;
-                if identifying {
-                    linkage::set_identifying(&mut store, &t.name, true)?;
+                // record 55, ruling 24: --identifying on a type that exists
+                // marks it, as the types door does; without it a name that
+                // exists is refused as ever
+                if !identifying {
+                    let t = linkage::add_id_type(&mut store, &name, description.as_deref())?;
+                    println!("added id type {} (id {})", t.name, t.id);
+                    return Ok(());
                 }
-                println!("added id type {} (id {})", t.name, t.id);
+                let (t, made) = linkage::ensure_id_type(&mut store, &name, description.as_deref())?;
+                if !t.identifying {
+                    linkage::set_identifying(&mut store, &t.name, true)?;
+                    audit(
+                        &mut registry,
+                        nils_registry::audit::Action::LinkageTypeFlag,
+                        serde_json::json!({"id_type": t.name, "identifying": true, "made": made}),
+                        None,
+                    )?;
+                }
+                if made {
+                    println!("added id type {} (id {}), identifying", t.name, t.id);
+                } else {
+                    println!("id type {} (id {}) identifies a person", t.name, t.id);
+                }
                 Ok(())
             }
             IdTypeCommand::List => {

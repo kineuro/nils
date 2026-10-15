@@ -4929,3 +4929,55 @@ fn migration_97_adds_what_a_file_holds_and_a_hash_holds_while_the_file_is_unchan
         assert_eq!(content::known(&mut store).unwrap(), 1, "{name}");
     }
 }
+
+/// Record 55, ruling 24: a linkage store from before migration 102, whose
+/// `id_type` has no `identifying` column, gains it by ALTER TABLE and learns
+/// which of its types identify a person, on both backends: the built-in
+/// ones, and none a person made.
+#[test]
+fn migration_102_adds_the_identifying_flag_to_an_old_id_type_on_both_backends() {
+    use nils_registry::linkage;
+    for (name, _guard, mut registry, mut store) in store_pairs() {
+        migrate::migrate(&mut registry, Kind::Registry).unwrap();
+        migrate::migrate(&mut store, Kind::Linkage).unwrap();
+        linkage::add_id_type(&mut store, "ctrl-id", None).unwrap();
+        // the store as it was before: no column, and at the version before
+        let id_type = store.qualified("id_type");
+        store
+            .batch(&format!("ALTER TABLE {id_type} DROP COLUMN identifying"))
+            .unwrap();
+        assert!(
+            !migrate::column_exists(&mut store, "id_type", "identifying").unwrap(),
+            "{name}"
+        );
+        let meta = store.qualified("linkage_meta");
+        store
+            .batch(&format!(
+                "UPDATE {meta} SET value = '101' WHERE key = 'schema_version'"
+            ))
+            .unwrap();
+        assert_eq!(
+            migrate::migrate(&mut store, Kind::Linkage).unwrap(),
+            [102],
+            "{name}"
+        );
+        assert!(
+            migrate::column_exists(&mut store, "id_type", "identifying").unwrap(),
+            "{name}"
+        );
+        for t in ["patient-id", "study-instance-uid", "personnummer"] {
+            assert!(
+                linkage::identifying_type(&mut store, t).unwrap(),
+                "{name}: {t}"
+            );
+        }
+        assert!(
+            !linkage::identifying_type(&mut store, "subject-code").unwrap(),
+            "{name}"
+        );
+        assert!(
+            !linkage::identifying_type(&mut store, "ctrl-id").unwrap(),
+            "{name}"
+        );
+    }
+}

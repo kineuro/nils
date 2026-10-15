@@ -219,13 +219,30 @@ impl TypeCount {
     }
 }
 
+/// One type by its name, read once: its id, its name and whether it
+/// identifies; none when there is no such type.
+pub fn id_type_named(store: &mut Store, name: &str) -> Result<Option<IdType>, Error> {
+    let t = store.qualified("id_type");
+    let sql = format!(
+        "SELECT id, name, description, identifying FROM {t} WHERE name = {}",
+        store.dialect().param(1, crate::schema::Type::Text)
+    );
+    match store.query_opt(&sql, &[Param::from(name)])? {
+        Some(r) => Ok(Some(IdType {
+            id: r.int(0)?,
+            name: r.text(1)?.to_string(),
+            description: r.opt_text(2)?.map(str::to_string),
+            identifying: r.opt_int(3)?.unwrap_or(0) != 0,
+        })),
+        None => Ok(None),
+    }
+}
+
 /// Record 55, ruling 24: whether an ID of this type identifies a person
 /// wherever it is met (the type's stored flag), which makes resolving one
 /// to a subject code a re-identification. A type that is not there is none.
 pub fn identifying_type(store: &mut Store, name: &str) -> Result<bool, Error> {
-    Ok(id_types(store)?
-        .into_iter()
-        .any(|t| t.name == name && t.identifying))
+    Ok(id_type_named(store, name)?.is_some_and(|t| t.identifying))
 }
 
 /// Record 55, ruling 24: say whether a type's IDs identify a person. A

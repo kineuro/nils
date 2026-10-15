@@ -36,6 +36,9 @@ pub enum Action {
     /// Record 55, ruling 24: an ID a caller gave turned into its subject
     /// code, or not; every lookup, found or not.
     LinkageResolve,
+    /// Record 55, ruling 24: an ID type said to identify a person
+    /// wherever it is met, or no longer to.
+    LinkageTypeFlag,
     /// Wave 4c §6.5: an archive was written.
     Backup,
     /// Wave 4c §6.6: an overlay proposed as a registry object, and one
@@ -199,6 +202,7 @@ impl Action {
             Action::LinkagePurge => "linkage.purge",
             Action::LinkageReveal => "linkage.reveal",
             Action::LinkageResolve => "linkage.resolve",
+            Action::LinkageTypeFlag => "linkage.type.flag",
             Action::Backup => "backup",
             Action::OverlayPropose => "overlay.propose",
             Action::OverlayAdopt => "overlay.adopt",
@@ -278,6 +282,7 @@ impl Action {
             Action::ReviewAccept
                 | Action::LinkageReveal
                 | Action::LinkageResolve
+                | Action::LinkageTypeFlag
                 | Action::JobsPrune
                 | Action::Backup
                 | Action::OverlayPropose

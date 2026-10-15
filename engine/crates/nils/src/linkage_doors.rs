@@ -74,7 +74,7 @@ pub(crate) fn route(
     let post = method == "POST";
     Some(match segs {
         ["api", "linkage", "types"] if get => types(registry),
-        ["api", "linkage", "types"] if post => add_type(registry, body),
+        ["api", "linkage", "types"] if post => add_type(registry, caller, body),
         ["api", "linkage", "imports"] if post => imports(home, registry, caller, body),
         ["api", "linkage", "held"] if get => held(registry, query.get("place").map(String::as_str)),
         ["api", "linkage", "held", "ids"] if get => {
@@ -112,7 +112,7 @@ fn types(registry: &mut Registry) -> Result<Reply, Reply> {
 }
 
 /// `POST /api/linkage/types {name, description}`: made once, found after.
-fn add_type(registry: &mut Registry, body: &str) -> Result<Reply, Reply> {
+fn add_type(registry: &mut Registry, caller: &Caller, body: &str) -> Result<Reply, Reply> {
     let doc = json_body(body)?;
     let name = doc["name"]
         .as_str()
@@ -131,12 +131,12 @@ fn add_type(registry: &mut Registry, body: &str) -> Result<Reply, Reply> {
         serde_json::Value::Bool(b) => Some(*b),
         _ => return Err(Reply::error(400, "identifying: true or false")),
     };
+    let unflag = doc["unflag"] == serde_json::Value::Bool(true);
     let mut store = open_linkage(registry)?;
     let (t, made) = linkage::ensure_id_type(&mut store, name, description)
         .map_err(|e| Reply::error(400, e.to_string()))?;
     if let Some(flag) = identifying {
-        linkage::set_identifying(&mut store, &t.name, flag)
-            .map_err(|e| Reply::error(409, e.to_string()))?;
+        flag_type(registry, &mut store, caller, &t, made, flag, unflag)?;
     }
     let counts = linkage::id_type_counts(&mut store)?;
     let mut answer = counts
@@ -152,6 +152,60 @@ fn add_type(registry: &mut Registry, body: &str) -> Result<Reply, Reply> {
     } else {
         Reply::ok(answer)
     })
+}
+
+/// Record 55, ruling 24: a type said to identify a person anywhere, or no
+/// longer to. A type made by this call takes the flag as given. Changing it
+/// on a type that exists, either way, is the reach of a re-identification:
+/// data:work at detail sensitive. Taking it away must be asked for in so
+/// many words (`unflag: true`), and a built-in identifying type keeps it:
+/// naming one again with `identifying: false` alone changes nothing, as it
+/// always did. Every change writes a `linkage.type.flag` audit row.
+pub(crate) fn flag_type(
+    registry: &mut Registry,
+    store: &mut Store,
+    caller: &Caller,
+    t: &linkage::IdType,
+    made: bool,
+    flag: bool,
+    unflag: bool,
+) -> Result<(), Reply> {
+    if t.identifying == flag {
+        return Ok(());
+    }
+    let builtin = nils_registry::schema::IDENTIFYING_ID_TYPES.contains(&t.name.as_str());
+    if !flag && !unflag {
+        if builtin {
+            return Ok(());
+        }
+        return Err(Reply::error(
+            409,
+            format!(
+                "{} identifies a person anywhere; say unflag: true to say it no longer does",
+                t.name
+            ),
+        ));
+    }
+    if !made {
+        caller.allowed(
+            &format!("changing whether {} identifies a person", t.name),
+            Need::One("data:work"),
+            Detail::Sensitive,
+        )?;
+    }
+    linkage::set_identifying(store, &t.name, flag).map_err(|e| Reply::error(409, e.to_string()))?;
+    nils_registry::audit::record(
+        registry,
+        &nils_registry::audit::Entry {
+            principal: &caller.principal,
+            action: nils_registry::audit::Action::LinkageTypeFlag,
+            scope: serde_json::json!({ "id_type": t.name, "identifying": flag, "made": made }),
+            policy: None,
+            job_id: None,
+            details: None,
+        },
+    )?;
+    Ok(())
 }
 
 /// The columns a body names: `[{header, role, id_type?}]`.
@@ -1209,7 +1263,7 @@ fn resolve(registry: &mut Registry, caller: &Caller, body: &str) -> Result<Reply
         ));
     }
     let mut linkage = open_linkage(registry)?;
-    let Some(type_id) = linkage::id_type_id(&mut linkage, &id_type)? else {
+    let Some(kind) = linkage::id_type_named(&mut linkage, &id_type)? else {
         let names: Vec<String> = linkage::id_types(&mut linkage)?
             .into_iter()
             .map(|t| t.name)
@@ -1223,7 +1277,7 @@ fn resolve(registry: &mut Registry, caller: &Caller, body: &str) -> Result<Reply
         ));
     };
     // an ID of a type flagged identifying is a re-identification
-    if linkage::identifying_type(&mut linkage, &id_type)? {
+    if kind.identifying {
         caller.allowed(
             &format!("resolving a {id_type}"),
             Need::One("data:work"),
@@ -1234,7 +1288,7 @@ fn resolve(registry: &mut Registry, caller: &Caller, body: &str) -> Result<Reply
     let lookup = keys.lookup(&id_type, &value);
     let identity = linkage::identities_by_lookup(&mut linkage, &[lookup])?
         .into_iter()
-        .find(|i| i.id_type_id == type_id);
+        .find(|i| i.id_type_id == kind.id);
     let found = match &identity {
         Some(i) => resolved(registry, caller, i.subject_id)?,
         None => None,
@@ -1701,15 +1755,56 @@ mod tests {
         assert!(linkage::identifying_type(&mut store, "hospital-id").unwrap());
         assert!(!linkage::identifying_type(&mut store, "study-id").unwrap());
         drop(store);
-        let kept = call(
-            &home,
+        let post = |registry: &mut Registry, who: &Caller, body: &str| {
+            call(&home, registry, who, "POST", "/api/linkage/types", body)
+        };
+        // naming a built-in identifying type again changes nothing, as ever
+        let kept = post(
             &mut registry,
             &anna,
-            "POST",
-            "/api/linkage/types",
             r#"{"name": "patient-id", "identifying": false}"#,
         );
-        assert_eq!(kept.status, 409, "{}", kept.body);
+        assert_eq!(kept.status, 200, "{}", kept.body);
+        assert_eq!(kept.body["identifying"], true);
+        // changing the flag of a type that exists, either way, needs data:work
+        // at detail sensitive
+        let chief = caller("data:work,sensitive");
+        let mark = r#"{"name": "study-id", "identifying": true}"#;
+        assert_eq!(post(&mut registry, &anna, mark).status, 403);
+        let marked = post(&mut registry, &chief, mark);
+        assert_eq!(marked.status, 200, "{}", marked.body);
+        assert_eq!(marked.body["identifying"], true);
+        // taking it away is asked for in so many words
+        let quiet = post(
+            &mut registry,
+            &chief,
+            r#"{"name": "hospital-id", "identifying": false}"#,
+        );
+        assert_eq!(quiet.status, 409, "{}", quiet.body);
+        let unflag = r#"{"name": "hospital-id", "identifying": false, "unflag": true}"#;
+        assert_eq!(post(&mut registry, &anna, unflag).status, 403);
+        let gone = post(&mut registry, &chief, unflag);
+        assert_eq!(gone.status, 200, "{}", gone.body);
+        assert_eq!(gone.body["identifying"], false);
+        // and a built-in one keeps it even then
+        let builtin = post(
+            &mut registry,
+            &chief,
+            r#"{"name": "patient-id", "identifying": false, "unflag": true}"#,
+        );
+        assert_eq!(builtin.status, 409, "{}", builtin.body);
+        // every change is in the audit log: hospital-id made so, study-id
+        // marked, hospital-id unmarked
+        let flagged = registry
+            .store()
+            .query(
+                "SELECT COUNT(*) FROM audit WHERE action = 'linkage.type.flag'",
+                &[],
+            )
+            .unwrap()[0]
+            .int(0)
+            .unwrap();
+        assert_eq!(flagged, 3);
     }
 
     #[test]
