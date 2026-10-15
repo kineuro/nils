@@ -3134,7 +3134,11 @@ fn a_re_sort_of_some_scans_judges_them_alone_and_loses_no_question() {
             ),
         );
         let args: serde_json::Value = serde_json::from_str(job[0].text(0).unwrap()).unwrap();
-        assert_eq!(args["scope"][0], format!("handle:{first}"), "{name}: {args}");
+        assert_eq!(
+            args["scope"][0],
+            format!("handle:{first}"),
+            "{name}: {args}"
+        );
 
         // the group is split: the two still waiting ask on in a group of
         // their own, and the scan answered is asked nothing
@@ -3251,7 +3255,7 @@ fn a_decision_made_with_the_rules_answer_in_view_is_asked_again_only_when_the_ru
         // the scan holds the person's answer
         nils_registry::review::note_rules_in_view(reg.store(), decision, "T1w").unwrap();
         let settings = nils_classify::job::Settings {
-            only: Some(vec![stack]),
+            stacks: nils_classify::job::Stacks::Only(std::sync::Arc::new([stack].into())),
             ..Default::default()
         };
         nils_classify::classify::classify(&mut reg, &pack, &settings, &Cancel::new()).unwrap();

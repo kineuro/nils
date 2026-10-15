@@ -1743,7 +1743,14 @@ fn resort(
         };
         let settings = nils_classify::Settings {
             name: format!("re-sort after {} answered {}", caller.principal, key.text()),
-            only: Some(list.clone()),
+            stacks: nils_classify::job::Stacks::Only(std::sync::Arc::new(
+                list.iter().copied().collect(),
+            )),
+            scope: vec![format!(
+                "review answer {}: {} scans",
+                key.text(),
+                list.len()
+            )],
             ..nils_classify::Settings::default()
         };
         let cancel = nils_digest::Cancel::new();
@@ -1789,7 +1796,13 @@ fn resort(
         _ => true,
     };
     let gate = if flagged {
-        crate::review_rule::after_opinions(&doors.home, registry, stacks, &caller.principal)
+        crate::review_rule::after_opinions(
+            &doors.home,
+            registry,
+            stacks,
+            &caller.principal,
+            doors.pack_dir.as_deref(),
+        )
     } else {
         json!({"rounds": [], "why": "the dataset's headers are not flagged as damaged, so the rules decide"})
     };

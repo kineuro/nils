@@ -774,7 +774,11 @@ fn round(pg: Option<(String, String)>) {
     assert_eq!(kind[0][0], "classify", "{kind:?}");
     assert_eq!(kind[0][1], "done", "{kind:?}");
     let args: Value = serde_json::from_str(kind[0][2].as_str().unwrap()).unwrap();
-    assert_eq!(args["only"]["stacks"], 2, "{args}");
+    assert_eq!(args["scope"].as_array().map(Vec::len), Some(1), "{args}");
+    assert!(
+        args["scope"][0].as_str().unwrap().ends_with("2 scans"),
+        "{args}"
+    );
     assert!(
         base_of(&home, c).is_none_or(|(v, _)| v.is_empty()),
         "the third is not decided"
