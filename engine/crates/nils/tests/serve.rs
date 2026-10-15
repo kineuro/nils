@@ -3,6 +3,8 @@
 //! `nils serve` (Wave 4a §11.1): the one door, driven as a second process
 //! would drive it, over plain HTTP.
 
+mod common;
+
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::path::Path;
@@ -6035,7 +6037,11 @@ fn a_list_on_an_axis_value_rehearses_adopts_and_is_named_on_the_pack() {
         None,
     );
     let classified: serde_json::Value = serde_json::from_str(&classified).unwrap();
-    assert_eq!(classified["pack"], shipped_mri().as_str(), "{classified}");
+    assert_eq!(
+        classified["pack"],
+        common::shipped_mri().as_str(),
+        "{classified}"
+    );
 }
 
 /// Record 42 S1: the author of a decision is the verified actor, never the
@@ -9029,21 +9035,4 @@ fn a_rule_change_is_rehearsed_over_the_registry_and_nothing_is_written() {
         manifest.contains("# The order the rule sets run in."),
         "the manifest kept its comments"
     );
-}
-
-/// The MRI pack the tree ships, as `mri@<version>`, so a test follows a rules release.
-fn shipped_mri() -> String {
-    let yml = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../../packs/mri/pack.yml"
-    ))
-    .unwrap();
-    let v = yml
-        .lines()
-        .find_map(|l| l.strip_prefix("version:"))
-        .unwrap()
-        .trim()
-        .trim_matches('"')
-        .to_string();
-    format!("mri@{v}")
 }

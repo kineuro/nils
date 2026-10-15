@@ -575,18 +575,13 @@ fn the_patch_contract_s_example_applies_to_the_mri_pack() {
         std::fs::read_to_string(contracts().join(format!("patch/v{}/example.yml", version.trim())))
             .expect("the example of the published version exists");
     let p = nils_pack::patch::Patch::parse("example.yml", &text).unwrap_or_else(|e| panic!("{e}"));
-    // the published example is kept to the pack the repository ships: a
-    // rules release that leaves it behind fails here, and it names a newer
-    // version to ship as
-    let shipped = common::shipped_mri_version();
+    // the example states one fixed version of the pack and a newer one to
+    // ship as, and stays as published: it is applied to a copy of the
+    // shipped pack set to its version, so a rules release never edits it
     let version = p
         .version
         .clone()
         .expect("the example names the pack's version");
-    assert_eq!(
-        version, shipped,
-        "contracts/patch example.yml names MRI pack {version}, and the pack shipped is {shipped}: bring the example up to it"
-    );
     let ships = p
         .ships
         .clone()
@@ -598,7 +593,21 @@ fn the_patch_contract_s_example_applies_to_the_mri_pack() {
     let kinds: std::collections::BTreeSet<&str> =
         p.operations.iter().map(|o| o.kind.as_str()).collect();
     assert!(kinds.len() >= 7, "the example shows most kinds: {kinds:?}");
-    let mri = common::shipped_mri();
+    let mri = mri_copy("patch-example");
+    let manifest = mri.join("pack.yml");
+    let text = std::fs::read_to_string(&manifest).unwrap();
+    let shipped = common::shipped_mri_version();
+    let at_example = text.replacen(
+        &format!("version: {shipped}"),
+        &format!("version: {version}"),
+        1,
+    );
+    assert!(
+        at_example.contains(&format!("version: {version}")),
+        "the copy is set to the example's version"
+    );
+    std::fs::write(&manifest, at_example).unwrap();
     let patched = nils_pack::patch::apply(&mri, &p, &|_| true).unwrap_or_else(|e| panic!("{e}"));
     assert_eq!(patched.applied.len(), p.operations.len());
+    let _ = std::fs::remove_dir_all(&mri);
 }

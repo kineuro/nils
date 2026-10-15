@@ -4,6 +4,8 @@
 //! SQLite home, `digest --dry-run` over a small tree, `--describe`, the exit
 //! codes.
 
+mod common;
+
 use std::io::Write as _;
 use std::process::{Command, Stdio};
 
@@ -1786,7 +1788,7 @@ fn pack_list_and_show_read_the_pack_directory() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|p| p["pack"] == shipped_mri().as_str()),
+            .any(|p| p["pack"] == common::shipped_mri().as_str()),
         "{listed}"
     );
 
@@ -7024,21 +7026,4 @@ fn a_pseudonymised_tree_holds_what_its_declaration_cannot_read() {
         ),
         0
     );
-}
-
-/// The MRI pack the tree ships, as `mri@<version>`, so a test follows a rules release.
-fn shipped_mri() -> String {
-    let yml = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../../packs/mri/pack.yml"
-    ))
-    .unwrap();
-    let v = yml
-        .lines()
-        .find_map(|l| l.strip_prefix("version:"))
-        .unwrap()
-        .trim()
-        .trim_matches('"')
-        .to_string();
-    format!("mri@{v}")
 }
