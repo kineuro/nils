@@ -372,7 +372,7 @@ fn migration_99_lets_a_certificate_cite_its_graded_run_on_both_backends() {
         );
         assert_eq!(
             migrate::migrate(&mut store, Kind::Registry).unwrap(),
-            [99],
+            [99, 100],
             "{name}"
         );
         assert!(
