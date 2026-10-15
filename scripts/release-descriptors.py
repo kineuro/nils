@@ -18,7 +18,9 @@ image of 1.0.0-alpha.71, and its own was pinned one commit after it).
         for each image the release pushed; writes <out>/pipelines/<package>/
         <name>/nils.job.yml for every descriptor of this tree that names one
         of them, pinned to it, and <out>/IMAGES (`<pipeline>\\t<image>`).
-        An expected image the release did not push (its job failed) ships no
+        A kineuro image the release does not build at all (not in --expect)
+        ships with the digest the tree pins. An expected image the release
+        did not push (its job failed) ships no
         descriptor; <out>/NOT-SHIPPED says which, for the release's notes,
         and the binaries and packs go out regardless.
     release-descriptors.py added <out>/IMAGES < <nils pipeline add --json>
@@ -110,7 +112,14 @@ def cmd_write(a: argparse.Namespace) -> None:
             fail(f"{path.relative_to(ROOT)} has no container-image.image line")
         current = IMAGE_LINE.match(lines[at].rstrip("\n")).group(2)
         repository = current.split("@", 1)[0]
-        if repository not in built:
+        # an image the release does not build at all (post-contrast's
+        # fallback, published from a machine with room) ships with the pin
+        # the tree has, which must name a digest
+        published = (repository.startswith(REGISTRY) and repository not in built
+                     and repository[len(REGISTRY):] not in expected)
+        if published and not REF.fullmatch(current):
+            fail(f"{path.relative_to(ROOT)} names {current}, which no release builds and no digest pins")
+        if repository not in built and not published:
             if repository.startswith(REGISTRY):
                 left.append(f"{path.relative_to(ROOT)} ({repository}, which this release does not build)")
             continue
@@ -120,12 +129,14 @@ def cmd_write(a: argparse.Namespace) -> None:
             fail(f"{path.relative_to(ROOT)} names the pipeline {name}, not its folder's {folder}")
         if name in shipped:
             fail(f"two descriptors name the pipeline {name}")
-        ref = built[repository]
+        ref = current if published else built[repository]
         prefix = IMAGE_LINE.match(lines[at].rstrip("\n")).group(1)
         lines[at] = f'{prefix}"{ref}"\n'
         # one comment line says where the pin comes from, after the SPDX line
         first = 1 if lines and lines[0].startswith("# SPDX-License-Identifier:") else 0
-        lines.insert(first, f"# Shipped by the release {a.tag}: container-image.image is the image that release built and pushed.\n")
+        said = ("container-image.image is the image published apart from it, as the tree pins it" if published
+                else "container-image.image is the image that release built and pushed")
+        lines.insert(first, f"# Shipped by the release {a.tag}: {said}.\n")
         dest = out / "pipelines" / package / folder / "nils.job.yml"
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_text("".join(lines))
@@ -136,7 +147,8 @@ def cmd_write(a: argparse.Namespace) -> None:
         if [x for i, x in enumerate(again) if i not in (first, at_again)] != [x for i, x in enumerate(text.splitlines()) if i != at]:
             fail(f"{dest}: more than its image line changed")
         shipped[name] = ref
-        named.add(repository)
+        if not published:
+            named.add(repository)
     unnamed = sorted(set(built) - named)
     if unnamed:
         fail(f"no descriptor of this tree names {', '.join(unnamed)}, which the release built")

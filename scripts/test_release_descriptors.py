@@ -29,10 +29,16 @@ class Write(unittest.TestCase):
             r = write({"nils-system1": "a"}, d / "out", d / "refs")
             self.assertEqual(r.returncode, 0, r.stderr)
             images = (d / "out" / "IMAGES").read_text().splitlines()
-            self.assertTrue(images and all(line.split("\t")[1].startswith("ghcr.io/kineuro/nils-system1@") for line in images), images)
+            self.assertTrue(images and all(line.split("\t")[1].startswith(("ghcr.io/kineuro/nils-system1@", "ghcr.io/kineuro/nils-postcontrast-full@"))
+                                           for line in images), images)
             shipped = {p.parent.name for p in (d / "out" / "pipelines").rglob("nils.job.yml")}
             self.assertIn("system1-score", shipped)
-            self.assertFalse(any(n.startswith(("bodypart", "postcontrast")) for n in shipped), shipped)
+            self.assertFalse(any(n.startswith(("bodypart", "postcontrast")) for n in shipped - {"postcontrast-full"}), shipped)
+            # the fallback's image, published apart, ships with the tree's pin
+            self.assertIn("postcontrast-full", shipped)
+            full = next(line for line in images if line.startswith("postcontrast-full\t"))
+            tree = (SCRIPT.parent.parent / "pipelines/nils-postcontrast/postcontrast-full/nils.job.yml").read_text()
+            self.assertIn(full.split("\t")[1], tree)
             notes = (d / "out" / "NOT-SHIPPED").read_text()
             self.assertIn("`nils-bodypart`", notes)
             self.assertIn("`nils-postcontrast`", notes)
@@ -44,8 +50,8 @@ class Write(unittest.TestCase):
             d = Path(d)
             r = write({}, d / "out", d / "refs")
             self.assertEqual(r.returncode, 0, r.stderr)
-            self.assertEqual((d / "out" / "IMAGES").read_text(), "")
-            self.assertEqual(list((d / "out" / "pipelines").rglob("nils.job.yml")), [])
+            # only the image published apart
+            self.assertEqual([line.split("\t")[0] for line in (d / "out" / "IMAGES").read_text().splitlines()], ["postcontrast-full"])
             self.assertEqual(len((d / "out" / "NOT-SHIPPED").read_text().splitlines()), 3)
 
     def test_every_image_pushed_names_none(self):
