@@ -1676,6 +1676,36 @@ fn an_axis_value_is_named_by_any_of_its_names_and_held_in_any_form() {
         technique.synonyms(),
         vec![pair("ASL-EPI", "ASL"), pair("3D-TSE", "SPACE")]
     );
+    // record 55, ruling 23: a label changed after rows were written; rows
+    // keep the old spelling, which still names the value, and a group's key
+    // and the value sampler show the new word
+    let relabelled = AxisNames {
+        stores_label: true,
+        values: vec![
+            AxisValueNames {
+                stored: Some("FLASH".into()),
+                ..v("SP-GRE", "SPGRE", &[])
+            },
+            v("GRE", "GRE", &[]),
+        ],
+    };
+    assert_eq!(id_of(&relabelled, "FLASH").as_deref(), Some("SP-GRE"));
+    assert_eq!(id_of(&relabelled, "SPGRE").as_deref(), Some("SP-GRE"));
+    assert_eq!(relabelled.stored(&relabelled.values[0]), "FLASH");
+    assert_eq!(relabelled.shown(&relabelled.values[0]), "SPGRE");
+    assert_eq!(
+        relabelled.synonyms(),
+        vec![pair("SP-GRE", "FLASH"), pair("SPGRE", "FLASH")]
+    );
+    assert_eq!(
+        relabelled.shown_synonyms(),
+        vec![pair("FLASH", "SPGRE"), pair("SP-GRE", "SPGRE")]
+    );
+    assert!(
+        technique
+            .shown_synonyms()
+            .contains(&pair("3D-TSE", "SPACE"))
+    );
     // an axis that stores the identity reads a label as it
     let ids = AxisNames {
         stores_label: false,

@@ -5184,17 +5184,8 @@ fn first_int(text: &str) -> Option<i64> {
 /// 55, ruling 23: `SP-GRE`, stored `FLASH`, reads `SPGRE`), else the row's
 /// text. Each of a multi-valued axis's comma-joined values is read so.
 pub fn word_of(pack: Option<&nils_pack::pack::Pack>, axis: &str, stored: &str) -> String {
-    let Some(a) = pack.and_then(|p| p.axes.iter().find(|x| x.name == axis)) else {
-        return stored.to_string();
-    };
-    if !a.stores_label {
-        return stored.to_string();
-    }
-    stored
-        .split(',')
-        .map(|v| a.label_of_stored(v.trim()))
-        .collect::<Vec<_>>()
-        .join(",")
+    pack.and_then(|p| p.axes.iter().find(|x| x.name == axis))
+        .map_or_else(|| stored.to_string(), |a| a.words_of_stored(stored))
 }
 
 /// Where a stack lands, which is its intent with v0's provenance routing.

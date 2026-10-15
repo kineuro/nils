@@ -1519,8 +1519,7 @@ fn load_cross(
     };
     let value_of = |ai: usize, v: &str, at: &str| -> R<usize> {
         let a = &axes[ai];
-        a.value_index(v)
-            .or_else(|| a.values.iter().position(|x| x.label == v))
+        a.value_named(v)
             .ok_or_else(|| Error::at(at, format!("{v} is not a value of the {} axis", a.name)))
     };
     let strings = |v: Option<&Value>, at: &str| -> R<Vec<String>> {
@@ -2006,13 +2005,14 @@ fn multi_key(m: &serde_json::Map<String, Value>, at: &str, sc: &mut Scope) -> R<
             })?,
             at,
         )?;
-        // An axis atom may name a value by its identity or by what a row
-        // stores, and it compares against what is stored, since that is what
-        // an earlier rule set left behind.
+        // An axis atom may name a value by its identity, its label or what a
+        // row stores, and it compares against what is stored, since that is
+        // what an earlier rule set left behind. A label that differs from
+        // the stored spelling (`stored:`) is read as its value, not compared
+        // as text no row holds.
         let axis = &sc.axes[ix];
-        let value = match axis.value_index(&want) {
+        let value = match axis.value_named(&want) {
             Some(i) => axis.stored(i).to_string(),
-            None if axis.values.iter().any(|v| v.label == want) => want,
             None if axis.default.as_deref() == Some(&want) => want,
             None => {
                 return Err(Error::at(
@@ -3135,13 +3135,10 @@ fn load_rule_set(
                 };
                 // A value outside the axis's vocabulary fails the pack here,
                 // which is what stops one name drifting into two.
-                let value = axes[ai]
-                    .value_index(&id)
-                    .or_else(|| axes[ai].values.iter().position(|v| v.label == id))
-                    .ok_or_else(|| {
-                        Error::at(&iat, format!("{id} is not a value of the {axis_name} axis"))
-                            .in_file(&f.path, Some(&f.source))
-                    })?;
+                let value = axes[ai].value_named(&id).ok_or_else(|| {
+                    Error::at(&iat, format!("{id} is not a value of the {axis_name} axis"))
+                        .in_file(&f.path, Some(&f.source))
+                })?;
                 values.push(SetValue {
                     value: Which::Fixed(value),
                     when,
@@ -3746,22 +3743,19 @@ fn load_pick(f: &File, axes: &[Axis], contract: u32) -> R<crate::pick::Model> {
         let Some(axis) = axes.iter().find(|a| a.name == of) else {
             return Ok(v.to_string());
         };
-        let i = axis
-            .value_index(v)
-            .or_else(|| axis.values.iter().position(|x| x.label == v))
-            .ok_or_else(|| {
-                here(Error::at(
-                    at,
-                    format!(
-                        "{v} is not a value of the axis {of}; it has {}",
-                        axis.values
-                            .iter()
-                            .map(|x| x.id.as_str())
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    ),
-                ))
-            })?;
+        let i = axis.value_named(v).ok_or_else(|| {
+            here(Error::at(
+                at,
+                format!(
+                    "{v} is not a value of the axis {of}; it has {}",
+                    axis.values
+                        .iter()
+                        .map(|x| x.id.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            ))
+        })?;
         Ok(axis.stored(i).to_string())
     };
     let values_of = |of: &str, v: &Value, at: &str| -> R<Vec<String>> {

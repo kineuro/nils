@@ -356,6 +356,10 @@ struct Class {
     /// The session passes, by their place among the pack's passes, whose
     /// target holds on the stack as the rules and the decisions left it.
     targets: Vec<usize>,
+    /// The routes of a family whose rules decided one of its axes, which
+    /// with the provenance make its acquisition family (record 55, ruling
+    /// 23), as a release reads them off the stack's evidence.
+    routes: Vec<String>,
 }
 
 fn split(stored: &str) -> Vec<String> {
@@ -385,6 +389,15 @@ fn classify(
         silent: v.silent,
         ..Class::default()
     };
+    for e in &v.evidence {
+        if crate::family::ROUTE_FAMILIES
+            .iter()
+            .any(|(set, _)| *set == e.rule_set)
+            && !c.routes.contains(&e.rule_set)
+        {
+            c.routes.push(e.rule_set.clone());
+        }
+    }
     let doubted = if v.silent {
         Vec::new()
     } else {
@@ -837,13 +850,32 @@ pub fn run(
                                         }
                                     }
                                 }
-                                let names = (maps[0] != maps[1]).then(|| {
-                                    let f = facts.get(id).cloned().unwrap_or_default();
-                                    [
-                                        namer(base, &maps[0], &f),
-                                        namer(&packs[t.key], &maps[1], &f),
-                                    ]
-                                });
+                                // each side's acquisition family, from the
+                                // routes its own rules decided by, so a rule
+                                // that brings a stack into a family moves its
+                                // name although no axis moves
+                                let family = |c: &Class, m: &BTreeMap<String, String>| {
+                                    crate::family::acquisition_family(
+                                        &c.routes,
+                                        m.get("provenance").map(String::as_str),
+                                    )
+                                    .map(str::to_string)
+                                };
+                                let families =
+                                    [family(&t.before, &maps[0]), family(&t.after, &maps[1])];
+                                let names = (maps[0] != maps[1] || families[0] != families[1])
+                                    .then(|| {
+                                        let f = facts.get(id).cloned().unwrap_or_default();
+                                        let [fb, fa] =
+                                            families.map(|acquisition_family| NameFacts {
+                                                acquisition_family,
+                                                ..f.clone()
+                                            });
+                                        [
+                                            namer(base, &maps[0], &fb),
+                                            namer(&packs[t.key], &maps[1], &fa),
+                                        ]
+                                    });
                                 (*id, maps, names)
                             })
                             .collect::<Vec<Disposed>>()
@@ -884,7 +916,24 @@ pub fn run(
                 }
             }
             let role = nils_pack::matters::PICK_CANDIDATES;
+            let mut rename = |names: Option<[(String, Option<String>); 2]>| {
+                if let Some([b, a]) = names {
+                    let d = b.0 != a.0;
+                    let bi = b.1 != a.1;
+                    descriptive_changed += i64::from(d);
+                    bids_changed += i64::from(bi);
+                    if d || bi {
+                        renamed.push(Renamed {
+                            stack: id,
+                            before: json!({"name": b.0, "bids": b.1}),
+                            after: json!({"name": a.0, "bids": a.1}),
+                        });
+                    }
+                }
+            };
             if maps[0] == maps[1] {
+                // no axis moved, and a name may still have: the family
+                rename(names);
                 if maps[0].contains_key(role) || labelled.contains(&id) {
                     finals.insert(id, maps);
                 }
@@ -898,6 +947,15 @@ pub fn run(
                 if from == to {
                     continue;
                 }
+                // in the words a person reads, each side's pack's own: a
+                // value whose label changed reads as the label, not the
+                // spelling its rows keep (record 55, ruling 23)
+                let read =
+                    |pack: &Pack, text: String| match pack.axes.iter().find(|a| a.name == *axis) {
+                        Some(a) => a.words_of_stored(&text),
+                        None => text,
+                    };
+                let (from, to) = (read(base, from), read(&packs[t.key], to));
                 let am = axes_moves.entry(axis.clone()).or_default();
                 am.moved += 1;
                 let row = am.rows.entry((from, to)).or_default();
@@ -920,19 +978,7 @@ pub fn run(
                     row.examples.push(id);
                 }
             }
-            if let Some([b, a]) = names {
-                let d = b.0 != a.0;
-                let bi = b.1 != a.1;
-                descriptive_changed += i64::from(d);
-                bids_changed += i64::from(bi);
-                if d || bi {
-                    renamed.push(Renamed {
-                        stack: id,
-                        before: json!({"name": b.0, "bids": b.1}),
-                        after: json!({"name": a.0, "bids": a.1}),
-                    });
-                }
-            }
+            rename(names);
             finals.insert(id, maps);
         }
     }
@@ -1446,8 +1492,7 @@ fn name_facts(store: &mut Store, stacks: &[i64]) -> Result<HashMap<i64, NameFact
                     dwi_directions: r.opt_int(6)?,
                     series_number: r.opt_int(7)?,
                     stacks_in_series: r.opt_int(8)?,
-                    // an effect report reads both sides with no family, so
-                    // a rule change moves no name by it
+                    // each side's own, from its verdict's routes
                     acquisition_family: None,
                 },
             );

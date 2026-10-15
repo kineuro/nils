@@ -542,6 +542,20 @@ impl Axis {
         })
     }
 
+    /// The value a pack file names: by its identity, an identity it had
+    /// before a rename, its label, or the spelling rows store for it
+    /// (`stored`), so a rule written before a value's word changed still
+    /// names it.
+    pub fn value_named(&self, word: &str) -> Option<usize> {
+        self.value_index(word)
+            .or_else(|| self.values.iter().position(|v| v.label == word))
+            .or_else(|| {
+                self.values
+                    .iter()
+                    .position(|v| v.stored.as_deref() == Some(word))
+            })
+    }
+
     /// The identity of the value a row stores.
     ///
     /// The inverse of [`Axis::stored`], and needed because an axis may store
@@ -586,6 +600,20 @@ impl Axis {
         self.id_of_stored(stored)
             .and_then(|id| self.values.iter().find(|v| v.id == id))
             .map_or(stored, |v| v.label.as_str())
+    }
+
+    /// What a person reads for a row's text of this axis: each of its
+    /// comma-joined values by [`Axis::label_of_stored`] where the axis
+    /// stores labels, the text as it is where it stores identities.
+    pub fn words_of_stored(&self, stored: &str) -> String {
+        if !self.stores_label {
+            return stored.to_string();
+        }
+        stored
+            .split(',')
+            .map(|v| self.label_of_stored(v.trim()))
+            .collect::<Vec<_>>()
+            .join(",")
     }
 }
 

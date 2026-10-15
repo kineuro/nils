@@ -162,9 +162,33 @@ impl AxisNames {
         out
     }
 
+    /// The name a person reads for a value: its label where the axis stores
+    /// labels, its identity where it stores identities. The name the pack
+    /// stores, except where a label changed after rows were written
+    /// (`stored`, record 55, ruling 23): `SPGRE` where rows keep `FLASH`.
+    pub fn shown<'a>(&self, v: &'a AxisValueNames) -> &'a str {
+        if self.stores_label { &v.label } else { &v.id }
+    }
+
+    /// Each text a row may hold that is not the name a person reads, with
+    /// that name: how a group's key and the value sampler show a value in
+    /// one form, the word the pack shows, whichever form its rows hold.
+    pub fn shown_synonyms(&self) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        for v in &self.values {
+            let shown = self.shown(v);
+            for name in self.held(v) {
+                if name != shown {
+                    out.push((name, shown.to_string()));
+                }
+            }
+        }
+        out
+    }
+
     /// Each text a row may hold that is not the name the pack stores, with
-    /// the name it stores: how a group's key and the value sampler read a
-    /// value in one form whichever form its rows hold.
+    /// the name it stores: how a level's signature reads a value in one
+    /// form whichever form its rows hold.
     pub fn synonyms(&self) -> Vec<(String, String)> {
         let mut out = Vec::new();
         for v in &self.values {
