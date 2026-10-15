@@ -438,6 +438,14 @@ A descriptor also declares its checks under `x-nils.qc`, as `snr >= 8` or `{metr
 
    The model's card sets the threshold its proposals are staged at. To stage fewer, raise it for the run with `--threshold 0.95`; a lower one is refused.
 
+   A run takes its proposals in once, as it closes; the `pipeline:qc` items of its failed units do not stop it. A run that closed without taking them, as one with a failed unit did before 1.0.0-alpha.83 (`summary.proposals.taken` is 0 and `refused` says they were in already), takes them in afterwards from the `results.json` files it left:
+
+   ```sh
+   nils pipeline ingest <run>
+   ```
+
+   It takes what the intake would have taken, at the run's threshold, and records it in the run's summary under `proposals`. Taking in again takes nothing and says so.
+
 2. Commit the confident part, or review the rest:
 
    ```sh

@@ -616,6 +616,28 @@ fn a_results_file_s_proposals_become_groups_and_staged_rows_and_nothing_in_force
         assert!(e.to_string().contains("threshold"), "{name}: {e}");
         assert_eq!(count(reg, "review_item", ""), items_before, "{name}");
 
+        // a failed unit's pipeline:qc item, keyed to the run and raised
+        // before its intake, holds no proposal and does not stop it
+        // (1.0.0-alpha.82 took none of such a run's proposals)
+        review::raise_pipeline_qc(
+            reg.store(),
+            &review::PipelineQc {
+                run_id: run.id,
+                pipeline: "propose@1",
+                unit: &format!("stack-{}", ids[0]),
+                stack_id: Some(ids[0]),
+                subject_id: None,
+                session_day: None,
+                status: "failed",
+                error: Some("refused on purpose"),
+                metrics: &json!({}),
+                job_id: None,
+            },
+            "2026-10-15T20:00:00Z",
+        )
+        .unwrap();
+        assert_eq!(proposals::held(reg.store(), run.id).unwrap(), 0, "{name}");
+
         let done = proposals::ingest(reg, &run, &proposals, None).unwrap();
         assert_eq!(done.decided, 1, "{name}: the person's stack is not asked");
         assert_eq!(done.members, 9, "{name}");
@@ -742,9 +764,24 @@ fn a_results_file_s_proposals_become_groups_and_staged_rows_and_nothing_in_force
         assert!(in_force(reg, false).is_empty(), "{name}");
         assert_eq!(in_force(reg, true).len(), 5, "{name}");
 
-        // a run goes in once
+        // a run goes in once: its own groups count, its unit's item not
+        let groups = done.groups.len() as i64;
+        assert_eq!(
+            proposals::held(reg.store(), run.id).unwrap(),
+            groups,
+            "{name}"
+        );
+        assert_eq!(
+            proposals::held(reg.store(), run.id + 1).unwrap(),
+            0,
+            "{name}"
+        );
         let e = proposals::ingest(reg, &run, &proposals, None).unwrap_err();
-        assert!(e.to_string().contains("in already"), "{name}: {e}");
+        assert!(
+            e.to_string()
+                .contains(&format!("in already, as {groups} review item(s)")),
+            "{name}: {e}"
+        );
 
         // R6: an agent or a model does not commit them; a person commits
         // the surest part by filter, and the rest stays staged
