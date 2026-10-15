@@ -4,6 +4,10 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [1.0.0-alpha.83] - 2026-10-15
+
+A fix to 1.0.0-alpha.82 on the night it reached production.
+
 ### Fixed
 
 - A pipeline run with a failed unit takes its proposals in (1.0.0-alpha.82). The intake refused a run whose proposals were in already by counting every review item keyed to the run, and a failed unit's `pipeline:qc` item is keyed to it too and is raised before the intake, so such a run took none of its proposals and said they were in already. Only the run's own `<axis>:model` items count now. `nils pipeline ingest <run>` takes in the proposals of a run that closed without them, from the `results.json` files it left, as its intake would have, and records them in the run's summary; taking in again takes nothing and says so.
