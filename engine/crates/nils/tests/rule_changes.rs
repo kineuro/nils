@@ -431,7 +431,7 @@ fn round(pg: Option<(String, String)>) {
     // --- the pack's quality: three parts, whole and for one dataset
     let q = server.get("/api/packs/mri/quality", REV);
     assert_eq!(q["pack"], "mri", "{q}");
-    assert_eq!(q["version"], "1.2.1", "{q}");
+    assert_eq!(q["version"], "1.2.2", "{q}");
     assert_eq!(q["stacks"], 10, "{q}");
     assert!(q["disagreements"]["pairs"].is_array(), "{q}");
     assert!(q["overrides"]["pairs"].is_array(), "{q}");
@@ -476,7 +476,7 @@ fn round(pg: Option<(String, String)>) {
     let id1 = p1["id"].as_i64().unwrap();
     assert_eq!(p1["kind"], "scoped", "{p1}");
     assert_eq!(p1["status"], "proposed", "{p1}");
-    assert_eq!(p1["on"], "1.2.1", "{p1}");
+    assert_eq!(p1["on"], "1.2.2", "{p1}");
     assert_eq!(p1["scopes"], json!(["dataset:alpha"]), "{p1}");
     assert_eq!(p1["datasets"], json!(["alpha"]), "{p1}");
     assert_eq!(p1["stale"], false, "{p1}");
@@ -502,7 +502,7 @@ fn round(pg: Option<(String, String)>) {
     // what the rehearsal began on: the version and the changes in force
     assert_eq!(
         p1["report"]["rehearsed_on"],
-        json!({"version": "1.2.1", "in_force": []}),
+        json!({"version": "1.2.2", "in_force": []}),
         "{p1}"
     );
     // the card counts what adoption re-sorts: a proposal names no scope of
@@ -731,7 +731,7 @@ fn round(pg: Option<(String, String)>) {
     let id2 = p2["id"].as_i64().unwrap();
     assert_eq!(p2["kind"], "pack", "{p2}");
     assert_eq!(p2["ships"]["as"], "rules release", "{p2}");
-    assert_eq!(p2["ships"]["version"], "1.2.2", "{p2}");
+    assert_eq!(p2["ships"]["version"], "1.2.3", "{p2}");
     assert_eq!(p2["card"]["moved"], 2, "{p2}");
     let (status, adopted) = server.call(
         "POST",
@@ -740,35 +740,35 @@ fn round(pg: Option<(String, String)>) {
         OPS,
     );
     assert_eq!(status, 202, "{adopted}");
-    assert_eq!(adopted["version"]["version"], "1.2.2", "{adopted}");
-    assert_eq!(adopted["version"]["from"], "1.2.1", "{adopted}");
-    assert_eq!(adopted["version"]["tag"], "pack-mri-v1.2.2", "{adopted}");
+    assert_eq!(adopted["version"]["version"], "1.2.3", "{adopted}");
+    assert_eq!(adopted["version"]["from"], "1.2.2", "{adopted}");
+    assert_eq!(adopted["version"]["tag"], "pack-mri-v1.2.3", "{adopted}");
     assert_eq!(adopted["version"]["state"], "to_release", "{adopted}");
     // the version in use is the new one, and the one before it is kept
     let manifest = std::fs::read_to_string(home.packs.join("mri/pack.yml")).unwrap();
-    assert!(manifest.contains("version: 1.2.2"), "{manifest}");
+    assert!(manifest.contains("version: 1.2.3"), "{manifest}");
     let kept = home
         .packs
         .with_file_name("packs.versions")
-        .join("mri/1.2.1/pack.yml");
+        .join("mri/1.2.2/pack.yml");
     assert!(
         std::fs::read_to_string(&kept)
             .unwrap()
-            .contains("version: 1.2.1"),
+            .contains("version: 1.2.2"),
         "{}",
         kept.display()
     );
     let j = server.over(adopted["job"].as_i64().unwrap());
     assert_eq!(j["state"], "done", "{j}");
     server.quiet();
-    assert_eq!(server.get("/api/packs/mri", REV)["version"], "1.2.2");
+    assert_eq!(server.get("/api/packs/mri", REV)["version"], "1.2.3");
     let p2 = server.get(&format!("/api/packs/mri/proposals/{id2}"), REV);
     assert_eq!(p2["applied"]["measured"]["stacks"], 10, "{p2}");
     assert_eq!(p2["applied"]["measured"]["moved"]["stacks"], 2, "{p2}");
     assert_eq!(p2["version"]["state"], "to_release", "{p2}");
     for s in stacks_named(&mut store, "qqtest") {
         assert!(modifier_holds(&mut store, s, "MT"), "qqtest {s} is MT");
-        assert_eq!(judged_by(&mut store, s).2, "1.2.2", "stack {s}");
+        assert_eq!(judged_by(&mut store, s).2, "1.2.3", "stack {s}");
     }
     // the scoped change applies to the new version too, and to alpha alone
     for s in &alpha_z {
@@ -784,7 +784,7 @@ fn round(pg: Option<(String, String)>) {
         );
     }
 
-    // the proposal rehearsed against 1.2.1 is stale until rehearsed again
+    // the proposal rehearsed against 1.2.2 is stale until rehearsed again
     let p = server.get(&format!("/api/packs/mri/proposals/{id_stale}"), REV);
     assert_eq!(p["stale"], true, "{p}");
     let (status, doc) = server.call(
@@ -806,7 +806,7 @@ fn round(pg: Option<(String, String)>) {
     );
     assert_eq!(status, 200, "{p}");
     assert_eq!(p["stale"], false, "{p}");
-    assert_eq!(p["on"], "1.2.2", "{p}");
+    assert_eq!(p["on"], "1.2.3", "{p}");
     // and a rejection closes it with its why
     let (status, doc) = server.call(
         "POST",
@@ -1186,7 +1186,7 @@ fn round(pg: Option<(String, String)>) {
         assert_eq!(pz["status"], "proposed", "{pz}");
         assert!(pz["version"].is_null() && pz["job"].is_null(), "{pz}");
         let manifest = std::fs::read_to_string(home.packs.join("mri/pack.yml")).unwrap();
-        assert!(manifest.contains("version: 1.2.2"), "{manifest}");
+        assert!(manifest.contains("version: 1.2.3"), "{manifest}");
         let left = home.packs.with_file_name("packs.versions").join("mri");
         assert!(
             !std::fs::read_dir(&left).unwrap().any(|e| e

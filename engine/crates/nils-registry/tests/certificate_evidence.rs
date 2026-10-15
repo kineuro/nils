@@ -370,8 +370,9 @@ fn migration_99_lets_a_certificate_cite_its_graded_run_on_both_backends() {
             !migrate::column_exists(&mut store, "certificate", "evidence").unwrap(),
             "{name}"
         );
+        // the first two of the steps taken: later migrations follow them
         assert_eq!(
-            migrate::migrate(&mut store, Kind::Registry).unwrap(),
+            migrate::migrate(&mut store, Kind::Registry).unwrap()[..2],
             [99, 100],
             "{name}"
         );
