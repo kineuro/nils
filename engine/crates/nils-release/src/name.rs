@@ -93,6 +93,11 @@ pub struct Fields<'a> {
     pub acquisition_type: Option<&'a str>,
     /// Comma-joined, as the axis stores it.
     pub modifier: Option<&'a str>,
+    /// The word of the acquisition family the pack's routes recognised,
+    /// where nothing else in the name says it (record 55, ruling 23: an
+    /// SWI's magnitude and phase say SWI): before the technique, as `acq-`
+    /// spells it.
+    pub family: Option<&'a str>,
     pub technique: Option<&'a str>,
     pub acceleration: Option<&'a str>,
     pub construct: Option<&'a str>,
@@ -149,6 +154,7 @@ pub fn describe(f: &Fields, include_acceleration: bool, include_contrast: bool) 
     push(f.base);
     push(f.acquisition_type);
     push(f.modifier);
+    push(f.family);
     push(f.technique);
     if include_acceleration {
         push(f.acceleration);

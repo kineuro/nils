@@ -191,6 +191,7 @@ fn naming_examples() {
         .enumerate()
         .map(|(i, s)| {
             let f = Fields {
+                family: None,
                 body_part: Some(s.body),
                 spinal_cord: s.body == "spine",
                 orientation: Some(s.orient),

@@ -283,9 +283,7 @@ impl Overlay {
                     ),
                 ));
             };
-            let Some(v) = a.values.iter().find(|v| {
-                v.id == value || v.label == value || v.aliases.iter().any(|x| x == value)
-            }) else {
+            let Some(v) = a.value_named(value).map(|i| &a.values[i]) else {
                 return Err(Error::at(at, format!("{axis} has no value named {value}")));
             };
             if !lists.iter().any(|l| *l == format!("{axis}.{}", v.id)) {

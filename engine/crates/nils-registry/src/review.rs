@@ -1602,7 +1602,7 @@ pub struct CommittedPart {
 
 /// A value as a set of values: a multi-valued axis is stored joined by
 /// commas, and none is the empty set.
-fn value_set(v: Option<&str>) -> Vec<String> {
+pub fn value_set(v: Option<&str>) -> Vec<String> {
     let mut out: Vec<String> = v
         .unwrap_or("")
         .split(',')

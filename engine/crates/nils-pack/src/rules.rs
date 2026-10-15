@@ -327,6 +327,11 @@ pub struct AxisValue {
     /// this, which is how `3D-TSE` and `SPACE` came to be two names for one
     /// thing; here the identity is the identity.
     pub label: String,
+    /// What a row stores for the value where the axis stores labels and the
+    /// label has changed since rows were written (record 55, ruling 23:
+    /// `SP-GRE` is shown and named `SPGRE` and still stored `FLASH`), so a
+    /// new word moves no stack. None where the row stores the label.
+    pub stored: Option<String>,
     /// The physics family, when the axis has them.
     pub family: Option<String>,
     /// Whether the axis's own rules try this value: a flag, a word or a
@@ -537,6 +542,20 @@ impl Axis {
         })
     }
 
+    /// The value a pack file names: by its identity, an identity it had
+    /// before a rename, its label, or the spelling rows store for it
+    /// (`stored`), so a rule written before a value's word changed still
+    /// names it.
+    pub fn value_named(&self, word: &str) -> Option<usize> {
+        self.value_index(word)
+            .or_else(|| self.values.iter().position(|v| v.label == word))
+            .or_else(|| {
+                self.values
+                    .iter()
+                    .position(|v| v.stored.as_deref() == Some(word))
+            })
+    }
+
     /// The identity of the value a row stores.
     ///
     /// The inverse of [`Axis::stored`], and needed because an axis may store
@@ -544,14 +563,19 @@ impl Axis {
     /// also the word BIDS uses. Anything keyed on the identity, a BIDS mapping
     /// among them, reads a row through this.
     pub fn id_of_stored(&self, stored: &str) -> Option<&str> {
+        let held = |v: &AxisValue| match self.stores_label {
+            true => v.stored.as_deref().unwrap_or(&v.label) == stored,
+            false => v.id == stored,
+        };
+        // the spelling rows hold first; a label a value was given since is
+        // read as that value too, where no other value stores it
         self.values
             .iter()
-            .find(|v| {
-                if self.stores_label {
-                    v.label == stored
-                } else {
-                    v.id == stored
-                }
+            .find(|v| held(v))
+            .or_else(|| {
+                self.stores_label
+                    .then(|| self.values.iter().find(|v| v.label == stored))
+                    .flatten()
             })
             .map(|v| v.id.as_str())
     }
@@ -559,10 +583,37 @@ impl Axis {
     /// What a row stores for this value.
     pub fn stored(&self, i: usize) -> &str {
         if self.stores_label {
-            &self.values[i].label
+            self.values[i]
+                .stored
+                .as_deref()
+                .unwrap_or(&self.values[i].label)
         } else {
             &self.values[i].id
         }
+    }
+
+    /// The word a person reads for what a row stores: the value's label, or
+    /// the row's text where no value stores it. The two differ only where a
+    /// value's label changed after rows were written (`stored`), or where the
+    /// axis stores identities.
+    pub fn label_of_stored<'a>(&'a self, stored: &'a str) -> &'a str {
+        self.id_of_stored(stored)
+            .and_then(|id| self.values.iter().find(|v| v.id == id))
+            .map_or(stored, |v| v.label.as_str())
+    }
+
+    /// What a person reads for a row's text of this axis: each of its
+    /// comma-joined values by [`Axis::label_of_stored`] where the axis
+    /// stores labels, the text as it is where it stores identities.
+    pub fn words_of_stored(&self, stored: &str) -> String {
+        if !self.stores_label {
+            return stored.to_string();
+        }
+        stored
+            .split(',')
+            .map(|v| self.label_of_stored(v.trim()))
+            .collect::<Vec<_>>()
+            .join(",")
     }
 }
 

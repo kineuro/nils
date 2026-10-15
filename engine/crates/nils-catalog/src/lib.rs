@@ -135,6 +135,10 @@ pub struct AxisValueRecord {
     /// The identities the value had before a rename, which still name it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub aliases: Vec<String>,
+    /// What a row stores where the axis stores labels and the label changed
+    /// after rows were written (record 55, ruling 23).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stored: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1679,6 +1683,7 @@ impl Catalog {
                         id: v.id.clone(),
                         label: v.label.clone(),
                         aliases: v.aliases.clone(),
+                        stored: v.stored.clone(),
                     })
                     .collect(),
             })
@@ -2051,6 +2056,7 @@ impl Names for Catalog {
                         id: v.id.clone(),
                         label: v.label.clone(),
                         aliases: v.aliases.clone(),
+                        stored: v.stored.clone(),
                     })
                     .collect(),
             })

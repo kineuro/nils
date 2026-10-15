@@ -97,6 +97,9 @@ pub struct NameFacts {
     pub dwi_b_value: Option<f64>,
     pub dwi_directions: Option<i64>,
     pub series_number: Option<i64>,
+    /// The acquisition family the pack's routes recognised (record 55,
+    /// ruling 23), which a name spells where nothing else in it says it.
+    pub acquisition_family: Option<String>,
 }
 
 /// A stack's names from its axes as stored and its facts: the descriptive
@@ -353,6 +356,10 @@ struct Class {
     /// The session passes, by their place among the pack's passes, whose
     /// target holds on the stack as the rules and the decisions left it.
     targets: Vec<usize>,
+    /// What each family's route said of it, which with the decisions in
+    /// force and the provenance make its acquisition family (record 55,
+    /// ruling 23), as a release reads them off the stack's evidence.
+    routes: Vec<crate::family::Said>,
 }
 
 fn split(stored: &str) -> Vec<String> {
@@ -382,6 +389,28 @@ fn classify(
         silent: v.silent,
         ..Class::default()
     };
+    for e in &v.evidence {
+        if !crate::family::ROUTE_FAMILIES
+            .iter()
+            .any(|(set, _)| *set == e.rule_set)
+        {
+            continue;
+        }
+        let at = match c.routes.iter().position(|s| s.route == e.rule_set) {
+            Some(i) => i,
+            None => {
+                c.routes.push(crate::family::Said {
+                    route: e.rule_set.clone(),
+                    axes: BTreeMap::new(),
+                });
+                c.routes.len() - 1
+            }
+        };
+        let values = c.routes[at].axes.entry(e.axis.clone()).or_default();
+        if !e.value.is_empty() && !values.contains(&e.value) {
+            values.push(e.value.clone());
+        }
+    }
     let doubted = if v.silent {
         Vec::new()
     } else {
@@ -834,11 +863,66 @@ pub fn run(
                                         }
                                     }
                                 }
-                                let names = (maps[0] != maps[1]).then(|| {
+                                // each side's acquisition family, from the
+                                // routes its own rules decided by, so a rule
+                                // that brings a stack into a family moves its
+                                // name although no axis moves
+                                // and with the decisions in force, as the
+                                // classification stands
+                                let family =
+                                    |pack: &Pack, c: &Class, m: &BTreeMap<String, String>| {
+                                        let decided: crate::family::InForce = c
+                                            .decided
+                                            .iter()
+                                            .map(|i| {
+                                                let v = c.axes[*i].values.join(",");
+                                                (
+                                                    pack.axes[*i].name.clone(),
+                                                    (!v.is_empty()).then_some(v),
+                                                )
+                                            })
+                                            .collect();
+                                        crate::family::acquisition_family(
+                                            Some(pack),
+                                            &c.routes,
+                                            &decided,
+                                            m.get("provenance").map(String::as_str),
+                                        )
+                                        .map(str::to_string)
+                                    };
+                                let families = [
+                                    family(base, &t.before, &maps[0]),
+                                    family(&packs[t.key], &t.after, &maps[1]),
+                                ];
+                                // a name moves by a word alone too: the
+                                // patched pack's word for a value it holds
+                                let words = |pack: &Pack, m: &BTreeMap<String, String>| {
+                                    m.iter()
+                                        .map(|(axis, v)| {
+                                            let w = pack
+                                                .axes
+                                                .iter()
+                                                .find(|a| a.name == *axis)
+                                                .map_or_else(
+                                                    || v.clone(),
+                                                    |a| a.words_of_stored(v),
+                                                );
+                                            (axis.clone(), w)
+                                        })
+                                        .collect::<BTreeMap<String, String>>()
+                                };
+                                let moved = maps[0] != maps[1]
+                                    || families[0] != families[1]
+                                    || words(base, &maps[0]) != words(&packs[t.key], &maps[1]);
+                                let names = moved.then(|| {
                                     let f = facts.get(id).cloned().unwrap_or_default();
+                                    let [fb, fa] = families.map(|acquisition_family| NameFacts {
+                                        acquisition_family,
+                                        ..f.clone()
+                                    });
                                     [
-                                        namer(base, &maps[0], &f),
-                                        namer(&packs[t.key], &maps[1], &f),
+                                        namer(base, &maps[0], &fb),
+                                        namer(&packs[t.key], &maps[1], &fa),
                                     ]
                                 });
                                 (*id, maps, names)
@@ -881,7 +965,24 @@ pub fn run(
                 }
             }
             let role = nils_pack::matters::PICK_CANDIDATES;
+            let mut rename = |names: Option<[(String, Option<String>); 2]>| {
+                if let Some([b, a]) = names {
+                    let d = b.0 != a.0;
+                    let bi = b.1 != a.1;
+                    descriptive_changed += i64::from(d);
+                    bids_changed += i64::from(bi);
+                    if d || bi {
+                        renamed.push(Renamed {
+                            stack: id,
+                            before: json!({"name": b.0, "bids": b.1}),
+                            after: json!({"name": a.0, "bids": a.1}),
+                        });
+                    }
+                }
+            };
             if maps[0] == maps[1] {
+                // no axis moved, and a name may still have: the family
+                rename(names);
                 if maps[0].contains_key(role) || labelled.contains(&id) {
                     finals.insert(id, maps);
                 }
@@ -895,6 +996,15 @@ pub fn run(
                 if from == to {
                     continue;
                 }
+                // in the words a person reads, each side's pack's own: a
+                // value whose label changed reads as the label, not the
+                // spelling its rows keep (record 55, ruling 23)
+                let read =
+                    |pack: &Pack, text: String| match pack.axes.iter().find(|a| a.name == *axis) {
+                        Some(a) => a.words_of_stored(&text),
+                        None => text,
+                    };
+                let (from, to) = (read(base, from), read(&packs[t.key], to));
                 let am = axes_moves.entry(axis.clone()).or_default();
                 am.moved += 1;
                 let row = am.rows.entry((from, to)).or_default();
@@ -917,19 +1027,7 @@ pub fn run(
                     row.examples.push(id);
                 }
             }
-            if let Some([b, a]) = names {
-                let d = b.0 != a.0;
-                let bi = b.1 != a.1;
-                descriptive_changed += i64::from(d);
-                bids_changed += i64::from(bi);
-                if d || bi {
-                    renamed.push(Renamed {
-                        stack: id,
-                        before: json!({"name": b.0, "bids": b.1}),
-                        after: json!({"name": a.0, "bids": a.1}),
-                    });
-                }
-            }
+            rename(names);
             finals.insert(id, maps);
         }
     }
@@ -1443,6 +1541,8 @@ fn name_facts(store: &mut Store, stacks: &[i64]) -> Result<HashMap<i64, NameFact
                     dwi_directions: r.opt_int(6)?,
                     series_number: r.opt_int(7)?,
                     stacks_in_series: r.opt_int(8)?,
+                    // each side's own, from its verdict's routes
+                    acquisition_family: None,
                 },
             );
         }
@@ -1862,12 +1962,8 @@ fn ids_of(pack: &Pack, axis: &str, values: &[String]) -> BTreeSet<String> {
     values
         .iter()
         .map(|v| {
-            a.and_then(|a| {
-                a.value_index(v)
-                    .or_else(|| a.values.iter().position(|x| x.label == *v))
-                    .map(|i| a.values[i].id.clone())
-            })
-            .unwrap_or_else(|| v.to_lowercase())
+            a.and_then(|a| a.value_named(v).map(|i| a.values[i].id.clone()))
+                .unwrap_or_else(|| v.to_lowercase())
         })
         .collect()
 }

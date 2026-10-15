@@ -2297,12 +2297,12 @@ impl<'a> Builder<'a> {
                 ));
                 axis_cols.push(format!(
                     "{} AS {col}",
-                    self.stored_form(axis, &format!("{alias}.value"))
+                    self.shown_form(axis, &format!("{alias}.value"))
                 ));
             } else {
                 axis_cols.push(format!(
                     "(SELECT {} FROM {} ax WHERE ax.stack_id = ch.k AND ax.axis = {ax}) AS {col}",
-                    self.sql.sorted_list(&self.stored_form(axis, "ax.value")),
+                    self.sql.sorted_list(&self.shown_form(axis, "ax.value")),
                     self.q("classification_axis")
                 ));
             }
@@ -3301,6 +3301,24 @@ impl<'a> Builder<'a> {
             .axis_names(axis)
             .map(|a| a.synonyms())
             .unwrap_or_default();
+        Self::one_form(x, &synonyms)
+    }
+
+    /// A row's value of an axis read in the word a person reads (record 55,
+    /// ruling 23): as [`Self::stored_form`], except that a value whose label
+    /// changed after rows were written reads as its label, so a group's key
+    /// and the value sampler say `SPGRE` where rows keep `FLASH`.
+    fn shown_form(&self, axis: &str, x: &str) -> String {
+        let synonyms = self
+            .ctx
+            .names
+            .axis_names(axis)
+            .map(|a| a.shown_synonyms())
+            .unwrap_or_default();
+        Self::one_form(x, &synonyms)
+    }
+
+    fn one_form(x: &str, synonyms: &[(String, String)]) -> String {
         if synonyms.is_empty() {
             return x.to_string();
         }
@@ -3365,8 +3383,9 @@ impl<'a> Builder<'a> {
 
     /// A clause over a group's keys with each value it names of a key read
     /// by an axis written as the key holds it (Wave 7a): `=`, `<>`, `in` and
-    /// `not_in` on such a key compare with the name the pack stores,
-    /// whichever name of the value the document wrote.
+    /// `not_in` on such a key compare with the name a person reads, which
+    /// is the key's own form, whichever name of the value the document
+    /// wrote.
     fn key_values(&self, c: &Clause, keys: &BTreeMap<String, String>) -> Clause {
         let mut out = c.clone();
         if matches!(c.op.as_str(), "=" | "<>" | "in" | "not_in")
@@ -3384,7 +3403,7 @@ impl<'a> Builder<'a> {
                 };
                 names
                     .named(&text)
-                    .map(|v| Arg::Text(names.stored(v).to_string()))
+                    .map(|v| Arg::Text(names.shown(v).to_string()))
             };
             match out.args.get_mut(1) {
                 Some(Arg::List(items)) => {

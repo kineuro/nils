@@ -16,6 +16,7 @@ pub mod derived;
 pub mod diagnostics;
 pub mod dwi;
 pub mod effect;
+pub mod family;
 pub mod fingerprint;
 pub mod fold;
 pub mod job;
