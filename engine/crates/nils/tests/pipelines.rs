@@ -8831,6 +8831,169 @@ x-nils:
   proposals: [{axis: body_part}]
 "#;
 
+/// [`PROPOSE`] whose first unit fails, with no proposal of its stack.
+const PROPOSE_ONE_FAILS: &str = r#"name: propose-partial
+schema-version: "0.5"
+tool-version: "1"
+container-image:
+  type: docker
+  image: "example.org/propose@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+command-line: |
+  python3 -c '
+  import json, os, sys
+  m = json.load(open(sys.argv[1])); out = sys.argv[2]
+  man = json.load(open(sys.argv[3] + "/manifest.json"))
+  model = man["models"][0]["model_id"]
+  first, rest = m["stacks"][0], m["stacks"][1:]
+  units = [{"unit_id": first["unit"], "status": "failed", "error": "refused on purpose"}] + [{"unit_id": s["unit"], "status": "succeeded"} for s in rest]
+  props = [{"stack_id": s["stack_id"], "axis": "body_part", "value": "brain", "probabilities": {"brain": 0.9, "spine": 0.1}, "model_id": model} for s in rest]
+  json.dump({"schema_version": "1", "units": units, "proposals": props}, open(os.path.join(out, "results.json"), "w"))
+  ' [Manifest] [OutputLocation] [Inputs]
+x-nils:
+  analysis-level: stack
+  input: {layout: stacks}
+  inputs:
+    - {id: model, type: model}
+  outputs:
+    - {id: note, kind: output, path-template: "notes/{stack}.txt"}
+  proposals: [{axis: body_part}]
+"#;
+
+/// 1.0.0-alpha.82 took none of a run's proposals where a unit failed: the
+/// unit's `pipeline:qc` item, keyed to the run, read as proposals in
+/// already. A run with a failed unit takes the others' in; `nils pipeline
+/// ingest` takes in those of a run that closed without them, once, and
+/// takes nothing the second time; a run not ended is refused.
+#[test]
+fn a_run_with_a_failed_unit_takes_its_proposals_and_ingest_takes_them_once() {
+    if !have("python3") {
+        eprintln!(
+            "python3 is not installed; the stand-in podman needs it, so this test is skipped"
+        );
+        return;
+    }
+    on_both(
+        "pipelines-ingest-failed-unit",
+        "nils_pipelines_ingest_failed_unit",
+        |lab| {
+            lab.add_descriptor("propose-partial", PROPOSE_ONE_FAILS);
+            let card = lab.work.path().join("card.json");
+            std::fs::write(
+                &card,
+                json!({"name": "bp-partial", "version": "1", "kind": "pass",
+                   "digest": format!("sha256:{}", "6".repeat(64)), "task": "axis:body_part"})
+                .to_string(),
+            )
+            .unwrap();
+            lab.ok(
+                &["model", "register", "--card", card.to_str().unwrap()],
+                None,
+            );
+            let stacks = stack_ids(lab).len() as i64;
+            assert!(stacks >= 3, "{stacks}");
+            let r = lab.json(&[
+                "run",
+                "propose-partial",
+                "--select",
+                "selection:every@1",
+                "--model",
+                "bp-partial@1",
+                "--json",
+            ]);
+            assert_eq!(r["status"], "partial", "{r}");
+            assert_eq!(r["summary"]["units"]["failed"], 1, "{r}");
+            let run = r["id"].as_i64().unwrap();
+            let id = run.to_string();
+            // the failed unit's item, and the others' proposals in one group
+            let qc = format!(
+                "SELECT COUNT(*) FROM review_item WHERE kind = 'pipeline:qc' \
+                 AND group_key LIKE 'run:{run}|unit:%'"
+            );
+            let items = format!(
+                "SELECT COUNT(*) FROM review_item WHERE kind = 'body_part:model' \
+                 AND group_key LIKE 'run:{run}|%'"
+            );
+            let members = format!(
+                "SELECT COUNT(*) FROM review_member WHERE item_id IN \
+                 (SELECT id FROM review_item WHERE kind = 'body_part:model' \
+                 AND group_key LIKE 'run:{run}|%')"
+            );
+            assert_eq!(lab.count(&qc), 1);
+            let proposed = &r["summary"]["proposals"];
+            assert!(proposed["refused"].is_null(), "{r}");
+            assert_eq!(proposed["taken"], stacks - 1, "{r}");
+            assert_eq!(lab.count(&items), 1);
+            assert_eq!(lab.count(&members), stacks - 1);
+
+            // its proposals are in: taking in again takes nothing, and says so
+            let again = lab.json(&["pipeline", "ingest", &id, "--json"]);
+            assert_eq!(again["taken"], 0, "{again}");
+            assert_eq!(again["in_already"], 1, "{again}");
+            let out = lab.ok(&["pipeline", "ingest", &id], None);
+            assert!(
+                out.contains("in already") && out.contains("nothing was taken"),
+                "{out}"
+            );
+            assert_eq!(lab.count(&items), 1);
+
+            // the run as 1.0.0-alpha.82 left it: its unit's item, no proposals
+            {
+                let mut store = lab.store();
+                store
+                    .execute(
+                        &format!(
+                            "DELETE FROM review_member WHERE item_id IN (SELECT id FROM review_item \
+                             WHERE kind = 'body_part:model' AND group_key LIKE 'run:{run}|%')"
+                        ),
+                        &[],
+                    )
+                    .unwrap();
+                store
+                    .execute(
+                        &format!(
+                            "DELETE FROM review_item WHERE kind = 'body_part:model' \
+                             AND group_key LIKE 'run:{run}|%'"
+                        ),
+                        &[],
+                    )
+                    .unwrap();
+            }
+            assert_eq!(lab.count(&items), 0);
+            let taken = lab.json(&["pipeline", "ingest", &id, "--json"]);
+            assert_eq!(taken["taken"], stacks - 1, "{taken}");
+            assert_eq!(taken["in_already"], 0, "{taken}");
+            assert_eq!(taken["ingested"]["items"], 1, "{taken}");
+            assert_eq!(lab.count(&items), 1);
+            assert_eq!(lab.count(&members), stacks - 1);
+            assert_eq!(lab.count(&qc), 1);
+            // the run's summary says what was taken, and when
+            let shown = lab.json(&["pipeline", "runs", &id, "--json"]);
+            let proposed = &shown["summary"]["proposals"];
+            assert_eq!(proposed["taken"], stacks - 1, "{shown}");
+            assert!(proposed["taken_later"]["at"].is_string(), "{shown}");
+
+            // a second time takes nothing
+            let again = lab.json(&["pipeline", "ingest", &id, "--json"]);
+            assert_eq!(again["taken"], 0, "{again}");
+            assert_eq!(again["in_already"], 1, "{again}");
+            assert_eq!(lab.count(&items), 1);
+            assert_eq!(lab.count(&members), stacks - 1);
+
+            // no such run, or one that has not ended, is refused
+            let (ok, _, err) = lab.run(&["pipeline", "ingest", "9999"], None);
+            assert!(!ok && err.contains("no pipeline run 9999"), "{err}");
+            lab.store()
+                .execute(
+                    &format!("UPDATE pipeline_run SET status = 'running' WHERE id = {run}"),
+                    &[],
+                )
+                .unwrap();
+            let (ok, _, err) = lab.run(&["pipeline", "ingest", &id], None);
+            assert!(!ok && err.contains("is running"), "{err}");
+        },
+    );
+}
+
 /// The open `body_part:model` groups, each with its member stacks.
 fn open_groups(lab: &Lab) -> Vec<(i64, BTreeSet<i64>)> {
     let mut store = lab.store();

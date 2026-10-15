@@ -474,38 +474,52 @@ pub fn threshold(m: &Model, asked: Option<f64>) -> Result<Option<f64>, Error> {
     }
 }
 
+/// How many review items hold a run's own proposals: its grouped
+/// `<axis>:model` items, keyed `run:<id>|<axis>:model|...`, with those
+/// carried under its key when a later run superseded part of a group.
+/// A unit's `pipeline:qc` item, keyed `run:<id>|unit:<unit>`, is the run's
+/// too but holds no proposal, so it is never counted.
+pub fn held(store: &mut Store, run_id: i64) -> Result<i64, Error> {
+    let d = store.dialect();
+    Ok(store
+        .query_opt(
+            &format!(
+                "SELECT COUNT(*) FROM {} WHERE group_key LIKE {} AND kind LIKE '%:model' \
+                 AND group_key LIKE {} || kind || '|%'",
+                store.qualified("review_item"),
+                d.param(1, Type::Text),
+                d.param(2, Type::Text)
+            ),
+            &[
+                Param::from(format!("run:{run_id}|%")),
+                Param::from(format!("run:{run_id}|")),
+            ],
+        )?
+        .map(|r| r.int(0))
+        .transpose()?
+        .unwrap_or(0))
+}
+
 /// Turn a run's proposals into grouped `<axis>:model` review items, and
 /// stage a decision by the model on each group at or above the model's
 /// threshold ([`threshold`]: its card's, or higher where `asked` raises
 /// it), all in one transaction: every item and decision is written, or
-/// none. A run is ingested once; a second ingest of it is refused.
+/// none. A run is ingested once; a second ingest of it is refused, as
+/// [`held`] counts it. The items its failed units raised do not count.
 pub fn ingest(
     registry: &mut Registry,
     run: &Run<'_>,
     proposals: &[Proposal],
     asked: Option<f64>,
 ) -> Result<Ingested, Error> {
-    let store = registry.store();
-    let d = store.dialect();
-    let prefix = format!("run:{}|", run.id);
-    let held = store
-        .query_opt(
-            &format!(
-                "SELECT COUNT(*) FROM {} WHERE group_key LIKE {}",
-                store.qualified("review_item"),
-                d.param(1, Type::Text)
-            ),
-            &[Param::from(format!("{prefix}%"))],
-        )?
-        .map(|r| r.int(0))
-        .transpose()?
-        .unwrap_or(0);
+    let held = held(registry.store(), run.id)?;
     if held > 0 {
         return Err(Error::Refused(format!(
             "the proposals of run {} are in already, as {held} review item(s)",
             run.id
         )));
     }
+    let store = registry.store();
     let resolved = checked(store, proposals)?;
     // only the run's own stacks, and only the models it may speak for
     let mut dropped: BTreeMap<String, i64> = BTreeMap::new();

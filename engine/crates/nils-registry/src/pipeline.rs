@@ -529,6 +529,18 @@ pub fn finish(store: &mut Store, id: i64, f: &Finish<'_>) -> Result<(), Error> {
     Ok(())
 }
 
+/// Write a closed run's summary again, as when its proposals are taken in
+/// after it closed.
+pub fn set_summary(store: &mut Store, id: i64, summary: &Value) -> Result<(), Error> {
+    store.update_by_id(
+        table("pipeline_run"),
+        &[("summary", Param::from(summary.to_string()))],
+        "id",
+        id,
+    )?;
+    Ok(())
+}
+
 /// One run by id.
 pub fn run(store: &mut Store, id: i64) -> Result<Option<Run>, Error> {
     let d = store.dialect();

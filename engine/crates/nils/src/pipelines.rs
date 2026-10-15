@@ -1810,6 +1810,19 @@ pub(crate) enum PipelineCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Take in a finished run's proposals (record 43 S6) as its intake
+    /// does: read again from the results.json files it left, grouped into
+    /// review items and staged at each model's threshold. For a run whose
+    /// intake took none, as one with a failed unit did before
+    /// 1.0.0-alpha.83. Taking in twice takes nothing the second time, and
+    /// says so. Through a door this is pipelines:work, as a run is
+    Ingest {
+        /// The run, by id
+        run: i64,
+        /// Machine-readable output
+        #[arg(long)]
+        json: bool,
+    },
     /// The runs, newest first, or one run with its derivatives
     Runs {
         /// One run, by id
@@ -2359,6 +2372,14 @@ pub(crate) fn command(home: &Home, command: PipelineCommand) -> Result<(), Exit>
             for a in &added {
                 println!("seeded {}", a["label"].as_str().unwrap_or_default());
             }
+            Ok(())
+        }
+        PipelineCommand::Ingest { run, json } => {
+            let doc = ingest_run(&mut registry, run)?;
+            if json {
+                return print(&doc);
+            }
+            println!("{}", doc["line"].as_str().unwrap_or_default());
             Ok(())
         }
         PipelineCommand::Runs {
@@ -5014,6 +5035,174 @@ fn resume_command(home: &Home, args: &RunArgs, run_id: i64) -> Result<(), Exit> 
         },
         outcome,
     )
+}
+
+/// `nils pipeline ingest <run>`: a closed run's proposals taken in after
+/// it closed, as its intake takes them ([`finalize`]): read again from the
+/// results.json of its output folder, or of each unit that ended where its
+/// units ran apart; only those on the axes its descriptor declares, of its
+/// own stacks, and of the models it was given or made, at the threshold it
+/// was run with. A run whose proposals are in already takes nothing. The
+/// run's summary says what was taken, and when.
+fn ingest_run(registry: &mut Registry, run_id: i64) -> Result<Value, Exit> {
+    let r = rows::run(registry.store(), run_id)?
+        .ok_or_else(|| usage(format!("no pipeline run {run_id}")))?;
+    // only a run whose containers ended and whose results were read
+    let closed = matches!(r.status.as_str(), "done" | "partial")
+        || (r.status == "failed" && r.results_digest.is_some());
+    if !closed {
+        return Err(usage(format!(
+            "run {run_id} is {}: only a run that ended with its results read is taken in again",
+            r.status
+        )));
+    }
+    let p = rows::get(registry.store(), r.pipeline_id)?
+        .ok_or_else(|| fail(format!("run {run_id} names a pipeline the catalog lost")))?;
+    let d = descriptor::from_value(p.descriptor.clone()).map_err(|e| {
+        fail(format!(
+            "{}: the catalog's descriptor no longer checks: {e}",
+            p.label()
+        ))
+    })?;
+    let held = nils_registry::proposals::held(registry.store(), run_id)
+        .map_err(|e| fail(e.to_string()))?;
+    let mut doc = json!({"run": run_id, "pipeline": p.label(), "taken": 0, "in_already": held});
+    if held > 0 {
+        doc["line"] = json!(format!(
+            "run {run_id}: its proposals are in already, as {held} review item(s); nothing was taken"
+        ));
+        return Ok(doc);
+    }
+    let place = r
+        .place_id
+        .and_then(|id| {
+            nils_registry::place::show(registry.store(), id)
+                .ok()
+                .flatten()
+        })
+        .ok_or_else(|| usage(format!("run {run_id} has no working place to read from")))?;
+    let output = r
+        .output
+        .as_deref()
+        .ok_or_else(|| usage(format!("run {run_id} names no output folder")))?;
+    let out = PathBuf::from(&place.path).join(output);
+    let units = rows::units(registry.store(), run_id)?;
+    let folders: Vec<PathBuf> = if r.units.as_deref() == Some("apart") {
+        units
+            .iter()
+            .filter(|u| u.state == "over")
+            .map(|u| out.join(&u.unit))
+            .collect()
+    } else {
+        vec![out.clone()]
+    };
+    let mut proposals: Vec<Value> = Vec::new();
+    let mut unreadable: Vec<String> = Vec::new();
+    for f in &folders {
+        match read_results(f) {
+            (Some(results), _) => proposals.extend(results.proposals),
+            (None, Some(why)) => unreadable.push(why),
+            (None, None) => {}
+        }
+    }
+    if let Some(why) = unreadable.first() {
+        return Err(fail(format!(
+            "run {run_id}: {} results.json file(s) could not be read, the first as {why}; nothing was taken",
+            unreadable.len()
+        )));
+    }
+    let declared: Vec<Value> = proposals
+        .iter()
+        .filter(|p| {
+            p["axis"]
+                .as_str()
+                .is_some_and(|a| d.proposals.iter().any(|x| x == a))
+        })
+        .cloned()
+        .collect();
+    doc["given"] = json!(proposals.len());
+    doc["declared"] = json!(declared.len());
+    if declared.is_empty() {
+        doc["line"] = json!(format!(
+            "run {run_id}: it proposed nothing on the axes it declares ({} proposal(s) in all); nothing was taken",
+            proposals.len()
+        ));
+        return Ok(doc);
+    }
+    // its own stacks, and the models it was given or made, as at its intake
+    let ours: std::collections::BTreeSet<i64> = match r.handle_id {
+        Some(h) => handle_stacks(registry.store(), h)?.into_iter().collect(),
+        None => return Err(fail(format!("run {run_id} pinned no handle"))),
+    };
+    let speaks_for: std::collections::BTreeSet<i64> = r
+        .model_ids
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_i64)
+        .chain(
+            r.summary["models"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|m| m["model"]["id"].as_i64()),
+        )
+        .collect();
+    let parsed = nils_registry::proposals::parse(&json!({ "proposals": declared }))
+        .map_err(|e| fail(format!("run {run_id}: {e}")))?;
+    let who = crate::actor();
+    let taken = with_lock(registry, INTAKE_LOCK, None, |registry| {
+        nils_registry::proposals::ingest(
+            registry,
+            &nils_registry::proposals::Run {
+                id: run_id,
+                job_id: r.job_id,
+                principal: &who,
+                stacks: Some(&ours),
+                models: Some(&speaks_for),
+            },
+            &parsed,
+            r.threshold,
+        )
+        .map_err(|e| format!("run {run_id}: {e}"))
+    })
+    .map_err(fail)?;
+    // the run's summary says what its proposals came to now
+    let mut summary = r.summary.clone();
+    if !summary.is_object() {
+        summary = json!({});
+    }
+    let mut proposed = summary["proposals"].clone();
+    if !proposed.is_object() {
+        proposed = json!({});
+    }
+    proposed["given"] = json!(proposals.len());
+    proposed["declared"] = json!(declared.len());
+    proposed["taken"] = json!(taken.members);
+    proposed["ingested"] = taken.to_json();
+    if let Some(o) = proposed.as_object_mut()
+        && let Some(refused) = o.remove("refused")
+    {
+        o.insert("refused_at_intake".into(), refused);
+    }
+    proposed["taken_later"] = json!({"at": nils_registry::time::now_iso(), "by": who});
+    summary["proposals"] = proposed;
+    rows::set_summary(registry.store(), run_id, &summary)?;
+    crate::audit(
+        registry,
+        nils_registry::audit::Action::PipelineRun,
+        json!({"run": run_id, "pipeline": p.label(), "proposals_taken_in": true}),
+        Some(json!({"members": taken.members, "items": taken.groups.len()})),
+    )?;
+    doc["taken"] = json!(taken.members);
+    doc["ingested"] = taken.to_json();
+    doc["line"] = json!(format!(
+        "run {run_id}: took in {} proposal(s) as {} review item(s), of {} on the axes it declares",
+        taken.members,
+        taken.groups.len(),
+        declared.len()
+    ));
+    Ok(doc)
 }
 
 /// What closing a run needs to say.

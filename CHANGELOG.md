@@ -4,6 +4,10 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Fixed
+
+- A pipeline run with a failed unit takes its proposals in (1.0.0-alpha.82). The intake refused a run whose proposals were in already by counting every review item keyed to the run, and a failed unit's `pipeline:qc` item is keyed to it too and is raised before the intake, so such a run took none of its proposals and said they were in already. Only the run's own `<axis>:model` items count now. `nils pipeline ingest <run>` takes in the proposals of a run that closed without them, from the `results.json` files it left, as its intake would have, and records them in the run's summary; taking in again takes nothing and says so.
+
 ## [pack-mri-v1.2.3] - 2026-10-15
 
 The MRI pack 1.2.3, a rules release on its own: an install on engine 1.0.0-alpha.82 or later takes it with `nils update --part rules`, or with Update on the MRI rules row of the desk's Settings › Parts, with no engine release and nothing started again. It works with engines `>=1.0.0-alpha.82, <2.0.0` and pack contract 10, since it relies on the engine that reads a value's `stored:` spelling and the acquisition family. `nils update --pin mri@1.2.2` goes back to the version before.
