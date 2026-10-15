@@ -8,6 +8,8 @@ name: rules-release
 # never the repository's latest release and carries no file named VERSION, so the
 # engine's own lookups never take it for an engine; the engine finds it in the listing
 # by its tag, and checks what it works with from its pack.yml before it installs it.
+# Where main's ci has not finished, a passed ci run on the pull request this commit is
+# the squash merge of, with the same tree, is taken instead (scripts/release-pr-head.sh).
 on:
   push:
     tags: ['pack-*-v*']
@@ -21,13 +23,21 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - name: main's ci passed on this commit
+      - name: ci passed on this commit, on main or on its pull request's same tree
+        # pr-head-tree: the release gate tags on the pull request's checks only where
+        # this step accepts them (scripts/release-pr-head.sh)
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           run=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$GITHUB_SHA&branch=main&event=push&status=success" --jq '.workflow_runs[0].id // empty')
-          [ -n "$run" ] || { echo "no ci run on main passed for $GITHUB_SHA: a rules release is tagged on a commit main's checks passed"; exit 1; }
-          echo "ci run $run passed on main for this commit"
+          if [ -n "$run" ]; then echo "ci run $run passed on main for this commit"; exit 0; fi
+          pr="" head=""
+          read -r pr head < <(scripts/release-pr-head.sh "$GITHUB_SHA") || true
+          if [ -n "$head" ]; then
+            run=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$head&event=pull_request&status=success" --jq '.workflow_runs[0].id // empty')
+          fi
+          [ -n "$run" ] || { echo "no ci run passed for $GITHUB_SHA on main or on its pull request's same tree: a rules release is tagged on a commit whose checks passed"; exit 1; }
+          echo "ci run $run passed on pull request #$pr, whose head has this commit's tree"
       - name: the pack states the tag's version, and is packed alone
         run: |
           rest=${GITHUB_REF_NAME#pack-}

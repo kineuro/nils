@@ -2,15 +2,19 @@ name: release
 # On a version tag: the binaries for the six targets, checked to carry the tag's
 # version, published as a GitHub release with the packs, their checksums, and the
 # matching section of CHANGELOG.md as the notes, in the form Bifrost uses
-# (docs/decisions/15, R4). A tag goes on a commit once ci passed on main, and that
-# run built the six binaries with engine-build.yml, so the release takes them from
-# it; where no run on main kept them, they are built here the same way.
+# (docs/decisions/15, R4). A tag goes on a commit once ci passed on main, or once ci
+# passed on the pull request it is the squash merge of, with the same tree
+# (scripts/release-pr-head.sh). Either run built the six binaries with
+# engine-build.yml from this tree, so the release takes them from it, main's run
+# first; where no such run kept them, they are built here the same way.
 #
-# Every model's image is built from the tag and pushed first (record 55 A5), and
-# the release ships the descriptors of its model pipelines, each naming the image
-# this run built by the digest it pushed (pipelines.tar.gz, with IMAGES), checked
-# by the tag's own binary as a catalog takes them. The release waits for both, so a
-# tag's descriptors never name an older image than its own.
+# Every model's image whose package changed since the previous release is built
+# from the tag and pushed first (record 55 A5); an unchanged one is the image the
+# previous release shipped, by the digest its IMAGES names, once the registry says
+# anyone may pull it. The release ships the descriptors of its model pipelines,
+# each naming that image by its digest (pipelines.tar.gz, with IMAGES), checked by
+# the tag's own binary as a catalog takes them. The release waits for both, so a
+# tag's descriptors never name an image older than its package's files.
 on:
   push:
     tags: ['v*']
@@ -27,17 +31,29 @@ jobs:
     outputs:
       run: ${{ steps.find.outputs.run }}
     steps:
+      - uses: actions/checkout@v7
       - id: find
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          kept() { gh api "repos/$GITHUB_REPOSITORY/actions/runs/$1/artifacts?per_page=100" --jq '[.artifacts[] | select(.expired | not) | select(.name | startswith("nils-"))] | length'; }
           run=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$GITHUB_SHA&branch=main&event=push&status=success" --jq '.workflow_runs[0].id // empty')
+          if [ -n "$run" ] && [ "$(kept "$run")" -lt 6 ]; then run=""; fi
           if [ -n "$run" ]; then
-            kept=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run/artifacts?per_page=100" --jq '[.artifacts[] | select(.expired | not) | select(.name | startswith("nils-"))] | length')
-            [ "$kept" -ge 6 ] || run=""
+            echo "the binaries ci run $run built on main"
+          else
+            # main's run has not finished (the tag went on the pull request's checks) or kept
+            # nothing: the pull request's ci run built the same tree
+            pr="" head=""
+            read -r pr head < <(scripts/release-pr-head.sh "$GITHUB_SHA") || true
+            if [ -n "$head" ]; then
+              run=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$head&event=pull_request&status=success" --jq '.workflow_runs[0].id // empty')
+              if [ -n "$run" ] && [ "$(kept "$run")" -lt 6 ]; then run=""; fi
+              if [ -n "$run" ]; then echo "the binaries pull request #$pr's ci run $run built from this tree"; fi
+            fi
           fi
           echo "run=$run" >> "$GITHUB_OUTPUT"
-          if [ -n "$run" ]; then echo "the binaries ci run $run built"; else echo "no run on main kept this commit's binaries, so they are built here"; fi
+          if [ -z "$run" ]; then echo "no ci run kept this tree's binaries, so they are built here"; fi
 
   build:
     needs: built
@@ -53,6 +69,13 @@ jobs:
     # is not here: it holds only FreeSurfer's Synth parts, but its build pulls
     # FreeSurfer's whole image (41 GB unpacked) and writes 34 GB, more than a
     # hosted runner's disk; it needs a larger runner.
+    #
+    # An image is built only when its package's files (pipelines/<image>, less its
+    # tests and README, which the image does not hold), this workflow or the
+    # descriptors script changed since the previous release's tag. Otherwise the
+    # job takes the image the previous release shipped, by the digest its IMAGES
+    # names, after the registry says anyone may pull it, and tags it with this
+    # release too; where any of that fails, it builds.
     name: model image ${{ matrix.image }}
     runs-on: ubuntu-latest
     strategy:
@@ -61,7 +84,44 @@ jobs:
         image: [nils-bodypart, nils-postcontrast, nils-system1]
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: built again, or the previous release's image
+        id: reuse
+        env:
+          GH_TOKEN: ${{ github.token }}
+          IMAGE: ${{ matrix.image }}
+        run: |
+          prev=$(git describe --tags --abbrev=0 --match 'v*' "$GITHUB_SHA^" 2>/dev/null || true)
+          if [ -z "$prev" ]; then echo "no release before this one, so $IMAGE is built"; exit 0; fi
+          inputs=("pipelines/$IMAGE" ":(exclude)pipelines/$IMAGE/tests" ":(exclude)pipelines/$IMAGE/README.md"
+                  .github/workflows/release.yml scripts/release-descriptors.py)
+          if ! git diff --quiet "$prev" "$GITHUB_SHA" -- "${inputs[@]}"; then
+            echo "$IMAGE's files changed since $prev, so it is built:"
+            git diff --stat "$prev" "$GITHUB_SHA" -- "${inputs[@]}" | tail -20
+            exit 0
+          fi
+          ref=$(gh release download "$prev" --repo "$GITHUB_REPOSITORY" -p IMAGES -O - 2>/dev/null | cut -f2 | grep -m1 -E "^ghcr\.io/kineuro/$IMAGE@sha256:[0-9a-f]{64}$" || true)
+          if [ -z "$ref" ]; then echo "$prev shipped no $IMAGE image, so it is built"; exit 0; fi
+          if ! python3 - "$ref" <<'PY'
+          import importlib.util, sys
+          spec = importlib.util.spec_from_file_location("descriptors", "scripts/release-descriptors.py")
+          rd = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(rd)
+          try:
+              ok = rd.pullable(sys.argv[1])
+          except SystemExit:
+              ok = False
+          sys.exit(0 if ok else 1)
+          PY
+          then
+            echo "$ref, which $prev shipped, cannot be pulled without credentials, so $IMAGE is built"
+            exit 0
+          fi
+          echo "$IMAGE's files are $prev's: its image $ref is taken, not built" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
       - name: room for an image of CUDA wheels
+        if: steps.reuse.outputs.ref == ''
         # a CUDA image is about 12 GB unpacked; the runner's toolchains this
         # job does not use make the room
         run: |
@@ -70,6 +130,7 @@ jobs:
           docker image prune --all --force > /dev/null
           df -h /
       - name: what the build checks
+        if: steps.reuse.outputs.ref == ''
         id: args
         run: |
           if [ "${{ matrix.image }}" = nils-bodypart ]; then
@@ -83,6 +144,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - id: push
+        if: steps.reuse.outputs.ref == ''
         uses: docker/build-push-action@v6
         with:
           context: pipelines/${{ matrix.image }}
@@ -94,10 +156,19 @@ jobs:
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.version=${{ github.ref_name }}
+      - name: the previous release's image, tagged with this release too
+        if: steps.reuse.outputs.ref != ''
+        # a name for people; the descriptors pin the digest, so a failure here changes nothing
+        continue-on-error: true
+        run: docker buildx imagetools create --tag "ghcr.io/kineuro/${{ matrix.image }}:${{ github.ref_name }}" "${{ steps.reuse.outputs.ref }}"
       - name: the reference the release's descriptors pin
+        env:
+          REUSED: ${{ steps.reuse.outputs.ref }}
+          PUSHED: ${{ steps.push.outputs.digest }}
         run: |
           mkdir -p refs
-          echo "ghcr.io/kineuro/${{ matrix.image }}@${{ steps.push.outputs.digest }}" | tee "refs/${{ matrix.image }}.ref" >> "$GITHUB_STEP_SUMMARY"
+          ref=${REUSED:-ghcr.io/kineuro/${{ matrix.image }}@$PUSHED}
+          echo "$ref" | tee "refs/${{ matrix.image }}.ref" >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v7
         with:
           name: image-${{ matrix.image }}
@@ -105,7 +176,7 @@ jobs:
 
   descriptors:
     # The descriptors the release ships: every one of this tree that names a
-    # model image this run built, pinned to the digest the run pushed, then
+    # model image this run built or took, pinned to that image's digest, then
     # taken into a catalog by the tag's own binary, which must keep that image.
     # An image job that failed ships no descriptor and is named in the notes
     # (NOT-SHIPPED); it never holds back the binaries and the packs.
