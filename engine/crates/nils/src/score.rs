@@ -103,7 +103,8 @@ pub(crate) fn can_be_t1_brain(
 ) -> bool {
     let greatest = |v: &[String]| v.iter().max().cloned().unwrap_or_default();
     let t1 = greatest(base) == "T1w" && !matches!(greatest(technique).as_str(), "TOF" | "PC");
-    let brain = body_part.is_empty()
+    // kept where neither body axis is answered yet, or where one says the head
+    let brain = (body_part.is_empty() && body_region.is_empty())
         || greatest(body_part).contains("brain")
         || body_region.iter().any(|r| r == "head");
     t1 && brain
