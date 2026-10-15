@@ -226,12 +226,13 @@ values:
   Dixon:
     # WFS is Canon's, WFOP and FatSep Hitachi's, FLEX GE's [V1, V2]
     terms: ['Dixon', 'mDIXON', 'IDEAL', 'LAVA-Flex', 'Flex', 'VIBE-Dixon', 'two-point Dixon', 'WFS', 'WFOP', 'FatSep', 'FLEX']
-    # Never an image the scanner typed LOCALIZER or SCOUT on a plain gradient
-    # echo, whose name is that of the series it plans (flags.yml,
-    # `typed_localizer_gre`; System 1's copied errors, 2026-10-13: a Philips
-    # survey named `cs1.8_T2_mDixon_TSE_cor` read Dixon), as DWI-EPI since
-    # pack 0.22.0.
-    requires: {not: typed_localizer_gre}
+    # MRI pack 1.2.1: never by the words of a gradient-echo scout, whose name
+    # is that of the series it plans (flags.yml, `gre_scout_readout`: an
+    # image typed LOCALIZER or SCOUT, or a Siemens position display, on a
+    # gradient echo; System 1's copied errors, 2026-10-13: a Philips survey
+    # named `cs1.8_T2_mDixon_TSE_cor` read Dixon), as DWI-EPI since pack
+    # 0.22.0. Where the header itself states a Dixon part, it stands.
+    requires: {any: [has_dixon, {not: gre_scout_readout}]}
     keywords:
       - dixon
       - ideal

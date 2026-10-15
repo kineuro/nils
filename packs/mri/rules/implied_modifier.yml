@@ -16,7 +16,15 @@ rules:
 
   'construct:dixon':
     clauses:
-      - {when: {any: [{axis: construct, is: Water}, {axis: construct, is: Fat}]}, cite: 'a Dixon water or fat image', source: construct}
+      # MRI pack 1.2.1: not where the water or fat came from the words of a
+      # gradient-echo scout named for the series it plans; a header that
+      # states the Dixon part still makes it one (axes/modifier.yml, Dixon)
+      - when:
+          all:
+            - {any: [{axis: construct, is: Water}, {axis: construct, is: Fat}]}
+            - {any: [has_dixon, {not: gre_scout_readout}]}
+        cite: 'a Dixon water or fat image'
+        source: construct
     set: {modifier: [Dixon]}
     confidence: 0.95
     why: 'water-only and fat-only images are made by chemical-shift (Dixon, IDEAL) separation'
