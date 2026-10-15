@@ -4828,37 +4828,22 @@ fn places(
     for bucket in bids_buckets.values_mut() {
         bucket.sort();
         let order: Vec<i64> = bucket.iter().map(|(_, stack, _)| *stack).collect();
-        let stem_of =
-            |bids: &HashMap<i64, Result<crate::bids::name::Name, crate::bids::name::Why>>,
-             stack: &i64|
-             -> Option<String> {
-                bids.get(stack)
-                    .and_then(|b| b.as_ref().ok())
-                    .map(|n| n.stem("s", "s"))
-            };
-        // Each round settles at least one group for good or adds a mark that
-        // splits it, and a stack carries at most one mark per axis and per
-        // property, so this ends; the bound is a guard, not a rule.
-        let mut first = true;
-        for _ in 0..64 {
-            let mut groups: BTreeMap<String, Vec<i64>> = BTreeMap::new();
-            for stack in &order {
-                if let Some(stem) = stem_of(&bids, stack) {
-                    groups.entry(stem).or_default().push(*stack);
-                }
+        settle_rounds(&order, &mut bids, &mut shared, |group, first, bids, shared| {
+            if first {
+                shared.name_groups.push(group.to_vec());
             }
-            let colliding: Vec<Vec<i64>> = groups.into_values().filter(|g| g.len() > 1).collect();
-            if colliding.is_empty() {
-                break;
-            }
-            for group in colliding {
-                if first {
-                    shared.name_groups.push(group.clone());
-                }
-                settle(&group, &acquisitions, &stated, pack, &mut bids, &mut shared);
-            }
-            first = false;
-        }
+            settle(group, &acquisitions, &stated, pack, bids, shared);
+        })
+        .map_err(|stacks| {
+            Error::Refused(format!(
+                "stacks {} would be written under one name, which is a fault of the release's naming and never an overwrite; nothing was written",
+                stacks
+                    .iter()
+                    .map(i64::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ))
+        })?;
     }
 
     let mut out = HashMap::new();
@@ -5042,6 +5027,72 @@ struct SharedGroup {
     differs: Vec<String>,
     /// The same thing as a sentence, which is what a person reads.
     why: String,
+}
+
+/// The groups of a bucket's stacks that build one BIDS stem, in the
+/// bucket's order; a group of one is none.
+fn sharing(
+    order: &[i64],
+    bids: &HashMap<i64, Result<crate::bids::name::Name, crate::bids::name::Why>>,
+) -> Vec<Vec<i64>> {
+    let mut groups: BTreeMap<String, Vec<i64>> = BTreeMap::new();
+    for stack in order {
+        if let Some(Ok(n)) = bids.get(stack) {
+            groups.entry(n.stem("s", "s")).or_default().push(*stack);
+        }
+    }
+    groups.into_values().filter(|g| g.len() > 1).collect()
+}
+
+/// Settle the names a bucket's stacks share, in rounds: each round groups
+/// the bucket by stem and settles each group (`settle_group`, told whether
+/// it is the first round), and the bucket is grouped again. Each round
+/// settles at least one group for good or adds a mark that splits it, and a
+/// stack carries at most one mark per axis and per property, so this ends;
+/// the bound of 64 rounds is a guard, not a rule. Should a stem still be
+/// shared when the rounds run out (#462), each stack of such a group takes
+/// the plain number in the group's order, and a stem shared even then is a
+/// fault: its stacks are answered, for the release to refuse before it
+/// writes anything, never to write two stacks to one name.
+fn settle_rounds(
+    order: &[i64],
+    bids: &mut HashMap<i64, Result<crate::bids::name::Name, crate::bids::name::Why>>,
+    shared: &mut Shared,
+    mut settle_group: impl FnMut(
+        &[i64],
+        bool,
+        &mut HashMap<i64, Result<crate::bids::name::Name, crate::bids::name::Why>>,
+        &mut Shared,
+    ),
+) -> Result<(), Vec<i64>> {
+    let mut first = true;
+    for _ in 0..64 {
+        let colliding = sharing(order, bids);
+        if colliding.is_empty() {
+            return Ok(());
+        }
+        for group in colliding {
+            settle_group(&group, first, bids, shared);
+        }
+        first = false;
+    }
+    for group in sharing(order, bids) {
+        for (n, stack) in group.iter().enumerate() {
+            record(
+                bids,
+                shared,
+                *stack,
+                Some(crate::bids::separate::Mark::number(n as i64 + 1)),
+                &[],
+            );
+            shared.numbered.insert(*stack);
+        }
+    }
+    let left: Vec<i64> = sharing(order, bids).concat();
+    match left.is_empty() {
+        true => Ok(()),
+        false => Err(left),
+    }
 }
 
 /// Settle one group of stacks that built one BIDS name (Wave 7a §8.1): a true
@@ -5660,6 +5711,71 @@ mod tests {
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect()
+    }
+
+    /// #462: rounds whose marks never split a group (a separator that marks
+    /// every member alike) run out, and the last step numbers the group:
+    /// every planned stem is one stack's, and each stack is counted as
+    /// told apart by the number.
+    #[test]
+    fn name_rounds_that_run_out_end_with_distinct_names() {
+        use crate::bids::separate::{By, Mark};
+        let name = crate::bids::name::Name {
+            datatype: "anat",
+            suffix: "T1w",
+            entities: vec![("subject", "s".to_string()), ("session", "s".to_string())],
+            refused: Vec::new(),
+            aslcontext: None,
+            acq: Vec::new(),
+        };
+        let mut bids: HashMap<i64, Result<crate::bids::name::Name, crate::bids::name::Why>> =
+            HashMap::new();
+        for stack in [11, 12, 13, 20] {
+            bids.insert(stack, Ok(name.clone()));
+        }
+        // stack 20 is apart from the start: a name of its own
+        bids.insert(
+            20,
+            Ok(name.marked(&Mark {
+                by: By::Number,
+                property: "own".into(),
+                value: "own".into(),
+                token: "own".into(),
+                slot: crate::bids::name::SLOT_NUMBER,
+            })),
+        );
+        let mut shared = Shared::default();
+        let mut rounds = 0;
+        let order = [11, 12, 13, 20];
+        settle_rounds(&order, &mut bids, &mut shared, |group, _, bids, _| {
+            rounds += 1;
+            for stack in group {
+                let Some(Ok(n)) = bids.get(stack) else {
+                    continue;
+                };
+                let same = Mark {
+                    by: By::Number,
+                    property: "same".into(),
+                    value: "x".into(),
+                    token: "x".into(),
+                    slot: crate::bids::name::SLOT_NUMBER,
+                };
+                let marked = n.marked(&same);
+                bids.insert(*stack, Ok(marked));
+            }
+        })
+        .unwrap();
+        assert_eq!(rounds, 64, "the stub never splits the group");
+        let stems: std::collections::BTreeSet<String> = order
+            .iter()
+            .map(|s| bids[s].as_ref().unwrap().stem("s", "s"))
+            .collect();
+        assert_eq!(stems.len(), order.len(), "{stems:?}");
+        assert!(sharing(&order, &bids).is_empty());
+        assert_eq!(
+            shared.numbered.iter().copied().collect::<Vec<_>>(),
+            [11, 12, 13]
+        );
     }
 
     #[test]
