@@ -384,7 +384,13 @@ pub(crate) const KINDS: [&str; 13] = [
 /// Browse folders place it, so SyMRI's multi-dynamic multi-echo or QALAS
 /// acquisition, a working scan the pack calls RawRecon, counts with SyMRI
 /// and not as Other (2026-10-14).
-pub(crate) fn kind_of(a: &Axes, folder: Option<&str>) -> &'static str {
+///
+/// `acquisition` is the acquisition family the pack's routes recognised
+/// ([`acquisition_family`]): an SWI's own image with no weighting, its
+/// phase (or a map the route made with none), counts as SWI and not as
+/// Other, as the SWI box holds it (2026-10-14). One with a weighting is
+/// told by it, as the magnitude's T2*w.
+pub(crate) fn kind_of(a: &Axes, folder: Option<&str>, acquisition: Option<&str>) -> &'static str {
     if has(a, "disposition", "scout")
         || has(a, "directory_type", "localizer")
         || has(a, "provenance", "Localizer")
@@ -412,6 +418,8 @@ pub(crate) fn kind_of(a: &Axes, folder: Option<&str>) -> &'static str {
         "PDw"
     } else if has(a, "base", "T2*w") || has(a, "base", "T2starw") {
         "T2*w"
+    } else if acquisition == Some("swi") {
+        "SWI"
     } else {
         "Other"
     }
@@ -1270,6 +1278,8 @@ pub(crate) fn visits(
     // what each of the scope's scans is
     let ids: Vec<i64> = stacks.iter().map(|(s, _)| *s).collect();
     let axes = axes_of(store, &ids).map_err(failed)?;
+    // the routes that decided each scan, for its acquisition family
+    let routes = routes_of(store, &ids).map_err(failed)?;
     let looks: HashSet<i64> = match &holds {
         Some(holds) => looked(store, holds, Some(subject))
             .map_err(failed)?
@@ -1322,9 +1332,12 @@ pub(crate) fn visits(
         for (stack, _) in &v.stacks {
             let a = axes.get(stack).unwrap_or(&empty);
             // SyMRI's acquisition is SyMRI's here as in its folder (record
-            // 55 C4, 2026-10-14), for the kinds and for `symri`
+            // 55 C4, 2026-10-14), for the kinds and for `symri`; an SWI's
+            // phase is the SWI's, as its box holds it
             let folder = own_folder(pack, a);
-            *kinds.entry(kind_of(a, folder)).or_default() += 1;
+            let acquisition =
+                acquisition_family(routes.get(stack).map_or(&[][..], Vec::as_slice), a);
+            *kinds.entry(kind_of(a, folder, acquisition)).or_default() += 1;
             for part in a.get("body_part").into_iter().flatten() {
                 regions.extend(regions_of(part));
             }
@@ -1554,9 +1567,9 @@ mod tests {
 
     #[test]
     fn a_scan_is_told_by_one_kind() {
-        assert_eq!(kind_of(&axes(&[("base", "T1w")]), None), "T1w");
+        assert_eq!(kind_of(&axes(&[("base", "T1w")]), None, None), "T1w");
         assert_eq!(
-            kind_of(&axes(&[("base", "T2w"), ("modifier", "FLAIR")]), None),
+            kind_of(&axes(&[("base", "T2w"), ("modifier", "FLAIR")]), None, None),
             "FLAIR"
         );
         assert_eq!(
@@ -1566,52 +1579,72 @@ mod tests {
                     ("modifier", "FatSat"),
                     ("modifier", "FLAIR")
                 ]),
+                None,
                 None
             ),
             "FLAIR"
         );
-        assert_eq!(kind_of(&axes(&[("base", "T2*w")]), None), "T2*w");
-        assert_eq!(kind_of(&axes(&[("base", "SWI")]), None), "SWI");
+        assert_eq!(kind_of(&axes(&[("base", "T2*w")]), None, None), "T2*w");
+        assert_eq!(kind_of(&axes(&[("base", "SWI")]), None, None), "SWI");
         assert_eq!(
-            kind_of(&axes(&[("provenance", "SWIRecon"), ("base", "T2*w")]), None),
+            kind_of(
+                &axes(&[("provenance", "SWIRecon"), ("base", "T2*w")]),
+                None,
+                None
+            ),
             "SWI"
         );
-        assert_eq!(kind_of(&axes(&[("base", "DWI")]), None), "DWI");
+        assert_eq!(kind_of(&axes(&[("base", "DWI")]), None, None), "DWI");
         assert_eq!(
-            kind_of(&axes(&[("directory_type", "dwi"), ("base", "T2w")]), None),
+            kind_of(
+                &axes(&[("directory_type", "dwi"), ("base", "T2w")]),
+                None,
+                None
+            ),
             "DWI"
         );
         assert_eq!(
-            kind_of(&axes(&[("directory_type", "perf")]), None),
+            kind_of(&axes(&[("directory_type", "perf")]), None, None),
             "Perfusion"
         );
-        assert_eq!(kind_of(&axes(&[("directory_type", "func")]), None), "fMRI");
         assert_eq!(
-            kind_of(&axes(&[("directory_type", "fmap")]), None),
+            kind_of(&axes(&[("directory_type", "func")]), None, None),
+            "fMRI"
+        );
+        assert_eq!(
+            kind_of(&axes(&[("directory_type", "fmap")]), None, None),
             "Field map"
         );
         // what made it before what it weighs, a scout before anything
         assert_eq!(
-            kind_of(&axes(&[("provenance", "SyMRI"), ("base", "T1w")]), None),
+            kind_of(
+                &axes(&[("provenance", "SyMRI"), ("base", "T1w")]),
+                None,
+                None
+            ),
             "SyMRI"
         );
         assert_eq!(
-            kind_of(&axes(&[("disposition", "scout"), ("base", "T1w")]), None),
+            kind_of(
+                &axes(&[("disposition", "scout"), ("base", "T1w")]),
+                None,
+                None
+            ),
             "Scout"
         );
         assert_eq!(
-            kind_of(&axes(&[("directory_type", "localizer")]), None),
+            kind_of(&axes(&[("directory_type", "localizer")]), None, None),
             "Scout"
         );
-        assert_eq!(kind_of(&axes(&[]), None), "Other");
-        assert_eq!(kind_of(&axes(&[("base", "MTw")]), None), "Other");
+        assert_eq!(kind_of(&axes(&[]), None, None), "Other");
+        assert_eq!(kind_of(&axes(&[("base", "MTw")]), None, None), "Other");
         // every kind a scan can be is one the visit lists
         for a in [
             axes(&[("base", "PDw")]),
             axes(&[("base", "T2w")]),
             axes(&[]),
         ] {
-            assert!(KINDS.contains(&kind_of(&a, None)));
+            assert!(KINDS.contains(&kind_of(&a, None, None)));
         }
     }
 
@@ -1630,7 +1663,7 @@ mod tests {
         // QALAS acquisition RawRecon and a working scan; it is in SyMRI's
         // folder (record 55 C4), and a visit counts it with SyMRI, not as
         // Other
-        let kind = |a: &Axes| kind_of(a, own_folder(Some(mri()), a));
+        let kind = |a: &Axes| kind_of(a, own_folder(Some(mri()), a), None);
         for technique in ["MDME", "QALAS"] {
             let acquisition = axes(&[
                 ("provenance", "RawRecon"),
@@ -1671,7 +1704,45 @@ mod tests {
         // with no pack served nothing knows SyMRI's folder by its technique
         let mdme = axes(&[("provenance", "RawRecon"), ("technique", "MDME")]);
         assert_eq!(own_folder(None, &mdme), None);
-        assert_eq!(kind_of(&mdme, None), "Other");
+        assert_eq!(kind_of(&mdme, None, None), "Other");
+    }
+
+    #[test]
+    fn an_swi_s_own_image_with_no_weighting_counts_as_swi_as_its_box_holds_it() {
+        // 2026-10-14: the SWI route calls an SWI's phase RawRecon and gives
+        // it no base, so a visit counted it as Other while the SWI box held
+        // it; by the acquisition family its route recognised it is the SWI's
+        let phase = axes(&[
+            ("provenance", "RawRecon"),
+            ("technique", "GRE-EPI"),
+            ("directory_type", "anat"),
+        ]);
+        assert_eq!(kind_of(&phase, None, Some("swi")), "SWI");
+        // any of the SWI's images with no weighting, a map it made with none
+        let r2star = axes(&[("provenance", "SWIRecon"), ("construct", "R2starmap")]);
+        assert_eq!(kind_of(&r2star, None, Some("swi")), "SWI");
+        // its magnitude keeps its weighting, its minIP and processed image
+        // are SWI as before
+        let magnitude = axes(&[("provenance", "RawRecon"), ("base", "T2*w")]);
+        assert_eq!(kind_of(&magnitude, None, Some("swi")), "T2*w");
+        let minip = axes(&[
+            ("provenance", "ProjectionDerived"),
+            ("base", "SWI"),
+            ("disposition", "reformat"),
+        ]);
+        assert_eq!(kind_of(&minip, None, Some("swi")), "SWI");
+        // what no route recognised, or another route's image with no
+        // weighting, is Other as before
+        assert_eq!(kind_of(&phase, None, None), "Other");
+        assert_eq!(kind_of(&phase, None, Some("stage")), "Other");
+        // the family the visits door reads it by, from the route its
+        // evidence cites, or the provenance a route enters on
+        let routes = vec!["swi".to_string(), "body_part".to_string()];
+        assert_eq!(acquisition_family(&routes, &phase), Some("swi"));
+        assert_eq!(
+            kind_of(&phase, None, acquisition_family(&routes, &phase)),
+            "SWI"
+        );
     }
 
     #[test]

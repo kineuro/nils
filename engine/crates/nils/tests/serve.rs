@@ -8552,7 +8552,8 @@ fn families_sweep(dsn: Option<&str>) {
     );
     assert_eq!(status, 200, "{visit}");
     // and the subject's visits, whose kinds line counts SyMRI's acquisition
-    // with SyMRI, as its folder holds it, never as Other (2026-10-14)
+    // with SyMRI, as its folder holds it, and an SWI's phase with the SWI, as
+    // its box holds it, never as Other (2026-10-14)
     let subject = dataset["scans"][0]["subject"]["id"]
         .as_i64()
         .unwrap_or_else(|| panic!("a subject: {dataset}"));
@@ -8578,10 +8579,14 @@ fn families_sweep(dsn: Option<&str>) {
         .collect();
     assert_eq!(kinds.get("SyMRI"), Some(&2), "{visits}");
     assert_eq!(one["symri"], 2, "{visits}");
-    // every scan once: the acquisition is no Other (the SWI's phase, which
-    // has no weighting, is the one Other here)
+    // and an SWI's phase, which has no weighting, with the SWI, as its box
+    // holds it: the SWI's phase, processed image and minIP; its magnitude
+    // is told by its T2*w
+    assert_eq!(kinds.get("SWI"), Some(&3), "{visits}");
+    assert_eq!(kinds.get("T2*w"), Some(&1), "{visits}");
+    // every scan once, and none of them Other
     assert_eq!(kinds.values().sum::<i64>(), 7, "{visits}");
-    assert_eq!(kinds.get("Other"), Some(&1), "{visits}");
+    assert_eq!(kinds.get("Other"), None, "{visits}");
 
     for doc in [&dataset, &browse, &visit] {
         let scans = by_series(doc);
