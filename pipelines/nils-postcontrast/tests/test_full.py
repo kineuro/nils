@@ -350,19 +350,25 @@ def test_a_tool_the_kernel_kills_does_not_end_the_run(standin_env, monkeypatch):
         assert "V" not in (T[s]["arms"] or "")
 
 
-def test_only_a_stack_its_tools_left_with_no_image_arm_abstains():
+def test_a_stack_with_no_image_arm_abstains_and_says_whether_the_run_or_the_data_failed():
     """Record 55 E3: model r1 answers only where it is certified. A stack
-    left with no image arm because its volume is unusable or it has no
-    segmentation is "not sure", where r1 would answer from its header
-    evidence alone; a stack that keeps an arm, or has none for its domain
-    with its tools done, is r1's as before."""
-    assert full.no_arm_reason("", convert_failed=True, segmented=False) == full.NO_VOLUME == "no-usable-volume"
-    assert full.no_arm_reason("", convert_failed=False, segmented=False) == full.NO_SEGMENTATION == "no-segmentation"
-    # any other way to no arm (a failed feature step, too few voxels): not sure as well
-    assert full.no_arm_reason("", convert_failed=False, segmented=True) == full.NO_ARM == "no-image-arm"
-    assert full.no_arm_reason("U", convert_failed=False, segmented=False) is None
-    assert full.no_arm_reason("TUV", convert_failed=True, segmented=False) is None
-
+    left with no image arm, for any reason, is "not sure", where r1 would
+    answer from its header evidence alone; the reason tells the run's own
+    failures (a dead worker, a step that raised) from what the data lacks.
+    A stack that keeps an arm is r1's as before."""
+    r = full.no_arm_reason
+    for why in ("dcm2niix", "4D", "fewer than 3 slices"):
+        assert r("", why, segmented=False) == full.NO_VOLUME == "no-usable-volume"
+    assert r("", None, segmented=False) == full.NO_SEGMENTATION == "no-segmentation"
+    # any other way to no arm (a failed feature step, too few voxels)
+    assert r("", None, segmented=True) == full.NO_ARM == "no-image-arm"
+    # a crash is the run's, never the data's
+    assert r("", "worker-died", segmented=False) == full.WORKER_DIED == "worker-died"
+    assert r("", None, segmented=True, died=True) == "worker-died"
+    assert r("", None, segmented=False, died=True) == "worker-died"
+    assert r("", "convert: MemoryError", segmented=False) == full.STEP_FAILED == "step-failed"
+    assert r("U", None, segmented=False) is None
+    assert r("TUV", "dcm2niix", segmented=False, died=True) is None
 
 def test_a_stack_with_no_image_arm_is_not_sure_and_says_why(standin_env, monkeypatch):
     monkeypatch.setenv("STANDIN_FLAT", "2")  # stack 2 converts to two slices: no usable volume

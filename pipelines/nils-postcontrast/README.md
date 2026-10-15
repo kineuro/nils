@@ -35,7 +35,8 @@ model r1 itself on the stacks the cascade defers: dcm2niix, SynthMorph,
 SynthSeg and SynthStrip, the regions', structures' and tail features, the
 three frozen arms (model input `arms`, with their atlases) and the fusion. A
 stack left with no image arm, for any reason, is "not sure"
-(`no-usable-volume`, `no-segmentation`, `no-image-arm`), where
+(`no-usable-volume`, `no-segmentation`, `no-image-arm`, or `worker-died` and
+`step-failed` where the run itself failed), where
 model r1 would answer from its header evidence alone. On a card it holds
 at most the memory the engine leases it (`gpu-memory-gb`, 60 GB: one full
 wave of two SynthSeg processes beside SynthMorph and SynthStrip); a smaller

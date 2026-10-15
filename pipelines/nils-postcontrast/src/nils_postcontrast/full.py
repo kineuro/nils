@@ -19,7 +19,9 @@ no image arm at all, for any reason, is "not sure": no usable volume (no
 conversion, fewer than 3 slices, 4D, ``no-usable-volume``), no
 segmentation after the card, its retry and the CPU (``no-segmentation``),
 or no arm its features could feed (a failed feature step, too few voxels,
-``no-image-arm``, 2026-10-15). Model r1 would answer it from its header
+``no-image-arm``), and where the run itself failed on it, a worker that
+died (``worker-died``) or a step that raised (``step-failed``), 2026-10-15.
+Model r1 would answer it from its header
 evidence alone, which no test has compared with a reference, and the model
 answers only where it is certified (record 55 E3). The change is class III
 by construction.
@@ -66,18 +68,26 @@ from .results import FAILED, SKIPPED, Run, Unit
 logger = logging.getLogger("nils_postcontrast.full")
 VALUE = {"given": GIVEN, "not given": NOT_GIVEN}
 NO_VOLUME, NO_SEGMENTATION, NO_ARM = "no-usable-volume", "no-segmentation", "no-image-arm"
+WORKER_DIED, STEP_FAILED = "worker-died", "step-failed"
+# what the conversion says of the data itself: no usable volume
+DATA_FAILS = ("dcm2niix", "4D", "fewer than 3 slices")
 
 
-def no_arm_reason(arms: str, convert_failed: bool, segmented: bool) -> str | None:
+def no_arm_reason(arms: str, convert_fail: str | None, segmented: bool, died: bool = False) -> str | None:
     """Why a candidate is "not sure" though model r1 could answer it from
     its header evidence alone: no image arm at all, for any reason (record
-    55 E3, 2026-10-15): no usable volume, no segmentation, or else no arm
-    its features could feed (a failed feature step, too few voxels); none
-    where it keeps an arm."""
+    55 E3). The run's own failures are told from the data's: a worker that
+    died on the stack (its memory, a signal) is ``worker-died`` and a step
+    that raised is ``step-failed``; only what the data itself lacks is
+    ``no-usable-volume`` (no conversion, fewer than 3 slices, 4D) or
+    ``no-segmentation``; else ``no-image-arm`` (no arm its features could
+    feed). None where it keeps an arm."""
     if arms:
         return None
-    if convert_failed:
-        return NO_VOLUME
+    if died or convert_fail == WORKER_DIED:
+        return WORKER_DIED
+    if convert_fail:
+        return NO_VOLUME if convert_fail in DATA_FAILS else STEP_FAILED
     if not segmented:
         return NO_SEGMENTATION
     return NO_ARM
@@ -385,7 +395,7 @@ def features_of(todo: list, work: Path, atlas: dict, hpn: dict, vxn: dict, env: 
                 lane_h.submit(sid, _cpu, sid, sd[sid], atlas, tools.missing(sd[sid]))
         for sid in dead:
             converting -= 1
-            rec[sid]["fail"] = "worker-died"
+            rec[sid]["fail"] = WORKER_DIED
             lane_c.submit(sid, _finish, sid, sd[sid], hpn, vxn)
         if on_card and buf and (len(buf) >= opts["wave"] or converting == 0):
             while buf:
@@ -566,7 +576,8 @@ def cmd_full(a) -> int:
         pi = float(p[i])
         a_ = str(ans[i])
         segmented = os.path.exists(tools.paths(str(work / "stacks" / str(sid)))["ss"])
-        lost = no_arm_reason(armset, bool(r.get("fail")), segmented)
+        died = bool(r.get("tools_died") or r.get("features_died"))
+        lost = no_arm_reason(armset, r.get("fail") or None, segmented, died)
         if lost:
             # record 55 E3: no image arm, so not where model r1 is certified
             tables[sid] = _table(sid, P, stage="full", reason=lost, arms=armset, failed_steps=failed or None, seconds=r["stage"])

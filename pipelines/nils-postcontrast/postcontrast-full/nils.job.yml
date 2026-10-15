@@ -131,7 +131,7 @@ x-nils:
         - {name: confidence, description: "The answer's probability, max(p, 1 - p)"}
         - {name: answers, type: integer, description: 1 when the stack is answered, else 0}
         - {name: stage, type: text, description: "full when the full pipeline scored the stack; null otherwise"}
-        - {name: reason, type: text, description: "Why the stack has no answer: sealed, not-mr, not-t1-brain, no-calibration, no-files, not-sure, no-usable-volume, no-segmentation or no-image-arm (no image arm, so no certified answer); null when answered"}
+        - {name: reason, type: text, description: "Why the stack has no answer: sealed, not-mr, not-t1-brain, no-calibration, no-files, not-sure, no-usable-volume, no-segmentation, no-image-arm, worker-died or step-failed (no image arm, so no certified answer; the last two are the run's own failures, not the data's); null when answered"}
         - {name: arms, type: text, description: "The image arms the stack had (T, U, V); a failed tool leaves the arms it could not feed out, as model r1"}
         - {name: failed_steps, type: text, description: "The steps that failed for the stack: convert, tools, base, tail, features"}
         - {name: cascade_digest, type: text, description: The cascade}
