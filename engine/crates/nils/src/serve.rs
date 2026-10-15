@@ -1082,6 +1082,11 @@ pub fn serve(home: &Home, args: ServeArgs) -> Result<(), Exit> {
     // where an installer leaves them; without any, the engine still serves
     // and the doors that need a pack say so.
     let pack_dir = crate::pack_dir(home, args.pack_dir.clone()).ok();
+    // the Data page's speed (2026-10-15): every pack is loaded, its corpus
+    // run, before the doors open, so that no request pays for it
+    if let Some(d) = &pack_dir {
+        warm_packs(d, &args.ask_pack);
+    }
     let server =
         listen(&args.bind).map_err(|e| fail(format!("cannot listen on {}: {e}", args.bind)))?;
     let bound = server
@@ -1619,6 +1624,30 @@ impl Watchdog {
             let _ = n.send("STOPPING=1");
         }
     }
+}
+
+/// Load every pack in the folder, each on a thread of its own, and the
+/// served one as the reader keeps it: a pack's load runs its whole corpus,
+/// a second or more, which the first request after a start paid before
+/// (the Data page's speed, 2026-10-15). A pack that does not load is said
+/// by the door that needs it, as before.
+fn warm_packs(dir: &std::path::Path, served: &str) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let packs: Vec<std::path::PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.join("pack.yml").is_file())
+        .collect();
+    std::thread::scope(|s| {
+        for p in &packs {
+            s.spawn(move || {
+                let _ = nils_pack::load(p, None);
+            });
+        }
+    });
+    let _ = crate::reader::served_pack(Some(dir), served);
 }
 
 /// How long a handler's registry connection may sit idle before the next
