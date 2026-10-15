@@ -1783,7 +1783,8 @@ fn the_knob_engine_rehearses_proposes_adopts_and_probes() {
     assert_eq!(status, 202, "{adopted}");
     let adopt_job = adopted["job"].as_i64().unwrap();
     // record 56 §5.6: kept as the scoped change it is
-    let kept = format!("proposal:{}", adopted["proposal"].as_i64().unwrap());
+    let kept_id = adopted["proposal"].as_i64().unwrap();
+    let kept = format!("proposal:{kept_id}");
     let (status, doc) = server.request("POST", &format!("/api/overlays/{id}/adopt"), None, ops);
     assert_eq!(status, 409, "{doc}");
 
@@ -1912,7 +1913,14 @@ fn the_knob_engine_rehearses_proposes_adopts_and_probes() {
     server.finish();
     assert_eq!(status, 200, "{signals}");
     let unresolved = &signals["unresolved_texts"];
-    assert_eq!(unresolved["overlay"], "site@1.0.0", "{signals}");
+    // record 56 §6.5: read with the adopted overlay's scoped change on the
+    // stacks of its origin, as the registry was sorted
+    assert!(unresolved["overlay"].is_null(), "{signals}");
+    assert_eq!(
+        unresolved["scoped"],
+        serde_json::json!([kept_id]),
+        "{signals}"
+    );
     assert_eq!(
         unresolved["axes"]["post_contrast"]["stacks"], 1,
         "{signals}"
@@ -1920,7 +1928,14 @@ fn the_knob_engine_rehearses_proposes_adopts_and_probes() {
     // and the stack the site's word resolved is the resolved sample's, under
     // the value the word reached
     let resolved = &signals["resolved_texts"];
-    assert_eq!(resolved["overlay"], "site@1.0.0", "{signals}");
+    // record 56 §6.5: read with the adopted overlay's scoped change on the
+    // stacks of its origin, as the registry was sorted
+    assert!(resolved["overlay"].is_null(), "{signals}");
+    assert_eq!(
+        resolved["scoped"],
+        serde_json::json!([kept_id]),
+        "{signals}"
+    );
     assert_eq!(
         resolved["axes"]["post_contrast"]["values"]["1"]["stacks"], 1,
         "{signals}"
