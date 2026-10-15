@@ -625,6 +625,7 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
     let Placements {
         by_stack: named,
         mut shared,
+        facts,
     } = places(registry.store(), &by_study, settings.pack, settings.naming)?;
     let named_by = std::mem::take(&mut shared.decided);
     // §9.4 with record 37 S6: where in the body, for the sidecar, by stack.
@@ -634,12 +635,7 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
         .iter()
         .filter_map(|(stack, p)| p.body_part.clone().map(|b| (*stack, b)))
         .collect();
-    // Record 55 C4: the sidecar's `NILS` object and the descriptive name, by
-    // stack, whatever the name spells.
-    let cards: HashMap<i64, serde_json::Value> = named
-        .iter()
-        .map(|(stack, p)| (*stack, p.card.clone()))
-        .collect();
+    // Record 55 C4: the descriptive name, by stack, whatever the name spells
     let nils_names: HashMap<i64, String> = named
         .iter()
         .map(|(stack, p)| (*stack, p.descriptive.name.clone()))
@@ -1059,6 +1055,25 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
             });
         }
     }
+    // Record 55 C4: the sidecar's `NILS` object of each stack this version
+    // writes, built for those alone (#450): the names are settled over the
+    // whole registry, and the cards are not, nor are the tiers they read.
+    let cards: HashMap<i64, serde_json::Value> = match settings.layout {
+        Layout::Bids => cards_of(
+            registry.store(),
+            &facts,
+            &named,
+            jobs.iter()
+                .filter(|j| {
+                    !matches!(
+                        j.change,
+                        crate::version::Change::Unchanged | crate::version::Change::Moved
+                    )
+                })
+                .map(|j| j.stack),
+        )?,
+        Layout::Descriptive => HashMap::new(),
+    };
     // What the state holds and this version does not.
     let gone = gone_stacks(registry.store(), dataset, report.release_id)?;
 
@@ -4389,7 +4404,6 @@ fn places(
     naming: crate::name::Naming,
 ) -> Result<Placements, Error> {
     let axes = axis_values(store)?;
-    let tiers = axis_tiers(store)?;
     // record 55, ruling 23: each stack's acquisition family, as the
     // classification stands, which its names and its sidecar carry
     let families_now = crate::family::families_of(store, Some(pack), None, &|s| {
@@ -4870,13 +4884,6 @@ fn places(
             out.insert(
                 n.stack,
                 Placed {
-                    card: crate::bids::card::card(
-                        &n.name,
-                        stated.get(&n.stack),
-                        tiers.get(&n.stack),
-                        acquisitions.get(&n.stack),
-                        families.get(&n.stack).copied(),
-                    ),
                     descriptive: n.clone(),
                     bids: bids
                         .remove(&n.stack)
@@ -4895,7 +4902,63 @@ fn places(
     Ok(Placements {
         by_stack: out,
         shared,
+        facts: CardFacts {
+            stated,
+            acquisitions,
+            families,
+        },
     })
+}
+
+/// What [`places`] read of every stack that a card is built from: the axes
+/// as they are said and the acquisition as the fingerprint measured it.
+struct CardFacts {
+    stated: HashMap<i64, BTreeMap<String, Vec<String>>>,
+    acquisitions: HashMap<i64, crate::bids::repeat::Acquisition>,
+    /// record 55, ruling 23: each stack's acquisition family, as the
+    /// classification stands
+    families: HashMap<i64, &'static str>,
+}
+
+/// The sidecar's `NILS` object of each of these stacks (record 55 C4), with
+/// the tiers read for them alone, in chunks (#450).
+fn cards_of(
+    store: &mut Store,
+    facts: &CardFacts,
+    named: &HashMap<i64, Placed>,
+    stacks: impl Iterator<Item = i64>,
+) -> Result<HashMap<i64, serde_json::Value>, Error> {
+    let stacks: Vec<i64> = stacks.filter(|s| named.contains_key(s)).collect();
+    let tiers = axis_tiers(store, &stacks)?;
+    CARDS_BUILT.with(|n| n.set(n.get() + stacks.len()));
+    Ok(stacks
+        .iter()
+        .map(|s| {
+            (
+                *s,
+                crate::bids::card::card(
+                    &named[s].descriptive.name,
+                    facts.stated.get(s),
+                    tiers.get(s),
+                    facts.acquisitions.get(s),
+                    facts.families.get(s).copied(),
+                ),
+            )
+        })
+        .collect())
+}
+
+thread_local! {
+    /// How many cards releases on this thread built (#450).
+    static CARDS_BUILT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// How many sidecar cards the releases run on this thread have built: what
+/// a test reads to see that a release builds the cards of the stacks it
+/// writes and no others (#450).
+#[doc(hidden)]
+pub fn cards_built() -> usize {
+    CARDS_BUILT.with(std::cell::Cell::get)
 }
 
 /// What [`places`] keeps of a stack beside its names: whether it is a
@@ -4916,6 +4979,7 @@ type Extra = (
 struct Placements {
     by_stack: HashMap<i64, Placed>,
     shared: Shared,
+    facts: CardFacts,
 }
 
 /// What the collision test of record 37 S2 found, for the report and the
@@ -5145,9 +5209,6 @@ struct Placed {
     /// keeps the fact in the sidecar, as `BodyPart`, and that is where a
     /// reader looks it up (record 37 S6).
     body_part: Option<String>,
-    /// The sidecar's `NILS` object: every axis, the descriptive name and the
-    /// acquisition (record 55 C4).
-    card: serde_json::Value,
 }
 
 /// `EchoNumbers` may carry several values; the first is this stack's.
@@ -5271,21 +5332,31 @@ fn axis_values(store: &mut Store) -> Result<HashMap<i64, BTreeMap<String, String
     Ok(out)
 }
 
-/// How each stack's axes were decided: the tier and the confidence, by axis
-/// (record 55 C4), for the sidecar's `NILS` object. One row per value; the
-/// first row of an axis speaks for it, since every value of one axis is
-/// decided at once.
-fn axis_tiers(store: &mut Store) -> Result<HashMap<i64, crate::bids::card::Tiers>, Error> {
-    let sql = format!(
-        "SELECT stack_id, axis, tier, confidence FROM {} ORDER BY id",
-        store.qualified("classification_axis")
-    );
+/// How these stacks' axes were decided: the tier and the confidence, by
+/// axis (record 55 C4), for the sidecar's `NILS` object. One row per value;
+/// the first row of an axis speaks for it, since every value of one axis is
+/// decided at once. Read for the stacks asked alone, in chunks (#450).
+fn axis_tiers(
+    store: &mut Store,
+    stacks: &[i64],
+) -> Result<HashMap<i64, crate::bids::card::Tiers>, Error> {
     let mut out: HashMap<i64, crate::bids::card::Tiers> = HashMap::new();
-    for r in store.query(&sql, &[])? {
-        out.entry(r.int(0)?)
-            .or_default()
-            .entry(r.text(1)?.to_string())
-            .or_insert((r.text(2)?.to_string(), r.double(3)?));
+    for chunk in stacks.chunks(500) {
+        let list = chunk
+            .iter()
+            .map(i64::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT stack_id, axis, tier, confidence FROM {} WHERE stack_id IN ({list}) ORDER BY id",
+            store.qualified("classification_axis")
+        );
+        for r in store.query(&sql, &[])? {
+            out.entry(r.int(0)?)
+                .or_default()
+                .entry(r.text(1)?.to_string())
+                .or_insert((r.text(2)?.to_string(), r.double(3)?));
+        }
     }
     Ok(out)
 }

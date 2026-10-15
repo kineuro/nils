@@ -1431,6 +1431,94 @@ fn the_full_style_spells_every_slot_and_the_minimal_one_the_type_modifiers_and_t
 /// every axis and differ in what they cover, which is the commonest residual
 /// in the archive. Both pairs build one BIDS name each. Nothing here is read
 /// from a corpus: the shapes are the ones the 2026-09-19 studies described.
+/// #450: a release builds the sidecar card of each stack it writes and of
+/// no other, though it names every stack of the registry; a release of one
+/// stack builds one card, and that card is the one a whole release writes.
+#[test]
+fn a_release_builds_the_cards_of_the_stacks_it_writes_alone() {
+    let Some(converter) = converter() else { return };
+    let source = tree();
+    let home_dir = TempDir::new("bids-home");
+    let (_home, mut reg) = registry(&home_dir, &source);
+    let policy = Policy::default();
+    let scheme = SessionScheme::default();
+    let whole = TempDir::new("bids-whole");
+    let before = run::cards_built();
+    let report = run::run(
+        &mut reg,
+        &settings(
+            whole.path(),
+            &policy,
+            &scheme,
+            Options::default(),
+            Some(&converter),
+        ),
+    )
+    .unwrap();
+    let all = run::cards_built() - before;
+    assert!(all >= 2, "{report:?}");
+    // the same stacks again write nothing, and build no card
+    let before = run::cards_built();
+    run::run(
+        &mut reg,
+        &settings(
+            whole.path(),
+            &policy,
+            &scheme,
+            Options::default(),
+            Some(&converter),
+        ),
+    )
+    .unwrap();
+    assert_eq!(run::cards_built() - before, 0);
+    let cards = |root: &Path| -> std::collections::BTreeMap<String, serde_json::Value> {
+        files_under(root)
+            .into_iter()
+            .filter(|f| f.starts_with("sub-") && f.ends_with(".json"))
+            .map(|f| {
+                let doc: serde_json::Value =
+                    serde_json::from_str(&std::fs::read_to_string(root.join(&f)).unwrap()).unwrap();
+                (f, doc["NILS"].clone())
+            })
+            .collect()
+    };
+    let every = cards(whole.path());
+    assert!(!every.is_empty() && every.len() <= all, "{every:?}");
+    // each stack released alone builds its own card alone, and writes the
+    // card the whole release wrote
+    let stacks: Vec<i64> = reg
+        .store()
+        .query("SELECT id FROM stack ORDER BY id", &[])
+        .unwrap()
+        .iter()
+        .map(|r| r.int(0).unwrap())
+        .collect();
+    let mut seen = 0;
+    for stack in stacks {
+        let one = TempDir::new("bids-one");
+        let mut s = settings(
+            one.path(),
+            &policy,
+            &scheme,
+            Options::default(),
+            Some(&converter),
+        );
+        s.name = "one stack";
+        s.selection.stacks = vec![stack];
+        let before = run::cards_built();
+        let report = run::run(&mut reg, &s).unwrap();
+        assert!(
+            run::cards_built() - before <= 1,
+            "stack {stack}: at most its own card: {report:?}"
+        );
+        for (file, card) in cards(one.path()) {
+            assert_eq!(every.get(&file), Some(&card), "{file}");
+            seen += 1;
+        }
+    }
+    assert_eq!(seen, every.len(), "every card, one stack at a time");
+}
+
 fn colliding() -> TempDir {
     collide(&[
         ("1", "t1_mprage_sag", "T1 MPRAGE", "3D", 4),
