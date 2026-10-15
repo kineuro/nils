@@ -231,8 +231,9 @@ values:
     # image typed LOCALIZER or SCOUT, or a Siemens position display, on a
     # gradient echo; System 1's copied errors, 2026-10-13: a Philips survey
     # named `cs1.8_T2_mDixon_TSE_cor` read Dixon), as DWI-EPI since pack
-    # 0.22.0. Where the header itself states a Dixon part, it stands.
-    requires: {any: [has_dixon, {not: gre_scout_readout}]}
+    # 0.22.0. Where the header itself states a Dixon part, or the in-phase
+    # and opposed-phase pair the combination below reads, it stands.
+    requires: {any: [has_dixon, {all: [has_in_phase, has_out_phase]}, {not: gre_scout_readout}]}
     keywords:
       - dixon
       - ideal
