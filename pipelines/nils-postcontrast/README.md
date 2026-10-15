@@ -41,10 +41,11 @@ at most the memory the engine leases it (`gpu-memory-gb`, 60 GB: one full
 wave of two SynthSeg processes beside SynthMorph and SynthStrip); a smaller
 budget runs fewer SynthSeg processes, then the CPU, and the Frangi filter
 goes on the card only where every worker's share fits beside a full wave.
-Its image is `Dockerfile.full`, FreeSurfer 8.2.0's image with the card's
-runtimes beside it. FreeSurfer's image carries third-party components whose
-terms are not ours to pass on, so each site builds it and repins the
-descriptor; it is never published. Tests: `pip install -e .[full,test] &&
+Its image is `Dockerfile.full`: of FreeSurfer 8.2.0 only the parts the
+Synth tools run on, copied unchanged from FreeSurfer's pinned image, with the
+card's runtimes beside them, and its notices (`NOTICE.full`) and licences in
+`/usr/local/share/licenses/nils-postcontrast-full`. No MATLAB Runtime, FSL or
+CorTechs tools and no licence key are in it. Tests: `pip install -e .[full,test] &&
 pytest tests/test_full.py`.
 
 AGPL-3.0-only.

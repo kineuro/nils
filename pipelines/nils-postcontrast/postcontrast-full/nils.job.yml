@@ -34,13 +34,15 @@
 # goes on the card only where every worker's share (2,200 MiB) fits beside
 # a full wave; at 60 GB it runs on the CPU, as model r1 itself ran it.
 #
-# The image is FreeSurfer 8.2.0's with the card's runtimes beside it
-# (Dockerfile.full). It carries third-party components FreeSurfer
-# distributes whose terms are not ours to pass on, so it is built by each
-# site and never published: the digest below is the image built from this
-# folder, and a site that builds its own pins its own. The weights and the
-# atlases are the run's model inputs, never part of the image; it runs
-# offline.
+# The image (Dockerfile.full) holds of FreeSurfer 8.2.0 only the parts the
+# Synth tools run on, copied unchanged from FreeSurfer's pinned image (its
+# Python, the three tools, their networks, the MNI 2009c template and the
+# colour table), with the card's runtimes beside them: no MATLAB Runtime,
+# no FSL or CorTechs tools, no licence key, no ptxas or Triton. Its
+# NOTICE and the licences it ships say whose terms each part is under. The
+# weights and the atlases are the run's model inputs, never part of the
+# image; it runs offline. The digest below is a development pin until the
+# image is pushed.
 name: postcontrast-full
 schema-version: "0.5"
 tool-version: "0.2.0"

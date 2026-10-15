@@ -50,9 +50,9 @@ jobs:
     # container no card), for linux/amd64, pushed by the tag. bodypart-embed's
     # encoder pins go to the body-part build, which fails where the weights it
     # bakes are other ones. The post-contrast fallback's image (Dockerfile.full)
-    # is not here: it is FreeSurfer's image, which carries the MATLAB Runtime,
-    # FSL's binaries and the CorTechs tools, whose terms do not let us
-    # redistribute them, and each site builds it (record 55, ruling 20).
+    # is not here: it holds only FreeSurfer's Synth parts, but its build pulls
+    # FreeSurfer's whole image (41 GB unpacked) and writes 34 GB, more than a
+    # hosted runner's disk; it needs a larger runner.
     name: model image ${{ matrix.image }}
     runs-on: ubuntu-latest
     strategy:
