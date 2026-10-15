@@ -236,6 +236,11 @@ values:
       exclusive: is_asl_m0_stated
   Water:
     terms: ['Dixon water', 'water only']
+    # MRI pack 1.2.1: never from the words of a gradient-echo scout, whose
+    # name is the series it plans (flags.yml, `gre_scout_readout`); a part
+    # the header states (ImageType, the per-frame token, ScanOptions
+    # DIXW/DIXF, GE's `WATER:` prefix, a Dixon token) still decides.
+    requires: {any: [has_water, has_dixon, {not: gre_scout_readout}]}
     keywords:
       - water only
       - water image
@@ -244,6 +249,11 @@ values:
       exclusive: has_water
   Fat:
     terms: ['Dixon fat', 'fat only']
+    # MRI pack 1.2.1: never from the words of a gradient-echo scout, whose
+    # name is the series it plans (flags.yml, `gre_scout_readout`); a part
+    # the header states (ImageType, the per-frame token, ScanOptions
+    # DIXW/DIXF, GE's `FAT:` prefix, a Dixon token) still decides.
+    requires: {any: [has_fat, has_dixon, {not: gre_scout_readout}]}
     keywords:
       - fat only
       - fat image
