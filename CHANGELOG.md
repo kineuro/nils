@@ -4,6 +4,17 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [pack-mri-v1.2.3] - 2026-10-15
+
+The MRI pack 1.2.3, a rules release on its own: an install on engine 1.0.0-alpha.82 or later takes it with `nils update --part rules`, or with Update on the MRI rules row of the desk's Settings › Parts, with no engine release and nothing started again. It works with engines `>=1.0.0-alpha.82, <2.0.0` and pack contract 10, since it relies on the engine that reads a value's `stored:` spelling and the acquisition family. `nils update --pin mri@1.2.2` goes back to the version before.
+
+### Changed
+
+- The pack shows and names every technique by a vendor-neutral word from the MR literature, not by one maker's product name (record 55, ruling 23): `SPGRE` for FLASH, `FSPGRE` for TurboFLASH, `VIGRE` for VIBE, `combMEGRE` for MEDIC, `SSFPFID` for FISP, `SSFPecho` for PSIF, `bSSFP` for FIESTA, `pcbSSFP` for CISS, `SSTSE` for HASTE, `IRTSE` for TIRM, `DETSE` for RESTORE, `rsEPI` for RESOLVE and `MSI` for MAVRIC. Rows keep the old word (`stored:`), so no stack moves and a rule, pick or campaign that wrote it still names the value; descriptive names change (`Ax_T2w_2D_FLAIR_IRTSE_ND`), BIDS technique tokens do not. Kept: MPRAGE, MP2RAGE, MEMPRAGE, DESS, GRASE, MDME, QALAS and the words that are generic already, and SPACE by Nima's ruling of 2026-10-15 (very widespread and well known). The table and its sources are in the pack's PROVENANCE.
+- The BIDS names of a family's images (SWI, SyMRI, STAGE, a mix sequence) spell the acquisition family before the technique, in both styles.
+- An echo Siemens' STAGE acquired (written ORIGINAL) enters the STAGE route, which makes it RawRecon again as before and leaves its other axes alone, so its evidence names the acquisition and its names say STAGE.
+- Replayed before release over a production archive of 546,440 MR stacks against 1.2.2: 0 stacks move on any axis; with the STAGE change, still no value moves and 79 acquired STAGE echoes gain an evidence tier on provenance.
+
 ## [1.0.0-alpha.82] - 2026-10-15
 
 Wave 7a's remaining work after the beta: the rules engine, Review in bulk, plain admin access, body part and post-contrast as layers of the Main scans map, one lookup from an ID to its subject code, and the acquisition family in names. Goes with desk 1.0.0-alpha.65. The assistant pin moves to 1.0.0-alpha.29; the Kvasir pin is unchanged.
@@ -101,17 +112,6 @@ Wave 7a's remaining work after the beta: the rules engine, Review in bulk, plain
 - Review round 1's questions keep blind answers blind (spec 11.4): a scan's tile is decided once from every question waiting on it, and every decision its answer writes carries that one mark, counted once a scan. An answer is blind only where the tile hid NILS's answers and every question on the scan was read through a door that hid them, or where it is the provisional answer to each. A pair or a value in doubt names the rules' answer in its words, so it is never read blind. A blind-first question's keys are the axis's first values, never a staged, System 1's or the rules' answer. Read for one scan (`stack`, the dataset viewer, whose names say NILS's answer), the questions list gives the scan's `mode` and notes its questions shown, so an answer there is never a blind label.
 - The rules' answer kept with a decision (`rules_in_view`) is the one the question showed: the stored classification's value, as the last sort wrote it with its overlay and adopted scoped changes, where it was the served pack's own answer before. A sort compares a multi-valued axis's values in any order.
 - An answer's re-sort uses the pack, the pack version and the overlay its scans were last sorted with; scans sorted by another version, or under an overlay the registry does not keep, are left to the next sort and `resort.state` is `refused`, with why. On Postgres the count of the questions a re-sort asked is a whole number again, and a count that fails is said in `resort.why`.
-
-## [pack-mri-v1.2.3] - 2026-10-15
-
-The MRI pack 1.2.3, a rules release on its own: an install on engine 1.0.0-alpha.82 or later takes it with `nils update --part rules`, or with Update on the MRI rules row of the desk's Settings › Parts, with no engine release and nothing started again. It works with engines `>=1.0.0-alpha.82, <2.0.0` and pack contract 10, since it relies on the engine that reads a value's `stored:` spelling and the acquisition family. `nils update --pin mri@1.2.2` goes back to the version before.
-
-### Changed
-
-- The pack shows and names every technique by a vendor-neutral word from the MR literature, not by one maker's product name (record 55, ruling 23): `SPGRE` for FLASH, `FSPGRE` for TurboFLASH, `VIGRE` for VIBE, `combMEGRE` for MEDIC, `SSFPFID` for FISP, `SSFPecho` for PSIF, `bSSFP` for FIESTA, `pcbSSFP` for CISS, `SSTSE` for HASTE, `IRTSE` for TIRM, `DETSE` for RESTORE, `rsEPI` for RESOLVE and `MSI` for MAVRIC. Rows keep the old word (`stored:`), so no stack moves and a rule, pick or campaign that wrote it still names the value; descriptive names change (`Ax_T2w_2D_FLAIR_IRTSE_ND`), BIDS technique tokens do not. Kept: MPRAGE, MP2RAGE, MEMPRAGE, DESS, GRASE, MDME, QALAS and the words that are generic already, and SPACE by Nima's ruling of 2026-10-15 (very widespread and well known). The table and its sources are in the pack's PROVENANCE.
-- The BIDS names of a family's images (SWI, SyMRI, STAGE, a mix sequence) spell the acquisition family before the technique, in both styles.
-- An echo Siemens' STAGE acquired (written ORIGINAL) enters the STAGE route, which makes it RawRecon again as before and leaves its other axes alone, so its evidence names the acquisition and its names say STAGE.
-- Replayed before release over a production archive of 546,440 MR stacks against 1.2.2: 0 stacks move on any axis; with the STAGE change, still no value moves and 79 acquired STAGE echoes gain an evidence tier on provenance.
 
 ## [pack-mri-v1.2.2] - 2026-10-15
 
