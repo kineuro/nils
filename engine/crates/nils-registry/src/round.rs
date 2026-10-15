@@ -25,15 +25,16 @@
 //!   where the two answers differ and `<axis>:unsure` where they agree
 //!   below a threshold.
 //!
-//! The gate on flagged datasets waits for System 1 to be confirmed: until
-//! a recorded certificate names the chosen model (D2), on a sealed sample or
-//! citing its graded run (record 55 ruling 22 b), it raises nothing, and a
-//! gate asked for says so. An axis a person decided is never asked again,
+//! The gate on flagged datasets runs once System 1 stands: its model is
+//! admitted and chosen for the task (record 55, ruling 27). Its admission,
+//! and the rules' replay, stand for it in production; a certificate, where
+//! one is recorded, is shown and no longer required. With no model chosen
+//! it raises nothing, and a gate asked for says so. An axis a person decided is never asked again,
 //! and a stack of a sample sealed now never becomes a review item.
 //!
 //! **System 1 never fills an answer silently** (record 55, ruling 20):
 //! where the rules name nothing on an axis of a flagged dataset and System
-//! 1 is confident, its answer is staged on the gate's question for a person
+//! 1 is confident at its threshold, its answer is staged on the gate's question for a person
 //! to confirm ([`stage`]). The pack says what naming nothing is and how
 //! System 1's word is stored ([`Words`]).
 
@@ -64,7 +65,9 @@ pub struct Round {
     pub model_id: Option<i64>,
     /// `{axis: {lambda1, lambda2}}`, from the model's card.
     pub gate: Value,
-    /// Whether a recorded certificate named the model when the round began.
+    /// Whether the model stood when the round began: admitted and chosen
+    /// for its task (record 55, ruling 27; before it, whether a recorded
+    /// certificate named it).
     pub confirmed: bool,
     pub started_at: String,
     pub started_by: String,
@@ -138,9 +141,9 @@ pub fn get(store: &mut Store, id: i64) -> Result<Option<Round>, StoreError> {
 }
 
 /// The round of this rules version and the System 1 model chosen now,
-/// begun here when it is new. A round of a model whose certificate was
-/// recorded later is marked confirmed then, since its thresholds are the
-/// same pair's.
+/// begun here when it is new. A round begun before its model stood (or,
+/// before ruling 27, before a certificate named it) is marked confirmed
+/// now, since its thresholds are the same pair's.
 pub fn current(
     store: &mut Store,
     pack: &str,
@@ -161,7 +164,7 @@ pub fn current(
         d.param(2, Type::Text),
     );
     let confirmed = match model_id {
-        Some(id) => opinion::confirmed(store, id)?.is_some(),
+        Some(id) => opinion::confirmed(store, id)?,
         None => false,
     };
     if let Some(r) = store.query_opt(&sql, &[Param::from(pack), Param::from(pack_version)])? {
@@ -493,7 +496,7 @@ pub fn is_gate_kind(item_kind: &str, axis: &str) -> bool {
 /// round's thresholds cover gets its outcome, kept in `gate_outcome`, and a
 /// question where it is not accepted; an earlier question the gate raised
 /// on a stack and axis it now accepts is closed as superseded. Nothing is
-/// gated in a round with no model or none confirmed, and the answer says
+/// gated in a round with no model, or one that does not stand, and the answer says
 /// why. The caller holds no transaction; this writes in one.
 pub fn gate(
     store: &mut Store,
@@ -510,7 +513,7 @@ pub fn gate(
     };
     if !round.confirmed {
         out.waiting = Some(format!(
-            "System 1 (model {model}) is not confirmed: no recorded certificate names it, and the gate on flagged datasets waits for that (record 56, D2)"
+            "System 1 (model {model}) does not stand: it is not admitted and chosen for its task, so the gate on flagged datasets waits (record 55, ruling 27)"
         ));
         return Ok(out);
     }
@@ -930,7 +933,8 @@ fn staged_by_another(store: &mut Store, stack: i64, axis: &str) -> Result<bool, 
 }
 
 /// Stage System 1's answers where the rules name nothing (record 55,
-/// ruling 20), over the questions a gate in a confirmed round raised:
+/// ruling 20), over the questions a gate raised in a round whose model
+/// stands (admitted and chosen, ruling 27):
 /// where the question is a disagreement, the rules' stored value names
 /// nothing ([`Words::names_nothing`]), no person decided it, and System 1
 /// names a value of the axis's vocabulary at its λ1 or above, that value,

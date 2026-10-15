@@ -116,8 +116,15 @@ fn a_certificate_cites_its_graded_run_on_both_backends() {
         for m in [s1.id, other.id] {
             model::admit(&mut reg, m, &passed, WHO).unwrap();
         }
+        // record 55 ruling 27: the model chosen for its task (here by
+        // default, the newest admitted) stands with no certificate
+        assert!(!opinion::confirmed(reg.store(), s1.id).unwrap(), "{name}");
+        assert!(
+            opinion::confirmed(reg.store(), other.id).unwrap(),
+            "{name}: admitted and chosen, it stands without a certificate"
+        );
         assert_eq!(
-            opinion::confirmed(reg.store(), s1.id).unwrap(),
+            opinion::certificate(reg.store(), other.id).unwrap(),
             None,
             "{name}"
         );
@@ -276,13 +283,20 @@ fn a_certificate_cites_its_graded_run_on_both_backends() {
             "{name}"
         );
         assert_eq!(
-            opinion::confirmed(reg.store(), s1.id).unwrap(),
+            opinion::certificate(reg.store(), s1.id).unwrap(),
             Some(cert.id),
             "{name}"
         );
         assert_eq!(
-            opinion::confirmed(reg.store(), other.id).unwrap(),
+            opinion::certificate(reg.store(), other.id).unwrap(),
             None,
+            "{name}"
+        );
+        // the certificate still names the default, so s1 is chosen and
+        // stands, and the other no longer does
+        assert!(opinion::confirmed(reg.store(), s1.id).unwrap(), "{name}");
+        assert!(
+            !opinion::confirmed(reg.store(), other.id).unwrap(),
             "{name}"
         );
         assert_eq!(

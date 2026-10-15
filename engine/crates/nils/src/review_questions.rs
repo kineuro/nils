@@ -1433,9 +1433,12 @@ fn scans(
     }
     let nils = answers_on(store, &shown, &key.axis).map_err(failed)?;
     let (model, s1) = system1_on(store, &shown, &key.axis).map_err(failed)?;
-    let certificate = match &model {
-        Some(m) => opinion::confirmed(store, m.id).map_err(failed)?,
-        None => None,
+    let (confirmed, certificate) = match &model {
+        Some(m) => (
+            opinion::confirmed(store, m.id).map_err(failed)?,
+            opinion::certificate(store, m.id).map_err(failed)?,
+        ),
+        None => (false, None),
     };
     let mut doc = json!({
         "scans": shown.iter().map(|s| known.remove(s).unwrap_or_else(|| json!({"stack": s}))).collect::<Vec<_>>(),
@@ -1504,10 +1507,10 @@ fn scans(
         tile["staged"] = scan.staged.clone().unwrap_or(Value::Null);
         tiles.push(tile);
     }
-    let status = match (&model, certificate) {
+    let status = match (&model, confirmed) {
         (None, _) => "no_model",
-        (Some(_), Some(_)) => "confirmed",
-        (Some(_), None) => "not_confirmed",
+        (Some(_), true) => "confirmed",
+        (Some(_), false) => "not_confirmed",
     };
     Ok(Reply::ok(json!({
         "key": key.text(),
@@ -1523,9 +1526,11 @@ fn scans(
             "model": model.as_ref().map(nils_registry::model::Model::named),
             "why": match status {
                 "no_model" => "no System 1 model is chosen for its task",
-                "not_confirmed" => "System 1 is not yet confirmed: no recorded certificate names it; its answer is a research model's",
-                _ => "System 1 is confirmed by a recorded certificate",
+                "not_confirmed" => "System 1 does not stand: its model is not admitted and chosen for its task; its answer is a research model's",
+                _ if certificate.is_some() => "System 1 stands on its admission and is chosen for its task; a recorded certificate also names it",
+                _ => "System 1 stands on its admission and is chosen for its task (record 55, ruling 27)",
             },
+            "certificate_id": certificate,
         },
         "total": total,
         "page": page,

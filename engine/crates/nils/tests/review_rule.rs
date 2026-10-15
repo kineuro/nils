@@ -463,7 +463,7 @@ fn open_items(server: &Served, kind: &str) -> Vec<Value> {
 }
 
 #[test]
-fn system1_runs_beside_the_rules_the_gate_waits_for_a_certificate_and_the_audit_grades() {
+fn system1_runs_beside_the_rules_the_gate_acts_on_the_chosen_model_and_the_audit_grades() {
     let home = Home {
         dir: TempDir::new("s1-home"),
         pg: None,
@@ -655,7 +655,7 @@ fn system1_runs_beside_the_rules_the_gate_waits_for_a_certificate_and_the_audit_
     // the normal dataset: no gate question, whatever System 1 says
     assert!(open_items(&server, "base:disagree").is_empty());
 
-    // flagged as damaged, the gate waits for a certificate naming the model
+    // flagged as damaged: the gate acts on the chosen, admitted model
     let (status, flag) = server.call(
         "PUT",
         "/api/datasets/ds/headers",
@@ -672,38 +672,15 @@ fn system1_runs_beside_the_rules_the_gate_waits_for_a_certificate_and_the_audit_
     assert_eq!(status, 200, "{flag}");
     assert_eq!(flag["damaged"], true, "{flag}");
     assert_eq!(flag["by"], "person", "{flag}");
-    let (status, gated) = server.call("POST", "/api/review/gate", Some(json!({})), OPS);
-    assert_eq!(status, 200, "{gated}");
-    let waiting = gated["rounds"][0]["gated"]["waiting"]
-        .as_str()
-        .unwrap_or_default();
-    assert!(waiting.contains("not confirmed"), "{gated}");
-    assert!(open_items(&server, "base:disagree").is_empty());
+    // record 55 ruling 27: the model is admitted and chosen, so System 1
+    // stands with no certificate recorded
     let s = server.get("/api/review/settings", OPS);
-    assert_eq!(s["system1"]["confirmed"], false, "{s}");
+    assert_eq!(s["system1"]["confirmed"], true, "{s}");
+    assert_eq!(s["system1"]["certificate_id"], Value::Null, "{s}");
     drop(server);
 
-    // a recorded certificate names it: the gate accepts only agreement above
-    // both thresholds, and asks about the rest
-    {
-        let mut store = home.store();
-        let t = nils_registry::schema::table("certificate");
-        store
-            .insert(
-                &nils_registry::Insert::new(
-                    t,
-                    &["sample", "model_ids", "result", "created_by", "created_at"],
-                ),
-                &[vec![
-                    nils_registry::Param::from("selection:s1-cert@1"),
-                    nils_registry::Param::from(json!([second]).to_string()),
-                    nils_registry::Param::from(json!({"passed": true}).to_string()),
-                    nils_registry::Param::from("anna"),
-                    nils_registry::Param::from("2026-10-14T00:00:00Z"),
-                ]],
-            )
-            .unwrap();
-    }
+    // the gate accepts only agreement above both thresholds, and asks about
+    // the rest
     let server = Served::start(&home, &path, false, &logged);
     // every question is read blind first from here, for the test
     let (status, set) = server.call(

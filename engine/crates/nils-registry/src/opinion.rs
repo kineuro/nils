@@ -13,7 +13,8 @@
 //! (record 56, section 1). An opinion stages nothing and raises no review
 //! item by itself: it is shown beside the questions Review holds, and on a
 //! dataset flagged as having damaged headers it feeds the gate
-//! ([`crate::round`]) once System 1 is confirmed by a recorded certificate.
+//! ([`crate::round`]) once System 1 stands: admitted and chosen for its
+//! task (record 55, ruling 27; a certificate is no longer required).
 //! The proposal path stays the image models' (`proposals`), whose answers
 //! do become staged decisions.
 
@@ -500,12 +501,21 @@ pub fn chosen(store: &mut Store) -> Result<Option<model::Chosen>, StoreError> {
     model::chosen(store, TASK, "site")
 }
 
-/// Whether System 1 is confirmed (record 56 section 3, record 55 D2): a
-/// recorded certificate names the model, on a sample sealed here or citing
-/// its graded run (record 55 ruling 22 b). Until then its gate on flagged
-/// datasets raises nothing and stages nothing, and Review shows its opinion
-/// as not yet confirmed.
-pub fn confirmed(store: &mut Store, model_id: i64) -> Result<Option<i64>, StoreError> {
+/// Whether System 1 stands (record 56 section 3; record 55 ruling 27): the
+/// model is admitted (or promoted) and is the one chosen for its task now,
+/// by a site's admin or by default ([`model::chosen`]). Its admission, and
+/// for the rules their replay, is what stands for it in production; a
+/// certificate is no longer asked for. A model that stands feeds the gate
+/// on flagged datasets and stages its answers there for a person to
+/// confirm; one that is not chosen, or not admitted, stages nothing.
+pub fn confirmed(store: &mut Store, model_id: i64) -> Result<bool, StoreError> {
+    Ok(chosen(store)?.is_some_and(|c| c.model.id == model_id && c.model.answers()))
+}
+
+/// The newest recorded certificate that names the model, where one does
+/// (record 55 D2, ruling 22 b): shown beside the model, never required
+/// (ruling 27, certificates serve the paper).
+pub fn certificate(store: &mut Store, model_id: i64) -> Result<Option<i64>, StoreError> {
     Ok(crate::labels::certified(store)
         .map_err(|e| match e {
             crate::labels::Error::Store(s) => s,
