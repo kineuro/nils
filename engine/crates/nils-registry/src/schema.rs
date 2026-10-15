@@ -3208,6 +3208,10 @@ fn build_linkage() -> Vec<Table> {
                 col("id", Type::Id),
                 req("name", Type::Text),
                 col("description", Type::Text),
+                // record 55, ruling 24: 1 when an ID of the type identifies
+                // a person wherever it is met, so resolving one to a subject
+                // code is a re-identification; null or 0 for a study's own
+                col("identifying", Type::Int),
             ],
         )
         .unique(&["name"]),
@@ -3265,6 +3269,12 @@ pub const SUBJECT_CODE_TYPE: &str = "subject-code";
 /// (2026-10-10: a dataset whose PatientID held such an ID failed at its
 /// first run on a registry that lacked the type). Its internal name stays
 /// the one the rules, the maps and the generator read.
+/// Record 55, ruling 24: the built-in types whose IDs identify a person
+/// wherever they are met: what PatientID held as written, a study's DICOM
+/// UID and the ID that is the same everywhere. Seeded with the flag set, and
+/// set on a store from before by migration 99.
+pub const IDENTIFYING_ID_TYPES: [&str; 3] = ["patient-id", "study-instance-uid", GENERATOR_ID_TYPE];
+
 pub const ID_TYPES: [(&str, &str); 4] = [
     ("patient-id", "PatientID (0010,0020) as written, trimmed"),
     (

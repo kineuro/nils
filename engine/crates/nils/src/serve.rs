@@ -6711,6 +6711,14 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
             if matches!(name, "POST /api/places" | "PUT /api/places/{id}") {
                 r["dataset"] = serde_json::Value::from("data:work");
             }
+            // record 55, ruling 24: the resolve writes nothing a person sees
+            // but is audited, every lookup; an ID of a type flagged
+            // identifying needs data:work at detail sensitive, checked at
+            // the door itself since the type is in the body
+            if name == "POST /api/linkage/resolve" {
+                r["audited"] = serde_json::Value::Bool(true);
+                r["identifying"] = serde_json::json!({"grant": "data:work", "detail": "sensitive"});
+            }
             r
         };
     vec![
@@ -7741,7 +7749,7 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
         ),
         row(
             "POST /api/linkage/resolve",
-            true,
+            false,
             false,
             "bounded",
             "one subject code",

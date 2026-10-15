@@ -445,8 +445,10 @@ fn the_door_on(backend: &str, pg: Option<(&str, &str)>) {
     );
     server.finish();
 
-    // every lookup that reached the store is audited, found or not: seven
-    // ctrl-id lookups and the admin's patient-id one
+    // the linkage store's read audit holds a row for each identity row a
+    // lookup opened (a match); the registry's audit log every lookup that
+    // reached the store, found or not: seven ctrl-id lookups and the
+    // admin's patient-id one
     let mut linkage = match pg {
         Some((dsn, schema)) => Store::connect_postgres(dsn, &format!("{schema}_linkage")).unwrap(),
         None => Store::open_sqlite(&home.path().join("linkage.db")).unwrap(),
@@ -469,7 +471,6 @@ fn the_door_on(backend: &str, pg: Option<(&str, &str)>) {
         [
             ("resolve: found".to_string(), 4),
             ("resolve: no scan to see".to_string(), 2),
-            ("resolve: not known".to_string(), 2),
         ],
         "{backend}"
     );

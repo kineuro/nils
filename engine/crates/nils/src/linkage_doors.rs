@@ -125,9 +125,19 @@ fn add_type(registry: &mut Registry, body: &str) -> Result<Reply, Reply> {
             )
         })?;
     let description = doc["description"].as_str().map(str::trim);
+    // record 55, ruling 24: whether its IDs identify a person anywhere
+    let identifying = match &doc["identifying"] {
+        serde_json::Value::Null => None,
+        serde_json::Value::Bool(b) => Some(*b),
+        _ => return Err(Reply::error(400, "identifying: true or false")),
+    };
     let mut store = open_linkage(registry)?;
     let (t, made) = linkage::ensure_id_type(&mut store, name, description)
         .map_err(|e| Reply::error(400, e.to_string()))?;
+    if let Some(flag) = identifying {
+        linkage::set_identifying(&mut store, &t.name, flag)
+            .map_err(|e| Reply::error(409, e.to_string()))?;
+    }
     let counts = linkage::id_type_counts(&mut store)?;
     let mut answer = counts
         .into_iter()
@@ -1169,14 +1179,15 @@ const RESOLVE_MAX: usize = 256;
 /// answers no identifier it was not given: not even the value back. A study's
 /// own ID (a map's type) is open to whoever uses the data at detail quasi; an
 /// ID that identifies a person wherever it is met
-/// ([`linkage::identifying_type`]) is a re-identification and needs
+/// (the type's stored flag, [`linkage::identifying_type`]) is a re-identification and needs
 /// `data:work` at detail sensitive, as the held reveal and the merge do. The
 /// value is looked up by its keyed hash, as the digest filed it, so no
 /// ciphertext is opened; a merged subject answers the subject it was merged
 /// into; a stack of a sample sealed now is not counted without the unsealed
 /// grant; the datasets are named only to a caller who may see them
-/// (`data:see` or `places:see`). Every lookup, found or not, writes one read
-/// audit row and one `linkage.resolve` row in the registry's audit log.
+/// (`data:see` or `places:see`). Every lookup, found or not, writes one
+/// `linkage.resolve` row in the registry's audit log, and a match one read
+/// audit row in the linkage store for the identity row it opened.
 fn resolve(registry: &mut Registry, caller: &Caller, body: &str) -> Result<Reply, Reply> {
     let doc = json_body(body)?;
     let id_type = doc["id_type"]
@@ -1197,14 +1208,6 @@ fn resolve(registry: &mut Registry, caller: &Caller, body: &str) -> Result<Reply
             format!("value: an ID of at most {RESOLVE_MAX} characters"),
         ));
     }
-    // an ID that identifies a person anywhere is a re-identification
-    if linkage::identifying_type(&id_type) {
-        caller.allowed(
-            &format!("resolving a {id_type}"),
-            Need::One("data:work"),
-            Detail::Sensitive,
-        )?;
-    }
     let mut linkage = open_linkage(registry)?;
     let Some(type_id) = linkage::id_type_id(&mut linkage, &id_type)? else {
         let names: Vec<String> = linkage::id_types(&mut linkage)?
@@ -1219,6 +1222,14 @@ fn resolve(registry: &mut Registry, caller: &Caller, body: &str) -> Result<Reply
             ),
         ));
     };
+    // an ID of a type flagged identifying is a re-identification
+    if linkage::identifying_type(&mut linkage, &id_type)? {
+        caller.allowed(
+            &format!("resolving a {id_type}"),
+            Need::One("data:work"),
+            Detail::Sensitive,
+        )?;
+    }
     let (_, keys) = keys_of(registry)?;
     let lookup = keys.lookup(&id_type, &value);
     let identity = linkage::identities_by_lookup(&mut linkage, &[lookup])?
@@ -1228,30 +1239,33 @@ fn resolve(registry: &mut Registry, caller: &Caller, body: &str) -> Result<Reply
         Some(i) => resolved(registry, caller, i.subject_id)?,
         None => None,
     };
-    // every lookup is audited, a miss and a sealed-only subject included
+    // every lookup is audited in the registry's log, a miss and a
+    // sealed-only subject included; the linkage store's read audit only
+    // when an identity row was opened, a match
     let outcome = match (&identity, &found) {
         (_, Some(_)) => "found",
         (Some(_), None) => "no scan to see",
         (None, None) => "not known",
     };
-    let now = nils_registry::time::now_iso();
-    let audit = vec![vec![
-        Param::from(now.as_str()),
-        Param::from(caller.principal.as_str()),
-        // a miss has no identity; 0 stands for none, as no identity has it
-        Param::Int(identity.as_ref().map_or(0, |i| i.id)),
-        Param::from(format!("resolve: {outcome}").as_str()),
-    ]];
-    linkage.begin()?;
-    let written = linkage.insert(
-        &nils_registry::Insert::all(nils_registry::schema::table("read_audit")),
-        &audit,
-    );
-    match written {
-        Ok(_) => linkage.commit()?,
-        Err(e) => {
-            let _ = linkage.rollback();
-            return Err(e.into());
+    if let Some(i) = &identity {
+        let now = nils_registry::time::now_iso();
+        let audit = vec![vec![
+            Param::from(now.as_str()),
+            Param::from(caller.principal.as_str()),
+            Param::Int(i.id),
+            Param::from(format!("resolve: {outcome}").as_str()),
+        ]];
+        linkage.begin()?;
+        let written = linkage.insert(
+            &nils_registry::Insert::all(nils_registry::schema::table("read_audit")),
+            &audit,
+        );
+        match written {
+            Ok(_) => linkage.commit()?,
+            Err(e) => {
+                let _ = linkage.rollback();
+                return Err(e.into());
+            }
         }
     }
     nils_registry::audit::record(
@@ -1512,9 +1526,6 @@ mod tests {
         assert!(names_datasets(&caller("data:see,quasi").access));
         assert!(names_datasets(&caller("places:see").access));
         assert!(names_datasets(&caller("admin").access));
-        assert!(linkage::identifying_type("personnummer"));
-        assert!(linkage::identifying_type("patient-id"));
-        assert!(!linkage::identifying_type("ctrl-id"));
     }
 
     /// A caller holding the listed grants, at the detail named beside
@@ -1659,6 +1670,46 @@ mod tests {
             r#"{"name": "Study Id"}"#,
         );
         assert_eq!(bad.status, 400);
+        // record 55, ruling 24: a type says whether its IDs identify a
+        // person anywhere; the built-in ones do, a study's own does not
+        // until it is said, and a built-in one stays identifying
+        let r = call(&home, &mut registry, &anna, "GET", "/api/linkage/types", "");
+        let flag = |name: &str| {
+            r.body
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|t| t["name"] == name)
+                .map(|t| t["identifying"].clone())
+                .unwrap()
+        };
+        assert_eq!(flag("patient-id"), true);
+        assert_eq!(flag("personnummer"), true);
+        assert_eq!(flag("study-instance-uid"), true);
+        assert_eq!(flag("subject-code"), false);
+        assert_eq!(flag("study-id"), false);
+        let hospital = call(
+            &home,
+            &mut registry,
+            &anna,
+            "POST",
+            "/api/linkage/types",
+            r#"{"name": "hospital-id", "identifying": true}"#,
+        );
+        assert_eq!(hospital.status, 201, "{}", hospital.body);
+        let mut store = registry.open_linkage().unwrap();
+        assert!(linkage::identifying_type(&mut store, "hospital-id").unwrap());
+        assert!(!linkage::identifying_type(&mut store, "study-id").unwrap());
+        drop(store);
+        let kept = call(
+            &home,
+            &mut registry,
+            &anna,
+            "POST",
+            "/api/linkage/types",
+            r#"{"name": "patient-id", "identifying": false}"#,
+        );
+        assert_eq!(kept.status, 409, "{}", kept.body);
     }
 
     #[test]

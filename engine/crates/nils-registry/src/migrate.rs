@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 101;
+pub const SCHEMA_VERSION: i64 = 102;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -458,6 +458,10 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 101,
         apply: a_decision_keeps_the_rules_answer_in_view,
     },
+    Migration {
+        version: 102,
+        apply: an_id_type_says_whether_it_identifies,
+    },
 ];
 
 /// Record 55 ruling 22 (b): a certificate may cite its graded run (the
@@ -499,6 +503,32 @@ fn a_decision_keeps_the_rules_answer_in_view(store: &mut Store, kind: Kind) -> R
         return Ok(());
     }
     add_columns(store, "decision", &["rules_in_view"])
+}
+
+/// Record 55, ruling 24: an ID type says whether its IDs identify a person
+/// wherever they are met, which makes resolving one a re-identification.
+/// The built-in identifying types are marked; a type a person made is a
+/// study's own until they say otherwise.
+fn an_id_type_says_whether_it_identifies(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Linkage {
+        return Ok(());
+    }
+    add_columns(store, "id_type", &["identifying"])?;
+    mark_identifying(store)
+}
+
+/// The built-in identifying types marked so.
+fn mark_identifying(store: &mut Store) -> Result<(), Error> {
+    let table = store.qualified("id_type");
+    let d = store.dialect();
+    let sql = format!(
+        "UPDATE {table} SET identifying = 1 WHERE name = {}",
+        d.param(1, crate::schema::Type::Text)
+    );
+    for name in schema::IDENTIFYING_ID_TYPES {
+        store.execute(&sql, &[Param::from(name)])?;
+    }
+    Ok(())
 }
 
 /// Record 55 F2 and F5 (spec §12.3): the post-contrast label of each stack,
@@ -2984,6 +3014,7 @@ fn create_declared_tables(store: &mut Store, kind: Kind) -> Result<(), Error> {
         for (name, description) in ID_TYPES {
             store.execute(&sql, &[Param::from(name), Param::from(description)])?;
         }
+        mark_identifying(store)?;
     }
     Ok(())
 }
@@ -3193,6 +3224,34 @@ mod tests {
     /// A linkage store from before migration 86 gains the type of an ID
     /// that is the same everywhere once; one where a person had made it
     /// keeps theirs (2026-10-10: a dataset declared one and its run failed).
+    /// Record 55, ruling 24: a linkage store from before migration 99
+    /// learns which of its types identify a person: the built-in ones, and
+    /// none a person made.
+    #[test]
+    fn a_linkage_store_from_before_learns_its_identifying_id_types() {
+        let mut store = Store::sqlite_in_memory().unwrap();
+        for m in MIGRATIONS.iter().take_while(|m| m.version <= 98) {
+            (m.apply)(&mut store, Kind::Linkage).unwrap();
+            set_version(&mut store, Kind::Linkage, m.version).unwrap();
+        }
+        crate::linkage::add_id_type(&mut store, "ctrl-id", None).unwrap();
+        store
+            .execute("UPDATE id_type SET identifying = NULL", &[])
+            .unwrap();
+        migrate(&mut store, Kind::Linkage).unwrap();
+        for name in schema::IDENTIFYING_ID_TYPES {
+            assert!(
+                crate::linkage::identifying_type(&mut store, name).unwrap(),
+                "{name}"
+            );
+        }
+        assert!(!crate::linkage::identifying_type(&mut store, "subject-code").unwrap());
+        assert!(!crate::linkage::identifying_type(&mut store, "ctrl-id").unwrap());
+        // the registry store has nothing to do
+        let mut registry = Store::sqlite_in_memory().unwrap();
+        an_id_type_says_whether_it_identifies(&mut registry, Kind::Registry).unwrap();
+    }
+
     #[test]
     fn a_linkage_store_from_before_gains_the_same_everywhere_id_type() {
         let mut store = Store::sqlite_in_memory().unwrap();

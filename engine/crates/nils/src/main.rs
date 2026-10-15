@@ -2232,6 +2232,10 @@ enum IdTypeCommand {
         name: String,
         #[arg(long, value_name = "TEXT")]
         description: Option<String>,
+        /// Its IDs identify a person wherever they are met (a hospital's
+        /// record number), so resolving one is a re-identification
+        #[arg(long)]
+        identifying: bool,
     },
     /// The identifier types, by id
     List,
@@ -6446,8 +6450,15 @@ fn linkage_command(home: &Home, command: LinkageCommand) -> Result<(), Exit> {
     match command {
         LinkageCommand::Import(args) => import(&mut registry, &mut store, args),
         LinkageCommand::IdType { command } => match command {
-            IdTypeCommand::Add { name, description } => {
+            IdTypeCommand::Add {
+                name,
+                description,
+                identifying,
+            } => {
                 let t = linkage::add_id_type(&mut store, &name, description.as_deref())?;
+                if identifying {
+                    linkage::set_identifying(&mut store, &t.name, true)?;
+                }
                 println!("added id type {} (id {})", t.name, t.id);
                 Ok(())
             }

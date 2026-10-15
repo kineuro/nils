@@ -355,6 +355,22 @@
         "writes": {
           "type": "boolean"
         },
+        "audited": {
+          "type": "boolean",
+          "description": "Record 55, ruling 24: a read that writes nothing a person sees but leaves an audit row for every call, as the resolve of an ID does"
+        },
+        "identifying": {
+          "type": "object",
+          "description": "Record 55, ruling 24: what a call for an ID of a type flagged identifying needs beside the row's own grant and detail",
+          "properties": {
+            "grant": {
+              "$ref": "grants.schema.json#/$defs/grant"
+            },
+            "detail": {
+              "$ref": "grants.schema.json#/$defs/detail"
+            }
+          }
+        },
         "idempotent": {
           "type": "boolean"
         },
