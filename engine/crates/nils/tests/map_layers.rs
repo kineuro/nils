@@ -714,6 +714,46 @@ fn cohort_layers(pg: Option<(String, String)>) {
         assert_eq!(mine["layer"]["held"][j], held, "{mine} {card}");
     }
 
+    // the cohort's own heatmap (its picks door) carries the same layer: each
+    // session's scans by value, the value of each role's scan picked, and
+    // the step as the cohort's door says it
+    let (status, refused) = server.call("GET", "/api/cohorts/quad/picks?layer=colour", None, OPS);
+    assert_eq!(status, 400, "{refused}");
+    assert_eq!(refused["field"], "layer", "{refused}");
+    let (status, heat) = server.call("GET", "/api/cohorts/quad/picks", None, OPS);
+    assert_eq!(status, 200, "{heat}");
+    assert!(heat.get("layer").is_none(), "{heat}");
+    let (status, heat) = server.call(
+        "GET",
+        "/api/cohorts/quad/picks?layer=body_region&limit=24",
+        None,
+        OPS,
+    );
+    assert_eq!(status, 200, "{heat}");
+    assert_eq!(heat["layer"]["layer"], "body_region", "{heat}");
+    assert_eq!(heat["layer"]["operation"], "body_part", "{heat}");
+    assert_eq!(heat["layer"]["values"], json!(["head", "spine"]), "{heat}");
+    assert_eq!(heat["layer"]["step"]["state"], "off", "{heat}");
+    let sessions: Vec<&Value> = heat["subjects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|s| s["sessions"].as_array().unwrap().iter())
+        .collect();
+    let picked_spine: Vec<&&Value> = sessions
+        .iter()
+        .filter(|s| s["roles"]["t1w"]["stack"] == taken)
+        .collect();
+    assert_eq!(picked_spine.len(), 1, "{heat}");
+    assert_eq!(picked_spine[0]["roles"]["t1w"]["layer"], "spine", "{heat}");
+    assert_eq!(picked_spine[0]["layer"]["scans"]["spine"], 1, "{heat}");
+    for s in &sessions {
+        assert!(s["layer"]["none"].is_i64(), "{s}");
+        if s["roles"]["t1w"]["stack"].is_i64() && s["roles"]["t1w"]["stack"] != taken {
+            assert_eq!(s["roles"]["t1w"]["layer"], "head", "{s}");
+        }
+    }
+
     // a scan of a sample sealed now is in no count for a caller who may not
     // read it, and in every count for one who may
     home.execute(&[format!(
@@ -758,6 +798,13 @@ fn cohort_layers(pg: Option<(String, String)>) {
             }
             server.post(path, body, OPS);
         }
+        let (status, heat) = server.call(
+            "GET",
+            &format!("/api/cohorts/quad/picks?layer={layer}"),
+            None,
+            OPS,
+        );
+        assert_eq!(status, 200, "{heat}");
     };
     for layer in ["body_region", "body_part", "post_contrast"] {
         doors(layer);

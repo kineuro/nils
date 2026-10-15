@@ -1112,6 +1112,18 @@ impl Layer {
             .unwrap_or(order.len())
     }
 
+    /// Values, each once, in the layer's order, a value it does not name
+    /// after them by name.
+    pub fn sorted(self, values: impl IntoIterator<Item = String>) -> Vec<String> {
+        let mut out: Vec<String> = values
+            .into_iter()
+            .collect::<BTreeSet<String>>()
+            .into_iter()
+            .collect();
+        out.sort_by_key(|v| self.position(v));
+        out
+    }
+
     /// A value's place for sorting: its position, then its name.
     fn rank(self, value: &str) -> (usize, &str) {
         (self.position(value), value)
@@ -1132,16 +1144,42 @@ fn stated(value: &str) -> Option<&'static str> {
 /// none, and on how many the 72-hour flag is up (post-contrast: the subject
 /// had contrast in the 72 hours before).
 #[derive(Debug, Clone, Default, PartialEq)]
-struct Held {
+pub struct Held {
     values: BTreeMap<String, i64>,
     none: i64,
     prior_72h: i64,
 }
 
 impl Held {
+    /// The values its scans carry, with how many carry each.
+    pub fn values(&self) -> impl Iterator<Item = (&String, &i64)> {
+        self.values.iter()
+    }
+
+    /// One scan more: under its value, or none; and its flag.
+    pub fn add(&mut self, r: &LayerRow) {
+        match &r.value {
+            Some(v) => *self.values.entry(v.clone()).or_insert(0) += 1,
+            None => self.none += 1,
+        }
+        if r.prior_72h {
+            self.prior_72h += 1;
+        }
+    }
+
+    /// As a door gives a visit's scans on the layer: by value, those with
+    /// none, and (post-contrast) the flag's.
+    pub fn to_json(&self, layer: Layer) -> Value {
+        let mut out = json!({"scans": self.values, "none": self.none});
+        if layer == Layer::PostContrast {
+            out["prior_72h"] = json!(self.prior_72h);
+        }
+        out
+    }
+
     /// The value most of its scans carry, a tie going to the one first in
     /// the layer's order; none where none of them carries one.
-    fn most(&self, layer: Layer) -> Option<&String> {
+    pub fn most(&self, layer: Layer) -> Option<&String> {
         self.values
             .iter()
             .filter(|(_, n)| **n > 0)
@@ -1151,6 +1189,90 @@ impl Held {
             })
             .map(|(v, _)| v)
     }
+}
+
+/// One MR stack on a layer: its subject and study, its value where it
+/// carries one, and (post-contrast) whether the 72-hour flag is up on it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LayerRow {
+    pub stack: i64,
+    pub subject: i64,
+    pub study: i64,
+    pub value: Option<String>,
+    pub prior_72h: bool,
+}
+
+/// Every MR stack of these subjects on a layer, each once, in stack order:
+/// the axis's value for the body layers; for post-contrast the label's
+/// state, else what the `post_contrast` axis says. Reads only.
+pub fn layer_rows(
+    store: &mut Store,
+    layer: Layer,
+    subjects: &[i64],
+) -> Result<Vec<LayerRow>, StoreError> {
+    let (stack, series, axis, label) = (
+        store.qualified("stack"),
+        store.qualified("series"),
+        store.qualified("classification_axis"),
+        store.qualified("contrast_label"),
+    );
+    let mut out = Vec::new();
+    let mut seen: BTreeSet<i64> = BTreeSet::new();
+    for chunk in subjects.chunks(500) {
+        let sql = match layer {
+            Layer::PostContrast => format!(
+                "SELECT x.id, se.subject_id, se.study_id, a.value, cl.contrast_state, \
+                 cl.contrast_prior_72h FROM {stack} x JOIN {series} se ON se.id = x.series_id \
+                 LEFT JOIN {label} cl ON cl.stack_id = x.id \
+                 LEFT JOIN {axis} a ON a.stack_id = x.id AND a.axis = 'post_contrast' \
+                 WHERE x.modality = 'MR' AND se.subject_id IN ({}) ORDER BY x.id",
+                list(chunk)
+            ),
+            _ => format!(
+                "SELECT x.id, se.subject_id, se.study_id, a.value FROM {stack} x \
+                 JOIN {series} se ON se.id = x.series_id \
+                 LEFT JOIN {axis} a ON a.stack_id = x.id AND a.axis = '{}' \
+                 WHERE x.modality = 'MR' AND se.subject_id IN ({}) ORDER BY x.id",
+                layer.name(),
+                list(chunk)
+            ),
+        };
+        for r in store.query(&sql, &[])? {
+            let id = r.int(0)?;
+            // one row a stack: an axis of one value has one row (Wave 4a
+            // §6.1), and a stack read once is not counted again
+            if !seen.insert(id) {
+                continue;
+            }
+            let axis_value = r
+                .opt_text(3)?
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .map(str::to_string);
+            let (value, prior_72h) = match layer {
+                Layer::PostContrast => {
+                    let state = r
+                        .opt_text(4)?
+                        .map(str::trim)
+                        .filter(|v| !v.is_empty())
+                        .map(str::to_string);
+                    let flagged = r.opt_text(5)?.is_some_and(|f| f.trim() == "yes");
+                    let value = state
+                        .or_else(|| axis_value.as_deref().and_then(stated).map(str::to_string));
+                    (value, flagged)
+                }
+                _ => (axis_value, false),
+            };
+            out.push(LayerRow {
+                stack: id,
+                subject: r.int(1)?,
+                study: r.int(2)?,
+                value,
+                prior_72h,
+            });
+        }
+    }
+    Ok(out)
 }
 
 /// A layer read over the map's visits.
@@ -1186,88 +1308,24 @@ fn layered(
         .map(|s| vec![Held::default(); s.visits.len()])
         .collect();
     let mut of: HashMap<i64, String> = HashMap::new();
-    let (stack, series, axis, label) = (
-        store.qualified("stack"),
-        store.qualified("series"),
-        store.qualified("classification_axis"),
-        store.qualified("contrast_label"),
-    );
     let ids: Vec<i64> = subjects.iter().map(|s| s.id).collect();
-    let mut seen: BTreeSet<i64> = BTreeSet::new();
-    for chunk in ids.chunks(500) {
-        let sql = match layer {
-            Layer::PostContrast => format!(
-                "SELECT x.id, se.subject_id, se.study_id, a.value, cl.contrast_state, \
-                 cl.contrast_prior_72h FROM {stack} x JOIN {series} se ON se.id = x.series_id \
-                 LEFT JOIN {label} cl ON cl.stack_id = x.id \
-                 LEFT JOIN {axis} a ON a.stack_id = x.id AND a.axis = 'post_contrast' \
-                 WHERE x.modality = 'MR' AND se.subject_id IN ({}) ORDER BY x.id",
-                list(chunk)
-            ),
-            _ => format!(
-                "SELECT x.id, se.subject_id, se.study_id, a.value FROM {stack} x \
-                 JOIN {series} se ON se.id = x.series_id \
-                 LEFT JOIN {axis} a ON a.stack_id = x.id AND a.axis = '{}' \
-                 WHERE x.modality = 'MR' AND se.subject_id IN ({}) ORDER BY x.id",
-                layer.name(),
-                list(chunk)
-            ),
+    for r in layer_rows(store, layer, &ids)? {
+        if withheld.contains(&r.stack) {
+            continue;
+        }
+        let Some(l) = labels.get(&r.study) else {
+            continue;
         };
-        for r in store.query(&sql, &[])? {
-            let id = r.int(0)?;
-            // one row a stack: an axis of one value has one row (Wave 4a
-            // §6.1), and a stack read once is not counted again
-            if withheld.contains(&id) || !seen.insert(id) {
-                continue;
-            }
-            let Some(l) = labels.get(&r.int(2)?) else {
-                continue;
-            };
-            let Some(&(si, vi)) = at.get(&(r.int(1)?, l.session_id)) else {
-                continue;
-            };
-            let axis_value = r
-                .opt_text(3)?
-                .map(str::trim)
-                .filter(|v| !v.is_empty())
-                .map(str::to_string);
-            let (value, flagged) = match layer {
-                Layer::PostContrast => {
-                    let state = r
-                        .opt_text(4)?
-                        .map(str::trim)
-                        .filter(|v| !v.is_empty())
-                        .map(str::to_string);
-                    let flagged = r.opt_text(5)?.is_some_and(|f| f.trim() == "yes");
-                    let value = state
-                        .or_else(|| axis_value.as_deref().and_then(stated).map(str::to_string));
-                    (value, flagged)
-                }
-                _ => (axis_value, false),
-            };
-            let h = &mut held[si][vi];
-            match value {
-                Some(v) => {
-                    *h.values.entry(v.clone()).or_insert(0) += 1;
-                    of.insert(id, v);
-                }
-                None => h.none += 1,
-            }
-            if flagged {
-                h.prior_72h += 1;
-            }
+        let Some(&(si, vi)) = at.get(&(r.subject, l.session_id)) else {
+            continue;
+        };
+        let h = &mut held[si][vi];
+        h.add(&r);
+        if let Some(v) = r.value {
+            of.insert(r.stack, v);
         }
     }
-    let mut values: Vec<String> = held
-        .iter()
-        .flatten()
-        .flat_map(|h| h.values.keys().cloned())
-        .collect::<BTreeSet<String>>()
-        .into_iter()
-        .collect();
-    // by name from the set, then by the layer's order, a sort that keeps
-    // the names' order among values the order does not name
-    values.sort_by_key(|v| layer.position(v));
+    let values = layer.sorted(held.iter().flatten().flat_map(|h| h.values.keys().cloned()));
     Ok(Layered {
         layer,
         of,
@@ -1376,15 +1434,8 @@ impl Layered {
     /// many none, the 72-hour flag's scans for post-contrast, and each
     /// candidate's value.
     fn on_visit(&self, doc: &mut Value, si: usize, vi: usize, x: &Taken) {
-        let h = &self.held[si][vi];
-        let mut layer = json!({
-            "taken": self.taken(x),
-            "scans": h.values,
-            "none": h.none,
-        });
-        if self.layer == Layer::PostContrast {
-            layer["prior_72h"] = json!(h.prior_72h);
-        }
+        let mut layer = self.held[si][vi].to_json(self.layer);
+        layer["taken"] = json!(self.taken(x));
         doc["layer"] = layer;
         for c in doc["candidates"].as_array_mut().into_iter().flatten() {
             let stacks: Vec<i64> = c["stacks"]
