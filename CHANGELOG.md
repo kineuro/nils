@@ -51,6 +51,7 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 - The sources document and the kept layouts are forgotten by the doors that write a place or a dataset, after they answered with success, and not by a read-only POST or a refused write.
 - `nils preview build --all` removes a part file only when it is older than the build by a quarter of an hour, never by a process this machine does not run, so a writer on shared storage keeps its file.
 - A run withdrawn as the younger of two for one step and scope deletes the scans it froze, and the lock a door keeps for a scope and step is dropped when nobody holds or waits for it.
+- Splitting an enhanced file's frames no longer mis-splits 8-bit or 1-bit pixel data stored as OW. Such data arrived as words and the object's geometry was ignored, so frames of an odd size (two frames of three bytes) were cut by the pad rule at one word each. It is now split by bytes (or bits) from rows, columns and samples, as OB data is, and refused with a clear error when the geometry is missing.
 
 ### Added
 

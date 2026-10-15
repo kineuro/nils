@@ -157,42 +157,7 @@ pub fn keep_frames(object: &mut InMemDicomObject, frames: &[u32], ts: &str) -> R
         let vr = e.vr();
         let kept = match e.value() {
             DicomValue::Primitive(PrimitiveValue::U8(bytes)) => {
-                let out = match geometry.filter(|g| g.bits_allocated == 1) {
-                    // 1-bit data packs its frames end to end in bits, a
-                    // frame not starting on a byte
-                    Some(g) => {
-                        let each = g.pixels();
-                        if bytes.len() * 8 < each * count as usize {
-                            return Err(format!(
-                                "1-bit pixel data of {} bytes is short of {count} frames",
-                                bytes.len()
-                            ));
-                        }
-                        let mut out = vec![0u8; (each * frames.len()).div_ceil(8)];
-                        let mut to = 0usize;
-                        for i in picked(frames.len()) {
-                            for b in i * each..(i + 1) * each {
-                                if bytes[b / 8] >> (b % 8) & 1 == 1 {
-                                    out[to / 8] |= 1 << (to % 8);
-                                }
-                                to += 1;
-                            }
-                        }
-                        out
-                    }
-                    None => {
-                        let each = match geometry {
-                            Some(g) => g.bytes(),
-                            None => per_frame(bytes.len(), count)?,
-                        };
-                        fits(bytes.len(), each, count)?;
-                        let mut out = Vec::with_capacity(each * frames.len() + 1);
-                        for i in picked(frames.len()) {
-                            out.extend_from_slice(&bytes[i * each..(i + 1) * each]);
-                        }
-                        out
-                    }
-                };
+                let out = split_bytes(bytes, geometry, count, &picked(frames.len()), true)?;
                 // a value of an odd length is padded to an even one
                 let mut out = out;
                 if out.len() % 2 == 1 {
@@ -201,16 +166,42 @@ pub fn keep_frames(object: &mut InMemDicomObject, frames: &[u32], ts: &str) -> R
                 DicomValue::Primitive(PrimitiveValue::U8(out.into()))
             }
             DicomValue::Primitive(PrimitiveValue::U16(words)) => {
-                let each = match geometry.filter(|g| g.bits_allocated == 16) {
-                    Some(g) => g.pixels(),
-                    None => per_frame(words.len(), count)?,
-                };
-                fits(words.len(), each, count)?;
-                let mut out = Vec::with_capacity(each * frames.len());
-                for i in picked(frames.len()) {
-                    out.extend_from_slice(&words[i * each..(i + 1) * each]);
+                // 8-bit and 1-bit data stored as OW arrive as words, but
+                // its frames are bytes (or bits): split them as the OB
+                // path does, then pack the kept bytes into words again
+                let stated_bits = object
+                    .element(tags::BITS_ALLOCATED)
+                    .ok()
+                    .and_then(|e| e.to_int::<u32>().ok());
+                if matches!(stated_bits, Some(1 | 8)) {
+                    if geometry.is_none() {
+                        return Err("pixel data of 8-bit or 1-bit samples stored as words \
+                             cannot be split without rows, columns and bits allocated"
+                            .into());
+                    }
+                    let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+                    let mut out =
+                        split_bytes(&bytes, geometry, count, &picked(frames.len()), false)?;
+                    if out.len() % 2 == 1 {
+                        out.push(0);
+                    }
+                    let packed: Vec<u16> = out
+                        .chunks(2)
+                        .map(|p| u16::from_le_bytes([p[0], p[1]]))
+                        .collect();
+                    DicomValue::Primitive(PrimitiveValue::U16(packed.into()))
+                } else {
+                    let each = match geometry.filter(|g| g.bits_allocated == 16) {
+                        Some(g) => g.pixels(),
+                        None => per_frame(words.len(), count)?,
+                    };
+                    fits(words.len(), each, count)?;
+                    let mut out = Vec::with_capacity(each * frames.len());
+                    for i in picked(frames.len()) {
+                        out.extend_from_slice(&words[i * each..(i + 1) * each]);
+                    }
+                    DicomValue::Primitive(PrimitiveValue::U16(out.into()))
                 }
-                DicomValue::Primitive(PrimitiveValue::U16(out.into()))
             }
             DicomValue::Primitive(PrimitiveValue::Empty) => {
                 DicomValue::Primitive(PrimitiveValue::Empty)
@@ -323,6 +314,56 @@ impl Geometry {
     /// The bytes of one frame, bits allocated a whole number of bytes.
     fn bytes(&self) -> usize {
         self.pixels() * self.bits_allocated.div_ceil(8)
+    }
+}
+
+/// The bytes of the `picked` frames (zero-based) of native pixel data of
+/// bytes: whole frames of the object's geometry, or, for 1-bit data, bits
+/// packed end to end and packed again from the first bit. `bare_ok` lets an
+/// object without geometry be split by its length (the OB path).
+fn split_bytes(
+    bytes: &[u8],
+    geometry: Option<Geometry>,
+    count: u32,
+    picked: &[usize],
+    bare_ok: bool,
+) -> Result<Vec<u8>, String> {
+    match geometry.filter(|g| g.bits_allocated == 1) {
+        // 1-bit data packs its frames end to end in bits, a frame not
+        // starting on a byte
+        Some(g) => {
+            let each = g.pixels();
+            if bytes.len() * 8 < each * count as usize {
+                return Err(format!(
+                    "1-bit pixel data of {} bytes is short of {count} frames",
+                    bytes.len()
+                ));
+            }
+            let mut out = vec![0u8; (each * picked.len()).div_ceil(8)];
+            let mut to = 0usize;
+            for &i in picked {
+                for b in i * each..(i + 1) * each {
+                    if bytes[b / 8] >> (b % 8) & 1 == 1 {
+                        out[to / 8] |= 1 << (to % 8);
+                    }
+                    to += 1;
+                }
+            }
+            Ok(out)
+        }
+        None => {
+            let each = match geometry {
+                Some(g) => g.bytes(),
+                None if bare_ok => per_frame(bytes.len(), count)?,
+                None => return Err("the frame geometry is missing".into()),
+            };
+            fits(bytes.len(), each, count)?;
+            let mut out = Vec::with_capacity(each * picked.len() + 1);
+            for &i in picked {
+                out.extend_from_slice(&bytes[i * each..(i + 1) * each]);
+            }
+            Ok(out)
+        }
     }
 }
 
@@ -538,6 +579,70 @@ mod tests {
         keep_frames(&mut o, &[1, 3], "1.2.840.10008.1.2.1").unwrap();
         // 1111 then 1010: 0b0101_1111, padded to two bytes
         assert_eq!(bytes_of(&o), [0b0101_1111, 0]);
+    }
+
+    fn words_of(bytes: &[u8]) -> Vec<u16> {
+        bytes
+            .chunks(2)
+            .map(|p| u16::from_le_bytes([p[0], *p.get(1).unwrap_or(&0)]))
+            .collect()
+    }
+
+    fn ow(bytes: &[u8]) -> Option<DicomValue<InMemDicomObject, Vec<u8>>> {
+        Some(DicomValue::Primitive(PrimitiveValue::U16(
+            words_of(bytes).into(),
+        )))
+    }
+
+    /// 8-bit data stored as OW arrives as words; its frames are still
+    /// bytes, odd sizes included.
+    #[test]
+    fn eight_bit_data_stored_as_words_splits_by_bytes() {
+        // two frames of three bytes: three words, no pad rule
+        let mut o = object(2, ow(&[1, 1, 1, 2, 2, 2]));
+        with_geometry(&mut o, 1, 3, 8);
+        keep_frames(&mut o, &[2], "1.2.840.10008.1.2.1").unwrap();
+        assert_eq!(bytes_of(&o), [2, 2, 2, 0]);
+        // three frames of three bytes and a pad byte
+        let mut o = object(3, ow(&[1, 1, 1, 2, 2, 2, 3, 3, 3, 0]));
+        with_geometry(&mut o, 1, 3, 8);
+        keep_frames(&mut o, &[3, 1], "1.2.840.10008.1.2.1").unwrap();
+        assert_eq!(bytes_of(&o), [3, 3, 3, 1, 1, 1]);
+        // a length that is not the geometry's is refused
+        let mut o = object(2, ow(&[1, 1, 1, 2, 2, 2, 9, 9]));
+        with_geometry(&mut o, 1, 3, 8);
+        assert!(keep_frames(&mut o, &[1], "1.2.840.10008.1.2.1").is_err());
+    }
+
+    /// 1-bit data stored as OW is split by bits, as the OB path does.
+    #[test]
+    fn one_bit_data_stored_as_words_splits_by_bits() {
+        // three frames of three by three: 27 bits, four bytes, two words
+        let mut bits = [0u8; 27];
+        bits[..9].fill(1);
+        bits[18..].fill(1);
+        let mut packed = vec![0u8; 4];
+        for (i, b) in bits.iter().enumerate() {
+            packed[i / 8] |= b << (i % 8);
+        }
+        let mut o = object(3, ow(&packed));
+        with_geometry(&mut o, 3, 3, 1);
+        keep_frames(&mut o, &[2, 3], "1.2.840.10008.1.2.1").unwrap();
+        // 000000000 then 111111111: bits 9..18 set
+        assert_eq!(bytes_of(&o), [0, 0b1111_1110, 0b11, 0]);
+    }
+
+    /// Words of 8-bit data with no geometry to split them by are refused.
+    #[test]
+    fn eight_bit_words_without_geometry_are_refused() {
+        let mut o = object(2, ow(&[1, 1, 1, 2, 2, 2]));
+        o.put(DataElement::new(
+            tags::BITS_ALLOCATED,
+            VR::US,
+            PrimitiveValue::from(8u16),
+        ));
+        let err = keep_frames(&mut o, &[1], "1.2.840.10008.1.2.1").unwrap_err();
+        assert!(err.contains("cannot be split"), "{err}");
     }
 
     /// The Extended Offset Table and its lengths are written again for the
