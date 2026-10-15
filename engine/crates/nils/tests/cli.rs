@@ -7024,6 +7024,8 @@ fn a_pseudonymised_tree_holds_what_its_declaration_cannot_read() {
         ),
         0
     );
+}
+
 /// The MRI pack the tree ships, as `mri@<version>`, so a test follows a rules release.
 fn shipped_mri() -> String {
     let yml = std::fs::read_to_string(concat!(
