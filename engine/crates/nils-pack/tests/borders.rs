@@ -12,13 +12,15 @@
 //! a role without its own tables is refused, and so is a key of contract 7
 //! in a pack that declares 6.
 
+mod common;
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use nils_pack::pick::{self, Border, Candidate, Model, Reference};
 
 fn mri() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packs/mri")
+    common::shipped_mri()
 }
 
 fn main_pick() -> Model {

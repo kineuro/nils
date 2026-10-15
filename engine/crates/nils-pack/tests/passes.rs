@@ -3,13 +3,13 @@
 //! A pass over a corpus: the reference the pack declared, the bin, the
 //! widening, the minimum and the tie.
 
-use std::path::Path;
+mod common;
 
 use nils_pack::pass::{Corpus, run_vote};
 use nils_pack::{Pack, Stack};
 
 fn mri() -> Pack {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packs/mri");
+    let dir = common::shipped_mri();
     nils_pack::load(&dir, None).expect("the MRI pack loads")
 }
 

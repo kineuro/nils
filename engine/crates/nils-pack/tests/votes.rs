@@ -4,18 +4,18 @@
 //! the votes hold the rule that decided each axis, and they hold the rules
 //! an ordered set never reached.
 
-use std::path::PathBuf;
+mod common;
 
 use nils_pack::corpus::{self, Case};
 use nils_pack::{Evaluated, Pack, Verdict, Vote};
 
 fn mri() -> Pack {
-    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../packs/mri");
+    let dir = common::shipped_mri();
     nils_pack::load(&dir, None).expect("the MRI pack loads")
 }
 
 fn cases() -> Vec<Case> {
-    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../packs/mri");
+    let dir = common::shipped_mri();
     corpus::read(&dir)
         .expect("the corpus reads")
         .into_iter()

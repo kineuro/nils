@@ -9,6 +9,8 @@
 //! not one line of Rust to make it work. If this passes, a CT pack and a PET
 //! pack are vocabulary and a corpus, which is what the wave promised.
 
+mod common;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -205,11 +207,7 @@ fn the_engine_carries_no_vocabulary_of_its_own() {
     // pack's vocabulary, the two packs could not both be right.
     let d = xr();
     let pack = nils_pack::load(d.path(), None).expect("the XR pack loads");
-    let mri = nils_pack::load(
-        &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packs/mri"),
-        None,
-    )
-    .expect("the MRI pack loads");
+    let mri = nils_pack::load(&common::shipped_mri(), None).expect("the MRI pack loads");
     for a in &pack.axes {
         assert!(
             !mri.axes.iter().any(|m| m.name == a.name),

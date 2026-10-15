@@ -3,6 +3,8 @@
 //! The pack's own shape (record 41, S3): the values no rule reaches, and the
 //! clauses that only restate another axis.
 
+mod common;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -286,7 +288,7 @@ cases:
 
 #[test]
 fn the_mri_pack_has_a_shape() {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packs/mri");
+    let dir = common::shipped_mri();
     let pack = nils_pack::load(&dir, None).expect("the MRI pack loads");
     let shape = pack.shape();
     let (values, reached) = shape.counts();

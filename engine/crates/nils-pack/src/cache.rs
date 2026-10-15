@@ -234,19 +234,18 @@ mod tests {
         let manifest = tmp.join("pack.yml");
         let text = std::fs::read_to_string(&manifest).unwrap();
         let version = first.version.to_string();
+        // its last digit one up (9 to 0), so the length stays and only the version moves
+        let mut digits: Vec<char> = version.chars().collect();
+        let last = digits.last_mut().expect("a version");
+        *last = char::from_digit(
+            (last.to_digit(10).expect("a version ends in a digit") + 1) % 10,
+            10,
+        )
+        .expect("a digit");
+        let next: String = digits.into_iter().collect();
         let bumped = text.replacen(
             &format!("version: {version}"),
-            &format!(
-                "version: {}",
-                version
-                    .chars()
-                    .map(|c| match c {
-                        '9' => '8',
-                        d if d.is_ascii_digit() => '9',
-                        o => o,
-                    })
-                    .collect::<String>()
-            ),
+            &format!("version: {next}"),
             1,
         );
         assert_ne!(text, bumped, "the manifest names its version");
