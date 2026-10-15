@@ -19,7 +19,7 @@ names = [
   "ses-20220115/anat/Ax_T1w_3D_MPRAGE_ND_1",
   "ses-20220115/anat/Ax_T1w_3D_MPRAGE_ND_2",
   "ses-20220115/anat/Ax_T2starw_3D_SWI_GRE_Magnitude-ND",
-  "ses-20220115/anat/Ax_T2w_2D_FLAIR_TIRM_ND",
+  "ses-20220115/anat/Ax_T2w_2D_FLAIR_IRTSE_ND",
   "ses-20220115/dwi/Ax_DWI_2D_DWI-EPI_ADC_b1000",
   "ses-20220115/dwi/Ax_DWI_2D_DWI-EPI_Trace_b1000",
   "ses-20220115/func/Ax_T2starw_2D_MoCo_BOLD_ND",
@@ -32,7 +32,7 @@ names = [
 # Amended 2026-10-14, record 55, ruling 23 (Nima: "on SWI we need the SWI in
 # the name too"): the SWI's magnitude, which the SWI route decided and calls
 # RawRecon and T2*w, says its acquisition, `SWI`, before its technique, in the
-# descriptive name. Nothing else here is a
+# descriptive name and in `acq-` in both BIDS styles. Nothing else here is a
 # family's acquisition, so nothing else moved.
 
 # Amended 2026-09-29, MRI pack 0.14.0. The BOLD series, whose file states no
@@ -120,7 +120,7 @@ names = [
 
 files = [
   "sourcedata/dicom/sub-X/ses-20220115/anat/sub-X_ses-20220115_acq-Ax+2D+FLAIR+IRTSE_T2w/<dicom>",
-  "sourcedata/dicom/sub-X/ses-20220115/anat/sub-X_ses-20220115_acq-Ax+3D+GRE_part-mag_T2starw/<dicom>",
+  "sourcedata/dicom/sub-X/ses-20220115/anat/sub-X_ses-20220115_acq-Ax+3D+SWI+GRE_part-mag_T2starw/<dicom>",
   "sourcedata/dicom/sub-X/ses-20220115/anat/sub-X_ses-20220115_acq-Ax+3D+MPRAGE_run-1_T1w/<dicom>",
   "sourcedata/dicom/sub-X/ses-20220115/anat/sub-X_ses-20220115_acq-Ax+3D+MPRAGE_run-2_T1w/<dicom>",
   "sourcedata/dicom/sub-X/ses-20220115/dwi/sub-X_ses-20220115_acq-Ax+2D+DWIEPI_ADC/<dicom>",
@@ -130,7 +130,7 @@ files = [
   "sourcedata/dicom/sub-X/ses-20220715/anat/sub-X_ses-20220715_acq-Ax+3D+MPRAGE_ce-contrast_T1w/<dicom>",
   "sourcedata/dicom/sub-X/ses-20220115/localizer/Ax_T1w_2D_MPRAGE_ND/<dicom>",
   "sub-X/ses-20220115/anat/sub-X_ses-20220115_acq-Ax+2D+FLAIR+IRTSE_T2w.nii.gz",
-  "sub-X/ses-20220115/anat/sub-X_ses-20220115_acq-Ax+3D+GRE_part-mag_T2starw.nii.gz",
+  "sub-X/ses-20220115/anat/sub-X_ses-20220115_acq-Ax+3D+SWI+GRE_part-mag_T2starw.nii.gz",
   "sub-X/ses-20220115/anat/sub-X_ses-20220115_acq-Ax+3D+MPRAGE_run-1_T1w.nii.gz",
   "sub-X/ses-20220115/anat/sub-X_ses-20220115_acq-Ax+3D+MPRAGE_run-2_T1w.nii.gz",
   "sub-X/ses-20220115/dwi/sub-X_ses-20220115_acq-Ax+2D+DWIEPI_ADC.nii.gz",
@@ -150,7 +150,7 @@ files = [
 [bids_minimal]
 files = [
   "sourcedata/dicom/sub-X/ses-20220115/anat/sub-X_ses-20220115_acq-2D+FLAIR+IRTSE_T2w/<dicom>",
-  "sourcedata/dicom/sub-X/ses-20220115/anat/sub-X_ses-20220115_acq-3D+GRE_part-mag_T2starw/<dicom>",
+  "sourcedata/dicom/sub-X/ses-20220115/anat/sub-X_ses-20220115_acq-3D+SWI+GRE_part-mag_T2starw/<dicom>",
   "sourcedata/dicom/sub-X/ses-20220115/anat/sub-X_ses-20220115_acq-3D+MPRAGE_run-1_T1w/<dicom>",
   "sourcedata/dicom/sub-X/ses-20220115/anat/sub-X_ses-20220115_acq-3D+MPRAGE_run-2_T1w/<dicom>",
   "sourcedata/dicom/sub-X/ses-20220115/dwi/sub-X_ses-20220115_acq-2D+DWIEPI_ADC/<dicom>",
@@ -160,7 +160,7 @@ files = [
   "sourcedata/dicom/sub-X/ses-20220715/anat/sub-X_ses-20220715_acq-3D+MPRAGE_ce-contrast_T1w/<dicom>",
   "sourcedata/dicom/sub-X/ses-20220115/localizer/Ax_T1w_2D_MPRAGE_ND/<dicom>",
   "sub-X/ses-20220115/anat/sub-X_ses-20220115_acq-2D+FLAIR+IRTSE_T2w.nii.gz",
-  "sub-X/ses-20220115/anat/sub-X_ses-20220115_acq-3D+GRE_part-mag_T2starw.nii.gz",
+  "sub-X/ses-20220115/anat/sub-X_ses-20220115_acq-3D+SWI+GRE_part-mag_T2starw.nii.gz",
   "sub-X/ses-20220115/anat/sub-X_ses-20220115_acq-3D+MPRAGE_run-1_T1w.nii.gz",
   "sub-X/ses-20220115/anat/sub-X_ses-20220115_acq-3D+MPRAGE_run-2_T1w.nii.gz",
   "sub-X/ses-20220115/dwi/sub-X_ses-20220115_acq-2D+DWIEPI_ADC.nii.gz",
@@ -234,7 +234,7 @@ minimal = [
 descriptive = [
   "ses-20230301/anat/Ax_T1w_3D_MPRAGE_ND_1",
   "ses-20230301/anat/Ax_T1w_3D_MPRAGE_ND_2",
-  "ses-20230301/anat/Ax_T2w_2D_FLAIR_TIRM_ND_3mm",
-  "ses-20230301/anat/Ax_T2w_2D_FLAIR_TIRM_ND_5mm_1",
-  "ses-20230301/anat/Ax_T2w_2D_FLAIR_TIRM_ND_5mm_2",
+  "ses-20230301/anat/Ax_T2w_2D_FLAIR_IRTSE_ND_3mm",
+  "ses-20230301/anat/Ax_T2w_2D_FLAIR_IRTSE_ND_5mm_1",
+  "ses-20230301/anat/Ax_T2w_2D_FLAIR_IRTSE_ND_5mm_2",
 ]
