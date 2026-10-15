@@ -6,6 +6,8 @@
 //! added here without the list would leave a gap nobody is asked about, and
 //! a list entry the code no longer reads would ask about nothing.
 
+mod common;
+
 use std::collections::BTreeSet;
 use std::path::Path;
 
@@ -54,7 +56,7 @@ fn the_axes_a_release_reads_by_name_are_the_ones_said_to_matter() {
 
 #[test]
 fn the_mri_pack_s_axes_that_matter_and_where_a_missing_one_is_asked() {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packs/mri");
+    let dir = common::shipped_mri();
     let pack = nils_pack::load(&dir, None).expect("the MRI pack");
     let matters = nils_pack::matters::of(&pack);
     let names: Vec<&str> = matters.axes.keys().map(String::as_str).collect();

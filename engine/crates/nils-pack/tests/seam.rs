@@ -11,46 +11,14 @@
 
 mod common;
 
-use std::fs;
-use std::path::{Path, PathBuf};
+use common::Dir;
 
 use nils_pack::stack::Value;
 use nils_pack::{Evaluated, Stack};
 
-struct Dir(PathBuf);
-
-impl Dir {
-    fn new() -> Dir {
-        let n = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("a clock")
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!("nils-seam-{}-{n}", std::process::id()));
-        fs::create_dir_all(&path).expect("a directory");
-        Dir(path)
-    }
-
-    fn file(&self, name: &str, body: &str) -> &Dir {
-        let at = self.0.join(name);
-        fs::create_dir_all(at.parent().expect("a parent")).expect("a directory");
-        fs::write(at, body).expect("a file");
-        self
-    }
-
-    fn path(&self) -> &Path {
-        &self.0
-    }
-}
-
-impl Drop for Dir {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
-    }
-}
-
 /// A pack for the imaginary modality XR: two axes, one route, one flag.
 fn xr() -> Dir {
-    let d = Dir::new();
+    let d = Dir::new("seam");
     d.file(
         "pack.yml",
         "\

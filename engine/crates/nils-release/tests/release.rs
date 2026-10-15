@@ -3,6 +3,8 @@
 //! A release from end to end: what leaves, what does not, and what is recorded
 //! (`docs/specs/wave3-anonymize-and-bids.md`, §8).
 
+mod common;
+
 use std::path::Path;
 
 use dicom_core::VR;
@@ -125,7 +127,7 @@ fn drop_schemas_named(dsn: &str, schema: &str) {
 fn pack() -> &'static nils_pack::pack::Pack {
     static PACK: std::sync::OnceLock<nils_pack::pack::Pack> = std::sync::OnceLock::new();
     PACK.get_or_init(|| {
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packs/mri");
+        let dir = common::shipped_mri();
         nils_pack::load(&dir, None).expect("the MRI pack loads")
     })
 }
@@ -956,7 +958,7 @@ fn the_descriptive_layout_names_each_echo_by_its_own_echo_number() {
         &nils_digest::Cancel::new(),
     )
     .unwrap();
-    let packs = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packs/mri");
+    let packs = common::shipped_mri();
     let pack = nils_pack::load(&packs, None).unwrap();
     nils_classify::classify::classify(
         &mut reg,
@@ -1009,7 +1011,7 @@ fn classified(reg: &mut Registry, source: &TempDir) {
         &nils_digest::Cancel::new(),
     )
     .unwrap();
-    let packs = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packs/mri");
+    let packs = common::shipped_mri();
     let pack = nils_pack::load(&packs, None).unwrap();
     nils_classify::classify::classify(
         reg,

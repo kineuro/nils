@@ -4,8 +4,9 @@
 //! one that does not, and its vote matrix covers every axis a rule decided.
 //! Over the synthetic registry, on both backends.
 
+mod common;
+
 use std::env;
-use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
 use std::time::Instant;
 
@@ -88,7 +89,7 @@ fn labs() -> Vec<Lab> {
 }
 
 fn mri() -> nils_pack::Pack {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packs/mri");
+    let dir = common::shipped_mri();
     nils_pack::load(&dir, None).expect("the MRI pack loads")
 }
 

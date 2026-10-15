@@ -4,6 +4,17 @@
 
 mod common;
 
+/// The latest of some versions, pre-releases included.
+fn newest<'a>(versions: impl Iterator<Item = &'a str>) -> Option<&'a str> {
+    versions.reduce(|a, b| {
+        if nils_pack::engines::newer(b, a) {
+            b
+        } else {
+            a
+        }
+    })
+}
+
 #[test]
 fn the_mri_pack_loads_and_its_corpus_holds() {
     let pack = match nils_pack::load(&common::shipped_mri(), None) {
@@ -16,30 +27,21 @@ fn the_mri_pack_loads_and_its_corpus_holds() {
     // change that forgets to raise it, or raises it without saying so, fails
     let changelog =
         std::fs::read_to_string(common::shipped_mri().join("../../CHANGELOG.md")).unwrap();
-    let released = changelog
-        .lines()
-        .find_map(|l| l.strip_prefix("## [pack-mri-v")?.split(']').next())
-        .expect("the CHANGELOG names an MRI rules release");
+    // the newest of all the headings, whatever their order in the file
+    let released = newest(
+        changelog
+            .lines()
+            .filter_map(|l| l.strip_prefix("## [pack-mri-v")?.split(']').next()),
+    )
+    .expect("the CHANGELOG names an MRI rules release");
     let provenance = std::fs::read_to_string(common::shipped_mri().join("PROVENANCE.md")).unwrap();
-    let rows: Vec<&str> = provenance
-        .lines()
-        .filter_map(|l| {
-            let v = l.strip_prefix("| ")?.split(" |").next()?;
-            (v.split('.').count() == 3 && v.split('.').all(|n| n.parse::<u32>().is_ok()))
-                .then_some(v)
-        })
-        .collect();
-    let newest_row = rows
-        .iter()
-        .copied()
-        .reduce(|a, b| {
-            if nils_pack::engines::newer(b, a) {
-                b
-            } else {
-                a
-            }
-        })
-        .expect("the provenance has version rows");
+    // a pre-release row counts as well as a release
+    let newest_row = newest(provenance.lines().filter_map(|l| {
+        let v = l.strip_prefix("| ")?.split(" |").next()?;
+        (v.starts_with(|c: char| c.is_ascii_digit()) && nils_pack::Version::parse(v, "row").is_ok())
+            .then_some(v)
+    }))
+    .expect("the provenance has version rows");
     assert_eq!(
         pack.id(),
         format!("mri@{released}"),

@@ -4,40 +4,13 @@
 //! The evidence rows cannot tell these apart from silence, which is why the
 //! evaluator says so itself (spec §14, answered here).
 
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+mod common;
 
-static N: AtomicU64 = AtomicU64::new(0);
-
-struct Dir(PathBuf);
-
-impl Dir {
-    fn new() -> Dir {
-        let n = N.fetch_add(1, Ordering::Relaxed);
-        let p = std::env::temp_dir().join(format!("nils-diag-test-{}-{n}", std::process::id()));
-        std::fs::create_dir_all(p.join("corpus")).unwrap();
-        std::fs::create_dir_all(p.join("axes")).unwrap();
-        std::fs::create_dir_all(p.join("rules")).unwrap();
-        Dir(p)
-    }
-    fn file(&self, name: &str, body: &str) -> &Dir {
-        std::fs::write(self.0.join(name), body).unwrap();
-        self
-    }
-    fn path(&self) -> &Path {
-        &self.0
-    }
-}
-
-impl Drop for Dir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
+use common::Dir;
 
 /// Two rule sets over one axis, in order, and a second axis nobody decides.
 fn pack() -> Dir {
-    let d = Dir::new();
+    let d = Dir::new("diag-test");
     d.file(
         "pack.yml",
         "\
@@ -280,7 +253,7 @@ cases:
 /// Record 35, the seam between S2 and S6: a pack with two normalizations of
 /// one description, and a rule set whose rules do not all read the same one.
 fn two_text_pack() -> Dir {
-    let d = Dir::new();
+    let d = Dir::new("diag-test");
     d.file(
         "pack.yml",
         "\

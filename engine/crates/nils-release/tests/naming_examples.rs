@@ -5,6 +5,8 @@
 //! against the MRI pack itself, and where each goes. Prints a table; run with
 //! `cargo test -p nils-release --test naming_examples -- --ignored --nocapture`.
 
+mod common;
+
 use std::collections::BTreeMap;
 
 use nils_release::bids::name::{Facts, Name, build};
@@ -121,7 +123,7 @@ fn axes(s: &S) -> BTreeMap<&'static str, Vec<&'static str>> {
 #[test]
 #[ignore]
 fn naming_examples() {
-    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packs/mri");
+    let dir = common::shipped_mri();
     let pack = nils_pack::load(&dir, None).expect("the MRI pack loads");
     let all = stacks();
     let facts = |s: &S| Facts {

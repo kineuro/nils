@@ -6,6 +6,8 @@
 //! It needs `7z`, which is a prerequisite of a deployment rather than of a
 //! checkout, so the tests say so and stop when it is absent.
 
+mod common;
+
 use std::path::Path;
 
 use dicom_core::VR;
@@ -58,7 +60,7 @@ fn tree() -> TempDir {
 fn pack() -> &'static nils_pack::pack::Pack {
     static PACK: std::sync::OnceLock<nils_pack::pack::Pack> = std::sync::OnceLock::new();
     PACK.get_or_init(|| {
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packs/mri");
+        let dir = common::shipped_mri();
         nils_pack::load(&dir, None).expect("the MRI pack loads")
     })
 }

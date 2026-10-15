@@ -7,6 +7,8 @@
 //! and a grounding rule edited or an example swapped ships with the pack,
 //! against the same binary.
 
+mod common;
+
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
@@ -537,11 +539,7 @@ fn every_listed_tool_s_input_schema_is_the_contract_s() {
         .unwrap(),
     )
     .unwrap();
-    let pack = nils_pack::load(
-        &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packs/mri"),
-        None,
-    )
-    .unwrap();
+    let pack = nils_pack::load(&common::shipped_mri(), None).unwrap();
     let model = pack.mcp.as_ref().expect("the MRI pack opts tools in");
     let home = synthetic();
     let server = Server::start(&home, &packs(), &[]);
