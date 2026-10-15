@@ -2499,3 +2499,117 @@ fn a_display_composite_is_released_only_when_asked_and_moves_nothing_else() {
         }
     }
 }
+
+/// #463: an enhanced file whose frames hold two stacks (two orientations)
+/// is released as both: each stack's file holds its frames alone, with its
+/// own SOP Instance UID, and `--stack` with the second stack's id plans it.
+#[test]
+fn both_stacks_of_an_enhanced_file_are_released() {
+    let source = TempDir::new("release-enhanced");
+    let per_frame: Vec<Vec<synth::Elem>> = (0..8)
+        .map(|i| {
+            vec![synth::fg_orientation(if i < 4 {
+                "1\\0\\0\\0\\1\\0"
+            } else {
+                "0\\1\\0\\0\\0\\-1"
+            })]
+        })
+        .collect();
+    let mut e = synth::enhanced_mr("E.1", "E.1.1", "E.1.1.1", Vec::new(), per_frame);
+    // eight frames of two by two 16-bit pixels, each frame its number
+    let pixels: Vec<u8> = (1..=8u16)
+        .flat_map(|f| [f; 4])
+        .flat_map(u16::to_le_bytes)
+        .collect();
+    e.extend([
+        synth::text(tags::PATIENT_ID, VR::LO, "P-E"),
+        synth::text(tags::STUDY_DATE, VR::DA, "20220115"),
+        synth::text(tags::SERIES_DESCRIPTION, VR::LO, "t1 tse"),
+        synth::text(tags::MANUFACTURER, VR::LO, "SYNTHETIC"),
+        synth::us(tags::ROWS, 2),
+        synth::us(tags::COLUMNS, 2),
+        synth::us(tags::BITS_ALLOCATED, 16),
+        synth::us(tags::BITS_STORED, 16),
+        synth::us(tags::SAMPLES_PER_PIXEL, 1),
+        synth::bytes(tags::PIXEL_DATA, VR::OW, pixels),
+    ]);
+    source.file(
+        "E/1",
+        &synth::part10(&synth::enhanced_meta("E.1.1.1"), &e, true),
+    );
+    let home_dir = TempDir::new("release-home");
+    let (_home, mut reg) = registry(&home_dir, &source);
+    let stacks: Vec<i64> = reg
+        .store()
+        .query("SELECT id FROM stack ORDER BY id", &[])
+        .unwrap()
+        .iter()
+        .map(|r| r.int(0).unwrap())
+        .collect();
+    assert_eq!(stacks.len(), 2, "the digest made two stacks of the file");
+    let policy = Policy::default();
+    let scheme = SessionScheme::default();
+
+    let out = TempDir::new("release-enhanced-out");
+    let report = run::run(&mut reg, &settings(out.path(), &policy, &scheme)).unwrap();
+    assert_eq!(report.stacks, 2, "both planned: {report:?}");
+    let written: Vec<_> = files_under(out.path())
+        .into_iter()
+        .filter(|p| p.extension().is_some_and(|x| x == "dcm"))
+        .collect();
+    assert_eq!(written.len(), 2, "{written:?}");
+    let mut uids = std::collections::BTreeSet::new();
+    let mut firsts = Vec::new();
+    for p in &written {
+        let o = dicom_object::open_file(p).unwrap();
+        assert_eq!(
+            o.element(tags::NUMBER_OF_FRAMES).unwrap().to_str().unwrap(),
+            "4"
+        );
+        let px = o
+            .element(tags::PIXEL_DATA)
+            .unwrap()
+            .to_bytes()
+            .unwrap()
+            .to_vec();
+        assert_eq!(px.len(), 4 * 4 * 2, "four frames of four 16-bit pixels");
+        firsts.push(u16::from_le_bytes([px[0], px[1]]));
+        uids.insert(
+            o.element(tags::SOP_INSTANCE_UID)
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .to_string(),
+        );
+        assert_eq!(
+            o.meta()
+                .media_storage_sop_instance_uid()
+                .trim_end_matches('\0'),
+            o.element(tags::SOP_INSTANCE_UID)
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .trim_end_matches('\0')
+        );
+    }
+    firsts.sort_unstable();
+    assert_eq!(
+        firsts,
+        [1, 5],
+        "each file begins with its own stack's first frame"
+    );
+    assert_eq!(uids.len(), 2, "each its own UID");
+
+    // the second stack named alone is planned and written alone
+    let one = TempDir::new("release-enhanced-one");
+    let mut s = settings(one.path(), &policy, &scheme);
+    s.name = "the second";
+    s.selection.stacks = vec![stacks[1]];
+    let report = run::run(&mut reg, &s).unwrap();
+    assert_eq!(report.stacks, 1, "{report:?}");
+    let written: Vec<_> = files_under(one.path())
+        .into_iter()
+        .filter(|p| p.extension().is_some_and(|x| x == "dcm"))
+        .collect();
+    assert_eq!(written.len(), 1, "{written:?}");
+}

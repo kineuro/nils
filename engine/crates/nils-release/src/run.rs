@@ -402,6 +402,10 @@ struct Instance {
     /// what the digest trusts and no more (§8.6).
     size: i64,
     mtime: i64,
+    /// Of an enhanced file the digest split between stacks, this stack's
+    /// frames as ranges (`1-4,9`): the file is written with those alone
+    /// (#463). None where the file is one stack's whole.
+    frames: Option<String>,
 }
 
 /// What one stack's release is, once the plan and the state have been joined
@@ -2953,15 +2957,17 @@ fn left_out_unless_asked(
     if selection.names_dispositions() {
         return Ok(out);
     }
-    let from = selection_from(store);
     let filter = filter_of(store, selection, picks, false);
-    let sql = format!(
-        "SELECT a.value, COUNT(DISTINCT k.id) {from} \
-         JOIN {} a ON a.stack_id = k.id AND a.axis = 'disposition' \
-         WHERE a.value IN ({}){filter} GROUP BY a.value ORDER BY a.value",
-        store.qualified("classification_axis"),
-        quoted(LEFT_OUT_UNLESS_ASKED)
-    );
+    let axis = store.qualified("classification_axis");
+    let left = quoted(LEFT_OUT_UNLESS_ASKED);
+    let rows = both_ways(store, "UNION ALL", |from| {
+        format!(
+            "SELECT a.value AS v, k.id AS s {from} \
+             JOIN {axis} a ON a.stack_id = k.id AND a.axis = 'disposition' \
+             WHERE a.value IN ({left}){filter}"
+        )
+    });
+    let sql = format!("SELECT v, COUNT(DISTINCT s) FROM ({rows}) u GROUP BY v ORDER BY v");
     for r in store.query(&sql, &[])? {
         out.insert(r.text(0)?.to_string(), r.int(1)?);
     }
@@ -3013,9 +3019,10 @@ fn freeze_picks(
 ) -> Result<nils_registry::pick_truth::Frozen, Error> {
     let taken: Vec<(i64, i64)> = {
         let store = registry.store();
-        let from = selection_from(store);
         let filter = selection_where(store, &settings.selection, live);
-        let sql = format!("SELECT DISTINCT k.id, se.subject_id {from} WHERE 1 = 1{filter}");
+        let sql = both_ways(store, "UNION", |from| {
+            format!("SELECT DISTINCT k.id, se.subject_id {from} WHERE 1 = 1{filter}")
+        });
         store
             .query(&sql, &[])?
             .iter()
@@ -3196,9 +3203,10 @@ impl Policies {
         };
         // the source roots the selection reaches, and the dataset holding
         // each
-        let from = selection_from(store);
         let filter = selection_where(store, &settings.selection, picks);
-        let sql = format!("SELECT DISTINCT so.root, so.root_canonical {from} WHERE 1 = 1{filter}");
+        let sql = both_ways(store, "UNION", |from| {
+            format!("SELECT DISTINCT so.root, so.root_canonical {from} WHERE 1 = 1{filter}")
+        });
         let roots: Vec<(String, String)> = store
             .query(&sql, &[])?
             .iter()
@@ -3276,7 +3284,9 @@ impl Policies {
     }
 }
 
-/// The joined tables every selection reader walks.
+/// The joined tables every selection reader walks: each instance under the
+/// stack its row names. A stack that lives only in later frames of an
+/// enhanced file is reached through [`selection_from_frames`] beside it.
 fn selection_from(store: &mut Store) -> String {
     format!(
         "FROM {instance} i \
@@ -3294,17 +3304,59 @@ fn selection_from(store: &mut Store) -> String {
     )
 }
 
+/// The same tables for the stacks an enhanced file holds in frames beyond
+/// its first stack (#463): each such stack with the instance whose frames
+/// it lives in, which `instance.stack_id` names under the file's first
+/// stack. The aliases are [`selection_from`]'s, so a reader's columns and
+/// filter read both alike.
+fn selection_from_frames(store: &mut Store) -> String {
+    format!(
+        "FROM {instance_frame} fr \
+         JOIN {instance} i ON i.id = fr.instance_id AND i.stack_id <> fr.stack_id \
+         JOIN {stack} k ON k.id = fr.stack_id \
+         JOIN {series} se ON se.id = i.series_id \
+         JOIN {subject} su ON su.id = se.subject_id \
+         JOIN {source_file} sf ON sf.instance_id = i.id \
+         JOIN {source} so ON so.id = sf.source_id",
+        instance_frame = store.qualified("instance_frame"),
+        instance = store.qualified("instance"),
+        stack = store.qualified("stack"),
+        series = store.qualified("series"),
+        subject = store.qualified("subject"),
+        source_file = store.qualified("source_file"),
+        source = store.qualified("source"),
+    )
+}
+
+/// A reader's query over both ways a stack reaches its files, `q` written
+/// once for a FROM clause: the rows through `instance.stack_id`, then those
+/// of the stacks that live in an enhanced file's later frames (#463), each
+/// half on its own indexes.
+fn both_ways(store: &mut Store, op: &str, q: impl Fn(&str) -> String) -> String {
+    let (plain, framed) = (selection_from(store), selection_from_frames(store));
+    format!("{} {op} {}", q(&plain), q(&framed))
+}
+
+/// The frames of a file a row's stack is written from: of a file the
+/// digest split between stacks, this stack's frames as ranges; null for a
+/// file that is one stack's whole.
+fn frames_column(store: &mut Store) -> String {
+    format!(
+        "(SELECT f.frames FROM {} f WHERE f.instance_id = i.id AND f.stack_id = k.id)",
+        store.qualified("instance_frame")
+    )
+}
+
 /// The subjects the selection reaches, in a fixed order.
 fn selected_subjects(
     store: &mut Store,
     selection: &Selection,
     picks: &Picks,
 ) -> Result<Vec<(i64, String)>, Error> {
-    let from = selection_from(store);
     let filter = selection_where(store, selection, picks);
-    let sql = format!(
-        "SELECT DISTINCT se.subject_id, su.code {from} WHERE 1 = 1{filter} ORDER BY se.subject_id"
-    );
+    let sql = both_ways(store, "UNION", |from| {
+        format!("SELECT DISTINCT se.subject_id, su.code {from} WHERE 1 = 1{filter}")
+    }) + " ORDER BY 1";
     let mut out = Vec::new();
     for r in store.query(&sql, &[])? {
         out.push((r.int(0)?, r.text(1)?.to_string()));
@@ -3314,12 +3366,13 @@ fn selected_subjects(
 
 /// How much source the selection is, for the preflight.
 fn selection_bytes(store: &mut Store, selection: &Selection, picks: &Picks) -> Result<i64, Error> {
-    let from = selection_from(store);
     let filter = selection_where(store, selection, picks);
     // Cast, because a sum of bigints is a numeric on Postgres and the store
     // reads a numeric only as text.
-    let sql =
-        format!("SELECT CAST(COALESCE(SUM(sf.size), 0) AS BIGINT) {from} WHERE 1 = 1{filter}");
+    let rows = both_ways(store, "UNION ALL", |from| {
+        format!("SELECT sf.size AS b {from} WHERE 1 = 1{filter}")
+    });
+    let sql = format!("SELECT CAST(COALESCE(SUM(b), 0) AS BIGINT) FROM ({rows}) u");
     Ok(store
         .query_opt(&sql, &[])?
         .map(|r| r.int(0))
@@ -3342,10 +3395,15 @@ pub struct Preview {
 
 pub fn preview(store: &mut Store, selection: &Selection) -> Result<Preview, Error> {
     let (reading, _) = picks_read(store, selection, "", "")?;
-    let from = selection_from(store);
     let filter = selection_where(store, selection, &Picks::Live(reading));
+    let rows = both_ways(store, "UNION ALL", |from| {
+        format!(
+            "SELECT su.id AS a, se.study_id AS b, k.id AS c, sf.size AS d {from} WHERE 1 = 1{filter}"
+        )
+    });
     let sql = format!(
-        "SELECT COUNT(DISTINCT su.id), COUNT(DISTINCT se.study_id), COUNT(DISTINCT k.id),                 COUNT(*), CAST(COALESCE(SUM(sf.size), 0) AS BIGINT)          {from} WHERE 1 = 1{filter}"
+        "SELECT COUNT(DISTINCT a), COUNT(DISTINCT b), COUNT(DISTINCT c), COUNT(*), \
+         CAST(COALESCE(SUM(d), 0) AS BIGINT) FROM ({rows}) u"
     );
     let r = store.query(&sql, &[])?;
     let Some(r) = r.first() else {
@@ -3370,30 +3428,30 @@ fn select_subject(
     subject: i64,
     picks: &Picks,
 ) -> Result<Vec<Instance>, Error> {
-    let from = selection_from(store);
     let filter = selection_where(store, selection, picks);
-    let sql = format!(
-        // The stored path is relative to the batch root it was walked from,
-        // which is what makes a registry portable; the root is on `source`.
-        "SELECT i.id, k.id, se.study_id, so.root, sf.path, \
-                sf.size, sf.mtime_ns \
-         {from} WHERE se.subject_id = {}{filter} \
-         ORDER BY se.study_id, k.id, i.id",
-        store.dialect().param(1, Type::Int),
-    );
-    rows_to_instances(store.query(&sql, &[Param::Int(subject)])?)
+    let frames = frames_column(store);
+    // The stored path is relative to the batch root it was walked from,
+    // which is what makes a registry portable; the root is on `source`.
+    // The id is a number, written into both halves of the text.
+    let sql = both_ways(store, "UNION ALL", |from| {
+        format!(
+            "SELECT i.id, k.id, se.study_id, so.root, sf.path, sf.size, sf.mtime_ns, {frames} \
+             {from} WHERE se.subject_id = {subject}{filter}"
+        )
+    }) + " ORDER BY 3, 2, 1";
+    rows_to_instances(store.query(&sql, &[])?)
 }
 
 /// One stack's instances, read only when the stack is written.
 fn instances_of(store: &mut Store, stack: i64) -> Result<Vec<Instance>, Error> {
-    let from = selection_from(store);
-    let sql = format!(
-        "SELECT i.id, k.id, se.study_id, so.root, sf.path, \
-                sf.size, sf.mtime_ns \
-         {from} WHERE k.id = {} ORDER BY i.id",
-        store.dialect().param(1, Type::Int),
-    );
-    rows_to_instances(store.query(&sql, &[Param::Int(stack)])?)
+    let frames = frames_column(store);
+    let sql = both_ways(store, "UNION ALL", |from| {
+        format!(
+            "SELECT i.id, k.id, se.study_id, so.root, sf.path, sf.size, sf.mtime_ns, {frames} \
+             {from} WHERE k.id = {stack}"
+        )
+    }) + " ORDER BY 1";
+    rows_to_instances(store.query(&sql, &[])?)
 }
 
 fn rows_to_instances(rows: Vec<nils_registry::store::Row>) -> Result<Vec<Instance>, Error> {
@@ -3401,19 +3459,22 @@ fn rows_to_instances(rows: Vec<nils_registry::store::Row>) -> Result<Vec<Instanc
     let mut seen = std::collections::HashSet::new();
     for r in rows {
         let id = r.int(0)?;
+        let stack = r.int(1)?;
         // An instance may sit under more than one path (Wave 1's duplicate
-        // handling); one copy of it is written.
-        if !seen.insert(id) {
+        // handling); one copy of it is written. An enhanced file split
+        // between stacks is one instance under each of them (#463).
+        if !seen.insert((id, stack)) {
             continue;
         }
         out.push(Instance {
             id,
-            stack: r.int(1)?,
+            stack,
             study: r.int(2)?,
             root: r.text(3)?.to_string(),
             path: Path::new(r.text(3)?).join(r.text(4)?).display().to_string(),
             size: r.int(5)?,
             mtime: r.int(6)?,
+            frames: r.opt_text(7)?.map(str::to_string),
         });
     }
     Ok(out)
@@ -3508,6 +3569,9 @@ struct Written {
 fn write_one(instance: &Instance, plan: &Plan, root: &Path, dir: &str) -> Result<Written, String> {
     let mut object = open(Path::new(&instance.path))?;
     let applied = scrub::apply(&mut object, plan);
+    if let Some(frames) = &instance.frames {
+        keep_frames(&mut object, frames, instance.stack, plan.remap)?;
+    }
 
     let relative = PathBuf::from(dir).join(format!("{:08}.dcm", instance.id));
     let target = root.join(&relative);
@@ -3536,6 +3600,53 @@ fn write_one(instance: &Instance, plan: &Plan, root: &Path, dir: &str) -> Result
         applied,
     })
 }
+
+/// Write an enhanced file the digest split between stacks as one stack's
+/// (#463): its frames alone kept, and a SOP Instance UID of its own, since
+/// the object written is no longer the one the file held and the file's
+/// other stack is written beside it. The UID is the file's, as the plan
+/// wrote it, remapped with the stack under the release's key where UIDs
+/// are remapped, and under the `2.25` arc otherwise; the same for ever.
+fn keep_frames(
+    object: &mut dicom_object::DefaultDicomObject,
+    frames: &str,
+    stack: i64,
+    remap: Option<&crate::uid::Remap>,
+) -> Result<(), String> {
+    let list = nils_dicom::split::frame_list(frames)?;
+    let ts = object
+        .meta()
+        .transfer_syntax()
+        .trim_end_matches('\0')
+        .to_string();
+    nils_dicom::split::keep_frames(object, &list, &ts)?;
+    let was = object
+        .element(dicom_dictionary_std::tags::SOP_INSTANCE_UID)
+        .ok()
+        .and_then(|e| {
+            e.to_str()
+                .ok()
+                .map(|s| s.trim_end_matches('\0').trim().to_string())
+        })
+        .unwrap_or_default();
+    let part = format!("{was}.frames.{stack}");
+    let new = match remap {
+        Some(r) => r.of(&part),
+        None => crate::uid::Remap::new(crate::uid::Root::default(), FRAMES_KEY).of(&part),
+    };
+    object.put(dicom_core::DataElement::new(
+        dicom_dictionary_std::tags::SOP_INSTANCE_UID,
+        dicom_core::VR::UI,
+        dicom_core::PrimitiveValue::from(new.clone()),
+    ));
+    object.update_meta(|m| m.media_storage_sop_instance_uid = new);
+    Ok(())
+}
+
+/// The key a split file's UID is made under where a release keeps UIDs:
+/// not a secret, only a domain, so that the UID is the same for ever and
+/// no other's.
+const FRAMES_KEY: &[u8] = b"nils/release/frames of a split file";
 
 /// Add one field to the sidecar the converter wrote, if it wrote one.
 ///
