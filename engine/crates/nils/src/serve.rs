@@ -5240,7 +5240,12 @@ fn scans_door(
     // record 55 H2: each scan's picture inline and its open questions, so
     // a page of the grid is one request
     if pictures {
-        crate::scans::with_pictures(registry, caller, &doors.home, &mut doc)?;
+        // with `links=1` each picture is the address of the preview door's
+        // middle plane rather than its bytes (the Data page's speed)
+        let links = query
+            .get("links")
+            .is_some_and(|p| matches!(p.as_str(), "1" | "true"));
+        crate::scans::with_pictures(registry, caller, &doors.home, &mut doc, links)?;
     }
     Ok(Reply::ok(doc))
 }
