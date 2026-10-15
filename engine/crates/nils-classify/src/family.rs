@@ -271,6 +271,7 @@ pub fn in_force(
          WHERE withdrawn_at IS NULL AND (staged_at IS NULL OR committed_at IS NOT NULL)",
         store.qualified("decision")
     );
+    let order = " ORDER BY id";
     let mut rows: Vec<Row> = Vec::new();
     let mut take = |store: &mut Store, sql: String| -> Result<(), StoreError> {
         for r in store.query(&sql, &[])? {
@@ -286,7 +287,7 @@ pub fn in_force(
         Ok(())
     };
     match stacks {
-        None => take(store, base.clone())?,
+        None => take(store, format!("{base}{order}"))?,
         Some(stacks) => {
             let series: Vec<i64> = tree
                 .values()
@@ -311,12 +312,15 @@ pub fn in_force(
                     if !chunk.is_empty() {
                         take(
                             store,
-                            format!("{base} AND scope = '{scope}' AND ref IN ({})", refs(chunk)),
+                            format!(
+                                "{base} AND scope = '{scope}' AND ref IN ({}){order}",
+                                refs(chunk)
+                            ),
                         )?;
                     }
                 }
             }
-            take(store, format!("{base} AND scope = 'origin'"))?;
+            take(store, format!("{base} AND scope = 'origin'{order}"))?;
         }
     }
     // a stack's scanner, where an origin decision may name it
@@ -400,7 +404,7 @@ pub fn in_force(
         for row in &origins {
             let key = (row.reference.to_lowercase(), row.axis.clone());
             match latest.get(&key) {
-                Some(held) if held.rank > row.rank => {}
+                Some(held) if (held.rank, held.id) > (row.rank, row.id) => {}
                 _ => {
                     latest.insert(key, row);
                 }
@@ -458,7 +462,15 @@ pub fn families_with(
     let mut every: BTreeSet<i64> = said.keys().copied().collect();
     match stacks {
         Some(s) => every.extend(s.iter().copied()),
-        None => every.extend(decided.keys().copied()),
+        None => {
+            // a stack known only by its provenance (a display composite)
+            // has a family too
+            every.extend(decided.keys().copied());
+            let stack_t = store.qualified("stack");
+            for r in store.query(&format!("SELECT id FROM {stack_t}"), &[])? {
+                every.insert(r.int(0)?);
+            }
+        }
     }
     for stack in every {
         let family = acquisition_family(
