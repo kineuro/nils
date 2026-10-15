@@ -4,6 +4,10 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [1.0.0-alpha.82] - 2026-10-15
+
+Wave 7a's remaining work after the beta: the rules engine, Review in bulk, plain admin access, body part and post-contrast as layers of the Main scans map, one lookup from an ID to its subject code, and the acquisition family in names. Goes with desk 1.0.0-alpha.65. The assistant pin moves to 1.0.0-alpha.29; the Kvasir pin is unchanged.
+
 ### Security
 
 - A rule that reads subject codes (the one a dataset's declaration writes for its pseudonymised tree, and a rule file's `code: verbatim`) never reads a personnummer as one. The subject code alphabet spells a personnummer's digits, so under a declaration that PatientID holds the subject code, a file whose PatientID held a twelve-digit personnummer became a subject whose code was the number, shown wherever codes are and written into a release's `sub-` names. Such a value does not answer the rule (an `identity_unparsed` diagnostic, shape only), and in a dataset's tree the file is held as above.
