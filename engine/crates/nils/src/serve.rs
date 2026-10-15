@@ -1177,6 +1177,16 @@ pub fn serve(home: &Home, args: ServeArgs) -> Result<(), Exit> {
         backup_dir: args.backup_dir.clone(),
         pick_references: Default::default(),
     });
+    // and the sources door's document read once behind the doors, so the
+    // Data page's first visit after a start finds it kept
+    {
+        let home = home.clone();
+        std::thread::spawn(move || {
+            if let Ok(mut registry) = home.open() {
+                let _ = crate::sources::document_kept(&mut registry, SOURCES_RECENT);
+            }
+        });
+    }
     let limit = args.requests;
     // A job a door queues runs without anyone starting a worker by hand. A
     // registry's queue has one worker, so where another already holds it,
@@ -1626,6 +1636,10 @@ impl Watchdog {
     }
 }
 
+/// How many recent digests the desk's Data page asks the sources door for,
+/// which the engine reads once as it starts.
+const SOURCES_RECENT: usize = 12;
+
 /// Load every pack in the folder, each on a thread of its own, and the
 /// served one as the reader keeps it: a pack's load runs its whole corpus,
 /// a second or more, which the first request after a start paid before
@@ -1983,6 +1997,10 @@ fn route(
         && (path.starts_with("/api/places") || path.starts_with("/api/datasets"))
     {
         crate::dataset::forget_layouts();
+    }
+    // any write at a door may change what the sources door reads
+    if *method != Method::Get {
+        crate::sources::forget();
     }
     match routed(doors, registry, ask, caller, method, path, query, body) {
         Ok(r) => r,
@@ -2731,9 +2749,12 @@ fn routed(
                         place::set(registry.store(), p.id, None, None, Some(&probed))?;
                     }
                 }
+                crate::sources::forget();
             }
+            // kept while what it was read from is the same (the Data page's
+            // speed, 2026-10-15)
             Ok(Reply::ok(
-                crate::sources::document(registry, recent)
+                crate::sources::document_kept(registry, recent)
                     .map_err(|e| Reply::error(500, e.to_string()))?,
             ))
         }
