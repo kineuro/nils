@@ -4,6 +4,10 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Changed
+
+- `nils score --step post_contrast`, and the scoring at the end of a bring-in, queue post-contrast's cascade only over the new stacks that can be T1-type brain by their stored axes (the base is T1w and the technique is not TOF or PC, and the body part says brain, the body region says head, or the body part is not answered yet), the test the cascade itself applies before it scores. A stack left out is not sent and gets no answer; the score's result says how many were left out (`left_out`, "not T1-type brain by the stored axes"), and where none qualifies nothing is queued and the step is skipped with that reason.
+
 ## [1.0.0-alpha.84] - 2026-10-15
 
 Ruling 27: a model stages on its admission; certificates serve the paper.
