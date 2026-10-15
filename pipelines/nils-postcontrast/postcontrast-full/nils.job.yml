@@ -41,8 +41,10 @@
 # no FSL or CorTechs tools, no licence key, no ptxas or Triton. Its
 # NOTICE and the licences it ships say whose terms each part is under. The
 # weights and the atlases are the run's model inputs, never part of the
-# image; it runs offline. The digest below is a development pin until the
-# image is pushed.
+# image; it runs offline. The release does not build this image (its
+# build needs more disk than a hosted runner): it is published from a
+# machine with the room by scripts/publish-postcontrast-full.sh, which
+# pins the digest below, and the release ships this pin as it is.
 name: postcontrast-full
 schema-version: "0.5"
 tool-version: "0.2.0"
@@ -52,7 +54,7 @@ description: >-
 
 container-image:
   type: docker
-  image: "ghcr.io/kineuro/nils-postcontrast-full@sha256:591f596ec1f43accf338a64222f02da3e6c7e6a7a3fbae59790d4e8162f6dde1"
+  image: "ghcr.io/kineuro/nils-postcontrast-full@sha256:aebd89528347ec70172086b799e6c5bd463d0bf5306e0aa155e6e90e65ecf0c4"
 
 inputs:
   - id: threads
