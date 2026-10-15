@@ -1121,12 +1121,23 @@ fn flow(pg: Option<(String, String)>) {
         OPS,
     );
     let st = &gated["rounds"][0]["gated"]["staged"];
-    assert_eq!((st["kept"].clone(), st["withdrawn"].clone()), (json!(1), json!(0)), "{gated}");
-    assert!(
-        st["waiting"].as_str().unwrap_or_default().contains("not served"),
+    assert_eq!(
+        (st["kept"].clone(), st["withdrawn"].clone()),
+        (json!(1), json!(0)),
         "{gated}"
     );
-    assert_eq!(waiting_by(&home), [("model".to_string(), Some(other))], "{gated}");
+    assert!(
+        st["waiting"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("not served"),
+        "{gated}"
+    );
+    assert_eq!(
+        waiting_by(&home),
+        [("model".to_string(), Some(other))],
+        "{gated}"
+    );
     home.exec(&format!(
         "UPDATE {{opinion}} SET p = 0.3 WHERE stack_id = {bare_n} AND axis = 'base'"
     ));
@@ -1174,7 +1185,11 @@ fn flow(pg: Option<(String, String)>) {
         OPS,
     );
     let st = &gated["rounds"][0]["gated"]["staged"];
-    assert_eq!((st["withdrawn"].clone(), st["kept"].clone()), (json!(1), json!(0)), "{gated}");
+    assert_eq!(
+        (st["withdrawn"].clone(), st["kept"].clone()),
+        (json!(1), json!(0)),
+        "{gated}"
+    );
     assert!(waiting_by(&home).is_empty(), "{gated}");
     drop(server);
     let server = Served::start(&home, &path, true);
@@ -1279,7 +1294,11 @@ fn flow(pg: Option<(String, String)>) {
     );
     let st = &gated["rounds"][0]["gated"]["staged"];
     assert_eq!(st["count"], 0, "{gated}");
-    assert_eq!(st["not_staged"].as_object().map(|m| m.len()), Some(1), "{gated}");
+    assert_eq!(
+        st["not_staged"].as_object().map(|m| m.len()),
+        Some(1),
+        "{gated}"
+    );
     assert_eq!(
         questions(&home, bare_n),
         [("base:disagree".to_string(), "open".to_string())],
