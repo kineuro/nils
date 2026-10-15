@@ -5258,6 +5258,12 @@ pub(crate) fn door(method: &str, segs: &[&str]) -> (Need, Detail) {
         ("POST", ["api", "linkage", "held", "reveal"]) | ("POST", ["api", "linkage", "merge"]) => {
             (Need::One("data:work"), Detail::Sensitive)
         }
+        // record 55, ruling 24: one ID a caller gives, turned into its
+        // subject code, for anyone who may use the data that subject is in;
+        // a subject code is quasi-identifying
+        ("POST", ["api", "linkage", "resolve"]) => {
+            (Need::AnyOf(&["data:see", "query:see"]), Quasi)
+        }
         // record 55 H2: a pick run is the pick verb queued, which is
         // Pipelines work as at the jobs door
         ("POST", ["api", "picks", "run"]) => (Need::One("pipelines:work"), Plain),
@@ -7541,6 +7547,15 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
             "one id",
             "Merging two subjects",
             "Merged two subjects",
+        ),
+        row(
+            "POST /api/linkage/resolve",
+            false,
+            false,
+            "bounded",
+            "one subject code",
+            "Finding a subject by an ID",
+            "Found a subject by an ID",
         ),
         row(
             "GET /api/backups",
