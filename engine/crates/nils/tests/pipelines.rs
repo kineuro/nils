@@ -3644,11 +3644,13 @@ fn an_optional_gpu_need_takes_the_leased_card_under_apptainer_and_else_the_cpu()
             None,
         );
     };
-    let env: [(&str, &Path); 4] = [
+    let env: [(&str, &Path); 5] = [
         ("FAKE_APPTAINER_ARGS", &calls),
         ("FAKE_GPU_FREE", &free),
         ("FAKE_GPU_TOTAL", &total),
         ("FAKE_GPU_ASKED", &asked),
+        // a full card gives way to the CPU after one second here, not 60
+        ("NILS_CARD_GRACE_S", Path::new("1")),
     ];
     // a run, and the containers it started: the `run` calls since the last
     let seen = std::cell::Cell::new(0usize);
@@ -3786,6 +3788,44 @@ fn an_optional_gpu_need_takes_the_leased_card_under_apptainer_and_else_the_cpu()
         "{pre}"
     );
 
+    // a card large enough but full (another tenant holds it): the units
+    // wait the grace, then run on the CPU, and their logs and the
+    // pre-flight say why; they never wait for it to empty
+    std::fs::write(&total, "98304").unwrap();
+    std::fs::write(&free, "1000").unwrap();
+    let pre = preflight("gpu-optional");
+    let why = pre["gpu"]["why"].as_str().unwrap_or_default();
+    assert!(
+        why.contains("card 1 has 1000 MiB free now") && why.contains("runs on the CPU"),
+        "{pre}"
+    );
+    let (ok, r, err, execs) = run("gpu-optional", &[]);
+    assert!(ok, "{err}");
+    assert_eq!(execs.len(), 4, "{execs:?}");
+    for e in &execs {
+        assert!(!e.iter().any(|w| w == "--nv"), "{e:?}");
+        assert!(
+            !e.iter().any(|w| w.starts_with("NILS_GPU_MEMORY_GB")),
+            "{e:?}"
+        );
+    }
+    for u in r["units_run"].as_array().unwrap() {
+        assert!(u["gpu_card"].is_null(), "{u}");
+    }
+    let run_id = r["id"].as_i64().unwrap();
+    let logs: Vec<String> = std::fs::read_dir(runs.join(run_id.to_string()).join("units"))
+        .unwrap()
+        .flatten()
+        .filter_map(|u| std::fs::read_to_string(u.path().join("log.txt")).ok())
+        .collect();
+    assert_eq!(logs.len(), 4, "{logs:?}");
+    for l in &logs {
+        assert!(
+            l.starts_with("nils: card 1: 1000 MiB free") && l.contains("this unit runs on the CPU"),
+            "{l}"
+        );
+    }
+
     // no card on the machine: the CPU
     std::fs::write(&total, "98304").unwrap();
     std::fs::write(&smi, "#!/bin/sh\nexit 1\n").unwrap();
@@ -3796,6 +3836,176 @@ fn an_optional_gpu_need_takes_the_leased_card_under_apptainer_and_else_the_cpu()
         execs.iter().all(|e| !e.iter().any(|w| w == "--nv")),
         "{execs:?}"
     );
+}
+
+/// Record 55 E5, after review: a pipeline that declares a slice cache is
+/// given the files' identities and the cache's mount only on a run that
+/// asks for the cache; a pass without it sees neither.
+#[test]
+fn the_cache_and_the_files_identities_only_for_a_run_that_asks() {
+    if !have("python3") {
+        eprintln!(
+            "python3 is not installed; the stand-in podman needs it, so this test is skipped"
+        );
+        return;
+    }
+    let lab = Lab::new("pipelines-cache-ask");
+    lab.add_descriptor(
+        "cached",
+        &format!(
+            r#"name: cached
+schema-version: "0.5"
+tool-version: "1"
+container-image:
+  type: docker
+  image: "example.org/cached@sha256:{hex}"
+inputs:
+  - id: cache
+    name: The slice cache
+    type: String
+    value-choices: ["/cache"]
+    value-key: "[CACHE]"
+    command-line-flag: --cache
+    optional: true
+command-line: |
+  python3 -c '
+  import json, os, sys
+  m = json.load(open(sys.argv[1])); out = sys.argv[2]
+  units = []
+  for s in m["stacks"]:
+      u = s["unit"]; d = os.path.join(out, u); os.makedirs(d, exist_ok=True)
+      ident = "identity" in s or any("identity" in f for f in s.get("files", []))
+      open(os.path.join(d, "out.txt"), "w").write("%s %s\n" % (ident, " ".join(sys.argv[3:])))
+      units.append({{"unit_id": u, "status": "succeeded", "derivatives": [u + "/out.txt"]}})
+  json.dump({{"schema_version": "1", "units": units}}, open(os.path.join(out, "results.json"), "w"))
+  ' [Manifest] [OutputLocation] [CACHE]
+x-nils:
+  analysis-level: stack
+  input: {{layout: stacks}}
+  cache: {{inputs: [stand-in-planes:v1]}}
+  outputs:
+    - id: o
+      kind: output
+      path-template: "stack-{{stack}}/out.txt"
+      media-type: text/plain
+"#,
+            hex = "f".repeat(64)
+        ),
+    );
+    let calls = lab.bin.path().join("args.log");
+    let mut seen = 0;
+    for (asked, args) in [(false, vec![]), (true, vec!["--param", "cache=/cache"])] {
+        let mut words = vec!["run", "cached", "--select", "selection:every@1", "--json"];
+        words.extend(args);
+        let r = lab.json(&words);
+        assert_eq!(r["status"], "done", "{r}");
+        let dir = lab
+            .work
+            .path()
+            .join(format!("derivatives/cached/{}", r["id"]));
+        let told: BTreeSet<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .filter_map(|e| std::fs::read_to_string(e.path().join("out.txt")).ok())
+            .map(|s| s.trim().split(' ').next().unwrap_or_default().to_string())
+            .collect();
+        assert_eq!(
+            told,
+            BTreeSet::from([if asked { "True" } else { "False" }.to_string()])
+        );
+        let all: Vec<Vec<String>> = std::fs::read_to_string(&calls)
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        let new = &all[seen..];
+        seen = all.len();
+        assert!(!new.is_empty());
+        for c in new {
+            let mounted = c
+                .windows(2)
+                .any(|w| w[0] == "--volume" && w[1].contains(":/cache"));
+            assert_eq!(mounted, asked, "{c:?}");
+            // no apptainer, so no work folder
+            assert!(!c.iter().any(|w| w == "--workdir"), "{c:?}");
+        }
+    }
+}
+
+/// Record 55 T24, after review: a unit that asks the lane's cores takes
+/// those free at its start, at least one, so it never waits for the whole
+/// lane while another run holds part of it; the container is told what it
+/// took as NILS_CORES.
+#[test]
+fn a_lane_s_unit_takes_the_cores_free_at_its_start() {
+    if !have("python3") {
+        eprintln!("python3 is not installed; the stand-ins need it, so this test is skipped");
+        return;
+    }
+    let lab = Lab::new("pipelines-lane-free");
+    let t = lab.work.path().join("trace");
+    let hold = lab.work.path().join("hold");
+    std::fs::write(&hold, "").unwrap();
+    lab.add_descriptor(
+        "holder",
+        &stack_slow("holder", "{cores: 2, memory-gb: 1}", ""),
+    );
+    lab.add_descriptor(
+        "wide-slow",
+        &stack_slow("wide-slow", "{cores: lane, memory-gb: 1}", ""),
+    );
+    lab.ok(
+        &["pipeline", "lane", "--cores", "3", "--memory-gb", "100"],
+        None,
+    );
+    // runs over the same stacks run one after another: two disjoint halves
+    let s = stack_ids(&lab);
+    select_stacks(&lab, "left", &s[..2]);
+    select_stacks(&lab, "right", &s[2..]);
+    let run = |name: &str, sel: &str| -> Vec<String> {
+        vec![
+            "run".into(),
+            name.into(),
+            "--select".into(),
+            sel.into(),
+            "--param".into(),
+            "sleep=0".into(),
+            "--json".into(),
+        ]
+    };
+    let words = run("holder", "selection:left@1");
+    let words: Vec<&str> = words.iter().map(String::as_str).collect();
+    let mut holder = lab.start(&t, &words, &[("SLOW_HOLD", &hold)]);
+    lab.wait_count(
+        "SELECT COUNT(*) FROM pipeline_unit WHERE state = 'running'",
+        1,
+        "the holder's first unit",
+    );
+    // 2 of the lane's 3 cores are held: each of the wide run's units takes
+    // the 1 free, and the run ends while the holder still holds its 2
+    let words = run("wide-slow", "selection:right@1");
+    let words: Vec<&str> = words.iter().map(String::as_str).collect();
+    let (ok, out, err) = lab.traced(&t, &words);
+    assert!(ok, "{err}");
+    let r: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(r["status"], "done", "{r}");
+    let starts: Vec<Vec<String>> = std::fs::read_to_string(&t)
+        .unwrap()
+        .lines()
+        .map(|l| l.split_whitespace().map(str::to_string).collect::<Vec<_>>())
+        .filter(|w| w[0] == "start")
+        .collect();
+    assert_eq!(starts[0][4], "2", "the holder: {starts:?}");
+    let wide = &starts[1..];
+    assert_eq!(
+        wide.len(),
+        r["units_run"].as_array().unwrap().len(),
+        "{starts:?}"
+    );
+    assert!(wide.iter().all(|w| w[4] == "1"), "{starts:?}");
+    std::fs::remove_file(&hold).unwrap();
+    let (ok, _, err) = holder.finish(60);
+    assert!(ok, "{err}");
 }
 
 /// Record 55 T24: a unit that asks every core of the lane (`cores: lane`)
@@ -4000,9 +4210,13 @@ fn a_release_s_descriptor_is_added_by_name_and_checked_by_its_sums() {
     let (ok, _, err) = add(&["--release", "stack-echo"]);
     assert!(!ok);
     assert!(
-        err.contains("does not match the release's checksum"),
+        err.contains("failed their integrity check")
+            && err.contains("does not match the release's checksum")
+            && err.contains("nothing was added"),
         "{err}"
     );
+    // no advice to take a descriptor from elsewhere
+    assert!(!err.contains("nils pipeline add <nils.job.yml>"), "{err}");
     // --channel speaks of a release only
     let (ok, _, err) = add(&["--channel", &channel, "x.yml"]);
     assert!(!ok);

@@ -426,10 +426,19 @@ pub(crate) fn descriptors_in(bytes: &[u8]) -> Result<BTreeMap<String, String>, S
 pub(crate) fn release_descriptor(base: &str, version: &str, name: &str) -> Result<String, Exit> {
     let bytes =
         crate::update::fetch_checked(base, version, RELEASE_DESCRIPTORS).map_err(|e| {
-            usage(format!(
-                "the release {version} ships no descriptors that can be read here ({}); a build that is not a release adds a descriptor from its checkout: nils pipeline add <nils.job.yml>",
-                e.message
-            ))
+            if e.message.contains(crate::update::CHECKSUM_MISMATCH) {
+                // an integrity failure, never a reason to take another
+                // descriptor: nothing is added
+                fail(format!(
+                    "the release {version}'s descriptors failed their integrity check ({}): the file is not the one the release published, so nothing was added",
+                    e.message
+                ))
+            } else {
+                usage(format!(
+                    "the release {version} ships no descriptors that can be read here ({}); a build that is not a release adds a descriptor from its checkout: nils pipeline add <nils.job.yml>",
+                    e.message
+                ))
+            }
         })?;
     let mut all = descriptors_in(&bytes).map_err(usage)?;
     let Some(text) = all.remove(name) else {
@@ -3906,6 +3915,23 @@ pub(crate) fn card_too_small(d: &Descriptor, lane: &Lane) -> Option<(u32, u64)> 
         .then(|| (card, total.unwrap_or(0)))
 }
 
+/// Why a unit whose card is optional may run on the CPU though the card is
+/// large enough (record 55, after review): its free memory is below a
+/// unit's need now, and a unit that cannot lease it within the grace runs
+/// on the CPU. None where the card has room, or cannot be asked.
+pub(crate) fn card_full_words(d: &Descriptor, lane: &Lane) -> Option<String> {
+    let card = lane.card?;
+    let smi = runtime::which("nvidia-smi", std::env::var_os("PATH").as_deref())?;
+    let free = lane::gpu_free_mib(&smi, card).ok()?;
+    let need = lane::mib_of_gb(d.needs.gpu_memory_gb);
+    (free < need).then(|| {
+        format!(
+            "card {card} has {free} MiB free now, and a unit needs {need} MiB: a unit that cannot lease it within {} s runs on the CPU",
+            card_grace().as_secs()
+        )
+    })
+}
+
 /// Why a unit runs on the CPU though a card is offered: the lane's card is
 /// smaller than the unit's need, so a lease on it would never come.
 pub(crate) fn too_small_words(d: &Descriptor, card: u32, total_mib: u64) -> String {
@@ -4019,6 +4045,64 @@ fn job_alive(store: &mut Store, id: i64) -> bool {
 /// forever.
 pub(crate) const AUTO_RESUMES: i64 = 3;
 
+/// The folder beside a unit's log that holds an apptainer container's
+/// `/tmp` and `/var/tmp` (its `--workdir`): converted volumes and other
+/// clinical-derived files while the unit runs, gone when it ends.
+const WORKDIR: &str = "tmp";
+
+/// How long a unit whose card is optional waits for its lease before it
+/// runs on the CPU (record 55, after review): 60 s, or `NILS_CARD_GRACE_S`.
+fn card_grace() -> Duration {
+    let s = std::env::var("NILS_CARD_GRACE_S")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(60);
+    Duration::from_secs(s)
+}
+
+/// Remove every apptainer work folder of a run (its own and each unit's):
+/// what a stopped, cancelled or interrupted unit left in its `/tmp`.
+pub(crate) fn drop_workdirs(run_dir: &Path) {
+    let _ = std::fs::remove_dir_all(run_dir.join(WORKDIR));
+    if let Ok(units) = std::fs::read_dir(run_dir.join("units")) {
+        for u in units.flatten() {
+            let _ = std::fs::remove_dir_all(u.path().join(WORKDIR));
+        }
+    }
+}
+
+/// A run's scratch folder, `<scratch place>/runs/<id>`, where its place is
+/// still known.
+fn run_folder(store: &mut Store, r: &Run) -> Option<PathBuf> {
+    let id = r.scratch_place_id.or(r.place_id)?;
+    let place = nils_registry::place::show(store, id).ok().flatten()?;
+    Some(PathBuf::from(place.path).join(RUNS).join(r.id.to_string()))
+}
+
+/// At an engine's start: the work folders of every run that no longer
+/// runs, whatever ended it, are removed.
+pub(crate) fn sweep_workdirs(store: &mut Store) -> Result<usize, String> {
+    let err = |e: nils_registry::Error| e.to_string();
+    let mut swept = 0;
+    for status in [
+        "cancelled",
+        "interrupted",
+        "failed",
+        "succeeded",
+        "breach",
+        "refused",
+        "unreported",
+    ] {
+        for r in rows::runs_in(store, status).map_err(err)? {
+            if let Some(dir) = run_folder(store, &r) {
+                drop_workdirs(&dir);
+                swept += 1;
+            }
+        }
+    }
+    Ok(swept)
+}
+
 /// Record 49 A1: a run whose engine went away with units in flight (its
 /// job is over, or no longer heard from, and the run still says running)
 /// is marked interrupted and queued once to be taken up again, under what
@@ -4031,6 +4115,10 @@ pub(crate) fn take_up_interrupted(store: &mut Store) -> Result<usize, String> {
     for r in rows::runs_in(store, "running").map_err(err)? {
         if r.job_id.is_some_and(|j| job_alive(store, j)) {
             continue;
+        }
+        // what its units left in their /tmp goes, whatever comes next
+        if let Some(dir) = run_folder(store, &r) {
+            drop_workdirs(&dir);
         }
         let old = r.job_id.and_then(|j| job::show(store, j).ok().flatten());
         if old
@@ -5072,6 +5160,8 @@ struct Running {
     batch: Batch,
     child: std::process::Child,
     inv: Invocation,
+    /// The cores and memory it holds of the lane.
+    ask: lane::Ask,
 }
 
 /// What every batch of a run shares.
@@ -5168,6 +5258,8 @@ fn execute_run(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Resul
     let working = PathBuf::from(&x.output.path);
     let scratch_root = PathBuf::from(&x.scratch.path);
     let run_dir = scratch_root.join(RUNS).join(x.run_id.to_string());
+    // a resumed run's units in flight start again from a clean /tmp
+    drop_workdirs(&run_dir);
     let input = run_dir.join("input");
     let inputs = run_dir.join("inputs");
     let rel_out = format!("{}/{}/{}", derivative::TREE, p.name, x.run_id);
@@ -5228,7 +5320,7 @@ fn execute_run(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Resul
             d.header,
             d.geometry,
             d.contrast,
-            !d.cache.is_empty(),
+            d.asks_cache(x.params),
             d.rows,
         )?,
         (Layout::Bids, Some(release)) => released(registry, release, d.level)?,
@@ -5571,6 +5663,10 @@ fn execute_run(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Resul
             x.runtime.stop(&r.inv);
             let _ = runtime::kill(&mut r.child);
             let _ = r.child.wait();
+            // its /tmp held clinical-derived files: gone with the container
+            if let Some(w) = &r.inv.workdir {
+                let _ = std::fs::remove_dir_all(w);
+            }
             // record 49 R3: a unit stopped mid-way is swept as one that
             // ended; where the sweep cannot vouch for its folder, the
             // folder goes, since a resume runs the unit again from a clean
@@ -5709,6 +5805,14 @@ struct Lanes {
     looked: Option<Instant>,
     card_asked: Option<Instant>,
     waiting: Option<String>,
+    /// A unit that asks the lane's cores takes what is free at its start.
+    lane_cores: bool,
+    /// The card is optional: a unit that cannot lease it within `grace`
+    /// runs on the CPU rather than wait (record 55, after review).
+    optional: bool,
+    grace: Duration,
+    /// Since when the card has been too full for a unit.
+    card_short: Option<Instant>,
 }
 
 /// Start the next batch if it fits the lane as every run holds it, under
@@ -5731,7 +5835,18 @@ fn start_next(
     l.seen = x.lane.ledger;
     l.seen.held_cores = held.cores;
     l.seen.held_memory_mib = held.memory_mib;
-    if !l.seen.fits(l.ask) {
+    // record 55 T24, after review: a unit that asks the lane's cores takes
+    // those free now, so units that share the lane never wait for all of it
+    let free = l.seen.cores.saturating_sub(l.seen.held_cores);
+    let ask = lane::Ask {
+        cores: if l.lane_cores && free == 0 {
+            l.ask.cores
+        } else {
+            x.descriptor.cores_at_start(free)
+        },
+        memory_mib: l.ask.memory_mib,
+    };
+    if !l.seen.fits(ask) {
         l.waiting = Some(format!(
             "the lane's budget: {} of {} cores and {} of {} MiB held{}",
             l.seen.held_cores,
@@ -5747,6 +5862,7 @@ fn start_next(
         return Ok(None);
     }
     let mut gpu_mib = None;
+    let mut note = None;
     if let Some(need) = l.gpu_need {
         l.card_asked = Some(Instant::now());
         let card = l.card;
@@ -5755,16 +5871,34 @@ fn start_next(
             None => Err("nvidia-smi is not on the search path".into()),
         };
         let held_gpu = held.gpu_mib;
-        match free {
-            Ok(free) if lane::lease_fits(free, held_gpu, need) => gpu_mib = Some(need),
-            Ok(free) => {
-                l.waiting = Some(format!(
-                    "card {card}: {free} MiB free, {held_gpu} MiB held by the lane's running units, and a unit needs {need} MiB"
-                ));
-                return Ok(None);
+        let short = match free {
+            Ok(free) if lane::lease_fits(free, held_gpu, need) => {
+                gpu_mib = Some(need);
+                None
             }
-            Err(e) => {
-                l.waiting = Some(format!("card {card}: {e}"));
+            Ok(free) => Some(format!(
+                "card {card}: {free} MiB free, {held_gpu} MiB held by the lane's running units, and a unit needs {need} MiB"
+            )),
+            Err(e) => Some(format!("card {card}: {e}")),
+        };
+        match short {
+            None => l.card_short = None,
+            // record 55, after review: an optional card that stays too full
+            // (a shared card another tenant holds) gives the unit to the CPU
+            // after a short wait, and the unit's log says why
+            Some(why) if l.optional => {
+                let since = *l.card_short.get_or_insert_with(Instant::now);
+                if since.elapsed() < l.grace {
+                    l.waiting = Some(why);
+                    return Ok(None);
+                }
+                note = Some(format!(
+                    "{why}, for {} s: this unit runs on the CPU",
+                    since.elapsed().as_secs()
+                ));
+            }
+            Some(why) => {
+                l.waiting = Some(why);
                 return Ok(None);
             }
         }
@@ -5772,8 +5906,9 @@ fn start_next(
     let Some(b) = pending.pop_front() else {
         return Ok(None);
     };
-    let mut inv = invocation_of(x, m, &b, shared)?;
+    let mut inv = invocation_of(x, m, &b, shared, ask.cores, gpu_mib.is_some())?;
     inv.card = gpu_mib.map(|_| l.card);
+    inv.note = note;
     if let Some(dir) = b.log.parent() {
         std::fs::create_dir_all(dir).map_err(|e| format!("the run's folder: {e}"))?;
     }
@@ -5786,7 +5921,7 @@ fn start_next(
                 registry.store(),
                 *id,
                 &rows::UnitStart {
-                    cores: i64::from(l.ask.cores),
+                    cores: i64::from(ask.cores),
                     memory_mb: l.ask.memory_mib as i64,
                     gpu_card: gpu_mib.map(|_| i64::from(l.card)),
                     gpu_memory_mb: gpu_mib.map(|g| g as i64),
@@ -5800,12 +5935,13 @@ fn start_next(
             .map_err(|e| e.to_string())?;
         }
     }
-    l.seen.take(l.ask);
+    l.seen.take(ask);
     l.waiting = None;
     Ok(Some(Running {
         batch: b,
         child,
         inv,
+        ask,
     }))
 }
 
@@ -5827,6 +5963,12 @@ fn schedule(
 ) -> Result<Scheduled, String> {
     let d = x.descriptor;
     let ask = ask_of(d);
+    // the least a unit starts with: a unit that asks the lane's cores takes
+    // one where no more is free
+    let least = lane::Ask {
+        cores: if d.needs.lane_cores { 1 } else { ask.cores },
+        memory_mib: ask.memory_mib,
+    };
     // this run's own units, which alone may fill the lane
     let mut ledger = x.lane.ledger;
     let total = m.units.len();
@@ -5843,11 +5985,15 @@ fn schedule(
         looked: None,
         card_asked: None,
         waiting: None,
+        lane_cores: d.needs.lane_cores,
+        optional: d.gpu == Gpu::Optional,
+        grace: card_grace(),
+        card_short: None,
     };
     loop {
         // start what fits
         while !pending.is_empty() {
-            if !ledger.fits(ask) {
+            if !ledger.fits(least) {
                 l.waiting = Some(format!(
                     "the lane's budget: {} of {} cores and {} of {} MiB held",
                     ledger.held_cores, ledger.cores, ledger.held_memory_mib, ledger.memory_mib
@@ -5874,7 +6020,7 @@ fn schedule(
             let released = nils_registry::lock::release(registry.store(), lock)
                 .map_err(|e| format!("the registry's lane lock: {e}"));
             if let Some(r) = started? {
-                ledger.take(ask);
+                ledger.take(r.ask);
                 running.push(r);
             }
             released?;
@@ -5914,7 +6060,7 @@ fn schedule(
             match running[i].child.try_wait() {
                 Ok(Some(status)) => {
                     let r = running.remove(i);
-                    ledger.give(ask);
+                    ledger.give(r.ask);
                     // what the container kept in its /tmp is gone with it
                     if let Some(w) = &r.inv.workdir {
                         let _ = std::fs::remove_dir_all(w);
@@ -5962,6 +6108,8 @@ fn invocation_of(
     m: &Materialised,
     b: &Batch,
     shared: &Shared,
+    cores: u32,
+    on_card: bool,
 ) -> Result<Invocation, String> {
     let d = x.descriptor;
     let p = x.pipeline;
@@ -5971,10 +6119,10 @@ fn invocation_of(
         ("NILS_RUN_ID".into(), x.run_id.to_string()),
         ("NILS_PIPELINE".into(), p.label()),
         ("NILS_IMAGE_DIGEST".into(), p.image_digest.clone()),
-        ("NILS_CORES".into(), d.needs.cores.to_string()),
+        ("NILS_CORES".into(), cores.to_string()),
         ("NILS_MEMORY_GB".into(), format!("{}", d.needs.memory_gb)),
     ];
-    if x.gpu {
+    if on_card {
         // record 55 T25: the card memory the unit is leased, which its tool
         // plans within (the post-contrast fallback sizes its waves to it)
         env.push((
@@ -6103,7 +6251,7 @@ fn invocation_of(
     // record 55 E5: the slice cache, read-write, for a pipeline that
     // declares the model inputs it keeps there; in the site's working
     // place, since the pictures are clinical
-    if !d.cache.is_empty() {
+    if d.asks_cache(x.params) {
         let dir = crate::slice_cache::folder(Path::new(&x.output.path));
         std::fs::create_dir_all(&dir).map_err(|e| format!("the slice cache's folder: {e}"))?;
         mounts.push(Mount {
@@ -6123,7 +6271,8 @@ fn invocation_of(
             env.push((var.clone(), g.secret.mount.clone()));
         }
     }
-    let argv = d.argv(x.params, &participants)?;
+    // the threads parameter told the cores this start was given
+    let argv = d.argv(&d.params_for_cores(x.params, cores), &participants)?;
     // who the process is: for podman the engine's own account, which
     // `--userns keep-id` maps to itself, never the group of a shared
     // (setgid) working place, which keep-id does not map and which would
@@ -6149,16 +6298,20 @@ fn invocation_of(
         image: p.image.clone(),
         argv,
         mounts,
-        gpu: x.gpu,
+        gpu: on_card,
         card: None,
         local_image: shared.local_image.clone(),
-        // apptainer's /tmp and /var/tmp, on disk beside the unit's log
-        workdir: b.log.parent().map(|d| d.join("tmp")),
+        // apptainer's /tmp and /var/tmp, on disk beside the unit's log;
+        // podman's and docker's are the container's own
+        workdir: (x.runtime.kind == runtime::Kind::Apptainer)
+            .then(|| b.log.parent().map(|d| d.join(WORKDIR)))
+            .flatten(),
+        note: None,
         env,
         user,
         // the unit's declared cores and memory, enforced where the runtime
         // can; the lane's budget counts them either way
-        cpus: shared.limits.0.then_some(d.needs.cores),
+        cpus: shared.limits.0.then_some(cores),
         memory_mib: shared.limits.1.then(|| lane::mib_of_gb(d.needs.memory_gb)),
     })
 }
@@ -6238,6 +6391,7 @@ fn stop_left(rt: &runtime::Cli, together: bool, units: &[rows::Unit], out: &Path
                 card: None,
                 local_image: None,
                 workdir: None,
+                note: None,
                 env: Vec::new(),
                 user: None,
                 cpus: None,
@@ -8706,6 +8860,34 @@ fn found_for(outputs: &[descriptor::Output], out: &Path, u: &Unit) -> Vec<String
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Record 55, after review: what apptainer units left in their /tmp
+    /// (clinical-derived volumes) goes when a run stops, is cancelled or
+    /// taken up again, and at an engine's start; nothing else of the run.
+    #[test]
+    fn a_run_s_work_folders_go_and_nothing_else() {
+        let base = std::env::temp_dir().join(format!("nils-workdirs-{}", std::process::id()));
+        let run = base.join("runs").join("7");
+        for d in [
+            "tmp/a",
+            "units/stack-1/tmp/b",
+            "units/stack-2/tmp",
+            "units/stack-2/out",
+        ] {
+            std::fs::create_dir_all(run.join(d)).unwrap();
+        }
+        std::fs::write(run.join("units/stack-1/tmp/b/vol.nii.gz"), b"x").unwrap();
+        std::fs::write(run.join("units/stack-1/log.txt"), b"log").unwrap();
+        drop_workdirs(&run);
+        assert!(!run.join("tmp").exists());
+        assert!(!run.join("units/stack-1/tmp").exists());
+        assert!(!run.join("units/stack-2/tmp").exists());
+        assert!(run.join("units/stack-1/log.txt").exists());
+        assert!(run.join("units/stack-2/out").exists());
+        // a run with no folders is no error
+        drop_workdirs(&base.join("runs").join("8"));
+        let _ = std::fs::remove_dir_all(&base);
+    }
 
     /// Record 55 H3, section 6.5: a `derivative:<kind>` input takes what
     /// its check leaves it: by default any result but a rejected one, with

@@ -19,6 +19,11 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 - The acquisition family on a call over every stack also covers a stack known only by its provenance (a display composite such as SyMRI or EPIMix), so its release names, sidecars and kinds keep the family; and of two origin decisions of one rank on a scanner and axis the newest stands on either backend (the decisions are read in id order and compared by rank, then id).
 - A pipeline whose card is optional runs on the CPU where the lane's card is smaller than a unit's `gpu-memory-gb`, rather than wait for a lease that never comes, and a pipeline that requires a card is refused there with the card's size and the need; the pre-flight says why in `gpu.why`.
 - An apptainer container's `/tmp` and `/var/tmp` are a folder on disk beside the unit's log (`--workdir`), removed when the unit ends, where they were a 64 MB tmpfs in a contained run; a tool's temporary files, such as the post-contrast fallback's converted and segmented volumes, no longer fill it. Podman's and docker's were on disk already.
+- A unit whose card is optional no longer waits for a card that is large enough but full (one another tenant holds): after 60 s without a lease (`NILS_CARD_GRACE_S`) it runs on the CPU, its log's first line says why, and the pre-flight says so in `gpu.why` while the card is that full.
+- A unit that asks the lane's cores (`cores: lane`) takes the cores free at its start, at least one and at most its threads parameter's maximum, rather than wait for the whole lane, and its threads parameter and `NILS_CORES` are set at each start from what it took, a resumed run's included (it kept the threads it first recorded).
+- An apptainer unit's work folder is removed when its run stops, is cancelled or is taken up again, and when the pipeline lane starts for every run no longer running; it holds clinical-derived volumes. Only apptainer units get one.
+- A pipeline that declares a slice cache is given the files' identities and the cache's mount only on a run that asks for the cache (`[Cache]`, or a parameter given `/cache`); body part's pass gets neither.
+- `nils pipeline add --release` reports a descriptors file that does not match the release's checksums as an integrity failure and adds nothing, with no advice to add a descriptor from elsewhere.
 
 ### Added
 

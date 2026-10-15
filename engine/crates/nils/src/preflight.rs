@@ -1109,7 +1109,14 @@ pub(crate) fn check(registry: &mut Registry, asked: &Asked<'_>) -> Result<Value,
         (Gpu::Optional | Gpu::Required, Some(_)) => crate::pipelines::card_too_small(&d, &lane),
         _ => None,
     };
-    let small_why = small.map(|(n, total)| crate::pipelines::too_small_words(&d, n, total));
+    let small_why = small
+        .map(|(n, total)| crate::pipelines::too_small_words(&d, n, total))
+        .or_else(|| {
+            // a card large enough but too full now: the CPU after the grace
+            (d.gpu == Gpu::Optional && offered.is_some())
+                .then(|| crate::pipelines::card_full_words(&d, &lane))
+                .flatten()
+        });
     let device = match (d.gpu, &offered) {
         (Gpu::None, _) | (Gpu::Optional, None) => Some("cpu".to_string()),
         (Gpu::Optional, Some(_)) if small.is_some() => Some("cpu".to_string()),

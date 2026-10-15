@@ -116,6 +116,9 @@ pub struct Invocation {
     /// post-contrast fallback's work folder). Podman's and docker's /tmp is
     /// the container's own, on disk. Made before the run.
     pub workdir: Option<PathBuf>,
+    /// A line the engine writes at the top of the unit's log before the
+    /// container's own output, such as why the unit runs on the CPU.
+    pub note: Option<String>,
     pub env: Vec<(String, String)>,
     /// The uid and gid the process runs as: the engine's user (for podman
     /// the engine process's own uid and gid, the ids keep-id maps). Docker
@@ -889,7 +892,11 @@ pub fn spawn(
     if let Some(w) = &inv.workdir {
         std::fs::create_dir_all(w)?;
     }
-    let out = std::fs::File::create(log)?;
+    let mut out = std::fs::File::create(log)?;
+    if let Some(n) = &inv.note {
+        use std::io::Write;
+        writeln!(out, "nils: {n}")?;
+    }
     let err = out.try_clone()?;
     let mut c = rt.command(inv);
     c.stdin(Stdio::null())
@@ -1060,6 +1067,7 @@ mod tests {
             card: None,
             local_image: None,
             workdir: None,
+            note: None,
             env: vec![("NILS_RUN".into(), "7".into())],
             user: Some((1000, 1000)),
             cpus: None,

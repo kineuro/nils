@@ -1863,6 +1863,44 @@ impl Descriptor {
         d
     }
 
+    /// The cores a unit takes at its start (record 55 T24, after review):
+    /// one that asks the lane's (`cores: lane`) takes what the lane has
+    /// free, at least one and at most what it was sized to, so units that
+    /// share the lane never wait for all of it; any other its number.
+    pub fn cores_at_start(&self, free: u32) -> u32 {
+        if self.needs.lane_cores {
+            free.min(self.needs.cores).max(1)
+        } else {
+            self.needs.cores
+        }
+    }
+
+    /// A unit's parameters for a start with `cores` cores: a unit that asks
+    /// the lane's has its threads parameter told the cores it was given at
+    /// that start, whatever the run recorded (a resumed run's included).
+    pub fn params_for_cores(&self, params: &Map<String, Value>, cores: u32) -> Map<String, Value> {
+        let mut out = params.clone();
+        if self.needs.lane_cores
+            && let Some(id) = &self.needs.cores_input
+        {
+            out.insert(id.clone(), Value::from(cores));
+        }
+        out
+    }
+
+    /// Whether a run reads and keeps the slice cache (record 55 E5, after
+    /// review): it declares what it keeps there and asks for it, by
+    /// `[Cache]` on its command line or a parameter given the cache's
+    /// path. Only such a run is given the files' identities and the mount.
+    pub fn asks_cache(&self, params: &Map<String, Value>) -> bool {
+        !self.cache.is_empty()
+            && (self
+                .command_line
+                .as_deref()
+                .is_some_and(|c| c.contains("[Cache]"))
+                || params.values().any(|v| v.as_str() == Some(CACHE_PATH)))
+    }
+
     /// Every declared parameter with its value: what was given as
     /// `id=value`, else the default, else null for an optional one. An id
     /// not declared, a value of the wrong type or range, and a required
@@ -2520,6 +2558,17 @@ x-nils:
             argv.windows(2).any(|w| w == ["--cache", CACHE_PATH]),
             "{argv:?}"
         );
+        // [Cache] on the command line asks for the cache; a declaration
+        // alone asks for it only through a parameter given its path
+        assert!(d.asks_cache(&d.resolve(&[]).unwrap()));
+        let declared = parse(&stacks("  cache: {inputs: [bodypart-slice-192:v1]}\n")).unwrap();
+        let mut params = declared.resolve(&[]).unwrap();
+        assert!(!declared.asks_cache(&params));
+        params.insert("cache".into(), Value::from(CACHE_PATH));
+        assert!(declared.asks_cache(&params));
+        params.insert("cache".into(), Value::Null);
+        assert!(!declared.asks_cache(&params));
+        assert!(!parse(&stacks("")).unwrap().asks_cache(&params));
         for (bad, says) in [
             ("  cache: {inputs: [Slices]}\n", "<name>:v<n>"),
             ("  cache: {inputs: [slices:1]}\n", "<name>:v<n>"),
@@ -2774,10 +2823,21 @@ x-nils:
                 .cores,
             48
         );
+        // at a start it takes the lane's free cores, at least one, at most
+        // what it was sized to, and its threads parameter is told them
+        assert_eq!(big.cores_at_start(48), 4);
+        assert_eq!(big.cores_at_start(2), 2);
+        assert_eq!(big.cores_at_start(0), 1);
+        let recorded = big.resolve(&[]).unwrap();
+        assert_eq!(big.params_for_cores(&recorded, 2)["dimension"], 2);
         // a number is not sized
         let fixed = parse(&with("{cores: 2}")).unwrap();
         assert!(!fixed.needs.lane_cores);
         assert_eq!(fixed.sized_to(48).needs.cores, 2);
+        assert_eq!(fixed.cores_at_start(1), 2);
+        let mut kept = Map::new();
+        kept.insert("dimension".into(), Value::from(3));
+        assert_eq!(fixed.params_for_cores(&kept, 1)["dimension"], 3);
         let e = parse(&with("{cores: all}")).unwrap_err();
         assert!(e.contains("or lane"), "{e}");
     }

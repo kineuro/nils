@@ -468,6 +468,10 @@ fn listed_as(listing: &str, prefix: Option<&str>) -> Vec<String> {
     out
 }
 
+/// What a fetched file that is not the one its release's sums name says,
+/// so a caller can tell an integrity failure from a file that is missing.
+pub(crate) const CHECKSUM_MISMATCH: &str = "does not match the release's checksum";
+
 /// Fetch one file of a release and check it against that release's sums.
 pub(crate) fn fetch_checked(base: &str, version: &str, file: &str) -> Result<Vec<u8>, Exit> {
     fetch_checked_at(base, &format!("v{version}"), file)
@@ -489,7 +493,7 @@ pub(crate) fn fetch_checked_at(base: &str, tag: &str, file: &str) -> Result<Vec<
     let got = sha256_hex(&bytes);
     if got != want {
         return Err(fail(format!(
-            "{file} does not match the release's checksum: {got} against {want}"
+            "{file} {CHECKSUM_MISMATCH}: {got} against {want}"
         )));
     }
     Ok(bytes)

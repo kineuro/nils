@@ -365,6 +365,17 @@ pub(crate) fn run(
     let roots_env = opts.ingest_roots.join(";");
     let me = std::env::current_exe().map_err(|e| fail(e.to_string()))?;
     let mut ran = 0usize;
+    // record 55, after review: the apptainer work folders of runs that no
+    // longer run hold clinical-derived files; the pipeline lane removes them
+    // when it starts
+    if matches!(opts.lane, job::Lane::All | job::Lane::Pipelines)
+        && let Err(e) = crate::pipelines::sweep_workdirs(store)
+    {
+        let _ = writeln!(
+            std::io::stderr(),
+            "nils: the pipeline lane could not clear old runs' work folders: {e}"
+        );
+    }
     let outcome = loop {
         if stop() {
             break Ok(());
