@@ -690,8 +690,8 @@ fn the_review_spine_groups_questions_and_a_decision_reaches_the_group() {
         );
 
         // C15 across scopes: an agent's call about one member, narrower
-        // than the person's about the group, does not win. It is written
-        // (a different key), and the next run still reads the person's.
+        // than the person's about the group, does not win. It is refused,
+        // naming who decided, and the next run still reads the person's.
         let disagreement = rows(
             &mut reg,
             "SELECT id FROM {review_item} WHERE status = 'open' AND scope = 'group' AND kind = 'base:decision'",
@@ -699,7 +699,7 @@ fn the_review_spine_groups_questions_and_a_decision_reaches_the_group() {
         .int(0)
         .unwrap();
         let stack_1 = review::members(reg.store(), disagreement).unwrap()[0].stack_id;
-        review::apply(
+        let refusal = review::apply(
             &mut reg,
             &Apply {
                 item: disagreement,
@@ -717,7 +717,11 @@ fn the_review_spine_groups_questions_and_a_decision_reaches_the_group() {
                 campaign: None,
             },
         )
-        .unwrap();
+        .expect_err("an agent does not override a person's wider decision");
+        assert!(
+            refusal.to_string().contains("C15"),
+            "{name}: the refusal names the rule: {refusal}"
+        );
         nils_classify::classify::classify(&mut reg, &pack, &settings, &Cancel::new()).unwrap();
         assert!(
             rows(
