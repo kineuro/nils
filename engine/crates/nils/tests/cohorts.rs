@@ -505,6 +505,143 @@ fn the_cohort_doors_make_rename_retire_and_change_members_by_hand() {
     );
 }
 
+/// #452: the list reads every cohort in a fixed number of queries, and
+/// each row says what the cohort's own door says: on cohorts fed by two
+/// datasets, sharing members, one of them retired.
+#[test]
+fn each_cohort_listed_reads_as_its_own_door_reads_it() {
+    let (home, _dir) = registry();
+    // a second dataset feeding the same cohort, with a subject of its own
+    let other = TempDir::new("cohorts-src-2");
+    let (study, sop) = ("1.2.3.C", "1.2.3.C.1.1");
+    let mut e = synth::minimal_mr(study, &format!("{study}.1"), sop);
+    e.push(synth::text(tags::PATIENT_ID, VR::LO, "P2"));
+    e.push(synth::text(tags::STUDY_DATE, VR::DA, "20230101"));
+    e.push(synth::text(tags::SERIES_DESCRIPTION, VR::LO, "t2 flair"));
+    other.file(
+        &format!("{study}/{sop}"),
+        &synth::part10(&MetaFields::mr(sop), &e, true),
+    );
+    ok(
+        &home,
+        &[
+            "place",
+            "add",
+            "ds2",
+            other.path().to_str().unwrap(),
+            "--role",
+            "source",
+            "--move-into",
+            "anon",
+            "--confirm-move",
+            "--patient-id",
+            "id-type:patient-id",
+            "--subjects",
+            "generated",
+            "--cohort",
+            "fed",
+        ],
+    );
+    ok(&home, &["digest", "--name", "b", "--no-private", "@ds2"]);
+    let codes: Vec<String> = {
+        let mut store =
+            nils_registry::Store::open_sqlite(&home.path().join("registry.db")).unwrap();
+        store
+            .query("SELECT code FROM subject ORDER BY id", &[])
+            .unwrap()
+            .iter()
+            .map(|r| r.text(0).unwrap().to_string())
+            .collect()
+    };
+    assert_eq!(codes.len(), 2, "{codes:?}");
+    // members shared with the fed cohort, and a retired cohort
+    ok(
+        &home,
+        &[
+            "clinical",
+            "cohort",
+            "make",
+            "both",
+            "--description",
+            "by hand",
+        ],
+    );
+    ok(
+        &home,
+        &[
+            "clinical", "cohort", "add", "both", &codes[0], &codes[1], "--why", "asked",
+        ],
+    );
+    ok(
+        &home,
+        &[
+            "clinical",
+            "cohort",
+            "make",
+            "old",
+            "--description",
+            "by hand",
+        ],
+    );
+    ok(
+        &home,
+        &[
+            "clinical", "cohort", "add", "old", &codes[1], "--why", "asked",
+        ],
+    );
+    ok(&home, &["clinical", "cohort", "retire", "old"]);
+
+    let server = Server::start(&home, 4, &[]);
+    let (status, listed) = server.request("GET", "/api/cohorts", None, None);
+    assert_eq!(status, 200, "{listed}");
+    let listed = listed.as_array().unwrap().clone();
+    assert_eq!(listed.len(), 3, "{listed:?}");
+    for row in &listed {
+        let name = row["name"].as_str().unwrap();
+        let (status, one) = server.request("GET", &format!("/api/cohorts/{name}"), None, None);
+        assert_eq!(status, 200, "{one}");
+        for key in [
+            "id",
+            "subjects",
+            "sessions",
+            "stacks",
+            "feeds",
+            "from",
+            "waiting",
+            "last_joined",
+            "retired_at",
+            "parts",
+            "datasets",
+        ] {
+            assert_eq!(row[key], one[key], "{name}: {key}");
+        }
+        assert_eq!(
+            row["releases"].as_i64().unwrap(),
+            one["releases"].as_array().unwrap().len() as i64,
+            "{name}"
+        );
+    }
+    server.finish();
+    let by = |name: &str| listed.iter().find(|c| c["name"] == name).unwrap().clone();
+    let fed = by("fed");
+    assert_eq!(fed["subjects"], 2, "{fed}");
+    let held: Vec<&str> = fed["datasets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(held.len(), 2, "two datasets hold its scans: {fed}");
+    assert!(held.contains(&"ds") && held.contains(&"ds2"), "{fed}");
+    let both = by("both");
+    assert_eq!(both["subjects"], 2, "{both}");
+    assert_eq!(both["stacks"], fed["stacks"], "{both}");
+    assert_eq!(both["datasets"].as_array().unwrap().len(), 2, "{both}");
+    let old = by("old");
+    assert!(old["retired_at"].is_string(), "{old}");
+    assert_eq!(old["subjects"], 1, "{old}");
+}
+
 #[test]
 fn a_session_handle_promotes_the_explain_door_matches_the_command_line_and_the_grants_hold() {
     let (home, _dir) = registry();
