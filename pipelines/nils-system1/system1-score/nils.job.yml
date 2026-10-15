@@ -28,9 +28,11 @@ description: >-
   probability, the rules' reliability on the header and the fields that
   mattered, as a second opinion beside the rules'.
 
-# The image is built by each site from this folder; no release publishes
-# it. The digest below is the image built from this folder, and a site
-# that builds its own pins its own.
+# A release builds this folder's image and ships this descriptor in its
+# pipelines.tar.gz with the digest of the image it pushed; a site takes it
+# from the release it runs (nils pipeline add --release system1-score). The
+# digest below is the development pin, the image built from this folder
+# before a release published one.
 container-image:
   type: docker
   image: "ghcr.io/kineuro/nils-system1@sha256:53171a3a2e107840dc4319a0f5b79e3d1e377b498cef507c9b21ec76b407de81"
@@ -90,6 +92,9 @@ x-nils:
       path-template: "system1/{stack}.json"
       media-type: application/json
   needs:
+    # CPU by design: System 1 is gradient boosting over a stack's header
+    # fields, arithmetic per stack in milliseconds, which a card would not
+    # make faster
     gpu: none
     memory-gb: 4
     cores: 4

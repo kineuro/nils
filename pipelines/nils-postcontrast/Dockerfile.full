@@ -8,34 +8,73 @@
 #   docker build -f pipelines/nils-postcontrast/Dockerfile.full \
 #       -t nils-postcontrast-full pipelines/nils-postcontrast
 #
-# The base is FreeSurfer 8.2.0's own image, pinned by digest: dcm2niix
-# aside, every tool and every weight the pipeline runs is FreeSurfer's
-# (SynthMorph, SynthSeg, SynthStrip, the MNI template). On the CPU each runs
-# as FreeSurfer runs it. For a card, three environments beside it carry the
-# runtimes the speed study ran the same scripts and weights in: the CUDA
-# 11.8 libraries for SynthMorph in FreeSurfer's own TensorFlow, a current
-# TensorFlow for SynthSeg (its script with one line changed for NumPy 2),
-# and PyTorch with CUDA 12.8 for SynthStrip.
+# A public image (record 55, ruling 22): of FreeSurfer 8.2.0 it carries
+# only what the pipeline runs, copied byte for byte from FreeSurfer's own
+# image, pinned by digest, in a build stage that is never published: the
+# Python FreeSurfer runs its Synth tools in (fspython, with its packages),
+# the scripts mri_synthseg, mri_synthstrip and mri_synthmorph, the
+# synthmorph package, their weights (SynthSeg 2.0's networks and label
+# lists, SynthStrip's, SynthMorph's affine) and the MNI ICBM 2009c template.
+# Not the MATLAB Runtime, FSL's binaries or the CorTechs tools, whose terms
+# do not let us pass them on, nor fspython's GPL readline and spheremorph
+# or its OpenCV, which no Synth tool uses, and no licence key, which none of
+# them reads. FreeSurfer's licence with the opening sentence its Part B
+# asks for, the weights' and the template's notices and the other licences
+# are in /usr/local/share/licenses/nils-postcontrast-full (NOTICE.full).
 #
-# Licences: FreeSurfer's image carries FreeSurfer's software licence
-# agreement and the third-party components FreeSurfer distributes (among
-# them FSL's and MATLAB runtime's, whose terms are not ours to pass on).
-# This image is therefore built by each site and never published; its
-# descriptor's digest names the image a site built. The model's weights
-# and the atlases are the site's model inputs, never part of the image.
+# On the CPU each tool runs as FreeSurfer runs it, in fspython. For a card,
+# three environments beside it carry the runtimes the speed study ran the
+# same scripts and weights in: the CUDA 11.8 libraries for SynthMorph in
+# FreeSurfer's own TensorFlow, a current TensorFlow for SynthSeg (its script
+# with one line changed for NumPy 2, marked as changed) and PyTorch with
+# CUDA 12.8 for SynthStrip. NVIDIA's ptxas (in TensorFlow's CUDA compiler
+# wheel) and Triton (which PyTorch pulls) are removed in the layer that
+# installs them: no NVIDIA licence names those tools as redistributable.
+#
+# The model's weights and the atlases are the site's model inputs, never
+# part of the image.
 
-ARG BASE=docker.io/freesurfer/freesurfer@sha256:5648104ca75a24f6ee5a8786146f99b405c2bda1da12bff723a15056da8ddf6b
+ARG FS_IMAGE=docker.io/freesurfer/freesurfer@sha256:5648104ca75a24f6ee5a8786146f99b405c2bda1da12bff723a15056da8ddf6b
+ARG BASE=docker.io/rockylinux/rockylinux:8.10@sha256:e8a49c5403b687db05d4d67333fa45808fbe74f36e683cec7abb1f7d0f2338c6
+
+FROM ${FS_IMAGE} AS fs
+# FreeSurfer's parts the pipeline runs, gathered under /slim as they lie
+RUN set -eux; FS=/usr/local/freesurfer/8.2.0-1; S=/slim$FS; L=/slim/usr/local/share/licenses/nils-postcontrast-full; \
+    mkdir -p $S/bin $S/models $S/average $S/python/scripts $S/python/packages $L; \
+    cp -a $FS/bin/fspython $FS/bin/mri_synthseg $FS/bin/mri_synthstrip $FS/bin/mri_synthmorph $S/bin/; \
+    cp -a $FS/python/bin $FS/python/lib $S/python/; \
+    cp -a $FS/python/scripts/mri_synthseg $FS/python/scripts/mri_synthstrip $FS/python/scripts/mri_synthmorph $S/python/scripts/; \
+    cp -a $FS/python/packages/synthmorph $S/python/packages/; \
+    cp -a $FS/models/synthseg_*2.0* $FS/models/synthseg_parcellation_labels.npy $FS/models/synthseg_parcellation_names.npy \
+      $FS/models/synthstrip.1.pt $FS/models/synthmorph.affine.2.h5 $S/models/; \
+    cp -a $FS/average/mni_icbm152_nlin_asym_09c $S/average/; \
+    cp -a $FS/FreeSurferColorLUT.txt $S/; \
+    P=$S/python/lib/python3.8; \
+    rm -f $S/python/lib/libreadline.so.6 $P/lib-dynload/readline.cpython-38-x86_64-linux-gnu.so; \
+    rm -rf $P/site-packages/spheremorph $P/site-packages/spheremorph-0.1-py3.8.egg-info \
+      $P/site-packages/cv2 $P/site-packages/opencv_python.libs $P/site-packages/opencv_python-4.11.0.86.dist-info; \
+    { printf '%s\n\n' 'All or portions of this licensed product (such portions are the "Software") have been obtained under license from The General Hospital Corporation "MGH" and are subject to the following terms and conditions:'; \
+      cat $FS/docs/license.freesurfer_SLA.txt; } > $L/FreeSurfer-license.txt; \
+    cp $FS/docs/license.apache.txt $L/Apache-2.0.txt; \
+    cp $FS/docs/license.dcm2niix.txt $L/dcm2niix-license.txt; \
+    cp $FS/average/mni_icbm152_nlin_asym_09c/COPYING $L/MNI-ICBM152-2009c-COPYING.txt
+
 FROM ${BASE}
+COPY --from=fs /slim/ /
+COPY NOTICE.full /usr/local/share/licenses/nils-postcontrast-full/NOTICE
 
 ARG DCM2NIIX_URL=https://github.com/rordenlab/dcm2niix/releases/download/v1.0.20241211/dcm2niix_lnx.zip
 ARG DCM2NIIX_SHA256=974805f80e9d91fa9a40e7edbc2c25bdc7c96b60d09a0f16067a13c6d767aab3
 ARG UV_VERSION=0.12.15
 
-ENV PIP_NO_CACHE_DIR=1 PIP_DISABLE_PIP_VERSION_CHECK=1 PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 \
+ENV FREESURFER_HOME=/usr/local/freesurfer/8.2.0-1 \
+    PATH=/usr/local/freesurfer/8.2.0-1/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+    PIP_NO_CACHE_DIR=1 PIP_DISABLE_PIP_VERSION_CHECK=1 PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 \
     UV_PYTHON_INSTALL_DIR=/opt/python UV_NO_CACHE=1
 
-# dcm2niix, the release the study's conversions ran (v1.0.20241211)
-RUN set -eux; dnf -y install unzip gcc gcc-c++ && dnf clean all; \
+# dcm2niix, the release the study's conversions ran (v1.0.20241211); the
+# OpenMP runtime FreeSurfer's image installs beside its Python
+RUN set -eux; dnf -y install unzip libgomp findutils procps-ng && dnf clean all; \
     curl -fsSL -o /tmp/d.zip "${DCM2NIIX_URL}"; \
     echo "${DCM2NIIX_SHA256}  /tmp/d.zip" | sha256sum -c -; \
     unzip -o /tmp/d.zip -d /usr/local/bin && chmod 755 /usr/local/bin/dcm2niix && rm /tmp/d.zip; \
@@ -47,18 +86,31 @@ RUN set -eux; curl -fsSL "https://github.com/astral-sh/uv/releases/download/${UV
     uv python install 3.12.11 3.10.21; \
     uv venv -p 3.10.21 /opt/feat; for e in tf st; do uv venv -p 3.12.11 /opt/$e; done
 COPY requirements-full.txt requirements-card.txt requirements-tf.txt requirements-st.txt /tmp/req/
-RUN set -eux; \
+# surfa builds from its source for Python 3.12: a compiler for the build
+# alone, gone again in this layer (diffutils stays: the check below)
+RUN set -eux; dnf -y install gcc gcc-c++ diffutils; \
     VIRTUAL_ENV=/opt/tf uv pip install -r /tmp/req/requirements-tf.txt; \
+    rm -f /opt/tf/lib/python3.12/site-packages/nvidia/cuda_nvcc/bin/ptxas; \
     VIRTUAL_ENV=/opt/st uv pip install --index-url https://download.pytorch.org/whl/cu128 torch==2.8.0; \
     VIRTUAL_ENV=/opt/st uv pip install -r /tmp/req/requirements-st.txt; \
+    VIRTUAL_ENV=/opt/st uv pip uninstall triton; \
+    test ! -e /opt/tf/lib/python3.12/site-packages/nvidia/cuda_nvcc/bin/ptxas; \
+    test ! -e /opt/st/lib/python3.12/site-packages/triton; \
     mkdir -p /opt/cu118 && fspython -m pip install --target /opt/cu118 --no-deps \
       nvidia-cublas-cu11==11.11.3.6 nvidia-cuda-cupti-cu11==11.8.87 nvidia-cuda-nvrtc-cu11==11.8.89 \
       nvidia-cuda-runtime-cu11==11.8.89 nvidia-cudnn-cu11==8.6.0.163 nvidia-cufft-cu11==10.9.0.58 \
       nvidia-curand-cu11==10.3.0.86 nvidia-cusolver-cu11==11.4.1.48 nvidia-cusparse-cu11==11.7.5.86; \
+    dnf -y remove gcc gcc-c++ && dnf -y autoremove && dnf clean all; test ! -e /usr/bin/gcc; \
     mkdir -p /opt/nils-postcontrast/fs-scripts; \
-    sed 's/lr_indices\[i, j\] = np.where(labels_segmentation == lab)\[0\]$/lr_indices[i, j] = np.where(labels_segmentation == lab)[0][0]/' \
-      "$FREESURFER_HOME/python/scripts/mri_synthseg" > /opt/nils-postcontrast/fs-scripts/mri_synthseg.py; \
-    grep -q 'labels_segmentation == lab)\[0\]\[0\]' /opt/nils-postcontrast/fs-scripts/mri_synthseg.py
+    { head -n 1 "$FREESURFER_HOME/python/scripts/mri_synthseg"; \
+      echo "# Changed by NILS (kineuro/nils, Dockerfile.full) from FreeSurfer 8.2.0's mri_synthseg in one line, for NumPy 2:"; \
+      echo "# np.where(labels_segmentation == lab)[0] became ...[0][0]. Under the FreeSurfer Software License Agreement:"; \
+      echo "# /usr/local/share/licenses/nils-postcontrast-full/FreeSurfer-license.txt"; \
+      tail -n +2 "$FREESURFER_HOME/python/scripts/mri_synthseg" \
+        | sed 's/lr_indices\[i, j\] = np.where(labels_segmentation == lab)\[0\]$/lr_indices[i, j] = np.where(labels_segmentation == lab)[0][0]/'; \
+    } > /opt/nils-postcontrast/fs-scripts/mri_synthseg.py; \
+    grep -q 'labels_segmentation == lab)\[0\]\[0\]' /opt/nils-postcontrast/fs-scripts/mri_synthseg.py; \
+    [ "$(diff "$FREESURFER_HOME/python/scripts/mri_synthseg" /opt/nils-postcontrast/fs-scripts/mri_synthseg.py | grep -c '^[<>]')" = 5 ]
 
 COPY pyproject.toml /src/pyproject.toml
 COPY src /src/src
@@ -67,7 +119,12 @@ RUN set -eux; VIRTUAL_ENV=/opt/feat uv pip install -r /tmp/req/requirements-full
     VIRTUAL_ENV=/opt/feat uv pip install --no-deps /src; rm -rf /src /tmp/req; \
     /opt/feat/bin/pip freeze 2>/dev/null > /opt/nils-postcontrast/pip-freeze.txt || VIRTUAL_ENV=/opt/feat uv pip freeze > /opt/nils-postcontrast/pip-freeze.txt; \
     ln -s /opt/feat/bin/nils-postcontrast /usr/local/bin/nils-postcontrast; \
-    nils-postcontrast --version
+    nils-postcontrast --version; \
+    fspython -c 'import tensorflow, torch, surfa, voxelmorph, neurite, synthmorph'; \
+    for t in mri_synthseg mri_synthstrip mri_synthmorph; do $t --help 2>&1 | grep -qi -E "usage|synopsis"; done; \
+    test -f "$FREESURFER_HOME/average/mni_icbm152_nlin_asym_09c/mni_icbm152_t1_tal_nlin_asym_09c.nii.gz"; \
+    test -f "$FREESURFER_HOME/FreeSurferColorLUT.txt"; \
+    test ! -e "$FREESURFER_HOME/MCRv97"; test -z "$(ls "$FREESURFER_HOME/bin" | grep -E 'fsl|tkmedit|tksurfer|tkregister' || true)"
 
 ENV NILS_PC_FS_HOME=/usr/local/freesurfer/8.2.0-1 \
     NILS_PC_CU118=/opt/cu118/nvidia \
@@ -78,3 +135,7 @@ ENV NILS_PC_FS_HOME=/usr/local/freesurfer/8.2.0-1 \
 USER 65534:65534
 WORKDIR /tmp
 CMD ["nils-postcontrast", "--help"]
+# The card's driver compiles TensorFlow's kernels for a card newer than its
+# build (sm_120) from PTX, once per process unless cached: the cache in the
+# container's /tmp, which the runner keeps on disk for the unit's life.
+ENV CUDA_CACHE_PATH=/tmp/nils-cuda-cache CUDA_CACHE_MAXSIZE=4294967296

@@ -185,11 +185,24 @@ def _nvidia_libs(site: str) -> str:
     return ":".join(sorted(os.path.join(site, n, "lib") for n in os.listdir(site) if os.path.isdir(os.path.join(site, n, "lib"))))
 
 
+def _with_libs(site: str) -> str:
+    """The CUDA libraries beside a tool's Python ahead of the library path the
+    process has: under apptainer --nv that path holds the card's driver
+    (libcuda), and a tool given only its own libraries finds no card and
+    runs on the CPU (2026-10-15, the fallback's image)."""
+    return ":".join(p for p in (_nvidia_libs(site), os.environ.get("LD_LIBRARY_PATH", "")) if p)
+
+
 def _site_nvidia(python: str) -> str:
     """The pip CUDA libraries beside a Python environment's interpreter."""
     root = Path(python).absolute().parent.parent  # the environment's root; its interpreter may link elsewhere
     hits = sorted(root.glob("lib/python3*/site-packages/nvidia"))
     return str(hits[0]) if hits else ""
+
+
+# the least share of a card a SynthSeg process is started with on its own
+# (a wave's processes take --synthseg-mib each, 20,000 by default)
+RETRY_LEAST_MIB = 20000
 
 
 @dataclass
@@ -201,12 +214,22 @@ class Card:
     reserved: int = 0
 
 
+def ss_procs_for(budget_mib: int, ss_procs: int, ss_mem_mib: int, other_mib: int) -> int:
+    """The SynthSeg processes a wave on a card of ``budget_mib`` runs: as
+    many as were asked that fit beside SynthMorph and SynthStrip (record 55
+    T25: a full wave of two holds 60,000 MiB); none where not even one fits,
+    and SynthSeg then runs once in the card's whole budget after the wave,
+    or on the CPU (``synthseg_retry``)."""
+    return max(0, min(ss_procs, (budget_mib - other_mib) // max(1, ss_mem_mib)))
+
+
 def _take(card: Card, need: int, lock, keep_free: int) -> None:
     """Wait until the run's share of the card holds ``need`` more MiB and,
-    on a shared card, the card keeps ``keep_free`` MiB free after it."""
+    on a shared card, the card keeps ``keep_free`` MiB free after it. A
+    need is never above the share (``ss_procs_for``, ``synthseg_retry``)."""
     while True:
         with lock:
-            fits = card.reserved + need <= card.budget_mib or card.reserved == 0
+            fits = card.reserved + need <= card.budget_mib
             if fits and keep_free > 0:
                 free = card_free_mib(card.device)
                 fits = free is not None and free - need >= keep_free
@@ -223,7 +246,7 @@ def wave(env: Env, card: Card, sids: list, work: str, atlas: dict, logdir: str, 
     SynthStrip run beside them, each one process over the wave. Returns the
     seconds each took; what a card step leaves undone is the CPU's."""
     sids = [s for s in sids if missing(f"{work}/stacks/{s}")]
-    if not sids:
+    if not sids or other_mib > card.budget_mib:
         return {}
     tag = f"w{sids[0]}"
     jm, js, ss = [], [], []
@@ -239,8 +262,9 @@ def wave(env: Env, card: Card, sids: list, work: str, atlas: dict, logdir: str, 
             js.append({"id": sid, "tool": "synthstrip", "argv": ["-i", p["nat"], "-o", p["strip"], "-m", p["mask"], "-g"]})
         if "synthseg" in m:
             ss.append((p["nat"], p["ss"]))
-    # the run's share of the card: a wave starts when its processes fit
-    n_ss = min(ss_procs, len(ss)) if ss else 0
+    # the run's share of the card: a wave starts when its processes fit, as
+    # many SynthSeg processes as the share holds beside the other two
+    n_ss = min(ss_procs_for(card.budget_mib, ss_procs, ss_mem_mib, other_mib), len(ss))
     need = other_mib + n_ss * ss_mem_mib
     _take(card, need, lock, keep_free)
     res: dict = {}
@@ -249,7 +273,7 @@ def wave(env: Env, card: Card, sids: list, work: str, atlas: dict, logdir: str, 
     try:
         if n_ss:
             tf_site = _site_nvidia(env.tf_python)
-            tenv = dict(os.environ, LD_LIBRARY_PATH=_nvidia_libs(tf_site), TF_USE_LEGACY_KERAS="1", TF_CPP_MIN_LOG_LEVEL="2",
+            tenv = dict(os.environ, LD_LIBRARY_PATH=_with_libs(tf_site), TF_USE_LEGACY_KERAS="1", TF_CPP_MIN_LOG_LEVEL="2",
                         TF_CUDNN_USE_AUTOTUNE="0", FREESURFER_HOME=env.fs_home, CUDA_VISIBLE_DEVICES=card.device, OMP_NUM_THREADS="4",
                         NILS_PC_TF_MEM_MB=str(ss_mem_mib), PYTHONPATH=str(HERE / "tfcap"))
             tenv.pop("TF_FORCE_GPU_ALLOW_GROWTH", None)
@@ -268,7 +292,7 @@ def wave(env: Env, card: Card, sids: list, work: str, atlas: dict, logdir: str, 
             Path(jf).write_text("".join(json.dumps(j) + "\n" for j in jm))
             # FreeSurfer's TensorFlow takes the whole card unless it grows into it (the study ran it so)
             menv = dict(os.environ, CUDA_VISIBLE_DEVICES=card.device, OMP_NUM_THREADS="4", FREESURFER_HOME=env.fs_home,
-                        LD_LIBRARY_PATH=_nvidia_libs(env.cu118), TF_FORCE_GPU_ALLOW_GROWTH="true")
+                        LD_LIBRARY_PATH=_with_libs(env.cu118), TF_FORCE_GPU_ALLOW_GROWTH="true")
             lf1 = open(f"{logdir}/{tag}.synthmorph.log", "a")
             pm = (subprocess.Popen([*env.fspython, str(HERE / "synth_batch.py"), jf, f"{logdir}/{tag}.synthmorph.out.jsonl"], stdout=lf1,
                                    stderr=lf1, env=menv), lf1)
@@ -310,11 +334,14 @@ def wave(env: Env, card: Card, sids: list, work: str, atlas: dict, logdir: str, 
 
 def synthseg_retry(env: Env, card: Card, sids: list, work: str, logdir: str, mem_mib: int, lock, keep_free: int = 0) -> int:
     """The stacks a wave's SynthSeg did not segment (a card's scratch space
-    that was not there, a process's share too small), once more on the
-    card in one process with a larger share; what is still missing goes to
-    the CPU. Returns how many it segmented."""
+    that was not there, a process's share too small, a share too small for
+    any SynthSeg process beside the other tools), once more on the card in
+    one process with a larger share, at most the run's whole share of the
+    card; what is still missing goes to the CPU. Returns how many it
+    segmented."""
     miss = [s for s in sids if os.path.exists(f"{work}/stacks/{s}/nat.nii.gz") and not os.path.exists(paths(f"{work}/stacks/{s}")["ss"])]
-    if not miss:
+    mem_mib = min(mem_mib, card.budget_mib)
+    if not miss or mem_mib < RETRY_LEAST_MIB:
         return 0
     tag = f"r{miss[0]}"
     fi, fo = f"{logdir}/{tag}.ss.in.txt", f"{logdir}/{tag}.ss.out.txt"
@@ -322,7 +349,7 @@ def synthseg_retry(env: Env, card: Card, sids: list, work: str, logdir: str, mem
     Path(fo).write_text("".join(paths(f"{work}/stacks/{s}")["ss"] + "\n" for s in miss))
     _take(card, mem_mib, lock, keep_free)
     try:
-        tenv = dict(os.environ, LD_LIBRARY_PATH=_nvidia_libs(_site_nvidia(env.tf_python)), TF_USE_LEGACY_KERAS="1", TF_CPP_MIN_LOG_LEVEL="2",
+        tenv = dict(os.environ, LD_LIBRARY_PATH=_with_libs(_site_nvidia(env.tf_python)), TF_USE_LEGACY_KERAS="1", TF_CPP_MIN_LOG_LEVEL="2",
                     TF_CUDNN_USE_AUTOTUNE="0", FREESURFER_HOME=env.fs_home, CUDA_VISIBLE_DEVICES=card.device, OMP_NUM_THREADS="4",
                     NILS_PC_TF_MEM_MB=str(mem_mib), PYTHONPATH=str(HERE / "tfcap"))
         with open(f"{logdir}/{tag}.ss.log", "a") as lf:

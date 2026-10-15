@@ -467,7 +467,9 @@ impl Meta {
     }
 }
 
-fn set_meta(store: &mut Store, key: &str, value: &str) -> Result<(), store::Error> {
+/// Set one `registry_meta` row through a store the caller holds without
+/// its [`Registry`]; the caller owns the transaction.
+pub fn set_meta(store: &mut Store, key: &str, value: &str) -> Result<(), store::Error> {
     set_meta_in(store, "registry_meta", key, value)
 }
 

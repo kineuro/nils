@@ -521,6 +521,8 @@ pub(crate) fn at_the_door(
     let Ok(d) = nils_pipeline::descriptor::from_value(p.descriptor.clone()) else {
         return Ok(());
     };
+    // record 55 T24: as the run sizes it, to this lane's cores
+    let d = d.sized_to(crate::pipelines::lane_of(registry).ledger.cores);
     let handle = match &resumed {
         Some(r) => r.handle_id,
         None => flag(command, "--handle").and_then(|h| h.parse::<i64>().ok()),

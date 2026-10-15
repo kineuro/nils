@@ -103,6 +103,9 @@ x-nils:
       path-template: "seeds/{stack}.json"
       media-type: application/json
   needs:
+    # BiomedCLIP's text tower scores the prompts, on a card where the lane
+    # leases one (its weights in float32 are about 0.8 GB), else the CPU
     gpu: optional
+    gpu-memory-gb: 3
     memory-gb: 4
     cores: 2

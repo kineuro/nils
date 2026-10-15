@@ -1,0 +1,59 @@
+nils-postcontrast-full: the third-party components in this image and their terms
+
+Beside NILS's own code (AGPL-3.0-only, https://github.com/kineuro/nils), the
+image carries:
+
+FreeSurfer 8.2.0's parts, copied unchanged from FreeSurfer's own image
+(freesurfer/freesurfer, pinned by digest in Dockerfile.full): the Python the
+Synth tools run in (fspython, with its packages, less its readline module and
+library, OpenCV and the spheremorph package, which none of them uses), the
+scripts mri_synthseg, mri_synthstrip and mri_synthmorph with their wrappers,
+the synthmorph package, SynthSeg 2.0's networks and label lists, SynthStrip's
+network, SynthMorph's affine network, the MNI ICBM 2009c template folder
+and FreeSurfer's colour table (FreeSurferColorLUT.txt).
+They are subject to the FreeSurfer Software License Agreement. Its text, with
+the opening sentence its Part B asks for, is FreeSurfer-license.txt beside
+this file. Nothing else of FreeSurfer is here, and no FreeSurfer licence key.
+
+/opt/nils-postcontrast/fs-scripts/mri_synthseg.py is FreeSurfer's
+mri_synthseg changed in one line for NumPy 2; it says so at its top.
+
+SynthSeg: Billot B, Greve DN, Puonti O, Thielscher A, Van Leemput K, Fischl B,
+Dalca AV, Iglesias JE. SynthSeg: segmentation of brain MRI scans of any
+contrast and resolution without retraining. Medical Image Analysis 2023.
+Billot B, Magdamo C, Cheng Y, Arnold SE, Das S, Iglesias JE. Robust machine
+learning segmentation for large-scale analysis of heterogeneous clinical brain
+MRI datasets. PNAS 2023. Its 2.0 networks come with FreeSurfer, under the
+agreement above.
+
+SynthStrip's network (synthstrip.1.pt): Hoopes A, Mora JS, Dalca AV, Fischl B,
+Hoffmann M. SynthStrip: skull-stripping for any brain image. NeuroImage 2022.
+Used under the Creative Commons Attribution 4.0 International licence
+(https://creativecommons.org/licenses/by/4.0/), one of the two its authors
+offer (https://surfer.nmr.mgh.harvard.edu/docs/synthstrip/).
+
+SynthMorph's affine network (synthmorph.affine.2.h5): Hoffmann M, Hoopes A,
+Greve DN, Fischl B, Dalca AV. Anatomy-aware and acquisition-agnostic joint
+registration with SynthMorph. Imaging Neuroscience 2024. Hoffmann M, Billot B,
+Greve DN, Iglesias JE, Fischl B, Dalca AV. SynthMorph: learning
+contrast-invariant registration without acquired images. IEEE Transactions on
+Medical Imaging 2022. Used under the Creative Commons Attribution 4.0
+International licence, one of the two its authors offer
+(https://synthmorph.io).
+
+The MNI ICBM 2009c nonlinear asymmetric template: Copyright (C) 1993-2004 Louis
+Collins, McConnell Brain Imaging Centre, Montreal Neurological Institute,
+McGill University. Its notice is MNI-ICBM152-2009c-COPYING.txt beside this
+file. Fonov VS, Evans AC, McKinstry RC, Almli CR, Collins DL. NeuroImage 2009;
+Fonov V, Evans AC, Botteron K, Almli CR, McKinstry RC, Collins DL. NeuroImage
+2011.
+
+dcm2niix v1.0.20241211 (https://github.com/rordenlab/dcm2niix): its licence is
+dcm2niix-license.txt beside this file.
+
+The Apache License 2.0 (voxelmorph, neurite, TensorFlow and others among the
+Python packages) is Apache-2.0.txt beside this file. Every Python package, in
+FreeSurfer's Python and in /opt, carries its own licence in its dist-info
+folder, and NVIDIA's CUDA libraries carry NVIDIA's terms there. NVIDIA's ptxas,
+which TensorFlow's CUDA compiler wheel holds, and Triton, which PyTorch pulls,
+are not in the image: no NVIDIA licence names those tools as redistributable.

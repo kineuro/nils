@@ -30,6 +30,11 @@ pub const UNITS: [&str; 2] = ["together", "apart"];
 /// What a unit is taken to need where the descriptor says nothing: one core
 /// and 2 GB of memory; a GPU unit 8 GB of the card's memory.
 pub const DEFAULT_CORES: u32 = 1;
+
+/// The word of `x-nils.needs.cores` for every core of the lane (record 55
+/// T24): a run sized to the machine it runs on, such as body part's pass
+/// over a registry, whose workers are its cores.
+pub const LANE_CORES: &str = "lane";
 pub const DEFAULT_MEMORY_GB: f64 = 2.0;
 pub const DEFAULT_GPU_MEMORY_GB: f64 = 8.0;
 
@@ -190,6 +195,11 @@ impl Units {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Needs {
     pub cores: u32,
+    /// `cores: lane` (record 55 T24, 2026-10-14): a unit takes every core
+    /// of the lane it runs in, and its `cores-input` is told that many
+    /// (never above the parameter's maximum). Until the descriptor is
+    /// [`Descriptor::sized_to`] a lane, `cores` holds 1.
+    pub lane_cores: bool,
     pub memory_gb: f64,
     /// Of the card's memory, for a unit that takes the GPU.
     pub gpu_memory_gb: f64,
@@ -1068,17 +1078,23 @@ pub fn from_value(document: Value) -> Result<Descriptor, String> {
     if !n.is_null() && !n.is_object() {
         return Err("x-nils.needs is a mapping: gpu, cores, memory-gb, gpu-memory-gb".into());
     }
-    let cores = match &n["cores"] {
-        Value::Null => DEFAULT_CORES,
+    let (cores, lane_cores) = match &n["cores"] {
+        Value::Null => (DEFAULT_CORES, false),
         Value::Number(c) => match c.as_u64() {
-            Some(c) if (1..=4096).contains(&c) => c as u32,
+            Some(c) if (1..=4096).contains(&c) => (c as u32, false),
             _ => {
                 return Err(format!(
-                    "x-nils.needs.cores is a whole number from 1, not {c}"
+                    "x-nils.needs.cores is a whole number from 1, or lane, not {c}"
                 ));
             }
         },
-        other => return Err(format!("x-nils.needs.cores is a whole number, not {other}")),
+        // record 55 T24: every core of the lane the run is given
+        Value::String(s) if s == LANE_CORES => (DEFAULT_CORES, true),
+        other => {
+            return Err(format!(
+                "x-nils.needs.cores is a whole number, or lane, not {other}"
+            ));
+        }
     };
     let positive = |key: &str, default: f64| -> Result<f64, String> {
         match opt_number(n, key, "x-nils.needs.")? {
@@ -1089,6 +1105,7 @@ pub fn from_value(document: Value) -> Result<Descriptor, String> {
     };
     let needs = Needs {
         cores,
+        lane_cores,
         memory_gb: positive("memory-gb", DEFAULT_MEMORY_GB)?,
         gpu_memory_gb: positive("gpu-memory-gb", DEFAULT_GPU_MEMORY_GB)?,
         cores_input: opt_text(n, "cores-input", "x-nils.needs.")?,
@@ -1827,6 +1844,97 @@ impl Descriptor {
         crate::sha256(crate::canonical(&self.document).as_bytes())
     }
 
+    /// The descriptor as a lane of `lane_cores` cores runs it (record 55
+    /// T24): one that asks every core of the lane (`cores: lane`) asks that
+    /// many, never above the maximum of the parameter its threads are told
+    /// by, and at least one; any other is as it is.
+    pub fn sized_to(&self, lane_cores: u32) -> Descriptor {
+        let mut d = self.clone();
+        if d.needs.lane_cores {
+            let most = d
+                .needs
+                .cores_input
+                .as_ref()
+                .and_then(|id| d.params.iter().find(|p| &p.id == id))
+                .and_then(|p| p.maximum)
+                .map_or(u32::MAX, |m| m.max(1.0).min(f64::from(u32::MAX)) as u32);
+            d.needs.cores = lane_cores.min(most).max(1);
+        }
+        d
+    }
+
+    /// A run's parameters as it records them (record 55 T24, second
+    /// review): a unit that asks the lane's cores, whose threads parameter
+    /// the caller did not set, has it recorded as null, since each unit is
+    /// told the cores it takes at its own start (the unit's row keeps
+    /// them); a value the caller set is kept, and wins.
+    pub fn open_lane_threads(&self, params: &mut Map<String, Value>, given: &[(String, String)]) {
+        if self.needs.lane_cores
+            && let Some(id) = &self.needs.cores_input
+            && !given.iter().any(|(g, _)| g == id)
+        {
+            params.insert(id.clone(), Value::Null);
+        }
+    }
+
+    /// The cores a unit takes at its start, or none while it waits for
+    /// them (record 55 T24, second review). A unit that names a number
+    /// takes it, as does one whose caller set its threads; a unit that asks
+    /// the lane's takes those free, at most what it was sized to. A unit
+    /// that runs alone (`together`) waits for at least half of that, so it
+    /// never locks in one core for hours, unless it has `waited` the
+    /// lane's grace; units that run apart take one core and up.
+    pub fn cores_at_start(
+        &self,
+        params: &Map<String, Value>,
+        free: u32,
+        together: bool,
+        waited: bool,
+    ) -> Option<u32> {
+        if !self.needs.lane_cores {
+            return Some(self.needs.cores);
+        }
+        if let Some(n) = self
+            .needs
+            .cores_input
+            .as_ref()
+            .and_then(|id| params.get(id))
+            .and_then(Value::as_f64)
+        {
+            return Some((n.max(1.0).min(f64::from(u32::MAX))) as u32);
+        }
+        let most = self.needs.cores.max(1);
+        let least = if together { most.div_ceil(2) } else { 1 };
+        (free >= least || (waited && free >= 1)).then(|| free.min(most))
+    }
+
+    /// A unit's parameters for a start with `cores` cores: a unit that asks
+    /// the lane's, whose threads parameter is open (null), is told the
+    /// cores it was given at that start; a value the caller set stays.
+    pub fn params_for_cores(&self, params: &Map<String, Value>, cores: u32) -> Map<String, Value> {
+        let mut out = params.clone();
+        if self.needs.lane_cores
+            && let Some(id) = &self.needs.cores_input
+            && out.get(id).is_none_or(Value::is_null)
+        {
+            out.insert(id.clone(), Value::from(cores));
+        }
+        out
+    }
+
+    /// Whether a run reads and keeps the slice cache (record 55 E5, after
+    /// review): it declares what it keeps there and asks for it, by
+    /// `[Cache]` on its command line or a parameter given the cache's
+    /// path. Only such a run is given the files' identities and the mount.
+    pub fn asks_cache(&self, params: &Map<String, Value>) -> bool {
+        !self.cache.is_empty()
+            && (self
+                .command_line
+                .as_deref()
+                .is_some_and(|c| c.contains("[Cache]"))
+                || params.values().any(|v| v.as_str() == Some(CACHE_PATH)))
+    }
+
     /// Every declared parameter with its value: what was given as
     /// `id=value`, else the default, else null for an optional one. An id
     /// not declared, a value of the wrong type or range, and a required
@@ -2484,6 +2592,17 @@ x-nils:
             argv.windows(2).any(|w| w == ["--cache", CACHE_PATH]),
             "{argv:?}"
         );
+        // [Cache] on the command line asks for the cache; a declaration
+        // alone asks for it only through a parameter given its path
+        assert!(d.asks_cache(&d.resolve(&[]).unwrap()));
+        let declared = parse(&stacks("  cache: {inputs: [bodypart-slice-192:v1]}\n")).unwrap();
+        let mut params = declared.resolve(&[]).unwrap();
+        assert!(!declared.asks_cache(&params));
+        params.insert("cache".into(), Value::from(CACHE_PATH));
+        assert!(declared.asks_cache(&params));
+        params.insert("cache".into(), Value::Null);
+        assert!(!declared.asks_cache(&params));
+        assert!(!parse(&stacks("")).unwrap().asks_cache(&params));
         for (bad, says) in [
             ("  cache: {inputs: [Slices]}\n", "<name>:v<n>"),
             ("  cache: {inputs: [slices:1]}\n", "<name>:v<n>"),
@@ -2594,6 +2713,7 @@ x-nils:
             d.needs,
             Needs {
                 cores: 4,
+                lane_cores: false,
                 memory_gb: 12.0,
                 gpu_memory_gb: 6.0,
                 cores_input: None,
@@ -2700,6 +2820,73 @@ x-nils:
             let e = parse(&with(needs)).unwrap_err();
             assert!(e.contains(words), "{needs}: {e}");
         }
+    }
+
+    /// Record 55 T24: a unit that asks every core of the lane (`cores:
+    /// lane`) asks the lane's cores once the descriptor is sized to the
+    /// lane, its threads parameter told as many, never above the
+    /// parameter's own maximum; a descriptor that names a number stays as
+    /// it is.
+    #[test]
+    fn a_unit_that_asks_the_lane_s_cores_is_sized_to_the_lane() {
+        let base = doc(&format!("antsx/ants@sha256:{HEX}"));
+        let with =
+            |needs: &str| base.replace("  needs: {gpu: optional}", &format!("  needs: {needs}"));
+        let d = parse(&with("{cores: lane, memory-gb: 6, cores-input: dimension}")).unwrap();
+        assert!(d.needs.lane_cores);
+        assert_eq!(d.needs.cores, 1, "unsized, a lane's unit holds one core");
+        // the parameter's maximum is 4: a lane of 48 cores gives it 4, a
+        // lane of 3 gives it 3
+        let big = d.sized_to(48);
+        assert_eq!(big.needs.cores, 4);
+        assert_eq!(big.resolve(&[]).unwrap()["dimension"], 4);
+        let small = d.sized_to(3);
+        assert_eq!(small.needs.cores, 3);
+        assert_eq!(small.resolve(&[]).unwrap()["dimension"], 3);
+        let e = small
+            .resolve(&[("dimension".into(), "4".into())])
+            .unwrap_err();
+        assert!(e.contains("3 cores"), "{e}");
+        assert_eq!(d.sized_to(0).needs.cores, 1);
+        // with no threads parameter, every core of the lane
+        assert_eq!(
+            parse(&with("{cores: lane}"))
+                .unwrap()
+                .sized_to(48)
+                .needs
+                .cores,
+            48
+        );
+        // at a start it takes the lane's free cores, at most what it was
+        // sized to: units apart from one core up, a unit alone waits for
+        // half unless it has waited the grace
+        let mut open = big.resolve(&[]).unwrap();
+        big.open_lane_threads(&mut open, &[]);
+        assert!(open["dimension"].is_null());
+        assert_eq!(big.cores_at_start(&open, 48, false, false), Some(4));
+        assert_eq!(big.cores_at_start(&open, 1, false, false), Some(1));
+        assert_eq!(big.cores_at_start(&open, 0, false, true), None);
+        assert_eq!(big.cores_at_start(&open, 1, true, false), None);
+        assert_eq!(big.cores_at_start(&open, 2, true, false), Some(2));
+        assert_eq!(big.cores_at_start(&open, 1, true, true), Some(1));
+        assert_eq!(big.params_for_cores(&open, 2)["dimension"], 2);
+        // threads the caller set win, and are what is recorded
+        let given = vec![("dimension".to_string(), "3".to_string())];
+        let mut set = big.resolve(&given).unwrap();
+        big.open_lane_threads(&mut set, &given);
+        assert_eq!(set["dimension"], 3);
+        assert_eq!(big.cores_at_start(&set, 48, true, false), Some(3));
+        assert_eq!(big.params_for_cores(&set, 4)["dimension"], 3);
+        // a number is not sized
+        let fixed = parse(&with("{cores: 2}")).unwrap();
+        assert!(!fixed.needs.lane_cores);
+        assert_eq!(fixed.sized_to(48).needs.cores, 2);
+        let mut kept = Map::new();
+        kept.insert("dimension".into(), Value::from(3));
+        assert_eq!(fixed.cores_at_start(&kept, 1, true, false), Some(2));
+        assert_eq!(fixed.params_for_cores(&kept, 1)["dimension"], 3);
+        let e = parse(&with("{cores: all}")).unwrap_err();
+        assert!(e.contains("or lane"), "{e}");
     }
 
     /// Record 49 A3: a table output declares its format and typed columns,

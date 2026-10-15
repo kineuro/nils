@@ -13,29 +13,48 @@
 # model r1's three frozen arms and its fusion with the stack's header
 # evidence, calibrated per site. It answers only T1-type brain at a
 # calibrated site and says "not sure" everywhere else, as the cascade.
+# Since 0.2.0 a stack left with no image arm, for any reason (no usable
+# volume, no segmentation after the card, its retry and the CPU, or no arm
+# its features could feed), is "not sure" with that reason, where model r1
+# would answer from its header evidence alone, which no test compared with
+# a reference (record 55 E3).
 #
 # With a card the tools run in waves on it (several SynthSeg processes,
 # each held to a share of the card) while worker processes convert before
 # and compute the features after; without one, every tool runs on the CPU,
 # one SynthSeg process per 96 GB of the memory given.
 #
-# The image is FreeSurfer 8.2.0's with the card's runtimes beside it
-# (Dockerfile.full). It carries third-party components FreeSurfer
-# distributes whose terms are not ours to pass on, so it is built by each
-# site and never published: the digest below is the image built from this
-# folder, and a site that builds its own pins its own. The weights and the
-# atlases are the run's model inputs, never part of the image; it runs
-# offline.
+# gpu-memory-gb is one full wave, measured in T25 (record 55): two
+# SynthSeg processes of 20,000 MiB beside 20,000 for SynthMorph and
+# SynthStrip hold 60,000 MiB, so the run takes one wave at a time, as T25's
+# did. The engine tells the unit what it leased (NILS_GPU_MEMORY_GB) and
+# the tool holds no more: a site that declares less gets fewer SynthSeg
+# processes a wave, then SynthSeg alone after each wave, then the CPU; a
+# card smaller than the need runs the unit on the CPU. The Frangi filter
+# goes on the card only where every worker's share (2,200 MiB) fits beside
+# a full wave; at 60 GB it runs on the CPU, as model r1 itself ran it.
+#
+# The image (Dockerfile.full) holds of FreeSurfer 8.2.0 only the parts the
+# Synth tools run on, copied unchanged from FreeSurfer's pinned image (its
+# Python, the three tools, their networks, the MNI 2009c template and the
+# colour table), with the card's runtimes beside them: no MATLAB Runtime,
+# no FSL or CorTechs tools, no licence key, no ptxas or Triton. Its
+# NOTICE and the licences it ships say whose terms each part is under. The
+# weights and the atlases are the run's model inputs, never part of the
+# image; it runs offline. The release does not build this image (its
+# build needs more disk than a hosted runner): it is published from a
+# machine with the room by scripts/publish-postcontrast-full.sh, which
+# pins the digest below, and the release ships this pin as it is.
 name: postcontrast-full
 schema-version: "0.5"
-tool-version: "0.1.0"
+tool-version: "0.2.1"
 description: >-
   Answer post_contrast with model r1's full pipeline on the T1-type brain
   stacks the cascade defers; "not sure" elsewhere.
 
 container-image:
   type: docker
-  image: "ghcr.io/kineuro/nils-postcontrast-full@sha256:591f596ec1f43accf338a64222f02da3e6c7e6a7a3fbae59790d4e8162f6dde1"
+  image: "ghcr.io/kineuro/nils-postcontrast-full@sha256:5eeb94a7b7a7405c5ba2add070690162f37673e06ff84f6c8c483813c71b5231"
 
 inputs:
   - id: threads
@@ -114,7 +133,7 @@ x-nils:
         - {name: confidence, description: "The answer's probability, max(p, 1 - p)"}
         - {name: answers, type: integer, description: 1 when the stack is answered, else 0}
         - {name: stage, type: text, description: "full when the full pipeline scored the stack; null otherwise"}
-        - {name: reason, type: text, description: "Why the stack has no answer: sealed, not-mr, not-t1-brain, no-calibration, no-files or not-sure; null when answered"}
+        - {name: reason, type: text, description: "Why the stack has no answer: sealed, not-mr, not-t1-brain, no-calibration, no-files, not-sure, no-usable-volume, no-segmentation, no-image-arm, worker-died or step-failed (no image arm, so no certified answer; the last two are the run's own failures, not the data's); null when answered"}
         - {name: arms, type: text, description: "The image arms the stack had (T, U, V); a failed tool leaves the arms it could not feed out, as model r1"}
         - {name: failed_steps, type: text, description: "The steps that failed for the stack: convert, tools, base, tail, features"}
         - {name: cascade_digest, type: text, description: The cascade}
@@ -123,7 +142,7 @@ x-nils:
   needs:
     gpu: optional
     memory-gb: 96
-    gpu-memory-gb: 48
+    gpu-memory-gb: 60
     cores: 16
     cores-input: threads
   proposals:

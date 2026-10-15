@@ -536,6 +536,101 @@ fn the_job_contract_is_the_runner_s() {
     );
 }
 
+/// Record 55 T24: a unit's cores are a number or every core of the lane,
+/// in the job contract as in the runner, and a descriptor that asks the
+/// lane's cores checks against both; any other word is refused by both.
+#[test]
+fn a_unit_may_ask_every_core_of_the_lane_in_the_contract_and_the_runner() {
+    use nils_pipeline::descriptor;
+    let job = json("job/v1/nils.job.schema.json");
+    let cores = &job["$defs"]["needs"]["properties"]["cores"];
+    assert_eq!(cores["oneOf"][1]["const"], descriptor::LANE_CORES);
+    let hex = "59c45f54a1f1dc69134f63bec91a726e41c71c64a16cc21cda0b54526910a3c3";
+    let text = |cores: &str| {
+        format!(
+            "name: wide\nschema-version: \"0.5\"\ntool-version: \"1\"\ncontainer-image: {{type: docker, image: \"a/b@sha256:{hex}\"}}\ninputs:\n  - {{id: threads, name: Threads, type: Number, integer: true, minimum: 1, maximum: 64, value-key: \"[T]\", command-line-flag: --threads, optional: true}}\ncommand-line: \"tool [Manifest] [OutputLocation] [T]\"\nx-nils:\n  analysis-level: stack\n  input: {{layout: stacks}}\n  outputs: [{{id: o, kind: output, path-template: \"o/{{stack}}.json\"}}]\n  needs: {{cores: {cores}, cores-input: threads}}\n"
+        )
+    };
+    for (cores, ok) in [("lane", true), ("8", true), ("all", false)] {
+        let value: serde_json::Value = serde_saphyr::from_str(&text(cores)).unwrap();
+        let broken = breaks(&job, &job, &value, "descriptor");
+        assert_eq!(broken.is_empty(), ok, "{cores}: {broken:#?}");
+        assert_eq!(descriptor::parse(&text(cores)).is_ok(), ok, "{cores}");
+    }
+    let d = descriptor::parse(&text("lane")).unwrap().sized_to(48);
+    assert_eq!(d.needs.cores, 48);
+    assert_eq!(d.resolve(&[]).unwrap()["threads"], 48);
+}
+
+/// Record 55 T24 and E5: body part's shipped descriptor runs a pass over
+/// the registry's stacks on the graded fast path (the stages overlapped, as
+/// many workers as the lane's cores, no cache) and a dataset's bring-in with
+/// the slice cache (its on-arrival parameters: the stages one after the
+/// other, the cache at /cache, the touched planes filled), as the engine
+/// writes each command line.
+#[test]
+fn body_part_s_pass_and_its_arrival_run_differently() {
+    use nils_pipeline::descriptor;
+    let text = std::fs::read_to_string(
+        contracts().join("../pipelines/nils-bodypart/bodypart-infer-fusion/nils.job.yml"),
+    )
+    .unwrap();
+    let d = descriptor::parse(&text).unwrap();
+    assert!(d.needs.lane_cores, "a lane's every core");
+    let argv = |d: &descriptor::Descriptor, given: &[(String, String)]| -> Vec<String> {
+        d.argv(&d.resolve(given).unwrap(), &[]).unwrap()
+    };
+    let has = |a: &[String], w: &[&str]| a.windows(w.len()).any(|x| x == w);
+    // a pass, on a lane of 48 cores (the production lane): 48 workers
+    let lane = d.sized_to(48);
+    let pass = argv(&lane, &[]);
+    assert!(has(&pass, &["--threads", "48"]), "{pass:?}");
+    assert!(has(&pass, &["--overlap", "on"]), "{pass:?}");
+    assert!(has(&pass, &["--device", "auto"]), "{pass:?}");
+    assert!(!pass.iter().any(|w| w == "--cache"), "{pass:?}");
+    // a lane wider than the workers' maximum gives the maximum
+    assert!(has(&argv(&d.sized_to(96), &[]), &["--threads", "64"]));
+    // at arrival: the on-arrival parameters, as `nils score` gives them
+    let given: Vec<(String, String)> = d.on_arrival.clone().expect("it scores at arrival");
+    let arrival = argv(&lane, &given);
+    for w in [
+        &["--cache", "/cache"][..],
+        &["--overlap", "off"],
+        &["--cache-fill", "touched"],
+        &["--threads", "48"],
+    ] {
+        assert!(has(&arrival, w), "{w:?} in {arrival:?}");
+    }
+    // the cache it is given is the engine's mount, and no other place
+    assert!(
+        lane.resolve(&[("cache".into(), "/elsewhere".into())])
+            .is_err()
+    );
+}
+
+/// Record 55 T23: post-contrast's cascade runs as its speed was graded, 32
+/// readers (pcs-speed), on a lane that has them, and every core of a
+/// smaller lane.
+#[test]
+fn post_contrast_s_cascade_reads_with_the_graded_workers() {
+    use nils_pipeline::descriptor;
+    let text = std::fs::read_to_string(
+        contracts().join("../pipelines/nils-postcontrast/postcontrast-cascade/nils.job.yml"),
+    )
+    .unwrap();
+    let d = descriptor::parse(&text).unwrap();
+    assert!(d.needs.lane_cores, "a lane's every core");
+    let argv = |d: &descriptor::Descriptor| -> Vec<String> {
+        d.argv(&d.resolve(&[]).unwrap(), &[]).unwrap()
+    };
+    let has = |a: &[String], w: &[&str]| a.windows(w.len()).any(|x| x == w);
+    for (lane, workers) in [(48, "32"), (32, "32"), (8, "8")] {
+        let s = d.sized_to(lane);
+        assert_eq!(s.needs.cores.to_string(), workers);
+        assert!(has(&argv(&s), &["--threads", workers]), "{lane}");
+    }
+}
+
 /// Record 55 H3 (job type 3, check a result): the descriptor keys a mask
 /// output and a derivative input gain are the runner's words as the schema
 /// names them, and a descriptor that uses them checks against both the

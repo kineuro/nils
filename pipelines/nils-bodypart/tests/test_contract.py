@@ -67,18 +67,18 @@ def entrypoint() -> list[str]:
     return words
 
 
-def container_argv(doc: dict) -> list[str]:
+def container_argv(doc: dict, params: dict | None = None) -> list[str]:
     """What the container runs for a descriptor, as the engine writes it:
     the image's entry point, then the command line with the engine's
-    folders in place and every parameter at its default (one without a
-    default left out)."""
+    folders in place and every parameter at its value in ``params``, else
+    its default (one without either left out)."""
     import shlex
 
     line = doc["command-line"]
     for key, at in {"[Manifest]": "/input/stacks.json", "[Inputs]": "/inputs", "[OutputLocation]": "/output", "[Cache]": "/cache"}.items():
         line = line.replace(key, at)
     for p in doc.get("inputs", []):
-        given = p.get("default-value")
+        given = (params or {}).get(p["id"], p.get("default-value"))
         word = "" if given is None else f"{p.get('command-line-flag', '')} {given}".strip()
         line = line.replace(p["value-key"], word)
     return entrypoint() + shlex.split(line)
@@ -153,7 +153,7 @@ def test_the_descriptors_pin_one_published_image_and_real_encoder_weights():
     by its registry manifest digest, and the embeddings name the encoders'
     weights as the image reports them (``python -m nils_bodypart.bake
     verify``), never the placeholders the descriptors started with. A
-    release that publishes a new image repins them."""
+    release ships them with the digest of the image it built."""
     import re
 
     yaml = pytest.importorskip("yaml")
@@ -173,6 +173,44 @@ def test_the_descriptors_pin_one_published_image_and_real_encoder_weights():
         assert re.fullmatch(r"sha256:[0-9a-f]{64}", d) and not placeholder.fullmatch(d), d
 
 
+def test_a_network_takes_a_card_where_the_lane_leases_one_and_a_scorer_never():
+    """Record 55 A5: every entry point that runs a network takes a card
+    where the lane leases one and the CPU otherwise, with the card memory it
+    needs; the head and its training are arithmetic per stack and stay on
+    the CPU, and their descriptors say why."""
+    yaml = pytest.importorskip("yaml")
+    docs = {e: yaml.safe_load((HERE / e / "nils.job.yml").read_text()) for e in ENTRIES}
+    for e in ("bodypart-embed", "bodypart-seed", "bodypart-infer-fusion"):
+        needs = docs[e]["x-nils"]["needs"]
+        assert needs["gpu"] == "optional", e
+        assert 0 < needs["gpu-memory-gb"] <= 8, e
+    for e in ("bodypart-infer", "bodypart-train"):
+        assert docs[e]["x-nils"]["needs"]["gpu"] == "none", e
+        assert "CPU by design" in (HERE / e / "nils.job.yml").read_text(), e
+
+
+def test_a_build_fails_where_its_encoders_are_not_the_ones_asked_for():
+    """A release passes bodypart-embed's encoder pins to the image's build
+    (ENCODER_DIGESTS), whose last step fails where the weights it baked are
+    other ones; a build asked for none checks none."""
+    yaml = pytest.importorskip("yaml")
+    from nils_bodypart import bake
+
+    doc = yaml.safe_load((HERE / "bodypart-embed" / "nils.job.yml").read_text())
+    pins = [d for o in doc["x-nils"]["outputs"] for d in o.get("encoders", [])]
+    asked = bake.expected(",".join(pins))
+    assert asked == sorted(pins)
+    assert bake.expected(" a , b,,a ") == ["a", "b"]
+    assert bake.expected("") == [] and bake.expected(None) == []
+    assert bake.check_expected(list(reversed(pins)), asked) is None
+    assert bake.check_expected(pins, []) is None
+    why = bake.check_expected([pins[0], "sha256:" + "1" * 64], asked)
+    assert why and "asked for" in why
+    assert bake.check_expected(pins[:1], asked)
+    dockerfile = (HERE / "Dockerfile").read_text()
+    assert 'NILS_BODYPART_EXPECT_ENCODERS="${ENCODER_DIGESTS}" python -m nils_bodypart.bake verify' in dockerfile
+
+
 def test_the_fusion_descriptor_declares_its_models_table_and_axes():
     """Record 50: the certified model's descriptor opts in to the stacks'
     headers, takes the encoder, the head and the optional coarse mode file
@@ -187,7 +225,9 @@ def test_the_fusion_descriptor_declares_its_models_table_and_axes():
         ("student", "model", True), ("deferral", "model", True), ("cascade", "model", True),
     ]
     assert {p["axis"] for p in x["proposals"]} == {"body_part", "body_region"}
-    assert x["needs"] == {"gpu": "none", "memory-gb": 12, "cores": 16, "cores-input": "threads"}
+    # record 55 A5: one image on the CPU and on a card, a card under the
+    # lane's lease where it has one
+    assert x["needs"] == {"gpu": "optional", "gpu-memory-gb": 4, "cores": "lane", "cores-input": "threads", "memory-gb": 16}
     (table,) = x["outputs"]
     assert (table["kind"], table["format"], table["path-template"]) == ("table", "json", "bodypart-fusion/{stack}.json")
     cols = {c["name"]: c.get("type", "number") for c in table["columns"]}
@@ -205,7 +245,7 @@ def test_the_fusion_descriptor_declares_its_models_table_and_axes():
     assert doc["tool-version"] == "0.6.0"
     # record 55 E5: scored at arrival with the touched planes filled, and
     # the slice cache's three input versions, read and written at /cache
-    assert x["on-arrival"] == {"params": {"cache_fill": "touched"}}
+    assert x["on-arrival"] == {"params": {"cache": "/cache", "overlap": "off", "cache_fill": "touched"}}
     assert x["cache"] == {"inputs": ["bodypart-slice-192:v1", "bodypart-planes-b24:v1", "bodypart-planes-touched:v1"]}
     from nils_bodypart import slicecache
 
@@ -216,7 +256,16 @@ def test_the_fusion_descriptor_declares_its_models_table_and_axes():
     a = cli.parser().parse_args(container_argv(doc)[1:])
     assert (a.entry, str(a.inputs), a.threads) == ("infer-fusion", "/inputs", 16)
     assert (a.reader, a.readahead) == ("reduced:touched", 4)
-    assert (str(a.cache), a.cache_fill) == ("/cache", "none")
+    # record 55 T24: a pass over the registry's stacks runs the graded
+    # fast path, the stages overlapped, and reads no cache
+    assert (a.cache, a.overlap, a.cache_fill) == (None, "on", "none")
+    # record 55 E5: at arrival, the stages one after the other, the slice
+    # cache read and written, and the touched planes filled for it
+    b = cli.parser().parse_args(container_argv(doc, x["on-arrival"]["params"])[1:])
+    assert (str(b.cache), b.overlap, b.cache_fill) == ("/cache", "off", "touched")
+    # record 55 A5: the card where the runner gives the container one, the
+    # CPU where it gives none (the entry point's own default is the CPU)
+    assert a.device == "auto"
     reader = next(p for p in doc["inputs"] if p["id"] == "reader")
     assert set(reader["value-choices"]) == {"reduced:touched", "full"}
 
@@ -266,3 +315,24 @@ def test_the_fusion_results_and_its_tables_are_the_contracts(tmp_path):
                 assert v in (0, 1) and not isinstance(v, bool)
             else:
                 assert isinstance(v, float) and 0 <= v <= 1
+
+
+def test_the_image_is_one_build_for_the_cpu_and_a_card_without_triton():
+    """Record 55 A5: the image takes torch's CUDA wheels, which run on the
+    CPU where the container is given no card, and removes Triton in the
+    layer that installed it: Triton bundles NVIDIA tools that no NVIDIA
+    licence names as redistributable, and the image compiles no kernel."""
+    text = (Path(__file__).resolve().parent.parent / "Dockerfile").read_text()
+    assert "ARG TORCH_INDEX=https://download.pytorch.org/whl/cu" in text
+    # each instruction whole, its continued lines joined
+    instructions, line = [], ""
+    for raw in text.splitlines():
+        if raw.lstrip().startswith("#") and not line:
+            continue
+        line += raw.rstrip("\\").strip() + " "
+        if not raw.rstrip().endswith("\\"):
+            instructions.append(line.strip())
+            line = ""
+    runs = [i for i in instructions if i.startswith("RUN ") and "torch==" in i]
+    assert len(runs) == 1 and "pip uninstall -y triton" in runs[0], runs
+    assert "find_spec('triton') is not None" in runs[0]

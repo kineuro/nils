@@ -30,15 +30,18 @@
 # runs offline; the runner runs it with --network none.
 name: postcontrast-cascade
 schema-version: "0.5"
-tool-version: "0.1.0"
+tool-version: "0.2.1"
 description: >-
   Propose post_contrast per stack on T1-type brain with the certified
   post-contrast model, through its three-slice student; defer the rest of
   T1-type brain to the full pipeline and say "not sure" elsewhere.
 
-# The image is built by each site from this folder; no release publishes
-# it. The digest below is the image built from this folder (CPU build,
-# torch 2.8.0), and a site that builds its own pins its own.
+# A release builds this folder's image (torch 2.8.0's CUDA 12.8 wheels, one
+# image for the CPU and a card) and ships this descriptor in its
+# pipelines.tar.gz with the digest of the image it pushed; a site takes it
+# from the release it runs (nils pipeline add --release postcontrast-cascade).
+# The digest below is the development pin, the image built from this folder
+# before a release published one.
 container-image:
   type: docker
   image: "ghcr.io/kineuro/nils-postcontrast@sha256:cbafd715a69c8e2c571ea1ce5f9ea7d2349d3e109300cd84d2d7d1e1fada5a7c"
@@ -49,8 +52,8 @@ inputs:
     type: Number
     integer: true
     minimum: 1
-    maximum: 64
-    description: Stacks whose slices are read at once, each in a worker process of its own.
+    maximum: 32
+    description: Stacks whose slices are read at once, each in a worker process of its own; the lane's cores, at most 32, as the speed was graded.
     value-key: "[THREADS]"
     command-line-flag: --threads
     default-value: 8
@@ -119,10 +122,14 @@ x-nils:
         - {name: student_digest, type: text, description: The cascade's student}
         - {name: fusion_digest, type: text, description: The cascade's fusion}
   needs:
+    # the student on a card where the lane leases one (bfloat16, as the
+    # study ran it), else on the CPU in float32; the same image either way
     gpu: optional
-    memory-gb: 8
+    # every core of the lane, at most the 32 readers the speed was graded
+    # with (pcs-speed, T23's mi-t23: 9.8 GB at 32 on the CPU, 7.3 on a card)
+    memory-gb: 12
     gpu-memory-gb: 4
-    cores: 8
+    cores: lane
     cores-input: threads
   proposals:
     - axis: post_contrast

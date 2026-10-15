@@ -605,6 +605,54 @@ pub fn interrupt(store: &mut Store, id: i64, why: &str) -> Result<bool, Error> {
     Ok(store.execute(&sql, &[Param::from(why), Param::Int(id)])? == 1)
 }
 
+/// Record what a run runs on, where it changed before its first unit
+/// started (a full optional card sends the whole run to the CPU).
+pub fn set_device(store: &mut Store, id: i64, device: &str) -> Result<(), Error> {
+    let d = store.dialect();
+    let sql = format!(
+        "UPDATE {} SET device = {} WHERE id = {}",
+        store.qualified("pipeline_run"),
+        d.param(1, Type::Text),
+        d.param(2, Type::Int)
+    );
+    store.execute(&sql, &[Param::from(device), Param::Int(id)])?;
+    Ok(())
+}
+
+/// The runs on `host` that ended, in one query: every status of
+/// [`RUN_STATUSES`] but running. Where `since` is given, only those that
+/// ended at or after it; an interrupted run, whose end carries no time, is
+/// taken only with no `since` (the first sweep), since the lane that marks
+/// a run interrupted clears its work folders then.
+pub fn runs_ended_since(
+    store: &mut Store,
+    host: &str,
+    since: Option<&str>,
+) -> Result<Vec<Run>, Error> {
+    let d = store.dialect();
+    let ended: Vec<String> = RUN_STATUSES
+        .iter()
+        .filter(|s| **s != "running")
+        .map(|s| format!("'{s}'"))
+        .collect();
+    let mut sql = format!(
+        "{} WHERE status IN ({}) AND host = {}",
+        select_runs(store),
+        ended.join(", "),
+        d.param(1, Type::Text)
+    );
+    let mut params = vec![Param::from(host)];
+    if let Some(since) = since {
+        sql.push_str(&format!(
+            " AND finished_at >= {}",
+            d.param(2, Type::Timestamp)
+        ));
+        params.push(Param::from(since));
+    }
+    sql.push_str(" ORDER BY id");
+    store.query(&sql, &params)?.iter().map(run_of).collect()
+}
+
 /// The runs in a status, oldest first.
 pub fn runs_in(store: &mut Store, status: &str) -> Result<Vec<Run>, Error> {
     let d = store.dialect();

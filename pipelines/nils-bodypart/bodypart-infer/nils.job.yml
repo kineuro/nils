@@ -79,6 +79,9 @@ x-nils:
       path-template: "bodypart/{stack}.json"
       media-type: application/json
   needs:
+    # CPU by design: the head is arithmetic per stack (a logistic
+    # regression, a forest or an SVM over embeddings bodypart-embed made),
+    # which a card would not make faster
     gpu: none
     memory-gb: 2
     cores: 2

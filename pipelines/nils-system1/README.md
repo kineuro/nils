@@ -13,8 +13,10 @@ never as a decision.
   one bundle file whose `system1.json` names every file by sha256
   (`src/nils_system1/bundle.py`). A bundle that brings code runs only with
   `trust_code` true, after its bytes match.
-- Build: `docker build -t nils-system1 pipelines/nils-system1`. Each site
-  builds it and repins the descriptor; no release publishes it.
+- Build: `docker build -t nils-system1 pipelines/nils-system1`. CPU only:
+  System 1 is arithmetic per stack. The release publishes it, and ships the
+  descriptor with the digest of the image it pushed in its
+  `pipelines.tar.gz` (`nils pipeline add --release system1-score`).
 - Tests: `pip install -e .[test] && pytest`.
 
 AGPL-3.0-only.

@@ -116,6 +116,18 @@ nils pipeline add pipelines/n4-bias-correction/nils.job.yml
 
 The descriptor is checked and kept whole with its digest. The image must be pinned by its registry manifest digest, `repository@sha256:<hex>`; a tag or an image id is refused. Adding the same descriptor again changes nothing; one that differs becomes the name's next version.
 
+The models' pipelines (body part, post-contrast's cascade and System 1) come from the engine's release, not from a checkout. Each release builds every model's image from its tag and ships the descriptors that name those images by the digests it pushed, in `pipelines.tar.gz` beside the binaries, listed in `IMAGES` and checked by `SHA256SUMS`. Take one by its name from the release this engine is:
+
+```sh
+nils pipeline add --release bodypart-infer-fusion
+nils pipeline add --release postcontrast-cascade
+nils pipeline add --release system1-score
+```
+
+`--release=<version>` takes the descriptor of another release, and `--channel <url>` (or `NILS_RELEASES`) another place releases come from. A release's tarball that is not what its sums say is refused. A descriptor in a checkout pins the image of an earlier release, for development; a build that is not a release adds from there as above. Post-contrast's fallback, `postcontrast-full`, is not in a release: each site builds its image from `pipelines/nils-postcontrast/Dockerfile.full` and repins the descriptor (see *Run a model registered by its card*).
+
+> **Warning:** the models' images run on the CPU and on a card. A pipeline that declares the card optional (`x-nils.needs.gpu: optional`) takes the lane's card where the runtime offers one (`nils pipeline lane --gpu-card <n>`; card 0 where the lane names none), under the lease its `gpu-memory-gb` asks, and the CPU where the lane names `none`, the machine has no card, or the card is smaller than a unit's need. Check the lane's card before you add a model's pipeline on a machine whose cards other work uses.
+
 The desk adds one the same way, under Pipelines, through `POST /api/pipelines` with the descriptor's text; it is an admin's (`install:work`), since it brings a container image onto the site.
 
 A descriptor of the bids layout finds each pick's image by the name the release gives it. The suffix is the base contrast and FLAIR is always a modifier, so the T1w is `*_T1w.nii.gz` and the FLAIR is a T2w with `FLAIR` among the `+` tokens of its `acq-` (`sub-01_ses-01_acq-Ax+2D+FLAIR+IRTSE_T2w.nii.gz`), never `*_FLAIR.nii.gz`, which only older releases wrote. A T2w without the token is the `t2w` pick. The segcsvd and SAMSEG starters find their FLAIR this way.
@@ -495,7 +507,9 @@ A dataset's bring-in ends with `score` (record 55 E5): the image models answer i
 
    The result names each queued run, and each step it skipped with its reason: its pipeline does not score at arrival (`not_on_arrival`), nothing here runs it (`no_pipeline`, `no_model`, `no_runtime`, `no_place`), the machine lacks what it needs (`requirements`), or the person who brought the dataset in may not run a pipeline (`no_grant`: a run reads pixels, so it needs Pipelines work at detail quasi). The bring-in itself never fails because of it, and a bring-in that read nothing new queues no score.
 
-A pipeline scores at arrival with `x-nils.on-arrival: true`, or with the parameters such a run is given, `x-nils.on-arrival: {params: {cache_fill: touched}}`.
+A pipeline scores at arrival with `x-nils.on-arrival: true`, or with the parameters such a run is given, `x-nils.on-arrival: {params: {cache: /cache, overlap: "off", cache_fill: touched}}`, as body part's does: at arrival its stages run one after the other with the slice cache, and a pass over scans the registry holds already runs them overlapped without it.
+
+A unit may ask for every core of the lane, `x-nils.needs: {cores: lane, cores-input: threads}`: the run is given as many as the lane's budget holds (`nils pipeline lane`), its threads parameter is set to them, never above the parameter's maximum, and the pre-flight shows the number. Body part's pipeline does, so a lane of 48 cores runs it with 48 workers.
 
 ## Re-score from the slice cache
 
@@ -507,7 +521,15 @@ The slice cache keeps the small pictures a model reads of each scan (record 55 E
    nils model choose bodypart-fusion@r8 --why "the new calibration"
    ```
 
-2. Run the step over the dataset again, from the desk's dataset page or its door (`POST /api/datasets/{name}/steps/body_part/run`). The run reads each scan's inputs from the cache where it holds them and reads the files of the rest.
+2. Run the model over the dataset's scans again with the cache:
+
+   ```sh
+   nils run bodypart-infer-fusion --select selection:<the dataset's stacks>@1 --param cache=/cache \
+     --model bodypart-tiny@r7 --model bodypart-fusion@r7 --model bodypart-fusion-coarse@r7 \
+     --model bodypart-student@s1-r7 --model bodypart-defer@d3-r7 --model bodypart-cascade@r7-fast
+   ```
+
+   The models are the cascade and its parts, in the order the body-part step gives them. The run reads each scan's inputs from the cache where it holds them and reads the files of the rest. A run from the desk's dataset page or its door (`POST /api/datasets/{name}/steps/body_part/run`) is a pass over scans the registry holds: it takes body part's fast path, the stages overlapped in one worker pool with a worker a core of the lane, and reads no cache (record 55 T24; the cache is filled at arrival, for new data only).
 
 3. See what the cache holds:
 
@@ -695,7 +717,7 @@ What a run does, in order:
 | step | what |
 |---|---|
 | input | `bids`: a release of the selection in the BIDS layout with the picks applied, under `<working>/runs/<run>/input`, so a BIDS App meets the one image a pick chose per role and session, named as the release names it (a FLAIR is a T2w with `FLAIR` in its `acq-`, never `_FLAIR`). `stacks`: `<working>/runs/<run>/input/stacks.json`, each stack's files under the source places |
-| lane | a run is one job in the pipeline lane, beside the runs whose stacks it does not share; its containers start while the cores and memory each declares fit in what the running units of every run leave of the lane's budget, a GPU one only under a lease on the lane's card. Units that run apart (`x-nils.units: apart`) each have a container of their own that sees its own input alone: the dataset's top-level files and its subject's or session's folder (bids), or a `stacks.json` of its stack and the folders of its files (stacks), with `[ParticipantLabels]` its subject and `NILS_UNIT` its id; each writes `derivatives/<pipeline>/<run>/<unit>/` and a `results.json` of its own. Each container is told `NILS_CORES` and `NILS_MEMORY_GB`. A unit is `queued`, `running`, `registering` or `over`, and `nils pipeline runs <run>` lists them |
+| lane | a run is one job in the pipeline lane, beside the runs whose stacks it does not share; its containers start while the cores and memory each declares fit in what the running units of every run leave of the lane's budget, a GPU one only under a lease on the lane's card. Units that run apart (`x-nils.units: apart`) each have a container of their own that sees its own input alone: the dataset's top-level files and its subject's or session's folder (bids), or a `stacks.json` of its stack and the folders of its files (stacks), with `[ParticipantLabels]` its subject and `NILS_UNIT` its id; each writes `derivatives/<pipeline>/<run>/<unit>/` and a `results.json` of its own. Each container is told `NILS_CORES` and `NILS_MEMORY_GB`, and one on a card `NILS_GPU_MEMORY_GB`, the card memory it is leased and plans within. A unit is `queued`, `running`, `registering` or `over`, and `nils pipeline runs <run>` lists them |
 | container | `/input` read-only, `/source/<n>` read-only in the stacks layout (one per folder that holds the selection's files, or the source places' roots past 2,000 folders, which the run's `summary.scope` says), `/inputs` read-only (`manifest.json` and the typed inputs; each derivative a run takes is listed under its input with `made_by`, the run that made it, its pipeline's name and version, the parameters it ran with, and the scan the derivative is tied to with the file name its release gave it), `/output` the one folder it writes, `<working>/derivatives/<pipeline>/<run>/`. No network. Podman runs with `--userns keep-id` and `--user`, and docker with `--user`, so the process is the engine's user on the host even where the image names a `USER` of its own, and a later run can link the files it wrote |
 | GPU | the lane's card alone, passed through CDI (`nvidia.com/gpu=<card>`, podman), `--nv` with `CUDA_VISIBLE_DEVICES=<card>` (apptainer) or `--gpus device=<card>` (docker) where the descriptor needs one, the host has one and the lane names a card; a pipeline whose need is `optional` runs on the CPU otherwise, and the run records `device cpu`; one whose need is `required` is refused |
 | apptainer | `apptainer run --containall --cleanenv --no-home --net --network none`, each folder bound with `--bind`, so the image's ENTRYPOINT runs before the descriptor's command line as it does under podman, the image built once from its digest into `<working>/images/` |

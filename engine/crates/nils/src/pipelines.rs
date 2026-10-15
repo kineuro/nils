@@ -375,6 +375,88 @@ pub(crate) fn add_descriptor(registry: &mut Registry, text: &str) -> Result<Valu
     Ok(v)
 }
 
+/// The file an engine release ships its model pipelines' descriptors in
+/// (record 55 A5, 2026-10-14): `pipelines/<package>/<name>/nils.job.yml`
+/// for each descriptor whose image the release built, naming that image by
+/// the digest the release pushed, so a tag's descriptors never name an
+/// older image than its own.
+pub(crate) const RELEASE_DESCRIPTORS: &str = "pipelines.tar.gz";
+
+/// The descriptors a release's `pipelines.tar.gz` holds, by the folder each
+/// is in (the pipeline's name), read without unpacking it.
+pub(crate) fn descriptors_in(bytes: &[u8]) -> Result<BTreeMap<String, String>, String> {
+    use std::io::Read;
+    let e = |e: std::io::Error| format!("reading the release's descriptors: {e}");
+    let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(bytes));
+    let mut out = BTreeMap::new();
+    for entry in archive.entries().map_err(e)? {
+        let mut entry = entry.map_err(e)?;
+        if !entry.header().entry_type().is_file() {
+            continue;
+        }
+        let path = entry
+            .path()
+            .map_err(e)?
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .filter(|c| c != ".")
+            .collect::<Vec<_>>();
+        // pipelines/<package>/<name>/nils.job.yml, and nothing else
+        let [top, _package, name, file] = path.as_slice() else {
+            continue;
+        };
+        if top != "pipelines" || file != "nils.job.yml" || name.starts_with('.') {
+            continue;
+        }
+        let mut text = String::new();
+        entry.read_to_string(&mut text).map_err(e)?;
+        out.insert(name.clone(), text);
+    }
+    if out.is_empty() {
+        return Err(format!(
+            "the release's {RELEASE_DESCRIPTORS} holds no descriptor"
+        ));
+    }
+    Ok(out)
+}
+
+/// The descriptor of the pipeline `name` that the engine release `version`
+/// ships, from `base`, checked against the release's sums, and named as
+/// its folder says.
+pub(crate) fn release_descriptor(base: &str, version: &str, name: &str) -> Result<String, Exit> {
+    let bytes = crate::update::fetch_checked_typed(base, &format!("v{version}"), RELEASE_DESCRIPTORS)
+        .map_err(|e| match e {
+            // an integrity failure, never a reason to take another
+            // descriptor: nothing is added
+            crate::update::Fetched::Mismatch { file, got, want } => fail(format!(
+                "the release {version}'s descriptors failed their integrity check ({file} does not match the release's checksum: {got} against {want}): the file is not the one the release published, so nothing was added"
+            )),
+            crate::update::Fetched::Failed(e) => usage(format!(
+                "the release {version} ships no descriptors that can be read here ({}); a build that is not a release adds a descriptor from its checkout: nils pipeline add <nils.job.yml>",
+                e.message
+            )),
+        })?;
+    let mut all = descriptors_in(&bytes).map_err(usage)?;
+    let Some(text) = all.remove(name) else {
+        return Err(usage(format!(
+            "the release {version} ships no descriptor of {name}; it ships {}",
+            all.into_keys().collect::<Vec<_>>().join(", ")
+        )));
+    };
+    let d = descriptor::parse(&text).map_err(|e| {
+        usage(format!(
+            "the release {version}'s descriptor of {name} does not check: {e}"
+        ))
+    })?;
+    if d.name != name {
+        return Err(usage(format!(
+            "the release {version}'s descriptor in {name}/ names the pipeline {}",
+            d.name
+        )));
+    }
+    Ok(text)
+}
+
 /// A change to the lane, as `nils pipeline lane` and `PUT
 /// /api/pipelines/lane` take it: each field left out is kept.
 #[derive(Debug, Default, serde::Deserialize)]
@@ -1614,8 +1696,20 @@ pub(crate) enum PipelineCommand {
     /// its name's next version; an image not pinned by its registry
     /// manifest digest is refused
     Add {
-        /// The descriptor
+        /// The descriptor; with --release, the name of a pipeline the
+        /// release ships
+        #[arg(value_name = "FILE|NAME")]
         file: PathBuf,
+        /// Take the descriptor from an engine release's pipelines.tar.gz,
+        /// checked against the release's SHA256SUMS: this engine's own
+        /// release, or --release=<version>. A release's descriptors name
+        /// the images it built, by the digests it pushed
+        #[arg(long, value_name = "VERSION", num_args = 0..=1, require_equals = true, default_missing_value = "")]
+        release: Option<String>,
+        /// Where releases come from, with --release; NILS_RELEASES sets
+        /// the same thing
+        #[arg(long, value_name = "URL", requires = "release")]
+        channel: Option<String>,
         /// Machine-readable output
         #[arg(long)]
         json: bool,
@@ -1836,11 +1930,35 @@ fn print(v: &Value) -> Result<(), Exit> {
 pub(crate) fn command(home: &Home, command: PipelineCommand) -> Result<(), Exit> {
     let mut registry = crate::open(home)?;
     match command {
-        PipelineCommand::Add { file, json } => {
-            let text = std::fs::read_to_string(&file)
-                .map_err(|e| usage(format!("{}: {e}", file.display())))?;
+        PipelineCommand::Add {
+            file,
+            release,
+            channel,
+            json,
+        } => {
+            let (text, from) = match release.as_deref().map(str::trim) {
+                None => (
+                    std::fs::read_to_string(&file)
+                        .map_err(|e| usage(format!("{}: {e}", file.display())))?,
+                    file.display().to_string(),
+                ),
+                // record 55 A5: the descriptor a release ships, which names
+                // the image that release built
+                Some(asked) => {
+                    let version = match asked.trim_start_matches('v') {
+                        "" => crate::update::VERSION,
+                        v => v,
+                    };
+                    let name = file.to_string_lossy().into_owned();
+                    let base = crate::update::engine_base(channel.as_deref());
+                    (
+                        release_descriptor(&base, version, &name)?,
+                        format!("{name} of the release {version}"),
+                    )
+                }
+            };
             let v = add_descriptor(&mut registry, &text)
-                .map_err(|e| usage(format!("{}: {}", file.display(), e.message)))?;
+                .map_err(|e| usage(format!("{from}: {}", e.message)))?;
             if json {
                 return print(&v);
             }
@@ -3782,8 +3900,48 @@ pub(crate) fn lane_refusal(d: &Descriptor, p: &Pipeline, lane: &Lane) -> Option<
     ))
 }
 
+/// The lane's card where it is smaller than a unit's need, with its size in
+/// MiB, as `nvidia-smi` says it (record 55 A5); none where it holds the
+/// need, or its size is not known.
+pub(crate) fn card_too_small(d: &Descriptor, lane: &Lane) -> Option<(u32, u64)> {
+    let card = lane.card?;
+    let smi = runtime::which("nvidia-smi", std::env::var_os("PATH").as_deref())?;
+    let total = lane::gpu_total_mib(&smi, card).ok();
+    (!lane::card_holds(total, lane::mib_of_gb(d.needs.gpu_memory_gb)))
+        .then(|| (card, total.unwrap_or(0)))
+}
+
+/// Why a unit whose card is optional may run on the CPU though the card is
+/// large enough (record 55, after review): its free memory is below a
+/// unit's need now, and a unit that cannot lease it within the grace runs
+/// on the CPU. None where the card has room, or cannot be asked.
+pub(crate) fn card_full_words(d: &Descriptor, lane: &Lane) -> Option<String> {
+    let card = lane.card?;
+    let smi = runtime::which("nvidia-smi", std::env::var_os("PATH").as_deref())?;
+    let free = lane::gpu_free_mib(&smi, card).ok()?;
+    let need = lane::mib_of_gb(d.needs.gpu_memory_gb);
+    (free < need).then(|| {
+        format!(
+            "card {card} has {free} MiB free now, and a unit needs {need} MiB: a unit that cannot lease it within {} s runs on the CPU",
+            card_grace().as_secs()
+        )
+    })
+}
+
+/// Why a unit runs on the CPU though a card is offered: the lane's card is
+/// smaller than the unit's need, so a lease on it would never come.
+pub(crate) fn too_small_words(d: &Descriptor, card: u32, total_mib: u64) -> String {
+    format!(
+        "card {card} holds {} GB, and a unit needs {} GB of a card",
+        descriptor::number_text(total_mib as f64 / 1024.0),
+        descriptor::number_text(d.needs.gpu_memory_gb)
+    )
+}
+
 /// The device a run takes and whether it takes the GPU: a GPU where the
-/// pipeline asks, the runtime offers one and the lane names a card.
+/// pipeline asks, the runtime offers one and the lane names a card that
+/// can hold a unit's need. An optional need runs on the CPU where the card
+/// is smaller than that (record 55 A5), and a required one is refused.
 fn device_for(
     d: &Descriptor,
     p: &Pipeline,
@@ -3791,8 +3949,21 @@ fn device_for(
     lane: &Lane,
 ) -> Result<(String, bool), Exit> {
     let offered = rt.gpu().filter(|_| lane.card.is_some());
+    let small = match (d.gpu, offered) {
+        (Gpu::Optional | Gpu::Required, Some(_)) => card_too_small(d, lane),
+        _ => None,
+    };
     match (d.gpu, offered) {
         (Gpu::None, _) | (Gpu::Optional, None) => Ok(("cpu".to_string(), false)),
+        (Gpu::Optional, Some(_)) if small.is_some() => Ok(("cpu".to_string(), false)),
+        (Gpu::Required, Some(_)) if small.is_some() => {
+            let (card, total) = small.unwrap_or_default();
+            Err(usage(format!(
+                "{} needs a GPU, and {}; nils pipeline lane --gpu-card <n> names a larger one",
+                p.label(),
+                too_small_words(d, card, total)
+            )))
+        }
         (Gpu::Optional | Gpu::Required, Some(g)) => Ok((g.to_string(), true)),
         (Gpu::Required, None) if rt.gpu().is_some() => Err(usage(format!(
             "{} needs a GPU, and the pipeline lane uses no card here; nils pipeline lane --gpu-card <n> names the one it leases",
@@ -3870,6 +4041,90 @@ fn job_alive(store: &mut Store, id: i64) -> bool {
 /// forever.
 pub(crate) const AUTO_RESUMES: i64 = 3;
 
+/// The folder beside a unit's log that holds an apptainer container's
+/// `/tmp` and `/var/tmp` (its `--workdir`): converted volumes and other
+/// clinical-derived files while the unit runs, gone when it ends.
+const WORKDIR: &str = "tmp";
+
+/// How long a unit whose card is optional waits for its lease before it
+/// runs on the CPU (record 55, after review): 60 s, or `NILS_CARD_GRACE_S`.
+fn card_grace() -> Duration {
+    let s = std::env::var("NILS_CARD_GRACE_S")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(60);
+    Duration::from_secs(s)
+}
+
+/// How long a unit that runs alone and asks the lane's cores waits for half
+/// of them before it takes what is free (record 55 T24, second review):
+/// 120 s, or `NILS_LANE_GRACE_S`.
+fn lane_grace() -> Duration {
+    let s = std::env::var("NILS_LANE_GRACE_S")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(120);
+    Duration::from_secs(s)
+}
+
+/// How long a run that runs on the card waits for room another tenant
+/// holds before it fails, saying why (record 55, third review): 30 minutes,
+/// or `NILS_CARD_STALL_S`.
+fn card_stall() -> Duration {
+    let s = std::env::var("NILS_CARD_STALL_S")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(1800);
+    Duration::from_secs(s)
+}
+
+/// Remove every apptainer work folder of a run (its own and each unit's):
+/// what a stopped, cancelled or interrupted unit left in its `/tmp`.
+pub(crate) fn drop_workdirs(run_dir: &Path) {
+    let _ = std::fs::remove_dir_all(run_dir.join(WORKDIR));
+    if let Ok(units) = std::fs::read_dir(run_dir.join("units")) {
+        for u in units.flatten() {
+            let _ = std::fs::remove_dir_all(u.path().join(WORKDIR));
+        }
+    }
+}
+
+/// A run's scratch folder, `<scratch place>/runs/<id>`, where its place is
+/// still known.
+fn run_folder(store: &mut Store, r: &Run) -> Option<PathBuf> {
+    let id = r.scratch_place_id.or(r.place_id)?;
+    let place = nils_registry::place::show(store, id).ok().flatten()?;
+    Some(PathBuf::from(place.path).join(RUNS).join(r.id.to_string()))
+}
+
+/// The registry key, with this host's name after it, that holds when the
+/// pipeline lane last swept the work folders of this host's runs that
+/// ended: lanes and their work folders are each host's own.
+const SWEPT_KEY: &str = "pipelines.workdirs_swept_at";
+
+/// At the pipeline lane's start: the work folders of this host's runs that
+/// ended since the last sweep (one query), whatever ended them, are
+/// removed, and the sweep's time is kept so the next one visits only the
+/// runs that end after it. The first sweep also visits the interrupted
+/// runs, whose end has no time; after it, the lane that marks a run
+/// interrupted clears its folders then.
+pub(crate) fn sweep_workdirs(store: &mut Store) -> Result<usize, String> {
+    let host = job::hostname();
+    let key = format!("{SWEPT_KEY}.{host}");
+    let since = meta_text(store, &key)?;
+    let now = nils_registry::time::now_iso();
+    let runs = rows::runs_ended_since(store, &host, since.as_deref()).map_err(|e| e.to_string())?;
+    let mut swept = 0;
+    for r in &runs {
+        if let Some(dir) = run_folder(store, r) {
+            drop_workdirs(&dir);
+            swept += 1;
+        }
+    }
+    nils_registry::home::set_meta(store, &key, &now).map_err(|e| e.to_string())?;
+    Ok(swept)
+}
+
 /// Record 49 A1: a run whose engine went away with units in flight (its
 /// job is over, or no longer heard from, and the run still says running)
 /// is marked interrupted and queued once to be taken up again, under what
@@ -3882,6 +4137,10 @@ pub(crate) fn take_up_interrupted(store: &mut Store) -> Result<usize, String> {
     for r in rows::runs_in(store, "running").map_err(err)? {
         if r.job_id.is_some_and(|j| job_alive(store, j)) {
             continue;
+        }
+        // what its units left in their /tmp goes, whatever comes next
+        if let Some(dir) = run_folder(store, &r) {
+            drop_workdirs(&dir);
         }
         let old = r.job_id.and_then(|j| job::show(store, j).ok().flatten());
         if old
@@ -4011,7 +4270,14 @@ pub(crate) fn run_command(home: &Home, args: RunArgs) -> Result<(), Exit> {
             p.label()
         ))
     })?;
-    let params = d.resolve(&pairs(&args.params)?).map_err(usage)?;
+    // record 55 T24: a unit that asks every core of the lane asks this
+    // lane's, and its threads parameter is told as many
+    let d = d.sized_to(lane_of(&mut registry).ledger.cores);
+    let given = pairs(&args.params)?;
+    let mut params = d.resolve(&given).map_err(usage)?;
+    // record 55 T24, second review: threads the caller set win; else each
+    // unit is told the cores it takes at its start, and the run records none
+    d.open_lane_threads(&mut params, &given);
 
     // where it goes and what runs it; either absent is the capability off
     let places = run_places(registry.store()).map_err(usage)?;
@@ -4569,12 +4835,14 @@ fn resume_command(home: &Home, args: &RunArgs, run_id: i64) -> Result<(), Exit> 
     }
     let p = rows::get(registry.store(), r.pipeline_id)?
         .ok_or_else(|| fail(format!("run {run_id} names a pipeline the catalog lost")))?;
-    let d = descriptor::from_value(p.descriptor.clone()).map_err(|e| {
-        fail(format!(
-            "{}: the catalog's descriptor no longer checks: {e}",
-            p.label()
-        ))
-    })?;
+    let d = descriptor::from_value(p.descriptor.clone())
+        .map_err(|e| {
+            fail(format!(
+                "{}: the catalog's descriptor no longer checks: {e}",
+                p.label()
+            ))
+        })?
+        .sized_to(lane_of(&mut registry).ledger.cores);
     let params = r
         .params
         .as_object()
@@ -4610,7 +4878,12 @@ fn resume_command(home: &Home, args: &RunArgs, run_id: i64) -> Result<(), Exit> 
         )));
     }
     let lane = lane_of(&mut registry);
-    let (device, gpu) = device_for(&d, &p, &rt, &lane)?;
+    let (mut device, mut gpu) = device_for(&d, &p, &rt, &lane)?;
+    // a run that went to the CPU off a full optional card goes on there,
+    // so a run never mixes devices
+    if r.device == "cpu" && d.gpu == Gpu::Optional {
+        (device, gpu) = ("cpu".to_string(), false);
+    }
     if (r.device == "cpu") != (device == "cpu") {
         return Err(usage(format!(
             "run {run_id} ran on {}, and would go on on {device}; start a new run",
@@ -4785,6 +5058,11 @@ fn conclude(
             failure: failure.as_ref(),
         },
     )?;
+    // the device it ran on, as recorded: a run sent to the CPU says so
+    let device = rows::run(registry.store(), run_id)
+        .ok()
+        .flatten()
+        .map_or_else(|| c.device.to_string(), |r| r.device);
     // record 49 A3: a run that loaded measures changed what the ask
     // answers, so it moves the epoch and the ask's catalog is built again
     let measures_loaded = summary["numbers"]["measures"].as_u64().unwrap_or(0) > 0;
@@ -4803,7 +5081,7 @@ fn conclude(
                 policy: None,
                 job_id: Some(c.job_id),
                 details: Some(json!({
-                    "status": status, "runtime": c.runtime, "device": c.device,
+                    "status": status, "runtime": c.runtime, "device": device,
                     "results": digest, "review_items": summary["review_items"],
                     "measures": summary["numbers"]["measures"],
                 })),
@@ -4918,6 +5196,8 @@ struct Running {
     batch: Batch,
     child: std::process::Child,
     inv: Invocation,
+    /// The cores and memory it holds of the lane.
+    ask: lane::Ask,
 }
 
 /// What every batch of a run shares.
@@ -5014,6 +5294,8 @@ fn execute_run(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Resul
     let working = PathBuf::from(&x.output.path);
     let scratch_root = PathBuf::from(&x.scratch.path);
     let run_dir = scratch_root.join(RUNS).join(x.run_id.to_string());
+    // a resumed run's units in flight start again from a clean /tmp
+    drop_workdirs(&run_dir);
     let input = run_dir.join("input");
     let inputs = run_dir.join("inputs");
     let rel_out = format!("{}/{}/{}", derivative::TREE, p.name, x.run_id);
@@ -5074,7 +5356,7 @@ fn execute_run(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Resul
             d.header,
             d.geometry,
             d.contrast,
-            !d.cache.is_empty(),
+            d.asks_cache(x.params),
             d.rows,
         )?,
         (Layout::Bids, Some(release)) => released(registry, release, d.level)?,
@@ -5417,6 +5699,10 @@ fn execute_run(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Resul
             x.runtime.stop(&r.inv);
             let _ = runtime::kill(&mut r.child);
             let _ = r.child.wait();
+            // its /tmp held clinical-derived files: gone with the container
+            if let Some(w) = &r.inv.workdir {
+                let _ = std::fs::remove_dir_all(w);
+            }
             // record 49 R3: a unit stopped mid-way is swept as one that
             // ended; where the sweep cannot vouch for its folder, the
             // folder goes, since a resume runs the unit again from a clean
@@ -5500,6 +5786,8 @@ struct LaneHeld {
     cores: u32,
     memory_mib: u64,
     gpu_mib: u64,
+    /// Of `gpu_mib`, what this run's own units hold.
+    own_gpu_mib: u64,
     runs: usize,
 }
 
@@ -5537,6 +5825,9 @@ fn lane_held(store: &mut Store, run_id: i64, host: &str, card: u32) -> Result<La
             .saturating_add(n(2)?.min(u64::from(u32::MAX)) as u32);
         held.memory_mib += n(3)?;
         held.gpu_mib += n(4)?;
+        if run == run_id {
+            held.own_gpu_mib += n(4)?;
+        }
         held.runs += 1;
     }
     Ok(held)
@@ -5555,6 +5846,22 @@ struct Lanes {
     looked: Option<Instant>,
     card_asked: Option<Instant>,
     waiting: Option<String>,
+    /// The card is optional: a unit that cannot lease it within `grace`
+    /// runs on the CPU rather than wait (record 55, after review).
+    optional: bool,
+    grace: Duration,
+    /// Since when the card has been too full for a unit.
+    card_short: Option<Instant>,
+    /// A unit of the run started on the card: the run never leaves it.
+    on_card: bool,
+    /// Why the whole run went to the CPU, where it did; each unit's log
+    /// says so.
+    to_cpu: Option<String>,
+    /// Since when a unit that runs alone has waited for half its cores.
+    lane_short: Option<Instant>,
+    lane_grace: Duration,
+    /// How long a run on the card waits for room another tenant holds.
+    card_stall: Duration,
 }
 
 /// Start the next batch if it fits the lane as every run holds it, under
@@ -5577,7 +5884,40 @@ fn start_next(
     l.seen = x.lane.ledger;
     l.seen.held_cores = held.cores;
     l.seen.held_memory_mib = held.memory_mib;
-    if !l.seen.fits(l.ask) {
+    // record 55 T24, after review: a unit that asks the lane's cores takes
+    // those free now, so units that share the lane never wait for all of
+    // it; one that runs alone waits a while for half of it first
+    let free = l.seen.cores.saturating_sub(l.seen.held_cores);
+    let together = pending.front().is_some_and(|b| b.key.is_none());
+    let waited = l
+        .lane_short
+        .is_some_and(|since| since.elapsed() >= l.lane_grace);
+    let Some(cores) = x
+        .descriptor
+        .cores_at_start(x.params, free, together, waited)
+    else {
+        l.lane_short.get_or_insert_with(Instant::now);
+        l.waiting = Some(format!(
+            "the lane's budget: {free} of {} cores free; {}",
+            l.seen.cores,
+            if together {
+                format!(
+                    "a unit that runs alone waits up to {} s for {} of the {} it may take",
+                    l.lane_grace.as_secs(),
+                    x.descriptor.needs.cores.max(1).div_ceil(2),
+                    x.descriptor.needs.cores
+                )
+            } else {
+                "a unit waits for one".to_string()
+            }
+        ));
+        return Ok(None);
+    };
+    let ask = lane::Ask {
+        cores,
+        memory_mib: l.ask.memory_mib,
+    };
+    if !l.seen.fits(ask) {
         l.waiting = Some(format!(
             "the lane's budget: {} of {} cores and {} of {} MiB held{}",
             l.seen.held_cores,
@@ -5601,25 +5941,80 @@ fn start_next(
             None => Err("nvidia-smi is not on the search path".into()),
         };
         let held_gpu = held.gpu_mib;
-        match free {
-            Ok(free) if lane::lease_fits(free, held_gpu, need) => gpu_mib = Some(need),
-            Ok(free) => {
-                l.waiting = Some(format!(
-                    "card {card}: {free} MiB free, {held_gpu} MiB held by the lane's running units, and a unit needs {need} MiB"
-                ));
+        let own = held.own_gpu_mib;
+        // every lease counts whole: the card's memory in use cannot be told
+        // apart by tenant, so subtracting it from the leases would let a
+        // foreign tenant's memory cancel this lane's own and overfill the
+        // card. Counting a lease that has loaded twice only waits longer.
+        // what keeps the lease: none, this run's own leases (which end with
+        // its units), or memory another tenant or another run holds
+        let short = match free {
+            Ok(free) if lane::lease_fits(free, held_gpu, need) => None,
+            Ok(free) if own > 0 && free.saturating_add(own) >= need => Some((
+                false,
+                format!(
+                    "card {card}: {free} MiB free and {own} MiB held by this run's own units, and a unit needs {need} MiB: it waits for them"
+                ),
+            )),
+            Ok(free) => Some((
+                true,
+                format!(
+                    "card {card}: {free} MiB free, {own} MiB of it this run's, and a unit needs {need} MiB: another tenant or run holds the rest"
+                ),
+            )),
+            Err(e) => Some((true, format!("card {card}: {e}"))),
+        };
+        match short {
+            None => {
+                l.card_short = None;
+                gpu_mib = Some(need);
+                l.on_card = true;
+            }
+            // an optional card another tenant keeps too full sends the
+            // whole run to the CPU, before its first unit starts, after a
+            // short wait; a run never mixes devices
+            Some((true, why)) if l.optional && !l.on_card => {
+                let since = *l.card_short.get_or_insert_with(Instant::now);
+                if since.elapsed() < l.grace {
+                    l.waiting = Some(why);
+                    return Ok(None);
+                }
+                let words = format!(
+                    "{why}, for {} s: the run runs on the CPU",
+                    since.elapsed().as_secs()
+                );
+                rows::set_device(registry.store(), x.run_id, "cpu").map_err(|e| e.to_string())?;
+                l.gpu_need = None;
+                l.to_cpu = Some(words);
+            }
+            // once on the card (or the card required), another tenant's
+            // shortfall is waited for a bounded time, then the run fails
+            // and says why
+            Some((true, why)) => {
+                let since = *l.card_short.get_or_insert_with(Instant::now);
+                if since.elapsed() >= l.card_stall {
+                    return Err(format!(
+                        "{why}, for {} s: the run gives up on the card (NILS_CARD_STALL_S); start it again when the card has room",
+                        since.elapsed().as_secs()
+                    ));
+                }
+                l.waiting = Some(why);
                 return Ok(None);
             }
-            Err(e) => {
-                l.waiting = Some(format!("card {card}: {e}"));
+            Some((false, why)) => {
+                l.card_short = None;
+                l.waiting = Some(why);
                 return Ok(None);
             }
         }
     }
+    let note = l.to_cpu.clone();
     let Some(b) = pending.pop_front() else {
         return Ok(None);
     };
-    let mut inv = invocation_of(x, m, &b, shared)?;
+    let mut inv = invocation_of(x, m, &b, shared, ask.cores, gpu_mib.is_some())?;
     inv.card = gpu_mib.map(|_| l.card);
+    inv.note = note;
     if let Some(dir) = b.log.parent() {
         std::fs::create_dir_all(dir).map_err(|e| format!("the run's folder: {e}"))?;
     }
@@ -5632,7 +6027,7 @@ fn start_next(
                 registry.store(),
                 *id,
                 &rows::UnitStart {
-                    cores: i64::from(l.ask.cores),
+                    cores: i64::from(ask.cores),
                     memory_mb: l.ask.memory_mib as i64,
                     gpu_card: gpu_mib.map(|_| i64::from(l.card)),
                     gpu_memory_mb: gpu_mib.map(|g| g as i64),
@@ -5646,12 +6041,14 @@ fn start_next(
             .map_err(|e| e.to_string())?;
         }
     }
-    l.seen.take(l.ask);
+    l.seen.take(ask);
     l.waiting = None;
+    l.lane_short = None;
     Ok(Some(Running {
         batch: b,
         child,
         inv,
+        ask,
     }))
 }
 
@@ -5673,6 +6070,12 @@ fn schedule(
 ) -> Result<Scheduled, String> {
     let d = x.descriptor;
     let ask = ask_of(d);
+    // the least a unit starts with: a unit that asks the lane's cores takes
+    // one where no more is free
+    let least = lane::Ask {
+        cores: if d.needs.lane_cores { 1 } else { ask.cores },
+        memory_mib: ask.memory_mib,
+    };
     // this run's own units, which alone may fill the lane
     let mut ledger = x.lane.ledger;
     let total = m.units.len();
@@ -5689,11 +6092,23 @@ fn schedule(
         looked: None,
         card_asked: None,
         waiting: None,
+        optional: d.gpu == Gpu::Optional,
+        grace: card_grace(),
+        card_short: None,
+        // a resumed run whose units ran on the card stays there
+        on_card: x.gpu
+            && rows::units(registry.store(), x.run_id)
+                .map(|us| us.iter().any(|u| u.gpu_card.is_some()))
+                .unwrap_or(false),
+        to_cpu: None,
+        lane_short: None,
+        lane_grace: lane_grace(),
+        card_stall: card_stall(),
     };
     loop {
         // start what fits
         while !pending.is_empty() {
-            if !ledger.fits(ask) {
+            if !ledger.fits(least) {
                 l.waiting = Some(format!(
                     "the lane's budget: {} of {} cores and {} of {} MiB held",
                     ledger.held_cores, ledger.cores, ledger.held_memory_mib, ledger.memory_mib
@@ -5720,7 +6135,7 @@ fn schedule(
             let released = nils_registry::lock::release(registry.store(), lock)
                 .map_err(|e| format!("the registry's lane lock: {e}"));
             if let Some(r) = started? {
-                ledger.take(ask);
+                ledger.take(r.ask);
                 running.push(r);
             }
             released?;
@@ -5760,7 +6175,11 @@ fn schedule(
             match running[i].child.try_wait() {
                 Ok(Some(status)) => {
                     let r = running.remove(i);
-                    ledger.give(ask);
+                    ledger.give(r.ask);
+                    // what the container kept in its /tmp is gone with it
+                    if let Some(w) = &r.inv.workdir {
+                        let _ = std::fs::remove_dir_all(w);
+                    }
                     take_in(
                         registry,
                         x,
@@ -5804,6 +6223,8 @@ fn invocation_of(
     m: &Materialised,
     b: &Batch,
     shared: &Shared,
+    cores: u32,
+    on_card: bool,
 ) -> Result<Invocation, String> {
     let d = x.descriptor;
     let p = x.pipeline;
@@ -5813,9 +6234,17 @@ fn invocation_of(
         ("NILS_RUN_ID".into(), x.run_id.to_string()),
         ("NILS_PIPELINE".into(), p.label()),
         ("NILS_IMAGE_DIGEST".into(), p.image_digest.clone()),
-        ("NILS_CORES".into(), d.needs.cores.to_string()),
+        ("NILS_CORES".into(), cores.to_string()),
         ("NILS_MEMORY_GB".into(), format!("{}", d.needs.memory_gb)),
     ];
+    if on_card {
+        // record 55 T25: the card memory the unit is leased, which its tool
+        // plans within (the post-contrast fallback sizes its waves to it)
+        env.push((
+            "NILS_GPU_MEMORY_GB".into(),
+            descriptor::number_text(d.needs.gpu_memory_gb),
+        ));
+    }
     match &b.key {
         None => {
             mounts = vec![
@@ -5937,7 +6366,7 @@ fn invocation_of(
     // record 55 E5: the slice cache, read-write, for a pipeline that
     // declares the model inputs it keeps there; in the site's working
     // place, since the pictures are clinical
-    if !d.cache.is_empty() {
+    if d.asks_cache(x.params) {
         let dir = crate::slice_cache::folder(Path::new(&x.output.path));
         std::fs::create_dir_all(&dir).map_err(|e| format!("the slice cache's folder: {e}"))?;
         mounts.push(Mount {
@@ -5957,7 +6386,8 @@ fn invocation_of(
             env.push((var.clone(), g.secret.mount.clone()));
         }
     }
-    let argv = d.argv(x.params, &participants)?;
+    // the threads parameter told the cores this start was given
+    let argv = d.argv(&d.params_for_cores(x.params, cores), &participants)?;
     // who the process is: for podman the engine's own account, which
     // `--userns keep-id` maps to itself, never the group of a shared
     // (setgid) working place, which keep-id does not map and which would
@@ -5983,14 +6413,20 @@ fn invocation_of(
         image: p.image.clone(),
         argv,
         mounts,
-        gpu: x.gpu,
+        gpu: on_card,
         card: None,
         local_image: shared.local_image.clone(),
+        // apptainer's /tmp and /var/tmp, on disk beside the unit's log;
+        // podman's and docker's are the container's own
+        workdir: (x.runtime.kind == runtime::Kind::Apptainer)
+            .then(|| b.log.parent().map(|d| d.join(WORKDIR)))
+            .flatten(),
+        note: None,
         env,
         user,
         // the unit's declared cores and memory, enforced where the runtime
         // can; the lane's budget counts them either way
-        cpus: shared.limits.0.then_some(d.needs.cores),
+        cpus: shared.limits.0.then_some(cores),
         memory_mib: shared.limits.1.then(|| lane::mib_of_gb(d.needs.memory_gb)),
     })
 }
@@ -6069,6 +6505,8 @@ fn stop_left(rt: &runtime::Cli, together: bool, units: &[rows::Unit], out: &Path
                 gpu: false,
                 card: None,
                 local_image: None,
+                workdir: None,
+                note: None,
                 env: Vec::new(),
                 user: None,
                 cpus: None,
@@ -6740,6 +7178,13 @@ fn finalize(
     let d = x.descriptor;
     let now = nils_registry::time::now_iso();
     let unit_rows = rows::units(registry.store(), x.run_id).map_err(|e| e.to_string())?;
+    // the device the run ran on, as recorded: a full optional card may
+    // have sent it to the CPU before its first unit
+    let on_card = x.gpu
+        && rows::run(registry.store(), x.run_id)
+            .ok()
+            .flatten()
+            .is_some_and(|r| r.device != "cpu");
     let by_name: BTreeMap<&str, &rows::Unit> =
         unit_rows.iter().map(|u| (u.unit.as_str(), u)).collect();
     let apart = d.units == Units::Apart;
@@ -7407,7 +7852,7 @@ fn finalize(
         // again, and the secrets it read, by id alone
         "units_mode": d.units.name(),
         "lane": x.lane.doc(),
-        "needs": {"cores": d.needs.cores, "memory_gb": d.needs.memory_gb, "gpu_memory_gb": x.gpu.then_some(d.needs.gpu_memory_gb)},
+        "needs": {"cores": d.needs.cores, "memory_gb": d.needs.memory_gb, "gpu_memory_gb": on_card.then_some(d.needs.gpu_memory_gb)},
         "resumed": x.resume.is_some(),
         "secrets": x.secrets.iter().map(|g| g.secret.id.clone()).collect::<Vec<_>>(),
     });
@@ -8537,6 +8982,186 @@ fn found_for(outputs: &[descriptor::Output], out: &Path, u: &Unit) -> Vec<String
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Record 55, second review: the lane's start sweeps the work folders
+    /// of the runs that ended (done, partial, failed, cancelled,
+    /// interrupted), never a running one's, and the next sweep visits only
+    /// those that ended after it.
+    #[test]
+    fn the_sweep_clears_ended_runs_once_and_never_a_running_one() {
+        sweep_case(Store::sqlite_in_memory().unwrap(), "sqlite");
+        // and on Postgres, where the time is cast to a timestamp
+        let Some(dsn) = std::env::var("NILS_TEST_POSTGRES_DSN")
+            .ok()
+            .filter(|d| !d.is_empty())
+        else {
+            eprintln!("NILS_TEST_POSTGRES_DSN is not set; the Postgres half is skipped");
+            return;
+        };
+        let schema = "nils_sweep_test";
+        let mut admin = Store::connect_postgres(&dsn, "public").unwrap();
+        admin
+            .batch(&format!(
+                "DROP SCHEMA IF EXISTS {schema} CASCADE; CREATE SCHEMA {schema}"
+            ))
+            .unwrap();
+        drop(admin);
+        sweep_case(Store::connect_postgres(&dsn, schema).unwrap(), "postgres");
+        let mut admin = Store::connect_postgres(&dsn, "public").unwrap();
+        admin
+            .batch(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+            .unwrap();
+    }
+
+    fn sweep_case(mut store: Store, backend: &str) {
+        let base =
+            std::env::temp_dir().join(format!("nils-sweep-{}-{backend}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        nils_registry::migrate::migrate(&mut store, nils_registry::migrate::Kind::Registry)
+            .unwrap();
+        let place = nils_registry::place::add(
+            &mut store,
+            &nils_registry::place::New {
+                name: "work",
+                role: nils_registry::place::Role::Working,
+                path: base.to_str().unwrap(),
+                guarantees: json!({}),
+                probed: json!({}),
+                handling: Value::Null,
+                dataset: Value::Null,
+            },
+        )
+        .unwrap();
+        let doc = json!({});
+        let (pl, _) = rows::add(
+            &mut store,
+            &rows::New {
+                name: "swept",
+                tool_version: "1",
+                descriptor: &doc,
+                descriptor_digest: "d1",
+                image: "example.org/swept",
+                image_digest: "sha256:00",
+                layout: "stacks",
+                level: "stack",
+                added_by: "test",
+                added_at: "2026-10-15T10:00:00Z",
+            },
+        )
+        .unwrap();
+        let params = json!({});
+        let host = job::hostname();
+        let mut start = |status: Option<&str>| -> i64 {
+            let id = rows::start(
+                &mut store,
+                &rows::NewRun {
+                    pipeline_id: pl.id,
+                    job_id: None,
+                    handle_id: None,
+                    selection: None,
+                    params: &params,
+                    runtime: "apptainer",
+                    runtime_version: "1",
+                    host: &host,
+                    device: "cpu",
+                    model_ids: &[],
+                    label_set_id: None,
+                    place_id: Some(place),
+                    scratch_place_id: None,
+                    principal: "t",
+                    actor: None,
+                    started_at: "2026-10-15T10:00:00Z",
+                },
+            )
+            .unwrap();
+            if let Some(s) = status {
+                rows::finish(
+                    &mut store,
+                    id,
+                    &rows::Finish {
+                        status: s,
+                        finished_at: &nils_registry::time::now_iso(),
+                        exit_code: None,
+                        results_digest: None,
+                        summary: &json!({}),
+                        error: None,
+                        failure: None,
+                    },
+                )
+                .unwrap();
+            }
+            id
+        };
+        let mut ids: Vec<i64> = [
+            Some("done"),
+            Some("partial"),
+            Some("failed"),
+            Some("cancelled"),
+            None,
+        ]
+        .into_iter()
+        .map(&mut start)
+        .collect();
+        // a run whose engine went away: interrupted, its end without a time
+        let gone = start(None);
+        assert!(rows::interrupt(&mut store, gone, "went away").unwrap());
+        ids.insert(4, gone);
+        let tmp = |id: i64| {
+            base.join(RUNS)
+                .join(id.to_string())
+                .join("units/stack-1")
+                .join(WORKDIR)
+        };
+        for id in &ids {
+            std::fs::create_dir_all(tmp(*id)).unwrap();
+        }
+        // times are whole seconds: the sweep comes a second after the ends
+        std::thread::sleep(Duration::from_millis(1100));
+        assert_eq!(sweep_workdirs(&mut store).unwrap(), 5);
+        for id in &ids[..5] {
+            assert!(!tmp(*id).exists(), "run {id}");
+        }
+        assert!(tmp(ids[5]).exists(), "a running run keeps its own");
+        // the next sweep visits none of those again, the interrupted one
+        // included, and the marker is this host's
+        std::fs::create_dir_all(tmp(gone)).unwrap();
+        assert_eq!(sweep_workdirs(&mut store).unwrap(), 0);
+        assert!(tmp(gone).exists());
+        assert!(
+            meta_text(&mut store, &format!("{SWEPT_KEY}.{host}"))
+                .unwrap()
+                .is_some()
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Record 55, after review: what apptainer units left in their /tmp
+    /// (clinical-derived volumes) goes when a run stops, is cancelled or
+    /// taken up again, and at an engine's start; nothing else of the run.
+    #[test]
+    fn a_run_s_work_folders_go_and_nothing_else() {
+        let base = std::env::temp_dir().join(format!("nils-workdirs-{}", std::process::id()));
+        let run = base.join("runs").join("7");
+        for d in [
+            "tmp/a",
+            "units/stack-1/tmp/b",
+            "units/stack-2/tmp",
+            "units/stack-2/out",
+        ] {
+            std::fs::create_dir_all(run.join(d)).unwrap();
+        }
+        std::fs::write(run.join("units/stack-1/tmp/b/vol.nii.gz"), b"x").unwrap();
+        std::fs::write(run.join("units/stack-1/log.txt"), b"log").unwrap();
+        drop_workdirs(&run);
+        assert!(!run.join("tmp").exists());
+        assert!(!run.join("units/stack-1/tmp").exists());
+        assert!(!run.join("units/stack-2/tmp").exists());
+        assert!(run.join("units/stack-1/log.txt").exists());
+        assert!(run.join("units/stack-2/out").exists());
+        // a run with no folders is no error
+        drop_workdirs(&base.join("runs").join("8"));
+        let _ = std::fs::remove_dir_all(&base);
+    }
 
     /// Record 55 H3, section 6.5: a `derivative:<kind>` input takes what
     /// its check leaves it: by default any result but a rejected one, with

@@ -5,30 +5,41 @@
 # infer-fusion, the certified body-part model of record 50), each with its
 # descriptor beside this file.
 #
-# CPU by default, which is how it runs until the laptop has a rootless GPU
-# path (record 43 R5). infer-fusion decodes lossless JPEG 2000 on a card where
-# the runner gives it one, with the nvImageCodec wheels in requirements.txt,
-# in this same image. A CUDA build of torch, for embed, for infer-fusion's
-# encoder on the card and for the cascade's student, takes the wheel index of
-# a CUDA torch; the wheels carry the CUDA runtime, so the base stays the same:
+# One image for the CPU and for a card (record 55 A5). torch comes from the
+# wheel index of a CUDA torch, whose wheels carry the CUDA runtime, so the
+# base stays the same. Where the runner gives the container a card (apptainer
+# --nv, a CDI device under podman, --gpus under docker), infer-fusion decodes
+# lossless JPEG 2000 on it with the nvImageCodec wheels in requirements.txt
+# and runs the cascade's student on it, and embed and seed run their encoders
+# on it. Where it gives none, torch finds no card and every step runs on the
+# CPU, as the CPU build does: the release publishes this build.
 #
 #   docker build -t nils-bodypart pipelines/nils-bodypart
-#   docker build --build-arg TORCH_INDEX=https://download.pytorch.org/whl/cu129 \
-#       -t nils-bodypart:cuda pipelines/nils-bodypart
 #
-# Both builds take one torch version. It is the newest with a CUDA 12 build
-# (the nvImageCodec wheels are CUDA 12 ones), and its CUDA wheels carry
-# kernels for Blackwell cards (sm_120), which torch 2.5.1 lacked.
+# A site that never has a card may build the smaller CPU-only image from the
+# same torch version; its answers are the same (record 55 E2, A5.2.3a):
+#
+#   docker build --build-arg TORCH_INDEX=https://download.pytorch.org/whl/cpu \
+#       -t nils-bodypart:cpu pipelines/nils-bodypart
+#
+# Both builds take one torch version, 2.13.0, the one the cascade was graded
+# with: its CPU build gave the certified model's answers exactly, and its
+# CUDA 12.9 build on a card the CPU build's answers (class I). It is the newest
+# with a CUDA 12 build (the nvImageCodec wheels are CUDA 12 ones), and its CUDA
+# wheels carry kernels for Blackwell cards (sm_120), which torch 2.5.1 lacked.
 #
 # The weights are baked in at build time at pinned Hugging Face commits
 # (src/nils_bodypart/encoders.py, PINS), and the image runs with
 # HF_HUB_OFFLINE=1: the build ends by loading both encoders with the network
-# off, so an image that would reach for the network is never made.
+# off, so an image that would reach for the network is never made. Given
+# ENCODER_DIGESTS (a comma list, as bodypart-embed's descriptor pins them),
+# the build also fails where the weights it baked are not those, which is
+# how a release checks the descriptors it ships against the image it built.
 
 ARG BASE=python:3.12-slim-bookworm@sha256:392307d22300de8b5986851a12d9176dfc0fc073e65bf6523ebd7dcbeb23564e
 FROM ${BASE}
 
-ARG TORCH_INDEX=https://download.pytorch.org/whl/cpu
+ARG TORCH_INDEX=https://download.pytorch.org/whl/cu129
 ARG TORCH_VERSION=2.13.0
 ARG TORCHVISION_VERSION=0.28.0
 
@@ -50,17 +61,25 @@ RUN apt-get update \
 # every start. pip compiles what it installs below.
 RUN python -m compileall -q -j 0 -x '/site-packages/' "$(python -c 'import sysconfig; print(sysconfig.get_path("stdlib"))')"
 
-# torch first, in its own layer, from the index the build asks for.
-RUN pip install --index-url "${TORCH_INDEX}" "torch==${TORCH_VERSION}" "torchvision==${TORCHVISION_VERSION}"
-
-# Every other dependency at its pinned version.
+# torch from the index the build asks for, then every other dependency at
+# its pinned version, in one layer. torch's CUDA wheels pull Triton, which
+# bundles NVIDIA's ptxas, cuobjdump and nvdisasm: no NVIDIA licence names
+# those as redistributable, and nothing here compiles a kernel (no
+# torch.compile), so it is removed in the layer that installed it and no
+# layer of the image carries it.
 COPY requirements.txt /tmp/requirements.txt
-RUN pip install -r /tmp/requirements.txt && rm /tmp/requirements.txt
+RUN pip install --index-url "${TORCH_INDEX}" "torch==${TORCH_VERSION}" "torchvision==${TORCHVISION_VERSION}" \
+    && pip install -r /tmp/requirements.txt && rm /tmp/requirements.txt \
+    && pip uninstall -y triton \
+    && python -c "import importlib.util, sys; sys.exit(importlib.util.find_spec('triton') is not None)"
 
 # The weights, in a layer of their own that a code change does not rebuild.
 COPY src/nils_bodypart/__init__.py src/nils_bodypart/encoders.py src/nils_bodypart/bake.py /opt/bake/nils_bodypart/
+# The hub client's download cache and log (xet) go: the log names the
+# building machine's memory, and nothing reads either offline.
 RUN PYTHONPATH=/opt/bake python -m nils_bodypart.bake download \
-    && rm -rf /opt/bake \
+    && rm -rf /opt/bake "$HF_HOME/xet" \
+    && test ! -e "$HF_HOME/xet" \
     && chmod -R a+rX /opt/nils-bodypart
 
 # From here on the hub clients never touch the network.
@@ -70,10 +89,11 @@ ENV HF_HUB_OFFLINE=1 \
 
 COPY pyproject.toml /src/pyproject.toml
 COPY src /src/src
+ARG ENCODER_DIGESTS=""
 RUN pip install --no-deps /src \
     && rm -rf /src \
     && pip freeze > /opt/nils-bodypart/pip-freeze.txt \
-    && python -m nils_bodypart.bake verify
+    && NILS_BODYPART_EXPECT_ENCODERS="${ENCODER_DIGESTS}" python -m nils_bodypart.bake verify
 
 # Not root: anything run by hand runs as nobody. The engine's runner names
 # its own user with --user (with podman's --userns keep-id beside it), which
