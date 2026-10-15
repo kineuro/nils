@@ -20,9 +20,19 @@
 //! shapes. Record 48: a pick of a stack of a sample
 //! sealed now keeps its state, and names no stack to a caller without
 //! sealed:see (`withheld`).
+//!
+//! With `?layer=` (body_region, body_part or post_contrast; record 55,
+//! decision 6, the data map's layers, as on the Main scans map) each of the
+//! page's sessions carries its MR scans by the layer's value, and each role
+//! the value of the scan picked; the answer carries the layer, its values
+//! on the page and the step that answers it over the cohort, as the
+//! cohort's own document carries it, on the first page alone (a later
+//! page, asked with `after`, says none). A stack of a sample sealed now is in
+//! no count for a caller who may not read it. Read only.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
+use nils_classify::main_scans::{Held, layer_rows, value_of_stacks};
 use nils_registry::Registry;
 use nils_registry::pick_truth::Of;
 use nils_registry::store::Error as StoreError;
@@ -90,6 +100,7 @@ pub(crate) fn door(
         ),
         None => None,
     };
+    let layer = crate::main_scans::layer_named(query.get("layer").map(String::as_str))?;
     let store = registry.store();
     let cohort = nils_registry::cohort::by_name(store, name)
         .map_err(failed)?
@@ -282,6 +293,31 @@ pub(crate) fn door(
                 .push(r.int(1).map_err(failed)?);
         }
     }
+    // the layer over the page's sessions: each session's MR scans by value,
+    // and each stack's value for the scan a role picked
+    let mut held: HashMap<i64, Held> = HashMap::new();
+    let mut valued: HashMap<i64, String> = HashMap::new();
+    if let Some(layer) = layer {
+        let session_of: HashMap<i64, i64> = studies
+            .iter()
+            .flat_map(|(session, list)| list.iter().map(move |study| (*study, *session)))
+            .collect();
+        let rows = layer_rows(store, layer, &page, None).map_err(failed)?;
+        let stacks: Vec<i64> = rows.iter().map(|r| r.stack).collect();
+        let hidden = crate::sealed::withheld(store, &caller.access, &stacks).map_err(failed)?;
+        for r in rows {
+            if hidden.contains(&r.stack) {
+                continue;
+            }
+            let Some(session) = session_of.get(&r.study) else {
+                continue;
+            };
+            held.entry(*session).or_default().add(&r);
+            if let Some(v) = r.value {
+                valued.insert(r.stack, v);
+            }
+        }
+    }
     let subjects: Vec<Value> = page
         .iter()
         .map(|subject| {
@@ -309,16 +345,30 @@ pub(crate) fn door(
                         if hidden {
                             v["withheld"] = json!(true);
                         }
+                        if layer.is_some() {
+                            // the value of the scan picked, as the map says it
+                            // (the lowest of its stacks that carries one), none
+                            // where it is withheld
+                            v["layer"] = json!(if hidden {
+                                None
+                            } else {
+                                p.and_then(|p| value_of_stacks(&valued, &p.stacks))
+                            });
+                        }
                         by_role.insert(role.clone(), v);
                     }
                     let label = format!("ses-{}", day.replace('-', ""));
-                    json!({
+                    let mut doc = json!({
                         "session": id,
                         "studies": studies.get(id).cloned().unwrap_or_default(),
                         "label": if quasi { label } else { shape(&label) },
                         "number": i + 1,
                         "roles": by_role,
-                    })
+                    });
+                    if let Some(layer) = layer {
+                        doc["layer"] = held.get(id).cloned().unwrap_or_default().to_json(layer);
+                    }
+                    doc
                 })
                 .collect();
             json!({
@@ -337,7 +387,33 @@ pub(crate) fn door(
             )
         })
         .collect();
-    Ok(json!({
+    let layered = match layer {
+        None => None,
+        Some(layer) => {
+            let values = layer.sorted(
+                held.values()
+                    .flat_map(|h| h.values().map(|(v, _)| v.clone())),
+            );
+            // the step is the cohort's, the same on every page: given with the
+            // first page alone
+            let step = if after.is_none() {
+                crate::operations::step_of(
+                    registry,
+                    crate::operations::Scope::Cohort(cohort.id),
+                    &format!("cohort:{}", cohort.name),
+                    layer.step(),
+                    !crate::sealed::reads(&caller.access),
+                )
+                .map_err(failed)?
+            } else {
+                None
+            };
+            Some(json!({
+                "layer": layer.name(), "operation": layer.step(), "values": values, "step": step,
+            }))
+        }
+    };
+    let mut out = json!({
         "cohort": {"name": cohort.name, "id": cohort.id},
         "detail": caller.access.detail.name(),
         "roles": roles,
@@ -347,5 +423,9 @@ pub(crate) fn door(
         "count": subjects.len(),
         "subjects": subjects,
         "next": next,
-    }))
+    });
+    if let Some(l) = layered {
+        out["layer"] = l;
+    }
+    Ok(out)
 }

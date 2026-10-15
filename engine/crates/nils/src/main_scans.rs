@@ -5,11 +5,14 @@
 //! saved as a new version that queues the scope's pick run; and the map of
 //! what the rules, saved or drafted, take for a role, read from the stored
 //! axes and written nowhere. A scope is `?cohort=NAME` or `?dataset=NAME`
-//! (or ID), or the same under `scope` or at the top of a body.
+//! (or ID), or the same under `scope` or at the top of a body. A map door
+//! asked for a `layer` (body region, body part or post-contrast) says what
+//! each visit's scans are by that operation's answers, and whether its step
+//! has run over the scope (record 55, decision 6: the data map's layers).
 
 use std::collections::{BTreeSet, HashMap};
 
-use nils_classify::main_scans::{self, Ask, Columns, Compare, Group};
+use nils_classify::main_scans::{self, Ask, Columns, Compare, Group, Layer};
 use nils_pack::pick::Model;
 use nils_pack::pick_rules::Rules;
 use nils_registry::Registry;
@@ -37,7 +40,8 @@ pub(crate) fn sized(body: &str) -> Result<(), Reply> {
 
 /// The doors of this module, as the capabilities list them (2026-10-11:
 /// they were routed and granted but not listed, so the desk hid the page).
-pub(crate) const DOORS: [&str; 6] = [
+pub(crate) const DOORS: [&str; 7] = [
+    "GET /api/picks/layer-step",
     "GET /api/picks/rules",
     "GET /api/picks/rules/text",
     "POST /api/picks/rules",
@@ -50,6 +54,15 @@ pub(crate) const DOORS: [&str; 6] = [
 /// cost, its result cap and its label; the grant and the detail are read
 /// from the door table.
 pub(crate) const POLICY: &[(&str, bool, bool, &str, &str, &str, &str)] = &[
+    (
+        "GET /api/picks/layer-step",
+        false,
+        false,
+        "bounded",
+        "one document",
+        "Reading a layer's step",
+        "Read a layer's step",
+    ),
     (
         "GET /api/picks/rules",
         false,
@@ -540,6 +553,7 @@ pub(crate) fn map(
         None | Some("default" | "day") => nils_registry::session::Scheme::default(),
         Some(n) => crate::stored_scheme(registry, n).map_err(Reply::from)?,
     };
+    let layer = layer_of(doc)?;
     let (saved, stored) = current(registry, model, &scope)?;
     let version = stored.as_ref().map_or(1, |s| s.version);
     let draft = match &doc["rules"] {
@@ -572,9 +586,22 @@ pub(crate) fn map(
             .filter_map(|r| r.int(0).ok())
             .collect()
     };
+    // a dataset's own stacks, those its folder holds a file of: the map's
+    // visits, candidates, scans taken and layer are read from these alone
+    // (Nima, 2026-10-12: a dataset holds stacks, never a subject's
+    // membership); a cohort holds every stack of its open members. Its
+    // `source` rows are read once, for these and for the layer's step.
+    let ids = crate::pick_scopes::sources_of(registry.store(), &scope).map_err(failed)?;
+    let held = match &ids {
+        Some(ids) => Some(
+            nils_registry::pick_rules::stacks_of_sources(registry.store(), ids).map_err(failed)?,
+        ),
+        None => None,
+    };
+    let sources = ids.as_deref().map(comma);
     // the scope's visits, in the cache before the map reads them
     visits_cached(registry, &scheme, &subjects)?;
-    let read = main_scans::read(
+    let mut read = main_scans::read(
         registry,
         &Ask {
             model,
@@ -584,6 +611,7 @@ pub(crate) fn map(
             picks: &picks,
             datasets: &datasets,
             withheld: &withheld,
+            held: held.as_ref(),
         },
     )
     .map_err(failed)?;
@@ -597,20 +625,43 @@ pub(crate) fn map(
         _ => None,
     };
     let cmp = Compare::new(&read, model, role, saved, draft, reference.as_ref());
-    let out = match door {
+    // the subjects door's group, worked out once: its page is what a layer
+    // is read for alone there
+    let paging = if door == Door::Subjects {
+        let group = Group::parse(&doc["group"]).map_err(|m| Reply::error(400, m))?;
+        let by_changes = match doc["order"].as_str() {
+            None | Some("changes") => true,
+            Some("visits") => false,
+            Some(_) => return Err(Reply::error(400, "order: changes or visits")),
+        };
+        let page = doc["page"].as_u64().unwrap_or(0) as usize;
+        let per_page = doc["per_page"].as_u64().unwrap_or(24).clamp(1, 48) as usize;
+        let members = main_scans::Members::of(&read, &cmp, by, &group, by_changes);
+        Some((members, page, per_page))
+    } else {
+        None
+    };
+    if let Some(layer) = layer {
+        let only = paging
+            .as_ref()
+            .map(|(members, page, per_page)| members.page(&read, *page, *per_page));
+        read.add_layer(
+            registry.store(),
+            layer,
+            &withheld,
+            held.as_ref(),
+            only.as_ref(),
+        )
+        .map_err(failed)?;
+    }
+    let mut out = match door {
         Door::Map => main_scans::map(&read, &cmp, model, role, by, version),
         Door::Strips => main_scans::strips(&read, &cmp, model, role, by),
         Door::Subjects => {
-            let group = Group::parse(&doc["group"]).map_err(|m| Reply::error(400, m))?;
-            let by_changes = match doc["order"].as_str() {
-                None | Some("changes") => true,
-                Some("visits") => false,
-                Some(_) => return Err(Reply::error(400, "order: changes or visits")),
+            let Some((members, page, per_page)) = paging else {
+                return Err(Reply::error(500, "the subjects door's page was not read"));
             };
-            let page = doc["page"].as_u64().unwrap_or(0) as usize;
-            let per_page = doc["per_page"].as_u64().unwrap_or(24).clamp(1, 48) as usize;
-            let mut page =
-                main_scans::subjects(&read, &cmp, by, &group, by_changes, page, per_page);
+            let mut page = main_scans::subjects(&read, &cmp, &members, page, per_page);
             // below detail quasi a subject's code and a person's words are
             // shown by their shape, as the viewer shows them (record 55 K7)
             if caller.access.detail < crate::grants::Detail::Quasi {
@@ -628,5 +679,114 @@ pub(crate) fn map(
             page
         }
     };
+    if let Some(layer) = layer
+        && door == Door::Map
+    {
+        // whether the step that answers the layer has run over the scope,
+        // as the scope's Data page says it, with why a run of it would be
+        // refused now: on the map door alone, the scope's summary, since
+        // the subjects and strips doors are asked beside it and its cost
+        // was measured on each (2026-10-15)
+        out["layer"]["step"] = layer_step(registry, &scope, sources.as_deref(), caller, layer)?;
+    }
     Ok(Reply::ok(out))
+}
+
+/// `GET /api/picks/layer-step?cohort=NAME&layer=L` (or `dataset=`): the
+/// step that answers a layer over a scope alone, as the map door gives it,
+/// for a page to ask while the step waits or runs instead of the whole map
+/// (the second review of 2026-10-15). Read by whoever may read the map or
+/// the cohort's heatmap.
+pub(crate) fn layer_step_door(
+    registry: &mut Registry,
+    caller: &crate::serve::Caller,
+    query: &HashMap<String, String>,
+) -> Result<Reply, Reply> {
+    let scope = scope_of(registry, query, None)?;
+    // a dataset's step is read as its Data page is, with data:see or
+    // pipelines:see; review:see reads a cohort's, as its heatmap is read
+    if scope.kind == nils_registry::pick_rules::ScopeKind::Dataset
+        && !caller.access.holds("data:see")
+        && !caller.access.holds("pipelines:see")
+    {
+        return Err(Reply::error(
+            403,
+            "a dataset's step is read with data:see or pipelines:see",
+        ));
+    }
+    let layer = layer_named(query.get("layer").map(String::as_str))?.ok_or_else(|| {
+        let mut r = Reply::error(400, "layer: body_region, body_part or post_contrast");
+        r.body["field"] = Value::from("layer");
+        r
+    })?;
+    let sources = scope_sources(registry, &scope)?;
+    let step = layer_step(registry, &scope, sources.as_deref(), caller, layer)?;
+    Ok(Reply::ok(json!({
+        "scope": scope.to_json(), "layer": layer.name(), "operation": layer.step(), "step": step,
+    })))
+}
+
+/// The layer a map door asks for: `body_region`, `body_part` or
+/// `post_contrast`, none where `layer` is missing or null.
+fn layer_of(doc: &Value) -> Result<Option<Layer>, Reply> {
+    match &doc["layer"] {
+        Value::Null => Ok(None),
+        Value::String(w) => layer_named(Some(w)),
+        _ => layer_named(Some("?")),
+    }
+}
+
+/// A layer as a door names it, the same words for every door that takes
+/// one: 400 naming the field where it is no layer.
+pub(crate) fn layer_named(word: Option<&str>) -> Result<Option<Layer>, Reply> {
+    Layer::from_word(word).map_err(|words| {
+        let mut r = Reply::error(400, words);
+        r.body["field"] = Value::from("layer");
+        r
+    })
+}
+
+/// A dataset's `source` rows, resolved once a request as its Data page
+/// resolves them, as a comma list; none for a cohort.
+fn scope_sources(registry: &mut Registry, scope: &Scope) -> Result<Option<String>, Reply> {
+    Ok(crate::pick_scopes::sources_of(registry.store(), scope)
+        .map_err(failed)?
+        .as_deref()
+        .map(comma))
+}
+
+fn comma(ids: &[i64]) -> String {
+    ids.iter()
+        .map(i64::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The step of the operation that answers a layer, over the scope's scans,
+/// as the dataset's or the cohort's own page carries it
+/// (`crate::operations::steps`): its state (done once a run of it finished
+/// over the scans or its model answered one of them), its run and job, what
+/// it answered, and why a run of it would be refused now. A dataset's counts
+/// keep a sealed sample as its Data page's do; a cohort's leave it out for
+/// a caller who may not read it, as the cohort's door does.
+fn layer_step(
+    registry: &mut Registry,
+    scope: &Scope,
+    sources: Option<&str>,
+    caller: &crate::serve::Caller,
+    layer: Layer,
+) -> Result<Value, Reply> {
+    use nils_registry::pick_rules::ScopeKind;
+    let ids = sources.unwrap_or_default().to_string();
+    let (held, hide_sealed) = match scope.kind {
+        ScopeKind::Dataset => (crate::operations::Scope::Sources(&ids), false),
+        ScopeKind::Cohort => (
+            crate::operations::Scope::Cohort(scope.id),
+            !crate::sealed::reads(&caller.access),
+        ),
+    };
+    let target = scope.label();
+    crate::operations::step_of(registry, held, &target, layer.step(), hide_sealed)
+        .map_err(failed)?
+        .ok_or_else(|| Reply::error(500, format!("{} is not an operation", layer.step())))
 }

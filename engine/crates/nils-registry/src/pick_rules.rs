@@ -14,6 +14,8 @@
 //! What the rules say is `nils_pack::pick_rules`'s; this keeps them. Which
 //! picks a reader reads is `crate::pick_truth`'s.
 
+use std::collections::BTreeSet;
+
 use serde_json::{Value, json};
 
 use crate::schema::{Type, table};
@@ -101,6 +103,30 @@ impl Scope {
     pub fn to_json(&self) -> Value {
         json!({"kind": self.kind.name(), "id": self.id, "name": self.name})
     }
+}
+
+/// The stacks these `source` rows hold a file of: a dataset's, its `source`
+/// rows resolved once by its caller as its Data page resolves them (the
+/// rows under its folder). Nima, 2026-10-12: a dataset holds stacks, never
+/// a subject's membership. Its pick run chooses among these, and its map,
+/// layer and layer step read them.
+pub fn stacks_of_sources(store: &mut Store, sources: &[i64]) -> Result<BTreeSet<i64>, StoreError> {
+    let mut out = BTreeSet::new();
+    for chunk in sources.chunks(500) {
+        let sql = format!(
+            "SELECT DISTINCT stack_id FROM {} WHERE source_id IN ({})",
+            store.qualified("source_stack"),
+            chunk
+                .iter()
+                .map(i64::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        for r in store.query(&sql, &[])? {
+            out.insert(r.int(0)?);
+        }
+    }
+    Ok(out)
 }
 
 /// One saved version of a scope's rules.
