@@ -5942,21 +5942,14 @@ fn start_next(
         };
         let held_gpu = held.gpu_mib;
         let own = held.own_gpu_mib;
-        // leases whose memory the card already shows in use are not counted
-        // twice: only what the leases hold beyond the memory in use is
-        // still to come (record 55, third review)
-        let total = l
-            .smi
-            .as_ref()
-            .and_then(|smi| lane::gpu_total_mib(smi, card).ok());
-        let to_come = |free: u64| match total {
-            Some(total) => held_gpu.saturating_sub(total.saturating_sub(free)),
-            None => held_gpu,
-        };
+        // every lease counts whole: the card's memory in use cannot be told
+        // apart by tenant, so subtracting it from the leases would let a
+        // foreign tenant's memory cancel this lane's own and overfill the
+        // card. Counting a lease that has loaded twice only waits longer.
         // what keeps the lease: none, this run's own leases (which end with
         // its units), or memory another tenant or another run holds
         let short = match free {
-            Ok(free) if lane::lease_fits(free, to_come(free), need) => None,
+            Ok(free) if lane::lease_fits(free, held_gpu, need) => None,
             Ok(free) if own > 0 && free.saturating_add(own) >= need => Some((
                 false,
                 format!(
