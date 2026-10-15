@@ -411,11 +411,6 @@ fn scoping(
     for op in &patch.operations {
         op_scopes.push(resolver.known(&op.scope, store).map_err(scoped_error)?);
     }
-    let adopted_scopes: Vec<Scope> = adopted
-        .ops
-        .iter()
-        .map(|a| resolver.kept(&a.op.scope, store))
-        .collect();
     let report_scope = match &settings.scope {
         Some(s) => resolver.known(s, store).map_err(scoped_error)?,
         None => {

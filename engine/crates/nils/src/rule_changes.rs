@@ -1040,6 +1040,7 @@ fn rehearsed(
         examples,
         workers,
         all_breaks: true,
+        ..Default::default()
     };
     crate::rehearse::report(registry, dir, patch, &settings).map_err(|e| match e {
         nils_classify::effect::Error::Refused(m) => Reply::error(400, m),
