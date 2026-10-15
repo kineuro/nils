@@ -1788,7 +1788,7 @@ fn pack_list_and_show_read_the_pack_directory() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|p| p["pack"] == common::shipped_mri().as_str()),
+            .any(|p| p["pack"] == common::shipped_mri_id()),
         "{listed}"
     );
 

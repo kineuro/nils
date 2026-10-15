@@ -241,3 +241,23 @@ cases:
     axes:
       construct: Water
       modifier: Dixon
+
+  - name: a scout whose ImageType carries only an in-phase part, named for the Dixon VIBE it plans, gets no Dixon
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\LOCALIZER\IN_PHASE'
+      scanning_sequence: GR
+      sequence_variant: SP
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_sequence_name: '*fl2d1'
+      text_series_description: 't1_vibe_dixon_tra localizer'
+      n_slices: 1
+      repetition_time: 8.6
+      echo_time: 2.4
+      flip_angle: 20
+    flags:
+      gre_scout_readout: true
+      has_in_phase: true
+      has_out_phase: false
+    axes:
+      modifier: ''

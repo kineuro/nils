@@ -593,21 +593,32 @@ fn the_patch_contract_s_example_applies_to_the_mri_pack() {
     let kinds: std::collections::BTreeSet<&str> =
         p.operations.iter().map(|o| o.kind.as_str()).collect();
     assert!(kinds.len() >= 7, "the example shows most kinds: {kinds:?}");
-    let mri = mri_copy("patch-example");
-    let manifest = mri.join("pack.yml");
+    // a copy, removed however the test ends
+    struct Copy(std::path::PathBuf);
+    impl Drop for Copy {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let mri = Copy(mri_copy("patch-example"));
+    let manifest = mri.0.join("pack.yml");
     let text = std::fs::read_to_string(&manifest).unwrap();
     let shipped = common::shipped_mri_version();
-    let at_example = text.replacen(
-        &format!("version: {shipped}"),
-        &format!("version: {version}"),
-        1,
+    std::fs::write(
+        &manifest,
+        text.replacen(
+            &format!("version: {shipped}"),
+            &format!("version: {version}"),
+            1,
+        ),
+    )
+    .unwrap();
+    let copy = nils_pack::load(&mri.0, None).unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(
+        copy.version.to_string(),
+        version,
+        "the copy is at the example's version"
     );
-    assert!(
-        at_example.contains(&format!("version: {version}")),
-        "the copy is set to the example's version"
-    );
-    std::fs::write(&manifest, at_example).unwrap();
-    let patched = nils_pack::patch::apply(&mri, &p, &|_| true).unwrap_or_else(|e| panic!("{e}"));
+    let patched = nils_pack::patch::apply(&mri.0, &p, &|_| true).unwrap_or_else(|e| panic!("{e}"));
     assert_eq!(patched.applied.len(), p.operations.len());
-    let _ = std::fs::remove_dir_all(&mri);
 }
