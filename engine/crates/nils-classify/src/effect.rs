@@ -356,10 +356,10 @@ struct Class {
     /// The session passes, by their place among the pack's passes, whose
     /// target holds on the stack as the rules and the decisions left it.
     targets: Vec<usize>,
-    /// The routes of a family whose rules decided one of its axes, which
-    /// with the provenance make its acquisition family (record 55, ruling
-    /// 23), as a release reads them off the stack's evidence.
-    routes: Vec<String>,
+    /// What each family's route said of it, which with the decisions in
+    /// force and the provenance make its acquisition family (record 55,
+    /// ruling 23), as a release reads them off the stack's evidence.
+    routes: Vec<crate::family::Said>,
 }
 
 fn split(stored: &str) -> Vec<String> {
@@ -390,12 +390,25 @@ fn classify(
         ..Class::default()
     };
     for e in &v.evidence {
-        if crate::family::ROUTE_FAMILIES
+        if !crate::family::ROUTE_FAMILIES
             .iter()
             .any(|(set, _)| *set == e.rule_set)
-            && !c.routes.contains(&e.rule_set)
         {
-            c.routes.push(e.rule_set.clone());
+            continue;
+        }
+        let at = match c.routes.iter().position(|s| s.route == e.rule_set) {
+            Some(i) => i,
+            None => {
+                c.routes.push(crate::family::Said {
+                    route: e.rule_set.clone(),
+                    axes: BTreeMap::new(),
+                });
+                c.routes.len() - 1
+            }
+        };
+        let values = c.routes[at].axes.entry(e.axis.clone()).or_default();
+        if !e.value.is_empty() && !values.contains(&e.value) {
+            values.push(e.value.clone());
         }
     }
     let doubted = if v.silent {
@@ -854,28 +867,64 @@ pub fn run(
                                 // routes its own rules decided by, so a rule
                                 // that brings a stack into a family moves its
                                 // name although no axis moves
-                                let family = |c: &Class, m: &BTreeMap<String, String>| {
-                                    crate::family::acquisition_family(
-                                        &c.routes,
-                                        m.get("provenance").map(String::as_str),
-                                    )
-                                    .map(str::to_string)
+                                // and with the decisions in force, as the
+                                // classification stands
+                                let family =
+                                    |pack: &Pack, c: &Class, m: &BTreeMap<String, String>| {
+                                        let decided: crate::family::InForce = c
+                                            .decided
+                                            .iter()
+                                            .map(|i| {
+                                                let v = c.axes[*i].values.join(",");
+                                                (
+                                                    pack.axes[*i].name.clone(),
+                                                    (!v.is_empty()).then_some(v),
+                                                )
+                                            })
+                                            .collect();
+                                        crate::family::acquisition_family(
+                                            Some(pack),
+                                            &c.routes,
+                                            &decided,
+                                            m.get("provenance").map(String::as_str),
+                                        )
+                                        .map(str::to_string)
+                                    };
+                                let families = [
+                                    family(base, &t.before, &maps[0]),
+                                    family(&packs[t.key], &t.after, &maps[1]),
+                                ];
+                                // a name moves by a word alone too: the
+                                // patched pack's word for a value it holds
+                                let words = |pack: &Pack, m: &BTreeMap<String, String>| {
+                                    m.iter()
+                                        .map(|(axis, v)| {
+                                            let w = pack
+                                                .axes
+                                                .iter()
+                                                .find(|a| a.name == *axis)
+                                                .map_or_else(
+                                                    || v.clone(),
+                                                    |a| a.words_of_stored(v),
+                                                );
+                                            (axis.clone(), w)
+                                        })
+                                        .collect::<BTreeMap<String, String>>()
                                 };
-                                let families =
-                                    [family(&t.before, &maps[0]), family(&t.after, &maps[1])];
-                                let names = (maps[0] != maps[1] || families[0] != families[1])
-                                    .then(|| {
-                                        let f = facts.get(id).cloned().unwrap_or_default();
-                                        let [fb, fa] =
-                                            families.map(|acquisition_family| NameFacts {
-                                                acquisition_family,
-                                                ..f.clone()
-                                            });
-                                        [
-                                            namer(base, &maps[0], &fb),
-                                            namer(&packs[t.key], &maps[1], &fa),
-                                        ]
+                                let moved = maps[0] != maps[1]
+                                    || families[0] != families[1]
+                                    || words(base, &maps[0]) != words(&packs[t.key], &maps[1]);
+                                let names = moved.then(|| {
+                                    let f = facts.get(id).cloned().unwrap_or_default();
+                                    let [fb, fa] = families.map(|acquisition_family| NameFacts {
+                                        acquisition_family,
+                                        ..f.clone()
                                     });
+                                    [
+                                        namer(base, &maps[0], &fb),
+                                        namer(&packs[t.key], &maps[1], &fa),
+                                    ]
+                                });
                                 (*id, maps, names)
                             })
                             .collect::<Vec<Disposed>>()
@@ -1913,12 +1962,8 @@ fn ids_of(pack: &Pack, axis: &str, values: &[String]) -> BTreeSet<String> {
     values
         .iter()
         .map(|v| {
-            a.and_then(|a| {
-                a.value_index(v)
-                    .or_else(|| a.values.iter().position(|x| x.label == *v))
-                    .map(|i| a.values[i].id.clone())
-            })
-            .unwrap_or_else(|| v.to_lowercase())
+            a.and_then(|a| a.value_named(v).map(|i| a.values[i].id.clone()))
+                .unwrap_or_else(|| v.to_lowercase())
         })
         .collect()
 }

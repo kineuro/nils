@@ -5156,7 +5156,7 @@ fn scans_door(
     let pack = crate::reader::served_pack(doors.pack_dir.as_deref(), &doors.ask_pack);
     crate::scans::with_names(registry, pack.as_deref(), &mut doc)?;
     // the dataset viewer: its family, its physics and its main roles
-    crate::viewer::with_facts(registry, &mut doc, scope)?;
+    crate::viewer::with_facts(registry, pack.as_deref(), &mut doc, scope)?;
     // record 55 H2: each scan's picture inline and its open questions, so
     // a page of the grid is one request
     if pictures {

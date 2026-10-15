@@ -476,9 +476,10 @@ fn campaign_answers(store: &mut Store, decision: i64, campaign: i64) -> Result<V
     Ok(json!({"id": campaign, "name": name, "answers": answers}))
 }
 
-/// The pack's label for each `(axis, value)`, keyed by the value's id and
-/// by its label, when the pack can be found; empty otherwise, and the
-/// document says null where it cannot say.
+/// The pack's label for each `(axis, value)`, keyed by the value's id, by
+/// its label and by the spelling rows keep where the label changed since
+/// (`stored`, record 55, ruling 23), when the pack can be found; empty
+/// otherwise, and the document says null where it cannot say.
 fn labels_of(pack_dir: Option<&Path>, pack: &str) -> BTreeMap<(String, String), String> {
     let mut out = BTreeMap::new();
     let Some(dir) = pack_dir else {
@@ -491,6 +492,9 @@ fn labels_of(pack_dir: Option<&Path>, pack: &str) -> BTreeMap<(String, String), 
         for v in &axis.values {
             out.insert((axis.name.clone(), v.id.clone()), v.label.clone());
             out.insert((axis.name.clone(), v.label.clone()), v.label.clone());
+            if let Some(stored) = &v.stored {
+                out.insert((axis.name.clone(), stored.clone()), v.label.clone());
+            }
         }
     }
     out

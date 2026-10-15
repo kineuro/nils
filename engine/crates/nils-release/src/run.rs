@@ -4173,8 +4173,11 @@ pub fn scan_names(
         store.qualified("stack_fingerprint"),
     );
     let empty = BTreeMap::new();
-    // record 55, ruling 23: the routes that decided each, for its family
-    let routes = crate::family::routes_of(store, Some(stacks))?;
+    // record 55, ruling 23: each one's acquisition family, as the
+    // classification stands
+    let families = crate::family::families_of(store, pack, Some(stacks), &|s| {
+        axes.get(&s).and_then(|a| a.get("provenance").cloned())
+    })?;
     for r in store.query(&sql, &[])? {
         let stack = r.int(0)?;
         let facts = nils_classify::effect::NameFacts {
@@ -4186,13 +4189,7 @@ pub fn scan_names(
             dwi_b_value: r.double(6).ok(),
             dwi_directions: r.opt_int(7)?,
             series_number: r.opt_int(8)?,
-            acquisition_family: crate::family::acquisition_family(
-                routes.get(&stack).map_or(&[][..], Vec::as_slice),
-                axes.get(&stack)
-                    .and_then(|a| a.get("provenance"))
-                    .map(String::as_str),
-            )
-            .map(str::to_string),
+            acquisition_family: families.get(&stack).map(|f| f.to_string()),
         };
         out.insert(
             stack,
@@ -4256,31 +4253,26 @@ pub fn name_of(
             )
             .map(str::to_string)
     });
-    // record 55, ruling 23: the technique's word, and the acquisition family
-    // where nothing in the name says it already
-    let technique_word = get("technique").map(|v| word_of(pack, "technique", v));
-    let spelled = crate::family::spelled(
-        facts.acquisition_family.as_deref(),
-        get("provenance"),
-        own.as_deref(),
-        &[
-            get("base").unwrap_or(""),
-            get("construct").unwrap_or(""),
-            get("technique").unwrap_or(""),
-            get("modifier").unwrap_or(""),
-        ],
-    );
+    // record 55, ruling 23: every name field in the word the pack gives it,
+    // and the acquisition family where nothing in the name says it already
+    let family = facts
+        .acquisition_family
+        .as_deref()
+        .and_then(|f| crate::family::ROUTE_FAMILIES.iter().find(|(_, x)| *x == f))
+        .map(|(_, f)| *f);
+    let words = name_words(pack, a, family, own.as_deref());
+    let spelled = words.family;
     let fields = name::Fields {
         body_part: get("body_part"),
         spinal_cord: get("body_part") == Some("spine"),
         orientation,
-        base: get("base"),
+        base: words.base.as_deref(),
         acquisition_type,
-        modifier: get("modifier"),
+        modifier: words.modifier.as_deref(),
         family: spelled.map(crate::family::word),
-        technique: technique_word.as_deref(),
-        acceleration: get("acceleration"),
-        construct: get("construct"),
+        technique: words.technique.as_deref(),
+        acceleration: words.acceleration.as_deref(),
+        construct: words.construct.as_deref(),
         post_contrast: contrast,
         datatype: get("directory_type"),
         dwi_b_value: facts.dwi_b_value,
@@ -4398,9 +4390,11 @@ fn places(
 ) -> Result<Placements, Error> {
     let axes = axis_values(store)?;
     let tiers = axis_tiers(store)?;
-    // record 55, ruling 23: the route that decided each stack, for the
-    // acquisition family its names and its sidecar carry
-    let routes = crate::family::routes_of(store, None)?;
+    // record 55, ruling 23: each stack's acquisition family, as the
+    // classification stands, which its names and its sidecar carry
+    let families_now = crate::family::families_of(store, Some(pack), None, &|s| {
+        axes.get(&s).and_then(|a| a.get("provenance").cloned())
+    })?;
     let t = table("stack_fingerprint");
     let d = store.dialect();
     let text = |c: &str| {
@@ -4519,16 +4513,9 @@ fn places(
         };
         let contrast = get("post_contrast").and_then(|v| id_of("post_contrast", v));
         let contrast = contrast.as_deref() == Some("given");
-        // record 55, ruling 23: the word a person reads for the technique,
-        // which a row may store under an older spelling (`SP-GRE`, stored
-        // `FLASH`, named `SPGRE`)
-        let technique_word = get("technique").map(|v| word_of(Some(pack), "technique", v));
-        // and the acquisition family the route recognised, which the names
-        // spell where nothing in them says it already
-        let family = crate::family::acquisition_family(
-            routes.get(&stack).map_or(&[][..], Vec::as_slice),
-            get("provenance"),
-        );
+        // record 55, ruling 23: the acquisition family the route recognised,
+        // which the names spell where nothing in them says it already
+        let family = families_now.get(&stack).copied();
         if let Some(f) = family {
             families.insert(stack, f);
         }
@@ -4543,28 +4530,22 @@ fn places(
                     .as_deref(),
             )
             .map(str::to_string);
-        let spelled = crate::family::spelled(
-            family,
-            get("provenance"),
-            own_folder_now.as_deref(),
-            &[
-                get("base").unwrap_or(""),
-                get("construct").unwrap_or(""),
-                get("technique").unwrap_or(""),
-                get("modifier").unwrap_or(""),
-            ],
-        );
+        // and every name field in the word a person reads, which a row may
+        // store under an older spelling (`SP-GRE`, stored `FLASH`, named
+        // `SPGRE`)
+        let words = name_words(Some(pack), a, family, own_folder_now.as_deref());
+        let spelled = words.family;
         let fields = name::Fields {
             body_part: get("body_part"),
             spinal_cord: get("body_part") == Some("spine"),
             orientation: r.opt_text(6)?,
-            base: get("base"),
+            base: words.base.as_deref(),
             acquisition_type: r.opt_text(9)?,
-            modifier: get("modifier"),
+            modifier: words.modifier.as_deref(),
             family: spelled.map(crate::family::word),
-            technique: technique_word.as_deref(),
-            acceleration: get("acceleration"),
-            construct: get("construct"),
+            technique: words.technique.as_deref(),
+            acceleration: words.acceleration.as_deref(),
+            construct: words.construct.as_deref(),
             post_contrast: contrast,
             datatype: get("directory_type"),
             dwi_b_value: r.double(12).ok(),
@@ -5177,6 +5158,62 @@ fn first_int(text: &str) -> Option<i64> {
         .parse()
         .ok()
         .filter(|n: &i64| *n > 0)
+}
+
+/// The words of a stack's name fields, each read through [`word_of`]
+/// (record 55, ruling 23), and the acquisition family the name spells: the
+/// one reading the descriptive names of a release ([`places`]) and of the
+/// scans doors ([`name_of`]) share.
+pub(crate) struct NameWords {
+    pub base: Option<String>,
+    pub modifier: Option<String>,
+    pub technique: Option<String>,
+    pub construct: Option<String>,
+    pub acceleration: Option<String>,
+    /// The family where nothing else in the name says it already.
+    pub family: Option<&'static str>,
+}
+
+pub(crate) fn name_words(
+    pack: Option<&nils_pack::pack::Pack>,
+    a: &BTreeMap<String, String>,
+    family: Option<&'static str>,
+    own_folder: Option<&str>,
+) -> NameWords {
+    // read by name, as the axes a release reads must be (`matters`)
+    let get = |k: &str| a.get(k).map(String::as_str).filter(|v| !v.is_empty());
+    let word = |axis: &str, v: Option<&str>| v.map(|v| word_of(pack, axis, v));
+    let (base, modifier, technique, construct, acceleration) = (
+        word("base", get("base")),
+        word("modifier", get("modifier")),
+        word("technique", get("technique")),
+        word("construct", get("construct")),
+        word("acceleration", get("acceleration")),
+    );
+    let provenance = a.get("provenance").map(|v| {
+        pack.and_then(|p| p.axes.iter().find(|x| x.name == "provenance"))
+            .and_then(|x| x.id_of_stored(v))
+            .map_or_else(|| v.clone(), str::to_string)
+    });
+    let family = crate::family::spelled(
+        family,
+        provenance.as_deref(),
+        own_folder,
+        &[
+            base.as_deref().unwrap_or(""),
+            construct.as_deref().unwrap_or(""),
+            technique.as_deref().unwrap_or(""),
+            modifier.as_deref().unwrap_or(""),
+        ],
+    );
+    NameWords {
+        base,
+        modifier,
+        technique,
+        construct,
+        acceleration,
+        family,
+    }
 }
 
 /// The word a person reads for what a row stores on an axis: the value's

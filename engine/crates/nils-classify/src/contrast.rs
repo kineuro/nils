@@ -197,6 +197,11 @@ impl Vocabulary {
         for a in &pack.axes {
             for v in &a.values {
                 identity.insert((a.name.clone(), v.label.clone()), v.id.clone());
+                // record 55, ruling 23: the spelling rows keep where the
+                // label changed since (`FLASH` for SP-GRE, labelled SPGRE)
+                if let Some(stored) = &v.stored {
+                    identity.insert((a.name.clone(), stored.clone()), v.id.clone());
+                }
                 identity.insert((a.name.clone(), v.id.clone()), v.id.clone());
                 if a.name == "technique" && v.family.as_deref() == Some("GRE") {
                     gradient_echo.insert(v.id.clone());

@@ -12197,7 +12197,7 @@ pub(crate) fn pack_document(
         pack.axes
             .iter()
             .find(|a| a.name == axis)
-            .and_then(|a| a.values.iter().find(|v| v.id == value || v.label == value))
+            .and_then(|a| a.value_named(value).map(|i| &a.values[i]))
             .map(|v| format!("{axis}.{}", v.id))
             .unwrap_or_else(|| name.to_string())
     };
