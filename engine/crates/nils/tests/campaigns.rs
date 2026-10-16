@@ -115,6 +115,8 @@ const CURATOR: &str = "curator-token-of-length";
 const ANNA: &str = "anna-rater-token-of-length";
 const BO: &str = "bo-rater-token-of-length";
 const JUDGE: &str = "judge-token-of-length";
+// record 55, ruling 35 (d): a maker who neither reviews nor reads every answer
+const MAKER: &str = "maker-token-of-length";
 
 impl Server {
     fn start(home: &TempDir) -> Server {
@@ -126,6 +128,7 @@ impl Server {
             format!("{ANNA}=anna@lab:campaigns:work,pipelines:work"),
             format!("{BO}=bo@lab:campaigns:work,pipelines:work"),
             format!("{JUDGE}=judge@lab:campaigns:work,pipelines:work"),
+            format!("{MAKER}=maya@lab:campaigns:work,query:see"),
         ]
         .join(",");
         let child = nils()
@@ -1930,4 +1933,180 @@ fn an_agent_at_the_keyboard_answers_as_an_agent_and_explain_names_it() {
         text.contains("from campaign agents, answered by an agent worker@lab (rater, spine)"),
         "{text}"
     );
+}
+
+/// Record 55, ruling 35 (d): the person who made a campaign, and an
+/// administrator, read its results at the door: per item the answers by
+/// rater, the adjudication, the settled value and the decisions the close
+/// wrote; the agreement, the unsure count and the counts by value. Blind
+/// while open to everyone else, and the raters named to the maker and a
+/// holder of review:work alone.
+#[test]
+fn a_campaign_s_results_are_its_maker_s_and_blind_to_its_raters_while_open() {
+    let home = registry();
+    let server = Server::start(&home);
+    server.ok(
+        "PUT",
+        "/api/ask/selections/every-stack",
+        Some(json!({"document": {
+            "ast_version": 1,
+            "sets": {"every": {"grain": "stack"}},
+            "out": {"set": "every", "level": "record"},
+        }})),
+        CURATOR,
+    );
+    let made = server.ok(
+        "POST",
+        "/api/campaigns",
+        Some(json!({
+            "name": "results",
+            "question": {"kind": "axis", "axis": "body_part"},
+            "source": {"selection": "every-stack@1"},
+            "raters_per_item": 2,
+            "raters": ["anna@lab", "bo@lab"],
+            "adjudicators": ["judge@lab"],
+            "adjudication": {"when": "disagree"},
+            "closes_into": "decision",
+        })),
+        MAKER,
+    );
+    assert_eq!(made["owner"], "maya@lab", "{made}");
+    let n = made["items"].as_array().unwrap().len();
+    assert!(n >= 2, "{made}");
+    // anna and bo read every item; they disagree on the last, and anna is
+    // unsure of the first
+    for i in 0..n {
+        let unsure = i == 0;
+        rate(
+            &server,
+            "results",
+            ANNA,
+            json!({"value": "brain", "unsure": unsure}),
+        );
+        let value = if i + 1 == n { "spine" } else { "brain" };
+        rate(&server, "results", BO, json!({"value": value}));
+    }
+
+    // open: a rater is refused, as at the answers' other doors
+    let (status, doc) = server.call("GET", "/api/campaigns/results/results", None, ANNA);
+    assert_eq!(status, 403, "{doc}");
+    assert!(doc["error"].as_str().unwrap().contains("blind"), "{doc}");
+    // the maker reads every answer by name
+    let r = server.ok("GET", "/api/campaigns/results/results", None, MAKER);
+    assert_eq!(r["named"], true, "{r}");
+    assert_eq!(r["status"], "open");
+    assert_eq!(r["count"].as_u64(), Some(n as u64), "{r}");
+    assert_eq!(r["unsure"], 1, "{r}");
+    assert_eq!(r["settled"].as_u64(), Some(n as u64 - 1), "{r}");
+    let exact = r["agreement"]["exact"].as_f64().unwrap();
+    assert!((exact - (n as f64 - 1.0) / n as f64).abs() < 1e-9, "{r}");
+    let names: Vec<&str> = r["raters"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x["rater"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["anna@lab", "bo@lab"], "{r}");
+    let last = &r["items"][n - 1];
+    assert_eq!(last["state"], "needs_adjudication", "{last}");
+    assert_eq!(last["answers"].as_array().unwrap().len(), 2, "{last}");
+    assert!(last["outcome"].is_null(), "{last}");
+    // the counts by value: answers given and items settled
+    let brain = r["values"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["value"] == "brain")
+        .unwrap();
+    assert_eq!(brain["answers"].as_u64(), Some(2 * n as u64 - 1), "{r}");
+    assert_eq!(brain["settled"].as_u64(), Some(n as u64 - 1), "{r}");
+    // an adjudicator reads the answers, the raters unnamed
+    let r = server.ok("GET", "/api/campaigns/results/results", None, JUDGE);
+    assert_eq!(r["named"], false, "{r}");
+    let names: Vec<&str> = r["raters"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x["rater"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["rater 1", "rater 2"], "{r}");
+    assert!(!r.to_string().contains("anna@lab"), "{r}");
+    // a holder of review:work reads them by name
+    let r = server.ok("GET", "/api/campaigns/results/results", None, CURATOR);
+    assert_eq!(r["named"], true, "{r}");
+
+    // a maker who rates in their own campaign is as blind as any rater
+    server.ok(
+        "POST",
+        "/api/campaigns",
+        Some(json!({
+            "name": "self-rated",
+            "question": {"kind": "axis", "axis": "body_part"},
+            "source": {"selection": "every-stack@1"},
+            "raters_per_item": 1,
+            "raters": ["maya@lab", "anna@lab"],
+            "adjudication": {"when": "never"},
+            "closes_into": "none",
+        })),
+        MAKER,
+    );
+    let (status, doc) = server.call("GET", "/api/campaigns/self-rated/results", None, MAKER);
+    assert_eq!(status, 403, "{doc}");
+
+    // the adjudicator settles the last item; the close writes decisions
+    let claimed = server.ok(
+        "POST",
+        "/api/campaigns/results/claim",
+        Some(json!({"role": "adjudicator"})),
+        JUDGE,
+    );
+    server.ok(
+        "POST",
+        &format!(
+            "/api/campaigns/results/assignments/{}/answer",
+            claimed["assignment"]["id"]
+        ),
+        Some(json!({"value": "spine"})),
+        JUDGE,
+    );
+    server.ok("POST", "/api/campaigns/results/close", None, CURATOR);
+
+    // closed: the maker reads what the close made
+    let r = server.ok("GET", "/api/campaigns/results/results", None, MAKER);
+    assert_eq!(r["status"], "closed", "{r}");
+    assert_eq!(r["settled"].as_u64(), Some(n as u64), "{r}");
+    assert_eq!(r["adjudicated"], 1, "{r}");
+    assert_eq!(r["decisions"].as_u64(), Some(n as u64), "{r}");
+    let last = &r["items"][n - 1];
+    assert_eq!(last["adjudicated"], true, "{last}");
+    assert_eq!(last["outcome"]["value"], "spine", "{last}");
+    assert!(last["decision_id"].is_i64(), "{last}");
+    let judged = last["answers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["role"] == "adjudicator")
+        .unwrap();
+    assert_eq!(judged["rater"], "judge@lab", "{last}");
+    let spine = r["values"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["value"] == "spine")
+        .unwrap();
+    assert_eq!(spine["settled"], 1, "{r}");
+    // a rater reads them once it is closed: her own by name, the others not
+    let r = server.ok("GET", "/api/campaigns/results/results", None, ANNA);
+    assert_eq!(r["named"], false, "{r}");
+    let names: Vec<&str> = r["raters"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x["rater"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"anna@lab"), "{r}");
+    assert!(names.contains(&"rater 1"), "{r}");
+    assert!(names.contains(&"adjudicator 1"), "{r}");
+    assert!(!r.to_string().contains("bo@lab"), "{r}");
+    assert!(!r.to_string().contains("judge@lab"), "{r}");
 }

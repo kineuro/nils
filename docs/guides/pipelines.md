@@ -705,6 +705,8 @@ For a campaign that asks one axis, such as body part, suggestions from outside t
 
    A rater taken off with `--remove` keeps their answers. Keeping the reading blind, and each stack read once, is the operator's: the command warns when the rater added already answered the same stacks in another campaign.
 
+6. Read the results. In the desk, the campaign's page has a Results view: per item each rater's answer, the adjudication, the settled value and the decision the close wrote, with the agreement, the unsure count, the counts by value and the label sets to download. At the door it is `GET /api/campaigns/{id}/results`. While the campaign is open it answers its maker (unless the maker rates in it), its adjudicators and a holder of `review:work`, and the raters are named to the maker and a holder of `review:work` alone.
+
 ## Compute a certificate on a sealed sample
 
 While a sample is sealed, nothing a system said of its stacks opens to anyone: the ask leaves them out, explain and the evidence line answer blind, their review items are not there, their timeline keeps only their arrival, a label set leaves their lines out, and no release carries them. That holds for an admin as for a rater. The file itself, its header and its pictures, still opens.

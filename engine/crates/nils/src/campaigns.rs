@@ -53,6 +53,8 @@ pub(crate) const DOORS: &[&str] = &[
     "GET /api/campaigns/{id}/batches",
     "POST /api/campaigns/{id}/batches/{batch}/accept",
     "GET /api/campaigns/{id}/stats",
+    // record 55, ruling 35 (d): a campaign's results for its maker
+    "GET /api/campaigns/{id}/results",
     "GET /api/campaigns/{id}/suggestions",
     "POST /api/campaigns/{id}/suggestions",
     "GET /api/campaigns/{id}/gallery",
@@ -91,7 +93,7 @@ pub(crate) fn door(method: &str, segs: &[&str]) -> Option<(Need, Detail)> {
                 "campaigns",
                 _,
                 "answers" | "batches" | "stats" | "combinations" | "suggestions" | "gallery"
-                | "mine" | "ab" | "pair" | "anchored",
+                | "mine" | "ab" | "pair" | "anchored" | "results",
             ],
         )
         | (
@@ -403,6 +405,15 @@ pub(crate) const POLICY: &[(&str, bool, bool, &str, &str, &str, &str)] = &[
         "counts and times per rater",
         "Reading how fast a campaign is read",
         "Read how fast a campaign is read",
+    ),
+    (
+        "GET /api/campaigns/{id}/results",
+        false,
+        false,
+        "bounded",
+        "every item and answer of one campaign",
+        "Reading a campaign's results",
+        "Read a campaign's results",
     ),
     (
         "GET /api/campaigns/{id}/suggestions",
@@ -1957,6 +1968,12 @@ pub(crate) fn route(
                 }
                 Ok(Reply::ok(doc))
             }
+            // record 55, ruling 35 (d): the results, for its maker and those
+            // who read every answer
+            ["api", "campaigns", which, "results"] if get => {
+                let c = campaign::find(registry.store(), which).map_err(campaign_err)?;
+                crate::results::door(registry, caller, &c)
+            }
             // record 48 R2: the certificates of sealed samples
             // record 48, the reference read by judges: an A/B item's sheet,
             // a cause, and how the campaign goes
@@ -2655,7 +2672,7 @@ pub(crate) fn sees_all(
 /// review:work reads every answer. Anyone else reads the campaigns of their
 /// own ([`own`]); `campaigns:see` alone does not open another's, since every
 /// holder of `campaigns:work` holds it.
-fn oversees(caller: &Caller) -> bool {
+pub(crate) fn oversees(caller: &Caller) -> bool {
     caller.access.holds("review:work")
 }
 
@@ -2882,7 +2899,7 @@ pub(crate) fn plain(caller: &Caller) -> bool {
 /// it opened, which are quasi-identifying, so a session's item keeps its id
 /// and position and loses both, with the key that spells them; a form or a
 /// free text the item came to is left out, as the answers' are.
-fn plain_item(v: &mut Value, grain: &str, free: bool) {
+pub(crate) fn plain_item(v: &mut Value, grain: &str, free: bool) {
     let Some(m) = v.as_object_mut() else {
         return;
     };
@@ -2901,7 +2918,7 @@ fn plain_item(v: &mut Value, grain: &str, free: bool) {
 
 /// An answer at detail plain: no why, no form, no actor detail, and no
 /// value where the value is free text.
-fn plain_answer(v: &mut Value, free: bool) {
+pub(crate) fn plain_answer(v: &mut Value, free: bool) {
     let Some(m) = v.as_object_mut() else {
         return;
     };
@@ -3062,7 +3079,7 @@ fn suggested_for(
 
 /// Record 45: an axes answer is kept as one text, and read as the object
 /// it is.
-fn axes_value(question: &Value, value: &mut Value) {
+pub(crate) fn axes_value(question: &Value, value: &mut Value) {
     if question["kind"] == "axes"
         && let Some(text) = value.as_str()
         && let Ok(v) = serde_json::from_str::<Value>(text)

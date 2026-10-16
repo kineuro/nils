@@ -4,6 +4,10 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Added
+
+- A campaign's results at one door, for its maker and an administrator (record 55, ruling 35 (d)). `GET /api/campaigns/{id}/results`, under campaigns:see, answers per item the answers standing now by rater, the adjudications, the settled value and the decisions or picks the close wrote, with the campaign's agreement (exact, Fleiss and Cohen kappa, per axis), the unsure count and the counts by value (answers given and items settled, per axis on an axes question). While the campaign is open it answers the maker, unless the maker rates in it, an adjudicator of it and a holder of review:work, and refuses any other rater with 403, as the answers door is blind. The raters are named to the maker and a holder of review:work alone; anyone else reads each other person as `rater N` or `adjudicator N`, and their own answers by their own name. The desk's campaign page reads it for its Results view.
+
 ## [1.0.0-alpha.87] - 2026-10-16
 
 Wave 7a's last engine: hospital reserve numbers read beside the personnummer and never kept, spare numbers through a map, model cards that gain their missing claims, the damaged-header flag's three signs (pack contract 11, MRI pack 1.3.0), the post-contrast label's clock across studies (time-rule-2), kept Query cards, LST-AI's thin image, and fixes from the wave's audit.

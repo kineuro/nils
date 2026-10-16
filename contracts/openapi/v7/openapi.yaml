@@ -3128,6 +3128,15 @@ paths:
       responses:
         "200": {description: The speed}
         "404": {description: No such campaign}
+  /api/campaigns/{id}/results:
+    get:
+      summary: A campaign's results, for its maker and those who read every answer (record 55, ruling 35 (d); campaigns:see)
+      description: "Per item the answers standing now by rater, the adjudications, the settled value and what the close made of it, with the campaign's agreement, unsure count and counts by value. Answers {campaign, name, status, owner, closes_into, closed_at, named, agreement, unsure, settled, adjudicated, decisions, picks, raters: [{rater, answers, adjudications, unsure}], values: [{axis, value, answers, settled}], count, items}. `agreement` is the campaign's (exact, Fleiss and Cohen kappa, `unsure`, `per_axis` on an axes question), open or closed. Each item is the campaign door's with `answers` [{id, rater, role, round, author_kind, value, form, derivative_id, why, unsure, answered_at, derived}] and `adjudicated`; `settled` counts the items agreed, adjudicated or resolved; `decisions` the distinct decisions the close wrote and `picks` the picks. `values` counts the raters' answers and the settled items by value, per axis on an axes question, and is null for a free question. Blind as the answers are: while the campaign is open the results are read by an adjudicator of it, a holder of review:work and its maker unless the maker rates in it (named as a rater or holding a rater's assignment); anyone else is refused with 403; once it is closed anyone whose campaign it is reads them. The raters are named (`named` true) to the maker and a holder of review:work alone; anyone else reads each other person as `rater N` or `adjudicator N`, numbered in the order they first answered, and their own answers by their own name. At detail plain an answer and an item lose what the campaign door's do."
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: The results}
+        "403": {description: "Rating is blind until the campaign closes, and the caller is neither its maker apart from its raters, an adjudicator of it nor a holder of review:work"}
+        "404": {description: "No such campaign, or not one of the caller's"}
   /api/campaigns/{id}/ab:
     get:
       summary: How an A/B campaign goes (record 48, the reference read by judges; campaigns:see)
