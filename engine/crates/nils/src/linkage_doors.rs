@@ -1242,6 +1242,18 @@ const RESOLVE_MAX: usize = 256;
 /// (`data:see` or `places:see`). Every lookup, found or not, writes one
 /// `linkage.resolve` row in the registry's audit log, and a match one read
 /// audit row in the linkage store for the identity row it opened.
+///
+/// The built-in type `subject-code` answers a subject's own code too. A merge
+/// files the alias's code under that type and a coded dataset its PatientID,
+/// but a subject made from an identifier of another type has no such row, and
+/// its code, asked for as a `subject-code`, was answered as unknown: the
+/// assistant's one chat refused, on that answer, to plan the erasure of a
+/// subject it was given by its code. A code some subject holds is looked up
+/// in the registry itself, which alone knows its own codes, and answers as
+/// any match does: through a merge to the subject it was merged into, with
+/// the scans the caller may see, and unknown where there are none. No
+/// identity row is opened, so no read audit row is written; the audit log
+/// holds the lookup, never the value.
 fn resolve(registry: &mut Registry, caller: &Caller, body: &str) -> Result<Reply, Reply> {
     let doc = json_body(body)?;
     let id_type = doc["id_type"]
@@ -1289,14 +1301,28 @@ fn resolve(registry: &mut Registry, caller: &Caller, body: &str) -> Result<Reply
     let identity = linkage::identities_by_lookup(&mut linkage, &[lookup])?
         .into_iter()
         .find(|i| i.id_type_id == kind.id);
-    let found = match &identity {
-        Some(i) => resolved(registry, caller, i.subject_id)?,
+    // a code some subject holds is that subject's, whether or not a row filed
+    // it under the type
+    let own = match &identity {
+        None if kind.name == nils_registry::schema::SUBJECT_CODE_TYPE => {
+            linkage::subjects_by_code(registry.store(), std::slice::from_ref(&value))?
+                .into_iter()
+                .next()
+        }
+        _ => None,
+    };
+    let subject_id = identity
+        .as_ref()
+        .map(|i| i.subject_id)
+        .or_else(|| own.as_ref().map(|s| s.id));
+    let found = match subject_id {
+        Some(id) => resolved(registry, caller, id)?,
         None => None,
     };
     // every lookup is audited in the registry's log, a miss and a
     // sealed-only subject included; the linkage store's read audit only
     // when an identity row was opened, a match
-    let outcome = match (&identity, &found) {
+    let outcome = match (subject_id, &found) {
         (_, Some(_)) => "found",
         (Some(_), None) => "no scan to see",
         (None, None) => "not known",
