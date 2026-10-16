@@ -1,13 +1,14 @@
 # What this copy leaves out
 
-This directory is a copy of the private record `kineuro/nils-design`, made on
-2026-09-02 under R7 of [15](15-ratification.md) §5, and widened on 2026-10-13 to the
-records the NILS paper cites (26, 34, 36, 39, 40, 41, 47, 48, 50, 53, 54, 55 and 56;
-[55](55-ready-for-production-and-the-paper.md) K11, test T15). R7 asks for a scrub pass with
-a written list; this is the list. The pass is a script in the private repository
-that asserts the count of every substitution it makes, so a refresh after an
-amendment fails instead of leaking, and it ends with a check that none of the
-removed terms remain in any file.
+This directory is a copy of the private record `kineuro/nils-design`, made on 2026-09-02
+under R7 of [15](15-ratification.md) §5, and widened on 2026-10-13 to the records the
+NILS paper cites (26, 34, 36, 39, 40, 41, 47, 48, 50, 53, 54, 55 and 56;
+[55](55-ready-for-production-and-the-paper.md) K11, test T15). Record 55 was refreshed
+on 2026-10-16, when it reached ruling 31, and record 56 with it. R7 asks for a scrub
+pass with a written list; this is the list. The pass is a script in the private
+repository that asserts the count of every substitution it makes, so a refresh after an
+amendment fails instead of leaking, and it ends with a check that none of the removed
+terms remain in any file.
 
 Nothing removed changes a decision, a verdict or an id. Where a sentence lost a
 fact, the sentence says so ("its size is not part of this copy") rather than
@@ -37,6 +38,7 @@ pretending the fact was never there.
 | How v0 protected its pseudonym map | 26 | "how that map was protected is not part of this copy", as in 16 |
 | The teacher of the writing course | 55 | "a course on scientific English". Russell Ouellette and Adithya Raju Ganeshan keep their names (55, ruling 15); the readers stay R, D and N |
 | The operators' private notes and procedures by name (memory notes, skills, the hub's map and rules), the evidence archive's paths, and links to rendered pages in a private workspace | 47, 48, 50, 54, 55, 56 | "our operating notes", "our build procedure", "the operators' map", "the evidence archive"; links removed |
+| The upkeep of the group's servers noted in a ruling: which alert was silenced and which edge and gateway software was upgraded | 55, ruling 18 | "The group's servers: their upkeep is not part of this copy."; the ruling's other items stand |
 | A test's synthetic value written in the shape of a personal number | 53 | described, not written |
 | The compute and storage servers by name in the records published before the paper | 00, 11, 12, 15, 19, 20 | "the compute server", "the storage server", from 2026-10-13 (55, ruling 15); a coordination server named in 14 became "an open-source coordination server" |
 | Em dashes | every record | the house's punctuation: a heading's dash became a middle dot, a table's lone dash "none", a pair of dashes in one sentence parentheses, a single dash a colon or a comma |

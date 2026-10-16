@@ -1,10 +1,11 @@
 <!-- SPDX-License-Identifier: AGPL-3.0-only -->
 
-# System 1 in the review rule, blind first, and the audit
+# System 1 in the review rule, blind first, changing the rules, and the audit
 
 How the engine runs System 1 beside the rules, asks people blind first where
-a read trains or measures, and measures the error of what it accepted every
-round (spec `wave7a-ready-for-production.md`, section 11).
+a read trains or measures, changes the rules with their effect shown before a
+person decides, and measures the error of what it accepted every round (spec
+`wave7a-ready-for-production.md`, section 11).
 
 ## 1. Serve System 1
 
@@ -126,7 +127,7 @@ Only blind answers become training labels. A campaign whose answers train or
 measure is made with `purpose` `train` or `measure` and is read blind first
 always.
 
-## 3. Answer the questions
+## 4. Answer the questions
 
 The few questions the rules leave (record 56) are answered a question at a
 time, each as a grid of its scans.
@@ -155,7 +156,95 @@ time, each as a grid of its scans.
    scans are re-sorted at once. A scan the page did not hold, or one answered
    meanwhile, refuses the whole answer.
 
-## 4. Run a round's audit
+## 5. Change the rules
+
+An error is mended in the rules, not scan by scan (record 56). A change is a
+patch of typed operations, its effect on the sorting is shown before anyone
+decides, and a person adopts it. The desk does the same on Review, Rules, whose
+tabs are Proposals, Quality, Change a rule and Words.
+
+1. Read where the pack is weak: the rules it cannot rank, which rule wins over
+   which, and, once a System 1 model serves, where System 1 confidently
+   disagrees. Add `?dataset=<name>` for one dataset:
+
+   ```
+   GET /api/packs/mri/quality
+   ```
+
+2. Write the change as a patch. The operations are listed in
+   `contracts/patch/v1`, with an example, and each carries a scope: the whole
+   pack (a pack edit, shipped as a rules release) or `site:NAME`,
+   `dataset:NAME` or `scanner:KEY=VALUE` (an overlay, which never leaves its
+   scope):
+
+   ```
+   patch: 1
+   pack: mri
+   operations:
+     - op: add_words
+       axis: post_contrast
+       value: given
+       words: [mdc]
+       scope: site:partner
+       reason: the partner writes mdc for contrast given
+   ```
+
+3. Check that it applies, and see what it does. Nothing is written:
+
+   ```
+   nils pack apply packs/mri --ops change.yml
+   nils pack rehearse --ops change.yml --scope dataset:<name>
+   ```
+
+   The same is `POST /api/packs/mri/rehearse`. The report says, per axis, how
+   many scans move from what to what; which names and main-scan picks change;
+   which Review questions appear and go; and, against the answers people
+   settled, the right answers it would turn wrong and the wrong ones it would
+   turn right. Through the door, a scope of more than 2,000 scans is queued as
+   a job.
+
+4. Keep it as a proposal, with its effect report and the card a person decides
+   on. A proposal is a pack edit or a scoped change, not both:
+
+   ```
+   POST /api/packs/mri/proposals  {"title": "mdc at the partner", "operations": [...]}
+   ```
+
+5. A person adopts or rejects it, with review:work and data:work:
+
+   ```
+   POST /api/packs/mri/proposals/<id>/decide  {"decision": "adopt", "why": "..."}
+   ```
+
+   The answer is a 409, with its reason, for a proposal that is stale because
+   the pack or the scoped changes in force have moved since it was rehearsed;
+   rehearse it again and read its card first:
+
+   ```
+   POST /api/packs/mri/proposals/<id>/rehearse
+   ```
+
+   Adopting a pack edit writes the pack's next version beside the pack, the one
+   it replaces kept whole under `<packs>.versions`, and re-sorts the registry;
+   the version is then released as a rules release. Adopting a scoped change
+   re-sorts its scope alone. What the re-sort did is written on the proposal.
+
+6. A word overlay goes the same way: `POST /api/overlays` keeps it as a
+   rehearsed proposal, and `POST /api/overlays/<id>/adopt` goes through the
+   proposal's decision, with its stale check. A newer adopted version of an
+   overlay retires the older. To go back to an older one, propose it again.
+
+> **Warning: an agent proposes and a person decides.** The decision door refuses
+> a caller that is not a person. The assistant's skill that teaches the sorting
+> new words writes `add_words` and `remove_words` and proposes them; no station
+> can adopt.
+
+> **Warning: a free-form edit of a pack's files gets no effect report.** The
+> report is for typed operations and overlays. A pack release that is edited by
+> hand is replayed over the archive first (`nils pack replay`), and every scan
+> that moves is listed and checked before it is released.
+
+## 6. Run a round's audit
 
 1. Draw the audit: 1 % of the round's accepted stacks, by a seed keyed by
    DICOM identity, and the campaign that reads them blind:
@@ -200,6 +289,12 @@ bound at 95 %. An audit's reads never train.
 | `GET /api/review/questions`, `/questions/{key}/scans` | review:see |
 | `POST /api/review/questions/{key}/answer` | review:work |
 | `POST /api/review/{id}/provisional` | review:work |
+| `POST /api/packs/{name}/rehearse` | pipelines:work or review:work |
+| `GET /api/packs/{name}/quality`, `/proposals`, `/proposals/{id}` | review:see |
+| `POST /api/packs/{name}/proposals`, `/proposals/{id}/rehearse` | pipelines:work or review:work |
+| `POST /api/packs/{name}/proposals/{id}/decide` | review:work and data:work, a person |
+| `POST /api/overlays` | review:work |
+| `POST /api/overlays/{id}/adopt` | review:work and data:work, a person |
 | `GET /api/review/rounds`, `/rounds/{id}`, `/settings` | review:see |
 | `POST /api/certificates` | models:work, a person |
 | `POST /api/review/gate` | review:work |

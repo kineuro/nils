@@ -24,13 +24,26 @@ install on an empty registry.
 
 The measure of the wave, in four sentences. Data enters NILS only through a
 folder layout that says what it is, and a file that leaves pseudonymised says so
-in its own header. Every scan carries the rules' answer and System 1's, the two
-agree or the scan is a review question with both suggestions and both reasons,
-and the error of what is accepted is measured blind every round. Every model
-NILS serves is a replaceable part with a card, fast on a CPU and much faster on
-a GPU, and the rules and the models update without a new engine. A person finds
-every task in one obvious place in the desk, and the people's work (answering,
-picking, checking a result, settling) is one list on one mechanism.
+in its own header. The rules decide every answer and System 1 stands beside
+them: a person is asked only where an axis that matters is left empty (and, on a
+dataset with damaged headers, where System 1 does not confirm the rules), with
+both suggestions and both reasons beside the question, and the error of what is
+accepted is measured by a blind audit. Every model NILS serves is a replaceable
+part with a card, fast on a CPU and much faster on a GPU, and the rules and the
+models update without a new engine. A person finds every task in one obvious
+place in the desk, and the people's work (answering, picking, checking a result,
+settling) is one list on one mechanism.
+
+> **Amended in place on 2026-10-16 by the audit of Wave 7a.** This specification
+> was written on 2026-10-08, before the work. Its sentences about what the code
+> does "today" describe the code of that day, and some of what it asks was changed
+> by a ruling or by the build. Each place that changed carries its own note,
+> naming the ruling or the record that changed it: the summary of System 1 above
+> and in section 1, and sections 3, 4.1, 5.1, 5.3, 6.1, 8.1, 8.2, 9.2, 11.2, 12.2,
+> 12.3, 13.1, 14, 17, 18, 19 and 20. Section 11.6 is new: the rules engine as
+> built (record 56). The rulings are in
+> `docs/decisions/55-ready-for-production-and-the-paper.md`, numbered from 1 on
+> 2026-10-12 and dated before that.
 
 ## 1. What Wave 7a delivers
 
@@ -50,11 +63,14 @@ picking, checking a result, settling) is one list on one mechanism.
 - **Models as parts** (§10): several models per task, each with a card, chosen
   per site; label sets registered from outside the engine; scoring at arrival
   with a per-session slice cache.
-- **System 1 in the review rule** (§11): its answer and confidence stored for
-  every scan; acceptance only when it agrees with the rules above certified
-  thresholds and the rules are reliable on that header; both suggestions and
-  both reasons in review, blind first where a read trains or measures; a blind
-  audit of accepted scans every round.
+- **The rules decide, with System 1 beside them** (§11): the rules decide every
+  answer; System 1's answer and confidence are stored for every scan as a second
+  opinion, and on a dataset with damaged headers the rules' answer is accepted
+  only when System 1 agrees above its thresholds; both suggestions and both
+  reasons in review, blind first where a read trains or measures; a blind audit
+  stream for accepted scans; and the rules engine, where a change to the rules
+  shows its effect before a person adopts it (§11.6). *Amended in place on
+  2026-10-16 by record 56.*
 - **The image models in production** (§12): body part's fast path; post-contrast
   served through its student where it is certified; the post-contrast label as a
   state with its minutes, its source and its flags.
@@ -85,15 +101,25 @@ Everything of Wave 5 and of the records that followed it:
 ## 3. What Wave 7a does not do
 
 - It does not take on the master plan's own Wave 7: the hardened runner, the
-  cluster executor, rules for CT, and retiring the previous prototype are Wave
-  7b's (record 55, section J).
-- It does not let a model decide alone. A model's answer is accepted only where
-  the rules agree and the gate's thresholds, set by a registered test, hold; the
-  rest is a review question.
+  cluster executor, rules for CT, and retiring the previous prototype (record 55,
+  section J). *Amended in place on 2026-10-16 by record 55, ruling 31 (i):* these
+  were to be Wave 7b's. Wave 7b is now record 57 and the short clinical import,
+  with the two items of record 56 that ruling 31 (b) moved there (§11.6), and
+  the four come later, outside 7b.
+- It does not let a model decide alone. The rules decide; System 1's answer is a
+  second opinion, accepted on a dataset with damaged headers only where it
+  agrees with the rules above the gate's thresholds, and staged for a person to
+  confirm where the rules name nothing (§11.2). *Amended in place on 2026-10-16
+  by record 56 and record 55, ruling 20:* this first said that a model's answer
+  is accepted only where the rules agree and the gate's thresholds hold, and
+  that the rest is a review question.
 - It does not let a person's answer that trains or measures a model be anchored
   by the model: those reads are blind first (§11.4).
 - It does not certify by re-grading. Every claim is graded once on a sample
-  sealed before it was drawn; a missed bar is reported as missed.
+  sealed before it was drawn; a missed bar is reported as missed. *Amended in
+  place on 2026-10-16 by record 55, ruling 27:* after this release no claim is
+  certified again; a production change is a fix, a check that nothing broke and
+  a release (§4.1).
 - It does not build manual segmentation (drawing masks); job type 4 is Wave 7b's.
 - It does not change the ruled disclosure: the release is pseudonymous, the date
   is the date (record 38), sequence names stay visible (§7).
@@ -108,7 +134,11 @@ Every engine and desk slice is built from its branch onto a development install
 through the development channel of record 31, tried there in use on a test
 registry, fixed in quick rounds, and merged only when its owner has accepted it.
 The desk is judged as a product in use, not as a set of passing tests. A
-release closes one or more slices; no release is cut for a single fix.
+release closes one or more slices. *Amended in place on 2026-10-16 by record 55,
+ruling 27 (2026-10-15):* this first added that no release is cut for a single
+fix. From alpha.83 on, a production change is a fix, a check that nothing broke
+(the tests and, for rules, the archive replay of §9.3) and a release, so a single
+fix is released alone (alpha.83 to alpha.86), and no certificate is asked again.
 
 ### 4.2 Every model on CPU and on GPU (A5)
 
@@ -146,6 +176,10 @@ into PatientID what the dataset chose; and a subject's code is the subject code
 generator's.
 
 ### 5.1 Where it stands
+
+*Amended in place on 2026-10-16:* this list is the engine as the wave found it on
+2026-10-08, with the lines of the code of that day. Sections 5.3 and 5.4 say what
+the wave built in its place, and 5.3 names the ruling that changed it.
 
 - The engine's two defaults disagree. `handling_of` defaults `arrives` to
   `identified` (`nils-registry/src/place.rs:464`), while `dataset_of` and
@@ -197,24 +231,59 @@ generator's.
 
 ### 5.3 Never read without the layout
 
-- `arrives` gains a fourth value, `undeclared`, which is the default of
-  `handling_of`, `dataset_of` and `default_dataset`. A place whose dataset is
-  undeclared is never digested: a digest, a bring-in or a pseudonymise of it is
-  refused with a named reason that says how to declare it.
-- Every path that adds a source runs `dataset::detect` before it writes the
-  place and answers with what it found when neither tree exists: `nils setup`'s
-  source place, `nils place add --role source`, `POST /api/places`, and the
-  desk's Data, Setup and Places paths (§13.1). The answer is a question, not a
-  default: the folder is declared identified (its loose entries are then moved
-  into `dcm-original`), or de-identified (its loose entries are then moved into
-  `dcm-anon`), or left undeclared.
-- A move of loose entries happens only on the person's word: the declaration
-  names the entries and the destination, and the move runs only when it is
-  confirmed (`--confirm-move` on the command line; a confirmation in the desk).
-  The rename of `dcm-raw` to `dcm-anon` stays automatic, as ruled, and is shown.
-- The migration turns every existing place with a null dataset into
-  `undeclared`. A place declared de-identified on purpose keeps its declaration.
-- The message of `main.rs:2631` says what is and is not read.
+**Amended in place on 2026-10-16 by record 55 (B2, the ruling of 2026-10-08 that
+the layout is read from the structure).** This section first gave `arrives` a
+fourth value, `undeclared`, and had every path that adds a source ask how its
+files arrive: identified, de-identified, or left undeclared. Nima's ruling
+replaced the question by the structure: adding data is the one moment its
+structure is expected, and the folder says what it is. A dataset's arrival is no
+longer declared, and a declaration that names it is refused, in words saying what
+decides it. What was built:
+
+- **A source place is a folder, and what the folder is decides what is read.** A
+  folder that holds `derivatives/` is one dataset. A dataset's own
+  `derivatives/dcm-raw` or `derivatives/dcm-anon` is a legacy place, read as that
+  tree. Anything else is a root, added alone: `nils setup`'s source place,
+  `nils place add --role source` and `POST /api/places` read nothing under it. A
+  folder under a root becomes a dataset, a source place of its own, only when a
+  person adds it (`nils place add-dataset ROOT FOLDER`, `POST /api/places` with
+  `root` and `folder`, or the desk's Add a dataset), and only then is its
+  structure read. `nils place folders` lists a root's folders by name, a page at
+  a time, without looking inside one; `nils place folder` looks at one before it
+  is added and changes nothing: whether it holds DICOM, whether it has
+  `derivatives/`, and what it would be.
+- **A dataset is what its folder holds.** Only `derivatives/dcm-original` is
+  *identified*: the pseudonymiser reads it and writes `derivatives/dcm-anon`.
+  Only `derivatives/dcm-anon`, or `dcm-raw`, renamed `dcm-anon` and shown, is
+  *anonymised*: the registry reads it. Both is *identified with its anonymised
+  copy*. Anything else, which is entries holding DICOM beside `derivatives/` or
+  no tree at all, is *unknown*.
+- **Nothing unknown is read.** Nothing of an unknown dataset, of a root, of a
+  folder that holds a place's folder, or of any `derivatives/dcm-original` is
+  digested, brought in or pseudonymised, and the refusal says why. The digest's
+  walk never goes into a `dcm-original` below the folder it reads.
+- **A move happens only on the person's word.** The entries of an unknown
+  dataset that hold DICOM go into the tree the person names, `originals` for
+  identified data or `anon` for data that is already anonymised, and only with
+  the confirmation: `--move-into originals|anon` with `--confirm-move` on
+  `nils place add` and `nils place set`, `move_into` with `confirm_move: true` on
+  `POST /api/places` and `PUT /api/places/{id}`, or a confirmation in the desk.
+  Without it the answer is a 409 that carries the layout and names what would
+  move, and nothing is written. Entries that hold no DICOM stay beside
+  `derivatives/`, unread. The rename of `dcm-raw` to `dcm-anon` stays automatic,
+  as ruled, and is shown.
+- **Anonymised data says what it holds before it is read:** what its PatientID
+  holds (`patient_id`, §5.4) and how its subjects are found (`subjects`). Either
+  `map`, through a map of subject codes to its ids, given or already in the
+  registry, a file whose id no map names being held; or `generated`, the subject
+  code generator making each code from the id as from a personnummer, every
+  subject a subject and never provisional.
+- **The migration.** Registry schema 80 makes every source place without a whole,
+  current declaration undeclared until its folder is explored again: one that
+  `nils setup` made with no dataset, one that the old default had read its folder
+  itself, and an anonymised one that does not say what PatientID holds and how
+  its subjects are found. No file is touched, and each keeps its rule, cohort and
+  tag lists.
 
 ### 5.4 What PatientID holds
 
@@ -271,13 +340,30 @@ pseudonymiser writes into `dcm-anon`, and every file a release writes, carries:
 - **(0012,0063) DeidentificationMethod:** a short text naming NILS, its version
   and the writer (pseudonymise or release).
 - **(0012,0064) DeidentificationMethodCodeSequence:** one item per option the
-  writer's own policy applies, from DICOM PS3.16 CID 7050: 113100 (the basic
-  application confidentiality profile) always; 113106 (full dates kept), since
-  the date is the date (record 38); 113108 (patient characteristics kept: sex and
-  age); 113110 (UIDs kept) only where the writer keeps them, which the
-  pseudonymiser does and a release that remaps them does not; 113111 (safe
-  private elements kept) only where an allowlist keeps them.
+  writer's own policy applies, from DICOM PS3.16 CID 7050. The options a writer
+  can state are the eight in the table below, each only while its condition
+  holds.
 - **(0028,0303) LongitudinalTemporalInformationModified:** `UNMODIFIED`.
+
+**Amended in place on 2026-10-16 by record 55 (the ruling of 2026-10-10, item 1,
+which keeps the scanner's identity in a pseudonymised copy and claims it as
+113109) and by the review of the wave's merge of 2026-10-10.** This section first
+listed five options: 113100 always, 113106, 113108, 113110 and 113111. What the
+writers state is:
+
+| Code | Option | Stated while |
+|---|---|---|
+| 113100 | Basic Application Confidentiality Profile | every direct identifier and every element of the ids category is removed, retained under a claimed option or cleaned as a description: always under the default plans |
+| 113105 | Clean Descriptors Option | always: the descriptions the rules read stay, cleaned of the file's own IDs, accession number, study id, birth date and the words of its names |
+| 113106 | Retain Longitudinal Temporal Information Full Dates Option | no date is removed, which is always: the date is the date (record 38) |
+| 113108 | Retain Patient Characteristics Option | the age, sex, size or weight is kept |
+| 113109 | Retain Device Identity Option | the device's identity is kept (its station name, serial number, UID, gantry or unique device identifier): by the pseudonymiser, since the rules and a decision for a scanner read it |
+| 113110 | Retain UIDs Option | the UIDs are kept, not remapped: by the pseudonymiser, not by a release that remaps them |
+| 113111 | Retain Safe Private Option | the pack's allowlist keeps private elements |
+| 113112 | Retain Institution Identity Option | the institution's name or address is kept |
+
+By default the pseudonymiser states 113100, 113105, 113106, 113108, 113109 and
+113110, and a release states 113100, 113105, 113106 and 113108.
 
 The option list is derived from the writer's policy, never written by hand, so
 a change of policy changes the marks. The marks are added in `scrub::apply`
@@ -499,20 +585,48 @@ refuse-and-route branch is replaced by, in order:
 5. **Body part stays in the name,** as the first group of the `acq-` label
    (`packs/mri/bids.yml:157-179`) and as the descriptive layout's prefix.
 
-How each mode spells 2 to 4:
-- **The BIDS mode** puts the difference and the fallback number into the `acq-`
-  label, in letters and digits only, after the pack's groups (for example
-  `acq-tra3mm`, `acq-tra2`), since strict BIDS admits no new entity.
-- **The informative mode** carries a `diff-` entity that names the property and
-  its value (for example `diff-SliceThickness3`), and the fallback as `_2`.
-  `schema::admits` (`bids/name.rs:286-295`) and the structural check exempt the
-  `diff-` entity in this mode only.
+**Amended in place on 2026-10-16 by record 55 (C4, the rulings of 2026-10-08:
+how a name is built, the three ways to name a stack, FLAIR is a modifier, and two
+styles with a full sidecar).** This section first described two modes, a BIDS
+mode that put a difference into `acq-` and an informative mode that carried a
+`diff-` entity (for example `diff-SliceThickness3`). The rulings replaced them,
+and the `diff-` entity does not exist: strict BIDS admits no entity of ours, and
+the validator refuses one. A release names its stacks in one of three styles,
+chosen per release:
+
+- **Descriptive:** v0's grammar as before, with `_` between its slots.
+- **Full BIDS** (`--naming full`, the default): the suffix is the base contrast,
+  or a construct suffix BIDS defines; whatever has an entity of its own goes to
+  it (`ce-`, `rec-`, `part-`, `echo-`, `inv-`); every other axis is spelled in
+  `acq-` in v0's slot order, joined by `+` (body part, with the brain implicit
+  and the spine `SC`; orientation; 2D or 3D; the modifiers; the technique; the
+  construct): `acq-Ax+2D+FLAIR+IRTSE_T2w`.
+- **Minimal BIDS** (`--naming minimal`): `acq-` holds only 2D or 3D, the
+  modifiers and the technique: `acq-2D+FLAIR+IRTSE_T2w`. Body part is in a
+  minimal name only where it is what separates two stacks.
+
+In both BIDS styles FLAIR, like STIR, DIR, PSIR and FatSat, is a modifier and
+never the suffix. A release recorded under the earlier `bids` or `informative`
+reads as `full`.
+
+A name conflict (rules 2 to 4 above) adds what separates the stacks: the value of
+a classification axis where they differ on one, in that axis's own slot;
+otherwise the measured property and its value (the slice thickness, the
+repetition time, the matrix and so on) after the pack's slots; as the last
+fallback a plain number, which is never a `run-`. In a BIDS name all of it is in
+`acq-` (`acq-Ax+2D+FLAIR+IRTSE+3mm_T2w` in the full style,
+`acq-2D+FLAIR+IRTSE+3mm_T2w` in the minimal one); in the descriptive layout it is
+a `_` slot of its own before v0's counter (`Ax_T2w_2D_FLAIR_TIRM_ND_3mm`). True
+repeats keep `run-`. No text, such as a protocol name or a series description,
+ever makes a name. A scout or a working scan, which never takes its BIDS name,
+takes no part in a name conflict.
 
 The release's record lists every name that a difference or a number decided,
-with the property and the values. A `release.shared_name` item is raised only if
-two stacks differ in nothing the engine can see and are not a repeat. The
-spelling of each mode is confirmed with the record's owner when the slice is
-built.
+with the property and the values, and its README says how many there are. A
+`release.shared_name` item is raised only if two stacks differ in nothing the
+engine can see and are not a repeat. Every BIDS sidecar carries a `NILS` object
+with every classification axis, the descriptive name and the acquisition as the
+registry measured it, and every `scans.tsv` a `nils_name` column.
 
 ### 8.2 The validator in CI (B7)
 
@@ -520,9 +634,11 @@ CI runs `tools/release-check/gate.sh` (`.github/workflows/ci.yml:276-277`), whos
 bar 2 is a structural check against a copy of the BIDS schema; the official
 `bids-validator` runs only if it is on the path (`tools/release-check/check.py:101-140`),
 and CI installs none. CI installs a pinned version of the official validator,
-and the gate runs it on the fixture release in both naming modes: 0 errors, with
-warnings listed in the job's summary. A release on the development install's
-test data is validated the same way by hand before the slice merges (T12).
+and the gate runs it on the fixture release in both BIDS naming styles, full and
+minimal (§8.1; *amended in place on 2026-10-16 by record 55, C4*, where it said
+both naming modes): 0 errors, with warnings listed in the job's summary. A
+release on the development install's test data is validated the same way by hand
+before the slice merges (T12).
 
 ### 8.3 Display composites (C3)
 
@@ -591,7 +707,10 @@ days.
 - **The desk.** Settings › Parts lists each pack with its version, its newer
   release and an update control.
 - **Versions.** The certified rules are MRI pack 1.0.0, the paper's named release;
-  production fixes ship as 1.0.1, 1.0.2 and on.
+  production fixes ship as 1.0.1, 1.0.2 and on. *Amended in place on 2026-10-16 by
+  record 55 (B5, ruling 31 (f)):* production runs the newest rules release, 1.2.3
+  today, and 1.0.0 is reachable by the pin, which is for reproducing the paper; a
+  site does not pin otherwise.
 
 **As built (2026-10-10).** The pack contract is the compatibility key: every
 engine already refuses a pack whose contract is above its own, so a rules
@@ -612,6 +731,16 @@ rules` takes the rules alone and starts nothing again, since the engine reads
 a pack again whenever its files change. The setup record notes the rules in
 use (`[rules.<name>]`). An engine in a container reads the packs its image
 carries.
+
+*Amended in place on 2026-10-16 by record 55 (B5 and the ruling of 2026-10-10,
+item 4; ruling 31 (f)):* the MRI pack names its engine range from 1.1.0 on (now
+`>=1.0.0-alpha.82, <2.0.0`, pack contract 10). Its first rules release on a tag of
+its own is `pack-mri-v1.2.0`; 1.0.2, 1.0.3 and 1.1.0 shipped inside it, and
+`pack-mri-v1.2.1` to `pack-mri-v1.2.3` followed. The certified 1.0.0 and 1.0.1
+were published by hand on 2026-10-16 as `pack-mri-v1.0.0` and `pack-mri-v1.0.1`,
+from the packs that engines alpha.78 and alpha.79 shipped (the commits that made
+them are older than the release workflow), so that an install can be pinned to the
+rules the paper reports.
 
 ### 9.3 The release discipline (C2)
 
@@ -707,7 +836,7 @@ from the release.
 
 **Tests:** T22, T23, T26.
 
-## 11. System 1 in the review rule (D3, D6, D7)
+## 11. System 1 in the review rule, and the rules that decide (D3, D6, D7; record 56)
 
 ### 11.1 System 1 as a pipeline
 
@@ -721,15 +850,39 @@ through the existing proposal path.
 
 ### 11.2 The gate
 
-For each stack and axis, the rules' answer is **accepted** when System 1's answer
-equals it, System 1's probability is at least λ1, and the rules' reliability is at
-least λ2; λ1 and λ2 per axis come from the frozen model's card, set by Learn then
-Test (§16.2). An accepted answer stays the rules' decision and records both
-authors: the rules' version and System 1's model id. Every other stack and axis
-becomes a review question: `<axis>:disagree` when the two answers differ,
-`<axis>:unsure` when they agree below a threshold. A pair of a rules version and a
-System 1 version is a round; a new rules release or a new chosen model starts a
-new round, and the gate's thresholds belong to the pair.
+**Amended in place on 2026-10-16 by record 56 (accepted 2026-10-09), record 55
+(the ruling on D3 of 2026-10-09, and rulings 20 and 27).** This section first put
+every stack and axis through the gate. The gate is chosen per dataset, not per
+scan:
+
+- **A dataset with normal headers:** the rules decide. Review holds only the axes
+  that matter that the rules left empty (§11.6), and System 1's opinion is a
+  second opinion beside those questions; it sends nothing there.
+- **A dataset flagged as having damaged or foreign headers** (§11.6): the full
+  gate applies, as this section first described it for every dataset. For each
+  stack and each axis the model's card gives thresholds for, the rules' answer is
+  **accepted** when System 1's answer equals it, System 1's probability is at
+  least λ1, and the rules' reliability is at least λ2; λ1 and λ2 per axis come
+  from the frozen model's card, set by Learn then Test (§16.2). An accepted answer
+  stays the rules' decision and records both authors: the rules' version and
+  System 1's model id. Every other stack and axis becomes a review question:
+  `<axis>:disagree` when the two answers differ, `<axis>:unsure` when they agree
+  below a threshold. An axis a person decided is not asked again, and a stack of a
+  sample sealed now never becomes a review item.
+- **System 1 never fills an answer silently** (ruling 20, 2026-10-14): where the
+  rules name nothing on an axis of a flagged dataset and System 1 is confident at
+  its threshold, its answer is staged on the gate's question for a person to
+  confirm.
+- **When the gate runs.** It runs once System 1 stands, which is once its model is
+  admitted and chosen for its task (ruling 27, 2026-10-15: its admission and its
+  replay stand for a certificate, and a certificate that is recorded is shown and
+  is no longer required). With no model chosen it raises nothing. It runs on
+  request (`POST /api/review/gate`) and after every System 1 run.
+
+A pair of a rules version and a System 1 version is a round; a new rules release
+or a new chosen model starts a new round, and the gate's thresholds belong to the
+pair. `GET /api/review/rounds` reports each round, what it accepted and what it
+sent to Review, by kind.
 
 ### 11.3 Both suggestions and both reasons
 
@@ -769,6 +922,157 @@ answers and recorded beside the round.
 
 **Tests:** T19, T20, T21.
 
+### 11.6 The rules engine (record 56)
+
+*Added on 2026-10-16, as built.* Record 56 (accepted on 2026-10-09) turned the
+review rule round: the rules decide, a person is asked only where they cannot,
+and an error is mended in the rules, not scan by scan. This section is what was
+built for it. The gate it leaves to System 1 is §11.2, and the pack's own
+releases are §9.2.
+
+**What goes to Review.** A scan becomes a question only when an axis that matters
+is left empty by the rules or, on a dataset flagged as damaged, when System 1
+does not confirm them (§11.2). The axes that matter are those that the release's
+names, the main-scan pick or a release read; the list comes from the code, and a
+test fails if it drifts from what the release reads. An axis is asked about when
+it is missing only if it holds one value, has no default and is not an image
+model's; for the MRI pack that is the base alone. Never a question: a conflict
+between the pack's rules (the pack's order decides, and the rule that lost is
+kept as evidence), a rule's low confidence, body part and post-contrast (each has
+its own operation and its own review, named in the pack's `review.by_model`), a
+scout's base, the split note, and an equal-rank disagreement inside the pack,
+which is a defect of the pack and goes to its quality report. The pack is silent
+on a localizer, an excluded stack and a display composite. Not ruled yet: the
+session pass and the physics vote still raise a question (`<axis>:session`,
+`<axis>:vote`) for an answer below their threshold of 0.70, and a broken
+constraint raises `classify.*`.
+
+**Questions are answered in bulk.** `GET /api/review/questions` gathers the
+sort's own questions that wait for a person into plain ones over a dataset's, a
+cohort's or the registry's scans: an axis and what is in dispute on it ("Which
+base?", "T2w or FLAIR?"), each counting its distinct scans and naming the two
+answers its keys give. `GET /api/review/questions/{key}/scans` pages one
+question's scans, each with its picture, NILS's answer, the rules' reason with
+the rules it was decided over, System 1's answer and any answer staged for a
+person. `POST /api/review/questions/{key}/answer` gives one value to the scans
+the person saw, with the exceptions set apart, as one decision per scan through
+the review spine in one transaction, and then re-sorts those scans alone, at once,
+by the pack and the overlay that sorted them. A question about several axes at
+once, and an item an open campaign holds, are answered elsewhere. A blind-first
+question hides NILS's own answers on its tiles, never the header text, and an
+answer is marked blind only where nothing of NILS's or System 1's answers was on
+screen. A stack of a sample sealed now is in no count.
+
+**A rule change is a list of typed operations.** The patch contract
+(`contracts/patch/v1`) names the operations most changes to a pack are:
+`add_words` and `remove_words`, `move_rule`, `move_set`, `set_priority`,
+`add_value`, `add_rule` (a rule built from templates: words in a field, a tag
+equal to a value, a physics range, a flag or an axis value, alone or combined; on
+an axis that holds several values, `nothing: true` makes the stack hold none of
+them where the conditions hold), `silence`, `by_model` and `map_name`, and four on
+the main-scan pick, which are pack edits only:
+`set_candidates`, `remove_border`, `set_near_tie` and `set_runner_up_within`. Each
+carries its scope, its reason and its evidence. A scope of the whole pack is a
+pack edit and ships as a rules release (§9.2); `site:NAME`, `dataset:NAME` and
+`scanner:KEY=VALUE` make an overlay, and an overlay never leaves its scope. The
+engine applies the operations in order to a copy of the pack's own documents,
+builds the result with the pack's own loader, refuses an operation that cannot
+apply with a plain reason, and lets the pack's corpus and the patch's own cases
+judge the result. `nils pack apply` checks a patch and, with `--out`, writes a
+pack edit as the pack's next version, each file rewritten only where it changed,
+so its comments stay.
+
+**Its effect is shown before anyone decides.** `nils pack rehearse` and
+`POST /api/packs/{name}/rehearse` (pipelines:work or review:work) sort the
+registry in scope twice, once by the pack and once by the patched pack, and write
+nothing. The report has, per axis, the stacks that move from one value to another,
+each row with its datasets, sites, makes, scanners and example stacks; the names,
+descriptive and BIDS, that change, before and after; the main-scan picks that
+change, by role, each side scored by its own pack's pick; the Review questions
+that appear and go, by kind; against the answers people settled (Review answers
+and a campaign's close), the right answers it turns wrong and the wrong ones it
+turns right, measured on the rules' own answer; and the scope and what the change
+ships as. A stack of a sample sealed now is never read. A scope of more than 2,000
+stacks is rehearsed as a job, and one of more than 200,000 is refused.
+
+**The pack's quality report** (`GET /api/packs/{name}/quality`, review:see) is for
+whoever tunes the pack: the equal-rank disagreements by rule pair; the overrides,
+which rule the pack's ranking put above which, by rule pair, with the stacks,
+datasets and rules versions; and System 1's confident disagreements with the
+rules once a System 1 model serves. It can be read for one dataset.
+
+**A proposal keeps a rehearsal until a person decides.**
+`POST /api/packs/{name}/proposals` (pipelines:work or review:work) keeps typed
+operations with their effect report as a proposal, a pack edit or a scoped change
+but not both, with the approval card a person decides on: the stacks it moves, its
+largest moves, the answers it fixes and breaks, every answer it breaks named with
+its scan, whether the pack's cases hold, and the questions before and after. A
+proposal is stale once the pack version or the scoped changes in force have moved
+after it was rehearsed, and it is rehearsed again before it can be adopted.
+`POST .../proposals/{id}/decide` adopts or rejects it, with review:work and
+data:work, and it is a person's: an agent or a model is refused. Adopting a pack
+edit writes the pack's next version beside the pack, the version it replaces kept
+whole under `<packs>.versions`, and records it as a rules version to release;
+adopting a scoped change keeps it for every sort to apply to its scope alone.
+Either way the re-sort is queued, and it writes on the proposal what it did
+(`applied.measured`: the stacks judged, those whose answer changed and on which
+axes, and their answers before and after). Every check that can refuse runs
+first, and the adoption, its re-sort's job, the audit row and the handles it
+invalidates are written in one transaction.
+
+**An overlay is adopted only as a proposal** (ruling 26, 2026-10-15).
+`POST /api/overlays` keeps an overlay as a proposal, rehearsed over the overlay's
+own origin with the scoped changes in force, and `POST /api/overlays/{id}/adopt`
+goes through the proposal's decide path: the same stale check, transaction and
+approval card, and a person's. A newer adopted version of an overlay retires the
+older; adopting an older one again is a rollback, done by proposing it again; any
+adoption makes the open proposals stale until they are rehearsed again; and
+withdrawing an adopted overlay is audited. `nils overlay` lists, shows, exports
+and refuses; it no longer adopts.
+
+**The damaged-header flag** (`GET` and `PUT /api/datasets/{name}/headers`, data:work
+to set) is a person's flag with a reason or else the signs. As built it reads one
+sign: at least half of the dataset's MR scans carry neither a series description
+nor a protocol name. Ruling 31 (c), 2026-10-16: the two other signs of record 56
+(words the pack's vocabulary does not know, and a manufacturer not seen before)
+are to be built and the flag set at ingest, with thresholds proposed from the
+evidence for Nima's yes before they ship.
+
+**The audit stream** (§11.5) is built: `POST /api/audit/draws` draws a round's
+sample and makes the campaign that reads it blind, and
+`POST /api/audit/draws/{id}/grade` works out the accepted error with its exact
+bound from the settled answers. No round has been drawn: the raters' registered
+check, which comes first, has not been passed.
+
+**The desk.** Review's Rules page has four tabs. Proposals shows a proposal on its
+approval card with its effect and the scans of any answer it breaks, adopted with
+a press and its re-sort followed to its counts. Quality shows the pack's quality,
+each row with the change that would mend it. Change a rule has one form for each
+typed operation, generated from the patch schema, whose effect is shown before it
+is proposed. Words keeps the site's own words for the rules' lists, as before. A
+dataset's detail says how many rule fixes were proposed from its read, and the one
+chat draws the same card. The assistant's `tune-sorting-words` skill writes
+`add_words` and `remove_words` instead of raw overlay documents and proposes them;
+no station can decide.
+
+**What guards it.** Sealed samples never feed the loop. An overlay never leaves its
+scope. Every rules version stays available. A change that turns any right answer
+wrong says so on its card. Only blind answers train System 1.
+
+**Not built, and moved to 7b by ruling 31 (b), 2026-10-16.** Two things. The first
+is the automatic grouping of Review answers and audit errors into proposals
+(record 56, section 5.3). What exists is that the overrides and the equal-rank
+disagreements are kept on every classification and grouped by rule pair on the
+Quality tab, each with a fix drafted, and that a person or the assistant drafts
+the rest. The second is the full effect report for a free-form edit of a pack's
+files (record 56, sections 5.3 and 5.5). The rules releases 1.0.2 to 1.2.3 were
+free-form edits, each replayed over the archive (§9.3), which counts the stacks
+that moved by axis, and `nils pack rehearse` takes typed operations or an overlay
+only. Until the report exists for a free-form edit, every pack release is
+replayed over the archive.
+
+**Tests:** T20.
+
 ## 12. The image models in production (E1 to E4, G5, F2, F5)
 
 ### 12.1 Body part's fast path
@@ -790,8 +1094,11 @@ answers only on T1-type brain (the header's T1 family and the body-part model's
 brain), and says "not sure" everywhere else. What the student defers goes to the
 full pipeline (segmentation, bias-field, vessel filter), pinned as an image built
 from the research environment; the licences of its tools' weights decide whether
-that image may ship beyond the site. Each faster form of §16.3 replaces a part only
-after its equivalence test.
+that image may ship beyond the site. *Amended in place on 2026-10-16 by record 55,
+ruling 22:* it ships. The image is published to the project's container registry
+where its licences allow, and a release ships the pipeline's descriptor pinned to
+the published digest (§20, question 10). Each faster form of §16.3 replaces a part
+only after its equivalence test.
 
 ### 12.3 The post-contrast label
 
@@ -824,6 +1131,21 @@ The label NILS stores becomes:
   quantitative maps); 2 % for ADC, QSM and TOF; 5 % where it is descriptive (T2, PD,
   DWI, SWI).
 
+*Amended in place on 2026-10-16 by record 55 (F5, and ruling 25 (b), which pull
+request #485 built):* the 72-hour flag and the ASL flag are `yes`, `no` or `unknown`
+(the ASL flag is none on a stack that is not ASL), and the label keeps beside them
+what the minutes are counted from (`bolus_start` or `first_post_t1`), the basis of
+its answer, every check that fired, its error level by use and the rule's version.
+The check for an earlier injection (C1) is a dated version of the rule,
+`time-rule-2`, written beside every label. Two studies of a subject that started
+less than 24 hours apart are one visit, and a contrast study of the visit counts
+for a stack only when the stack's last image was acquired at or after the first
+image of that study's first post-contrast T1 or first bolus series, so that a scan
+taken before it stays `pre` (flag `C1_clock_before`). Where a clock is missing or
+fails the trust guard, the study counts by its start time, as `time-rule-1` counted
+it (flag `C1_no_clock`), and a study with contrast 24 to 72 hours earlier counts for
+every stack, as before. A label made under `time-rule-1` keeps its meaning.
+
 **Tests:** T24, T25, T27.
 
 ## 13. A desk that is one product (H2 to H5, K5, K6)
@@ -837,13 +1159,19 @@ on the development install and accepted in use before it merges (§4.1).
 | Section | Pages |
 |---|---|
 | Home | what needs the person, each tile a link to where they act; what runs; setup until it is done |
-| Data | Datasets (each dataset's steps: Pseudonymise, Read, Sort, each a button, and "Do all"); Browse (subjects, then sessions, then scans); Cohorts |
-| Ask | Cards; Selections (a list, new); Exports |
-| Review | one list of work (§13.2); Picks; Label sets |
+| Data | Datasets and cohorts (one page); Browse (subjects, then sessions, then scans); Pseudonyms |
+| Query | Cards; Selections (a list, new); Exports |
+| Review | Work (one list, §13.2); Main scans; Subjects; Rules (§11.6); Rounds; Label sets |
 | Pipelines | Catalog; Runs; Jobs with their logs; Models (§10.2); a form to add a pipeline |
 | Release | Releases; hand over; withdraw; session schemes |
 | Assistant | Conversations; Plans waiting (the inbox); Standing grants |
 | Settings | Overview; Parts (with Engine, Desk, Language models and the Assistant's stations set in under it); Places; People; Backups; Audit; Setup (reachable from Home until setup is done) |
+
+*Amended in place on 2026-10-16 by record 55 (the desk's design of 2026-10-09,
+confirmed that day; ruling 20 of 2026-10-14):* the rows for Data, Query and Review
+are the sections as built. They first read, for Data, Datasets with a "Do all"
+button and Cohorts as two pages; for Query, Ask; and for Review, one list of work,
+Picks and Label sets. Ruling 20 undid the rename of Query to Ask.
 
 **How the shell changes.**
 - Sections are registered in `web/src/home/placeholders.ts` (one grant and one
@@ -860,10 +1188,11 @@ on the development install and accepted in use before it merges (§4.1).
   rater) sees their campaigns and no queue, rules or identifiers, and the page does
   not read the queue for them. The grants themselves do not change.
 - **Words:** one word per thing. "Sort" is classification only; "Read" is the
-  digest; "Pseudonymise" is the step and its button; "Ask" names the query section,
-  whose cards keep their name; "Language models" replaces "Kvasir" on the page
-  (the part keeps its name on Parts); "People" and "Backups" replace "Identity" and
-  "Database".
+  digest; "Pseudonymise" is the step and its button; "Query" names the query
+  section, whose cards keep their name (*amended in place on 2026-10-16 by record
+  55, ruling 20*: it first said "Ask"); "Language models" replaces "Kvasir" on
+  the page (the part keeps its name on Parts); "People" and "Backups" replace
+  "Identity" and "Database".
 - **Nothing hidden while empty:** the Picks, Proposals and Asked chips show with a
   count of zero and a line that says what would fill them. Home's tiles are links.
 - **The dark theme:** progress and selection colours that nearly vanish are mended
@@ -871,9 +1200,23 @@ on the development install and accepted in use before it merges (§4.1).
 
 **The rounds, in order.**
 1. **One safe way in for data** (§5): one dialog, Data's "Add a dataset", which
-   always asks how the files arrive, shows the trees and the loose entries it found
-   and what it would move, and moves only on confirmation. Setup's DICOM step and
-   Places' "Add a place" with the source role lead to it.
+   says what a folder is before anything reads it. Setup's DICOM step
+   and Places' "Add a place" with the source role lead to it. *Amended in place on
+   2026-10-16 by record 55 (B2, the ruling of 2026-10-08):* the dialog first always
+   asked how the files arrive. It is now a finder, never a list of every folder,
+   since a root may hold thousands: pick the root (skipped when there is one), type
+   part of a folder's name or browse, fifty at a time, and pick a folder. NILS
+   looks inside it once and says whether it holds DICOM, whether it has the two
+   trees, how many entries with DICOM lie loose beside them, and the state the
+   dataset would get (§5.3). One Add button, and a folder with no DICOM asks "Add
+   anyway?" first. The dialog asks only what the structure cannot say: for
+   anonymised data, what PatientID holds and how its subjects are found; for
+   identified data, the kind of identifying ID its PatientID holds (one that is
+   the same everywhere, which the key codes with no map, or a hospital or study
+   ID, whose subject codes a map gives) and what becomes of an ID no map names. A
+   dataset whose files lie beside its two folders is finished from the dataset's
+   one button: it asks whether they are identified or already anonymised, names
+   the entries and the folder, and moves them only once the person confirms.
 2. **A dataset's steps as a line:** Pseudonymise, Read, Sort, each with its count,
    its button and its last job; "Do all" runs the chain; the Pseudonymisation page
    has its own button.
@@ -1016,7 +1359,15 @@ segmentation (type 4) waits for Wave 7b.
   local model: the bench (`bench/`, a scrubbed corpus with recorded golds) gains a
   script for its evaluations, and fixtures for the two stations never measured live
   (analysis-plan's cohorts and selections; run-read's planted runs). The desk's
-  picker lists every station a person may use.
+  picker lists every station a person may use. *Amended in place on 2026-10-16 by
+  record 55 (B6, the ruling of 2026-10-09 "one chat"; T10 as changed on
+  2026-10-10; ruling 6 of 2026-10-12):* the stations became skills of one chat,
+  one agent and one voice, with about ten namespaced tools mounted from the
+  person's grants for the whole session, writes only proposed and executed from an
+  approval card by application code, and sub-agents only for read-only fan-out.
+  The bench holds conversations graded by pass^3, with routing, task-switching,
+  approval-bypass and injection suites, and the chat is measured and improved on
+  qwen3.8-flash-next, the stations' model.
 - **One model, no surprise swaps.** The model gateway cold-swaps a card's models and
   returns a card to its default after ten idle minutes, so a site whose default is
   not the assistant's model pays a swap of one to two minutes on the first request
@@ -1228,6 +1579,11 @@ channel (§4.1) on a test registry; "the production install" is the site's
 install after its refresh (§15.3). Each repository runs its own gate in CI as
 before, and the tests below are added to it where they can run there.
 
+A change to a test is written beside the original, with its date and the ruling
+(record 55, A3), and the original stands. *Amended in place on 2026-10-16 by
+record 55:* the tests below that carry a change were changed by rulings after this
+section was written.
+
 **Data in, data out**
 - **T4.** A folder without `derivatives/dcm-original` or `derivatives/dcm-anon`
   is never read as de-identified: 0 files digested before the person's answer,
@@ -1239,7 +1595,9 @@ before, and the tests below are added to it where they can run there.
 - **T13.** The quasi-identifier rule holds at every door that returns rows (§7.1):
   a test per door; sequence names stay visible.
 - **T12.** A BIDS release passes the official validator with 0 errors in both
-  naming modes, in CI on every change to the release code (§8.2).
+  naming modes, in CI on every change to the release code (§8.2). *Changed on
+  2026-10-08 (record 55, C4, "the three ways to name a stack"):* the two modes are
+  the two BIDS naming styles, full and minimal (§8.1).
 - **T18.** No release is refused for a name conflict (§8.1): 0 refusals on the
   development install's test data and on the production install's first release.
 - **T17.** Display composites are classified and left out of analysis releases by
@@ -1263,17 +1621,33 @@ before, and the tests below are added to it where they can run there.
 - **T20.** The review rule (§11): every scan carries System 1's answer and
   confidence; the accepted and reviewed shares are reported; review shows both
   suggestions and both reasons, blind first where a read trains or measures.
+  *Changed on 2026-10-10 (accepted that day):* on production, the scans sent to
+  Review are reported by kind, and none is sent for a pack conflict, a rule's low
+  confidence, body part or post-contrast (record 56); System 1's opinion is shown
+  beside each question once D2 confirms it, or reported as not yet; Review pages
+  stay blind-first for reads that train or measure.
 - **T21.** The blind audit's first round (§11.5): its raters pass their check
   first; the accepted error and its bound are reported; 0 audit reads train.
 - **T24.** Body part's fast path: a cold pass of the archive in about an hour on
   the production install, its equivalence class held; every scan has a body
-  region or a stated reason (§12.1).
+  region or a stated reason (§12.1). *Changed on 2026-10-13 (ruling 11):* a cold
+  pass of the archive in at most about 1.5 h on a card, the equivalence class held,
+  every scan with a body region or a stated reason; the bar does not apply to a CPU
+  alone. *Changed again on 2026-10-15 (ruling 29):* the production half is graded
+  on one dataset; the pass at archive scale stays the one graded in the research
+  container, and production proves the run, the stated reason of every scan with
+  no region, and that its answers are stored.
 - **T25.** Post-contrast answers only on T1-type brain and "not sure" elsewhere; a
   pass's time is measured against the hour; each faster form passed its
-  equivalence test (§12.2, §16.3).
+  equivalence test (§12.2, §16.3). *Changed on 2026-10-13 (ruling 11):*
+  post-contrast's pass in under 4 h on a card, improved after 7a; the bar does not
+  apply to a CPU alone.
 - **T27.** Every scan in a session with a T1 anchor carries the post-contrast
   state, the minutes since injection, the label's source and the 72-hour flag,
-  with the failure-mode checks run (§12.3).
+  with the failure-mode checks run (§12.3). *Changed on 2026-10-16 (ruling 30,
+  beside ruling 29):* its production check is graded on a calibrated cohort that
+  receives contrast, once that cohort is on production, together with the audit of
+  the post-contrast time rule (ruling 25); it stays owed until then.
 - **T19, T28, T29, T30** grade the research of §16 once each.
 
 **The desk and the people's work**
@@ -1283,14 +1657,23 @@ before, and the tests below are added to it where they can run there.
 - **T32.** Review and Campaigns are one list of work; job types 1, 2, 3 and 5
   work; Browse and the heatmap exist; a body-part curation round and a per-axis
   review run in the desk with zero database-level integration (§13.2).
-- **T33.** Job type 3 is used on a real segmentation QC set (§13.3).
+- **T33.** Job type 3 is used on a real segmentation QC set (§13.3). *Changed on
+  2026-10-11 (ruling 7 of that day):* type 3 works end to end on test data. A run
+  writes masks, a check is made from the run, items are answered and adjudicated,
+  the campaign closes, each result's status is written as a person's decision, and
+  a rejected mask is left out of the run's outputs.
 - **T34.** The reader shows no blank or black screen on a test round of 200 items,
   shows the rules' evidence beside the image, and has its fixed-size, compact and
   expanded views (§13.4).
 
 **The parts around the engine**
 - **T10.** Every assistant station meets its bar on its own test questions with
-  the local model (§14).
+  the local model (§14). *Changed on 2026-10-10 (accepted that day), and graded on
+  the model of ruling 6 of 2026-10-12:* the one chat on its bench with the local
+  model. Each skill's questions (the stations' test questions carried over) are at
+  or above their bar of record 19 or their last measurement, none worse, graded by
+  pass^3, and the routing, task-switching, approval-bypass and injection suites
+  pass.
 - **T11.** The model gateway's sleep-and-wake fault and the thinking-as-text fault
   each have a reproduction test that passes, and the five open engine issues are
   closed by merged fixes (§14).
@@ -1307,18 +1690,24 @@ T36 (the end-of-wave checklist) are graded in the record.
 
 ## 18. Defaults settled in this spec
 
-- A place's arrival defaults to `undeclared`, and an undeclared place is never
-  digested (§5.3). Loose entries move only on confirmation; `dcm-raw` is renamed
-  `dcm-anon` as ruled, and shown.
+- A dataset is what its folder holds, and a folder with neither tree is unknown
+  and never read (§5.3). Loose entries move only on confirmation; `dcm-raw` is
+  renamed `dcm-anon` as ruled, and shown. *Amended in place on 2026-10-16 by
+  record 55, B2 (the ruling of 2026-10-08):* this first said that a place's arrival
+  defaults to `undeclared` and that an undeclared place is never digested.
 - A dataset declares `patient_id: subject-code` or `patient_id: id-type:<name>`
   (§5.4); an unknown subject's files are held.
 - `nils init` and `nils setup` make registries of the subject code generator's scheme
   (§5.2).
 - The marks' option list is derived from each writer's policy (§6.1).
 - The series description and protocol name are technical fields (§7.1).
-- The BIDS mode spells a difference and the fallback number into `acq-`; the
-  informative mode carries `diff-<Property><Value>` and a plain `_<n>`; a fallback is
-  never called a run (§8.1).
+- A release names its stacks in one of three styles, descriptive, full BIDS and
+  minimal BIDS; a difference and the fallback number go into `acq-` in the two BIDS
+  styles and into a slot of their own in the descriptive one; a fallback is never
+  called a run (§8.1). *Amended in place on 2026-10-16 by record 55, C4 (the
+  rulings of 2026-10-08):* this first said that the BIDS mode spells a difference
+  and the fallback number into `acq-` and that the informative mode carries
+  `diff-<Property><Value>` and a plain `_<n>`.
 - A pack's own tag is `pack-<name>-v<version>`, and its manifest names an engine range
   (§9.2).
 - A task's chosen model defaults to the model a recorded certificate names (§10.2).
@@ -1327,7 +1716,7 @@ T36 (the end-of-wave checklist) are graded in the record.
 - The slice cache's key is the SOP Instance UID, the file's sha256 and the model
   input's version; it lives in the site's working place (§10.4).
 - One review question in five is blind first, as a site setting; only blind answers
-  train (§11.4).
+  train (§11.4). *Noted on 2026-10-16:* the share was never ruled (§20, question 4).
 - A round is a pair of a rules version and a System 1 version; its audit reads 1 % of
   its accepted stacks (§11.2, §11.5).
 - A stack with no body region carries one of `sealed`, `not-mr`, `no-geometry`,
@@ -1349,8 +1738,10 @@ stacked where slices share code (§4.1). The steps follow the record's road.
 - **A1** keep-data keeps what a later setup needs (§15.1).
 - **S1** the install test at the wave's start, with the OIDC shape added (§15.2).
 - **A2** the subject code generator: #369 rebased and renamed (§5.2).
-- **A3** never read without the layout: `undeclared`, detection on every path,
-  confirmed moves, the migration (§5.3).
+- **A3** never read without the layout: the layout read from the folder's
+  structure, confirmed moves, the migration (§5.3; *amended in place on
+  2026-10-16 by record 55, B2*, where it said `undeclared` and detection on every
+  path).
 - **A4** what PatientID holds; "code them anyway" queues its job (§5.4).
 - **B1** one safe way in for data (§13.1, round 1).
 - **A5** the five open issues verified against their fixes and closed (§14).
@@ -1426,17 +1817,89 @@ stacked where slices share code (§4.1). The steps follow the record's road.
 Each is settled with the record's owner when its slice is built, and written into the
 record with its date.
 
+**Amended in place on 2026-10-16 by the audit of Wave 7a.** Ten of the eleven were
+settled, each in the record with its date, and the answer to each is below with
+its ruling. The eleventh, question 4, was never ruled. The rulings are in
+`docs/decisions/55-ready-for-production-and-the-paper.md`: those of 2026-10-12 and
+after are numbered, the earlier ones are dated.
+
 1. Record 54's open rulings D1 to D10, which are §5.2's defaults until then.
+
+   **Answered, one by one.** D1 (`blake2b-8` as the default) and D2 (a personnummer
+   is an ID type, an invalid one is refused) were built as §5.2's defaults, and D10
+   (review and merge) was done: the content of pull request #369 reached main with
+   part one. D4 (a subject coded from a personnummer is not provisional), D7
+   (`dcm-anon` is written beside `dcm-original`, in the study's own folder) and D8
+   (the key file is a root-only file on the production install) were ruled on
+   2026-10-08 (record 55, B2). D5 (the subjects of studies with no personnummer in
+   their DICOM) was settled the same day by the ruling that anonymised or coded
+   data must have its subjects resolved, by a map or by a code made from its ID
+   (§5.3). D3 (the route per study), D6 (re-keying the production registry) and D9
+   (the keyed half of the check) were overtaken: B1 starts production from an empty
+   registry under the group's key (2026-10-08), and ruling 21 of 2026-10-14 has Nima
+   bring datasets in one by one and test the key first on numbers he makes up.
 2. How each naming mode spells a difference and the fallback number (§8.1).
+
+   **Answered** by the rulings of 2026-10-08 (record 55, C4): three styles,
+   descriptive, full and minimal; a difference or a fallback number goes into
+   `acq-` in the two BIDS styles, `run-` is kept for true repeats, and a plain
+   number is last.
 3. Whether `dcm-anon`'s folder names carry the series description (§7.2).
+
+   **Answered** by ruling 18 of 2026-10-14 (K9): yes, as
+   `<SeriesNumber>-<description reduced to letters, digits and hyphens, about 40
+   characters>`, the number alone when the description is empty; new writes only,
+   existing trees never renamed, and a resumed run keeps its tree's scheme.
 4. The share of blind-first review questions, and that only blind answers train (§11.4).
+
+   **Not ruled.** The default of this specification is built and in force: one
+   question in five is read blind first, a site setting (`review.blind_share`), and
+   only blind answers train. Record 55 proposed it on 2026-10-08 under D3 "to
+   confirm with Nima"; D6 was ruled that day, that a read whose answers train or
+   measure is answered blind first; and record 56 (accepted 2026-10-09) lists "only
+   blind answers train System 1" among its guards. No ruling confirms or changes
+   the share.
 5. The robustness certificate's sample: the earlier certificate's sample with the
    training guard, and whether an untouched sealed sample joins it (§16.2).
+
+   **Answered** by D2 (2026-10-08): the earlier certificate's sample, kept out of
+   every training step by the guard, graded once. Ruling 22 of 2026-10-14 records
+   that D2 was graded on certificate 2's samples, unsealed by ruling 19, and on a
+   second, untouched sample of a research guard's unread stacks, which was never a
+   registry seal.
 6. Where the minutes since injection are counted from: the first post-contrast T1, or
    the bolus start (§12.3).
+
+   **Answered** by ruling 5 of 2026-10-11 (the time-label plan's T1): from the bolus
+   start where a bolus series exists, else from the first post-contrast T1's first
+   instance, with which one recorded.
 7. Whether the coarse body-part mode keeps neck within spine (§16.5).
+
+   **Answered** by ruling 8 of 2026-10-12 (B6): yes, neck stays within spine in both
+   modes until 100 trainable neck stacks from at least 50 subjects exist.
 8. What keep-data keeps of the model gateway's state (§15.1).
+
+   **Answered** by the ruling of 2026-10-08 (B4): all of it, the models, the store,
+   the sealed credentials and the assistant's key.
 9. Where the archived registry stays readable after a refresh (§15.3).
+
+   **Answered** by B1 (2026-10-08) and ruling 21 of 2026-10-14: in a separate
+   read-only database beside the new registry. The old registry stays as the "test"
+   registry and is archived whole.
 10. The licences of the post-contrast fallback's tool weights (§12.2).
+
+    **Answered** by rulings 20 and 22 of 2026-10-14. Ruling 20 had the image
+    site-built and never re-hosted; ruling 22 replaced it: every model's image is
+    published by the release, and the fallback's, which carries the parts of
+    FreeSurfer 8.2.0 that the Synth tools run on, is published openly where their
+    licences allow. It is published to the project's container registry with the
+    notices and licences of its parts inside it (`NOTICE.full`), and no licence key.
 11. Whether the assistant's model becomes the card's default before the
     release-and-resume driver exists (§14).
+
+    **Answered** by ruling 6, item 3, of 2026-10-12: the one chat is measured and
+    improved on qwen3.8-flash-next, the stations' model ("lets focus on improving
+    flash-next"), so a site that makes it the card's default pays no swap for the
+    assistant. The release-and-resume driver exists (Kvasir #40) and falls back to
+    a cold swap; the warm swap waits for a model-server image with the upstream
+    fix.
