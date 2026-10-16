@@ -4,6 +4,10 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Fixed
+
+- A job queued by hand or by a client of the jobs door reads packs from the deployment's pack directory when its own command line names none. A server started with `--pack-dir` and no packs in the registry's home or the standard folders ran a job queued with `nils jobs enqueue -- classify --pack mri` (and any other verb that reads packs: `digest --pack`, `pick run`, `score`, `explain`) with no pack directory of its own, and the job failed at once with "no pack directory: pass --pack-dir, set NILS_PACK_DIR, or put packs in one of ...". Only the steps of a bring-in's chain, and the verbs the jobs door knew by name, were queued with the deployment's `--pack-dir` appended. The worker now hands the packs the server serves to every job it runs as `NILS_PACK_DIR`, in one place, wherever the job came from; a command line that names its own `--pack-dir` keeps it.
+
 ## [1.0.0-alpha.87] - 2026-10-16
 
 Wave 7a's last engine: hospital reserve numbers read beside the personnummer and never kept, spare numbers through a map, model cards that gain their missing claims, the damaged-header flag's three signs (pack contract 11, MRI pack 1.3.0), the post-contrast label's clock across studies (time-rule-2), kept Query cards, LST-AI's thin image, and fixes from the wave's audit.

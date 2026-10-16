@@ -159,6 +159,7 @@ impl Server {
             .args(extra)
             .env("USER", "anna")
             .env("HOSTNAME", "ward-3")
+            .env_remove("NILS_PACK_DIR")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         for (k, v) in env {
@@ -9214,4 +9215,174 @@ fn a_rule_change_is_rehearsed_over_the_registry_and_nothing_is_written() {
         manifest.contains("# The order the rule sets run in."),
         "the manifest kept its comments"
     );
+}
+
+const JOBS_PACKS_SCHEMA: &str = "nils_jobs_packs";
+
+/// A job the worker runs reads packs from the deployment's pack directory
+/// when its own command line names none, whoever queued it: a person's
+/// `nils jobs enqueue`, which the door never sees, or the door itself. The
+/// server is started with `--pack-dir` and finds no packs anywhere else
+/// (an empty home, no `NILS_PACK_DIR`); a command line that names its own
+/// pack directory keeps it.
+#[test]
+fn a_queued_job_reads_the_deployments_packs_when_it_names_none() {
+    jobs_pack_dir_sweep(None);
+}
+
+/// The same on Postgres.
+#[test]
+fn a_queued_job_reads_the_deployments_packs_on_postgres_too() {
+    let Some(dsn) = std::env::var("NILS_TEST_POSTGRES_DSN")
+        .ok()
+        .filter(|d| !d.is_empty())
+    else {
+        eprintln!("NILS_TEST_POSTGRES_DSN is not set; the Postgres half is skipped");
+        return;
+    };
+    jobs_pack_dir_sweep(Some(&dsn));
+    nils_registry::Store::connect_postgres(&dsn, JOBS_PACKS_SCHEMA)
+        .unwrap()
+        .batch(&format!(
+            "DROP SCHEMA IF EXISTS {JOBS_PACKS_SCHEMA} CASCADE; DROP SCHEMA IF EXISTS {JOBS_PACKS_SCHEMA}_linkage CASCADE"
+        ))
+        .unwrap();
+}
+
+fn jobs_pack_dir_sweep(dsn: Option<&str>) {
+    let home = TempDir::new("jobs-packs-home");
+    let tree = TempDir::new("jobs-packs-src");
+    // the server's HOME and data home: no pack in either
+    let bare = TempDir::new("jobs-packs-bare");
+    let sop = "1.2.3.A.1.1";
+    let mut e = synth::minimal_mr("1.2.3.A", "1.2.3.A.1", sop);
+    e.push(synth::text(tags::PATIENT_ID, VR::LO, "P1"));
+    e.push(synth::text(tags::SERIES_DESCRIPTION, VR::LO, "t1 mprage"));
+    tree.file(
+        &format!("1.2.3.A/{sop}"),
+        &synth::part10(&MetaFields::mr(sop), &e, true),
+    );
+    run(&home, &["key", "add", "k"], Some("a serve test key\n"));
+    match dsn {
+        Some(dsn) => {
+            nils_registry::Store::connect_postgres(dsn, JOBS_PACKS_SCHEMA)
+                .unwrap()
+                .batch(&format!(
+                    "DROP SCHEMA IF EXISTS {JOBS_PACKS_SCHEMA} CASCADE; DROP SCHEMA IF EXISTS {JOBS_PACKS_SCHEMA}_linkage CASCADE"
+                ))
+                .unwrap();
+            run(
+                &home,
+                &[
+                    "init",
+                    "--backend",
+                    "postgres",
+                    "--dsn",
+                    dsn,
+                    "--schema",
+                    JOBS_PACKS_SCHEMA,
+                    "--key",
+                    "k",
+                ],
+                None,
+            );
+        }
+        None => {
+            run(&home, &["init", "--key", "k"], None);
+        }
+    }
+    run(
+        &home,
+        &[
+            "digest",
+            "--name",
+            "a",
+            "--no-private",
+            tree.path().to_str().unwrap(),
+        ],
+        None,
+    );
+    run(&home, &["fingerprint"], None);
+    let share = bare.path().join("share");
+    let server = Server::start(
+        &home,
+        1000,
+        &[
+            "--worker",
+            "--auth",
+            "token",
+            "--token",
+            "an-operator-token-of-len=ops@lab:operator",
+        ],
+        &[
+            ("HOME", bare.path().to_str().unwrap()),
+            ("XDG_DATA_HOME", share.to_str().unwrap()),
+            ("XDG_CONFIG_HOME", bare.path().to_str().unwrap()),
+        ],
+    );
+    let ops = Some("an-operator-token-of-len");
+    // until a job is over, two minutes at most; the job as the registry has it
+    let wait = |job: i64| -> serde_json::Value {
+        let since = std::time::Instant::now();
+        loop {
+            let shown: serde_json::Value = serde_json::from_str(&run(
+                &home,
+                &["jobs", "show", &job.to_string(), "--json"],
+                None,
+            ))
+            .unwrap();
+            if matches!(
+                shown["state"].as_str(),
+                Some("done" | "failed" | "cancelled")
+            ) || since.elapsed().as_secs() >= 120
+            {
+                return shown;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+    };
+    let enqueue = |words: &[&str]| -> i64 {
+        let mut args = vec!["jobs", "enqueue", "--"];
+        args.extend_from_slice(words);
+        let out = run(&home, &args, None);
+        out.split(|c: char| !c.is_ascii_digit())
+            .find(|w| !w.is_empty())
+            .unwrap_or_else(|| panic!("no job id in {out:?}"))
+            .parse()
+            .unwrap()
+    };
+
+    // a person's queued sort: the command line names no packs, the server's
+    // are used
+    let by_hand = wait(enqueue(&["classify", "--pack", "mri"]));
+    assert_eq!(by_hand["state"], "done", "{by_hand}");
+    // the sort the desk queues at the door
+    let (status, queued) = server.request(
+        "POST",
+        "/api/jobs",
+        Some(r#"{"command": ["classify", "--pack", "mri", "--name", "again"]}"#),
+        ops,
+    );
+    assert_eq!(status, 202, "{queued}");
+    let door = wait(queued["job"].as_i64().unwrap());
+    assert_eq!(door["state"], "done", "{door}");
+    // the pick run reads packs as well
+    let picks = wait(enqueue(&["pick", "run", "--pack", "mri"]));
+    assert!(
+        !picks["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("no pack directory"),
+        "{picks}"
+    );
+    // a command line that names its own packs keeps them: this directory has
+    // none, and the job says so instead of reading the server's
+    let own = wait(enqueue(&[
+        "classify",
+        "--pack",
+        "mri",
+        "--pack-dir",
+        bare.path().to_str().unwrap(),
+    ]));
+    assert_eq!(own["state"], "failed", "{own}");
 }

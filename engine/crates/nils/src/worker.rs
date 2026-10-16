@@ -378,6 +378,17 @@ pub(crate) struct Options<'a> {
     pub(crate) quiet: bool,
     /// Which jobs it takes (record 49 A1).
     pub(crate) lane: job::Lane,
+    /// The pack directory the deployment serves, handed to a job whose own
+    /// command line names none (as `NILS_PACK_DIR`, which every verb that
+    /// reads packs looks at after its flag). None where nobody gave one, and
+    /// the verb looks where it always looks.
+    pub(crate) pack_dir: Option<&'a std::path::Path>,
+}
+
+/// Whether a queued command line names a pack directory of its own.
+fn names_a_pack_dir(argv: &[String]) -> bool {
+    argv.iter()
+        .any(|w| w == "--pack-dir" || w.starts_with("--pack-dir="))
 }
 
 /// Run queued jobs until `stop` says so, or with `once` until the queue is
@@ -466,10 +477,19 @@ pub(crate) fn run(
         };
         // The queued command line names no registry; the worker's is the one
         // it runs in.
-        let spawned = std::process::Command::new(&me)
-            .arg("--registry")
-            .arg(home.dir())
-            .args(&argv)
+        let mut command = std::process::Command::new(&me);
+        command.arg("--registry").arg(home.dir()).args(&argv);
+        // A job that queued no pack directory reads the deployment's: the
+        // doors name it on the verbs they know, a person's `nils jobs
+        // enqueue` names none, and the worker is where every queued verb
+        // is run. The command line's own wins, and so does a verb that
+        // was queued with the environment's.
+        if let Some(dir) = opts.pack_dir
+            && !names_a_pack_dir(&argv)
+        {
+            command.env("NILS_PACK_DIR", dir);
+        }
+        let spawned = command
             .env(job::ADOPT_VAR, next.id.to_string())
             .env(
                 "NILS_PRINCIPAL",
