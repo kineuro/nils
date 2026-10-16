@@ -19,7 +19,7 @@
 //!
 //! | code | failure mode | here |
 //! |---|---|---|
-//! | `C1_prior_72h` | an earlier injection, the same day or days before | the subject step: a study of the subject 0 to 72 hours earlier with an MR contrast event makes this study's `pre` labels `undetermined`, and flags every stack |
+//! | `C1_prior_72h` | an earlier injection, the same day or days before | the subject step: a study of the subject that started 24 to 72 hours earlier with an MR contrast event makes this study's `pre` labels `undetermined`; a study of the same visit with one does so for each stack acquired at or after its injection by the clock (C1's clock, below); every stack such a study counts for is flagged |
 //! | `C2_exam` | two exams in one session | head and spine stacks in one session: the rule runs per exam, and a label the exam's own bracket does not give is `undetermined`; another MR study of the subject within 24 hours is a flag (`C2_second_study`) |
 //! | `C3_bolus_before_L` | bolus and test-bolus runs | a DSC, DCE or contrast MRA series before the last pre T1 contradicts the bracket: every label of the session is `undetermined`. Otherwise stacks after the bolus that the rule left unknown are `post` (`basis` bolus), and the bolus start is the injection time |
 //! | `C4_split` | a split dose or a preload | a flag: two bolus series five minutes or more apart, or a bolus after the first post T1, and the stacks between the two events |
@@ -41,11 +41,45 @@
 //! pass cannot see, so [`subject`] runs after [`session`] over every session
 //! of one subject. A pure function of what it is handed: the registry's side
 //! is `nils_classify::contrast`.
+//!
+//! **C1's clock** (`time-rule-2`, record 55, ruling 25 of 2026-10-15: "a
+//! scan taken before the other study's first post-contrast T1 in the same
+//! visit stays pre"). Two studies of a subject that started less than
+//! [`Config::same_visit_minutes`] apart, either way, are one visit. A study
+//! of the visit with an MR contrast event counts as an earlier injection
+//! for a stack of the other only when the stack's last image was acquired at
+//! or after that study's anchor ([`Facts::anchor`]): the first image of its
+//! first post-contrast T1 (a certified post answer on a T1-family stack in
+//! the rule's frame) or of its first bolus series (DSC, DCE or contrast MRA),
+//! whichever comes first. A stack whose last image comes before the anchor
+//! does not count that study, so its `pre` stays `pre`, flagged
+//! `C1_clock_before`. Where the anchor or the stack's last image time is
+//! missing, or either study's clock fails the trust guard, the study counts
+//! as `time-rule-1` counted it, when it started 0 to 24 hours before this
+//! one, and the stack is flagged `C1_no_clock`. A study that started 24 to
+//! 72 hours earlier counts for every stack, as before. The 72-hour flag is
+//! per stack: `yes` where some study counts for it.
+//!
+//! The clock rests on the time-label study's counts (2026-10-12 label):
+//! most of C1's moves came from a second study of the same visit, and in
+//! the archive every stack the clock keeps `pre` was acquired at least two
+//! minutes (a median half an hour) before the other study's first post
+//! T1, on the same scanner, with its own session's last pre T1 before that
+//! anchor too. A study whose contrast rests on a contrast tag alone has no
+//! anchor: the tag is the source the time rule leaves out.
 
 use std::collections::{BTreeMap, BTreeSet};
 
-/// The rule's version, written beside every label it makes.
-pub const RULE: &str = "time-rule-1";
+/// The rule's version, written beside every label it makes, so that a label
+/// keeps the meaning of the rule it was made under:
+///
+/// - `time-rule-1` (2026-10-13): the time-label study's registered rule;
+///   C1 counted a contrast study of the subject by the studies' start times
+///   alone, 0 to 72 hours before, for every stack of the later study.
+/// - `time-rule-2` (record 55, ruling 25 of 2026-10-15): C1 judges a study
+///   of the same visit by the clock (C1's clock, in the module's notes), and
+///   the 72-hour flag is per stack. Nothing else changed.
+pub const RULE: &str = "time-rule-2";
 
 /// Every number the rule and its checks use, as the time-label study
 /// registered them (plan sections 4 and 5) and as the time-rule study's
@@ -502,6 +536,16 @@ pub struct Facts {
     /// A contrast event in the session: a certified post answer on a T1,
     /// a bolus series, or an MR contrast tag.
     pub contrast: bool,
+    /// Whether the session's clock passes the trust guard, so that its
+    /// stacks can be placed against another study's anchor.
+    pub trusted: bool,
+    /// When the session's contrast was given by, on the clock (C1's clock,
+    /// `time-rule-2`): the first image of its first post-contrast T1 (a
+    /// certified post answer on a T1-family stack in the rule's frame) or of
+    /// its first bolus series (DSC, DCE or contrast MRA), whichever comes
+    /// first. None where its clock is not trusted, or no such stack has a
+    /// time: a contrast tag alone gives no anchor.
+    pub anchor: Option<f64>,
 }
 
 /// A session's pass: its labels, and the facts the subject step reads.
@@ -1090,31 +1134,102 @@ pub fn session(cfg: &Config, study: &Study) -> Passed {
         }
         labels.push(l);
     }
+    // C1's clock: the anchor other studies of the visit are placed against
+    let anchor = trusted
+        .then(|| {
+            scans
+                .iter()
+                .filter(|s| {
+                    in_frame(s)
+                        && ((s.kind.t1_family && s.answer.is_some_and(|a| a.post))
+                            || s.kind.family.bolus())
+                })
+                .filter_map(|s| s.first.or(s.time))
+                .reduce(f64::min)
+        })
+        .flatten();
     Passed {
         study: study.id,
         labels,
-        facts: Facts { contrast },
+        facts: Facts {
+            contrast,
+            trusted,
+            anchor,
+        },
     }
 }
 
+/// Another study of the visit with an MR contrast event, as C1's clock
+/// reads it for a session.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Visit {
+    /// This session's start minus the other study's, in minutes.
+    minutes: f64,
+    /// The other study's anchor ([`Facts::anchor`]).
+    anchor: Option<f64>,
+}
+
 /// What the subject step found of one session.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 struct Look {
-    prior: Prior,
-    within_day: bool,
+    /// A study 24 to 72 hours earlier with an MR contrast event.
+    earlier: bool,
+    /// The studies of the same visit with an MR contrast event.
+    visit: Vec<Visit>,
+    /// A date this session or another study lacks.
+    unknown: bool,
     ct_72h: bool,
     other_mr_study_day: bool,
 }
 
+/// How the studies of a session's look count for one of its stacks.
+#[derive(Debug, Clone, Copy, Default)]
+struct Counted {
+    /// A study of the same visit counts for it.
+    visit: bool,
+    /// The clock placed the stack before a study of the visit, which so
+    /// does not count for it.
+    before: bool,
+    /// A study of the visit could not be placed against the stack.
+    no_clock: bool,
+}
+
+impl Look {
+    /// C1's clock for a stack whose last image is `last` (none where it has
+    /// no time or its session's clock is not trusted).
+    fn counted(&self, last: Option<f64>) -> Counted {
+        let mut c = Counted::default();
+        for v in &self.visit {
+            match (last, v.anchor) {
+                (Some(x), Some(a)) if x < a => c.before = true,
+                (Some(_), Some(_)) => c.visit = true,
+                _ => {
+                    // time-rule-1: a study that started 0 to 24 hours before
+                    c.no_clock = true;
+                    if v.minutes >= 0.0 {
+                        c.visit = true;
+                    }
+                }
+            }
+        }
+        c
+    }
+}
+
 /// The subject-level step (record 55 F5): over every session of one
-/// subject, after each session's pass, the 72-hour flag and C1. A session
-/// with an MR contrast event 0 to 72 hours before it (the same day
-/// included) makes its `pre` labels `undetermined` (`C1_prior_72h`), its
-/// own pre T1 answers too, and flags every stack `yes`; where a date is
-/// missing the flag is `unknown`. CT sessions are counted as a flag and
-/// change nothing (the time-label plan's T6: MR only until CT is
-/// pseudonymised). Another MR study of the subject within 24 hours either
-/// way is C2's flag.
+/// subject, after each session's pass, the 72-hour flag and C1, stack by
+/// stack. A study of the subject that started 24 to 72 hours before a
+/// session with an MR contrast event counts for every stack of the session;
+/// a study of the same visit with one counts for a stack by C1's clock (in
+/// the module's notes, `time-rule-2`): when the stack's last image was
+/// acquired at or after that study's anchor, or, where the clock cannot be
+/// read, when the study started 0 to 24 hours before (`C1_no_clock`). Where
+/// a study counts for a stack, its `pre` label becomes `undetermined`
+/// (`C1_prior_72h`), an own pre T1 answer as well, and its 72-hour flag is
+/// `yes`; where none does and a date is missing, the flag is `unknown`. CT
+/// sessions are counted as a flag and change nothing (the time-label plan's
+/// T6: MR only until CT is pseudonymised). Another MR study of the subject
+/// within 24 hours either way is C2's flag.
 pub fn subject(cfg: &Config, studies: &[Study], passed: &mut [Passed]) {
     let at: BTreeMap<i64, Option<f64>> = studies.iter().map(|s| (s.id, s.at_minutes)).collect();
     let mr: BTreeMap<i64, bool> = studies
@@ -1122,56 +1237,80 @@ pub fn subject(cfg: &Config, studies: &[Study], passed: &mut [Passed]) {
         .map(|s| (s.id, s.mr_series > 0 || !s.scans.is_empty()))
         .collect();
     let ct: BTreeMap<i64, bool> = studies.iter().map(|s| (s.id, s.ct_tagged > 0)).collect();
-    let contrast: BTreeMap<i64, bool> =
-        passed.iter().map(|p| (p.study, p.facts.contrast)).collect();
+    let facts: BTreeMap<i64, Facts> = passed.iter().map(|p| (p.study, p.facts.clone())).collect();
+    // each stack's last image on the clock, by its study
+    let last: BTreeMap<(i64, i64), Option<f64>> = studies
+        .iter()
+        .flat_map(|s| s.scans.iter().map(move |x| ((s.id, x.stack), x.last)))
+        .collect();
     let ids: Vec<i64> = studies.iter().map(|s| s.id).collect();
     let mut looks: BTreeMap<i64, Look> = BTreeMap::new();
     for &i in &ids {
         let mut look = Look {
-            prior: Prior::No,
-            within_day: false,
+            earlier: false,
+            visit: Vec::new(),
+            unknown: at[&i].is_none(),
             ct_72h: false,
             other_mr_study_day: false,
         };
-        let mut unknown = at[&i].is_none();
         for &j in ids.iter().filter(|&&j| j != i) {
             let (Some(ti), Some(tj)) = (at[&i], at[&j]) else {
-                unknown = true;
+                look.unknown = true;
                 continue;
             };
             let d = ti - tj;
-            if (0.0..=cfg.lookback_minutes).contains(&d) {
-                if contrast.get(&j).copied().unwrap_or(false) && mr[&j] {
-                    look.prior = Prior::Yes;
-                    if d < cfg.same_visit_minutes {
-                        look.within_day = true;
-                    }
+            let other = facts.get(&j);
+            if other.is_some_and(|f| f.contrast) && mr[&j] {
+                if d.abs() < cfg.same_visit_minutes {
+                    look.visit.push(Visit {
+                        minutes: d,
+                        anchor: other.and_then(|f| f.anchor),
+                    });
+                } else if (0.0..=cfg.lookback_minutes).contains(&d) {
+                    look.earlier = true;
                 }
-                if ct[&j] {
-                    look.ct_72h = true;
-                }
+            }
+            if (0.0..=cfg.lookback_minutes).contains(&d) && ct[&j] {
+                look.ct_72h = true;
             }
             if mr[&j] && d.abs() < cfg.same_visit_minutes {
                 look.other_mr_study_day = true;
             }
         }
-        if look.prior != Prior::Yes && unknown {
-            look.prior = Prior::Unknown;
-        }
         looks.insert(i, look);
     }
     for p in passed.iter_mut() {
-        let look = looks.get(&p.study).copied().unwrap_or(Look {
-            prior: Prior::Unknown,
-            within_day: false,
+        let look = looks.get(&p.study).cloned().unwrap_or(Look {
+            earlier: false,
+            visit: Vec::new(),
+            unknown: true,
             ct_72h: false,
             other_mr_study_day: false,
         });
+        let trusted = p.facts.trusted;
         for l in &mut p.labels {
-            l.prior_72h = look.prior;
-            if look.prior == Prior::Yes {
+            let stack_last = last
+                .get(&(p.study, l.stack))
+                .copied()
+                .flatten()
+                .filter(|_| trusted);
+            let counted = look.counted(stack_last);
+            l.prior_72h = if look.earlier || counted.visit {
+                Prior::Yes
+            } else if look.unknown {
+                Prior::Unknown
+            } else {
+                Prior::No
+            };
+            if counted.before {
+                l.flags.insert("C1_clock_before");
+            }
+            if counted.no_clock {
+                l.flags.insert("C1_no_clock");
+            }
+            if l.prior_72h == Prior::Yes {
                 l.flags.insert("C1_prior_72h_flag");
-                l.flags.insert(if look.within_day {
+                l.flags.insert(if counted.visit {
                     "C1_source_within_24h"
                 } else {
                     "C1_source_24_to_72h"
@@ -1186,7 +1325,7 @@ pub fn subject(cfg: &Config, studies: &[Study], passed: &mut [Passed]) {
                     l.flags.insert("C1_prior_72h");
                 }
             }
-            if look.prior == Prior::Unknown {
+            if l.prior_72h == Prior::Unknown {
                 l.flags.insert("C1_dates_unknown");
             }
             if look.ct_72h {
@@ -1415,6 +1554,230 @@ mod tests {
         let l = run(vec![earlier, undated]);
         assert_eq!(l[&4].prior_72h, Prior::Unknown);
         assert!(l[&4].flags.contains("C1_dates_unknown"));
+    }
+
+    /// A study of day 20000 that started `minutes` after 08:00.
+    fn started(id: i64, minutes: f64, scans: Vec<Scan>) -> Study {
+        let mut s = study(id, 20_000.0, scans);
+        s.at_minutes = s.at_minutes.map(|m| m + minutes);
+        s
+    }
+
+    fn tagged(mut s: Scan) -> Scan {
+        s.tagged = true;
+        s
+    }
+
+    #[test]
+    fn c1_clock_a_scan_before_the_other_studys_first_post_t1_stays_pre() {
+        // one visit split into two studies that started together: the first
+        // holds a FLAIR and the last pre T1, the second the post T1 at 40
+        let first = started(
+            1,
+            0.0,
+            vec![
+                scan(1, 1, 0.0, FLAIR),
+                answered(scan(2, 2, 10.0, T1), false, By::Image),
+                scan(3, 3, 20.0, FLAIR),
+            ],
+        );
+        let second = started(
+            2,
+            0.0,
+            vec![
+                answered(scan(4, 4, 40.0, T1), true, By::Image),
+                scan(5, 5, 50.0, FLAIR),
+            ],
+        );
+        let l = run(vec![first, second]);
+        assert_eq!(l[&1].state, State::Pre);
+        assert_eq!(l[&1].reason, None);
+        assert_eq!(l[&1].prior_72h, Prior::No);
+        assert!(l[&1].flags.contains("C1_clock_before"));
+        assert!(!l[&1].flags.contains("C1_prior_72h_flag"));
+        // the own pre T1 answer as well
+        assert_eq!(l[&2].state, State::Pre);
+        assert_eq!(l[&2].source, Source::Image);
+        // the second study's labels stand; the first has no contrast
+        assert_eq!(l[&5].state, State::Post);
+        assert_eq!(l[&5].prior_72h, Prior::No);
+        assert!(l[&5].flags.contains("C2_second_study"));
+        assert_eq!(RULE, "time-rule-2");
+    }
+
+    #[test]
+    fn c1_clock_a_scan_after_the_other_studys_first_post_t1_is_c1() {
+        // the first study's post T1 at 20; the second started half an hour
+        // later, and its FLAIR and own pre T1 came after that injection
+        let first = started(
+            1,
+            0.0,
+            vec![
+                answered(scan(1, 1, 0.0, T1), false, By::Image),
+                answered(scan(2, 2, 20.0, T1), true, By::Image),
+            ],
+        );
+        let second = started(
+            2,
+            30.0,
+            vec![
+                scan(3, 3, 30.0, FLAIR),
+                answered(scan(4, 4, 40.0, T1), false, By::Image),
+                answered(scan(5, 5, 60.0, T1), true, By::Image),
+                scan(6, 6, 70.0, FLAIR),
+            ],
+        );
+        let l = run(vec![first, second]);
+        assert_eq!(l[&3].state, State::Undetermined);
+        assert_eq!(l[&3].reason.as_deref(), Some("C1_prior_72h"));
+        assert_eq!(l[&3].prior_72h, Prior::Yes);
+        assert!(l[&3].flags.contains("C1_source_within_24h"));
+        assert!(!l[&3].flags.contains("C1_clock_before"));
+        assert_eq!(l[&4].reason.as_deref(), Some("C1_prior_72h"));
+        // post stays post, with the flag
+        assert_eq!(l[&6].state, State::Post);
+        assert_eq!(l[&6].prior_72h, Prior::Yes);
+        // the first study came before the second's injection: nothing counts for it
+        assert_eq!(l[&1].state, State::Pre);
+        assert_eq!(l[&1].prior_72h, Prior::No);
+        assert!(l[&1].flags.contains("C1_clock_before"));
+    }
+
+    #[test]
+    fn c1_clock_a_study_that_started_later_but_injected_first_counts() {
+        // the second study started ten minutes after the first, but its post
+        // T1 (at 20) came before the first study's FLAIR and pre T1
+        let first = started(
+            1,
+            0.0,
+            vec![
+                scan(1, 1, 30.0, FLAIR),
+                answered(scan(2, 2, 40.0, T1), false, By::Image),
+                answered(scan(3, 3, 60.0, T1), true, By::Image),
+            ],
+        );
+        let second = started(
+            2,
+            10.0,
+            vec![
+                answered(scan(4, 4, 10.0, T1), false, By::Image),
+                answered(scan(5, 5, 20.0, T1), true, By::Image),
+            ],
+        );
+        let l = run(vec![first, second]);
+        assert_eq!(l[&1].reason.as_deref(), Some("C1_prior_72h"));
+        assert_eq!(l[&2].reason.as_deref(), Some("C1_prior_72h"));
+        assert_eq!(l[&1].prior_72h, Prior::Yes);
+        // and the first study's injection came after the second's scans
+        assert_eq!(l[&4].state, State::Pre);
+        assert_eq!(l[&4].prior_72h, Prior::No);
+    }
+
+    #[test]
+    fn c1_clock_does_not_reach_a_study_24_to_72_hours_earlier() {
+        // a contrast study 30 hours earlier counts for every stack, even one
+        // its anchor (on the clock, after it) would leave alone in one visit
+        let mut earlier = study(
+            1,
+            20_000.0,
+            vec![
+                answered(scan(11, 1, 50.0, T1), false, By::Image),
+                answered(scan(12, 2, 60.0, T1), true, By::Image),
+            ],
+        );
+        earlier.at_minutes = earlier.at_minutes.map(|m| m - 30.0 * 60.0);
+        let mut s = bracketed();
+        s.insert(0, scan(9, 5, -10.0, FLAIR));
+        let l = run(vec![earlier, study(2, 20_000.0, s)]);
+        assert_eq!(l[&9].reason.as_deref(), Some("C1_prior_72h"));
+        assert_eq!(l[&1].reason.as_deref(), Some("C1_prior_72h"));
+        assert!(l[&9].flags.contains("C1_source_24_to_72h"));
+        assert!(!l[&9].flags.contains("C1_clock_before"));
+        assert_eq!(l[&4].state, State::Post);
+        assert_eq!(l[&4].prior_72h, Prior::Yes);
+    }
+
+    #[test]
+    fn c1_clock_without_its_times_falls_back_to_the_start_times() {
+        let pre_only = |id, minutes| {
+            started(
+                id,
+                minutes,
+                vec![
+                    scan(id * 10 + 1, 1, 30.0, FLAIR),
+                    answered(scan(id * 10 + 2, 2, 40.0, T1), false, By::Image),
+                ],
+            )
+        };
+        // a contrast tag alone gives no anchor: as time-rule-1, a study that
+        // started earlier counts, one that started later does not
+        let tag_only = |id, minutes| {
+            started(
+                id,
+                minutes,
+                vec![
+                    tagged(scan(id * 10 + 1, 1, 50.0, FLAIR)),
+                    scan(id * 10 + 2, 2, 60.0, FLAIR),
+                ],
+            )
+        };
+        let l = run(vec![tag_only(1, 0.0), pre_only(2, 10.0)]);
+        assert_eq!(l[&21].reason.as_deref(), Some("C1_prior_72h"));
+        assert!(l[&21].flags.contains("C1_no_clock"));
+        assert_eq!(l[&22].reason.as_deref(), Some("C1_prior_72h"));
+        let l = run(vec![tag_only(1, 20.0), pre_only(2, 10.0)]);
+        assert_eq!(l[&21].state, State::Pre);
+        assert_eq!(l[&21].prior_72h, Prior::No);
+        assert!(l[&21].flags.contains("C1_no_clock"));
+        // a stack with no image time, against a known anchor
+        let mut s = pre_only(2, 10.0);
+        s.scans[0].first = None;
+        s.scans[0].last = None;
+        let post = started(
+            1,
+            0.0,
+            vec![
+                answered(scan(11, 1, 50.0, T1), true, By::Image),
+                scan(12, 2, 60.0, FLAIR),
+            ],
+        );
+        let l = run(vec![post.clone(), s]);
+        assert_eq!(l[&21].reason.as_deref(), Some("C1_prior_72h"));
+        assert!(l[&21].flags.contains("C1_no_clock"));
+        // its sibling has its times, and was acquired before the anchor
+        assert_eq!(l[&22].state, State::Pre);
+        assert!(l[&22].flags.contains("C1_clock_before"));
+        // an untrusted clock (a session over four hours) gives no anchor
+        let mut long = post;
+        long.scans[1].time = long.scans[1].time.map(|t| t + 5.0 * 3600.0);
+        long.scans[1].first = long.scans[1].time;
+        long.scans[1].last = long.scans[1].time;
+        let l = run(vec![long, pre_only(2, 10.0)]);
+        assert_eq!(l[&21].reason.as_deref(), Some("C1_prior_72h"));
+        assert!(l[&21].flags.contains("C1_no_clock"));
+    }
+
+    #[test]
+    fn c1_clock_anchor_is_the_first_post_t1_or_the_bolus() {
+        let cfg = Config::default();
+        let at = |m: f64| 20_000.0 * 86_400.0 + 8.0 * 3600.0 + m * 60.0;
+        let mut s = bracketed();
+        assert_eq!(
+            session(&cfg, &study(1, 20_000.0, s.clone())).facts.anchor,
+            Some(at(20.0))
+        );
+        // a bolus series before the first post T1 is the anchor
+        s.push(scan(8, 22, 12.0, DSC));
+        let f = session(&cfg, &study(1, 20_000.0, s)).facts;
+        assert_eq!(f.anchor, Some(at(12.0)));
+        assert!(f.trusted && f.contrast);
+        // a sealed post answer is never an anchor; a tag is none
+        let mut s = bracketed();
+        s[2].outside = Outside::Sealed;
+        s[3].tagged = true;
+        let f = session(&cfg, &study(1, 20_000.0, s)).facts;
+        assert!(f.contrast);
+        assert_eq!(f.anchor, None);
     }
 
     #[test]
