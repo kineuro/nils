@@ -1745,6 +1745,160 @@ fn refused_items(pg: Option<(String, String)>) {
     }
 }
 
+/// T33's proof run on the development build closed three items of four.
+/// The fourth, accepted by both raters with no part flagged, was refused
+/// "form.parts is a list" because that run had put a string in its stored
+/// outcome on purpose, to watch a refusal named (`refused_items` does the
+/// same). This is the case with nothing spoiled, through the doors with
+/// the body the desk posts: two raters accept one result and reject
+/// another, every field of their form an empty list, so no part is flagged
+/// and no settlement is asked; the outcome the campaign door serves keeps
+/// the lists; one person's close writes both results. On SQLite and on
+/// Postgres.
+#[test]
+fn two_raters_who_agree_with_no_part_flagged_are_closed_without_a_settlement() {
+    agreed_items(None);
+}
+
+#[test]
+fn two_raters_who_agree_with_no_part_flagged_are_closed_without_a_settlement_on_postgres() {
+    let Some(dsn) = std::env::var("NILS_TEST_POSTGRES_DSN")
+        .ok()
+        .filter(|d| !d.is_empty())
+    else {
+        return;
+    };
+    let schema = "nils_check_agreed";
+    let drop = || {
+        let mut store = Store::connect_postgres(&dsn, schema).expect("connect");
+        store
+            .batch(&format!(
+                "DROP SCHEMA IF EXISTS {schema} CASCADE; DROP SCHEMA IF EXISTS {schema}_linkage CASCADE"
+            ))
+            .expect("drop");
+    };
+    drop();
+    agreed_items(Some((dsn.clone(), schema.to_string())));
+    drop();
+}
+
+fn agreed_items(pg: Option<(String, String)>) {
+    let (home, work, a, _b, _pipeline, run, place) = small_on("checks-agreed", pg);
+    let m1 = mask_of(&home, work.path(), run, place, a, "", &lesions(0));
+    let m2 = mask_of(&home, work.path(), run, place, a, "two/", &lesions(1));
+    let server = Server::start(&home);
+    let ops = ops_token();
+    let anna = token("anna", &["campaigns:see", "campaigns:work"], "quasi");
+    let bo = token("bo", &["campaigns:see", "campaigns:work"], "quasi");
+    let mut body = check_body("agreed at the close", json!({"derivatives": [m1, m2]}));
+    body["raters"] = json!(["anna@desk.example", "bo@desk.example"]);
+    body["raters_per_item"] = json!(2);
+    read_preview(&server, &body, &ops);
+    let made = server.ok("POST", "/api/campaigns", Some(body), &ops);
+    let check = made["id"].as_i64().unwrap();
+
+    // each rater claims and answers as the desk's reader does: the first
+    // result accepted, the second rejected, the form with every field an
+    // empty list (the body is the one the proof run's network log holds)
+    for rater in [&anna, &bo] {
+        for _ in 0..2 {
+            let claimed = server.ok(
+                "POST",
+                &format!("/api/campaigns/{check}/claim"),
+                Some(json!({"role": "rater"})),
+                rater,
+            );
+            let assignment = claimed["assignment"]["id"].as_i64().unwrap();
+            let derivative = claimed["item"]["derivative_id"].as_i64().unwrap();
+            assert!(derivative == m1 || derivative == m2, "{claimed}");
+            let value = if derivative == m1 {
+                "accepted"
+            } else {
+                "rejected"
+            };
+            server.ok(
+                "POST",
+                &format!("/api/campaigns/{check}/assignments/{assignment}/answer"),
+                Some(json!({
+                    "value": value,
+                    "form": {"reasons": [], "parts": [], "points": [], "seen": [], "shown": []}
+                })),
+                rater,
+            );
+        }
+    }
+    let campaign = |token: &str| server.ok("GET", &format!("/api/campaigns/{check}"), None, token);
+    let item_of = |doc: &Value, d: i64| -> Value {
+        doc["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["derivative_id"] == d)
+            .unwrap()
+            .clone()
+    };
+    // agreed on both, none sent to a settlement, every list of the stored
+    // outcome a list
+    let doc = campaign(&ops);
+    assert_eq!(doc["counts"]["items"]["agreed"], 2, "{doc}");
+    assert!(
+        doc["counts"]["items"]["needs_adjudication"].is_null(),
+        "{doc}"
+    );
+    for (d, verdict) in [(m1, "accepted"), (m2, "rejected")] {
+        let it = item_of(&doc, d);
+        assert_eq!(it["state"], "agreed", "{doc}");
+        assert_eq!(it["outcome"]["value"], verdict, "{doc}");
+        for key in ["reasons", "parts", "points", "seen", "shown"] {
+            assert_eq!(it["outcome"]["form"][key], json!([]), "{key}: {doc}");
+        }
+        assert!(it["refused"].is_null(), "{doc}");
+    }
+
+    // one close by a person writes both: none refused, none left
+    let closed = server.ok("POST", &format!("/api/campaigns/{check}/close"), None, &ops);
+    assert_eq!(
+        (closed["resolved"].as_i64(), closed["unresolved"].as_i64()),
+        (Some(2), Some(0)),
+        "{closed}"
+    );
+    assert_eq!(closed["refused"], json!([]), "{closed}");
+    assert_eq!(closed["skipped"], json!([]), "{closed}");
+    let doc = campaign(&ops);
+    assert_eq!(doc["status"], "closed", "{doc}");
+    assert_eq!(doc["close_again"], false, "{doc}");
+    assert!(doc["counts"]["items"]["refused"].is_null(), "{doc}");
+    for d in [m1, m2] {
+        let it = item_of(&doc, d);
+        assert_eq!(it["state"], "resolved", "{doc}");
+        assert!(it["refused"].is_null(), "{doc}");
+    }
+    let by = |c: &str| -> Vec<i64> {
+        server.ok("GET", &format!("/api/derivatives?check={c}"), None, &ops)["derivatives"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| d["id"].as_i64().unwrap())
+            .collect()
+    };
+    assert_eq!(by("accepted"), vec![m1]);
+    assert_eq!(by("rejected"), vec![m2]);
+    assert!(by("unchecked").is_empty());
+    // nothing is left to write: a close is refused
+    let (status, said) = server.call("POST", &format!("/api/campaigns/{check}/close"), None, &ops);
+    assert_eq!(status, 409, "{said}");
+    // the job that warms the check's layers ends before its registry goes
+    if let Some(job) = made["layers"]["job"].as_i64() {
+        for _ in 0..600 {
+            let (_, j) = server.call("GET", &format!("/api/jobs/{job}"), None, &ops);
+            if matches!(j["state"].as_str(), Some("done" | "failed" | "cancelled")) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    }
+}
+
 /// Review of E1, E2, item 3: a layer whose scan's picture cannot be read
 /// says why by its class, never by the archive's file path.
 #[test]
