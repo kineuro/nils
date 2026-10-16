@@ -4,6 +4,11 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Changed
+
+- A release builds a model image (body part, post-contrast, System 1) only when its package's files, the release workflow or the descriptors script changed since the previous release's tag. An unchanged image is the one the previous release shipped, by the digest its `IMAGES` names, once the registry says anyone may pull it; the descriptors and `IMAGES` keep their form.
+- A release, and a rules release, may take its commit's checks from the pull request it is the squash merge of, where the merge's tree is byte for byte the pull request head's and main's tip before the merge is in that head, so the pull request's ci ran on exactly this tree (`scripts/release-pr-head.sh`). The release then takes the six binaries from that pull request's ci run when main's run has not kept them.
+
 ## [1.0.0-alpha.85] - 2026-10-16
 
 Post-contrast is sent only the scans that can be T1-type brain.
