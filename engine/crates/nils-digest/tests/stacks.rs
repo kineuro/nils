@@ -841,6 +841,90 @@ fn a_volume_whose_slices_take_turns_at_the_echo_number_is_one_stack() {
     }
 }
 
+/// A volume taken in two blocks at different repetition times stays two
+/// scans (record 55, ruling 9 of the smaller ones): the signature holds the
+/// repetition time, and the fold joins only stacks that differ by echo
+/// number, so it never joins the blocks. Both shapes are tried: blocks whose
+/// slices each take turns at the echo number, and blocks that carry
+/// different echo numbers as well as different repetition times.
+#[test]
+fn a_volume_taken_in_two_blocks_at_different_repetition_times_stays_two_stacks() {
+    for lab in labs() {
+        let name = lab.name;
+        let dir = TempDir::new("stacks-two-tr");
+        for n in 1..=8u32 {
+            let (block, tr, z) = if n <= 4 {
+                ("a", "2000", 2.0 * f64::from(n))
+            } else {
+                ("b", "4000", 2.0 * f64::from(n))
+            };
+            // T.1: every slice takes turns at the echo number, in both blocks
+            dir.file(
+                &format!("T.1/{n}"),
+                &mr(
+                    "T",
+                    "T.1",
+                    &format!("T.1.{n}"),
+                    "P1",
+                    &[
+                        echo_number(if n % 2 == 1 { "1" } else { "2" }),
+                        instance_number(&n.to_string()),
+                        echo_time("25.5"),
+                        repetition_time(tr),
+                        iop(AXIAL),
+                        ipp(&format!("-120\\-110\\{z}")),
+                    ],
+                ),
+            );
+            // T.2: the blocks carry different echo numbers too
+            dir.file(
+                &format!("T.2/{n}"),
+                &mr(
+                    "T",
+                    "T.2",
+                    &format!("T.2.{n}"),
+                    "P1",
+                    &[
+                        echo_number(if block == "a" { "1" } else { "2" }),
+                        instance_number(&n.to_string()),
+                        echo_time("25.5"),
+                        repetition_time(tr),
+                        iop(AXIAL),
+                        ipp(&format!("-120\\-110\\{z}")),
+                    ],
+                ),
+            );
+        }
+        let s = settings(&dir);
+        let mut reg = lab.open();
+
+        digest(&s, &mut reg).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(
+            stacks_by_series(&mut reg),
+            [
+                ("T.1".to_string(), 4),
+                ("T.1".to_string(), 4),
+                ("T.2".to_string(), 4),
+                ("T.2".to_string(), 4)
+            ],
+            "{name}"
+        );
+        assert_eq!(
+            one(
+                &mut reg,
+                "SELECT COUNT(DISTINCT repetition_time) FROM {stack}"
+            ),
+            2,
+            "{name}"
+        );
+        counts_add_up(&mut reg, name);
+
+        // a second run over the same files changes nothing
+        digest(&s, &mut reg).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(one(&mut reg, "SELECT COUNT(*) FROM {stack}"), 4, "{name}");
+    }
+}
+
 /// Where the echo number is an echo, each echo states its echo time, and the
 /// split stands: a dual echo, three echo numbers of which two state times
 /// and one states none, SyMRI's echoes under each saturation delay, a
