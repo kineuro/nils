@@ -1222,6 +1222,41 @@ fn a_run_asked_to_stop_before_it_began_writes_nothing_and_ends_cancelled() {
     assert_eq!(report.files.written, 12, "{report}");
 }
 
+/// A run the registry fails ends with the registry's own words, and the job
+/// and the batch say the same. A trigger refuses every row the run records,
+/// so the first flush fails while more files are left to ask about than the
+/// workers hold; the asks that come after it are told that the run is over,
+/// which follows from the failure and is never the run's error.
+#[test]
+fn a_run_the_registry_fails_ends_with_the_registry_s_own_words() {
+    let lab = lab();
+    let dir = dataset();
+    let mut registry = lab.home.open().unwrap();
+    import_map(&mut registry);
+    let place = declare(&mut registry, dir.path(), json!({}));
+    registry
+        .store()
+        .batch(
+            "CREATE TRIGGER refuse_rows BEFORE INSERT ON pseudonym_file \
+             BEGIN SELECT RAISE(ABORT, 'the registry refuses a row'); END",
+        )
+        .unwrap();
+    let failed = pseudonymize(&settings(&place), &mut registry).unwrap_err();
+    let why = failed.to_string();
+    assert!(why.contains("the registry refuses a row"), "{why}");
+    let job = &rows(
+        &mut registry,
+        "SELECT state, error FROM job ORDER BY id DESC LIMIT 1",
+    )[0];
+    assert_eq!(job.text(0).unwrap(), "failed");
+    assert_eq!(job.opt_text(1).unwrap(), Some(why.as_str()));
+    let batch = &rows(
+        &mut registry,
+        "SELECT state FROM ingest_batch ORDER BY id DESC LIMIT 1",
+    )[0];
+    assert_eq!(batch.text(0).unwrap(), "failed");
+}
+
 /// A dataset that codes what no map names makes its subjects' codes from
 /// their IDs, final and asking nothing (Nima, 2026-10-10: "the subject code
 /// should be created from their ID"): the same ID gives the same subject

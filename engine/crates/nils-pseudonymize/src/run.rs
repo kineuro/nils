@@ -15,6 +15,12 @@
 //! code, or the keyed lookup and the sealed identifier of a file to hold,
 //! and writes `pseudonym_file` in transactions of `batch_rows`. An
 //! identifier never leaves the process and is never written in the clear.
+//!
+//! A failure of the registry thread ends the run, and the run's error is the
+//! first failure that thread met: a collision with its review item, or the
+//! registry's own words. The asks that come after it are answered that the
+//! run is over, which stops a worker and is never a worker's error, since it
+//! only follows from the failure.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
@@ -423,6 +429,10 @@ enum Answer {
         out_size: u64,
     },
     Failed(String),
+    /// The registry thread has failed already, and its first failure is the
+    /// run's error: the worker stops with nothing to report of its own, since
+    /// what it is told here follows from that failure and is not a cause.
+    Over,
 }
 
 /// One thing the registry thread records.
@@ -505,7 +515,9 @@ struct Tally {
     removed: BTreeMap<String, u64>,
     private_removed: u64,
     refused_by: BTreeMap<String, u64>,
-    /// The registry thread could not answer: the run is over.
+    /// What this worker met itself: the registry thread's words for the batch
+    /// its ask was in, or a failure of its own (a folder it could not make).
+    /// A worker told that the run is over keeps nothing here.
     error: Option<String>,
 }
 
@@ -676,10 +688,13 @@ fn execute(
         for w in pool {
             tally.merge(w.join().expect("worker thread"));
         }
+        // The run's error is the first failure the registry thread met. A
+        // worker's text is that failure again, a later one, or its own (a
+        // folder it could not make), and which worker's is counted first
+        // depends on how the threads ran, so a worker's text is the run's
+        // error only where the registry thread did not fail.
         let recorded = recording.join().expect("registry thread");
-        if let Err(e) = recorded
-            && tally.error.is_none()
-        {
+        if let Err(e) = recorded {
             tally.error = Some(e.to_string());
         }
         (walked, resumed, tally)
@@ -1006,6 +1021,7 @@ fn worker(ctx: &Ctx<'_>, rx: &Receiver<Task>, asks: &Sender<Ask>, items: &Sender
         }
         let Ok(answer) = reply_rx.recv() else { break };
         let (subject, code, written, created, provisional) = match answer {
+            Answer::Over => break,
             Answer::Failed(why) => {
                 tally.error = Some(why);
                 break;
@@ -1281,8 +1297,8 @@ struct Recorder<'a> {
     skipped: u64,
     walk_errors: u64,
     last_heartbeat: Instant,
-    /// The first error met; the thread goes on draining so the workers
-    /// can stop, and the run ends with it.
+    /// The first error met, the run's error; the thread goes on draining so
+    /// the workers can stop, and every ask after it is answered `Over`.
     error: Option<String>,
 }
 
@@ -1408,7 +1424,7 @@ impl<'a> Recorder<'a> {
     fn answer(&mut self, batch: Vec<Ask>) {
         if self.error.is_some() {
             for ask in batch {
-                let _ = ask.reply.send(Answer::Failed("the run is over".into()));
+                let _ = ask.reply.send(Answer::Over);
             }
             return;
         }
