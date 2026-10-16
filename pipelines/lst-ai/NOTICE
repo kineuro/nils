@@ -1,0 +1,88 @@
+nils-lst-ai: the third-party components in this image and their terms
+
+Beside NILS's own files (AGPL-3.0-only, https://github.com/kineuro/nils), this
+image is LST-AI's own image, jqmcginnis/lst-ai v1.2.0 by LST-AI's authors,
+pinned by its manifest digest in Dockerfile, with one thin layer on top. The
+layer does four things: it removes the image's ENTRYPOINT, it puts HD-BET's
+parameters in /opt/hd-bet_params where every account reads them, it changes one
+line of HD-BET's paths.py to name that folder, and it adds this notice and the
+licence texts beside it, in /usr/local/share/licenses/nils-lst-ai. LST-AI's
+code, weights and atlas, greedy, the rest of HD-BET's code and every library
+are the upstream image's, byte for byte.
+
+Research use only. LST-AI's authors say: "LST-AI is a research-only tool for MS
+Lesion Segmentation and has not been validated, licensed or approved for any
+clinical usage." It is no medical device, and nothing here changes that.
+
+LST-AI 1.1.0 (https://github.com/CompImg/LST-AI), the `lst` command: the MIT
+License, Copyright (c) 2023 Julian McGinnis. Its text is LST-AI-LICENSE.txt
+beside this file. The model weights (UNet3D_MS_final_mdlA.h5, mdlB, mdlC), the
+atlas and the binaries folder of the package come from that project's release
+v1.1.0 (lst_data.zip) and are distributed with it under that licence; they carry
+no licence file of their own.
+Wiltgen T, McGinnis J, Schlaeger S, Kofler F, Voon C, Berthele A, Bischl D,
+Grundl L, Will N, Metz M, Schinz D, Sepp D, Prucker P, Schmitz-Koep B, Zimmer
+C, Menze B, Rueckert D, Hemmer B, Kirschke J, Mühlau M, Wiestler B. LST-AI: A
+deep learning ensemble for accurate MS lesion segmentation. NeuroImage:
+Clinical 42, 103611 (2024). https://doi.org/10.1016/j.nicl.2024.103611
+
+The atlas folder (sub-mni152_space-mni_t1.nii.gz, a skull-stripped copy of it
+and a mask of regions in the same space) holds the MNI ICBM 152 2009c nonlinear
+symmetric template, as the header of its T1 file says, and files made on it.
+The notice that comes with the MNI ICBM 152 2009 templates reads:
+  Copyright (C) 1993-2004 Louis Collins, McConnell Brain Imaging Centre,
+  Montreal Neurological Institute, McGill University. Permission to use, copy,
+  modify, and distribute this software and its documentation for any purpose
+  and without fee is hereby granted, provided that the above copyright notice
+  appear in all copies. The authors and McGill University make no
+  representations about the suitability of this software for any purpose. It is
+  provided "as is" without express or implied warranty. The authors are not
+  responsible for any data loss, equipment damage, property loss, or injury to
+  subjects or patients resulting from the use or misuse of this software
+  package.
+Fonov VS, Evans AC, McKinstry RC, Almli CR, Collins DL. Unbiased nonlinear
+average age-appropriate brain templates from birth to adulthood. NeuroImage
+47, S102 (2009). Fonov V, Evans AC, Botteron K, Almli CR, McKinstry RC, Collins
+DL. Unbiased average age-appropriate atlases for pediatric studies. NeuroImage
+54, 313 (2011).
+
+HD-BET 1.0 (https://github.com/MIC-DKFZ/HD-BET), the brain extraction LST-AI
+calls: the Apache License 2.0, HD-BET-LICENSE.txt beside this file.
+HD_BET/paths.py is the one file of it changed here, in one line, and says so
+where it changed, as the licence asks.
+Isensee F, Schell M, Tursunova I, Brugnara G, Bonekamp D, Neuberger U, Wick A,
+Schlemmer HP, Heiland S, Wick W, Bendszus M, Maier-Hein KH, Kickingereder P.
+Automated brain extraction of multi-sequence MRI using artificial neural
+networks. Human Brain Mapping 2019. https://doi.org/10.1002/hbm.24750
+
+HD-BET's parameters (0.model to 4.model, in /opt/hd-bet_params): Isensee F,
+Schell M, Tursunova I, Brugnara G, Bonekamp D, Neuberger U, Wick A, Schlemmer
+HP, Heiland S, Wick W, Bendszus M, Maier-Hein KH, Kickingereder P. HD-BET
+parameters, version 1.0. Zenodo, 2019. https://doi.org/10.5281/zenodo.2540695
+Used under the Creative Commons Attribution 4.0 International licence
+(https://creativecommons.org/licenses/by/4.0/). The files are not changed: the
+Dockerfile copies each from the upstream image and checks its SHA-256, and the
+upstream image's files carry the MD5 sums the Zenodo record lists.
+
+greedy (https://github.com/pyushkevich/greedy), the registration LST-AI calls:
+Paul Yushkevich, University of Pennsylvania. The greedy in /usr/local/bin is
+built from the source commit of 18 May 2023 that LST-AI's image names, and that
+source is under the GNU General Public License, version 3 or later
+(greedy-COPYING.txt beside this file, and the headers of its source files). Its
+source is in this image, in /greedy, as the licence asks of whoever passes the
+program on. The project moved to the Apache License 2.0 in August 2026, after
+this build, and this build keeps its own terms. It is built with ITK 5.2.1
+(Apache-2.0) and VTK 9.1.0 (BSD-3-Clause), linked into it. The package's
+binaries folder holds another build of greedy, of October 2023, which lst does
+not call: it runs the greedy on the search path.
+
+The Apache License 2.0 (TensorFlow 2.13.1, Keras 2.13.1, SimpleITK 2.4.0 and
+others among the Python packages) is HD-BET-LICENSE.txt beside this file. Other
+Python packages (PyTorch 2.1.0, NumPy, SciPy, scikit-image, nibabel) are under
+their own licences. Every Python package carries its licence in its dist-info
+folder, and every Ubuntu 22.04 package in /usr/share/doc/<package>/copyright.
+
+NVIDIA's CUDA 12.1 runtime libraries, cuDNN 8.9 and NCCL come from the CUDA base
+image that LST-AI's image is built on. That image says its contents are governed
+by the NVIDIA Deep Learning Container License, a copy of which is in this image
+at /NGC-DL-CONTAINER-LICENSE.
