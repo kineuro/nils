@@ -1367,7 +1367,7 @@ segmentation (type 4) waits for Wave 7b.
   approval card by application code, and sub-agents only for read-only fan-out.
   The bench holds conversations graded by pass^3, with routing, task-switching,
   approval-bypass and injection suites, and the chat is measured and improved on
-  the model server's default model, qwen3.8-flash-next.
+  qwen3.8-flash-next, the stations' model.
 - **One model, no surprise swaps.** The model gateway cold-swaps a card's models and
   returns a card to its default after ten idle minutes, so a site whose default is
   not the assistant's model pays a swap of one to two minutes on the first request
@@ -1898,7 +1898,8 @@ after are numbered, the earlier ones are dated.
     release-and-resume driver exists (§14).
 
     **Answered** by ruling 6, item 3, of 2026-10-12: the one chat is measured and
-    improved on qwen3.8-flash-next, the stations' model and the model server's
-    default ("lets focus on improving flash-next"). The release-and-resume driver
-    exists (Kvasir #40) and falls back to a cold swap; the warm swap waits for a
-    model-server image with the upstream fix.
+    improved on qwen3.8-flash-next, the stations' model ("lets focus on improving
+    flash-next"), so a site that makes it the card's default pays no swap for the
+    assistant. The release-and-resume driver exists (Kvasir #40) and falls back to
+    a cold swap; the warm swap waits for a model-server image with the upstream
+    fix.
