@@ -711,10 +711,11 @@ fn a_map_without_the_main_number_ends_the_run_on_a_collision() {
 }
 
 /// A spare that is no personnummer (a wrong check digit, as a reserve number
-/// may have): the map refuses its row and writes nothing, and the run holds
-/// its files under their study's UID, which no number map can release. A map
-/// of that study UID to the subject code releases them, and the next run of
-/// the held files writes them under the main subject.
+/// may have): the number map refuses its row and writes nothing, and the run
+/// holds its files as a reserve number's, under the number's keyed lookup and
+/// by its shape, nothing of it kept. A map row naming it under
+/// `reserve-number` beside the subject code releases them, and the next run
+/// of the held files writes them under the main subject.
 #[test]
 fn a_spare_that_is_no_personnummer_is_refused_by_the_map_and_held_by_the_run() {
     let lab = lab();
@@ -761,23 +762,18 @@ fn a_spare_that_is_no_personnummer_is_refused_by_the_map_and_held_by_the_run() {
         "SELECT id_type, shape FROM pseudonym_file WHERE state = 'held'",
     );
     assert_eq!(held.len(), 1);
-    assert_eq!(held[0].text(0).unwrap(), "study-instance-uid");
-    // held, and shown, by the shape of its study's UID, not of the number
-    let shape = held[0].text(1).unwrap();
-    assert!(
-        shape.starts_with("9.9.999.") && shape != "999999999999",
-        "{shape}"
-    );
+    assert_eq!(held[0].text(0).unwrap(), "reserve-number");
+    // held, and shown, by the shape of the number
+    assert_eq!(held[0].text(1).unwrap(), "999999999999");
 
-    // the study's UID mapped to the subject code releases it
-    let (study_uid, _, _) = uids("a", 4, 1, 1);
+    // the number mapped as a reserve number to the subject code releases it
     let released = import(
         &mut registry,
         &[
-            ("study", Role::Identifier("study-instance-uid".into())),
+            ("reserve", Role::Identifier("reserve-number".into())),
             ("code", Role::Code),
         ],
-        &[&[&study_uid, &a]],
+        &[&[NOT_A_NUMBER, &a]],
         false,
     );
     assert!(released.written(), "{released}");
