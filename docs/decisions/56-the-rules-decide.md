@@ -276,7 +276,7 @@ On the archive's unseen sessions, Variant R would send 9.3 per 1,000 to Review, 
 | System 1 step 1: plan, freeze, grade, rerun, H3 shadow, Variant R | `studies/2026-10-08-system1-damage-and-cheap-model/plan.md` (section 16), `report.md` |
 | Evidence runs (sha256 manifests, mirrored to the research machine) | `studies/phase0-evidence/runs/`: s1-7a-check, s1-7a-guard, s1-7a-real, s1-7a-x2, s1-7a-h3, s1-7a-varr |
 | The frozen System 1 | `FROZEN.sha256` 456b1907…c4bf, in the research container's private place |
-| The question logic | nils #386, branch `wave7a-review-logic`; `nils-pack/src/matters.rs`, `nils/src/disagreements.rs`; record 34's measurement on the development laptop |
+| The question logic | nils #386, branch `wave7a-review-logic`; `nils-pack/src/matters.rs`, `nils/src/disagreements.rs`; its effect report on record 34's corpus, with the engine's output: `studies/2026-10-09-review-logic/effect-2026-10-09.md`, `effect-engine-output.json` |
 | Review round 1's design | `studies/2026-10-09-review-round1/report.md` |
 | The desk's design | `studies/2026-10-09-desk-design/` |
 | The pack archive replay | our operating notes |
