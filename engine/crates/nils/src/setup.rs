@@ -28,6 +28,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::{Exit, fail, usage};
 use crate::{tools, tui, update};
+
+/// Record 55 ruling 35 (c): the setup's steps the desk asks for through the
+/// supervisor.
+pub(crate) mod change;
 use nils_registry::home::{Home, InitOptions};
 use nils_registry::{Backend, Scheme};
 
@@ -1850,6 +1854,11 @@ fn helper_words(state: &State) -> Vec<Vec<String>> {
     for part in updatable_parts(state) {
         out.push(vec!["update".to_string(), part.to_string()]);
     }
+    // record 55 ruling 35 (c): a change of the setup and an archive put
+    // back, each read by root from the request the supervisor left in its
+    // own folder, never from a word of its caller's
+    out.push(vec![change::CHANGE.to_string()]);
+    out.push(vec![change::RESTORE.to_string()]);
     out
 }
 
@@ -1934,8 +1943,16 @@ fn helper_text(dir: &Path, helper: &Helper, state: &State) -> String {
          \x20     *) echo \"nils-manage update takes one part or none: {updatable}\" >&2; exit 2 ;;\n\
          \x20   esac\n\
          \x20   ;;\n\
+         \x20 change)\n\
+         \x20   [ \"$#\" -eq 1 ] || {{ echo \"nils-manage change takes no other word\" >&2; exit 2; }}\n\
+         \x20   exec {nils} supervise change\n\
+         \x20   ;;\n\
+         \x20 restore)\n\
+         \x20   [ \"$#\" -eq 1 ] || {{ echo \"nils-manage restore takes no other word\" >&2; exit 2; }}\n\
+         \x20   exec {nils} supervise restore\n\
+         \x20   ;;\n\
          \x20 *)\n\
-         \x20   echo \"nils-manage: restart <part>, restart all, reapply, reapply all, update or update <part>\" >&2\n\
+         \x20   echo \"nils-manage: restart <part>, restart all, reapply, reapply all, update, update <part>, change or restore\" >&2\n\
          \x20   exit 2\n\
          \x20   ;;\n\
          esac\n",
@@ -10021,6 +10038,14 @@ pub(crate) enum RegistryStep {
         #[arg(long, value_name = "DAY")]
         week_start: String,
     },
+    /// One `install.change` row in the audit log, for a change the
+    /// supervisor made (record 55 ruling 35 (c)); what changed is read as
+    /// JSON from the input
+    Audit {
+        /// Who asked for it, as user@node
+        #[arg(long, value_name = "PRINCIPAL")]
+        by: String,
+    },
 }
 
 /// One step of the registry's, taken by the account running this. Setup runs
@@ -10092,6 +10117,11 @@ pub(crate) fn registry_step(home: &Home, step: RegistryStep) -> Result<(), Exit>
             timezone,
             week_start,
         } => calendar_here(&home_on_machine(home), &timezone, &week_start).map_err(fail),
+        RegistryStep::Audit { by } => {
+            let scope: serde_json::Value = serde_json::from_reader(std::io::stdin().lock())
+                .map_err(|e| usage(format!("what changed, on the input: {e}")))?;
+            change::audit_here(&home_on_machine(home), &by, scope).map_err(fail)
+        }
     }
 }
 
@@ -18453,6 +18483,7 @@ pub(crate) fn install_doc(state: &State) -> serde_json::Value {
         "unfinished": state.unfinished,
         "node": node_doc(state),
         "rules": state.rules,
+        "changes": change::served_doc(state),
     })
 }
 
@@ -27748,6 +27779,8 @@ mod tests {
             "/usr/local/sbin/nils-manage reapply",
             "/usr/local/sbin/nils-manage reapply all",
             "/usr/local/sbin/nils-manage update",
+            "/usr/local/sbin/nils-manage change",
+            "/usr/local/sbin/nils-manage restore",
         ] {
             assert!(rule.contains(line), "{line} is not in {rule}");
         }
@@ -27913,6 +27946,10 @@ mod tests {
             vec!["update", "desk", "engine"],
             vec!["systemctl", "restart", "sshd"],
             vec!["/bin/sh"],
+            vec!["change", "--what", "backups"],
+            vec!["change", "/etc/shadow"],
+            vec!["restore", "../registry"],
+            vec!["restore", "a1b2c3d4-20261016120000"],
             vec![],
         ] {
             let out = Command::new("sh")
@@ -28025,6 +28062,62 @@ mod tests {
             assert!(
                 said.contains("nils-manage reapply takes all, or no other word"),
                 "{args:?}: {said}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Record 55 ruling 35 (c): the helper makes a change of the setup and
+    /// puts an archive back each by one word with nothing after it, so the
+    /// rule names both as whole lines and the request is root's to read from
+    /// the supervisor's folder. The recorded engine is `echo` here.
+    #[cfg(unix)]
+    #[test]
+    fn the_helper_changes_the_setup_and_restores_by_one_word_alone() {
+        if cfg!(target_os = "macos") {
+            return;
+        }
+        let Some(echo) = ["/bin/echo", "/usr/bin/echo"]
+            .into_iter()
+            .find(|p| Path::new(p).exists())
+        else {
+            return;
+        };
+        let plan = deployment();
+        let mut state = deployed_state(&plan);
+        state.parts.get_mut("engine").expect("an engine").path = echo.to_string();
+        let text = helper_text(
+            &plan.dir,
+            plan.helper.as_ref().expect("a deployment keeps one"),
+            &state,
+        );
+        let dir = scratch("helper-change");
+        let script = dir.join("nils-manage");
+        std::fs::write(&script, &text).unwrap();
+        let run = |args: &[&str]| {
+            Command::new("sh")
+                .arg(&script)
+                .args(args)
+                .output()
+                .expect("sh runs the helper")
+        };
+        for (word, runs) in [
+            ("change", "supervise change"),
+            ("restore", "supervise restore"),
+        ] {
+            let out = run(&[word]);
+            assert!(
+                out.status.success(),
+                "{word}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), runs);
+            let out = run(&[word, "all"]);
+            assert_eq!(out.status.code(), Some(2), "{word} took a second word");
+            assert!(out.stdout.is_empty(), "{word} all ran something");
+            assert!(
+                String::from_utf8_lossy(&out.stderr).contains("takes no other word"),
+                "{word}"
             );
         }
         let _ = std::fs::remove_dir_all(&dir);
