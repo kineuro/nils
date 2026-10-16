@@ -6098,9 +6098,9 @@ with gzip.open(out, "wb") as f:
 /// and SAMSEG's label maps and segcsvd's PVS, on the FLAIR for LST-AI's
 /// masks, and for segcsvd's WMH, which names no role, on the input whose
 /// grid it matches. The stand-in podman runs a command line after the
-/// image as an image without an ENTRYPOINT would; LST-AI's own image has
-/// one (its descriptor's notes), so this proves its command line, not its
-/// image.
+/// image as an image without an ENTRYPOINT would, which LST-AI's thin
+/// image is (`pipelines/lst-ai/Dockerfile`; the image it is built on has
+/// one), so this proves the command lines, not the images.
 #[test]
 fn the_masks_the_starters_make_are_tied_to_their_scans_and_read_into_their_parts() {
     if !have("python3") || !have("dcm2niix") {
@@ -6333,45 +6333,73 @@ exec '{}' "$@""#,
     }
 }
 
-/// The LST-AI descriptor's image is pinned by a manifest digest its
-/// registry still serves (record 55 H3, P1). It asks Docker Hub, so it
-/// needs the network: run it by name with `--ignored`.
-#[test]
-#[ignore = "asks Docker Hub: run by hand"]
-fn the_lst_ai_image_digest_resolves_at_its_registry() {
-    let text = std::fs::read_to_string(repo().join("pipelines/lst-ai/nils.job.yml")).unwrap();
-    let d = nils_pipeline::descriptor::parse(&text).unwrap();
-    let repository = d
-        .image
-        .repository
-        .strip_prefix("docker.io/")
-        .expect("a Docker Hub image");
-    let mut token = ureq::get(format!(
-        "https://auth.docker.io/token?service=registry.docker.io&scope=repository:{repository}:pull"
-    ))
-    .call()
-    .unwrap();
+/// The manifest `digest` of `repository` (`docker.io/<path>` or
+/// `ghcr.io/<path>`) is served to a client with no credentials, and the
+/// registry answers that very digest.
+fn registry_serves(repository: &str, digest: &str) {
+    let (token_url, manifest_url) = if let Some(path) = repository.strip_prefix("docker.io/") {
+        (
+            format!(
+                "https://auth.docker.io/token?service=registry.docker.io&scope=repository:{path}:pull"
+            ),
+            format!("https://registry-1.docker.io/v2/{path}/manifests/{digest}"),
+        )
+    } else if let Some(path) = repository.strip_prefix("ghcr.io/") {
+        (
+            format!("https://ghcr.io/token?service=ghcr.io&scope=repository:{path}:pull"),
+            format!("https://ghcr.io/v2/{path}/manifests/{digest}"),
+        )
+    } else {
+        panic!("a registry this test does not ask: {repository}");
+    };
+    let mut token = ureq::get(token_url).call().unwrap();
     let token: Value = serde_json::from_str(&token.body_mut().read_to_string().unwrap()).unwrap();
-    let answer = ureq::head(format!(
-        "https://registry-1.docker.io/v2/{repository}/manifests/{}",
-        d.image.digest
-    ))
-    .header(
-        "Authorization",
-        format!("Bearer {}", token["token"].as_str().unwrap()),
-    )
-    .header(
-        "Accept",
-        "application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.manifest.v1+json",
-    )
-    .call()
-    .unwrap();
-    assert_eq!(answer.status(), 200);
-    let digest = answer
+    let answer = ureq::head(manifest_url)
+        .header(
+            "Authorization",
+            format!("Bearer {}", token["token"].as_str().unwrap()),
+        )
+        .header(
+            "Accept",
+            "application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.manifest.v1+json",
+        )
+        .call()
+        .unwrap_or_else(|e| panic!("{repository}@{digest}: {e}"));
+    assert_eq!(answer.status(), 200, "{repository}@{digest}");
+    let served = answer
         .headers()
         .get("docker-content-digest")
         .and_then(|v| v.to_str().ok());
-    assert_eq!(digest, Some(d.image.digest.as_str()));
+    assert_eq!(served, Some(digest), "{repository}");
+}
+
+/// The digests the LST-AI image names are pinned by manifests their
+/// registries still serve (record 55 H3, P1): the image the thin image is
+/// built on, named by the Dockerfile's `LST_NAME` and `LST_DIGEST` (Docker
+/// Hub), and the image the descriptor pins, which is that one until
+/// `scripts/publish-lst-ai.sh --pin` writes the thin image's digest (then
+/// `ghcr.io/kineuro/nils-lst-ai`). They ask the registries, so they need
+/// the network: run by name with `--ignored`.
+#[test]
+#[ignore = "asks Docker Hub and ghcr.io: run by hand"]
+fn the_lst_ai_image_digests_resolve_at_their_registries() {
+    let dockerfile = std::fs::read_to_string(repo().join("pipelines/lst-ai/Dockerfile")).unwrap();
+    let arg = |name: &str| {
+        dockerfile
+            .lines()
+            .find_map(|l| l.strip_prefix(&format!("ARG {name}=")))
+            .unwrap_or_else(|| panic!("the Dockerfile has no ARG {name}"))
+            .to_string()
+    };
+    let (base, base_digest) = (arg("LST_NAME"), arg("LST_DIGEST"));
+    let text = std::fs::read_to_string(repo().join("pipelines/lst-ai/nils.job.yml")).unwrap();
+    assert!(
+        text.contains(&base_digest),
+        "the descriptor names the image the Dockerfile builds on"
+    );
+    let d = nils_pipeline::descriptor::parse(&text).unwrap();
+    registry_serves(&base, &base_digest);
+    registry_serves(&d.image.repository, &d.image.digest);
 }
 
 /// Record 49 A4's proof: an engine started on a fresh registry seeds the

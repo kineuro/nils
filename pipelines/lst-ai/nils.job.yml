@@ -4,8 +4,7 @@
 # T1-weighted image and a FLAIR, a deep-learning ensemble (Wiltgen,
 # McGinnis et al., NeuroImage: Clinical 42, 2024), the segmentation
 # Neuroverify had people check lesion by lesion. A starting point for job
-# type 3, check a result (record 55 H3), not a starter the engine seeds:
-# it does not run as it is pinned (below).
+# type 3, check a result (record 55 H3), not a starter the engine seeds.
 #
 # One session's T1w and FLAIR in; a binary lesion mask, the same lesions
 # labelled by where they lie (1 periventricular, 2 juxtacortical, 3
@@ -24,35 +23,54 @@
 # pre-flight and skipped by the run; one that reaches this without its
 # FLAIR writes nothing here, so the run makes it a pipeline:qc item.
 #
-# The image is jqmcginnis/lst-ai v1.2.0 by LST-AI's authors, the one
-# Neuroverify ran, pinned by its registry manifest digest, resolved
-# 2026-10-11 by a registry manifest request, not pulled: a single-platform
-# linux/amd64 image manifest of 11.1 GB (CUDA 12.1, TensorFlow 2.13,
-# PyTorch 2.1), run here on the CPU (--device cpu). It is built from
-# CompImg/LST-AI's branch jqm/old_hd_bet, with the model weights and atlas
-# of that project's release v1.1.0. LST-AI is MIT (its LICENSE, Copyright
-# 2023 Julian McGinnis; the weights come with no other licence); the image
-# carries HD-BET (Apache-2.0) with HD-BET's parameters (CC-BY-4.0, Zenodo
-# record 2540695) and greedy (Apache-2.0). Its authors say it is for
-# research only and not validated for clinical use. It needs no licence
-# file.
+# The image is the thin NILS image of this folder (Dockerfile and NOTICE),
+# published by scripts/publish-lst-ai.sh as ghcr.io/kineuro/nils-lst-ai and
+# pinned below by its own digest. It is built on LST-AI's image,
+# jqmcginnis/lst-ai v1.2.0 by LST-AI's authors, the one Neuroverify ran, by
+# its registry manifest digest
+# sha256:2b2a0d6454e6efff60a350df3c650ae9584f1926338dec7842f9e71912cc6c85
+# (resolved 2026-10-11 by a registry manifest request: a single-platform
+# linux/amd64 image of 11.1 GB, 30 GB unpacked; CUDA 12.1, TensorFlow 2.13,
+# PyTorch 2.1), and runs on the CPU (--device cpu). LST-AI's image is built
+# from CompImg/LST-AI's branch jqm/old_hd_bet, with the model weights and
+# atlas of that project's release v1.1.0. LST-AI is MIT (its LICENSE,
+# Copyright 2023 Julian McGinnis; the weights come with no other licence);
+# the image carries HD-BET (Apache-2.0) with HD-BET's parameters (CC-BY-4.0,
+# Zenodo record 2540695) and greedy, which in that build is GPL-3.0 or later
+# with its source in the image (the project moved to Apache-2.0 in August
+# 2026, after it). Its authors say it is for research only and not validated
+# for clinical use. The thin image's NOTICE says whose terms each part is
+# under.
 #
-# Two facts of the image, read from its manifest, its configuration and
-# one 125-byte layer, keep it from running under job contract v1 as it
-# is pinned:
+# LST-AI's own image does not run under job contract v1 as it is. Two facts
+# of it, read from its manifest, its configuration and its layers, keep it:
 # - its ENTRYPOINT is `lst`, which the contract runs before the command
 #   line, so the words below reach lst as its own arguments and it refuses
 #   them; lst takes a T1w and a FLAIR by their file names, which no word of
 #   the contract names for a session;
 # - HD-BET reads its parameters from ~/hd-bet_params, and they are in
-#   /root/hd-bet_params under a /root of mode 700, which the account a
-#   run's container has (never root) cannot read; without them HD-BET
-#   downloads them, and a run has no network.
-# The command line is what runs once both are lifted: an image built from
-# this digest with no ENTRYPOINT and the parameters where any account
-# reads them, pinned by its own digest, or a contract that lets a
-# descriptor set an image's ENTRYPOINT aside. A unit's time and memory
-# were not measured here; the needs are a starting point.
+#   /root/hd-bet_params as files of mode 600 under a /root of mode 700,
+#   which the account a run's container has (never root, and with no home
+#   of its own) cannot read; without them HD-BET downloads them, and a run
+#   has no network.
+# The thin image lifts both and changes nothing else: it has no ENTRYPOINT,
+# and the parameters are in /opt/hd-bet_params, readable by every account,
+# with one line of HD-BET's paths.py naming that folder, whatever the
+# account's home is. The command line below is what runs in it.
+#
+# Run under job contract v1's conditions (docker; an account with no passwd
+# entry and no home, on a read-only root; no network; /input read-only,
+# /output the one writable folder; 4 cores, 16 GB) on one session's 3D T1w
+# and 3D FLAIR at 1 mm, with --fast-mode, a unit wrote all three outputs,
+# both masks on the FLAIR's grid and the table's voxels and volume those of
+# the mask, and peaked at 10 GB of memory, so the needs keep their 16. Run
+# by the engine's docker runtime, the same session's outputs were registered
+# as derivatives, the masks tied to the FLAIR. No unit-minutes is declared:
+# on a laptop CPU held to 15 W the unit took 2 h 37 min, nearly all of it
+# HD-BET's skull strip, whose forward pass ran for hours on that Intel CPU
+# until denormals were flushed (torch.set_flush_denormal(True) brought it
+# from over 18 minutes to 27 seconds), so the first run on a server says
+# what a unit takes.
 name: lst-ai
 schema-version: "0.5"
 tool-version: "1.2.0"
@@ -60,9 +78,13 @@ description: >-
   Segment each session's multiple sclerosis lesions with LST-AI from its
   T1w and FLAIR: a lesion mask, the lesions labelled periventricular,
   juxtacortical, subcortical or infratentorial, and their count and
-  volume. One session is one unit; CPU. Not runnable from this image as
-  it is: see the descriptor's notes.
+  volume. One session is one unit; CPU.
 
+# --- not pinned yet (scripts/publish-lst-ai.sh --pin removes these lines) ---
+# The line below still names LST-AI's own image, the base of the thin image,
+# which does not run under job contract v1 (above). The pin replaces it with
+# the thin image's digest.
+# ---
 container-image:
   type: docker
   image: "docker.io/jqmcginnis/lst-ai@sha256:2b2a0d6454e6efff60a350df3c650ae9584f1926338dec7842f9e71912cc6c85"
