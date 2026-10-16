@@ -146,6 +146,10 @@ pub enum Why {
         column: String,
         invalid: personnummer::Invalid,
     },
+    /// A cell of a reserve number column is a valid personnummer, which the
+    /// pseudonymiser reads as one and never as a reserve number: the
+    /// column's header, never the value.
+    IsPersonnummer { column: String },
 }
 
 impl fmt::Display for Why {
@@ -176,7 +180,15 @@ impl fmt::Display for Why {
             Why::NotPersonnummer { column, invalid } => write!(
                 f,
                 "{column}: not an ID that is the same everywhere ({invalid}); such a column \
-                 takes ten or twelve digits with a valid date and check digit"
+                 takes ten or twelve digits with a valid date and check digit, and a \
+                 hospital's reserve number goes in a column of type {}",
+                personnummer::RESERVE_ID_TYPE
+            ),
+            Why::IsPersonnummer { column } => write!(
+                f,
+                "{column}: an ID that is the same everywhere, not a reserve number: a dataset \
+                 reads it as one, so it goes in a column of type {}",
+                personnummer::ID_TYPE
             ),
         }
     }
@@ -434,6 +446,20 @@ pub fn import(
                 .to_string(),
         ));
     }
+    // no code is ever made from a reserve number (Nima, 2026-10-16): it is
+    // no ID that is the same everywhere, and two hospitals may give one
+    // number to two people
+    if map
+        .columns
+        .iter()
+        .any(|c| c.role == Role::Canonical(personnummer::RESERVE_ID_TYPE.to_string()))
+    {
+        return Err(Error::Message(format!(
+            "a {} column is no canonical column: no code is ever made from a reserve number; name the person's code (code) or their personnummer (canonical:{}) beside it",
+            personnummer::RESERVE_ID_TYPE,
+            personnummer::ID_TYPE
+        )));
+    }
     let mut type_ids: HashMap<String, Option<i64>> = HashMap::new();
     let mut types_to_make: Vec<String> = Vec::new();
     for c in map.columns {
@@ -488,7 +514,9 @@ pub fn import(
                 continue;
             }
             // a personnummer is filed, looked up and coded as its twelve
-            // digits, as the digest files it
+            // digits, as the digest files it; a reserve number in its one
+            // written form, as the pseudonymiser looks it up, and a cell
+            // that names nobody is an empty one
             let normal;
             let v = match c.role.id_type() {
                 Some(t) if personnummer::is_type(t) => match personnummer::normalise(v) {
@@ -507,6 +535,25 @@ pub fn import(
                         refused = true;
                         continue;
                     }
+                },
+                Some(personnummer::RESERVE_ID_TYPE) => match personnummer::reserve(v) {
+                    // a valid number is read as one, never as a reserve number,
+                    // so a row filing it as one would name no file
+                    Some(_) if personnummer::normalise(v).is_ok() => {
+                        report.conflicts.push(Conflict {
+                            row: r.line,
+                            why: Why::IsPersonnummer {
+                                column: c.header.clone(),
+                            },
+                        });
+                        refused = true;
+                        continue;
+                    }
+                    Some(n) => {
+                        normal = n;
+                        normal.as_str()
+                    }
+                    None => continue,
                 },
                 _ => v,
             };
@@ -1353,7 +1400,7 @@ mod tests {
         assert_eq!(r.conflicts[0].row, 1);
         assert!(!r.written());
         assert_eq!(count(&mut registry, "SELECT COUNT(*) FROM subject"), 0);
-        assert_eq!(count(&mut linkage, "SELECT COUNT(*) FROM id_type"), 4);
+        assert_eq!(count(&mut linkage, "SELECT COUNT(*) FROM id_type"), 5);
         // with it: the fixture code of §7.1 for PID-0001
         let r = run(
             &mut registry,
@@ -1712,6 +1759,168 @@ mod tests {
             false,
         );
         assert_eq!(r.held_released, 0);
+    }
+
+    /// Nima, 2026-10-16: a map files a hospital's reserve number under its
+    /// own type, beside the person's code or another of their identifiers:
+    /// its keyed lookup in one written form and nothing sealed, nothing of it
+    /// in a rehearsal or a report; it releases the files held under it; a
+    /// cell that names nobody is an empty one; and no code is made from one.
+    /// The numbers are made up: twelve digits that name no date.
+    #[test]
+    fn a_reserve_number_is_filed_as_its_lookup_and_releases_its_held_files() {
+        let (mut registry, mut linkage, keys) = stores();
+        // a file held under a reserve number, as the pseudonymiser holds one
+        registry
+            .execute(
+                "INSERT INTO pseudonym_file (id, place_id, path, size, mtime, state, shape, lookup, id_type, first_seen, code_anyway) VALUES (1, 1, 'f1', 0, 0, 'held', '999999999999', ?, 'reserve-number', 't', 0)",
+                &[Param::Bytes(keys.lookup("reserve-number", "199913241234"))],
+            )
+            .unwrap();
+        let cols = columns(&[
+            ("reservnummer", "identifier:reserve-number"),
+            ("code", "code"),
+        ]);
+        let data = rows(&[
+            &["19991324-1234", "sub-one"],
+            &["1999 1325 5678", "sub-two"],
+        ]);
+        let dry = run(
+            &mut registry,
+            &mut linkage,
+            &keys,
+            &cols,
+            &data,
+            true,
+            false,
+        );
+        assert!(dry.conflicts.is_empty(), "{dry}");
+        assert_eq!((dry.rows, dry.subjects.new, dry.identifiers.new), (2, 2, 2));
+        assert_eq!(dry.held_released, 1);
+        let shown = format!("{dry}{}", dry.as_json());
+        for part in ["19991324", "1999 1325", "13255678"] {
+            assert!(!shown.contains(part), "{shown}");
+        }
+        let r = run(
+            &mut registry,
+            &mut linkage,
+            &keys,
+            &cols,
+            &data,
+            false,
+            false,
+        );
+        assert!(r.written(), "{r}");
+        assert_eq!(
+            r.held_released_by,
+            vec![Released {
+                id_type: "reserve-number".into(),
+                held_as: "reserve-number".into(),
+                files: 1
+            }]
+        );
+        let filed = "SELECT COUNT(*) FROM identity i JOIN id_type t ON t.id = i.id_type_id \
+                     WHERE t.name = 'reserve-number'";
+        assert_eq!(count(&mut linkage, filed), 2);
+        assert_eq!(
+            count(
+                &mut linkage,
+                &format!("{filed} AND length(i.ciphertext) > 0")
+            ),
+            0,
+            "the lookup alone"
+        );
+        // found however the number is written
+        let found = linkage::identities_by_lookup(
+            &mut linkage,
+            &[keys.lookup("reserve-number", "199913255678")],
+        )
+        .unwrap();
+        assert_eq!(found.len(), 1);
+        // beside another identifier of the person instead of a code
+        linkage::add_id_type(&mut linkage, "site-id", None).unwrap();
+        let site = columns(&[("site", "identifier:site-id"), ("code", "code")]);
+        run(
+            &mut registry,
+            &mut linkage,
+            &keys,
+            &site,
+            &rows(&[&["SITE-3", "sub-three"]]),
+            false,
+            false,
+        );
+        let beside = columns(&[
+            ("site", "identifier:site-id"),
+            ("reserve", "identifier:reserve-number"),
+        ]);
+        let r = run(
+            &mut registry,
+            &mut linkage,
+            &keys,
+            &beside,
+            &rows(&[&["SITE-3", "19991326-0001"]]),
+            false,
+            false,
+        );
+        assert!(r.written(), "{r}");
+        assert_eq!((r.subjects.known, r.identifiers.new), (1, 1));
+        let on = linkage::identities_by_lookup(
+            &mut linkage,
+            &[keys.lookup("reserve-number", "199913260001")],
+        )
+        .unwrap();
+        let three: i64 = registry
+            .query("SELECT id FROM subject WHERE code = 'sub-three'", &[])
+            .unwrap()[0]
+            .int(0)
+            .unwrap();
+        assert_eq!((on.len(), on[0].subject_id), (1, three));
+        // a cell that names nobody is an empty one, and a valid personnummer
+        // is no reserve number (the tax agency's published test number)
+        let r = run(
+            &mut registry,
+            &mut linkage,
+            &keys,
+            &cols,
+            &rows(&[&[" - ", "sub-four"], &["850101-2382", "sub-five"]]),
+            true,
+            false,
+        );
+        assert_eq!(r.conflicts.len(), 2, "{r}");
+        assert_eq!(r.conflicts[0].why, Why::Empty);
+        assert_eq!(
+            r.conflicts[1].why,
+            Why::IsPersonnummer {
+                column: "reservnummer".into()
+            }
+        );
+        assert!(!r.to_string().contains("2382"), "{r}");
+        // and no code is ever made from a reserve number
+        let canonical = columns(&[
+            ("reserve", "canonical:reserve-number"),
+            ("site", "identifier:site-id"),
+        ]);
+        let err = import(
+            &mut registry,
+            &mut linkage,
+            &keys,
+            Some(&derive()),
+            &Map {
+                columns: &canonical,
+                rows: &rows(&[&["199913270002", "SITE-4"]]),
+                dry_run: true,
+                make_types: false,
+                place_id: None,
+                actor: "tester@lab",
+                job_id: None,
+            },
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("no code is ever made from a reserve number"),
+            "{err}"
+        );
     }
 
     #[test]

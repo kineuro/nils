@@ -1024,8 +1024,13 @@ fn build_registry() -> Vec<Table> {
                 col("dataset", Type::Json),
                 // Record 56 section 3: a dataset whose headers are damaged
                 // or foreign (stripped names, another site's anonymised
-                // export, another language), as a person flagged it:
-                // {damaged, why, by, at}. Null reads the signs instead.
+                // export, another language). The flag in force, {damaged,
+                // why, by, at}, and beside it `person`, a person's word,
+                // which wins, and `signs`, what the signs read at the end of
+                // the dataset's last sort with their thresholds (record 55,
+                // ruling 31 (c)). The flag alone is a person's, as an engine
+                // before the signs were kept wrote it. Null: neither, and
+                // the signs are read when asked.
                 col("headers", Type::Json),
             ],
         )
@@ -3281,11 +3286,19 @@ pub const SUBJECT_CODE_TYPE: &str = "subject-code";
 /// the one the rules, the maps and the generator read.
 /// Record 55, ruling 24: the built-in types whose IDs identify a person
 /// wherever they are met: what PatientID held as written, a study's DICOM
-/// UID and the ID that is the same everywhere. Seeded with the flag set, and
-/// set on a store from before by migration 102.
-pub const IDENTIFYING_ID_TYPES: [&str; 3] = ["patient-id", "study-instance-uid", GENERATOR_ID_TYPE];
+/// UID, the ID that is the same everywhere and a hospital's reserve number.
+/// Seeded with the flag set, and set on a store from before by migrations
+/// 102 and 104.
+pub const IDENTIFYING_ID_TYPES: [&str; 4] = [
+    "patient-id",
+    "study-instance-uid",
+    GENERATOR_ID_TYPE,
+    RESERVE_ID_TYPE,
+];
 
-pub const ID_TYPES: [(&str, &str); 4] = [
+/// The id types a linkage store is seeded with; migration 104 adds the
+/// reserve number's to a store from before.
+pub const ID_TYPES: [(&str, &str); 5] = [
     ("patient-id", "PatientID (0010,0020) as written, trimmed"),
     (
         "study-instance-uid",
@@ -3296,6 +3309,7 @@ pub const ID_TYPES: [(&str, &str); 4] = [
         "the subject code of a subject merged into this one",
     ),
     (GENERATOR_ID_TYPE, GENERATOR_ID_DESCRIPTION),
+    (RESERVE_ID_TYPE, RESERVE_ID_DESCRIPTION),
 ];
 
 /// The id type of an identifying ID that is the same everywhere (a
@@ -3305,6 +3319,22 @@ pub const GENERATOR_ID_TYPE: &str = crate::personnummer::ID_TYPE;
 
 /// What a person reads of that type.
 pub const GENERATOR_ID_DESCRIPTION: &str = "An identifying ID that is the same everywhere (personnummer, national ID, social security number), coded by the subject code generator";
+
+/// The id type of a hospital's reserve number (Nima, 2026-10-16): what a
+/// dataset whose PatientID holds an ID that is the same everywhere reads a
+/// PatientID that is none as, which only a map gives a subject.
+pub const RESERVE_ID_TYPE: &str = crate::personnummer::RESERVE_ID_TYPE;
+
+/// What a person reads of that type.
+pub const RESERVE_ID_DESCRIPTION: &str = "a hospital's reserve number for a person without a personnummer, or beside one; never kept, its identity is its keyed lookup alone";
+
+/// Wave 7a (Nima, 2026-10-08: "we never save pn any where on registery";
+/// 2026-10-16: reserve numbers "are just like pns however they are not real
+/// pns"): the types whose IDs the registry never keeps, not even sealed. An
+/// identity of one is its keyed lookup alone, a held file of one keeps its
+/// shape and its lookup, and its subject is shown by its code. The linkage
+/// store applies it to every row it files ([`crate::linkage::keeps`]).
+pub const NEVER_KEPT_ID_TYPES: [&str; 2] = [GENERATOR_ID_TYPE, RESERVE_ID_TYPE];
 
 /// An id type as a person reads it: the generator's as an ID that is the
 /// same everywhere, every other type (a hospital or study ID) by its name.

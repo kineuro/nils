@@ -236,9 +236,16 @@ pub fn gate_of(m: &Model) -> Value {
 
 // ------------------------------------------------ the damaged-header flag
 
-/// A dataset's damaged-header flag as a person set it (record 56 section
-/// 3): `{damaged, why, by, at}`, or none where nobody did.
-pub fn headers_flag(store: &mut Store, place_id: i64) -> Result<Option<Value>, StoreError> {
+// A dataset's `headers` document (record 56 section 3; record 55, ruling
+// 31 (c)): the flag in force at the top, `{damaged, why, by, at}`, as every
+// engine since the flag reads it, and beside it what decided it: `person`,
+// the word of a person who set or cleared it, and `signs`, what the signs
+// read at the end of the dataset's last sort, with their thresholds. The
+// person's word wins while it stands. A document of an engine before the
+// signs were kept (the flag alone, with neither) is a person's word.
+
+/// The `headers` document as it is stored, or none.
+fn headers_doc(store: &mut Store, place_id: i64) -> Result<Option<Value>, StoreError> {
     let d = store.dialect();
     let t = table("place");
     let sql = format!(
@@ -250,19 +257,47 @@ pub fn headers_flag(store: &mut Store, place_id: i64) -> Result<Option<Value>, S
     Ok(store
         .query_opt(&sql, &[Param::Int(place_id)])?
         .and_then(|r| r.opt_text(0).ok().flatten().map(str::to_string))
-        .and_then(|t| serde_json::from_str(&t).ok()))
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .filter(Value::is_object))
 }
 
-/// Set or clear a dataset's flag. `damaged` none clears it, so the signs
-/// decide again.
-pub fn set_headers_flag(
+/// The two parts of a stored document: a person's word and the signs'.
+fn parts(doc: Option<Value>) -> (Option<Value>, Option<Value>) {
+    let Some(doc) = doc else {
+        return (None, None);
+    };
+    if doc.get("person").is_none() && doc.get("signs").is_none() {
+        // the flag alone: a person set it, before the signs were kept
+        return (Some(doc), None);
+    }
+    let some = |v: &Value| Some(v.clone()).filter(Value::is_object);
+    (some(&doc["person"]), some(&doc["signs"]))
+}
+
+/// Write the parts back with the flag in force above them: the person's
+/// word where one stands, else the signs'; nothing where neither is.
+fn write_parts(
     store: &mut Store,
     place_id: i64,
-    damaged: Option<bool>,
-    why: Option<&str>,
-    who: &str,
-) -> Result<Option<Value>, StoreError> {
-    let doc = damaged.map(|d| json!({"damaged": d, "why": why, "by": who, "at": now_iso()}));
+    person: Option<&Value>,
+    signs: Option<&Value>,
+) -> Result<(), StoreError> {
+    let top = match (person, signs) {
+        (Some(p), _) => Some(json!({
+            "damaged": p["damaged"].as_bool().unwrap_or(false),
+            "why": p["why"], "by": p["by"], "at": p["at"],
+        })),
+        (None, Some(s)) => Some(json!({
+            "damaged": s["damaged"].as_bool().unwrap_or(false),
+            "why": s["why"], "by": "signs", "at": s["at"],
+        })),
+        (None, None) => None,
+    };
+    let doc = top.map(|mut t| {
+        t["person"] = person.cloned().unwrap_or(Value::Null);
+        t["signs"] = signs.cloned().unwrap_or(Value::Null);
+        t
+    });
     store.update_by_id(
         table("place"),
         &[(
@@ -273,7 +308,48 @@ pub fn set_headers_flag(
         "id",
         place_id,
     )?;
+    Ok(())
+}
+
+/// A dataset's damaged-header flag as a person set it (record 56 section
+/// 3): `{damaged, why, by, at}`, or none where nobody did, or the person
+/// let the signs decide again.
+pub fn headers_flag(store: &mut Store, place_id: i64) -> Result<Option<Value>, StoreError> {
+    Ok(parts(headers_doc(store, place_id)?).0)
+}
+
+/// What a dataset's signs read at the end of its last sort, with their
+/// thresholds and the pack that read them, or none where no sort has read
+/// them since the signs were kept.
+pub fn headers_signs(store: &mut Store, place_id: i64) -> Result<Option<Value>, StoreError> {
+    Ok(parts(headers_doc(store, place_id)?).1)
+}
+
+/// Set or clear a person's word on a dataset's flag. `damaged` none clears
+/// it, so the signs decide again; what they read last is kept either way.
+pub fn set_headers_flag(
+    store: &mut Store,
+    place_id: i64,
+    damaged: Option<bool>,
+    why: Option<&str>,
+    who: &str,
+) -> Result<Option<Value>, StoreError> {
+    let (_, signs) = parts(headers_doc(store, place_id)?);
+    let doc = damaged.map(|d| json!({"damaged": d, "why": why, "by": who, "at": now_iso()}));
+    write_parts(store, place_id, doc.as_ref(), signs.as_ref())?;
     Ok(doc)
+}
+
+/// Keep what a dataset's signs read (record 55, ruling 31 (c): at the end of
+/// a sort), beside a person's word, which still wins where one stands.
+/// `signs` says itself whether they flag (`damaged`) and why.
+pub fn set_headers_signs(
+    store: &mut Store,
+    place_id: i64,
+    signs: &Value,
+) -> Result<(), StoreError> {
+    let (person, _) = parts(headers_doc(store, place_id)?);
+    write_parts(store, place_id, person.as_ref(), Some(signs))
 }
 
 // ------------------------------------------------------------- the gate
@@ -1215,6 +1291,37 @@ mod tests {
             rules_read: Some(read.map(str::to_string)),
             ..said(value, 0.97, Some(0.99))
         }
+    }
+
+    /// Record 55, ruling 31 (c): a dataset's headers document keeps a
+    /// person's word and the signs apart, the flag in force at the top; the
+    /// flag alone, as an engine before the signs were kept wrote it, is a
+    /// person's word, and a document of neither is none.
+    #[test]
+    fn a_persons_word_and_the_signs_are_kept_apart() {
+        let legacy = json!({"damaged": true, "why": "an export", "by": "astrid", "at": "t"});
+        let (person, signs) = parts(Some(legacy.clone()));
+        assert_eq!(person, Some(legacy));
+        assert_eq!(signs, None);
+        let both = json!({
+            "damaged": false, "why": "our names", "by": "astrid", "at": "t",
+            "person": {"damaged": false, "why": "our names", "by": "astrid", "at": "t"},
+            "signs": {"damaged": true, "why": "50 % unread", "at": "u"},
+        });
+        let (person, signs) = parts(Some(both));
+        assert_eq!(person.unwrap()["damaged"], false);
+        assert_eq!(signs.unwrap()["damaged"], true);
+        let signs_only = json!({
+            "damaged": true, "why": "50 % unread", "by": "signs", "at": "u",
+            "person": null, "signs": {"damaged": true, "why": "50 % unread", "at": "u"},
+        });
+        let (person, signs) = parts(Some(signs_only));
+        assert_eq!(
+            person, None,
+            "a person who let the signs decide has no word"
+        );
+        assert_eq!(signs.unwrap()["why"], "50 % unread");
+        assert_eq!(parts(None), (None, None));
     }
 
     /// After D2: the model answers in its own vocabulary and says how it

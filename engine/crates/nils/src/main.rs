@@ -50,6 +50,7 @@ mod file_header;
 mod folders;
 mod gate;
 mod grants;
+mod headers;
 mod intake;
 mod linkage_doors;
 mod login;
@@ -2195,7 +2196,7 @@ enum LinkageCommand {
 struct ImportArgs {
     /// The CSV: a header row, then one subject per row
     csv: PathBuf,
-    /// A column's role: HEADER=identifier:<type>, HEADER=canonical:<type> (the subject code derives from it; a column of IDs that are the same everywhere is read as twelve digits and a cell that is none refuses its row), HEADER=code or HEADER=ignore; without any, the two flags below name the columns
+    /// A column's role: HEADER=identifier:<type>, HEADER=canonical:<type> (the subject code derives from it; a column of IDs that are the same everywhere is read as twelve digits and a cell that is none refuses its row), HEADER=code or HEADER=ignore; a hospital's reserve number is an identifier:reserve-number, filed as its keyed lookup alone and never canonical; without any, the two flags below name the columns
     #[arg(long, value_name = "HEADER=ROLE")]
     column: Vec<String>,
     /// The type the identifiers are filed under, without --column
@@ -2765,6 +2766,10 @@ fn classify(home: &Home, args: ClassifyArgs) -> Result<(), Exit> {
             message: "stopped: what was judged is written; run again to go on".into(),
         });
     }
+    // record 55, ruling 31 (c): the damaged-header flag set at ingest, for
+    // each dataset holding a scan this sort judged, with this sort's pack,
+    // before the steps after it (the score, System 1 and its gate) read it
+    classify_headers(&mut registry, &pack, report.job_id);
     if settings.leave_open {
         // a preview that fails is counted in the job's result and never
         // fails the sort or the chain after it; a stop ends the job stopped
@@ -2823,6 +2828,53 @@ fn classify_scope(
         out.extend(r.stacks(&scope));
     }
     Ok(out)
+}
+
+/// The headers step of a classify run (record 55, ruling 31 (c)): the
+/// damaged-header signs of every dataset holding a scan the run judged, read
+/// with the run's pack and kept on the dataset ([`headers::after_sort`]).
+/// What it did is said on stderr and kept in the job's result as `headers`;
+/// a dataset whose signs could not be read is counted there and never fails
+/// the sort.
+fn classify_headers(registry: &mut Registry, pack: &nils_pack::Pack, job: i64) {
+    let store = registry.store();
+    let done = headers::after_sort(store, pack, job);
+    let datasets = done["datasets"].as_array().cloned().unwrap_or_default();
+    let flagged: Vec<&str> = datasets
+        .iter()
+        .filter(|d| d["damaged"] == true)
+        .filter_map(|d| d["dataset"].as_str())
+        .collect();
+    let failed = done["failed"].as_array().map_or(0, Vec::len);
+    if !datasets.is_empty() || failed > 0 {
+        eprintln!(
+            "headers: {} {} read, {} flagged as damaged{}{}",
+            datasets.len(),
+            if datasets.len() == 1 {
+                "dataset"
+            } else {
+                "datasets"
+            },
+            flagged.len(),
+            if flagged.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", flagged.join(", "))
+            },
+            if failed > 0 {
+                format!(", {failed} not read")
+            } else {
+                String::new()
+            }
+        );
+    }
+    if let Ok(Some(row)) = nils_registry::job::show(store, job) {
+        let mut result = row.result.unwrap_or_else(|| serde_json::json!({}));
+        if result.is_object() {
+            result["headers"] = done;
+            let _ = nils_registry::job::set_result(store, job, &result);
+        }
+    }
 }
 
 /// The preview step of a classify run (record 55 H2): the previews of the
@@ -8063,11 +8115,11 @@ fn custody_doc(home: &Home, registry: &mut Registry) -> Result<serde_json::Value
         serde_json::json!({
             "store": "linkage store",
             "owner": "the registry's operator; the identifiers are the clinic's",
-            "what": "the identifiers behind the codes, encrypted under the registry's key; the linkages between subjects; the audit of every read; a personnummer is never kept here, not even sealed: its identity is its keyed lookup alone and its subject is shown by its code (record 55, the ruling of 2026-10-08)",
+            "what": "the identifiers behind the codes, encrypted under the registry's key; the linkages between subjects; the audit of every read; a personnummer is never kept here, not even sealed, nor is a hospital's reserve number, which identifies a person as a personnummer does: the identity of either is its keyed lookup alone and its subject is shown by its code (record 55, the rulings of 2026-10-08 and 2026-10-16)",
             "where": where_db(LINKAGE_DB, &linkage_schema),
             "files": if sqlite { db_files(LINKAGE_DB) } else { Vec::new() },
             "holds": [
-                "identifying: the identifiers (encrypted), except a personnummer, which is never kept, and their keyed lookups",
+                "identifying: the identifiers (encrypted), except a personnummer or a reserve number, which is never kept, and their keyed lookups",
                 "technical: the linkages, the id types, the read audit (actor, time, why, identity id)",
             ],
             "counts": {
@@ -8395,7 +8447,7 @@ fn custody_doc(home: &Home, registry: &mut Registry) -> Result<serde_json::Value
             "where": "rows of pseudonym_file in the registry",
             "files": [],
             "holds": [
-                "identifying: the identifier of a held file, sealed under the registry's key for the reveal door alone (detail sensitive, audited), except a personnummer, which is never kept, not even sealed: its keyed lookup is all there is (record 55, the ruling of 2026-10-08)",
+                "identifying: the identifier of a held file, sealed under the registry's key for the reveal door alone (detail sensitive, audited), except a personnummer or a reserve number, which is never kept, not even sealed: its keyed lookup is all there is (record 55, the rulings of 2026-10-08 and 2026-10-16)",
                 "quasi-identifying: the paths of the originals, which a raw export may name after the patient",
                 "technical: the states, the sizes, the times, the digests, the identifier shapes and keyed lookups",
             ],

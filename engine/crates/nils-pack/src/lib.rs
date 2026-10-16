@@ -42,6 +42,7 @@ pub mod shape;
 pub mod stack;
 pub mod verdict;
 pub mod version;
+pub mod words;
 mod yaml;
 mod yaml_edit;
 

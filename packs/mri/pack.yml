@@ -9,8 +9,8 @@
 # in slices 3, 4 and 6 of the wave.
 
 pack: mri
-version: 1.2.3
-contract: 10
+version: 1.3.0
+contract: 11
 # The engines this pack works with (pack contract 10, record 55 B5): from the
 # first engine that reads rules releases on. An engine before it speaks pack
 # contract 9 at most and refuses the pack by its contract already; the range
@@ -272,6 +272,31 @@ review:
       - {axis: directory_type, is: excluded}
       - {axis: directory_type, is: localizer}
       - {axis: construct, is: DisplayComposite}
+  # MRI pack 1.3.0 (pack contract 11; record 56 section 3, record 55 ruling
+  # 31 (c)): a dataset whose headers are damaged or foreign (stripped names,
+  # another site's anonymised export, another language) is flagged at the
+  # end of every sort by its signs, and its scans go through the full gate.
+  # It is flagged when one share reaches its threshold: its MR scans with
+  # neither a series description nor a protocol name (`nameless`); its named
+  # MR scans none of whose words this pack knows (`unknown_words`, the words
+  # folded as the technique rules fold a series' names, so GE's exam-level
+  # protocol name is left out); its MR scans by a maker the rules were not
+  # built on and no dataset brought in before it holds, or by none
+  # (`unseen_maker`). A person's flag wins over the signs.
+  #
+  # Measured over a production archive of 550,680 MR stacks in seven
+  # datasets, and over the damage study's copies of 14,834 stacks in seven
+  # damage families (the design repository, studies/2026-10-16-damaged-flag):
+  # the clean datasets read at most 0.3 % nameless, 0.6 % unknown words and
+  # 2.1 % unseen makers (perfusion maps a post-processing vendor signs). An
+  # anonymisation dropout reads 37 % nameless; abbreviations, typos, console
+  # languages and vendor-word swaps read 3.9 to 5.0 % unknown words; real
+  # exports read 2.9 to 24 % unknown words where the exporter wrote a
+  # placeholder over the description, and 13 % unseen makers where it wrote
+  # its own name over the maker's. A scanner model the registry has not
+  # seen is no sign: models are new on 14 to 69 % of the scans of datasets
+  # whose headers are as usual.
+  damaged_headers: {words: technique_text, makers: [Siemens, GE, Philips], nameless: 0.10, unknown_words: 0.02, unseen_maker: 0.10}
 
 # The lists a site may amend through an overlay, and nothing else: a pack
 # decides what is editable, not the engine (§5.3). Physics, flags and the

@@ -23,6 +23,13 @@
 //! personnummer (another shape, a date that is no date, a wrong check digit)
 //! is refused rather than hashed as read, so that the code it would have
 //! given is never mistaken for the person's.
+//!
+//! A hospital's reserve number, the number it gives a person who has no
+//! personnummer or whose personnummer it does not know, identifies the
+//! person as a personnummer does without being one: it is filed under
+//! [`RESERVE_ID_TYPE`] in one written form, its spaces and its one separator
+//! dropped ([`reserve`]), with no date or check digit asked of it, and no
+//! code is ever made from it (Nima, 2026-10-16).
 
 use std::fmt;
 
@@ -31,9 +38,32 @@ use crate::time::now_iso;
 /// The id type whose values are personnummer.
 pub const ID_TYPE: &str = "personnummer";
 
+/// The id type of a hospital's reserve number.
+pub const RESERVE_ID_TYPE: &str = "reserve-number";
+
 /// Whether identifiers of `id_type` are normalised as personnummer.
 pub fn is_type(id_type: &str) -> bool {
     id_type == ID_TYPE
+}
+
+/// A reserve number in its one written form: spaces dropped, and the one
+/// separator (`-` or `+`) dropped where the value holds only one; nothing
+/// else is asked of it, neither a date nor a check digit. None where no
+/// letter or digit is left, which names nobody.
+pub fn reserve(value: &str) -> Option<String> {
+    let compact: String = value.chars().filter(|c| !c.is_whitespace()).collect();
+    if !compact.chars().any(char::is_alphanumeric) {
+        return None;
+    }
+    let separators = compact.chars().filter(|c| matches!(c, '-' | '+')).count();
+    Some(if separators == 1 {
+        compact
+            .chars()
+            .filter(|c| !matches!(c, '-' | '+'))
+            .collect()
+    } else {
+        compact
+    })
 }
 
 /// Why a value is not a personnummer. Never carries the value.
@@ -320,6 +350,41 @@ mod tests {
         // the 29th of February of a year that has none (1900 had none)
         assert_eq!(normalise_on("190002292399", TODAY), Err(Invalid::Date));
         assert_eq!(normalise_on("200102292399", TODAY), Err(Invalid::Date));
+    }
+
+    /// Nima, 2026-10-16: a reserve number keeps its digits as written, its
+    /// spaces and its one separator dropped, whatever date or check digit
+    /// they spell; nothing is left of a value of spaces and a separator.
+    #[test]
+    fn a_reserve_number_is_written_one_way_and_never_checked() {
+        // made up: twelve digits that name no date
+        for written in [
+            "199913241234",
+            "19991324-1234",
+            " 19991324 1234 ",
+            "19991324+1234",
+            "1999 1324-1234",
+        ] {
+            assert_eq!(
+                reserve(written).as_deref(),
+                Some("199913241234"),
+                "{written}"
+            );
+        }
+        // no date and no check digit is asked of it: a personnummer with a
+        // wrong check digit is one written form like any other
+        assert_eq!(reserve("850101-2383").as_deref(), Some("8501012383"));
+        // two separators are no one separator: kept as written
+        assert_eq!(reserve("R-12-34").as_deref(), Some("R-12-34"));
+        assert_eq!(
+            reserve("ab12").as_deref(),
+            Some("ab12"),
+            "letters as written"
+        );
+        assert_eq!(reserve("12345ä789").as_deref(), Some("12345ä789"));
+        for nothing in ["", "   ", "-", " + ", "--", "-+-"] {
+            assert_eq!(reserve(nothing), None, "{nothing:?}");
+        }
     }
 
     #[test]

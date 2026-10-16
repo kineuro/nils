@@ -59,7 +59,13 @@ use crate::yaml::{self, File};
 /// refuses the pack, and the update path never installs one it would refuse.
 /// It is refused in a pack that declares less, so an engine at 9, which
 /// would load the pack without reading the range, refuses it by its contract.
-pub const CONTRACT: u32 = 10;
+/// Version 11 (record 56 §3; record 55, ruling 31 (c)) adds one key under
+/// `review`: `damaged_headers`, the thresholds at which a dataset's signs
+/// flag its headers as damaged, the makers the rules were built on and the
+/// text a series' names are folded into words by. It is refused in a pack
+/// that declares less, so an engine at 10, which would flag a dataset by its
+/// nameless scans alone, refuses the pack by its contract.
+pub const CONTRACT: u32 = 11;
 
 /// What a field may be shown to (Wave 4a §11.2, C27): `local` (this node
 /// only: free text, paths, exact dates, identifiers), `federated` (on the
@@ -251,6 +257,36 @@ pub struct Review {
     /// Stacks nobody is asked about at all. An excluded localizer is a
     /// decided outcome, and a queue that carries it is v0's queue.
     pub silent_when: Option<Expr>,
+    /// Record 56 §3 (pack contract 11): when a dataset's headers read as
+    /// damaged or foreign by its signs, so its scans go through the full
+    /// gate. None in a pack before contract 11.
+    pub damaged_headers: Option<DamagedHeaders>,
+}
+
+/// When a dataset's headers read as damaged or foreign by its signs (record
+/// 56 §3; record 55, ruling 31 (c); pack contract 11). A dataset is flagged
+/// when one sign's share reaches its threshold; a sign the pack gives no
+/// threshold is read and shown, and flags nothing. The thresholds are the
+/// pack's because what counts as names the rules cannot read is knowledge
+/// about the rules, as when a person is asked is (§8.2), and a rules
+/// release changes them with no engine release.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct DamagedHeaders {
+    /// The derived text whose fold turns a series' names into words
+    /// ([`crate::words`]); none, the first the pack derives from the series
+    /// description.
+    pub words: Option<String>,
+    /// The share of a dataset's MR scans that carry neither a series
+    /// description nor a protocol name.
+    pub nameless: Option<f64>,
+    /// The share of its named MR scans none of whose words the pack knows.
+    pub unknown_words: Option<f64>,
+    /// The share of its MR scans by a maker the pack does not name and no
+    /// dataset brought in before it holds, or by none.
+    pub unseen_maker: Option<f64>,
+    /// The makers the rules were built on, as a person names them
+    /// ([`crate::words::maker_of`]): never unseen.
+    pub makers: Vec<String>,
 }
 
 impl Review {
@@ -900,6 +936,28 @@ fn build_unjudged(dir: &Path, overlay: Option<&Overlay>) -> R<Pack> {
             deps: HashSet::new(),
         };
         review.silent_when = Some(manifest.blame(compile(w, "review.silent_when", &mut sc))?);
+    }
+
+    // Record 56 §3 (pack contract 11): the thresholds of the damaged-header
+    // flag, read once the derived texts exist, since `words` names one.
+    // Refused in a pack that declares less, so an engine at 10, which would
+    // flag by the nameless share alone, refuses the pack instead.
+    if let Some(r) = m.get("review")
+        && let Some(d) = manifest
+            .blame(yaml::obj(r, "review"))?
+            .get("damaged_headers")
+    {
+        if contract < 11 {
+            return Err(Error::at(
+                "review.damaged_headers",
+                format!(
+                    "damaged_headers is pack contract 11's; this pack declares contract {contract}, \
+                     and an engine of {contract} would flag a dataset by its nameless scans alone"
+                ),
+            )
+            .in_file(&manifest.path, Some(&manifest.source)));
+        }
+        review.damaged_headers = Some(manifest.blame(damaged_headers(d, &derived))?);
     }
 
     // A threshold for an axis the pack does not decide is a name that names
@@ -1669,6 +1727,64 @@ fn load_cross(
         }
     }
     Ok(())
+}
+
+/// `review.damaged_headers` (pack contract 11): each key checked, since a
+/// threshold that names nothing would sit in the file looking like policy
+/// and do nothing.
+fn damaged_headers(v: &Value, derived: &[Normalizer]) -> R<DamagedHeaders> {
+    let at = "review.damaged_headers";
+    let mut out = DamagedHeaders::default();
+    for (key, value) in yaml::obj(v, at)? {
+        let here = format!("{at}.{key}");
+        match key.as_str() {
+            "words" => {
+                let name = yaml::text(value, &here)?;
+                let description = crate::stack::field_index("text_series_description");
+                if !derived
+                    .iter()
+                    .any(|d| d.into == name && description.is_some_and(|f| d.from.contains(&f)))
+                {
+                    return Err(Error::at(
+                        &here,
+                        format!("{name} is no text this pack derives from the series description"),
+                    ));
+                }
+                out.words = Some(name);
+            }
+            "nameless" | "unknown_words" | "unseen_maker" => {
+                let share = yaml::number(value, &here)?;
+                if !(0.0..=1.0).contains(&share) {
+                    return Err(Error::at(
+                        &here,
+                        format!(
+                            "a share from 0 to 1, which flags a dataset at or above it, not {share}"
+                        ),
+                    ));
+                }
+                match key.as_str() {
+                    "nameless" => out.nameless = Some(share),
+                    "unknown_words" => out.unknown_words = Some(share),
+                    _ => out.unseen_maker = Some(share),
+                }
+            }
+            "makers" => {
+                out.makers = yaml::texts(value, &here)?;
+                if out.makers.iter().any(|m| m.trim().is_empty()) {
+                    return Err(Error::at(&here, "a maker is named, never empty"));
+                }
+            }
+            other => {
+                return Err(Error::at(
+                    &here,
+                    format!(
+                        "damaged_headers holds words, nameless, unknown_words, unseen_maker and makers, not {other}"
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(out)
 }
 
 fn files_of(

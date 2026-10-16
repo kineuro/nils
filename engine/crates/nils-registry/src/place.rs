@@ -613,9 +613,12 @@ impl PatientId {
                 "patient_id: {name} is no id type's name (lower case letters, digits and hyphens)"
             ));
         }
-        if crate::personnummer::is_type(name) {
+        // an ID the registry never keeps, an ID that is the same everywhere
+        // or a hospital's reserve number (Nima, 2026-10-16), it could not
+        // write if it would
+        if !crate::linkage::keeps(name) {
             return Err(format!(
-                "patient_id: a pseudonymised file never holds an ID that is the same everywhere ({name}); write the subject code or a hospital or study ID"
+                "patient_id: a pseudonymised file never holds an ID that is the same everywhere or a reserve number ({name}), which the registry never keeps; write the subject code or a hospital or study ID"
             ));
         }
         Ok(PatientId::IdType(name.to_string()))
@@ -1635,6 +1638,7 @@ mod tests {
         assert_eq!(d["patient_id"], "subject-code");
         for (bad, what) in [
             ("id-type:personnummer", "never holds"),
+            ("id-type:reserve-number", "never holds"),
             ("id-type:Study ID", "no id type"),
             ("the code", "subject-code or id-type:"),
         ] {

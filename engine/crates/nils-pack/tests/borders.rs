@@ -525,6 +525,8 @@ fn edited(contract: u32, edit: impl Fn(&str) -> String) -> PathBuf {
         .lines()
         // the engines a pack works with are pack contract 10's
         .filter(|l| contract >= 10 || !l.starts_with("engine:"))
+        // and the damaged-header thresholds pack contract 11's
+        .filter(|l| contract >= 11 || !l.starts_with("  damaged_headers:"))
         .map(|l| {
             if l.starts_with("contract:") {
                 format!("contract: {contract}")

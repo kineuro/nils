@@ -327,27 +327,10 @@ fn sorted_regions(regions: &BTreeSet<String>) -> Vec<String> {
 }
 
 /// A maker as a person names it: the scanner's own spelling of the big
-/// makers brought to one word, any other as written.
+/// makers brought to one word, any other as written. The pack's crate holds
+/// it since the damaged-header flag reads makers too (record 56 §3).
 pub(crate) fn maker_of(raw: &str) -> Option<String> {
-    let written = raw.trim();
-    if written.is_empty() {
-        return None;
-    }
-    let l = written.to_lowercase();
-    let named = if l.contains("siemens") {
-        "Siemens"
-    } else if l.contains("philips") {
-        "Philips"
-    } else if l == "ge" || l.starts_with("ge ") || l.contains("general electric") {
-        "GE"
-    } else if l.contains("toshiba") || l.contains("canon") {
-        "Canon"
-    } else if l.contains("hitachi") || l.contains("fujifilm") {
-        "Hitachi"
-    } else {
-        return Some(written.to_string());
-    };
-    Some(named.to_string())
+    nils_pack::words::maker_of(raw)
 }
 
 /// A stack's decided axes, every value of each.
@@ -724,14 +707,14 @@ fn reads_identifiers(access: &Access) -> bool {
 /// The labels of these subjects by an id type: each one's value of it,
 /// opened and audited, as it is where this caller may see it and as its
 /// shape otherwise; a subject that holds none, or one whose value the store
-/// keeps nothing of (a personnummer), is not in the answer.
+/// keeps nothing of (a personnummer, a reserve number), is not in the answer.
 fn labels_by_type(
     registry: &mut Registry,
     caller: &Caller,
     shown: &Shown,
     subjects: &[i64],
 ) -> Result<HashMap<i64, String>, Reply> {
-    if subjects.is_empty() || nils_registry::personnummer::is_type(&shown.name) {
+    if subjects.is_empty() || !linkage::keeps(&shown.name) {
         return Ok(HashMap::new());
     }
     let key = registry.pseudonym_key().map_err(failed)?;
@@ -808,7 +791,7 @@ fn id_type_facet(registry: &mut Registry, subjects: &[i64]) -> Vec<Value> {
     }
     let mut out: Vec<(String, usize)> = types
         .iter()
-        .filter(|t| !nils_registry::personnummer::is_type(&t.name))
+        .filter(|t| linkage::keeps(&t.name))
         .filter_map(|t| held.get(&t.id).map(|s| (t.name.clone(), s.len())))
         .collect();
     out.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));

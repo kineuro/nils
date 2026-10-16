@@ -223,7 +223,12 @@ the wave built in its place, and 5.3 names the ruling that changed it.
   another scheme is refused.
 - **The number:** a value of ID type `personnummer` is normalised to twelve
   digits; a value that is not a personnummer fails the identity rule or refuses
-  its map row and is held, never coded as given.
+  its map row and is held, never coded as given. In a dataset's originals a
+  PatientID that is no personnummer is read as a hospital's reserve number (ID
+  type `reserve-number`), which is never kept and never coded: a map row of
+  `identifier:reserve-number` beside the person's code or another of their IDs
+  gives the file its subject, and until one does the file is held under the
+  number's keyed lookup (Nima, 2026-10-16).
 - **Not provisional:** a subject whose code comes from a personnummer is a
   subject, not a provisional one.
 - The open rulings of record 54 (its D1 to D10) are this slice's defaults and are

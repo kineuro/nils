@@ -13,6 +13,12 @@
 //! be made, in which case an identifier no subject holds comes back as
 //! unknown, with nothing written: that is how the pseudonymiser holds a
 //! file for want of a map (record 26 §4).
+//!
+//! A hospital's reserve number, which a rule that reads an ID that is the
+//! same everywhere reads in a PatientID that is none, is looked up before
+//! the study the file falls back to, and is held under its own lookup when
+//! no subject holds either; no subject is ever made from it, whoever asks
+//! (Nima, 2026-10-16).
 
 use std::collections::{BTreeMap, HashMap};
 use std::num::NonZeroUsize;
@@ -25,7 +31,7 @@ use nils_registry::store::{Insert, Param, Store};
 use nils_registry::{HomeError, Registry, Scheme, pseudonym};
 
 use crate::batch::Fields;
-use crate::rule::{FALLBACK_ID_TYPE, Ident, Rule};
+use crate::rule::{FALLBACK_ID_TYPE, Ident, RESERVE_ID_TYPE, Rule};
 
 /// Rows the lookup cache holds (§9.1).
 pub const CACHE_ROWS: usize = 200_000;
@@ -126,7 +132,8 @@ pub enum Make {
     /// from the ID is final, whether a map, the dataset's `code` or a
     /// person asked for it; no subject is made provisional any more
     /// (2026-10-10), and the `provisional` mark stays only on subjects an
-    /// older engine made.
+    /// older engine made. Never from a reserve number, which is answered as
+    /// unknown when no subject holds it.
     Subject,
 }
 
@@ -142,6 +149,10 @@ pub struct Resolver {
     /// The rule's id type and the fallback's.
     id_type: IdType,
     fallback: IdType,
+    /// The type a reserve number is looked up and held under, for a rule
+    /// that reads an ID that is the same everywhere in a dataset's originals
+    /// ([`Rule::reads_reserve`]).
+    reserve: Option<IdType>,
     /// The rule reads the code itself, not an identifier to derive one from.
     verbatim: bool,
     /// The rule files personnummer, whose codes the subject code generator
@@ -187,6 +198,10 @@ impl Resolver {
         let mut linkage = registry.open_linkage()?;
         let id_type = id_type_of(&mut linkage, &rule.id_type)?;
         let fallback = id_type_of(&mut linkage, FALLBACK_ID_TYPE)?;
+        let reserve = match rule.reads_reserve && rule.normalises() {
+            true => Some(id_type_of(&mut linkage, RESERVE_ID_TYPE)?),
+            false => None,
+        };
         let meta = registry.meta();
         let cap = NonZeroUsize::new(CACHE_ROWS).unwrap_or(NonZeroUsize::MIN);
         Ok(Resolver {
@@ -197,6 +212,7 @@ impl Resolver {
             display_length: meta.display_length,
             id_type,
             fallback,
+            reserve,
             verbatim: rule.verbatim,
             personnummer: rule.normalises(),
             own_codes: rule.own_codes,
@@ -299,34 +315,62 @@ impl Resolver {
         )?)
     }
 
-    /// The id type a file's identifier is filed under.
+    /// The id type a file's identifier is filed under: its reserve
+    /// number's where it has one, else the fallback's or the rule's.
     pub fn type_of(&self, ident: &Ident) -> &IdType {
-        if ident.fell_back {
-            &self.fallback
-        } else {
-            &self.id_type
+        self.filed(ident).0
+    }
+
+    /// The type and the value a file is filed, and held, under.
+    fn filed<'s, 'i>(&'s self, ident: &'i Ident) -> (&'s IdType, &'i str) {
+        match (&self.reserve, &ident.reserve) {
+            (Some(t), Some(number)) => (t, number.as_str()),
+            _ if ident.fell_back => (&self.fallback, ident.value.as_str()),
+            _ => (&self.id_type, ident.value.as_str()),
         }
     }
 
     /// The keyed lookup of a file's identifier (§7.4 step 2), which is what
-    /// a held file keeps in place of the identifier.
+    /// a held file keeps in place of the identifier: a reserve number's
+    /// where the file has one.
     pub fn lookup(&self, ident: &Ident) -> Vec<u8> {
-        self.keys.lookup(&self.type_of(ident).name, &ident.value)
+        let (t, value) = self.filed(ident);
+        self.keys.lookup(&t.name, value)
+    }
+
+    /// The lookup of the study a file with a reserve number falls back to,
+    /// which a map of the study's UID may have named (as every such file was
+    /// held before reserve numbers were read, and is released still); none
+    /// for any other file, whose own lookup is the study's where it fell
+    /// back.
+    fn study_lookup(&self, ident: &Ident) -> Option<Vec<u8>> {
+        (self.reserve.is_some() && ident.reserve.is_some())
+            .then(|| self.keys.lookup(&self.fallback.name, &ident.value))
+    }
+
+    /// Whether no subject is ever made for the file: it is filed under a
+    /// reserve number (Nima, 2026-10-16).
+    fn never_coded(&self, ident: &Ident) -> bool {
+        self.type_of(ident).name == RESERVE_ID_TYPE
     }
 
     /// A file's identifier sealed under the store's encrypt key, for the one
-    /// door that reveals it; none for a personnummer, which is never kept
-    /// (Wave 7a): its held row keeps the keyed lookup and the shape alone.
+    /// door that reveals it; none for a type the store never keeps, a
+    /// personnummer or a reserve number (Wave 7a): its held row keeps the
+    /// keyed lookup and the shape alone.
     pub fn seal(&self, ident: &Ident) -> Option<Vec<u8>> {
-        let sealed = self.keys.seal_kept(&self.type_of(ident).name, &ident.value);
+        let (t, value) = self.filed(ident);
+        let sealed = self.keys.seal_kept(&t.name, value);
         (!sealed.is_empty()).then_some(sealed)
     }
 
     /// The subject of every file (§7.4): by the lookup of its identifier
     /// when the linkage store has met it (step 3); else by the code, created
     /// (step 4), or found and the identity attached, or a collision (step
-    /// 5). The subject rows go into the caller's transaction on `store`;
-    /// the identity rows wait for [`Resolver::file_identities`].
+    /// 5). A file with a reserve number is found by it, else by its study,
+    /// and is otherwise unknown, whatever `make` says. The subject rows go
+    /// into the caller's transaction on `store`; the identity rows wait for
+    /// [`Resolver::file_identities`].
     pub fn resolve(
         &mut self,
         store: &mut Store,
@@ -341,7 +385,8 @@ impl Resolver {
             ..Resolved::default()
         };
         // the lookups the cache does not hold, with the first file of each:
-        // the rule's own, and the one a map released the file under
+        // the rule's own, and the one a map released the file under, and a
+        // reserve number's study
         let mut misses: HashMap<Vec<u8>, usize> = HashMap::new();
         let mut given: HashMap<Vec<u8>, usize> = HashMap::new();
         let mut lookups: Vec<Vec<u8>> = Vec::with_capacity(n);
@@ -351,8 +396,8 @@ impl Resolver {
                 Some(id) => out.found[i] = Found::Known(id),
                 None => {
                     misses.entry(lookup.clone()).or_insert(i);
-                    if let Some(g) = &w.lookup {
-                        given.entry(g.clone()).or_insert(i);
+                    for g in w.lookup.iter().cloned().chain(self.study_lookup(w.ident)) {
+                        given.entry(g).or_insert(i);
                     }
                 }
             }
@@ -431,6 +476,10 @@ impl Resolver {
         let mut groups: BTreeMap<String, Group> = BTreeMap::new();
         for (lookup, &i) in &misses {
             let w = &who[i];
+            if self.never_coded(w.ident) {
+                // a reserve number no subject holds waits for a map
+                continue;
+            }
             let code = if self.takes_verbatim(w.ident) {
                 // the value the rule read is the code itself (§7.3)
                 pseudonym::verbatim(self.scheme, &self.key, &w.ident.value)
@@ -569,32 +618,43 @@ impl Resolver {
                 out.found[i] = Found::Known(id);
             }
         }
-        if out.found.contains(&Found::Unknown) {
+        if out
+            .found
+            .iter()
+            .zip(who)
+            .any(|(f, w)| *f == Found::Unknown && !self.never_coded(w.ident))
+        {
             return Err(missing_row("subject").into());
         }
         Ok(out)
     }
 
     /// The subject the cache holds for a file: under the lookup it was
-    /// released under, if one, else under the rule's own.
+    /// released under, if one, else under the rule's own (a reserve
+    /// number's, where the file has one), else under its study's, for a file
+    /// with a reserve number.
     fn hit(&mut self, w: &Who<'_>, own: &[u8]) -> Option<i64> {
         if let Some(g) = &w.lookup
             && let Some(&id) = self.identities.get(g)
         {
             return Some(id);
         }
-        self.identities.get(own).copied()
+        if let Some(&id) = self.identities.get(own) {
+            return Some(id);
+        }
+        let study = self.study_lookup(w.ident)?;
+        self.identities.get(&study).copied()
     }
 
     /// An identity row for the subject, filed after the commit (§9.3), and
     /// the lookup cached.
     fn attach(&mut self, subject_id: i64, ident: &Ident, lookup: Vec<u8>) {
-        let ty = self.type_of(ident);
+        let (ty, value) = self.filed(ident);
         self.pending.push(NewIdentity {
             subject_id,
             id_type_id: ty.id,
             lookup: lookup.clone(),
-            ciphertext: self.keys.seal_kept(&ty.name, &ident.value),
+            ciphertext: self.keys.seal_kept(&ty.name, value),
             source: "dicom",
             first_batch_id: Some(self.batch_id),
         });

@@ -52,6 +52,21 @@ model: a person confirms it with one commit, or answers otherwise. System 1
 never fills an answer on its own, and a dataset without the flag stages
 nothing.
 
+A dataset is flagged by its signs at the end of every sort, for each dataset
+holding a scan the sort judged, with the sort's own pack. Three signs are
+read, each held to the pack's threshold (`review.damaged_headers`, pack
+contract 11), and the dataset is flagged when one reaches it:
+
+- its MR scans with neither a series description nor a protocol name;
+- its named MR scans none of whose words the pack knows;
+- its MR scans by a maker the rules were not built on that no dataset
+  brought in before it holds, or by none.
+
+The Data card says which sign flagged it, with the share and the threshold.
+A person flags a dataset, or marks it as usual, with a why, from the card or
+with `PUT /api/datasets/<name>/headers`; that word wins over the signs until
+the person lets the signs decide again (`damaged: null`).
+
 ## 2. Record System 1's certificate (for the paper)
 
 A certificate is not required for System 1 to stage answers (record 55,
