@@ -123,6 +123,21 @@ fn series(
     kind: Kind,
     hhmmss: u32,
 ) -> Vec<(String, Vec<Elem>)> {
+    series_of(patient, study, day, "075000", series, number, kind, hhmmss)
+}
+
+/// As [`series`], of a study that started at `started` (HHMMSS).
+#[allow(clippy::too_many_arguments)]
+fn series_of(
+    patient: &str,
+    study: &str,
+    day: &str,
+    started: &str,
+    series: &str,
+    number: i64,
+    kind: Kind,
+    hhmmss: u32,
+) -> Vec<(String, Vec<Elem>)> {
     let (name, scanning, variant, acq, tr, te, ti) = match kind {
         Kind::T1 => (
             "t1_mprage_sag",
@@ -153,7 +168,7 @@ fn series(
             let mut fields = vec![
                 (tags::PATIENT_ID, VR::LO, patient.to_string()),
                 (tags::STUDY_DATE, VR::DA, day.to_string()),
-                (tags::STUDY_TIME, VR::TM, "075000".to_string()),
+                (tags::STUDY_TIME, VR::TM, started.to_string()),
                 (tags::SERIES_DATE, VR::DA, day.to_string()),
                 (tags::ACQUISITION_DATE, VR::DA, day.to_string()),
                 (tags::ACQUISITION_TIME, VR::TM, at.clone()),
@@ -450,5 +465,122 @@ fn every_stack_of_an_anchored_session_carries_the_label_t27() {
         })
         .collect::<Vec<_>>();
         assert_eq!(before, after, "{name}");
+    }
+}
+
+/// Subject C, one visit on 2024-03-11 in three studies (record 55, ruling
+/// 25: C1's clock). Studies 8.4 and 8.5 started together at 07:50: 8.4 a
+/// FLAIR at 09:55, the pre T1 at 10:00 and a FLAIR at 10:05; 8.5 the post T1
+/// at 10:20 and a FLAIR at 10:30. Study 8.6 started at 13:00: a FLAIR at
+/// 13:05, a pre T1 at 13:10 and a post T1 at 13:30.
+fn visit_tree() -> TempDir {
+    let dir = TempDir::new("classify-contrast-visit");
+    let s = |study, started, series, n, k, t| {
+        series_of("PC", study, "20240311", started, series, n, k, t)
+    };
+    write(&dir, s("8.4", "075000", "8.4.1", 1, Kind::Flair, 95_500));
+    write(&dir, s("8.4", "075000", "8.4.2", 2, Kind::T1, 100_000));
+    write(&dir, s("8.4", "075000", "8.4.3", 3, Kind::Flair, 100_500));
+    write(&dir, s("8.5", "075000", "8.5.5", 5, Kind::T1, 102_000));
+    write(&dir, s("8.5", "075000", "8.5.6", 6, Kind::Flair, 103_000));
+    write(&dir, s("8.6", "130000", "8.6.1", 1, Kind::Flair, 130_500));
+    write(&dir, s("8.6", "130000", "8.6.2", 2, Kind::T1, 131_000));
+    write(&dir, s("8.6", "130000", "8.6.3", 3, Kind::T1, 133_000));
+    dir
+}
+
+#[test]
+fn a_study_of_the_same_visit_is_judged_by_the_clock() {
+    let pack = nils_pack::load(&packs(), None).expect("the MRI pack loads");
+    for lab in labs() {
+        let name = lab.name;
+        let dir = visit_tree();
+        let mut reg = lab.home.open().unwrap();
+        let mut s = nils_digest::Settings::new(dir.path());
+        s.name = "t".into();
+        s.workers = 2;
+        s.walk_threads = 2;
+        digest(&s, &mut reg).unwrap_or_else(|e| panic!("{name}: {e}"));
+        nils_classify::run(
+            &mut reg,
+            &nils_classify::Settings::default(),
+            &Cancel::new(),
+        )
+        .unwrap_or_else(|e| panic!("{name}: {e}"));
+        nils_classify::classify::classify(&mut reg, &pack, &Default::default(), &Cancel::new())
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+        for (series, given) in [
+            ("8.4.2", false),
+            ("8.5.5", true),
+            ("8.6.2", false),
+            ("8.6.3", true),
+        ] {
+            let st = stack_of(&mut reg, series);
+            read(&mut reg, st, given);
+        }
+        let done = nils_classify::contrast::label(reg.store(), &pack, None)
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(
+            (done.sessions, done.anchored_sessions, done.stacks),
+            (3, 3, 8),
+            "{name}: {done:?}"
+        );
+        let a = |reg: &mut Registry, s: &str| {
+            let st = stack_of(reg, s);
+            let checks = rows(
+                reg,
+                &format!(
+                    "SELECT CAST(checks AS TEXT), rule FROM {{contrast_label}} WHERE stack_id = {st}"
+                ),
+            );
+            let checks = (
+                checks[0].text(0).unwrap().to_string(),
+                checks[0].text(1).unwrap().to_string(),
+            );
+            (label(reg, st), checks)
+        };
+
+        // 8.4 came before 8.5's injection (its post T1 at 10:20) and before
+        // 8.6's: its pre labels stand, where time-rule-1 made them
+        // undetermined for a study that started with it
+        let (flair, (checks, rule)) = a(&mut reg, "8.4.1");
+        assert_eq!(
+            (flair.0.as_str(), flair.3.as_str(), flair.4.as_deref()),
+            ("pre", "no", None),
+            "{name}: {checks}"
+        );
+        assert!(checks.contains("C1_clock_before"), "{name}: {checks}");
+        assert!(checks.contains("C2_second_study"), "{name}: {checks}");
+        assert_eq!(rule, nils_pack::contrast::RULE, "{name}");
+        assert_eq!(rule, "time-rule-2", "{name}");
+        let (own, _) = a(&mut reg, "8.4.2");
+        assert_eq!(
+            (own.0.as_str(), own.2.as_str(), own.3.as_str()),
+            ("pre", "reader", "no"),
+            "{name}"
+        );
+        let (late, _) = a(&mut reg, "8.5.6");
+        assert_eq!(
+            (late.0.as_str(), late.1, late.3.as_str()),
+            ("post", Some(10.0), "no"),
+            "{name}"
+        );
+
+        // 8.6 started later the same day, after 8.5's injection: C1 as before
+        let (flair, (checks, _)) = a(&mut reg, "8.6.1");
+        assert_eq!(
+            (flair.0.as_str(), flair.3.as_str(), flair.4.as_deref()),
+            ("undetermined", "yes", Some("C1_prior_72h")),
+            "{name}: {checks}"
+        );
+        assert!(checks.contains("C1_source_within_24h"), "{name}: {checks}");
+        let (own, _) = a(&mut reg, "8.6.2");
+        assert_eq!(own.4.as_deref(), Some("C1_prior_72h"), "{name}");
+        let (post, _) = a(&mut reg, "8.6.3");
+        assert_eq!(
+            (post.0.as_str(), post.3.as_str()),
+            ("post", "yes"),
+            "{name}"
+        );
     }
 }
