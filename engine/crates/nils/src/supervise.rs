@@ -450,6 +450,12 @@ pub(crate) struct Config {
     pub trust: PathBuf,
     #[serde(default = "default_poll")]
     pub poll_seconds: u64,
+    /// How old the install door's look at the releases must be before a
+    /// person's asking for it again is let through. GitHub keeps its own
+    /// answer for a minute and an address has sixty requests an hour, so a
+    /// quicker look only spends them.
+    #[serde(default = "default_look_again")]
+    pub look_again_seconds: u64,
     /// Where every apply is recorded, one JSON line each.
     pub log: PathBuf,
     /// The host's target; detected when absent.
@@ -469,6 +475,9 @@ fn default_bind() -> String {
 }
 fn default_poll() -> u64 {
     900
+}
+fn default_look_again() -> u64 {
+    60
 }
 fn default_settle() -> u64 {
     30
@@ -808,6 +817,15 @@ pub(crate) fn update(
     Ok(row)
 }
 
+/// Whether what a channel names is a release to offer beside what is
+/// installed: any, where nothing is, else only one newer than the installed
+/// by the engine's own order of versions (`update::newer`). A channel that
+/// still names an older release than the one installed, or a stale answer
+/// that does, offers nothing; it used to offer whatever differed.
+fn offered_beside(installed: Option<&str>, named: &str) -> bool {
+    installed.is_none_or(|have| crate::update::newer(named, have))
+}
+
 /// What is installed and what the channel offers, per part.
 pub(crate) fn capabilities(config: &Config, node: &str) -> Value {
     let target = config.target.clone().unwrap_or_else(host_target);
@@ -825,10 +843,10 @@ pub(crate) fn capabilities(config: &Config, node: &str) -> Value {
             };
             let newer = match latest(&p.channel, &p.name) {
                 Ok((l, _))
-                    if installed
-                        .as_ref()
-                        .map(|m| m.version != l.version)
-                        .unwrap_or(true) =>
+                    if offered_beside(
+                        installed.as_ref().map(|m| m.version.as_str()),
+                        &l.version,
+                    ) =>
                 {
                     json!({ "version": l.version, "manifest_url": l.manifest_url })
                 }
@@ -1159,7 +1177,7 @@ fn cached_rules(
 }
 
 /// A slow look kept for a while: the newest release, the card.
-fn cached(slot: &'static Slot, every: Duration, make: impl FnOnce() -> Value) -> Value {
+fn cached(slot: &Slot, every: Duration, make: impl FnOnce() -> Value) -> Value {
     let held = slot.get_or_init(|| Mutex::new(None));
     if let Ok(guard) = held.lock()
         && let Some((at, value)) = guard.as_ref()
@@ -1174,9 +1192,63 @@ fn cached(slot: &'static Slot, every: Duration, make: impl FnOnce() -> Value) ->
     value
 }
 
+/// Let go of a slow look a person asked to have made again, once it is at
+/// least `min_age` old, so the next read makes it anew. A younger one stays:
+/// GitHub keeps its own answer for a minute, and an address has sixty
+/// requests an hour that every look spends. Whether it was let go.
+fn let_go(slot: &Slot, min_age: Duration) -> bool {
+    let Some(held) = slot.get() else {
+        return false;
+    };
+    let Ok(mut guard) = held.lock() else {
+        return false;
+    };
+    match guard.as_ref() {
+        Some((at, _)) if at.elapsed() >= min_age => {
+            *guard = None;
+            true
+        }
+        _ => false,
+    }
+}
+
+/// The releases looked at again, at a person's asking (`?fresh=1`): what the
+/// door kept of them is let go once it is `min_age` old, with what was read
+/// beside them, a desk release's floor and each pack's own releases. The
+/// packs an engine release carries never change, so those read stay; one
+/// that could not be read is asked for again.
+fn look_again(min_age: Duration) {
+    if !let_go(&NEWEST, min_age) {
+        return;
+    }
+    if let Some(held) = FLOORS.get()
+        && let Ok(mut guard) = held.lock()
+    {
+        guard.clear();
+    }
+    if let Some(held) = RULES.get()
+        && let Ok(mut guard) = held.lock()
+    {
+        guard.clear();
+    }
+    if let Some(held) = BUNDLED.get()
+        && let Ok(mut guard) = held.lock()
+    {
+        guard.retain(|_, (_, found)| found.is_ok());
+    }
+}
+
+/// Whether a request for a door asks for a fresh look: `?fresh=1`.
+fn wants_fresh(url: &str) -> bool {
+    url.split_once('?')
+        .is_some_and(|(_, query)| query.split('&').any(|pair| pair == "fresh=1"))
+}
+
 /// The install door: the setup record, each service with whether it runs,
-/// the newest release beside the one installed, and the machine's card.
-fn install(config: &Config) -> (u16, Value) {
+/// the newest release beside the one installed, and the machine's card. With
+/// `fresh`, the releases are looked at again where the look it kept is old
+/// enough ([`look_again`]); it always says when it looked (`release.looked_at`).
+fn install(config: &Config, fresh: bool) -> (u16, Value) {
     let Some(state) = crate::setup::read_state() else {
         return error(
             404,
@@ -1188,9 +1260,15 @@ fn install(config: &Config) -> (u16, Value) {
     };
     let mut doc = crate::setup::install_doc(&state);
     let every = Duration::from_secs(config.poll_seconds.max(60));
-    // Each part against its own newest release, looked at once in a while;
-    // what is installed is read from the record on every call, so a part
-    // just updated stops being offered at once.
+    if fresh {
+        look_again(Duration::from_secs(config.look_again_seconds));
+    }
+    // Each part against its own newest release, looked at once in a while,
+    // and when it was looked at, which the desk says beside what it offers;
+    // what is installed is read from the record on every call, and an offer
+    // is only a release newer than it ([`crate::releases::PartRelease`]), so
+    // a part just updated stops being offered at once and a look made before
+    // a release was published never offers an older one in its place.
     let newest = cached(&NEWEST, every, || {
         let mut looked = serde_json::Map::new();
         for part in crate::releases::OWN_RELEASES {
@@ -1212,13 +1290,13 @@ fn install(config: &Config) -> (u16, Value) {
             };
             looked.insert(part.to_string(), found);
         }
-        Value::Object(looked)
+        json!({ "at": nils_registry::time::now_iso(), "parts": Value::Object(looked) })
     });
     let rows = crate::releases::part_releases(
         &state,
         &mut |part| match (
-            newest[part]["version"].as_str(),
-            newest[part]["error"].as_str(),
+            newest["parts"][part]["version"].as_str(),
+            newest["parts"][part]["error"].as_str(),
         ) {
             (Some(v), _) => Ok(v.to_string()),
             (None, Some(e)) => Err(e.to_string()),
@@ -1226,7 +1304,7 @@ fn install(config: &Config) -> (u16, Value) {
         },
         &mut |version| cached_floor(every, version),
         &mut || {
-            newest["desk"]["versions"]
+            newest["parts"]["desk"]["versions"]
                 .as_array()
                 .map(|a| {
                     a.iter()
@@ -1238,6 +1316,7 @@ fn install(config: &Config) -> (u16, Value) {
         crate::releases::engine_contracts(),
     );
     doc["release"] = crate::releases::release_doc(&rows, None);
+    doc["release"]["looked_at"] = newest["at"].clone();
     // The rule packs beside the ones the engine's release carries: the
     // release an update takes, or the one installed. What is on disk is read
     // on every call; a release's packs never change, so they are kept. Each
@@ -1514,7 +1593,7 @@ fn handle(config: &Config, node: &str, busy: &Mutex<()>, runs: &Runs, mut reques
     let (status, body) = match (method.clone(), path.as_str()) {
         (Method::Get, "/api/supervise/capabilities") => (200, capabilities(config, node)),
         (Method::Get, "/api/supervise/log") => (200, json!({ "rows": log_rows(&config.log, 200) })),
-        (Method::Get, "/api/supervise/install") => install(config),
+        (Method::Get, "/api/supervise/install") => install(config, wants_fresh(&url)),
         (Method::Post, "/api/supervise/restart") => {
             let doc = body_json(&mut request);
             let mut args = vec!["supervise".to_string(), "restart".to_string()];
@@ -1669,9 +1748,10 @@ pub(crate) fn run(config_path: &Path, bind: Option<String>) -> Result<(), Exit> 
                 std::thread::sleep(Duration::from_secs(config.poll_seconds.max(5)));
                 for p in &config.parts {
                     if let Ok((l, _)) = latest(&p.channel, &p.name)
-                        && p.installed()
-                            .map(|m| m.version != l.version)
-                            .unwrap_or(true)
+                        && offered_beside(
+                            p.installed().as_ref().map(|m| m.version.as_str()),
+                            &l.version,
+                        )
                     {
                         eprintln!("supervise: {} has {} on its channel", p.name, l.version);
                     }
@@ -2041,5 +2121,62 @@ mod tests {
             .collect();
         assert_eq!(names, ["r1.json"]);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The releases the door looked at are kept for the poll, and let go at
+    /// a person's asking only once the look is old enough: a quicker one
+    /// would spend the address's sixty requests an hour on GitHub's own
+    /// minute-old answer.
+    #[test]
+    fn a_look_is_let_go_at_a_persons_asking_only_once_it_is_old_enough() {
+        let slot = Slot::new();
+        let made = std::cell::Cell::new(0);
+        let look = || {
+            cached(&slot, Duration::from_secs(900), || {
+                made.set(made.get() + 1);
+                json!(made.get())
+            })
+        };
+        assert_eq!(look(), 1);
+        assert_eq!(look(), 1, "kept for the poll");
+        assert!(
+            !let_go(&slot, Duration::from_secs(60)),
+            "a minute is not up"
+        );
+        assert_eq!(look(), 1, "and what is kept stays");
+        assert!(let_go(&slot, Duration::ZERO), "old enough, it goes");
+        assert_eq!(look(), 2, "and the next read makes it anew");
+        assert!(
+            !let_go(&Slot::new(), Duration::ZERO),
+            "where none was made, there is nothing to let go"
+        );
+    }
+
+    #[test]
+    fn only_fresh_equals_one_asks_for_a_fresh_look() {
+        assert!(wants_fresh("/api/supervise/install?fresh=1"));
+        assert!(wants_fresh("/api/supervise/install?x=2&fresh=1"));
+        assert!(!wants_fresh("/api/supervise/install"));
+        assert!(!wants_fresh("/api/supervise/install?fresh=0"));
+        assert!(!wants_fresh("/api/supervise/install?refresh=1"));
+    }
+
+    /// The channel's offer is a release newer than the installed one by the
+    /// engine's own order, never one that only differs.
+    #[test]
+    fn a_channel_offers_only_a_release_newer_than_the_installed_one() {
+        assert!(offered_beside(None, "1.0.0"), "none installed: any");
+        assert!(offered_beside(Some("1.0.0-alpha.84"), "1.0.0-alpha.85"));
+        assert!(offered_beside(Some("1.0.0-alpha.9"), "1.0.0-alpha.10"));
+        assert!(!offered_beside(Some("1.0.0-alpha.85"), "1.0.0-alpha.85"));
+        assert!(
+            !offered_beside(Some("1.0.0-alpha.85"), "1.0.0-alpha.84"),
+            "an older release is never offered after a newer one"
+        );
+        assert!(!offered_beside(Some("1.0.0-alpha.10"), "1.0.0-alpha.9"));
+        assert!(
+            !offered_beside(Some("1.0.0-alpha.85.dev.2"), "1.0.0-alpha.85"),
+            "a development build is past the release it came from"
+        );
     }
 }

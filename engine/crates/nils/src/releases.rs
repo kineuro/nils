@@ -574,6 +574,67 @@ mod tests {
         assert_eq!(doc["behind"], json!([]));
     }
 
+    /// 2026-10-16: the Parts page named alpha.84 as the newest release a
+    /// minute after alpha.85 was published, from a look kept for a quarter of
+    /// an hour. A look is never what an offer is measured by alone: a part is
+    /// offered only a release newer than the one installed, by the engine's own
+    /// order, so a look older than what is installed (a stale answer, or an
+    /// install past its releases, as a development build is) offers nothing,
+    /// and never a downgrade.
+    #[test]
+    fn a_look_older_than_what_is_installed_offers_nothing_and_never_a_downgrade() {
+        let s = state("1.0.0-alpha.85", "1.0.0-alpha.65");
+        let r = rows(
+            &s,
+            &[("engine", "1.0.0-alpha.84"), ("desk", "1.0.0-alpha.64")],
+            None,
+        );
+        assert!(
+            r.iter()
+                .all(|r| !r.behind() && r.newer().is_none() && r.to_take().is_none()),
+            "{r:?}"
+        );
+        let engine = r.iter().find(|r| r.part == "engine").unwrap();
+        assert_eq!(engine.newest.as_deref(), Some("1.0.0-alpha.84"));
+        assert_eq!(
+            engine.line(),
+            "engine 1.0.0-alpha.85: the newest release is 1.0.0-alpha.84"
+        );
+        let doc = release_doc(&r, None);
+        assert_eq!(doc["newer"], Value::Null, "{doc}");
+        assert_eq!(doc["behind"], json!([]), "{doc}");
+        for part in doc["parts"].as_array().unwrap() {
+            assert_eq!(part["newer"], Value::Null, "{part}");
+        }
+
+        // the same look beside an install that is behind it offers that release, and only that
+        let s = state("1.0.0-alpha.83", "1.0.0-alpha.65");
+        let r = rows(
+            &s,
+            &[("engine", "1.0.0-alpha.84"), ("desk", "1.0.0-alpha.65")],
+            None,
+        );
+        let doc = release_doc(&r, None);
+        assert_eq!(doc["newer"], "1.0.0-alpha.84", "{doc}");
+        assert_eq!(doc["behind"], json!(["engine"]), "{doc}");
+
+        // and a release that is only spelled differently is not newer: the number is, not the text
+        let s = state("1.0.0-alpha.9", "1.0.0-alpha.65");
+        let r = rows(
+            &s,
+            &[("engine", "1.0.0-alpha.10"), ("desk", "1.0.0-alpha.65")],
+            None,
+        );
+        assert_eq!(release_doc(&r, None)["newer"], "1.0.0-alpha.10");
+        let s = state("1.0.0-alpha.10", "1.0.0-alpha.65");
+        let r = rows(
+            &s,
+            &[("engine", "1.0.0-alpha.9"), ("desk", "1.0.0-alpha.65")],
+            None,
+        );
+        assert_eq!(release_doc(&r, None)["newer"], Value::Null);
+    }
+
     #[test]
     fn an_engine_behind_is_offered_by_its_own_version() {
         let s = state("1.0.0-alpha.48", "1.0.0-alpha.51");

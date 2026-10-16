@@ -124,11 +124,16 @@ impl Channel {
 
     /// A supervise.toml over one part installed at `install`.
     fn config(&self, part: &str, install: &Path, restart: &str) -> PathBuf {
+        self.config_with(part, install, restart, "")
+    }
+
+    /// The same, with `top` more lines of the file's own keys, as `look_again_seconds = 0`.
+    fn config_with(&self, part: &str, install: &Path, restart: &str, top: &str) -> PathBuf {
         let path = self.dir.path().join("supervise.toml");
         std::fs::write(
             &path,
             format!(
-                "trust = \"{}\"\nlog = \"{}\"\nsettle_seconds = 2\n[tokens]\n\"a-supervisor-token-of-length\" = \"admin@test\"\n[[parts]]\nname = \"{part}\"\ninstall = \"{}\"\nrestart = \"{restart}\"\nchannel = \"{}\"\nversion_file = \"VERSION\"\n",
+                "trust = \"{}\"\nlog = \"{}\"\nsettle_seconds = 2\n{top}[tokens]\n\"a-supervisor-token-of-length\" = \"admin@test\"\n[[parts]]\nname = \"{part}\"\ninstall = \"{}\"\nrestart = \"{restart}\"\nchannel = \"{}\"\nversion_file = \"VERSION\"\n",
                 self.trust().display(),
                 self.dir.path().join("supervise.log").display(),
                 install.display(),
@@ -616,6 +621,199 @@ fn the_install_door_offers_a_desk_released_alone() {
         token,
     );
     assert_eq!(status, 400, "{refused}");
+}
+
+/// An engine install recorded at one version and a channel of files naming
+/// another as its newest release, each changed between two calls as an update
+/// and a publication change them.
+struct Releases {
+    home: TempDir,
+    settings: PathBuf,
+}
+
+impl Releases {
+    fn new(installed: &str, newest: &str) -> Releases {
+        let home = TempDir::new("supervise-releases");
+        let settings = home.path().join("config");
+        std::fs::create_dir_all(settings.join("nils")).unwrap();
+        std::fs::create_dir_all(home.path().join("releases/latest/download")).unwrap();
+        let releases = Releases { home, settings };
+        releases.update_to(installed);
+        releases.publish(newest);
+        releases
+    }
+
+    /// The setup record says the engine is at `version`, as an update leaves it.
+    fn update_to(&self, version: &str) {
+        std::fs::write(
+            self.settings.join("nils").join("setup.toml"),
+            format!(
+                "dir = \"{}\"\nmode = \"off\"\nruntime = \"machine\"\nservice = \"none\"\n\n[parts.engine]\nversion = \"{version}\"\npath = \"{}\"\n",
+                self.home.path().join("nils").display(),
+                self.home.path().join("engine").join("nils").display()
+            ),
+        )
+        .unwrap();
+    }
+
+    /// The channel names `version` as its newest release.
+    fn publish(&self, version: &str) {
+        std::fs::write(
+            self.home.path().join("releases/latest/download/VERSION"),
+            format!("{version}\n"),
+        )
+        .unwrap();
+    }
+
+    fn serve(&self, config: &Path) -> Service {
+        let url = format!("file://{}", self.home.path().join("releases").display());
+        Service::start_with(
+            config,
+            &[
+                ("XDG_CONFIG_HOME", self.settings.to_str().unwrap()),
+                ("NILS_RELEASES", url.as_str()),
+            ],
+        )
+    }
+}
+
+/// The engine's own row of an install door's answer.
+fn engine_row(doc: &serde_json::Value) -> serde_json::Value {
+    doc["release"]["parts"]
+        .as_array()
+        .expect("each part")
+        .iter()
+        .find(|p| p["part"] == "engine")
+        .cloned()
+        .expect("the engine's row")
+}
+
+/// 2026-10-16: the desk's Parts page named alpha.84 as the newest release a
+/// minute after alpha.85 was published, because the door keeps what it looked
+/// at for a quarter of an hour and said nothing of how old that was. It says
+/// when it looked, and looks again when asked.
+#[test]
+fn the_install_door_says_when_it_looked_and_looks_again_when_asked() {
+    let c = Channel::new();
+    let install = c.dir.path().join("install");
+    std::fs::create_dir_all(&install).unwrap();
+    std::fs::write(install.join("VERSION"), "1.0.0\n").unwrap();
+    // a minute need not pass between two looks of this test's
+    let config = c.config_with("engine", &install, "true", "look_again_seconds = 0\n");
+    let releases = Releases::new("1.0.0-alpha.83", "1.0.0-alpha.84");
+    let s = releases.serve(&config);
+    let token = Some("a-supervisor-token-of-length");
+
+    let (status, doc) = s.call("GET", "/api/supervise/install", None, token);
+    assert_eq!(status, 200, "{doc}");
+    assert_eq!(doc["release"]["installed"], "1.0.0-alpha.83", "{doc}");
+    assert_eq!(doc["release"]["newer"], "1.0.0-alpha.84", "{doc}");
+    let at = doc["release"]["looked_at"].clone();
+
+    // alpha.85 is published; a plain read keeps what was looked at, as the page did on 2026-10-16
+    releases.publish("1.0.0-alpha.85");
+    let (_, doc) = s.call("GET", "/api/supervise/install", None, token);
+    assert_eq!(doc["release"]["newer"], "1.0.0-alpha.84", "{doc}");
+
+    // asked again, it looks again
+    let (status, doc) = s.call("GET", "/api/supervise/install?fresh=1", None, token);
+    assert_eq!(status, 200, "{doc}");
+    assert_eq!(doc["release"]["newest"], "1.0.0-alpha.85", "{doc}");
+    assert_eq!(doc["release"]["newer"], "1.0.0-alpha.85", "{doc}");
+    assert_eq!(engine_row(&doc)["newer"], "1.0.0-alpha.85", "{doc}");
+
+    // and says when it looked: to the second, in UTC, and no earlier than the first look
+    let again = doc["release"]["looked_at"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the door says when it looked: {doc}"))
+        .to_string();
+    let first = at
+        .as_str()
+        .unwrap_or_else(|| panic!("the first look says when too: {at}"));
+    assert!(
+        again.len() == 20 && again.ends_with('Z') && again.as_str() >= first,
+        "{first} {again}"
+    );
+
+    // a plain read after it keeps that look, until it is asked again
+    releases.publish("1.0.0-alpha.86");
+    let (_, doc) = s.call("GET", "/api/supervise/install", None, token);
+    assert_eq!(doc["release"]["newer"], "1.0.0-alpha.85", "{doc}");
+    assert_eq!(doc["release"]["looked_at"], again.as_str(), "{doc}");
+}
+
+/// What the door looked at may be older than what is installed, as it is the
+/// moment an update lands: the record is read on every call and an offer is
+/// only a release newer than it, so nothing older is ever offered. And a
+/// person's asking again is let through no more than once a minute, which is
+/// what GitHub's sixty requests an hour for an address allow.
+#[test]
+fn the_install_door_never_offers_an_older_release_and_looks_again_no_more_than_once_a_minute() {
+    let c = Channel::new();
+    let install = c.dir.path().join("install");
+    std::fs::create_dir_all(&install).unwrap();
+    std::fs::write(install.join("VERSION"), "1.0.0\n").unwrap();
+    let config = c.config("engine", &install, "true");
+    let releases = Releases::new("1.0.0-alpha.83", "1.0.0-alpha.84");
+    let s = releases.serve(&config);
+    let token = Some("a-supervisor-token-of-length");
+
+    let (_, doc) = s.call("GET", "/api/supervise/install", None, token);
+    assert_eq!(doc["release"]["newer"], "1.0.0-alpha.84", "{doc}");
+    let at = doc["release"]["looked_at"].clone();
+    assert!(at.is_string(), "the door says when it looked: {doc}");
+
+    // the update lands (alpha.85, past what the door looked at): the look is
+    // older than what is installed, and offers nothing
+    releases.update_to("1.0.0-alpha.85");
+    let (_, doc) = s.call("GET", "/api/supervise/install", None, token);
+    assert_eq!(doc["release"]["installed"], "1.0.0-alpha.85", "{doc}");
+    assert_eq!(doc["release"]["newest"], "1.0.0-alpha.84", "{doc}");
+    assert_eq!(doc["release"]["newer"], serde_json::Value::Null, "{doc}");
+    assert_eq!(doc["release"]["behind"], serde_json::json!([]), "{doc}");
+    assert_eq!(engine_row(&doc)["newer"], serde_json::Value::Null, "{doc}");
+
+    // asked again within the minute, the door does not look: the look it
+    // kept is the one it answers with, and says so
+    releases.publish("1.0.0-alpha.86");
+    let (status, doc) = s.call("GET", "/api/supervise/install?fresh=1", None, token);
+    assert_eq!(status, 200, "{doc}");
+    assert_eq!(doc["release"]["newest"], "1.0.0-alpha.84", "{doc}");
+    assert_eq!(doc["release"]["newer"], serde_json::Value::Null, "{doc}");
+    assert_eq!(doc["release"]["looked_at"], at, "{doc}");
+}
+
+/// The signed channel's door (the first of the supervisor's) offers a release
+/// newer than the installed one, never one that only differs: a channel that
+/// still names an older release after a newer one is installed offers nothing.
+#[test]
+fn the_channel_door_offers_no_release_older_than_the_installed_one() {
+    let c = Channel::new();
+    let install = c.dir.path().join("install");
+    std::fs::create_dir_all(&install).unwrap();
+    std::fs::write(install.join("VERSION"), "1.0.0\n").unwrap();
+    let config = c.config("engine", &install, "true");
+    c.publish("engine", "1.0.1", &["openapi=3"], true);
+    let s = Service::start(&config);
+    let token = Some("a-supervisor-token-of-length");
+    let (status, done) = s.call(
+        "POST",
+        "/api/supervise/update",
+        Some(r#"{"part":"engine"}"#),
+        token,
+    );
+    assert_eq!(status, 200, "{done}");
+
+    // the channel's latest goes back to 1.0.0: it differs, and is older
+    c.publish("engine", "1.0.0", &["openapi=3"], true);
+    let (_, caps) = s.call("GET", "/api/supervise/capabilities", None, token);
+    assert_eq!(caps["parts"][0]["version"], "1.0.1", "{caps}");
+    assert_eq!(caps["parts"][0]["newer"], serde_json::Value::Null, "{caps}");
+
+    // a later one is offered
+    c.publish("engine", "1.0.2", &["openapi=3"], true);
+    let (_, caps) = s.call("GET", "/api/supervise/capabilities", None, token);
+    assert_eq!(caps["parts"][0]["newer"]["version"], "1.0.2", "{caps}");
 }
 
 /// The install door says the rule packs beside the ones the engine's release

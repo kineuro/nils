@@ -80,6 +80,7 @@ bind = "127.0.0.1:8470"
 trust = "trust.pub"
 log = "supervise.log"
 poll_seconds = 900
+look_again_seconds = 60
 settle_seconds = 30
 
 [tokens]
@@ -111,7 +112,7 @@ entitlement; the desk reaches them through its own proxy):
 
 | door | what it does |
 |---|---|
-| `GET /api/supervise/capabilities` | the supervisor's version and target; per part: what is installed (from `installed.json` in the install directory), its contracts and digest, its health as its own door answers, and `newer` when the channel's latest is ahead |
+| `GET /api/supervise/capabilities` | the supervisor's version and target; per part: what is installed (from `installed.json` in the install directory), its contracts and digest, its health as its own door answers, and `newer` when the channel's latest is newer than what is installed by the engine's own order of versions |
 | `POST /api/supervise/update` `{part, version?, allow_contract_change?}` | fetch the channel's latest (a `version` that is not the latest is refused by name), verify, apply, restart, settle; 200 with the log row, 409 with the verifier's or the settle's named reason |
 | `GET /api/supervise/log` | every apply and every refusal, one row each, with the manifest digest |
 
@@ -137,7 +138,15 @@ install and acts on it, from the setup record of the account it runs as
 - `GET /api/supervise/install` says where everything lives and how it runs,
   each part's version, where each part answers and who can reach it there,
   whether each service runs, whether a newer release is out, and the
-  machine's card.
+  machine's card. The releases are looked at once in a quarter of an hour
+  (`poll_seconds`), and `release.looked_at` says when; with `?fresh=1` the
+  door looks again where the look it kept is at least `look_again_seconds`
+  (60) old, and answers with that look otherwise, since GitHub keeps its own
+  answer for a minute and an address has sixty requests an hour. A part is
+  offered only a release newer than the one installed, by the engine's own
+  order of versions, so a look made before a release was published offers
+  the release before it until it looks again, and a look older than what is
+  installed offers nothing.
 - `POST /api/supervise/restart` restarts one part, or every part in the order
   they start.
 - `POST /api/supervise/reapply` writes the engine's unit or container again
