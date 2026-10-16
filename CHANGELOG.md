@@ -4,6 +4,8 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [1.0.0-alpha.88] - 2026-10-17
+
 ### Fixed
 
 - A job queued by hand or by a client of the jobs door reads packs from the deployment's pack directory when its own command line names none. A server started with `--pack-dir` and no packs in the registry's home or the standard folders ran a job queued with `nils jobs enqueue -- classify --pack mri` (and any other verb that reads packs: `digest --pack`, `pick run`, `score`, `explain`) with no pack directory of its own, and the job failed at once with "no pack directory: pass --pack-dir, set NILS_PACK_DIR, or put packs in one of ...". Only the steps of a bring-in's chain, and the verbs the jobs door knew by name, were queued with the deployment's `--pack-dir` appended. The worker now hands the packs the server serves to every job it runs as `NILS_PACK_DIR`, in one place, wherever the job came from; a command line that names its own `--pack-dir` keeps it.
