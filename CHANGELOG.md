@@ -4,6 +4,10 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [1.0.0-alpha.86] - 2026-10-16
+
+Post-contrast's fallback keeps its card arms inside its image, and a release rebuilds only the model images that changed.
+
 ### Changed
 
 - A release builds a model image (body part, post-contrast, System 1) only when its package's files, the release workflow or the descriptors script changed since the previous release's tag. An unchanged image is the one the previous release shipped, by the digest its `IMAGES` names, once the registry says anyone may pull it; the descriptors and `IMAGES` keep their form.
