@@ -17,7 +17,7 @@ use nils_ask::ast::{Ask, Grain};
 use nils_ask::exec::Bounds;
 use nils_ask::handle::{self, HandleError, Provenance, Spec};
 use nils_ask::run::{Request, RunError, explain, run};
-use nils_ask::validate::{Class, Scope};
+use nils_ask::validate::{Class, Names, Scope};
 use nils_ask::{parse, promote, selection, values};
 use nils_registry::linkage::{self, NewIdentity, Subkeys};
 use nils_registry::session::Scheme;
@@ -427,6 +427,51 @@ fn an_upload_resolves_through_the_linkage_store_and_leaks_nothing() {
             "{}: an identifier leaked into the registry",
             l.name
         );
+    }
+}
+
+/// An upload is made without the epoch moving, so a catalog built before it
+/// calls it unknown until it reads the uploads again; the ask doors do so at
+/// every request (a start from a list uploaded a moment ago answered 400).
+#[test]
+fn an_upload_made_since_is_known_once_the_catalog_reads_the_uploads_again() {
+    for mut l in labs() {
+        let listed = |from: usize| -> Vec<String> {
+            (from..from + 3).map(|i| format!("PID-100{i}")).collect()
+        };
+        let epoch = l.registry.meta().epoch;
+        let first = values::upload(&mut l.registry, "patient-id", &listed(1), "tester").unwrap();
+        assert_eq!(
+            l.registry.meta().epoch,
+            epoch,
+            "{}: an upload judges nothing and moves no epoch",
+            l.name
+        );
+        // the catalog was built before: the validator would refuse a document
+        // that names the upload
+        assert!(!l.catalog.upload(&first.upload_id), "{}", l.name);
+        l.catalog.refresh_uploads(l.registry.store()).unwrap();
+        assert!(l.catalog.upload(&first.upload_id), "{}", l.name);
+        // a second one is read in the same way, and the first stays known
+        let second = values::upload(&mut l.registry, "patient-id", &listed(4), "tester").unwrap();
+        assert!(!l.catalog.upload(&second.upload_id), "{}", l.name);
+        l.catalog.refresh_uploads(l.registry.store()).unwrap();
+        assert!(l.catalog.upload(&first.upload_id), "{}", l.name);
+        assert!(l.catalog.upload(&second.upload_id), "{}", l.name);
+        assert!(!l.catalog.upload("u-0000000000000000"), "{}", l.name);
+        // nothing new: the stamp is the same and so is the set
+        let (stamp, known) = (l.catalog.uploads_stamp, l.catalog.uploads.clone());
+        l.catalog.refresh_uploads(l.registry.store()).unwrap();
+        assert_eq!(
+            (l.catalog.uploads_stamp, &l.catalog.uploads),
+            (stamp, &known),
+            "{}",
+            l.name
+        );
+        // the same set a catalog built now reads
+        refresh(&mut l);
+        assert_eq!(l.catalog.uploads, known, "{}", l.name);
+        assert_eq!(l.catalog.uploads_stamp, stamp, "{}", l.name);
     }
 }
 

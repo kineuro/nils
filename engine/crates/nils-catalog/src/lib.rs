@@ -246,7 +246,11 @@ pub struct Catalog {
     pub derived: Vec<DerivedRecord>,
     pub selections: BTreeMap<String, u64>,
     pub handles: BTreeMap<String, Grain>,
+    /// The uploads the registry holds, and the stamp they were read at
+    /// ([`Catalog::refresh_uploads`]): an upload is made without the epoch
+    /// moving.
     pub uploads: BTreeSet<String>,
+    pub uploads_stamp: (i64, i64),
     /// Wave 7a: the datasets a stack can be of, each with the `source` rows
     /// that are its own, which the `dataset` fields read, and the stamp
     /// they were read at ([`place::dataset_stamp`]).
@@ -1566,6 +1570,28 @@ fn edges() -> Vec<EdgeRecord> {
     ]
 }
 
+/// How many uploads the registry holds and the highest id among them: what
+/// [`Catalog::refresh_uploads`] compares. Uploads are only ever added, so a
+/// new one moves the highest id.
+fn upload_stamp(store: &mut Store) -> Result<(i64, i64), Error> {
+    let sql = format!(
+        "SELECT COUNT(*), COALESCE(MAX(id), 0) FROM {}",
+        store.qualified("values_source")
+    );
+    let r = &store.query(&sql, &[])?[0];
+    Ok((r.int(0)?, r.int(1)?))
+}
+
+/// The id of every upload the registry holds.
+fn upload_ids(store: &mut Store) -> Result<BTreeSet<String>, Error> {
+    let sql = format!("SELECT upload_id FROM {}", store.qualified("values_source"));
+    let mut ids = BTreeSet::new();
+    for r in store.query(&sql, &[])? {
+        ids.insert(r.text(0)?.to_string());
+    }
+    Ok(ids)
+}
+
 impl Catalog {
     /// Build the catalog from a registry and its pack.
     pub fn build(registry: &mut Registry, pack: &Pack) -> Result<Catalog, Error> {
@@ -1840,13 +1866,10 @@ impl Catalog {
                 .unwrap_or(Grain::Subject);
             handles.insert(r.int(0)?.to_string(), grain);
         }
-        let mut uploads = BTreeSet::new();
-        for r in store.query(
-            &format!("SELECT upload_id FROM {}", store.qualified("values_source")),
-            &[],
-        )? {
-            uploads.insert(r.text(0)?.to_string());
-        }
+        // the stamp first, so an upload made between the two reads shows in
+        // the next stamp and is read then
+        let uploads_stamp = upload_stamp(store)?;
+        let uploads = upload_ids(store)?;
         let datasets_stamp = place::dataset_stamp(store)?;
         let datasets = place::dataset_sources(store)?;
         Ok(Catalog {
@@ -1870,6 +1893,7 @@ impl Catalog {
             selections,
             handles,
             uploads,
+            uploads_stamp,
             datasets,
             datasets_stamp,
             caps: Caps::default(),
@@ -1886,6 +1910,22 @@ impl Catalog {
         if stamp != self.datasets_stamp {
             self.datasets = place::dataset_sources(store)?;
             self.datasets_stamp = stamp;
+        }
+        Ok(())
+    }
+
+    /// Read the uploads again where one was made since. An upload judges
+    /// nothing, so it moves no epoch (the epoch is the clock of judgements:
+    /// moving it would make every handle stale and stop every staged commit),
+    /// and a catalog kept at an epoch would call an upload made after it was
+    /// built unknown, whether a door of another handler thread or the
+    /// command line made it. Comparing the stamp is cheaper than reading
+    /// every id again.
+    pub fn refresh_uploads(&mut self, store: &mut Store) -> Result<(), Error> {
+        let stamp = upload_stamp(store)?;
+        if stamp != self.uploads_stamp {
+            self.uploads = upload_ids(store)?;
+            self.uploads_stamp = stamp;
         }
         Ok(())
     }
