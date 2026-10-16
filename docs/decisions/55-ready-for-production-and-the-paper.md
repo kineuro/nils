@@ -805,6 +805,8 @@ Nima asked which of his decisions held the work back. I listed ten, each with my
     - **(i) 7b is record 57 and the short clinical import** (rulings 20 and 21.4), with the two items of (b). The agenda's J1 to J5 come later, outside 7b.
     - **(j) T1, read as follows (A3: written beside the original, which stays as written):** its "0 restarts in 24 h" counts automatic restarts (`NRestarts`, as B1's refresh checks them). The planned updates inside the 24 hours (alpha.83, alpha.85 and alpha.86) are listed beside the grade.
 
+32. **The F2 audit counts model r3's read as a read** (Nima, 2026-10-16, "go wih your recommendation"). Ruling 25 (c) named campaigns 8 to 18, the post-contrast campaigns on 2026-10-12. Campaigns 20 (model r3's test read, 779 items, 2026-10-13) and 21 (its adjudication, 15 items, 2026-10-14) came after it and are post-contrast reads too, so their sessions count as already read: N meets nothing in the audit that N read three days before. The registered frame holds 918 sessions, 144 of them with a post label, 6 under the plan's 150; the shortfall is reported with the audit's result (`studies/2026-10-08-postcontrast-time-label/plan.md`, deviation 3).
+
 ## Amendments made with this record (2026-10-08)
 - **Record 11:** its Wave 7 paragraph gains the split: 7a is this record, 7b keeps the paragraph's work; 7a's gate is T1 to T36 above.
 - **Record 40:** step 5 (System 1 in the engine) is replaced by D3, and step 7 (segment on the contracts) by H3 and H4.
