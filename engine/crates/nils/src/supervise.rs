@@ -1826,18 +1826,6 @@ fn handle(config: &Config, node: &str, busy: &Mutex<()>, runs: &Runs, mut reques
     reply(request, status, body);
 }
 
-/// The person the desk says asked, by the header the desk sets on what it
-/// forwards here and strips from what a browser sends; the token's own
-/// name where there is none.
-fn person(request: &Request) -> Option<String> {
-    request
-        .headers()
-        .iter()
-        .find(|h| h.field.equiv("X-Nils-Person"))
-        .map(|h| h.value.as_str().trim().to_string())
-        .filter(|p| !p.is_empty() && p.len() <= 200 && !p.chars().any(char::is_control))
-}
-
 /// `POST /api/supervise/uninstall {leave, confirm}` (gate T31, step 1.9):
 /// `leave` is `nils` (the services, the programs and the packs go, the
 /// data stays for the next setup) or `everything` (the data and the
