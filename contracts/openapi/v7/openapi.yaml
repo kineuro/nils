@@ -2003,6 +2003,23 @@ paths:
       responses:
         "200": {description: "The folders inside the folder, or where a browser starts"}
         "400": {description: A path that is not absolute}
+  /api/supervise/uninstall:
+    get:
+      summary: What an uninstall would remove and keep, both ways, read from the setup record and changing nothing (added in place, additively, on 2026-10-16, gate T31 step 1.9)
+      description: "{dir, name (the install directory's name, the word to type), install (the install in one line), helper (whether the uninstall goes through the helper), keep_data and everything (the lines nils uninstall --print says for each way), everything_refused (why a purge would be refused, or null)}."
+      responses:
+        "200": {description: "{dir, name, install, helper, keep_data, everything, everything_refused}"}
+        "401": {description: No token the supervisor knows}
+        "409": {description: No setup is recorded on this host}
+    post:
+      summary: Uninstall NILS from this host, apart from the call (nils uninstall --keep-data or --purge, without asking; added in place, additively, on 2026-10-16, gate T31 step 1.9)
+      description: "`leave` is `nils` (the services, the programs and the packs go; the registry and its key, the backups, the desk's people, the assistant's history, Kvasir's models and the setup's choices stay for the next setup) or `everything` (all of that and the install directory, the registry's key with it, which cannot be undone); `confirm` is the install directory's name, typed. Where the services are the machine's own and the supervisor runs as its own account, the uninstall goes through the helper (`nils-manage uninstall keep-data` or `uninstall purge`). Every ask that starts one is written first, with who asked (the `X-Nils-Person` header the desk sets from its session, else the token's name), as a line of `acts.log` beside the supervisor's configuration, and the run keeps it as `by`. The run stops the supervisor's own service among the others and goes on after it."
+      requestBody: {required: true, content: {application/json: {schema: {type: object, required: [leave, confirm], properties: {leave: {type: string, enum: [nils, everything]}, confirm: {type: string}}}}}}
+      responses:
+        "202": {description: "A run: {id, what: uninstall, command, state, pid, started_at, by}"}
+        "400": {description: "A leave that is neither, or confirm that is not the directory's name"}
+        "401": {description: No token the supervisor knows}
+        "409": {description: "No setup is recorded on this host, a purge the command would refuse (the directory is not absolute, is the root, or holds the home directory), or a run is still going"}
   /api/derivatives:
     get:
       summary: The derivatives, newest first (record 42 S4; nils derivative list)

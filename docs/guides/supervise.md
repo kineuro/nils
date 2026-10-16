@@ -173,7 +173,17 @@ install and acts on it, from the setup record of the account it runs as
   more than five seconds to read, as a network mount that does not answer
   may, is answered without its listing, and the answer says so.
 
-A restart, a reapply and an update run apart from the call that started them,
+- `GET /api/supervise/uninstall` says what an uninstall would remove and keep,
+  both ways, in the words `nils uninstall --print` uses, and the name of the
+  install's directory; `POST /api/supervise/uninstall` with `{"leave":
+  "nils", "confirm": "<that name>"}` removes NILS and keeps the data, and with
+  `"leave": "everything"` removes the directory and the registry's key with
+  it. The name is typed either way, and the supervisor checks it. Who asked
+  is written to `acts.log` beside the supervisor's configuration before
+  anything starts (the desk names the person it forwards for), and the run
+  keeps it. The desk offers this at the foot of Settings > Setup.
+
+A restart, a reapply, an update and an uninstall run apart from the call that started them,
 one at a time, and `GET /api/supervise/runs/{id}` says how each went, with the
 last lines of its output. By hand they are `nils supervise restart --part
 engine`, `nils supervise reapply --part engine` and `nils update --all`.
@@ -191,7 +201,8 @@ nils-deploy ALL=(root) NOPASSWD: /usr/local/sbin/nils-manage restart engine,
 /usr/local/sbin/nils-manage restart desk, /usr/local/sbin/nils-manage restart gateway,
 /usr/local/sbin/nils-manage restart assistant, /usr/local/sbin/nils-manage restart all,
 /usr/local/sbin/nils-manage reapply, /usr/local/sbin/nils-manage reapply all,
-/usr/local/sbin/nils-manage update
+/usr/local/sbin/nils-manage update, /usr/local/sbin/nils-manage uninstall keep-data,
+/usr/local/sbin/nils-manage uninstall purge
 ```
 
 sudo matches a command and its words exactly, so a call carrying any other
@@ -201,7 +212,9 @@ part of this install or `all`, `reapply`, which writes the engine's unit again
 from the record and starts it, `reapply all`, which writes every part's unit
 again and starts them in order, `update`, which runs `nils update --all`, and
 `update` with the name of a part that has releases of its own, which runs
-`nils update --part` for that part alone.
+`nils update --part` for that part alone, and `uninstall keep-data` and
+`uninstall purge`, which run `nils uninstall --keep-data --yes` and `nils
+uninstall --purge --yes`.
 It takes no path, no unit name and no command of its caller's.
 
 The account is named with `--account supervisor=nils-deploy`, which `--system`
@@ -214,8 +227,10 @@ is written.
 So on such an install the doors go through it: `POST /api/supervise/restart`
 runs `sudo -n /usr/local/sbin/nils-manage restart <part>`, `POST
 /api/supervise/reapply` runs `... reapply` for the engine and
-`... reapply all` with no part, and `POST /api/supervise/update-all` runs
-`... update`. Run as root, the same commands do the work themselves and ask
+`... reapply all` with no part, `POST /api/supervise/update-all` runs
+`... update`, and `POST /api/supervise/uninstall` runs `... uninstall
+keep-data` or `... uninstall purge`. A helper written before the uninstall
+was one of its words refuses it until `nils setup` writes it again. Run as root, the same commands do the work themselves and ask
 sudo for nothing. An install whose services are an account's own has no
 helper and needs none: it restarts its own units.
 
@@ -224,8 +239,10 @@ brought up to date since, is not asked for it: `nils update --all` writes
 neither the helper nor its rule. The reapply ends failed and says to run `nils
 setup` again as root, which writes both again.
 
-What the account can do with it is restart this install's services and put new
-files in place for its parts, which is what following a release is. What it
+What the account can do with it is restart this install's services, put new
+files in place for its parts, which is what following a release is, and
+uninstall this install, which the desk asks for only behind the directory's
+name typed by a person with install work. What it
 cannot do is run anything else as root, reach another install, or change the
 rule, the accounts the parts run as, or the capabilities the engine keeps.
 

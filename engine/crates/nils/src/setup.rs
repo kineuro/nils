@@ -1835,7 +1835,9 @@ fn supervisor_refusal(system: &SystemUnits, parts: &[Part]) -> Option<String> {
 /// Every command line the helper answers to: one word for each part of this
 /// install to restart, `all` for every one of them in the order they start,
 /// `reapply` for the engine and `reapply all` for every part, each written
-/// again from the record, and `update`, which follows a release. This is the
+/// again from the record, `update`, which follows a release, and `uninstall
+/// keep-data` and `uninstall purge`, which the desk asks for through the
+/// supervisor behind a typed confirmation (gate T31, step 1.9). This is the
 /// whole of what the privilege is, and both the program and the sudoers rule
 /// are written from it, so neither can name something the other does not.
 fn helper_words(state: &State) -> Vec<Vec<String>> {
@@ -1850,6 +1852,10 @@ fn helper_words(state: &State) -> Vec<Vec<String>> {
     for part in updatable_parts(state) {
         out.push(vec!["update".to_string(), part.to_string()]);
     }
+    // gate T31, step 1.9: the uninstall the desk asks for, NILS alone with
+    // the data kept or everything, each a whole command line of its own
+    out.push(vec!["uninstall".to_string(), "keep-data".to_string()]);
+    out.push(vec!["uninstall".to_string(), "purge".to_string()]);
     out
 }
 
@@ -1934,8 +1940,16 @@ fn helper_text(dir: &Path, helper: &Helper, state: &State) -> String {
          \x20     *) echo \"nils-manage update takes one part or none: {updatable}\" >&2; exit 2 ;;\n\
          \x20   esac\n\
          \x20   ;;\n\
+         \x20 uninstall)\n\
+         \x20   [ \"$#\" -eq 2 ] || {{ echo \"nils-manage uninstall takes keep-data or purge\" >&2; exit 2; }}\n\
+         \x20   case \"$2\" in\n\
+         \x20     keep-data) exec {nils} uninstall --keep-data --yes ;;\n\
+         \x20     purge) exec {nils} uninstall --purge --yes ;;\n\
+         \x20     *) echo \"nils-manage uninstall takes keep-data or purge\" >&2; exit 2 ;;\n\
+         \x20   esac\n\
+         \x20   ;;\n\
          \x20 *)\n\
-         \x20   echo \"nils-manage: restart <part>, restart all, reapply, reapply all, update or update <part>\" >&2\n\
+         \x20   echo \"nils-manage: restart <part>, restart all, reapply, reapply all, update, update <part>, or uninstall keep-data or purge\" >&2\n\
          \x20   exit 2\n\
          \x20   ;;\n\
          esac\n",
@@ -19411,6 +19425,94 @@ pub(crate) fn uninstall(args: UninstallArgs) -> Result<(), Exit> {
     Ok(())
 }
 
+/// The word a person types to uninstall an install from the desk: the name
+/// of its directory, as `nils uninstall` asks it typed before a purge.
+pub(crate) fn uninstall_name(state: &State) -> String {
+    Path::new(&state.dir)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default()
+}
+
+/// Gate T31, step 1.9: what an uninstall from the desk would remove and
+/// keep, both ways, in the words `nils uninstall --print` says, read from
+/// the record and changing nothing: `GET /api/supervise/uninstall`. A purge
+/// the command would refuse says why in `everything_refused`.
+pub(crate) fn uninstall_preview() -> Result<serde_json::Value, String> {
+    let state = read_state()
+        .ok_or_else(|| format!("no setup is recorded at {}", state_path().display()))?;
+    let console = Console::new(true);
+    let me = std::env::current_exe()
+        .ok()
+        .map(|p| std::fs::canonicalize(&p).unwrap_or(p));
+    let said = |leaving: Leaving| {
+        let removal = gather_removal(&state, me.clone(), leaving);
+        removal_text(&removal, leaving, &console)
+            .lines()
+            .map(|l| plain_words(l).trim_end().to_string())
+            .filter(|l| !l.trim().is_empty())
+            .collect::<Vec<_>>()
+    };
+    let refused = safe_to_purge(Path::new(&state.dir), home_dir().as_deref()).err();
+    Ok(serde_json::json!({
+        "dir": state.dir,
+        "name": uninstall_name(&state),
+        "install": describe_state(&state),
+        "helper": state.helper.is_some(),
+        "keep_data": said(Leaving::KeepData),
+        "everything": said(Leaving::Purge),
+        "everything_refused": refused,
+    }))
+}
+
+/// A line without the terminal's colour codes.
+fn plain_words(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut chars = line.chars();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            for c in chars.by_ref() {
+                if c.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+            continue;
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Gate T31, step 1.9: the uninstall a supervisor runs for the desk,
+/// `keep-data` (NILS alone, the data kept) or `purge` (everything), without
+/// asking, since the desk asked the person to type the directory's name
+/// first. Where the services are the machine's own and this is the account
+/// the supervisor runs as, the helper does it as root, with a command line
+/// the rule names; otherwise this process does it, as `nils uninstall` does.
+pub(crate) fn uninstall_supervised(leave: &str) -> Result<(), Exit> {
+    let (keep_data, purge) = match leave {
+        "keep-data" => (true, false),
+        "purge" => (false, true),
+        other => {
+            return Err(usage(format!(
+                "{other}: the uninstall is keep-data or purge"
+            )));
+        }
+    };
+    if let Some(state) = read_state()
+        && let Some(argv) = helper_call(&state, &["uninstall", leave])
+    {
+        return run_helper(&argv);
+    }
+    uninstall(UninstallArgs {
+        keep_data,
+        purge,
+        yes: true,
+        print: false,
+        dir: None,
+    })
+}
+
 /// With no record, what a setup that stopped before it wrote one leaves in
 /// the places a setup uses: this program when it is `nils`, the `nils-desk`
 /// beside it, the first-party packs beside it, and the base directory only
@@ -28027,6 +28129,70 @@ mod tests {
                 "{args:?}: {said}"
             );
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Gate T31, step 1.9: the helper uninstalls with the data kept or
+    /// everything, each by a word of its own that the rule names, and runs
+    /// nothing for any other word. The recorded engine is `echo` here, so
+    /// what it would run is printed and nothing is removed.
+    #[cfg(unix)]
+    #[test]
+    fn the_helper_uninstalls_keeping_the_data_or_everything_and_nothing_else() {
+        if cfg!(target_os = "macos") {
+            return;
+        }
+        let Some(echo) = ["/bin/echo", "/usr/bin/echo"]
+            .into_iter()
+            .find(|p| Path::new(p).exists())
+        else {
+            return;
+        };
+        let plan = deployment();
+        let mut state = deployed_state(&plan);
+        state.parts.get_mut("engine").expect("an engine").path = echo.to_string();
+        let helper = plan.helper.clone().expect("a deployment keeps one");
+        let text = helper_text(&plan.dir, &helper, &state);
+        let dir = scratch("helper-uninstall");
+        let script = dir.join("nils-manage");
+        std::fs::write(&script, &text).unwrap();
+        let run = |args: &[&str]| {
+            Command::new("sh")
+                .arg(&script)
+                .args(args)
+                .output()
+                .expect("sh runs the helper")
+        };
+        for (word, said) in [
+            ("keep-data", "uninstall --keep-data --yes"),
+            ("purge", "uninstall --purge --yes"),
+        ] {
+            let out = run(&["uninstall", word]);
+            assert!(
+                out.status.success(),
+                "{word}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), said);
+        }
+        for words in [
+            &["uninstall"][..],
+            &["uninstall", "all"],
+            &["uninstall", "purge", "--dir"],
+            &["uninstall", "keep-data", "now"],
+        ] {
+            let out = run(words);
+            assert_eq!(out.status.code(), Some(2), "{words:?}");
+            assert!(out.stdout.is_empty(), "{words:?} ran something");
+        }
+        let rule = sudoers_text(&helper, &state);
+        for line in [
+            "/usr/local/sbin/nils-manage uninstall keep-data",
+            "/usr/local/sbin/nils-manage uninstall purge",
+        ] {
+            assert!(rule.contains(line), "{line} is not in {rule}");
+        }
+        assert!(!rule.contains('*'), "a wildcard takes anything: {rule}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

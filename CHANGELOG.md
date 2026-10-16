@@ -4,6 +4,10 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Added
+
+- The supervisor uninstalls NILS for the desk (gate T31, step 1.9). `GET /api/supervise/uninstall` says what an uninstall would remove and keep, both ways, in the words of `nils uninstall --print`, with the install directory's name; `POST /api/supervise/uninstall {leave: nils | everything, confirm}` runs `nils uninstall --keep-data` or `--purge` without asking, apart from the call, once `confirm` is that name. Where the services are the machine's own, it goes through the helper, which gains the words `uninstall keep-data` and `uninstall purge` and its rule the two command lines; a helper written before refuses them until `nils setup` writes it again. Who asked, as the desk names the person it forwards for (`X-Nils-Person`), is written to `acts.log` beside the supervisor's configuration before the run starts, and the run keeps it as `by`.
+
 ## [1.0.0-alpha.87] - 2026-10-16
 
 Wave 7a's last engine: hospital reserve numbers read beside the personnummer and never kept, spare numbers through a map, model cards that gain their missing claims, the damaged-header flag's three signs (pack contract 11, MRI pack 1.3.0), the post-contrast label's clock across studies (time-rule-2), kept Query cards, LST-AI's thin image, and fixes from the wave's audit.
