@@ -1207,6 +1207,7 @@ pub fn serve(home: &Home, args: ServeArgs) -> Result<(), Exit> {
             let home = home.clone();
             let roots = args.ingest_root.clone();
             let stop = Arc::clone(&stop_queue);
+            let packs = pack_dir.clone();
             // lab 26b, finding 4: a job this engine queues runs with the
             // workers the engine was started with, where the caller
             // named none
@@ -1215,7 +1216,9 @@ pub fn serve(home: &Home, args: ServeArgs) -> Result<(), Exit> {
             } else {
                 args.workers.max(1)
             };
-            std::thread::spawn(move || queue_worker(&home, &roots, workers, lane, &stop))
+            std::thread::spawn(move || {
+                queue_worker(&home, &roots, workers, lane, packs.as_deref(), &stop)
+            })
         })
         .collect()
     } else {
@@ -1714,6 +1717,7 @@ fn queue_worker(
     roots: &[String],
     workers: usize,
     lane: nils_registry::job::Lane,
+    pack_dir: Option<&std::path::Path>,
     stop: &std::sync::atomic::AtomicBool,
 ) {
     let stopped = || stop.load(Ordering::SeqCst);
@@ -1733,6 +1737,7 @@ fn queue_worker(
                             workers: Some(workers),
                             quiet: true,
                             lane,
+                            pack_dir,
                         },
                         &stopped,
                     )

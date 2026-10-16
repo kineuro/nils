@@ -10469,6 +10469,7 @@ fn jobs_command(home: &Home, command: JobsCommand) -> Result<(), Exit> {
                     workers: None,
                     quiet: false,
                     lane,
+                    pack_dir: None,
                 },
                 &|| cancel.stop(),
             )
