@@ -31,11 +31,9 @@ jobs:
         run: |
           run=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$GITHUB_SHA&branch=main&event=push&status=success" --jq '.workflow_runs[0].id // empty')
           if [ -n "$run" ]; then echo "ci run $run passed on main for this commit"; exit 0; fi
-          pr="" head=""
-          read -r pr head < <(scripts/release-pr-head.sh "$GITHUB_SHA") || true
-          if [ -n "$head" ]; then
-            run=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$head&event=pull_request&status=success" --jq '.workflow_runs[0].id // empty')
-          fi
+          pr="" head="" run=""
+          # only that pull request's own run, made against main (scripts/release-pr-head.sh)
+          read -r pr head run < <(scripts/release-pr-head.sh "$GITHUB_SHA") || true
           [ -n "$run" ] || { echo "no ci run passed for $GITHUB_SHA on main or on its pull request's same tree: a rules release is tagged on a commit whose checks passed"; exit 1; }
           echo "ci run $run passed on pull request #$pr, whose head has this commit's tree"
       - name: the pack states the tag's version, and is packed alone

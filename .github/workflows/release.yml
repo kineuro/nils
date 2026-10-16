@@ -44,13 +44,11 @@ jobs:
           else
             # main's run has not finished (the tag went on the pull request's checks) or kept
             # nothing: the pull request's ci run built the same tree
+            # the script returns only that pull request's own run, made against main
             pr="" head=""
-            read -r pr head < <(scripts/release-pr-head.sh "$GITHUB_SHA") || true
-            if [ -n "$head" ]; then
-              run=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$head&event=pull_request&status=success" --jq '.workflow_runs[0].id // empty')
-              if [ -n "$run" ] && [ "$(kept "$run")" -lt 6 ]; then run=""; fi
-              if [ -n "$run" ]; then echo "the binaries pull request #$pr's ci run $run built from this tree"; fi
-            fi
+            read -r pr head run < <(scripts/release-pr-head.sh "$GITHUB_SHA") || true
+            if [ -n "$run" ] && [ "$(kept "$run")" -lt 6 ]; then run=""; fi
+            if [ -n "$run" ]; then echo "the binaries pull request #$pr's ci run $run built from this tree"; fi
           fi
           echo "run=$run" >> "$GITHUB_OUTPUT"
           if [ -z "$run" ]; then echo "no ci run kept this tree's binaries, so they are built here"; fi
