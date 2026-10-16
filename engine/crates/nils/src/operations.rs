@@ -182,6 +182,71 @@ fn count(store: &mut Store, sql: &str) -> Result<i64, StoreError> {
     store.query(sql, &[])?[0].int(0)
 }
 
+/// Ruling 35 (b) of 2026-10-16: body part and post-contrast are optional
+/// models a person runs when the data need them, so each step says how many
+/// of the scans in scope its model would add an answer to, and what that
+/// is: for body part the scans with no body part (no rule's and no model's
+/// answer); for post-contrast the scans that can be T1-type brain by their
+/// stored axes (the test the cascade applies, [`crate::score::can_be_t1_brain`])
+/// whose contrast neither the rules nor its model told. A count, never a
+/// value; read-only.
+fn hint(
+    store: &mut Store,
+    step: &str,
+    holds: &str,
+    groups: &[String],
+) -> Result<Value, StoreError> {
+    let (axis, stack, member, item) = (
+        store.qualified("classification_axis"),
+        store.qualified("stack"),
+        store.qualified("review_member"),
+        store.qualified("review_item"),
+    );
+    let has = |name: &str| {
+        format!(
+            "EXISTS (SELECT 1 FROM {axis} a WHERE a.stack_id = x.id AND a.axis = '{name}' \
+             AND a.value IS NOT NULL AND a.value <> '')"
+        )
+    };
+    let greatest = |name: &str| {
+        format!(
+            "COALESCE((SELECT MAX(a.value) FROM {axis} a WHERE a.stack_id = x.id AND a.axis = '{name}' \
+             AND a.value IS NOT NULL AND a.value <> ''), '')"
+        )
+    };
+    // what its model answered already, staged or put in force since
+    let answered = format!(
+        "EXISTS (SELECT 1 FROM {member} rm JOIN {item} ri ON ri.id = rm.item_id \
+         WHERE rm.stack_id = x.id AND ri.kind IN ({}) AND ri.status IN ('staged', 'accepted'))",
+        quoted(groups)
+    );
+    let (kind, wanting) = if step == "post_contrast" {
+        let brain = format!(
+            "((NOT {} AND NOT {}) OR {} LIKE '%brain%' OR EXISTS (SELECT 1 FROM {axis} a \
+             WHERE a.stack_id = x.id AND a.axis = 'body_region' AND a.value = 'head'))",
+            has("body_part"),
+            has("body_region"),
+            greatest("body_part"),
+        );
+        (
+            "t1_brain_contrast_unknown",
+            format!(
+                "{} = 'T1w' AND {} NOT IN ('TOF', 'PC') AND {brain} AND NOT {}",
+                greatest("base"),
+                greatest("technique"),
+                has("post_contrast"),
+            ),
+        )
+    } else {
+        ("no_body_part", format!("NOT {}", has("body_part")))
+    };
+    let scans = count(
+        store,
+        &format!("SELECT COUNT(*) FROM {stack} x WHERE {holds} AND {wanting} AND NOT {answered}"),
+    )?;
+    Ok(json!({"kind": kind, "scans": scans}))
+}
+
 /// Why a step's run is refused: the status a door answers it with, a short
 /// reason a client tells refusals apart by, and the words a person reads.
 #[derive(Debug, Clone, PartialEq)]
@@ -1155,6 +1220,8 @@ pub(crate) fn steps(
             (None, None) => None,
         };
         let refused = refusal(name, at.busy(), planned, scans);
+        // ruling 35 (b): how many scans its model would add an answer to
+        let hint = hint(store, name, &holds, &groups)?;
         // record 55 F5: post-contrast's own label, the time rule's, on the
         // scans in scope
         let label = if name == "post_contrast" {
@@ -1177,6 +1244,7 @@ pub(crate) fn steps(
             "jobs": at.jobs(),
             "refusal": refused.map(|r| r.doc()),
             "label": label,
+            "hint": hint,
         }));
     }
     Ok(out)

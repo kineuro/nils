@@ -1,18 +1,23 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! Scoring at arrival and the slice cache (record 55 E5; spec section
-//! 10.4; gate test T26): a dataset brought in gets its image answers
-//! without a manual run, and a re-score after a model update reads the
-//! slice cache instead of the files.
+//! 10.4; gate test T26 as ruling 35 (b) wrote it beside the original): a
+//! dataset brought in is scored by System 1 without a manual run; body part
+//! and post-contrast are optional models a person runs from the dataset's
+//! step, and a re-score after a model update reads the slice cache instead
+//! of the files.
 //!
-//! A bring-in ends with `score`, which queues the body-part step's run over
-//! the batch's new stacks with the chosen model, since its pipeline
-//! declares `x-nils.on-arrival`; the run is given the working place's
-//! `slice-cache/` and a `stacks.json` that names each file's SOP Instance
-//! UID, and the sha256 of each file a run reported reading whole is kept.
-//! After a new head is chosen, the step's run from its door finds every
-//! file's sha256 in `stacks.json`, and the stand-in image reads its inputs
-//! from the cache: the files it reads are counted in a log, and none is
-//! read. A bring-in of nothing new queues no score, and a caller who may
+//! A bring-in ends with `score`, which queues System 1's run over the
+//! batch's new stacks with the chosen model, since its pipeline declares
+//! `x-nils.on-arrival`, and queues no body part, though its pipeline
+//! declares it too: the score names it under `optional`, and the dataset's
+//! body-part step waits, saying how many scans have no body part (`hint`).
+//! A person runs it from the step's door; the run is given the working
+//! place's `slice-cache/` and a `stacks.json` that names each file's SOP
+//! Instance UID, and the sha256 of each file a run reported reading whole
+//! is kept. After a new head is chosen, the step's run from its door finds
+//! every file's sha256 in `stacks.json`, and the stand-in image reads its
+//! inputs from the cache: the files it reads are counted in a log, and none
+//! is read. A bring-in of nothing new queues no score, and a caller who may
 //! not run a pipeline gets the score skipped, with the reason.
 //!
 //! No container runtime is needed and no real image is run: a stand-in for
@@ -88,7 +93,52 @@ env["FAKE_MOUNTS"] = json.dumps(mounts)
 sys.exit(subprocess.call(argv, env=dict(os.environ, **env)))
 "#;
 
-/// The body-part pipeline's stand-in, which scores at arrival and keeps
+/// System 1's stand-in, which scores at arrival: it reads the registry's
+/// rows and no file, and says T1w on base for every stack.
+fn system1_stand_in() -> String {
+    format!(
+        r#"# SPDX-License-Identifier: AGPL-3.0-only
+name: system1-score
+schema-version: "0.5"
+tool-version: "1"
+container-image:
+  type: docker
+  image: "example.org/system1-stand-in@sha256:{}"
+command-line: |
+  python3 -c '
+  import json, os, sys
+  m = json.load(open(sys.argv[1])); out = sys.argv[2]
+  man = json.load(open(sys.argv[3] + "/manifest.json"))
+  ids = [x["model_id"] for x in man["models"] if x["input"] == "model"]
+  assert len(ids) == 1, man
+  units, opinions = [], []
+  for s in m["stacks"]:
+      d = os.path.join(out, "system1"); os.makedirs(d, exist_ok=True)
+      json.dump({{"value": "T1w"}}, open(os.path.join(d, "%d.json" % s["stack_id"]), "w"))
+      units.append({{"unit_id": s["unit"], "status": "succeeded", "derivatives": ["system1/%d.json" % s["stack_id"]]}})
+      opinions.append({{"stack_id": s["stack_id"], "axis": "base", "value": "T1w", "p": 0.9, "reliability": 0.9,
+                        "model_id": ids[0], "rules_read": {{"value": "none"}}}})
+  json.dump({{"schema_version": "1", "units": units, "opinions": opinions}}, open(os.path.join(out, "results.json"), "w"))
+  ' [Manifest] [OutputLocation] [Inputs]
+x-nils:
+  analysis-level: stack
+  on-arrival: true
+  input: {{layout: stacks, header: true, rows: true}}
+  inputs:
+    - {{id: model, type: model}}
+  outputs:
+    - id: opinion
+      kind: output
+      path-template: "system1/{{stack}}.json"
+      media-type: application/json
+  needs: {{gpu: none}}
+  opinions: [{{axis: base}}]
+"#,
+        "e".repeat(64)
+    )
+}
+
+/// The body-part pipeline's stand-in, which declares scoring at arrival and keeps
 /// its input in the slice cache: per stack, where every file's sha256 is in
 /// `stacks.json` and the cache holds the entry those identities key, it
 /// reads no file; otherwise it reads each file whole, logs the read, keeps
@@ -509,12 +559,24 @@ fn round(pg: Option<(String, String)>) {
         "--role",
         "working",
     ]);
-    // the body-part pipeline, which scores at arrival, and its model
+    // the body-part pipeline, which declares scoring at arrival, and its
+    // model; System 1's pipeline, which scores at arrival, and its model
     let descriptor = work.file("bodypart-infer-fusion.yml", stand_in().as_bytes());
     let added = home.json(&["pipeline", "add", descriptor.to_str().unwrap(), "--json"]);
     std::fs::remove_file(&descriptor).unwrap();
     assert_eq!(added["label"], "bodypart-infer-fusion@1", "{added}");
+    let descriptor = work.file("system1-score.yml", system1_stand_in().as_bytes());
+    let added = home.json(&["pipeline", "add", descriptor.to_str().unwrap(), "--json"]);
+    std::fs::remove_file(&descriptor).unwrap();
+    assert_eq!(added["label"], "system1-score@1", "{added}");
     let files = TempDir::new("arrival-models");
+    let (s1, _) = register(
+        &home,
+        &files,
+        json!({"name": "s1", "version": "t1", "kind": "pass", "task": "system1",
+               "gate": {"axes": {"base": {"lambda1": 0.9, "lambda2": 0.99}}, "evidence": "run:test"}}),
+        b"a system one",
+    );
     let (_, encoder_digest) = register(
         &home,
         &files,
@@ -542,7 +604,7 @@ fn round(pg: Option<(String, String)>) {
             .to_string()
             .as_bytes(),
     );
-    for m in [head, coarse] {
+    for m in [s1, head, coarse] {
         home.ok(&[
             "model",
             "admit",
@@ -574,32 +636,63 @@ fn round(pg: Option<(String, String)>) {
     let result = &score["result"];
     assert_eq!(result["batch"], "first", "{score}");
     assert_eq!(result["new_stacks"], 6, "{score}");
+    // ruling 35 (b): System 1 alone scores at arrival
     let queued_runs = result["queued"].as_array().unwrap();
     assert_eq!(queued_runs.len(), 1, "{score}");
-    assert_eq!(queued_runs[0]["step"], "body_part", "{score}");
+    assert_eq!(queued_runs[0]["step"], "system1", "{score}");
     assert_eq!(queued_runs[0]["stacks"], 6, "{score}");
-    // post-contrast and System 1 (record 55 D3) are not installed: each
-    // skipped, and why
-    let skipped = result["skipped"].as_array().unwrap();
-    assert_eq!(skipped.len(), 2, "{score}");
-    assert_eq!(skipped[0]["step"], "post_contrast", "{score}");
-    assert_eq!(skipped[0]["reason"], "no_pipeline", "{score}");
-    assert_eq!(skipped[1]["step"], "system1", "{score}");
-    assert_eq!(skipped[1]["reason"], "no_pipeline", "{score}");
+    assert_eq!(result["skipped"], json!([]), "{score}");
+    // body part and post-contrast are a person's runs, never the arrival's
+    assert_eq!(
+        result["optional"],
+        json!(["body_part", "post_contrast"]),
+        "{score}"
+    );
     // the run with the chosen model, for the dataset, under the chain's
-    // principal, and it ran
+    // principal, and it ran, reading no file
     let run = server.over(queued_runs[0]["job"].as_i64().unwrap());
     assert_eq!(run["state"], "done", "{run}");
-    assert_eq!(run["args"]["step"], "body_part", "{run}");
+    assert_eq!(run["args"]["step"], "system1", "{run}");
     assert_eq!(run["args"]["for"], "dataset:ds", "{run}");
     assert_eq!(run["args"]["arrival"]["batch"], "first", "{run}");
     let argv = run["args"]["queued"].to_string();
-    assert!(argv.contains(&format!("\"--model\",\"{head}\"")), "{run}");
-    // every scan has its image answer, and every file was read once
+    assert!(argv.contains(&format!("\"--model\",\"{s1}\"")), "{run}");
+    assert_eq!(reads(&read_log), 0, "System 1 reads rows, no file");
+    // every scan has System 1's opinion
+    let opinions = {
+        let mut store = home.store();
+        let sql = format!(
+            "SELECT COUNT(DISTINCT stack_id) FROM {} WHERE model_id = {s1}",
+            store.qualified("opinion")
+        );
+        store.query(&sql, &[]).unwrap()[0].int(0).unwrap()
+    };
+    assert_eq!(opinions, 6);
+    // the body-part step waits for a person, and says what it would add
+    let s = server.get("/api/datasets/ds/summary", READS);
+    let bp = step(&s, "body_part");
+    assert_eq!(bp["state"], "waiting", "{s}");
+    assert_eq!(bp["answered"], 0, "{s}");
+    assert_eq!(
+        bp["hint"],
+        json!({"kind": "no_body_part", "scans": 6}),
+        "{s}"
+    );
+    let pc = step(&s, "post_contrast");
+    assert_eq!(pc["hint"]["kind"], "t1_brain_contrast_unknown", "{s}");
+    assert_eq!(jobs_of(&home, "pipeline").len(), 1, "System 1's run only");
+
+    // a person runs body part from its step: every scan has its image
+    // answer, and every file was read once
+    let (status, started) = server.run("datasets/ds", "body_part", OPS);
+    assert_eq!(status, 202, "{started}");
+    let first_run = server.over(started["job"].as_i64().unwrap());
+    assert_eq!(first_run["state"], "done", "{first_run}");
     let s = server.get("/api/datasets/ds/summary", READS);
     let bp = step(&s, "body_part");
     assert_eq!(bp["state"], "done", "{s}");
     assert_eq!(bp["answered"], 6, "{s}");
+    assert_eq!(bp["hint"]["scans"], 0, "{s}");
     assert_eq!(reads(&read_log), 12);
     // the content of each file read whole is known now
     assert_eq!(known(&home), 12);
@@ -668,7 +761,7 @@ fn round(pg: Option<(String, String)>) {
     let skipped_steps = read["result"]["chain_ended"]["skipped"].to_string();
     assert!(skipped_steps.contains("score"), "{read}");
     assert_eq!(jobs_of(&home, "score").len(), 1);
-    assert_eq!(jobs_of(&home, "pipeline").len(), 2);
+    assert_eq!(jobs_of(&home, "pipeline").len(), 3);
 
     // a caller who may sort but not run a pipeline: the score is skipped,
     // and says why
@@ -707,7 +800,7 @@ fn round(pg: Option<(String, String)>) {
         skipped[0]["why"].as_str().unwrap().contains("detail quasi"),
         "{score}"
     );
-    assert_eq!(jobs_of(&home, "pipeline").len(), 2, "no run was queued");
+    assert_eq!(jobs_of(&home, "pipeline").len(), 3, "no run was queued");
     drop(server);
 
     // the cache as `nils cache show` reads it

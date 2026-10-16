@@ -5562,7 +5562,8 @@ fn a_chain_runs_through_the_jobs_door_and_a_refused_step_ends_it() {
     assert_eq!(scored["state"], "done", "{scored}");
     assert_eq!(scored["kind"], "score", "{scored}");
     assert_eq!(scored["result"]["new_stacks"], 2, "{scored}");
-    // no pipeline answers either step here: each is skipped, and says why
+    // ruling 35 (b): System 1 alone scores at arrival, and no pipeline
+    // answers it here: it is skipped, and says why
     assert_eq!(
         scored["result"]["queued"],
         serde_json::json!([]),
@@ -5570,6 +5571,15 @@ fn a_chain_runs_through_the_jobs_door_and_a_refused_step_ends_it() {
     );
     assert_eq!(
         scored["result"]["skipped"][0]["reason"], "no_pipeline",
+        "{scored}"
+    );
+    assert_eq!(
+        scored["result"]["skipped"][0]["step"], "system1",
+        "{scored}"
+    );
+    assert_eq!(
+        scored["result"]["skipped"].as_array().map(Vec::len),
+        Some(1),
         "{scored}"
     );
     assert_eq!(

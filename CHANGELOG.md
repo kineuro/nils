@@ -7,6 +7,13 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 ### Fixed
 
 - A job queued by hand or by a client of the jobs door reads packs from the deployment's pack directory when its own command line names none. A server started with `--pack-dir` and no packs in the registry's home or the standard folders ran a job queued with `nils jobs enqueue -- classify --pack mri` (and any other verb that reads packs: `digest --pack`, `pick run`, `score`, `explain`) with no pack directory of its own, and the job failed at once with "no pack directory: pass --pack-dir, set NILS_PACK_DIR, or put packs in one of ...". Only the steps of a bring-in's chain, and the verbs the jobs door knew by name, were queued with the deployment's `--pack-dir` appended. The worker now hands the packs the server serves to every job it runs as `NILS_PACK_DIR`, in one place, wherever the job came from; a command line that names its own `--pack-dir` keeps it.
+### Changed
+
+- A dataset's arrival is scored by System 1 alone (record 55, ruling 35 (b) of 2026-10-16; gate test T26). The last step of a bring-in, `nils score @dataset --name <batch>`, queues System 1's run over the batch's new stacks and no longer queues body part or post-contrast, though their pipelines declare `x-nils.on-arrival`: they are optional models a person runs from the dataset's step (`POST /api/datasets/{name}/steps/{step}/run`) when the data need them. The score's result names them under `optional`. `nils score ... --step body_part` (or `post_contrast`) still queues one over a batch's new stacks, with the parameters its pipeline declares for a run at arrival (body part's slice cache among them).
+
+### Added
+
+- Each operation's step on a dataset's summary and a cohort's document says how many of its scans its model would add an answer to (`hint {kind, scans}`, ruling 35 (b)): for body part the scans with no body part, neither the rules' nor its model's (`no_body_part`); for post-contrast the scans that can be T1-type brain by their stored axes, the test its cascade applies, whose contrast neither the rules nor its model told (`t1_brain_contrast_unknown`). A count only.
 
 ## [1.0.0-alpha.87] - 2026-10-16
 

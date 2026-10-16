@@ -533,7 +533,7 @@ A card registered without the label set its model was trained on, its tested cla
 
 ## Score a dataset as it arrives
 
-A dataset's bring-in ends with `score` (record 55 E5): the image models answer its new scans without anyone starting a run.
+A dataset's bring-in ends with `score` (record 55 E5): System 1 answers its new scans without anyone starting a run. Body part and post-contrast are optional models that add value where the data need them (ruling 35 (b)): a person runs them from the dataset's step, and they never run at arrival.
 
 1. Bring the dataset in, as ever:
 
@@ -541,7 +541,7 @@ A dataset's bring-in ends with `score` (record 55 E5): the image models answer i
    nils bring-in @scans
    ```
 
-   After the digest, the fingerprints, the sort and any pick run, `nils score @scans --name <batch>` runs as the last step. For body part, then post-contrast, it queues the step's run over the stacks the batch brought (those whose first batch is the bring-in's), with the model the site chose for the task, where the step's pipeline declares `x-nils.on-arrival`. The run goes to the pipeline lane, so it never holds up the next digest, and the dataset's step shows it queued, running and done. Post-contrast reads the body part's answers, so where both run it is queued once the body part's run ends done.
+   After the digest, the fingerprints, the sort and any pick run, `nils score @scans --name <batch>` runs as the last step. It queues System 1's run over the stacks the batch brought (those whose first batch is the bring-in's), with the model the site chose for the task `system1`, where its pipeline declares `x-nils.on-arrival`. The run goes to the pipeline lane, so it never holds up the next digest. The result names body part and post-contrast under `optional`.
 
 2. Read what it queued and what it skipped:
 
@@ -549,7 +549,9 @@ A dataset's bring-in ends with `score` (record 55 E5): the image models answer i
    nils jobs show <score job>
    ```
 
-   The result names each queued run, and each step it skipped with its reason: its pipeline does not score at arrival (`not_on_arrival`), nothing here runs it (`no_pipeline`, `no_model`, `no_runtime`, `no_place`), the machine lacks what it needs (`requirements`), or the person who brought the dataset in may not run a pipeline (`no_grant`: a run reads pixels, so it needs Pipelines work at detail quasi). The bring-in itself never fails because of it, and a bring-in that read nothing new queues no score.
+   The result names the queued run, and a step it skipped with its reason: its pipeline does not score at arrival (`not_on_arrival`), nothing here runs it (`no_pipeline`, `no_model`, `no_runtime`, `no_place`), the machine lacks what it needs (`requirements`), or the person who brought the dataset in may not run a pipeline (`no_grant`: a run reads pixels, so it needs Pipelines work at detail quasi). The bring-in itself never fails because of it, and a bring-in that read nothing new queues no score.
+
+3. Where the data need body part or post-contrast, run it from the dataset's step: the desk's Run on the step, or its door, `POST /api/datasets/{name}/steps/{step}/run`. Each step says how many scans its model would add an answer to (`hint` on the dataset's summary): the scans with no body part, and the scans that can be T1-type brain whose contrast is unknown. `nils score @scans --name <batch> --step body_part` runs body part over one batch's new stacks with the parameters its pipeline declares for a run at arrival, the slice cache among them; with `--step post_contrast` as well, post-contrast is queued once the body part's run ends done.
 
 A pipeline scores at arrival with `x-nils.on-arrival: true`, or with the parameters such a run is given, `x-nils.on-arrival: {params: {cache: /cache, overlap: "off", cache_fill: touched}}`, as body part's does: at arrival its stages run one after the other with the slice cache, and a pass over scans the registry holds already runs them overlapped without it.
 
@@ -573,7 +575,7 @@ The slice cache keeps the small pictures a model reads of each scan (record 55 E
      --model bodypart-student@s1-r7 --model bodypart-defer@d3-r7 --model bodypart-cascade@r7-fast
    ```
 
-   The models are the cascade and its parts, in the order the body-part step gives them. The run reads each scan's inputs from the cache where it holds them and reads the files of the rest. A run from the desk's dataset page or its door (`POST /api/datasets/{name}/steps/body_part/run`) is a pass over scans the registry holds: it takes body part's fast path, the stages overlapped in one worker pool with a worker a core of the lane, and reads no cache (record 55 T24; the cache is filled at arrival, for new data only).
+   The models are the cascade and its parts, in the order the body-part step gives them. The run reads each scan's inputs from the cache where it holds them and reads the files of the rest. A run from the desk's dataset page or its door (`POST /api/datasets/{name}/steps/body_part/run`) is a pass over scans the registry holds: it takes body part's fast path, the stages overlapped in one worker pool with a worker a core of the lane, and reads no cache (record 55 T24). The cache is filled by a run that asks for it: `--param cache=/cache`, or `nils score --step body_part` over a batch's new stacks.
 
 3. See what the cache holds:
 

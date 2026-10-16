@@ -156,8 +156,8 @@ enum Command {
     /// Bring in what is new: pseudonymise a dataset, then digest, fingerprint
     /// and classify it, as one chain of queued jobs (record 26)
     BringIn(BringInArgs),
-    /// Score a batch's new stacks with the image models that score at
-    /// arrival: the last step of a bring-in (record 55 E5)
+    /// Score a batch's new stacks with System 1: the last step of a
+    /// bring-in (record 55 E5); body part or post-contrast with --step
     Score(score::ScoreArgs),
     /// The slice cache: what it keeps, and the versions no model reads any
     /// more (record 55 E5)

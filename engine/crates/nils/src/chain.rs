@@ -9,8 +9,9 @@
 //! dataset: pseudonymise, then digest, fingerprint and classify, the
 //! digest sharing the pseudonymise step's batch name, and since record 55
 //! (H2) a pick run for the dataset where it feeds a cohort and the pack
-//! declares picks, and (E5) a last step, `score`, which queues the image
-//! models' runs over the batch's new stacks (`crate::score`).
+//! declares picks, and (E5) a last step, `score`, which queues System 1's
+//! run over the batch's new stacks (`crate::score`; ruling 35 (b): body
+//! part and post-contrast are a person's runs, never the bring-in's).
 
 use nils_registry::job::{self, Job};
 use nils_registry::place::Place;
@@ -116,8 +117,8 @@ pub(crate) fn picks_named(
     steps
 }
 
-/// The score a bring-in ends with (record 55 E5): the image models'
-/// runs over the batch's new stacks, the batch named as the digest is.
+/// The score a bring-in ends with (record 55 E5, ruling 35 (b)): System
+/// 1's run over the batch's new stacks, the batch named as the digest is.
 pub(crate) fn score_step(
     place: &Place,
     batch: &str,
@@ -189,8 +190,8 @@ pub(crate) fn bring_in(
     {
         steps.push(pick_step(place, pack));
     }
-    // record 55 E5: the image models score the batch's new stacks without
-    // a manual run, the last step
+    // record 55 E5, ruling 35 (b): System 1 scores the batch's new stacks
+    // without a manual run, the last step
     steps.push(score_step(place, &name, pack_dir));
     let first = steps.remove(0);
     (first, steps)
@@ -372,8 +373,8 @@ pub(crate) fn continue_chain(store: &mut Store, job: &Job) -> Result<Option<i64>
 }
 
 /// A step of a chain that sorts what a read brought: the fingerprints, the
-/// sort, the pick after it, the pictures of what was sorted, and the image
-/// models' score of it (record 55 E5).
+/// sort, the pick after it, the pictures of what was sorted, and System
+/// 1's score of it (record 55 E5).
 fn sorting(step: &[String]) -> bool {
     matches!(
         step.first().map(String::as_str),
@@ -531,7 +532,7 @@ mod tests {
         assert_eq!(then[0], ["digest", "@scans", "--name", "batch-1"]);
         assert_eq!(then[1], ["fingerprint"]);
         assert_eq!(then[2], ["classify", "--pack", "mri"]);
-        // record 55 E5: the image models score the batch, last
+        // record 55 E5: System 1 scores the batch, last
         assert_eq!(then[3], ["score", "@scans", "--name", "batch-1"]);
         let (first, then) = bring_in(&place("deidentified"), None, None, None, false, true);
         assert_eq!(first[0], "digest");
