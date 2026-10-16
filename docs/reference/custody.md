@@ -34,9 +34,9 @@ Every store the registry at `<home>` keeps (backend sqlite), rendered by `nils c
 
 | | |
 |---|---|
-| what | the identifiers behind the codes, encrypted under the registry's key; the linkages between subjects; the audit of every read |
+| what | the identifiers behind the codes, encrypted under the registry's key; the linkages between subjects; the audit of every read; a personnummer is never kept here, not even sealed: its identity is its keyed lookup alone and its subject is shown by its code (record 55, the ruling of 2026-10-08) |
 | where | `<home>/linkage.db`, mode 600 (SQLite keeps linkage.db-wal and linkage.db-shm beside it while a connection is open) |
-| holds | identifying: the identifiers (encrypted) and their keyed lookups<br>technical: the linkages, the id types, the read audit (actor, time, why, identity id) |
+| holds | identifying: the identifiers (encrypted), except a personnummer, which is never kept, and their keyed lookups<br>technical: the linkages, the id types, the read audit (actor, time, why, identity id) |
 | owner | the registry's operator; the identifiers are the clinic's |
 | kept | until purged; a purged identifier is filed again only when its file is parsed again (changed, or new), not by a digest that finds the file unchanged |
 | read | `nils linkage show <code> [--why <text>]` (every read is audited) |
@@ -62,7 +62,7 @@ Every store the registry at `<home>` keeps (backend sqlite), rendered by `nils c
 
 | | |
 |---|---|
-| what | the files a digest refused, each with its class and detail, and one review item per batch and class |
+| what | the files a digest refused, each with its class and detail, and one review item per batch and class; and the files it set aside by policy (an unsupported SOP class such as a screen capture, a presentation state or a report, or another modality), which are rows of the same list with their class and file no review item, only a count on the batch's report and the dataset's summary (record 56, 2026-10-11) |
 | where | rows of source_file (status quarantined) and review_item (kind ingest.quarantine) in the registry |
 | holds | quasi-identifying: the file paths<br>technical: the class, the detail, the counts |
 | owner | the registry's operator |
@@ -281,6 +281,160 @@ Every store the registry at `<home>` keeps (backend sqlite), rendered by `nils c
 | change | `nils pipeline add <nils.job.yml>`<br>`nils pipeline runtime --set <choice>`<br>`nils pipeline lane --cores <n> --memory-gb <n> --gpu-card <n\|none> --output-place <place> --scratch-place <place>`<br>`nils pipeline secret set <id> --file <path>`<br>`nils run <pipeline> --select selection:<name>@<v>`<br>`nils run --resume <run>` |
 | export | `nils pipeline show <pipeline> --json`<br>`nils pipeline runs <run> --json` |
 | delete | with the registry and the working place; nils has no command for one |
+
+## locations and content hashes
+
+| | |
+|---|---|
+| what | where each scan's files are and what their bytes hash to (record 55, the duplicate policy of 2026-10-10 and E5): every file the digest reads is a location of its instance, the instance's own or another copy of it whose subject, study, series and instance UIDs are all the instance's, and a copy is never read as a new instance; the stacks each source holds a file of, whoever read the stack first; and the sha256 of a file's bytes, learnt only when a pipeline's image read the file whole, never by a pass over the archive |
+| where | rows of source_file (its instance, its status, when it was first and last seen), source_stack and file_content in the registry |
+| holds | quasi-identifying: the file paths<br>technical: the sizes, the modification times, the statuses, when each file was first and last seen, the sha256 of a file's bytes |
+| owner | the registry's operator |
+| kept | a location's row stays for good: a file that vanished is marked gone and its scan stays with the dataset; a file's hash holds only while source_file says the size and time the file had when the hash was learnt, and a newer hash replaces the older |
+| read | `nils status [--batch <id>]`<br>GET /api/datasets/{name}/summary |
+| change | `nils digest <root>`<br>`nils run <pipeline> --select selection:<name>@<v>` (a pipeline whose image reports the hash of each file it read whole) |
+| export | no command |
+| delete | with the registry |
+
+## pseudonymise records
+
+| | |
+|---|---|
+| what | what the pseudonymiser last saw of each file of a dataset's originals (record 26 sections 3 and 4), and what the digest holds of a dataset it reads in place: the file's path under the originals, its size and modification time, whether its copy was written, still stands, is held for want of a map, or was refused, where the copy was written with its size and digest, and the digest of the original as it was read; for a held file the shape of its identifier and its keyed lookup, so that a map naming the identifier releases the file, the ID type, when a map released it, whether a person asked to code it anyway, and the subject and the ID type it waits for |
+| where | rows of pseudonym_file in the registry |
+| holds | identifying: the identifier of a held file, sealed under the registry's key for the reveal door alone (detail sensitive, audited), except a personnummer, which is never kept, not even sealed: its keyed lookup is all there is (record 55, the ruling of 2026-10-08)<br>quasi-identifying: the paths of the originals, which a raw export may name after the patient<br>technical: the states, the sizes, the times, the digests, the identifier shapes and keyed lookups |
+| owner | the registry's operator, for the research group that owns the dataset |
+| kept | for good while the dataset stands: a run writes a file's row again, and a purge of the originals removes the files after proving each by its digest, and leaves the rows |
+| read | GET /api/linkage/held<br>GET /api/linkage/held/ids<br>POST /api/linkage/held/reveal (detail sensitive; one audit row for each identifier opened)<br>GET /api/datasets/{name}/summary |
+| change | `nils pseudonymize @<dataset> [--held] [--dry-run]`<br>`nils linkage import <csv>` (a map releases the held files it names)<br>POST /api/linkage/held/code<br>`nils place originals <dataset> --vault \| --purge` |
+| export | no command |
+| delete | with the registry; nils place originals <dataset> --purge removes the originals themselves, not these rows |
+
+## System 1's opinions
+
+| | |
+|---|---|
+| what | System 1's answer on a stack and axis, a second opinion beside the rules' and never a decision (record 55 D3, record 56): its value, its calibrated probability, the rules' reliability on that header, the fields that mattered most with each one's effect measured by leaving it out, and how the model read the rules' answer; written when System 1's run ends, at a dataset's arrival and over the archive on request |
+| where | rows of opinion in the registry |
+| holds | technical: the answers, the probabilities, the reliability, the names of the header fields that mattered and their effect; no value of a field |
+| owner | the operator who chose the model |
+| kept | for good: a newer run of a model writes newer rows, and the newest is read |
+| read | GET /api/review/{id}/suggestions<br>GET /api/review/settings |
+| change | `nils score @<dataset> --name <batch> --step system1`<br>POST /api/review/system1/run |
+| export | no command |
+| delete | with the registry |
+
+## review rounds and audit draws
+
+| | |
+|---|---|
+| what | a round, the pair of a rules version and a System 1 version, with the gate's thresholds as the model's card set them (record 55 D3, record 56 section 3); the gate's outcome on each stack and axis of a dataset flagged as having damaged headers: accepted, disagree or unsure; and each blind audit draw (record 55 D7): its seed and share, the frame it was drawn from, the stacks drawn by their DICOM identity with the rules' answer each was accepted with, the audit campaign that reads them, and the grade of its settled answers |
+| where | rows of review_round, gate_outcome, audit_draw and audit_draw_stack in the registry |
+| holds | quasi-identifying: the study and series instance UIDs of a drawn stack<br>technical: the packs, the versions, the thresholds, the outcomes, the answers and probabilities, the seeds, the shares, the digests and the grades |
+| owner | the registry's operator |
+| kept | for good: a round and a draw are what a result cites; a stack's outcome in a round is written again by the gate's next run, and dropped where the gate leaves it to a person's staged answer |
+| read | GET /api/review/rounds<br>GET /api/review/rounds/{id}<br>GET /api/audit/draws<br>GET /api/audit/draws/{id} |
+| change | POST /api/review/gate<br>POST /api/audit/draws<br>POST /api/audit/draws/{id}/grade |
+| export | no command |
+| delete | with the registry |
+
+## blind-first reads
+
+| | |
+|---|---|
+| what | what says whether an answer was given blind (record 55 D6): when a person first opened a review question and when its suggestions were first shown to them, a provisional answer given before the suggestions showed with the seconds it took, and when a rater of a blind-first campaign was first shown an item's suggestion |
+| where | rows of review_read, review_provisional and campaign_reveal in the registry |
+| holds | quasi-identifying: the principal who opened, answered or was shown<br>a person's words: a provisional answer<br>technical: the item, the times and the seconds |
+| owner | the registry's operator |
+| kept | for good: only an answer given blind becomes a training label, and these rows are what say which was |
+| read | `nils custody` |
+| change | POST /api/review/{id}/provisional |
+| export | no command |
+| delete | with the registry |
+
+## post-contrast labels
+
+| | |
+|---|---|
+| what | the post-contrast label of each stack (record 55 F2 and F5): its state, pre, post, by definition or undetermined, the minutes since the injection and what they are counted from, where the label came from, the 72-hour flag, ASL after contrast, the reason and every check that fired, whether the session holds a certified T1 answer, and the version of the rule; written again whole for a subject each time its sessions are labelled |
+| where | rows of contrast_label in the registry |
+| holds | technical: the state, the minutes since injection (counted from acquisition times within a visit, never a date), the source, the flags, the checks, the rule's version and when it ran |
+| owner | the registry's operator |
+| kept | one row a stack, written again whole for a subject each time its sessions are labelled |
+| read | `nils contrast show <stack>` |
+| change | `nils contrast label` |
+| export | `nils contrast show <stack> --json` |
+| delete | with the registry |
+
+## main scans
+
+| | |
+|---|---|
+| what | which stack stands for a session's role (Wave 3 section 10, record 55 decision 6): for each role and occasion the stacks picked, the score, the margin to the next candidate, the borders, every component and what it read, every candidate considered, the pack and its version, who made the pick and, for a person's, why; and a dataset's or a cohort's own main-scan rules, one row for each version with its reason and author, and each run of a version |
+| where | rows of pick, pick_stack, pick_rules and pick_rules_run in the registry |
+| holds | quasi-identifying: the day a session opened<br>a person's words: why a person picked, and why the rules were changed<br>technical: the roles, the scores, the margins, the borders, the components, the candidates, the rules as stored with their digest, the principals and the times |
+| owner | the research group; a person's pick is theirs |
+| kept | for good: a pick that a person overruled or withdrew stays and stops applying, and a saved version of a scope's rules is never changed, so that every release names rules it can still read |
+| read | `nils pick list`<br>`nils pick explain <pick>`<br>GET /api/picks/rules<br>GET /api/picks/rules/text |
+| change | `nils pick run`<br>`nils pick set`<br>`nils pick withdraw <pick>`<br>POST /api/picks/rules |
+| export | `nils pick list --json`<br>GET /api/picks/rules/text |
+| delete | with the registry |
+
+## rule proposals
+
+| | |
+|---|---|
+| what | the changes proposed to a pack's rules (record 56): typed operations with their scope, reason and evidence, kept with the effect report they were rehearsed into and the approval card a person decided on, who proposed and who decided and why, the rules version an adopted pack edit wrote, the re-sort an adoption queued and what it did |
+| where | rows of rule_proposal in the registry |
+| holds | quasi-identifying: the stations and scanners a report's rows name, and the stacks and datasets it cites<br>a person's words: the title, the reason and the why of a decision<br>technical: the operations, the scopes, the counts, the transitions, the cases, the versions, the principals and the times |
+| owner | the person who proposed each, the operator who decided it |
+| kept | for good: a decided proposal stays with its card and what its re-sort did; an adopted scoped change that a later version of its overlay replaced is retired, not deleted |
+| read | GET /api/packs/{name}/proposals<br>GET /api/packs/{name}/proposals/{id} |
+| change | POST /api/packs/{name}/proposals<br>POST /api/packs/{name}/proposals/{id}/rehearse<br>POST /api/packs/{name}/proposals/{id}/decide<br>POST /api/overlays/<id>/adopt (an overlay is adopted through its proposal) |
+| export | GET /api/packs/{name}/proposals/{id} |
+| delete | with the registry |
+
+## slice cache
+
+| | |
+|---|---|
+| what | the small pictures a model reads of a scan, kept per session so that a re-score after a model update reads them instead of the files (record 55 E5): one folder for each model input's version, whose files are the image's own, keyed by the SOP Instance UIDs of the files they came from, the sha256 of their bytes and the input's version, never by a registry id |
+| where | files under slice-cache in a working place, and none is bound now, so none can be made |
+| holds | quasi-identifying: pictures drawn from the pixels of a subject's scans, which are clinical and never leave the site<br>technical: the input version, the UIDs and digests that key an entry, and retention.json |
+| owner | the registry's operator |
+| kept | a version an admitted or promoted model reads is kept; one no such model reads is dropped once it has gone unread for 30 days (retention.json keeps when each went unread), looked at after each run that used the cache and by nils cache prune |
+| read | `nils cache show` |
+| change | `nils run <pipeline> --select selection:<name>@<v>` (a pipeline that declares the versions it keeps is given the folder) |
+| export | no command |
+| delete | `nils cache prune` (the versions no admitted model has read for 30 days); otherwise remove the folder |
+
+## pictures
+
+| | |
+|---|---|
+| what | the pictures of a scan, made so that no page waits for a job queue or a whole volume (Wave 5 section 12.7, record 55 H2): a preview for each stack, its three middle planes and every plane at display size as JPEG frames, with a second file for a stack whose files carry burned-in annotation, and the viewing pyramid, every slice at four in-plane levels of 256 by 256 HTJ2K tiles, with its manifest |
+| where | files under previews and pyramids in a working place, and none is bound now, so none can be made |
+| holds | quasi-identifying: pictures drawn from the pixels of a subject's scans, which can carry burned-in annotation (a stack's second preview has the top and bottom eighths of its plane blank, which a caller below detail sensitive is served)<br>technical: the manifests, the windows, the offsets and the digests |
+| owner | the registry's operator |
+| kept | a preview is made again only when its stack's files change (its content digest), and nils preview build --all removes the previews of stacks the registry no longer holds; a pyramid stays until it is built again with --force |
+| read | `nils pyramid list`<br>GET /api/instances/{stack}/manifest |
+| change | `nils preview build [--stack <id> \| --dataset <name> \| --all]`<br>`nils pyramid build --stack <id>`<br>`nils pyramid pack --all` |
+| export | GET /api/instances/{stack}/preview (to a caller who may see pixels: detail quasi, and detail sensitive for a stack with burned-in annotation) |
+| delete | remove the folders; nils has no command for one pyramid |
+
+## places export
+
+| | |
+|---|---|
+| what | the document nils place export writes: every place in force with its name, role and path, the guarantees its operator declared and its handling, and, for a source place, the dataset it is declared as (its state and trees and its settings: what its PatientID holds, how its subjects are found, its ID type and its cohort), so that a site starting again from an empty registry declares them again (Wave 7a section 15.3); it is written where the operator asks and read by nothing but nils place import |
+| where | the file nils place export --out names, or its standard output |
+| holds | technical: each place's name, role and path, its guarantees and handling, each dataset's declaration, the registry's id and when the document was made; never a subject's data |
+| owner | the registry's operator |
+| kept | until removed |
+| read | `nils place export` |
+| change | `nils place import <file>` |
+| export | `nils place export --out <file>` |
+| delete | remove the file |
 
 ## logs
 

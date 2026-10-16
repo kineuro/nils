@@ -1324,6 +1324,17 @@ fn custody_quarantine_review_and_purge_go_round() {
             "identifier read audit",
             "derivatives",
             "pipelines",
+            "locations and content hashes",
+            "pseudonymise records",
+            "System 1's opinions",
+            "review rounds and audit draws",
+            "blind-first reads",
+            "post-contrast labels",
+            "main scans",
+            "rule proposals",
+            "slice cache",
+            "pictures",
+            "places export",
             "logs"
         ]
     );
