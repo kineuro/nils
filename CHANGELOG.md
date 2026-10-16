@@ -4,6 +4,14 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Changed
+
+- A dataset's arrival is scored by System 1 alone (record 55, ruling 35 (b) of 2026-10-16; gate test T26). The last step of a bring-in, `nils score @dataset --name <batch>`, queues System 1's run over the batch's new stacks and no longer queues body part or post-contrast, though their pipelines declare `x-nils.on-arrival`: they are optional models a person runs from the dataset's step (`POST /api/datasets/{name}/steps/{step}/run`) when the data need them. The score's result names them under `optional`. `nils score ... --step body_part` (or `post_contrast`) still queues one over a batch's new stacks, with the parameters its pipeline declares for a run at arrival (body part's slice cache among them).
+
+### Added
+
+- Each operation's step on a dataset's summary and a cohort's document says how many of its scans its model would add an answer to (`hint {kind, scans}`, ruling 35 (b)): for body part the scans with no body part, neither the rules' nor its model's (`no_body_part`); for post-contrast the scans that can be T1-type brain by their stored axes, the test its cascade applies, whose contrast neither the rules nor its model told (`t1_brain_contrast_unknown`). A count only.
+
 ## [1.0.0-alpha.87] - 2026-10-16
 
 Wave 7a's last engine: hospital reserve numbers read beside the personnummer and never kept, spare numbers through a map, model cards that gain their missing claims, the damaged-header flag's three signs (pack contract 11, MRI pack 1.3.0), the post-contrast label's clock across studies (time-rule-2), kept Query cards, LST-AI's thin image, and fixes from the wave's audit.
