@@ -1024,8 +1024,13 @@ fn build_registry() -> Vec<Table> {
                 col("dataset", Type::Json),
                 // Record 56 section 3: a dataset whose headers are damaged
                 // or foreign (stripped names, another site's anonymised
-                // export, another language), as a person flagged it:
-                // {damaged, why, by, at}. Null reads the signs instead.
+                // export, another language). The flag in force, {damaged,
+                // why, by, at}, and beside it `person`, a person's word,
+                // which wins, and `signs`, what the signs read at the end of
+                // the dataset's last sort with their thresholds (record 55,
+                // ruling 31 (c)). The flag alone is a person's, as an engine
+                // before the signs were kept wrote it. Null: neither, and
+                // the signs are read when asked.
                 col("headers", Type::Json),
             ],
         )

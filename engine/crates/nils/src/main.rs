@@ -50,6 +50,7 @@ mod file_header;
 mod folders;
 mod gate;
 mod grants;
+mod headers;
 mod intake;
 mod linkage_doors;
 mod login;
@@ -2765,6 +2766,10 @@ fn classify(home: &Home, args: ClassifyArgs) -> Result<(), Exit> {
             message: "stopped: what was judged is written; run again to go on".into(),
         });
     }
+    // record 55, ruling 31 (c): the damaged-header flag set at ingest, for
+    // each dataset holding a scan this sort judged, with this sort's pack,
+    // before the steps after it (the score, System 1 and its gate) read it
+    classify_headers(&mut registry, &pack, report.job_id);
     if settings.leave_open {
         // a preview that fails is counted in the job's result and never
         // fails the sort or the chain after it; a stop ends the job stopped
@@ -2823,6 +2828,53 @@ fn classify_scope(
         out.extend(r.stacks(&scope));
     }
     Ok(out)
+}
+
+/// The headers step of a classify run (record 55, ruling 31 (c)): the
+/// damaged-header signs of every dataset holding a scan the run judged, read
+/// with the run's pack and kept on the dataset ([`headers::after_sort`]).
+/// What it did is said on stderr and kept in the job's result as `headers`;
+/// a dataset whose signs could not be read is counted there and never fails
+/// the sort.
+fn classify_headers(registry: &mut Registry, pack: &nils_pack::Pack, job: i64) {
+    let store = registry.store();
+    let done = headers::after_sort(store, pack, job);
+    let datasets = done["datasets"].as_array().cloned().unwrap_or_default();
+    let flagged: Vec<&str> = datasets
+        .iter()
+        .filter(|d| d["damaged"] == true)
+        .filter_map(|d| d["dataset"].as_str())
+        .collect();
+    let failed = done["failed"].as_array().map_or(0, Vec::len);
+    if !datasets.is_empty() || failed > 0 {
+        eprintln!(
+            "headers: {} {} read, {} flagged as damaged{}{}",
+            datasets.len(),
+            if datasets.len() == 1 {
+                "dataset"
+            } else {
+                "datasets"
+            },
+            flagged.len(),
+            if flagged.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", flagged.join(", "))
+            },
+            if failed > 0 {
+                format!(", {failed} not read")
+            } else {
+                String::new()
+            }
+        );
+    }
+    if let Ok(Some(row)) = nils_registry::job::show(store, job) {
+        let mut result = row.result.unwrap_or_else(|| serde_json::json!({}));
+        if result.is_object() {
+            result["headers"] = done;
+            let _ = nils_registry::job::set_result(store, job, &result);
+        }
+    }
 }
 
 /// The preview step of a classify run (record 55 H2): the previews of the

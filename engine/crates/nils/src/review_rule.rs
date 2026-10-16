@@ -26,8 +26,9 @@
 //!   headers (`POST /api/review/gate`, and after every System 1 run).
 //! - **The damaged-header flag** (record 56 section 3,
 //!   `GET`/`PUT /api/datasets/{name}/headers`): a person's flag, or else the
-//!   signs (most of a dataset's scans with no series description and no
-//!   protocol name).
+//!   signs, set at the end of every sort ([`crate::headers`]: nameless scans,
+//!   words the pack does not know, a maker never seen, each held to the
+//!   pack's threshold).
 //! - **System 1 over the archive** (§11.1, `POST /api/review/system1/run`):
 //!   the chosen model's pipeline over every MR stack, on request.
 //! - **The audit** (§11.5): `POST /api/audit/draws` draws 1 % of a round's
@@ -685,75 +686,25 @@ fn provisional(
 
 // ----------------------------------------------------- the flag and gate
 
-/// A dataset's damaged-header signs: of its MR scans, how many carry no
-/// series description and no protocol name, and whether that is most of
-/// them (record 56 section 3: missing series descriptions are a sign;
-/// until System 1's reliability model serves, the share decides).
-fn signs(store: &mut Store, sources: &[i64]) -> Result<Value, StoreError> {
-    if sources.is_empty() {
-        return Ok(json!({"scans": 0, "no_names": 0, "share": 0.0, "damaged": false}));
-    }
-    let list = sources
-        .iter()
-        .map(i64::to_string)
-        .collect::<Vec<_>>()
-        .join(", ");
-    let holds = crate::operations::held_by(store, "x", &list);
-    let sql = format!(
-        "SELECT COUNT(*), SUM(CASE WHEN COALESCE(TRIM(f.text_series_description), '') = '' \
-         AND COALESCE(TRIM(f.text_protocol_name), '') = '' THEN 1 ELSE 0 END) \
-         FROM {} x JOIN {} f ON f.stack_id = x.id WHERE {holds} AND UPPER(COALESCE(f.modality, '')) = 'MR'",
-        store.qualified("stack"),
-        store.qualified("stack_fingerprint"),
-    );
-    let (n, bare) = match store.query_opt(&sql, &[])? {
-        Some(r) => (r.int(0)?, r.opt_int(1)?.unwrap_or(0)),
-        None => (0, 0),
-    };
-    let share = if n > 0 { bare as f64 / n as f64 } else { 0.0 };
-    Ok(json!({
-        "scans": n, "no_names": bare, "share": share,
-        "damaged": n > 0 && share >= SIGNS_SHARE,
-        "rule": format!("flagged by its signs where at least {:.0} % of its MR scans carry neither a series description nor a protocol name", SIGNS_SHARE * 100.0),
-    }))
-}
-
-/// The share of nameless scans at which the signs flag a dataset.
-const SIGNS_SHARE: f64 = 0.5;
-
 /// Whether one dataset is held to the full gate, as its flag says (record
-/// 56 §6.3: an answer's re-sort runs the gate again only there).
+/// 56 §6.3: an answer's re-sort runs the gate again only there): a person's
+/// word, or its signs, read with `pack` where no sort kept them.
 pub(crate) fn damaged(
     store: &mut Store,
     place: &Place,
     sources: &[i64],
+    pack: Option<&nils_pack::Pack>,
 ) -> Result<bool, StoreError> {
-    Ok(flag_of(store, place, sources)?["damaged"].as_bool() == Some(true))
-}
-
-/// A dataset's flag: a person's where one was set, else the signs'.
-fn flag_of(store: &mut Store, place: &Place, sources: &[i64]) -> Result<Value, StoreError> {
-    let set = round::headers_flag(store, place.id)?;
-    let signs = signs(store, sources)?;
-    let damaged = match &set {
-        Some(f) => f["damaged"].as_bool().unwrap_or(false),
-        None => signs["damaged"].as_bool().unwrap_or(false),
-    };
-    Ok(json!({
-        "dataset": place.name, "damaged": damaged,
-        "by": if set.is_some() { "person" } else { "signs" },
-        "flag": set, "signs": signs,
-        "gate": if damaged {
-            "the full gate: System 1 must agree with the rules on each scan above its thresholds, once System 1 is confirmed"
-        } else {
-            "the rules decide; Review holds only the axes that matter they left empty"
-        },
-    }))
+    Ok(crate::headers::flag_of(store, place, sources, pack)?["damaged"].as_bool() == Some(true))
 }
 
 /// Every source dataset flagged as having damaged headers, with its
-/// sources.
-fn flagged(registry: &mut Registry) -> Result<Vec<(Place, Vec<i64>)>, StoreError> {
+/// sources: by a person's word, or by its signs, read with `pack` where no
+/// sort kept them.
+fn flagged(
+    registry: &mut Registry,
+    pack: Option<&nils_pack::Pack>,
+) -> Result<Vec<(Place, Vec<i64>)>, StoreError> {
     let store = registry.store();
     let mut out = Vec::new();
     for p in nils_registry::place::active(store)? {
@@ -761,7 +712,7 @@ fn flagged(registry: &mut Registry) -> Result<Vec<(Place, Vec<i64>)>, StoreError
             continue;
         }
         let sources = crate::sources::source_ids(store, &p)?;
-        let f = flag_of(store, &p, &sources)?;
+        let f = crate::headers::flag_of(store, &p, &sources, pack)?;
         if f["damaged"].as_bool() == Some(true) {
             out.push((p, sources));
         }
@@ -775,9 +726,10 @@ fn flagged_stacks(
     registry: &mut Registry,
     only: Option<&[i64]>,
     dataset: Option<&str>,
+    pack: Option<&nils_pack::Pack>,
 ) -> Result<BTreeMap<(String, String), Vec<i64>>, StoreError> {
     let mut sources: Vec<i64> = Vec::new();
-    for (p, s) in flagged(registry)? {
+    for (p, s) in flagged(registry, pack)? {
         if dataset.is_some_and(|d| d != p.name) {
             continue;
         }
@@ -887,7 +839,10 @@ fn gate_over(
     who: &str,
     pack_dir: Option<&std::path::Path>,
 ) -> Result<Value, StoreError> {
-    let groups = flagged_stacks(registry, only, dataset)?;
+    // a dataset no sort has read the signs of is read with the engine's own
+    // pack, as the doors read it
+    let signs_pack = crate::headers::served(pack_dir, crate::headers::DEFAULT_PACK);
+    let groups = flagged_stacks(registry, only, dataset, signs_pack.as_deref())?;
     let mut rounds = Vec::new();
     for ((pack, version), stacks) in groups {
         let store = registry.store();
@@ -1406,6 +1361,9 @@ pub(crate) fn route(
         }
         ["api", "datasets", name, "headers"] if get || put => (|| {
             let place = crate::scans::dataset_named(registry, name)?;
+            // the deployment's pack, for a dataset no sort has read the
+            // signs of since they are kept
+            let pack = crate::headers::served(doors.pack_dir.as_deref(), &doors.ask_pack);
             let store = registry.store();
             let sources = crate::sources::source_ids(store, &place).map_err(failed)?;
             if put {
@@ -1427,7 +1385,10 @@ pub(crate) fn route(
                 round::set_headers_flag(store, place.id, damaged, why, &caller.principal)
                     .map_err(failed)?;
             }
-            Ok(Reply::ok(flag_of(store, &place, &sources).map_err(failed)?))
+            Ok(Reply::ok(
+                crate::headers::flag_of(store, &place, &sources, pack.as_deref())
+                    .map_err(failed)?,
+            ))
         })(),
         ["api", "audit", "draws"] if post => draw_door(doors, registry, caller, body),
         ["api", "audit", "draws"] if get => (|| {

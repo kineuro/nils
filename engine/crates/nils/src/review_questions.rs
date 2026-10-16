@@ -2051,7 +2051,9 @@ fn resort(
     // answer about one dataset whose headers are not reads no other's flag
     let flagged = match scope {
         Scope::Dataset { place, sources } => {
-            crate::review_rule::damaged(registry.store(), place, sources).unwrap_or(true)
+            let pack = crate::headers::served(doors.pack_dir.as_deref(), &doors.ask_pack);
+            crate::review_rule::damaged(registry.store(), place, sources, pack.as_deref())
+                .unwrap_or(true)
         }
         _ => true,
     };

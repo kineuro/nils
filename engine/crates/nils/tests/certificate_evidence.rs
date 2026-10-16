@@ -676,6 +676,22 @@ fn flow(pg: Option<(String, String)>) {
         files.path().join("s1.bin").to_str().unwrap(),
     ]);
     let server = Served::start(&home, &path, true);
+    // the sort read both datasets' signs (record 55, ruling 31 (c)): the bare
+    // series' name is no word the pack knows, half of each dataset's named
+    // scans, so both are flagged; a person marks both as usual, and flags
+    // each below where the test wants the gate
+    for name in ["dmg", "ok"] {
+        let read = server.ok("GET", &format!("/api/datasets/{name}/headers"), None, OPS);
+        assert_eq!(read["by"], "signs", "{read}");
+        assert_eq!(read["signs"]["unknown_words"]["flags"], true, "{read}");
+        let usual = server.ok(
+            "PUT",
+            &format!("/api/datasets/{name}/headers"),
+            Some(json!({"damaged": false, "why": "a test of the gate, flagged by hand below"})),
+            OPS,
+        );
+        assert_eq!(usual["damaged"], false, "{usual}");
+    }
     server.ok(
         "POST",
         "/api/models/choose",

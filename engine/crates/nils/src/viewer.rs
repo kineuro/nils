@@ -327,27 +327,10 @@ fn sorted_regions(regions: &BTreeSet<String>) -> Vec<String> {
 }
 
 /// A maker as a person names it: the scanner's own spelling of the big
-/// makers brought to one word, any other as written.
+/// makers brought to one word, any other as written. The pack's crate holds
+/// it since the damaged-header flag reads makers too (record 56 §3).
 pub(crate) fn maker_of(raw: &str) -> Option<String> {
-    let written = raw.trim();
-    if written.is_empty() {
-        return None;
-    }
-    let l = written.to_lowercase();
-    let named = if l.contains("siemens") {
-        "Siemens"
-    } else if l.contains("philips") {
-        "Philips"
-    } else if l == "ge" || l.starts_with("ge ") || l.contains("general electric") {
-        "GE"
-    } else if l.contains("toshiba") || l.contains("canon") {
-        "Canon"
-    } else if l.contains("hitachi") || l.contains("fujifilm") {
-        "Hitachi"
-    } else {
-        return Some(written.to_string());
-    };
-    Some(named.to_string())
+    nils_pack::words::maker_of(raw)
 }
 
 /// A stack's decided axes, every value of each.

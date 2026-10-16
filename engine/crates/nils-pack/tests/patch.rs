@@ -631,10 +631,11 @@ fn an_operation_that_writes_a_later_contract_s_key_raises_the_pack_s_contract() 
     copy(&mri(), &at_8);
     let manifest = std::fs::read_to_string(at_8.join("pack.yml")).unwrap();
     assert!(manifest.contains(&format!("\ncontract: {}\n", nils_pack::CONTRACT)));
-    // at contract 8, without the `engine` key a pack below 10 may not carry
+    // at contract 8, without the `engine` key a pack below 10 may not carry,
+    // nor the damaged-header thresholds of 11
     let at_contract_8: String = manifest
         .lines()
-        .filter(|l| !l.starts_with("engine:"))
+        .filter(|l| !l.starts_with("engine:") && !l.starts_with("  damaged_headers:"))
         .map(|l| match l.starts_with("contract:") {
             true => "contract: 8\n".to_string(),
             false => format!("{l}\n"),

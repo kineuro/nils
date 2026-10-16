@@ -879,11 +879,11 @@ fn a_shown_entry_marked_quasi_still_loads_and_is_shown() {
 }
 
 /// A manifest declaring `contract`, without the `engine` key a pack below
-/// contract 10 may not carry.
+/// contract 10 may not carry, nor the damaged-header thresholds of 11.
 fn at_contract(manifest: &str, contract: u32) -> String {
     manifest
         .lines()
-        .filter(|l| !l.starts_with("engine:"))
+        .filter(|l| !l.starts_with("engine:") && !l.starts_with("  damaged_headers:"))
         .map(|l| match l.starts_with("contract:") {
             true => format!("contract: {contract}"),
             false => l.to_string(),

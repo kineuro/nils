@@ -101,7 +101,37 @@ fn every_manifest_key_the_loader_reads_is_on_the_schema() {
     review.sort_unstable();
     assert_eq!(
         review,
-        ["by_model", "low_confidence", "missing", "silent_when"]
+        [
+            "by_model",
+            "damaged_headers",
+            "low_confidence",
+            "missing",
+            "silent_when"
+        ]
+    );
+    // pack contract 11: the damaged-header thresholds, closed on what the
+    // loader reads
+    let mut damaged: Vec<&str> =
+        schema["properties"]["review"]["properties"]["damaged_headers"]["properties"]
+            .as_object()
+            .expect("damaged_headers' properties")
+            .keys()
+            .map(String::as_str)
+            .collect();
+    damaged.sort_unstable();
+    assert_eq!(
+        damaged,
+        [
+            "makers",
+            "nameless",
+            "unknown_words",
+            "unseen_maker",
+            "words"
+        ]
+    );
+    assert_eq!(
+        schema["properties"]["review"]["properties"]["damaged_headers"]["additionalProperties"],
+        false
     );
     assert_eq!(
         schema["properties"]["review"]["additionalProperties"],
@@ -197,8 +227,9 @@ fn mri_at_contract_5() -> Dir {
             continue;
         }
         skipping = false;
-        // the engines a pack works with are pack contract 10's
-        if line.starts_with("engine:") {
+        // the engines a pack works with are pack contract 10's, and the
+        // damaged-header thresholds 11's
+        if line.starts_with("engine:") || line.starts_with("  damaged_headers:") {
             continue;
         }
         if line.starts_with("contract:") {
@@ -257,12 +288,14 @@ fn a_pack_of_an_earlier_contract_loads_under_this_one() {
 }
 
 /// The copy's manifest declaring `contract`, with `engine` naming a range
-/// where one is given.
+/// where one is given, and without the damaged-header thresholds below
+/// contract 11.
 fn declare(dir: &Path, contract: u32, engine: Option<&str>) {
     let manifest = std::fs::read_to_string(dir.join("pack.yml")).unwrap();
     let mut out = String::new();
     for line in manifest.lines() {
-        if line.starts_with("engine:") {
+        if line.starts_with("engine:") || (contract < 11 && line.starts_with("  damaged_headers:"))
+        {
             continue;
         }
         if line.starts_with("contract:") {
@@ -330,6 +363,75 @@ fn a_pack_names_the_engines_it_works_with_from_contract_10() {
     declare(dir.path(), 10, None);
     let pack = nils_pack::load(dir.path(), None).expect("a contract-10 pack without a range loads");
     assert!(pack.engine.is_none());
+}
+
+/// Pack contract 11 (record 56 §3; record 55, ruling 31 (c)): the
+/// damaged-header thresholds. The shipped pack states them; a pack that
+/// declares less is refused with the key named, since an engine of 10 would
+/// flag a dataset by its nameless scans alone; a share outside 0 to 1, a key
+/// the block does not hold, a text the pack does not derive from the series
+/// description and an empty maker are each refused; a pack may give some
+/// thresholds and not others, or none.
+#[test]
+fn a_pack_gives_the_damaged_header_thresholds_from_contract_11() {
+    let shipped = nils_pack::load(&common::shipped_mri(), None).expect("the MRI pack loads");
+    let d = shipped
+        .review
+        .damaged_headers
+        .clone()
+        .expect("the MRI pack states them");
+    assert_eq!(d.words.as_deref(), Some("technique_text"));
+    assert_eq!(d.makers, ["Siemens", "GE", "Philips"]);
+    assert!(d.nameless.is_some() && d.unknown_words.is_some() && d.unseen_maker.is_some());
+
+    let dir = Dir::mri_copy("damaged-headers");
+    let with = |block: &str, contract: u32| {
+        let manifest = std::fs::read_to_string(common::shipped_mri().join("pack.yml")).unwrap();
+        let out: String = manifest
+            .lines()
+            .map(|l| {
+                if l.starts_with("  damaged_headers:") {
+                    if block.is_empty() {
+                        String::new()
+                    } else {
+                        format!("  damaged_headers: {block}\n")
+                    }
+                } else if l.starts_with("contract:") {
+                    format!("contract: {contract}\n")
+                } else {
+                    format!("{l}\n")
+                }
+            })
+            .collect();
+        std::fs::write(dir.path().join("pack.yml"), out).unwrap();
+        nils_pack::load(dir.path(), None).map_err(|e| e.to_string())
+    };
+    let pack = with("{nameless: 0.2}", 11).expect("a block with one threshold loads");
+    assert_eq!(
+        pack.review.damaged_headers,
+        Some(nils_pack::pack::DamagedHeaders {
+            nameless: Some(0.2),
+            ..Default::default()
+        })
+    );
+    let pack = with("", 11).expect("and a pack without the block");
+    assert!(pack.review.damaged_headers.is_none());
+    let e = with("{nameless: 0.2}", 10).err().unwrap();
+    assert!(
+        e.contains("damaged_headers is pack contract 11's; this pack declares contract 10"),
+        "{e}"
+    );
+    let e = with("{nameless: 1.5}", 11).err().unwrap();
+    assert!(e.contains("a share from 0 to 1"), "{e}");
+    let e = with("{named: 0.2}", 11).err().unwrap();
+    assert!(e.contains("not named"), "{e}");
+    let e = with("{words: stated_anatomy_text}", 11).err().unwrap();
+    assert!(
+        e.contains("stated_anatomy_text is no text this pack derives from the series description"),
+        "{e}"
+    );
+    let e = with("{makers: [Siemens, ' ']}", 11).err().unwrap();
+    assert!(e.contains("never empty"), "{e}");
 }
 
 /// T9 (record 55 B5): the MRI pack is the first rules release that ships on
