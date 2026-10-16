@@ -1774,6 +1774,7 @@ fn handle(config: &Config, node: &str, busy: &Mutex<()>, runs: &Runs, mut reques
                     .map_or_else(|| who.clone(), |p| p.to_string())
             });
             asked(runs, &path["/api/supervise/".len()..], doc, &by)
+        }
         // gate T31, step 1.9: what an uninstall would remove and keep, and
         // the uninstall itself, NILS alone or everything, behind the
         // directory's name typed
