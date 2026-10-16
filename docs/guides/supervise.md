@@ -191,7 +191,17 @@ install and acts on it, from the setup record of the account it runs as
   `GET /api/supervise/install` says which of them this supervisor makes in
   `changes`.
 
-A restart, a reapply, an update, a change and a restore run apart from the
+- `GET /api/supervise/uninstall` says what an uninstall would remove and keep,
+  both ways, in the words `nils uninstall --print` uses, and the name of the
+  install's directory; `POST /api/supervise/uninstall` with `{"leave":
+  "nils", "confirm": "<that name>"}` removes NILS and keeps the data, and with
+  `"leave": "everything"` removes the directory and the registry's key with
+  it. The name is typed either way, and the supervisor checks it. Who asked
+  is written to `acts.log` beside the supervisor's configuration before
+  anything starts (the desk names the person it forwards for), and the run
+  keeps it. The desk offers this at the foot of Settings > Setup.
+
+A restart, a reapply, an update, a change, a restore and an uninstall run apart from the
 call that started them, one at a time, and `GET /api/supervise/runs/{id}` says how each went, with the
 last lines of its output. By hand they are `nils supervise restart --part
 engine`, `nils supervise reapply --part engine` and `nils update --all`.
@@ -210,7 +220,8 @@ nils-deploy ALL=(root) NOPASSWD: /usr/local/sbin/nils-manage restart engine,
 /usr/local/sbin/nils-manage restart assistant, /usr/local/sbin/nils-manage restart all,
 /usr/local/sbin/nils-manage reapply, /usr/local/sbin/nils-manage reapply all,
 /usr/local/sbin/nils-manage update, /usr/local/sbin/nils-manage change,
-/usr/local/sbin/nils-manage restore
+/usr/local/sbin/nils-manage restore, /usr/local/sbin/nils-manage uninstall keep-data,
+/usr/local/sbin/nils-manage uninstall purge
 ```
 
 sudo matches a command and its words exactly, so a call carrying any other
@@ -220,7 +231,9 @@ part of this install or `all`, `reapply`, which writes the engine's unit again
 from the record and starts it, `reapply all`, which writes every part's unit
 again and starts them in order, `update`, which runs `nils update --all`, and
 `update` with the name of a part that has releases of its own, which runs
-`nils update --part` for that part alone, `change`, which makes the change of
+`nils update --part` for that part alone, `uninstall keep-data` and
+`uninstall purge`, which run `nils uninstall --keep-data --yes` and `nils
+uninstall --purge --yes`, `change`, which makes the change of
 the setup the supervisor left in its folder, and `restore`, which puts back
 the archive it named there. Root reads that request itself, never through a
 link, checks it again as the door did, and takes it away, so it is made once.
@@ -236,8 +249,10 @@ is written.
 So on such an install the doors go through it: `POST /api/supervise/restart`
 runs `sudo -n /usr/local/sbin/nils-manage restart <part>`, `POST
 /api/supervise/reapply` runs `... reapply` for the engine and
-`... reapply all` with no part, and `POST /api/supervise/update-all` runs
-`... update`. Run as root, the same commands do the work themselves and ask
+`... reapply all` with no part, `POST /api/supervise/update-all` runs
+`... update`, and `POST /api/supervise/uninstall` runs `... uninstall
+keep-data` or `... uninstall purge`. A helper written before the uninstall
+was one of its words refuses it until `nils setup` writes it again. Run as root, the same commands do the work themselves and ask
 sudo for nothing. An install whose services are an account's own has no
 helper and needs none: it restarts its own units.
 
@@ -250,7 +265,8 @@ What the account can do with it is restart this install's services, put new
 files in place for its parts, which is what following a release is, and make
 the changes the desk's settings make: how people sign in, where the engine
 writes its archives, the stations' model server, and an archive of the backup
-folder put back. Those are an administrator's, and the desk asks for them only
+folder put back, and uninstall this install behind the directory's name
+typed. Those are an administrator's, and the desk asks for them only
 for a person who holds `install:work`; the account that may ask for them is
 as much an administrator of this install as that person is. What it cannot do
 is run anything else as root, reach another install, turn sign-in off, or

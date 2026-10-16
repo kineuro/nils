@@ -883,6 +883,8 @@ pub(crate) fn capabilities(config: &Config, node: &str) -> Value {
             "POST /api/supervise/backups",
             "POST /api/supervise/model",
             "POST /api/supervise/restore",
+            "GET /api/supervise/uninstall",
+            "POST /api/supervise/uninstall",
         ],
         "log": log_rows(&config.log, 5),
     })
@@ -1006,6 +1008,16 @@ impl Runs {
     }
 
     fn start(&self, what: &str, args: &[String]) -> Result<Value, (u16, String)> {
+        self.start_by(what, args, None)
+    }
+
+    /// A run started for a person, whose name the run's record keeps.
+    fn start_by(
+        &self,
+        what: &str,
+        args: &[String],
+        by: Option<&str>,
+    ) -> Result<Value, (u16, String)> {
         self.going()?;
         let mut children = self
             .children
@@ -1027,6 +1039,10 @@ impl Runs {
             "finished_at": null,
             "exit": null,
         });
+        let mut doc = doc;
+        if let Some(by) = by {
+            doc["by"] = json!(by);
+        }
         // the run is on record before its id is answered, or it is not
         // started: an id the door cannot read back would leave a desk with
         // "no run by that id" for a run that is going
@@ -1758,6 +1774,17 @@ fn handle(config: &Config, node: &str, busy: &Mutex<()>, runs: &Runs, mut reques
                     .map_or_else(|| who.clone(), |p| p.to_string())
             });
             asked(runs, &path["/api/supervise/".len()..], doc, &by)
+        // gate T31, step 1.9: what an uninstall would remove and keep, and
+        // the uninstall itself, NILS alone or everything, behind the
+        // directory's name typed
+        (Method::Get, "/api/supervise/uninstall") => match crate::setup::uninstall_preview() {
+            Ok(doc) => (200, doc),
+            Err(why) => error(409, why),
+        },
+        (Method::Post, "/api/supervise/uninstall") => {
+            let doc = body_json(&mut request);
+            let by = person(&request).unwrap_or_else(|| who.clone());
+            uninstall_door(config, runs, &doc, &by)
         }
         (Method::Post, "/api/supervise/update") => {
             let mut text = String::new();
@@ -1797,6 +1824,105 @@ fn handle(config: &Config, node: &str, busy: &Mutex<()>, runs: &Runs, mut reques
         ),
     };
     reply(request, status, body);
+}
+
+/// The person the desk says asked, by the header the desk sets on what it
+/// forwards here and strips from what a browser sends; the token's own
+/// name where there is none.
+fn person(request: &Request) -> Option<String> {
+    request
+        .headers()
+        .iter()
+        .find(|h| h.field.equiv("X-Nils-Person"))
+        .map(|h| h.value.as_str().trim().to_string())
+        .filter(|p| !p.is_empty() && p.len() <= 200 && !p.chars().any(char::is_control))
+}
+
+/// `POST /api/supervise/uninstall {leave, confirm}` (gate T31, step 1.9):
+/// `leave` is `nils` (the services, the programs and the packs go, the
+/// data stays for the next setup) or `everything` (the data and the
+/// registry's key too, which cannot be undone), and `confirm` the name of
+/// the install's directory, typed. The uninstall runs apart from the call,
+/// as a restart does, since it stops this service and the desk with it.
+/// Every ask that starts one is written to `acts.log` beside this service's
+/// configuration, with who asked, before the run starts; an uninstall that
+/// keeps the data keeps that file.
+fn uninstall_door(config: &Config, runs: &Runs, doc: &Value, by: &str) -> (u16, Value) {
+    let word = match doc["leave"].as_str() {
+        Some("nils") => "keep-data",
+        Some("everything") => "purge",
+        _ => {
+            return error(
+                400,
+                "leave: nils (the data stays) or everything (the data and the registry's key go too)",
+            );
+        }
+    };
+    let Some(state) = crate::setup::read_state() else {
+        return error(
+            409,
+            format!(
+                "no setup is recorded at {}, so there is nothing here to uninstall",
+                crate::setup::state_path().display()
+            ),
+        );
+    };
+    let name = crate::setup::uninstall_name(&state);
+    if name.is_empty() || doc["confirm"].as_str().map(str::trim) != Some(name.as_str()) {
+        return error(
+            400,
+            format!("confirm: type {name}, the name of the install's directory, to uninstall it"),
+        );
+    }
+    if word == "purge"
+        && let Ok(preview) = crate::setup::uninstall_preview()
+        && let Some(why) = preview["everything_refused"].as_str()
+    {
+        return error(409, format!("{} will not be removed: {why}", state.dir));
+    }
+    let args = vec![
+        "supervise".to_string(),
+        "uninstall".to_string(),
+        "--leave".to_string(),
+        word.to_string(),
+    ];
+    let act = json!({
+        "at": nils_registry::time::now_iso(),
+        "by": by,
+        "act": "uninstall",
+        "leave": doc["leave"],
+        "dir": state.dir,
+    });
+    if let Err(e) = act_row(config, &act) {
+        return error(
+            500,
+            format!("the ask could not be recorded, so nothing was started: {e}"),
+        );
+    }
+    let run = runs.start_by("uninstall", &args, Some(by));
+    if let Err((_, why)) = &run {
+        // the ask is on record; so is that nothing started
+        let mut refused = act;
+        refused["started"] = json!(false);
+        refused["why"] = json!(why);
+        let _ = act_row(config, &refused);
+    }
+    started(run)
+}
+
+/// One act asked of this service, as a line of `acts.log` beside its
+/// configuration.
+fn act_row(config: &Config, act: &Value) -> std::io::Result<()> {
+    let dir = config
+        .log
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_default();
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("acts.log"))?;
+    writeln!(file, "{act}")
 }
 
 /// The service: the door on the bind address, and a poll that logs a newer version when the channel names one.
@@ -1901,6 +2027,13 @@ pub(crate) enum SuperviseCommand {
     /// stopped, the archive restored, the engine started again
     #[command(hide = true)]
     Restore,
+    /// Uninstall the install nils setup made, for the desk: keep-data or
+    /// purge, without asking, through the helper where it has one
+    #[command(hide = true)]
+    Uninstall {
+        #[arg(long)]
+        leave: String,
+    },
     /// Run a command of this binary for a run the service started, and record how it ended
     #[command(hide = true)]
     Record {
@@ -2039,6 +2172,7 @@ pub(crate) fn command(command: SuperviseCommand) -> Result<(), Exit> {
         SuperviseCommand::Record { dir, id, command } => record(&dir, &id, &command),
         SuperviseCommand::Change => crate::setup::change::change_command(),
         SuperviseCommand::Restore => crate::setup::change::restore_command(),
+        SuperviseCommand::Uninstall { leave } => crate::setup::uninstall_supervised(&leave),
         SuperviseCommand::Restart { part } => {
             let state = recorded()?;
             crate::setup::restart_units(&state, part.as_deref()).map(|_| ())

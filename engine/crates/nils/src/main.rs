@@ -35,6 +35,7 @@ mod campaigns;
 mod certainty;
 mod chain;
 mod checks;
+mod clinical_doors;
 mod cohort_picks;
 mod contrast;
 mod dataset;
@@ -8229,8 +8230,8 @@ fn custody_doc(home: &Home, registry: &mut Registry) -> Result<serde_json::Value
             "counts": { "cohorts": cohorts, "members": members, "diseases": diseases, "observation_types": kinds, "events": events, "subjects_with_birth_date": with_birth_date },
             "kept": "for ever; a correction supersedes the old row and the old row stays (section 13.2)",
             "commands": {
-                "read": ["nils clinical vocabulary list", "nils clinical cohort list", "nils clinical cohort show <name>", "nils custody"],
-                "change": ["nils clinical vocabulary load", "nils clinical cohort make | rename | set | retire | add | remove", "nils ask promote", "a digest of a dataset that feeds a cohort"],
+                "read": ["nils clinical vocabulary list", "nils clinical cohort list", "nils clinical cohort show <name>", "nils custody", "the desk's Data > Clinical (GET /api/clinical/vocabulary)"],
+                "change": ["nils clinical vocabulary load", "nils clinical import", "nils clinical cohort make | rename | set | retire | add | remove", "nils ask promote", "a digest of a dataset that feeds a cohort", "the desk's Data > Clinical (POST /api/clinical/vocabulary, POST /api/clinical/import)"],
                 "export": ["nils release"],
                 "delete": delete_db(REGISTRY_DB, &registry_schema),
             },

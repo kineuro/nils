@@ -472,7 +472,7 @@ paths:
   /api/capabilities:
     get:
       summary: What this engine is and speaks (C26)
-      description: "The engine version, the contract versions (openapi, review-item, pack, suite, mcp and, since version 7, model), the loaded packs with their versions, the registry id, epoch, schema version and `synthetic` (the builder's name when `nils synth` made the registry, absent on real data; a desk shows a banner on it), the auth mode, the caller's principal, grants (sorted), detail, roles (for one release, the ladder steps up to the detail, never admin), display name, mail, ceiling and actor, the node, the list of doors, and since version 3 `assist` (the assistant's URL when one is installed), `event_streams` (the cap), `idempotency` (the header, the doors, the hours), `policy` (one row per door, Wave 4c section 6.5, each naming the grant it needs as a grant or an array meaning any of, with `also` for a second grant, `detail` for the lowest detail and, since version 5, `dataset` on POST /api/places and PUT /api/places/{id} for the grant their dataset fields need beside the door's own), since Wave 5 section 10.4 `supervisor` (the URL of the supervisor on this host when `nils serve --supervisor` names one, null otherwise), and since version 5 `places.dataset` (record 26: `grant`, the `fields` a declaration takes, the three `arrives` and the two `trees` by name), and since version 7 `derivatives` (record 42: `enabled`, the working `place` new derivatives go into or the `reason` they are off, the `kinds`, the `grants` and `upload_max_bytes`; added in place by record 55 H3, `parts` and `layers`, the doors of a result's parts and of its layer on a scan with their grants, detail and limits, and `check`, the doors of a result checked directly with their grant) and, added in place by record 55 H3, `campaigns` (`questions`, the kinds a campaign asks, check among them; `closes_into`; and `check` {grains, verdicts, needs, reasons_max, words_max, points_max, note_max, panels_max, panels_default, derivatives_max, items_max, parts_inline, sources, which, presets: {components, labels, whole}, the reasons the New check fills in by the kind of the part set, grants, doors}) and `pipelines` (record 43: `enabled`, true when a container runtime and a working place are both there, else false with the `reason` that names the cure and never an error; the `runtime` taken with its `name`, `version` and `gpu`, the operator's `choice` (auto, podman, apptainer, docker or off; docker is taken only when chosen; since record 49 also apptainer-first), what was `looked` at, the `place` (since record 49 R7 the lane's output place) and the `scratch` place, the count of `pipelines` in the catalog, the job `contract`, and the `grants`: see, run and the detail a run needs, quasi; since record 49 the `lane` {cores, memory_gb, set {cores, memory_gb}, why, gpu_card}, the budget the lane's units run within together as set and as this machine allows it, and the card a GPU unit leases, `places` {output, scratch, output_set, scratch_set} (record 49 R7: the working places a run's outputs and its scratch go to, as `nils pipeline lane --output-place` and `--scratch-place` name them, else the first working place), `apptainer_image` (sif or sandbox) and `secrets`, the ids of the secret inputs the site set, never their paths). Added in place, additively, on 2026-10-12: `tools`, {dcm2niix: the tool as GET /api/tools answers it}, kept a minute. Added in place, additively, on 2026-10-12 (record 55, rulings of 2026-10-12, item 6): each pack's `main_roles`, the roles its picks name (t1w, flair and t2w in the MRI pack), which a run over a dataset's or a cohort's main scans takes as `main:<role>@dataset:<name>`."
+      description: "The engine version, the contract versions (openapi, review-item, pack, suite, mcp and, since version 7, model), the loaded packs with their versions, the registry id, epoch, schema version and `synthetic` (the builder's name when `nils synth` made the registry, absent on real data; a desk shows a banner on it), the auth mode, the caller's principal, grants (sorted), detail, roles (for one release, the ladder steps up to the detail, never admin), display name, mail, ceiling and actor, the node, the list of doors, and since version 3 `assist` (the assistant's URL when one is installed), `event_streams` (the cap), `idempotency` (the header, the doors, the hours), `policy` (one row per door, Wave 4c section 6.5, each naming the grant it needs as a grant or an array meaning any of, with `also` for a second grant, `detail` for the lowest detail and, since version 5, `dataset` on POST /api/places and PUT /api/places/{id} for the grant their dataset fields need beside the door's own), since Wave 5 section 10.4 `supervisor` (the URL of the supervisor on this host when `nils serve --supervisor` names one, null otherwise), and since version 5 `places.dataset` (record 26: `grant`, the `fields` a declaration takes, the three `arrives` and the two `trees` by name), and since version 7 `derivatives` (record 42: `enabled`, the working `place` new derivatives go into or the `reason` they are off, the `kinds`, the `grants` and `upload_max_bytes`; added in place by record 55 H3, `parts` and `layers`, the doors of a result's parts and of its layer on a scan with their grants, detail and limits, and `check`, the doors of a result checked directly with their grant) and, added in place by record 55 H3, `campaigns` (`questions`, the kinds a campaign asks, check among them; `closes_into`; and `check` {grains, verdicts, needs, reasons_max, words_max, points_max, note_max, panels_max, panels_default, derivatives_max, items_max, parts_inline, sources, which, presets: {components, labels, whole}, the reasons the New check fills in by the kind of the part set, grants, doors}) and `pipelines` (record 43: `enabled`, true when a container runtime and a working place are both there, else false with the `reason` that names the cure and never an error; the `runtime` taken with its `name`, `version` and `gpu`, the operator's `choice` (auto, podman, apptainer, docker or off; docker is taken only when chosen; since record 49 also apptainer-first), what was `looked` at, the `place` (since record 49 R7 the lane's output place) and the `scratch` place, the count of `pipelines` in the catalog, the job `contract`, and the `grants`: see, run and the detail a run needs, quasi; since record 49 the `lane` {cores, memory_gb, set {cores, memory_gb}, why, gpu_card}, the budget the lane's units run within together as set and as this machine allows it, and the card a GPU unit leases, `places` {output, scratch, output_set, scratch_set} (record 49 R7: the working places a run's outputs and its scratch go to, as `nils pipeline lane --output-place` and `--scratch-place` name them, else the first working place), `apptainer_image` (sif or sandbox) and `secrets`, the ids of the secret inputs the site set, never their paths). Added in place, additively, on 2026-10-12: `tools`, {dcm2niix: the tool as GET /api/tools answers it}, kept a minute. Added in place, additively, on 2026-10-12 (record 55, rulings of 2026-10-12, item 6): each pack's `main_roles`, the roles its picks name (t1w, flair and t2w in the MRI pack), which a run over a dataset's or a cohort's main scans takes as `main:<role>@dataset:<name>`. Added in place, additively, on 2026-10-16 (gate T31, step 13.8): `releases` {expert: the expert options POST /api/releases reads, by their body's names}, so a desk offers only what the engine reads."
       responses:
         "200": {description: The capabilities}
   /api/summary:
@@ -605,9 +605,21 @@ paths:
                 stacks: {type: array, items: {type: integer}}
                 observations: {type: array, items: {type: string}}
                 handle: {type: integer, description: "A stack handle whose keys are the stacks released (Wave 5 section 6.6); refused when its answer no longer reproduces"}
+                naming: {type: string, enum: [full, minimal], description: "How a BIDS name spells what the entities do not (record 55 C4); minimal needs layout bids"}
+                localizers: {type: string, enum: [sourcedata, datatype, anat, drop], description: "Added in place on 2026-10-16 (gate T31, step 13.8, the release form's expert options, with every field below): where a localizer goes in a BIDS tree, as --localizers"}
+                synthetic: {type: string, enum: [folder, anat, derivatives], description: "Where a vendor's synthetic contrast goes, as --synthetic"}
+                dicom: {type: string, enum: [all, folders, none], description: "Which stacks a BIDS release also writes as DICOM, as --dicom"}
+                converter: {type: string, description: "dcm2niix, the engine's own as nils tools finds it, for any caller; or, from a caller holding install:work alone (403 otherwise), the absolute path of a regular file named dcm2niix, not a link, owned by root or the engine's account and not writable by others, as --dcm2niix. Any other program or file is refused (400)"}
+                compress: {type: boolean, default: true, description: "false writes .nii rather than .nii.gz, as --no-compress"}
+                authors: {type: array, items: {type: string}, description: "Whose dataset it is, for dataset_description.json, as --author; whoever ran the release when absent"}
+                categories: {type: array, items: {type: string, enum: [patient, trial, provider, institution, times, ids]}, description: "The categories of element removed, as --categories; all of them when absent, and at least one when given"}
+                uid_root: {type: string, description: "The arc new UIDs hang from, as --uid-root; DICOM's UUID arc when absent"}
+                picked: {type: boolean, default: false, description: "Only the stacks a pick chose, as --picked"}
+                roles: {type: array, items: {type: string}, description: "Only stacks holding one of these roles, as --role"}
       responses:
         "202": {description: "{job, state: queued, command}"}
-        "400": {description: The handle named is not at stack grain}
+        "403": {description: "A converter named by its path, from a caller without install:work"}
+        "400": {description: "The handle named is not at stack grain; or an expert option the command would refuse (a localizer placement, a category or a UID root it does not read, a converter not named dcm2niix or a file the engine would not trust)"}
         "409": {description: "The handle named does not reproduce: truncated, stale (the registry moved, or the handle was invalidated) or incomplete, in that order; or wave 5 section 10.2: out is not under a declared export place, once any place is declared"}
   /api/handovers:
     post:
@@ -2045,6 +2057,23 @@ paths:
         "202": {description: "A run"}
         "400": {description: "Not one archive's name"}
         "409": {description: "A run is still going, or no service runs the engine"}
+  /api/supervise/uninstall:
+    get:
+      summary: What an uninstall would remove and keep, both ways, read from the setup record and changing nothing (added in place, additively, on 2026-10-16, gate T31 step 1.9)
+      description: "{dir, name (the install directory's name, the word to type), install (the install in one line), helper (whether the uninstall goes through the helper), keep_data and everything (the lines nils uninstall --print says for each way), everything_refused (why a purge would be refused, or null)}."
+      responses:
+        "200": {description: "{dir, name, install, helper, keep_data, everything, everything_refused}"}
+        "401": {description: No token the supervisor knows}
+        "409": {description: No setup is recorded on this host}
+    post:
+      summary: Uninstall NILS from this host, apart from the call (nils uninstall --keep-data or --purge, without asking; added in place, additively, on 2026-10-16, gate T31 step 1.9)
+      description: "`leave` is `nils` (the services, the programs and the packs go; the registry and its key, the backups, the desk's people, the assistant's history, Kvasir's models and the setup's choices stay for the next setup) or `everything` (all of that and the install directory, the registry's key with it, which cannot be undone); `confirm` is the install directory's name, typed. Where the services are the machine's own and the supervisor runs as its own account, the uninstall goes through the helper (`nils-manage uninstall keep-data` or `uninstall purge`). Every ask that starts one is written first, with who asked (the `X-Nils-Person` header the desk sets from its session, else the token's name), as a line of `acts.log` beside the supervisor's configuration, and the run keeps it as `by`. The run stops the supervisor's own service among the others and goes on after it."
+      requestBody: {required: true, content: {application/json: {schema: {type: object, required: [leave, confirm], properties: {leave: {type: string, enum: [nils, everything]}, confirm: {type: string}}}}}}
+      responses:
+        "202": {description: "A run: {id, what: uninstall, command, state, pid, started_at, by}"}
+        "400": {description: "A leave that is neither, or confirm that is not the directory's name"}
+        "401": {description: No token the supervisor knows}
+        "409": {description: "No setup is recorded on this host, a purge the command would refuse (the directory is not absolute, is the root, or holds the home directory), or a run is still going"}
   /api/derivatives:
     get:
       summary: The derivatives, newest first (record 42 S4; nils derivative list)
@@ -2214,6 +2243,38 @@ paths:
         "200": {description: "The entry the catalog held already: {..., added: false, replaces: [], replaces_why}"}
         "400": {description: "No descriptor, or one that does not parse or check, in plain words: {error}"}
         "403": {description: No install:work}
+  /api/clinical/vocabulary:
+    get:
+      summary: The clinical vocabulary the registry holds (nils clinical vocabulary list --json; added in place, additively, on 2026-10-16, gate T31 step 22.8)
+      description: "data:see. {diseases: [{id, name, code, description, types: [{name, description}]}], observation_types: [{id, name, category, value_type, unit, primary, sensitive}]}."
+      responses:
+        "200": {description: "{diseases, observation_types}"}
+        "403": {description: No data:see}
+    post:
+      summary: Load a clinical vocabulary (nils clinical vocabulary load; added in place, additively, on 2026-10-16, gate T31 step 22.8)
+      description: "data:work, audited as `vocabulary.load` under the caller with the counts. Body {text (a vocabulary file's text), name (the file's name, for the audit row)}; with no text, the pack's own clinical/vocabulary.yml in the directory the engine reads its packs from. Loaded by name: what exists is updated, what is new is added, nothing is removed. Answers {diseases, disease_types, observation_types (each {added, updated}), from, changed}."
+      requestBody:
+        content:
+          application/json:
+            schema: {type: object, properties: {text: {type: string}, name: {type: string}}}
+      responses:
+        "200": {description: "{diseases, disease_types, observation_types, from, changed}"}
+        "400": {description: "A vocabulary the engine cannot read: {error}"}
+        "403": {description: No data:work}
+        "409": {description: "No text, and the engine reads no pack directory or its vocabulary cannot be read: {error}"}
+  /api/clinical/import:
+    post:
+      summary: Preview or apply a clinical import of a CSV under a mapping (nils clinical import; added in place, additively, on 2026-10-16, gate T31 step 22.8)
+      description: "data:work. Body {mapping (the mapping's text: the target, how a row names its subject, the columns and their parsers, the key, what to do with a row that exists), csv (the file's text), apply (false, the default, previews and writes nothing)}. A mapping whose rows name their subjects by an identifier looks each up in the linkage store and needs detail sensitive (403 below it). An apply writes under the caller in one transaction as a job of kind clinical-import, idempotent on the mapping's key, and is audited as `clinical.import` with the counts and never a value. Answers {target, applied, rows, added, skipped, updated, superseded, reviewed, refused ({why: count}), changes, samples: [{row, subject, verdict, detail}]}; a sample's subject code is shown from detail quasi up and is null below it."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object, required: [mapping, csv], properties: {mapping: {type: string}, csv: {type: string}, apply: {type: boolean, default: false}}}
+      responses:
+        "200": {description: "{target, applied, rows, added, skipped, updated, superseded, reviewed, refused, changes, samples}"}
+        "400": {description: "No mapping or csv, a mapping the engine cannot run, or a file it cannot read as CSV: {error}"}
+        "403": {description: "No data:work, or below detail sensitive for a mapping that names subjects by an identifier"}
   /api/pipelines/lane:
     get:
       summary: The pipeline lane (nils pipeline lane --json; added in place, additively, on 2026-10-14, record 55 H2)
@@ -2299,6 +2360,61 @@ paths:
       responses:
         "200": {description: The run}
         "404": {description: No such run}
+  /api/pipelines/runtime:
+    get:
+      summary: The container runtime pipelines run under, as chosen and as found (nils pipeline runtime --json; added in place, additively, on 2026-10-16, gate T31 step 15.8)
+      description: "pipelines:see. {choice (the operator's: auto until one is set), choices (every word choice takes), apptainer_image (how apptainer keeps an image: sif or sandbox), apptainer_images, capability (what GET /api/capabilities says of pipelines: enabled, the runtime found, the reason when off, the lane)}."
+      responses:
+        "200": {description: "{choice, choices, apptainer_image, apptainer_images, capability}"}
+        "403": {description: No pipelines:see}
+    put:
+      summary: Choose the runtime pipelines run under, or how apptainer keeps an image (nils pipeline runtime --set --apptainer-image; added in place, additively, on 2026-10-16, gate T31 step 15.8)
+      description: "An admin's (install:work), audited as `pipeline.runtime` under the caller, one row per field. Either or both of {choice (auto, apptainer-first, podman, apptainer, docker or off; docker only when chosen here), apptainer_image (sif, or sandbox where there is no /dev/fuse)}, both checked before either is written. Answers as GET does; the runtime of a new choice is looked for behind the door, and capability says so until it is found."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object, properties: {choice: {type: string, enum: [auto, apptainer-first, podman, apptainer, docker, "off"]}, apptainer_image: {type: string, enum: [sif, sandbox]}}}
+      responses:
+        "200": {description: "{choice, choices, apptainer_image, apptainer_images, capability}"}
+        "400": {description: "Neither field, or a word the field does not take: {error}"}
+        "403": {description: No install:work}
+  /api/pipelines/starters:
+    get:
+      summary: The starter catalog and whether the engine seeds it at its start (nils pipeline starter --json; added in place, additively, on 2026-10-16, gate T31 step 15.8)
+      description: "pipelines:see. {seeding (on or off), starters: [{name, digest, image, state (what the catalog holds of it, in words)}]}."
+      responses:
+        "200": {description: "{seeding, starters}"}
+        "403": {description: No pipelines:see}
+    put:
+      summary: Turn the seeding of the starter catalog at the engine's start on or off (nils pipeline starter --on --off; added in place, additively, on 2026-10-16, gate T31 step 15.8)
+      description: "An admin's (install:work), audited as `pipeline.runtime` under the caller. Body {seeding: on or off}. Answers as GET does."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object, required: [seeding], properties: {seeding: {type: string, enum: ["on", "off"]}}}
+      responses:
+        "200": {description: "{seeding, starters}"}
+        "400": {description: "seeding is not on or off: {error}"}
+        "403": {description: No install:work}
+  /api/pipelines/starters/seed:
+    post:
+      summary: Seed the starters the catalog lacks, now (nils pipeline starter --seed; added in place, additively, on 2026-10-16, gate T31 step 15.8)
+      description: "An admin's (install:work). Adds each starter the catalog lacks, or whose older starter version it holds, as the engine does at its start; a person's version or a retired one is left so. Each version added is audited as `pipeline.add` under the starter catalog. Answers as GET does with `added` ([{id, label, image}]), empty when nothing was lacking."
+      responses:
+        "200": {description: "{seeding, starters, added}"}
+        "403": {description: No install:work}
+  /api/pipeline-runs/{id}/seeds:
+    get:
+      summary: The values a run suggests a person curate and the stacks it suggests curating (nils pipeline seeds RUN --json; added in place, additively, on 2026-10-16, gate T31 step 15.8)
+      description: "pipelines:see. {run, seeds (each entry as the pipeline wrote it, with stack_id, axis and value), per_value ({axis=value: count}), selection: {stacks}, withheld (how many seeds and stacks of a sample sealed now were left out, for a caller who does not read sealed samples)}. The stacks are saved as a selection at PUT /api/ask/selections/{name}, as --save does."
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: integer}}
+      responses:
+        "200": {description: "{run, seeds, per_value, selection, withheld}"}
+        "403": {description: No pipelines:see}
+        "404": {description: "No such run, or a run that suggested no seeds"}
   /api/pipeline-runs/{id}/log:
     get:
       summary: What a run's containers printed, where its units ran together (record 55 H2, round 5; added in place, additively, on 2026-10-13)
