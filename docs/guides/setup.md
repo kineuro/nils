@@ -678,7 +678,7 @@ the desk's Parts page the same.
 ### Rules releases
 
 The rules ship on their own as well. A first-party pack is released under a
-tag of its own, `pack-mri-v1.0.2`, with no engine release beside it, so a
+tag of its own, `pack-mri-v1.2.3`, with no engine release beside it, so a
 rules fix reaches an install the way a desk release does. Its release
 carries `pack-mri.tar.gz`, holding `packs/mri/` as the engine's
 `packs.tar.gz` holds every pack, and `pack-mri.VERSION`, both named in its
@@ -699,7 +699,9 @@ the engines it works with, `engine: ">=1.0.0-alpha.80, <2.0.0"`, for what a
 contract cannot say, such as an engine fix the rules rely on. A release this
 engine would refuse is never installed, and `--check` says it waits and why;
 a newer engine takes it. The certified rules are MRI pack 1.0.0, the paper's
-named release; production fixes ship as 1.0.1, 1.0.2 and on.
+named release. An install runs the newest rules release its engine reads (1.2.3
+today), since that is where the rules' fixes ship; 1.0.0 and 1.0.1 are published
+as rules releases of their own, so that the paper's rules can be reproduced.
 
 On GitHub the releases are found in the repository's listing by their tags.
 A channel of a deployment's own lays each out as GitHub does, under
@@ -709,12 +711,17 @@ the rules alone. Where the engine's own release cannot be read, a pack's own
 releases are measured against the pack in place, never below it. An engine in a container reads the packs its image carries,
 so rules releases reach it with the engine's next image.
 
-An install can be pinned to one version of a pack, to reproduce what the
-paper reports with rules 1.0.0, for example:
+A pin holds an install to one version of a pack, and it is for one purpose:
+reproducing what the paper reports, which was found with rules 1.0.0. A machine
+that repeats the paper's results pins that version:
 
 ```
 nils update --pin mri@1.0.0
 ```
+
+A site does not pin otherwise. Its rules follow the newest release, which
+`nils update --part rules` takes, or Update on the MRI rules row of the desk's
+Parts page, and a pinned install misses the fixes made since.
 
 The pin is written beside the packs, in `.nils-packs.json`, and in the
 setup record (`pinned = "1.0.0"` under `[rules.mri]`). That version is put in

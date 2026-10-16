@@ -707,7 +707,10 @@ days.
 - **The desk.** Settings › Parts lists each pack with its version, its newer
   release and an update control.
 - **Versions.** The certified rules are MRI pack 1.0.0, the paper's named release;
-  production fixes ship as 1.0.1, 1.0.2 and on.
+  production fixes ship as 1.0.1, 1.0.2 and on. *Amended in place on 2026-10-16 by
+  record 55 (B5, ruling 31 (f)):* production runs the newest rules release, 1.2.3
+  today, and 1.0.0 is reachable by the pin, which is for reproducing the paper; a
+  site does not pin otherwise.
 
 **As built (2026-10-10).** The pack contract is the compatibility key: every
 engine already refuses a pack whose contract is above its own, so a rules
@@ -733,9 +736,11 @@ carries.
 item 4; ruling 31 (f)):* the MRI pack names its engine range from 1.1.0 on (now
 `>=1.0.0-alpha.82, <2.0.0`, pack contract 10). Its first rules release on a tag of
 its own is `pack-mri-v1.2.0`; 1.0.2, 1.0.3 and 1.1.0 shipped inside it, and
-`pack-mri-v1.2.1` to `pack-mri-v1.2.3` followed. The certified 1.0.0 and 1.0.1 are
-to be published as rules releases from the engine trees that carried them, so
-that an install can be pinned to the rules the paper reports.
+`pack-mri-v1.2.1` to `pack-mri-v1.2.3` followed. The certified 1.0.0 and 1.0.1
+were published by hand on 2026-10-16 as `pack-mri-v1.0.0` and `pack-mri-v1.0.1`,
+from the packs that engines alpha.78 and alpha.79 shipped (the commits that made
+them are older than the release workflow), so that an install can be pinned to the
+rules the paper reports.
 
 ### 9.3 The release discipline (C2)
 
