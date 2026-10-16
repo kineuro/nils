@@ -4162,7 +4162,10 @@ fn routed(
                 }
             }
             // gate T31, step 13.8: the release form's expert options
-            command.extend(release_expert_flags(&doc)?);
+            command.extend(release_expert_flags(
+                &doc,
+                caller.access.holds(nils_pipeline::failure::INSTALL_GRANT),
+            )?);
             if let Some(dir) = &doors.pack_dir {
                 command.extend(["--pack-dir".into(), dir.display().to_string()]);
             }
@@ -5769,10 +5772,13 @@ pub(crate) const RELEASE_EXPERT: [&str; 10] = [
 /// converter, uncompressed NIfTI, the authors, the categories of element
 /// removed, the UID root, only the picked stacks, and only stacks of some
 /// roles. Each is checked here with the parser the command uses, so a bad
-/// one is refused before a job is queued. The converter is dcm2niix by
-/// name or by a path whose file is named dcm2niix: the job runs it, and a
-/// door that ran any program a caller named would run anything.
-pub(crate) fn release_expert_flags(doc: &serde_json::Value) -> Result<Vec<String>, Reply> {
+/// one is refused before a job is queued. The converter is the word
+/// dcm2niix, the engine's own, for anyone; a path only from an admin, and
+/// only to a file it would trust ([`converter_path`]): the job runs it.
+pub(crate) fn release_expert_flags(
+    doc: &serde_json::Value,
+    may_install: bool,
+) -> Result<Vec<String>, Reply> {
     use nils_release::bids::place::{Dicom, Localizers, Synthetic};
     let mut out: Vec<String> = Vec::new();
     let word = |key: &str| -> Result<Option<&str>, Reply> {
@@ -5827,19 +5833,12 @@ pub(crate) fn release_expert_flags(doc: &serde_json::Value) -> Result<Vec<String
         out.extend(["--dicom".into(), v.into()]);
     }
     if let Some(v) = word("converter")? {
-        let path = std::path::Path::new(v);
-        let named = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .is_some_and(|n| n == "dcm2niix" || n == "dcm2niix.exe");
-        let whole = v == "dcm2niix" || path.is_absolute();
-        if !named || !whole || v.split('/').any(|s| s == "..") {
-            return Err(Reply::error(
-                400,
-                "converter is dcm2niix, or the absolute path of a file named dcm2niix",
-            ));
+        // the word is the engine's own dcm2niix, found as `nils tools` finds
+        // it, which is the command's default and needs no flag
+        if v != "dcm2niix" {
+            converter_path(v, may_install)?;
+            out.extend(["--dcm2niix".into(), v.into()]);
         }
-        out.extend(["--dcm2niix".into(), v.into()]);
     }
     match &doc["compress"] {
         serde_json::Value::Null | serde_json::Value::Bool(true) => {}
@@ -5882,6 +5881,59 @@ pub(crate) fn release_expert_flags(doc: &serde_json::Value) -> Result<Vec<String
         out.extend(["--role".into(), role]);
     }
     Ok(out)
+}
+
+/// A converter named by its path at the release door (gate T31, step
+/// 13.8, as reviewed): the job runs it as the engine, so a path is taken
+/// only from a caller holding install:work, and only where it names a
+/// regular file called dcm2niix, not a link, owned by root or by the
+/// account the engine runs as, and not writable by anyone else. Anyone else
+/// names the engine's own, `dcm2niix`.
+fn converter_path(v: &str, may_install: bool) -> Result<(), Reply> {
+    let path = std::path::Path::new(v);
+    let named = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n == "dcm2niix" || n == "dcm2niix.exe");
+    if !named || !path.is_absolute() || v.split('/').any(|s| s == "..") {
+        return Err(Reply::error(
+            400,
+            "converter is dcm2niix, the engine's own, or the absolute path of a file named dcm2niix",
+        ));
+    }
+    if !may_install {
+        return Err(Reply::error(
+            403,
+            "converter: a path names a program the job runs, which is an admin's (install:work); name dcm2niix for the engine's own",
+        ));
+    }
+    let meta = std::fs::symlink_metadata(path)
+        .map_err(|e| Reply::error(400, format!("converter {v} cannot be read: {e}")))?;
+    if !meta.file_type().is_file() {
+        return Err(Reply::error(
+            400,
+            format!("converter {v} is not a regular file; a link is not taken"),
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if meta.uid() != 0 && meta.uid() != crate::pipelines::engine_uid() {
+            return Err(Reply::error(
+                400,
+                format!(
+                    "converter {v} is owned by neither root nor the account the engine runs as"
+                ),
+            ));
+        }
+        if meta.mode() & 0o002 != 0 {
+            return Err(Reply::error(
+                400,
+                format!("converter {v} may be written by anyone"),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// The probe door's `location` (Wave 4c §6.6): a location `@name` names

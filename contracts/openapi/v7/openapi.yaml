@@ -604,7 +604,7 @@ paths:
                 localizers: {type: string, enum: [sourcedata, datatype, anat, drop], description: "Added in place on 2026-10-16 (gate T31, step 13.8, the release form's expert options, with every field below): where a localizer goes in a BIDS tree, as --localizers"}
                 synthetic: {type: string, enum: [folder, anat, derivatives], description: "Where a vendor's synthetic contrast goes, as --synthetic"}
                 dicom: {type: string, enum: [all, folders, none], description: "Which stacks a BIDS release also writes as DICOM, as --dicom"}
-                converter: {type: string, description: "dcm2niix, or the absolute path of a file named dcm2niix, as --dcm2niix; any other program is refused (400)"}
+                converter: {type: string, description: "dcm2niix, the engine's own as nils tools finds it, for any caller; or, from a caller holding install:work alone (403 otherwise), the absolute path of a regular file named dcm2niix, not a link, owned by root or the engine's account and not writable by others, as --dcm2niix. Any other program or file is refused (400)"}
                 compress: {type: boolean, default: true, description: "false writes .nii rather than .nii.gz, as --no-compress"}
                 authors: {type: array, items: {type: string}, description: "Whose dataset it is, for dataset_description.json, as --author; whoever ran the release when absent"}
                 categories: {type: array, items: {type: string, enum: [patient, trial, provider, institution, times, ids]}, description: "The categories of element removed, as --categories; all of them when absent, and at least one when given"}
@@ -613,7 +613,8 @@ paths:
                 roles: {type: array, items: {type: string}, description: "Only stacks holding one of these roles, as --role"}
       responses:
         "202": {description: "{job, state: queued, command}"}
-        "400": {description: "The handle named is not at stack grain; or an expert option the command would refuse (a localizer placement, a category or a UID root it does not read, a converter not named dcm2niix)"}
+        "403": {description: "A converter named by its path, from a caller without install:work"}
+        "400": {description: "The handle named is not at stack grain; or an expert option the command would refuse (a localizer placement, a category or a UID root it does not read, a converter not named dcm2niix or a file the engine would not trust)"}
         "409": {description: "The handle named does not reproduce: truncated, stale (the registry moved, or the handle was invalidated) or incomplete, in that order; or wave 5 section 10.2: out is not under a declared export place, once any place is declared"}
   /api/handovers:
     post:

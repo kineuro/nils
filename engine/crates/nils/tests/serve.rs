@@ -3124,15 +3124,49 @@ fn the_clinical_vocabulary_and_import_doors_do_what_the_command_line_does() {
 
 /// Gate T31, step 13.8: the release form's expert options reach the job as
 /// the flags of `nils release`, and one the command would refuse is refused
-/// at the door before anything is queued, a converter that is not dcm2niix
-/// among them.
+/// at the door before anything is queued. The converter is the engine's own
+/// `dcm2niix` for anyone; a path is taken only from an admin (install:work),
+/// and only to a regular file named dcm2niix, not a link, owned by root or
+/// the engine's account and writable by nobody else, since the job runs it.
+#[cfg(unix)]
 #[test]
 fn the_release_doors_expert_options_become_the_commands_flags() {
+    use std::os::unix::fs::PermissionsExt;
     let home = registry();
     let export = TempDir::new("t31-export");
     let out = export.path().join("tree").display().to_string();
-    let server = Server::start(&home, 12, &[], &[]);
-    let (status, caps) = server.request("GET", "/api/capabilities", None, None);
+    // a converter an admin may name, one in the open, a link and a folder
+    let tools = TempDir::new("t31-tools");
+    let good = tools.path().join("trusted").join("dcm2niix");
+    let open = tools.path().join("open").join("dcm2niix");
+    let link = tools.path().join("link").join("dcm2niix");
+    let folder = tools.path().join("folder").join("dcm2niix");
+    for (file, mode) in [(&good, 0o755), (&open, 0o777)] {
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(file, "#!/bin/sh\necho v1\n").unwrap();
+        std::fs::set_permissions(file, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+    std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&good, &link).unwrap();
+    std::fs::create_dir_all(&folder).unwrap();
+    let path = |p: &std::path::Path| p.display().to_string();
+
+    let server = Server::start(
+        &home,
+        18,
+        &[
+            "--auth",
+            "token",
+            "--token",
+            "an-admin-token-of-length=ad@lab:admin",
+            "--token",
+            "a-release-worker-tokenx=rel@lab:release:work,release:see",
+        ],
+        &[],
+    );
+    let admin = Some("an-admin-token-of-length");
+    let worker = Some("a-release-worker-tokenx");
+    let (status, caps) = server.request("GET", "/api/capabilities", None, admin);
     assert_eq!(status, 200, "{caps}");
     assert_eq!(
         caps["releases"]["expert"].as_array().map(Vec::len),
@@ -3146,14 +3180,14 @@ fn the_release_doors_expert_options_become_the_commands_flags() {
             &serde_json::json!({
                 "name": "expert", "out": out, "layout": "bids",
                 "localizers": "drop", "synthetic": "anat", "dicom": "none",
-                "converter": "/opt/tools/dcm2niix", "compress": false,
+                "converter": path(&good), "compress": false,
                 "authors": ["Ada Lovelace", "Alan Turing"],
                 "categories": ["patient", "ids"], "uid_root": "1.2.826.0.1.3680043.10.543",
                 "picked": true, "roles": ["t1", "flair"],
             })
             .to_string(),
         ),
-        None,
+        admin,
     );
     assert_eq!(status, 202, "{queued}");
     let command: Vec<&str> = queued["command"]
@@ -3167,7 +3201,7 @@ fn the_release_doors_expert_options_become_the_commands_flags() {
         "--localizers drop",
         "--synthetic anat",
         "--dicom none",
-        "--dcm2niix /opt/tools/dcm2niix",
+        &format!("--dcm2niix {}", path(&good)),
         "--no-compress",
         "--author Ada Lovelace",
         "--author Alan Turing",
@@ -3179,15 +3213,16 @@ fn the_release_doors_expert_options_become_the_commands_flags() {
     ] {
         assert!(line.contains(flag), "{flag} is not in {line}");
     }
-    // nothing asked, nothing added: the command's defaults stand
+    // nothing asked, nothing added: the command's defaults stand, the
+    // engine's own dcm2niix among them
     let (status, plain) = server.request(
         "POST",
         "/api/releases",
         Some(
-            &serde_json::json!({"name": "plain", "out": out, "compress": true, "picked": false})
+            &serde_json::json!({"name": "plain", "out": out, "compress": true, "picked": false, "converter": "dcm2niix"})
                 .to_string(),
         ),
-        None,
+        admin,
     );
     assert_eq!(status, 202, "{plain}");
     let line = plain["command"].to_string();
@@ -3202,7 +3237,29 @@ fn the_release_doors_expert_options_become_the_commands_flags() {
     ] {
         assert!(!line.contains(flag), "{flag} is in {line}");
     }
-    // refused before a job is queued
+    // a person with release work names the engine's own, never a path
+    let (status, own) = server.request(
+        "POST",
+        "/api/releases",
+        Some(&serde_json::json!({"name": "own", "out": out, "converter": "dcm2niix"}).to_string()),
+        worker,
+    );
+    assert_eq!(status, 202, "{own}");
+    let (status, refused) = server.request(
+        "POST",
+        "/api/releases",
+        Some(
+            &serde_json::json!({"name": "theirs", "out": out, "converter": path(&good)})
+                .to_string(),
+        ),
+        worker,
+    );
+    assert_eq!(status, 403, "{refused}");
+    assert!(
+        refused["error"].as_str().unwrap().contains("install:work"),
+        "{refused}"
+    );
+    // refused before a job is queued, even for an admin
     for (bad, words) in [
         (serde_json::json!({"converter": "/bin/sh"}), "converter"),
         (
@@ -3212,6 +3269,22 @@ fn the_release_doors_expert_options_become_the_commands_flags() {
         (
             serde_json::json!({"converter": "/opt/../bin/dcm2niix"}),
             "converter",
+        ),
+        (
+            serde_json::json!({"converter": path(&tools.path().join("none").join("dcm2niix"))}),
+            "cannot be read",
+        ),
+        (
+            serde_json::json!({"converter": path(&link)}),
+            "not a regular file",
+        ),
+        (
+            serde_json::json!({"converter": path(&folder)}),
+            "not a regular file",
+        ),
+        (
+            serde_json::json!({"converter": path(&open)}),
+            "written by anyone",
         ),
         (serde_json::json!({"localizers": "attic"}), "localizers"),
         (serde_json::json!({"categories": []}), "categories"),
@@ -3226,16 +3299,16 @@ fn the_release_doors_expert_options_become_the_commands_flags() {
         doc["name"] = serde_json::json!("refused");
         doc["out"] = serde_json::json!(out);
         let (status, refused) =
-            server.request("POST", "/api/releases", Some(&doc.to_string()), None);
+            server.request("POST", "/api/releases", Some(&doc.to_string()), admin);
         assert_eq!(status, 400, "{bad}: {refused}");
         assert!(
             refused["error"].as_str().unwrap().contains(words),
             "{bad}: {refused}"
         );
     }
-    let (status, jobs) = server.request("GET", "/api/jobs", None, None);
+    let (status, jobs) = server.request("GET", "/api/jobs", None, admin);
     assert_eq!(status, 200, "{jobs}");
-    assert_eq!(jobs["jobs"].as_array().map(Vec::len), Some(2), "{jobs}");
+    assert_eq!(jobs["jobs"].as_array().map(Vec::len), Some(3), "{jobs}");
     server.finish();
 }
 
