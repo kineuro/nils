@@ -879,6 +879,10 @@ pub(crate) fn capabilities(config: &Config, node: &str) -> Value {
             "GET /api/supervise/runs/{id}",
             "POST /api/supervise/look",
             "POST /api/supervise/folders",
+            "POST /api/supervise/signin",
+            "POST /api/supervise/backups",
+            "POST /api/supervise/model",
+            "POST /api/supervise/restore",
         ],
         "log": log_rows(&config.log, 5),
     })
@@ -898,6 +902,70 @@ fn error(status: u16, message: impl Into<String>) -> (u16, Value) {
         status,
         json!({ "error": message.into(), "disclosure": disclosure }),
     )
+}
+
+/// The person a desk names for a call, as `user@node`: the desk signs them
+/// in and holds the token, so the name is the desk's to give, and a call
+/// with no token the supervisor knows is refused before it is read. `None`
+/// where no desk named one.
+fn person(request: &Request) -> Option<String> {
+    request
+        .headers()
+        .iter()
+        .find(|h| h.field.equiv("X-Nils-Person"))
+        .and_then(|h| nils_registry::principal::Principal::parse(h.value.as_str()))
+        .map(|p| p.to_string())
+}
+
+/// A change of the setup or an archive put back (record 55 ruling 35 (c)):
+/// what was asked checked as the run will check it again, left in a
+/// request file of the supervisor's folder, and made by a run apart from
+/// the call, one run at a time.
+fn asked(runs: &Runs, what: &str, mut doc: Value, by: &str) -> (u16, Value) {
+    use crate::setup::change;
+    let Some(state) = crate::setup::read_state() else {
+        return error(
+            404,
+            format!(
+                "no setup is recorded at {}; this door changes an install nils setup made",
+                crate::setup::state_path().display()
+            ),
+        );
+    };
+    if !doc.is_object() {
+        return error(400, format!("{what}: a JSON object"));
+    }
+    doc["what"] = json!(what);
+    doc["by"] = json!(by);
+    // the body may hold a secret, so what does not read is said by its
+    // fields, never by echoing it
+    let Ok(request) = serde_json::from_value::<change::Request>(doc) else {
+        return error(
+            400,
+            match what {
+                "signin" => {
+                    "signin: {mode: local | oidc, first?: {name, password}, oidc?: {issuer, client_id, client_secret, roles_claim?}}"
+                }
+                "backups" => "backups: {dir}",
+                "model" => "model: {server, key, model?}",
+                _ => "restore: {archive}",
+            },
+        );
+    };
+    if let Some((status, why)) = change::refusal(&state, &request) {
+        return error(status, why);
+    }
+    if let Err((status, why)) = runs.going() {
+        return error(status, why);
+    }
+    if let Some(why) = change::helper_lacks(&state, request.word()) {
+        return error(409, why);
+    }
+    if let Err(e) = change::leave_request(Path::new(&state.dir), &request) {
+        return error(500, format!("the request was not left for the run: {e}"));
+    }
+    let word = request.word();
+    started(runs.start(word, &["supervise".to_string(), word.to_string()]))
 }
 
 fn principal(config: &Config, request: &Request) -> Option<String> {
@@ -923,21 +991,26 @@ struct Runs {
 }
 
 impl Runs {
-    fn start(&self, what: &str, args: &[String]) -> Result<Value, (u16, String)> {
+    /// The run still going, where one is: one runs at a time.
+    fn going(&self) -> Result<(), (u16, String)> {
         let mut children = self
             .children
             .lock()
             .map_err(|_| (500, "the runs are held".to_string()))?;
-        let mut going = None;
         for (id, child) in children.iter_mut() {
             if matches!(child.try_wait(), Ok(None)) {
-                going = Some(id.clone());
-                break;
+                return Err((409, format!("run {id} is still going; one run at a time")));
             }
         }
-        if let Some(id) = going {
-            return Err((409, format!("run {id} is still going; one run at a time")));
-        }
+        Ok(())
+    }
+
+    fn start(&self, what: &str, args: &[String]) -> Result<Value, (u16, String)> {
+        self.going()?;
+        let mut children = self
+            .children
+            .lock()
+            .map_err(|_| (500, "the runs are held".to_string()))?;
         std::fs::create_dir_all(&self.dir)
             .map_err(|e| (500, format!("{}: {e}", self.dir.display())))?;
         let millis = SystemTime::now()
@@ -1672,6 +1745,20 @@ fn handle(config: &Config, node: &str, busy: &Mutex<()>, runs: &Runs, mut reques
                 },
             }
         }
+        (
+            Method::Post,
+            "/api/supervise/signin"
+            | "/api/supervise/backups"
+            | "/api/supervise/model"
+            | "/api/supervise/restore",
+        ) => {
+            let doc = body_json(&mut request);
+            let by = person(&request).unwrap_or_else(|| {
+                nils_registry::principal::Principal::parse(&who)
+                    .map_or_else(|| who.clone(), |p| p.to_string())
+            });
+            asked(runs, &path["/api/supervise/".len()..], doc, &by)
+        }
         (Method::Post, "/api/supervise/update") => {
             let mut text = String::new();
             let _ = request.as_reader().read_to_string(&mut text);
@@ -1806,6 +1893,14 @@ pub(crate) enum SuperviseCommand {
         #[arg(long)]
         part: Option<String>,
     },
+    /// Make the change of the setup the supervisor's door left in its
+    /// folder (record 55 ruling 35 (c))
+    #[command(hide = true)]
+    Change,
+    /// Put back the archive the supervisor's door named: the engine
+    /// stopped, the archive restored, the engine started again
+    #[command(hide = true)]
+    Restore,
     /// Run a command of this binary for a run the service started, and record how it ended
     #[command(hide = true)]
     Record {
@@ -1942,6 +2037,8 @@ pub(crate) fn command(command: SuperviseCommand) -> Result<(), Exit> {
         }
         SuperviseCommand::Run { config, bind } => run(&config, bind),
         SuperviseCommand::Record { dir, id, command } => record(&dir, &id, &command),
+        SuperviseCommand::Change => crate::setup::change::change_command(),
+        SuperviseCommand::Restore => crate::setup::change::restore_command(),
         SuperviseCommand::Restart { part } => {
             let state = recorded()?;
             crate::setup::restart_units(&state, part.as_deref()).map(|_| ())

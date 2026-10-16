@@ -463,6 +463,18 @@ impl Service {
         body: Option<&str>,
         token: Option<&str>,
     ) -> (u16, serde_json::Value) {
+        self.call_for(method, path, body, token, None)
+    }
+
+    /// A call the desk makes for a person, whom it names in X-Nils-Person.
+    fn call_for(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<&str>,
+        token: Option<&str>,
+        person: Option<&str>,
+    ) -> (u16, serde_json::Value) {
         let mut stream = TcpStream::connect(self.url.trim_start_matches("http://")).unwrap();
         let body = body.unwrap_or("");
         let mut head = format!(
@@ -474,6 +486,9 @@ impl Service {
         }
         if let Some(t) = token {
             head.push_str(&format!("Authorization: Bearer {t}\r\n"));
+        }
+        if let Some(p) = person {
+            head.push_str(&format!("X-Nils-Person: {p}\r\n"));
         }
         head.push_str("\r\n");
         stream.write_all(head.as_bytes()).unwrap();
@@ -1315,4 +1330,378 @@ fn the_door_reports_the_install_restarts_apart_and_looks_inside_a_folder() {
         token,
     );
     assert_eq!(status, 400);
+}
+
+/// A run the supervisor started, followed to its end.
+fn ended(s: &Service, run: &serde_json::Value, token: Option<&str>) -> serde_json::Value {
+    let id = run["id"].as_str().expect("a run's id").to_string();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    loop {
+        let (status, doc) = s.call("GET", &format!("/api/supervise/runs/{id}"), None, token);
+        assert_eq!(status, 200, "{doc}");
+        if doc["state"] != "running" {
+            return doc;
+        }
+        assert!(std::time::Instant::now() < deadline, "{doc}");
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
+fn said(run: &serde_json::Value) -> String {
+    run["tail"]
+        .as_array()
+        .map(|lines| {
+            lines
+                .iter()
+                .filter_map(|l| l.as_str())
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .unwrap_or_default()
+}
+
+/// Record 55 ruling 35 (c), T31: the setup's printed steps are the
+/// supervisor's doors. An install whose parts run in docker, with `docker`
+/// and every service manager a stand-in that writes down what it was asked,
+/// so nothing outside the test's folder is reached: an archive is put back
+/// with the engine stopped and started again and the restore audited under
+/// the person the desk named; the engine is given another backup folder;
+/// sign-in moves to a provider; and what a door does not take is refused
+/// before anything is written.
+#[cfg(unix)]
+#[test]
+fn the_supervisor_changes_the_setup_and_restores_through_its_doors() {
+    use std::os::unix::fs::PermissionsExt;
+    let c = Channel::new();
+    let install = c.dir.path().join("install");
+    std::fs::create_dir_all(&install).unwrap();
+    std::fs::write(install.join("VERSION"), "1.0.0\n").unwrap();
+    let config = c.config("engine", &install, "true");
+    let home = TempDir::new("supervise-change");
+    let settings = home.path().join("config");
+    std::fs::create_dir_all(settings.join("nils")).unwrap();
+    let dir = home.path().join("nils");
+    let registry = dir.join("registry");
+    let backups = dir.join("backups");
+    std::fs::create_dir_all(&backups).unwrap();
+
+    // the stand-ins: docker and every service manager, each writing down
+    // its words and doing nothing else
+    let bin = home.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let asked = home.path().join("asked.log");
+    for tool in [
+        "docker",
+        "systemctl",
+        "loginctl",
+        "journalctl",
+        "podman",
+        "launchctl",
+    ] {
+        let path = bin.join(tool);
+        std::fs::write(
+            &path,
+            format!(
+                "#!/bin/sh\necho \"{tool} $*\" >> '{}'\nexit 0\n",
+                asked.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let env: Vec<(&str, &str)> = vec![
+        ("HOME", home.path().to_str().unwrap()),
+        ("XDG_CONFIG_HOME", settings.to_str().unwrap()),
+        ("PATH", &path),
+        ("NILS_NO_TTY", "1"),
+        ("NILS_RELEASES", "http://127.0.0.1:9/releases"),
+    ];
+    let at_registry = |args: &[&str], input: Option<&str>| {
+        let mut child = nils()
+            .envs(env.iter().copied())
+            .env("USER", "anna")
+            .arg("--registry")
+            .arg(&registry)
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut stdin = child.stdin.take().unwrap();
+        if let Some(text) = input {
+            stdin.write_all(text.as_bytes()).unwrap();
+        }
+        drop(stdin);
+        let out = child.wait_with_output().unwrap();
+        assert!(
+            out.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).to_string()
+    };
+    at_registry(&["key", "add", "k"], Some("a supervise test key\n"));
+    at_registry(&["init", "--key", "k"], None);
+    at_registry(&["backup", "--dir", backups.to_str().unwrap()], None);
+    let archive = std::fs::read_dir(&backups)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .next()
+        .expect("an archive");
+    let record = settings.join("nils").join("setup.toml");
+    std::fs::write(
+        &record,
+        format!(
+            "dir = \"{}\"\nmode = \"off\"\nruntime = \"docker\"\nservice = \"docker\"\nreach = \"loopback\"\nbackend = \"sqlite\"\nat = \"2026-10-16T00:00:00Z\"\n\n[ports]\nengine = 8437\ndesk = 7200\nkvasir = 7100\nassistant = 7300\n\n[parts.engine]\nversion = \"1.0.0-alpha.87\"\npath = \"ghcr.io/kineuro/nils\"\nkind = \"docker\"\n",
+            dir.display()
+        ),
+    )
+    .unwrap();
+    let s = Service::start_with(&config, &env);
+    let token = Some("a-supervisor-token-of-length");
+    let anna = Some("anna@desk.example.org");
+
+    // what this supervisor changes here: no desk, so no sign-in, and no
+    // assistant, so no model
+    let (status, doc) = s.call("GET", "/api/supervise/install", None, token);
+    assert_eq!(status, 200, "{doc}");
+    assert_eq!(
+        doc["changes"]["served"],
+        serde_json::json!(["backups", "restore"]),
+        "{doc}"
+    );
+    let post = |door: &str, body: &str| {
+        s.call_for(
+            "POST",
+            &format!("/api/supervise/{door}"),
+            Some(body),
+            token,
+            anna,
+        )
+    };
+    // refused before anything is written: no token, a path for an archive,
+    // a part the install lacks, nobody signing in, a body that does not read
+    let (status, _) = s.call_for(
+        "POST",
+        "/api/supervise/restore",
+        Some(&format!(r#"{{"archive":"{archive}"}}"#)),
+        None,
+        anna,
+    );
+    assert_eq!(status, 401);
+    for (door, body, want) in [
+        ("restore", r#"{"archive":"../registry"}"#, 400),
+        ("restore", r#"{"archive":"a/b"}"#, 400),
+        ("signin", r#"{"mode":"local"}"#, 409),
+        ("signin", r#"{"mode":"off"}"#, 400),
+        (
+            "model",
+            r#"{"server":"https://m.example.org/v1","key":"k"}"#,
+            409,
+        ),
+        ("backups", r#"{"dir":"relative"}"#, 400),
+        ("backups", r#"{"folder":"/x"}"#, 400),
+    ] {
+        let (status, doc) = post(door, body);
+        assert_eq!(status, want, "{door} {body}: {doc}");
+    }
+    let (status, doc) = post(
+        "model",
+        r#"{"server":"https://m.example.org","key":"sk-secret"}"#,
+    );
+    assert_eq!(status, 409, "{doc}");
+    assert!(!doc.to_string().contains("sk-secret"), "{doc}");
+    assert!(
+        !dir.join("supervise")
+            .join("requests")
+            .join("change.json")
+            .exists()
+    );
+
+    // an archive put back: the engine stopped, restored, started again
+    let (status, run) = post("restore", &format!(r#"{{"archive":"{archive}"}}"#));
+    assert_eq!(status, 202, "{run}");
+    assert_eq!(run["command"], serde_json::json!(["supervise", "restore"]));
+    let done = ended(&s, &run, token);
+    assert_eq!(done["state"], "done", "{done}");
+    assert!(
+        said(&done).contains("is put back, and the engine is running again"),
+        "{done}"
+    );
+    let words = std::fs::read_to_string(&asked).unwrap();
+    let stop = words.find("docker stop nils-engine").expect(&words);
+    let start = words.find("docker restart nils-engine").expect(&words);
+    assert!(stop < start, "{words}");
+    assert!(
+        registry.join("backups-before-restore").is_dir(),
+        "the registry as it stood was archived first"
+    );
+    assert!(
+        !dir.join("supervise")
+            .join("requests")
+            .join("restore.json")
+            .exists(),
+        "the request is taken once"
+    );
+    let rows = at_registry(&["audit", "list", "--action", "restore", "--json"], None);
+    assert!(rows.contains("anna@desk.example.org"), "{rows}");
+    assert!(rows.contains(&archive), "{rows}");
+
+    // another backup folder: on record, and the engine's service written
+    // again with it and only the engine started again
+    let elsewhere = home.path().join("archives");
+    let (status, run) = post(
+        "backups",
+        &format!(r#"{{"dir":"{}"}}"#, elsewhere.display()),
+    );
+    assert_eq!(status, 202, "{run}");
+    let done = ended(&s, &run, token);
+    assert_eq!(done["state"], "done", "{done}");
+    assert!(elsewhere.is_dir(), "the folder is made");
+    let recorded = std::fs::read_to_string(&record).unwrap();
+    assert!(
+        recorded.contains(&format!("backup_dir = \"{}\"", elsewhere.display())),
+        "{recorded}"
+    );
+    let compose = std::fs::read_to_string(dir.join("compose.yaml")).unwrap();
+    assert!(compose.contains(elsewhere.to_str().unwrap()), "{compose}");
+    assert!(
+        std::fs::read_to_string(&asked)
+            .unwrap()
+            .contains("docker compose up -d --force-recreate engine"),
+    );
+    let rows = at_registry(
+        &["audit", "list", "--action", "install.change", "--json"],
+        None,
+    );
+    assert!(rows.contains("anna@desk.example.org"), "{rows}");
+    assert!(rows.contains("backups"), "{rows}");
+    // asked again for the folder it has, the run says so and changes nothing
+    let (status, run) = post(
+        "backups",
+        &format!(r#"{{"dir":"{}"}}"#, elsewhere.display()),
+    );
+    assert_eq!(status, 202, "{run}");
+    let done = ended(&s, &run, token);
+    assert_eq!(done["state"], "failed", "{done}");
+    assert!(said(&done).contains("already"), "{done}");
+
+    // sign-in: a desk now, where nobody signs in; a provider that publishes
+    // its keys is taken, and one that does not leaves everything as it was
+    let mut text = std::fs::read_to_string(&record).unwrap();
+    text.push_str("\n[parts.desk]\nversion = \"1.0.0-alpha.68\"\npath = \"ghcr.io/kineuro/nils-desk\"\nkind = \"docker\"\n");
+    std::fs::write(&record, &text).unwrap();
+    let (status, doc) = s.call("GET", "/api/supervise/install", None, token);
+    assert_eq!(status, 200, "{doc}");
+    assert!(
+        doc["changes"]["served"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("signin")),
+        "{doc}"
+    );
+    // a desk that keeps nobody is not moved to passwords without a first person
+    let (status, run) = post("signin", r#"{"mode":"local"}"#);
+    assert_eq!(status, 202, "{run}");
+    let done = ended(&s, &run, token);
+    assert_eq!(done["state"], "failed", "{done}");
+    assert!(said(&done).contains("name the first person"), "{done}");
+    assert!(
+        std::fs::read_to_string(&record)
+            .unwrap()
+            .contains("mode = \"off\"")
+    );
+    // a provider with no discovery document is not taken
+    let silent = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let silent_port = silent.local_addr().unwrap().port();
+    drop(silent);
+    let (status, run) = post(
+        "signin",
+        &format!(
+            r#"{{"mode":"oidc","oidc":{{"issuer":"http://127.0.0.1:{silent_port}/o/nils/","client_id":"desk","client_secret":"a-client-secret"}}}}"#
+        ),
+    );
+    assert_eq!(status, 202, "{run}");
+    let done = ended(&s, &run, token);
+    assert_eq!(done["state"], "failed", "{done}");
+    assert!(
+        said(&done).contains("did not say where its keys are"),
+        "{done}"
+    );
+    assert!(
+        std::fs::read_to_string(&record)
+            .unwrap()
+            .contains("mode = \"off\"")
+    );
+    assert!(!said(&done).contains("a-client-secret"));
+    // one that publishes its discovery document is
+    let provider = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = provider.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for stream in provider.incoming().flatten().take(8) {
+            let mut stream = stream;
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf);
+            let body = format!(
+                r#"{{"issuer":"http://127.0.0.1:{port}/o/nils/","jwks_uri":"http://127.0.0.1:{port}/o/nils/jwks/","scopes_supported":["openid","entitlements"]}}"#
+            );
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+        }
+    });
+    let (status, run) = post(
+        "signin",
+        &format!(
+            r#"{{"mode":"oidc","oidc":{{"issuer":"http://127.0.0.1:{port}/o/nils/","client_id":"desk","client_secret":"a-client-secret"}}}}"#
+        ),
+    );
+    assert_eq!(status, 202, "{run}");
+    let done = ended(&s, &run, token);
+    assert_eq!(done["state"], "done", "{done}");
+    assert!(said(&done).contains("people sign in at"), "{done}");
+    let recorded = std::fs::read_to_string(&record).unwrap();
+    assert!(recorded.contains("mode = \"oidc\""), "{recorded}");
+    assert!(recorded.contains("jwks/"), "{recorded}");
+    assert!(
+        !recorded.contains("a-client-secret"),
+        "the record holds no secret"
+    );
+    let desk = std::fs::read_to_string(dir.join("desk").join("nils-desk.toml")).unwrap();
+    assert!(desk.contains("mode = \"oidc\""), "{desk}");
+    assert!(desk.contains("client_id = \"desk\""), "{desk}");
+    let secret = dir.join("desk").join("client-secret");
+    assert_eq!(
+        std::fs::read_to_string(&secret).unwrap().trim(),
+        "a-client-secret"
+    );
+    assert_eq!(
+        std::fs::metadata(&secret).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    let compose = std::fs::read_to_string(dir.join("compose.yaml")).unwrap();
+    assert!(compose.contains("--auth"), "{compose}");
+    let rows = at_registry(
+        &["audit", "list", "--action", "install.change", "--json"],
+        None,
+    );
+    assert!(rows.contains("\"signin\""), "{rows}");
+    assert!(!rows.contains("a-client-secret"), "{rows}");
+    // and asked for the same provider again, the door says so
+    let (status, doc) = post(
+        "signin",
+        &format!(
+            r#"{{"mode":"oidc","oidc":{{"issuer":"http://127.0.0.1:{port}/o/nils/","client_id":"desk","client_secret":"x"}}}}"#
+        ),
+    );
+    assert_eq!(status, 409, "{doc}");
 }

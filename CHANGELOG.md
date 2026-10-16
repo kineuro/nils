@@ -4,6 +4,11 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Added
+
+- The setup steps the desk printed as commands are doors of the supervisor (record 55, ruling 35 (c), T31): `POST /api/supervise/signin` changes how people sign in (a password the desk keeps, with the first person where it keeps nobody yet, or a provider the desk is registered at already), `POST /api/supervise/backups` gives the engine another folder for its archives, `POST /api/supervise/model` names the model server the assistant's stations use, and `POST /api/supervise/restore` puts an archive of the engine's backup folder back: the engine stopped, `nils restore` run as the engine's account, which writes the pre-restore archive first as before, and the engine started again. Each is checked, left in a request file of the supervisor's own folder, and made by a run apart from the call (`nils supervise change`, `nils supervise restore`), as `nils setup` makes it: the record written, then the install repaired from it. Where the services are the machine's own, the run asks the helper with one word and no argument (`change`, `restore`), so the sudoers rule still names whole command lines, and root reads the request, checks it again and takes it away; a helper written before these words is not asked, and the door says to write it again. Turning sign-in off and registering the desk at an Authentik stay at the machine. `GET /api/supervise/install` says which changes the supervisor makes there (`changes`).
+- Two audit actions: `install.change`, a change of the setup made through the supervisor, naming what changed and never a secret, and `restore`, an archive put back, written into the registry as restored so it is there afterwards and moving the epoch. Both are under the person the desk names to the supervisor in `X-Nils-Person`; `nils restore --by` names one at the keyboard.
+
 ## [1.0.0-alpha.87] - 2026-10-16
 
 Wave 7a's last engine: hospital reserve numbers read beside the personnummer and never kept, spare numbers through a map, model cards that gain their missing claims, the damaged-header flag's three signs (pack contract 11, MRI pack 1.3.0), the post-contrast label's clock across studies (time-rule-2), kept Query cards, LST-AI's thin image, and fixes from the wave's audit.
