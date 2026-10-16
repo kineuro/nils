@@ -340,7 +340,7 @@ fn the_door_serves_what_the_command_line_has() {
     assert_eq!(caps["auth"], "off", "{caps}");
     assert_eq!(caps["principal"], "anna@ward-3", "{caps}");
     // the suite contract, version 3: off holds every grant and detail sensitive
-    assert_eq!(caps["grants"].as_array().unwrap().len(), 28, "{caps}");
+    assert_eq!(caps["grants"].as_array().unwrap().len(), 30, "{caps}");
     assert_eq!(caps["detail"], "sensitive", "{caps}");
     assert_eq!(
         caps["roles"],
@@ -619,7 +619,7 @@ fn nils_tokens_keeps_an_entry_s_own_list() {
     );
     assert_eq!(status, 200, "{doc}");
     assert_eq!(doc["principal"], "cy@lab-2", "{doc}");
-    assert_eq!(doc["grants"].as_array().unwrap().len(), 28, "{doc}");
+    assert_eq!(doc["grants"].as_array().unwrap().len(), 30, "{doc}");
     assert_eq!(doc["detail"], "sensitive", "{doc}");
     server.finish();
 }
@@ -5014,7 +5014,7 @@ fn every_door_needs_its_grant_and_a_refusal_names_it() {
     // any grant of the vocabulary, record 48's sealed:see among them
     assert_eq!(
         row("GET /api/status")["grant"].as_array().unwrap().len(),
-        29
+        31
     );
     // record 42 R7: a rater is not a reviewer of the whole queue; closing a
     // campaign writes decisions, which needs both

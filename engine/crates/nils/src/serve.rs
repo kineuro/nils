@@ -3890,6 +3890,26 @@ fn routed(
                     "linkage import and linkage merge are the linkage verbs the door queues",
                 ));
             }
+            // Record 55, ruling 35 (c): of the handover verbs `run` and
+            // `verify` are jobs; a password is read only at its own door,
+            // and a typed one is given only at the handover door, which
+            // holds it to the grant or the release's maker
+            if command[0] == "handover" {
+                if !matches!(command.get(1).map(String::as_str), Some("run" | "verify")) {
+                    return Err(Reply::error(
+                        400,
+                        "handover run and handover verify are the handover verbs the door queues",
+                    ));
+                }
+                if command.iter().any(|w| {
+                    w.starts_with("--sealed-password") || w.starts_with("--password-stdin")
+                }) {
+                    return Err(Reply::error(
+                        400,
+                        "a typed handover password is given at POST /api/handovers, not here",
+                    ));
+                }
+            }
             // Record 55 H3: of the derivative verbs a result's parts and its
             // layer are jobs; add reads a file of the host and is not.
             if command[0] == "derivative"
@@ -4205,43 +4225,12 @@ fn routed(
                 serde_json::json!({ "job": id, "state": "queued", "command": command }),
             ))
         }
-        ["api", "handovers"] if post => {
-            let doc = json_body(body)?;
-            let release = doc["release"]
-                .as_str()
-                .ok_or_else(|| Reply::error(400, "release is required"))?;
-            let out = doc["out"]
-                .as_str()
-                .ok_or_else(|| Reply::error(400, "out is required"))?;
-            // Wave 5 §10.2: a handover writes only to an exchange place.
-            crate::places::require(
-                registry.store(),
-                nils_registry::place::Role::Exchange,
-                std::path::Path::new(out),
-            )
-            .map_err(|r| Reply::error(409, r.message))?;
-            let mut command = vec![
-                "handover".to_string(),
-                "run".to_string(),
-                "--release".to_string(),
-                release.to_string(),
-                "--out".to_string(),
-                out.to_string(),
-            ];
-            if let Some(k) = doc["key"].as_str() {
-                command.extend(["--key".into(), k.into()]);
-            }
-            let id = nils_registry::job::enqueue_with(
-                registry.store(),
-                &command,
-                Some(release),
-                Some(principal),
-                queued_by(caller),
-            )
-            .map_err(job_err)?;
-            Ok(Reply::accepted(
-                serde_json::json!({ "job": id, "state": "queued", "command": command }),
-            ))
+        // record 55, ruling 35 (c): a handover's own password, made or
+        // typed, or none for a reason; and the handovers listed
+        ["api", "handovers"] if post => crate::handover_doors::queue(registry, caller, body),
+        ["api", "handovers"] if get => crate::handover_doors::list(registry, caller, query),
+        ["api", "handovers", id, "password"] if post => {
+            crate::handover_doors::password(registry, caller, id)
         }
         ["api", "select"] if post => {
             // The bounded synchronous path: what a selection reaches,
@@ -5506,7 +5495,15 @@ pub(crate) fn door(method: &str, segs: &[&str]) -> (Need, Detail) {
         ("POST", ["api", "keys"]) | ("POST", ["api", "keys", _, "remove"]) => {
             (Need::Both("database:work", "install:work"), Detail::Sensitive)
         }
-        ("POST", ["api", "handovers", "password"]) => (Need::One("release:work"), Detail::Sensitive),
+        // record 55, ruling 35 (c): the handovers are read on the Release
+        // page, and by whoever may show a handover's password; showing one is
+        // that grant's, or the release's maker's, checked at the door
+        ("GET", ["api", "handovers"]) => {
+            (Need::AnyOf(&["release:see", "handover-password:see"]), Plain)
+        }
+        ("POST", ["api", "handovers", _, "password"]) => {
+            (Need::AnyOf(&["handover-password:see", "release:see"]), Plain)
+        }
         // record 55, ruling 24: one ID a caller gives, turned into its
         // subject code, for anyone who may use the data that subject is in;
         // a subject code is quasi-identifying. An ID that identifies a person
@@ -6227,6 +6224,7 @@ pub(crate) fn doors_list() -> Vec<String> {
     .chain(crate::session_schemes::DOORS.iter())
     .chain(crate::linkage_doors::DOORS.iter())
     .chain(crate::keys_doors::DOORS.iter())
+    .chain(crate::handover_doors::DOORS.iter())
     .chain(crate::campaigns::DOORS.iter())
     .chain(crate::ask_doors::DOORS.iter())
     .chain(crate::main_scans::DOORS.iter())
@@ -6779,7 +6777,7 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
                 name,
                 "POST /api/keys"
                     | "POST /api/keys/{name}/remove"
-                    | "POST /api/handovers/password"
+                    | "POST /api/handovers/{id}/password"
                     | "POST /api/linkage/show"
                     | "POST /api/linkage/links"
                     | "POST /api/linkage/links/{id}/unlink"
@@ -6788,7 +6786,10 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
                 r["audited"] = serde_json::Value::Bool(true);
                 r["person_only"] = serde_json::Value::Bool(true);
             }
-            if matches!(name, "POST /api/keys" | "POST /api/handovers/password") {
+            if matches!(
+                name,
+                "POST /api/keys" | "POST /api/handovers" | "POST /api/handovers/{id}/password"
+            ) {
                 r["secret"] = serde_json::Value::Bool(true);
             }
             r
@@ -7901,7 +7902,16 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
             "Removed a key",
         ),
         row(
-            "POST /api/handovers/password",
+            "GET /api/handovers",
+            false,
+            false,
+            "bounded",
+            "every handover, or one release's",
+            "Listing the handovers",
+            "Listed the handovers",
+        ),
+        row(
+            "POST /api/handovers/{id}/password",
             false,
             false,
             "free",

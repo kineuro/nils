@@ -21,9 +21,8 @@ pub struct Settings<'a> {
     /// Where the archives go, which is not where the tree is.
     pub out: &'a Path,
     pub archiver: &'a Archiver,
-    /// The key the password is derived from, by name.
-    pub key_name: &'a str,
-    pub password: &'a str,
+    /// How the archives are kept closed (record 55, ruling 35 (c)).
+    pub protection: Protection<'a>,
     pub cap: i64,
     pub strategy: Strategy,
     /// `7z`'s compression level. Low by default: a released tree is mostly
@@ -33,6 +32,51 @@ pub struct Settings<'a> {
     /// Read every archive back before saying it is done.
     pub verify: bool,
     pub actor: &'a str,
+}
+
+/// How a handover's archives are kept closed (record 55, ruling 35 (c),
+/// Nima 2026-10-16): each handover has a password of its own, or none for a
+/// reason a person gave. Never a password shared by every handover under a
+/// key, which is what a handover from before registry schema 105 has.
+pub enum Protection<'a> {
+    /// A password of its own, derived from this key and the handover's id
+    /// ([`super::handover_password`]); never stored.
+    Made { key_name: &'a str, key: &'a [u8] },
+    /// A password the person handing over typed. `sealed` is it under the
+    /// registry's key (`key_name`), which is all the row keeps.
+    Typed {
+        key_name: &'a str,
+        password: &'a str,
+        sealed: &'a [u8],
+    },
+    /// Not encrypted, and why; the row keeps the reason.
+    None { why: &'a str },
+}
+
+impl Protection<'_> {
+    fn kind(&self) -> super::Kind {
+        match self {
+            Protection::Made { .. } => super::Kind::Made,
+            Protection::Typed { .. } => super::Kind::Typed,
+            Protection::None { .. } => super::Kind::None,
+        }
+    }
+
+    fn key_name(&self) -> &str {
+        match self {
+            Protection::Made { key_name, .. } | Protection::Typed { key_name, .. } => key_name,
+            Protection::None { .. } => "",
+        }
+    }
+
+    /// The password of the handover with this id, or none.
+    fn password(&self, handover: i64) -> Option<String> {
+        match self {
+            Protection::Made { key, .. } => Some(super::handover_password(key, handover)),
+            Protection::Typed { password, .. } => Some(password.to_string()),
+            Protection::None { .. } => None,
+        }
+    }
 }
 
 /// What a handover says when it is done.
@@ -60,6 +104,8 @@ pub struct Report {
     pub missing: i64,
     pub failed: Vec<String>,
     pub seconds: f64,
+    /// `made`, `typed` or `none` (record 55, ruling 35 (c)).
+    pub password: String,
 }
 
 #[derive(Debug)]
@@ -127,10 +173,16 @@ pub fn run(registry: &mut Registry, settings: &Settings) -> Result<Report, Error
                 scope: serde_json::json!({
                     "release": settings.release,
                     "out": settings.out.display().to_string(),
+                    "handover": result.as_ref().map(|r| r.handover_id).unwrap_or_default(),
+                    "encrypted": !matches!(settings.protection, Protection::None { .. }),
+                    "password": settings.protection.kind().word(),
                 }),
                 policy: None,
                 job_id: Some(job_id),
-                details: None,
+                details: match &settings.protection {
+                    Protection::None { why } => Some(serde_json::json!({ "unencrypted_why": why })),
+                    _ => None,
+                },
             },
         )
         .map_err(Error::Store)?;
@@ -172,10 +224,13 @@ fn run_handover(registry: &mut Registry, settings: &Settings) -> Result<Report, 
         bytes: present.iter().map(|(_, b)| b).sum(),
         subjects: members.iter().filter(|m| !m.subject.is_empty()).count() as i64,
         missing,
+        password: settings.protection.kind().word().to_string(),
         ..Report::default()
     };
     std::fs::create_dir_all(settings.out).map_err(Error::Io)?;
     report.handover_id = open_row(registry.store(), settings, &found, &report)?;
+    // its own password, now that it has an id; held here and nowhere else
+    let password = settings.protection.password(report.handover_id);
 
     let codes = subject_ids(registry.store())?;
     let mut rows: Vec<Vec<Param>> = Vec::new();
@@ -190,7 +245,7 @@ fn run_handover(registry: &mut Registry, settings: &Settings) -> Result<Report, 
                 &root,
                 &chunk.entries(),
                 &path,
-                settings.password,
+                password.as_deref(),
                 settings.level,
             )
             .and_then(|()| match &settings.par2 {
@@ -202,7 +257,7 @@ fn run_handover(registry: &mut Registry, settings: &Settings) -> Result<Report, 
             Err(_) => (String::new(), 0),
         };
         let verified = match (&made, settings.verify) {
-            (Ok(()), true) => settings.archiver.verify(&path, settings.password).err(),
+            (Ok(()), true) => settings.archiver.verify(&path, password.as_deref()).err(),
             _ => None,
         };
         let failed = made.as_ref().err().cloned().or_else(|| verified.clone());
@@ -259,7 +314,14 @@ fn run_handover(registry: &mut Registry, settings: &Settings) -> Result<Report, 
     write_subjects(registry.store(), report.handover_id, &people)?;
     // The manifest beside the archives, because a recipient has the archives
     // and not the registry.
-    write_manifest(settings.out, &report, &chunks, settings.release).map_err(Error::Io)?;
+    write_manifest(
+        settings.out,
+        &report,
+        &chunks,
+        settings.release,
+        password.is_some(),
+    )
+    .map_err(Error::Io)?;
     close_row(registry.store(), &report)?;
     report.seconds = started.elapsed().as_secs_f64();
     Ok(report)
@@ -271,7 +333,7 @@ pub fn verify(
     registry: &mut Registry,
     handover: i64,
     archiver: &Archiver,
-    password: &str,
+    password: Option<&str>,
 ) -> Result<Report, Error> {
     let started = std::time::Instant::now();
     let d = registry.store().dialect();
@@ -346,6 +408,130 @@ pub fn verify(
     }
     report.seconds = started.elapsed().as_secs_f64();
     Ok(report)
+}
+
+/// A handover as its row keeps it: how it is kept closed, and the release
+/// version it handed over with who made that version (record 55, ruling 35
+/// (c): the maker may see and set its password).
+#[derive(Debug, Clone)]
+pub struct Kept {
+    pub id: i64,
+    pub kind: super::Kind,
+    pub key_name: String,
+    pub sealed: Option<Vec<u8>>,
+    pub why: Option<String>,
+    pub release: String,
+    pub version: String,
+    pub maker: String,
+    pub started_at: String,
+    pub finished_at: Option<String>,
+    pub archives: i64,
+    pub root: String,
+}
+
+impl Kept {
+    /// What a list answers: never the sealed password.
+    pub fn as_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "id": self.id,
+            "release": self.release,
+            "version": self.version,
+            "maker": self.maker,
+            "root": self.root,
+            "started_at": self.started_at,
+            "finished_at": self.finished_at,
+            "archives": self.archives,
+            "encrypted": self.kind != super::Kind::None,
+            "password": match self.kind { super::Kind::Key => "key", k => k.word() },
+            "password_words": self.kind.words(),
+            "key": if self.kind == super::Kind::Typed || self.kind == super::Kind::None { None } else { Some(self.key_name.as_str()) },
+            "unencrypted_why": self.why,
+        })
+    }
+}
+
+/// The handovers, newest first: of one release by name, or one by its id,
+/// or every one.
+pub fn kept(store: &mut Store, release: Option<&str>, id: Option<i64>) -> Result<Vec<Kept>, Error> {
+    let d = store.dialect();
+    let h = table("handover");
+    let started = d.text_of_qualified(Some("h"), h.column("started_at").expect("a column"));
+    let finished = d.text_of_qualified(Some("h"), h.column("finished_at").expect("a column"));
+    let mut wheres = Vec::new();
+    let mut params = Vec::new();
+    if let Some(name) = release {
+        params.push(Param::from(name));
+        wheres.push(format!("r.name = {}", d.param(params.len(), Type::Text)));
+    }
+    if let Some(id) = id {
+        params.push(Param::Int(id));
+        wheres.push(format!("h.id = {}", d.param(params.len(), Type::Int)));
+    }
+    let wheres = if wheres.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {}", wheres.join(" AND "))
+    };
+    let sql = format!(
+        "SELECT h.id, h.password, h.key_name, h.password_sealed, h.unencrypted_why, r.name, r.version, r.actor, \
+         {started}, {finished}, h.archives, h.root \
+         FROM {} h JOIN {} r ON r.id = h.release_id{wheres} ORDER BY h.id DESC",
+        store.qualified("handover"),
+        store.qualified("release"),
+    );
+    store
+        .query(&sql, &params)?
+        .iter()
+        .map(|r| {
+            Ok(Kept {
+                id: r.int(0)?,
+                kind: super::Kind::read(r.opt_text(1)?),
+                key_name: r.text(2)?.to_string(),
+                sealed: r.opt_bytes(3)?.map(<[u8]>::to_vec),
+                why: r.opt_text(4)?.map(str::to_string),
+                release: r.text(5)?.to_string(),
+                version: r.text(6)?.to_string(),
+                maker: r.text(7)?.to_string(),
+                started_at: r.text(8)?.to_string(),
+                finished_at: r.opt_text(9)?.map(str::to_string),
+                archives: r.int(10)?,
+                root: r.text(11)?.to_string(),
+            })
+        })
+        .collect()
+}
+
+/// The password that opens a handover's archives: its own, derived again;
+/// a typed one, unsealed; the key's shared one for a handover from before;
+/// none for one not encrypted. Read from the registry's key store, never
+/// written anywhere.
+pub fn password_of(registry: &Registry, kept: &Kept) -> Result<Option<String>, Error> {
+    use super::Kind;
+    let key = || {
+        registry
+            .keys()
+            .read(&kept.key_name)
+            .map_err(|e| Error::Refused(e.to_string()))
+    };
+    Ok(match kept.kind {
+        Kind::None => None,
+        Kind::Key => Some(super::password(&key()?)),
+        Kind::Made => Some(super::handover_password(&key()?, kept.id)),
+        Kind::Typed => {
+            let sealed = kept.sealed.as_deref().ok_or_else(|| {
+                Error::Refused(format!("handover {} keeps no sealed password", kept.id))
+            })?;
+            let opened = nils_registry::linkage::Subkeys::derive(&key()?)
+                .open(sealed)
+                .map_err(|_| {
+                    Error::Refused(format!(
+                        "the password of handover {} does not open under key {}",
+                        kept.id, kept.key_name
+                    ))
+                })?;
+            Some(opened)
+        }
+    })
 }
 
 /// The newest finished version of a release, by id: a version string sorts by
@@ -551,6 +737,9 @@ fn open_row(
                 "files",
                 "bytes",
                 "packed_bytes",
+                "password",
+                "password_sealed",
+                "unencrypted_why",
             ],
         )
         .returning(&["id"]),
@@ -560,7 +749,7 @@ fn open_row(
             Param::from(settings.strategy.name()),
             Param::Int(settings.cap),
             Param::Int(settings.level as i64),
-            Param::from(settings.key_name),
+            Param::from(settings.protection.key_name()),
             Param::from(settings.archiver.describe()),
             match &settings.par2 {
                 Some(p) => Param::Int(p.percent as i64),
@@ -572,6 +761,15 @@ fn open_row(
             Param::Int(report.files),
             Param::Int(report.bytes),
             Param::Int(0),
+            Param::from(settings.protection.kind().word()),
+            match &settings.protection {
+                Protection::Typed { sealed, .. } => Param::Bytes(sealed.to_vec()),
+                _ => Param::Null,
+            },
+            match &settings.protection {
+                Protection::None { why } => Param::from(*why),
+                _ => Param::Null,
+            },
         ]],
     )?;
     Ok(written.first().map(|r| r.int(0)).transpose()?.unwrap_or(0))
@@ -701,6 +899,7 @@ fn write_manifest(
     report: &Report,
     chunks: &[plan::Chunk],
     dataset: &str,
+    encrypted: bool,
 ) -> Result<(), std::io::Error> {
     use std::fmt::Write as _;
     let mut text = String::from("archive\tdigest\tbytes\tfiles\tsubjects\n");
@@ -725,7 +924,7 @@ fn write_manifest(
         "{dataset}, version {}\n\n\
          {} archive(s), {} file(s), {} bytes packed.\n\
          Written by nils {} with {}.\n\n\
-         Every archive has encrypted headers, so listing one needs the password too.\n\
+         {}\n\
          Check a file against handover.tsv before unpacking it: the digest is BLAKE2s-256.\n\n\
              7z x <archive>\n",
         report.version,
@@ -734,6 +933,11 @@ fn write_manifest(
         report.packed_bytes,
         env!("CARGO_PKG_VERSION"),
         report.tool,
+        if encrypted {
+            "Every archive has encrypted headers, so listing one needs the password too."
+        } else {
+            "The archives are not encrypted: whoever holds them can open them."
+        },
     );
     std::fs::write(out.join("HANDOVER"), readme)?;
     Ok(())

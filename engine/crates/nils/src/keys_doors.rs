@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! Record 55, ruling 35 (c): the key store and a handover's password at the
-//! door, so the desk has a place for what `nils key` and `nils handover
-//! password` do at the keyboard.
+//! Record 55, ruling 35 (c): the key store at the door, so the desk has a
+//! place for what `nils key` does at the keyboard. A handover's password is
+//! [`crate::handover_doors`]'s.
 //!
 //! - `GET /api/keys`: the keys by name, with their length, fingerprint and
 //!   which one the registry's pseudonyms come from; never a byte of one.
@@ -13,18 +13,14 @@
 //!   with nothing kept.
 //! - `POST /api/keys/{name}/remove {confirm}`: a key the registry does not
 //!   use taken away, its name typed again to confirm.
-//! - `POST /api/handovers/password {key}`: the password a handover under a
-//!   key was packed with, for the person receiving the archives.
 //!
 //! A secret given here or answered here goes only over the authenticated
 //! door: it is never written to the registry, the jobs, the audit or a log,
 //! never put in an error, and an answer that carries one says `no-store`.
 //! The acts are a person's, never an agent's or a model's, and each is
 //! audited by the key's name alone. The grants are the door table's:
-//! reading the store is the Backups page's, changing it is an admin's
-//! (`database:work` and `install:work` at detail sensitive), and the
-//! password is the work of whoever hands a release over, at detail
-//! sensitive.
+//! reading the store is the Backups page's, and changing it is an admin's
+//! (`database:work` and `install:work` at detail sensitive).
 
 use nils_registry::keys::{self, KeyError, KeyStore};
 use nils_registry::linkage::Subkeys;
@@ -39,14 +35,13 @@ pub(crate) const DOORS: &[&str] = &[
     "GET /api/keys",
     "POST /api/keys",
     "POST /api/keys/{name}/remove",
-    "POST /api/handovers/password",
 ];
 
 /// The header every answer that carries a secret, or that follows one, is
 /// sent with: no cache along the way keeps it.
 pub(crate) const NO_STORE: (&str, &str) = ("Cache-Control", "no-store");
 
-/// The doors under `/api/keys` and the handover's password, or nothing
+/// The doors under `/api/keys`, or nothing
 /// when the path is not one. The grants were checked by the table.
 pub(crate) fn route(
     registry: &mut Registry,
@@ -61,7 +56,6 @@ pub(crate) fn route(
         ["api", "keys"] if get => list(registry),
         ["api", "keys"] if post => add(registry, caller, body),
         ["api", "keys", name, "remove"] if post => remove(registry, caller, name, body),
-        ["api", "handovers", "password"] if post => password(registry, caller, body),
         _ => return None,
     })
 }
@@ -250,48 +244,13 @@ fn remove(
     Ok(Reply::ok(json!({ "name": name, "removed": true })))
 }
 
-/// `POST /api/handovers/password {key}`: `{key, password}`, the password
-/// every handover under that key was packed with (`nils handover password
-/// --key`), sent `no-store`. It is derived, never stored, and the audit
-/// names the key alone.
-fn password(registry: &mut Registry, caller: &Caller, body: &str) -> Result<Reply, Reply> {
-    person_only(caller, "reading a handover's password")?;
-    let doc = json_body(body)?;
-    let name = doc["key"]
-        .as_str()
-        .map(str::trim)
-        .filter(|n| !n.is_empty())
-        .ok_or_else(|| {
-            Reply::error(
-                400,
-                "key: the name of the key the handover was packed under",
-            )
-        })?
-        .to_string();
-    let key = registry.keys().read(&name).map_err(refused)?;
-    let password = nils_release::handover::password(&key);
-    audit::record(
-        registry,
-        &audit::Entry {
-            principal: &caller.principal,
-            action: audit::Action::HandoverPassword,
-            scope: json!({ "key": name }),
-            policy: None,
-            job_id: None,
-            details: None,
-        },
-    )?;
-    Ok(Reply::ok(json!({ "key": name, "password": password })).with(NO_STORE.0, NO_STORE.1))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::grants::Detail;
 
     /// The door table: reading the store is the Backups page's; changing
-    /// it is an admin's at detail sensitive; the password is release work
-    /// at detail sensitive. Every door has its policy row.
+    /// it is an admin's at detail sensitive. Every door has its policy row.
     #[test]
     fn the_key_doors_need_their_grants_and_detail() {
         let need = |method: &str, path: &str| {
@@ -313,10 +272,6 @@ mod tests {
                 "{m} {p}"
             );
         }
-        assert_eq!(
-            need("POST", "/api/handovers/password"),
-            ("the release:work grant".to_string(), Detail::Sensitive)
-        );
         let policy = crate::serve::policy();
         for d in DOORS {
             assert!(

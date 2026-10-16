@@ -22,7 +22,7 @@ Every store the registry at `<home>` keeps (backend sqlite), rendered by `nils c
 |---|---|
 | what | the pseudonymous catalogue: subjects, studies, series, stacks, instances, source files, diagnostics, review items, jobs and batches |
 | where | `<home>/registry.db`, mode 600 (SQLite keeps registry.db-wal and registry.db-shm beside it while a connection is open) |
-| holds | quasi-identifying: birth dates, sex, study dates and times, station and institution names, study descriptions and comments, source paths<br>technical: everything else the catalogue declares, the series description and the protocol name among them |
+| holds | quasi-identifying: birth dates, sex, study dates and times, station and institution names, study descriptions and comments, source paths<br>technical: everything else the catalogue declares, the series description and the protocol name among them<br>secret, sealed: a handover's password a person typed, under the registry's key and never in clear; a password NILS made for a handover is not kept, since it is derived again (record 55, ruling 35 (c)) |
 | owner | the registry's operator, for the research group that owns the archive |
 | kept | until deleted; nothing expires on its own, and a run marks files that vanished as gone instead of deleting their rows; a stack or series that holds no instance, because every file of it was a duplicate, is removed |
 | read | `nils status [--batch <id>]`<br>`nils quarantine list`<br>`nils review list` |
@@ -53,7 +53,7 @@ Every store the registry at `<home>` keeps (backend sqlite), rendered by `nils c
 | holds | secret: the key bytes; whoever holds the registry's key can derive its codes and read its linkage store |
 | owner | the registry's operator |
 | kept | until removed; the key the registry names cannot be removed while it names it |
-| read | `nils key list` (names, lengths and fingerprints, never the bytes)<br>GET /api/keys (the same) |
+| read | `nils key list` (names, lengths and fingerprints, never the bytes)<br>GET /api/keys (the same)<br>`nils handover password --handover <id>, or POST /api/handovers/{id}/password for a holder of handover-password:see or the release's maker: one handover's password, derived from its key` (audited) |
 | change | `nils key add <name>`<br>POST /api/keys, an admin's: the passphrase in the body alone, never stored elsewhere, logged or audited |
 | export | copy the file (that is the backup the key needs) |
 | delete | `nils key remove <name>, or POST /api/keys/{name}/remove with the name typed, an admin's` |

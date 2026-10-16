@@ -50,6 +50,7 @@ mod file_header;
 mod folders;
 mod gate;
 mod grants;
+mod handover_doors;
 mod headers;
 mod intake;
 mod keys_doors;
@@ -1472,10 +1473,26 @@ struct HandoverArgs {
     /// Where the archives go, which is not where the tree is
     #[arg(long, value_name = "DIR")]
     out: PathBuf,
-    /// The key the password is derived from, by name. The password is never
-    /// stored and never appears in a command line
-    #[arg(long, value_name = "NAME")]
-    key: String,
+    /// The key this handover's own password is derived from, by name; the
+    /// registry's pseudonym key when none is named. The password is the
+    /// handover's alone, never stored and never in a command line
+    #[arg(long, value_name = "NAME", conflicts_with_all = ["password_stdin", "no_encrypt"])]
+    key: Option<String>,
+    /// Read the password from standard input instead (one line) and keep it
+    /// sealed under the registry's key, never in clear
+    #[arg(long, conflicts_with = "no_encrypt")]
+    password_stdin: bool,
+    /// The typed password sealed under the registry's key, as the handover
+    /// door queues it: hex, never the password in clear
+    #[arg(long, hide = true, value_name = "HEX", conflicts_with_all = ["password_stdin", "no_encrypt", "key"])]
+    sealed_password: Option<String>,
+    /// Write the archives without encryption; needs --why, which the
+    /// handover and the audit keep
+    #[arg(long, requires = "why")]
+    no_encrypt: bool,
+    /// Why the archives are not encrypted
+    #[arg(long, value_name = "TEXT", requires = "no_encrypt")]
+    why: Option<String>,
     /// How big an archive may get, as a number with a unit
     #[arg(long, default_value = "100GB", value_name = "SIZE")]
     chunk: String,
@@ -1506,9 +1523,10 @@ struct HandoverVerifyArgs {
     /// Which handover, by its id
     #[arg(long, value_name = "ID")]
     handover: i64,
-    /// The key its password was derived from
+    /// Not needed: the handover names its key, and its password is found
+    /// from it. Kept so an older command line still runs
     #[arg(long, value_name = "NAME")]
-    key: String,
+    key: Option<String>,
     #[arg(long = "7z", default_value = "7z", value_name = "PATH")]
     sevenzip: PathBuf,
     #[arg(long)]
@@ -1526,9 +1544,18 @@ struct HandoverListArgs {
 
 #[derive(Debug, Parser)]
 struct HandoverPasswordArgs {
-    /// The key, by name
-    #[arg(long, value_name = "NAME")]
-    key: String,
+    /// The old scheme: the password every handover under this key was
+    /// packed with before each handover had its own
+    #[arg(
+        long,
+        value_name = "NAME",
+        required_unless_present = "handover",
+        conflicts_with = "handover"
+    )]
+    key: Option<String>,
+    /// The password of one handover, by its id (record 55, ruling 35 (c))
+    #[arg(long, value_name = "ID")]
+    handover: Option<i64>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -8077,6 +8104,7 @@ fn custody_doc(home: &Home, registry: &mut Registry) -> Result<serde_json::Value
             "holds": [
                 "quasi-identifying: birth dates, sex, study dates and times, station and institution names, study descriptions and comments, source paths",
                 "technical: everything else the catalogue declares, the series description and the protocol name among them",
+                "secret, sealed: a handover's password a person typed, under the registry's key and never in clear; a password NILS made for a handover is not kept, since it is derived again (record 55, ruling 35 (c))",
             ],
             "counts": { "subjects": subjects, "studies": studies, "series": series, "instances": instances, "source_files": source_files },
             "kept": "until deleted; nothing expires on its own, and a run marks files that vanished as gone instead of deleting their rows; a stack or series that holds no instance, because every file of it was a duplicate, is removed",
@@ -8121,7 +8149,7 @@ fn custody_doc(home: &Home, registry: &mut Registry) -> Result<serde_json::Value
             "counts": { "keys": key_list.len(), "in_use": meta.pseudonym_key },
             "kept": "until removed; the key the registry names cannot be removed while it names it",
             "commands": {
-                "read": ["nils key list (names, lengths and fingerprints, never the bytes)", "GET /api/keys (the same)"],
+                "read": ["nils key list (names, lengths and fingerprints, never the bytes)", "GET /api/keys (the same)", "nils handover password --handover <id>, or POST /api/handovers/{id}/password for a holder of handover-password:see or the release's maker: one handover's password, derived from its key (audited)"],
                 "change": ["nils key add <name>", "POST /api/keys, an admin's: the passphrase in the body alone, never stored elsewhere, logged or audited"],
                 "export": ["copy the file (that is the backup the key needs)"],
                 "delete": "nils key remove <name>, or POST /api/keys/{name}/remove with the name typed, an admin's",
@@ -11416,12 +11444,39 @@ fn handover_command(home: &Home, command: HandoverCommand) -> Result<(), Exit> {
         HandoverCommand::Password(args) => {
             // Reading a password out is a deliberate act, so it is its own
             // verb rather than a line of some other command's output.
-            let key = home
-                .keys(None)
-                .read(&args.key)
-                .map_err(|e| fail(e.to_string()))?;
-            println!("{}", nils_release::handover::password(&key));
-            Ok(())
+            if let Some(key) = &args.key {
+                let key = home.keys(None).read(key).map_err(|e| fail(e.to_string()))?;
+                eprintln!(
+                    "the old scheme: this opens the archives of a handover made before each had its own password; a newer handover's is `nils handover password --handover ID`"
+                );
+                println!("{}", nils_release::handover::password(&key));
+                return Ok(());
+            }
+            let id = args.handover.unwrap_or_default();
+            let mut registry = open(home)?;
+            let kept = nils_release::handover::run::kept(registry.store(), None, Some(id))
+                .map_err(|e| fail(e.to_string()))?
+                .into_iter()
+                .next()
+                .ok_or_else(|| usage(format!("no handover {id}")))?;
+            match nils_release::handover::run::password_of(&registry, &kept)
+                .map_err(|e| fail(e.to_string()))?
+            {
+                Some(p) => {
+                    audit(
+                        &mut registry,
+                        nils_registry::audit::Action::HandoverPassword,
+                        serde_json::json!({ "handover": id }),
+                        None,
+                    )?;
+                    println!("{p}");
+                    Ok(())
+                }
+                None => Err(usage(format!(
+                    "handover {id} was handed over unencrypted: {}",
+                    kept.why.as_deref().unwrap_or("no reason kept")
+                ))),
+            }
         }
     }
 }
@@ -11475,11 +11530,6 @@ fn handover_run(home: &Home, args: HandoverArgs) -> Result<(), Exit> {
         Some(percent) => Some(archive::Par2::find(percent).map_err(usage)?),
         None => None,
     };
-    let key = home
-        .keys(None)
-        .read(&args.key)
-        .map_err(|e| fail(e.to_string()))?;
-    let password = nils_release::handover::password(&key);
     let mut registry = open(home)?;
     // Wave 5 section 10.2: a handover writes only to an exchange place.
     require_place(
@@ -11487,13 +11537,65 @@ fn handover_run(home: &Home, args: HandoverArgs) -> Result<(), Exit> {
         nils_registry::place::Role::Exchange,
         &args.out,
     )?;
+    // Record 55, ruling 35 (c): a password of the handover's own, made from a
+    // key or typed and kept sealed; or none, with the reason kept.
+    let registry_key = registry.meta().pseudonym_key.clone();
+    let typed: Option<(String, Vec<u8>)> = if args.password_stdin {
+        let mut line = String::new();
+        io::stdin()
+            .read_line(&mut line)
+            .map_err(|e| fail(format!("stdin: {e}")))?;
+        let given = line.trim_end_matches(['\n', '\r']).to_string();
+        if let Some(why) = nils_release::handover::typed_refusal(&given) {
+            return Err(usage(why));
+        }
+        let sealed = Subkeys::derive(&registry.pseudonym_key()?).seal(&given);
+        Some((given, sealed))
+    } else if let Some(hex) = &args.sealed_password {
+        let sealed = hex::decode(hex.trim())
+            .map_err(|_| usage("--sealed-password is the door's sealed password, in hex"))?;
+        let given = Subkeys::derive(&registry.pseudonym_key()?)
+            .open(&sealed)
+            .map_err(|_| usage("--sealed-password does not open under the registry's key"))?;
+        Some((given, sealed))
+    } else {
+        None
+    };
+    let made_key = match (&typed, args.no_encrypt) {
+        (None, false) => {
+            let name = args.key.clone().unwrap_or_else(|| registry_key.clone());
+            let bytes = registry
+                .keys()
+                .read(&name)
+                .map_err(|e| fail(e.to_string()))?;
+            Some((name, bytes))
+        }
+        _ => None,
+    };
+    let why = args.why.as_deref().map(str::trim).unwrap_or_default();
+    if args.no_encrypt && why.chars().count() < 4 {
+        return Err(usage(
+            "--why: why the archives go unencrypted, a few words; the handover and the audit keep it",
+        ));
+    }
+    let protection = match (&typed, &made_key) {
+        (Some((given, sealed)), _) => run::Protection::Typed {
+            key_name: &registry_key,
+            password: given,
+            sealed,
+        },
+        (None, Some((name, bytes))) => run::Protection::Made {
+            key_name: name,
+            key: bytes,
+        },
+        (None, None) => run::Protection::None { why },
+    };
 
     let settings = run::Settings {
         release: &args.release,
         out: &args.out,
         archiver: &archiver,
-        key_name: &args.key,
-        password: &password,
+        protection,
         cap,
         strategy,
         level: args.level,
@@ -11524,6 +11626,17 @@ fn handover_run(home: &Home, args: HandoverArgs) -> Result<(), Exit> {
     println!("  subjects         {:>12}", report.subjects);
     println!("  files            {:>12}", report.files);
     println!("  archives         {:>12}", report.archives);
+    println!(
+        "  password         {}",
+        match report.password.as_str() {
+            "made" => format!(
+                "its own, made by NILS: nils handover password --handover {}",
+                report.handover_id
+            ),
+            "typed" => "the one typed, kept sealed".to_string(),
+            _ => "none: not encrypted".to_string(),
+        }
+    );
     println!(
         "  {:>9.2} GiB of tree into {:.2} GiB of archives",
         report.bytes as f64 / (1u64 << 30) as f64,
@@ -11562,14 +11675,27 @@ fn handover_verify(home: &Home, args: HandoverVerifyArgs) -> Result<(), Exit> {
     use nils_release::handover::{archive, run};
 
     let archiver = archive::Archiver::find(&args.sevenzip).map_err(usage)?;
-    let key = home
-        .keys(None)
-        .read(&args.key)
-        .map_err(|e| fail(e.to_string()))?;
-    let password = nils_release::handover::password(&key);
     let mut registry = open(home)?;
-    let report =
-        run::verify(&mut registry, args.handover, &archiver, &password).map_err(|e| match e {
+    // the handover names its key and how it is kept closed (record 55,
+    // ruling 35 (c)); a key named here must be that one
+    let kept = run::kept(registry.store(), None, Some(args.handover))
+        .map_err(|e| fail(e.to_string()))?
+        .into_iter()
+        .next()
+        .ok_or_else(|| usage(format!("no handover {}", args.handover)))?;
+    if let Some(k) = &args.key
+        && kept.kind != nils_release::handover::Kind::Typed
+        && kept.kind != nils_release::handover::Kind::None
+        && *k != kept.key_name
+    {
+        return Err(usage(format!(
+            "handover {} was packed under key {}, not {k}",
+            args.handover, kept.key_name
+        )));
+    }
+    let password = run::password_of(&registry, &kept).map_err(|e| fail(e.to_string()))?;
+    let report = run::verify(&mut registry, args.handover, &archiver, password.as_deref())
+        .map_err(|e| match e {
             run::Error::Refused(m) => usage(m),
             other => fail(other.to_string()),
         })?;
@@ -11583,6 +11709,7 @@ fn handover_verify(home: &Home, args: HandoverVerifyArgs) -> Result<(), Exit> {
     }
     println!("handover {}", report.handover_id);
     println!("  in               {}", report.out);
+    println!("  kept closed      {}", kept.kind.words());
     println!("  archives         {:>12}", report.archives);
     println!("  read back        {:>12}", report.verified);
     for why in &report.failed {
@@ -11590,6 +11717,13 @@ fn handover_verify(home: &Home, args: HandoverVerifyArgs) -> Result<(), Exit> {
     }
     println!("  {:.1} s", report.seconds);
     finish(&report)
+}
+
+/// How a listed handover is kept closed, from its tenth column.
+fn handover_kind(r: &nils_registry::store::Row) -> Result<nils_release::handover::Kind, Exit> {
+    Ok(nils_release::handover::Kind::read(
+        r.opt_text(10).map_err(|e| fail(e.to_string()))?,
+    ))
 }
 
 fn handover_list(home: &Home, args: HandoverListArgs) -> Result<(), Exit> {
@@ -11614,7 +11748,7 @@ fn handover_list(home: &Home, args: HandoverListArgs) -> Result<(), Exit> {
     }
     let sql = format!(
         "SELECT h.id, r.name, r.version, h.root, {started}, h.archives, h.files, \
-                h.packed_bytes, h.key_name, h.error \
+                h.packed_bytes, h.key_name, h.error, h.password, h.unencrypted_why \
          FROM {} h JOIN {} r ON r.id = h.release_id{wheres} ORDER BY h.id",
         store.qualified("handover"),
         store.qualified("release"),
@@ -11637,6 +11771,13 @@ fn handover_list(home: &Home, args: HandoverListArgs) -> Result<(), Exit> {
                 "files": r.int(6).map_err(|e| fail(e.to_string()))?,
                 "bytes": r.int(7).map_err(|e| fail(e.to_string()))?,
                 "key": r.text(8).map_err(|e| fail(e.to_string()))?,
+                // record 55, ruling 35 (c): how it is kept closed
+                "encrypted": handover_kind(r)? != nils_release::handover::Kind::None,
+                "password": match handover_kind(r)? {
+                    nils_release::handover::Kind::Key => "key",
+                    k => k.word(),
+                },
+                "unencrypted_why": r.opt_text(11).map_err(|e| fail(e.to_string()))?,
             }));
         }
         println!(
@@ -11652,12 +11793,25 @@ fn handover_list(home: &Home, args: HandoverListArgs) -> Result<(), Exit> {
         let when = r.text(4).map_err(|e| fail(e.to_string()))?;
         let when = when.split('T').next().unwrap_or(when);
         println!("{id:>4}  {name} {version}  {when}");
+        let kind = handover_kind(r)?;
         println!(
-            "        {} archive(s), {} file(s), {:.2} GiB, opened by key {}",
+            "        {} archive(s), {} file(s), {:.2} GiB, {}{}",
             r.int(5).map_err(|e| fail(e.to_string()))?,
             r.int(6).map_err(|e| fail(e.to_string()))?,
             r.int(7).map_err(|e| fail(e.to_string()))? as f64 / (1u64 << 30) as f64,
-            r.text(8).map_err(|e| fail(e.to_string()))?,
+            kind.words(),
+            match kind {
+                nils_release::handover::Kind::Key | nils_release::handover::Kind::Made => {
+                    format!(", key {}", r.text(8).map_err(|e| fail(e.to_string()))?)
+                }
+                nils_release::handover::Kind::None => format!(
+                    ": {}",
+                    r.opt_text(11)
+                        .map_err(|e| fail(e.to_string()))?
+                        .unwrap_or("no reason kept")
+                ),
+                nils_release::handover::Kind::Typed => String::new(),
+            }
         );
         println!(
             "        into {}",

@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! Record 55, ruling 35 (c): every step that can live in the desk gets a
-//! place in it. What `nils key`, `nils handover password` and `nils linkage
-//! show`, `link`, `unlink` and `purge` do at the keyboard, at the door:
+//! place in it. What `nils key` and `nils linkage show`, `link`, `unlink`
+//! and `purge` do at the keyboard, at the door:
 //! each refused to anyone but who may do it and to any agent or model,
-//! each audited, a passphrase and a password never stored, logged, put in
-//! an error or in the audit, and a value that reads as a personnummer never
+//! each audited, a passphrase never stored, logged, put in an error or in
+//! the audit, and a value that reads as a personnummer never
 //! answered.
 
 use std::io::{BufRead, BufReader, Read, Write};
@@ -333,40 +333,6 @@ fn keys_and_identifiers_at_the_door_are_an_admins_acts_and_no_secret_is_kept() {
     );
     assert_eq!(std::fs::read(&kept_key).unwrap(), REGISTRY_KEY.as_bytes());
 
-    // --- a handover's password -----------------------------------------
-    let want = run(
-        &home,
-        &["handover", "password", "--key", "partner-2026"],
-        None,
-    );
-    let want = want.trim();
-    assert_eq!(want.len(), 64);
-    let ask = serde_json::json!({ "key": "partner-2026" });
-    let a = server.post("/api/handovers/password", ask.clone(), REVIEWER);
-    assert_eq!(a.status, 403, "{}", a.text);
-    let a = server.call(
-        "POST",
-        "/api/handovers/password",
-        Some(ask.clone()),
-        OPERATOR,
-        AGENT,
-    );
-    assert_eq!(a.status, 403, "{}", a.text);
-    let a = server.post(
-        "/api/handovers/password",
-        serde_json::json!({ "key": "nobody" }),
-        OPERATOR,
-    );
-    assert_eq!(a.status, 404, "{}", a.text);
-    let a = server.post("/api/handovers/password", ask.clone(), OPERATOR);
-    assert_eq!(a.status, 200, "{}", a.text);
-    assert_eq!(a.body["password"], want, "{}", a.text);
-    assert!(
-        a.headers.contains("cache-control: no-store"),
-        "{}",
-        a.headers
-    );
-
     // --- a key taken away ----------------------------------------------
     let a = server.post(
         "/api/keys/partner-2026/remove",
@@ -557,7 +523,6 @@ fn keys_and_identifiers_at_the_door_are_an_admins_acts_and_no_secret_is_kept() {
     for act in [
         "key.add",
         "key.remove",
-        "handover.password",
         "linkage.reveal",
         "linkage.link",
         "linkage.unlink",
@@ -571,7 +536,6 @@ fn keys_and_identifiers_at_the_door_are_an_admins_acts_and_no_secret_is_kept() {
         a.text
     );
     assert!(!a.text.contains(SECRET), "{}", a.text);
-    assert!(!a.text.contains(want), "{}", a.text);
     // the policy says which doors carry a secret
     let a = server.get("/api/capabilities", ADMIN);
     let row = |door: &str| {
@@ -584,7 +548,7 @@ fn keys_and_identifiers_at_the_door_are_an_admins_acts_and_no_secret_is_kept() {
             .unwrap_or_else(|| panic!("{door} has no policy row"))
     };
     assert_eq!(row("POST /api/keys")["secret"], true);
-    assert_eq!(row("POST /api/handovers/password")["secret"], true);
+    assert_eq!(row("POST /api/handovers/{id}/password")["secret"], true);
     assert_eq!(row("POST /api/linkage/purge")["person_only"], true);
     drop(server);
 
@@ -595,7 +559,7 @@ fn keys_and_identifiers_at_the_door_are_an_admins_acts_and_no_secret_is_kept() {
     assert!(files.iter().any(|(p, _)| p.ends_with("registry.db")));
     assert!(files.iter().any(|(p, _)| p == &log));
     for (p, bytes) in &files {
-        for secret in [SECRET, want, "198501012382"] {
+        for secret in [SECRET, "198501012382"] {
             if secret == "198501012382" && !p.ends_with("serve.err") && !p.ends_with("serve.out") {
                 // the personnummer is a test input; only the engine's own
                 // output is held to never print it

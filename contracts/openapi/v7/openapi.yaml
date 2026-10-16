@@ -605,8 +605,16 @@ paths:
         "400": {description: The handle named is not at stack grain}
         "409": {description: "The handle named does not reproduce: truncated, stale (the registry moved, or the handle was invalidated) or incomplete, in that order; or wave 5 section 10.2: out is not under a declared export place, once any place is declared"}
   /api/handovers:
+    get:
+      summary: The handovers, newest first, and how each is kept closed (release:see or handover-password:see)
+      description: "Added in place, additively, on 2026-10-16 by record 55, ruling 35 (c). Each handover with the release version it packed, who made that version (`maker`), where it went, its archives, whether it is encrypted and how (`password`: `made`, a password of its own derived from its key and its id; `typed`, one typed when it was handed over and kept sealed; `none`, not encrypted, with `unencrypted_why`; `key`, a handover from before each had its own, opened by its key's password, shared by every handover under the key), and `may_show`, whether this caller may show its password. Never a password."
+      parameters:
+        - {name: release, in: query, schema: {type: string}, description: Only the handovers of this release}
+      responses:
+        "200": {description: "{count, handovers: [{id, release, version, maker, root, started_at, finished_at, archives, encrypted, password: made | typed | none | key, password_words, key, unencrypted_why, may_show}]}"}
     post:
       summary: Hand a release over, as a queued job (nils handover run)
+      description: "Amended in place, additively, on 2026-10-16 by record 55, ruling 35 (c): a release stays a plain folder and a handover an optional step. Encryption is a choice, on by default; `encrypt: false` needs a `why` of a few words, which the handover and its audit row keep (handed over unencrypted). Each handover has a password of its own, never one shared per key: `password: made` (the default) derives it from `key`, or the registry's key when none is named, and the handover's id, and stores nothing; `password: typed` takes `typed` (8 to 256 printable characters), for a holder of handover-password:work or the person who made the release's newest version, refused to an agent or a model; it is sealed under the registry's key before it enters the job and is never kept or shown in clear, and the answer's `command` says `(sealed)` in its place. The answer is sent Cache-Control no-store."
       requestBody:
         content:
           application/json:
@@ -616,20 +624,27 @@ paths:
               properties:
                 release: {type: string}
                 out: {type: string}
-                key: {type: string}
+                key: {type: string, description: "The key a made password is derived from; the registry's key when absent"}
+                encrypt: {type: boolean, default: true}
+                why: {type: string, description: "Needed with encrypt false"}
+                password: {type: string, enum: [made, typed], default: made}
+                typed: {type: string, description: "The password, with password typed"}
       responses:
         "202": {description: "{job, state: queued, command}"}
+        "400": {description: "encrypt false without a why, a password neither made nor typed, or a typed one too short, too long or holding a control character (never quoted)"}
+        "403": {description: "A typed password without handover-password:work and not the release's maker, or from an agent or a model"}
         "409": {description: "Wave 5 section 10.2: out is not under a declared exchange place, once any place is declared"}
-  /api/handovers/password:
+  /api/handovers/{id}/password:
     post:
-      summary: The password of a handover's key, for the person receiving the archives (nils handover password; release:work, detail sensitive, a person)
-      description: "Added in place, additively, on 2026-10-16 by record 55, ruling 35 (c). The password every handover under that key was packed with: derived from the key, deterministic and never stored. Answered with Cache-Control no-store, to be shown once and given apart; never written to the registry, a job, the audit or a log. A call that acts as an agent or a model is refused (403). Audited as `handover.password` with the key's name."
-      requestBody: {content: {application/json: {schema: {type: object, required: [key], properties: {key: {type: string, description: "The key's name in the key store"}}}}}}
+      summary: One handover's password, for the person receiving its archives (nils handover password --handover; handover-password:see, or the release's maker)
+      description: "Added in place, additively, on 2026-10-16 by record 55, ruling 35 (c). Its own password, derived again or unsealed; for a handover from before each had its own, its key's shared password (`kind: key`, the old scheme, which `nils handover password --key` still prints). Answered Cache-Control no-store, never written to the registry, a job, the audit or a log. Who may: a holder of handover-password:see, given to a desk group like any grant and held by the admin's set, or the person who made the release version it packed; anyone else is refused (403) whatever release grant they hold, and so is an agent or a model. Every show writes one handover.password row in the audit log with the handover's id alone."
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: integer}}
       responses:
-        "200": {description: "{key, password}"}
-        "400": {description: "No key named, or a name the store does not take"}
-        "403": {description: "Without release:work at detail sensitive, or acting as an agent or a model"}
-        "404": {description: No key of that name}
+        "200": {description: "{handover, password, kind: made | typed | key}"}
+        "403": {description: "Neither the grant nor the release's maker, or acting as an agent or a model"}
+        "404": {description: No handover with that id}
+        "409": {description: "Handed over unencrypted (with its reason), or its key is not in the store"}
   /api/select:
     post:
       summary: What a selection reaches, without releasing it (nils select); the bounded synchronous path
