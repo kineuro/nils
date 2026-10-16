@@ -2157,6 +2157,10 @@ fn routed(
     ) {
         return r;
     }
+    // record 55, ruling 35 (c): the key store and a handover's password
+    if let Some(r) = crate::keys_doors::route(registry, caller, method.as_str(), &segs, body) {
+        return r;
+    }
     // record 26: the linkage doors, under the table's grants like the rest
     if let Some(r) = crate::linkage_doors::route(
         &doors.home,
@@ -5486,6 +5490,23 @@ pub(crate) fn door(method: &str, segs: &[&str]) -> (Need, Detail) {
         ("POST", ["api", "linkage", "held", "reveal"]) | ("POST", ["api", "linkage", "merge"]) => {
             (Need::One("data:work"), Detail::Sensitive)
         }
+        // record 55, ruling 35 (c): what `nils linkage show`, `link`,
+        // `unlink` and `purge` do at the keyboard is an admin's at the door:
+        // Data work with the install's work, which no ladder step below
+        // admin holds, at detail sensitive
+        ("POST", ["api", "linkage", "show" | "links" | "purge"])
+        | ("POST", ["api", "linkage", "links", _, "unlink"]) => {
+            (Need::Both("data:work", "install:work"), Detail::Sensitive)
+        }
+        // record 55, ruling 35 (c): the key store is read on the Backups
+        // page; a key added or taken away is an admin's, at detail
+        // sensitive, and the password of a handover is the work of whoever
+        // hands a release over, at detail sensitive
+        ("GET", ["api", "keys"]) => (Need::One("database:see"), Plain),
+        ("POST", ["api", "keys"]) | ("POST", ["api", "keys", _, "remove"]) => {
+            (Need::Both("database:work", "install:work"), Detail::Sensitive)
+        }
+        ("POST", ["api", "handovers", "password"]) => (Need::One("release:work"), Detail::Sensitive),
         // record 55, ruling 24: one ID a caller gives, turned into its
         // subject code, for anyone who may use the data that subject is in;
         // a subject code is quasi-identifying. An ID that identifies a person
@@ -6205,6 +6226,7 @@ pub(crate) fn doors_list() -> Vec<String> {
     .chain(crate::pipelines::SETUP_DOORS.iter())
     .chain(crate::session_schemes::DOORS.iter())
     .chain(crate::linkage_doors::DOORS.iter())
+    .chain(crate::keys_doors::DOORS.iter())
     .chain(crate::campaigns::DOORS.iter())
     .chain(crate::ask_doors::DOORS.iter())
     .chain(crate::main_scans::DOORS.iter())
@@ -6749,6 +6771,25 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
             if name == "POST /api/linkage/resolve" {
                 r["audited"] = serde_json::Value::Bool(true);
                 r["identifying"] = serde_json::json!({"grant": "data:work", "detail": "sensitive"});
+            }
+            // record 55, ruling 35 (c): the key and identifier acts are a
+            // person's, every one audited, and two carry a secret that is
+            // never stored, logged or put in the audit
+            if matches!(
+                name,
+                "POST /api/keys"
+                    | "POST /api/keys/{name}/remove"
+                    | "POST /api/handovers/password"
+                    | "POST /api/linkage/show"
+                    | "POST /api/linkage/links"
+                    | "POST /api/linkage/links/{id}/unlink"
+                    | "POST /api/linkage/purge"
+            ) {
+                r["audited"] = serde_json::Value::Bool(true);
+                r["person_only"] = serde_json::Value::Bool(true);
+            }
+            if matches!(name, "POST /api/keys" | "POST /api/handovers/password") {
+                r["secret"] = serde_json::Value::Bool(true);
             }
             r
         };
@@ -7795,6 +7836,78 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
             "one subject code",
             "Finding a subject by an ID",
             "Found a subject by an ID",
+        ),
+        row(
+            "POST /api/linkage/show",
+            false,
+            false,
+            "bounded",
+            "one subject's identifiers",
+            "Showing a subject's identifiers",
+            "Showed a subject's identifiers",
+        ),
+        row(
+            "POST /api/linkage/links",
+            true,
+            false,
+            "job",
+            "one linkage and one job",
+            "Linking two subjects as one person",
+            "Linked two subjects as one person",
+        ),
+        row(
+            "POST /api/linkage/links/{id}/unlink",
+            true,
+            false,
+            "bounded",
+            "one linkage",
+            "Reversing a linkage",
+            "Reversed a linkage",
+        ),
+        row(
+            "POST /api/linkage/purge",
+            true,
+            false,
+            "bounded",
+            "one count",
+            "Purging identifiers",
+            "Purged identifiers",
+        ),
+        row(
+            "GET /api/keys",
+            false,
+            false,
+            "free",
+            "every key, by name",
+            "Reading the key store",
+            "Read the key store",
+        ),
+        row(
+            "POST /api/keys",
+            true,
+            false,
+            "free",
+            "one key, by name",
+            "Adding a key",
+            "Added a key",
+        ),
+        row(
+            "POST /api/keys/{name}/remove",
+            true,
+            false,
+            "free",
+            "one key, by name",
+            "Removing a key",
+            "Removed a key",
+        ),
+        row(
+            "POST /api/handovers/password",
+            false,
+            false,
+            "free",
+            "one password",
+            "Reading a handover's password",
+            "Read a handover's password",
         ),
         row(
             "GET /api/backups",

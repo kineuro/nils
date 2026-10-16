@@ -190,6 +190,15 @@ pub enum Action {
     /// Record 55 H2: a session scheme kept under a name at its door, as
     /// `nils session scheme add` keeps one. A new name relabels nothing.
     SessionScheme,
+    /// Record 55, ruling 35 (c): a key added to the key store at its door,
+    /// made from a passphrase, or one taken away. The row names the key and
+    /// its length; never a byte of it, nor its fingerprint.
+    KeyAdd,
+    KeyRemove,
+    /// Record 55, ruling 35 (c): the password of a handover's key read out
+    /// at its door for the person receiving the archives. The row names the
+    /// key; never the password.
+    HandoverPassword,
 }
 
 impl Action {
@@ -276,6 +285,9 @@ impl Action {
             Action::RegistryRepair => "registry.repair",
             Action::ToolInstall => "tool.install",
             Action::SessionScheme => "session.scheme",
+            Action::KeyAdd => "key.add",
+            Action::KeyRemove => "key.remove",
+            Action::HandoverPassword => "handover.password",
         }
     }
 
@@ -288,6 +300,9 @@ impl Action {
                 | Action::LinkageReveal
                 | Action::LinkageResolve
                 | Action::LinkageTypeFlag
+                | Action::KeyAdd
+                | Action::KeyRemove
+                | Action::HandoverPassword
                 | Action::JobsPrune
                 | Action::Backup
                 | Action::OverlayPropose

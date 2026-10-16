@@ -39,10 +39,10 @@ Every store the registry at `<home>` keeps (backend sqlite), rendered by `nils c
 | holds | identifying: the identifiers (encrypted), except a personnummer or a reserve number, which is never kept, and their keyed lookups<br>technical: the linkages, the id types, the read audit (actor, time, why, identity id) |
 | owner | the registry's operator; the identifiers are the clinic's |
 | kept | until purged; a purged identifier is filed again only when its file is parsed again (changed, or new), not by a digest that finds the file unchanged |
-| read | `nils linkage show <code> [--why <text>]` (every read is audited) |
-| change | `nils digest <root>`<br>`nils linkage import <csv>`<br>`nils linkage link \| unlink \| merge`<br>`nils linkage id-type add` |
+| read | `nils linkage show <code> [--why <text>]` (every read is audited)<br>POST /api/linkage/show, an admin's: types and counts, and the kept values with a why, never one that reads as a personnummer (every read is audited) |
+| change | `nils digest <root>`<br>`nils linkage import <csv>`<br>`nils linkage link \| unlink \| merge`<br>`nils linkage id-type add`<br>POST /api/linkage/links and /links/{id}/unlink, an admin's |
 | export | none in Wave 1 |
-| delete | `nils linkage purge --subject <code> \| --all` (the read audit and the id types stay) |
+| delete | `nils linkage purge --subject <code> \| --all, or POST /api/linkage/purge with the code typed, an admin's` (the read audit and the id types stay) |
 
 ## key store
 
@@ -53,10 +53,10 @@ Every store the registry at `<home>` keeps (backend sqlite), rendered by `nils c
 | holds | secret: the key bytes; whoever holds the registry's key can derive its codes and read its linkage store |
 | owner | the registry's operator |
 | kept | until removed; the key the registry names cannot be removed while it names it |
-| read | `nils key list` (names, lengths and fingerprints, never the bytes) |
-| change | `nils key add <name>` |
+| read | `nils key list` (names, lengths and fingerprints, never the bytes)<br>GET /api/keys (the same) |
+| change | `nils key add <name>`<br>POST /api/keys, an admin's: the passphrase in the body alone, never stored elsewhere, logged or audited |
 | export | copy the file (that is the backup the key needs) |
-| delete | `nils key remove <name>` |
+| delete | `nils key remove <name>, or POST /api/keys/{name}/remove with the name typed, an admin's` |
 
 ## quarantine list
 

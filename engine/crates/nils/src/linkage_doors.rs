@@ -45,6 +45,10 @@ pub(crate) const DOORS: &[&str] = &[
     "POST /api/linkage/held/reveal",
     "POST /api/linkage/merge",
     "POST /api/linkage/resolve",
+    "POST /api/linkage/show",
+    "POST /api/linkage/links",
+    "POST /api/linkage/links/{id}/unlink",
+    "POST /api/linkage/purge",
 ];
 
 /// The most rows one call to the imports door takes; a larger map goes in
@@ -84,6 +88,10 @@ pub(crate) fn route(
         ["api", "linkage", "held", "reveal"] if post => held_reveal(registry, caller, body),
         ["api", "linkage", "merge"] if post => merge(registry, caller, body),
         ["api", "linkage", "resolve"] if post => resolve(registry, caller, body),
+        ["api", "linkage", "show"] if post => show(registry, caller, body),
+        ["api", "linkage", "links"] if post => link(registry, caller, body),
+        ["api", "linkage", "links", id, "unlink"] if post => unlink(registry, caller, id),
+        ["api", "linkage", "purge"] if post => purge(registry, caller, body),
         _ => return None,
     })
 }
@@ -1522,6 +1530,456 @@ fn merge(registry: &mut Registry, caller: &Caller, body: &str) -> Result<Reply, 
     Ok(Reply::accepted(
         serde_json::json!({ "job": id, "state": "queued" }),
     ))
+}
+
+/// Record 55, ruling 35 (c): the shortest reason a show of values takes.
+const WHY_SHORTEST: usize = 4;
+
+/// What a purge of every subject is confirmed with, typed.
+pub(crate) const PURGE_ALL_WORDS: &str = "every subject";
+
+/// The subject a code names, merged or not; 404 when none.
+fn subject_coded(registry: &mut Registry, code: &str) -> Result<linkage::Subject, Reply> {
+    linkage::subjects_by_code(registry.store(), &[code.to_string()])?
+        .into_iter()
+        .next()
+        .ok_or_else(|| Reply::gated(404, format!("no subject with code {code}")))
+}
+
+/// A subject's code from a body's field, trimmed; 400 when there is none.
+fn code_in(doc: &serde_json::Value, key: &str) -> Result<String, Reply> {
+    doc[key]
+        .as_str()
+        .map(str::trim)
+        .filter(|c| !c.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| Reply::error(400, format!("{key}: a subject's code")))
+}
+
+/// `POST /api/linkage/show {subject, values?, why?}` (record 55, ruling 35
+/// (c); `nils linkage show` at the door, an admin's): a subject's
+/// identifiers by type, each with where it came from and whether the store
+/// keeps it, and the linkages that name the subject. Without `values` no
+/// identifier is opened and none is answered. With `values` and a `why`,
+/// the identifiers the store keeps are opened, one read audit row each as
+/// at the keyboard, and answered, except a value that reads as a
+/// personnummer, which is answered as its shape alone (`withheld`): the
+/// registry keeps no personnummer as one (its type is never kept), and a
+/// personnummer filed under another type is not shown on a page either.
+/// Every show is audited as `linkage.reveal` with the counts, and the why.
+fn show(registry: &mut Registry, caller: &Caller, body: &str) -> Result<Reply, Reply> {
+    crate::keys_doors::person_only(caller, "showing a subject's identifiers")?;
+    let doc = json_body(body)?;
+    let code = code_in(&doc, "subject")?;
+    let values = match &doc["values"] {
+        serde_json::Value::Null => false,
+        serde_json::Value::Bool(b) => *b,
+        _ => return Err(Reply::error(400, "values: true or false")),
+    };
+    let why = doc["why"]
+        .as_str()
+        .map(str::trim)
+        .filter(|w| w.chars().count() >= WHY_SHORTEST)
+        .map(str::to_string);
+    if values && why.is_none() {
+        return Err(Reply::error(
+            400,
+            "why: what the values are read for, a few words; written to the audit",
+        ));
+    }
+    let subject = subject_coded(registry, &code)?;
+    let merged_into = match subject.merged_into {
+        Some(into) => linkage::subjects_by_id(registry.store(), &[into])?
+            .into_iter()
+            .next()
+            .map(|s| s.code),
+        None => None,
+    };
+    let mut store = open_linkage(registry)?;
+    // every identity row of the subject by its type, without opening one
+    let identity = store.qualified("identity");
+    let id_type = store.qualified("id_type");
+    let sql = format!(
+        "SELECT i.id, t.name, i.source, CASE WHEN i.ciphertext IS NOT NULL AND length(i.ciphertext) > 0 THEN 1 ELSE 0 END \
+         FROM {identity} i JOIN {id_type} t ON t.id = i.id_type_id WHERE i.subject_id = {} ORDER BY i.id",
+        store.dialect().param(1, Type::Int)
+    );
+    let rows = store.query(&sql, &[Param::Int(subject.id)])?;
+    let mut opened: HashMap<i64, String> = HashMap::new();
+    if values && rows.iter().any(|r| r.int(3).unwrap_or(0) == 1) {
+        let (_, keys) = keys_of(registry)?;
+        for r in linkage::reveal(
+            &mut store,
+            &keys,
+            subject.id,
+            &caller.principal,
+            why.as_deref(),
+        )? {
+            if r.kept {
+                opened.insert(r.identity_id, r.value);
+            }
+        }
+    }
+    let mut withheld = 0usize;
+    let mut shown = 0usize;
+    let mut by_type: Vec<(String, usize, bool)> = Vec::new();
+    let mut identifiers = Vec::new();
+    for r in &rows {
+        let id = r.int(0)?;
+        let name = r.text(1)?.to_string();
+        let kept = r.int(3)? == 1;
+        match by_type.iter_mut().find(|(t, _, _)| *t == name) {
+            Some(entry) => entry.1 += 1,
+            None => by_type.push((name.clone(), 1, kept)),
+        }
+        let mut row = serde_json::json!({
+            "identity": id,
+            "id_type": name,
+            "label": nils_registry::schema::id_type_label(&name),
+            "source": r.text(2)?,
+            "kept": kept,
+        });
+        if let Some(value) = opened.get(&id) {
+            if nils_registry::personnummer::normalise(value).is_ok() {
+                withheld += 1;
+                row["shape"] = serde_json::Value::from(crate::scans::shape(value));
+                row["withheld"] = serde_json::Value::from(
+                    "it reads as a personnummer, which is never shown on a page",
+                );
+            } else {
+                shown += 1;
+                row["value"] = serde_json::Value::from(value.as_str());
+            }
+        }
+        identifiers.push(row);
+    }
+    let links = linkage::linkages_of(&mut store, subject.id)?;
+    let others: Vec<i64> = links
+        .iter()
+        .flat_map(|l| [l.subject_a, l.subject_b])
+        .filter(|&id| id != subject.id)
+        .collect();
+    let codes: HashMap<i64, String> = linkage::subjects_by_id(registry.store(), &others)?
+        .into_iter()
+        .map(|s| (s.id, s.code))
+        .collect();
+    let linkages: Vec<serde_json::Value> = links
+        .iter()
+        .map(|l| {
+            let (role, other) = if l.subject_a == subject.id {
+                ("canonical", l.subject_b)
+            } else {
+                ("alias", l.subject_a)
+            };
+            let evidence = serde_json::from_str::<serde_json::Value>(&l.evidence)
+                .ok()
+                .and_then(|e| e["text"].as_str().map(str::to_string))
+                .unwrap_or_else(|| l.evidence.clone());
+            serde_json::json!({
+                "id": l.id,
+                "role": role,
+                "other": codes.get(&other).cloned().unwrap_or_else(|| format!("#{other}")),
+                "evidence": evidence,
+                "by": l.actor,
+                "at": l.created_at,
+                "reversed_at": l.reversed_at,
+                "reversed_by": l.reversed_by,
+            })
+        })
+        .collect();
+    nils_registry::audit::record(
+        registry,
+        &nils_registry::audit::Entry {
+            principal: &caller.principal,
+            action: nils_registry::audit::Action::LinkageReveal,
+            scope: serde_json::json!({
+                "subject": subject.id,
+                "identifiers": rows.len(),
+                "values": values,
+                "shown": shown,
+                "withheld": withheld,
+            }),
+            policy: None,
+            job_id: None,
+            details: why.as_ref().map(|w| serde_json::json!({ "why": w })),
+        },
+    )?;
+    let reply = Reply::ok(serde_json::json!({
+        "subject": subject.code,
+        "merged_into": merged_into,
+        "values": values,
+        "identifiers": identifiers,
+        "by_type": by_type.iter().map(|(t, n, kept)| serde_json::json!({
+            "id_type": t,
+            "label": nils_registry::schema::id_type_label(t),
+            "count": n,
+            "kept": kept,
+        })).collect::<Vec<_>>(),
+        "shown": shown,
+        "withheld": withheld,
+        "linkages": linkages,
+    }));
+    Ok(reply.with(crate::keys_doors::NO_STORE.0, crate::keys_doors::NO_STORE.1))
+}
+
+/// The two subjects of a link, both found and neither merged already.
+fn link_pair(registry: &mut Registry, a: &str, b: &str) -> Result<(i64, i64), Reply> {
+    if a == b {
+        return Err(Reply::error(400, "a and b name the same subject"));
+    }
+    let found = linkage::subjects_by_code(registry.store(), &[a.to_string(), b.to_string()])?;
+    let mut ids = [0i64; 2];
+    for (i, c) in [a, b].iter().enumerate() {
+        match found.iter().find(|s| s.code == *c) {
+            None => return Err(Reply::gated(404, format!("no subject with code {c}"))),
+            Some(s) if s.merged_into.is_some() => {
+                return Err(Reply::gated(409, format!("subject {c} was merged already")));
+            }
+            Some(s) => ids[i] = s.id,
+        }
+    }
+    Ok((ids[0], ids[1]))
+}
+
+/// `POST /api/linkage/links {a, b, evidence}` (record 55, ruling 35 (c);
+/// `nils linkage link` at the door, an admin's): the two subjects recorded
+/// as one person, `a` canonical and `b` the alias, audited as `linkage.link`
+/// with the evidence, and `b` merged into `a` as the merge door merges, a
+/// queued job. Answers 202 `{linkage, job, state: queued}`.
+fn link(registry: &mut Registry, caller: &Caller, body: &str) -> Result<Reply, Reply> {
+    crate::keys_doors::person_only(caller, "linking two subjects")?;
+    let doc = json_body(body)?;
+    let a = code_in(&doc, "a")?;
+    let b = code_in(&doc, "b")?;
+    let evidence = doc["evidence"]
+        .as_str()
+        .map(str::trim)
+        .filter(|w| w.chars().count() >= WHY_SHORTEST)
+        .ok_or_else(|| Reply::error(400, "evidence: what shows they are one person"))?
+        .to_string();
+    let (subject_a, subject_b) = link_pair(registry, &a, &b)?;
+    let mut store = open_linkage(registry)?;
+    let id = linkage::link(
+        &mut store,
+        subject_a,
+        subject_b,
+        &evidence,
+        &caller.principal,
+    )?;
+    nils_registry::audit::record(
+        registry,
+        &nils_registry::audit::Entry {
+            principal: &caller.principal,
+            action: nils_registry::audit::Action::LinkageLink,
+            scope: serde_json::json!({ "linkage": id, "a": subject_a, "b": subject_b }),
+            policy: None,
+            job_id: None,
+            details: Some(serde_json::json!({ "evidence": evidence })),
+        },
+    )?;
+    let command = vec![
+        "linkage".to_string(),
+        "merge".to_string(),
+        a,
+        b,
+        "--why".to_string(),
+        evidence,
+    ];
+    let job = nils_registry::job::enqueue_with(
+        registry.store(),
+        &command,
+        Some("merge"),
+        Some(&caller.principal),
+        queued_by(caller),
+    )
+    .map_err(|e| Reply::error(500, e.to_string()))?;
+    Ok(Reply::accepted(
+        serde_json::json!({ "linkage": id, "job": job, "state": "queued" }),
+    ))
+}
+
+/// `POST /api/linkage/links/{id}/unlink` (record 55, ruling 35 (c); `nils
+/// linkage unlink` at the door, an admin's): an open linkage reversed, a
+/// column and never row surgery, audited as `linkage.unlink`. The merge it
+/// brought stays; 404 where no open linkage has the id.
+fn unlink(registry: &mut Registry, caller: &Caller, id: &str) -> Result<Reply, Reply> {
+    crate::keys_doors::person_only(caller, "reversing a linkage")?;
+    let id: i64 = id
+        .parse()
+        .map_err(|_| Reply::error(404, format!("{id} is not a linkage's id")))?;
+    let mut store = open_linkage(registry)?;
+    if !linkage::unlink(&mut store, id, &caller.principal)? {
+        return Err(Reply::error(404, format!("no open linkage {id}")));
+    }
+    nils_registry::audit::record(
+        registry,
+        &nils_registry::audit::Entry {
+            principal: &caller.principal,
+            action: nils_registry::audit::Action::LinkageUnlink,
+            scope: serde_json::json!({ "linkage": id }),
+            policy: None,
+            job_id: None,
+            details: None,
+        },
+    )?;
+    Ok(Reply::ok(
+        serde_json::json!({ "linkage": id, "reversed": true }),
+    ))
+}
+
+/// What a purge would remove, or removed: the identifiers and linkages of
+/// one subject, or of every subject.
+pub(crate) struct PurgeTarget {
+    /// The subject's code and id; none for every subject.
+    pub(crate) subject: Option<(String, i64)>,
+}
+
+impl PurgeTarget {
+    /// `(identities, linkages)` it holds now, as the keyboard says them
+    /// before it asks: every linkage of one subject, open or reversed, and
+    /// the open ones of every subject.
+    pub(crate) fn holds(&self, store: &mut Store) -> Result<(u64, u64), nils_registry::Error> {
+        Ok(match &self.subject {
+            Some((_, id)) => (
+                linkage::identities_of_subjects(store, &[*id])?.len() as u64,
+                linkage::linkages_of(store, *id)?.len() as u64,
+            ),
+            None => {
+                let h = linkage::holdings(store)?;
+                (h.identities, h.linkages)
+            }
+        })
+    }
+}
+
+/// The purge itself, for the keyboard and the door alike (§13 `linkage
+/// purge`): the rows deleted, recorded as a job done whose arguments hold
+/// what it removed and never what the identifiers were, and audited as
+/// `linkage.purge` under `principal`. Returns what it removed and the job.
+pub(crate) fn purge_now(
+    registry: &mut Registry,
+    store: &mut Store,
+    target: &PurgeTarget,
+    principal: &str,
+) -> Result<(linkage::Purged, i64), String> {
+    let purged = linkage::purge(store, target.subject.as_ref().map(|(_, id)| *id))
+        .map_err(|e| e.to_string())?;
+    let code = target.subject.as_ref().map(|(c, _)| c.as_str());
+    let name = match code {
+        Some(c) => format!("subject {c}"),
+        None => PURGE_ALL_WORDS.to_string(),
+    };
+    let job_id = nils_registry::job::claim(
+        registry.store(),
+        &nils_registry::job::Claim {
+            kind: "linkage-purge",
+            name: name.as_str(),
+            args: serde_json::json!({
+                "subject": code,
+                "all": code.is_none(),
+                "actor": principal,
+                "identities": purged.identities,
+                "linkages": purged.linkages,
+            }),
+        },
+    )
+    .map_err(|e| e.to_string())?;
+    nils_registry::job::finish(
+        registry.store(),
+        job_id,
+        nils_registry::job::State::Done,
+        None,
+    )
+    .map_err(|e| e.to_string())?;
+    nils_registry::audit::record(
+        registry,
+        &nils_registry::audit::Entry {
+            principal,
+            action: nils_registry::audit::Action::LinkagePurge,
+            scope: serde_json::json!({
+                "subject": code, "all": code.is_none(),
+                "identities": purged.identities, "linkages": purged.linkages,
+            }),
+            policy: None,
+            job_id: None,
+            details: Some(serde_json::json!({ "job": job_id })),
+        },
+    )
+    .map_err(|e| e.to_string())?;
+    Ok((purged, job_id))
+}
+
+/// `POST /api/linkage/purge {subject | all: true, confirm, dry_run?}`
+/// (record 55, ruling 35 (c); `nils linkage purge` at the door, an
+/// admin's): the identifiers and linkages of one subject, or of every
+/// subject, deleted. `confirm` is the subject's code typed again, or
+/// `every subject`; without it nothing goes (400). A dry run answers what
+/// would go and needs no confirm. The read audit and the registry's
+/// subjects stay. Answers `{subject, all, identities, linkages, job}`.
+fn purge(registry: &mut Registry, caller: &Caller, body: &str) -> Result<Reply, Reply> {
+    crate::keys_doors::person_only(caller, "purging identifiers")?;
+    let doc = json_body(body)?;
+    let all = doc["all"] == true;
+    let dry_run = doc["dry_run"] == true;
+    let target = match (
+        doc["subject"]
+            .as_str()
+            .map(str::trim)
+            .filter(|c| !c.is_empty()),
+        all,
+    ) {
+        (Some(code), false) => {
+            let s = subject_coded(registry, code)?;
+            PurgeTarget {
+                subject: Some((s.code, s.id)),
+            }
+        }
+        (None, true) => PurgeTarget { subject: None },
+        _ => {
+            return Err(Reply::error(
+                400,
+                "a purge names one subject by its code, or all: true",
+            ));
+        }
+    };
+    let mut store = open_linkage(registry)?;
+    let words = match &target.subject {
+        Some((code, _)) => code.clone(),
+        None => PURGE_ALL_WORDS.to_string(),
+    };
+    if dry_run {
+        let (identities, linkages) = target.holds(&mut store)?;
+        return Ok(Reply::ok(serde_json::json!({
+            "subject": target.subject.as_ref().map(|(c, _)| c),
+            "all": all,
+            "identities": identities,
+            "linkages": linkages,
+            "dry_run": true,
+            "confirm": words,
+        })));
+    }
+    if doc["confirm"].as_str().map(str::trim) != Some(words.as_str()) {
+        return Err(Reply::error(
+            400,
+            format!(
+                "confirm: type {} to purge; a purged identifier is gone, and only a new read of its files files it again",
+                if all {
+                    "every subject"
+                } else {
+                    "the subject's code"
+                }
+            ),
+        ));
+    }
+    let (purged, job) = purge_now(registry, &mut store, &target, &caller.principal)
+        .map_err(|e| Reply::error(500, e))?;
+    Ok(Reply::ok(serde_json::json!({
+        "subject": target.subject.as_ref().map(|(c, _)| c),
+        "all": all,
+        "identities": purged.identities,
+        "linkages": purged.linkages,
+        "job": job,
+    })))
 }
 
 #[cfg(test)]

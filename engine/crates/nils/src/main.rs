@@ -52,6 +52,7 @@ mod gate;
 mod grants;
 mod headers;
 mod intake;
+mod keys_doors;
 mod linkage_doors;
 mod login;
 mod logs;
@@ -6832,43 +6833,17 @@ fn purge(
         println!("nothing purged");
         return Ok(());
     }
-    let purged = linkage::purge(store, id)?;
-    let now = nils_registry::time::now_iso();
-    let args = serde_json::json!({
-        "subject": subject,
-        "all": all,
-        "actor": actor(),
-        "identities": purged.identities,
-        "linkages": purged.linkages,
-    });
-    // Recorded as a job, done (Wave 4a section 9.1): what it removed is in
-    // the args, and never what the identifiers were.
-    let _ = now;
-    let job_id = nils_registry::job::claim(
-        registry.store(),
-        &nils_registry::job::Claim {
-            kind: "linkage-purge",
-            name: target.as_str(),
-            args,
-        },
-    )
-    .map_err(|e| fail(e.to_string()))?;
-    nils_registry::job::finish(
-        registry.store(),
-        job_id,
-        nils_registry::job::State::Done,
-        None,
-    )
-    .map_err(|e| fail(e.to_string()))?;
-    audit(
+    // record 55, ruling 35 (c): the door purges the same way
+    let code = subject.map(str::to_string);
+    let (purged, _) = crate::linkage_doors::purge_now(
         registry,
-        nils_registry::audit::Action::LinkagePurge,
-        serde_json::json!({
-            "subject": subject, "all": all,
-            "identities": purged.identities, "linkages": purged.linkages,
-        }),
-        Some(serde_json::json!({ "job": job_id })),
-    )?;
+        store,
+        &crate::linkage_doors::PurgeTarget {
+            subject: code.zip(id),
+        },
+        &actor(),
+    )
+    .map_err(fail)?;
     println!(
         "purged {} identifier(s) and {} linkage(s) of {target}; the read audit and the registry's subjects stay, and a file parsed again files its identifier again (an unchanged file does not)",
         purged.identities, purged.linkages
@@ -8130,10 +8105,10 @@ fn custody_doc(home: &Home, registry: &mut Registry) -> Result<serde_json::Value
             },
             "kept": "until purged; a purged identifier is filed again only when its file is parsed again (changed, or new), not by a digest that finds the file unchanged",
             "commands": {
-                "read": ["nils linkage show <code> [--why <text>] (every read is audited)"],
-                "change": ["nils digest <root>", "nils linkage import <csv>", "nils linkage link | unlink | merge", "nils linkage id-type add"],
+                "read": ["nils linkage show <code> [--why <text>] (every read is audited)", "POST /api/linkage/show, an admin's: types and counts, and the kept values with a why, never one that reads as a personnummer (every read is audited)"],
+                "change": ["nils digest <root>", "nils linkage import <csv>", "nils linkage link | unlink | merge", "nils linkage id-type add", "POST /api/linkage/links and /links/{id}/unlink, an admin's"],
                 "export": ["none in Wave 1"],
-                "delete": "nils linkage purge --subject <code> | --all (the read audit and the id types stay)",
+                "delete": "nils linkage purge --subject <code> | --all, or POST /api/linkage/purge with the code typed, an admin's (the read audit and the id types stay)",
             },
         }),
         serde_json::json!({
@@ -8146,10 +8121,10 @@ fn custody_doc(home: &Home, registry: &mut Registry) -> Result<serde_json::Value
             "counts": { "keys": key_list.len(), "in_use": meta.pseudonym_key },
             "kept": "until removed; the key the registry names cannot be removed while it names it",
             "commands": {
-                "read": ["nils key list (names, lengths and fingerprints, never the bytes)"],
-                "change": ["nils key add <name>"],
+                "read": ["nils key list (names, lengths and fingerprints, never the bytes)", "GET /api/keys (the same)"],
+                "change": ["nils key add <name>", "POST /api/keys, an admin's: the passphrase in the body alone, never stored elsewhere, logged or audited"],
                 "export": ["copy the file (that is the backup the key needs)"],
-                "delete": "nils key remove <name>",
+                "delete": "nils key remove <name>, or POST /api/keys/{name}/remove with the name typed, an admin's",
             },
         }),
         serde_json::json!({
