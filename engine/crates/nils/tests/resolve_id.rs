@@ -5,7 +5,9 @@
 //! the subject code, or that it is not known; it never answers an
 //! identifier it was not given. The question that asked for it, "how many
 //! SWI acquisition types does Ctrl0042 have?", is then a question of that
-//! subject code. On SQLite always, and on Postgres where a test DSN is set.
+//! subject code. A subject code asked for as a `subject-code` is the subject
+//! it is, filed under the type or not. On SQLite always, and on Postgres
+//! where a test DSN is set.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
@@ -490,6 +492,173 @@ fn the_door_on(backend: &str, pg: Option<(&str, &str)>) {
     assert_eq!(logged, 8, "{backend}");
     if let Some((dsn, schema)) = pg {
         drop_schema(dsn, schema);
+    }
+}
+
+/// A subject's own code asked for as a `subject-code` is answered as the
+/// subject it is. A synthetic registry files no identity row for any code,
+/// as a subject made from an identifier of another type has none, and the
+/// door answered every such code as unknown; a merged subject's code answers
+/// the subject it was merged into, a code whose scans are all sealed or that
+/// no subject holds is unknown, and another type answers no code.
+fn the_code_on(backend: &str, pg: Option<(&str, &str)>) {
+    let home = synthetic(pg);
+    let three = subjects(&home, pg);
+    let (a, b, c) = (&three[0], &three[1], &three[2]);
+    plant(&home, pg, &a.2[..1], (c.0, &c.2));
+    run(
+        &home,
+        &[
+            "linkage",
+            "merge",
+            &a.1,
+            &b.1,
+            "--why",
+            "one person, two codes",
+        ],
+        None,
+    );
+
+    let server = Server::start(&home, 8);
+    let ask = |id_type: &str, value: &str| serde_json::json!({"id_type": id_type, "value": value});
+    // a's own code: no row filed it, and it is the subject it names, with
+    // its own scans and the merged b's, and nothing else in the answer
+    let (status, own) = server.post("/api/linkage/resolve", &ask("subject-code", &a.1), ADMIN);
+    assert_eq!(status, 200, "{backend}: {own}");
+    assert_eq!(own["known"], true, "{backend}: {own}");
+    assert_eq!(own["id_type"], "subject-code", "{backend}: {own}");
+    assert_eq!(own["subject_code"], a.1.as_str(), "{backend}: {own}");
+    assert_eq!(own["scans"], a.2.len() + b.2.len(), "{backend}: {own}");
+    assert_eq!(
+        own["datasets"],
+        serde_json::json!(["controls"]),
+        "{backend}"
+    );
+    let mut keys: Vec<&str> = own
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort();
+    assert_eq!(
+        keys,
+        ["datasets", "id_type", "known", "scans", "subject_code"],
+        "{backend}: {own}"
+    );
+    // a reviewer, who uses the data at detail quasi, gets the same, however
+    // the code was written around
+    let padded = format!("  {} ", a.1);
+    let (status, same) = server.post(
+        "/api/linkage/resolve",
+        &ask("subject-code", &padded),
+        REVIEWER,
+    );
+    assert_eq!(status, 200, "{backend}: {same}");
+    assert_eq!(same, own, "{backend}");
+    // the code of the subject that was merged into a answers a
+    let (status, alias) = server.post("/api/linkage/resolve", &ask("subject-code", &b.1), ADMIN);
+    assert_eq!(status, 200, "{backend}: {alias}");
+    assert_eq!(alias["subject_code"], a.1.as_str(), "{backend}: {alias}");
+    // a subject every scan of whom is sealed now is unknown without the
+    // unsealed grant, which no admin holds, as an ID of it is
+    let (status, sealed) = server.post("/api/linkage/resolve", &ask("subject-code", &c.1), ADMIN);
+    assert_eq!(status, 200, "{backend}: {sealed}");
+    assert_eq!(
+        sealed,
+        serde_json::json!({"id_type": "subject-code", "known": false}),
+        "{backend}"
+    );
+    // a code no subject holds is unknown
+    let (status, none) = server.post(
+        "/api/linkage/resolve",
+        &ask("subject-code", "no-such-code-0000"),
+        ADMIN,
+    );
+    assert_eq!(status, 200, "{backend}: {none}");
+    assert_eq!(
+        none,
+        serde_json::json!({"id_type": "subject-code", "known": false}),
+        "{backend}"
+    );
+    // only the type subject-code answers a code: as a PatientID it is
+    // nothing the store filed
+    let (status, other) = server.post("/api/linkage/resolve", &ask("patient-id", &a.1), ADMIN);
+    assert_eq!(status, 200, "{backend}: {other}");
+    assert_eq!(other["known"], false, "{backend}: {other}");
+    // a code is quasi-identifying: a plain reader and a rater are refused
+    let (status, _) = server.post("/api/linkage/resolve", &ask("subject-code", &a.1), READER);
+    assert_eq!(status, 403, "{backend}");
+    let (status, _) = server.post("/api/linkage/resolve", &ask("subject-code", &a.1), RATER);
+    assert_eq!(status, 403, "{backend}");
+    server.finish();
+
+    // the read audit holds a row for the one identity row a lookup opened
+    // (the merged b's code, filed on a); a subject's own code opens none
+    let mut linkage = match pg {
+        Some((dsn, schema)) => Store::connect_postgres(dsn, &format!("{schema}_linkage")).unwrap(),
+        None => Store::open_sqlite(&home.path().join("linkage.db")).unwrap(),
+    };
+    let read = linkage
+        .query(
+            &format!(
+                "SELECT why, COUNT(*) FROM {} WHERE why LIKE 'resolve:%' GROUP BY why ORDER BY why",
+                linkage.qualified("read_audit")
+            ),
+            &[],
+        )
+        .unwrap()
+        .iter()
+        .map(|r| (r.text(0).unwrap().to_string(), r.int(1).unwrap()))
+        .collect::<Vec<_>>();
+    drop(linkage);
+    assert_eq!(read, [("resolve: found".to_string(), 1)], "{backend}");
+    // the registry's audit log holds the six lookups that reached the
+    // store, each with its type and outcome, and never the value asked for
+    let mut s = store(&home, pg);
+    let logged = s
+        .query(
+            &format!(
+                "SELECT CAST(scope AS TEXT) FROM {} WHERE action = 'linkage.resolve' ORDER BY id",
+                s.qualified("audit")
+            ),
+            &[],
+        )
+        .unwrap()
+        .iter()
+        .map(|r| r.text(0).unwrap().to_string())
+        .collect::<Vec<_>>();
+    drop(s);
+    assert_eq!(logged.len(), 6, "{backend}: {logged:?}");
+    let outcome = |i: usize| -> (String, String) {
+        let row: serde_json::Value = serde_json::from_str(&logged[i]).unwrap();
+        (
+            row["id_type"].as_str().unwrap().to_string(),
+            row["outcome"].as_str().unwrap().to_string(),
+        )
+    };
+    assert_eq!(outcome(0), ("subject-code".into(), "found".into()));
+    assert_eq!(outcome(3), ("subject-code".into(), "no scan to see".into()));
+    assert_eq!(outcome(4), ("subject-code".into(), "not known".into()));
+    assert_eq!(outcome(5), ("patient-id".into(), "not known".into()));
+    for row in &logged {
+        assert!(!row.contains("no-such-code-0000"), "{backend}: {row}");
+        assert!(!row.contains("\"value\""), "{backend}: {row}");
+    }
+    if let Some((dsn, schema)) = pg {
+        drop_schema(dsn, schema);
+    }
+}
+
+#[test]
+fn a_subject_code_resolves_as_the_subject_it_is_for_those_who_use_the_data() {
+    the_code_on("sqlite", None);
+    match std::env::var("NILS_TEST_POSTGRES_DSN")
+        .ok()
+        .filter(|d| !d.is_empty())
+    {
+        Some(dsn) => the_code_on("postgres", Some((&dsn, "nils_resolve_code"))),
+        None => eprintln!("NILS_TEST_POSTGRES_DSN is not set; the Postgres half is skipped"),
     }
 }
 
