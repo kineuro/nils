@@ -4646,6 +4646,23 @@ fn every_door_needs_its_grant_and_a_refusal_names_it() {
             "query-see",
             "query:work",
         ),
+        // record 55 K6: keeping a card is saving it, and putting it back too
+        (
+            "PUT",
+            "/api/ask/documents/1/kept",
+            "",
+            "query-work",
+            "query-see",
+            "query:work",
+        ),
+        (
+            "DELETE",
+            "/api/ask/documents/1/kept",
+            "",
+            "query-work",
+            "query-see",
+            "query:work",
+        ),
         (
             "PUT",
             "/api/ask/selections/kept",
