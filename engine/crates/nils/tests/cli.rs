@@ -1813,9 +1813,10 @@ fn pack_list_and_show_read_the_pack_directory() {
     assert_eq!(shown["modality"], "MR");
     assert_eq!(shown["flags"], 593);
     assert_eq!(
-        shown["contract"], 10,
-        "pack 1.1.0: the engines it works with (contract 10), after review.by_model (contract 9), after record 53's session pass, fallback \
-         border over several values and private elements a reader is shown (contract 8)"
+        shown["contract"], 11,
+        "pack 1.3.0: the damaged-header thresholds (contract 11), after the engines it works with (contract 10), after \
+         review.by_model (contract 9), after record 53's session pass, fallback border over several values and private \
+         elements a reader is shown (contract 8)"
     );
     // record 53: what a packet must carry to replay the pack: the private
     // elements it shows, with where a builder reads them, and what the
