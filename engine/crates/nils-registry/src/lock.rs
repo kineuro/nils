@@ -46,6 +46,11 @@ use crate::store::{Error, Param, Store};
 /// the next build to make again (2026-10-14).
 pub const SESSION_CACHE: &str = "session-cache";
 
+/// The lock of a model's card, held for its transaction by an addition of
+/// the claims a registered card lacks (record 55 ruling 31 (a)), so two
+/// additions to one card never both read it as lacking a claim.
+pub const MODEL_CARD: &str = "model-card";
+
 /// A lock this process holds. Give it back with [`release`]; a guard that
 /// is dropped instead lets a file lock go with its file, and leaves an
 /// advisory lock held until the connection ends.

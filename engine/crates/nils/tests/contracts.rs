@@ -289,8 +289,18 @@ fn the_model_contract_is_the_engine_s_registry() {
             "promoted",
             "retired",
             "chosen",
-            "unchosen"
+            "unchosen",
+            "claims_added"
         ]
+    );
+    // record 55 ruling 31 (a): what a card may gain once registered
+    assert_eq!(
+        strings(&life["properties"]["additions"]["items"]["properties"]["fields"]["items"]["enum"]),
+        ["trained_on", "tested", "speed.cpu", "speed.gpu"]
+    );
+    assert_eq!(
+        nils_registry::model::CLAIMS,
+        ["trained_on", "tested", "speed"]
     );
     assert_eq!(
         strings(&life["$defs"]["check"]["required"]),

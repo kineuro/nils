@@ -1380,7 +1380,10 @@ fn build_registry() -> Vec<Table> {
                 req("task", Type::Text),
                 req("slot", Type::Text),
                 req("state", Type::Text),
-                // the card as it was registered, kept whole
+                // the card as it was registered, kept whole; since record 55
+                // ruling 31 (a) it may gain the claims it lacked (the label
+                // set it was trained on, its tested claims, its speed), each
+                // addition a claims_added event holding what was added
                 req("card", Type::Json),
                 // a head names the encoder whose features it reads; the
                 // first of them, when it reads several (model_encoder)
@@ -1416,7 +1419,8 @@ fn build_registry() -> Vec<Table> {
                 col("id", Type::Id),
                 req("model_id", Type::Int),
                 // registered, admitted, admission_failed, promoted, retired,
-                // chosen, unchosen (record 55 D4)
+                // chosen, unchosen (record 55 D4), claims_added (record 55
+                // ruling 31 (a))
                 req("transition", Type::Text),
                 req("principal", Type::Text),
                 req("at", Type::Timestamp),

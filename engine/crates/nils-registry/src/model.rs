@@ -32,6 +32,13 @@
 //! A cascade (record 55 E2, the ruling of 2026-10-10) is one model whose
 //! card names its parts, each a registered model by digest under the name of
 //! the pipeline input it fills (`parts`); promoting it retires none of them.
+//!
+//! A card is kept as it was registered, with one exception (record 55,
+//! ruling 31 (a), 2026-10-16): a registered card may gain the claims it
+//! lacks, the label set it was trained on, its tested claims and its speed
+//! ([`add_claims`]). Additions only: nothing a card states changes, each
+//! claim is checked as registration checks it, and each addition is an
+//! event (`claims_added`, with what was added) and an audit row.
 
 use serde_json::{Value, json};
 
@@ -502,6 +509,14 @@ fn event(
     Ok(())
 }
 
+/// What a model's audit row names it by.
+fn scope_of(m: &Model) -> Value {
+    json!({
+        "model": m.id, "name": m.name, "version": m.version, "digest": m.digest,
+        "task": m.task, "slot": m.slot,
+    })
+}
+
 fn audit_row(
     registry: &mut Registry,
     action: Action,
@@ -514,10 +529,7 @@ fn audit_row(
         &Entry {
             principal: who,
             action,
-            scope: json!({
-                "model": m.id, "name": m.name, "version": m.version, "digest": m.digest,
-                "task": m.task, "slot": m.slot,
-            }),
+            scope: scope_of(m),
             policy: None,
             job_id: None,
             details: Some(details),
@@ -615,6 +627,13 @@ fn checked_slot(store: &mut Store, card: &Value) -> Result<String, Error> {
             }
         }
     }
+    checked_trained_on(card)?;
+    checked_parts_of_a_card(card)?;
+    Ok(slot)
+}
+
+/// The label set a card says it was trained on is named by its digest.
+fn checked_trained_on(card: &Value) -> Result<(), Error> {
     if let Some(t) = card.get("trained_on").filter(|v| !v.is_null()) {
         let set = t["label_set"].as_str().unwrap_or("");
         if !is_digest(set) {
@@ -623,8 +642,24 @@ fn checked_slot(store: &mut Store, card: &Value) -> Result<String, Error> {
             ));
         }
     }
-    checked_parts_of_a_card(card)?;
-    Ok(slot)
+    Ok(())
+}
+
+/// Record 40 R3 and 42 S7: the labels a model was fitted on are a label
+/// set this registry wrote or registered, and none drawn from a sealed
+/// certification sample, since a model fitted on the sample that certifies
+/// it certifies nothing.
+fn trained_on_usable(store: &mut Store, digest: &str) -> Result<(), Error> {
+    let sets = crate::labels::by_digest(store, digest).map_err(labels_err)?;
+    if sets.is_empty() {
+        return Err(Error::Unknown(format!(
+            "no label set has the digest {digest}; a model is trained on a set this registry wrote (nils labels export)"
+        )));
+    }
+    for set in &sets {
+        crate::labels::usable_for_training(store, set.id).map_err(labels_err)?;
+    }
+    Ok(())
 }
 
 /// Record 55 D4 and A5: the card's tested claims, speed, GPU need and
@@ -789,20 +824,8 @@ pub fn register(registry: &mut Registry, card: &Value, who: &str) -> Result<Mode
     // record 55 E2: a cascade's parts are registered models, none retired
     parts_of(store, card)?;
     let trained_on = card["trained_on"]["label_set"].as_str().map(str::to_string);
-    // Record 40 R3 and 42 S7: the labels a model was fitted on are a label
-    // set this registry wrote, and none drawn from a sealed certification
-    // sample, since a model fitted on the sample that certifies it
-    // certifies nothing.
     if let Some(digest) = &trained_on {
-        let sets = crate::labels::by_digest(store, digest).map_err(labels_err)?;
-        if sets.is_empty() {
-            return Err(Error::Unknown(format!(
-                "no label set has the digest {digest}; a model is trained on a set this registry wrote (nils labels export)"
-            )));
-        }
-        for set in &sets {
-            crate::labels::usable_for_training(store, set.id).map_err(labels_err)?;
-        }
+        trained_on_usable(store, digest)?;
     }
     let pack_version = card["pack_version"].as_str().map(str::to_string);
     let now = now_iso();
@@ -1371,6 +1394,250 @@ pub fn retire(
         json!({ "why": why }),
     )?;
     Ok(m)
+}
+
+// ------------------------------------------- claims added to a card
+
+/// The claims a registered card may gain (record 55, ruling 31 (a)), in
+/// the order they are added: the label set it was trained on, its tested
+/// claims and its speed. Nothing else joins a card once it is registered:
+/// a card that lacks anything else is a new version of the model.
+pub const CLAIMS: [&str; 3] = ["trained_on", "tested", "speed"];
+
+/// What an addition did.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Added {
+    /// The model as it is now, its card holding the claims.
+    pub model: Model,
+    /// The fields of [`missing`] the claims filled, in the card's order.
+    pub fields: Vec<&'static str>,
+    /// The claims as they were added, in the card's own shape.
+    pub added: Value,
+}
+
+/// Whether a card's value states nothing: absent, null, or an empty list.
+fn states_nothing(v: &Value) -> bool {
+    v.is_null() || v.as_array().is_some_and(Vec::is_empty)
+}
+
+/// Refused unless a card lacks `field` ([`missing`] names it) and states
+/// nothing at `held`, its value there.
+fn may_gain(m: &Model, before: &[&str], field: &str, held: &Value) -> Result<(), Error> {
+    if !states_nothing(held) {
+        return Err(refused(format!(
+            "model {} ({}) states {field} on its card already, and nothing a card states changes (record 55, ruling 31 (a)): another {field} is a new version of the model",
+            m.id,
+            m.label()
+        )));
+    }
+    if !before.contains(&field) {
+        return Err(refused(if field == "speed.gpu" {
+            format!(
+                "model {} ({}) needs no GPU (its gpu is {}), so its card states no speed with a GPU",
+                m.id,
+                m.label(),
+                m.gpu()
+            )
+        } else {
+            format!(
+                "model {} ({}) does not lack {field} on its card",
+                m.id,
+                m.label()
+            )
+        }));
+    }
+    Ok(())
+}
+
+/// Add to a registered model's card the claims it lacks (record 55, ruling
+/// 31 (a), Nima 2026-10-16: a registered card may gain its missing claims,
+/// the label set it was trained on, its tested claims, its speed;
+/// additions only, each one audited; nothing already on a card changes).
+///
+/// `claims` is an object of one or more of [`CLAIMS`], each in the card's
+/// own shape (`contracts/model/v1/card.schema.json`), `speed` holding
+/// `cpu`, `gpu` or both. A claim is refused where the card states it
+/// already, and where [`missing`] does not name it (a speed with a GPU on a
+/// card whose gpu is none); any other field is refused, since any other
+/// change is a new version of the model. The card with the claims is
+/// checked as registration checks a card, and the label set `trained_on`
+/// names must be one this registry holds and usable for training under the
+/// seals in force (records 40 R3 and 55 E6). `digest`, where given, must be
+/// the model's: the claims were written for that artifact.
+///
+/// The card gains the claims and the model's `trained_on` follows. The
+/// addition is an event `claims_added`, holding what was added, the fields
+/// filled and what the card lacked before and after, and an audit row
+/// `model.add_claims`, both written in the transaction that writes the
+/// card, under the card's lock. A model in any state may gain claims: a
+/// claim says what a model is and changes nothing it decided.
+pub fn add_claims(
+    registry: &mut Registry,
+    id: i64,
+    claims: &Value,
+    who: &str,
+    why: Option<&str>,
+    digest: Option<&str>,
+) -> Result<Added, Error> {
+    let Some(given) = claims.as_object().filter(|m| !m.is_empty()) else {
+        return Err(invalid(
+            "the claims are an object of trained_on, tested or speed, each in the card's own shape (contracts/model/v1)",
+        ));
+    };
+    if let Some(other) = given.keys().find(|k| !CLAIMS.contains(&k.as_str())) {
+        return Err(refused(format!(
+            "{other} is not a claim a registered card gains: only trained_on, tested and speed join a card once it is registered (record 55, ruling 31 (a)); any other change is a new version of the model"
+        )));
+    }
+    if let Some(k) = given.iter().find(|(_, v)| v.is_null()).map(|(k, _)| k) {
+        return Err(invalid(format!(
+            "{k} is given as null: a claim added states something"
+        )));
+    }
+    let why = why.map(str::trim).filter(|w| !w.is_empty());
+    // the label set is read (its labels.tsv, against the seals in force)
+    // before the card is locked, as registration reads it before it writes
+    let label_set = given
+        .get("trained_on")
+        .and_then(|t| t["label_set"].as_str())
+        .map(str::to_string);
+    if let Some(set) = &label_set {
+        checked_trained_on(&json!({ "trained_on": given["trained_on"] }))?;
+        trained_on_usable(registry.store(), set)?;
+    }
+    in_transaction(registry.store(), |store| {
+        crate::lock::take_for_transaction(store, crate::lock::MODEL_CARD)?;
+        let m = known(store, id)?;
+        if let Some(d) = digest
+            && d != m.digest
+        {
+            return Err(refused(format!(
+                "the claims are for {d}, and model {} ({}) is {}",
+                m.id,
+                m.label(),
+                m.digest
+            )));
+        }
+        if !m.card.is_object() {
+            return Err(refused(format!(
+                "model {} ({}) holds no card that reads, so nothing is added to it",
+                m.id,
+                m.label()
+            )));
+        }
+        let before = m.missing();
+        let mut card = m.card.clone();
+        let mut added = serde_json::Map::new();
+        let mut fields: Vec<&'static str> = Vec::new();
+        for key in CLAIMS {
+            let Some(value) = given.get(key) else {
+                continue;
+            };
+            if key != "speed" {
+                if key == "tested" && !value.as_array().is_some_and(|a| !a.is_empty()) {
+                    return Err(invalid(
+                        "tested adds a list of at least one claim, each with its claim, value and evidence",
+                    ));
+                }
+                may_gain(&m, &before, key, &card[key])?;
+                card[key] = value.clone();
+                added.insert(key.to_string(), value.clone());
+                fields.push(key);
+                continue;
+            }
+            let Some(sides) = value.as_object().filter(|s| !s.is_empty()) else {
+                return Err(invalid(
+                    "speed is an object of cpu, gpu or both, each stacks_per_second, hardware and evidence",
+                ));
+            };
+            if let Some(other) = sides.keys().find(|s| !matches!(s.as_str(), "cpu" | "gpu")) {
+                return Err(invalid(format!("speed holds cpu and gpu, not {other}")));
+            }
+            if !card["speed"].is_null() && !card["speed"].is_object() {
+                return Err(refused(format!(
+                    "model {} ({}) states speed on its card already, as something other than cpu and gpu",
+                    m.id,
+                    m.label()
+                )));
+            }
+            let mut speed = serde_json::Map::new();
+            for (side, field) in [("cpu", "speed.cpu"), ("gpu", "speed.gpu")] {
+                let Some(one) = sides.get(side) else {
+                    continue;
+                };
+                if one.is_null() {
+                    return Err(invalid(format!(
+                        "{field} is given as null: a claim added states something"
+                    )));
+                }
+                may_gain(&m, &before, field, &card["speed"][side])?;
+                if !card["speed"].is_object() {
+                    card["speed"] = json!({});
+                }
+                card["speed"][side] = one.clone();
+                speed.insert(side.to_string(), one.clone());
+                fields.push(field);
+            }
+            added.insert(key.to_string(), Value::Object(speed));
+        }
+        // checked as registration checks a card (its label set above)
+        checked_trained_on(&card)?;
+        checked_parts_of_a_card(&card)?;
+        let after = missing(&card);
+        let added = Value::Object(added);
+        let mut sets = vec![("card", Param::from(card.to_string()))];
+        if let Some(set) = &label_set {
+            sets.push(("trained_on", Param::from(set.as_str())));
+        }
+        store.update_by_id(table("model"), &sets, "id", id)?;
+        let now = now_iso();
+        event(
+            store,
+            id,
+            "claims_added",
+            who,
+            &now,
+            Some(json!({
+                "fields": fields, "added": added, "missing_before": before,
+                "missing_after": after, "why": why,
+            })),
+        )?;
+        let model = known(store, id)?;
+        audit::record_in(
+            store,
+            &Entry {
+                principal: who,
+                action: Action::ModelAddClaims,
+                scope: scope_of(&model),
+                policy: None,
+                job_id: None,
+                details: Some(json!({
+                    "fields": fields, "added": added, "missing": after, "why": why,
+                })),
+            },
+        )?;
+        Ok(Added {
+            model,
+            fields,
+            added,
+        })
+    })
+}
+
+/// The claims a card gained after it was registered (record 55, ruling 31
+/// (a)), oldest first, read from the model's events: when, by whom, the
+/// fields filled, what was added and why.
+pub fn additions(events: &[Value]) -> Vec<Value> {
+    events
+        .iter()
+        .filter(|e| e["transition"] == "claims_added")
+        .map(|e| {
+            json!({
+                "at": e["at"], "by": e["by"], "fields": e["detail"]["fields"],
+                "added": e["detail"]["added"], "why": e["detail"]["why"],
+            })
+        })
+        .collect()
 }
 
 // ------------------------------------------ CPU and GPU equivalence

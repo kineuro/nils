@@ -988,7 +988,7 @@ paths:
   /api/models/{id}:
     get:
       summary: One registered model, with its card and its events (nils model show)
-      description: "The model of contracts/model/v1/lifecycle.schema.json: identity, card, state, the check that admitted it, who moved it and when, the review item a promotion named, and every transition as an event. Record 55 D4 and A5, added in place: `complete` and `missing`, whether its card states everything a served model's does (the label set it was trained on, its tested claims, its speed on a CPU and, unless its gpu is none, on a GPU, its gpu need, its equivalence unless its gpu is none, its intended use and its limits) and what it lacks; and `equivalence_measured`, the CPU and GPU equivalence its admitting check measured. Record 55 ruling 22 (b), added in place here, in GET /api/models and in GET /api/models/tasks: `certificate`, the newest recorded certificate naming the model, as GET /api/certificates answers one, with `words`, what it certified in a line; or null. Under models:see."
+      description: "The model of contracts/model/v1/lifecycle.schema.json: identity, card, state, the check that admitted it, who moved it and when, the review item a promotion named, and every transition as an event. Record 55 D4 and A5, added in place: `complete` and `missing`, whether its card states everything a served model's does (the label set it was trained on, its tested claims, its speed on a CPU and, unless its gpu is none, on a GPU, its gpu need, its equivalence unless its gpu is none, its intended use and its limits) and what it lacks; and `equivalence_measured`, the CPU and GPU equivalence its admitting check measured. Record 55 ruling 22 (b), added in place here, in GET /api/models and in GET /api/models/tasks: `certificate`, the newest recorded certificate naming the model, as GET /api/certificates answers one, with `words`, what it certified in a line; or null. Under models:see. Record 55 ruling 31 (a), added in place: `additions`, the claims its card gained after it was registered (POST /api/models/{id}/claims), oldest first, each `{at, by, fields, added, why}` from its claims_added events."
       parameters: [{name: id, in: path, required: true, schema: {type: integer}}]
       responses:
         "200": {description: "The model with its events"}
@@ -1033,6 +1033,20 @@ paths:
         "200": {description: The model}
         "404": {description: No such model}
         "409": {description: "Retired already, or (record 55 E2) a part of an admitted or promoted cascade, which is named and goes first"}
+  /api/models/{id}/claims:
+    post:
+      summary: Add the claims a registered model's card lacks (nils model add-claims), since record 55 ruling 31 (a)
+      description: "Added in place. `{claims, digest?, why?}`: `claims` is an object of one or more of trained_on, tested and speed, each in the card's own shape (contracts/model/v1/card.schema.json), speed holding cpu, gpu or both. Additions only: a claim the card states already is refused (409, naming it), and so is a claim missing does not name (a speed with a GPU on a card whose gpu is none) and any other field, which is a new version of the model (409). The card with the claims is checked as registration checks a card (400 for a claim that is not one), and the label set trained_on names must be one this registry wrote or registered (404) and usable for training under the seals in force, by DICOM identity (409, records 40 R3 and 55 E6). `digest`, where given, must be the model's (409). A model in any state may gain claims. The card gains the claims, the model's trained_on follows, and the addition is an event `claims_added` holding the fields filled, the claims as added, what the card lacked before and after and why, with an audit row (model.add_claims) written in the same transaction under the caller's name. Answers the model, with `added`: `{fields, claims}`. Under models:work."
+      parameters: [{name: id, in: path, required: true, schema: {type: integer}}]
+      requestBody:
+        content:
+          application/json:
+            schema: {type: object, required: [claims], properties: {claims: {type: object}, digest: {type: string}, why: {type: string}}}
+      responses:
+        "200": {description: "The model, with added: the fields filled and the claims as added"}
+        "400": {description: "No claims, or a claim that is not one as registration checks it"}
+        "404": {description: "No such model, or no label set with the digest trained_on names"}
+        "409": {description: "A claim the card states already, a field that is not trained_on, tested or speed, a speed with a GPU on a card whose gpu is none, another model's digest, or a label set holding a row of a sample sealed now"}
   /api/picks:
     post:
       summary: A person's pick, which a pick run leaves standing (record 42 S3; nils pick set)
