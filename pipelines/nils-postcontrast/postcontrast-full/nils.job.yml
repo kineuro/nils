@@ -47,7 +47,7 @@
 # pins the digest below, and the release ships this pin as it is.
 name: postcontrast-full
 schema-version: "0.5"
-tool-version: "0.2.1"
+tool-version: "0.2.2"
 description: >-
   Answer post_contrast with model r1's full pipeline on the T1-type brain
   stacks the cascade defers; "not sure" elsewhere.

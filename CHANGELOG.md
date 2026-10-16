@@ -9,6 +9,10 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 - A release builds a model image (body part, post-contrast, System 1) only when its package's files, the release workflow or the descriptors script changed since the previous release's tag. An unchanged image is the one the previous release shipped, by the digest its `IMAGES` names, once the registry says anyone may pull it; the descriptors and `IMAGES` keep their form.
 - A release, and a rules release, may take its commit's checks from the pull request it is the squash merge of, where the merge's tree is byte for byte the pull request head's and main's tip before the merge is in that head, so the pull request's ci ran on exactly this tree (`scripts/release-pr-head.sh`). The release then takes the six binaries from that pull request's ci run when main's run has not kept them.
 
+### Fixed
+
+- Post-contrast's fallback (`postcontrast-full`, nils-postcontrast 0.2.2) keeps arms U and V on a card in its image. With the Frangi filter on the card, CuPy writes every kernel it compiles to a cache under the home, and in a container whose home is missing on a read-only root (apptainer's `--no-home`, the image's unprivileged user) every stack that reached the filter lost both arms to an `OSError`: 19 of 93 stacks in the image's card test. The cache now goes in the run's work folder unless `CUPY_CACHE_DIR` names one. The CPU path and the answers elsewhere are unchanged. The descriptor pins the image built from 0.2.2.
+
 ## [1.0.0-alpha.85] - 2026-10-16
 
 Post-contrast is sent only the scans that can be T1-type brain.
