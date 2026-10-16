@@ -36,12 +36,12 @@ settling) is one list on one mechanism.
 
 > **Amended in place on 2026-10-16 by the audit of Wave 7a.** This specification
 > was written on 2026-10-08, before the work. Its sentences about what the code
-> does "today" describe the code of that day, and some of what it asks was
-> changed by a ruling or by the build. Each place that changed carries its own
-> note, naming the ruling or the record that changed it: the summary of System 1
-> above and in section 1, and sections 3, 4.1, 5.1, 5.3, 6.1, 8.1, 8.2, 9.2,
-> 11.2, 12.2, 13.1, 14, 17, 18, 19 and 20. Section 11.6 is new: the rules engine
-> as built (record 56). The rulings are in
+> does "today" describe the code of that day, and some of what it asks was changed
+> by a ruling or by the build. Each place that changed carries its own note,
+> naming the ruling or the record that changed it: the summary of System 1 above
+> and in section 1, and sections 3, 4.1, 5.1, 5.3, 6.1, 8.1, 8.2, 9.2, 11.2, 12.2,
+> 12.3, 13.1, 14, 17, 18, 19 and 20. Section 11.6 is new: the rules engine as
+> built (record 56). The rulings are in
 > `docs/decisions/55-ready-for-production-and-the-paper.md`, numbered from 1 on
 > 2026-10-12 and dated before that.
 
@@ -1130,6 +1130,21 @@ The label NILS stores becomes:
   inclusion in pooled quantitative analysis (FLAIR segmentation sets, ASL blood flow,
   quantitative maps); 2 % for ADC, QSM and TOF; 5 % where it is descriptive (T2, PD,
   DWI, SWI).
+
+*Amended in place on 2026-10-16 by record 55 (F5, and ruling 25 (b), which pull
+request #485 built):* the 72-hour flag and the ASL flag are `yes`, `no` or `unknown`
+(the ASL flag is none on a stack that is not ASL), and the label keeps beside them
+what the minutes are counted from (`bolus_start` or `first_post_t1`), the basis of
+its answer, every check that fired, its error level by use and the rule's version.
+The check for an earlier injection (C1) is a dated version of the rule,
+`time-rule-2`, written beside every label. Two studies of a subject that started
+less than 24 hours apart are one visit, and a contrast study of the visit counts
+for a stack only when the stack's last image was acquired at or after the first
+image of that study's first post-contrast T1 or first bolus series, so that a scan
+taken before it stays `pre` (flag `C1_clock_before`). Where a clock is missing or
+fails the trust guard, the study counts by its start time, as `time-rule-1` counted
+it (flag `C1_no_clock`), and a study with contrast 24 to 72 hours earlier counts for
+every stack, as before. A label made under `time-rule-1` keeps its meaning.
 
 **Tests:** T24, T25, T27.
 
