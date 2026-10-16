@@ -1982,8 +1982,9 @@ fn build_registry() -> Vec<Table> {
         // of the release record, so "what did we send them, and is it still
         // intact" is a query rather than a folder somebody remembers.
         //
-        // The password is not here and never will be: it is a key, derived
-        // from a named one in the store under a domain of its own.
+        // The password is not here in clear and never will be: it is derived
+        // from a named key in the store, or, typed by a person, sealed under
+        // the registry's key.
         Table::new(
             "handover",
             vec![
@@ -2012,6 +2013,18 @@ fn build_registry() -> Vec<Table> {
                 // recipient has to receive.
                 req("packed_bytes", Type::Int),
                 col("error", Type::Text),
+                // Record 55, ruling 35 (c), Nima 2026-10-16 (registry schema
+                // 105): how the archives are kept closed. `made`, a password
+                // of this handover alone, derived from the key named above
+                // and the handover's id, never stored; `typed`, one the
+                // person handing over gave, kept sealed under the registry's
+                // key below and never in clear; `none`, not encrypted, with
+                // the reason given; empty for a handover from before, whose
+                // password is the old one of its key, shared by every
+                // handover under it.
+                col("password", Type::Text),
+                col("password_sealed", Type::Bytes),
+                col("unencrypted_why", Type::Text),
             ],
         )
         .index(&["release_id"]),

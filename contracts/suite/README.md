@@ -15,7 +15,7 @@ directory beside the old one, which stays.
 |---|---|---|
 | 1 | [`v1/`](v1/) | Wave 4c slice A7, 2026-09-09 |
 | 2 | [`v2/`](v2/) | 2026-09-15: grants and detail in place of the role ladder |
-| 3 | [`v3/`](v3/) | 2026-09-24: version 2 with the grants of record 42 R7: the model registry's `models:see` and `models:work`, and the campaigns' `campaigns:see` and `campaigns:work`; 2026-09-26, in place: `sealed:see` (record 48) |
+| 3 | [`v3/`](v3/) | 2026-09-24: version 2 with the grants of record 42 R7: the model registry's `models:see` and `models:work`, and the campaigns' `campaigns:see` and `campaigns:work`; 2026-09-26, in place: `sealed:see` (record 48); 2026-10-16, in place: `handover-password:see` and `handover-password:work` (record 55, ruling 35 (c)), in the admin's set alone |
 
 ## What version 1 fixes
 

@@ -18,7 +18,7 @@ use std::collections::{BTreeSet, HashMap};
 use serde_json::Value;
 
 /// The vocabulary, sorted by code point, as `grants.schema.json` lists it.
-pub(crate) const GRANTS: [&str; 29] = [
+pub(crate) const GRANTS: [&str; 31] = [
     "assistant-settings:see",
     "assistant-settings:work",
     "assistant:use",
@@ -30,6 +30,12 @@ pub(crate) const GRANTS: [&str; 29] = [
     "data:work",
     "database:see",
     "database:work",
+    // record 55, ruling 35 (c): showing a handover's password, and typing
+    // one when handing over; the admin's set holds both, a desk group is
+    // given them like any other, and a release's maker needs neither for
+    // the handovers of their own release
+    "handover-password:see",
+    "handover-password:work",
     "identity:see",
     "identity:work",
     "install:see",

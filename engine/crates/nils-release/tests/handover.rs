@@ -125,7 +125,7 @@ fn released(home_dir: &TempDir, source: &TempDir, out: &Path) -> (Home, Registry
 fn settings<'a>(
     out: &'a Path,
     archiver: &'a Archiver,
-    password: &'a str,
+    _password: &'a str,
     cap: i64,
     strategy: Strategy,
 ) -> handover::Settings<'a> {
@@ -133,8 +133,11 @@ fn settings<'a>(
         release: "a cohort",
         out,
         archiver,
-        key_name: "k",
-        password,
+        // record 55, ruling 35 (c): a password of the handover's own
+        protection: handover::Protection::Made {
+            key_name: "k",
+            key: KEY,
+        },
         cap,
         strategy,
         level: 1,
@@ -284,7 +287,8 @@ fn a_damaged_or_missing_archive_is_found_when_it_is_read_back() {
     std::fs::write(&archives[0], &damaged).unwrap();
     std::fs::remove_file(&archives[1]).unwrap();
 
-    let again = handover::verify(&mut reg, report.handover_id, &archiver, &password).unwrap();
+    let own = nils_release::handover::handover_password(KEY, report.handover_id);
+    let again = handover::verify(&mut reg, report.handover_id, &archiver, Some(&own)).unwrap();
     assert_eq!(again.failed.len(), 2, "{:?}", again.failed);
     assert!(
         again.failed.iter().any(|f| f.contains("checksum")),
@@ -321,7 +325,7 @@ fn a_wrong_password_is_told_apart_from_a_damaged_archive() {
     .unwrap();
 
     let wrong = nils_release::handover::password(b"another key entirely!!!");
-    let again = handover::verify(&mut reg, report.handover_id, &archiver, &wrong).unwrap();
+    let again = handover::verify(&mut reg, report.handover_id, &archiver, Some(&wrong)).unwrap();
     assert_eq!(again.failed.len(), 1);
     assert!(
         again.failed[0].contains("the password does not open it"),
@@ -389,4 +393,55 @@ fn there_is_nothing_to_hand_over_until_there_is_a_release() {
     s.release = "a cohort nobody released";
     let e = handover::run(&mut reg, &s).unwrap_err().to_string();
     assert!(e.contains("no finished release"), "{e}");
+}
+
+/// Record 55, ruling 35 (c): the old shared password does not open a new
+/// handover, which has its own; one handed over unencrypted keeps why, and
+/// opens with no password; a typed one keeps it sealed and never in clear.
+#[test]
+fn each_handover_has_its_own_password_or_none_with_a_reason() {
+    let Some(archiver) = archiver() else { return };
+    let source = tree();
+    let home_dir = TempDir::new("handover-home");
+    let out = TempDir::new("handover-out");
+    let ship = TempDir::new("handover-ship");
+    let (_home, mut reg) = released(&home_dir, &source, out.path());
+    let made = handover::run(
+        &mut reg,
+        &settings(ship.path(), &archiver, "", 1 << 30, Strategy::Ordered),
+    )
+    .unwrap();
+    assert_eq!(made.password, "made");
+    let old = nils_release::handover::password(KEY);
+    let again = handover::verify(&mut reg, made.handover_id, &archiver, Some(&old)).unwrap();
+    assert_eq!(
+        again.failed.len(),
+        1,
+        "the key's shared password opens nothing new"
+    );
+
+    let plain = TempDir::new("handover-plain");
+    let mut s = settings(plain.path(), &archiver, "", 1 << 30, Strategy::Ordered);
+    s.protection = handover::Protection::None {
+        why: "the partner's own encrypted drive",
+    };
+    let none = handover::run(&mut reg, &s).unwrap();
+    assert_eq!(none.password, "none");
+    let again = handover::verify(&mut reg, none.handover_id, &archiver, None).unwrap();
+    assert!(again.failed.is_empty(), "{:?}", again.failed);
+
+    let typed = TempDir::new("handover-typed");
+    let secret = "a typed handover password";
+    let sealed = nils_registry::linkage::Subkeys::derive(KEY).seal(secret);
+    let mut s = settings(typed.path(), &archiver, "", 1 << 30, Strategy::Ordered);
+    s.protection = handover::Protection::Typed {
+        key_name: "k",
+        password: secret,
+        sealed: &sealed,
+    };
+    let t = handover::run(&mut reg, &s).unwrap();
+    let again = handover::verify(&mut reg, t.handover_id, &archiver, Some(secret)).unwrap();
+    assert!(again.failed.is_empty(), "{:?}", again.failed);
+    let db = std::fs::read(home_dir.path().join("registry.db")).unwrap();
+    assert!(!db.windows(secret.len()).any(|w| w == secret.as_bytes()));
 }
