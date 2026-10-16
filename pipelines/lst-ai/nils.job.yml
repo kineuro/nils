@@ -80,14 +80,9 @@ description: >-
   juxtacortical, subcortical or infratentorial, and their count and
   volume. One session is one unit; CPU.
 
-# --- not pinned yet (scripts/publish-lst-ai.sh --pin removes these lines) ---
-# The line below still names LST-AI's own image, the base of the thin image,
-# which does not run under job contract v1 (above). The pin replaces it with
-# the thin image's digest.
-# ---
 container-image:
   type: docker
-  image: "docker.io/jqmcginnis/lst-ai@sha256:2b2a0d6454e6efff60a350df3c650ae9584f1926338dec7842f9e71912cc6c85"
+  image: "ghcr.io/kineuro/nils-lst-ai@sha256:85d9647e8be753bd7c354a228750db81566f339283284565a3e2e8eacb458dae"
 
 inputs:
   - id: threshold
