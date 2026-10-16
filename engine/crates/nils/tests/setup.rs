@@ -4319,3 +4319,355 @@ fn a_machine_install_takes_a_rules_release_and_keeping_the_data_keeps_its_note()
     let state = state_of(config.path());
     assert!(state.contains("from = \"pack-mri-v1.0.2\""), "{state}");
 }
+
+/// One request to a door on the loopback, its status and its JSON body.
+fn ask_door(
+    port: u16,
+    method: &str,
+    path: &str,
+    token: Option<&str>,
+    person: Option<&str>,
+    body: Option<&str>,
+) -> (u16, serde_json::Value) {
+    use std::io::{Read, Write};
+    let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).expect("the door answers");
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(60)))
+        .unwrap();
+    let body = body.unwrap_or("");
+    let mut head = format!(
+        "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n",
+        body.len()
+    );
+    if let Some(t) = token {
+        head.push_str(&format!("Authorization: Bearer {t}\r\n"));
+    }
+    if let Some(p) = person {
+        head.push_str(&format!("X-Nils-Person: {p}\r\n"));
+    }
+    head.push_str("\r\n");
+    stream.write_all(head.as_bytes()).unwrap();
+    stream.write_all(body.as_bytes()).unwrap();
+    let mut answer = String::new();
+    stream.read_to_string(&mut answer).unwrap();
+    let status: u16 = answer
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .expect("a status line");
+    let json = answer
+        .split_once("\r\n\r\n")
+        .map(|(_, b)| serde_json::from_str(b).unwrap_or(serde_json::Value::Null))
+        .unwrap_or(serde_json::Value::Null);
+    (status, json)
+}
+
+/// What a machine-wide look at the places an install or an uninstall
+/// touches finds: every file under them with its size and modification
+/// time. Taken before and after, it proves a test changed nothing there.
+fn outside_snapshot(roots: &[PathBuf]) -> Vec<(PathBuf, u64, Option<std::time::SystemTime>)> {
+    fn walk(
+        dir: &Path,
+        depth: usize,
+        out: &mut Vec<(PathBuf, u64, Option<std::time::SystemTime>)>,
+    ) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(meta) = std::fs::symlink_metadata(&path) else {
+                continue;
+            };
+            out.push((path.clone(), meta.len(), meta.modified().ok()));
+            if meta.is_dir() && depth > 0 {
+                walk(&path, depth - 1, out);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for root in roots {
+        walk(root, 3, &mut out);
+    }
+    out.sort();
+    out
+}
+
+/// Gate T31, step 1.9: the desk uninstalls NILS through the supervisor.
+/// The supervisor says what each way would remove and keep, refuses an ask
+/// without its token, with a leave it does not know or without the
+/// directory's name typed, and then runs the uninstall apart from the call:
+/// NILS alone keeps the data and the setup's choices, and records who asked;
+/// everything removes the directory. The install, its record and its home
+/// are temporary directories of this test, and the places a real install
+/// keeps its record, its units and its programs are looked at before and
+/// after: nothing outside the test's own directories is touched.
+#[cfg(unix)]
+#[test]
+fn the_supervisor_uninstalls_for_the_desk_behind_the_typed_name_and_nothing_else() {
+    let releases = Releases::new("99.0.0");
+    // what a real install on this machine would hold, looked at before and after
+    let real: Vec<PathBuf> = {
+        let mut roots = vec![PathBuf::from("/etc/systemd/system")];
+        if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+            roots.extend([
+                home.join(".config").join("systemd").join("user"),
+                home.join(".config").join("nils"),
+                home.join(".local").join("bin"),
+                home.join(".local").join("share").join("nils"),
+                home.join("nils"),
+            ]);
+        }
+        if let Some(config) = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from) {
+            roots.extend([config.join("systemd").join("user"), config.join("nils")]);
+        }
+        // the account's own home as the machine names it, where a test run
+        // with a scratch HOME would otherwise look only at the scratch: the
+        // units, the record and the programs of an install that is there
+        // (its data directory changes under a running engine and is left out)
+        let uid = Command::new("id")
+            .arg("-u")
+            .output()
+            .ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
+        let passwd = std::fs::read_to_string("/etc/passwd").unwrap_or_default();
+        if let Some(home) = uid.and_then(|uid| {
+            passwd
+                .lines()
+                .map(|l| l.split(':').collect::<Vec<_>>())
+                .find(|f| f.len() > 5 && f[2] == uid)
+                .map(|f| PathBuf::from(f[5]))
+        }) {
+            roots.extend([
+                home.join(".config").join("systemd").join("user"),
+                home.join(".config").join("nils"),
+                home.join(".local").join("bin"),
+                home.join(".local").join("share").join("nils"),
+            ]);
+        }
+        roots
+    };
+    let before = outside_snapshot(&real);
+
+    for (leave, typed_wrong) in [("nils", "nil"), ("everything", "everything")] {
+        let nils = Installed::new(&format!("nils-sv-uninstall-{leave}"));
+        let config = TempDir::new(&format!("nils-sv-uninstall-{leave}-config"));
+        let home = TempDir::new(&format!("nils-sv-uninstall-{leave}-home"));
+        let base = TempDir::new(&format!("nils-sv-uninstall-{leave}-base"));
+        let dir = base.path().join("site");
+        let o = output(
+            Command::new(nils.path())
+                .arg("setup")
+                .args([
+                    "--yes",
+                    "--parts",
+                    "desk",
+                    "--mode",
+                    "local",
+                    "--dir",
+                    dir.to_str().unwrap(),
+                    "--no-service",
+                    "--channel",
+                    &releases.url(),
+                ])
+                .env("NILS_NO_TTY", "1")
+                .env("NO_COLOR", "1")
+                .env("HOME", home.path())
+                .env("XDG_CONFIG_HOME", config.path())
+                .env_remove("NILS_RELEASES")
+                .env_remove("NILS_DESK_RELEASES"),
+        );
+        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+        let supervise = dir.join("supervise").join("supervise.toml");
+        let text = std::fs::read_to_string(&supervise).expect("setup wrote the supervisor's file");
+        let token = text
+            .lines()
+            .skip_while(|l| l.trim() != "[tokens]")
+            .nth(1)
+            .and_then(|l| l.split('"').nth(1))
+            .expect("one token")
+            .to_string();
+        let key = dir.join("registry").join("keys").join("nils");
+        assert!(key.is_file(), "the install made its key");
+
+        let mut child = Command::new(nils.path())
+            .args(["supervise", "run", "--config"])
+            .arg(&supervise)
+            .args(["--bind", "127.0.0.1:0"])
+            .env("NILS_NO_TTY", "1")
+            .env("NO_COLOR", "1")
+            .env("HOME", home.path())
+            .env("XDG_CONFIG_HOME", config.path())
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("the supervisor starts");
+        let port: u16 = {
+            use std::io::BufRead;
+            let mut line = String::new();
+            std::io::BufReader::new(child.stdout.take().unwrap())
+                .read_line(&mut line)
+                .unwrap();
+            line.split_whitespace()
+                .nth(2)
+                .and_then(|a| a.rsplit_once(':'))
+                .and_then(|(_, p)| p.parse().ok())
+                .unwrap_or_else(|| panic!("no address in {line}"))
+        };
+        let t = Some(token.as_str());
+
+        let (status, caps) = ask_door(port, "GET", "/api/supervise/capabilities", t, None, None);
+        assert_eq!(status, 200, "{caps}");
+        assert!(
+            caps["doors"]
+                .to_string()
+                .contains("POST /api/supervise/uninstall"),
+            "{caps}"
+        );
+        // what each way would remove and keep, and the word to type
+        let (status, preview) = ask_door(port, "GET", "/api/supervise/uninstall", t, None, None);
+        assert_eq!(status, 200, "{preview}");
+        assert_eq!(preview["name"], "site", "{preview}");
+        assert_eq!(preview["dir"], dir.display().to_string(), "{preview}");
+        assert!(
+            preview["keep_data"].to_string().contains("Keeping"),
+            "{preview}"
+        );
+        assert!(
+            preview["everything"]
+                .to_string()
+                .contains("and everything in it"),
+            "{preview}"
+        );
+        assert!(
+            !preview["keep_data"]
+                .to_string()
+                .contains("and everything in it"),
+            "{preview}"
+        );
+        assert!(preview["everything_refused"].is_null(), "{preview}");
+        // refused before anything runs
+        let ask = |leave: &str, confirm: &str| {
+            serde_json::json!({"leave": leave, "confirm": confirm}).to_string()
+        };
+        let (status, _) = ask_door(
+            port,
+            "POST",
+            "/api/supervise/uninstall",
+            None,
+            None,
+            Some(&ask(leave, "site")),
+        );
+        assert_eq!(status, 401);
+        let (status, refused) = ask_door(
+            port,
+            "POST",
+            "/api/supervise/uninstall",
+            t,
+            None,
+            Some(&ask("some", "site")),
+        );
+        assert_eq!(status, 400, "{refused}");
+        let (status, refused) = ask_door(
+            port,
+            "POST",
+            "/api/supervise/uninstall",
+            t,
+            None,
+            Some(&ask(leave, typed_wrong)),
+        );
+        assert_eq!(status, 400, "{refused}");
+        assert!(
+            refused["error"].as_str().unwrap().contains("type site"),
+            "{refused}"
+        );
+        assert!(
+            !dir.join("setup.kept.toml").exists() && key.is_file(),
+            "nothing went"
+        );
+        assert!(
+            config.path().join("nils").join("setup.toml").is_file(),
+            "nothing went"
+        );
+
+        // the uninstall, apart from the call, for the person the desk names
+        let (status, run) = ask_door(
+            port,
+            "POST",
+            "/api/supervise/uninstall",
+            t,
+            Some("ada@lab"),
+            Some(&ask(leave, " site ")),
+        );
+        assert_eq!(status, 202, "{run}");
+        assert_eq!(run["what"], "uninstall", "{run}");
+        assert_eq!(run["by"], "ada@lab", "{run}");
+        let id = run["id"].as_str().unwrap().to_string();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        let ended = loop {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the uninstall did not end"
+            );
+            if leave == "everything" && !dir.exists() {
+                break serde_json::Value::Null;
+            }
+            let (status, now) = ask_door(
+                port,
+                "GET",
+                &format!("/api/supervise/runs/{id}"),
+                t,
+                None,
+                None,
+            );
+            if status == 200 && now["state"] != "running" {
+                break now;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        };
+        if leave == "everything" {
+            // the run's own record went with the directory: what it removed
+            // is read off the disk instead, once the last of it is gone
+            let record = config.path().join("nils").join("setup.toml");
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+            while (dir.exists() || record.exists() || nils.path().exists())
+                && std::time::Instant::now() < deadline
+            {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+
+        assert!(
+            !config.path().join("nils").join("setup.toml").exists(),
+            "the record went"
+        );
+        assert!(!nils.path().exists(), "the program went with NILS");
+        if leave == "nils" {
+            assert_eq!(ended["state"], "done", "{ended}");
+            assert_eq!(ended["by"], "ada@lab", "{ended}");
+            assert!(key.is_file(), "the data stays: {ended}");
+            assert!(dir.join("setup.kept.toml").is_file(), "{ended}");
+            let acts = std::fs::read_to_string(dir.join("supervise").join("acts.log")).unwrap();
+            let act: serde_json::Value =
+                serde_json::from_str(acts.lines().last().unwrap()).unwrap();
+            assert_eq!(act["by"], "ada@lab", "{acts}");
+            assert_eq!(act["act"], "uninstall", "{acts}");
+            assert_eq!(act["leave"], "nils", "{acts}");
+            assert_eq!(
+                acts.lines().count(),
+                1,
+                "the refused asks are not acts: {acts}"
+            );
+        } else {
+            assert!(!dir.exists(), "everything went");
+        }
+    }
+    assert_eq!(
+        before,
+        outside_snapshot(&real),
+        "an uninstall in the test's own directories changed something outside them"
+    );
+}

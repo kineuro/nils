@@ -87,7 +87,7 @@ impl Archiver {
         root: &Path,
         members: &[String],
         archive: &Path,
-        password: &str,
+        password: Option<&str>,
         level: u8,
     ) -> Result<(), String> {
         if members.is_empty() {
@@ -103,20 +103,22 @@ impl Archiver {
         }
         std::fs::write(&list, text).map_err(|e| format!("could not write the file list ({e})"))?;
 
-        let mut child = Command::new(&self.path)
+        let mut command = Command::new(&self.path);
+        command
             .current_dir(root)
             .arg("a")
             .arg("-t7z")
             .arg(format!("-mx={level}"))
-            .arg("-mmt=on")
+            .arg("-mmt=on");
+        if password.is_some() {
             // The filenames are a description of the cohort, so they are
-            // encrypted too.
-            .arg("-mhe=on")
+            // encrypted too; and the password comes on stdin, not in argv.
+            command.arg("-mhe=on").arg("-p");
+        }
+        let mut child = command
             // Not solid: a handover that loses everything after one damaged
             // byte is not a handover.
             .arg("-ms=off")
-            // The password comes on stdin, not in argv.
-            .arg("-p")
             .arg("-bso0")
             .arg("-bsp0")
             .arg(archive)
@@ -130,7 +132,8 @@ impl Archiver {
         // confirm it, and a run that answers once writes an archive with a
         // password nobody has: it exits 0, and the failure is only found by
         // reading the archive back. Which is why a handover reads them back.
-        if let Some(stdin) = child.stdin.as_mut() {
+        // Not encrypted (a reason was given and recorded), 7z asks nothing.
+        if let (Some(stdin), Some(password)) = (child.stdin.as_mut(), password) {
             writeln!(stdin, "{password}\n{password}")
                 .map_err(|e| format!("7z would not take the password ({e})"))?;
         }
@@ -149,7 +152,7 @@ impl Archiver {
     ///
     /// The password is part of the test: an archive nobody can open is not an
     /// archive that was handed over.
-    pub fn verify(&self, archive: &Path, password: &str) -> Result<(), String> {
+    pub fn verify(&self, archive: &Path, password: Option<&str>) -> Result<(), String> {
         // **No `-p` here**, which is the asymmetry: on `a` it means "ask me for
         // a password", and on `t` it means "the password is the empty string".
         // With it, every archive of a good set reports a wrong password. 7z
@@ -164,7 +167,7 @@ impl Archiver {
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| format!("7z could not be run ({e})"))?;
-        if let Some(stdin) = child.stdin.as_mut() {
+        if let (Some(stdin), Some(password)) = (child.stdin.as_mut(), password) {
             writeln!(stdin, "{password}").ok();
         }
         let out = child
@@ -259,7 +262,7 @@ mod tests {
             version: "test".into(),
         };
         assert_eq!(
-            a.pack(Path::new("/tmp"), &[], Path::new("/tmp/x.7z"), "p", 1),
+            a.pack(Path::new("/tmp"), &[], Path::new("/tmp/x.7z"), Some("p"), 1),
             Err("nothing to pack".to_string())
         );
     }

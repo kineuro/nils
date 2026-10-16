@@ -341,7 +341,7 @@ fn the_door_serves_what_the_command_line_has() {
     assert_eq!(caps["auth"], "off", "{caps}");
     assert_eq!(caps["principal"], "anna@ward-3", "{caps}");
     // the suite contract, version 3: off holds every grant and detail sensitive
-    assert_eq!(caps["grants"].as_array().unwrap().len(), 28, "{caps}");
+    assert_eq!(caps["grants"].as_array().unwrap().len(), 30, "{caps}");
     assert_eq!(caps["detail"], "sensitive", "{caps}");
     assert_eq!(
         caps["roles"],
@@ -620,7 +620,7 @@ fn nils_tokens_keeps_an_entry_s_own_list() {
     );
     assert_eq!(status, 200, "{doc}");
     assert_eq!(doc["principal"], "cy@lab-2", "{doc}");
-    assert_eq!(doc["grants"].as_array().unwrap().len(), 28, "{doc}");
+    assert_eq!(doc["grants"].as_array().unwrap().len(), 30, "{doc}");
     assert_eq!(doc["detail"], "sensitive", "{doc}");
     server.finish();
 }
@@ -2975,6 +2975,344 @@ fn places_are_registry_objects_and_the_rules_hold_at_the_doors() {
     assert!(audited.contains("\"place.add\""), "{audited}");
 }
 
+/// Gate T31, step 22.8 (record 55, ruling 35 (c)): the clinical vocabulary
+/// loaded and clinical rows imported at their doors, as the command line
+/// does: read with data:see, written with data:work, a preview writing
+/// nothing, an apply under the caller and a re-run changing nothing, the
+/// subject codes of the preview shown from detail quasi up, a mapping that
+/// names subjects by an identifier refused below detail sensitive, and each
+/// load and apply audited under its caller.
+#[test]
+fn the_clinical_vocabulary_and_import_doors_do_what_the_command_line_does() {
+    let home = registry();
+    let code = {
+        let mut store =
+            nils_registry::Store::open_sqlite(&home.path().join("registry.db")).unwrap();
+        store
+            .query("SELECT code FROM subject LIMIT 1", &[])
+            .unwrap()[0]
+            .text(0)
+            .unwrap()
+            .to_string()
+    };
+    let server = Server::start(
+        &home,
+        14,
+        &[
+            "--auth",
+            "token",
+            "--token",
+            "a-reader-token-of-length=reader@lab:reader",
+            "--token",
+            "a-plain-data-worker-tok=pl@lab:data:work,data:see",
+            "--token",
+            "a-quasi-data-worker-tok=qu@lab:reviewer,data:work",
+            "--token",
+            "an-admin-token-of-length=ad@lab:admin",
+        ],
+        &[],
+    );
+    let reader = Some("a-reader-token-of-length");
+    let plain = Some("a-plain-data-worker-tok");
+    let quasi = Some("a-quasi-data-worker-tok");
+    let admin = Some("an-admin-token-of-length");
+
+    let (status, none) = server.request("GET", "/api/clinical/vocabulary", None, reader);
+    assert_eq!(status, 200, "{none}");
+    assert_eq!(none["diseases"], serde_json::json!([]), "{none}");
+    let (status, _) = server.request("POST", "/api/clinical/vocabulary", Some("{}"), reader);
+    assert_eq!(status, 403);
+    let (status, bad) = server.request(
+        "POST",
+        "/api/clinical/vocabulary",
+        Some(r#"{"text": "diseases: [", "name": "broken.yml"}"#),
+        plain,
+    );
+    assert_eq!(status, 400, "{bad}");
+    // no text: the pack's own vocabulary
+    let (status, loaded) = server.request("POST", "/api/clinical/vocabulary", Some("{}"), plain);
+    assert_eq!(status, 200, "{loaded}");
+    assert_eq!(loaded["diseases"]["added"], 8, "{loaded}");
+    assert_eq!(
+        loaded["from"], "the pack's clinical/vocabulary.yml",
+        "{loaded}"
+    );
+    let (status, held) = server.request("GET", "/api/clinical/vocabulary", None, reader);
+    assert_eq!(status, 200, "{held}");
+    assert_eq!(held["diseases"].as_array().unwrap().len(), 8, "{held}");
+    assert_eq!(
+        held["observation_types"].as_array().unwrap().len(),
+        16,
+        "{held}"
+    );
+
+    let mapping = "import:\n  target: event\n  subject: {column: code}\n  observation_type: EDSS\n  columns:\n    event_date: {column: date, parser: date, format: '%Y-%m-%d'}\n    value: {column: edss, parser: float}\n";
+    let csv = format!("code,date,edss\n{code},2022-01-15,2.5\nnobody,2022-01-15,1\n");
+    let ask = |apply: bool| {
+        serde_json::json!({"mapping": mapping, "csv": csv, "apply": apply}).to_string()
+    };
+    let (status, _) = server.request("POST", "/api/clinical/import", Some(&ask(false)), reader);
+    assert_eq!(status, 403);
+    // a preview at plain: the counts, no subject code
+    let (status, preview) =
+        server.request("POST", "/api/clinical/import", Some(&ask(false)), plain);
+    assert_eq!(status, 200, "{preview}");
+    assert_eq!(preview["applied"], false, "{preview}");
+    assert_eq!(preview["added"], 1, "{preview}");
+    assert_eq!(
+        preview["refused"]["a subject the registry does not know"], 1,
+        "{preview}"
+    );
+    assert!(!preview.to_string().contains(&code), "{preview}");
+    // at quasi the codes, and the apply under the caller
+    let (status, shown) = server.request("POST", "/api/clinical/import", Some(&ask(false)), quasi);
+    assert_eq!(status, 200, "{shown}");
+    assert!(shown.to_string().contains(&code), "{shown}");
+    let (status, applied) = server.request("POST", "/api/clinical/import", Some(&ask(true)), quasi);
+    assert_eq!(status, 200, "{applied}");
+    assert_eq!(applied["applied"], true, "{applied}");
+    assert_eq!(applied["added"], 1, "{applied}");
+    let (status, again) = server.request("POST", "/api/clinical/import", Some(&ask(true)), quasi);
+    assert_eq!(status, 200, "{again}");
+    assert_eq!(again["skipped"], 1, "{again}");
+    assert_eq!(again["changes"], 0, "{again}");
+    // refused in words: no csv, a mapping the engine cannot run
+    let (status, refused) = server.request(
+        "POST",
+        "/api/clinical/import",
+        Some(&serde_json::json!({"mapping": mapping}).to_string()),
+        plain,
+    );
+    assert_eq!(status, 400, "{refused}");
+    let (status, refused) = server.request(
+        "POST",
+        "/api/clinical/import",
+        Some(&serde_json::json!({"mapping": "import: {target: event}", "csv": csv}).to_string()),
+        plain,
+    );
+    assert_eq!(status, 400, "{refused}");
+    // rows named by an identifier: sensitive, checked before anything is read
+    let by_id = mapping.replace(
+        "{column: code}",
+        "{column: code, by: identifier, id_type: mrn}",
+    );
+    let body = serde_json::json!({"mapping": by_id, "csv": csv}).to_string();
+    let (status, refused) = server.request("POST", "/api/clinical/import", Some(&body), quasi);
+    assert_eq!(status, 403, "{refused}");
+    let (status, refused) = server.request("POST", "/api/clinical/import", Some(&body), admin);
+    assert_eq!(status, 400, "{refused}");
+    assert!(
+        refused["error"]
+            .as_str()
+            .unwrap()
+            .contains("no identifier type named mrn"),
+        "{refused}"
+    );
+    server.finish();
+    let audited = run(
+        &home,
+        &["audit", "list", "--action", "clinical.import", "--json"],
+        None,
+    );
+    assert!(audited.contains("qu@lab"), "{audited}");
+    let audited = run(
+        &home,
+        &["audit", "list", "--action", "vocabulary.load", "--json"],
+        None,
+    );
+    assert!(audited.contains("pl@lab"), "{audited}");
+}
+
+/// Gate T31, step 13.8: the release form's expert options reach the job as
+/// the flags of `nils release`, and one the command would refuse is refused
+/// at the door before anything is queued. The converter is the engine's own
+/// `dcm2niix` for anyone; a path is taken only from an admin (install:work),
+/// and only to a regular file named dcm2niix, not a link, owned by root or
+/// the engine's account and writable by nobody else, since the job runs it.
+#[cfg(unix)]
+#[test]
+fn the_release_doors_expert_options_become_the_commands_flags() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = registry();
+    let export = TempDir::new("t31-export");
+    let out = export.path().join("tree").display().to_string();
+    // a converter an admin may name, one in the open, a link and a folder
+    let tools = TempDir::new("t31-tools");
+    let good = tools.path().join("trusted").join("dcm2niix");
+    let open = tools.path().join("open").join("dcm2niix");
+    let link = tools.path().join("link").join("dcm2niix");
+    let folder = tools.path().join("folder").join("dcm2niix");
+    for (file, mode) in [(&good, 0o755), (&open, 0o777)] {
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(file, "#!/bin/sh\necho v1\n").unwrap();
+        std::fs::set_permissions(file, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+    std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&good, &link).unwrap();
+    std::fs::create_dir_all(&folder).unwrap();
+    let path = |p: &std::path::Path| p.display().to_string();
+
+    let server = Server::start(
+        &home,
+        18,
+        &[
+            "--auth",
+            "token",
+            "--token",
+            "an-admin-token-of-length=ad@lab:admin",
+            "--token",
+            "a-release-worker-tokenx=rel@lab:release:work,release:see",
+        ],
+        &[],
+    );
+    let admin = Some("an-admin-token-of-length");
+    let worker = Some("a-release-worker-tokenx");
+    let (status, caps) = server.request("GET", "/api/capabilities", None, admin);
+    assert_eq!(status, 200, "{caps}");
+    assert_eq!(
+        caps["releases"]["expert"].as_array().map(Vec::len),
+        Some(10),
+        "{caps}"
+    );
+    let (status, queued) = server.request(
+        "POST",
+        "/api/releases",
+        Some(
+            &serde_json::json!({
+                "name": "expert", "out": out, "layout": "bids",
+                "localizers": "drop", "synthetic": "anat", "dicom": "none",
+                "converter": path(&good), "compress": false,
+                "authors": ["Ada Lovelace", "Alan Turing"],
+                "categories": ["patient", "ids"], "uid_root": "1.2.826.0.1.3680043.10.543",
+                "picked": true, "roles": ["t1", "flair"],
+            })
+            .to_string(),
+        ),
+        admin,
+    );
+    assert_eq!(status, 202, "{queued}");
+    let command: Vec<&str> = queued["command"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|w| w.as_str().unwrap())
+        .collect();
+    let line = command.join(" ");
+    for flag in [
+        "--localizers drop",
+        "--synthetic anat",
+        "--dicom none",
+        &format!("--dcm2niix {}", path(&good)),
+        "--no-compress",
+        "--author Ada Lovelace",
+        "--author Alan Turing",
+        "--categories patient,ids",
+        "--uid-root 1.2.826.0.1.3680043.10.543",
+        "--picked",
+        "--role t1",
+        "--role flair",
+    ] {
+        assert!(line.contains(flag), "{flag} is not in {line}");
+    }
+    // nothing asked, nothing added: the command's defaults stand, the
+    // engine's own dcm2niix among them
+    let (status, plain) = server.request(
+        "POST",
+        "/api/releases",
+        Some(
+            &serde_json::json!({"name": "plain", "out": out, "compress": true, "picked": false, "converter": "dcm2niix"})
+                .to_string(),
+        ),
+        admin,
+    );
+    assert_eq!(status, 202, "{plain}");
+    let line = plain["command"].to_string();
+    for flag in [
+        "--localizers",
+        "--no-compress",
+        "--picked",
+        "--categories",
+        "--dcm2niix",
+        "--author",
+        "--role",
+    ] {
+        assert!(!line.contains(flag), "{flag} is in {line}");
+    }
+    // a person with release work names the engine's own, never a path
+    let (status, own) = server.request(
+        "POST",
+        "/api/releases",
+        Some(&serde_json::json!({"name": "own", "out": out, "converter": "dcm2niix"}).to_string()),
+        worker,
+    );
+    assert_eq!(status, 202, "{own}");
+    let (status, refused) = server.request(
+        "POST",
+        "/api/releases",
+        Some(
+            &serde_json::json!({"name": "theirs", "out": out, "converter": path(&good)})
+                .to_string(),
+        ),
+        worker,
+    );
+    assert_eq!(status, 403, "{refused}");
+    assert!(
+        refused["error"].as_str().unwrap().contains("install:work"),
+        "{refused}"
+    );
+    // refused before a job is queued, even for an admin
+    for (bad, words) in [
+        (serde_json::json!({"converter": "/bin/sh"}), "converter"),
+        (
+            serde_json::json!({"converter": "tools/dcm2niix"}),
+            "converter",
+        ),
+        (
+            serde_json::json!({"converter": "/opt/../bin/dcm2niix"}),
+            "converter",
+        ),
+        (
+            serde_json::json!({"converter": path(&tools.path().join("none").join("dcm2niix"))}),
+            "cannot be read",
+        ),
+        (
+            serde_json::json!({"converter": path(&link)}),
+            "not a regular file",
+        ),
+        (
+            serde_json::json!({"converter": path(&folder)}),
+            "not a regular file",
+        ),
+        (
+            serde_json::json!({"converter": path(&open)}),
+            "written by anyone",
+        ),
+        (serde_json::json!({"localizers": "attic"}), "localizers"),
+        (serde_json::json!({"categories": []}), "categories"),
+        (
+            serde_json::json!({"categories": ["patient", "shoes"]}),
+            "shoes",
+        ),
+        (serde_json::json!({"uid_root": "1.2.x"}), "uid_root"),
+        (serde_json::json!({"picked": "yes"}), "picked"),
+    ] {
+        let mut doc = bad.clone();
+        doc["name"] = serde_json::json!("refused");
+        doc["out"] = serde_json::json!(out);
+        let (status, refused) =
+            server.request("POST", "/api/releases", Some(&doc.to_string()), admin);
+        assert_eq!(status, 400, "{bad}: {refused}");
+        assert!(
+            refused["error"].as_str().unwrap().contains(words),
+            "{bad}: {refused}"
+        );
+    }
+    let (status, jobs) = server.request("GET", "/api/jobs", None, admin);
+    assert_eq!(status, 200, "{jobs}");
+    assert_eq!(jobs["jobs"].as_array().map(Vec::len), Some(3), "{jobs}");
+    server.finish();
+}
+
 #[test]
 fn a_job_queued_at_the_door_runs_when_serve_runs_its_queue() {
     let home = registry();
@@ -5015,7 +5353,7 @@ fn every_door_needs_its_grant_and_a_refusal_names_it() {
     // any grant of the vocabulary, record 48's sealed:see among them
     assert_eq!(
         row("GET /api/status")["grant"].as_array().unwrap().len(),
-        29
+        31
     );
     // record 42 R7: a rater is not a reviewer of the whole queue; closing a
     // campaign writes decisions, which needs both
@@ -5562,7 +5900,8 @@ fn a_chain_runs_through_the_jobs_door_and_a_refused_step_ends_it() {
     assert_eq!(scored["state"], "done", "{scored}");
     assert_eq!(scored["kind"], "score", "{scored}");
     assert_eq!(scored["result"]["new_stacks"], 2, "{scored}");
-    // no pipeline answers either step here: each is skipped, and says why
+    // ruling 35 (b): System 1 alone scores at arrival, and no pipeline
+    // answers it here: it is skipped, and says why
     assert_eq!(
         scored["result"]["queued"],
         serde_json::json!([]),
@@ -5570,6 +5909,15 @@ fn a_chain_runs_through_the_jobs_door_and_a_refused_step_ends_it() {
     );
     assert_eq!(
         scored["result"]["skipped"][0]["reason"], "no_pipeline",
+        "{scored}"
+    );
+    assert_eq!(
+        scored["result"]["skipped"][0]["step"], "system1",
+        "{scored}"
+    );
+    assert_eq!(
+        scored["result"]["skipped"].as_array().map(Vec::len),
+        Some(1),
         "{scored}"
     );
     assert_eq!(

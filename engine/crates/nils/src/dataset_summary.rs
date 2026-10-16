@@ -434,6 +434,32 @@ pub(crate) fn found_of(
     }
 }
 
+/// The pseudonymised step's counts: the files of the copy and the files of
+/// the originals not in it yet, from the trees as the probe last counted
+/// them, `(files, stopped short)` each. The probe is bounded and stops
+/// short of a large tree, so `partial` says the copy holds at least `files`,
+/// and `waiting_partial` that `waiting` is no whole count: at least
+/// `waiting` where only the originals' count stopped short, and unknown
+/// where the copy's did too.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CopyCount {
+    pub(crate) files: i64,
+    pub(crate) waiting: i64,
+    pub(crate) partial: bool,
+    pub(crate) waiting_partial: bool,
+}
+
+pub(crate) fn copy_of(originals: (Option<i64>, bool), copied: (Option<i64>, bool)) -> CopyCount {
+    let (o, c) = (originals.0.unwrap_or(0), copied.0.unwrap_or(0));
+    let partial = copied.1 && copied.0.is_some();
+    CopyCount {
+        files: c,
+        waiting: (o - c).max(0),
+        partial,
+        waiting_partial: partial || (originals.1 && originals.0.is_some()),
+    }
+}
+
 /// `(label, scans)` by value of an axis over the dataset's stacks, most
 /// first; for the kind axis a FLAIR is named as one whatever its base.
 fn by_axis(
@@ -960,19 +986,27 @@ pub(crate) fn document(
     found["tree"] = json!(found_tree);
     steps.push(found);
     if has_originals {
-        let originals = tree("originals", "files").unwrap_or(0);
-        let copied = tree("anon", "files").unwrap_or(0);
-        let waiting = (originals - copied).max(0);
+        let stopped = |t: &str| doc["trees"][t]["partial"].as_bool() == Some(true);
+        let copy = copy_of(
+            (tree("originals", "files"), stopped("originals")),
+            (tree("anon", "files"), stopped("anon")),
+        );
         let open = open_of(&["pseudonymize"]);
         steps.push(step(
             "pseudonymised",
             chain_state(
                 open,
                 newest_of(&["pseudonymize"]),
-                copied > 0 && waiting == 0,
+                copy.files > 0 && copy.waiting == 0,
             ),
             open.or_else(|| newest_of(&["pseudonymize"])),
-            json!({"files": copied, "waiting": waiting, "held": held}),
+            json!({
+                "files": copy.files,
+                "waiting": copy.waiting,
+                "held": held,
+                "partial": copy.partial,
+                "waiting_partial": copy.waiting_partial,
+            }),
         ));
     }
     let set_aside_total: i64 = set_aside.iter().map(|k| k.count).sum();
@@ -1172,7 +1206,9 @@ pub(crate) fn document(
 
 #[cfg(test)]
 mod tests {
-    use super::{Found, Light, chain_state, flag_id, found_of, named_for, names};
+    use super::{
+        CopyCount, Found, Light, chain_state, copy_of, flag_id, found_of, named_for, names,
+    };
 
     #[test]
     fn a_found_count_is_the_newest_walk_s_once_one_ran_and_says_where_a_probe_stopped_short() {
@@ -1213,6 +1249,43 @@ mod tests {
         // short of nothing
         assert!(!found_of((Some(4), Some(9), false), None, false).partial);
         assert!(!found_of((None, None, true), None, false).partial);
+    }
+
+    #[test]
+    fn the_pseudonymised_step_says_where_its_counts_stopped_short() {
+        // whole counts: the copy and what waits are exact
+        assert_eq!(
+            copy_of((Some(10), false), (Some(4), false)),
+            CopyCount {
+                files: 4,
+                waiting: 6,
+                partial: false,
+                waiting_partial: false
+            }
+        );
+        // the originals' count stopped short: at least that many wait
+        let c = copy_of((Some(200_000), true), (Some(4), false));
+        assert_eq!(
+            (c.files, c.waiting, c.partial, c.waiting_partial),
+            (4, 199_996, false, true)
+        );
+        // the copy's stopped short: at least that many copied, and what
+        // waits is not known
+        let c = copy_of((Some(200_000), true), (Some(200_000), true));
+        assert_eq!(
+            (c.files, c.waiting, c.partial, c.waiting_partial),
+            (200_000, 0, true, true)
+        );
+        // a tree nobody counted stopped short of nothing
+        assert_eq!(
+            copy_of((None, true), (None, true)),
+            CopyCount {
+                files: 0,
+                waiting: 0,
+                partial: false,
+                waiting_partial: false
+            }
+        );
     }
 
     fn w(line: &str) -> Vec<String> {

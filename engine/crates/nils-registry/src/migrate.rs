@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 104;
+pub const SCHEMA_VERSION: i64 = 105;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -470,7 +470,27 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 104,
         apply: a_reserve_number_is_built_in_and_never_kept,
     },
+    Migration {
+        version: 105,
+        apply: a_handover_has_its_own_password,
+    },
 ];
+
+/// Record 55, ruling 35 (c), Nima 2026-10-16: each handover has its own
+/// password, made or typed, or is not encrypted with a reason
+/// (`handover.password`, `password_sealed`, `unencrypted_why`). The columns
+/// are added and left empty: a handover from before keeps the password its
+/// key gave every handover under it, and says so.
+fn a_handover_has_its_own_password(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_columns(
+        store,
+        "handover",
+        &["password", "password_sealed", "unencrypted_why"],
+    )
+}
 
 /// Record 55 K6 (2026-10-16): a person keeps a card, and an assistant's
 /// draft is no card until they do (`ask_document.kept_by`, `kept_at`). The
@@ -4068,7 +4088,7 @@ mod column_migration {
         let mut store = Store::sqlite_in_memory().unwrap();
         before(&mut store);
         assert_eq!(count(&mut store), 0);
-        assert_eq!(migrate(&mut store, Kind::Linkage).unwrap(), [104]);
+        assert_eq!(migrate(&mut store, Kind::Linkage).unwrap(), [104, 105]);
         assert_eq!(count(&mut store), 1);
         let t = crate::linkage::id_type_named(&mut store, "reserve-number")
             .unwrap()

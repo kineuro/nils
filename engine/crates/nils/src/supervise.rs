@@ -879,6 +879,12 @@ pub(crate) fn capabilities(config: &Config, node: &str) -> Value {
             "GET /api/supervise/runs/{id}",
             "POST /api/supervise/look",
             "POST /api/supervise/folders",
+            "POST /api/supervise/signin",
+            "POST /api/supervise/backups",
+            "POST /api/supervise/model",
+            "POST /api/supervise/restore",
+            "GET /api/supervise/uninstall",
+            "POST /api/supervise/uninstall",
         ],
         "log": log_rows(&config.log, 5),
     })
@@ -898,6 +904,70 @@ fn error(status: u16, message: impl Into<String>) -> (u16, Value) {
         status,
         json!({ "error": message.into(), "disclosure": disclosure }),
     )
+}
+
+/// The person a desk names for a call, as `user@node`: the desk signs them
+/// in and holds the token, so the name is the desk's to give, and a call
+/// with no token the supervisor knows is refused before it is read. `None`
+/// where no desk named one.
+fn person(request: &Request) -> Option<String> {
+    request
+        .headers()
+        .iter()
+        .find(|h| h.field.equiv("X-Nils-Person"))
+        .and_then(|h| nils_registry::principal::Principal::parse(h.value.as_str()))
+        .map(|p| p.to_string())
+}
+
+/// A change of the setup or an archive put back (record 55 ruling 35 (c)):
+/// what was asked checked as the run will check it again, left in a
+/// request file of the supervisor's folder, and made by a run apart from
+/// the call, one run at a time.
+fn asked(runs: &Runs, what: &str, mut doc: Value, by: &str) -> (u16, Value) {
+    use crate::setup::change;
+    let Some(state) = crate::setup::read_state() else {
+        return error(
+            404,
+            format!(
+                "no setup is recorded at {}; this door changes an install nils setup made",
+                crate::setup::state_path().display()
+            ),
+        );
+    };
+    if !doc.is_object() {
+        return error(400, format!("{what}: a JSON object"));
+    }
+    doc["what"] = json!(what);
+    doc["by"] = json!(by);
+    // the body may hold a secret, so what does not read is said by its
+    // fields, never by echoing it
+    let Ok(request) = serde_json::from_value::<change::Request>(doc) else {
+        return error(
+            400,
+            match what {
+                "signin" => {
+                    "signin: {mode: local | oidc, first?: {name, password}, oidc?: {issuer, client_id, client_secret, roles_claim?}}"
+                }
+                "backups" => "backups: {dir}",
+                "model" => "model: {server, key, model?}",
+                _ => "restore: {archive}",
+            },
+        );
+    };
+    if let Some((status, why)) = change::refusal(&state, &request) {
+        return error(status, why);
+    }
+    if let Err((status, why)) = runs.going() {
+        return error(status, why);
+    }
+    if let Some(why) = change::helper_lacks(&state, request.word()) {
+        return error(409, why);
+    }
+    if let Err(e) = change::leave_request(Path::new(&state.dir), &request) {
+        return error(500, format!("the request was not left for the run: {e}"));
+    }
+    let word = request.word();
+    started(runs.start(word, &["supervise".to_string(), word.to_string()]))
 }
 
 fn principal(config: &Config, request: &Request) -> Option<String> {
@@ -923,21 +993,36 @@ struct Runs {
 }
 
 impl Runs {
-    fn start(&self, what: &str, args: &[String]) -> Result<Value, (u16, String)> {
+    /// The run still going, where one is: one runs at a time.
+    fn going(&self) -> Result<(), (u16, String)> {
         let mut children = self
             .children
             .lock()
             .map_err(|_| (500, "the runs are held".to_string()))?;
-        let mut going = None;
         for (id, child) in children.iter_mut() {
             if matches!(child.try_wait(), Ok(None)) {
-                going = Some(id.clone());
-                break;
+                return Err((409, format!("run {id} is still going; one run at a time")));
             }
         }
-        if let Some(id) = going {
-            return Err((409, format!("run {id} is still going; one run at a time")));
-        }
+        Ok(())
+    }
+
+    fn start(&self, what: &str, args: &[String]) -> Result<Value, (u16, String)> {
+        self.start_by(what, args, None)
+    }
+
+    /// A run started for a person, whose name the run's record keeps.
+    fn start_by(
+        &self,
+        what: &str,
+        args: &[String],
+        by: Option<&str>,
+    ) -> Result<Value, (u16, String)> {
+        self.going()?;
+        let mut children = self
+            .children
+            .lock()
+            .map_err(|_| (500, "the runs are held".to_string()))?;
         std::fs::create_dir_all(&self.dir)
             .map_err(|e| (500, format!("{}: {e}", self.dir.display())))?;
         let millis = SystemTime::now()
@@ -954,6 +1039,10 @@ impl Runs {
             "finished_at": null,
             "exit": null,
         });
+        let mut doc = doc;
+        if let Some(by) = by {
+            doc["by"] = json!(by);
+        }
         // the run is on record before its id is answered, or it is not
         // started: an id the door cannot read back would leave a desk with
         // "no run by that id" for a run that is going
@@ -1672,6 +1761,32 @@ fn handle(config: &Config, node: &str, busy: &Mutex<()>, runs: &Runs, mut reques
                 },
             }
         }
+        (
+            Method::Post,
+            "/api/supervise/signin"
+            | "/api/supervise/backups"
+            | "/api/supervise/model"
+            | "/api/supervise/restore",
+        ) => {
+            let doc = body_json(&mut request);
+            let by = person(&request).unwrap_or_else(|| {
+                nils_registry::principal::Principal::parse(&who)
+                    .map_or_else(|| who.clone(), |p| p.to_string())
+            });
+            asked(runs, &path["/api/supervise/".len()..], doc, &by)
+        }
+        // gate T31, step 1.9: what an uninstall would remove and keep, and
+        // the uninstall itself, NILS alone or everything, behind the
+        // directory's name typed
+        (Method::Get, "/api/supervise/uninstall") => match crate::setup::uninstall_preview() {
+            Ok(doc) => (200, doc),
+            Err(why) => error(409, why),
+        },
+        (Method::Post, "/api/supervise/uninstall") => {
+            let doc = body_json(&mut request);
+            let by = person(&request).unwrap_or_else(|| who.clone());
+            uninstall_door(config, runs, &doc, &by)
+        }
         (Method::Post, "/api/supervise/update") => {
             let mut text = String::new();
             let _ = request.as_reader().read_to_string(&mut text);
@@ -1710,6 +1825,93 @@ fn handle(config: &Config, node: &str, busy: &Mutex<()>, runs: &Runs, mut reques
         ),
     };
     reply(request, status, body);
+}
+
+/// `POST /api/supervise/uninstall {leave, confirm}` (gate T31, step 1.9):
+/// `leave` is `nils` (the services, the programs and the packs go, the
+/// data stays for the next setup) or `everything` (the data and the
+/// registry's key too, which cannot be undone), and `confirm` the name of
+/// the install's directory, typed. The uninstall runs apart from the call,
+/// as a restart does, since it stops this service and the desk with it.
+/// Every ask that starts one is written to `acts.log` beside this service's
+/// configuration, with who asked, before the run starts; an uninstall that
+/// keeps the data keeps that file.
+fn uninstall_door(config: &Config, runs: &Runs, doc: &Value, by: &str) -> (u16, Value) {
+    let word = match doc["leave"].as_str() {
+        Some("nils") => "keep-data",
+        Some("everything") => "purge",
+        _ => {
+            return error(
+                400,
+                "leave: nils (the data stays) or everything (the data and the registry's key go too)",
+            );
+        }
+    };
+    let Some(state) = crate::setup::read_state() else {
+        return error(
+            409,
+            format!(
+                "no setup is recorded at {}, so there is nothing here to uninstall",
+                crate::setup::state_path().display()
+            ),
+        );
+    };
+    let name = crate::setup::uninstall_name(&state);
+    if name.is_empty() || doc["confirm"].as_str().map(str::trim) != Some(name.as_str()) {
+        return error(
+            400,
+            format!("confirm: type {name}, the name of the install's directory, to uninstall it"),
+        );
+    }
+    if word == "purge"
+        && let Ok(preview) = crate::setup::uninstall_preview()
+        && let Some(why) = preview["everything_refused"].as_str()
+    {
+        return error(409, format!("{} will not be removed: {why}", state.dir));
+    }
+    let args = vec![
+        "supervise".to_string(),
+        "uninstall".to_string(),
+        "--leave".to_string(),
+        word.to_string(),
+    ];
+    let act = json!({
+        "at": nils_registry::time::now_iso(),
+        "by": by,
+        "act": "uninstall",
+        "leave": doc["leave"],
+        "dir": state.dir,
+    });
+    if let Err(e) = act_row(config, &act) {
+        return error(
+            500,
+            format!("the ask could not be recorded, so nothing was started: {e}"),
+        );
+    }
+    let run = runs.start_by("uninstall", &args, Some(by));
+    if let Err((_, why)) = &run {
+        // the ask is on record; so is that nothing started
+        let mut refused = act;
+        refused["started"] = json!(false);
+        refused["why"] = json!(why);
+        let _ = act_row(config, &refused);
+    }
+    started(run)
+}
+
+/// One act asked of this service, as a line of `acts.log` beside its
+/// configuration.
+fn act_row(config: &Config, act: &Value) -> std::io::Result<()> {
+    let dir = config
+        .log
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_default();
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("acts.log"))?;
+    writeln!(file, "{act}")
 }
 
 /// The service: the door on the bind address, and a poll that logs a newer version when the channel names one.
@@ -1805,6 +2007,21 @@ pub(crate) enum SuperviseCommand {
     Reapply {
         #[arg(long)]
         part: Option<String>,
+    },
+    /// Make the change of the setup the supervisor's door left in its
+    /// folder (record 55 ruling 35 (c))
+    #[command(hide = true)]
+    Change,
+    /// Put back the archive the supervisor's door named: the engine
+    /// stopped, the archive restored, the engine started again
+    #[command(hide = true)]
+    Restore,
+    /// Uninstall the install nils setup made, for the desk: keep-data or
+    /// purge, without asking, through the helper where it has one
+    #[command(hide = true)]
+    Uninstall {
+        #[arg(long)]
+        leave: String,
     },
     /// Run a command of this binary for a run the service started, and record how it ended
     #[command(hide = true)]
@@ -1942,6 +2159,9 @@ pub(crate) fn command(command: SuperviseCommand) -> Result<(), Exit> {
         }
         SuperviseCommand::Run { config, bind } => run(&config, bind),
         SuperviseCommand::Record { dir, id, command } => record(&dir, &id, &command),
+        SuperviseCommand::Change => crate::setup::change::change_command(),
+        SuperviseCommand::Restore => crate::setup::change::restore_command(),
+        SuperviseCommand::Uninstall { leave } => crate::setup::uninstall_supervised(&leave),
         SuperviseCommand::Restart { part } => {
             let state = recorded()?;
             crate::setup::restart_units(&state, part.as_deref()).map(|_| ())

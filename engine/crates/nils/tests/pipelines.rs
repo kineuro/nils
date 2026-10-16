@@ -2524,6 +2524,30 @@ fn the_body_part_loop_embeds_seeds_trains_a_model_and_proposes_through_the_runne
             .all(|i| i["status"] == "superseded"),
         "{open}"
     );
+
+    // gate T31, step 15.8: the seeds at their door, as the command read
+    // them, for the desk to save as a selection
+    lab.json(&["pipeline", "starter", "--off", "--json"]);
+    let server = Server::start(&lab);
+    let path = format!("/api/pipeline-runs/{}/seeds", seeded["id"]);
+    let (status, door) = server.call("GET", &path, None, PLAIN);
+    assert_eq!(status, 200, "{door}");
+    assert_eq!(door["per_value"], saved["per_value"], "{door}");
+    assert_eq!(door["selection"], saved["selection"], "{door}");
+    assert_eq!(door["seeds"], saved["seeds"], "{door}");
+    assert_eq!(door["withheld"], 0, "{door}");
+    let (status, _) = server.call("GET", &path, None, READER);
+    assert_eq!(status, 403, "a reader holds no pipelines:see");
+    let (status, none) = server.call(
+        "GET",
+        &format!("/api/pipeline-runs/{}/seeds", first["id"]),
+        None,
+        PLAIN,
+    );
+    assert_eq!(status, 404, "a run that suggested none: {none}");
+    let (status, _) = server.call("GET", "/api/pipeline-runs/999999/seeds", None, PLAIN);
+    assert_eq!(status, 404);
+    drop(server);
 }
 
 /// A pipeline that tries what a hostile container could: links planted in
@@ -12259,4 +12283,135 @@ fn a_session_scheme_is_kept_at_its_door_and_never_replaced_there() {
         assert_eq!(n, 2);
         drop(server);
     });
+}
+
+/// Gate T31, step 15.8: the runtime pipelines run under and the starter
+/// catalog's seeding read on the Pipelines page and changed by an admin at
+/// their doors, as `nils pipeline runtime` and `nils pipeline starter`
+/// change them, each change audited under the caller; a bad word is refused
+/// before anything is written.
+#[test]
+fn the_runtime_and_the_starters_are_set_at_their_doors_by_an_admin() {
+    if !have("python3") {
+        eprintln!("python3 is not installed; the lab needs it, so this test is skipped");
+        return;
+    }
+    let lab = Lab::new("pipelines-runtime-doors");
+    // the engine seeds nothing at its start, so the door's seeding is seen
+    lab.json(&["pipeline", "starter", "--off", "--json"]);
+    let server = Server::start(&lab);
+
+    // the runtime: read with pipelines:see, set by an admin
+    let (status, rt) = server.call("GET", "/api/pipelines/runtime", None, PLAIN);
+    assert_eq!(status, 200, "{rt}");
+    assert!(
+        rt["choices"].as_array().unwrap().contains(&json!("off")),
+        "{rt}"
+    );
+    assert!(rt["capability"].is_object(), "{rt}");
+    let (status, _) = server.call("GET", "/api/pipelines/runtime", None, READER);
+    assert_eq!(status, 403);
+    let off = json!({"choice": "off"});
+    let (status, _) = server.call("PUT", "/api/pipelines/runtime", Some(off.clone()), PLAIN);
+    assert_eq!(status, 403, "pipelines:work is not an admin's");
+    for bad in [
+        json!({}),
+        json!({"choice": "kubernetes"}),
+        json!({"choice": "off", "apptainer_image": "zip"}),
+        json!({"choice": 3}),
+    ] {
+        let (status, v) = server.call("PUT", "/api/pipelines/runtime", Some(bad.clone()), ADMIN);
+        assert_eq!(status, 400, "{bad}: {v}");
+    }
+    // the refused one with a good choice wrote nothing
+    assert_ne!(
+        lab.json(&["pipeline", "runtime", "--json"])["choice"],
+        "off"
+    );
+    let (status, set) = server.call("PUT", "/api/pipelines/runtime", Some(off), ADMIN);
+    assert_eq!(status, 200, "{set}");
+    assert_eq!(set["choice"], "off", "{set}");
+    let (status, set) = server.call(
+        "PUT",
+        "/api/pipelines/runtime",
+        Some(json!({"apptainer_image": "sandbox"})),
+        ADMIN,
+    );
+    assert_eq!(status, 200, "{set}");
+    assert_eq!(set["apptainer_image"], "sandbox", "{set}");
+    assert_eq!(set["choice"], "off", "the other field is kept: {set}");
+
+    // the starters: read with pipelines:see, seeding set and run by an admin
+    let (status, st) = server.call("GET", "/api/pipelines/starters", None, PLAIN);
+    assert_eq!(status, 200, "{st}");
+    assert_eq!(st["seeding"], "off", "{st}");
+    assert_eq!(st["starters"].as_array().unwrap().len(), 7, "{st}");
+    assert!(
+        st["starters"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|s| s["state"] == "absent"),
+        "{st}"
+    );
+    let (status, _) = server.call("POST", "/api/pipelines/starters/seed", None, PLAIN);
+    assert_eq!(status, 403);
+    let (status, v) = server.call(
+        "PUT",
+        "/api/pipelines/starters",
+        Some(json!({"seeding": "maybe"})),
+        ADMIN,
+    );
+    assert_eq!(status, 400, "{v}");
+    let (status, on) = server.call(
+        "PUT",
+        "/api/pipelines/starters",
+        Some(json!({"seeding": "on"})),
+        ADMIN,
+    );
+    assert_eq!(status, 200, "{on}");
+    assert_eq!(on["seeding"], "on", "{on}");
+    let (status, seeded) = server.call("POST", "/api/pipelines/starters/seed", None, ADMIN);
+    assert_eq!(status, 200, "{seeded}");
+    assert_eq!(seeded["added"].as_array().unwrap().len(), 7, "{seeded}");
+    let (status, again) = server.call("POST", "/api/pipelines/starters/seed", None, ADMIN);
+    assert_eq!(status, 200, "{again}");
+    assert!(again["added"].as_array().unwrap().is_empty(), "{again}");
+    drop(server);
+
+    // the command line reads what the doors set
+    let rt = lab.json(&["pipeline", "runtime", "--json"]);
+    assert_eq!(rt["enabled"], false, "{rt}");
+    let st = lab.json(&["pipeline", "starter", "--json"]);
+    assert_eq!(st["seeding"], "on", "{st}");
+    // each change under the admin who made it
+    let rows: Vec<(String, Value)> = lab
+        .store()
+        .query(
+            "SELECT principal, scope FROM audit WHERE action = 'pipeline.runtime' ORDER BY id",
+            &[],
+        )
+        .unwrap()
+        .iter()
+        .map(|r| {
+            (
+                r.text(0).unwrap().to_string(),
+                serde_json::from_str(r.text(1).unwrap()).unwrap(),
+            )
+        })
+        .collect();
+    let by_admin: Vec<&Value> = rows
+        .iter()
+        .filter(|(p, _)| p == "ada@lab")
+        .map(|(_, s)| s)
+        .collect();
+    assert_eq!(
+        by_admin,
+        [
+            &json!({"choice": "off"}),
+            &json!({"apptainer_image": "sandbox"}),
+            &json!({"starter": "on"})
+        ],
+        "{rows:?}"
+    );
 }
