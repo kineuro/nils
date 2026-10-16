@@ -970,7 +970,9 @@ fn chosen_lookups(store: &mut Store, p: &place::Place, ids: &[i64]) -> Result<Ve
 /// nothing new to code, no job is queued and `job` is null, so a second
 /// press queues no second run. A file held for want of its subject's id
 /// type value is not coded anyway: its subject is known, and it waits for
-/// the value, which a map gives.
+/// the value, which a map gives. Nor is a file held under a reserve number,
+/// which no code is ever made from: a map of the number gives it its
+/// subject (Nima, 2026-10-16).
 ///
 /// Wave 7a, the pseudonymise step: `ids` names the identifiers to code by
 /// the rows the held ids door gives them, every one of the dataset where it
@@ -1038,9 +1040,11 @@ fn held_code(registry: &mut Registry, caller: &Caller, body: &str) -> Result<Rep
     let d = store.dialect();
     let sql = format!(
         "UPDATE {} SET code_anyway = 1 WHERE place_id = {} AND state = 'held' \
-         AND released_at IS NULL AND code_anyway = 0 AND wants_type IS NULL",
+         AND released_at IS NULL AND code_anyway = 0 AND wants_type IS NULL \
+         AND (id_type IS NULL OR id_type <> '{}')",
         store.qualified(HELD_TABLE),
-        d.param(1, Type::Int)
+        d.param(1, Type::Int),
+        nils_registry::schema::RESERVE_ID_TYPE
     );
     let n = match lookups {
         None => store.execute(&sql, &[Param::Int(p.id)])?,
@@ -1715,7 +1719,8 @@ mod tests {
                 "patient-id",
                 "study-instance-uid",
                 "subject-code",
-                "personnummer"
+                "personnummer",
+                "reserve-number"
             ]
         );
         assert_eq!(r.body[0]["identifiers"], 0);
@@ -1765,6 +1770,7 @@ mod tests {
         };
         assert_eq!(flag("patient-id"), true);
         assert_eq!(flag("personnummer"), true);
+        assert_eq!(flag("reserve-number"), true);
         assert_eq!(flag("study-instance-uid"), true);
         assert_eq!(flag("subject-code"), false);
         assert_eq!(flag("study-id"), false);
@@ -2032,6 +2038,45 @@ mod tests {
             "",
         );
         assert_eq!(r.body[0]["waits_for"], "site-id", "{}", r.body);
+    }
+
+    /// Nima, 2026-10-16: no code is ever made from a hospital's reserve
+    /// number, so a file held under one is not coded anyway; a map of the
+    /// number gives it its subject. A file held under another type beside it
+    /// is coded as before.
+    #[test]
+    fn a_file_held_under_a_reserve_number_is_never_coded_anyway() {
+        let dir = TempDir::new("linkage-doors-reserve");
+        let (home, mut registry) = registry(&dir);
+        let work = caller("data:work,sensitive");
+        let place_id = a_place(&mut registry, &dir, "ward-r");
+        registry
+            .store()
+            .execute(
+                "INSERT INTO pseudonym_file (place_id, path, size, mtime, state, shape, lookup, id_type, first_seen, code_anyway) VALUES \
+                 (?, 'r1', 0, 0, 'held', '999999999999', x'01', 'reserve-number', '2026-10-16T00:00:00Z', 0), \
+                 (?, 's1', 0, 0, 'held', '9.9.999', x'02', 'study-instance-uid', '2026-10-16T00:00:00Z', 0)",
+                &[Param::Int(place_id), Param::Int(place_id)],
+            )
+            .unwrap();
+        let r = call(
+            &home,
+            &mut registry,
+            &work,
+            "POST",
+            "/api/linkage/held/code",
+            r#"{"place": "ward-r", "run": false}"#,
+        );
+        assert_eq!(r.status, 200, "{}", r.body);
+        assert_eq!(r.body["files"], 1, "{}", r.body);
+        let flagged: Vec<String> = registry
+            .store()
+            .query("SELECT path FROM pseudonym_file WHERE code_anyway = 1", &[])
+            .unwrap()
+            .iter()
+            .map(|r| r.text(0).unwrap().to_string())
+            .collect();
+        assert_eq!(flagged, ["s1"]);
     }
 
     #[test]

@@ -166,7 +166,7 @@ impl Settings {
                     place.name
                 )
             })?;
-        let identity = match &dataset["identity"] {
+        let mut identity = match &dataset["identity"] {
             Value::Null => Rule::default(),
             rule => {
                 let mut rule = Rule::parse(&json!({"identity": rule}).to_string())
@@ -175,6 +175,9 @@ impl Settings {
                 rule
             }
         };
+        // the originals: a PatientID that is no personnummer, under a rule
+        // that reads one, is a hospital's reserve number (Nima, 2026-10-16)
+        identity.reads_reserve = true;
         let unmapped = match dataset["unmapped"].as_str().unwrap_or("hold") {
             "code" => Unmapped::Code,
             _ => Unmapped::Hold,

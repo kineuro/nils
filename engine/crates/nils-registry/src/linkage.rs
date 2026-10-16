@@ -54,24 +54,31 @@ impl Subkeys {
     /// is looked up as its twelve digits however it was written, so that a
     /// number typed into a selection or a map finds the identity the digest
     /// filed; a value of that type that is no personnummer is looked up as
-    /// given, and finds nothing the digest or a map filed.
+    /// given, and finds nothing the digest or a map filed. A reserve number
+    /// is looked up in its one written form, its spaces and its separator
+    /// dropped ([`personnummer::reserve`]).
     pub fn lookup(&self, id_type: &str, value: &str) -> Vec<u8> {
-        let normal = personnummer::is_type(id_type)
-            .then(|| personnummer::normalise(value).ok())
-            .flatten();
+        let normal = if personnummer::is_type(id_type) {
+            personnummer::normalise(value).ok()
+        } else if id_type == personnummer::RESERVE_ID_TYPE {
+            personnummer::reserve(value)
+        } else {
+            None
+        };
         let value = normal.as_deref().unwrap_or(value);
         pseudonym::lookup(&self.k_lookup, id_type, value).to_vec()
     }
 
     /// What an identity row keeps of its identifier (Wave 7a, Nima
     /// 2026-10-08: a personnummer is never saved anywhere in the registry):
-    /// the identifier sealed, or nothing for a personnummer, whose identity
-    /// is its keyed lookup alone and whose subject is shown by its code.
+    /// the identifier sealed, or nothing for a type the store never keeps
+    /// ([`keeps`]), whose identity is its keyed lookup alone and whose
+    /// subject is shown by its code.
     pub fn seal_kept(&self, id_type: &str, value: &str) -> Vec<u8> {
-        if personnummer::is_type(id_type) {
-            Vec::new()
-        } else {
+        if keeps(id_type) {
             self.seal(value)
+        } else {
+            Vec::new()
         }
     }
 
@@ -125,6 +132,15 @@ pub struct IdType {
     /// Record 55, ruling 24: an ID of this type identifies a person
     /// wherever it is met.
     pub identifying: bool,
+}
+
+/// Whether the store keeps the identifiers of a type, sealed under the
+/// registry's key: every type but those it never keeps, an ID that is the
+/// same everywhere and a hospital's reserve number
+/// ([`crate::schema::NEVER_KEPT_ID_TYPES`]), whose identity is its keyed
+/// lookup alone. Every identity row is filed by it ([`insert_identities`]).
+pub fn keeps(id_type: &str) -> bool {
+    !crate::schema::NEVER_KEPT_ID_TYPES.contains(&id_type)
 }
 
 /// A name for an identifier type: lower case letters, digits and hyphens,
@@ -394,20 +410,28 @@ pub struct NewIdentity {
 }
 
 /// File identity rows. A row whose `(id_type_id, lookup)` exists is an error:
-/// the caller resolved the identity first and would not write it twice.
+/// the caller resolved the identity first and would not write it twice. A
+/// row of a type the store never keeps ([`keeps`]) is filed as its keyed
+/// lookup alone, whatever ciphertext it came with.
 pub fn insert_identities(store: &mut Store, rows: &[NewIdentity]) -> Result<u64, Error> {
     if rows.is_empty() {
         return Ok(0);
     }
+    let never_kept = never_kept_type_ids(store)?;
     let now = now_iso();
     let values: Vec<Vec<Param>> = rows
         .iter()
         .map(|r| {
+            let ciphertext = if never_kept.contains(&r.id_type_id) {
+                Vec::new()
+            } else {
+                r.ciphertext.clone()
+            };
             vec![
                 Param::from(r.subject_id),
                 Param::from(r.id_type_id),
                 Param::from(r.lookup.clone()),
-                Param::from(r.ciphertext.clone()),
+                Param::from(ciphertext),
                 Param::from(r.source),
                 Param::from(r.first_batch_id),
                 Param::from(now.as_str()),
@@ -418,16 +442,38 @@ pub fn insert_identities(store: &mut Store, rows: &[NewIdentity]) -> Result<u64,
     Ok(rows.len() as u64)
 }
 
+/// The ids of the types this store never keeps a value of, as it has them.
+fn never_kept_type_ids(store: &mut Store) -> Result<Vec<i64>, Error> {
+    let t = store.qualified("id_type");
+    let d = store.dialect();
+    let marks: Vec<String> = (0..crate::schema::NEVER_KEPT_ID_TYPES.len())
+        .map(|i| d.param(i + 1, crate::schema::Type::Text))
+        .collect();
+    let params: Vec<Param> = crate::schema::NEVER_KEPT_ID_TYPES
+        .iter()
+        .map(|n| Param::from(*n))
+        .collect();
+    store
+        .query(
+            &format!("SELECT id FROM {t} WHERE name IN ({})", marks.join(", ")),
+            &params,
+        )?
+        .iter()
+        .map(|r| r.int(0))
+        .collect()
+}
+
 /// An identifier read back: the row, its type and the value in clear.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Revealed {
     pub identity_id: i64,
     pub id_type: String,
     pub source: String,
-    /// The identifier, or empty where none is kept (a personnummer).
+    /// The identifier, or empty where none is kept (a personnummer, a
+    /// reserve number).
     pub value: String,
-    /// Whether the store kept the identifier at all; a personnummer is
-    /// never kept, and its subject is shown by its code.
+    /// Whether the store kept the identifier at all; a type it never keeps
+    /// ([`keeps`]) is not, and its subject is shown by its code.
     pub kept: bool,
 }
 
@@ -1041,24 +1087,25 @@ mod tests {
                 "patient-id",
                 "study-instance-uid",
                 "subject-code",
-                "personnummer"
+                "personnummer",
+                "reserve-number"
             ]
         );
         assert_eq!(id_type_id(&mut store, "patient-id").unwrap(), Some(1));
         assert_eq!(id_type_id(&mut store, "nope").unwrap(), None);
         let t = add_id_type(&mut store, "personal-number", Some("the Swedish one")).unwrap();
-        // after the four seeded types, the generator's last of them
-        assert_eq!(t.id, 5);
+        // after the five seeded types, the reserve number's last of them
+        assert_eq!(t.id, 6);
         assert!(add_id_type(&mut store, "personal-number", None).is_err());
         assert!(add_id_type(&mut store, "Personal Number", None).is_err());
         // made once, found after
         let (again, made) = ensure_id_type(&mut store, "personal-number", None).unwrap();
-        assert_eq!((again.id, made), (5, false));
+        assert_eq!((again.id, made), (6, false));
         let (t, made) = ensure_id_type(&mut store, "study-id", Some("a study's own")).unwrap();
-        assert_eq!((t.id, made), (6, true));
+        assert_eq!((t.id, made), (7, true));
         assert!(ensure_id_type(&mut store, "Bad Name", None).is_err());
         let counts = id_type_counts(&mut store).unwrap();
-        assert_eq!(counts.len(), 6);
+        assert_eq!(counts.len(), 7);
         assert_eq!((counts[0].identifiers, counts[0].subjects), (0, 0));
         assert!(valid_id_type_name("a1-b2"));
         assert!(!valid_id_type_name("-a"));
@@ -1121,6 +1168,70 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    /// Nima, 2026-10-16: a reserve number is never kept, as a personnummer
+    /// is not; one property of the type, which the store applies to every
+    /// row it files, whatever ciphertext a caller sealed. A reserve number
+    /// is looked up in one written form, with no check of its digits.
+    #[test]
+    fn a_type_the_store_never_keeps_is_filed_as_its_lookup_alone() {
+        let mut store = Store::sqlite_in_memory().unwrap();
+        migrate::migrate(&mut store, Kind::Linkage).unwrap();
+        let keys = Subkeys::derive(KEY);
+        assert!(!keeps("personnummer") && !keeps("reserve-number"));
+        assert!(keeps("patient-id") && keeps("study-instance-uid") && keeps("site-id"));
+        assert!(keys.seal_kept("reserve-number", "199913241234").is_empty());
+        assert!(keys.seal_kept("personnummer", "198501012382").is_empty());
+        assert!(!keys.seal_kept("patient-id", "199913241234").is_empty());
+        // made up: twelve digits that name no date, however written
+        let reserve = keys.lookup("reserve-number", "199913241234");
+        for written in ["19991324-1234", " 19991324 1234", "19991324+1234"] {
+            assert_eq!(keys.lookup("reserve-number", written), reserve, "{written}");
+        }
+        assert_ne!(keys.lookup("patient-id", "199913241234"), reserve);
+        let type_id = |store: &mut Store, name: &str| id_type_id(store, name).unwrap().unwrap();
+        let (pn, rn, pid) = (
+            type_id(&mut store, "personnummer"),
+            type_id(&mut store, "reserve-number"),
+            type_id(&mut store, "patient-id"),
+        );
+        // a caller that seals by mistake keeps nothing of either
+        let rows: Vec<NewIdentity> = [
+            (
+                pn,
+                keys.lookup("personnummer", "198501012382"),
+                "198501012382",
+            ),
+            (rn, reserve.clone(), "199913241234"),
+            (pid, keys.lookup("patient-id", "P1"), "P1"),
+        ]
+        .into_iter()
+        .map(|(id_type_id, lookup, value)| NewIdentity {
+            subject_id: 7,
+            id_type_id,
+            lookup,
+            ciphertext: keys.seal(value),
+            source: "csv",
+            first_batch_id: None,
+        })
+        .collect();
+        insert_identities(&mut store, &rows).unwrap();
+        let shown = reveal(&mut store, &keys, 7, "tester", None).unwrap();
+        let kept: Vec<(&str, bool, &str)> = shown
+            .iter()
+            .map(|r| (r.id_type.as_str(), r.kept, r.value.as_str()))
+            .collect();
+        assert_eq!(
+            kept,
+            [
+                ("personnummer", false, ""),
+                ("reserve-number", false, ""),
+                ("patient-id", true, "P1"),
+            ]
+        );
+        let found = identities_by_lookup(&mut store, std::slice::from_ref(&reserve)).unwrap();
+        assert_eq!((found.len(), found[0].subject_id), (1, 7));
     }
 
     #[test]

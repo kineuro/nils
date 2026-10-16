@@ -1000,9 +1000,12 @@ fn worker(ctx: &Ctx<'_>, rx: &Receiver<Task>, asks: &Sender<Ask>, items: &Sender
         // 2026-10-10: "the subject code should be created from their ID")
         let anyway = prior.as_ref().is_some_and(|p| p.code_anyway);
         let by_generator = ctx.settings.identity.derives_by_generator(&prepared.ident);
-        let make = if dry {
-            Make::Nothing
-        } else if anyway || ctx.settings.unmapped == Unmapped::Code || by_generator {
+        // a reserve number is never coded, whatever the dataset says of an
+        // identifier no map names and whoever asks: only a map gives it a
+        // subject (Nima, 2026-10-16)
+        let codes = prepared.ident.reserve.is_none()
+            && (anyway || ctx.settings.unmapped == Unmapped::Code || by_generator);
+        let make = if !dry && codes {
             Make::Subject
         } else {
             Make::Nothing
@@ -1054,7 +1057,7 @@ fn worker(ctx: &Ctx<'_>, rx: &Receiver<Task>, asks: &Sender<Ask>, items: &Sender
                 sealed,
                 id_type,
             } => {
-                if dry && (anyway || by_generator || ctx.settings.unmapped == Unmapped::Code) {
+                if dry && codes {
                     // would be coded: counted as a write under a code the
                     // run would derive, the plan applied for its counts
                     if items.send(Item::WouldCode { lookup }).is_err() {
@@ -1068,7 +1071,7 @@ fn worker(ctx: &Ctx<'_>, rx: &Receiver<Task>, asks: &Sender<Ask>, items: &Sender
                         true,
                     )
                 } else {
-                    let shape = nils_dicom::diagnostic::shape(&prepared.ident.value);
+                    let shape = nils_dicom::diagnostic::shape(prepared.ident.filed());
                     progress.file(&progress.held, size);
                     if items
                         .send(Item::Held {
@@ -1097,7 +1100,7 @@ fn worker(ctx: &Ctx<'_>, rx: &Receiver<Task>, asks: &Sender<Ask>, items: &Sender
                 id_type,
                 wants,
             } => {
-                let shape = nils_dicom::diagnostic::shape(&prepared.ident.value);
+                let shape = nils_dicom::diagnostic::shape(prepared.ident.filed());
                 progress.file(&progress.held, size);
                 if items
                     .send(Item::Held {
@@ -1554,6 +1557,7 @@ impl<'a> Recorder<'a> {
                 let answer = match found {
                     Found::Unknown => {
                         if self.settings.dry_run
+                            && ask.ident.reserve.is_none()
                             && (ask.make != Make::Nothing
                                 || self.settings.unmapped == Unmapped::Code)
                         {

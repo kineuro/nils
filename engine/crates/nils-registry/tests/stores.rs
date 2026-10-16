@@ -427,12 +427,12 @@ fn a_home_on_postgres_initialises_and_reopens() {
     let mut linkage = reg.open_linkage().unwrap();
     assert_eq!(linkage.schema(), Some("nils_home_test_linkage"));
     // the seeded types: patient-id, study-instance-uid and, since record
-    // 26, subject-code, and since 2026-10-10 the type of an ID that is the
-    // same everywhere
+    // 26, subject-code, since 2026-10-10 the type of an ID that is the
+    // same everywhere, and since 2026-10-16 the reserve number's
     let n = linkage.query("SELECT COUNT(*) FROM id_type", &[]).unwrap()[0]
         .int(0)
         .unwrap();
-    assert_eq!(n, 4);
+    assert_eq!(n, 5);
     drop(linkage);
     reg.store()
         .batch("DROP SCHEMA nils_home_test CASCADE; DROP SCHEMA nils_home_test_linkage CASCADE")

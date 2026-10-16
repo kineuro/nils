@@ -29,6 +29,14 @@ pub const FALLBACK_FIELD: &str = "StudyInstanceUID";
 /// The id type the fallback files under.
 pub const FALLBACK_ID_TYPE: &str = "study-instance-uid";
 
+/// The field whose value, under a rule that reads an ID that is the same
+/// everywhere, is a hospital's reserve number when it is no personnummer
+/// (Nima, 2026-10-16).
+pub const RESERVE_FIELD: &str = "PatientID";
+
+/// The id type a reserve number is looked up and held under.
+pub const RESERVE_ID_TYPE: &str = nils_registry::personnummer::RESERVE_ID_TYPE;
+
 /// Where one source of the rule reads from.
 #[derive(Debug, Clone)]
 pub enum From {
@@ -90,6 +98,14 @@ pub struct Rule {
     /// to its study, as v0 filed it. The engine sets it on the rules it
     /// writes for a declaration; a rule file cannot, and keeps the fallback.
     pub holds_unread: bool,
+    /// The rule reads an identified dataset's originals for the
+    /// pseudonymiser (record 26 §3), where a PatientID that is no
+    /// personnummer under a rule of that type is a hospital's reserve number
+    /// (Nima, 2026-10-16): looked up under [`RESERVE_ID_TYPE`], held under it,
+    /// never coded ([`Ident::reserve`]). The engine sets it on the rule the
+    /// pseudonymiser reads a dataset's originals under; a rule file cannot,
+    /// and a digest's rule falls back to the study as it always did.
+    pub reads_reserve: bool,
     /// Where the rule came from, for `--describe`: a path, or none for the
     /// default.
     pub source: Option<String>,
@@ -152,6 +168,23 @@ pub struct Ident {
     /// The fallback was taken: the value is the study UID, the type
     /// [`FALLBACK_ID_TYPE`].
     pub fell_back: bool,
+    /// Under a rule that reads an ID that is the same everywhere in a
+    /// dataset's originals ([`Rule::reads_reserve`]), the value of PatientID
+    /// when it is none: a hospital's reserve number, in its one written form
+    /// (Nima, 2026-10-16). The file is looked up under
+    /// [`RESERVE_ID_TYPE`] before its study, and held under it when no
+    /// subject holds either; no code is ever made from it. Only with the
+    /// fallback, so a number of the rule's own type that answered stands as
+    /// it always did.
+    pub reserve: Option<String>,
+}
+
+impl Ident {
+    /// The value the file is filed, and held, under: its reserve number
+    /// where it has one, else its identifier.
+    pub fn filed(&self) -> &str {
+        self.reserve.as_deref().unwrap_or(&self.value)
+    }
 }
 
 /// Why a rule file was refused.
@@ -210,6 +243,7 @@ impl Default for Rule {
             verbatim: false,
             own_codes: false,
             holds_unread: false,
+            reads_reserve: false,
             source: None,
             fields: IdentityFields::default(),
             today: personnummer::today(),
@@ -321,6 +355,17 @@ impl Rule {
                 personnummer::ID_TYPE
             )));
         }
+        // no code is ever made from a reserve number (Nima, 2026-10-16): a
+        // rule that read one as its own type would make one for a number no
+        // map names
+        if spec.id_type == RESERVE_ID_TYPE {
+            return Err(RuleError(format!(
+                "identity.id_type: {RESERVE_ID_TYPE} is read beside an ID that is the same \
+                 everywhere, never as a rule's own type: a rule of type {} reads a {RESERVE_FIELD} \
+                 that is no personnummer as a reserve number, which only a map gives a subject",
+                personnummer::ID_TYPE
+            )));
+        }
         let keywords: Vec<&str> = from
             .iter()
             .filter_map(|s| match &s.from {
@@ -335,6 +380,7 @@ impl Rule {
             verbatim,
             own_codes: false,
             holds_unread: false,
+            reads_reserve: false,
             source: None,
             fields,
             today: personnummer::today(),
@@ -378,13 +424,25 @@ impl Rule {
         &self.fields
     }
 
-    /// The id type of an identifier the rule resolved.
+    /// The id type of an identifier the rule resolved: the type of what the
+    /// file is filed under ([`Ident::filed`]).
     pub fn id_type_of(&self, ident: &Ident) -> &str {
-        if ident.fell_back {
+        if ident.reserve.is_some() {
+            RESERVE_ID_TYPE
+        } else if ident.fell_back {
             FALLBACK_ID_TYPE
         } else {
             &self.id_type
         }
+    }
+
+    /// Whether a source's value that is no personnummer is a reserve number:
+    /// the rule reads an ID that is the same everywhere in a dataset's
+    /// originals ([`Rule::reads_reserve`]), and the source is PatientID.
+    fn reserve_source(&self, from: &From) -> bool {
+        self.reads_reserve
+            && self.normalises()
+            && matches!(from, From::Field(f) if f == RESERVE_FIELD)
     }
 
     /// The rule in words, as `--describe` prints it.
@@ -418,6 +476,11 @@ impl Rule {
                 "; a value it cannot read is held, an empty one falls back to {FALLBACK_FIELD}"
             )),
             false => out.push_str(&format!(", then {FALLBACK_FIELD}")),
+        }
+        if self.from.iter().any(|s| self.reserve_source(&s.from)) {
+            out.push_str(&format!(
+                "; a {RESERVE_FIELD} that is no personnummer is a reserve number, found through a map and never coded"
+            ));
         }
         if self.verbatim {
             out.push_str("; the value read is the subject code itself");
@@ -456,6 +519,9 @@ impl Rule {
         });
         if self.normalises() {
             out["normalise"] = json!("personnummer-12");
+            if self.from.iter().any(|s| self.reserve_source(&s.from)) {
+                out["reserve"] = json!(RESERVE_ID_TYPE);
+            }
         }
         if self.holds_unread {
             out["unread"] = json!("held");
@@ -470,6 +536,7 @@ impl Rule {
     pub fn trace(&self, values: &[Option<String>], study_uid: &str, rel: &str) -> Traced {
         let mut next_field = 0usize;
         let mut probe: Option<String> = None;
+        let mut reserve: Option<String> = None;
         let mut sources: Vec<(Option<String>, Outcome)> = Vec::with_capacity(self.from.len());
         let mut answer: Option<(usize, String)> = None;
         for (i, source) in self.from.iter().enumerate() {
@@ -510,7 +577,12 @@ impl Rule {
                     sources.push((shape, Outcome::Answered));
                     answer = Some((i, id));
                 }
-                None => sources.push((shape, Outcome::Unparsed)),
+                None => {
+                    sources.push((shape, Outcome::Unparsed));
+                    if reserve.is_none() && self.reserve_source(&source.from) {
+                        reserve = id.and_then(personnummer::reserve);
+                    }
+                }
             }
         }
         match answer {
@@ -521,6 +593,7 @@ impl Rule {
                     value,
                     probe,
                     fell_back: false,
+                    reserve: None,
                 },
             },
             None => Traced {
@@ -530,6 +603,7 @@ impl Rule {
                     value: study_uid.to_string(),
                     probe,
                     fell_back: true,
+                    reserve,
                 },
             },
         }
@@ -565,6 +639,7 @@ impl Rule {
         // consumes no extracted value.
         let mut next_field = 0usize;
         let mut probe: Option<String> = None;
+        let mut reserve: Option<String> = None;
         for source in &self.from {
             let read: Option<String> = match &source.from {
                 From::Field(_) => {
@@ -597,12 +672,18 @@ impl Rule {
                         value: id,
                         probe,
                         fell_back: false,
+                        reserve: None,
                     };
                 }
-                None => x.diagnostics.push(
-                    Diagnostic::new(DiagnosticKind::IdentityUnparsed, source.from.label())
-                        .with_shape(value),
-                ),
+                None => {
+                    x.diagnostics.push(
+                        Diagnostic::new(DiagnosticKind::IdentityUnparsed, source.from.label())
+                            .with_shape(value),
+                    );
+                    if reserve.is_none() && self.reserve_source(&source.from) {
+                        reserve = id.and_then(personnummer::reserve);
+                    }
+                }
             }
         }
         let tried: Vec<String> = self.from.iter().map(|s| s.from.label()).collect();
@@ -614,6 +695,7 @@ impl Rule {
             value: x.study_uid.clone(),
             probe,
             fell_back: true,
+            reserve,
         }
     }
 }
@@ -658,7 +740,8 @@ mod tests {
             Ident {
                 value: "P1".into(),
                 probe: Some("P1".into()),
-                fell_back: false
+                fell_back: false,
+                reserve: None
             }
         );
         assert_eq!(rule.id_type_of(&ident), "patient-id");
@@ -781,6 +864,104 @@ identity:
         let traced = rule.trace(&[Some(wrong), None], "1.2.3", "s/1.dcm");
         assert!(traced.ident.fell_back);
         assert_eq!(traced.sources[0].1, Outcome::Unparsed);
+    }
+
+    /// Nima, 2026-10-16: under a rule that reads an ID that is the same
+    /// everywhere in a dataset's originals, a PatientID that is none (a
+    /// hospital's reserve number, twelve digits that name no date) is read
+    /// as a reserve number in its one written form, beside the fallback,
+    /// which the resolver looks up before the study and never codes. A valid
+    /// personnummer answers as it always did, wherever it is; no other
+    /// source, no other rule and no rule a digest reads reads a reserve
+    /// number, and no rule reads one as its own type.
+    #[test]
+    fn a_patient_id_that_is_no_personnummer_is_a_reserve_number() {
+        let mut rule =
+            Rule::parse("identity:\n  id_type: personnummer\n  from:\n    - field: PatientID\n")
+                .unwrap();
+        // a digest's rule, as a file or a dataset stores it: as before
+        assert!(!rule.reads_reserve);
+        let mut x = extracted(vec![Some("19991324-1234")]);
+        let ident = rule.apply(&mut x, "s/1.dcm");
+        assert!(ident.fell_back && ident.reserve.is_none());
+        assert_eq!(rule.id_type_of(&ident), FALLBACK_ID_TYPE);
+        assert!(rule.to_json().get("reserve").is_none());
+        assert!(!rule.describe().contains("reserve"));
+        // the pseudonymiser's
+        rule.reads_reserve = true;
+        assert_eq!(
+            rule.describe(),
+            "as an ID that is the same everywhere: PatientID (as twelve digits), then \
+             StudyInstanceUID; a PatientID that is no personnummer is a reserve number, found \
+             through a map and never coded"
+        );
+        assert_eq!(rule.to_json()["reserve"], "reserve-number");
+        // made up: twelve digits that name no date
+        for written in ["199913241234", "19991324-1234", " 19991324 1234 "] {
+            let mut x = extracted(vec![Some(written)]);
+            let ident = rule.apply(&mut x, "s/1.dcm");
+            assert!(ident.fell_back, "{written}");
+            assert_eq!(ident.value, "1.2.826.0.1.3680043.8.498.1");
+            assert_eq!(ident.reserve.as_deref(), Some("199913241234"));
+            assert_eq!(ident.filed(), "199913241234");
+            assert_eq!(rule.id_type_of(&ident), RESERVE_ID_TYPE);
+            assert!(!rule.derives_by_generator(&ident));
+            // what the rule read is said as before: unparsed, then the fallback
+            let kinds: Vec<DiagnosticKind> = x.diagnostics.iter().map(|d| d.kind).collect();
+            assert_eq!(
+                kinds,
+                [
+                    DiagnosticKind::IdentityUnparsed,
+                    DiagnosticKind::IdentityFallback
+                ]
+            );
+            let traced = rule.trace(&[Some(written.to_string())], "1.2.3", "s/1.dcm");
+            assert_eq!(traced.ident.reserve.as_deref(), Some("199913241234"));
+            assert_eq!(traced.sources[0].1, Outcome::Unparsed);
+        }
+        // a valid personnummer is no reserve number; nothing, or nothing
+        // that names anyone, is none either and falls back as before
+        for (written, reserve) in [(Some(PN), None), (None, None), (Some(" - "), None)] {
+            let mut x = extracted(vec![written]);
+            let ident = rule.apply(&mut x, "s/1.dcm");
+            assert_eq!(ident.reserve, reserve, "{written:?}");
+            assert_eq!(ident.fell_back, written != Some(PN), "{written:?}");
+        }
+        // only PatientID's value is a reserve number, wherever it stands in
+        // the rule, and a valid number another field holds answers before it
+        let mut both = Rule::parse(
+            "identity:\n  id_type: personnummer\n  from:\n    - field: OtherPatientIDs\n    - field: PatientID\n",
+        )
+        .unwrap();
+        both.reads_reserve = true;
+        let mut x = extracted(vec![Some("TRIAL-0042"), Some("19991324-1234")]);
+        let ident = both.apply(&mut x, "s/1.dcm");
+        assert_eq!(ident.reserve.as_deref(), Some("199913241234"));
+        let mut x = extracted(vec![Some(PN_OTHER), Some("19991324-1234")]);
+        let ident = both.apply(&mut x, "s/1.dcm");
+        assert_eq!((ident.value.as_str(), ident.reserve), (PN_OTHER, None));
+        let mut first = Rule::parse(
+            "identity:\n  id_type: personnummer\n  from:\n    - field: PatientID\n    - field: OtherPatientIDs\n",
+        )
+        .unwrap();
+        first.reads_reserve = true;
+        let mut x = extracted(vec![Some("19991324-1234"), Some(PN_OTHER)]);
+        let ident = first.apply(&mut x, "s/1.dcm");
+        assert_eq!((ident.value.as_str(), ident.reserve), (PN_OTHER, None));
+        // a rule of another type reads no reserve number, flag or none
+        let other = Rule {
+            reads_reserve: true,
+            ..Rule::default()
+        };
+        let mut x = extracted(vec![Some("199913241234")]);
+        assert_eq!(other.apply(&mut x, "s/1.dcm").reserve, None);
+        assert!(other.to_json().get("reserve").is_none());
+        // and no rule reads one as its own type
+        let err =
+            Rule::parse("identity:\n  id_type: reserve-number\n  from:\n    - field: PatientID\n")
+                .unwrap_err()
+                .0;
+        assert!(err.contains("never as a rule's own type"), "{err}");
     }
 
     #[test]

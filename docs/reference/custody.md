@@ -34,9 +34,9 @@ Every store the registry at `<home>` keeps (backend sqlite), rendered by `nils c
 
 | | |
 |---|---|
-| what | the identifiers behind the codes, encrypted under the registry's key; the linkages between subjects; the audit of every read; a personnummer is never kept here, not even sealed: its identity is its keyed lookup alone and its subject is shown by its code (record 55, the ruling of 2026-10-08) |
+| what | the identifiers behind the codes, encrypted under the registry's key; the linkages between subjects; the audit of every read; a personnummer is never kept here, not even sealed, nor is a hospital's reserve number, which identifies a person as a personnummer does: the identity of either is its keyed lookup alone and its subject is shown by its code (record 55, the rulings of 2026-10-08 and 2026-10-16) |
 | where | `<home>/linkage.db`, mode 600 (SQLite keeps linkage.db-wal and linkage.db-shm beside it while a connection is open) |
-| holds | identifying: the identifiers (encrypted), except a personnummer, which is never kept, and their keyed lookups<br>technical: the linkages, the id types, the read audit (actor, time, why, identity id) |
+| holds | identifying: the identifiers (encrypted), except a personnummer or a reserve number, which is never kept, and their keyed lookups<br>technical: the linkages, the id types, the read audit (actor, time, why, identity id) |
 | owner | the registry's operator; the identifiers are the clinic's |
 | kept | until purged; a purged identifier is filed again only when its file is parsed again (changed, or new), not by a digest that finds the file unchanged |
 | read | `nils linkage show <code> [--why <text>]` (every read is audited) |
@@ -302,7 +302,7 @@ Every store the registry at `<home>` keeps (backend sqlite), rendered by `nils c
 |---|---|
 | what | what the pseudonymiser last saw of each file of a dataset's originals (record 26 sections 3 and 4), and what the digest holds of a dataset it reads in place: the file's path under the originals, its size and modification time, whether its copy was written, still stands, is held for want of a map, or was refused, where the copy was written with its size and digest, and the digest of the original as it was read; for a held file the shape of its identifier and its keyed lookup, so that a map naming the identifier releases the file, the ID type, when a map released it, whether a person asked to code it anyway, and the subject and the ID type it waits for |
 | where | rows of pseudonym_file in the registry |
-| holds | identifying: the identifier of a held file, sealed under the registry's key for the reveal door alone (detail sensitive, audited), except a personnummer, which is never kept, not even sealed: its keyed lookup is all there is (record 55, the ruling of 2026-10-08)<br>quasi-identifying: the paths of the originals, which a raw export may name after the patient<br>technical: the states, the sizes, the times, the digests, the identifier shapes and keyed lookups |
+| holds | identifying: the identifier of a held file, sealed under the registry's key for the reveal door alone (detail sensitive, audited), except a personnummer or a reserve number, which is never kept, not even sealed: its keyed lookup is all there is (record 55, the rulings of 2026-10-08 and 2026-10-16)<br>quasi-identifying: the paths of the originals, which a raw export may name after the patient<br>technical: the states, the sizes, the times, the digests, the identifier shapes and keyed lookups |
 | owner | the registry's operator, for the research group that owns the dataset |
 | kept | for good while the dataset stands: a run writes a file's row again, and a purge of the originals removes the files after proving each by its digest, and leaves the rows |
 | read | GET /api/linkage/held<br>GET /api/linkage/held/ids<br>POST /api/linkage/held/reveal (detail sensitive; one audit row for each identifier opened)<br>GET /api/datasets/{name}/summary |

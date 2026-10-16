@@ -2041,7 +2041,7 @@ impl<'a> Writer<'a> {
                         // holds, which is what a person answers
                         let shape = match (self.resolver.holds(&p.ident), &p.ident.probe) {
                             (true, Some(read)) => nils_dicom::diagnostic::shape(read),
-                            _ => nils_dicom::diagnostic::shape(&p.ident.value),
+                            _ => nils_dicom::diagnostic::shape(p.ident.filed()),
                         };
                         rows.push(row(
                             &p.path,

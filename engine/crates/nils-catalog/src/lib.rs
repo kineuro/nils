@@ -1753,12 +1753,13 @@ impl Catalog {
                 d.courses.push(r.text(1)?.to_string());
             }
         }
-        // the namespaces an answer may reveal: never the generator's type,
-        // whose value NILS does not keep (record 55 B2), so it is no
-        // namespace of any registry's (2026-10-10, the type made built in)
+        // the namespaces an answer may reveal: never a type whose value NILS
+        // does not keep, the generator's (record 55 B2) or a reserve
+        // number's (2026-10-16), so neither is a namespace of any registry's
+        // (2026-10-10, the generator's type made built in)
         let namespaces = nils_registry::schema::ID_TYPES
             .iter()
-            .filter(|(n, _)| *n != nils_registry::schema::GENERATOR_ID_TYPE)
+            .filter(|(n, _)| nils_registry::linkage::keeps(n))
             .map(|(n, _)| n.to_string())
             .collect();
         let mut cohorts = Vec::new();

@@ -198,7 +198,7 @@ impl CandidateTally {
         self.subjects.insert(hash_of(&format!(
             "{}\0{}",
             rule.id_type_of(&traced.ident),
-            traced.ident.value
+            traced.ident.filed()
         )));
         for d in diagnostics {
             let e = self

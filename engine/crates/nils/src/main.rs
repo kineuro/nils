@@ -2196,7 +2196,7 @@ enum LinkageCommand {
 struct ImportArgs {
     /// The CSV: a header row, then one subject per row
     csv: PathBuf,
-    /// A column's role: HEADER=identifier:<type>, HEADER=canonical:<type> (the subject code derives from it; a column of IDs that are the same everywhere is read as twelve digits and a cell that is none refuses its row), HEADER=code or HEADER=ignore; without any, the two flags below name the columns
+    /// A column's role: HEADER=identifier:<type>, HEADER=canonical:<type> (the subject code derives from it; a column of IDs that are the same everywhere is read as twelve digits and a cell that is none refuses its row), HEADER=code or HEADER=ignore; a hospital's reserve number is an identifier:reserve-number, filed as its keyed lookup alone and never canonical; without any, the two flags below name the columns
     #[arg(long, value_name = "HEADER=ROLE")]
     column: Vec<String>,
     /// The type the identifiers are filed under, without --column
@@ -8115,11 +8115,11 @@ fn custody_doc(home: &Home, registry: &mut Registry) -> Result<serde_json::Value
         serde_json::json!({
             "store": "linkage store",
             "owner": "the registry's operator; the identifiers are the clinic's",
-            "what": "the identifiers behind the codes, encrypted under the registry's key; the linkages between subjects; the audit of every read; a personnummer is never kept here, not even sealed: its identity is its keyed lookup alone and its subject is shown by its code (record 55, the ruling of 2026-10-08)",
+            "what": "the identifiers behind the codes, encrypted under the registry's key; the linkages between subjects; the audit of every read; a personnummer is never kept here, not even sealed, nor is a hospital's reserve number, which identifies a person as a personnummer does: the identity of either is its keyed lookup alone and its subject is shown by its code (record 55, the rulings of 2026-10-08 and 2026-10-16)",
             "where": where_db(LINKAGE_DB, &linkage_schema),
             "files": if sqlite { db_files(LINKAGE_DB) } else { Vec::new() },
             "holds": [
-                "identifying: the identifiers (encrypted), except a personnummer, which is never kept, and their keyed lookups",
+                "identifying: the identifiers (encrypted), except a personnummer or a reserve number, which is never kept, and their keyed lookups",
                 "technical: the linkages, the id types, the read audit (actor, time, why, identity id)",
             ],
             "counts": {
@@ -8447,7 +8447,7 @@ fn custody_doc(home: &Home, registry: &mut Registry) -> Result<serde_json::Value
             "where": "rows of pseudonym_file in the registry",
             "files": [],
             "holds": [
-                "identifying: the identifier of a held file, sealed under the registry's key for the reveal door alone (detail sensitive, audited), except a personnummer, which is never kept, not even sealed: its keyed lookup is all there is (record 55, the ruling of 2026-10-08)",
+                "identifying: the identifier of a held file, sealed under the registry's key for the reveal door alone (detail sensitive, audited), except a personnummer or a reserve number, which is never kept, not even sealed: its keyed lookup is all there is (record 55, the rulings of 2026-10-08 and 2026-10-16)",
                 "quasi-identifying: the paths of the originals, which a raw export may name after the patient",
                 "technical: the states, the sizes, the times, the digests, the identifier shapes and keyed lookups",
             ],

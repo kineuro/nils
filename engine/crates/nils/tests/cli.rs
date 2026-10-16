@@ -476,11 +476,11 @@ fn import_digest_show_and_link_go_round() {
         "hospital number",
     ]);
     assert!(out.status.success(), "{}", stderr(&out));
-    // after the four seeded types, the generator's the last of them
-    assert_eq!(stdout(&out), "added id type mrn (id 5)\n");
+    // after the five seeded types, the reserve number's the last of them
+    assert_eq!(stdout(&out), "added id type mrn (id 6)\n");
     let out = run(&["linkage", "id-type", "list"]);
     assert!(
-        stdout(&out).contains("  5  mrn                      hospital number"),
+        stdout(&out).contains("  6  mrn                      hospital number"),
         "{}",
         stdout(&out)
     );
@@ -1570,7 +1570,7 @@ fn custody_quarantine_review_and_purge_go_round() {
         stdout(&out)
     );
     let rows = store.query("SELECT COUNT(*) FROM id_type", &[]).unwrap();
-    assert_eq!(rows[0].int(0).unwrap(), 4);
+    assert_eq!(rows[0].int(0).unwrap(), 5);
     // status lists the purges as the jobs they were
     let out = run(&["status", "--json"]);
     let doc = json(&out);

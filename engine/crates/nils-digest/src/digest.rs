@@ -1026,7 +1026,7 @@ fn parse_all(
                             format!("{} stacks in one file", stacks.len()),
                         ));
                     }
-                    counts.accepted(&x, rule.id_type_of(&ident), &ident.value, &stacks, size);
+                    counts.accepted(&x, rule.id_type_of(&ident), ident.filed(), &stacks, size);
                     progress.file(true);
                     let hashes = RowHashes::of(&x);
                     Item::Parsed(Box::new(ParsedFile {

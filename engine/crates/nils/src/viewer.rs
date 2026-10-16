@@ -707,14 +707,14 @@ fn reads_identifiers(access: &Access) -> bool {
 /// The labels of these subjects by an id type: each one's value of it,
 /// opened and audited, as it is where this caller may see it and as its
 /// shape otherwise; a subject that holds none, or one whose value the store
-/// keeps nothing of (a personnummer), is not in the answer.
+/// keeps nothing of (a personnummer, a reserve number), is not in the answer.
 fn labels_by_type(
     registry: &mut Registry,
     caller: &Caller,
     shown: &Shown,
     subjects: &[i64],
 ) -> Result<HashMap<i64, String>, Reply> {
-    if subjects.is_empty() || nils_registry::personnummer::is_type(&shown.name) {
+    if subjects.is_empty() || !linkage::keeps(&shown.name) {
         return Ok(HashMap::new());
     }
     let key = registry.pseudonym_key().map_err(failed)?;
@@ -791,7 +791,7 @@ fn id_type_facet(registry: &mut Registry, subjects: &[i64]) -> Vec<Value> {
     }
     let mut out: Vec<(String, usize)> = types
         .iter()
-        .filter(|t| !nils_registry::personnummer::is_type(&t.name))
+        .filter(|t| linkage::keeps(&t.name))
         .filter_map(|t| held.get(&t.id).map(|s| (t.name.clone(), s.len())))
         .collect();
     out.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));

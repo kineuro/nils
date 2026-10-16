@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 103;
+pub const SCHEMA_VERSION: i64 = 104;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -465,6 +465,10 @@ pub static MIGRATIONS: &[Migration] = &[
     Migration {
         version: 103,
         apply: a_card_is_kept_by_a_person,
+    },
+    Migration {
+        version: 104,
+        apply: a_reserve_number_is_built_in_and_never_kept,
     },
 ];
 
@@ -1119,10 +1123,17 @@ fn a_source_place_nobody_declared_is_undeclared(
 /// would be keyed again with its key before it migrates; no tool does that
 /// yet.
 fn a_personnummer_is_never_kept(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    nothing_kept_of(store, kind, crate::personnummer::ID_TYPE)
+}
+
+/// What a store sealed of one type's identifiers dropped: in the linkage
+/// store, every identity of the type keeps its keyed lookup alone; in the
+/// registry, a held file of the type keeps its shape and its lookup.
+fn nothing_kept_of(store: &mut Store, kind: Kind, id_type: &str) -> Result<(), Error> {
     let d = store.dialect();
     match kind {
         Kind::Linkage => {
-            let Some(id) = crate::linkage::id_type_id(store, crate::personnummer::ID_TYPE)? else {
+            let Some(id) = crate::linkage::id_type_id(store, id_type)? else {
                 return Ok(());
             };
             store.execute(
@@ -1145,11 +1156,43 @@ fn a_personnummer_is_never_kept(store: &mut Store, kind: Kind) -> Result<(), Err
                     store.qualified("pseudonym_file"),
                     d.param(1, schema::Type::Text)
                 ),
-                &[Param::from(crate::personnummer::ID_TYPE)],
+                &[Param::from(id_type)],
             )?;
         }
     }
     Ok(())
+}
+
+/// Nima, 2026-10-16: a hospital's reserve number, which a dataset whose
+/// PatientID holds an ID that is the same everywhere reads a PatientID that
+/// is none as, identifies a person as a personnummer does without being one
+/// ("just like pns however they are not real pns"), and has its protection.
+/// Every linkage store has its type, built in and identifying: a fresh one
+/// from the seed ([`ID_TYPES`]), one from before from here, once. The store
+/// never keeps a value of it, not even sealed ([`crate::linkage::keeps`]):
+/// what a type of that name a person made before sealed is dropped, in the
+/// linkage store and in a held file's row, as migration 82 dropped what a
+/// store from before sealed of a personnummer.
+fn a_reserve_number_is_built_in_and_never_kept(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind == Kind::Linkage {
+        if crate::linkage::id_type_id(store, schema::RESERVE_ID_TYPE)?.is_none() {
+            let table = store.qualified("id_type");
+            let d = store.dialect();
+            store.execute(
+                &format!(
+                    "INSERT INTO {table} (name, description) VALUES ({}, {})",
+                    d.param(1, crate::schema::Type::Text),
+                    d.param(2, crate::schema::Type::Text)
+                ),
+                &[
+                    Param::from(schema::RESERVE_ID_TYPE),
+                    Param::from(schema::RESERVE_ID_DESCRIPTION),
+                ],
+            )?;
+        }
+        mark_identifying(store)?;
+    }
+    nothing_kept_of(store, kind, schema::RESERVE_ID_TYPE)
 }
 
 /// The 2026-10-03 fingerprint fields: a series gains how it stores its
@@ -3241,7 +3284,8 @@ mod tests {
                 "patient-id",
                 "study-instance-uid",
                 "subject-code",
-                "personnummer"
+                "personnummer",
+                "reserve-number"
             ]
         );
         assert_eq!(
@@ -3926,28 +3970,12 @@ mod column_migration {
         let other = crate::linkage::id_type_id(&mut linkage, "patient-id")
             .unwrap()
             .unwrap();
-        crate::linkage::insert_identities(
+        // what a store from before sealed, filed past the rule the store
+        // applies now (`linkage::keeps`)
+        sealed_before(
             &mut linkage,
-            &[
-                crate::linkage::NewIdentity {
-                    subject_id: 1,
-                    id_type_id: pnr,
-                    lookup: vec![1],
-                    ciphertext: keys.seal("198501012382"),
-                    source: "dicom",
-                    first_batch_id: None,
-                },
-                crate::linkage::NewIdentity {
-                    subject_id: 1,
-                    id_type_id: other,
-                    lookup: vec![2],
-                    ciphertext: keys.seal("P1"),
-                    source: "dicom",
-                    first_batch_id: None,
-                },
-            ],
-        )
-        .unwrap();
+            &[(pnr, keys.seal("198501012382")), (other, keys.seal("P1"))],
+        );
         for _ in 0..2 {
             a_personnummer_is_never_kept(&mut linkage, Kind::Linkage).unwrap();
         }
@@ -3974,6 +4002,131 @@ mod column_migration {
             )
             .unwrap();
         a_personnummer_is_never_kept(&mut registry, Kind::Registry).unwrap();
+        let rows = registry
+            .query(
+                "SELECT path FROM pseudonym_file WHERE sealed IS NOT NULL",
+                &[],
+            )
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].text(0).unwrap(), "b");
+    }
+
+    /// Identity rows of subject 1 with their ciphertext as given, filed
+    /// past `linkage::insert_identities`, as a store from before kept them.
+    fn sealed_before(linkage: &mut Store, rows: &[(i64, Vec<u8>)]) {
+        let values: Vec<Vec<Param>> = rows
+            .iter()
+            .enumerate()
+            .map(|(i, (id_type_id, ciphertext))| {
+                vec![
+                    Param::Int(1),
+                    Param::Int(*id_type_id),
+                    Param::Bytes(vec![i as u8 + 1]),
+                    Param::Bytes(ciphertext.clone()),
+                    Param::from("dicom"),
+                    Param::Null,
+                    Param::from("2026-10-08T00:00:00Z"),
+                ]
+            })
+            .collect();
+        linkage
+            .insert(
+                &crate::store::Insert::all(schema::table("identity")),
+                &values,
+            )
+            .unwrap();
+    }
+
+    /// Nima, 2026-10-16: a linkage store from before migration 104 gains the
+    /// reserve number's type once, identifying; one where a person had made a
+    /// type of that name keeps it, and what it sealed under it is dropped, in
+    /// the linkage store and in a held file's row, every other identifier
+    /// staying sealed.
+    #[test]
+    fn migration_104_builds_the_reserve_number_in_and_keeps_none() {
+        let count = |store: &mut Store| {
+            store
+                .query(
+                    "SELECT COUNT(*) FROM id_type WHERE name = 'reserve-number'",
+                    &[],
+                )
+                .unwrap()[0]
+                .int(0)
+                .unwrap()
+        };
+        let before = |store: &mut Store| {
+            for m in MIGRATIONS.iter().take_while(|m| m.version <= 103) {
+                (m.apply)(store, Kind::Linkage).unwrap();
+                set_version(store, Kind::Linkage, m.version).unwrap();
+            }
+            store
+                .execute("DELETE FROM id_type WHERE name = 'reserve-number'", &[])
+                .unwrap();
+        };
+        // a store that never had it
+        let mut store = Store::sqlite_in_memory().unwrap();
+        before(&mut store);
+        assert_eq!(count(&mut store), 0);
+        assert_eq!(migrate(&mut store, Kind::Linkage).unwrap(), [104]);
+        assert_eq!(count(&mut store), 1);
+        let t = crate::linkage::id_type_named(&mut store, "reserve-number")
+            .unwrap()
+            .unwrap();
+        assert!(t.identifying);
+        assert_eq!(
+            t.description.as_deref(),
+            Some(schema::RESERVE_ID_DESCRIPTION)
+        );
+        // once: running it again adds nothing
+        a_reserve_number_is_built_in_and_never_kept(&mut store, Kind::Linkage).unwrap();
+        assert_eq!(count(&mut store), 1);
+
+        // a store where a person made a type of that name and sealed values
+        let keys = crate::linkage::Subkeys::derive(b"a test key");
+        let mut store = Store::sqlite_in_memory().unwrap();
+        before(&mut store);
+        let made = crate::linkage::add_id_type(&mut store, "reserve-number", Some("ours"))
+            .unwrap()
+            .id;
+        let other = crate::linkage::id_type_id(&mut store, "patient-id")
+            .unwrap()
+            .unwrap();
+        sealed_before(
+            &mut store,
+            &[(made, keys.seal("199913241234")), (other, keys.seal("P1"))],
+        );
+        migrate(&mut store, Kind::Linkage).unwrap();
+        assert_eq!(count(&mut store), 1);
+        let t = crate::linkage::id_type_named(&mut store, "reserve-number")
+            .unwrap()
+            .unwrap();
+        assert_eq!((t.id, t.identifying), (made, true));
+        let shown = crate::linkage::reveal(&mut store, &keys, 1, "tester", None).unwrap();
+        let kept: Vec<(String, bool, String)> = shown
+            .into_iter()
+            .map(|r| (r.id_type, r.kept, r.value))
+            .collect();
+        assert_eq!(
+            kept,
+            [
+                ("reserve-number".to_string(), false, String::new()),
+                ("patient-id".to_string(), true, "P1".to_string()),
+            ]
+        );
+
+        // a held file's row keeps its shape and lookup alone
+        let mut registry = Store::sqlite_in_memory().unwrap();
+        migrate(&mut registry, Kind::Registry).unwrap();
+        registry
+            .execute(
+                "INSERT INTO pseudonym_file (place_id, path, size, mtime, state, sealed, id_type, first_seen, code_anyway) \
+                 VALUES (1, 'a', 1, 1, 'held', x'0102', 'reserve-number', '2026-10-16T00:00:00Z', 0), \
+                        (1, 'b', 1, 1, 'held', x'0102', 'patient-id', '2026-10-16T00:00:00Z', 0)",
+                &[],
+            )
+            .unwrap();
+        a_reserve_number_is_built_in_and_never_kept(&mut registry, Kind::Registry).unwrap();
         let rows = registry
             .query(
                 "SELECT path FROM pseudonym_file WHERE sealed IS NOT NULL",
