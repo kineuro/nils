@@ -41,6 +41,8 @@ A pipeline is a container image that takes a frozen selection and writes files t
    nils pipeline runtime --set apptainer-first --apptainer-image sandbox
    ```
 
+   The desk chooses the runtime on Pipelines > Catalog, under Runtime, through `GET` and `PUT /api/pipelines/runtime`; choosing is an admin's (`install:work`) and is audited.
+
    Apptainer 1.1 or later is taken, since an older one cannot keep an unprivileged container off the network. Each image is built once from its pinned digest into `<working>/images/<digest>.sif` (or `.sandbox`) and run from there; the build's log is the run's `image.log`.
 
 ## Set the lane
@@ -95,6 +97,8 @@ The engine seeds the first analyses of record 49 into its catalog each time it s
    nils pipeline starter --off
    nils pipeline starter --on
    ```
+
+The desk shows the same on Pipelines > Catalog, under Starters, and an admin seeds them now or turns the seeding off there (`GET` and `PUT /api/pipelines/starters`, `POST /api/pipelines/starters/seed`, `install:work`).
 
 A version a person added is never gone over, and a starter a person retired stays retired. A newer engine with newer pins adds them as the name's next version only where the newest version is the engine's own starter. A newer starter that fixes the older one replaces it (see *Choose a version*).
 
@@ -593,6 +597,8 @@ A pipeline keeps model inputs in the cache by declaring their versions, `x-nils.
    ```sh
    nils pipeline seeds <run> --save seeds-to-curate
    ```
+
+   In the desk, a run that suggested any says so on its page under Suggested to curate, with Save as a selection (`GET /api/pipeline-runs/{id}/seeds`, then the ask's own `PUT /api/ask/selections/{name}`).
 
 2. Start a campaign from it:
 

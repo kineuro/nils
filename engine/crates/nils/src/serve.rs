@@ -2078,6 +2078,23 @@ fn routed(
     {
         return r;
     }
+    // gate T31, step 22.8: the clinical vocabulary and importer
+    if let Some(r) = crate::clinical_doors::route(
+        registry,
+        doors.pack_dir.as_deref(),
+        caller,
+        method.as_str(),
+        &segs,
+        body,
+    ) {
+        return r;
+    }
+    // gate T31, step 15.8: the runtime and the starter catalog
+    if let Some(r) =
+        crate::pipelines::runtime_route(registry, principal, method.as_str(), &segs, body)
+    {
+        return r;
+    }
     // record 55 H2: the kept session schemes
     if let Some(r) = crate::session_schemes::route(registry, method.as_str(), &segs, body) {
         return r;
@@ -4144,6 +4161,8 @@ fn routed(
                     command.extend([flag.to_string(), v.to_string()]);
                 }
             }
+            // gate T31, step 13.8: the release form's expert options
+            command.extend(release_expert_flags(&doc)?);
             if let Some(dir) = &doors.pack_dir {
                 command.extend(["--pack-dir".into(), dir.display().to_string()]);
             }
@@ -5387,6 +5406,10 @@ pub(crate) fn door(method: &str, segs: &[&str]) -> (Need, Detail) {
     if let Some(n) = crate::rule_changes::door(method, segs) {
         return n;
     }
+    // gate T31, step 22.8: the clinical vocabulary and importer
+    if let Some(n) = crate::clinical_doors::door(method, segs) {
+        return n;
+    }
     // record 56 §6.3: Review round 1's questions, before the table's
     // pattern for one item
     if let Some(n) = crate::review_questions::door(method, segs) {
@@ -5590,6 +5613,18 @@ pub(crate) fn door(method: &str, segs: &[&str]) -> (Need, Detail) {
         // page; adding a pipeline, setting the lane or a secret brings an
         // image or a site's file into what runs, an admin's
         ("GET", ["api", "pipelines", "lane" | "secrets"]) => (Need::One("pipelines:see"), Plain),
+        // gate T31, step 15.8: the runtime and the starter catalog are read
+        // on the Pipelines page; choosing a runtime or seeding the catalog
+        // changes what runs and where, an admin's
+        ("GET", ["api", "pipelines", "runtime" | "starters"]) => {
+            (Need::One("pipelines:see"), Plain)
+        }
+        ("PUT", ["api", "pipelines", "runtime" | "starters"])
+        | ("POST", ["api", "pipelines", "starters", "seed"]) => {
+            (Need::One(nils_pipeline::failure::INSTALL_GRANT), Plain)
+        }
+        // a run's seeds name stacks and the values suggested for them
+        ("GET", ["api", "pipeline-runs", _, "seeds"]) => (Need::One("pipelines:see"), Plain),
         ("POST", ["api", "pipelines"])
         | ("PUT", ["api", "pipelines", "lane"])
         | ("PUT" | "DELETE", ["api", "pipelines", "secrets", _]) => {
@@ -5712,6 +5747,141 @@ fn cancel_needs(job: &nils_registry::job::Job) -> &'static str {
         "ask" => "query:work",
         _ => "pipelines:work",
     }
+}
+
+/// The release door's expert options, as the capabilities name them.
+pub(crate) const RELEASE_EXPERT: [&str; 10] = [
+    "localizers",
+    "synthetic",
+    "dicom",
+    "converter",
+    "compress",
+    "authors",
+    "categories",
+    "uid_root",
+    "picked",
+    "roles",
+];
+
+/// The release door's expert options (gate T31, step 13.8), as the flags of
+/// `nils release`: where localizers and a vendor's synthetic contrasts go
+/// and which stacks are also written as DICOM in a BIDS tree, the
+/// converter, uncompressed NIfTI, the authors, the categories of element
+/// removed, the UID root, only the picked stacks, and only stacks of some
+/// roles. Each is checked here with the parser the command uses, so a bad
+/// one is refused before a job is queued. The converter is dcm2niix by
+/// name or by a path whose file is named dcm2niix: the job runs it, and a
+/// door that ran any program a caller named would run anything.
+pub(crate) fn release_expert_flags(doc: &serde_json::Value) -> Result<Vec<String>, Reply> {
+    use nils_release::bids::place::{Dicom, Localizers, Synthetic};
+    let mut out: Vec<String> = Vec::new();
+    let word = |key: &str| -> Result<Option<&str>, Reply> {
+        match &doc[key] {
+            serde_json::Value::Null => Ok(None),
+            serde_json::Value::String(s) => Ok(Some(s.trim()).filter(|s| !s.is_empty())),
+            _ => Err(Reply::error(400, format!("{key} is a word"))),
+        }
+    };
+    let words = |key: &str| -> Result<Vec<String>, Reply> {
+        match &doc[key] {
+            serde_json::Value::Null => Ok(Vec::new()),
+            serde_json::Value::Array(a) => a
+                .iter()
+                .map(|v| {
+                    v.as_str()
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .ok_or_else(|| Reply::error(400, format!("{key} is a list of words")))
+                })
+                .collect(),
+            serde_json::Value::String(s) => Ok(s
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect()),
+            _ => Err(Reply::error(400, format!("{key} is a list of words"))),
+        }
+    };
+    if let Some(v) = word("localizers")? {
+        Localizers::parse(v).ok_or_else(|| {
+            Reply::error(
+                400,
+                format!("localizers is sourcedata, datatype, anat or drop, not {v}"),
+            )
+        })?;
+        out.extend(["--localizers".into(), v.into()]);
+    }
+    if let Some(v) = word("synthetic")? {
+        Synthetic::parse(v).ok_or_else(|| {
+            Reply::error(
+                400,
+                format!("synthetic is folder, anat or derivatives, not {v}"),
+            )
+        })?;
+        out.extend(["--synthetic".into(), v.into()]);
+    }
+    if let Some(v) = word("dicom")? {
+        Dicom::parse(v)
+            .ok_or_else(|| Reply::error(400, format!("dicom is all, folders or none, not {v}")))?;
+        out.extend(["--dicom".into(), v.into()]);
+    }
+    if let Some(v) = word("converter")? {
+        let path = std::path::Path::new(v);
+        let named = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n == "dcm2niix" || n == "dcm2niix.exe");
+        let whole = v == "dcm2niix" || path.is_absolute();
+        if !named || !whole || v.split('/').any(|s| s == "..") {
+            return Err(Reply::error(
+                400,
+                "converter is dcm2niix, or the absolute path of a file named dcm2niix",
+            ));
+        }
+        out.extend(["--dcm2niix".into(), v.into()]);
+    }
+    match &doc["compress"] {
+        serde_json::Value::Null | serde_json::Value::Bool(true) => {}
+        serde_json::Value::Bool(false) => out.push("--no-compress".into()),
+        _ => return Err(Reply::error(400, "compress is true or false")),
+    }
+    for author in words("authors")? {
+        out.extend(["--author".into(), author]);
+    }
+    let categories = words("categories")?;
+    if !doc["categories"].is_null() {
+        if categories.is_empty() {
+            return Err(Reply::error(
+                400,
+                "categories names at least one of patient, trial, provider, institution, times, ids",
+            ));
+        }
+        for c in &categories {
+            nils_release::tags::Category::parse(c).ok_or_else(|| {
+                Reply::error(
+                    400,
+                    format!(
+                        "{c} is not a category: patient, trial, provider, institution, times, ids"
+                    ),
+                )
+            })?;
+        }
+        out.extend(["--categories".into(), categories.join(",")]);
+    }
+    if let Some(v) = word("uid_root")? {
+        nils_release::uid::Root::new(v).map_err(|e| Reply::error(400, format!("uid_root: {e}")))?;
+        out.extend(["--uid-root".into(), v.into()]);
+    }
+    match &doc["picked"] {
+        serde_json::Value::Null | serde_json::Value::Bool(false) => {}
+        serde_json::Value::Bool(true) => out.push("--picked".into()),
+        _ => return Err(Reply::error(400, "picked is true or false")),
+    }
+    for role in words("roles")? {
+        out.extend(["--role".into(), role]);
+    }
+    Ok(out)
 }
 
 /// The probe door's `location` (Wave 4c §6.6): a location `@name` names
@@ -6203,6 +6373,8 @@ pub(crate) fn doors_list() -> Vec<String> {
     .chain(std::iter::once(&crate::preflight::DOOR))
     .chain(crate::tools::DOORS.iter())
     .chain(crate::pipelines::SETUP_DOORS.iter())
+    .chain(crate::pipelines::RUNTIME_DOORS.iter())
+    .chain(crate::clinical_doors::DOORS.iter())
     .chain(crate::session_schemes::DOORS.iter())
     .chain(crate::linkage_doors::DOORS.iter())
     .chain(crate::campaigns::DOORS.iter())
@@ -6283,6 +6455,10 @@ fn capabilities(
         // 2026-10-12: whether dcm2niix is here, where and which build, and
         // the install the engine offers an admin
         "tools": crate::tools::capability(doors.home.dir()),
+        // gate T31, step 13.8: the release door's expert options, so a desk
+        // offers only what this engine reads rather than sending a field an
+        // older engine would pass over in silence
+        "releases": {"expert": RELEASE_EXPERT},
         "policy": policy(),
         "idempotency": {
             "header": "Idempotency-Key",
@@ -8228,6 +8404,8 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
             .iter()
             .chain(crate::main_scans::POLICY.iter())
             .chain(crate::review_rule::POLICY.iter())
+            .chain(crate::pipelines::RUNTIME_POLICY.iter())
+            .chain(crate::clinical_doors::POLICY.iter())
             .chain(crate::rule_changes::POLICY.iter())
             .chain(crate::review_questions::POLICY.iter())
             .map(|(door, writes, idem, cost, cap, now, then)| {

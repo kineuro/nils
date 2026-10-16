@@ -2974,6 +2974,271 @@ fn places_are_registry_objects_and_the_rules_hold_at_the_doors() {
     assert!(audited.contains("\"place.add\""), "{audited}");
 }
 
+/// Gate T31, step 22.8 (record 55, ruling 35 (c)): the clinical vocabulary
+/// loaded and clinical rows imported at their doors, as the command line
+/// does: read with data:see, written with data:work, a preview writing
+/// nothing, an apply under the caller and a re-run changing nothing, the
+/// subject codes of the preview shown from detail quasi up, a mapping that
+/// names subjects by an identifier refused below detail sensitive, and each
+/// load and apply audited under its caller.
+#[test]
+fn the_clinical_vocabulary_and_import_doors_do_what_the_command_line_does() {
+    let home = registry();
+    let code = {
+        let mut store =
+            nils_registry::Store::open_sqlite(&home.path().join("registry.db")).unwrap();
+        store
+            .query("SELECT code FROM subject LIMIT 1", &[])
+            .unwrap()[0]
+            .text(0)
+            .unwrap()
+            .to_string()
+    };
+    let server = Server::start(
+        &home,
+        14,
+        &[
+            "--auth",
+            "token",
+            "--token",
+            "a-reader-token-of-length=reader@lab:reader",
+            "--token",
+            "a-plain-data-worker-tok=pl@lab:data:work,data:see",
+            "--token",
+            "a-quasi-data-worker-tok=qu@lab:reviewer,data:work",
+            "--token",
+            "an-admin-token-of-length=ad@lab:admin",
+        ],
+        &[],
+    );
+    let reader = Some("a-reader-token-of-length");
+    let plain = Some("a-plain-data-worker-tok");
+    let quasi = Some("a-quasi-data-worker-tok");
+    let admin = Some("an-admin-token-of-length");
+
+    let (status, none) = server.request("GET", "/api/clinical/vocabulary", None, reader);
+    assert_eq!(status, 200, "{none}");
+    assert_eq!(none["diseases"], serde_json::json!([]), "{none}");
+    let (status, _) = server.request("POST", "/api/clinical/vocabulary", Some("{}"), reader);
+    assert_eq!(status, 403);
+    let (status, bad) = server.request(
+        "POST",
+        "/api/clinical/vocabulary",
+        Some(r#"{"text": "diseases: [", "name": "broken.yml"}"#),
+        plain,
+    );
+    assert_eq!(status, 400, "{bad}");
+    // no text: the pack's own vocabulary
+    let (status, loaded) = server.request("POST", "/api/clinical/vocabulary", Some("{}"), plain);
+    assert_eq!(status, 200, "{loaded}");
+    assert_eq!(loaded["diseases"]["added"], 8, "{loaded}");
+    assert_eq!(
+        loaded["from"], "the pack's clinical/vocabulary.yml",
+        "{loaded}"
+    );
+    let (status, held) = server.request("GET", "/api/clinical/vocabulary", None, reader);
+    assert_eq!(status, 200, "{held}");
+    assert_eq!(held["diseases"].as_array().unwrap().len(), 8, "{held}");
+    assert_eq!(
+        held["observation_types"].as_array().unwrap().len(),
+        16,
+        "{held}"
+    );
+
+    let mapping = "import:\n  target: event\n  subject: {column: code}\n  observation_type: EDSS\n  columns:\n    event_date: {column: date, parser: date, format: '%Y-%m-%d'}\n    value: {column: edss, parser: float}\n";
+    let csv = format!("code,date,edss\n{code},2022-01-15,2.5\nnobody,2022-01-15,1\n");
+    let ask = |apply: bool| {
+        serde_json::json!({"mapping": mapping, "csv": csv, "apply": apply}).to_string()
+    };
+    let (status, _) = server.request("POST", "/api/clinical/import", Some(&ask(false)), reader);
+    assert_eq!(status, 403);
+    // a preview at plain: the counts, no subject code
+    let (status, preview) =
+        server.request("POST", "/api/clinical/import", Some(&ask(false)), plain);
+    assert_eq!(status, 200, "{preview}");
+    assert_eq!(preview["applied"], false, "{preview}");
+    assert_eq!(preview["added"], 1, "{preview}");
+    assert_eq!(
+        preview["refused"]["a subject the registry does not know"], 1,
+        "{preview}"
+    );
+    assert!(!preview.to_string().contains(&code), "{preview}");
+    // at quasi the codes, and the apply under the caller
+    let (status, shown) = server.request("POST", "/api/clinical/import", Some(&ask(false)), quasi);
+    assert_eq!(status, 200, "{shown}");
+    assert!(shown.to_string().contains(&code), "{shown}");
+    let (status, applied) = server.request("POST", "/api/clinical/import", Some(&ask(true)), quasi);
+    assert_eq!(status, 200, "{applied}");
+    assert_eq!(applied["applied"], true, "{applied}");
+    assert_eq!(applied["added"], 1, "{applied}");
+    let (status, again) = server.request("POST", "/api/clinical/import", Some(&ask(true)), quasi);
+    assert_eq!(status, 200, "{again}");
+    assert_eq!(again["skipped"], 1, "{again}");
+    assert_eq!(again["changes"], 0, "{again}");
+    // refused in words: no csv, a mapping the engine cannot run
+    let (status, refused) = server.request(
+        "POST",
+        "/api/clinical/import",
+        Some(&serde_json::json!({"mapping": mapping}).to_string()),
+        plain,
+    );
+    assert_eq!(status, 400, "{refused}");
+    let (status, refused) = server.request(
+        "POST",
+        "/api/clinical/import",
+        Some(&serde_json::json!({"mapping": "import: {target: event}", "csv": csv}).to_string()),
+        plain,
+    );
+    assert_eq!(status, 400, "{refused}");
+    // rows named by an identifier: sensitive, checked before anything is read
+    let by_id = mapping.replace(
+        "{column: code}",
+        "{column: code, by: identifier, id_type: mrn}",
+    );
+    let body = serde_json::json!({"mapping": by_id, "csv": csv}).to_string();
+    let (status, refused) = server.request("POST", "/api/clinical/import", Some(&body), quasi);
+    assert_eq!(status, 403, "{refused}");
+    let (status, refused) = server.request("POST", "/api/clinical/import", Some(&body), admin);
+    assert_eq!(status, 400, "{refused}");
+    assert!(
+        refused["error"]
+            .as_str()
+            .unwrap()
+            .contains("no identifier type named mrn"),
+        "{refused}"
+    );
+    server.finish();
+    let audited = run(
+        &home,
+        &["audit", "list", "--action", "clinical.import", "--json"],
+        None,
+    );
+    assert!(audited.contains("qu@lab"), "{audited}");
+    let audited = run(
+        &home,
+        &["audit", "list", "--action", "vocabulary.load", "--json"],
+        None,
+    );
+    assert!(audited.contains("pl@lab"), "{audited}");
+}
+
+/// Gate T31, step 13.8: the release form's expert options reach the job as
+/// the flags of `nils release`, and one the command would refuse is refused
+/// at the door before anything is queued, a converter that is not dcm2niix
+/// among them.
+#[test]
+fn the_release_doors_expert_options_become_the_commands_flags() {
+    let home = registry();
+    let export = TempDir::new("t31-export");
+    let out = export.path().join("tree").display().to_string();
+    let server = Server::start(&home, 12, &[], &[]);
+    let (status, caps) = server.request("GET", "/api/capabilities", None, None);
+    assert_eq!(status, 200, "{caps}");
+    assert_eq!(
+        caps["releases"]["expert"].as_array().map(Vec::len),
+        Some(10),
+        "{caps}"
+    );
+    let (status, queued) = server.request(
+        "POST",
+        "/api/releases",
+        Some(
+            &serde_json::json!({
+                "name": "expert", "out": out, "layout": "bids",
+                "localizers": "drop", "synthetic": "anat", "dicom": "none",
+                "converter": "/opt/tools/dcm2niix", "compress": false,
+                "authors": ["Ada Lovelace", "Alan Turing"],
+                "categories": ["patient", "ids"], "uid_root": "1.2.826.0.1.3680043.10.543",
+                "picked": true, "roles": ["t1", "flair"],
+            })
+            .to_string(),
+        ),
+        None,
+    );
+    assert_eq!(status, 202, "{queued}");
+    let command: Vec<&str> = queued["command"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|w| w.as_str().unwrap())
+        .collect();
+    let line = command.join(" ");
+    for flag in [
+        "--localizers drop",
+        "--synthetic anat",
+        "--dicom none",
+        "--dcm2niix /opt/tools/dcm2niix",
+        "--no-compress",
+        "--author Ada Lovelace",
+        "--author Alan Turing",
+        "--categories patient,ids",
+        "--uid-root 1.2.826.0.1.3680043.10.543",
+        "--picked",
+        "--role t1",
+        "--role flair",
+    ] {
+        assert!(line.contains(flag), "{flag} is not in {line}");
+    }
+    // nothing asked, nothing added: the command's defaults stand
+    let (status, plain) = server.request(
+        "POST",
+        "/api/releases",
+        Some(
+            &serde_json::json!({"name": "plain", "out": out, "compress": true, "picked": false})
+                .to_string(),
+        ),
+        None,
+    );
+    assert_eq!(status, 202, "{plain}");
+    let line = plain["command"].to_string();
+    for flag in [
+        "--localizers",
+        "--no-compress",
+        "--picked",
+        "--categories",
+        "--dcm2niix",
+        "--author",
+        "--role",
+    ] {
+        assert!(!line.contains(flag), "{flag} is in {line}");
+    }
+    // refused before a job is queued
+    for (bad, words) in [
+        (serde_json::json!({"converter": "/bin/sh"}), "converter"),
+        (
+            serde_json::json!({"converter": "tools/dcm2niix"}),
+            "converter",
+        ),
+        (
+            serde_json::json!({"converter": "/opt/../bin/dcm2niix"}),
+            "converter",
+        ),
+        (serde_json::json!({"localizers": "attic"}), "localizers"),
+        (serde_json::json!({"categories": []}), "categories"),
+        (
+            serde_json::json!({"categories": ["patient", "shoes"]}),
+            "shoes",
+        ),
+        (serde_json::json!({"uid_root": "1.2.x"}), "uid_root"),
+        (serde_json::json!({"picked": "yes"}), "picked"),
+    ] {
+        let mut doc = bad.clone();
+        doc["name"] = serde_json::json!("refused");
+        doc["out"] = serde_json::json!(out);
+        let (status, refused) =
+            server.request("POST", "/api/releases", Some(&doc.to_string()), None);
+        assert_eq!(status, 400, "{bad}: {refused}");
+        assert!(
+            refused["error"].as_str().unwrap().contains(words),
+            "{bad}: {refused}"
+        );
+    }
+    let (status, jobs) = server.request("GET", "/api/jobs", None, None);
+    assert_eq!(status, 200, "{jobs}");
+    assert_eq!(jobs["jobs"].as_array().map(Vec::len), Some(2), "{jobs}");
+    server.finish();
+}
+
 #[test]
 fn a_job_queued_at_the_door_runs_when_serve_runs_its_queue() {
     let home = registry();

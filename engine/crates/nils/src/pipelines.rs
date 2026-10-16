@@ -797,6 +797,268 @@ pub(crate) fn setup_route(
     })
 }
 
+/// Gate T31, step 15.8: the doors of the runtime pipelines run under, the
+/// starter catalog and a run's seeds, as the capabilities list them.
+pub(crate) const RUNTIME_DOORS: [&str; 6] = [
+    "GET /api/pipelines/runtime",
+    "PUT /api/pipelines/runtime",
+    "GET /api/pipelines/starters",
+    "PUT /api/pipelines/starters",
+    "POST /api/pipelines/starters/seed",
+    "GET /api/pipeline-runs/{id}/seeds",
+];
+
+/// The policy rows of [`RUNTIME_DOORS`]: door, writes, idempotent, cost,
+/// cap, and what the assistant says while and after.
+pub(crate) const RUNTIME_POLICY: &[(&str, bool, bool, &str, &str, &str, &str)] = &[
+    (
+        "GET /api/pipelines/runtime",
+        false,
+        false,
+        "free",
+        "one document",
+        "Reading the pipeline runtime",
+        "Read the pipeline runtime",
+    ),
+    (
+        "PUT /api/pipelines/runtime",
+        true,
+        true,
+        "free",
+        "one document",
+        "Choosing the pipeline runtime",
+        "Chose the pipeline runtime",
+    ),
+    (
+        "GET /api/pipelines/starters",
+        false,
+        false,
+        "free",
+        "the starters",
+        "Reading the starter catalog",
+        "Read the starter catalog",
+    ),
+    (
+        "PUT /api/pipelines/starters",
+        true,
+        true,
+        "free",
+        "one setting",
+        "Turning the starter seeding on or off",
+        "Turned the starter seeding on or off",
+    ),
+    (
+        "POST /api/pipelines/starters/seed",
+        true,
+        true,
+        "free",
+        "the starters",
+        "Seeding the starter catalog",
+        "Seeded the starter catalog",
+    ),
+    (
+        "GET /api/pipeline-runs/{id}/seeds",
+        false,
+        false,
+        "bounded",
+        "one run's seeds",
+        "Reading a run's seeds",
+        "Read a run's seeds",
+    ),
+];
+
+/// The runtime and the starters as their doors answer them.
+fn runtime_answer(registry: &mut Registry) -> Value {
+    json!({
+        "choice": choice(registry).name(),
+        "choices": Choice::WORDS,
+        "apptainer_image": image_form(registry).name(),
+        "apptainer_images": ImageForm::WORDS,
+        "capability": capability(registry),
+    })
+}
+
+fn starters_answer(registry: &mut Registry) -> Result<Value, Reply> {
+    let list = crate::starter::list(registry).map_err(|e| Reply::error(500, e))?;
+    Ok(json!({
+        "seeding": if crate::starter::enabled(registry) { "on" } else { "off" },
+        "starters": list,
+    }))
+}
+
+/// One act of these doors on the audit log, under the person who asked, as
+/// `nils pipeline runtime` and `nils pipeline starter` record theirs.
+fn runtime_audit(registry: &mut Registry, principal: &str, scope: Value) -> Result<(), Reply> {
+    nils_registry::audit::record(
+        registry,
+        &nils_registry::audit::Entry {
+            principal,
+            action: nils_registry::audit::Action::PipelineRuntime,
+            scope,
+            policy: None,
+            job_id: None,
+            details: None,
+        },
+    )
+    .map(|_| ())
+    .map_err(|e| Reply::error(500, e.to_string()))
+}
+
+/// Gate T31, step 15.8: `GET` and `PUT /api/pipelines/runtime` (the
+/// runtime pipelines run under and how apptainer keeps an image, as `nils
+/// pipeline runtime --set` and `--apptainer-image`), `GET` and `PUT
+/// /api/pipelines/starters` (whether the engine seeds its starters at its
+/// start, as `nils pipeline starter --on` and `--off`) and `POST
+/// /api/pipelines/starters/seed` (seed what the catalog lacks now, as
+/// `--seed`). The grants are the door table's: pipelines:see to read,
+/// install:work to change, since each changes what runs and where. Each
+/// change is audited under the caller.
+pub(crate) fn runtime_route(
+    registry: &mut Registry,
+    principal: &str,
+    method: &str,
+    segs: &[&str],
+    body: &str,
+) -> Option<Result<Reply, Reply>> {
+    let parsed = |body: &str| -> Result<Value, Reply> {
+        serde_json::from_str(body)
+            .map_err(|e| Reply::error(400, format!("the body is not JSON: {e}")))
+    };
+    Some(match (method, segs) {
+        ("GET", ["api", "pipelines", "runtime"]) => Ok(Reply::ok(runtime_answer(registry))),
+        ("PUT", ["api", "pipelines", "runtime"]) => (|| {
+            let v = parsed(body)?;
+            let word = |key: &str| -> Result<Option<String>, Reply> {
+                match &v[key] {
+                    Value::Null => Ok(None),
+                    Value::String(s) => Ok(Some(s.trim().to_string())),
+                    _ => Err(Reply::error(400, format!("{key} is a word"))),
+                }
+            };
+            let set = word("choice")?;
+            let form = word("apptainer_image")?;
+            if set.is_none() && form.is_none() {
+                return Err(Reply::error(
+                    400,
+                    "the runtime takes choice, apptainer_image or both",
+                ));
+            }
+            // both are checked before either is written
+            let set = set
+                .map(|w| {
+                    Choice::parse(&w).ok_or_else(|| {
+                        Reply::error(
+                            400,
+                            format!("choice is one of {}, not {w}", Choice::WORDS.join(", ")),
+                        )
+                    })
+                })
+                .transpose()?;
+            let form = form
+                .map(|w| {
+                    ImageForm::parse(&w).ok_or_else(|| {
+                        Reply::error(
+                            400,
+                            format!(
+                                "apptainer_image is one of {}, not {w}",
+                                ImageForm::WORDS.join(", ")
+                            ),
+                        )
+                    })
+                })
+                .transpose()?;
+            let err = |e: nils_registry::home::HomeError| Reply::error(500, e.to_string());
+            if let Some(form) = form {
+                registry
+                    .set_meta(APPTAINER_IMAGE_KEY, form.name())
+                    .map_err(err)?;
+                runtime_audit(registry, principal, json!({"apptainer_image": form.name()}))?;
+            }
+            if let Some(c) = set {
+                registry.set_meta(RUNTIME_KEY, c.name()).map_err(err)?;
+                runtime_audit(registry, principal, json!({"choice": c.name()}))?;
+            }
+            Ok(Reply::ok(runtime_answer(registry)))
+        })(),
+        ("GET", ["api", "pipelines", "starters"]) => starters_answer(registry).map(Reply::ok),
+        ("PUT", ["api", "pipelines", "starters"]) => (|| {
+            let v = parsed(body)?;
+            let word = match v["seeding"].as_str() {
+                Some(w @ ("on" | "off")) => w,
+                _ => return Err(Reply::error(400, "seeding is on or off")),
+            };
+            registry
+                .set_meta(crate::starter::SETTING, word)
+                .map_err(|e| Reply::error(500, e.to_string()))?;
+            runtime_audit(registry, principal, json!({"starter": word}))?;
+            starters_answer(registry).map(Reply::ok)
+        })(),
+        ("POST", ["api", "pipelines", "starters", "seed"]) => (|| {
+            let added = crate::starter::seed(registry).map_err(|e| Reply::error(500, e))?;
+            let mut doc = starters_answer(registry)?;
+            doc["added"] = json!(added);
+            Ok(Reply::ok(doc))
+        })(),
+        _ => return None,
+    })
+}
+
+/// `GET /api/pipeline-runs/{id}/seeds` (gate T31, step 15.8): what `nils
+/// pipeline seeds` reads of a run, the values it suggests a person curate,
+/// counted by axis and value, and the stacks it suggests curating, which a
+/// caller saves as a selection at the ask's selection door. A seed or a
+/// suggested stack of a sample sealed now is withheld from a caller who
+/// does not read sealed samples, and how many were is said.
+fn seeds_answer(registry: &mut Registry, caller: &Caller, run: i64) -> Result<Reply, Reply> {
+    let doc = seeds_of(registry.store(), run).map_err(|e| {
+        if e.starts_with("no pipeline run") || e.contains("suggested no seeds") {
+            Reply::error(404, e)
+        } else {
+            Reply::error(500, e)
+        }
+    })?;
+    let mut seeds: Vec<Value> = doc["seeds"].as_array().cloned().unwrap_or_default();
+    let mut stacks: Vec<i64> = doc["selection"]["stacks"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_i64)
+        .collect();
+    let mut withheld = 0usize;
+    if !crate::sealed::reads(&caller.access) {
+        let mut named: Vec<i64> = stacks.clone();
+        named.extend(seeds.iter().filter_map(|s| s["stack_id"].as_i64()));
+        let sealed = crate::sealed::now(registry.store(), &named)
+            .map_err(|e| Reply::error(500, e.to_string()))?;
+        if !sealed.is_empty() {
+            let before = seeds.len() + stacks.len();
+            seeds.retain(|s| {
+                !s["stack_id"]
+                    .as_i64()
+                    .is_some_and(|id| sealed.contains(&id))
+            });
+            stacks.retain(|id| !sealed.contains(id));
+            withheld = before - seeds.len() - stacks.len();
+        }
+    }
+    let mut per: BTreeMap<String, usize> = BTreeMap::new();
+    for s in &seeds {
+        let key = format!(
+            "{}={}",
+            s["axis"].as_str().unwrap_or_default(),
+            s["value"].as_str().unwrap_or_default()
+        );
+        *per.entry(key).or_default() += 1;
+    }
+    Ok(Reply::ok(json!({
+        "run": run,
+        "seeds": seeds,
+        "per_value": per,
+        "selection": {"stacks": stacks},
+        "withheld": withheld,
+    })))
+}
+
 /// One secret's row of the list, or a row that says it is not set.
 fn one_secret(all: &Value, id: &str) -> Value {
     all["secrets"]
@@ -1525,6 +1787,11 @@ pub(crate) fn route(
         ["api", "pipeline-runs", id, "units", unit, "log"] => (|| {
             let id = id_of(id, "run")?;
             run_log(registry, caller, id, Some(unit), query)
+        })(),
+        // gate T31, step 15.8: what a run suggests curating
+        ["api", "pipeline-runs", id, "seeds"] => (|| {
+            let id = id_of(id, "run")?;
+            seeds_answer(registry, caller, id)
         })(),
         _ => return None,
     })
