@@ -4,6 +4,10 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [1.0.0-alpha.87] - 2026-10-16
+
+Wave 7a's last engine: hospital reserve numbers read beside the personnummer and never kept, spare numbers through a map, model cards that gain their missing claims, the damaged-header flag's three signs (pack contract 11, MRI pack 1.3.0), the post-contrast label's clock across studies (time-rule-2), kept Query cards, LST-AI's thin image, and fixes from the wave's audit.
+
 ### Added
 
 - The install door says when it looked at the releases, and looks again when asked. `GET /api/supervise/install` gains `release.looked_at` (UTC, to the second), and `?fresh=1` makes the supervisor look at the releases again where the look it kept is at least `look_again_seconds` old (60 by default: GitHub keeps its own answer for a minute, and an address has sixty requests an hour that every look spends). Where the look is younger, the answer carries the look it has. The desk's Parts page says how old the look is beside its table and asks for a new one with Look again.
