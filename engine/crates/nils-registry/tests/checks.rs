@@ -1251,6 +1251,266 @@ fn a_part_two_raters_flag_for_different_reasons_is_written_once_with_both() {
     }
 }
 
+/// What the desk sends for a result nothing is wrong with, and for one it
+/// rejects whole: every field there, each an empty list.
+fn desk_empty() -> Value {
+    json!({"reasons": [], "parts": [], "points": [], "seen": [], "shown": []})
+}
+
+/// T33's proof run on the development build closed three items of four:
+/// its fourth, accepted by both raters with no part flagged, was refused
+/// with "form.parts is a list", because that run had put a string in the
+/// item's stored outcome on purpose, to watch a refusal being named (the
+/// comparison with `a_refused_check_item_stays_refused_until_a_later_close_writes_it`).
+/// This is the case with nothing spoiled, on both backends: two raters
+/// answer with the form the desk sends, so no part is flagged, and agree
+/// with no settlement; the stored outcome keeps every field a list; one
+/// person's close writes all four items. Beside them are the other three
+/// shapes of the run: both reject, a split settled by an adjudicator with
+/// the same empty form, and a part flagged.
+#[test]
+fn two_raters_who_agree_with_no_part_flagged_are_closed_whole_without_a_settlement() {
+    for mut l in labs() {
+        let name = l.name;
+        let reg = &mut l.registry;
+        let (s0, s1, _) = scans(reg);
+        let (d0, d1, d2, d3) = (
+            mask(reg, s0, 1),
+            mask(reg, s0, 2),
+            mask(reg, s0, 3),
+            mask(reg, s0, 4),
+        );
+        let q = question("result");
+        let c = campaign::create(
+            reg,
+            &new(
+                "t33-agreed",
+                &q,
+                vec![
+                    item(d0, None, s0, s1),
+                    item(d1, None, s0, s1),
+                    item(d2, None, s0, s1),
+                    item(d3, None, s0, s1),
+                ],
+                2,
+                vec!["cleo@lab".into()],
+            ),
+        )
+        .unwrap();
+        let both =
+            |reg: &mut Registry, first: (&str, Value), second: (&str, Value), minute: u32| {
+                let a = read(
+                    reg,
+                    c.id,
+                    "anna@lab",
+                    Role::Rater,
+                    first.0,
+                    first.1,
+                    None,
+                    minute,
+                )
+                .unwrap();
+                assert_ne!(a.state, "agreed", "{name}: one rater is not an agreement");
+                read(
+                    reg,
+                    c.id,
+                    "bo@lab",
+                    Role::Rater,
+                    second.0,
+                    second.1,
+                    None,
+                    minute + 2,
+                )
+                .unwrap()
+            };
+        // d0: both accept with nothing flagged, nothing seen
+        let a = both(
+            reg,
+            ("accepted", desk_empty()),
+            ("accepted", desk_empty()),
+            0,
+        );
+        assert_eq!(a.state, "agreed", "{name}");
+        assert!(a.adjudication.is_none(), "{name}: no settlement is asked");
+        // d1: both reject, the same empty form
+        let a = both(
+            reg,
+            ("rejected", desk_empty()),
+            ("rejected", desk_empty()),
+            4,
+        );
+        assert_eq!(a.state, "agreed", "{name}");
+        // d2: a split, settled by the adjudicator with the same empty form
+        let a = both(
+            reg,
+            ("accepted", desk_empty()),
+            ("rejected", desk_empty()),
+            8,
+        );
+        assert_eq!(a.state, "needs_adjudication", "{name}");
+        let a = read(
+            reg,
+            c.id,
+            "cleo@lab",
+            Role::Adjudicator,
+            "accepted",
+            desk_empty(),
+            None,
+            12,
+        )
+        .unwrap();
+        assert_eq!(a.state, "adjudicated", "{name}");
+        // d3: both flag, one part each
+        let a = both(
+            reg,
+            (
+                "flagged",
+                json!({"reasons": [], "parts": [{"label": 1, "reason": "under"}], "points": [], "seen": [1], "shown": []}),
+            ),
+            (
+                "flagged",
+                json!({"reasons": [], "parts": [{"label": 3, "reason": "over"}], "points": [], "seen": [3], "shown": []}),
+            ),
+            14,
+        );
+        assert_eq!(a.state, "agreed", "{name}");
+
+        // nothing in an outcome the close reads is anything but a list:
+        // d0 and d1 hold the verdict and five empty lists
+        let items = campaign::items(reg.store(), c.id).unwrap();
+        let of = |d: i64| items.iter().find(|i| i.derivative_id == Some(d)).unwrap();
+        for (d, verdict) in [(d0, "accepted"), (d1, "rejected"), (d2, "accepted")] {
+            let form = &of(d).outcome["form"];
+            assert_eq!(of(d).outcome["value"], verdict, "{name}: result {d}");
+            for key in ["reasons", "parts", "points", "seen", "shown"] {
+                assert_eq!(form[key], json!([]), "{name}: result {d}, form.{key}");
+            }
+            assert_eq!(
+                check::outcome_form(form).unwrap(),
+                check::Form::default(),
+                "{name}: result {d}"
+            );
+        }
+        assert_eq!(
+            of(d3).outcome["form"]["parts"],
+            json!([{"label": 1, "reason": "under"}, {"label": 3, "reason": "over"}]),
+            "{name}"
+        );
+        // answering wrote no decision
+        assert!(
+            decisions(reg.store(), "derivative", &d0.to_string()).is_empty(),
+            "{name}"
+        );
+
+        // one close by a person writes all four: none refused, none left
+        let closed = close_as_person(reg, c.id, 30);
+        assert_eq!(
+            (closed.resolved, closed.unresolved),
+            (4, 0),
+            "{name}: {closed:?}"
+        );
+        assert!(closed.refused.is_empty(), "{name}: {closed:?}");
+        assert!(closed.skipped.is_empty(), "{name}: {closed:?}");
+        let st = reg.store();
+        for (d, verdict) in [(d0, "accepted"), (d1, "rejected"), (d2, "accepted")] {
+            let result = derivative::get(st, d).unwrap().unwrap();
+            assert_eq!(
+                result.check_status.as_deref(),
+                Some(verdict),
+                "{name}: result {d}"
+            );
+            assert_eq!(result.check_reasons, json!([]), "{name}: result {d}");
+            // one decision of a person's, no why, and none on any part
+            assert_eq!(
+                decisions(st, "derivative", &d.to_string()),
+                vec![(verdict.to_string(), None, false)],
+                "{name}: result {d}"
+            );
+            assert!(
+                part_status(st, d).iter().all(|(_, s, _)| s.is_none()),
+                "{name}: result {d}: no part was flagged or seen"
+            );
+        }
+        assert_eq!(
+            part_status(st, d3),
+            vec![
+                (1, Some("flagged".into()), Some("under".into())),
+                (2, None, None),
+                (3, Some("flagged".into()), Some("over".into())),
+            ],
+            "{name}"
+        );
+        assert_eq!(
+            derivative::get(st, d3)
+                .unwrap()
+                .unwrap()
+                .check_status
+                .as_deref(),
+            Some("flagged"),
+            "{name}"
+        );
+        let now = campaign::items(st, c.id).unwrap();
+        for it in &now {
+            assert_eq!(
+                it.state, "resolved",
+                "{name}: result {:?}",
+                it.derivative_id
+            );
+            assert!(it.refused_why.is_none(), "{name}");
+            assert!(it.outcome["decisions"]["result"].is_i64(), "{name}");
+            let ri = nils_registry::review::item(st, it.review_item_id)
+                .unwrap()
+                .unwrap();
+            assert_ne!(ri.status, "open", "{name}: its question is answered");
+        }
+
+        // and no form whose parts are not a list gets in by an answer, so no
+        // outcome made from answers can hold one: the door says so in the
+        // words the close uses for a damaged row, and the same item is then
+        // answered whole
+        let c = campaign::create(
+            reg,
+            &new("t33-shape", &q, vec![item(d0, None, s0, s1)], 1, vec![]),
+        )
+        .unwrap();
+        for bad in [json!("x"), json!({"label": 1, "reason": "under"}), json!(7)] {
+            let e = read(
+                reg,
+                c.id,
+                "anna@lab",
+                Role::Rater,
+                "flagged",
+                json!({"parts": bad}),
+                None,
+                40,
+            )
+            .unwrap_err();
+            assert!(
+                e.to_string().contains("form.parts is a list"),
+                "{name}: {e}"
+            );
+        }
+        assert!(
+            campaign::answers(reg.store(), c.id).unwrap().is_empty(),
+            "{name}: nothing was stored"
+        );
+        let a = read(
+            reg,
+            c.id,
+            "anna@lab",
+            Role::Rater,
+            "accepted",
+            desk_empty(),
+            None,
+            42,
+        )
+        .unwrap();
+        assert_eq!(a.state, "agreed", "{name}");
+        let only = campaign::items(reg.store(), c.id).unwrap();
+        assert_eq!(only[0].outcome["form"]["parts"], json!([]), "{name}");
+    }
+}
+
 /// Close a one-rater check over `results`, each answered as given, by a
 /// person. Answers the campaign.
 fn closed_check(
