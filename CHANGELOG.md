@@ -4,6 +4,15 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Added
+
+- The install door says when it looked at the releases, and looks again when asked. `GET /api/supervise/install` gains `release.looked_at` (UTC, to the second), and `?fresh=1` makes the supervisor look at the releases again where the look it kept is at least `look_again_seconds` old (60 by default: GitHub keeps its own answer for a minute, and an address has sixty requests an hour that every look spends). Where the look is younger, the answer carries the look it has. The desk's Parts page says how old the look is beside its table and asks for a new one with Look again.
+
+### Fixed
+
+- The desk's Parts page named the release before the newest as the one to take, for up to a quarter of an hour after a release was published, and said "checked just now" beside it. The supervisor looks at the releases once in `poll_seconds` (900) and kept that look with nothing to say how old it was and nothing that could renew it: a minute after 1.0.0-alpha.85 was published, with 1.0.0-alpha.83 installed, the page read "Engine 1.0.0-alpha.84 is out". Pressing Update was never affected, since `nils update` reads the releases itself and installs none that is not newer than what is installed, so it would have taken the newest; the page named a release the update would not have taken. The look now says when it was made and a person can renew it (above). An offer is, and stays, only a release newer than the installed one by the engine's own order of versions, so a look older than what is installed offers nothing.
+- The signed channel's door (`GET /api/supervise/capabilities`) offered whatever release the channel named when it differed from the installed one, so a channel that still named an older release after a newer one was installed offered the older one as `newer`, and the supervisor's poll logged it. It offers a release only when it is newer than the installed one by the engine's own order of versions, which `nils update` and a pack's range of engines use too.
+
 ## [1.0.0-alpha.86] - 2026-10-16
 
 Post-contrast's fallback keeps its card arms inside its image, and a release rebuilds only the model images that changed.
