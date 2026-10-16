@@ -462,6 +462,59 @@ def test_the_tools_keep_the_library_path_the_card_s_driver_is_on(monkeypatch, tm
     assert tools._with_libs("") == ""
 
 
+def _cupy_cache_write() -> str:
+    """What CuPy does with a kernel it compiled (cupy.cuda.compiler,
+    ``get_cache_dir`` and ``_compile_with_cache_cuda``): the folder made
+    under ``~/.cupy/kernel_cache`` unless ``CUPY_CACHE_DIR`` names one, and
+    the kernel written into it."""
+    d = os.environ.get("CUPY_CACHE_DIR", os.path.expanduser("~/.cupy/kernel_cache"))
+    if not os.path.isdir(d):
+        os.makedirs(d, exist_ok=True)
+    with open(os.path.join(d, "k.cubin"), "wb") as f:
+        f.write(b"cubin")
+    return d
+
+
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root writes into a read-only folder")
+def test_the_frangi_filter_s_kernel_cache_is_in_the_work_folder(monkeypatch, tmp_path):
+    """2026-10-16, the fallback's image on a card: in a container whose home
+    is missing on a read-only root, CuPy's kernel cache under the home
+    raised OSError on every stack that reached the Frangi filter, which
+    lost arms U and V. The cache goes in the run's work folder, and the
+    feature workers start with it."""
+    ro = tmp_path / "root"
+    ro.mkdir()
+    ro.chmod(stat.S_IRUSR | stat.S_IXUSR)
+    try:
+        monkeypatch.setenv("HOME", str(ro / "home" / "nobody"))
+        monkeypatch.delenv("CUPY_CACHE_DIR", raising=False)
+        monkeypatch.delenv("LD_LIBRARY_PATH", raising=False)
+        monkeypatch.delenv("CUDA_PATH", raising=False)
+        with pytest.raises(OSError):
+            _cupy_cache_write()  # the fault, as the image's card run met it
+        work = tmp_path / "work"
+        full.frangi_card_env(tools.Env(fs_home=""), work)
+        assert _cupy_cache_write() == str(work / "cupy-cache")
+        lane = full.Lane(1, (tools.Env(fs_home=""), "cpu", ""))
+        try:
+            lane.submit("w", os.getenv, "CUPY_CACHE_DIR")
+            out: list = []
+            for _ in range(600):
+                got, dead = lane.done(0.1)
+                out += got
+                if got or dead:
+                    break
+            assert out == [("w", str(work / "cupy-cache"))]
+        finally:
+            lane.shutdown()
+        # a cache the caller named is kept
+        monkeypatch.setenv("CUPY_CACHE_DIR", str(tmp_path / "named"))
+        full.frangi_card_env(tools.Env(fs_home=""), tmp_path / "work2")
+        assert os.environ["CUPY_CACHE_DIR"] == str(tmp_path / "named") and not (tmp_path / "work2").exists()
+    finally:
+        ro.chmod(stat.S_IRWXU)
+
+
 def test_the_card_budget_is_what_the_engine_leased(monkeypatch):
     """The engine tells a unit on a card the memory it leased it
     (NILS_GPU_MEMORY_GB); the run plans within it unless told otherwise."""

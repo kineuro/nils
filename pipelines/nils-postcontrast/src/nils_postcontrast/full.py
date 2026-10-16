@@ -328,6 +328,29 @@ def candidates(stacks, context, F: Fusion, features_all: bool = False) -> tuple[
     return rows, why, todo
 
 
+def frangi_card_env(env: tools.Env, work: Path) -> None:
+    """What the feature workers need to run the Frangi filter on the card,
+    set before they start. CuPy compiles the filter's kernels with NVRTC:
+    the CUDA 12 libraries beside the card's TensorFlow go on the path the
+    workers start with. CuPy also writes every kernel it compiles to a
+    cache, ``~/.cupy/kernel_cache`` unless ``CUPY_CACHE_DIR`` says
+    otherwise; in a container the home is often missing on a read-only
+    root (apptainer ``--no-home``, an image's nobody user), and every
+    stack that reached the filter lost arms U and V to the ``OSError``
+    (2026-10-16, the fallback's image on a card). The cache goes in the
+    run's work folder, which is on disk and writable, unless the caller
+    named one."""
+    site = tools._site_nvidia(env.tf_python) if env.tf_python else ""
+    libs = tools._nvidia_libs(site)
+    if libs:
+        os.environ["LD_LIBRARY_PATH"] = libs + (":" + os.environ["LD_LIBRARY_PATH"] if os.environ.get("LD_LIBRARY_PATH") else "")
+        os.environ["CUDA_PATH"] = os.path.join(site, "cuda_runtime")
+    if not os.environ.get("CUPY_CACHE_DIR"):
+        cache = Path(work).absolute() / "cupy-cache"
+        cache.mkdir(parents=True, exist_ok=True)
+        os.environ["CUPY_CACHE_DIR"] = str(cache)
+
+
 def features_of(todo: list, work: Path, atlas: dict, hpn: dict, vxn: dict, env: tools.Env, cards: list, opts: dict) -> tuple[dict, dict]:
     """Every candidate's arm columns and what happened to it, by stack id;
     and the run's counts."""
@@ -343,13 +366,7 @@ def features_of(todo: list, work: Path, atlas: dict, hpn: dict, vxn: dict, env: 
         frangi = "card" if on_card else "cpu"
     card_names = ",".join(c.device for c in cards)
     if frangi == "card":
-        # CuPy compiles the filter's kernels with NVRTC: the CUDA 12 libraries
-        # beside the card's TensorFlow, on the path the feature workers start with
-        site = tools._site_nvidia(env.tf_python) if env.tf_python else ""
-        libs = tools._nvidia_libs(site)
-        if libs:
-            os.environ["LD_LIBRARY_PATH"] = libs + (":" + os.environ["LD_LIBRARY_PATH"] if os.environ.get("LD_LIBRARY_PATH") else "")
-            os.environ["CUDA_PATH"] = os.path.join(site, "cuda_runtime")
+        frangi_card_env(env, work)
     heavy = max(1, min(opts["workers"], opts["memory_gb"] // CPU_SYNTHSEG_GB))
     lane_a = Lane(opts["convert_workers"], (env, "cpu", ""))
     lane_c = Lane(opts["workers"], (env, frangi, card_names))

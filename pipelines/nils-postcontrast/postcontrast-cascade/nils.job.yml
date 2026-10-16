@@ -30,7 +30,7 @@
 # runs offline; the runner runs it with --network none.
 name: postcontrast-cascade
 schema-version: "0.5"
-tool-version: "0.2.1"
+tool-version: "0.2.2"
 description: >-
   Propose post_contrast per stack on T1-type brain with the certified
   post-contrast model, through its three-slice student; defer the rest of
