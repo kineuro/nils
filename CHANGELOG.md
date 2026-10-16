@@ -14,6 +14,9 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 ### Added
 
 - Each operation's step on a dataset's summary and a cohort's document says how many of its scans its model would add an answer to (`hint {kind, scans}`, ruling 35 (b)): for body part the scans with no body part, neither the rules' nor its model's (`no_body_part`); for post-contrast the scans that can be T1-type brain by their stored axes, the test its cascade applies, whose contrast neither the rules nor its model told (`t1_brain_contrast_unknown`). A count only.
+### Added
+
+- `GET /api/datasets/{name}/summary` says when the pseudonymised step's counts stopped short, as the found step does. Its `files` and `waiting` come from the same bounded probe of the originals and the copy, so the step gains `partial` (the copy's count stopped short and it holds at least `files`) and `waiting_partial` (`waiting` is at least that where only the originals' count stopped short, and not known where the copy's did too). The OpenAPI 7 contract is amended in place, additively. Tested by `the_pseudonymised_step_says_where_its_counts_stopped_short`.
 
 ## [1.0.0-alpha.87] - 2026-10-16
 
