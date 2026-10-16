@@ -4,6 +4,10 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Added
+
+- `GET /api/datasets/{name}/summary` says when the pseudonymised step's counts stopped short, as the found step does. Its `files` and `waiting` come from the same bounded probe of the originals and the copy, so the step gains `partial` (the copy's count stopped short and it holds at least `files`) and `waiting_partial` (`waiting` is at least that where only the originals' count stopped short, and not known where the copy's did too). The OpenAPI 7 contract is amended in place, additively. Tested by `the_pseudonymised_step_says_where_its_counts_stopped_short`.
+
 ## [1.0.0-alpha.87] - 2026-10-16
 
 Wave 7a's last engine: hospital reserve numbers read beside the personnummer and never kept, spare numbers through a map, model cards that gain their missing claims, the damaged-header flag's three signs (pack contract 11, MRI pack 1.3.0), the post-contrast label's clock across studies (time-rule-2), kept Query cards, LST-AI's thin image, and fixes from the wave's audit.
