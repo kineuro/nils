@@ -1309,18 +1309,21 @@ paths:
         "409": {description: "The document from.document names reads a session scheme the registry no longer keeps: {error, issues}, scheme_mismatch at scheme naming the document and the scheme, with what to do: store it again with a scheme the registry keeps, or keep the scheme again (added in place on 2026-10-12; it answered 500); or, added in place on 2026-10-13, from.handle names a handle whose list was held back, which holds no rows"}
   /api/ask/documents:
     get:
-      summary: The documents, folded into lineages by their parent chain, newest first (Wave 5 section 12.1)
+      summary: The documents, folded into lineages by their parent chain, newest first (Wave 5 section 12.1); the cards a person kept, by default (record 55 K6)
+      description: "Added in place, additively, on 2026-10-16 by record 55 (K6, the assistant's drafts are cards only when kept): a card is a line of versions, and a person keeps it (`PUT /api/ask/documents/{id}/kept`, or by storing a document the request carries at `POST /api/ask/documents`). The list answers the kept cards by default, and with `kept=no` the drafts nobody has kept, such as what an assistant proposed, or with `kept=all` both. A line is kept when its first document is, the one no parent leads to. A registry from before (schema 103) holds every line it had as kept, by whoever made it when it was made."
       parameters:
         - {name: limit, in: query, schema: {type: integer, default: 100}, description: "At most this many lineages, capped at page_rows_max"}
         - {name: after, in: query, schema: {type: integer}, description: "Lineages whose latest document id is below this, for the next page"}
+        - {name: kept, in: query, schema: {type: string, enum: ["yes", "no", all], default: "yes"}, description: "yes: the kept cards; no: the drafts nobody kept; all: both. Anything else is 400"}
       responses:
-        "200": {description: "{count, documents: [{document, root, name, grain, out, level, versions, author, created_at, updated_at, last_used_at, hash, last_run: {handle, at} | null}], next}"}
+        "200": {description: "{count, documents: [{document, root, name, grain, out, level, versions, author, created_at, updated_at, last_used_at, hash, last_run: {handle, at} | null, kept: {by, at} | null}], next, cards, drafts}; `kept` is who kept the line and when, null for a draft; `cards` and `drafts` count all the lines kept and not kept, whatever the page and the filter"}
+        "400": {description: "kept is not yes, no or all"}
     post:
       summary: Store a document and get its handle
-      description: "Stored under a parent, the document is that document's next version: a document already stored with no parent, such as a draft an assistant proposed, is adopted into the line once, and never into a line that follows it. The same text is one document."
+      description: "Stored under a parent, the document is that document's next version: a document already stored with no parent, such as a draft an assistant proposed, is adopted into the line once, and never into a line that follows it. The same text is one document. Added in place, additively, on 2026-10-16 by record 55 (K6): storing a document the request carries (`document`) is keeping its card, so the caller, when a person at a keyboard, is who kept it (a line already kept stays kept by whoever kept it first); a caller that acts as an agent or a model stores it and keeps nothing, and naming a document already stored (`document_id`), as keeping a draft under a parent does, keeps nothing either: `PUT /api/ask/documents/{id}/kept` does."
       requestBody: {content: {application/json: {schema: {type: object, properties: {document: {type: object}, document_id: {type: integer}, parent: {type: integer, description: The id of the document this one follows}}}}}}
       responses:
-        "200": {description: "{document, hash, digest, parent}"}
+        "200": {description: "{document, hash, digest, parent, kept: {by, at} | null}"}
         "400": {description: "A document that is refused, or a parent that is not a document id; added in place on 2026-10-12, a text or a number a date meets that writes no date (unknown_value at the clause, a date being written YYYY-MM-DD or YYYY-MM-DDTHH:MM:SSZ in UTC), a date parameter whose value is no date (unknown_value at params.<name>), and a document the request carries that names a session scheme the registry does not keep (scheme_mismatch at scheme), where they answered 500"}
         "404": {description: No document with that parent id}
         "409": {description: "A stored document (document_id) reads a session scheme the registry no longer keeps: {error, issues}, scheme_mismatch at scheme naming the document and the scheme, with what to do: store it again with a scheme the registry keeps, or keep the scheme again (added in place on 2026-10-12; it answered 500)"}
@@ -1330,7 +1333,26 @@ paths:
       parameters:
         - {name: id, in: path, required: true, schema: {type: integer}}
       responses:
-        "200": {description: The document with its provenance}
+        "200": {description: "The document with its provenance and, added in place on 2026-10-16 by record 55 (K6), `kept`: {by, at} when a person kept the card it is a version of, null when nobody did"}
+        "404": {description: No such document}
+  /api/ask/documents/{id}/kept:
+    put:
+      summary: Keep the card a document is a version of (query:work; a person's act; record 55 K6)
+      description: "The assistant proposes, and a person keeps: a draft is a card on the Query page's list only once kept. The mark sits on the first document of the document's line of versions, whichever version `id` names, and keeps the whole line. A card already kept stays as it is, kept by whoever kept it first, when they did; the answer says so. Refused with 403 for a caller that acts as an agent or a model. Writes no audit row and moves no epoch, since it changes no judgement."
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: integer}}
+      responses:
+        "200": {description: "{document, first, kept: {by, at}}: the document named, the first document of its line, and who kept the card and when"}
+        "403": {description: "No query:work, or a caller that acts as an agent or a model"}
+        "404": {description: No such document}
+    delete:
+      summary: Put the card a document is a version of back among the drafts (query:work; a person's act; record 55 K6)
+      description: "Nothing is deleted: the card leaves the default list and is listed with `kept=no`, where it can be kept again. A card nobody kept answers the same. Refused with 403 for a caller that acts as an agent or a model."
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: integer}}
+      responses:
+        "200": {description: "{document, first, kept: null}"}
+        "403": {description: "No query:work, or a caller that acts as an agent or a model"}
         "404": {description: No such document}
   /api/ask/selections:
     get:

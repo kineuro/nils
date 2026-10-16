@@ -5401,6 +5401,10 @@ pub(crate) fn door(method: &str, segs: &[&str]) -> (Need, Detail) {
         // saving what a question is; Wave 5 §12.1: a saved selection and an
         // identifier list are quasi-identifying territory
         ("POST", ["api", "ask", "documents" | "jobs"]) => (Need::One("query:work"), Plain),
+        // record 55 K6: keeping a card is saving it, so it needs the same
+        ("PUT" | "DELETE", ["api", "ask", "documents", _, "kept"]) => {
+            (Need::One("query:work"), Plain)
+        }
         ("PUT", ["api", "ask", "selections", _]) | ("POST", ["api", "ask", "values"]) => {
             (Need::One("query:work"), Quasi)
         }
@@ -8052,6 +8056,24 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
             "one document",
             "Reading a document",
             "Read a document",
+        ),
+        row(
+            "PUT /api/ask/documents/{id}/kept",
+            true,
+            false,
+            "free",
+            "one card",
+            "Keeping a card",
+            "Kept a card",
+        ),
+        row(
+            "DELETE /api/ask/documents/{id}/kept",
+            true,
+            false,
+            "free",
+            "one card",
+            "Putting a card back among the drafts",
+            "Put a card back among the drafts",
         ),
         row(
             "GET /api/ask/selections",

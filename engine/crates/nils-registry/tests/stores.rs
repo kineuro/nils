@@ -4958,7 +4958,7 @@ fn migration_102_adds_the_identifying_flag_to_an_old_id_type_on_both_backends() 
             .unwrap();
         assert_eq!(
             migrate::migrate(&mut store, Kind::Linkage).unwrap(),
-            [102],
+            (102..=migrate::SCHEMA_VERSION).collect::<Vec<i64>>(),
             "{name}"
         );
         assert!(
@@ -4979,5 +4979,105 @@ fn migration_102_adds_the_identifying_flag_to_an_old_id_type_on_both_backends() 
             !linkage::identifying_type(&mut store, "ctrl-id").unwrap(),
             "{name}"
         );
+    }
+}
+
+/// Record 55 K6: a registry from before migration 103, whose documents carry
+/// no mark, gains `kept_by` and `kept_at` and holds every line it had as kept
+/// by whoever made it, when it was made, on both backends: a document with no
+/// parent and one whose parent is no longer stored start lines, and a version
+/// under a parent is part of its line and carries no mark of its own. A
+/// document stored after is a draft until a person keeps it.
+#[test]
+fn migration_103_holds_every_line_from_before_as_kept_by_whoever_made_it() {
+    for (name, _guard, mut store) in stores() {
+        migrate::migrate(&mut store, Kind::Registry).unwrap();
+        let (doc, meta) = (
+            store.qualified("ask_document"),
+            store.qualified("registry_meta"),
+        );
+        store
+            .batch(&format!(
+                "ALTER TABLE {doc} DROP COLUMN kept_by;\n\
+                 ALTER TABLE {doc} DROP COLUMN kept_at;\n\
+                 UPDATE {meta} SET value = '102' WHERE key = 'schema_version'"
+            ))
+            .unwrap();
+        assert!(!migrate::column_exists(&mut store, "ask_document", "kept_at").unwrap());
+        fn put(store: &mut Store, digest: &str, who: &str, day: &str, parent: Option<i64>) -> i64 {
+            let at = format!("2026-10-{day}T09:00:00Z");
+            store
+                .insert(
+                    &Insert::new(
+                        table("ask_document"),
+                        &[
+                            "digest",
+                            "hash",
+                            "ask",
+                            "principal",
+                            "created_at",
+                            "last_used_at",
+                            "parent_id",
+                        ],
+                    )
+                    .returning(&["id"]),
+                    &[vec![
+                        Param::from(digest),
+                        Param::from(format!("h-{digest}")),
+                        Param::from("{}"),
+                        Param::from(who),
+                        Param::from(at.as_str()),
+                        Param::from("2026-10-12T09:00:00Z"),
+                        Param::from(parent),
+                    ]],
+                )
+                .unwrap()[0]
+                .int(0)
+                .unwrap()
+        }
+        let card = put(&mut store, "d1", "anna@lab", "01", None);
+        let version = put(&mut store, "d2", "bo@lab", "03", Some(card));
+        let draft = put(&mut store, "d3", "cy@lab", "04", None);
+        let orphan = put(&mut store, "d4", "di@lab", "05", Some(999_999));
+        assert_eq!(
+            migrate::migrate(&mut store, Kind::Registry).unwrap(),
+            (103..=migrate::SCHEMA_VERSION).collect::<Vec<i64>>(),
+            "{name}"
+        );
+        assert!(migrate::column_exists(&mut store, "ask_document", "kept_by").unwrap());
+        assert!(migrate::column_exists(&mut store, "ask_document", "kept_at").unwrap());
+        let mark = |store: &mut Store, id: i64| -> (Option<String>, Option<String>) {
+            let r = store
+                .query(
+                    &format!(
+                        "SELECT kept_by, kept_at FROM {} WHERE id = {id}",
+                        store.qualified("ask_document")
+                    ),
+                    &[],
+                )
+                .unwrap();
+            (
+                r[0].opt_text(0).unwrap().map(str::to_string),
+                r[0].opt_text(1).unwrap().map(str::to_string),
+            )
+        };
+        let kept = |who: &str, day: &str| {
+            (
+                Some(who.to_string()),
+                Some(format!("2026-10-{day}T09:00:00Z")),
+            )
+        };
+        assert_eq!(mark(&mut store, card), kept("anna@lab", "01"), "{name}");
+        assert_eq!(mark(&mut store, version), (None, None), "{name}");
+        assert_eq!(mark(&mut store, draft), kept("cy@lab", "04"), "{name}");
+        assert_eq!(mark(&mut store, orphan), kept("di@lab", "05"), "{name}");
+        // it ran once, and a document stored after is nobody's card
+        assert!(
+            migrate::migrate(&mut store, Kind::Registry)
+                .unwrap()
+                .is_empty()
+        );
+        let later = put(&mut store, "d5", "ed@lab", "06", None);
+        assert_eq!(mark(&mut store, later), (None, None), "{name}");
     }
 }

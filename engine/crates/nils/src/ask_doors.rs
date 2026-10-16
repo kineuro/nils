@@ -527,6 +527,7 @@ fn answer(
 ) -> Result<Reply, Reply> {
     let principal = caller.principal.as_str();
     let (get, post, put) = (method == "GET", method == "POST", method == "PUT");
+    let delete = method == "DELETE";
     let path = format!("/{}", segs.join("/"));
     // The door table every door reads (the suite contract, version 2).
     // Wave 5 §12.1: an identifier list is quasi-identifying territory, so
@@ -1327,13 +1328,28 @@ fn answer(
         }
         ["api", "ask", "documents"] if get => {
             // Wave 5 §12.1: documents folded into lineages by their parent
-            // chain, newest lineage first, each with its last run
+            // chain, newest lineage first, each with its last run. Record 55
+            // K6: the cards a person kept, or with `kept=no` the drafts
+            // nobody did, or with `kept=all` both
             let limit = query
                 .get("limit")
                 .and_then(|l| l.parse::<usize>().ok())
                 .unwrap_or(100)
                 .clamp(1, caps.page_rows_max as usize);
             let after = query.get("after").and_then(|a| a.parse::<i64>().ok());
+            let show = match query.get("kept").map(String::as_str) {
+                None | Some("yes") => Some(true),
+                Some("no") => Some(false),
+                Some("all") => None,
+                Some(other) => {
+                    return Err(Reply::error(
+                        400,
+                        format!(
+                            "kept is yes (the cards, by default), no (the drafts) or all, not {other}"
+                        ),
+                    ));
+                }
+            };
             let all =
                 document::list(registry.store()).map_err(|e| Reply::error(500, e.to_string()))?;
             let by_id: HashMap<i64, usize> =
@@ -1354,6 +1370,12 @@ fn answer(
             for i in 0..all.len() {
                 lineages.entry(root_of(i)).or_default().push(i);
             }
+            // a line is kept when its first document is: the one that no
+            // parent leads to, which is not always the lowest id (a draft
+            // adopted under a later card)
+            let kept_of = |first: i64| by_id.get(&first).and_then(|&i| all[i].kept.as_ref());
+            let cards = lineages.keys().filter(|&&f| kept_of(f).is_some()).count();
+            let drafts = lineages.len() - cards;
             // the last run of any version: the newest handle whose ask hash is
             // one of the lineage's hashes
             let handles = handle::list(registry.store(), true)
@@ -1373,8 +1395,9 @@ fn answer(
                 }
             }
             let mut rows: Vec<Value> = lineages
-                .values()
-                .map(|members| {
+                .iter()
+                .filter(|(first, _)| show.is_none_or(|want| kept_of(**first).is_some() == want))
+                .map(|(first, members)| {
                     let versions: Vec<&document::Document> =
                         members.iter().map(|&i| &all[i]).collect();
                     let latest = *versions
@@ -1405,6 +1428,7 @@ fn answer(
                         "last_used_at": versions.iter().map(|d| d.last_used_at.as_str()).max(),
                         "hash": latest.hash,
                         "last_run": run.map(|(id, at)| json!({"handle": id, "at": at})),
+                        "kept": kept_of(*first),
                     })
                 })
                 .collect();
@@ -1420,7 +1444,7 @@ fn answer(
                 None
             };
             Ok(Reply::ok(
-                json!({"count": page.len(), "documents": page, "next": next}),
+                json!({"count": page.len(), "documents": page, "next": next, "cards": cards, "drafts": drafts}),
             ))
         }
         ["api", "ask", "documents"] if post => {
@@ -1449,20 +1473,62 @@ fn answer(
                 values_cap: caps.options_values as usize,
             };
             let d = affordance::post(registry, &ask, &s, parent).map_err(affordance_err)?;
-            Ok(Reply::ok(
-                json!({"document": d.id, "hash": d.hash, "digest": d.digest, "parent": d.parent_id}),
-            ))
+            // record 55 K6: a person who stores a document the request
+            // carries keeps its card, which is what saving one is; naming a
+            // document already stored, as keeping a draft under a parent
+            // does, keeps nothing, and an agent or a model that stores one
+            // proposes it, and a person keeps it
+            let card = if stored.is_none() && crate::serve::author_of(caller).0 == "person" {
+                document::keep(registry.store(), d.id, principal)
+            } else {
+                document::card_of(registry.store(), d.id)
+            }
+            .map_err(|e| Reply::error(500, e.to_string()))?;
+            Ok(Reply::ok(json!({
+                "document": d.id, "hash": d.hash, "digest": d.digest, "parent": d.parent_id,
+                "kept": card.and_then(|c| c.kept),
+            })))
         }
         ["api", "ask", "documents", _] if get => {
             let id = id_at(3)?;
             let d = document::get(registry.store(), id)
                 .map_err(|e| Reply::error(500, e.to_string()))?
                 .ok_or_else(|| Reply::error(404, format!("no document {id}")))?;
+            // record 55 K6: whether the card it is a version of is kept
+            let card = document::card_of(registry.store(), id)
+                .map_err(|e| Reply::error(500, e.to_string()))?;
             Ok(Reply::ok(json!({
                 "document": d.id, "hash": d.hash, "digest": d.digest, "principal": d.principal,
                 "created_at": d.created_at, "last_used_at": d.last_used_at, "parent": d.parent_id,
+                "kept": card.and_then(|c| c.kept),
                 "ask": d.ask,
             })))
+        }
+        ["api", "ask", "documents", _, "kept"] if put || delete => {
+            // record 55 K6: a person keeps a card, or puts it back among
+            // the drafts. The assistant proposes and a person keeps, so an
+            // agent's or a model's token is refused, whatever it holds.
+            let (kind, _) = crate::serve::author_of(caller);
+            if kind != "person" {
+                return Err(Reply::error(
+                    403,
+                    format!(
+                        "keeping a card is a person's act, and this caller acts as {}",
+                        nils_registry::a_or_an(kind)
+                    ),
+                ));
+            }
+            let id = id_at(3)?;
+            let card = if put {
+                document::keep(registry.store(), id, principal)
+            } else {
+                document::unkeep(registry.store(), id)
+            }
+            .map_err(|e| Reply::error(500, e.to_string()))?
+            .ok_or_else(|| Reply::error(404, format!("no document {id}")))?;
+            Ok(Reply::ok(
+                json!({"document": id, "first": card.first, "kept": card.kept}),
+            ))
         }
         ["api", "ask", "selections"] if get => {
             // record 55 H2: the saved selections as a list, by name, a page
@@ -1857,6 +1923,8 @@ pub(crate) const DOORS: &[&str] = &[
     "GET /api/ask/documents",
     "POST /api/ask/documents",
     "GET /api/ask/documents/{id}",
+    "PUT /api/ask/documents/{id}/kept",
+    "DELETE /api/ask/documents/{id}/kept",
     "GET /api/ask/selections",
     "PUT /api/ask/selections/{name}",
     "GET /api/ask/selections/{name}",

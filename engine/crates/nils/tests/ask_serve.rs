@@ -4589,3 +4589,219 @@ fn every_door_holds_a_list_of_fewer_than_five_that_an_age_chose() {
 
 /// The schema the Postgres half of the small lists door test registers in.
 const LIST_SCHEMA: &str = "nils_ask_serve_list_test";
+
+/// Record 55 K6: an assistant's draft is a card on the Query page's list only
+/// once a person keeps it. The draft door stores a draft nobody kept; the
+/// list answers the kept cards, the drafts with `kept=no` and both with
+/// `kept=all`; keeping and putting back are a person's acts under query:work,
+/// refused for a caller who may only see and for a caller that acts as an
+/// agent; the mark sits on the first document of the line, so keeping any
+/// version keeps the line and the first keeper stays; storing a document the
+/// request carries as a person keeps its card, as an agent keeps nothing, and
+/// naming one already stored keeps nothing; and the doors are listed and in
+/// the policy.
+#[test]
+fn a_draft_is_listed_as_a_card_only_when_a_person_keeps_it() {
+    let home = synthetic();
+    let server = Server::start(
+        &home,
+        28,
+        &[
+            "--auth",
+            "token",
+            "--token",
+            "a-reader-token-of-length=seer@lab:query:see",
+            "--token",
+            "an-operator-token-of-len=ops@lab:operator",
+            "--token",
+            "a-second-operator-token-=bo@lab:operator",
+        ],
+    );
+    let reader = Some("a-reader-token-of-length");
+    let ops = Some("an-operator-token-of-len");
+    let bo = Some("a-second-operator-token-");
+    let agent = [("X-Nils-Actor", r#"{"kind":"agent","name":"assistant"}"#)];
+    let ids = |listed: &serde_json::Value| -> Vec<i64> {
+        listed["documents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| d["document"].as_i64().unwrap())
+            .collect()
+    };
+    let list = |query: &str, who: Option<&str>| {
+        let (status, listed) =
+            server.request("GET", &format!("/api/ask/documents{query}"), None, who);
+        assert_eq!(status, 200, "{listed}");
+        listed
+    };
+    // the assistant drafts, as the agent it acts as: stored, and nobody's card
+    let text = serde_json::to_string(&plain("women over forty")).unwrap();
+    let (status, drafted) = server.request_with(
+        "POST",
+        "/api/ask/draft",
+        Some(&body(serde_json::json!({"text": text}))),
+        ops,
+        &agent,
+    );
+    assert_eq!(status, 200, "{drafted}");
+    let draft = drafted["document"].as_i64().expect("stored");
+    let listed = list("", ops);
+    assert!(!ids(&listed).contains(&draft), "{listed}");
+    assert_eq!(
+        (listed["cards"].as_i64(), listed["drafts"].as_i64()),
+        (Some(0), Some(1)),
+        "{listed}"
+    );
+    let listed = list("?kept=no", ops);
+    assert_eq!(ids(&listed), [draft], "{listed}");
+    assert!(listed["documents"][0]["kept"].is_null(), "{listed}");
+    assert_eq!(ids(&list("?kept=all", ops)), [draft]);
+    let (status, refused) = server.request("GET", "/api/ask/documents?kept=maybe", None, ops);
+    assert_eq!(status, 400, "{refused}");
+    // a document says whether its card is kept
+    let (status, read) =
+        server.request("GET", &format!("/api/ask/documents/{draft}"), None, reader);
+    assert_eq!(status, 200, "{read}");
+    assert!(read["kept"].is_null(), "{read}");
+    // keeping is a person's act, under query:work
+    let door = format!("/api/ask/documents/{draft}/kept");
+    let (status, refused) = server.request_with("PUT", &door, None, ops, &agent);
+    assert_eq!(status, 403, "{refused}");
+    assert!(
+        refused["error"]
+            .as_str()
+            .unwrap()
+            .contains("a person's act"),
+        "{refused}"
+    );
+    let (status, refused) = server.request("PUT", &door, None, reader);
+    assert_eq!(status, 403, "{refused}");
+    let (status, refused) = server.request_with("DELETE", &door, None, ops, &agent);
+    assert_eq!(status, 403, "{refused}");
+    let (status, nothing) = server.request("PUT", "/api/ask/documents/999999/kept", None, ops);
+    assert_eq!(status, 404, "{nothing}");
+    let (status, nothing) = server.request("DELETE", "/api/ask/documents/999999/kept", None, ops);
+    assert_eq!(status, 404, "{nothing}");
+    assert!(ids(&list("", ops)).is_empty());
+    // a person keeps it: who and when, and it is a card
+    let (status, kept) = server.request("PUT", &door, None, ops);
+    assert_eq!(status, 200, "{kept}");
+    assert_eq!(
+        (kept["document"].as_i64(), kept["first"].as_i64()),
+        (Some(draft), Some(draft))
+    );
+    assert_eq!(kept["kept"]["by"], "ops@lab", "{kept}");
+    let at = kept["kept"]["at"].as_str().expect("when").to_string();
+    assert!(at.ends_with('Z') && at.len() == 20, "{at}");
+    let listed = list("", reader);
+    assert_eq!(ids(&listed), [draft], "{listed}");
+    assert_eq!(listed["documents"][0]["kept"], kept["kept"], "{listed}");
+    assert_eq!(
+        (listed["cards"].as_i64(), listed["drafts"].as_i64()),
+        (Some(1), Some(0)),
+        "{listed}"
+    );
+    assert!(ids(&list("?kept=no", ops)).is_empty());
+    let (_, read) = server.request("GET", &format!("/api/ask/documents/{draft}"), None, reader);
+    assert_eq!(read["kept"], kept["kept"], "{read}");
+    // another person keeping it leaves the first keeper
+    let (status, again) = server.request("PUT", &door, None, bo);
+    assert_eq!(status, 200, "{again}");
+    assert_eq!(again["kept"]["by"], "ops@lab", "{again}");
+    assert_eq!(again["kept"]["at"], at.as_str(), "{again}");
+    // put back, it is a draft again, kept=no lists it, and nothing was deleted
+    let (status, back) = server.request("DELETE", &door, None, bo);
+    assert_eq!(status, 200, "{back}");
+    assert!(back["kept"].is_null(), "{back}");
+    assert!(ids(&list("", ops)).is_empty());
+    assert_eq!(ids(&list("?kept=no", ops)), [draft]);
+    // naming a document already stored, as keeping a draft under a parent does, keeps nothing
+    let (status, named) = server.request(
+        "POST",
+        "/api/ask/documents",
+        Some(&body(serde_json::json!({"document_id": draft}))),
+        ops,
+    );
+    assert_eq!(status, 200, "{named}");
+    assert_eq!(named["document"], draft, "{named}");
+    assert!(named["kept"].is_null(), "{named}");
+    // storing a document the request carries, as a person, keeps its card; as an agent keeps nothing
+    let (status, card) = server.request(
+        "POST",
+        "/api/ask/documents",
+        Some(&body(
+            serde_json::json!({"document": plain("a card by hand")}),
+        )),
+        bo,
+    );
+    assert_eq!(status, 200, "{card}");
+    assert_eq!(card["kept"]["by"], "bo@lab", "{card}");
+    let card_id = card["document"].as_i64().unwrap();
+    let (status, proposed) = server.request_with(
+        "POST",
+        "/api/ask/documents",
+        Some(&body(serde_json::json!({"document": plain("a proposal")}))),
+        ops,
+        &agent,
+    );
+    assert_eq!(status, 200, "{proposed}");
+    assert!(proposed["kept"].is_null(), "{proposed}");
+    let proposal = proposed["document"].as_i64().unwrap();
+    assert_eq!(ids(&list("", ops)), [card_id]);
+    // a version stored under a draft is part of its line: keeping the version keeps the line
+    let (status, version) = server.request_with(
+        "POST",
+        "/api/ask/documents",
+        Some(&body(
+            serde_json::json!({"document": plain("a proposal, narrowed"), "parent": proposal}),
+        )),
+        ops,
+        &agent,
+    );
+    assert_eq!(status, 200, "{version}");
+    assert_eq!(version["parent"], proposal, "{version}");
+    let version = version["document"].as_i64().unwrap();
+    let (status, kept_line) = server.request(
+        "PUT",
+        &format!("/api/ask/documents/{version}/kept"),
+        None,
+        ops,
+    );
+    assert_eq!(status, 200, "{kept_line}");
+    assert_eq!(kept_line["first"], proposal, "{kept_line}");
+    let listed = list("", ops);
+    let row = listed["documents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["document"] == version)
+        .unwrap_or_else(|| panic!("{listed}"));
+    assert_eq!(
+        (row["versions"].as_i64(), row["kept"]["by"].as_str()),
+        (Some(2), Some("ops@lab")),
+        "{row}"
+    );
+    assert_eq!(ids(&listed), [version, card_id], "{listed}");
+    // the doors are listed and have their policy rows
+    let (status, caps) = server.request("GET", "/api/capabilities", None, ops);
+    assert_eq!(status, 200, "{caps}");
+    for door in [
+        "PUT /api/ask/documents/{id}/kept",
+        "DELETE /api/ask/documents/{id}/kept",
+    ] {
+        assert!(
+            caps["doors"].as_array().unwrap().iter().any(|d| d == door),
+            "{door}"
+        );
+        let row = caps["policy"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["door"] == door)
+            .unwrap_or_else(|| panic!("{door}"));
+        assert_eq!(row["grant"], "query:work", "{row}");
+        assert_eq!(row["writes"], true, "{row}");
+    }
+    server.finish();
+}
