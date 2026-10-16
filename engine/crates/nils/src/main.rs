@@ -12795,6 +12795,11 @@ struct RestoreArgs {
     /// Yes, replace the registry and the linkage store with the archive
     #[arg(long)]
     yes: bool,
+    /// Who asked for it, as `user@node`, where that is not the account
+    /// running this: the person the supervisor restored for (record 55
+    /// ruling 35 (c))
+    #[arg(long, value_name = "PRINCIPAL", hide = true)]
+    by: Option<String>,
 }
 
 /// Wave 4c §6.5: the packs a directory holds, for the door. Record 26: with
@@ -13386,6 +13391,40 @@ fn verify_command(home: &Home, args: VerifyArgs) -> Result<(), Exit> {
 fn restore_command(home: &Home, args: RestoreArgs) -> Result<(), Exit> {
     let mut registry = open(home)?;
     let doc = backup::restore(home, &mut registry, &args.archive, args.yes)?;
+    // The row goes into the registry as it was put back, so it is there to
+    // read afterwards: written before, it would be replaced with the rest.
+    // The registry is opened again, since its files were replaced under the
+    // one open before.
+    drop(registry);
+    let by = args
+        .by
+        .as_deref()
+        .and_then(nils_registry::principal::Principal::parse)
+        .map_or_else(actor, |p| p.to_string());
+    let audited = open(home).and_then(|mut restored| {
+        nils_registry::audit::record(
+            &mut restored,
+            &nils_registry::audit::Entry {
+                principal: &by,
+                action: nils_registry::audit::Action::Restore,
+                scope: serde_json::json!({
+                    "archive": args.archive.file_name().map(|n| n.to_string_lossy().into_owned()),
+                    "pre_restore": doc["pre_restore"]
+                        .as_str()
+                        .and_then(|p| Path::new(p).file_name())
+                        .map(|n| n.to_string_lossy().into_owned()),
+                }),
+                policy: None,
+                job_id: None,
+                details: None,
+            },
+        )
+        .map_err(|e| fail(e.to_string()))
+    });
+    if let Err(e) = audited {
+        // the archive is back either way; the missing row is said
+        eprintln!("nils: the restore is not in the audit log: {}", e.message);
+    }
     println!(
         "nils restore   {}   pre-restore archive {}",
         doc["restored"].as_str().unwrap_or_default(),
