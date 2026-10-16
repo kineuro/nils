@@ -991,3 +991,143 @@ out: {{set: by_month, level: aggregate, columns: [["field", {{}}, "month"], ["fi
         );
     }
 }
+
+/// Record 55 K6, on each backend: a draft an assistant proposed is no card
+/// until a person keeps it. The mark sits on the first document of a line of
+/// versions, so keeping any version keeps the line, the first keeper stays,
+/// and putting the card back clears the line; a document that is not stored
+/// has no card; and a document unused for the retention goes unless a card a
+/// person kept holds it.
+#[test]
+fn a_draft_is_a_card_only_when_a_person_keeps_it() {
+    let doc = |name: &str| {
+        parse(
+            &json!({
+                "ast_version": 1,
+                "name": name,
+                "sets": {"a": {"grain": "subject"}},
+                "out": {"set": "a", "level": "count"}
+            })
+            .to_string(),
+        )
+        .unwrap()
+    };
+    for mut l in labs() {
+        let scope = Scope::default();
+        let scheme = Scheme::default();
+        let s = Setting {
+            names: &l.catalog,
+            scope: &scope,
+            scheme: &scheme,
+            principal: "anna@lab",
+            bounds: bounds(),
+            values_cap: 50,
+        };
+        // the draft door stores what the assistant proposes, and nobody kept it
+        let drafted = affordance::draft(
+            &mut l.registry,
+            &serde_json::to_string(&doc("women")).unwrap(),
+            &s,
+            None,
+        )
+        .unwrap();
+        let first = drafted.document.expect("a valid draft is stored");
+        let card = document::card_of(l.registry.store(), first)
+            .unwrap()
+            .unwrap();
+        assert_eq!((card.first, card.kept), (first, None), "{}", l.name);
+        // its next version, stored under it, is part of the same card
+        let second = affordance::post(&mut l.registry, &doc("women over 40"), &s, Some(first))
+            .unwrap()
+            .id;
+        let card = document::card_of(l.registry.store(), second)
+            .unwrap()
+            .unwrap();
+        assert_eq!((card.first, card.kept), (first, None), "{}", l.name);
+        // another draft, in a line of its own
+        let alone = affordance::draft(
+            &mut l.registry,
+            &serde_json::to_string(&doc("men")).unwrap(),
+            &s,
+            None,
+        )
+        .unwrap()
+        .document
+        .unwrap();
+        // keeping the second version keeps the line, by its first document
+        let kept = document::keep(l.registry.store(), second, "anna@lab")
+            .unwrap()
+            .unwrap();
+        assert_eq!(kept.first, first, "{}", l.name);
+        let by = kept.kept.expect("kept");
+        assert_eq!(by.by, "anna@lab", "{}", l.name);
+        let mark = |l: &mut common::Lab, id: i64| {
+            document::get(l.registry.store(), id).unwrap().unwrap().kept
+        };
+        assert_eq!(mark(&mut l, first), Some(by.clone()), "{}", l.name);
+        assert_eq!(mark(&mut l, second), None, "{}", l.name);
+        assert_eq!(mark(&mut l, alone), None, "{}", l.name);
+        // the first keeper stays, with the time they kept it
+        let again = document::keep(l.registry.store(), first, "bo@lab")
+            .unwrap()
+            .unwrap();
+        assert_eq!(again.kept, Some(by.clone()), "{}", l.name);
+        let seen = document::card_of(l.registry.store(), second)
+            .unwrap()
+            .unwrap();
+        assert_eq!(seen.kept, Some(by), "{}", l.name);
+        // the list reads the marks
+        let listed = document::list(l.registry.store()).unwrap();
+        let marks: Vec<(i64, bool)> = listed.iter().map(|d| (d.id, d.kept.is_some())).collect();
+        assert_eq!(marks, [(first, true), (second, false), (alone, false)]);
+        // a document that is not stored has no card
+        assert!(
+            document::card_of(l.registry.store(), 999_999)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            document::keep(l.registry.store(), 999_999, "anna@lab")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            document::unkeep(l.registry.store(), 999_999)
+                .unwrap()
+                .is_none()
+        );
+        // unused for the retention: the draft goes, the card a person kept stays
+        let table = l.registry.store().qualified("ask_document");
+        l.registry
+            .store()
+            .batch(&format!(
+                "UPDATE {table} SET last_used_at = '2026-01-01T00:00:00Z'"
+            ))
+            .unwrap();
+        let now = nils_registry::time::now_iso();
+        assert_eq!(
+            document::prune(l.registry.store(), &now, document::KEEP_DAYS).unwrap(),
+            1,
+            "{}",
+            l.name
+        );
+        let left: Vec<i64> = document::list(l.registry.store())
+            .unwrap()
+            .iter()
+            .map(|d| d.id)
+            .collect();
+        assert_eq!(left, [first, second], "{}", l.name);
+        // put back, the card is a draft again: any version names it, nothing is deleted
+        let back = document::unkeep(l.registry.store(), second)
+            .unwrap()
+            .unwrap();
+        assert_eq!((back.first, back.kept), (first, None), "{}", l.name);
+        assert_eq!(mark(&mut l, first), None, "{}", l.name);
+        assert_eq!(document_count(&mut l.registry), 2, "{}", l.name);
+        // and kept again, it is marked anew
+        let once_more = document::keep(l.registry.store(), first, "bo@lab")
+            .unwrap()
+            .unwrap();
+        assert_eq!(once_more.kept.unwrap().by, "bo@lab", "{}", l.name);
+    }
+}

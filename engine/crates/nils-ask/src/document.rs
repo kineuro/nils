@@ -6,7 +6,8 @@
 //! canonical text with its parameters bound, where the content hash is the
 //! core's; the same text posted twice is one row. A document holds the
 //! question and never subject data; its rows go ninety days after the last
-//! use.
+//! use, unless a person kept the card it is a version of (record 55 K6): a
+//! draft an assistant proposed is no card until a person keeps it.
 
 use std::fmt;
 
@@ -59,6 +60,26 @@ pub struct Document {
     pub created_at: String,
     pub last_used_at: String,
     pub parent_id: Option<i64>,
+    /// The mark on this document itself. It counts only on the first
+    /// document of a line of versions, which is the card (`card_of`).
+    pub kept: Option<Kept>,
+}
+
+/// Who kept a card and when (record 55 K6): a person's act, which puts the
+/// card on their list of cards. A draft nobody kept is not on it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Kept {
+    pub by: String,
+    pub at: String,
+}
+
+/// The card a document is a version of: the first document of its line, and
+/// whether a person kept it. A line is kept when its first document is, and
+/// keeping or putting back any version acts on that one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Card {
+    pub first: i64,
+    pub kept: Option<Kept>,
 }
 
 /// The digest of a whole document: its canonical JSON, parameters bound.
@@ -69,7 +90,8 @@ pub fn digest(ask: &Ask) -> String {
     hex::encode(h.finalize())
 }
 
-const COLUMNS: &str = "id, digest, hash, ask, principal, created_at, last_used_at, parent_id";
+const COLUMNS: &str =
+    "id, digest, hash, ask, principal, created_at, last_used_at, parent_id, kept_by, kept_at";
 
 fn document_of(r: &Row) -> Result<Document, DocumentError> {
     let ask: Ask = serde_json::from_str(r.text(3)?)
@@ -83,6 +105,18 @@ fn document_of(r: &Row) -> Result<Document, DocumentError> {
         created_at: r.text(5)?.to_string(),
         last_used_at: r.text(6)?.to_string(),
         parent_id: r.opt_int(7)?,
+        kept: kept_in(r, 8, 9)?,
+    })
+}
+
+/// The mark a row carries in its two columns: both, or none.
+fn kept_in(r: &Row, by: usize, at: usize) -> Result<Option<Kept>, DocumentError> {
+    Ok(match (r.opt_text(by)?, r.opt_text(at)?) {
+        (Some(by), Some(at)) => Some(Kept {
+            by: by.to_string(),
+            at: at.to_string(),
+        }),
+        _ => None,
     })
 }
 
@@ -168,6 +202,7 @@ pub fn put(
         created_at: now.clone(),
         last_used_at: now,
         parent_id: parent,
+        kept: None,
     })
 }
 
@@ -193,6 +228,90 @@ fn descends_from(store: &mut Store, id: i64, ancestor: i64) -> Result<bool, Docu
         };
     }
     Ok(false)
+}
+
+/// The card a document is a version of: the first document of its line,
+/// reached through the parents, and whether a person kept it. None for a
+/// document that is not stored. A parent that is gone starts the line where
+/// it is, and a chain longer than any a person makes ends where it is
+/// reached. A read here moves no last use.
+pub fn card_of(store: &mut Store, id: i64) -> Result<Option<Card>, DocumentError> {
+    let sql = format!(
+        "SELECT id, parent_id, kept_by, kept_at FROM {} WHERE id = {}",
+        store.qualified("ask_document"),
+        store.dialect().param(1, Type::Int)
+    );
+    let mut at = id;
+    let mut steps = 0;
+    let mut found: Option<Card> = None;
+    loop {
+        let Some(r) = store.query_opt(&sql, &[Param::Int(at)])? else {
+            return Ok(found);
+        };
+        found = Some(Card {
+            first: r.int(0)?,
+            kept: kept_in(&r, 2, 3)?,
+        });
+        match r.opt_int(1)? {
+            Some(parent) if steps < 1000 => {
+                steps += 1;
+                at = parent;
+            }
+            _ => return Ok(found),
+        }
+    }
+}
+
+/// Keep the card a document is a version of, as `by`, now (record 55 K6).
+/// A card already kept stays as it is, kept by whoever kept it first when
+/// they did. None for a document that is not stored. Whether the caller may
+/// keep is the door's to say; a keep is a person's act.
+pub fn keep(store: &mut Store, id: i64, by: &str) -> Result<Option<Card>, DocumentError> {
+    let Some(card) = card_of(store, id)? else {
+        return Ok(None);
+    };
+    if card.kept.is_some() {
+        return Ok(Some(card));
+    }
+    let at = now_iso();
+    store.update_by_id(
+        table("ask_document"),
+        &[
+            ("kept_by", Param::from(by)),
+            ("kept_at", Param::from(at.as_str())),
+            ("last_used_at", Param::from(at.as_str())),
+        ],
+        "id",
+        card.first,
+    )?;
+    Ok(Some(Card {
+        first: card.first,
+        kept: Some(Kept {
+            by: by.to_string(),
+            at,
+        }),
+    }))
+}
+
+/// Put the card a document is a version of back among the drafts: nobody
+/// has kept it. Nothing is deleted, and keeping it again marks it anew.
+/// None for a document that is not stored.
+pub fn unkeep(store: &mut Store, id: i64) -> Result<Option<Card>, DocumentError> {
+    let Some(card) = card_of(store, id)? else {
+        return Ok(None);
+    };
+    if card.kept.is_some() {
+        store.update_by_id(
+            table("ask_document"),
+            &[("kept_by", Param::Null), ("kept_at", Param::Null)],
+            "id",
+            card.first,
+        )?;
+    }
+    Ok(Some(Card {
+        first: card.first,
+        kept: None,
+    }))
 }
 
 /// A document by handle; a read moves its last use.
@@ -226,17 +345,61 @@ pub fn list(store: &mut Store) -> Result<Vec<Document>, DocumentError> {
     store.query(&sql, &[])?.iter().map(document_of).collect()
 }
 
-/// Drop every document unused for `keep_days`; returns how many went.
+/// Drop every document unused for `keep_days`, except the versions of a card
+/// a person kept (record 55 K6); returns how many went.
 pub fn prune(store: &mut Store, now: &str, keep_days: i64) -> Result<u64, DocumentError> {
     let now_secs =
         secs_of(now).ok_or_else(|| DocumentError::Message(format!("{now} is not a timestamp")))?;
     let cutoff = now_secs.saturating_sub((keep_days.max(0) as u64) * 86_400);
     let cutoff_iso = nils_registry::time::iso_of(cutoff);
     let dialect = store.dialect();
-    let sql = format!(
-        "DELETE FROM {} WHERE last_used_at < {}",
-        store.qualified("ask_document"),
+    let table_name = store.qualified("ask_document");
+    let unused = format!(
+        "SELECT id FROM {table_name} WHERE last_used_at < {}",
         dialect.param(1, Type::Timestamp)
     );
-    Ok(store.execute(&sql, &[Param::from(cutoff_iso.as_str())])?)
+    let unused: Vec<i64> = store
+        .query(&unused, &[Param::from(cutoff_iso.as_str())])?
+        .iter()
+        .map(|r| r.int(0))
+        .collect::<Result<_, _>>()?;
+    if unused.is_empty() {
+        return Ok(0);
+    }
+    // the lines a person kept, by the parents every document names
+    let lines = store.query(
+        &format!(
+            "SELECT id, parent_id, CASE WHEN kept_at IS NULL THEN 0 ELSE 1 END FROM {table_name}"
+        ),
+        &[],
+    )?;
+    let mut parent: std::collections::HashMap<i64, Option<i64>> = std::collections::HashMap::new();
+    let mut kept: std::collections::HashSet<i64> = std::collections::HashSet::new();
+    for r in &lines {
+        parent.insert(r.int(0)?, r.opt_int(1)?);
+        if r.int(2)? != 0 {
+            kept.insert(r.int(0)?);
+        }
+    }
+    let in_kept_line = |mut id: i64| {
+        for _ in 0..1000 {
+            if kept.contains(&id) {
+                return true;
+            }
+            match parent.get(&id).copied().flatten() {
+                Some(up) => id = up,
+                None => return false,
+            }
+        }
+        true
+    };
+    let delete = format!(
+        "DELETE FROM {table_name} WHERE id = {}",
+        dialect.param(1, Type::Int)
+    );
+    let mut gone = 0;
+    for id in unused.into_iter().filter(|&id| !in_kept_line(id)) {
+        gone += store.execute(&delete, &[Param::Int(id)])?;
+    }
+    Ok(gone)
 }

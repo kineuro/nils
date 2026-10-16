@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 102;
+pub const SCHEMA_VERSION: i64 = 103;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -462,7 +462,34 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 102,
         apply: an_id_type_says_whether_it_identifies,
     },
+    Migration {
+        version: 103,
+        apply: a_card_is_kept_by_a_person,
+    },
 ];
+
+/// Record 55 K6 (2026-10-16): a person keeps a card, and an assistant's
+/// draft is no card until they do (`ask_document.kept_by`, `kept_at`). The
+/// two columns are added, and every line of versions the registry holds is
+/// marked kept by whoever made it, when it was made. A draft stored before
+/// cannot be told from a card made by hand, and no card leaves a person's
+/// list unasked. Only the first document of a line is marked: the one with
+/// no parent, or whose parent is no longer stored.
+fn a_card_is_kept_by_a_person(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_columns(store, "ask_document", &["kept_by", "kept_at"])?;
+    let table = store.qualified("ask_document");
+    store.execute(
+        &format!(
+            "UPDATE {table} SET kept_by = principal, kept_at = created_at \
+             WHERE kept_at IS NULL AND (parent_id IS NULL OR parent_id NOT IN (SELECT id FROM {table}))"
+        ),
+        &[],
+    )?;
+    Ok(())
+}
 
 /// Record 55 ruling 22 (b): a certificate may cite its graded run (the
 /// run, its manifest's sha256, the plan's commit and the model's artifact

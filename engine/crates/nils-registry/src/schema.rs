@@ -2477,6 +2477,12 @@ fn build_registry() -> Vec<Table> {
                 req("created_at", Type::Timestamp),
                 req("last_used_at", Type::Timestamp),
                 col("parent_id", Type::Int),
+                // Record 55 K6 (2026-10-16): a person kept the card this
+                // document starts, and when. The mark sits on the first
+                // document of a line of versions and keeps the whole line;
+                // null where nobody has, as for a draft an assistant proposed.
+                col("kept_by", Type::Text),
+                col("kept_at", Type::Timestamp),
             ],
         )
         .unique(&["digest"])
