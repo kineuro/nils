@@ -1006,6 +1006,13 @@ in, `modes: [informative]` for the ones the standard has an entity for, and the
 mode is written on the release row, so a re-run of a release writes the names
 that release wrote.
 
+*Amended in place on 2026-10-16 by record 55 (C4, the rulings of 2026-10-08):* the
+two modes were replaced by three styles of naming, chosen per release: the
+descriptive layout and two BIDS styles, `--naming full`, the default, and
+`--naming minimal`. A release recorded under `bids` or `informative` re-runs as
+`full`. Wave 7a's specification says what each style spells (section 8.1 of
+`wave7a-ready-for-production.md`).
+
 **`func` requires `task`, and no stack has one.** Of 1,173 functional stacks,
 ten carry anything resting-like in their text and none says "task". They are
 genuinely functional, we simply do not know what the subject was doing, and no
