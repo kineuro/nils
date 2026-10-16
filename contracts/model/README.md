@@ -22,7 +22,7 @@ directory beside the old one, which stays.
 | document | what it fixes |
 |---|---|
 | `card.schema.json` | the card: identity by the digest of the canonical artifact, name and version, kind, task and slot, the encoders a head reads in order (by digest; record 43 lets a head read several), the threshold its proposals are staged at (record 43), the label set it was fitted on (by digest), the pack version, the image that runs it, metrics, preprocessing, parameters, intended use, limits and the runtime a check ran under; record 55 D3: a System 1 model's (task `system1`) review gate thresholds per axis, `gate.axes.<axis>.lambda1` and `lambda2` |
-| `lifecycle.schema.json` | the four states, the transitions and their events, the check record that admits a model, and a registered model as the engine answers it; record 55 ruling 22 (b): the certificate that names it, on a sealed sample or citing the graded run that measured it (`certificate`, `citation`) |
+| `lifecycle.schema.json` | the four states, the transitions and their events, the check record that admits a model, and a registered model as the engine answers it; record 55 ruling 22 (b): the certificate that names it, on a sealed sample or citing the graded run that measured it (`certificate`, `citation`); record 55 ruling 31 (a): the transition `claims_added` and the claims a card gained after it was registered (`additions`) |
 
 The rules both implementations keep:
 
@@ -30,6 +30,7 @@ The rules both implementations keep:
 2. Admission records a check. One that passed moves a registered model to admitted and stays on it; one that failed is kept as an event and leaves the state as it was.
 3. Promotion is refused unless the model was admitted. Promoting a model retires the one promoted before it in the same task and slot, so a slot has at most one promoted model.
 4. Every transition is an event with who and when, and an audit row. Nothing is deleted.
+5. A card is kept as it was registered, except that it may gain the claims it lacks (record 55, ruling 31 (a)): the label set it was trained on (`trained_on`), its tested claims (`tested`) and its speed (`speed.cpu`, and `speed.gpu` unless its `gpu` is `none`). Additions only: a claim the card states already is refused, and so is any other field, which is a new version of the model. Each claim is checked as registration checks it, and each addition is a `claims_added` event holding what was added, and an audit row.
 
 In the engine a model's answer is a decision with `author_kind` model and the
 model's id, refused unless the model is registered and admitted or promoted,

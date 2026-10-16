@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://nils.kineuro.se/contracts/model/v1/lifecycle.schema.json",
   "title": "NILS model lifecycle",
-  "description": "Record 42 (D15): the four states a registered model passes through and the record of each passage, the same in the engine and in Kvasir. A model is registered with its card; admitted by a check that passed, which is kept; promoted, which is refused unless it was admitted, and since record 55 D4 retires nothing, so several admitted or promoted models answer one task and slot; and retired. The site chooses the one model of each task and slot that answers (chosen), by default the one a recorded certificate names. A check that failed is kept too and leaves the state where it was. Every transition is an event with who and when, and an audit row. Nothing is deleted: a retired model still names what it decided.",
+  "description": "Record 42 (D15): the four states a registered model passes through and the record of each passage, the same in the engine and in Kvasir. A model is registered with its card; admitted by a check that passed, which is kept; promoted, which is refused unless it was admitted, and since record 55 D4 retires nothing, so several admitted or promoted models answer one task and slot; and retired. The site chooses the one model of each task and slot that answers (chosen), by default the one a recorded certificate names. A check that failed is kept too and leaves the state where it was. Every transition is an event with who and when, and an audit row. Nothing is deleted: a retired model still names what it decided. Record 55 ruling 31 (a): a registered card may gain the claims it lacks (the label set it was trained on, its tested claims, its speed), additions only; each addition is an event, claims_added, and an audit row, model.add_claims.",
   "$defs": {
     "state": {
       "type": "string",
@@ -10,7 +10,7 @@
     },
     "transition": {
       "type": "string",
-      "enum": ["registered", "admitted", "admission_failed", "promoted", "retired", "chosen", "unchosen"]
+      "enum": ["registered", "admitted", "admission_failed", "promoted", "retired", "chosen", "unchosen", "claims_added"]
     },
     "check": {
       "type": "object",
@@ -90,7 +90,7 @@
         "at": { "type": "string", "description": "ISO 8601, UTC" },
         "detail": {
           "type": ["object", "null"],
-          "description": "The check, the model a promotion retired or was retired by, the review item a person accepted, why"
+          "description": "The check, the model a promotion retired or was retired by, the review item a person accepted, why; for claims_added (record 55 ruling 31 (a)) the fields it filled, the claims as added, what the card lacked before and after, and why"
         }
       }
     },
@@ -178,6 +178,25 @@
     "events": {
       "type": "array",
       "items": { "$ref": "#/$defs/event" }
+    },
+    "additions": {
+      "type": "array",
+      "description": "Record 55 ruling 31 (a): the claims its card gained after it was registered, oldest first, read from its claims_added events",
+      "items": {
+        "type": "object",
+        "required": ["at", "by", "fields", "added"],
+        "properties": {
+          "at": { "type": "string", "description": "ISO 8601, UTC" },
+          "by": { "type": "string", "description": "The principal" },
+          "fields": {
+            "type": "array",
+            "items": { "type": "string", "enum": ["trained_on", "tested", "speed.cpu", "speed.gpu"] },
+            "description": "The fields of missing the claims filled"
+          },
+          "added": { "type": "object", "description": "The claims as they were added, in the card's own shape: trained_on, tested, speed" },
+          "why": { "type": ["string", "null"] }
+        }
+      }
     }
   }
 }

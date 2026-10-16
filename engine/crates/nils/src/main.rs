@@ -8159,7 +8159,7 @@ fn custody_doc(home: &Home, registry: &mut Registry) -> Result<serde_json::Value
             "kept": "for good; a retired model is what the decisions it answered name",
             "commands": {
                 "read": ["nils model list", "nils model show <model>", "nils model chosen"],
-                "change": ["nils model register --card <file>", "nils model admit <model> --check <file>", "nils model promote <model>", "nils model choose <model>", "nils model retire <model>"],
+                "change": ["nils model register --card <file>", "nils model add-claims <model> --claims <file>", "nils model admit <model> --check <file>", "nils model promote <model>", "nils model choose <model>", "nils model retire <model>"],
                 "export": ["nils model show <model> --json"],
                 "delete": "with the registry",
             },

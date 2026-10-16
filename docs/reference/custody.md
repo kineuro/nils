@@ -110,7 +110,7 @@ Every store the registry at `<home>` keeps (backend sqlite), rendered by `nils c
 | owner | the operator who registered, admitted and promoted each |
 | kept | for good; a retired model is what the decisions it answered name |
 | read | `nils model list`<br>`nils model show <model>`<br>`nils model chosen` |
-| change | `nils model register --card <file>`<br>`nils model admit <model> --check <file>`<br>`nils model promote <model>`<br>`nils model choose <model>`<br>`nils model retire <model>` |
+| change | `nils model register --card <file>`<br>`nils model add-claims <model> --claims <file>`<br>`nils model admit <model> --check <file>`<br>`nils model promote <model>`<br>`nils model choose <model>`<br>`nils model retire <model>` |
 | export | `nils model show <model> --json` |
 | delete | with the registry |
 

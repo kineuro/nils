@@ -107,6 +107,10 @@ pub enum Action {
     /// Record 55 D4: a site chose the model that answers a task and slot,
     /// or sent the task back to its default.
     ModelChoose,
+    /// Record 55 ruling 31 (a): a registered card gained the claims it
+    /// lacked (the label set it was trained on, its tested claims, its
+    /// speed). Nothing it stated before changes, and no judgement does.
+    ModelAddClaims,
     /// Record 42 S3: a person picked the stack that stands for a session's
     /// role, or withdrew a person's pick. The ask reads picks, so both
     /// move the epoch.
@@ -239,6 +243,7 @@ impl Action {
             Action::ModelPromote => "model.promote",
             Action::ModelRetire => "model.retire",
             Action::ModelChoose => "model.choose",
+            Action::ModelAddClaims => "model.add_claims",
             Action::PickSet => "pick.set",
             Action::PickWithdraw => "pick.withdraw",
             Action::DerivativeRegister => "derivative.register",
@@ -298,6 +303,7 @@ impl Action {
                 | Action::ModelPromote
                 | Action::ModelRetire
                 | Action::ModelChoose
+                | Action::ModelAddClaims
                 | Action::DerivativeRegister
                 | Action::DerivativeRead
                 | Action::CampaignCreate

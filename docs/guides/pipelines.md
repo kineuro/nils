@@ -496,6 +496,41 @@ The post-contrast step of a dataset or a cohort runs `postcontrast-cascade`, giv
 
 The post-contrast label is the engine's own and not a pipeline's (record 55 F2 and F5). Every MR stack carries a state (`pre`, `post`, `by_definition`, `undetermined`), the minutes since injection, where the label came from and the 72-hour flag, set by the time rule over its session's clock between the last pre and the first post T1 whose answer is certified (the image model at or above its threshold, or a person's read), with the checks against the eight failure modes each giving its reason code; `nils contrast show <stack>` reads one and `nils contrast label` labels again. Each label also carries its error level by use, the bar the label is held to where it is used: at most 1 % where it decides inclusion in pooled quantitative analysis (FLAIR segmentation sets, ASL blood flow, quantitative maps), 2 % for ADC, QSM and TOF, and 5 % where it is descriptive (T2, PD, DWI, SWI). A level is a bar for a use, not a claim: the label is certified for a use only where its audit's bound meets it.
 
+## Complete a registered model's card
+
+A card registered without the label set its model was trained on, its tested claims or its speed may gain them later (record 55, ruling 31 (a)). Nothing the card states changes.
+
+1. See what the card lacks:
+
+   ```sh
+   nils model show postcontrast-fusion@r1
+   ```
+
+   The `card` line says `complete`, or lists what it lacks.
+
+2. Register the label set the model was trained on, if it is not registered yet:
+
+   ```sh
+   nils labels register sets/postcontrast-r1-train --name postcontrast-r1-train
+   ```
+
+3. Write the claims in the card's own shape, beside the model they are for, and add them:
+
+   ```json
+   {"model": "postcontrast-fusion@r1", "digest": "sha256:<the model's digest>", "why": "its training set, its tests and its speed",
+    "claims": {"trained_on": {"label_set": "sha256:<the set's digest>", "name": "postcontrast-r1-train", "rows": 2558},
+               "tested": [{"claim": "what was measured", "value": "0 of 650", "bound": "0.46 %", "evidence": "<the evidence run>"}],
+               "speed": {"cpu": {"stacks_per_second": 3.44, "hardware": "<cores and storage>", "evidence": "<the evidence run>"}}}}
+   ```
+
+   ```sh
+   nils model add-claims postcontrast-fusion@r1 --claims claims-fusion.json
+   ```
+
+   A claim the card states already is refused, and so is any other field: a card that needs another change is a new version of the model. Each claim is checked as registration checks it, the label set among them (registered, and clear of every sample sealed now). The door is `POST /api/models/{id}/claims`, under Models work.
+
+4. `nils model show` lists each addition with who made it, when and why, and the audit keeps it as `model.add_claims`.
+
 ## Score a dataset as it arrives
 
 A dataset's bring-in ends with `score` (record 55 E5): the image models answer its new scans without anyone starting a run.

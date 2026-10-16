@@ -85,17 +85,24 @@ impl Drop for Server {
 
 impl Server {
     fn start(home: &TempDir, requests: usize, extra: &[&str]) -> Server {
+        Server::start_with_workers(home, 2, requests, extra)
+    }
+
+    /// [`Server::start`] with this many handler threads. One, where a test
+    /// needs the thread that took a request to be the one that takes the
+    /// next, with the state it kept.
+    fn start_with_workers(
+        home: &TempDir,
+        workers: usize,
+        requests: usize,
+        extra: &[&str],
+    ) -> Server {
         let mut cmd = nils();
         cmd.arg("--registry")
             .arg(home.path())
-            .args([
-                "serve",
-                "--bind",
-                "127.0.0.1:0",
-                "--workers",
-                "2",
-                "--requests",
-            ])
+            .args(["serve", "--bind", "127.0.0.1:0", "--workers"])
+            .arg(workers.to_string())
+            .arg("--requests")
             .arg(requests.to_string())
             .args(["--pack-dir", packs().to_str().unwrap()])
             .args(extra)
@@ -1587,6 +1594,151 @@ fn the_summary_the_start_from_resolver_and_the_document_list_answer_on_the_synth
                 .any(|p| p["door"] == door),
             "{door}"
         );
+    }
+}
+
+/// The codes of the first `n` subjects of a registry, oldest first.
+fn subject_codes(home: &TempDir, pg: Option<(&str, &str)>, n: usize) -> Vec<String> {
+    let mut store = match pg {
+        Some((dsn, schema)) => nils_registry::Store::connect_postgres(dsn, schema).unwrap(),
+        None => nils_registry::Store::open_sqlite(&home.path().join("registry.db")).unwrap(),
+    };
+    let sql = format!(
+        "SELECT code FROM {} WHERE merged_into IS NULL ORDER BY id LIMIT {n}",
+        store.qualified("subject")
+    );
+    store
+        .query(&sql, &[])
+        .unwrap()
+        .iter()
+        .map(|r| r.text(0).unwrap().to_string())
+        .collect()
+}
+
+/// A list of IDs uploaded a moment ago is a start the next request can use
+/// (T31, 2026-10-16). The ask doors keep a catalog for each handler thread at
+/// the registry's epoch, an upload moves no epoch, and a start that named an
+/// upload made after the catalog was built answered 400, "upload u-... is not
+/// known; uploads live only until resolved", until some other write moved
+/// the epoch. One handler thread, so the thread that takes the upload and
+/// the start is the one whose catalog was built before them; on each backend.
+#[test]
+fn a_list_uploaded_just_now_is_a_start_the_next_request_can_use() {
+    let schema = "nils_ask_serve_fresh_upload";
+    for (backend, home, dsn) in backends(schema) {
+        let pg = dsn.as_deref().map(|d| (d, schema));
+        // the site's IDs of fourteen subjects, as the site's map files them
+        let codes = subject_codes(&home, pg, 14);
+        assert_eq!(codes.len(), 14, "{backend}");
+        run(&home, &["linkage", "id-type", "add", "site-id"], None);
+        let rows: String = codes
+            .iter()
+            .enumerate()
+            .map(|(i, code)| format!("S-{i:03},{code}\n"))
+            .collect();
+        let csv = home.path().join("site-ids.csv");
+        std::fs::write(&csv, format!("identifier,code\n{rows}")).unwrap();
+        run(
+            &home,
+            &[
+                "linkage",
+                "import",
+                csv.to_str().unwrap(),
+                "--id-type",
+                "site-id",
+            ],
+            None,
+        );
+        std::fs::remove_file(&csv).unwrap();
+        let ids = |from: usize, to: usize| -> Vec<String> {
+            (from..to).map(|i| format!("S-{i:03}")).collect()
+        };
+        let reviewer = Some("a-reviewer-token-of-leng");
+        let server = Server::start_with_workers(
+            &home,
+            1,
+            7,
+            &[
+                "--auth",
+                "token",
+                "--token",
+                "a-reviewer-token-of-leng=rita@lab:reviewer",
+            ],
+        );
+        let upload = |values: Vec<String>| {
+            server.request(
+                "POST",
+                "/api/ask/values",
+                Some(&body(
+                    serde_json::json!({"namespace": "site-id", "values": values}),
+                )),
+                reviewer,
+            )
+        };
+        let start = |upload_id: &str| {
+            server.request(
+                "POST",
+                "/api/ask/start",
+                Some(&body(serde_json::json!({"from": {"values": upload_id}}))),
+                reviewer,
+            )
+        };
+        // the thread builds its catalog on the first request
+        let (status, everyone) = server.request(
+            "POST",
+            "/api/ask/start",
+            Some(&body(serde_json::json!({"from": {}}))),
+            reviewer,
+        );
+        assert_eq!(status, 200, "{backend}: {everyone}");
+        assert_eq!(everyone["count"], 48, "{backend}: {everyone}");
+        // eight of the nine IDs are known to the site's map
+        let mut first = ids(0, 8);
+        first.push("S-999".to_string());
+        let (status, up) = upload(first);
+        assert_eq!(status, 200, "{backend}: {up}");
+        assert_eq!(up["n"], 9, "{backend}: {up}");
+        assert_eq!(up["subjects"], 8, "{backend}: {up}");
+        assert_eq!(up["unresolved"], serde_json::json!([8]), "{backend}: {up}");
+        let upload_id = up["upload_id"].as_str().unwrap().to_string();
+        // and the start from it, at once, finds it
+        let (status, opened) = start(&upload_id);
+        assert_eq!(status, 200, "{backend}: {opened}");
+        assert_eq!(opened["set"], "people", "{backend}: {opened}");
+        assert_eq!(opened["count"], 8, "{backend}: {opened}");
+        assert_eq!(opened["subjects"], 8, "{backend}: {opened}");
+        assert_eq!(
+            opened["document"]["values"]["list"]["upload"], upload_id,
+            "{backend}: {opened}"
+        );
+        // the upload moved no epoch: nobody's handle went stale for it
+        assert_eq!(opened["epoch"], everyone["epoch"], "{backend}: {opened}");
+        // the opening document runs, as the desk goes on to run it
+        let (status, ran) = server.request(
+            "POST",
+            "/api/ask/run",
+            Some(&body(serde_json::json!({"document": opened["document"]}))),
+            reviewer,
+        );
+        assert_eq!(status, 200, "{backend}: {ran}");
+        assert_eq!(ran["rows"][0][0], 8, "{backend}: {ran}");
+        // a second list uploaded after the first is found in the same way
+        let (status, up) = upload(ids(8, 14));
+        assert_eq!(status, 200, "{backend}: {up}");
+        let (status, opened) = start(up["upload_id"].as_str().unwrap());
+        assert_eq!(status, 200, "{backend}: {opened}");
+        assert_eq!(opened["count"], 6, "{backend}: {opened}");
+        // and an upload nobody made is still refused, as before
+        let (status, refused) = start("u-0000000000000000");
+        assert_eq!(status, 400, "{backend}: {refused}");
+        assert!(
+            refused.to_string().contains("is not known"),
+            "{backend}: {refused}"
+        );
+        server.finish();
+        if let Some(dsn) = &dsn {
+            drop_schema(dsn, schema);
+        }
     }
 }
 

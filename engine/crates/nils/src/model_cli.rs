@@ -19,6 +19,11 @@
 //! graded run that measured a model, at the engine's door under a person's
 //! token (`nils login`, `--token` or `NILS_TOKEN`), so the person is the
 //! identity the engine verified and never a local user name.
+//!
+//! Record 55 ruling 31 (a): `add-claims` adds to a registered card the
+//! claims it lacks (the label set it was trained on, its tested claims, its
+//! speed), additions only and each audited, as `POST /api/models/{id}/claims`
+//! does; `show` lists what a card gained since it was registered.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -150,6 +155,25 @@ pub(crate) enum RegistryCommand {
         /// The model: its id, its digest (sha256:...) or name@version
         model: String,
         /// Why, in the person's own words
+        #[arg(long, value_name = "TEXT")]
+        why: Option<String>,
+        /// Machine-readable output
+        #[arg(long)]
+        json: bool,
+    },
+    /// Add the claims a registered model's card lacks (record 55, ruling 31
+    /// a): the label set it was trained on, its tested claims, its speed.
+    /// Additions only, each audited; a claim the card states already is
+    /// refused, and so is any other field
+    AddClaims {
+        /// The model: its id, its digest (sha256:...) or name@version
+        model: String,
+        /// The claims: a JSON file in the card's own shape (trained_on,
+        /// tested, speed), or one holding them as `claims` beside the
+        /// `model`, its `digest` and `why`; - for standard input
+        #[arg(long, value_name = "FILE")]
+        claims: PathBuf,
+        /// Why, in the person's own words; the file's when not given
         #[arg(long, value_name = "TEXT")]
         why: Option<String>,
         /// Machine-readable output
@@ -323,6 +347,54 @@ fn resolved(registry: &mut nils_registry::Registry, reference: &str) -> Result<M
             "no registered model answers to {reference}: an id, a digest (sha256:...) or name@version"
         ))
     })
+}
+
+/// The claims a file gives (record 55 ruling 31 (a)), its digest guard and
+/// its why: the file is the claims in the card's own shape, or holds them
+/// as `claims` beside the `model` they are for (which must be the one
+/// named), its `digest` (which the engine checks) and `why`.
+fn claims_of(
+    registry: &mut nils_registry::Registry,
+    m: &Model,
+    doc: serde_json::Value,
+) -> Result<(serde_json::Value, Option<String>, Option<String>), Exit> {
+    if doc.get("claims").is_none() {
+        return Ok((doc, None, None));
+    }
+    if let Some(k) = doc
+        .as_object()
+        .into_iter()
+        .flatten()
+        .map(|(k, _)| k)
+        .find(|k| !matches!(k.as_str(), "claims" | "model" | "digest" | "why"))
+    {
+        return Err(usage(format!(
+            "the claims file holds {k}: it is the claims in the card's own shape, or claims beside model, digest and why"
+        )));
+    }
+    let text = |k: &str| -> Result<Option<String>, Exit> {
+        match &doc[k] {
+            serde_json::Value::Null => Ok(None),
+            serde_json::Value::String(s) => Ok(Some(s.clone())),
+            other => Err(usage(format!(
+                "the claims file's {k} is a text, not {other}"
+            ))),
+        }
+    };
+    let (named, digest, why) = (text("model")?, text("digest")?, text("why")?);
+    if let Some(named) = named {
+        let other = resolved(registry, &named)?;
+        if other.id != m.id {
+            return Err(usage(format!(
+                "the claims are for {named}, model {} ({}), not model {} ({})",
+                other.id,
+                other.label(),
+                m.id,
+                m.label()
+            )));
+        }
+    }
+    Ok((doc["claims"].clone(), digest, why))
 }
 
 fn line(m: &Model) -> String {
@@ -537,6 +609,38 @@ fn registry_command(home: &Home, cmd: RegistryCommand) -> Result<(), Exit> {
             }
             Ok(())
         }
+        RegistryCommand::AddClaims {
+            model,
+            claims,
+            why,
+            json,
+        } => {
+            let doc = read_json(&claims, "claims")?;
+            let m = resolved(&mut registry, &model)?;
+            let (claims, digest, said) = claims_of(&mut registry, &m, doc)?;
+            let why = why.or(said);
+            let done = model::add_claims(
+                &mut registry,
+                m.id,
+                &claims,
+                &who,
+                why.as_deref(),
+                digest.as_deref(),
+            )
+            .map_err(model_err)?;
+            if json {
+                let mut doc = done.model.to_json();
+                doc["added"] = serde_json::json!({"fields": done.fields, "claims": done.added});
+                print_json(&doc);
+            } else {
+                println!("added {} to {}", done.fields.join(", "), line(&done.model));
+                match done.model.missing().as_slice() {
+                    [] => println!("  its card is complete"),
+                    lacks => println!("  its card still lacks {}", lacks.join(", ")),
+                }
+            }
+            Ok(())
+        }
         RegistryCommand::Keep {
             model,
             artifact,
@@ -598,9 +702,11 @@ fn registry_command(home: &Home, cmd: RegistryCommand) -> Result<(), Exit> {
             let m = resolved(&mut registry, &model)?;
             let events = model::events(registry.store(), m.id)?;
             let certified = model::certified(registry.store())?;
+            let additions = model::additions(&events);
             if json {
                 let mut doc = m.to_json();
                 doc["events"] = serde_json::Value::from(events);
+                doc["additions"] = serde_json::Value::from(additions);
                 doc["certificate"] = model::certificate_json(&m, &certified);
                 print_json(&doc);
                 return Ok(());
@@ -615,6 +721,30 @@ fn registry_command(home: &Home, cmd: RegistryCommand) -> Result<(), Exit> {
             }
             if let Some(t) = &m.trained_on {
                 println!("  trained on  {t}");
+            }
+            match m.missing().as_slice() {
+                [] => println!("  card        complete"),
+                lacks => println!("  card        lacks {}", lacks.join(", ")),
+            }
+            // record 55 ruling 31 (a): what the card gained since it was
+            // registered
+            for a in &additions {
+                let fields: Vec<&str> = a["fields"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(serde_json::Value::as_str)
+                    .collect();
+                println!(
+                    "  added       {} on {} by {}{}",
+                    fields.join(", "),
+                    a["at"].as_str().unwrap_or(""),
+                    a["by"].as_str().unwrap_or(""),
+                    a["why"]
+                        .as_str()
+                        .map(|w| format!(": {w}"))
+                        .unwrap_or_default()
+                );
             }
             if let Some(c) = &m.check {
                 println!(

@@ -956,3 +956,213 @@ fn the_admission_suite_measures_the_cpu_and_gpu_equivalence() {
     );
     assert!(out.contains("worse than class III"), "{out}");
 }
+
+/// Record 55 ruling 31 (a): a registered card gains the claims it lacks,
+/// at the door under the caller's name and at the keyboard from a file of
+/// claims beside the model they are for. Additions only and audited; the
+/// door and `nils model show` list what the card gained.
+#[test]
+fn a_registered_card_gains_its_missing_claims_at_the_door_and_the_keyboard() {
+    let home = registry();
+    let out = TempDir::new("claims-out");
+    let server = Server::start(&home);
+    server.ok(
+        "POST",
+        "/api/places",
+        Some(json!({"name": "labels-out", "role": "export", "path": out.path().to_str().unwrap()})),
+        ADMIN,
+    );
+    let ids = identities(&home);
+    let (_, study, series, key, _) = &ids[0];
+    let tsv = format!(
+        "{HEADER}\n{study}\t{series}\t{key}\t\tpost_contrast\tnot given\tagent\tmodel r1's anchors\n"
+    );
+    let set = server.ok(
+        "POST",
+        "/api/label-sets/register",
+        Some(set_body("pc-train", &tsv)),
+        ADMIN,
+    );
+    let set_digest = format!("sha256:{}", set["digest"].as_str().unwrap());
+    // a CPU model registered without its label set, its tests or its speed
+    server.ok(
+        "POST",
+        "/api/models",
+        Some(json!({"name": "student", "version": "3", "kind": "encoder", "digest": digest('e'), "task": "features:slices"})),
+        ADMIN,
+    );
+    let fusion = server.ok(
+        "POST",
+        "/api/models",
+        Some(json!({
+            "name": "fusion", "version": "r1", "kind": "head", "digest": digest('f'),
+            "task": "axis:post_contrast", "encoder": {"digest": digest('e')}, "threshold": 0.9,
+            "gpu": "none", "intended_use": "post_contrast on T1-type brain", "limits": ["site data only"],
+        })),
+        ADMIN,
+    );
+    assert_eq!(
+        fusion["missing"],
+        json!(["trained_on", "tested", "speed.cpu"]),
+        "{fusion}"
+    );
+    let id = fusion["id"].as_i64().unwrap();
+    let door = format!("/api/models/{id}/claims");
+    let speed = json!({"cpu": {"stacks_per_second": 3.44, "hardware": "32 workers", "evidence": "mi-t23", "note": "inside the cascade"}});
+
+    // models:see may not; a body without claims, a field the ruling does
+    // not name, a set not registered and another model's digest are refused
+    let (status, _) = server.call(
+        "POST",
+        &door,
+        Some(json!({"claims": {"speed": speed}})),
+        SEER,
+    );
+    assert_eq!(status, 403);
+    for (body, want, words) in [
+        (json!({"speed": speed}), 400, "claims"),
+        (
+            json!({"claims": {"intended_use": "more"}}),
+            409,
+            "intended_use is not a claim",
+        ),
+        (
+            json!({"claims": {"trained_on": {"label_set": digest('9')}}}),
+            404,
+            "no label set",
+        ),
+        (
+            json!({"claims": {"speed": speed}, "digest": digest('e')}),
+            409,
+            "the claims are for",
+        ),
+    ] {
+        let (status, doc) = server.call("POST", &door, Some(body), ADMIN);
+        assert_eq!(status, want, "{words}: {doc}");
+        assert!(doc.to_string().contains(words), "{words}: {doc}");
+    }
+    // the door adds the speed under the caller's name
+    let added = server.ok(
+        "POST",
+        &door,
+        Some(json!({"claims": {"speed": speed}, "digest": digest('f'), "why": "ruling 31 (a)"})),
+        ADMIN,
+    );
+    assert_eq!(added["added"]["fields"], json!(["speed.cpu"]), "{added}");
+    assert_eq!(added["missing"], json!(["trained_on", "tested"]), "{added}");
+    assert_eq!(added["card"]["speed"], speed, "{added}");
+    let (status, doc) = server.call(
+        "POST",
+        &door,
+        Some(json!({"claims": {"speed": speed}})),
+        ADMIN,
+    );
+    assert_eq!(status, 409, "{doc}");
+    assert!(doc.to_string().contains("states speed.cpu"), "{doc}");
+
+    // at the keyboard, from a file of claims beside the model they are for
+    let files = TempDir::new("claims-files");
+    let claims = files.path().join("claims.json");
+    let tested = json!([{"claim": "the fusion's export against model r1's pickle", "value": "pass",
+                         "bound": "largest difference 3.3e-16", "n": 9232, "evidence": "pcf-parts"}]);
+    std::fs::write(
+        &claims,
+        json!({"model": "student@3", "digest": digest('f'), "claims": {"tested": tested}})
+            .to_string(),
+    )
+    .unwrap();
+    let path = claims.to_str().unwrap();
+    let (good, _, err) = cli(
+        &home,
+        &["model", "add-claims", "fusion@r1", "--claims", path],
+    );
+    assert!(
+        !good && err.contains("the claims are for student@3"),
+        "{err}"
+    );
+    std::fs::write(
+        &claims,
+        json!({"model": "fusion@r1", "digest": digest('f'), "why": "record 55, ruling 31 (a)",
+               "claims": {"trained_on": {"label_set": set_digest, "name": "pc-train", "rows": 1}, "tested": tested}})
+        .to_string(),
+    )
+    .unwrap();
+    let text = ok(
+        &home,
+        &["model", "add-claims", "fusion@r1", "--claims", path],
+    );
+    assert!(
+        text.starts_with("added trained_on, tested to model"),
+        "{text}"
+    );
+    assert!(text.contains("its card is complete"), "{text}");
+    // a bare file in the card's own shape reads too, and is refused here
+    // since the card states its tests now
+    let bare = files.path().join("bare.json");
+    std::fs::write(&bare, json!({"tested": tested}).to_string()).unwrap();
+    let (good, _, err) = cli(
+        &home,
+        &[
+            "model",
+            "add-claims",
+            "fusion@r1",
+            "--claims",
+            bare.to_str().unwrap(),
+        ],
+    );
+    assert!(!good && err.contains("states tested"), "{err}");
+
+    // complete, naming its set; the door and show list the additions
+    let shown = server.ok("GET", &format!("/api/models/{id}"), None, SEER);
+    assert_eq!(shown["complete"], true, "{shown}");
+    assert_eq!(shown["trained_on"], set_digest, "{shown}");
+    assert_eq!(
+        shown["card"]["trained_on"]["label_set"], set_digest,
+        "{shown}"
+    );
+    let additions = shown["additions"].as_array().unwrap();
+    assert_eq!(additions.len(), 2, "{shown}");
+    assert_eq!(additions[0]["by"], "ada@lab", "{shown}");
+    assert_eq!(additions[0]["fields"], json!(["speed.cpu"]), "{shown}");
+    assert_eq!(additions[1]["by"], "cleo@lab", "{shown}");
+    assert_eq!(
+        additions[1]["fields"],
+        json!(["trained_on", "tested"]),
+        "{shown}"
+    );
+    assert_eq!(additions[1]["why"], "record 55, ruling 31 (a)", "{shown}");
+    let text = ok(&home, &["model", "show", "fusion@r1"]);
+    assert!(text.contains("card        complete"), "{text}");
+    assert!(text.contains("added       speed.cpu on "), "{text}");
+    assert!(
+        text.contains("added       trained_on, tested on "),
+        "{text}"
+    );
+    assert!(
+        text.contains("by cleo@lab: record 55, ruling 31 (a)"),
+        "{text}"
+    );
+    let as_json: Value =
+        serde_json::from_str(&ok(&home, &["model", "show", "fusion@r1", "--json"])).unwrap();
+    assert_eq!(as_json["additions"], shown["additions"], "{as_json}");
+    let student = ok(&home, &["model", "show", "student@3"]);
+    assert!(
+        student.contains("card        lacks trained_on"),
+        "{student}"
+    );
+
+    // each addition is an audit row under its principal
+    let mut registry = nils_registry::home::Home::new(home.path()).open().unwrap();
+    let store = registry.store();
+    let sql = format!(
+        "SELECT principal FROM {} WHERE action = 'model.add_claims' ORDER BY id",
+        store.qualified("audit")
+    );
+    let who: Vec<String> = store
+        .query(&sql, &[])
+        .unwrap()
+        .iter()
+        .map(|r| r.text(0).unwrap().to_string())
+        .collect();
+    assert_eq!(who, ["ada@lab", "cleo@lab"]);
+}

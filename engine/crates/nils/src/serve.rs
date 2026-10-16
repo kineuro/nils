@@ -4791,8 +4791,10 @@ fn routed(
                 return Err(Reply::error(404, format!("no model {id}")));
             };
             let mut doc = m.to_json();
-            doc["events"] =
-                serde_json::Value::from(nils_registry::model::events(registry.store(), id)?);
+            let events = nils_registry::model::events(registry.store(), id)?;
+            // record 55 ruling 31 (a): what the card gained since
+            doc["additions"] = serde_json::Value::from(nils_registry::model::additions(&events));
+            doc["events"] = serde_json::Value::from(events);
             // record 55 ruling 22 (b): the certificate that names it
             let certified = nils_registry::model::certified(registry.store())?;
             doc["certificate"] = nils_registry::model::certificate_json(&m, &certified);
@@ -4830,6 +4832,30 @@ fn routed(
             let m = nils_registry::model::retire(registry, id, principal, doc["why"].as_str())
                 .map_err(model_err)?;
             Ok(Reply::ok(m.to_json()))
+        }
+        // Record 55 ruling 31 (a): a registered card gains the claims it
+        // lacks, additions only, each audited under the caller's name.
+        ["api", "models", _, "claims"] if post => {
+            let id = id_at(2)?;
+            let doc = json_body(body)?;
+            let Some(claims) = doc.get("claims") else {
+                return Err(Reply::error(
+                    400,
+                    "claims: the claims to add, in the card's own shape (trained_on, tested, speed)",
+                ));
+            };
+            let done = nils_registry::model::add_claims(
+                registry,
+                id,
+                claims,
+                principal,
+                doc["why"].as_str(),
+                doc["digest"].as_str(),
+            )
+            .map_err(model_err)?;
+            let mut out = done.model.to_json();
+            out["added"] = serde_json::json!({"fields": done.fields, "claims": done.added});
+            Ok(Reply::ok(out))
         }
         // Record 42 S3: a person's pick, which a pick run leaves standing,
         // and its withdrawal. A pick a person writes is a person's: an
@@ -6104,6 +6130,7 @@ pub(crate) fn doors_list() -> Vec<String> {
         "POST /api/models/{id}/admit",
         "POST /api/models/{id}/promote",
         "POST /api/models/{id}/retire",
+        "POST /api/models/{id}/claims",
         "POST /api/picks",
         "POST /api/picks/run",
         "GET /api/picks/summary",
@@ -6978,6 +7005,15 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
             "one model",
             "Retiring a model",
             "Retired a model",
+        ),
+        row(
+            "POST /api/models/{id}/claims",
+            true,
+            false,
+            "free",
+            "one model",
+            "Adding the claims a model's card lacks",
+            "Added the claims a model's card lacked",
         ),
         row(
             "POST /api/picks",

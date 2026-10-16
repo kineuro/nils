@@ -74,6 +74,13 @@ impl AskState {
             catalog
                 .refresh_datasets(registry.store())
                 .map_err(|e| Reply::error(500, format!("the datasets: {e}")))?;
+            // an upload is made without it too, and is read again here
+            // rather than moving the epoch, which is the clock of
+            // judgements: a start from a list just uploaded has to find it,
+            // and no handle of anyone's is stale for it
+            catalog
+                .refresh_uploads(registry.store())
+                .map_err(|e| Reply::error(500, format!("the uploads: {e}")))?;
         }
         if self.reader.is_none() {
             let r = registry
