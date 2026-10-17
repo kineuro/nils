@@ -4,6 +4,15 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [1.0.0-alpha.89] - 2026-10-17
+
+### Fixed
+
+- A dataset's pseudonymised step says done once its pseudonymise run has done the work, however large the dataset. After a run over a dataset of 30 million files ended with every file written or refused and none held, the step stayed `waiting` with no file pseudonymised, and the Data card offered to pseudonymise the whole dataset again. The step counted the originals and the copy from the dataset's probe, which is bounded (a page's worth of entries, two seconds a tree) and stops short of a large tree, and the probe the run made as it ended reached part of the originals and, on a share still busy with the run's writes, none of the copy. Once a whole run of the originals has ended, done or cancelled, the step now counts from the runs: the copy is what that run wrote or found unchanged, with what the runs of the held files after it wrote, and the originals are the most of what it saw and what the probe counts, so files that arrived since a run still wait. The probe counts only before any run.
+- The pseudonymised step's `waiting` no longer counts a refused file or a held one. It counted every original not in the copy, so a dataset with one refused file was never done, and a held file was counted in both `held` and `waiting`. A held file still keeps the step from done; a refused one is final. After a cancelled run the copy is at least the more of what that run decided and what the whole run done before it and the runs of the held files between them wrote or found unchanged, and `partial` says it is a lower bound until a whole run ends done; `waiting_partial` says the originals' count is one, after a cancelled run or where the probe counted more originals than any run saw. Either way the step is not done.
+- The sources door's trees agree with the summary, so the Data page's Originals box and the copy's count say what the step says. An identified dataset's originals and copy are counted as its pseudonymised step counts them, the originals' bytes as the run measured them; a de-identified dataset's tree, where the probe stopped short of it, is counted by its newest finished read, as its found step counts it. The place's own `probed` stays the probe's.
+- The found step of an identified dataset counts its newest whole pseudonymise run that ended done, never a run of its held files alone (a `--held` run after it made the step count only the held files), and gives that run's bytes, the size of every original it saw. The OpenAPI 7 contract is amended in place, with no field added or changed in shape. Tested by the summary's unit tests (`a_whole_run_counts_the_copy_where_the_probe_stopped_short_of_both_trees` and six more) and through both doors, on both registry backends, by `the_copy_is_counted_from_the_runs_where_the_probe_stopped_short`.
+
 ## [1.0.0-alpha.88] - 2026-10-17
 
 ### Fixed
