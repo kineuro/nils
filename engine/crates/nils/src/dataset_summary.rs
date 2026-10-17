@@ -1492,8 +1492,8 @@ const QUIET: &str =
 /// place. The counts are read again when any of these moves, but for what a
 /// run moves as it goes: the epoch while a read runs, which it moves with
 /// every few hundred files it files, and the newest question while a job
-/// runs. While a job is not over, a batch runs or a sort that ended may
-/// still be making its pictures (`true`), they are kept a few seconds only.
+/// runs. While a job is not over (the previews a sort queued among them)
+/// or a batch runs (`true`), they are kept a few seconds only.
 fn stamp(
     store: &mut Store,
     dataset: &Place,
@@ -1549,37 +1549,12 @@ fn stamp(
     } else {
         "-".to_string()
     };
-    // a sort whose row says done goes on making the pictures in the same
-    // run, which moves nothing but the files: once it may, the pictures are
-    // counted again, and again every few seconds while it may, as the
-    // step's progress
-    let making = store
-        .query(
-            &format!(
-                "SELECT {}, {} FROM {job} WHERE kind = 'classify' AND state = 'done' ORDER BY id DESC LIMIT 1",
-                crate::text_of(store, "job", "finished_at"),
-                crate::text_of(store, "job", "result"),
-            ),
-            &[],
-        )?
-        .first()
-        .map(|r| -> Result<bool, StoreError> {
-            let recent = r
-                .opt_text(0)?
-                .and_then(nils_registry::time::secs_of)
-                .is_some_and(|at| nils_registry::time::now_secs().saturating_sub(at) < MAKING);
-            let named = r
-                .opt_text(1)?
-                .and_then(|t| serde_json::from_str::<Value>(t).ok())
-                .is_some_and(|result| result.get("previews").is_some());
-            Ok(recent && !named)
-        })
-        .transpose()?
-        .unwrap_or(false);
-    let busy = running > 0 || !open.is_empty() || making;
+    // the pictures of what a sort judged are a job of their own (2026-10-17),
+    // so while they are made that job is among the jobs not over
+    let busy = running > 0 || !open.is_empty();
     let key = format!(
         "{epoch}|{batches}|{last_batch}|{running}|{last_job}|{act}|{question}|{sessions}|\
-         {visits}|{labels}|{sealed}|{}|{making}|{ids:?}|{}|{}",
+         {visits}|{labels}|{sealed}|{}|{ids:?}|{}|{}",
         open.join(","),
         dataset.as_json(),
         working
