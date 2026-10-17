@@ -766,6 +766,11 @@ enum PreviewCommand {
         /// Pictures encoded at once; the machine's cores when absent
         #[arg(long, value_name = "N")]
         workers: Option<usize>,
+        /// Stacks made at once over many, the workers shared between them; a
+        /// quarter of the workers, one to sixteen, when absent, and 1 makes
+        /// one after another
+        #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..=64))]
+        at_once: Option<u32>,
         /// Make them again even where they are current
         #[arg(long)]
         force: bool,
@@ -801,6 +806,11 @@ enum PyramidCommand {
         /// Planes encoded at once; the machine's cores when absent
         #[arg(long, value_name = "N")]
         workers: Option<usize>,
+        /// Stacks built at once over many, the workers shared between them;
+        /// an eighth of the workers, one to eight, when absent, and 1 builds
+        /// one after another
+        #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..=64))]
+        at_once: Option<u32>,
         /// Build again the pyramids that are built; without it a stack that has one is skipped
         #[arg(long)]
         force: bool,
@@ -5770,6 +5780,7 @@ fn pyramid_command(home: &Home, command: PyramidCommand) -> Result<(), Exit> {
             pack_dir,
             place,
             workers,
+            at_once,
             force,
         } => {
             let working =
@@ -5781,8 +5792,11 @@ fn pyramid_command(home: &Home, command: PyramidCommand) -> Result<(), Exit> {
             });
             let Some(stack) = stack else {
                 drop(registry);
+                let at_once =
+                    at_once.map_or_else(|| crate::pyramid::stacks_at_once(workers), |n| n as usize);
                 return pyramid_many(
-                    home, select, handle, classified, &pack, pack_dir, &working, workers, force,
+                    home, select, handle, classified, &pack, pack_dir, &working, workers, at_once,
+                    force,
                 );
             };
             let root = crate::pyramid::dir(std::path::Path::new(&working.path), stack);
@@ -5913,7 +5927,8 @@ fn pyramid_command(home: &Home, command: PyramidCommand) -> Result<(), Exit> {
 /// Record 45 E1: the pyramids of a selection's or a handle's stacks as one
 /// job of kind `pyramid`, which skips the stacks built, counts the ones
 /// that fail with why and goes on, and ends with built, skipped and failed
-/// in its result; with `force` the ones built are built again.
+/// in its result; with `force` the ones built are built again. `at_once`
+/// stacks are built at a time, the `workers` shared between them.
 #[allow(clippy::too_many_arguments)]
 fn pyramid_many(
     home: &Home,
@@ -5924,6 +5939,7 @@ fn pyramid_many(
     pack_dir: Option<std::path::PathBuf>,
     working: &nils_registry::place::Place,
     workers: usize,
+    at_once: usize,
     force: bool,
 ) -> Result<(), Exit> {
     let handle = match (&select, handle, classified) {
@@ -5966,7 +5982,8 @@ fn pyramid_many(
             name: &name,
             args: serde_json::json!({
                 "selection": select, "handle": handle, "classified": classified,
-                "place": working.name, "stacks": stacks.len(), "workers": workers, "force": force,
+                "place": working.name, "stacks": stacks.len(), "workers": workers,
+                "at_once": at_once, "force": force,
             }),
         },
     )
@@ -5994,7 +6011,7 @@ fn pyramid_many(
         std::path::Path::new(&working.path),
         &stacks,
         workers,
-        crate::pyramid::stacks_at_once(workers),
+        at_once,
         None,
         force,
         &mut go_on,
@@ -6035,6 +6052,7 @@ fn preview_command(home: &Home, command: PreviewCommand) -> Result<(), Exit> {
         all,
         place,
         workers,
+        at_once,
         force,
     } = command;
     let mut registry = open(home)?;
@@ -6099,6 +6117,7 @@ fn preview_command(home: &Home, command: PreviewCommand) -> Result<(), Exit> {
             ));
         }
     };
+    let at_once = at_once.map_or_else(|| crate::preview::stacks_at_once(workers), |n| n as usize);
     let job = nils_registry::job::claim(
         store,
         &nils_registry::job::Claim {
@@ -6106,7 +6125,7 @@ fn preview_command(home: &Home, command: PreviewCommand) -> Result<(), Exit> {
             name: &name,
             args: serde_json::json!({
                 "dataset": dataset, "all": all, "place": working.name,
-                "stacks": stacks.len(), "workers": workers, "force": force,
+                "stacks": stacks.len(), "workers": workers, "at_once": at_once, "force": force,
             }),
         },
     )
@@ -6129,15 +6148,8 @@ fn preview_command(home: &Home, command: PreviewCommand) -> Result<(), Exit> {
                 Ok(nils_registry::job::Asked::Cancel)
             )
     };
-    let mut many = crate::preview::make_many(
-        store,
-        &root,
-        &stacks,
-        force,
-        workers,
-        crate::preview::stacks_at_once(workers),
-        &mut go_on,
-    );
+    let mut many =
+        crate::preview::make_many(store, &root, &stacks, force, workers, at_once, &mut go_on);
     if all && !many.stopped {
         // #456: the stacks the registry holds now, not those it held when
         // the build began, and nothing written since it began

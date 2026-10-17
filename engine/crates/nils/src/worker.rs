@@ -723,6 +723,11 @@ mod tests {
             with_workers(argv("pyramid build --stack 7"), Some(4)),
             argv("pyramid build --stack 7 --workers 4")
         );
+        // a build of several stacks at once shares the workers it is given
+        assert_eq!(
+            with_workers(argv("pyramid build --classified 7 --at-once 2"), Some(4)),
+            argv("pyramid build --classified 7 --at-once 2 --workers 4")
+        );
     }
 
     /// Lab 26c, finding 5: a verb asked to stop exits 130, and the job it

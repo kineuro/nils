@@ -2848,6 +2848,7 @@ pub(crate) fn located(pack_dir: Option<&Path>, command: Vec<String>) -> Result<V
             "--classified",
             "--place",
             "--workers",
+            "--at-once",
             "--pack",
             "--force",
         ],
@@ -5486,6 +5487,27 @@ mod tests {
         });
         assert!(waited, "the second writer waited for the first to let go");
         assert!(writing_now(&root).is_some(), "free once both let go");
+    }
+
+    /// The jobs door queues `pyramid build --at-once N` as it queues
+    /// `--workers N`, a flag and its value; `pyramid list` takes neither.
+    #[test]
+    fn the_jobs_door_queues_a_build_of_several_stacks_at_once() {
+        let words = |l: &str| l.split_whitespace().map(String::from).collect::<Vec<_>>();
+        let line = "pyramid build --classified 7 --place work --workers 16 --at-once 4";
+        let Ok(queued) = located(None, words(line)) else {
+            panic!("{line} was refused");
+        };
+        assert_eq!(queued, words(line));
+        for refused in [
+            "pyramid build --classified 7 --at-once",
+            "pyramid list --at-once 4",
+        ] {
+            match located(None, words(refused)) {
+                Err(reply) => assert_eq!(reply.status, 400, "{refused}"),
+                Ok(_) => panic!("{refused} was queued"),
+            }
+        }
     }
 }
 

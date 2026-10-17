@@ -626,6 +626,12 @@ To build again pyramids that are built, for example after a fix to the reader, a
 nils pyramid build --select selection:every-t1@1 --force
 ```
 
+The job builds several stacks at once, an eighth of its workers (one to eight), each with its share of the workers, so the files of a large selection on a network share are read many at a time. To say how many, add `--at-once N`; `--at-once 1` builds one stack after another:
+
+```sh
+nils pyramid build --select selection:every-t1@1 --at-once 4
+```
+
 ## Ask several axes of a stack at once
 
 1. Make an `axes` campaign. The served pack's legal combinations are frozen into the question:

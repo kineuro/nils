@@ -400,6 +400,22 @@ fn a_classify_with_no_working_place_or_no_previews_makes_none() {
     assert!(!b.work.path().join("previews").exists());
     let (out, _) = ok(&b.home, &["preview", "build", "--all"]);
     assert_eq!(json_line(&out)["built"], 2, "{out}");
+    // several stacks at once, as many as asked: the job says how many, and
+    // the counts are the same; none at once is refused
+    let (out, _) = ok(
+        &b.home,
+        &["preview", "build", "--all", "--force", "--at-once", "2"],
+    );
+    assert_eq!(json_line(&out)["built"], 2, "{out}");
+    assert!(
+        jobs(&b.home)
+            .iter()
+            .any(|j| j["kind"] == "preview" && j["args"]["at_once"] == 2),
+        "{:?}",
+        jobs(&b.home)
+    );
+    let (good, _, err) = run(&b.home, &["preview", "build", "--all", "--at-once", "0"]);
+    assert!(!good && err.contains("--at-once"), "{err}");
 }
 
 /// A server killed when the test is over: no request count to keep.
