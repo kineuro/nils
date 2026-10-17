@@ -2281,6 +2281,8 @@ pub(crate) struct GoOn {
     params: serde_json::Map<String, Value>,
     /// The selection the parts were frozen from, where they were.
     selection: Option<String>,
+    /// The worker's job the part taken up again kept running for them.
+    kept: Option<i64>,
 }
 
 impl GoOn {
@@ -2298,6 +2300,7 @@ impl GoOn {
             chunk: part["chunk"].as_u64(),
             params: serde_json::Map::new(),
             selection: None,
+            kept: None,
         })
     }
 
@@ -4901,7 +4904,7 @@ pub(crate) fn run_command(home: &Home, args: RunArgs) -> Result<(), Exit> {
     let pack = pack_of_bids(home, &args, &d);
     // the job a worker took, which the parts take up in turn and which
     // stays running between them
-    let mut kept: Option<i64> = None;
+    let mut kept: Option<i64> = args.go_on.as_ref().and_then(|g| g.kept);
     for (k, &i) in todo.iter().enumerate() {
         let (handle_id, selection) = (parts[i].0, &parts[i].1);
         // a stop asked between two parts stops the parts from this one
@@ -5687,6 +5690,7 @@ fn resume_command(home: &Home, args: &RunArgs, run_id: i64) -> Result<(), Exit> 
     );
     go_on.params = params;
     go_on.selection = r.selection.clone();
+    go_on.kept = Some(job_id).filter(|j| adopted(*j));
     drop(registry);
     run_command(
         home,
