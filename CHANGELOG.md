@@ -12,7 +12,7 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ### Added
 
-- `nils preview build` and `nils pyramid build` take `--at-once N` (1 to 64), how many scans a build over many makes at once, and the jobs door queues it on `pyramid build`; the job's args say `at_once`. Tested by unit tests over twelve synthetic scans (several at once make the pictures one at a time makes, file for file; a failed scan is counted by its class; a stop keeps what was made and leaves no part file; one at a time keeps the order asked) and through both verbs and the jobs door.
+- `nils preview build` and `nils pyramid build` take `--at-once N` (1 to 64), how many scans a build over many makes at once, and the jobs door queues it on `pyramid build`; the job's args say `at_once`. The OpenAPI 7 contract is amended in place, additively. Tested by unit tests over twelve synthetic scans (several at once make the pictures one at a time makes, file for file; a failed scan is counted by its class; a stop keeps what was made and leaves no part file; one at a time keeps the order asked) and through both verbs and the jobs door.
 
 ## [1.0.0-alpha.89] - 2026-10-17
 
