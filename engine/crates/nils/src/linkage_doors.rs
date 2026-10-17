@@ -728,10 +728,20 @@ fn datasets_holding(
         let names = by_source.get(&r.int(1)?).cloned().unwrap_or_default();
         out.entry(r.int(0)?).or_default().extend(names);
     }
+    if places.is_empty() {
+        return Ok(out);
+    }
+    // by the datasets' own copies, read from the index on the place, the
+    // state and the subject (2026-10-17), where a subject alone is no key
     let sql = format!(
-        "SELECT DISTINCT subject_id, place_id FROM {} WHERE subject_id IN ({ids}) \
-         AND state IN ('written', 'unchanged')",
+        "SELECT DISTINCT subject_id, place_id FROM {} WHERE place_id IN ({}) \
+         AND state IN ('written', 'unchanged') AND subject_id IN ({ids})",
         store.qualified(HELD_TABLE),
+        places
+            .iter()
+            .map(|p| p.id.to_string())
+            .collect::<Vec<_>>()
+            .join(", "),
     );
     for r in store.query(&sql, &[])? {
         let place = r.int(1)?;
@@ -840,18 +850,27 @@ fn held_ids(registry: &mut Registry, caller: &Caller, place: Option<&str>) -> Re
     // is final and marks nothing, so a subject is of a map when the map
     // filed an identity of it (`csv`), and generated otherwise or where an
     // older engine marked it provisional
+    // (2026-10-17: read a subject at a time from the index on the place,
+    // the state and the subject, where a DISTINCT over every copy of a
+    // dataset of 30 million files took 13 seconds)
     let store = registry.store();
-    let sql = format!(
-        "SELECT DISTINCT f.subject_id, s.provisional \
-         FROM {} f JOIN {} s ON s.id = f.subject_id \
-         WHERE f.place_id = {} AND f.state IN ('written', 'unchanged')",
-        store.qualified(HELD_TABLE),
-        store.qualified("subject"),
-        store.dialect().param(1, Type::Int)
-    );
+    let carried: Vec<i64> = nils_registry::dataset_subjects::copied(store, p.id)?
+        .into_iter()
+        .collect();
     let mut coded: Vec<(i64, bool)> = Vec::new();
-    for r in store.query(&sql, &[Param::Int(p.id)])? {
-        coded.push((r.int(0)?, r.opt_int(1)?.unwrap_or(0) == 1));
+    for chunk in carried.chunks(500) {
+        let sql = format!(
+            "SELECT id, provisional FROM {} WHERE id IN ({})",
+            store.qualified("subject"),
+            chunk
+                .iter()
+                .map(i64::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        for r in store.query(&sql, &[])? {
+            coded.push((r.int(0)?, r.opt_int(1)?.unwrap_or(0) == 1));
+        }
     }
     coded.sort_unstable();
     coded.dedup_by_key(|(s, _)| *s);

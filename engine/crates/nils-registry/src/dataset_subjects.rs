@@ -125,6 +125,13 @@ pub struct SetAside {
 /// dataset's pseudonymise run wrote it under that subject. Its place's id
 /// and its `source` rows name the dataset. A file read in place, which no
 /// pseudonymise run wrote, names no subject, and none is counted for it.
+///
+/// Read from the subjects (2026-10-17), where every copy of the dataset was
+/// joined to every file by its path: on a dataset of 30 million files that
+/// took 4 to 13 seconds. The subjects its copies carry are read from the
+/// index a subject at a time ([`copied`]), those with a stack in its tree
+/// are left out, and only the copies of the few left are matched to the
+/// files by path.
 pub fn set_aside_without_stacks(
     store: &mut Store,
     place_id: i64,
@@ -134,27 +141,75 @@ pub fn set_aside_without_stacks(
     if sources.is_empty() || reasons.is_empty() {
         return Ok(SetAside::default());
     }
+    let carried = copied(store, place_id)?;
+    if carried.is_empty() {
+        return Ok(SetAside::default());
+    }
+    let sql = format!(
+        "SELECT DISTINCT ns.subject_id FROM ({}) ns WHERE ns.subject_id IS NOT NULL",
+        scanned(store.schema(), sources)
+    );
+    let mut with: BTreeSet<i64> = BTreeSet::new();
+    for r in store.query(&sql, &[])? {
+        with.insert(r.int(0)?);
+    }
+    let without: Vec<i64> = carried.difference(&with).copied().collect();
     let reasons = reasons
         .iter()
         .map(|r| text(r))
         .collect::<Vec<_>>()
         .join(", ");
-    let sql = format!(
-        "SELECT COUNT(DISTINCT spf.subject_id), COUNT(DISTINCT ssf.id) FROM {} ssf \
-         JOIN {} spf ON spf.place_id = {place_id} AND spf.out_path = ssf.path \
-         WHERE ssf.source_id IN ({}) AND ssf.status = 'quarantined' AND ssf.reason IN ({reasons}) \
-         AND spf.state IN ('written', 'unchanged') AND spf.subject_id IS NOT NULL \
-         AND spf.subject_id NOT IN (SELECT ns.subject_id FROM ({}) ns WHERE ns.subject_id IS NOT NULL)",
-        store.qualified("source_file"),
-        store.qualified("pseudonym_file"),
-        list(sources),
-        scanned(store.schema(), sources),
-    );
-    let row = &store.query(&sql, &[])?[0];
+    let (mut subjects, mut files) = (BTreeSet::new(), BTreeSet::new());
+    for chunk in without.chunks(500) {
+        let sql = format!(
+            "SELECT spf.subject_id, ssf.id FROM {} spf JOIN {} ssf ON ssf.path = spf.out_path \
+             WHERE spf.place_id = {place_id} AND spf.state IN ('written', 'unchanged') \
+             AND spf.subject_id IN ({}) AND ssf.source_id IN ({}) AND ssf.status = 'quarantined' \
+             AND ssf.reason IN ({reasons})",
+            store.qualified("pseudonym_file"),
+            store.qualified("source_file"),
+            list(chunk),
+            list(sources),
+        );
+        for r in store.query(&sql, &[])? {
+            subjects.insert(r.int(0)?);
+            files.insert(r.int(1)?);
+        }
+    }
     Ok(SetAside {
-        subjects: row.int(0)?,
-        files: row.int(1)?,
+        subjects: subjects.len() as i64,
+        files: files.len() as i64,
     })
+}
+
+/// The subjects a place's pseudonymised files carry: those of its files
+/// written, or whose copy from before stands (`unchanged`). Read from the
+/// index on the place, the state and the subject one subject at a time, as
+/// many reads as there are subjects, however many files each has
+/// (2026-10-17: a DISTINCT over every copy of a dataset of 30 million files
+/// took 13 seconds).
+pub fn copied(store: &mut Store, place_id: i64) -> Result<BTreeSet<i64>, Error> {
+    let files = store.qualified("pseudonym_file");
+    let mut out = BTreeSet::new();
+    for state in ["written", "unchanged"] {
+        let next = |after: &str| {
+            format!(
+                "(SELECT f.subject_id FROM {files} f WHERE f.place_id = {place_id} \
+                 AND f.state = '{state}' AND f.subject_id {after} ORDER BY f.subject_id LIMIT 1)"
+            )
+        };
+        let sql = format!(
+            "WITH RECURSIVE carried(subject_id) AS (SELECT {} \
+             UNION ALL SELECT {} FROM carried c WHERE c.subject_id IS NOT NULL) \
+             SELECT subject_id FROM carried WHERE subject_id IS NOT NULL",
+            next("IS NOT NULL"),
+            next("> c.subject_id"),
+        );
+        for r in store.query(&sql, &[])? {
+            out.insert(r.int(0)?);
+        }
+    }
+    Ok(out)
 }
 
 #[cfg(test)]

@@ -5164,3 +5164,163 @@ fn migration_106_indexes_a_dataset_s_files_by_status_and_subject_on_both_backend
         );
     }
 }
+
+/// 2026-10-17, on both backends: the subjects a place's copies carry are
+/// read from the index on the place, the state and the subject one subject
+/// at a time, and the subjects of a dataset's set-aside files with no stack
+/// in it are found from those; each is what a reading of every row said.
+#[test]
+fn a_place_s_copied_and_set_aside_subjects_are_read_from_the_index_on_both_backends() {
+    use nils_registry::dataset_subjects::{SetAside, copied, scanned, set_aside_without_stacks};
+    for (name, _guard, mut store) in stores() {
+        migrate::migrate(&mut store, Kind::Registry).unwrap();
+        let q = |store: &Store, t: &str| store.qualified(t);
+        let (series, stack, held, files, copies) = (
+            q(&store, "series"),
+            q(&store, "stack"),
+            q(&store, "source_stack"),
+            q(&store, "source_file"),
+            q(&store, "pseudonym_file"),
+        );
+        let now = "2026-10-17T00:00:00Z";
+        // subjects 1 to 3 have a stack in the tree of source 1; 4 and 5
+        // have none, and 6 one in another tree
+        for subject in 1..=6 {
+            store
+                .batch(&format!(
+                    "INSERT INTO {series} (series_instance_uid, study_id, subject_id, n_instances, n_stacks, first_batch_id) \
+                     VALUES ('2.25.{subject}', {subject}, {subject}, 1, 1, 1);
+                     INSERT INTO {stack} (series_id, stack_index, stack_key, modality, orientation, n_instances, first_batch_id) \
+                     VALUES ((SELECT id FROM {series} WHERE series_instance_uid = '2.25.{subject}'), 0, 'k', 'MR', 'AX', 1, 1);
+                     INSERT INTO {held} (source_id, stack_id, first_seen_at) \
+                     VALUES ({}, (SELECT MAX(id) FROM {stack}), '{now}')",
+                    if subject == 6 { 2 } else { 1 }
+                ))
+                .unwrap();
+        }
+        store
+            .batch(&format!("DELETE FROM {held} WHERE source_id = 1 AND stack_id IN (SELECT x.id FROM {stack} x JOIN {series} se ON se.id = x.series_id WHERE se.subject_id IN (4, 5))"))
+            .unwrap();
+        // the copies of place 7: written, unchanged, held and refused, and
+        // two subjects' copies the read set aside, one of them not by policy
+        let copy = |store: &mut Store,
+                    path: &str,
+                    state: &str,
+                    subject: Option<i64>,
+                    out: Option<&str>| {
+            store
+                .execute(
+                    &format!(
+                        "INSERT INTO {copies} (place_id, path, size, mtime, state, out_path, subject_id, first_seen, code_anyway) \
+                         VALUES (7, '{path}', 1, 1, '{state}', {}, {}, '{now}', 0)",
+                        out.map_or("NULL".to_string(), |o| format!("'{o}'")),
+                        subject.map_or("NULL".to_string(), |s| s.to_string()),
+                    ),
+                    &[],
+                )
+                .unwrap();
+        };
+        let file = |store: &mut Store, path: &str, status: &str, reason: &str| {
+            store
+                .execute(
+                    &format!(
+                        "INSERT INTO {files} (source_id, batch_id, dir, path, size, mtime_ns, status, reason, seen_at) \
+                         VALUES (1, 1, 'd', '{path}', 1, 1, '{status}', '{reason}', '{now}')"
+                    ),
+                    &[],
+                )
+                .unwrap();
+        };
+        for (n, subject) in [1, 1, 2, 2, 2].iter().enumerate() {
+            copy(
+                &mut store,
+                &format!("o/{n}"),
+                "written",
+                Some(*subject),
+                Some(&format!("a/{n}")),
+            );
+        }
+        copy(&mut store, "o/u", "unchanged", Some(3), Some("a/u"));
+        copy(&mut store, "o/h", "held", Some(9), None);
+        copy(&mut store, "o/h2", "held", None, None);
+        copy(&mut store, "o/r", "refused", None, None);
+        copy(&mut store, "o/w", "written", None, Some("a/w"));
+        for (path, subject, reason) in [
+            ("aside/4a", 4, "unsupported_sop_class"),
+            ("aside/4b", 4, "unsupported_modality"),
+            ("aside/5a", 5, "unsupported_sop_class"),
+            ("aside/5b", 5, "parse_error"),
+            ("aside/6a", 6, "unsupported_sop_class"),
+        ] {
+            copy(
+                &mut store,
+                &format!("o/{path}"),
+                "written",
+                Some(subject),
+                Some(path),
+            );
+            file(&mut store, path, "quarantined", reason);
+        }
+        // another place's copy of a subject with no stack, refused here too
+        store
+            .execute(
+                &format!(
+                    "INSERT INTO {copies} (place_id, path, size, mtime, state, out_path, subject_id, first_seen, code_anyway) \
+                     VALUES (8, 'o/x', 1, 1, 'written', 'aside/5a', 5, '{now}', 0)"
+                ),
+                &[],
+            )
+            .unwrap();
+        let carried = copied(&mut store, 7).unwrap();
+        let every: std::collections::BTreeSet<i64> = store
+            .query(
+                &format!(
+                    "SELECT DISTINCT subject_id FROM {copies} WHERE place_id = 7 \
+                     AND state IN ('written', 'unchanged') AND subject_id IS NOT NULL"
+                ),
+                &[],
+            )
+            .unwrap()
+            .iter()
+            .map(|r| r.int(0).unwrap())
+            .collect();
+        assert_eq!(carried, every, "{name}");
+        assert_eq!(carried, [1, 2, 3, 4, 5, 6].into(), "{name}");
+        assert!(copied(&mut store, 99).unwrap().is_empty(), "{name}");
+        let policy = ["unsupported_sop_class", "unsupported_modality"];
+        let now_counted = set_aside_without_stacks(&mut store, 7, &[1], &policy).unwrap();
+        let r = &store
+            .query(
+                &format!(
+                    "SELECT COUNT(DISTINCT spf.subject_id), COUNT(DISTINCT ssf.id) FROM {files} ssf \
+                     JOIN {copies} spf ON spf.place_id = 7 AND spf.out_path = ssf.path \
+                     WHERE ssf.source_id IN (1) AND ssf.status = 'quarantined' \
+                     AND ssf.reason IN ('unsupported_sop_class', 'unsupported_modality') \
+                     AND spf.state IN ('written', 'unchanged') AND spf.subject_id IS NOT NULL \
+                     AND spf.subject_id NOT IN (SELECT ns.subject_id FROM ({}) ns WHERE ns.subject_id IS NOT NULL)",
+                    scanned(store.schema(), &[1])
+                ),
+                &[],
+            )
+            .unwrap()[0];
+        let every = SetAside {
+            subjects: r.int(0).unwrap(),
+            files: r.int(1).unwrap(),
+        };
+        assert_eq!(now_counted, every, "{name}");
+        // 4's two set aside by policy, and one each of 5's and of 6's,
+        // whose stack is in another tree and none in this one
+        assert_eq!(
+            now_counted,
+            SetAside {
+                subjects: 3,
+                files: 4
+            },
+            "{name}"
+        );
+        assert_eq!(
+            set_aside_without_stacks(&mut store, 7, &[], &policy).unwrap(),
+            SetAside::default()
+        );
+    }
+}
