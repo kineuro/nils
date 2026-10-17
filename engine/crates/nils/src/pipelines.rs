@@ -4498,6 +4498,47 @@ pub(crate) fn drop_workdirs(run_dir: &Path) {
     }
 }
 
+/// A new run's folder made its own (2026-10-17): where `dir` is there
+/// already, it holds another run's files, and it is moved aside to
+/// `<id>.before-<when>` beside it, never deleted. Answers where it went;
+/// a folder that cannot be moved refuses the run, which never starts among
+/// another run's files.
+fn set_aside(dir: &Path) -> Result<Option<PathBuf>, String> {
+    if std::fs::symlink_metadata(dir).is_err() {
+        return Ok(None);
+    }
+    let when: String = nils_registry::time::now_iso()
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .collect();
+    let name = dir
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let mut to = dir.with_file_name(format!("{name}.before-{when}"));
+    let mut n = 1;
+    while std::fs::symlink_metadata(&to).is_ok() {
+        n += 1;
+        to = dir.with_file_name(format!("{name}.before-{when}-{n}"));
+    }
+    std::fs::rename(dir, &to).map_err(|e| {
+        format!(
+            "the run's folder {} holds another run's files, and could not be moved aside: {e}",
+            dir.display()
+        )
+    })?;
+    Ok(Some(to))
+}
+
+/// What a run says of the files another run left in its folder.
+fn moved_words(dir: &Path, to: &Path) -> String {
+    format!(
+        "this run's folder {} held another run's files, which were moved to {}",
+        dir.display(),
+        to.display()
+    )
+}
+
 /// A run's scratch folder, `<scratch place>/runs/<id>`, where its place is
 /// still known.
 fn run_folder(store: &mut Store, r: &Run) -> Option<PathBuf> {
@@ -6053,6 +6094,9 @@ struct Shared {
     /// Whether the runtime holds a container to its cores and its memory
     /// here (record 49, after review).
     limits: (bool, bool),
+    /// What the first container's log says before its own words: where the
+    /// files another run left in this run's folder went (2026-10-17).
+    said: Mutex<Option<String>>,
 }
 
 /// A unit's id as a folder name: the characters a unit's id is made of.
@@ -6133,6 +6177,17 @@ fn execute_run(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Resul
     let working = PathBuf::from(&x.output.path);
     let scratch_root = PathBuf::from(&x.scratch.path);
     let run_dir = scratch_root.join(RUNS).join(x.run_id.to_string());
+    // 2026-10-17: a new run's folder is its own. One that is there already
+    // holds another run's files (a registry made again numbers its runs
+    // from 1 in the same working place): it is moved aside, never deleted,
+    // and the run says so; a run taken up again goes on in its own
+    let moved = match x.resume {
+        None => set_aside(&run_dir)?,
+        Some(_) => None,
+    };
+    if let Some(to) = &moved {
+        eprintln!("nils: run {}: {}", x.run_id, moved_words(&run_dir, to));
+    }
     // a resumed run's units in flight start again from a clean /tmp
     drop_workdirs(&run_dir);
     let input = run_dir.join("input");
@@ -6469,6 +6524,7 @@ fn execute_run(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Resul
         manifest,
         local_image,
         limits: runtime::limits_here(x.runtime),
+        said: Mutex::new(moved.as_ref().map(|to| moved_words(&run_dir, to))),
     };
 
     // the batches: those whose container ended and whose taking in a stop
@@ -6853,7 +6909,12 @@ fn start_next(
     };
     let mut inv = invocation_of(x, m, &b, shared, ask.cores, gpu_mib.is_some())?;
     inv.card = gpu_mib.map(|_| l.card);
-    inv.note = note;
+    // the run's folder said once, in the first container's log
+    let said = shared.said.lock().ok().and_then(|mut s| s.take());
+    inv.note = match (said, note) {
+        (Some(said), Some(note)) => Some(format!("{said}; {note}")),
+        (said, note) => said.or(note),
+    };
     if let Some(dir) = b.log.parent() {
         std::fs::create_dir_all(dir).map_err(|e| format!("the run's folder: {e}"))?;
     }
@@ -9874,6 +9935,37 @@ x-nils:
         assert_eq!(with_chunk(run.clone(), 5_000, Some(5_000)), run);
         assert_eq!(with_chunk(run.clone(), 4_999, Some(5_000)), run);
         assert_eq!(with_chunk(run.clone(), 456_110, None), run);
+    }
+
+    /// 2026-10-17: a folder a new run finds at its own path holds another
+    /// run's files, and is moved aside whole, never deleted; a second one
+    /// in the same second takes a name of its own; no folder, nothing.
+    #[test]
+    fn a_folder_another_run_left_is_moved_aside_whole() {
+        let base = std::env::temp_dir().join(format!("nils-aside-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let dir = base.join(RUNS).join("7");
+        assert_eq!(set_aside(&dir).unwrap(), None);
+        std::fs::create_dir_all(dir.join("input")).unwrap();
+        std::fs::write(dir.join("image.log"), "an older registry's run 7").unwrap();
+        std::fs::write(dir.join("input/stacks.json"), "{}").unwrap();
+        let to = set_aside(&dir).unwrap().unwrap();
+        assert!(!dir.exists());
+        assert_eq!(to.parent(), dir.parent());
+        let name = to.file_name().unwrap().to_string_lossy().to_string();
+        assert!(name.starts_with("7.before-"), "{name}");
+        assert_eq!(
+            std::fs::read_to_string(to.join("image.log")).unwrap(),
+            "an older registry's run 7"
+        );
+        assert!(to.join("input/stacks.json").is_file());
+        // again at once: a name of its own beside the first
+        std::fs::create_dir_all(&dir).unwrap();
+        let again = set_aside(&dir).unwrap().unwrap();
+        assert_ne!(again, to);
+        assert!(again.is_dir() && to.is_dir() && !dir.exists());
+        assert!(moved_words(&dir, &to).contains("moved to"));
+        std::fs::remove_dir_all(&base).unwrap();
     }
 
     /// A handle of these stacks, each with a subject ten times its id,

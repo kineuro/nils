@@ -4672,7 +4672,9 @@ fn a_cancelled_run_keeps_its_units_and_goes_on() {
 /// the parts after it and says so; its run taken up again (`--resume`)
 /// ends and goes on with the parts after it that no run holds yet, each a
 /// run of its own over its own handle, every stack once. A handle that
-/// fits one part runs as it is.
+/// fits one part runs as it is. A new run whose folder holds another
+/// run's files (a registry made again numbers its runs from 1) moves them
+/// aside whole and says so; a run taken up again keeps its own.
 #[test]
 fn a_handle_runs_in_parts_and_a_part_taken_up_again_goes_on_with_the_rest() {
     if !have("python3") {
@@ -4728,6 +4730,30 @@ fn a_handle_runs_in_parts_and_a_part_taken_up_again_goes_on_with_the_rest() {
         }
     }
     let _open = Open(gate.clone());
+    // an older registry's runs 1 and 2 left their folders in the working
+    // place
+    let folders = lab.work.path().join("runs");
+    for old in ["1", "2"] {
+        std::fs::create_dir_all(folders.join(old).join("input")).unwrap();
+        std::fs::write(
+            folders.join(old).join("image.log"),
+            format!("an older registry's run {old}"),
+        )
+        .unwrap();
+        std::fs::write(folders.join(old).join("input/old.txt"), "old").unwrap();
+    }
+    let aside = |id: &str| -> Vec<PathBuf> {
+        std::fs::read_dir(&folders)
+            .unwrap()
+            .flatten()
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with(&format!("{id}.before-"))
+            })
+            .map(|e| e.path())
+            .collect()
+    };
     let child = lab
         .command(&lab.path)
         .args([
@@ -4748,7 +4774,7 @@ fn a_handle_runs_in_parts_and_a_part_taken_up_again_goes_on_with_the_rest() {
         .spawn()
         .unwrap();
     let started = std::time::Instant::now();
-    loop {
+    let first = loop {
         let begun: Vec<String> = trace(&t)
             .into_iter()
             .filter(|e| e.0 == "start")
@@ -4762,14 +4788,14 @@ fn a_handle_runs_in_parts_and_a_part_taken_up_again_goes_on_with_the_rest() {
             .get(1)
             .is_some_and(|u| PathBuf::from(format!("{}.pid", gate_of(u).display())).exists());
         if over == 1 && waiting {
-            break;
+            break begun[0].clone();
         }
         assert!(
             started.elapsed().as_secs() < 60,
             "the first part never got half way: {begun:?}, {over} over"
         );
         std::thread::sleep(std::time::Duration::from_millis(50));
-    }
+    };
     let job = lab.count("SELECT job_id FROM pipeline_run WHERE id = 1");
     lab.ok(&["jobs", "cancel", &job.to_string()], None);
     let out = child.wait_with_output().unwrap();
@@ -4787,15 +4813,35 @@ fn a_handle_runs_in_parts_and_a_part_taken_up_again_goes_on_with_the_rest() {
         "{err}"
     );
     assert_eq!(lab.count("SELECT COUNT(*) FROM pipeline_run"), 1, "{err}");
+    // the new run 1 moved the older run 1's folder aside, whole, and said
+    // so, on its own words and in its first container's log
+    let moved = aside("1");
+    assert_eq!(moved.len(), 1, "{moved:?}");
+    assert_eq!(
+        std::fs::read_to_string(moved[0].join("image.log")).unwrap(),
+        "an older registry's run 1"
+    );
+    assert!(moved[0].join("input/old.txt").is_file());
+    assert!(!folders.join("1/image.log").exists());
+    assert!(!folders.join("1/input/old.txt").exists());
+    assert!(
+        err.contains("nils: run 1: this run's folder") && err.contains("moved to"),
+        "{err}"
+    );
+    let log =
+        std::fs::read_to_string(folders.join("1/units").join(&first).join("log.txt")).unwrap();
+    assert!(
+        log.starts_with("nils: this run's folder") && log.contains(".before-"),
+        "{log}"
+    );
     // the job of the part records every part, so its run taken up again
     // finds those after it
     let args: Value = serde_json::from_str(
-        &lab.store()
+        lab.store()
             .query(&format!("SELECT args FROM job WHERE id = {job}"), &[])
             .unwrap()[0]
             .text(0)
-            .unwrap()
-            .to_string(),
+            .unwrap(),
     )
     .unwrap();
     assert_eq!(args["part"]["part"], 1, "{args}");
@@ -4835,6 +4881,11 @@ fn a_handle_runs_in_parts_and_a_part_taken_up_again_goes_on_with_the_rest() {
     }
     assert_eq!(seen, all);
     assert_eq!(lab.count("SELECT COUNT(*) FROM derivative"), 4);
+    // taken up again, run 1 went on in its own folder; the part after it, a
+    // new run, moved the older run 2's folder aside
+    assert_eq!(aside("1").len(), 1);
+    assert_eq!(aside("2").len(), 1);
+    assert!(!folders.join("2/input/old.txt").exists());
     // taken up again, nothing is left: the part after it is run 2 now
     let (ok, _, err) = lab.run(&["run", "--resume", "1"], None);
     assert!(!ok);
