@@ -418,7 +418,7 @@ Every store the registry at `<home>` keeps (backend sqlite), rendered by `nils c
 | owner | the registry's operator |
 | kept | a preview is made again only when its stack's files change (its content digest), and nils preview build --all removes the previews of stacks the registry no longer holds; a pyramid stays until it is built again with --force |
 | read | `nils pyramid list`<br>GET /api/instances/{stack}/manifest |
-| change | `nils preview build [--stack <id> \| --dataset <name> \| --all]`<br>`nils pyramid build --stack <id>`<br>`nils pyramid pack --all` |
+| change | `nils preview build [--stack <id> \| --dataset <name> \| --classified <job> \| --all]`<br>`nils pyramid build --stack <id>`<br>`nils pyramid pack --all` |
 | export | GET /api/instances/{stack}/preview (to a caller who may see pixels: detail quasi, and detail sensitive for a stack with burned-in annotation) |
 | delete | remove the folders; nils has no command for one pyramid |
 

@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-//! Record 55 H2 (E1): a stack's preview, made when the stack is sorted, so
-//! no picture on the Data page waits for a job queue or a 3D volume. One
-//! file per stack under the working place, beside the pyramids:
+//! Record 55 H2 (E1): a stack's preview, made after the stack is sorted by
+//! the job the sort queues on the pictures lane as it ends (2026-10-17: no
+//! longer in the sort's own run, which held up the pick and the score
+//! behind it), so no picture on the Data page waits for a 3D volume; a
+//! stack with none yet is answered from its middle plane's file and made on
+//! a thread of the engine. One file per stack under the working place,
+//! beside the pyramids:
 //!
 //! ```text
 //! previews/<stack mod 1000, three digits>/<stack>.preview
@@ -1068,7 +1072,8 @@ pub fn dataset_stacks(
         .collect()
 }
 
-/// The stacks a classify job judged: what its preview step makes.
+/// The stacks a classify job judged: what the previews job a sort queues
+/// as it ends makes (`preview build --classified JOB`).
 pub fn classified_by(store: &mut Store, job: i64) -> Result<Vec<i64>, String> {
     let sql = format!(
         "SELECT stack_id FROM {} WHERE job_id = {} ORDER BY stack_id",
@@ -1261,7 +1266,7 @@ pub fn data_url(jpeg: &[u8]) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Made now: a door asked for a preview no sort made.
+// Made now: a door asked for a preview not made yet.
 //
 // The first picture is v0's: the middle plane's one file decoded in the
 // request, drawn and answered at once; the whole preview is made after, on
@@ -1685,9 +1690,9 @@ fn warming() -> std::sync::MutexGuard<'static, Warming> {
 }
 
 /// Make the previews of `stacks` on a thread of this process, one after
-/// another, after the answer has gone: a page of scans listed before their
-/// sort made pictures has them when it is listed again. Never the job
-/// queue.
+/// another, after the answer has gone: a page of scans listed before the
+/// job after their sort made their pictures has them when it is listed
+/// again. Never the job queue.
 pub fn warm(home: &nils_registry::home::Home, working: &Path, stacks: &[i64]) {
     if stacks.is_empty() {
         return;

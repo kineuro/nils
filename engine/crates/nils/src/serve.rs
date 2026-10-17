@@ -1194,8 +1194,9 @@ pub fn serve(home: &Home, args: ServeArgs) -> Result<(), Exit> {
     let stop_queue = Arc::new(std::sync::atomic::AtomicBool::new(false));
     // Record 49 A1: pipeline runs have a lane of their own beside it, so a
     // long run never holds up a digest, a classify or a release.
-    // Record 55 H2: and the pictures lane, the pyramids built in the
-    // background after a sort, at a low priority and with half the workers.
+    // Record 55 H2: and the pictures lane, the previews and the pyramids
+    // made in the background after a sort, at a low priority and with half
+    // the workers.
     let queue: Vec<std::thread::JoinHandle<()>> = if args.worker {
         [
             nils_registry::job::Lane::Main,
@@ -2676,7 +2677,7 @@ fn routed(
                         })?,
                 )
             };
-            // record 55 H2: the preview a sort made, beside the pyramid
+            // record 55 H2: the preview made after a sort, beside the pyramid
             if rest.first() == Some(&"preview") {
                 return crate::preview::door(
                     registry,

@@ -55,9 +55,10 @@ pub struct Settings {
     pub votes: bool,
     /// Leave the run's job running when the sort ends well, for a step the
     /// caller makes part of the run and then finishes the job itself: the
-    /// classify command's previews, so the job is not shown done while the
-    /// step still runs, and a cancel still reaches it (review of
-    /// 2026-10-10). A cancelled or failed sort finishes its job as before.
+    /// classify command's headers step, so the job is not shown done while
+    /// the step still runs (review of 2026-10-10; the previews it made too
+    /// are a job of their own on the pictures lane since 2026-10-17). A
+    /// cancelled or failed sort finishes its job as before.
     pub leave_open: bool,
     /// Record 56 section 6.5, a scoped re-sort: the stacks a classify
     /// judges, every one by default. A stack outside them is neither read

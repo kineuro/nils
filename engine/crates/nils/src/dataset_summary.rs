@@ -56,11 +56,6 @@ const KINDS: &[&str] = &[
 /// How many of the newest jobs of those kinds are looked through.
 pub(crate) const WINDOW: usize = 2000;
 
-/// How long after a sort's row says done its pictures may still be being
-/// made in the same run, in seconds: past it, a run that never wrote them
-/// is not said to be making them.
-const MAKING: u64 = 6 * 3600;
-
 /// The axis the kinds of scan are read from, and the modifier that makes a
 /// scan of any base a FLAIR, as a person names it (the MRI pack's axes).
 const KIND_AXIS: &str = "base";
@@ -1408,47 +1403,25 @@ pub(crate) fn document(
         main["finished_at"] = picks["last_run"]["finished_at"].clone();
     }
     steps.push(main);
-    // a sort makes the pictures of what it judged in the same run
-    let open = open_of(&["classify", "preview"]);
-    let sort = newest_of(&["classify", "preview"]);
-    // the sort's row says done once it has judged, and its run goes on to
-    // make the pictures, writing them into its result at the end: until
-    // the result names them they are still being made, for a while
-    let making = open.is_none()
-        && working.is_some()
-        && pictures < stacks
-        && sort.is_some_and(|j| {
-            j.kind == "classify"
-                && j.state == "done"
-                && j.finished_at
-                    .as_deref()
-                    .and_then(nils_registry::time::secs_of)
-                    .is_some_and(|at| nils_registry::time::now_secs().saturating_sub(at) < MAKING)
-                && nils_registry::job::show(store, j.id)
-                    .ok()
-                    .flatten()
-                    .is_some_and(|row| {
-                        row.result
-                            .as_ref()
-                            .is_none_or(|r| r.get("previews").is_none())
-                    })
-        });
+    // the pictures of what a sort judged are a job of their own on the
+    // pictures lane, queued as the sort ends and before its 3D views
+    // (2026-10-17: never made in the sort's own run, so the sort is done
+    // once it has judged): the step is that job's while it is queued or
+    // runs, with its progress, and its counts are the previews under the
+    // working place
+    let open = open_of(&["preview"]);
     let mut picture_step = step(
         "pictures",
         if working.is_none() {
             "off"
-        } else if making {
-            "running"
         } else {
             state_of(open, pictures > 0)
         },
-        open.or(sort),
+        open.or_else(|| newest_of(&["preview"])),
         json!({"made": pictures, "of": stacks}),
     );
-    if making {
-        picture_step["progress"] = json!({"done": pictures, "total": stacks});
-    }
-    picture_step["in_sort"] = json!(open.or(sort).is_some_and(|j| j.kind == "classify"));
+    // a sort makes no picture in its own run any more
+    picture_step["in_sort"] = json!(false);
     steps.push(picture_step);
     let open = open_of(&["pyramid"]);
     steps.push(step(

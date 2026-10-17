@@ -10,13 +10,16 @@
 //! never holds up a digest; `nils serve --worker` runs a worker for each, and
 //! the pipeline lane's worker also queues again a run whose engine went away.
 //!
-//! Record 55 H2: a third lane, the pictures lane, builds the pyramids. A
-//! classify that ends done queues the pyramids of the stacks it judged
-//! there, a low-priority build in the background that never holds up a
-//! digest, a classify or a pseudonymise; a picture a reader asks for while
-//! it runs is built between two of its stacks. A worker beside the doors
-//! wakes as soon as a door queues a job, and still looks at the queue every
-//! few seconds for a job another process queued.
+//! Record 55 H2: a third lane, the pictures lane, makes the previews and
+//! builds the pyramids. A classify that ends done queues the previews of
+//! the stacks it judged there, then their pyramids, a low-priority build in
+//! the background that never holds up a digest, a classify or a
+//! pseudonymise (2026-10-17: the sort itself makes none, and the pick and
+//! the score after it never wait for pictures); a picture a reader asks for
+//! while the pyramids are built is built between two of their stacks. A
+//! worker beside the doors wakes as soon as a door queues a job, and still
+//! looks at the queue every few seconds for a job another process
+//! queued.
 
 use std::collections::VecDeque;
 use std::io::{BufRead as _, Write as _};
@@ -316,53 +319,89 @@ pub(crate) fn build_asked_pyramids(
 }
 
 /// Record 55 H2: a classify that ended done queues, on the pictures lane,
-/// the pyramids of the stacks it judged, under its own principal, grants
-/// and detail; nothing where no working place is bound, where it judged
-/// nothing, or where such a build for it is queued already.
-pub(crate) fn queue_pictures_after(store: &mut Store, ended: &job::Job) -> Option<i64> {
+/// the previews of the stacks it judged and then their pyramids, so the
+/// lane makes the previews first, under the sort's own principal, grants
+/// and detail: nothing where no working place is bound or the sort judged
+/// nothing, neither build where one for the sort is queued already, and no
+/// previews where it ran with `--no-previews`. Answers the jobs it queued,
+/// each with its verb, the previews first.
+pub(crate) fn queue_pictures_after(
+    store: &mut Store,
+    ended: &job::Job,
+) -> Vec<(&'static str, i64)> {
+    queue_after_sort(store, ended, &["preview", "pyramid"])
+}
+
+/// The previews alone, as a classify run at the keyboard queues them as it
+/// ends (2026-10-17): no worker ran it, so none queues them after it.
+pub(crate) fn queue_previews_after(store: &mut Store, ended: &job::Job) -> Option<i64> {
+    queue_after_sort(store, ended, &["preview"])
+        .first()
+        .map(|(_, id)| *id)
+}
+
+/// `verb build --classified JOB --place NAME` queued on the pictures lane
+/// for each of `verbs` in order, after the sort `ended`.
+fn queue_after_sort(
+    store: &mut Store,
+    ended: &job::Job,
+    verbs: &[&'static str],
+) -> Vec<(&'static str, i64)> {
+    let mut out = Vec::new();
     if ended.kind != "classify" || ended.state != State::Done {
-        return None;
+        return out;
     }
-    let working = crate::pyramid::working_place(store, None).ok()?;
-    if crate::preview::classified_by(store, ended.id)
-        .ok()?
-        .is_empty()
-    {
-        return None;
+    let Ok(working) = crate::pyramid::working_place(store, None) else {
+        return out;
+    };
+    if !crate::preview::classified_by(store, ended.id).is_ok_and(|s| !s.is_empty()) {
+        return out;
     }
     let id = ended.id.to_string();
-    let queued = job::queued_in(store, job::Lane::Pictures, 500).ok()?;
-    if queued.iter().any(|j| {
-        j.queued()
-            .is_some_and(|w| w.windows(2).any(|p| p[0] == "--classified" && p[1] == id))
-    }) {
-        return None;
-    }
-    let command: Vec<String> = [
-        "pyramid",
-        "build",
-        "--classified",
-        &id,
-        "--place",
-        &working.name,
-    ]
-    .iter()
-    .map(|w| w.to_string())
-    .collect();
+    let Ok(queued) = job::queued_in(store, job::Lane::Pictures, 500) else {
+        return out;
+    };
+    let no_previews = ended
+        .queued()
+        .is_some_and(|w| w.iter().any(|a| a == "--no-previews"));
     let extra = serde_json::json!({
         "detail": ended.args["detail"],
         "grants": ended.args["grants"],
         "actor": ended.args["actor"],
         "after": ended.id,
     });
-    job::enqueue_with(
-        store,
-        &command,
-        Some(&format!("pictures after job {}", ended.id)),
-        ended.principal(),
-        extra,
-    )
-    .ok()
+    for &verb in verbs {
+        if verb == "preview" && no_previews {
+            continue;
+        }
+        let there = queued.iter().any(|j| {
+            j.queued().is_some_and(|w| {
+                w.first().is_some_and(|v| v == verb)
+                    && w.windows(2).any(|p| p[0] == "--classified" && p[1] == id)
+            })
+        });
+        if there {
+            continue;
+        }
+        let command: Vec<String> = [verb, "build", "--classified", &id, "--place", &working.name]
+            .iter()
+            .map(|w| w.to_string())
+            .collect();
+        let name = match verb {
+            "preview" => format!("previews after job {}", ended.id),
+            _ => format!("pictures after job {}", ended.id),
+        };
+        if let Ok(queued) = job::enqueue_with(
+            store,
+            &command,
+            Some(&name),
+            ended.principal(),
+            extra.clone(),
+        ) {
+            out.push((verb, queued));
+        }
+    }
+    out
 }
 
 /// How a worker runs the queue.
@@ -601,17 +640,26 @@ pub(crate) fn run(
         // grants do not reach ends the chain, and the job's result says so.
         match job::show(store, next.id) {
             Ok(Some(ended)) if ended.state == State::Done => {
-                // record 55 H2: after a sort, its pyramids in the background
-                if opts.lane != job::Lane::Pictures
-                    && let Some(queued) = queue_pictures_after(store, &ended)
-                {
-                    let line = format!("job {}: its pyramids queued as job {queued}", next.id);
-                    let _ = if opts.quiet {
-                        writeln!(std::io::stderr(), "nils serve: {line}")
-                    } else {
-                        writeln!(std::io::stdout(), "{line}")
-                    };
-                    wake();
+                // record 55 H2: after a sort, its previews and then its
+                // pyramids in the background
+                if opts.lane != job::Lane::Pictures {
+                    let queued = queue_pictures_after(store, &ended);
+                    for (verb, id) in &queued {
+                        let what = if *verb == "preview" {
+                            "previews"
+                        } else {
+                            "pyramids"
+                        };
+                        let line = format!("job {}: its {what} queued as job {id}", next.id);
+                        let _ = if opts.quiet {
+                            writeln!(std::io::stderr(), "nils serve: {line}")
+                        } else {
+                            writeln!(std::io::stdout(), "{line}")
+                        };
+                    }
+                    if !queued.is_empty() {
+                        wake();
+                    }
                 }
                 match crate::chain::continue_chain(store, &ended) {
                     Ok(Some(queued)) => {
@@ -668,12 +716,12 @@ fn outcome(code: Option<i32>, printed: String, status: String) -> (State, Option
 }
 
 /// Whether a verb reads `--workers`: the two that walk a tree file by file,
-/// and the pyramid's encoder. Everything else counts its work in windows or
-/// in rows and has no such flag.
+/// and the previews' and the pyramid's encoders. Everything else counts its
+/// work in windows or in rows and has no such flag.
 fn takes_workers(argv: &[String]) -> bool {
     match argv.first().map(String::as_str) {
         Some("digest" | "pseudonymize") => true,
-        Some("pyramid") => argv.get(1).is_some_and(|w| w == "build"),
+        Some("pyramid" | "preview") => argv.get(1).is_some_and(|w| w == "build"),
         _ => false,
     }
 }
@@ -727,6 +775,11 @@ mod tests {
         assert_eq!(
             with_workers(argv("pyramid build --classified 7 --at-once 2"), Some(4)),
             argv("pyramid build --classified 7 --at-once 2 --workers 4")
+        );
+        // and so do the previews a sort queues on the pictures lane
+        assert_eq!(
+            with_workers(argv("preview build --classified 7 --place w"), Some(4)),
+            argv("preview build --classified 7 --place w --workers 4")
         );
     }
 
@@ -839,6 +892,95 @@ mod tests {
         build_asked_pyramids(&mut store, &working, 2);
         assert_eq!(state(&mut store, asked), State::Done);
         assert!(root.join("manifest.json").exists());
+    }
+
+    /// Record 55 H2 (2026-10-17): a sort is the registry's work alone. One
+    /// that ended done queues the previews of what it judged on the
+    /// pictures lane, then their pyramids, each once and never on the main
+    /// lane; one run with `--no-previews` queues its pyramids alone; and one
+    /// run at the keyboard queues its previews alone.
+    #[test]
+    fn a_sort_queues_its_previews_then_its_pyramids_on_the_pictures_lane() {
+        let src = nils_dicom::synth::TempDir::new("worker-after-sort-src");
+        let work = nils_dicom::synth::TempDir::new("worker-after-sort-work");
+        let mut store = crate::pyramid::test_stacks::registry(src.path(), 6);
+        nils_registry::place::add(
+            &mut store,
+            &nils_registry::place::New {
+                name: "work",
+                role: nils_registry::place::Role::Working,
+                path: work.path().to_str().unwrap(),
+                guarantees: serde_json::json!({}),
+                probed: serde_json::json!({}),
+                handling: serde_json::Value::Null,
+                dataset: serde_json::Value::Null,
+            },
+        )
+        .unwrap();
+        // a sort that judged `stacks` and ended done
+        let mut sorted = |line: &str, stacks: [i64; 2]| -> job::Job {
+            let id = job::enqueue(&mut store, &argv(line), None, None).unwrap();
+            for stack in stacks {
+                store
+                    .execute(
+                        "INSERT INTO classification (stack_id, pack, pack_version, contract, job_id, epoch, review_items) \
+                         VALUES (?, 'mri', '1', 1, ?, 0, 0)",
+                        &[
+                            nils_registry::Param::Int(stack),
+                            nils_registry::Param::Int(id),
+                        ],
+                    )
+                    .unwrap();
+            }
+            assert!(job::take(&mut store, id).unwrap());
+            job::finish(&mut store, id, State::Done, None).unwrap();
+            job::show(&mut store, id).unwrap().unwrap()
+        };
+        let sort = sorted("classify --pack mri", [1, 2]);
+        let bare = sorted("classify --pack mri --no-previews", [3, 4]);
+        let keyboard = sorted("classify --pack mri", [5, 6]);
+        let queued = queue_pictures_after(&mut store, &sort);
+        let verbs: Vec<&str> = queued.iter().map(|(v, _)| *v).collect();
+        assert_eq!(verbs, ["preview", "pyramid"]);
+        assert!(queued[0].1 < queued[1].1, "the previews are queued first");
+        // the pictures lane's, never the main lane's
+        let lane = |store: &mut Store| -> Vec<String> {
+            job::queued_in(store, job::Lane::Pictures, 10)
+                .unwrap()
+                .iter()
+                .map(|j| j.queued().unwrap().join(" "))
+                .collect()
+        };
+        assert_eq!(
+            lane(&mut store),
+            [
+                format!("preview build --classified {} --place work", sort.id),
+                format!("pyramid build --classified {} --place work", sort.id),
+            ]
+        );
+        assert!(
+            job::next_queued_in(&mut store, job::Lane::Main)
+                .unwrap()
+                .is_none()
+        );
+        // once
+        assert!(queue_pictures_after(&mut store, &sort).is_empty());
+        assert_eq!(queue_previews_after(&mut store, &sort), None);
+        // with --no-previews, the pyramids alone
+        let verbs: Vec<&str> = queue_pictures_after(&mut store, &bare)
+            .iter()
+            .map(|(v, _)| *v)
+            .collect();
+        assert_eq!(verbs, ["pyramid"]);
+        // at the keyboard, the previews alone
+        let previews = queue_previews_after(&mut store, &keyboard).unwrap();
+        let queued = lane(&mut store);
+        assert_eq!(queued.len(), 4, "{queued:?}");
+        assert_eq!(
+            queued.last().unwrap(),
+            &format!("preview build --classified {} --place work", keyboard.id)
+        );
+        assert!(job::show(&mut store, previews).unwrap().is_some());
     }
 
     #[test]
