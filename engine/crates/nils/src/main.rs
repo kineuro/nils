@@ -5644,10 +5644,10 @@ fn bring_in(home: &Home, args: BringInArgs) -> Result<(), Exit> {
         .position(|w| w == "--name")
         .and_then(|i| first.get(i + 1))
         .cloned();
-    let grants: Vec<&str> = crate::grants::GRANTS.to_vec();
+    let reach = crate::grants::Access::keyboard(sealed::keyboard_reads());
     let mut extra = serde_json::json!({
-        "detail": crate::grants::Detail::Sensitive.name(),
-        "grants": grants,
+        "detail": reach.detail.name(),
+        "grants": reach.list(),
         "then": then,
     });
     if let Some(n) = unread {
@@ -10405,14 +10405,19 @@ fn jobs_command(home: &Home, command: JobsCommand) -> Result<(), Exit> {
         }
         JobsCommand::Enqueue { name, command } => {
             // queued at the keyboard, the verb keeps the keyboard's reach,
-            // every class; a worker runs a job that recorded no detail as
-            // plain (the suite contract, version 2)
+            // every class and every grant (the certificate's only with
+            // --unsealed-access), as `nils bring-in` records it: a worker
+            // runs a job that recorded no detail as plain (the suite
+            // contract, version 2), and a score or a chain's next step is
+            // checked against the grants the job recorded (2026-10-17: a
+            // score queued here recorded none, and skipped System 1)
+            let reach = crate::grants::Access::keyboard(sealed::keyboard_reads());
             let id = job::enqueue_with(
                 store,
                 &command,
                 name.as_deref(),
                 Some(&actor()),
-                serde_json::json!({ "detail": crate::grants::Detail::Sensitive.name() }),
+                serde_json::json!({ "detail": reach.detail.name(), "grants": reach.list() }),
             )
             .map_err(err)?;
             println!("queued job {id}: nils {}", command.join(" "));

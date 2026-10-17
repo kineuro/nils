@@ -318,10 +318,11 @@ fn score(
     // a chain's step runs under what its first job recorded; a score at the
     // keyboard with the keyboard's reach
     let adopted = std::env::var(job::ADOPT_VAR).is_ok();
+    let keyboard = Access::keyboard(crate::sealed::keyboard_reads());
     let access = if adopted {
         crate::chain::recorded_access(&me)
     } else {
-        Access::everything()
+        keyboard.clone()
     };
     let sources = crate::sources::source_ids(registry.store(), place).map_err(|e| e.to_string())?;
     let stacks = new_stacks(registry.store(), &sources, batch)?;
@@ -443,8 +444,8 @@ fn score(
             "arrival": {"batch": batch, "score_job": job_id},
         });
         if !adopted {
-            extra["detail"] = json!(Detail::Sensitive.name());
-            extra["grants"] = json!(crate::grants::GRANTS.to_vec());
+            extra["detail"] = json!(keyboard.detail.name());
+            extra["grants"] = json!(keyboard.list());
         }
         if after_body_part && p.step == "body_part" {
             let mut then = vec![

@@ -26,7 +26,7 @@
 
 use std::ffi::{OsStr, OsString};
 use std::io::Write as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use dicom_core::VR;
@@ -218,12 +218,24 @@ struct Home {
 
 impl Home {
     fn run(&self, args: &[&str], stdin: Option<&str>) -> (bool, String, String) {
+        self.run_with(args, stdin, &[])
+    }
+
+    /// [`Home::run`] with more of the environment: a worker's search path,
+    /// what its stand-ins log to.
+    fn run_with(
+        &self,
+        args: &[&str],
+        stdin: Option<&str>,
+        env: &[(&str, &OsStr)],
+    ) -> (bool, String, String) {
         let mut child = nils()
             .arg("--registry")
             .arg(self.dir.path())
             .args(args)
             .env("USER", "anna")
             .env("HOSTNAME", "ward-3")
+            .envs(env.iter().copied())
             .env_remove("NILS_DSN")
             .env_remove("NILS_JOB_ID")
             .env_remove("NILS_JOB_DETAIL")
@@ -505,7 +517,25 @@ fn known(home: &Home) -> i64 {
     nils_registry::content::known(&mut store).unwrap()
 }
 
-fn round(pg: Option<(String, String)>) {
+/// What a round starts from: a registry with the dataset `ds` of three
+/// sessions (six scans, twelve files), the working place `work`, the
+/// body-part and System 1 stand-ins with their models, admitted, and a
+/// search path whose first folder holds the stand-in podman.
+struct Lab {
+    home: Home,
+    dir: TempDir,
+    work: TempDir,
+    files: TempDir,
+    bin: TempDir,
+    path: OsString,
+    args_log: PathBuf,
+    read_log: PathBuf,
+    s1: i64,
+    encoder_digest: String,
+    check: PathBuf,
+}
+
+fn lab(pg: Option<(String, String)>) -> Lab {
     let home = Home {
         dir: TempDir::new("arrival-home"),
         pg,
@@ -617,6 +647,35 @@ fn round(pg: Option<(String, String)>) {
     let path = fake_path(&bin);
     let args_log = bin.path().join("args.log");
     let read_log = bin.path().join("reads.log");
+    Lab {
+        home,
+        dir,
+        work,
+        files,
+        bin,
+        path,
+        args_log,
+        read_log,
+        s1,
+        encoder_digest,
+        check,
+    }
+}
+
+fn round(pg: Option<(String, String)>) {
+    let Lab {
+        home,
+        dir,
+        work,
+        files,
+        bin,
+        path,
+        args_log,
+        read_log,
+        s1,
+        encoder_digest,
+        check,
+    } = lab(pg);
     let env: [(&str, &OsStr); 2] = [
         ("FAKE_PODMAN_ARGS", args_log.as_os_str()),
         ("STANDIN_READS", read_log.as_os_str()),
@@ -817,6 +876,128 @@ fn round(pg: Option<(String, String)>) {
     drop(work);
     drop(other);
     drop(dir);
+}
+
+/// A job as `nils jobs show` gives it.
+fn job_doc(home: &Home, id: i64) -> Value {
+    home.json(&["jobs", "show", &id.to_string(), "--json"])
+}
+
+/// How many stacks have an opinion of the model.
+fn opinions_of(home: &Home, model: i64) -> i64 {
+    let mut store = home.store();
+    let sql = format!(
+        "SELECT COUNT(DISTINCT stack_id) FROM {} WHERE model_id = {model}",
+        store.qualified("opinion")
+    );
+    store.query(&sql, &[]).unwrap()[0].int(0).unwrap()
+}
+
+/// 2026-10-17, on a production install: a dataset's bring-in queued at the
+/// keyboard a step at a time (`nils jobs enqueue`) recorded no grants, so
+/// its score skipped System 1 for want of `pipelines:work`. A job queued at
+/// the keyboard records the keyboard's reach, so the score queues System
+/// 1's run over the batch's new stacks, and the worker runs it.
+fn keyboard_round(pg: Option<(String, String)>) {
+    let Lab {
+        home,
+        dir,
+        work,
+        files,
+        bin,
+        path,
+        args_log,
+        read_log,
+        s1,
+        ..
+    } = lab(pg);
+    let packs = packs();
+    for step in [
+        &["pseudonymize", "@ds", "--name", "kb"][..],
+        &["digest", "@ds", "--name", "kb"],
+        &["fingerprint"],
+        &["classify", "--pack-dir", &packs],
+        &["score", "@ds", "--name", "kb", "--pack-dir", &packs],
+    ] {
+        let mut args = vec!["jobs", "enqueue", "--"];
+        args.extend_from_slice(step);
+        home.ok(&args);
+    }
+    // each job records the keyboard's reach: every grant but the
+    // certificate's, which only --unsealed-access gives, at sensitive
+    let queued = job_doc(&home, jobs_of(&home, "score")[0]);
+    let grants = queued["args"]["grants"].as_array().unwrap();
+    assert!(grants.iter().any(|g| g == "pipelines:work"), "{queued}");
+    assert!(!grants.iter().any(|g| g == "sealed:see"), "{queued}");
+    assert_eq!(queued["args"]["detail"], "sensitive", "{queued}");
+    let env: [(&str, &OsStr); 4] = [
+        ("PATH", path.as_os_str()),
+        ("NILS_PACK_DIR", OsStr::new(&packs)),
+        ("FAKE_PODMAN_ARGS", args_log.as_os_str()),
+        ("STANDIN_READS", read_log.as_os_str()),
+    ];
+    let (good, out, err) = home.run_with(&["jobs", "work", "--once"], None, &env);
+    assert!(good, "{err}\n{out}");
+    let score = job_doc(&home, jobs_of(&home, "score")[0]);
+    assert_eq!(score["state"], "done", "{score}");
+    let result = &score["result"];
+    assert_eq!(result["new_stacks"], 6, "{score}");
+    assert_eq!(result["skipped"], json!([]), "{score}");
+    assert!(result.get("score_skipped").is_none(), "{score}");
+    let queued_runs = result["queued"].as_array().unwrap();
+    assert_eq!(queued_runs.len(), 1, "{score}");
+    assert_eq!(queued_runs[0]["step"], "system1", "{score}");
+    assert_eq!(queued_runs[0]["stacks"], 6, "{score}");
+    // the run, under the reach the score's job recorded, ran and gave every
+    // scan its opinion
+    let run = job_doc(&home, queued_runs[0]["job"].as_i64().unwrap());
+    assert_eq!(run["state"], "done", "{run}");
+    assert_eq!(run["args"]["arrival"]["batch"], "kb", "{run}");
+    assert_eq!(opinions_of(&home, s1), 6);
+    drop(files);
+    drop(bin);
+    drop(work);
+    drop(dir);
+}
+
+#[test]
+fn a_bring_in_queued_at_the_keyboard_is_scored_by_system_one() {
+    if !have("python3") {
+        eprintln!(
+            "python3 is not installed; the stand-in podman needs it, so this test is skipped"
+        );
+        return;
+    }
+    keyboard_round(None);
+}
+
+#[test]
+fn a_bring_in_queued_at_the_keyboard_is_scored_on_postgres_too() {
+    if !have("python3") {
+        eprintln!(
+            "python3 is not installed; the stand-in podman needs it, so this test is skipped"
+        );
+        return;
+    }
+    let Some(dsn) = std::env::var("NILS_TEST_POSTGRES_DSN")
+        .ok()
+        .filter(|d| !d.is_empty())
+    else {
+        eprintln!("NILS_TEST_POSTGRES_DSN is not set; the Postgres half is skipped");
+        return;
+    };
+    let schema = "nils_arrival_keyboard";
+    let drop = || {
+        let mut store = Store::connect_postgres(&dsn, schema).expect("connect");
+        store
+            .batch(&format!(
+                "DROP SCHEMA IF EXISTS {schema} CASCADE; DROP SCHEMA IF EXISTS {schema}_linkage CASCADE"
+            ))
+            .expect("drop");
+    };
+    drop();
+    keyboard_round(Some((dsn.clone(), schema.to_string())));
+    drop();
 }
 
 #[test]

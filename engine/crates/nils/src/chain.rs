@@ -278,7 +278,8 @@ impl BringIn {
 
 /// What a chain step needs of the caller who queued the first job, as the
 /// job recorded them: the grants and the detail. A job queued from the
-/// keyboard recorded every grant and detail sensitive.
+/// keyboard recorded the keyboard's reach (`Access::keyboard`); one that
+/// recorded no grants holds none, so it queues no step that needs one.
 pub(crate) fn recorded_access(job: &Job) -> Access {
     let mut access = Access::default();
     if let Some(grants) = job.args["grants"].as_array() {

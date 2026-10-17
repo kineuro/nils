@@ -223,6 +223,21 @@ impl Access {
         access
     }
 
+    /// The keyboard's reach, which a job queued at the keyboard records as
+    /// its caller's (`nils jobs enqueue`, `nils bring-in`, a score run at
+    /// the keyboard): [`Access::everything`], and [`UNSEALED`] too where
+    /// `--unsealed-access` gave a reason (`unsealed`), since the keyboard
+    /// reads a stack of a sample sealed now only then. A chain's later
+    /// steps and a score at arrival are checked against what the job
+    /// recorded, as they are against a door caller's grants.
+    pub(crate) fn keyboard(unsealed: bool) -> Access {
+        let mut access = Access::everything();
+        if unsealed {
+            access.give(UNSEALED);
+        }
+        access
+    }
+
     /// A grant of the vocabulary, or none.
     pub(crate) fn known(text: &str) -> Option<&'static str> {
         GRANTS.iter().copied().find(|g| *g == text)
@@ -530,5 +545,28 @@ mod tests {
             job(serde_json::json!({"argv": ["ask", "run"]})),
             Detail::Plain
         );
+    }
+
+    /// 2026-10-17: a job queued at the keyboard records the keyboard's
+    /// reach, so a score it queues runs System 1: every grant at detail
+    /// sensitive, and the certificate's grant only with `--unsealed-access`.
+    #[test]
+    fn the_keyboard_s_reach_is_everything_and_sealed_only_when_asked() {
+        let reach = Access::keyboard(false);
+        assert_eq!(reach, Access::everything());
+        assert!(reach.holds("pipelines:work"), "a run at arrival");
+        assert!(!reach.holds(UNSEALED));
+        assert_eq!(reach.detail, Detail::Sensitive);
+        let unsealed = Access::keyboard(true);
+        assert!(unsealed.holds(UNSEALED));
+        assert_eq!(unsealed.list().len(), GRANTS.len());
+        // as a job records it, and as a chain's step reads it back
+        let recorded = serde_json::json!({"detail": reach.detail.name(), "grants": reach.list()});
+        let mut back = Access::default();
+        for g in strings(&recorded["grants"]) {
+            back.add(&Access::named(g).unwrap());
+        }
+        back.detail = Detail::of_job(&recorded);
+        assert_eq!(back, reach);
     }
 }
