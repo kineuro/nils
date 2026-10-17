@@ -26,9 +26,18 @@
 //! job queued after any of those: the next step of a chain, the pictures
 //! and the pick run after a sort. `GET /api/jobs?dataset=name` lists the
 //! same jobs, newest first.
+//!
+//! What it counts of a dataset of 30 million files takes seconds to read
+//! (2026-10-17), and the desk asks every few seconds while a step runs, so
+//! the counts are kept under a stamp of what they read and read once for
+//! the requests that ask at the same time ([`kept`]); the jobs, the steps'
+//! states and their progress are read on every request.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, LazyLock, Mutex};
+use std::time::{Duration, Instant};
 
 use nils_registry::Registry;
 use nils_registry::place::{self, Place};
@@ -55,11 +64,6 @@ const KINDS: &[&str] = &[
 
 /// How many of the newest jobs of those kinds are looked through.
 pub(crate) const WINDOW: usize = 2000;
-
-/// How long after a sort's row says done its pictures may still be being
-/// made in the same run, in seconds: past it, a run that never wrote them
-/// is not said to be making them.
-const MAKING: u64 = 6 * 3600;
 
 /// The axis the kinds of scan are read from, and the modifier that makes a
 /// scan of any base a FLAIR, as a person names it (the MRI pack's axes).
@@ -213,8 +217,13 @@ fn newest(store: &mut Store, window: usize) -> Result<Vec<Light>, StoreError> {
 }
 
 /// The jobs a dataset's digests ran under, the sorts that judged its
-/// stacks, and the runs of the operations' models over them.
-fn seeds(store: &mut Store, sources: &[i64]) -> Result<BTreeSet<i64>, StoreError> {
+/// stacks (`sorts`, where read already), and the runs of the operations'
+/// models over them.
+fn seeds(
+    store: &mut Store,
+    sources: &[i64],
+    sorts: Option<&BTreeSet<i64>>,
+) -> Result<BTreeSet<i64>, StoreError> {
     let mut out = BTreeSet::new();
     if sources.is_empty() {
         return Ok(out);
@@ -233,18 +242,52 @@ fn seeds(store: &mut Store, sources: &[i64]) -> Result<BTreeSet<i64>, StoreError
     )? {
         out.insert(r.int(0)?);
     }
+    match sorts {
+        Some(sorts) => out.extend(sorts),
+        None => out.extend(sorts_of(store, &ids)?),
+    }
+    Ok(out)
+}
+
+/// The jobs of the sorts that judged a dataset's stacks: every job a
+/// classification of a stack its sources (a comma list) hold names.
+fn sorts_of(store: &mut Store, sources: &str) -> Result<BTreeSet<i64>, StoreError> {
+    let mut out = BTreeSet::new();
+    if sources.trim().is_empty() {
+        return Ok(out);
+    }
     for r in store.query(
         &format!(
             "SELECT DISTINCT cl.job_id FROM {} cl JOIN {} x ON x.id = cl.stack_id WHERE {}",
             store.qualified("classification"),
             store.qualified("stack"),
-            crate::operations::held_by(store, "x", &ids),
+            crate::operations::held_by(store, "x", sources),
         ),
         &[],
     )? {
         out.insert(r.int(0)?);
     }
     Ok(out)
+}
+
+/// Whether a job has judged a stack the sources (a comma list) hold: a
+/// sort not over yet, which the sorts read with the summary's counts may
+/// not name yet.
+fn sorted_by(store: &mut Store, sources: &str, job: i64) -> Result<bool, StoreError> {
+    if sources.trim().is_empty() {
+        return Ok(false);
+    }
+    let rows = store.query(
+        &format!(
+            "SELECT cl.stack_id FROM {} cl JOIN {} x ON x.id = cl.stack_id \
+             WHERE cl.job_id = {job} AND {} LIMIT 1",
+            store.qualified("classification"),
+            store.qualified("stack"),
+            crate::operations::held_by(store, "x", sources),
+        ),
+        &[],
+    )?;
+    Ok(!rows.is_empty())
 }
 
 /// A dataset's jobs among the newest `window`, newest first: the ones that
@@ -257,8 +300,21 @@ pub(crate) fn jobs_of(
     dataset: &Place,
     window: usize,
 ) -> Result<Vec<Light>, StoreError> {
+    jobs_sorted(store, dataset, window, None)
+}
+
+/// [`jobs_of`], with the jobs of the sorts that judged the dataset's stacks
+/// read already (`sorts`, with the summary's counts): a sort not over that
+/// they do not name is looked for among the classifications, so a sort that
+/// judges its stacks now is the dataset's as soon as it has judged one.
+fn jobs_sorted(
+    store: &mut Store,
+    dataset: &Place,
+    window: usize,
+    sorts: Option<&BTreeSet<i64>>,
+) -> Result<Vec<Light>, StoreError> {
     let sources = crate::sources::source_ids(store, dataset)?;
-    let mut related = seeds(store, &sources)?;
+    let mut related = seeds(store, &sources, sorts)?;
     // the folder as declared and as the disk resolves it, which a linked
     // tree makes two
     let mut folders = vec![dataset.path.trim_end_matches('/').to_string()];
@@ -276,6 +332,14 @@ pub(crate) fn jobs_of(
     // are this one's
     let added_again = was_a_dataset_before(store, dataset, &folders)?;
     let mut jobs = newest(store, window)?;
+    if sorts.is_some() {
+        let ids = list(&sources);
+        for j in jobs.iter().filter(|j| j.open() && j.kind == "classify") {
+            if !related.contains(&j.id) && sorted_by(store, &ids, j.id)? {
+                related.insert(j.id);
+            }
+        }
+    }
     jobs.reverse();
     let mut out = Vec::new();
     for j in jobs {
@@ -958,36 +1022,645 @@ fn policy_reasons() -> String {
         .join(", ")
 }
 
-/// Record 56 (2026-10-11): the files of the sources the read set aside by
-/// policy (a SOP class or a modality outside the batch's knobs), by kind in
-/// plain words, most first. They ask nobody anything; the files the reader
-/// could not take keep their review item and are not counted here.
-pub(crate) fn set_aside_of(store: &mut Store, sources: &str) -> Result<Vec<SetAside>, StoreError> {
-    let sql = format!(
-        "SELECT reason, detail, COUNT(*) FROM {} WHERE source_id IN ({sources}) \
-         AND status = 'quarantined' AND reason IN ({}) GROUP BY reason, detail",
-        store.qualified("source_file"),
-        policy_reasons()
-    );
+/// What a dataset's files count, by what the read made of them (record
+/// 55, 2026-10-10): the files read as their instance's own (`new`), the
+/// copies of an instance (`copies`), of which one of each instance whose
+/// own file is no live file of the dataset is `known`; the files the read
+/// refused, held for their instance (`same_instance`) or let go
+/// (`left_out`); the files gone from the tree since a read; and the newest
+/// batch that refused a file a person may look at (none set aside by
+/// policy, none held for its instance).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct Files {
+    pub(crate) new: i64,
+    pub(crate) copies: i64,
+    pub(crate) known: i64,
+    pub(crate) refused: i64,
+    pub(crate) same_instance: i64,
+    pub(crate) left_out: i64,
+    pub(crate) gone: i64,
+    pub(crate) refused_batch: Option<i64>,
+}
+
+impl Files {
+    /// The files read: their instance's own and the copies.
+    pub(crate) fn read(&self) -> i64 {
+        self.new + self.copies
+    }
+
+    /// The copies that are this dataset's second file of an instance.
+    pub(crate) fn twice(&self) -> i64 {
+        (self.copies - self.known).max(0)
+    }
+}
+
+/// A dataset's files (`sources`, a comma list of its `source` ids) counted
+/// as the summary says them, with the files the read set aside by policy
+/// (record 56: a SOP class or a modality outside the batch's knobs) by kind
+/// in plain words, most first; those ask nobody anything, and the files the
+/// reader could not take keep their review item and are not among them.
+/// Two reads where there were nine (2026-10-17): every file by its status,
+/// which the index on the source and the status answers without reading a
+/// row, and the refused ones, which are few, by reason; the copies whose
+/// instance is known are counted apart, from their own rows.
+pub(crate) fn files_of(
+    store: &mut Store,
+    sources: &str,
+) -> Result<(Files, Vec<SetAside>), StoreError> {
+    let file = store.qualified("source_file");
+    let mut files = Files::default();
+    for r in store.query(
+        &format!(
+            "SELECT status, COUNT(*) FROM {file} WHERE source_id IN ({sources}) GROUP BY status"
+        ),
+        &[],
+    )? {
+        let n = r.int(1)?;
+        match r.text(0)? {
+            "ingested" => files.new += n,
+            "duplicate" => files.copies += n,
+            "gone" => files.gone += n,
+            _ => {}
+        }
+    }
+    // the refused ones by reason, the detail of those set aside by policy,
+    // and the newest batch of each; whether a reason is a same-instance one
+    // is the store's own LIKE, as it was asked of every file before
+    let same = nils_registry::review::SAME_INSTANCE_KIND;
+    let drop = nils_registry::review::SAME_INSTANCE_DROP;
+    let policy = policy_reasons();
+    let like = format!("CASE WHEN reason LIKE '{same}%' THEN 1 ELSE 0 END");
+    let detail = format!("CASE WHEN reason IN ({policy}) THEN detail END");
     let mut by: std::collections::BTreeMap<&'static str, (&'static str, i64)> =
         std::collections::BTreeMap::new();
-    for r in store.query(&sql, &[])? {
-        let Some(class) = nils_dicom::QuarantineClass::from_name(r.text(0)?) else {
-            continue;
-        };
-        let (kind, words) = nils_dicom::set_aside_words(class, r.opt_text(1)?);
-        by.entry(kind).or_insert((words, 0)).1 += r.int(2)?;
+    let names = policy_names();
+    for r in store.query(
+        &format!(
+            "SELECT reason, {like}, {detail}, COUNT(*), MAX(batch_id) FROM {file} \
+             WHERE source_id IN ({sources}) AND status = 'quarantined' GROUP BY reason, {like}, {detail}"
+        ),
+        &[],
+    )? {
+        let reason = r.opt_text(0)?;
+        let same_kind = r.int(1)? == 1;
+        let n = r.int(3)?;
+        if reason.is_none() || !same_kind {
+            files.refused += n;
+        }
+        if reason == Some(drop) {
+            files.left_out += n;
+        }
+        if reason == Some(same) {
+            files.same_instance += n;
+        }
+        let set_aside = reason.is_some_and(|reason| names.contains(&reason));
+        if reason.is_none() || (!same_kind && !set_aside) {
+            files.refused_batch = files.refused_batch.max(r.opt_int(4)?);
+        }
+        if let Some(class) = reason
+            .filter(|_| set_aside)
+            .and_then(nils_dicom::QuarantineClass::from_name)
+        {
+            let (kind, words) = nils_dicom::set_aside_words(class, r.opt_text(2)?);
+            by.entry(kind).or_insert((words, 0)).1 += n;
+        }
     }
-    let mut out: Vec<SetAside> = by
+    // one copy of each instance whose own file is no live file of this
+    // dataset is known; every other copy is this dataset's second file. The
+    // copies are found first, through the index on the source and the
+    // status, and materialised, so that no planner walks every file in
+    // instance order looking for them
+    let instance = store.qualified("instance");
+    files.known = count(
+        store,
+        &format!(
+            "WITH copies AS MATERIALIZED (SELECT instance_id FROM {file} \
+             WHERE source_id IN ({sources}) AND status = 'duplicate') \
+             SELECT COUNT(DISTINCT c.instance_id) FROM copies c \
+             JOIN {instance} i ON i.id = c.instance_id LEFT JOIN {file} o ON o.id = i.source_file_id \
+             WHERE o.id IS NULL OR o.source_id NOT IN ({sources}) OR o.status NOT IN ('ingested', 'duplicate')"
+        ),
+    )?;
+    let mut set_aside: Vec<SetAside> = by
         .into_iter()
         .map(|(kind, (words, count))| SetAside { kind, words, count })
         .collect();
-    out.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.kind.cmp(b.kind)));
-    Ok(out)
+    set_aside.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.kind.cmp(b.kind)));
+    Ok((files, set_aside))
+}
+
+/// What the summary counts of a dataset that only a read, a run, a sort or
+/// a person's act changes (2026-10-17): its subjects, visits and scans, its
+/// files, how sure the sort is, the kinds and regions, the main scans, the
+/// pictures and 3D views made, and the operations' counts, with the jobs of
+/// the sorts that judged its stacks. On a dataset of 30 million files they
+/// take seconds to read, so they are kept ([`kept`]) while the jobs, the
+/// steps' states and their progress are read on every request.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct Counts {
+    pub(crate) studies: i64,
+    pub(crate) stacks: i64,
+    pub(crate) sessions: Option<i64>,
+    pub(crate) subjects: i64,
+    pub(crate) files: Files,
+    pub(crate) identity_questions: i64,
+    pub(crate) set_aside: Vec<SetAside>,
+    pub(crate) set_aside_no_scans: nils_registry::dataset_subjects::SetAside,
+    pub(crate) classified: i64,
+    pub(crate) certainty: crate::certainty::Certainty,
+    pub(crate) passes: i64,
+    pub(crate) kinds: Vec<(String, i64)>,
+    pub(crate) regions: Vec<(String, i64)>,
+    pub(crate) sorts: BTreeSet<i64>,
+    pub(crate) picks: Value,
+    pub(crate) pictures: i64,
+    pub(crate) views: i64,
+    pub(crate) operations: Vec<crate::operations::Counted>,
+}
+
+/// What the sorts say of a dataset's stacks: how many they judged, how
+/// sure they are, a pass's questions, the kinds and regions, and the jobs of
+/// the sorts.
+#[derive(Debug, Clone, Default, PartialEq)]
+struct Sorted {
+    classified: i64,
+    certainty: crate::certainty::Certainty,
+    passes: i64,
+    kinds: Vec<(String, i64)>,
+    regions: Vec<(String, i64)>,
+    sorts: BTreeSet<i64>,
+}
+
+/// A dataset's counts read now. `hide` leaves a sample sealed now out of
+/// the kinds and regions; `working` is the folder the pictures and 3D views
+/// are made under, where one is bound. On a dataset of 30 million files each
+/// part takes a second or more, and they read different tables, so the
+/// sorts' counts and the operations' are read beside the files' on
+/// connections of their own, and the pictures are looked for on threads of
+/// their own meanwhile (2026-10-17).
+pub(crate) fn counts(
+    registry: &mut Registry,
+    dataset: &Place,
+    ids: &[i64],
+    hide: bool,
+    working: Option<&Path>,
+) -> Result<Counts, Reply> {
+    #[cfg(test)]
+    tests::hold(&dataset.path);
+    let home = registry.home().clone();
+    let store = registry.store();
+    let window = nils_registry::cohort::built_window(store).map_err(failed)?;
+    let sources = list(ids);
+    // the visits are none where nobody has built the session cache, and
+    // a count of it where somebody has
+    let mut c = Counts {
+        sessions: window.map(|_| 0),
+        // Nima, 2026-10-12: a dataset holds stacks and files, never
+        // subjects; the subjects counted in it are those with a stack its
+        // tree holds a file of, as every reader counts them
+        // (`nils_registry::dataset_subjects`)
+        subjects: nils_registry::dataset_subjects::count(store, ids).map_err(failed)?,
+        ..Counts::default()
+    };
+    if !ids.is_empty() {
+        // record 55 (2026-10-10): every scan its tree has a file of, whoever
+        // read it first
+        let in_tree = crate::operations::held_by(store, "x", &sources);
+        let studies_in_tree = crate::operations::studies_held_by(store, "x", &sources);
+        c.studies = count(
+            store,
+            &format!(
+                "SELECT COUNT(*) FROM {} x WHERE {studies_in_tree}",
+                store.qualified("study")
+            ),
+        )
+        .map_err(failed)?;
+        c.stacks = count(
+            store,
+            &format!(
+                "SELECT COUNT(*) FROM {} x WHERE {in_tree}",
+                store.qualified("stack")
+            ),
+        )
+        .map_err(failed)?;
+    }
+    let names = crate::operations::OPERATIONS.map(|(name, _)| name);
+    let stacks = c.stacks;
+    let operations = |store: &mut Store| {
+        crate::operations::counted(
+            store,
+            crate::operations::Scope::Sources(&sources),
+            // counted as the card counts them (record 48: never by kind); a
+            // cohort's steps leave a sealed sample out
+            false,
+            &names,
+        )
+        .map_err(failed)
+    };
+    let sorting = |store: &mut Store| sorted(store, &sources, hide, stacks);
+    std::thread::scope(|scope| -> Result<(), Reply> {
+        let operations_apart = (!ids.is_empty()).then(|| scope.spawn(|| apart(&home, operations)));
+        let sorted_apart = (!ids.is_empty()).then(|| scope.spawn(|| apart(&home, sorting)));
+        // the stacks whose pictures and 3D views are looked for, under the
+        // working place where one is bound: every stack its tree holds a
+        // file of
+        let looking = match working {
+            Some(w) if c.stacks > 0 => {
+                let looked = crate::preview::dataset_stacks(store, dataset).map_err(failed)?;
+                Some(scope.spawn(move || made(w, &looked)))
+            }
+            _ => None,
+        };
+        if !ids.is_empty() {
+            files_and_visits(store, dataset.id, ids, window, &mut c)?;
+        }
+        // the main scans of its subjects, as the picks summary door says them
+        c.picks = crate::pick_after::summary(store, dataset, None).map_err(failed)?;
+        c.operations = match operations_apart.map(joined).transpose()?.flatten() {
+            Some(counted) => counted,
+            None => operations(store)?,
+        };
+        if let Some(sorted_apart) = sorted_apart {
+            let s = match joined(sorted_apart)? {
+                Some(s) => s,
+                None => sorting(store)?,
+            };
+            c.classified = s.classified;
+            c.certainty = s.certainty;
+            c.passes = s.passes;
+            c.kinds = s.kinds;
+            c.regions = s.regions;
+            c.sorts = s.sorts;
+        }
+        if let Some(looking) = looking {
+            (c.pictures, c.views) = looking.join().unwrap_or((0, 0));
+        }
+        Ok(())
+    })?;
+    Ok(c)
+}
+
+/// `read` on a connection of its own to the registry `home` names, so that
+/// it runs beside the rest; none where no connection opens, and the caller
+/// reads it on its own after the rest.
+fn apart<T>(
+    home: &nils_registry::Home,
+    read: impl FnOnce(&mut Store) -> Result<T, Reply>,
+) -> Result<Option<T>, Reply> {
+    match home.open() {
+        Ok(mut registry) => read(registry.store()).map(Some),
+        Err(_) => Ok(None),
+    }
+}
+
+/// What a thread read, or its panic carried on.
+fn joined<T>(handle: std::thread::ScopedJoinHandle<'_, T>) -> T {
+    match handle.join() {
+        Ok(read) => read,
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
+}
+
+/// The visits and the files of a dataset (its place's id) with sources
+/// (`ids`), read into `c`.
+fn files_and_visits(
+    store: &mut Store,
+    place_id: i64,
+    ids: &[i64],
+    window: Option<i64>,
+    c: &mut Counts,
+) -> Result<(), Reply> {
+    let list = list(ids);
+    let sources = list.as_str();
+    if let Some(window) = window {
+        let (study, cache) = (
+            store.qualified("study"),
+            store.qualified("session_cache_study"),
+        );
+        let studies_in_tree = crate::operations::studies_held_by(store, "x", sources);
+        // 2026-10-12: and none where the cache holds not all of its
+        // dated studies yet (read since anything built it), so that a
+        // dataset read after the cache was built does not say 0 visits
+        let uncached = count(
+            store,
+            &format!(
+                "SELECT COUNT(*) FROM {study} x WHERE {studies_in_tree} \
+                 AND COALESCE(x.date_filled, x.study_date) IS NOT NULL \
+                 AND EXISTS (SELECT 1 FROM {series} se WHERE se.study_id = x.id) \
+                 AND NOT EXISTS (SELECT 1 FROM {cache} scs WHERE scs.study_id = x.id \
+                 AND scs.window_days = {window})",
+                series = store.qualified("series"),
+            ),
+        )
+        .map_err(failed)?;
+        c.sessions = if uncached > 0 {
+            None
+        } else {
+            Some(
+                count(
+                    store,
+                    &format!(
+                        "SELECT COUNT(DISTINCT scs.session_id) FROM {cache} scs \
+                         JOIN {study} x ON x.id = scs.study_id WHERE {studies_in_tree} \
+                         AND scs.window_days = {window}"
+                    ),
+                )
+                .map_err(failed)?,
+            )
+        };
+    }
+    // record 55 (2026-10-10): the files read as their instance's own, the
+    // copies of an instance another dataset read or this one holds a file
+    // of already, the files held because the registry holds their instance
+    // UID under another subject, study or series, the files a person let
+    // go out of the read and the files gone from the tree since a read;
+    // record 56: the files the read set aside by policy, by kind
+    (c.files, c.set_aside) = files_of(store, sources).map_err(failed)?;
+    // the open questions about the dataset's held files (the duplicate
+    // policy's defaults, 2026-10-10)
+    let same = nils_registry::review::SAME_INSTANCE_KIND;
+    let keys: Vec<String> = ids
+        .iter()
+        .map(|id| format!("ri.group_key LIKE 'source:{id}|%'"))
+        .collect();
+    c.identity_questions = count(
+        store,
+        &format!(
+            "SELECT COUNT(*) FROM {} ri WHERE ri.kind = '{same}' AND ri.status = 'open' AND ({})",
+            store.qualified("review_item"),
+            keys.join(" OR ")
+        ),
+    )
+    .map_err(failed)?;
+    // and the subjects with no stack in it its set-aside files are of, a
+    // fact about those files (2026-10-12)
+    c.set_aside_no_scans = nils_registry::dataset_subjects::set_aside_without_stacks(
+        store,
+        place_id,
+        ids,
+        &policy_names(),
+    )
+    .map_err(failed)?;
+    Ok(())
+}
+
+/// What the sorts say of the stacks the sources (a comma list) hold,
+/// `stacks` of them.
+fn sorted(store: &mut Store, sources: &str, hide: bool, stacks: i64) -> Result<Sorted, Reply> {
+    let in_tree = crate::operations::held_by(store, "x", sources);
+    let classified = count(
+        store,
+        &format!(
+            "SELECT COUNT(*) FROM {} x JOIN {} cl ON cl.stack_id = x.id WHERE {in_tree}",
+            store.qualified("stack"),
+            store.qualified("classification"),
+        ),
+    )
+    .map_err(failed)?;
+    // record 56: how sure the sort is counts what the sort asks, never
+    // a question about body part or post-contrast, which are steps of
+    // their own; counted as the card and the sources door count it, so
+    // the two agree, and a pass's questions beside it
+    let asks = crate::certainty::Asks::sort(store).map_err(failed)?;
+    let certainty = crate::certainty::of_sources(store, &asks, sources, stacks).map_err(failed)?;
+    let holds = crate::operations::Scope::Sources(sources).holds(store);
+    let passes = crate::certainty::passes(store, &holds).map_err(failed)?;
+    let sealed = hide.then(|| store.qualified("sealed_stack"));
+    Ok(Sorted {
+        classified,
+        certainty,
+        passes,
+        kinds: by_axis(store, sources, KIND_AXIS, sealed.as_deref()).map_err(failed)?,
+        regions: by_axis(store, sources, REGION_AXIS, sealed.as_deref()).map_err(failed)?,
+        sorts: sorts_of(store, sources).map_err(failed)?,
+    })
+}
+
+/// How long a dataset's counts are kept while what they were read under
+/// is the same: a minute, as the sources door's document is kept, or a few
+/// seconds while a job is not over or a batch runs, whose counts move with
+/// nothing else moving (the files a read files, the pictures a sort makes).
+const KEEP: Duration = Duration::from_secs(60);
+const KEEP_BUSY: Duration = Duration::from_secs(15);
+
+/// A dataset's counts as kept, under the stamp they were read under.
+struct Kept {
+    stamp: String,
+    at: Instant,
+    ttl: Duration,
+    counts: Arc<Counts>,
+}
+
+/// One dataset's counts, for callers who read a sample sealed now or for
+/// those who do not: the counts kept, whether a request reads them now, and
+/// how many times they were read from the registry rather than answered
+/// from the kept ones or another request's reading.
+#[derive(Default)]
+struct Slot {
+    kept: Option<Kept>,
+    reading: bool,
+    reads: usize,
+}
+
+/// A dataset's slot: its place's folder and id, and whether a sample sealed
+/// now is left out of its counts.
+type Key = (String, i64, bool);
+
+/// The counts kept, by dataset, and the signal a request waiting for
+/// another's reading wakes on.
+static KEPT: LazyLock<(Mutex<HashMap<Key, Slot>>, Condvar)> = LazyLock::new(Default::default);
+
+/// How many times the kept counts were forgotten: a reading that began
+/// before a door wrote may have read what the write changed, so what it
+/// read is answered and never kept.
+static FORGOTTEN: AtomicU64 = AtomicU64::new(0);
+
+/// The quiet acts of the audit: a stack's pixels opened, a sealed sample
+/// read, an identifier looked up or revealed, a derivative read. They
+/// change nothing the counts read and come often, so they move no stamp.
+const QUIET: &str =
+    "'instance.open', 'sealed.read', 'linkage.resolve', 'linkage.reveal', 'derivative.read'";
+
+/// What a dataset's counts are read under (2026-10-17), read again on every
+/// request from indexes and small tables, in milliseconds whatever the
+/// registry holds: the registry's epoch, which moves with every judgement,
+/// merge and read's commit; every batch, which a read or a pseudonymise run
+/// begins and ends; the newest job and every job not over with its state
+/// (a sort, a pick, the pictures, a pipeline); the newest act of a person
+/// the audit keeps; the newest question, visit, post-contrast label and the
+/// samples sealed now; the dataset's place, its sources and the working
+/// place. The counts are read again when any of these moves, but for what a
+/// run moves as it goes: the epoch while a read runs, which it moves with
+/// every few hundred files it files, and the newest question while a job
+/// runs. While a job is not over (the previews a sort queued among them)
+/// or a batch runs (`true`), they are kept a few seconds only.
+fn stamp(
+    store: &mut Store,
+    dataset: &Place,
+    ids: &[i64],
+    working: Option<&Place>,
+) -> Result<(String, bool), StoreError> {
+    let q = |t: &str| store.qualified(t);
+    let (meta, batch, job, audit) = (q("registry_meta"), q("ingest_batch"), q("job"), q("audit"));
+    let (item, session, session_study, label, sealed) = (
+        q("review_item"),
+        q("session_cache"),
+        q("session_cache_study"),
+        q("contrast_label"),
+        q("sealed_stack"),
+    );
+    let sql = format!(
+        "SELECT (SELECT value FROM {meta} WHERE key = 'epoch'), \
+         (SELECT COUNT(*) FROM {batch}), (SELECT MAX(id) FROM {batch}), \
+         (SELECT COUNT(*) FROM {batch} WHERE finished_at IS NULL), \
+         (SELECT MAX(id) FROM {job}), \
+         (SELECT MAX(a.id) FROM (SELECT id, action FROM {audit} ORDER BY id DESC LIMIT 200) a \
+          WHERE a.action NOT IN ({QUIET})), \
+         (SELECT MAX(id) FROM {item}), (SELECT MAX(id) FROM {session}), \
+         (SELECT MAX(id) FROM {session_study}), (SELECT MAX(id) FROM {label}), \
+         (SELECT COUNT(*) FROM {sealed} WHERE unsealed_at IS NULL)"
+    );
+    let r = &store.query(&sql, &[])?[0];
+    let epoch = r.opt_text(0)?.unwrap_or_default().to_string();
+    let n = |i: usize| -> Result<i64, StoreError> { Ok(r.opt_int(i)?.unwrap_or(0)) };
+    let (batches, last_batch, running, last_job, act) = (n(1)?, n(2)?, n(3)?, n(4)?, n(5)?);
+    let (question, sessions, visits, labels, sealed) = (n(6)?, n(7)?, n(8)?, n(9)?, n(10)?);
+    // the jobs not over, but the workers' own rows, which run as long as
+    // the engine does
+    let mut open = Vec::new();
+    for r in store.query(
+        &format!(
+            "SELECT id, state, kind FROM {job} WHERE state IN ('queued', 'running', 'cancelling') ORDER BY id"
+        ),
+        &[],
+    )? {
+        if !nils_registry::job::is_worker(r.text(2)?) {
+            open.push(format!("{}:{}", r.int(0)?, r.text(1)?));
+        }
+    }
+    // while a read runs, the epoch it moves with every few hundred files it
+    // files is left out, and while a job runs, the newest question, which a
+    // sort or a model raises as it goes: what they change is read again
+    // every few seconds while they run, and at once when they end. A
+    // person's act moves the audit's newest row whatever runs.
+    let epoch = if running > 0 { "-".to_string() } else { epoch };
+    let question = if open.is_empty() {
+        question.to_string()
+    } else {
+        "-".to_string()
+    };
+    // the pictures of what a sort judged are a job of their own (2026-10-17),
+    // so while they are made that job is among the jobs not over
+    let busy = running > 0 || !open.is_empty();
+    let key = format!(
+        "{epoch}|{batches}|{last_batch}|{running}|{last_job}|{act}|{question}|{sessions}|\
+         {visits}|{labels}|{sealed}|{}|{ids:?}|{}|{}",
+        open.join(","),
+        dataset.as_json(),
+        working
+            .map(|w| format!("{}:{}", w.id, w.path))
+            .unwrap_or_default(),
+    );
+    Ok((key, busy))
+}
+
+/// A request reading a dataset's counts for the others: whatever becomes of
+/// it, the others are told it is over, and one of them reads them where it
+/// read none.
+struct Reading(Key);
+
+impl Drop for Reading {
+    fn drop(&mut self) {
+        let (slots, over) = &*KEPT;
+        let mut slots = slots.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(slot) = slots.get_mut(&self.0) {
+            slot.reading = false;
+        }
+        over.notify_all();
+    }
+}
+
+/// A dataset's counts (2026-10-17): the kept ones while what they were read
+/// under is the same, else read now, once however many ask at the same
+/// time. On a dataset of 30 million files the desk asked for the summary
+/// every five seconds without waiting for the answer before, and ten
+/// readings of the same counts ran at once, each slowing the others; a
+/// request that finds another reading them waits for that reading and
+/// answers with it.
+fn kept(
+    registry: &mut Registry,
+    dataset: &Place,
+    ids: &[i64],
+    hide: bool,
+    working: Option<&Place>,
+) -> Result<Arc<Counts>, Reply> {
+    let (stamp, busy) = stamp(registry.store(), dataset, ids, working).map_err(failed)?;
+    let key: Key = (dataset.path.clone(), dataset.id, hide);
+    let (slots, over) = &*KEPT;
+    let mut held = slots.lock().unwrap_or_else(|e| e.into_inner());
+    loop {
+        let slot = held.entry(key.clone()).or_default();
+        if let Some(k) = &slot.kept
+            && k.stamp == stamp
+            && k.at.elapsed() < k.ttl
+        {
+            return Ok(Arc::clone(&k.counts));
+        }
+        if !slot.reading {
+            slot.reading = true;
+            slot.reads += 1;
+            break;
+        }
+        held = over.wait(held).unwrap_or_else(|e| e.into_inner());
+    }
+    drop(held);
+    let reading = Reading(key.clone());
+    let forgotten = FORGOTTEN.load(Ordering::SeqCst);
+    let counts = Arc::new(counts(
+        registry,
+        dataset,
+        ids,
+        hide,
+        working.map(|w| Path::new(&w.path)),
+    )?);
+    {
+        let mut held = slots.lock().unwrap_or_else(|e| e.into_inner());
+        let slot = held.entry(key.clone()).or_default();
+        slot.kept = (FORGOTTEN.load(Ordering::SeqCst) == forgotten).then(|| Kept {
+            stamp,
+            at: Instant::now(),
+            ttl: if busy { KEEP_BUSY } else { KEEP },
+            counts: Arc::clone(&counts),
+        });
+    }
+    drop(reading);
+    Ok(counts)
+}
+
+/// Forget every dataset's kept counts: a write at a door may have changed
+/// them.
+pub(crate) fn forget() {
+    let (slots, _) = &*KEPT;
+    let mut held = slots.lock().unwrap_or_else(|e| e.into_inner());
+    FORGOTTEN.fetch_add(1, Ordering::SeqCst);
+    for slot in held.values_mut() {
+        slot.kept = None;
+    }
+}
+
+/// How many times a dataset's counts were read from the registry, for the
+/// tests.
+#[cfg(test)]
+fn reads_of(dataset: &Place, hide: bool) -> usize {
+    let (slots, _) = &*KEPT;
+    let held = slots.lock().unwrap_or_else(|e| e.into_inner());
+    held.get(&(dataset.path.clone(), dataset.id, hide))
+        .map_or(0, |s| s.reads)
 }
 
 /// The summary of one dataset, as `GET /api/datasets/{name}/summary`
-/// answers it.
+/// answers it: the counts kept while nothing they read moved ([`kept`]),
+/// the jobs, the steps' states and their progress read now.
 pub(crate) fn document(
     registry: &mut Registry,
     access: &Access,
@@ -996,8 +1669,7 @@ pub(crate) fn document(
     // what a run of body part or post-contrast would be here, or why a door
     // would refuse it
     let plans = crate::operations::plans(registry).map_err(failed)?;
-    let store = registry.store();
-    let ids = crate::sources::source_ids(store, dataset).map_err(failed)?;
+    let ids = crate::sources::source_ids(registry.store(), dataset).map_err(failed)?;
     let state = dataset.dataset["state"]
         .as_str()
         .unwrap_or("unknown")
@@ -1005,9 +1677,23 @@ pub(crate) fn document(
     // its trees as the probe counted them and as the runs that walked them
     // did, the found and the pseudonymised steps read from one reading as
     // the sources door's trees are (2026-10-17)
-    let counts = counted(store, dataset, &ids).map_err(failed)?;
+    let counts = counted(registry.store(), dataset, &ids).map_err(failed)?;
     let has_originals = counts.originals;
-    let jobs = jobs_of(store, dataset, WINDOW).map_err(failed)?;
+    // the pictures and the 3D views, under the working place where one is
+    // bound
+    let working = crate::pyramid::working_place(registry.store(), None).ok();
+    // what the registry holds of it, kept while nothing it read moved: a
+    // stack of a sample sealed now is never counted by kind or region for a
+    // caller who does not read sealed stacks (record 48)
+    let c = kept(
+        registry,
+        dataset,
+        &ids,
+        !crate::sealed::reads(access),
+        working.as_ref(),
+    )?;
+    let store = registry.store();
+    let jobs = jobs_sorted(store, dataset, WINDOW, Some(&c.sorts)).map_err(failed)?;
     let newest_of = |kinds: &[&str]| jobs.iter().find(|j| kinds.contains(&j.kind.as_str()));
     let open_of = |kinds: &[&str]| {
         jobs.iter()
@@ -1022,201 +1708,11 @@ pub(crate) fn document(
         ),
     )
     .map_err(failed)?;
-
-    // what the registry holds of it: nothing before its first read
-    let window = nils_registry::cohort::built_window(store).map_err(failed)?;
     let sources = list(&ids);
-    // the visits are none where nobody has built the session cache, and
-    // a count of it where somebody has
-    let (mut studies, mut stacks, mut sessions) = (0, 0, window.map(|_| 0));
-    // Nima, 2026-10-12: a dataset holds stacks and files, never subjects;
-    // the subjects counted in it are those with a stack its tree holds a
-    // file of, as every reader counts them (`nils_registry::dataset_subjects`)
-    let subjects = nils_registry::dataset_subjects::count(store, &ids).map_err(failed)?;
-    let (mut read, mut refused, mut reads, mut classified) = (0, 0, 0, 0);
-    // record 55 (2026-10-10): the files read as their instance's own, the
-    // copies of an instance another dataset read (`known`) or this one holds
-    // a file of already (`twice`), and the files held because the registry
-    // holds their instance UID under another subject, study or series
-    let (mut new, mut known, mut twice, mut same_instance) = (0, 0, 0, 0);
-    // and the files a person let go out of the read, the files gone from the
-    // tree since a read, and the open questions about the dataset's held
-    // files (the duplicate policy's defaults, 2026-10-10)
-    let (mut left_out, mut gone, mut identity_questions) = (0, 0, 0);
-    let mut refused_batch: Option<i64> = None;
-    // record 56 (2026-10-11): the files the read set aside by policy, which
-    // ask nobody anything, by kind in plain words
-    let mut set_aside: Vec<SetAside> = Vec::new();
-    // and the subjects with no stack in it its set-aside files are of, a
-    // fact about those files (2026-10-12)
-    let mut set_aside_no_scans = nils_registry::dataset_subjects::SetAside::default();
-    let mut certainty = crate::certainty::Certainty::default();
-    let mut passes = 0;
-    let (mut kinds, mut regions) = (Vec::new(), Vec::new());
-    let mut last_digest: Option<(String, Option<String>)> = None;
+    // the reads of its tree: how many, and when the newest ran
+    let (mut reads, mut last_digest) = (0, None);
     if !ids.is_empty() {
-        let q = |t: &str| store.qualified(t);
-        let (batch, stack, study, file, cache, instance, class) = (
-            q("ingest_batch"),
-            q("stack"),
-            q("study"),
-            q("source_file"),
-            q("session_cache_study"),
-            q("instance"),
-            q("classification"),
-        );
-        // record 55 (2026-10-10): every scan its tree has a file of, whoever
-        // read it first
-        let in_tree = crate::operations::held_by(store, "x", &sources);
-        let studies_in_tree = crate::operations::studies_held_by(store, "x", &sources);
-        studies = count(
-            store,
-            &format!("SELECT COUNT(*) FROM {study} x WHERE {studies_in_tree}"),
-        )
-        .map_err(failed)?;
-        stacks = count(
-            store,
-            &format!("SELECT COUNT(*) FROM {stack} x WHERE {in_tree}"),
-        )
-        .map_err(failed)?;
-        if let Some(window) = window {
-            // 2026-10-12: and none where the cache holds not all of its
-            // dated studies yet (read since anything built it), so that a
-            // dataset read after the cache was built does not say 0 visits
-            let uncached = count(
-                store,
-                &format!(
-                    "SELECT COUNT(*) FROM {study} x WHERE {studies_in_tree} \
-                     AND COALESCE(x.date_filled, x.study_date) IS NOT NULL \
-                     AND EXISTS (SELECT 1 FROM {series} se WHERE se.study_id = x.id) \
-                     AND NOT EXISTS (SELECT 1 FROM {cache} scs WHERE scs.study_id = x.id \
-                     AND scs.window_days = {window})",
-                    series = store.qualified("series"),
-                ),
-            )
-            .map_err(failed)?;
-            sessions = if uncached > 0 {
-                None
-            } else {
-                Some(
-                    count(
-                        store,
-                        &format!(
-                            "SELECT COUNT(DISTINCT scs.session_id) FROM {cache} scs \
-                             JOIN {study} x ON x.id = scs.study_id WHERE {studies_in_tree} \
-                             AND scs.window_days = {window}"
-                        ),
-                    )
-                    .map_err(failed)?,
-                )
-            };
-        }
-        read = count(
-            store,
-            &format!(
-                "SELECT COUNT(*) FROM {file} WHERE source_id IN ({sources}) \
-                 AND status IN ('ingested', 'duplicate')"
-            ),
-        )
-        .map_err(failed)?;
-        let same = nils_registry::review::SAME_INSTANCE_KIND;
-        refused = count(
-            store,
-            &format!(
-                "SELECT COUNT(*) FROM {file} WHERE source_id IN ({sources}) AND status = 'quarantined' \
-                 AND (reason IS NULL OR reason NOT LIKE '{same}%')"
-            ),
-        )
-        .map_err(failed)?;
-        let drop = nils_registry::review::SAME_INSTANCE_DROP;
-        left_out = count(
-            store,
-            &format!(
-                "SELECT COUNT(*) FROM {file} WHERE source_id IN ({sources}) AND status = 'quarantined' \
-                 AND reason = '{drop}'"
-            ),
-        )
-        .map_err(failed)?;
-        gone = count(
-            store,
-            &format!(
-                "SELECT COUNT(*) FROM {file} WHERE source_id IN ({sources}) AND status = 'gone'"
-            ),
-        )
-        .map_err(failed)?;
-        let item = store.qualified("review_item");
-        let keys: Vec<String> = ids
-            .iter()
-            .map(|id| format!("ri.group_key LIKE 'source:{id}|%'"))
-            .collect();
-        identity_questions = count(
-            store,
-            &format!(
-                "SELECT COUNT(*) FROM {item} ri WHERE ri.kind = '{same}' AND ri.status = 'open' AND ({})",
-                keys.join(" OR ")
-            ),
-        )
-        .map_err(failed)?;
-        same_instance = count(
-            store,
-            &format!(
-                "SELECT COUNT(*) FROM {file} WHERE source_id IN ({sources}) AND status = 'quarantined' \
-                 AND reason = '{same}'"
-            ),
-        )
-        .map_err(failed)?;
-        new = count(
-            store,
-            &format!(
-                "SELECT COUNT(*) FROM {file} WHERE source_id IN ({sources}) AND status = 'ingested'"
-            ),
-        )
-        .map_err(failed)?;
-        let copies = count(
-            store,
-            &format!(
-                "SELECT COUNT(*) FROM {file} WHERE source_id IN ({sources}) AND status = 'duplicate'"
-            ),
-        )
-        .map_err(failed)?;
-        // one copy of each instance whose own file is no live file of this
-        // dataset is known; every other copy is this dataset's second file
-        known = count(
-            store,
-            &format!(
-                "SELECT COUNT(DISTINCT f.instance_id) FROM {file} f \
-                 JOIN {instance} i ON i.id = f.instance_id LEFT JOIN {file} o ON o.id = i.source_file_id \
-                 WHERE f.source_id IN ({sources}) AND f.status = 'duplicate' \
-                 AND (o.id IS NULL OR o.source_id NOT IN ({sources}) OR o.status NOT IN ('ingested', 'duplicate'))"
-            ),
-        )
-        .map_err(failed)?;
-        twice = (copies - known).max(0);
-        set_aside = set_aside_of(store, &sources).map_err(failed)?;
-        set_aside_no_scans = nils_registry::dataset_subjects::set_aside_without_stacks(
-            store,
-            dataset.id,
-            &ids,
-            &policy_names(),
-        )
-        .map_err(failed)?;
-        // the newest batch that refused a file a person may look at: none
-        // set aside by policy, none held for its instance
-        refused_batch = store
-            .query(
-                &format!(
-                    "SELECT MAX(batch_id) FROM {file} WHERE source_id IN ({sources}) AND status = 'quarantined' \
-                     AND (reason IS NULL OR (reason NOT LIKE '{same}%' AND reason NOT IN ({})))",
-                    policy_reasons()
-                ),
-                &[],
-            )
-            .map_err(failed)?
-            .first()
-            .map(|r| r.opt_int(0))
-            .transpose()
-            .map_err(failed)?
-            .flatten();
+        let batch = store.qualified("ingest_batch");
         reads = count(
             store,
             &format!(
@@ -1237,7 +1733,7 @@ pub(crate) fn document(
             )
             .map_err(failed)?
             .first()
-            .map(|r| -> Result<_, StoreError> {
+            .map(|r| -> Result<(String, Option<String>), StoreError> {
                 Ok((
                     r.opt_text(0)?.unwrap_or_default().to_string(),
                     r.opt_text(1)?.map(str::to_string),
@@ -1245,26 +1741,13 @@ pub(crate) fn document(
             })
             .transpose()
             .map_err(failed)?;
-        classified = count(
-            store,
-            &format!("SELECT COUNT(*) FROM {stack} x JOIN {class} cl ON cl.stack_id = x.id WHERE {in_tree}"),
-        )
-        .map_err(failed)?;
-        // record 56: how sure the sort is counts what the sort asks, never
-        // a question about body part or post-contrast, which are steps of
-        // their own; counted as the card and the sources door count it, so
-        // the two agree, and a pass's questions beside it
-        let asks = crate::certainty::Asks::sort(store).map_err(failed)?;
-        certainty = crate::certainty::of_sources(store, &asks, &sources, stacks).map_err(failed)?;
-        let holds = crate::operations::Scope::Sources(&sources).holds(store);
-        passes = crate::certainty::passes(store, &holds).map_err(failed)?;
-        let sealed = (!crate::sealed::reads(access)).then(|| store.qualified("sealed_stack"));
-        kinds = by_axis(store, &sources, KIND_AXIS, sealed.as_deref()).map_err(failed)?;
-        regions = by_axis(store, &sources, REGION_AXIS, sealed.as_deref()).map_err(failed)?;
     }
+    let (stacks, certainty) = (c.stacks, &c.certainty);
+    let (pictures, views) = (c.pictures, c.views);
+    let files = &c.files;
 
     // the main scans of its subjects, as the picks summary door says them
-    let picks = crate::pick_after::summary(store, dataset, None).map_err(failed)?;
+    let picks = &c.picks;
     let (picked, borders) = picks["roles"]
         .as_object()
         .map(|roles| {
@@ -1276,16 +1759,6 @@ pub(crate) fn document(
             })
         })
         .unwrap_or((0, 0));
-
-    // the pictures and the 3D views, under the working place where one is bound
-    let working = crate::pyramid::working_place(store, None).ok();
-    let (pictures, views) = match &working {
-        Some(w) if stacks > 0 => {
-            let all = crate::preview::dataset_stacks(store, dataset).map_err(failed)?;
-            made(Path::new(&w.path), &all)
-        }
-        _ => (0, 0),
-    };
 
     let mut steps = Vec::new();
     // found: the tree NILS reads, or the originals of an identified dataset,
@@ -1337,16 +1810,17 @@ pub(crate) fn document(
             }),
         ));
     }
-    let set_aside_total: i64 = set_aside.iter().map(|k| k.count).sum();
+    let set_aside_total: i64 = c.set_aside.iter().map(|k| k.count).sum();
     let open = open_of(&["digest", "ingest"]);
     let mut read_step = step(
         "read",
         chain_state(open, newest_of(&["digest", "ingest"]), reads > 0),
         open.or_else(|| newest_of(&["digest", "ingest"])),
         json!({
-            "files": read, "new": new, "known": known, "twice": twice,
-            "same_instance": same_instance, "left_out": left_out, "gone": gone,
-            "refused": refused, "set_aside": set_aside_total, "reads": reads,
+            "files": files.read(), "new": files.new, "known": files.known,
+            "twice": files.twice(), "same_instance": files.same_instance,
+            "left_out": files.left_out, "gone": files.gone,
+            "refused": files.refused, "set_aside": set_aside_total, "reads": reads,
         }),
     );
     if read_step["job"].is_null()
@@ -1368,22 +1842,21 @@ pub(crate) fn document(
         ),
         open.or(sort_failed).or_else(|| newest_of(&["classify"])),
         json!({
-            "scans": classified, "of": stacks, "look": certainty.to_sort,
-            "passes": passes, "unsorted": unsorted,
+            "scans": c.classified, "of": stacks, "look": certainty.to_sort,
+            "passes": c.passes, "unsorted": unsorted,
         }),
     ));
     // body part and post-contrast, the operations of their own, over its
-    // stacks
+    // stacks: what they counted is kept with the rest, where their runs are
+    // read now
     steps.extend(
-        crate::operations::steps(
+        crate::operations::steps_counted(
             store,
             crate::operations::Scope::Sources(&sources),
             &format!("dataset:{}", dataset.name),
             stacks,
             &plans,
-            // counted as the card counts them (record 48: never by kind); a
-            // cohort's steps leave a sealed sample out
-            false,
+            &c.operations,
         )
         .map_err(failed)?,
     );
@@ -1408,47 +1881,25 @@ pub(crate) fn document(
         main["finished_at"] = picks["last_run"]["finished_at"].clone();
     }
     steps.push(main);
-    // a sort makes the pictures of what it judged in the same run
-    let open = open_of(&["classify", "preview"]);
-    let sort = newest_of(&["classify", "preview"]);
-    // the sort's row says done once it has judged, and its run goes on to
-    // make the pictures, writing them into its result at the end: until
-    // the result names them they are still being made, for a while
-    let making = open.is_none()
-        && working.is_some()
-        && pictures < stacks
-        && sort.is_some_and(|j| {
-            j.kind == "classify"
-                && j.state == "done"
-                && j.finished_at
-                    .as_deref()
-                    .and_then(nils_registry::time::secs_of)
-                    .is_some_and(|at| nils_registry::time::now_secs().saturating_sub(at) < MAKING)
-                && nils_registry::job::show(store, j.id)
-                    .ok()
-                    .flatten()
-                    .is_some_and(|row| {
-                        row.result
-                            .as_ref()
-                            .is_none_or(|r| r.get("previews").is_none())
-                    })
-        });
+    // the pictures of what a sort judged are a job of their own on the
+    // pictures lane, queued as the sort ends and before its 3D views
+    // (2026-10-17: never made in the sort's own run, so the sort is done
+    // once it has judged): the step is that job's while it is queued or
+    // runs, with its progress, and its counts are the previews under the
+    // working place
+    let open = open_of(&["preview"]);
     let mut picture_step = step(
         "pictures",
         if working.is_none() {
             "off"
-        } else if making {
-            "running"
         } else {
             state_of(open, pictures > 0)
         },
-        open.or(sort),
+        open.or_else(|| newest_of(&["preview"])),
         json!({"made": pictures, "of": stacks}),
     );
-    if making {
-        picture_step["progress"] = json!({"done": pictures, "total": stacks});
-    }
-    picture_step["in_sort"] = json!(open.or(sort).is_some_and(|j| j.kind == "classify"));
+    // a sort makes no picture in its own run any more
+    picture_step["in_sort"] = json!(false);
     steps.push(picture_step);
     let open = open_of(&["pyramid"]);
     steps.push(step(
@@ -1462,8 +1913,8 @@ pub(crate) fn document(
         json!({"made": views, "of": stacks}),
     ));
 
-    let pairs = |v: Vec<(String, i64)>, key: &str| -> Vec<Value> {
-        v.into_iter()
+    let pairs = |v: &[(String, i64)], key: &str| -> Vec<Value> {
+        v.iter()
             .map(|(label, n)| {
                 let mut m = serde_json::Map::new();
                 m.insert(key.to_string(), json!(label));
@@ -1491,38 +1942,38 @@ pub(crate) fn document(
         "detail": access.detail.name(),
         "state": state,
         "added_at": dataset.created_at,
-        "subjects": subjects,
-        "sessions": sessions,
-        "studies": studies,
+        "subjects": c.subjects,
+        "sessions": c.sessions,
+        "studies": c.studies,
         "scans": stacks,
         "sure": certainty.sure,
         "need_a_look": certainty.to_sort,
         "unsorted": unsorted,
         "look_kinds": certainty.need_a_look,
-        "identity_questions": identity_questions,
-        "kinds": pairs(kinds, "kind"),
-        "body_regions": pairs(regions, "region"),
+        "identity_questions": c.identity_questions,
+        "kinds": pairs(&c.kinds, "kind"),
+        "body_regions": pairs(&c.regions, "region"),
         "files": {
             "found": found_files,
             "bytes": found_count.bytes,
             "found_partial": found_count.partial,
-            "read": read,
-            "new": new,
-            "known": known,
-            "twice": twice,
-            "same_instance": same_instance,
-            "left_out": left_out,
-            "gone": gone,
-            "refused": refused,
-            "refused_batch": refused_batch,
+            "read": files.read(),
+            "new": files.new,
+            "known": files.known,
+            "twice": files.twice(),
+            "same_instance": files.same_instance,
+            "left_out": files.left_out,
+            "gone": files.gone,
+            "refused": files.refused,
+            "refused_batch": files.refused_batch,
             "set_aside": set_aside_total,
-            "set_aside_kinds": set_aside
+            "set_aside_kinds": c.set_aside
                 .iter()
                 .map(|k| json!({"kind": k.kind, "words": k.words, "count": k.count}))
                 .collect::<Vec<_>>(),
             "set_aside_no_scans": {
-                "subjects": set_aside_no_scans.subjects,
-                "files": set_aside_no_scans.files,
+                "subjects": c.set_aside_no_scans.subjects,
+                "files": c.set_aside_no_scans.files,
             },
             "held": held,
         },
@@ -2094,5 +2545,717 @@ mod tests {
         assert_eq!(chain_state(None, Some(&done), true), "done");
         assert_eq!(chain_state(None, Some(&done), false), "waiting");
         assert_eq!(chain_state(None, None, false), "waiting");
+    }
+
+    /// A dataset whose counts pause as they are read, while a test holds
+    /// it, so that the requests asked at once meet one reading.
+    static HOLD: std::sync::Mutex<Option<(String, std::time::Duration)>> =
+        std::sync::Mutex::new(None);
+
+    pub(super) fn hold(dataset: &str) {
+        let held = HOLD.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        if let Some((path, pause)) = held
+            && path == dataset
+        {
+            std::thread::sleep(pause);
+        }
+    }
+
+    use nils_dicom::synth::TempDir;
+    use nils_registry::home::{Home, InitOptions};
+    use nils_registry::place::{self, Place};
+    use nils_registry::{Registry, Store};
+    use std::collections::BTreeSet;
+
+    struct MadeUp {
+        _dir: TempDir,
+        home: Home,
+        registry: Registry,
+        dataset: Place,
+        source: i64,
+    }
+
+    fn one(store: &mut Store, sql: &str) -> i64 {
+        store.query(sql, &[]).unwrap()[0]
+            .opt_int(0)
+            .unwrap()
+            .unwrap_or(0)
+    }
+
+    fn exec(store: &mut Store, sql: &str) {
+        store
+            .execute(sql, &[])
+            .unwrap_or_else(|e| panic!("{sql}: {e}"));
+    }
+
+    /// A registry the synthetic builder made, and a dataset of it as a
+    /// read and a pseudonymise run leave one: its tree holds a file of
+    /// every other scan, files of every status and of every reason a read
+    /// gives, copies of an instance whose own file is no file of it and of
+    /// one whose own file is, pseudonymised files carried by subjects with
+    /// a scan in it and by two with none, whose files the read set aside,
+    /// held and refused ones, an open question about a file held for its
+    /// instance, and pictures and a 3D view of some of its scans.
+    fn made_up(name: &str) -> MadeUp {
+        let dir = TempDir::new(name);
+        let home = Home::new(dir.path().join("registry"));
+        home.keys(None).add("k", b"nils-fixture-key").unwrap();
+        let mut registry = home
+            .init(&InitOptions {
+                backend: nils_registry::Backend::Sqlite,
+                dsn: None,
+                schema: None,
+                scheme: nils_registry::pseudonym::Scheme::Blake2b32,
+                key: "k".to_string(),
+                display_length: nils_registry::pseudonym::DEFAULT_DISPLAY_LENGTH,
+                session_scheme: None,
+            })
+            .unwrap();
+        nils_synth::build(
+            &mut registry,
+            &nils_synth::Plan {
+                seed: 7,
+                subjects: 40,
+            },
+        )
+        .unwrap();
+        let folder = dir.path().join("ward");
+        let anon = folder.join(place::ANON_TREE);
+        std::fs::create_dir_all(&anon).unwrap();
+        std::fs::create_dir_all(folder.join(place::ORIGINALS_TREE)).unwrap();
+        let work = dir.path().join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let store = registry.store();
+        let add = |store: &mut Store, name: &str, role, path: &std::path::Path, dataset| {
+            place::add(
+                store,
+                &place::New {
+                    name,
+                    role,
+                    path: &path.display().to_string(),
+                    guarantees: json!({}),
+                    probed: json!({}),
+                    handling: Value::Null,
+                    dataset,
+                },
+            )
+            .unwrap()
+        };
+        let id = add(
+            store,
+            "ward",
+            place::Role::Source,
+            &folder,
+            json!({
+                "arrives": "identified",
+                "trees": {"originals": place::ORIGINALS_TREE, "anon": place::ANON_TREE},
+                "unmapped": "hold",
+            }),
+        );
+        add(store, "work", place::Role::Working, &work, Value::Null);
+        let now = "2026-10-17T00:00:00Z";
+        let root = anon.canonicalize().unwrap().display().to_string();
+        exec(
+            store,
+            &format!(
+                "INSERT INTO source (root, root_canonical, first_seen_at) VALUES ('{root}', '{root}', '{now}')"
+            ),
+        );
+        let source = one(store, "SELECT MAX(id) FROM source");
+        exec(
+            store,
+            &format!(
+                "INSERT INTO ingest_batch (source_id, name, config, started_at, finished_at, state, kind, counts) \
+                 VALUES ({source}, 'ward-2026-10-17', '{{}}', '{now}', '{now}', 'done', 'digest', '{{\"seen\": 1}}')"
+            ),
+        );
+        let batch = one(store, "SELECT MAX(id) FROM ingest_batch");
+        let stacks: Vec<(i64, i64, i64)> = store
+            .query(
+                "SELECT x.id, x.series_id, se.subject_id FROM stack x \
+                 JOIN series se ON se.id = x.series_id ORDER BY x.id",
+                &[],
+            )
+            .unwrap()
+            .iter()
+            .map(|r| (r.int(0).unwrap(), r.int(1).unwrap(), r.int(2).unwrap()))
+            .collect();
+        // two subjects with no scan in the tree, and every other scan of the
+        // rest
+        let without: Vec<i64> = stacks
+            .iter()
+            .map(|s| s.2)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .rev()
+            .take(2)
+            .collect();
+        let held: Vec<(i64, i64, i64)> = stacks
+            .iter()
+            .copied()
+            .filter(|s| !without.contains(&s.2))
+            .step_by(2)
+            .collect();
+        assert_eq!(without.len(), 2);
+        assert!(held.len() > 3);
+        let file = |store: &mut Store,
+                    path: &str,
+                    status: &str,
+                    reason: Option<&str>,
+                    detail: Option<&str>,
+                    instance: Option<i64>|
+         -> i64 {
+            let text = |v: Option<&str>| v.map_or("NULL".to_string(), |v| format!("'{v}'"));
+            exec(
+                store,
+                &format!(
+                    "INSERT INTO source_file (source_id, batch_id, dir, path, size, mtime_ns, status, reason, detail, instance_id, seen_at, first_seen_at) \
+                     VALUES ({source}, {batch}, 'd', '{path}', 1, 1, '{status}', {}, {}, {}, '{now}', '{now}')",
+                    text(reason),
+                    text(detail),
+                    instance.map_or("NULL".to_string(), |i| i.to_string()),
+                ),
+            );
+            one(store, "SELECT MAX(id) FROM source_file")
+        };
+        let copied = |store: &mut Store,
+                      path: &str,
+                      state: &str,
+                      subject: Option<i64>,
+                      out: Option<&str>| {
+            exec(
+                store,
+                &format!(
+                    "INSERT INTO pseudonym_file (place_id, path, size, mtime, state, out_path, subject_id, lookup, batch_id, first_seen, code_anyway) \
+                     VALUES ({id}, 'o/{path}', 1, 1, '{state}', {}, {}, {}, {batch}, '{now}', 0)",
+                    out.map_or("NULL".to_string(), |o| format!("'{o}'")),
+                    subject.map_or("NULL".to_string(), |s| s.to_string()),
+                    if state == "held" { "x'0102'" } else { "NULL" },
+                ),
+            );
+        };
+        for (n, (stack, _, subject)) in held.iter().enumerate() {
+            exec(
+                store,
+                &format!(
+                    "INSERT INTO source_stack (source_id, stack_id, first_seen_at) VALUES ({source}, {stack}, '{now}')"
+                ),
+            );
+            for i in 0..3 {
+                let path = format!("s{stack}/{i}.dcm");
+                file(store, &path, "ingested", None, None, None);
+                let state = if (n + i) % 7 == 0 {
+                    "unchanged"
+                } else {
+                    "written"
+                };
+                copied(store, &path, state, Some(*subject), Some(&path));
+            }
+        }
+        // copies: of an instance whose own file is none of the tree's, and
+        // of one whose own file is the tree's
+        let (stack, series, _) = held[0];
+        let own = one(
+            store,
+            &format!("SELECT MIN(id) FROM source_file WHERE path = 's{stack}/0.dcm'"),
+        );
+        for (n, owner) in [(1, None), (2, None), (3, Some(own))] {
+            exec(
+                store,
+                &format!(
+                    "INSERT INTO instance (sop_instance_uid, series_id, stack_id, source_file_id, first_batch_id) \
+                     VALUES ('2.25.{n}', {series}, {stack}, {}, {batch})",
+                    owner.map_or("NULL".to_string(), |o: i64| o.to_string())
+                ),
+            );
+            let instance = one(store, "SELECT MAX(id) FROM instance");
+            file(
+                store,
+                &format!("copy/{n}.dcm"),
+                "duplicate",
+                None,
+                None,
+                Some(instance),
+            );
+        }
+        // refused, set aside by policy, held for their instance, let go,
+        // and gone
+        const PRESENTATION: &str = "1.2.840.10008.5.1.4.1.1.11.1";
+        const CAPTURE: &str = "1.2.840.10008.5.1.4.1.1.7";
+        for (path, reason, detail) in [
+            (
+                "aside/1.dcm",
+                Some("unsupported_sop_class"),
+                Some(PRESENTATION),
+            ),
+            (
+                "aside/2.dcm",
+                Some("unsupported_sop_class"),
+                Some(PRESENTATION),
+            ),
+            ("aside/3.dcm", Some("unsupported_sop_class"), Some(CAPTURE)),
+            ("aside/4.dcm", Some("unsupported_modality"), Some("SR")),
+            ("same/1.dcm", Some("identity.same_instance"), None),
+            ("same/2.dcm", Some("identity.same_instance"), None),
+            ("same/3.dcm", Some("identity.same_instance.drop"), None),
+            (
+                "bad/1.dcm",
+                Some("parse_error"),
+                Some("the header ends early"),
+            ),
+            ("bad/2.dcm", Some("not_dicom"), None),
+            ("bad/3.dcm", None, None),
+        ] {
+            file(store, path, "quarantined", reason, detail, None);
+        }
+        file(store, "gone/1.dcm", "gone", None, None, None);
+        // the subjects with no scan in the tree: their copies the read set
+        // aside, and one it did not
+        for (n, subject) in without.iter().enumerate() {
+            let path = format!("nostack/{n}.dcm");
+            file(
+                store,
+                &path,
+                "quarantined",
+                Some("unsupported_sop_class"),
+                Some(CAPTURE),
+                None,
+            );
+            copied(store, &path, "written", Some(*subject), Some(&path));
+        }
+        copied(
+            store,
+            "nostack/kept.dcm",
+            "written",
+            Some(without[0]),
+            Some("nowhere.dcm"),
+        );
+        copied(store, "held/1.dcm", "held", None, None);
+        copied(store, "held/2.dcm", "held", Some(without[1]), None);
+        copied(store, "refused/1.dcm", "refused", None, None);
+        exec(
+            store,
+            &format!(
+                "INSERT INTO review_item (kind, scope, status, created_at, group_key) \
+                 VALUES ('identity.same_instance', 'file', 'open', '{now}', 'source:{source}|same/1.dcm')"
+            ),
+        );
+        // a picture of three of its scans and a 3D view of one
+        for (n, (stack, _, _)) in held.iter().take(3).enumerate() {
+            let picture = crate::preview::path(&work, *stack, false);
+            std::fs::create_dir_all(picture.parent().unwrap()).unwrap();
+            std::fs::write(&picture, b"p").unwrap();
+            if n == 0 {
+                let view = crate::pyramid::dir(&work, *stack);
+                std::fs::create_dir_all(&view).unwrap();
+                std::fs::write(view.join("manifest.json"), b"{}").unwrap();
+            }
+        }
+        let dataset = place::list(store)
+            .unwrap()
+            .into_iter()
+            .find(|p| p.name == "ward")
+            .unwrap();
+        MadeUp {
+            _dir: dir,
+            home,
+            registry,
+            dataset,
+            source,
+        }
+    }
+
+    fn summary(registry: &mut Registry, dataset: &Place) -> Value {
+        match super::document(registry, &crate::grants::Access::everything(), dataset) {
+            Ok(doc) => doc,
+            Err(r) => panic!("{} {}", r.status, r.body),
+        }
+    }
+
+    /// 2026-10-17: the files counted in two reads where there were nine,
+    /// the subjects of the set-aside files found from the subjects the
+    /// copies carry, and those read a subject at a time from the index:
+    /// each says what the statements it replaced said, on a dataset with
+    /// every status and reason.
+    #[test]
+    fn the_counts_read_from_the_indexes_are_what_every_row_counted() {
+        let mut m = made_up("summary-counts");
+        let store = m.registry.store();
+        let sources = m.source.to_string();
+        let (files, set_aside) = super::files_of(store, &sources).unwrap();
+        let same = nils_registry::review::SAME_INSTANCE_KIND;
+        let drop = nils_registry::review::SAME_INSTANCE_DROP;
+        let policy = super::policy_reasons();
+        let was = |store: &mut Store, cond: &str| {
+            one(
+                store,
+                &format!(
+                    "SELECT COUNT(*) FROM source_file WHERE source_id IN ({sources}) AND {cond}"
+                ),
+            )
+        };
+        assert_eq!(
+            files.read(),
+            was(store, "status IN ('ingested', 'duplicate')")
+        );
+        assert_eq!(files.new, was(store, "status = 'ingested'"));
+        assert_eq!(files.copies, was(store, "status = 'duplicate'"));
+        assert_eq!(files.gone, was(store, "status = 'gone'"));
+        assert_eq!(
+            files.refused,
+            was(
+                store,
+                &format!(
+                    "status = 'quarantined' AND (reason IS NULL OR reason NOT LIKE '{same}%')"
+                )
+            )
+        );
+        assert_eq!(
+            files.left_out,
+            was(
+                store,
+                &format!("status = 'quarantined' AND reason = '{drop}'")
+            )
+        );
+        assert_eq!(
+            files.same_instance,
+            was(
+                store,
+                &format!("status = 'quarantined' AND reason = '{same}'")
+            )
+        );
+        let refused_batch = store
+            .query(
+                &format!(
+                    "SELECT MAX(batch_id) FROM source_file WHERE source_id IN ({sources}) AND status = 'quarantined' \
+                     AND (reason IS NULL OR (reason NOT LIKE '{same}%' AND reason NOT IN ({policy})))"
+                ),
+                &[],
+            )
+            .unwrap()[0]
+            .opt_int(0)
+            .unwrap();
+        assert_eq!(files.refused_batch, refused_batch);
+        assert!(files.refused_batch.is_some());
+        let known = one(
+            store,
+            &format!(
+                "SELECT COUNT(DISTINCT f.instance_id) FROM source_file f \
+                 JOIN instance i ON i.id = f.instance_id LEFT JOIN source_file o ON o.id = i.source_file_id \
+                 WHERE f.source_id IN ({sources}) AND f.status = 'duplicate' \
+                 AND (o.id IS NULL OR o.source_id NOT IN ({sources}) OR o.status NOT IN ('ingested', 'duplicate'))"
+            ),
+        );
+        assert_eq!(files.known, known);
+        assert_eq!((files.known, files.twice()), (2, 1), "{files:?}");
+        assert_eq!(
+            (
+                files.new,
+                files.copies,
+                files.refused,
+                files.left_out,
+                files.same_instance,
+                files.gone
+            ),
+            (files.new, 3, 9, 1, 2, 1)
+        );
+        // the files set aside by policy, by kind, as they were counted
+        let mut by: std::collections::BTreeMap<&str, (&str, i64)> = Default::default();
+        for r in store
+            .query(
+                &format!(
+                    "SELECT reason, detail, COUNT(*) FROM source_file WHERE source_id IN ({sources}) \
+                     AND status = 'quarantined' AND reason IN ({policy}) GROUP BY reason, detail"
+                ),
+                &[],
+            )
+            .unwrap()
+        {
+            let class = nils_dicom::QuarantineClass::from_name(r.text(0).unwrap()).unwrap();
+            let (kind, words) = nils_dicom::set_aside_words(class, r.opt_text(1).unwrap());
+            by.entry(kind).or_insert((words, 0)).1 += r.int(2).unwrap();
+        }
+        let mut was: Vec<super::SetAside> = by
+            .into_iter()
+            .map(|(kind, (words, count))| super::SetAside { kind, words, count })
+            .collect();
+        was.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.kind.cmp(b.kind)));
+        assert_eq!(set_aside, was);
+        assert_eq!(set_aside.iter().map(|k| k.count).sum::<i64>(), 6);
+        // the subjects of the set-aside files with no scan in the tree, as
+        // every copy joined to every file counted them
+        let place = m.dataset.id;
+        let reasons = super::policy_names();
+        let now = nils_registry::dataset_subjects::set_aside_without_stacks(
+            store,
+            place,
+            &[m.source],
+            &reasons,
+        )
+        .unwrap();
+        let r = &store
+            .query(
+                &format!(
+                    "SELECT COUNT(DISTINCT spf.subject_id), COUNT(DISTINCT ssf.id) FROM source_file ssf \
+                     JOIN pseudonym_file spf ON spf.place_id = {place} AND spf.out_path = ssf.path \
+                     WHERE ssf.source_id IN ({sources}) AND ssf.status = 'quarantined' AND ssf.reason IN ({policy}) \
+                     AND spf.state IN ('written', 'unchanged') AND spf.subject_id IS NOT NULL \
+                     AND spf.subject_id NOT IN (SELECT ns.subject_id FROM ({}) ns WHERE ns.subject_id IS NOT NULL)",
+                    nils_registry::dataset_subjects::scanned(None, &[m.source])
+                ),
+                &[],
+            )
+            .unwrap()[0];
+        assert_eq!(
+            (now.subjects, now.files),
+            (r.int(0).unwrap(), r.int(1).unwrap())
+        );
+        assert_eq!((now.subjects, now.files), (2, 2));
+        // the subjects its copies carry, as a DISTINCT over every copy
+        let carried = nils_registry::dataset_subjects::copied(store, place).unwrap();
+        let was: BTreeSet<i64> = store
+            .query(
+                &format!(
+                    "SELECT DISTINCT subject_id FROM pseudonym_file WHERE place_id = {place} \
+                     AND state IN ('written', 'unchanged') AND subject_id IS NOT NULL"
+                ),
+                &[],
+            )
+            .unwrap()
+            .iter()
+            .map(|r| r.int(0).unwrap())
+            .collect();
+        assert_eq!(carried, was);
+        assert!(carried.len() > 2);
+    }
+
+    /// 2026-10-17: a dataset's counts are read once and kept while nothing
+    /// they read moves, and the kept answer is the one read fresh; requests
+    /// asked at once meet one reading; a read, a job, an act of a person or
+    /// a question moves them, and an opening of a scan's pixels does not.
+    #[test]
+    fn a_summary_is_read_once_for_requests_at_once_and_kept_while_nothing_it_counts_moves() {
+        let mut m = made_up("summary-kept");
+        let hide = true;
+        let reads = |m: &MadeUp| super::reads_of(&m.dataset, hide);
+        let first = summary(&mut m.registry, &m.dataset);
+        assert_eq!(reads(&m), 1);
+        assert!(first["scans"].as_i64().unwrap() > 3, "{first}");
+        assert_eq!(first["files"]["known"], 2, "{first}");
+        assert_eq!(
+            first["files"]["set_aside_no_scans"],
+            json!({"subjects": 2, "files": 2})
+        );
+        assert_eq!(first["files"]["held"], 2, "{first}");
+        assert_eq!(first["identity_questions"], 1, "{first}");
+        assert_eq!(first["pictures_place"], "work");
+        let made = |doc: &Value, name: &str| {
+            doc["steps"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|s| s["step"] == name)
+                .unwrap()["made"]
+                .clone()
+        };
+        assert_eq!(made(&first, "pictures"), 3, "{first}");
+        assert_eq!(made(&first, "views"), 1, "{first}");
+        // kept: answered again without reading
+        assert_eq!(summary(&mut m.registry, &m.dataset), first);
+        assert_eq!(reads(&m), 1, "kept");
+        // and what was kept is what a fresh reading says
+        super::forget();
+        assert_eq!(summary(&mut m.registry, &m.dataset), first);
+        assert_eq!(reads(&m), 2, "read again once forgotten");
+
+        // eight requests at once, each on a connection of its own, while
+        // the reading takes a while: read once, the same answer to each
+        super::forget();
+        *HOLD.lock().unwrap() = Some((
+            m.dataset.path.clone(),
+            std::time::Duration::from_millis(400),
+        ));
+        let at_once = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let answers: Vec<Value> = (0..8)
+            .map(|_| {
+                let (home, dataset, at_once) = (m.home.clone(), m.dataset.clone(), at_once.clone());
+                std::thread::spawn(move || {
+                    let mut registry = home.open().unwrap();
+                    at_once.wait();
+                    summary(&mut registry, &dataset)
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|h| h.join().unwrap())
+            .collect();
+        *HOLD.lock().unwrap() = None;
+        assert_eq!(reads(&m), 3, "eight requests, one reading");
+        for answer in &answers {
+            assert_eq!(answer, &first);
+        }
+
+        // a read begins: its files are counted, and while it runs the
+        // counts are kept a while; it ends: they are read again
+        let store = m.registry.store();
+        let now = "2026-10-17T01:00:00Z";
+        exec(
+            store,
+            &format!(
+                "INSERT INTO ingest_batch (source_id, name, config, started_at, state, kind) \
+                 VALUES ({}, 'ward-again', '{{}}', '{now}', 'running', 'digest')",
+                m.source
+            ),
+        );
+        let batch = one(store, "SELECT MAX(id) FROM ingest_batch");
+        exec(
+            store,
+            &format!(
+                "INSERT INTO source_file (source_id, batch_id, dir, path, size, mtime_ns, status, seen_at) \
+                 VALUES ({}, {batch}, 'd', 'new/1.dcm', 1, 1, 'ingested', '{now}')",
+                m.source
+            ),
+        );
+        let running = summary(&mut m.registry, &m.dataset);
+        assert_eq!(reads(&m), 4, "a read began");
+        assert_eq!(
+            running["files"]["new"],
+            first["files"]["new"].as_i64().unwrap() + 1
+        );
+        exec(
+            m.registry.store(),
+            &format!(
+                "UPDATE ingest_batch SET state = 'done', finished_at = '{now}' WHERE id = {batch}"
+            ),
+        );
+        let ended = summary(&mut m.registry, &m.dataset);
+        assert_eq!(reads(&m), 5, "a read ended");
+        super::forget();
+        assert_eq!(summary(&mut m.registry, &m.dataset), ended, "as read fresh");
+        assert_eq!(reads(&m), 6);
+
+        // an opening of a scan's pixels moves nothing; a person's act does
+        let audit = |store: &mut Store, action: &str| {
+            exec(
+                store,
+                &format!(
+                    "INSERT INTO audit (at, principal, action, scope) VALUES ('{now}', 'anna@lab', '{action}', '{{}}')"
+                ),
+            )
+        };
+        audit(m.registry.store(), "instance.open");
+        summary(&mut m.registry, &m.dataset);
+        assert_eq!(reads(&m), 6, "an opening moves nothing");
+        audit(m.registry.store(), "review.accept");
+        summary(&mut m.registry, &m.dataset);
+        assert_eq!(reads(&m), 7, "an act of a person");
+        // a question raised
+        exec(
+            m.registry.store(),
+            &format!(
+                "INSERT INTO review_item (kind, scope, status, created_at, group_key) \
+                 VALUES ('identity.same_instance', 'file', 'open', '{now}', 'source:{}|same/2.dcm')",
+                m.source
+            ),
+        );
+        let asked = summary(&mut m.registry, &m.dataset);
+        assert_eq!(reads(&m), 8, "a question raised");
+        assert_eq!(asked["identity_questions"], 2);
+
+        // a worker of the engine's queue runs as long as the engine does,
+        // and is no run: a question raised while it runs is counted at once
+        exec(
+            m.registry.store(),
+            &format!(
+                "INSERT INTO job (kind, name, state, started_at) VALUES ('worker', 'queue', 'running', '{now}')"
+            ),
+        );
+        summary(&mut m.registry, &m.dataset);
+        assert_eq!(reads(&m), 9, "a worker began");
+        exec(
+            m.registry.store(),
+            &format!(
+                "INSERT INTO review_item (kind, scope, status, created_at, group_key) \
+                 VALUES ('identity.same_instance', 'file', 'open', '{now}', 'source:{}|same/3.dcm')",
+                m.source
+            ),
+        );
+        let raised = summary(&mut m.registry, &m.dataset);
+        assert_eq!(reads(&m), 10, "a question raised while a worker waits");
+        assert_eq!(raised["identity_questions"], 3);
+
+        // a pseudonymise run queued and running, with its batch: its
+        // progress moves on every request while the counts are kept
+        exec(
+            m.registry.store(),
+            &format!(
+                "INSERT INTO job (kind, name, args, state, started_at, progress) VALUES ('pseudonymize', 'ward-2026-10-17', \
+                 '{{\"queued\": [\"pseudonymize\", \"@ward\"]}}', 'running', '{now}', '{{\"files\": 1}}')"
+            ),
+        );
+        let job = one(m.registry.store(), "SELECT MAX(id) FROM job");
+        exec(
+            m.registry.store(),
+            &format!(
+                "INSERT INTO ingest_batch (source_id, job_id, name, config, started_at, state, kind) \
+                 VALUES ({}, {job}, 'ward-2026-10-17', '{{}}', '{now}', 'running', 'pseudonymize')",
+                m.source
+            ),
+        );
+        let step = |doc: &Value| {
+            doc["steps"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|s| s["step"] == "pseudonymised")
+                .unwrap()
+                .clone()
+        };
+        let one_file = summary(&mut m.registry, &m.dataset);
+        assert_eq!(reads(&m), 11, "a run queued");
+        assert_eq!(step(&one_file)["job"], job);
+        assert_eq!(step(&one_file)["progress"], json!({"files": 1}));
+        exec(
+            m.registry.store(),
+            &format!("UPDATE job SET progress = '{{\"files\": 2}}' WHERE id = {job}"),
+        );
+        let two_files = summary(&mut m.registry, &m.dataset);
+        assert_eq!(reads(&m), 11, "kept while the run goes on");
+        assert_eq!(step(&two_files)["state"], "running");
+        assert_eq!(step(&two_files)["progress"], json!({"files": 2}));
+        // what a run moves as it goes, the epoch a read moves with every
+        // commit and the questions a sort raises, is read again every few
+        // seconds while it runs, never on every request
+        exec(
+            m.registry.store(),
+            "UPDATE registry_meta SET value = value || '1' WHERE key = 'epoch'",
+        );
+        exec(
+            m.registry.store(),
+            &format!(
+                "INSERT INTO review_item (kind, scope, status, created_at) VALUES ('base:missing', 'stack', 'open', '{now}')"
+            ),
+        );
+        summary(&mut m.registry, &m.dataset);
+        assert_eq!(reads(&m), 11, "kept a while, as a run goes on");
+        // a person's act is read at once, whatever runs
+        audit(m.registry.store(), "decision");
+        summary(&mut m.registry, &m.dataset);
+        assert_eq!(reads(&m), 12, "an act of a person while a run goes on");
+        exec(
+            m.registry.store(),
+            &format!("UPDATE job SET state = 'done', finished_at = '{now}' WHERE id = {job}"),
+        );
+        exec(
+            m.registry.store(),
+            &format!(
+                "UPDATE ingest_batch SET state = 'done', finished_at = '{now}' WHERE job_id = {job}"
+            ),
+        );
+        let over = summary(&mut m.registry, &m.dataset);
+        assert_eq!(reads(&m), 13, "the run ended");
+        assert_eq!(step(&over)["progress"], Value::Null);
+        super::forget();
+        assert_eq!(summary(&mut m.registry, &m.dataset), over, "as read fresh");
     }
 }

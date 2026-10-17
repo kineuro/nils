@@ -319,7 +319,7 @@ enum Command {
         #[command(subcommand)]
         command: PyramidCommand,
     },
-    /// A stack's preview: its three middle planes and every plane small, one file a stack beside the pyramids, made when it is sorted (record 55 H2)
+    /// A stack's preview: its three middle planes and every plane small, one file a stack beside the pyramids, made on the pictures lane after it is sorted (record 55 H2)
     Preview {
         #[command(subcommand)]
         command: PreviewCommand,
@@ -748,8 +748,9 @@ enum SettingsCommand {
 
 #[derive(Debug, Subcommand)]
 enum PreviewCommand {
-    /// Make the previews of stacks already sorted: each made again only when
-    /// its files changed, so a run that stopped goes on where it was
+    /// Make the previews of stacks already sorted, as the job a sort queues
+    /// on the pictures lane does: each made again only when its files
+    /// changed, so a run that stopped goes on where it was
     Build {
         /// One stack, by its id
         #[arg(long, value_name = "ID", conflicts_with_all = ["dataset", "all"])]
@@ -760,12 +761,21 @@ enum PreviewCommand {
         /// Every stack of the registry; previews of stacks it no longer holds are removed
         #[arg(long)]
         all: bool,
+        /// Every stack a classify job judged: the job a sort queues on the
+        /// pictures lane as it ends (record 55 H2)
+        #[arg(long, value_name = "JOB", conflicts_with_all = ["stack", "dataset", "all"])]
+        classified: Option<i64>,
         /// The working place to write under; the first working place when absent
         #[arg(long, value_name = "NAME")]
         place: Option<String>,
         /// Pictures encoded at once; the machine's cores when absent
         #[arg(long, value_name = "N")]
         workers: Option<usize>,
+        /// Stacks made at once over many, the workers shared between them; a
+        /// quarter of the workers, one to sixteen, when absent, and 1 makes
+        /// one after another
+        #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..=64))]
+        at_once: Option<u32>,
         /// Make them again even where they are current
         #[arg(long)]
         force: bool,
@@ -801,6 +811,11 @@ enum PyramidCommand {
         /// Planes encoded at once; the machine's cores when absent
         #[arg(long, value_name = "N")]
         workers: Option<usize>,
+        /// Stacks built at once over many, the workers shared between them;
+        /// an eighth of the workers, one to eight, when absent, and 1 builds
+        /// one after another
+        #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..=64))]
+        at_once: Option<u32>,
         /// Build again the pyramids that are built; without it a stack that has one is skipped
         #[arg(long)]
         force: bool,
@@ -2596,7 +2611,7 @@ struct ClassifyArgs {
     /// have replaced are removed (record 41)
     #[arg(long)]
     no_votes: bool,
-    /// Make no previews of the stacks judged (record 55 H2); `nils preview
+    /// Queue no previews of the stacks judged (record 55 H2); `nils preview
     /// build` makes them later
     #[arg(long)]
     no_previews: bool,
@@ -2749,11 +2764,12 @@ fn classify(home: &Home, args: ClassifyArgs) -> Result<(), Exit> {
         }
         None => None,
     };
-    // record 55 H2: the stacks judged get their previews in the same run,
-    // while the sort is still the job, so no picture waits for a queue; the
-    // job stays running until they are made, so it is never shown done
-    // while they run and a cancel reaches them (review of 2026-10-10)
-    settings.leave_open = !args.no_previews;
+    // the job stays running until the headers step below has read what the
+    // steps after the sort read, then ends done. A sort is the registry's
+    // work alone (2026-10-17): the previews of what it judged are a job of
+    // their own on the pictures lane, so the pictures of a large dataset
+    // never hold up the pick and the score queued behind the sort
+    settings.leave_open = true;
     let result = nils_classify::classify::classify(&mut registry, &pack, &settings, &cancel);
     // a sort that could not start (another holds the registry) did nothing
     // to record; the proposal says its job's state until one runs
@@ -2800,21 +2816,13 @@ fn classify(home: &Home, args: ClassifyArgs) -> Result<(), Exit> {
     // each dataset holding a scan this sort judged, with this sort's pack,
     // before the steps after it (the score, System 1 and its gate) read it
     classify_headers(&mut registry, &pack, report.job_id);
-    if settings.leave_open {
-        // a preview that fails is counted in the job's result and never
-        // fails the sort or the chain after it; a stop ends the job stopped
-        let stopped = classify_previews(&mut registry, report.job_id, &cancel);
-        let state = if stopped { "cancelled" } else { "done" };
-        nils_classify::job::finish(registry.store(), report.job_id, state, None)
-            .map_err(|e| fail(e.to_string()))?;
-        printed?;
-        if stopped {
-            return Err(Exit {
-                code: STOPPED,
-                message: "stopped: what was judged and made is written; run again to go on".into(),
-            });
-        }
-        return Ok(());
+    nils_classify::job::finish(registry.store(), report.job_id, "done", None)
+        .map_err(|e| fail(e.to_string()))?;
+    // record 55 H2: the worker that ran a queued sort queues its previews
+    // and its pyramids on the pictures lane once the sort is done; a sort
+    // run at the keyboard queues its previews itself
+    if !args.no_previews && std::env::var_os(nils_registry::job::ADOPT_VAR).is_none() {
+        classify_previews(&mut registry, report.job_id);
     }
     printed
 }
@@ -2907,70 +2915,21 @@ fn classify_headers(registry: &mut Registry, pack: &nils_pack::Pack, job: i64) {
     }
 }
 
-/// The preview step of a classify run (record 55 H2): the previews of the
-/// stacks the run judged, each made only where its files changed, under the
-/// first working place; none where the deployment binds no working place.
-/// What it did is said on stderr and kept in the job's result as
-/// `previews`; a stop keeps what was made. Whether it was stopped, by a
-/// signal or by a cancel asked of the job, whose heartbeat it keeps; a
-/// preview that fails, or a list that cannot be read, is said and counted
-/// and never an error of the run (review of 2026-10-10).
-fn classify_previews(registry: &mut Registry, job: i64, cancel: &Cancel) -> bool {
+/// The preview step of a classify run at the keyboard (record 55 H2): the
+/// previews of the stacks it judged, queued as a job of their own on the
+/// pictures lane (`preview build --classified JOB --place NAME`), as the
+/// worker queues them after a sort it ran (2026-10-17: never made in the
+/// sort's own run, which they held up for days on a large dataset); none
+/// where no working place is bound or the run judged nothing. Said on
+/// stderr, and never an error of the run.
+fn classify_previews(registry: &mut Registry, job: i64) {
     let store = registry.store();
-    let Ok(working) = crate::pyramid::working_place(store, None) else {
-        return false;
+    let Ok(Some(ended)) = nils_registry::job::show(store, job) else {
+        return;
     };
-    let stacks = match crate::preview::classified_by(store, job) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("previews: the stacks judged were not read, so none was made: {e}");
-            return false;
-        }
-    };
-    if stacks.is_empty() {
-        return false;
+    if let Some(queued) = crate::worker::queue_previews_after(store, &ended) {
+        eprintln!("previews: queued as job {queued} on the pictures lane");
     }
-    let workers = std::thread::available_parallelism().map_or(4, |n| n.get());
-    let total = stacks.len();
-    let mut go_on = |store: &mut nils_registry::Store, so_far: &crate::preview::Many| {
-        let done = so_far.built.len() + so_far.current.len() + so_far.failed.len();
-        // the job's heartbeat, every tenth stack and the last, which is also
-        // where a cancel asked of it is heard
-        if !done.is_multiple_of(10) && done != total {
-            return !cancel.stop();
-        }
-        let progress = serde_json::json!({"previews": {"done": done, "total": total}});
-        !cancel.stop()
-            && !matches!(
-                nils_registry::job::beat(store, job, Some(&progress)),
-                Ok(nils_registry::job::Asked::Cancel)
-            )
-    };
-    let many = crate::preview::make_many(
-        store,
-        Path::new(&working.path),
-        &stacks,
-        false,
-        workers,
-        &mut go_on,
-    );
-    let summary = many.as_json(&working.name);
-    eprintln!(
-        "previews: {} made, {} current, {} failed in {:.1} s under {}",
-        many.built.len(),
-        many.current.len(),
-        many.failed.len(),
-        many.seconds,
-        working.name
-    );
-    if let Ok(Some(row)) = nils_registry::job::show(store, job) {
-        let mut result = row.result.unwrap_or_else(|| serde_json::json!({}));
-        if result.is_object() {
-            result["previews"] = summary;
-            let _ = nils_registry::job::set_result(store, job, &result);
-        }
-    }
-    many.stopped
 }
 
 /// `nils explain` (Wave 2 §12): small, and load-bearing. It is the answer to
@@ -5685,10 +5644,10 @@ fn bring_in(home: &Home, args: BringInArgs) -> Result<(), Exit> {
         .position(|w| w == "--name")
         .and_then(|i| first.get(i + 1))
         .cloned();
-    let grants: Vec<&str> = crate::grants::GRANTS.to_vec();
+    let reach = crate::grants::Access::keyboard(sealed::keyboard_reads());
     let mut extra = serde_json::json!({
-        "detail": crate::grants::Detail::Sensitive.name(),
-        "grants": grants,
+        "detail": reach.detail.name(),
+        "grants": reach.list(),
         "then": then,
     });
     if let Some(n) = unread {
@@ -5769,6 +5728,7 @@ fn pyramid_command(home: &Home, command: PyramidCommand) -> Result<(), Exit> {
             pack_dir,
             place,
             workers,
+            at_once,
             force,
         } => {
             let working =
@@ -5780,8 +5740,11 @@ fn pyramid_command(home: &Home, command: PyramidCommand) -> Result<(), Exit> {
             });
             let Some(stack) = stack else {
                 drop(registry);
+                let at_once =
+                    at_once.map_or_else(|| crate::pyramid::stacks_at_once(workers), |n| n as usize);
                 return pyramid_many(
-                    home, select, handle, classified, &pack, pack_dir, &working, workers, force,
+                    home, select, handle, classified, &pack, pack_dir, &working, workers, at_once,
+                    force,
                 );
             };
             let root = crate::pyramid::dir(std::path::Path::new(&working.path), stack);
@@ -5912,7 +5875,8 @@ fn pyramid_command(home: &Home, command: PyramidCommand) -> Result<(), Exit> {
 /// Record 45 E1: the pyramids of a selection's or a handle's stacks as one
 /// job of kind `pyramid`, which skips the stacks built, counts the ones
 /// that fail with why and goes on, and ends with built, skipped and failed
-/// in its result; with `force` the ones built are built again.
+/// in its result; with `force` the ones built are built again. `at_once`
+/// stacks are built at a time, the `workers` shared between them.
 #[allow(clippy::too_many_arguments)]
 fn pyramid_many(
     home: &Home,
@@ -5923,6 +5887,7 @@ fn pyramid_many(
     pack_dir: Option<std::path::PathBuf>,
     working: &nils_registry::place::Place,
     workers: usize,
+    at_once: usize,
     force: bool,
 ) -> Result<(), Exit> {
     let handle = match (&select, handle, classified) {
@@ -5965,7 +5930,8 @@ fn pyramid_many(
             name: &name,
             args: serde_json::json!({
                 "selection": select, "handle": handle, "classified": classified,
-                "place": working.name, "stacks": stacks.len(), "workers": workers, "force": force,
+                "place": working.name, "stacks": stacks.len(), "workers": workers,
+                "at_once": at_once, "force": force,
             }),
         },
     )
@@ -5993,6 +5959,7 @@ fn pyramid_many(
         std::path::Path::new(&working.path),
         &stacks,
         workers,
+        at_once,
         None,
         force,
         &mut go_on,
@@ -6022,17 +5989,20 @@ fn pyramid_many(
 }
 
 /// Record 55 H2: `nils preview build`, the previews of stacks already
-/// sorted. One stack is made at the keyboard; a dataset's or every stack is
-/// one job of kind `preview`, with its progress, that a cancel stops (what
-/// was made stays made) and whose result counts what was made, what was
-/// current and what failed with its reason class.
+/// sorted. One stack is made at the keyboard; a dataset's, a sort's
+/// (`--classified JOB`, the job a sort queues on the pictures lane as it
+/// ends) or every stack is one job of kind `preview`, with its progress,
+/// that a cancel stops (what was made stays made) and whose result counts
+/// what was made, what was current and what failed with its reason class.
 fn preview_command(home: &Home, command: PreviewCommand) -> Result<(), Exit> {
     let PreviewCommand::Build {
         stack,
         dataset,
         all,
+        classified,
         place,
         workers,
+        at_once,
         force,
     } = command;
     let mut registry = open(home)?;
@@ -6076,8 +6046,8 @@ fn preview_command(home: &Home, command: PreviewCommand) -> Result<(), Exit> {
     let store = registry.store();
     // when the build began: a prune keeps what was written after it (#456)
     let began = std::time::SystemTime::now();
-    let (stacks, name) = match (&dataset, all) {
-        (Some(n), _) => {
+    let (stacks, name) = match (&dataset, classified, all) {
+        (Some(n), _, _) => {
             let p = nils_registry::place::by_name(store, n)
                 .map_err(|e| fail(e.to_string()))?
                 .filter(|p| p.role == nils_registry::place::Role::Source && p.retired_at.is_none())
@@ -6087,24 +6057,30 @@ fn preview_command(home: &Home, command: PreviewCommand) -> Result<(), Exit> {
                 format!("dataset {n}"),
             )
         }
-        (None, true) => (
+        // record 55 H2: the stacks a sort judged, the job it queues as it ends
+        (None, Some(job), _) => (
+            crate::preview::classified_by(store, job).map_err(fail)?,
+            format!("classified by job {job}"),
+        ),
+        (None, None, true) => (
             crate::preview::every_stack(store).map_err(fail)?,
             "every stack".to_string(),
         ),
-        (None, false) => {
+        (None, None, false) => {
             return Err(usage(
-                "preview build names --stack ID, --dataset NAME or --all",
+                "preview build names --stack ID, --dataset NAME, --classified JOB or --all",
             ));
         }
     };
+    let at_once = at_once.map_or_else(|| crate::preview::stacks_at_once(workers), |n| n as usize);
     let job = nils_registry::job::claim(
         store,
         &nils_registry::job::Claim {
             kind: "preview",
             name: &name,
             args: serde_json::json!({
-                "dataset": dataset, "all": all, "place": working.name,
-                "stacks": stacks.len(), "workers": workers, "force": force,
+                "dataset": dataset, "classified": classified, "all": all, "place": working.name,
+                "stacks": stacks.len(), "workers": workers, "at_once": at_once, "force": force,
             }),
         },
     )
@@ -6127,7 +6103,8 @@ fn preview_command(home: &Home, command: PreviewCommand) -> Result<(), Exit> {
                 Ok(nils_registry::job::Asked::Cancel)
             )
     };
-    let mut many = crate::preview::make_many(store, &root, &stacks, force, workers, &mut go_on);
+    let mut many =
+        crate::preview::make_many(store, &root, &stacks, force, workers, at_once, &mut go_on);
     if all && !many.stopped {
         // #456: the stacks the registry holds now, not those it held when
         // the build began, and nothing written since it began
@@ -8609,7 +8586,7 @@ fn custody_doc(home: &Home, registry: &mut Registry) -> Result<serde_json::Value
             "kept": "a preview is made again only when its stack's files change (its content digest), and nils preview build --all removes the previews of stacks the registry no longer holds; a pyramid stays until it is built again with --force",
             "commands": {
                 "read": ["nils pyramid list", "GET /api/instances/{stack}/manifest"],
-                "change": ["nils preview build [--stack <id> | --dataset <name> | --all]", "nils pyramid build --stack <id>", "nils pyramid pack --all"],
+                "change": ["nils preview build [--stack <id> | --dataset <name> | --classified <job> | --all]", "nils pyramid build --stack <id>", "nils pyramid pack --all"],
                 "export": ["GET /api/instances/{stack}/preview (to a caller who may see pixels: detail quasi, and detail sensitive for a stack with burned-in annotation)"],
                 "delete": "remove the folders; nils has no command for one pyramid",
             },
@@ -10428,14 +10405,19 @@ fn jobs_command(home: &Home, command: JobsCommand) -> Result<(), Exit> {
         }
         JobsCommand::Enqueue { name, command } => {
             // queued at the keyboard, the verb keeps the keyboard's reach,
-            // every class; a worker runs a job that recorded no detail as
-            // plain (the suite contract, version 2)
+            // every class and every grant (the certificate's only with
+            // --unsealed-access), as `nils bring-in` records it: a worker
+            // runs a job that recorded no detail as plain (the suite
+            // contract, version 2), and a score or a chain's next step is
+            // checked against the grants the job recorded (2026-10-17: a
+            // score queued here recorded none, and skipped System 1)
+            let reach = crate::grants::Access::keyboard(sealed::keyboard_reads());
             let id = job::enqueue_with(
                 store,
                 &command,
                 name.as_deref(),
                 Some(&actor()),
-                serde_json::json!({ "detail": crate::grants::Detail::Sensitive.name() }),
+                serde_json::json!({ "detail": reach.detail.name(), "grants": reach.list() }),
             )
             .map_err(err)?;
             println!("queued job {id}: nils {}", command.join(" "));

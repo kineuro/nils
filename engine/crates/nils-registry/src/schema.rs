@@ -363,7 +363,10 @@ fn build_registry() -> Vec<Table> {
         .unique(&["source_id", "path"])
         .index(&["source_id", "dir"])
         .index(&["batch_id", "status"])
-        .index(&["instance_id"]),
+        .index(&["instance_id"])
+        // 2026-10-17 (migration 106): a dataset's files counted by status
+        // from the index, and its refused and copied files found among few
+        .index(&["source_id", "status"]),
         // Record 55 (Nima's duplicate policy, 2026-10-10): the stacks a
         // source holds a file of, whoever read the stack first. A file whose
         // subject, study, series and instance UIDs are an instance the
@@ -1109,7 +1112,10 @@ fn build_registry() -> Vec<Table> {
         )
         .unique(&["place_id", "path"])
         .index(&["place_id", "dir"])
-        .index(&["place_id", "state"]),
+        // 2026-10-17 (migration 106): the subjects a place's copies carry
+        // read from the index a subject at a time, where the place and the
+        // state alone were indexed before
+        .index(&["place_id", "state", "subject_id"]),
         Table::new(
             "classification",
             vec![

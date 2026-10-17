@@ -4667,6 +4667,268 @@ fn a_cancelled_run_keeps_its_units_and_goes_on() {
     assert_eq!(ends, 4, "{:?}", trace(&t));
 }
 
+/// 2026-10-17: a handle runs in parts (`--handle H --chunk N`), as the
+/// arrival score and a step's door queue a large one: a part stopped stops
+/// the parts after it and says so; its run taken up again (`--resume`)
+/// ends and goes on with the parts after it that no run holds yet, each a
+/// run of its own over its own handle, every stack once. A handle that
+/// fits one part runs as it is. A new run whose folder holds another
+/// run's files (a registry made again numbers its runs from 1) moves them
+/// aside whole and says so; a run taken up again keeps its own.
+#[test]
+fn a_handle_runs_in_parts_and_a_part_taken_up_again_goes_on_with_the_rest() {
+    if !have("python3") {
+        eprintln!(
+            "python3 is not installed; the stand-in podman needs it, so this test is skipped"
+        );
+        return;
+    }
+    let lab = Lab::new("pipelines-handle-parts");
+    lab.add_descriptor("slow", &stack_slow("slow", "{cores: 1, memory-gb: 1}", ""));
+    lab.ok(
+        &["pipeline", "lane", "--cores", "1", "--memory-gb", "100"],
+        None,
+    );
+    let packs = packs();
+    let every = json!({"ast_version": 1, "sets": {"every": {"grain": "stack"}}, "out": {"set": "every", "level": "record"}});
+    let file = ask_file(&lab, "every-stack", &every);
+    let answer = lab.json(&[
+        "ask",
+        "run",
+        "--file",
+        &file,
+        "--pack-dir",
+        packs.to_str().unwrap(),
+        "--json",
+    ]);
+    let handle = answer["handle"].as_i64().unwrap();
+    let all: BTreeSet<i64> = lab
+        .store()
+        .query("SELECT id FROM stack", &[])
+        .unwrap()
+        .iter()
+        .map(|r| r.int(0).unwrap())
+        .collect();
+    assert_eq!(all.len(), 4);
+    // each unit waits at a gate of its own: the first is let through, the
+    // second waits at its gate until its run is cancelled
+    let t = lab.work.path().join("trace");
+    let gate = lab.work.path().join("gate");
+    let gate_of = |unit: &str| PathBuf::from(format!("{}-{unit}", gate.display()));
+    // whatever happens, every gate is opened at the end, so nothing the
+    // run started outlives the test
+    struct Open(PathBuf);
+    impl Drop for Open {
+        fn drop(&mut self) {
+            let dir = self.0.parent().unwrap();
+            for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+                let name = e.file_name().to_string_lossy().to_string();
+                if let Some(g) = name.strip_suffix(".pid").filter(|n| n.starts_with("gate-")) {
+                    let _ = std::fs::write(dir.join(g), "");
+                }
+            }
+        }
+    }
+    let _open = Open(gate.clone());
+    // an older registry's runs 1 and 2 left their folders in the working
+    // place
+    let folders = lab.work.path().join("runs");
+    for old in ["1", "2"] {
+        std::fs::create_dir_all(folders.join(old).join("input")).unwrap();
+        std::fs::write(
+            folders.join(old).join("image.log"),
+            format!("an older registry's run {old}"),
+        )
+        .unwrap();
+        std::fs::write(folders.join(old).join("input/old.txt"), "old").unwrap();
+    }
+    let aside = |id: &str| -> Vec<PathBuf> {
+        std::fs::read_dir(&folders)
+            .unwrap()
+            .flatten()
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with(&format!("{id}.before-"))
+            })
+            .map(|e| e.path())
+            .collect()
+    };
+    let child = lab
+        .command(&lab.path)
+        .args([
+            "run",
+            "slow",
+            "--handle",
+            &handle.to_string(),
+            "--chunk",
+            "2",
+            "--param",
+            "sleep=0",
+        ])
+        .env("LANE_TRACE", &t)
+        .env("SLOW_GATE", &gate)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let started = std::time::Instant::now();
+    let first = loop {
+        let begun: Vec<String> = trace(&t)
+            .into_iter()
+            .filter(|e| e.0 == "start")
+            .map(|e| e.2)
+            .collect();
+        if let Some(first) = begun.first() {
+            std::fs::write(gate_of(first), "").unwrap();
+        }
+        let over = lab.count("SELECT COUNT(*) FROM pipeline_unit WHERE state = 'over'");
+        let waiting = begun
+            .get(1)
+            .is_some_and(|u| PathBuf::from(format!("{}.pid", gate_of(u).display())).exists());
+        if over == 1 && waiting {
+            break begun[0].clone();
+        }
+        assert!(
+            started.elapsed().as_secs() < 60,
+            "the first part never got half way: {begun:?}, {over} over"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    let job = lab.count("SELECT job_id FROM pipeline_run WHERE id = 1");
+    lab.ok(&["jobs", "cancel", &job.to_string()], None);
+    let out = child.wait_with_output().unwrap();
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains(&format!(
+            "handle {handle}: 4 stack(s) in 2 parts of at most 2"
+        )),
+        "{err}"
+    );
+    assert!(err.contains("(part 1 of 2, handle "), "{err}");
+    assert!(
+        err.contains("nils run --resume 1 takes this part up again and goes on with them"),
+        "{err}"
+    );
+    assert_eq!(lab.count("SELECT COUNT(*) FROM pipeline_run"), 1, "{err}");
+    // the new run 1 moved the older run 1's folder aside, whole, and said
+    // so, on its own words and in its first container's log
+    let moved = aside("1");
+    assert_eq!(moved.len(), 1, "{moved:?}");
+    assert_eq!(
+        std::fs::read_to_string(moved[0].join("image.log")).unwrap(),
+        "an older registry's run 1"
+    );
+    assert!(moved[0].join("input/old.txt").is_file());
+    assert!(!folders.join("1/image.log").exists());
+    assert!(!folders.join("1/input/old.txt").exists());
+    assert!(
+        err.contains("nils: run 1: this run's folder") && err.contains("moved to"),
+        "{err}"
+    );
+    let log =
+        std::fs::read_to_string(folders.join("1/units").join(&first).join("log.txt")).unwrap();
+    assert!(
+        log.starts_with("nils: this run's folder") && log.contains(".before-"),
+        "{log}"
+    );
+    // the job of the part records every part, so its run taken up again
+    // finds those after it
+    let args: Value = serde_json::from_str(
+        lab.store()
+            .query(&format!("SELECT args FROM job WHERE id = {job}"), &[])
+            .unwrap()[0]
+            .text(0)
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(args["part"]["part"], 1, "{args}");
+    assert_eq!(args["part"]["of"], 2, "{args}");
+    let handles: Vec<i64> = args["part"]["handles"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|h| h.as_i64().unwrap())
+        .collect();
+    assert_eq!(handles.len(), 2, "{args}");
+    assert!(!handles.contains(&handle), "{args}");
+    // taken up again with every gate open: the part ends, and the part
+    // after it runs as a run of its own over its own handle
+    let (ok, _, err) = lab.run(&["run", "--resume", "1"], None);
+    assert!(ok, "{err}");
+    assert!(
+        err.contains(&format!(
+            "run 1 was part 1 of 2: the parts after it go on, handles {}",
+            handles[1]
+        )),
+        "{err}"
+    );
+    let runs = lab.json(&["pipeline", "runs", "--json"]);
+    let runs = runs.as_array().unwrap();
+    assert_eq!(runs.len(), 2, "{runs:?}");
+    assert!(runs.iter().all(|r| r["status"] == "done"), "{runs:?}");
+    assert_eq!(
+        lab.count("SELECT handle_id FROM pipeline_run WHERE id = 2"),
+        handles[1]
+    );
+    let mut seen = BTreeSet::new();
+    for run in [1, 2] {
+        for s in run_stacks_apart(&lab, run) {
+            assert!(seen.insert(s), "stack {s} ran twice");
+        }
+    }
+    assert_eq!(seen, all);
+    assert_eq!(lab.count("SELECT COUNT(*) FROM derivative"), 4);
+    // taken up again, run 1 went on in its own folder; the part after it, a
+    // new run, moved the older run 2's folder aside
+    assert_eq!(aside("1").len(), 1);
+    assert_eq!(aside("2").len(), 1);
+    assert!(!folders.join("2/input/old.txt").exists());
+    // taken up again, nothing is left: the part after it is run 2 now
+    let (ok, _, err) = lab.run(&["run", "--resume", "1"], None);
+    assert!(!ok);
+    assert!(err.contains("nothing is left to run"), "{err}");
+    // a handle that fits one part runs as it is
+    let (ok, _, err) = lab.run(
+        &[
+            "run",
+            "slow",
+            "--handle",
+            &handle.to_string(),
+            "--chunk",
+            "4",
+            "--param",
+            "sleep=0",
+        ],
+        None,
+    );
+    assert!(ok, "{err}");
+    assert_eq!(
+        lab.count("SELECT handle_id FROM pipeline_run WHERE id = 3"),
+        handle
+    );
+}
+
+/// The stacks a run's units were given, where they ran apart.
+fn run_stacks_apart(lab: &Lab, run: i64) -> BTreeSet<i64> {
+    let units = lab
+        .work
+        .path()
+        .join("runs")
+        .join(run.to_string())
+        .join("units");
+    let mut out = BTreeSet::new();
+    for e in std::fs::read_dir(&units).unwrap().flatten() {
+        let doc = stacks_json(lab, run, Some(&e.file_name().to_string_lossy()));
+        for s in doc["stacks"].as_array().unwrap() {
+            out.insert(s["stack_id"].as_i64().unwrap());
+        }
+    }
+    out
+}
+
 /// Record 49 A3: a pipeline of the stacks layout that writes one table a
 /// stack, a volume and a site, and reports an SNR among its metrics, one
 /// stack's (`low`) under the declared check.
@@ -8073,16 +8335,68 @@ fn a_run_takes_a_selection_larger_than_an_answer_holds() {
         assert_eq!(sizes, [1_104, 2_000, 2_000]);
         assert_eq!(seen, all);
 
-        // a handle is run as it is
+        // a handle runs in parts too (2026-10-17), as the arrival score
+        // queues a large one: the smallest part's handle in parts of at most
+        // 1,000, two runs over handles of their own that hold its stacks
+        // once each
+        let smallest = runs
+            .iter()
+            .map(|r| r["id"].as_i64().unwrap())
+            .min_by_key(|id| run_stacks(lab, *id).len())
+            .unwrap();
+        let handle = lab.count(&format!(
+            "SELECT handle_id FROM pipeline_run WHERE id = {smallest}"
+        ));
+        let before: BTreeSet<i64> = lab
+            .json(&["pipeline", "runs", "--limit", "100", "--json"])
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["id"].as_i64().unwrap())
+            .collect();
         let (good, _, err) = lab.run(
-            &["run", "stack-count", "--handle", "1", "--chunk", "10"],
+            &[
+                "run",
+                "stack-count",
+                "--handle",
+                &handle.to_string(),
+                "--chunk",
+                "1000",
+            ],
             None,
         );
-        assert!(!good);
+        assert!(good, "{err}");
         assert!(
-            err.contains("cannot be used with") || err.contains("--chunk"),
+            err.contains(&format!(
+                "handle {handle}: 1104 stack(s) in 2 parts of at most 1000"
+            )),
             "{err}"
         );
+        let parts: Vec<i64> = lab
+            .json(&["pipeline", "runs", "--limit", "100", "--json"])
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["id"].as_i64().unwrap())
+            .filter(|id| !before.contains(id))
+            .collect();
+        assert_eq!(parts.len(), 2, "{parts:?}");
+        let mut seen = BTreeSet::new();
+        let mut sizes = Vec::new();
+        for run in &parts {
+            let held = lab.count(&format!(
+                "SELECT handle_id FROM pipeline_run WHERE id = {run}"
+            ));
+            assert_ne!(held, handle, "a part runs over a handle of its own");
+            let part = run_stacks(lab, *run);
+            sizes.push(part.len());
+            for s in part {
+                assert!(seen.insert(s), "stack {s} ran twice");
+            }
+        }
+        sizes.sort_unstable();
+        assert_eq!(sizes, [104, 1_000]);
+        assert_eq!(seen, run_stacks(lab, smallest));
 
         // a seal takes the whole sample however large, here 5,101 stacks
         let sealed = lab.json(&[

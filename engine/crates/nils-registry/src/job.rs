@@ -856,9 +856,9 @@ pub fn next_queued(store: &mut Store) -> Result<Option<Job>, Error> {
 /// Which queued jobs a worker takes (record 49 A1): pipeline runs have a
 /// lane of their own, so a long run never holds up a digest, a classify
 /// or a release, which the main lane runs. Record 55 H2: so do the
-/// pyramids, built in the background after a sort on the pictures lane, so
-/// they never hold up a digest, a classify or a pseudonymise, and a sort
-/// never holds up a picture.
+/// pictures, the previews and the pyramids built in the background after a
+/// sort on the pictures lane, so they never hold up a digest, a classify
+/// or a pseudonymise, and a sort never holds up a picture.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Lane {
     /// Every queued job, oldest first: a worker started by hand.
@@ -867,7 +867,7 @@ pub enum Lane {
     Main,
     /// Pipeline runs only.
     Pipelines,
-    /// Pyramid builds only (record 55 H2).
+    /// Preview and pyramid builds only (record 55 H2).
     Pictures,
 }
 
@@ -927,9 +927,9 @@ pub fn queued_in(store: &mut Store, lane: Lane, limit: usize) -> Result<Vec<Job>
 fn lane_filter(lane: Lane) -> &'static str {
     match lane {
         Lane::All => "",
-        Lane::Main => " AND kind NOT IN ('pipeline', 'pyramid')",
+        Lane::Main => " AND kind NOT IN ('pipeline', 'pyramid', 'preview')",
         Lane::Pipelines => " AND kind = 'pipeline'",
-        Lane::Pictures => " AND kind = 'pyramid'",
+        Lane::Pictures => " AND kind IN ('pyramid', 'preview')",
     }
 }
 

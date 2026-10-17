@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 105;
+pub const SCHEMA_VERSION: i64 = 106;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -474,7 +474,38 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 105,
         apply: a_handover_has_its_own_password,
     },
+    Migration {
+        version: 106,
+        apply: a_dataset_s_files_are_counted_from_the_indexes,
+    },
 ];
+
+/// The Data page on a dataset of 30 million files (2026-10-17): its summary
+/// counted the files by status, found the subjects of its set-aside files
+/// and the held IDs door the subjects its copies carry by reading every row
+/// of the two largest tables, on every request. `source_file` gains an
+/// index on its source and status, so a dataset's files are counted by
+/// status from the index and its refused and copied files are found among
+/// few; `pseudonym_file`'s index on its place and state gains the subject,
+/// so the subjects a place's copies carry are read from the index one
+/// subject at a time, and the narrower index it replaces is dropped. Only
+/// indexes change. Each is built once, over every row of its table: on a
+/// registry of 35 million files, a minute or two each.
+fn a_dataset_s_files_are_counted_from_the_indexes(
+    store: &mut Store,
+    kind: Kind,
+) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_indexes(store, "source_file")?;
+    if table_exists(store, "pseudonym_file")? {
+        add_indexes(store, "pseudonym_file")?;
+        let narrower = store.qualified("ix_pseudonym_file_place_id_state");
+        store.batch(&format!("DROP INDEX IF EXISTS {narrower}"))?;
+    }
+    Ok(())
+}
 
 /// Record 55, ruling 35 (c), Nima 2026-10-16: each handover has its own
 /// password, made or typed, or is not encrypted with a reason
@@ -4088,7 +4119,7 @@ mod column_migration {
         let mut store = Store::sqlite_in_memory().unwrap();
         before(&mut store);
         assert_eq!(count(&mut store), 0);
-        assert_eq!(migrate(&mut store, Kind::Linkage).unwrap(), [104, 105]);
+        assert_eq!(migrate(&mut store, Kind::Linkage).unwrap(), [104, 105, 106]);
         assert_eq!(count(&mut store), 1);
         let t = crate::linkage::id_type_named(&mut store, "reserve-number")
             .unwrap()

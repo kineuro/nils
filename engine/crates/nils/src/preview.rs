@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-//! Record 55 H2 (E1): a stack's preview, made when the stack is sorted, so
-//! no picture on the Data page waits for a job queue or a 3D volume. One
-//! file per stack under the working place, beside the pyramids:
+//! Record 55 H2 (E1): a stack's preview, made after the stack is sorted by
+//! the job the sort queues on the pictures lane as it ends (2026-10-17: no
+//! longer in the sort's own run, which held up the pick and the score
+//! behind it), so no picture on the Data page waits for a 3D volume; a
+//! stack with none yet is answered from its middle plane's file and made on
+//! a thread of the engine. One file per stack under the working place,
+//! beside the pyramids:
 //!
 //! ```text
 //! previews/<stack mod 1000, three digits>/<stack>.preview
@@ -241,6 +245,21 @@ pub fn sources(store: &mut Store, stack: i64) -> Result<Vec<Source>, String> {
     }
     out.sort_by(|a, b| a.file.path.cmp(&b.file.path));
     Ok(out)
+}
+
+/// What a stack's volume comes to in memory, about, from what the registry
+/// says of its files: two bytes a pixel of every plane they give, a file
+/// whose rows and columns the registry does not know counted as 512 by
+/// 512. A build over many stacks holds the stacks it makes at once to a
+/// budget of it ([`pyramid::VOLUMES_AT_ONCE`]).
+pub fn volume_bytes(files: &[Source]) -> u64 {
+    files
+        .iter()
+        .map(|s| {
+            let (rows, cols) = s.matrix.unwrap_or((512, 512));
+            u64::from(s.planes()) * u64::from(rows) * u64::from(cols) * 2
+        })
+        .sum()
 }
 
 /// The stack's content digest: its files' paths, sizes, times and frames,
@@ -523,17 +542,21 @@ fn assemble(mut header: Header, drawn: Drawn) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
-/// Write a file whole or not at all: a part file of its own, renamed.
+/// Write a file whole or not at all: a part file of its own, renamed, and
+/// removed where the write or the rename failed.
 fn write_whole(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let dir = path.parent().ok_or("a preview has no directory")?;
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     static PART: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = PART.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let part = path.with_extension(format!("part.{}.{n}", std::process::id()));
-    let mut f = std::fs::File::create(&part).map_err(|e| e.to_string())?;
-    f.write_all(bytes).map_err(|e| e.to_string())?;
-    drop(f);
-    std::fs::rename(&part, path).map_err(|e| {
+    let written = (|| -> std::io::Result<()> {
+        let mut f = std::fs::File::create(&part)?;
+        f.write_all(bytes)?;
+        drop(f);
+        std::fs::rename(&part, path)
+    })();
+    written.map_err(|e| {
         let _ = std::fs::remove_file(&part);
         e.to_string()
     })
@@ -768,13 +791,27 @@ pub fn make(
     if !force && digest_on_disk(working, stack).as_deref() == Some(digest.as_str()) {
         return Ok(Made::Current);
     }
+    made_from(files, stack, &digest, working, workers)
+}
+
+/// Read a stack's files and write its preview: the half of [`make`] that
+/// needs no registry, which a build over many stacks runs for several
+/// stacks at once.
+fn made_from(
+    files: Vec<Source>,
+    stack: i64,
+    digest: &str,
+    working: &Path,
+    workers: usize,
+) -> Result<Made, (String, bool)> {
     let list: Vec<StackFile> = files.into_iter().map(|s| s.file).collect();
     let vol = pyramid::read_stack(&list).map_err(|w| (w, true))?;
-    let bytes = write(&vol, stack, &digest, working, workers).map_err(|w| (w, false))?;
+    let bytes = write(&vol, stack, digest, working, workers).map_err(|w| (w, false))?;
     Ok(Made::Built { bytes })
 }
 
-/// What a build over many stacks did.
+/// What a build over many stacks did. Where several stacks are made at
+/// once, the lists are in the order the stacks ended, not the order asked.
 #[derive(Debug, Default)]
 pub struct Many {
     pub built: Vec<i64>,
@@ -789,6 +826,18 @@ pub struct Many {
 }
 
 impl Many {
+    /// Count what making one stack's preview did.
+    fn count(&mut self, stack: i64, made: Result<Made, (String, bool)>) {
+        match made {
+            Ok(Made::Built { bytes }) => {
+                self.bytes += bytes;
+                self.built.push(stack);
+            }
+            Ok(Made::Current) => self.current.push(stack),
+            Err((why, reading)) => self.failed.push((stack, pyramid::reason_of(&why, reading))),
+        }
+    }
+
     pub fn as_json(&self, place: &str) -> serde_json::Value {
         serde_json::json!({
             "place": place,
@@ -809,38 +858,130 @@ impl Many {
     }
 }
 
-/// Make the previews of `stacks`, one stack at a time, each with `workers`
-/// encoders; `go_on` is asked after each with the counts so far, and a
-/// false stops there (what was made stays made).
+/// How many stacks a build over many makes at once where nobody said: a
+/// quarter of the workers, one to sixteen. A stack's files are read a few
+/// at a time ([`pyramid::read_stack`]), and where they lie on a network
+/// share each read waits on its round trip, so one stack at a time read a
+/// share at a fraction of what it gives (a sort's previews went at two
+/// stacks a second, where the digest before them read seven times the
+/// bytes); several stacks at once keep that many more reads in flight. A
+/// machine of seven workers or fewer makes one at a time.
+pub fn stacks_at_once(workers: usize) -> usize {
+    (workers / 4).clamp(1, 16)
+}
+
+/// Make the previews of `stacks`, `at_once` stacks at a time, the
+/// `workers` encoders shared between them; `go_on` is asked after each
+/// stack with the counts so far, and a false stops there (what was made
+/// stays made).
+///
+/// With `at_once` 1, one stack after another, each with every encoder.
+/// With more, this thread, which holds the registry, reads each stack's
+/// files and digest and counts a current preview at once; a stack to make
+/// goes to a builder of its own, at most `at_once` of them running and
+/// their volumes within [`pyramid::VOLUMES_AT_ONCE`], each reading its
+/// stack's files and writing its preview with `workers / at_once`
+/// encoders, and each result is counted, and `go_on` asked, here as it
+/// comes. A stop hands out no more stacks, waits for the ones being made
+/// (each preview is written whole or not at all) and counts them.
 pub fn make_many(
     store: &mut Store,
     working: &Path,
     stacks: &[i64],
     force: bool,
     workers: usize,
+    at_once: usize,
     go_on: &mut dyn FnMut(&mut Store, &Many) -> bool,
 ) -> Many {
     let started = Instant::now();
     let mut out = Many::default();
     let mut seen = BTreeSet::new();
-    for &stack in stacks {
-        if !seen.insert(stack) {
-            continue;
-        }
-        match make(store, working, stack, force, workers) {
-            Ok(Made::Built { bytes }) => {
-                out.bytes += bytes;
-                out.built.push(stack);
+    if at_once <= 1 {
+        for &stack in stacks {
+            if !seen.insert(stack) {
+                continue;
             }
-            Ok(Made::Current) => out.current.push(stack),
-            Err((why, reading)) => out.failed.push((stack, pyramid::reason_of(&why, reading))),
+            out.count(stack, make(store, working, stack, force, workers));
+            out.seconds = started.elapsed().as_secs_f64();
+            if !go_on(store, &out) {
+                out.stopped = true;
+                break;
+            }
         }
         out.seconds = started.elapsed().as_secs_f64();
-        if !go_on(store, &out) {
-            out.stopped = true;
-            break;
-        }
+        return out;
     }
+    let encoders = (workers / at_once).max(1);
+    // one stack counted, and `go_on` asked unless a stop came before: the
+    // stacks still being made after a stop are counted and nothing is asked
+    let mut counted = |out: &mut Many, store: &mut Store, stack, made| {
+        out.count(stack, made);
+        out.seconds = started.elapsed().as_secs_f64();
+        if !out.stopped && !go_on(store, &*out) {
+            out.stopped = true;
+        }
+    };
+    std::thread::scope(|s| {
+        let (ended, results) =
+            std::sync::mpsc::channel::<(i64, u64, Result<Made, (String, bool)>)>();
+        let mut running = 0usize;
+        // what the volumes of the stacks being made come to, about
+        let mut holding = 0u64;
+        for &stack in stacks {
+            if out.stopped {
+                break;
+            }
+            if !seen.insert(stack) {
+                continue;
+            }
+            let files = match sources(store, stack) {
+                Ok(files) => files,
+                Err(why) => {
+                    counted(&mut out, store, stack, Err((why, true)));
+                    continue;
+                }
+            };
+            let digest = digest(stack, &files);
+            if !force && digest_on_disk(working, stack).as_deref() == Some(digest.as_str()) {
+                counted(&mut out, store, stack, Ok(Made::Current));
+                continue;
+            }
+            // a builder free, and room for the stack's volume, first, the
+            // results that came meanwhile counted; every builder sends one
+            // result, so the wait ends
+            let bytes = volume_bytes(&files);
+            while !pyramid::may_start(running, at_once, holding, bytes) && !out.stopped {
+                let Ok((done, freed, made)) = results.recv() else {
+                    break;
+                };
+                running -= 1;
+                holding = holding.saturating_sub(freed);
+                counted(&mut out, store, done, made);
+            }
+            if out.stopped {
+                break;
+            }
+            running += 1;
+            holding += bytes;
+            let ended = ended.clone();
+            s.spawn(move || {
+                let made = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    made_from(files, stack, &digest, working, encoders)
+                }))
+                .unwrap_or_else(|_| Err(("a preview's builder panicked".to_string(), false)));
+                let _ = ended.send((stack, bytes, made));
+            });
+        }
+        drop(ended);
+        // the stacks being made end whole, after a stop as well
+        while running > 0 {
+            let Ok((done, _, made)) = results.recv() else {
+                break;
+            };
+            running -= 1;
+            counted(&mut out, store, done, made);
+        }
+    });
     out.seconds = started.elapsed().as_secs_f64();
     out
 }
@@ -931,7 +1072,8 @@ pub fn dataset_stacks(
         .collect()
 }
 
-/// The stacks a classify job judged: what its preview step makes.
+/// The stacks a classify job judged: what the previews job a sort queues
+/// as it ends makes (`preview build --classified JOB`).
 pub fn classified_by(store: &mut Store, job: i64) -> Result<Vec<i64>, String> {
     let sql = format!(
         "SELECT stack_id FROM {} WHERE job_id = {} ORDER BY stack_id",
@@ -1124,7 +1266,7 @@ pub fn data_url(jpeg: &[u8]) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Made now: a door asked for a preview no sort made.
+// Made now: a door asked for a preview not made yet.
 //
 // The first picture is v0's: the middle plane's one file decoded in the
 // request, drawn and answered at once; the whole preview is made after, on
@@ -1548,9 +1690,9 @@ fn warming() -> std::sync::MutexGuard<'static, Warming> {
 }
 
 /// Make the previews of `stacks` on a thread of this process, one after
-/// another, after the answer has gone: a page of scans listed before their
-/// sort made pictures has them when it is listed again. Never the job
-/// queue.
+/// another, after the answer has gone: a page of scans listed before the
+/// job after their sort made their pictures has them when it is listed
+/// again. Never the job queue.
 pub fn warm(home: &nils_registry::home::Home, working: &Path, stacks: &[i64]) {
     if stacks.is_empty() {
         return;
@@ -2229,6 +2371,274 @@ mod tests {
         assert_eq!((u(16), u(20), u(24)), (28, 31, 36));
         assert_eq!(c.len(), 36);
         assert_eq!(&c[28..31], &[1, 2, 3]);
+    }
+
+    /// What a preview holds, but when and how quickly it was made: its
+    /// digest, shape, frames and frame quality, and every picture's bytes.
+    fn pictures_of(work: &Path, stack: i64) -> (String, [u32; 3], u32, u8, Vec<u8>) {
+        let p = path(work, stack, false);
+        let (h, start) = read_header(&p).unwrap();
+        let bytes = std::fs::read(&p).unwrap();
+        (
+            h.digest,
+            h.shape,
+            h.frames.count,
+            h.frame_quality,
+            bytes[start as usize..].to_vec(),
+        )
+    }
+
+    /// The part files under a working place's previews.
+    fn part_files(work: &Path) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        for shard in std::fs::read_dir(work.join("previews"))
+            .into_iter()
+            .flatten()
+        {
+            for f in std::fs::read_dir(shard.unwrap().path()).unwrap() {
+                let p = f.unwrap().path();
+                if p.to_string_lossy().contains(".part.") {
+                    out.push(p);
+                }
+            }
+        }
+        out
+    }
+
+    fn mtime(p: &Path) -> SystemTime {
+        std::fs::metadata(p).unwrap().modified().unwrap()
+    }
+
+    fn sorted(mut v: Vec<i64>) -> Vec<i64> {
+        v.sort_unstable();
+        v
+    }
+
+    #[test]
+    fn the_stacks_made_at_once_are_a_quarter_of_the_workers() {
+        for (workers, at_once) in [(0, 1), (1, 1), (4, 1), (7, 1), (8, 2), (32, 8), (64, 16)] {
+            assert_eq!(stacks_at_once(workers), at_once, "{workers}");
+        }
+        assert_eq!(stacks_at_once(512), 16);
+    }
+
+    /// Record 55 H2: a sort's previews of a dataset on a network share went
+    /// at two stacks a second, one stack's files read at a time. Several
+    /// stacks at once make the previews one at a time makes, every one, and
+    /// a second build finds them current and writes none.
+    #[test]
+    fn previews_made_several_at_once_are_the_ones_made_one_at_a_time() {
+        let src = nils_dicom::synth::TempDir::new("preview-many-src");
+        let mut store = crate::pyramid::test_stacks::registry(src.path(), 12);
+        let stacks: Vec<i64> = (1..=12).collect();
+        let (serial, pooled) = (scratch("many-serial"), scratch("many-pooled"));
+        let one = make_many(&mut store, &serial, &stacks, false, 4, 1, &mut |_, _| true);
+        assert_eq!(one.built, stacks, "one at a time, in the order asked");
+        let mut asked = 0;
+        let many = make_many(
+            &mut store,
+            &pooled,
+            &stacks,
+            false,
+            8,
+            4,
+            &mut |_, so_far| {
+                asked += 1;
+                // asked once a stack, with every stack counted so far
+                assert_eq!(so_far.built.len() + so_far.current.len(), asked);
+                true
+            },
+        );
+        assert_eq!(asked, 12);
+        assert_eq!(sorted(many.built.clone()), stacks);
+        assert!(many.current.is_empty() && many.failed.is_empty() && !many.stopped);
+        assert!(many.bytes > 0);
+        for s in &stacks {
+            assert_eq!(
+                pictures_of(&serial, *s),
+                pictures_of(&pooled, *s),
+                "stack {s}"
+            );
+        }
+        assert_eq!(
+            many.as_json("work")["built"],
+            one.as_json("work")["built"],
+            "the result's shape and counts are the same"
+        );
+        // a current preview is counted and never made again
+        let before: Vec<SystemTime> = stacks
+            .iter()
+            .map(|s| mtime(&path(&pooled, *s, false)))
+            .collect();
+        let again = make_many(&mut store, &pooled, &stacks, false, 8, 4, &mut |_, _| true);
+        assert!(again.built.is_empty() && again.failed.is_empty());
+        assert_eq!(sorted(again.current), stacks);
+        let after: Vec<SystemTime> = stacks
+            .iter()
+            .map(|s| mtime(&path(&pooled, *s, false)))
+            .collect();
+        assert_eq!(before, after, "no preview was written again");
+        assert!(part_files(&pooled).is_empty());
+        let _ = std::fs::remove_dir_all(&serial);
+        let _ = std::fs::remove_dir_all(&pooled);
+    }
+
+    /// A stack whose files cannot be read, in a builder, and a stack the
+    /// registry lists no file of, read on the registry's thread, are each
+    /// counted with the class of why, and the others are made.
+    #[test]
+    fn a_stack_that_fails_among_many_is_counted_and_the_rest_are_made() {
+        let src = nils_dicom::synth::TempDir::new("preview-fail-src");
+        let mut store = crate::pyramid::test_stacks::registry(src.path(), 8);
+        std::fs::remove_dir_all(src.path().join("s3")).unwrap();
+        let work = scratch("many-fail");
+        let mut stacks: Vec<i64> = (1..=8).collect();
+        stacks.insert(4, 99);
+        let many = make_many(&mut store, &work, &stacks, false, 8, 4, &mut |_, _| true);
+        assert_eq!(sorted(many.built.clone()), vec![1, 2, 4, 5, 6, 7, 8]);
+        let mut failed = many.failed.clone();
+        failed.sort_unstable();
+        assert_eq!(failed, vec![(3, "unreadable"), (99, "no_files")]);
+        assert!(!many.stopped);
+        assert_eq!(many.as_json("work")["failures_by_reason"]["unreadable"], 1);
+        assert!(!path(&work, 3, false).exists() && !path(&work, 99, false).exists());
+        assert!(part_files(&work).is_empty());
+        let _ = std::fs::remove_dir_all(&work);
+    }
+
+    /// A stop asked after a few stacks hands out no more, lets the stacks
+    /// being made end whole and counts them; what was made stays made, no
+    /// part file is left, and the next build goes on where it stopped.
+    #[test]
+    fn a_stop_among_many_keeps_what_was_made_and_leaves_no_part_file() {
+        let src = nils_dicom::synth::TempDir::new("preview-stop-src");
+        let mut store = crate::pyramid::test_stacks::registry(src.path(), 12);
+        let stacks: Vec<i64> = (1..=12).collect();
+        let work = scratch("many-stop");
+        let mut asked = 0;
+        let many = make_many(&mut store, &work, &stacks, false, 8, 4, &mut |_, _| {
+            asked += 1;
+            asked < 3
+        });
+        assert!(many.stopped);
+        assert_eq!(asked, 3, "nothing is asked after the stop");
+        // the third result stopped it, with at most three others being made
+        let made = many.built.len();
+        assert!((3..=6).contains(&made), "{made}");
+        for s in &stacks {
+            let there = path(&work, *s, false).exists();
+            assert_eq!(there, many.built.contains(s), "stack {s}");
+            if there {
+                assert!(opened(&path(&work, *s, false)).unwrap().is_some());
+            }
+        }
+        assert!(part_files(&work).is_empty());
+        let rest = make_many(&mut store, &work, &stacks, false, 8, 4, &mut |_, _| true);
+        assert_eq!(rest.current.len(), made);
+        assert_eq!(rest.built.len(), 12 - made);
+        let _ = std::fs::remove_dir_all(&work);
+    }
+
+    #[test]
+    fn a_stack_s_volume_is_counted_from_what_the_registry_says_of_its_files() {
+        let s = |frames: Option<Vec<u32>>, in_file: Option<i64>, matrix| Source {
+            file: StackFile {
+                path: PathBuf::from("/a"),
+                frames,
+            },
+            size: 1,
+            mtime_ns: 1,
+            instance: None,
+            position: None,
+            frames_in_file: in_file,
+            matrix,
+        };
+        let two = [
+            s(None, None, Some((256, 200))),
+            s(None, None, Some((256, 200))),
+        ];
+        assert_eq!(volume_bytes(&two), 2 * 256 * 200 * 2);
+        // the frames of a file that are the stack's, or every frame it holds
+        assert_eq!(
+            volume_bytes(&[s(Some(vec![1, 2, 3]), Some(10), Some((100, 100)))]),
+            3 * 100 * 100 * 2
+        );
+        assert_eq!(
+            volume_bytes(&[s(None, Some(10), Some((100, 100)))]),
+            10 * 100 * 100 * 2
+        );
+        // a matrix the registry does not know counts as 512 by 512
+        assert_eq!(volume_bytes(&[s(None, None, None)]), 512 * 512 * 2);
+    }
+
+    /// Stacks whose volumes come to more than the budget each are made one
+    /// after another, in the order asked, however many at once were asked.
+    #[test]
+    fn previews_of_large_volumes_are_made_one_after_another() {
+        let src = nils_dicom::synth::TempDir::new("preview-large-src");
+        let mut store = crate::pyramid::test_stacks::registry(src.path(), 5);
+        // the registry says each stack's planes are 40,000 by 40,000
+        store
+            .execute("UPDATE instance SET rows = 40000, columns = 40000", &[])
+            .unwrap();
+        let work = scratch("large");
+        let stacks: Vec<i64> = (1..=5).collect();
+        let mut seen: Vec<Vec<i64>> = Vec::new();
+        let many = make_many(&mut store, &work, &stacks, false, 8, 4, &mut |_, so_far| {
+            seen.push(so_far.built.clone());
+            true
+        });
+        assert_eq!(many.built, stacks);
+        let prefixes: Vec<Vec<i64>> = (1..=5).map(|n| (1..=n).collect()).collect();
+        assert_eq!(seen, prefixes, "each made alone, in the order asked");
+        let _ = std::fs::remove_dir_all(&work);
+    }
+
+    /// One stack at a time is the build as it was: each stack made, current
+    /// or failed in the order asked, `go_on` asked after each, and a stop
+    /// ends it at once.
+    #[test]
+    fn one_stack_at_a_time_is_the_build_in_the_order_asked() {
+        let src = nils_dicom::synth::TempDir::new("preview-serial-src");
+        let mut store = crate::pyramid::test_stacks::registry(src.path(), 6);
+        std::fs::remove_dir_all(src.path().join("s4")).unwrap();
+        let work = scratch("serial-order");
+        make(&mut store, &work, 2, false, 2).unwrap();
+        let stacks: Vec<i64> = (1..=6).collect();
+        let mut seen: Vec<(Vec<i64>, Vec<i64>, Vec<i64>)> = Vec::new();
+        let many = make_many(&mut store, &work, &stacks, false, 8, 1, &mut |_, so_far| {
+            seen.push((
+                so_far.built.clone(),
+                so_far.current.clone(),
+                so_far.failed.iter().map(|(s, _)| *s).collect(),
+            ));
+            true
+        });
+        let v = |s: &[i64]| s.to_vec();
+        assert_eq!(
+            seen,
+            vec![
+                (v(&[1]), v(&[]), v(&[])),
+                (v(&[1]), v(&[2]), v(&[])),
+                (v(&[1, 3]), v(&[2]), v(&[])),
+                (v(&[1, 3]), v(&[2]), v(&[4])),
+                (v(&[1, 3, 5]), v(&[2]), v(&[4])),
+                (v(&[1, 3, 5, 6]), v(&[2]), v(&[4])),
+            ]
+        );
+        assert_eq!(many.failed, vec![(4, "unreadable")]);
+        // a stop after the second stack ends the build there
+        let other = scratch("serial-stop");
+        let mut asked = 0;
+        let stopped = make_many(&mut store, &other, &stacks, false, 8, 1, &mut |_, _| {
+            asked += 1;
+            asked < 2
+        });
+        assert!(stopped.stopped);
+        assert_eq!(stopped.built, vec![1, 2]);
+        assert!(!path(&other, 3, false).exists());
+        let _ = std::fs::remove_dir_all(&work);
+        let _ = std::fs::remove_dir_all(&other);
     }
 
     #[test]

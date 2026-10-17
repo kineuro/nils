@@ -234,7 +234,7 @@ Of the starters, recon-all's memory, MRIQC's `--notrack`, and the FLAIR alignmen
    nils run bodypart-infer-fusion --select selection:every@1 --chunk 20000 --model bodypart-tiny@r7 --model bodypart-fusion@r7
    ```
 
-   `--chunk N` freezes the selection in stack order into parts of at most N stacks, each a handle of its own, and runs each part as a run of its own, one after another. The parts together are the selection, each stack once. Where a part fails, the ones after it are not run, and the error names their handles, so `nils run <pipeline> --handle <id>` runs each; `nils run --resume <run>` takes up the one that failed.
+   `--chunk N` freezes the selection in stack order into parts of at most N stacks, each a handle of its own, and runs each part as a run of its own, one after another. The parts together are the selection, each stack once. A handle splits the same way (`nils run <pipeline> --handle <id> --chunk N`), each part a handle of its own pinned as the handle is; a handle that fits one part runs as it is, and a handle of a scope's main scans of several roles is split only as it is frozen, by `--select`. Where a part fails or is stopped, the ones after it are not run, and the error names their handles and how to go on: `nils run --resume <run>` takes up the part that stopped and then runs the parts after it that no run holds yet, and `nils run <pipeline> --handle <id>` runs one. Each part's job records every part's handle (`part.handles` in its args), so a part taken up by `nils jobs resume` or by the pipeline lane after its engine went away goes on with the rest too. Under a worker the parts are one job, which stays running until the last part ends.
 
 4. Read what it did:
 
@@ -324,6 +324,14 @@ nils tools list
 
 The install downloads the build this version of `nils` pins from rordenlab's releases (or the mirror `NILS_DCM2NIIX_RELEASES` names), checks its sha256, unpacks it into the registry's `tools/` folder and asks its version; it is audited as `tool.install`. One found already is left alone. Where the engine cannot reach GitHub, it says so and gives the way by hand. The desk offers the same install through `POST /api/tools/dcm2niix/install`, and `GET /api/tools` and the capabilities' `tools` say whether dcm2niix is here, where and which build.
 
+Where the engine cannot reach GitHub, fetch the archive `nils tools list` names (its name, its address and its sha256) on a machine that can, and give that file to the engine:
+
+```sh
+nils tools install dcm2niix --from dcm2niix_lnx.zip
+```
+
+The desk offers the same beside Try again, as Install from a file, through `POST /api/tools/dcm2niix/install-file` with the archive as the body. The archive is checked against the pinned sha256 before anything is unpacked, a file that is not the pinned build is refused with the archive it takes named, and the right one is installed as the download is.
+
 ## Run several at once
 
 Runs whose stacks do not meet go on side by side, each a job of its own, and all of them within the lane's one budget.
@@ -368,7 +376,7 @@ A run whose units run apart (`x-nils.units: apart`) keeps each unit it finished.
    nils run --resume <run>
    ```
 
-   The units in flight when it stopped run again from a clean folder; a unit whose container had ended is taken in from what it left, and nothing is registered twice. `nils jobs resume <job>` of the run's job does the same. A run whose units run together goes on from the start, unless its container had ended, when it is taken in from what that left.
+   The units in flight when it stopped run again from a clean folder; a unit whose container had ended is taken in from what it left, and nothing is registered twice. `nils jobs resume <job>` of the run's job does the same. A run whose units run together goes on from the start, unless its container had ended, when it is taken in from what that left. A run that is a part of one split with `--chunk` then goes on with the parts after it that no run holds yet, one after another, with the parameters, models and version it recorded; a part a run holds already, one run by hand, is left as it is.
 
    A run taken up again goes on beside the runs whose stacks it does not share, and is refused, as a new run is, while a running run holds one of its stacks.
 
@@ -547,6 +555,8 @@ A dataset's bring-in ends with `score` (record 55 E5): System 1 answers its new 
 
    After the digest, the fingerprints, the sort and any pick run, `nils score @scans --name <batch>` runs as the last step. It queues System 1's run over the stacks the batch brought (those whose first batch is the bring-in's), with the model the site chose for the task `system1`, where its pipeline declares `x-nils.on-arrival`. The run goes to the pipeline lane, so it never holds up the next digest. The result names body part and post-contrast under `optional`.
 
+   A batch of more new stacks than one container of the pipeline holds is queued in parts (`--chunk`), each a run of its own in the one job: 1,250 stacks for each GB of memory its descriptor declares a unit needs, 5,000 for System 1's 4 GB, since its header model reads every stack's rows at once and 456,110 stacks did not fit where 5,220 did. A pipeline whose units run apart is never split. A step's run from its door and System 1's run over the archive are queued the same way. A bring-in queued at the keyboard, whole (`nils bring-in`) or a step at a time (`nils jobs enqueue`), records the keyboard's reach, so its score runs System 1.
+
 2. Read what it queued and what it skipped:
 
    ```sh
@@ -624,6 +634,12 @@ To build again pyramids that are built, for example after a fix to the reader, a
 
 ```sh
 nils pyramid build --select selection:every-t1@1 --force
+```
+
+The job builds several stacks at once, an eighth of its workers (one to eight) and fewer where the stacks are large, each with its share of the workers, so the files of a large selection on a network share are read many at a time. To say how many, add `--at-once N`; `--at-once 1` builds one stack after another:
+
+```sh
+nils pyramid build --select selection:every-t1@1 --at-once 4
 ```
 
 ## Ask several axes of a stack at once
@@ -796,4 +812,4 @@ Whatever reads a release's picks after it was made reads what it kept, not the p
 
 > **Warning:** a release made before 2026-10-12 kept no picks. Its readers read the live picks of what it recorded while they name the stacks it holds. Once a newer version of the rules it read has replaced them, or they no longer name its stacks, a unit says which of its stacks stands for a role is not known and why, a check's preview counts its results under `panels_gone` and shows their made-on scan alone, and a mask's grid is the input whose grid its file's matches.
 
-The container's log is `<working>/runs/<run>/log.txt`, or `<working>/runs/<run>/units/<unit>/log.txt` for a unit that runs apart, and a bids input's release log `release.log` beside it.
+The container's log is `<working>/runs/<run>/log.txt`, or `<working>/runs/<run>/units/<unit>/log.txt` for a unit that runs apart, and a bids input's release log `release.log` beside it. A run's folder is its own: a new run that finds `runs/<run>/` there already, left by another run of the same number (a registry made again numbers its runs from 1), moves it aside whole to `runs/<run>.before-<when>`, never deleting it, and says so in its output and on the first line of its first container's log. A run taken up again goes on in its own folder.

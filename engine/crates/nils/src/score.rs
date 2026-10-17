@@ -9,7 +9,9 @@
 //! run over them, as its door makes it, under the principal, grants and
 //! detail the chain recorded. The run goes to the pipeline lane, so a long
 //! score never holds up a digest, and the dataset's step shows it as it
-//! shows a run its door queued.
+//! shows a run its door queued. A batch of more new stacks than one
+//! container of the pipeline holds is run in parts (`--chunk`,
+//! `crate::pipelines::part_stacks`), each a run of its own, in one job.
 //!
 //! Body part and post-contrast are optional models that add value where the
 //! data need them: a person runs them from the dataset's step (its door,
@@ -318,10 +320,11 @@ fn score(
     // a chain's step runs under what its first job recorded; a score at the
     // keyboard with the keyboard's reach
     let adopted = std::env::var(job::ADOPT_VAR).is_ok();
+    let keyboard = Access::keyboard(crate::sealed::keyboard_reads());
     let access = if adopted {
         crate::chain::recorded_access(&me)
     } else {
-        Access::everything()
+        keyboard.clone()
     };
     let sources = crate::sources::source_ids(registry.store(), place).map_err(|e| e.to_string())?;
     let stacks = new_stacks(registry.store(), &sources, batch)?;
@@ -434,6 +437,9 @@ fn score(
         let mut command = p.command[..2].to_vec();
         command.extend(["--handle".to_string(), handle.to_string()]);
         command.extend_from_slice(&p.command[2..]);
+        // 2026-10-17: more new stacks than one container of the pipeline
+        // holds are run in parts, each a run of its own
+        let command = crate::pipelines::in_parts(store, command, frozen);
         let mut extra = json!({
             "detail": me.args["detail"].clone(),
             "grants": me.args["grants"].clone(),
@@ -443,8 +449,8 @@ fn score(
             "arrival": {"batch": batch, "score_job": job_id},
         });
         if !adopted {
-            extra["detail"] = json!(Detail::Sensitive.name());
-            extra["grants"] = json!(crate::grants::GRANTS.to_vec());
+            extra["detail"] = json!(keyboard.detail.name());
+            extra["grants"] = json!(keyboard.list());
         }
         if after_body_part && p.step == "body_part" {
             let mut then = vec![

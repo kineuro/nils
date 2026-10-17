@@ -7,7 +7,11 @@
 //! pin: setup places it beside nils on a machine install, and an admin
 //! installs it from the desk or with `nils tools install dcm2niix` into the
 //! registry's own `tools` folder, which the engine's account writes and no
-//! system path is.
+//! system path is. Where the engine cannot reach the releases, an admin
+//! gives it the archive fetched on a machine that can (gate T31, step
+//! 15.7): the desk's Install from a file, or `nils tools install dcm2niix
+//! --from FILE`. That archive is held to the same sha256 and installed the
+//! same way.
 //!
 //! The engine finds dcm2niix in this order: a path a run or a release
 //! names with `--dcm2niix`; the one a site gave setup with `--dcm2niix`;
@@ -129,17 +133,88 @@ pub(crate) fn no_build_here() -> String {
 }
 
 /// The way by hand, for an engine that cannot reach the releases: the
-/// archive, its digest and where the binary goes.
+/// archive, its digest, the install from a file and where the binary goes.
 pub(crate) fn by_hand(pin: &Pin, into: &Path) -> String {
     format!(
-        "download {} on a machine that reaches it, check that its sha256 is {}, unpack the \
-         dcm2niix in it to {} and make it executable; or point {DCM2NIIX_MIRROR_ENV} at a \
+        "download {} on a machine that reaches it and give that file to the desk's Install \
+         from a file, or to {FILE_COMMAND}, which install it once its sha256 is {}; or unpack \
+         the dcm2niix in it to {} and make it executable; or point {DCM2NIIX_MIRROR_ENV} at a \
          folder or server that holds {DCM2NIIX_VERSION}/{}",
         archive_url(DCM2NIIX_RELEASES, pin),
         pin.sha256,
         into.display(),
         pin.archive
     )
+}
+
+/// The door that installs the pinned build from an archive the caller
+/// gives, and its command line twin, for an engine that cannot reach the
+/// releases (gate T31, step 15.7): the archive is fetched on a machine that
+/// reaches them and given whole.
+pub(crate) const FILE_DOOR: &str = "POST /api/tools/dcm2niix/install-file";
+pub(crate) const FILE_COMMAND: &str = "nils tools install dcm2niix --from FILE";
+
+/// The most bytes an archive given whole may hold. The archives this
+/// version pins are under one megabyte (947,680 bytes for Linux and
+/// 930,002 for macOS), so 4 MiB leaves room, and anything larger is no
+/// archive of the pinned build and is refused before it is read whole.
+pub(crate) const FILE_MAX: u64 = 4 << 20;
+
+/// The archive an install from a file takes, as the tools' status and a
+/// refused install name it: the door and the command that take it, its
+/// name, the release's own address, its sha256 and the most bytes taken.
+fn file_of(pin: &Pin) -> Value {
+    json!({
+        "door": FILE_DOOR,
+        "command": FILE_COMMAND,
+        "archive": pin.archive,
+        "url": archive_url(DCM2NIIX_RELEASES, pin),
+        "sha256": pin.sha256,
+        "max_bytes": FILE_MAX,
+    })
+}
+
+/// The archive an install from a file takes, in words: its name, the
+/// build and the release's own address.
+fn wanted_file(pin: &Pin) -> String {
+    format!(
+        "{} of dcm2niix {DCM2NIIX_VERSION} ({})",
+        pin.archive,
+        archive_url(DCM2NIIX_RELEASES, pin)
+    )
+}
+
+/// An archive given whole, read to its end and never past [`FILE_MAX`]
+/// bytes; one that says beforehand it is larger is refused before anything
+/// is read. A refusal is its status and why.
+pub(crate) fn read_archive(
+    from: impl std::io::Read,
+    said: Option<u64>,
+) -> Result<Vec<u8>, (u16, String)> {
+    use std::io::Read as _;
+    let over = || {
+        let wanted = pin_here()
+            .map(|p| wanted_file(&p))
+            .unwrap_or_else(no_build_here);
+        (
+            413,
+            format!(
+                "an archive of more than {FILE_MAX} bytes is not {wanted}, which this takes; \
+                 nothing was unpacked or written"
+            ),
+        )
+    };
+    if said.is_some_and(|n| n > FILE_MAX) {
+        return Err(over());
+    }
+    let mut bytes = Vec::new();
+    from.take(FILE_MAX + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| (400, format!("the archive could not be read: {e}")))?;
+    if bytes.len() as u64 > FILE_MAX {
+        return Err(over());
+    }
+    Ok(bytes)
 }
 
 /// The one file of a zip archive at its top by that name: stored or
@@ -258,6 +333,8 @@ pub(crate) enum NotFetched {
     Unreachable { url: String, why: String },
     /// It was reached, and what came is not the pinned build.
     Refused { url: String, why: String },
+    /// An archive given whole is not the pinned build.
+    NotPinned { name: String, why: String },
     /// The binary could not be written.
     Unwritten(String),
 }
@@ -277,8 +354,29 @@ impl NotFetched {
             NotFetched::Refused { url, why } => {
                 format!("{url} is not the build this version pins: {why}; nothing was written")
             }
+            NotFetched::NotPinned { name, why } => {
+                let wanted = pin_here()
+                    .map(|p| wanted_file(&p))
+                    .unwrap_or_else(no_build_here);
+                format!(
+                    "{name} is not {wanted}, the archive this version of nils pins: {why}; \
+                     nothing was unpacked or written"
+                )
+            }
             NotFetched::Unwritten(why) => format!("dcm2niix could not be written: {why}"),
         }
+    }
+
+    /// Whether an archive given whole would install where this did not:
+    /// the releases were not reached, or what came, or was given, is not
+    /// the pinned build.
+    pub(crate) fn a_file_would_do(&self) -> bool {
+        matches!(
+            self,
+            NotFetched::Unreachable { .. }
+                | NotFetched::Refused { .. }
+                | NotFetched::NotPinned { .. }
+        )
     }
 
     /// Whether the releases could not be reached at all.
@@ -313,21 +411,54 @@ fn fetch(url: &str) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
+/// Where the archive an install unpacks comes from.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Archive<'a> {
+    /// Downloaded from rordenlab's releases, or the mirror
+    /// NILS_DCM2NIIX_RELEASES names.
+    Download,
+    /// Given whole, for an engine that cannot reach the releases: the body
+    /// of the file door, or the file `--from` names. `name` is what the
+    /// install says and audits it as.
+    Given { bytes: &'a [u8], name: &'a str },
+}
+
+/// The pinned build placed at `into` from the archive `archive` names, once
+/// its sha256 is the pin's: the one way a download and an archive given
+/// whole are unpacked, so nothing is unpacked from an archive that is not
+/// the pinned one and nothing is written where it is not. Answers where it
+/// came from: the address downloaded, or the given archive's name.
+pub(crate) fn take_into(archive: Archive<'_>, into: &Path) -> Result<String, NotFetched> {
+    let pin = pin_here().ok_or_else(|| NotFetched::NoBuild(no_build_here()))?;
+    let (bytes, source) = match archive {
+        Archive::Download => {
+            let url = archive_url(&releases_base(), &pin);
+            let bytes = fetch(&url).map_err(|why| NotFetched::Unreachable {
+                url: url.clone(),
+                why,
+            })?;
+            (std::borrow::Cow::Owned(bytes), url)
+        }
+        Archive::Given { bytes, name } => (std::borrow::Cow::Borrowed(bytes), name.to_string()),
+    };
+    let binary = binary_of(&bytes, &wanted_sha256(&pin)).map_err(|why| match archive {
+        Archive::Download => NotFetched::Refused {
+            url: source.clone(),
+            why,
+        },
+        Archive::Given { .. } => NotFetched::NotPinned {
+            name: source.clone(),
+            why,
+        },
+    })?;
+    place_binary(&binary, into).map_err(NotFetched::Unwritten)?;
+    Ok(source)
+}
+
 /// The pinned build downloaded, checked and placed at `into`. Nothing is
 /// written where the archive is not the pinned one.
 pub(crate) fn fetch_into(into: &Path) -> Result<String, NotFetched> {
-    let pin = pin_here().ok_or_else(|| NotFetched::NoBuild(no_build_here()))?;
-    let url = archive_url(&releases_base(), &pin);
-    let bytes = fetch(&url).map_err(|why| NotFetched::Unreachable {
-        url: url.clone(),
-        why,
-    })?;
-    let binary = binary_of(&bytes, &wanted_sha256(&pin)).map_err(|why| NotFetched::Refused {
-        url: url.clone(),
-        why,
-    })?;
-    place_binary(&binary, into).map_err(NotFetched::Unwritten)?;
-    Ok(url)
+    take_into(Archive::Download, into)
 }
 
 // ------------------------------------------------------------- the lookup
@@ -486,6 +617,9 @@ pub(crate) fn dcm2niix_status(home: Option<&Path>) -> Value {
             "source": pin.map(|p| archive_url(&releases_base(), &p)),
             "sha256": pin.map(|p| p.sha256),
             "why": pin.is_none().then(no_build_here),
+            // gate T31, step 15.7: the file to fetch where the engine
+            // cannot reach the releases, and the door that takes it
+            "file": pin.filter(|_| into.is_some()).map(|p| file_of(&p)),
         },
     })
 }
@@ -521,24 +655,28 @@ pub(crate) type Refused = (u16, Value);
 
 /// The pinned dcm2niix installed into the registry's tools folder, where
 /// the engine finds none: downloaded from rordenlab's releases (or the
-/// mirror `NILS_DCM2NIIX_RELEASES` names), checked against the pinned
-/// sha256, unpacked and asked its version. One found anywhere is left
-/// alone. Nothing is written where the archive is not the pinned one, and
-/// a binary that does not run here is taken away again. Audited as
-/// `tool.install` under `principal`.
+/// mirror `NILS_DCM2NIIX_RELEASES` names), or given whole as `archive`
+/// says, checked against the pinned sha256, unpacked and asked its version.
+/// One found anywhere is left alone. Nothing is written where the archive
+/// is not the pinned one, and a binary that does not run here is taken
+/// away again. Audited as `tool.install` under `principal`.
 pub(crate) fn install(
     registry: &mut nils_registry::Registry,
     home: &Path,
     principal: &str,
+    archive: Archive<'_>,
 ) -> Result<Value, Refused> {
-    let refused = |status: u16, error: String, offline: bool| -> Refused {
-        (
-            status,
-            json!({
-                "error": error, "disclosure": "safe", "offline": offline,
-                "failure": nils_pipeline::failure::Cause::Dcm2niix.doc(),
-            }),
-        )
+    let refused = |status: u16, error: String, offline: bool, file: bool| -> Refused {
+        let mut body = json!({
+            "error": error, "disclosure": "safe", "offline": offline,
+            "failure": nils_pipeline::failure::Cause::Dcm2niix.doc(),
+        });
+        // gate T31, step 15.7: where an archive given whole would install,
+        // the file to fetch and the door that takes it
+        if file && let Some(pin) = pin_here() {
+            body["file"] = file_of(&pin);
+        }
+        (status, body)
     };
     // one install at a time: a second waits, and finds the first's
     static INSTALLING: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -556,26 +694,37 @@ pub(crate) fn install(
         }));
     }
     let into = installed_at(home);
-    let source = match fetch_into(&into) {
-        Ok(url) => url,
+    let source = match take_into(archive, &into) {
+        Ok(source) => source,
         Err(e) => {
             let status = match &e {
                 NotFetched::NoBuild(_) => 409,
                 NotFetched::Unreachable { .. } | NotFetched::Refused { .. } => 502,
+                NotFetched::NotPinned { .. } => 422,
                 NotFetched::Unwritten(_) => 500,
             };
-            return Err(refused(status, e.said(&into), e.offline()));
+            return Err(refused(
+                status,
+                e.said(&into),
+                e.offline(),
+                e.a_file_would_do(),
+            ));
         }
     };
     let version = match nils_release::bids::convert::Converter::find(&into) {
         Ok(c) => c.version,
         Err(e) => {
             let _ = std::fs::remove_file(&into);
+            let how = match archive {
+                Archive::Download => "was downloaded".to_string(),
+                Archive::Given { name, .. } => format!("was unpacked from {name}"),
+            };
             return Err(refused(
                 409,
                 format!(
-                    "dcm2niix {DCM2NIIX_VERSION} was downloaded and does not run here, so it was taken away again: {e}"
+                    "dcm2niix {DCM2NIIX_VERSION} {how} and does not run here, so it was taken away again: {e}"
                 ),
+                false,
                 false,
             ));
         }
@@ -600,6 +749,7 @@ pub(crate) fn install(
             job_id: None,
             details: Some(json!({
                 "path": into.display().to_string(), "source": source, "said": version,
+                "given": matches!(archive, Archive::Given { .. }),
             })),
         },
     )
@@ -616,10 +766,33 @@ pub(crate) fn install(
     }))
 }
 
+/// An install's answer as a door's reply.
+fn replied(done: Result<Value, Refused>) -> Result<crate::serve::Reply, crate::serve::Reply> {
+    use crate::serve::Reply;
+    match done {
+        Ok(done) => Ok(Reply::ok(done)),
+        Err((status, body)) => {
+            let mut r = Reply::error(status, body["error"].as_str().unwrap_or_default());
+            r.body = body;
+            Err(r)
+        }
+    }
+}
+
+/// A tool the engine does not install.
+fn not_installed_here(tool: &str) -> crate::serve::Reply {
+    crate::serve::Reply::error(
+        404,
+        format!("the engine installs dcm2niix alone, not {tool}"),
+    )
+}
+
 /// The doors: `GET /api/tools`, what the engine runs beside itself and
 /// whether it is here, and `POST /api/tools/dcm2niix/install`, an admin's
 /// install of the pinned build (2026-10-12). The grants are the door
 /// table's: install:see or pipelines:see to read, install:work to install.
+/// The install from a file reads its body as bytes, so `nils serve` sends
+/// it to [`install_file`] before any body is read as text.
 pub(crate) fn route(
     home: &Path,
     registry: &mut nils_registry::Registry,
@@ -634,26 +807,57 @@ pub(crate) fn route(
             "tools": [dcm2niix_status(Some(home))],
         })))),
         ["api", "tools", tool, "install"] if post => Some(if *tool == DCM2NIIX {
-            match install(registry, home, principal) {
-                Ok(done) => Ok(Reply::ok(done)),
-                Err((status, body)) => {
-                    let mut r = Reply::error(status, body["error"].as_str().unwrap_or_default());
-                    r.body = body;
-                    Err(r)
-                }
-            }
+            replied(install(registry, home, principal, Archive::Download))
         } else {
-            Err(Reply::error(
-                404,
-                format!("the engine installs dcm2niix alone, not {tool}"),
-            ))
+            Err(not_installed_here(tool))
         }),
         _ => None,
     }
 }
 
+/// What the install from a file is called where the archive came as a
+/// door's body.
+const UPLOADED: &str = "the archive uploaded";
+
+/// `POST /api/tools/dcm2niix/install-file` (gate T31, step 15.7): the
+/// archive of the pinned build as the body, for an engine that cannot reach
+/// the releases. The body is read only once the caller holds the install's
+/// grant, and never past [`FILE_MAX`] bytes; it is then installed as the
+/// download is, held to the same sha256 before anything is unpacked.
+pub(crate) fn install_file(
+    home: &Path,
+    registry: &mut nils_registry::Registry,
+    caller: &crate::serve::Caller,
+    segs: &[&str],
+    request: &mut tiny_http::Request,
+) -> Result<crate::serve::Reply, crate::serve::Reply> {
+    use crate::serve::Reply;
+    let (need, detail) = crate::serve::door("POST", segs);
+    caller.allowed(&format!("/{}", segs.join("/")), need, detail)?;
+    let tool = segs.get(2).copied().unwrap_or_default();
+    if tool != DCM2NIIX {
+        return Err(not_installed_here(tool));
+    }
+    let said = request.body_length().map(|n| n as u64);
+    let bytes = read_archive(request.as_reader(), said)
+        .map_err(|(status, why)| Reply::error(status, why))?;
+    replied(install(
+        registry,
+        home,
+        &caller.principal,
+        Archive::Given {
+            bytes: &bytes,
+            name: UPLOADED,
+        },
+    ))
+}
+
 /// The doors, as the capabilities list them.
-pub(crate) const DOORS: [&str; 2] = ["GET /api/tools", "POST /api/tools/dcm2niix/install"];
+pub(crate) const DOORS: [&str; 3] = [
+    "GET /api/tools",
+    "POST /api/tools/dcm2niix/install",
+    FILE_DOOR,
+];
 
 /// `nils tools`.
 #[derive(Debug, clap::Subcommand)]
@@ -667,10 +871,16 @@ pub(crate) enum ToolsCommand {
     /// Install the dcm2niix build this version pins into the registry's
     /// tools folder, where the engine finds none: downloaded from
     /// rordenlab's releases, or the mirror NILS_DCM2NIIX_RELEASES names,
-    /// and checked against its sha256
+    /// or taken from the archive --from names, and checked against its
+    /// sha256
     Install {
         /// The tool: dcm2niix
         tool: String,
+        /// The archive of the pinned build, fetched on a machine that
+        /// reaches the releases, for one that cannot: checked against its
+        /// sha256 before anything is unpacked, and nothing is downloaded
+        #[arg(long, value_name = "FILE")]
+        from: Option<PathBuf>,
         /// Machine-readable output
         #[arg(long)]
         json: bool,
@@ -712,6 +922,21 @@ pub(crate) fn command(
             ),
         }
         println!("           this version pins {DCM2NIIX_VERSION}");
+        // gate T31, step 15.7: the file to fetch where the releases cannot
+        // be reached from here
+        let file = &t["install"]["file"];
+        if t["present"] != true
+            && let (Some(archive), Some(url), Some(sha256)) = (
+                file["archive"].as_str(),
+                file["url"].as_str(),
+                file["sha256"].as_str(),
+            )
+        {
+            println!(
+                "           where the releases cannot be reached: fetch {archive} ({url}, sha256 \
+                 {sha256}) on a machine that reaches them, then {FILE_COMMAND}"
+            );
+        }
     };
     match command.unwrap_or(ToolsCommand::List { json: false }) {
         ToolsCommand::List { json } => {
@@ -723,15 +948,32 @@ pub(crate) fn command(
             }
             Ok(())
         }
-        ToolsCommand::Install { tool, json } => {
+        ToolsCommand::Install { tool, from, json } => {
             if tool != DCM2NIIX {
                 return Err(crate::usage(format!(
                     "nils tools install dcm2niix: the engine installs dcm2niix alone, not {tool}"
                 )));
             }
+            // gate T31, step 15.7: the archive given whole, read as the
+            // file door reads its body
+            let given = match &from {
+                Some(path) => {
+                    let file = std::fs::File::open(path)
+                        .map_err(|e| crate::fail(format!("{}: {e}", path.display())))?;
+                    let said = file.metadata().ok().map(|m| m.len());
+                    let bytes = read_archive(file, said)
+                        .map_err(|(_, why)| crate::fail(format!("{}: {why}", path.display())))?;
+                    Some((bytes, path.display().to_string()))
+                }
+                None => None,
+            };
+            let archive = match &given {
+                Some((bytes, name)) => Archive::Given { bytes, name },
+                None => Archive::Download,
+            };
             let mut registry = crate::open(home)?;
             let principal = nils_registry::principal::Principal::current().to_string();
-            match install(&mut registry, home.dir(), &principal) {
+            match install(&mut registry, home.dir(), &principal, archive) {
                 Ok(done) => {
                     if json {
                         print(&done);

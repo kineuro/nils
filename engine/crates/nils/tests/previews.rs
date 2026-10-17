@@ -1,14 +1,15 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-//! Record 55 H2 (E1, E2, E4): the preview a sort makes and the doors that
-//! serve it. A classify run makes the previews of the stacks it judged
-//! under the working place; `nils preview build` makes them for stacks
+//! Record 55 H2 (E1, E2, E4): the previews made after a sort and the doors
+//! that serve them. A sort is the registry's work alone (2026-10-17): a
+//! classify run ends done once it has judged, and the previews of the
+//! stacks it judged are a job of their own on the pictures lane, queued
+//! before their pyramids; `nils preview build` makes them for stacks
 //! already sorted and makes none twice; the preview door answers the first
 //! picture in one request from one file, gated as every picture is, with
 //! an ETag and immutable caching when the digest is named; the frames door
 //! answers a range of planes in one read; a page of scans carries its
-//! pictures and its open questions; a sort queues its pyramids on the
-//! pictures lane; and a worker beside the doors starts a queued job at
-//! once.
+//! pictures and its open questions; and a worker beside the doors starts a
+//! queued job at once.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
@@ -239,6 +240,11 @@ fn preview_file(work: &Path, stack: i64, held: bool) -> PathBuf {
         ))
 }
 
+/// The pictures lane run once, by hand: what a sort queued there is made.
+fn pictures_lane(home: &TempDir) -> String {
+    ok(home, &["jobs", "work", "--once", "--lane", "pictures"]).0
+}
+
 /// Classify, asking about every axis, so the stacks carry open questions.
 fn classify(home: &TempDir) -> String {
     let (_, err) = ok(
@@ -263,14 +269,15 @@ fn mtime(p: &Path) -> std::time::SystemTime {
 }
 
 #[test]
-fn the_sort_makes_previews_and_a_second_build_makes_none() {
+fn the_sort_queues_its_previews_and_a_second_build_makes_none() {
     let b = bed("idem", None);
     let work = b.work.path();
+    // the sort makes no picture in its own run: it queues them on the
+    // pictures lane, which makes them
     let err = classify(&b.home);
-    assert!(
-        err.contains("previews: 2 made, 0 current, 0 failed"),
-        "{err}"
-    );
+    assert!(err.contains("previews: queued as job"), "{err}");
+    assert!(!work.join("previews").exists(), "the sort made none itself");
+    pictures_lane(&b.home);
     for stack in [1, 2] {
         assert!(preview_file(work, stack, false).exists(), "stack {stack}");
     }
@@ -330,12 +337,34 @@ fn the_sort_makes_previews_and_a_second_build_makes_none() {
     let (out, _) = ok(&b.home, &["jobs", "list", "--all", "--json"]);
     assert!(out.contains("\"preview\""), "{out}");
 
-    // a classify that judges the stacks again makes no preview again
+    // a classify that judges the stacks again queues its previews again,
+    // and they are current: none is made again
+    let before: Vec<_> = [1, 2]
+        .iter()
+        .map(|s| mtime(&preview_file(work, *s, false)))
+        .collect();
     let err = classify(&b.home);
-    assert!(
-        !err.contains("previews:") || err.contains("previews: 0 made"),
-        "{err}"
+    assert!(err.contains("previews: queued as job"), "{err}");
+    pictures_lane(&b.home);
+    let last = jobs(&b.home)
+        .into_iter()
+        .filter(|j| j["kind"] == "preview")
+        .max_by_key(|j| j["id"].as_i64())
+        .unwrap();
+    assert_eq!(last["state"], "done", "{last}");
+    assert_eq!(
+        (
+            last["result"]["built"].as_i64(),
+            last["result"]["current"].as_i64()
+        ),
+        (Some(0), Some(2)),
+        "{last}"
     );
+    let after: Vec<_> = [1, 2]
+        .iter()
+        .map(|s| mtime(&preview_file(work, *s, false)))
+        .collect();
+    assert_eq!(before, after, "no preview was written again");
 
     // a stack that has no preview and is asked for it is told so
     let (good, _, err) = run(&b.home, &["preview", "build", "--stack", "77"]);
@@ -346,13 +375,15 @@ fn the_sort_makes_previews_and_a_second_build_makes_none() {
     );
 }
 
-/// Review of 2026-10-10: the sort's job stays running while its previews
-/// are made, its heartbeat counting them, and ends done after them; a stack
-/// whose preview cannot be made is counted and fails neither the sort nor
-/// its job. Before, the job was done before its first preview, so a queue
-/// waited behind a job shown done that no cancel reached.
+/// 2026-10-17: a sort is the registry's work alone. Its job ends done once
+/// it has judged, with no preview made or counted in it, so the pick and
+/// the score queued behind it never wait for pictures (a large sort judged
+/// its stacks in minutes and then made previews for days); the previews
+/// are a job of their own on the pictures lane, whose heartbeat counts
+/// them, and a stack whose preview cannot be made is counted there and
+/// fails neither that job nor the sort.
 #[test]
-fn the_sort_s_job_ends_after_its_previews_and_a_failed_one_fails_nothing() {
+fn the_sort_ends_before_its_previews_and_a_failed_one_fails_nothing() {
     let b = bed("open", None);
     // the files of one stack are gone: its preview cannot be made
     std::fs::remove_dir_all(
@@ -363,22 +394,27 @@ fn the_sort_s_job_ends_after_its_previews_and_a_failed_one_fails_nothing() {
             .join("1.2.3.B"),
     )
     .unwrap();
-    let err = classify(&b.home);
-    assert!(
-        err.contains("previews: 1 made, 0 current, 1 failed"),
-        "{err}"
-    );
-    let (out, _) = ok(&b.home, &["jobs", "list", "--all", "--json"]);
-    let jobs: serde_json::Value = serde_json::from_str(&out).unwrap();
-    let sort = jobs
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|j| j["kind"] == "classify")
-        .unwrap();
+    classify(&b.home);
+    let list = jobs(&b.home);
+    let sort = list.iter().find(|j| j["kind"] == "classify").unwrap();
     assert_eq!(sort["state"], "done", "{sort}");
-    assert_eq!(sort["progress"]["previews"]["total"], 2, "{sort}");
-    assert_eq!(sort["result"]["previews"]["failed"], 1, "{sort}");
+    assert!(sort["progress"].get("previews").is_none(), "{sort}");
+    assert!(sort["result"].get("previews").is_none(), "{sort}");
+    let queued = list.iter().find(|j| j["kind"] == "preview").unwrap();
+    assert_eq!(queued["state"], "queued", "{queued}");
+    assert_eq!(
+        words(queued),
+        format!("preview build --classified {} --place work", sort["id"]),
+        "{queued}"
+    );
+    pictures_lane(&b.home);
+    let list = jobs(&b.home);
+    let made = list.iter().find(|j| j["kind"] == "preview").unwrap();
+    assert_eq!(made["state"], "done", "{made}");
+    assert_eq!(made["progress"]["total"], 2, "{made}");
+    assert_eq!(made["result"]["built"], 1, "{made}");
+    assert_eq!(made["result"]["failed"], 1, "{made}");
+    assert_eq!(made["args"]["classified"], sort["id"], "{made}");
 }
 
 #[test]
@@ -398,8 +434,28 @@ fn a_classify_with_no_working_place_or_no_previews_makes_none() {
     };
     assert!(!err.contains("previews:"), "{err}");
     assert!(!b.work.path().join("previews").exists());
+    assert!(
+        !jobs(&b.home).iter().any(|j| j["kind"] == "preview"),
+        "no previews queued"
+    );
     let (out, _) = ok(&b.home, &["preview", "build", "--all"]);
     assert_eq!(json_line(&out)["built"], 2, "{out}");
+    // several stacks at once, as many as asked: the job says how many, and
+    // the counts are the same; none at once is refused
+    let (out, _) = ok(
+        &b.home,
+        &["preview", "build", "--all", "--force", "--at-once", "2"],
+    );
+    assert_eq!(json_line(&out)["built"], 2, "{out}");
+    assert!(
+        jobs(&b.home)
+            .iter()
+            .any(|j| j["kind"] == "preview" && j["args"]["at_once"] == 2),
+        "{:?}",
+        jobs(&b.home)
+    );
+    let (good, _, err) = run(&b.home, &["preview", "build", "--all", "--at-once", "0"]);
+    assert!(!good && err.contains("--at-once"), "{err}");
 }
 
 /// A server killed when the test is over: no request count to keep.
@@ -558,6 +614,7 @@ fn the_preview_doors_and_a_page_of_pictures_on_postgres_too() {
 fn doors_sweep(name: &str, dsn: Option<&str>) {
     let b = bed(name, dsn);
     classify(&b.home);
+    pictures_lane(&b.home);
     let work = b.work.path();
     let annotated = if preview_file(work, 1, true).exists() {
         1
@@ -914,7 +971,7 @@ fn words(j: &serde_json::Value) -> String {
 }
 
 #[test]
-fn a_sort_queues_its_pyramids_on_the_pictures_lane() {
+fn a_sort_queues_its_previews_and_pyramids_on_the_pictures_lane() {
     let b = bed("lane", None);
     ok(
         &b.home,
@@ -927,7 +984,8 @@ fn a_sort_queues_its_pyramids_on_the_pictures_lane() {
             packs().to_str().unwrap(),
         ],
     );
-    // the main lane runs the sort and its previews, and leaves the pyramids
+    // the main lane runs the sort alone, and leaves its previews and its
+    // pyramids to the pictures lane, the previews queued first
     ok(&b.home, &["jobs", "work", "--once", "--lane", "main"]);
     let list = jobs(&b.home);
     let classify = list
@@ -935,7 +993,17 @@ fn a_sort_queues_its_pyramids_on_the_pictures_lane() {
         .find(|j| j["kind"] == "classify")
         .expect("the classify job");
     assert_eq!(classify["state"], "done", "{classify}");
-    assert_eq!(classify["result"]["previews"]["built"], 2, "{classify}");
+    assert!(classify["result"].get("previews").is_none(), "{classify}");
+    let preview = list
+        .iter()
+        .find(|j| j["kind"] == "preview")
+        .expect("a preview job queued after the sort");
+    assert_eq!(preview["state"], "queued", "{preview}");
+    assert_eq!(
+        words(preview),
+        format!("preview build --classified {} --place work", classify["id"]),
+        "{preview}"
+    );
     let pyramid = list
         .iter()
         .find(|j| j["kind"] == "pyramid")
@@ -946,14 +1014,20 @@ fn a_sort_queues_its_pyramids_on_the_pictures_lane() {
         format!("pyramid build --classified {} --place work", classify["id"]),
         "{pyramid}"
     );
+    assert!(preview["id"].as_i64() < pyramid["id"].as_i64(), "{list:?}");
+    assert!(!b.work.path().join("previews").exists());
     assert!(!b.work.path().join("pyramids").exists());
-    // a reader's single stack, queued after it, runs first on its lane
+    // a reader's single stack, queued after them, runs first on its lane,
+    // then the previews, then the 3D views
     ok(
         &b.home,
         &["jobs", "enqueue", "--", "pyramid", "build", "--stack", "2"],
     );
     ok(&b.home, &["jobs", "work", "--once", "--lane", "pictures"]);
     let list = jobs(&b.home);
+    let preview = list.iter().find(|j| j["kind"] == "preview").unwrap();
+    assert_eq!(preview["state"], "done", "{preview}");
+    assert_eq!(preview["result"]["built"], 2, "{preview}");
     let built: Vec<&serde_json::Value> = list.iter().filter(|j| j["kind"] == "pyramid").collect();
     assert_eq!(built.len(), 2, "{list:?}");
     assert!(built.iter().all(|j| j["state"] == "done"), "{built:?}");
@@ -966,8 +1040,12 @@ fn a_sort_queues_its_pyramids_on_the_pictures_lane() {
         .find(|j| words(j).contains("--classified"))
         .unwrap();
     assert!(
-        single["finished_at"].as_str() <= background["started_at"].as_str(),
-        "the reader's stack ran first: {single} {background}"
+        single["finished_at"].as_str() <= preview["started_at"].as_str(),
+        "the reader's stack ran first: {single} {preview}"
+    );
+    assert!(
+        preview["finished_at"].as_str() <= background["started_at"].as_str(),
+        "the previews before the 3D views: {preview} {background}"
     );
     assert_eq!(background["result"]["built"], 1, "{background}");
     assert_eq!(background["result"]["skipped"], 1, "{background}");
@@ -980,6 +1058,7 @@ fn a_sort_queues_its_pyramids_on_the_pictures_lane() {
                 .join("manifest.json")
                 .exists()
         );
+        assert!(preview_file(b.work.path(), s, false).exists());
     }
 }
 

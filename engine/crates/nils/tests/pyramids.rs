@@ -1293,6 +1293,21 @@ fn force_builds_again_what_is_built() {
     assert_eq!(job["state"], "done", "{job}");
     assert_eq!(job["result"]["built"], 2, "{job}");
     assert_eq!(job["args"]["force"], true, "{job}");
+    // several stacks at once: the flag passes the door, the job says how
+    // many, and the counts are the same
+    let job = server.job(json!([
+        "pyramid",
+        "build",
+        "--select",
+        "selection:every@1",
+        "--force",
+        "--at-once",
+        "2"
+    ]));
+    assert_eq!(job["state"], "done", "{job}");
+    assert_eq!(job["args"]["at_once"], 2, "{job}");
+    assert_eq!(job["result"]["built"], 2, "{job}");
+    assert_eq!(job["result"]["failed"], 1, "{job}");
     let (status, refused) = server.call(
         "POST",
         "/api/jobs",

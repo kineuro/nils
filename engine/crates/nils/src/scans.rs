@@ -406,7 +406,7 @@ pub const STILLS_BUDGET: std::time::Duration = std::time::Duration::from_millis(
 /// sort's questions waiting on its stack (a grouped question under each of
 /// its members, and a question about the stack alone), so the desk can
 /// mark the scans that need a look as the card counts them; and `picture`, its own
-/// middle plane from the preview its sort made, as a data URL
+/// middle plane from the preview made after its sort, as a data URL
 /// `{data, width, height, digest, held, partial}`. A scan with no preview
 /// yet has its middle plane decoded from its one file (`partial` true) as
 /// long as the page's budget lasts, and null after (decoded on, and its
