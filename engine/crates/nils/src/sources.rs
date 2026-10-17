@@ -8,7 +8,9 @@
 //! over time, and what they still need. A source's rows are the `source`
 //! roots under the place's path. Its subjects, studies, sessions and stacks
 //! are the ones its digests created first, so something seen from two
-//! sources counts under the first. Every number here is a count.
+//! sources counts under the first. Every number here is a count. Where a
+//! run counted a tree whole, the tree is counted as the dataset's summary
+//! counts it rather than as the probe did (2026-10-17).
 
 use std::path::Path;
 
@@ -241,6 +243,15 @@ fn source(
         });
         return Ok(doc);
     }
+    // 2026-10-17: the trees counted as the dataset's summary counts them,
+    // from its runs once they walked a tree, since the probe is bounded and
+    // stops short of a large one: for a dataset of 30 million files whose
+    // run had written all but the refused ones, the Originals box said what
+    // the probe reached in two seconds and the copy none. The place's own
+    // `probed` stays the probe's.
+    let counted = crate::dataset_summary::counted(store, p, ids)?;
+    counted.overlay(&mut doc["trees"]);
+    counted.overlay(&mut doc["dataset"]["trees"]);
     let sources = list(ids);
     let q = |t: &str| store.qualified(t);
     let (batch, stack, study, file, cache, class) = (
@@ -484,6 +495,48 @@ mod tests {
         assert_eq!(read(&mut registry).1, 0);
         super::forget();
         assert_eq!(read(&mut registry).1, 1, "forgotten");
+        // a batch that begins or ends is read again without the epoch: a
+        // pseudonymise run's counts or a read's are what the trees and the
+        // summary's steps count from (2026-10-17)
+        let store = registry.store();
+        let (source, batch) = (store.qualified("source"), store.qualified("ingest_batch"));
+        store
+            .execute(
+                &format!(
+                    "INSERT INTO {source} (root, root_canonical, first_seen_at) \
+                     VALUES ('/d', '/d', '2026-10-17T00:00:00Z')"
+                ),
+                &[],
+            )
+            .unwrap();
+        let id = store
+            .query(&format!("SELECT MAX(id) FROM {source}"), &[])
+            .unwrap()[0]
+            .int(0)
+            .unwrap();
+        store
+            .execute(
+                &format!(
+                    "INSERT INTO {batch} (source_id, name, config, started_at, state, kind) \
+                     VALUES ({id}, 'b', '{{}}', '2026-10-17T00:00:00Z', 'running', 'pseudonymize')"
+                ),
+                &[],
+            )
+            .unwrap();
+        assert_eq!(read(&mut registry).1, 1, "a batch began");
+        assert_eq!(read(&mut registry).1, 0);
+        registry
+            .store()
+            .execute(
+                &format!(
+                    "UPDATE {batch} SET state = 'done', finished_at = '2026-10-17T01:00:00Z', \
+                     counts = '{{}}' WHERE source_id = {id}"
+                ),
+                &[],
+            )
+            .unwrap();
+        assert_eq!(read(&mut registry).1, 1, "a batch ended");
+        assert_eq!(read(&mut registry).1, 0);
     }
 
     #[test]

@@ -358,34 +358,33 @@ pub(crate) struct Found {
     /// The probe's count stopped short of a large tree (it reads a page's
     /// worth of entries, never a walk of the archive): at least `files`.
     pub(crate) partial: bool,
-    /// `read` (a read of the tree), `pseudonymise` (a pseudonymise run of
-    /// the originals) or `probe`.
+    /// `read` (a read of the tree), `pseudonymise` (a whole pseudonymise
+    /// run of the originals that ended done) or `probe`.
     pub(crate) counted_by: &'static str,
 }
 
-/// The newest finished walk of a dataset's found tree, which counts every
-/// file of it where the probe is bounded: a read (a digest) for the tree
-/// NILS reads, a pseudonymise run for an identified dataset's originals.
-/// Both are filed under the tree NILS reads (`anon_root`, canonical); a read
-/// of a folder under it walked less than the tree and is not one. The files
-/// the walk saw (seen, unchanged ones too), and their bytes where it
-/// measured every one (a read that found none unchanged; a pseudonymise run
-/// measures none).
+/// A tree as the probe last counted it: `(files, bytes, stopped short)`.
+/// The probe is bounded (a page's worth of entries, never a walk of the
+/// archive), so a large tree's count is at least `files`.
+pub(crate) type Probed = (Option<i64>, Option<i64>, bool);
+
+/// The newest finished read (a digest) of the tree NILS reads, which counts
+/// every file of it where the probe is bounded, filed under that tree
+/// (`anon_root`, canonical); a read of a folder under it walked less than
+/// the tree and is not one. The files it saw (seen, unchanged ones too),
+/// and their bytes where it measured every one (a read that found none
+/// unchanged). An identified dataset's originals are walked by its
+/// pseudonymise runs instead ([`Runs::walk`]).
 pub(crate) fn walked(
     store: &mut Store,
     sources: &str,
     anon_root: &str,
-    tree: &str,
 ) -> Result<Option<(i64, Option<i64>)>, StoreError> {
-    let originals = tree == "originals";
-    let kind = match originals {
-        true => "b.kind = 'pseudonymize'",
-        false => "(b.kind IS NULL OR b.kind = 'digest')",
-    };
     let d = store.dialect();
     let sql = format!(
         "SELECT {} FROM {} b JOIN {} s ON s.id = b.source_id \
-         WHERE b.source_id IN ({sources}) AND s.root_canonical = {} AND {kind} \
+         WHERE b.source_id IN ({sources}) AND s.root_canonical = {} \
+         AND (b.kind IS NULL OR b.kind = 'digest') \
          AND b.state = 'done' ORDER BY b.id DESC LIMIT 1",
         crate::text_of(store, "ingest_batch", "counts"),
         store.qualified("ingest_batch"),
@@ -400,24 +399,369 @@ pub(crate) fn walked(
         .opt_text(0)?
         .and_then(|t| serde_json::from_str(t).ok())
         .unwrap_or(Value::Null);
-    Ok(match originals {
-        true => counts["files"]["seen"].as_i64().map(|seen| (seen, None)),
-        false => counts["seen"].as_i64().map(|seen| {
-            let every = counts["unchanged"].as_i64().unwrap_or(0) == 0;
-            (seen, counts["bytes"].as_i64().filter(|_| every))
-        }),
+    Ok(counts["seen"].as_i64().map(|seen| {
+        let every = counts["unchanged"].as_i64().unwrap_or(0) == 0;
+        (seen, counts["bytes"].as_i64().filter(|_| every))
+    }))
+}
+
+/// One pseudonymise run of a dataset's originals that ended, done or
+/// cancelled, as its batch's counts (the run's report) say it. A run that
+/// failed wrote no counts, and a dry run records no batch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Run {
+    /// A person or an update cancelled it: what it counted is what it
+    /// decided before it stopped, and it saw at least `seen` originals.
+    pub(crate) cancelled: bool,
+    /// It read only the held files a map released or a person coded anyway
+    /// (`--held`), never the whole of the originals.
+    pub(crate) held_only: bool,
+    pub(crate) seen: i64,
+    pub(crate) written: i64,
+    pub(crate) unchanged: i64,
+    pub(crate) refused: i64,
+    /// The size of every file it saw, whatever became of it.
+    pub(crate) bytes: Option<i64>,
+}
+
+impl Run {
+    /// A run from its batch's state and counts; none for a dry run's report
+    /// or counts that are no run's report.
+    pub(crate) fn of(state: &str, counts: &Value) -> Option<Run> {
+        if counts["dry_run"].as_bool() == Some(true) {
+            return None;
+        }
+        let files = &counts["files"];
+        let n = |k: &str| files[k].as_i64().unwrap_or(0);
+        Some(Run {
+            cancelled: state == "cancelled",
+            held_only: counts["held_only"].as_bool() == Some(true),
+            seen: files["seen"].as_i64()?,
+            written: n("written"),
+            unchanged: n("unchanged"),
+            refused: n("refused"),
+            bytes: counts["bytes"].as_i64(),
+        })
+    }
+}
+
+/// The pseudonymise runs of a dataset that ended, done or cancelled, newest
+/// first: the batches of kind pseudonymize filed under the tree NILS reads
+/// (`anon_root`, canonical), where every run files its batch.
+pub(crate) fn runs(
+    store: &mut Store,
+    sources: &str,
+    anon_root: &str,
+) -> Result<Vec<Run>, StoreError> {
+    let d = store.dialect();
+    let sql = format!(
+        "SELECT b.state, {} FROM {} b JOIN {} s ON s.id = b.source_id \
+         WHERE b.source_id IN ({sources}) AND s.root_canonical = {} \
+         AND b.kind = 'pseudonymize' AND b.state IN ('done', 'cancelled') \
+         ORDER BY b.id DESC",
+        crate::text_of(store, "ingest_batch", "counts"),
+        store.qualified("ingest_batch"),
+        store.qualified("source"),
+        d.param(1, nils_registry::schema::Type::Text),
+    );
+    let mut out = Vec::new();
+    for r in store.query(&sql, &[nils_registry::store::Param::from(anon_root)])? {
+        let counts: Value = r
+            .opt_text(1)?
+            .and_then(|t| serde_json::from_str(t).ok())
+            .unwrap_or(Value::Null);
+        if let Some(run) = Run::of(r.text(0)?, &counts) {
+            out.push(run);
+        }
+    }
+    Ok(out)
+}
+
+/// The runs a dataset's originals and copy are counted from (2026-10-17):
+/// the newest whole run that ended, done or cancelled (`base`), whose
+/// counts are facts about what it decided however it ended; the newest
+/// whole run that ended done (`done`, the walk the found step counts); the
+/// runs of the held files that ended after the base, newest first; and,
+/// where the base was cancelled, those that ended between the run done
+/// and the base. A run of the held files reads only those, so it is never
+/// the base, nor the found step's walk.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct Runs {
+    pub(crate) base: Option<Run>,
+    pub(crate) done: Option<Run>,
+    pub(crate) held_after: Vec<Run>,
+    pub(crate) held_between: Vec<Run>,
+}
+
+impl Runs {
+    /// The runs that count, from every run that ended, newest first.
+    pub(crate) fn of(newest_first: Vec<Run>) -> Runs {
+        let mut out = Runs::default();
+        for run in newest_first {
+            if run.held_only {
+                match out.base {
+                    None => out.held_after.push(run),
+                    Some(_) => out.held_between.push(run),
+                }
+                continue;
+            }
+            if out.base.is_none() {
+                out.base = Some(run.clone());
+            }
+            if !run.cancelled {
+                out.done = Some(run);
+                break;
+            }
+        }
+        out
+    }
+
+    /// The found step's walk of the originals: what the newest whole run
+    /// that ended done saw, and the size of every file it saw.
+    pub(crate) fn walk(&self) -> Option<(i64, Option<i64>)> {
+        self.done.as_ref().map(|r| (r.seen, r.bytes))
+    }
+}
+
+/// A tree's count as the doors answer it: its files, their bytes where
+/// measured, and whether the count is a lower bound.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Tree {
+    pub(crate) files: i64,
+    pub(crate) bytes: Option<i64>,
+    pub(crate) partial: bool,
+}
+
+/// What an identified dataset's originals and copy count once a whole run
+/// has ended (2026-10-17).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Copied {
+    /// The originals: the most of what the base saw, what the found step
+    /// counts and what the probe counted last (files that arrived since a
+    /// run), with the bytes of the count that gave it. A lower bound where
+    /// the base was cancelled, the found step's count is one, or a probe
+    /// that stopped short counted more than any run saw.
+    pub(crate) originals: Tree,
+    /// The copy: the files the base wrote or found unchanged, and those the
+    /// runs of the held files after it wrote. Where the base was cancelled,
+    /// at least the more of what it decided and what the whole run done
+    /// before it and the runs of the held files between them wrote or found
+    /// unchanged.
+    pub(crate) files: i64,
+    /// The files the base and the runs of the held files after it refused,
+    /// which are final: no run decides them again. Where the base was
+    /// cancelled, at least the more of its and the run done before it's.
+    pub(crate) refused: i64,
+    /// The copy holds at least `files`: the base was cancelled, so the copy
+    /// is a lower bound until a whole run ends done.
+    pub(crate) partial: bool,
+}
+
+impl Copied {
+    /// The pseudonymised step's counts: the copy, and the originals no run
+    /// has decided yet, the files held now and the refused ones left out
+    /// (each is said elsewhere, and a refused file is final). Where the
+    /// originals' count is a lower bound, so is what waits, unless the
+    /// copy's is one too: then what waits is not known.
+    pub(crate) fn step(&self, held: i64) -> CopyCount {
+        CopyCount {
+            files: self.files,
+            waiting: (self.originals.files - self.files - held - self.refused).max(0),
+            partial: self.partial,
+            waiting_partial: self.originals.partial,
+        }
+    }
+}
+
+/// The originals and the copy as the runs count them; none before a whole
+/// run of the originals has ended.
+pub(crate) fn copied(originals: Probed, found: &Found, runs: &Runs) -> Option<Copied> {
+    let base = runs.base.as_ref()?;
+    let found_files = found.files.unwrap_or(0);
+    let probed = originals.0.unwrap_or(0);
+    let by_runs = base.seen.max(found_files);
+    let most = by_runs.max(probed);
+    let bytes = if found.files == Some(most) {
+        found.bytes
+    } else if base.seen == most {
+        base.bytes
+    } else {
+        originals.1
+    };
+    let sum = |runs: &[Run], of: fn(&Run) -> i64| runs.iter().map(of).sum::<i64>();
+    // a cancelled run decided only some files, and a copy an earlier run
+    // wrote stands: the copy holds at least the more of what it decided and
+    // what the run done before it and the runs of the held files between
+    // them did, and so many are refused at least (2026-10-17)
+    let (decided, refused) = match (&runs.done, base.cancelled) {
+        (Some(done), true) => (
+            (base.written + base.unchanged)
+                .max(done.written + done.unchanged + sum(&runs.held_between, |r| r.written)),
+            base.refused
+                .max(done.refused + sum(&runs.held_between, |r| r.refused)),
+        ),
+        _ => (base.written + base.unchanged, base.refused),
+    };
+    Some(Copied {
+        originals: Tree {
+            files: most,
+            bytes,
+            partial: base.cancelled || found.partial || (originals.2 && probed > by_runs),
+        },
+        files: decided + sum(&runs.held_after, |r| r.written),
+        refused: refused + sum(&runs.held_after, |r| r.refused),
+        partial: base.cancelled,
     })
+}
+
+/// What the doors count of a dataset's trees (2026-10-17): the probe's
+/// counts as the place keeps them, the found tree's count, and for an
+/// identified dataset the runs of its originals. The summary's found and
+/// pseudonymised steps and the sources door's trees are all read from it,
+/// so the card, its steps and the desk's Originals box say the same; the
+/// place's own `probed` is never changed by it.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Counted {
+    /// The dataset has originals: they are its found tree, and its runs
+    /// count the copy.
+    pub(crate) originals: bool,
+    /// The probe's counts of the originals and of the copy, as kept.
+    pub(crate) probed: (Probed, Probed),
+    pub(crate) found: Found,
+    pub(crate) runs: Runs,
+}
+
+impl Counted {
+    /// The counts from the probe's and the runs': the found tree's walk is
+    /// the newest whole pseudonymise run that ended done for an identified
+    /// dataset, else the newest finished read of the tree (`read`).
+    pub(crate) fn new(
+        originals: bool,
+        probed: (Probed, Probed),
+        runs: Runs,
+        read: Option<(i64, Option<i64>)>,
+    ) -> Counted {
+        let found = match originals {
+            true => found_of(probed.0, runs.walk(), true),
+            false => found_of(probed.1, read, false),
+        };
+        Counted {
+            originals,
+            probed,
+            found,
+            runs,
+        }
+    }
+
+    /// The originals and the copy as the runs count them; none for a
+    /// dataset without originals, or before a whole run of them ended.
+    pub(crate) fn copied(&self) -> Option<Copied> {
+        if !self.originals {
+            return None;
+        }
+        copied(self.probed.0, &self.found, &self.runs)
+    }
+
+    /// The pseudonymised step's counts and whether it is done. Once a whole
+    /// run has ended they are the runs' (2026-10-17), and the step is done
+    /// where the copy holds files and no file waits, is held or may wait
+    /// uncounted, and the copy is no lower bound. Before that they are the
+    /// probe's, as before: the copy and what the originals hold beyond it,
+    /// done where nothing does.
+    pub(crate) fn step(&self, held: i64) -> (CopyCount, bool) {
+        match self.copied() {
+            Some(c) => {
+                let copy = c.step(held);
+                let done = copy.files > 0
+                    && copy.waiting == 0
+                    && !copy.waiting_partial
+                    && !copy.partial
+                    && held == 0;
+                (copy, done)
+            }
+            None => {
+                let (originals, anon) = self.probed;
+                let copy = copy_of((originals.0, originals.2), (anon.0, anon.2));
+                (copy, copy.files > 0 && copy.waiting == 0)
+            }
+        }
+    }
+
+    /// The trees as a door answers them, `{originals, anon}` each with its
+    /// path and counts (or null), counted as the summary's steps count
+    /// them. An identified dataset's originals and copy, once a whole run of
+    /// the originals has ended, are counted as its pseudonymised step counts
+    /// them, the copy a lower bound where the step's is, and its bytes the
+    /// probe's where it counted the copy whole, else none; a de-identified dataset's tree, where the probe stopped
+    /// short of it, as its found step counts it, by its newest finished
+    /// read. Any other tree keeps the probe's counts.
+    pub(crate) fn overlay(&self, trees: &mut Value) {
+        let set = |tree: &mut Value, files: Option<i64>, bytes: Option<i64>, partial: bool| {
+            if tree.is_object() {
+                tree["files"] = json!(files);
+                tree["bytes"] = json!(bytes);
+                tree["partial"] = json!(partial);
+            }
+        };
+        if let Some(c) = self.copied() {
+            let o = c.originals;
+            set(&mut trees["originals"], Some(o.files), o.bytes, o.partial);
+            let anon = self.probed.1;
+            set(
+                &mut trees["anon"],
+                Some(c.files),
+                anon.1.filter(|_| !anon.2),
+                c.partial,
+            );
+        } else if !self.originals && self.probed.1.2 && self.found.counted_by == "read" {
+            let f = &self.found;
+            set(&mut trees["anon"], f.files, f.bytes, f.partial);
+        }
+    }
+}
+
+/// A dataset's trees counted for the doors: the probe's counts its place
+/// keeps, and the runs or the read that walked its found tree, filed under
+/// the tree NILS reads among its sources (`ids`).
+pub(crate) fn counted(
+    store: &mut Store,
+    dataset: &Place,
+    ids: &[i64],
+) -> Result<Counted, StoreError> {
+    let doc = dataset.dataset_doc();
+    let probe = |t: &str| -> Probed {
+        let tree = &doc["trees"][t];
+        (
+            tree["files"].as_i64(),
+            tree["bytes"].as_i64(),
+            tree["partial"].as_bool() == Some(true),
+        )
+    };
+    let originals = !doc["trees"]["originals"].is_null();
+    let probed = (probe("originals"), probe("anon"));
+    let root = match (ids.is_empty(), dataset.tree_path("anon")) {
+        (false, Some(anon)) => Some(
+            std::fs::canonicalize(&anon)
+                .unwrap_or(anon)
+                .display()
+                .to_string(),
+        ),
+        _ => None,
+    };
+    let sources = list(ids);
+    let (runs, read) = match (root, originals) {
+        (Some(root), true) => (Runs::of(runs(store, &sources, &root)?), None),
+        (Some(root), false) => (Runs::default(), walked(store, &sources, &root)?),
+        (None, _) => (Runs::default(), None),
+    };
+    Ok(Counted::new(originals, probed, runs, read))
 }
 
 /// The found tree's count: the newest finished walk of it once one has
 /// run, else the probe's, which says where it stopped short. A walk that
 /// measured not every file's bytes takes the probe's where the probe
 /// counted the tree whole, and none where it stopped short.
-pub(crate) fn found_of(
-    probed: (Option<i64>, Option<i64>, bool),
-    walk: Option<(i64, Option<i64>)>,
-    originals: bool,
-) -> Found {
+pub(crate) fn found_of(probed: Probed, walk: Option<(i64, Option<i64>)>, originals: bool) -> Found {
     match walk {
         Some((files, bytes)) => Found {
             files: Some(files),
@@ -435,12 +779,8 @@ pub(crate) fn found_of(
 }
 
 /// The pseudonymised step's counts: the files of the copy and the files of
-/// the originals not in it yet, from the trees as the probe last counted
-/// them, `(files, stopped short)` each. The probe is bounded and stops
-/// short of a large tree, so `partial` says the copy holds at least `files`,
-/// and `waiting_partial` that `waiting` is no whole count: at least
-/// `waiting` where only the originals' count stopped short, and unknown
-/// where the copy's did too.
+/// the originals not in it yet. `partial` says the copy holds at least
+/// `files`, and `waiting_partial` that `waiting` is no whole count.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct CopyCount {
     pub(crate) files: i64,
@@ -449,6 +789,12 @@ pub(crate) struct CopyCount {
     pub(crate) waiting_partial: bool,
 }
 
+/// The step's counts before any whole run has ended: from the trees as the
+/// probe last counted them, `(files, stopped short)` each. The probe is
+/// bounded and stops short of a large tree, so `partial` says where the
+/// copy's count did, and `waiting_partial` says `waiting` is at least that
+/// where only the originals' count stopped short, and unknown where the
+/// copy's did too.
 pub(crate) fn copy_of(originals: (Option<i64>, bool), copied: (Option<i64>, bool)) -> CopyCount {
     let (o, c) = (originals.0.unwrap_or(0), copied.0.unwrap_or(0));
     let partial = copied.1 && copied.0.is_some();
@@ -656,9 +1002,11 @@ pub(crate) fn document(
         .as_str()
         .unwrap_or("unknown")
         .to_string();
-    let doc = &dataset.dataset_doc();
-    let tree = |t: &str, k: &str| doc["trees"][t][k].as_i64();
-    let has_originals = !doc["trees"]["originals"].is_null();
+    // its trees as the probe counted them and as the runs that walked them
+    // did, the found and the pseudonymised steps read from one reading as
+    // the sources door's trees are (2026-10-17)
+    let counts = counted(store, dataset, &ids).map_err(failed)?;
+    let has_originals = counts.originals;
     let jobs = jobs_of(store, dataset, WINDOW).map_err(failed)?;
     let newest_of = |kinds: &[&str]| jobs.iter().find(|j| kinds.contains(&j.kind.as_str()));
     let open_of = |kinds: &[&str]| {
@@ -942,28 +1290,12 @@ pub(crate) fn document(
     let mut steps = Vec::new();
     // found: the tree NILS reads, or the originals of an identified dataset,
     // counted by the newest walk of it once one has run (2026-10-14): the
-    // probe reads a page's worth of entries and says where it stopped short
+    // probe reads a page's worth of entries and says where it stopped short;
+    // an identified dataset's walk is its newest whole pseudonymise run that
+    // ended done, never a run of its held files alone (2026-10-17)
     let found_tree = if has_originals { "originals" } else { "anon" };
-    let walk = match (ids.is_empty(), dataset.tree_path("anon")) {
-        (false, Some(anon)) => {
-            let root = std::fs::canonicalize(&anon)
-                .unwrap_or(anon)
-                .display()
-                .to_string();
-            walked(store, &sources, &root, found_tree).map_err(failed)?
-        }
-        _ => None,
-    };
-    let counted = found_of(
-        (
-            tree(found_tree, "files"),
-            tree(found_tree, "bytes"),
-            doc["trees"][found_tree]["partial"].as_bool() == Some(true),
-        ),
-        walk,
-        has_originals,
-    );
-    let found_files = counted.files;
+    let found_count = &counts.found;
+    let found_files = found_count.files;
     let found_state = if state == "unknown" {
         "waiting"
     } else if found_files.unwrap_or(0) > 0 || reads > 0 {
@@ -979,26 +1311,22 @@ pub(crate) fn document(
         "finished_at": dataset.probed_at.clone().unwrap_or_else(|| dataset.created_at.clone()),
         "progress": null,
         "files": found_files,
-        "bytes": counted.bytes,
-        "partial": counted.partial,
-        "counted_by": counted.counted_by,
+        "bytes": found_count.bytes,
+        "partial": found_count.partial,
+        "counted_by": found_count.counted_by,
     });
     found["tree"] = json!(found_tree);
     steps.push(found);
     if has_originals {
-        let stopped = |t: &str| doc["trees"][t]["partial"].as_bool() == Some(true);
-        let copy = copy_of(
-            (tree("originals", "files"), stopped("originals")),
-            (tree("anon", "files"), stopped("anon")),
-        );
+        // the copy and what waits, from the newest whole run that ended and
+        // the runs of the held files after it, once one has (2026-10-17): the
+        // probe stops short of a large tree, and two counts that stopped short
+        // never made a large dataset's step done
+        let (copy, done) = counts.step(held);
         let open = open_of(&["pseudonymize"]);
         steps.push(step(
             "pseudonymised",
-            chain_state(
-                open,
-                newest_of(&["pseudonymize"]),
-                copy.files > 0 && copy.waiting == 0,
-            ),
+            chain_state(open, newest_of(&["pseudonymize"]), done),
             open.or_else(|| newest_of(&["pseudonymize"])),
             json!({
                 "files": copy.files,
@@ -1176,8 +1504,8 @@ pub(crate) fn document(
         "body_regions": pairs(regions, "region"),
         "files": {
             "found": found_files,
-            "bytes": counted.bytes,
-            "found_partial": counted.partial,
+            "bytes": found_count.bytes,
+            "found_partial": found_count.partial,
             "read": read,
             "new": new,
             "known": known,
@@ -1207,8 +1535,10 @@ pub(crate) fn document(
 #[cfg(test)]
 mod tests {
     use super::{
-        CopyCount, Found, Light, chain_state, copy_of, flag_id, found_of, named_for, names,
+        CopyCount, Counted, Found, Light, Probed, Run, Runs, chain_state, copy_of, flag_id,
+        found_of, named_for, names,
     };
+    use serde_json::{Value, json};
 
     #[test]
     fn a_found_count_is_the_newest_walk_s_once_one_ran_and_says_where_a_probe_stopped_short() {
@@ -1286,6 +1616,397 @@ mod tests {
                 waiting_partial: false
             }
         );
+    }
+
+    /// A run's report as its batch keeps it: `[seen, written, unchanged,
+    /// held, refused]`, and the bytes of every file it saw.
+    fn report(held_only: bool, files: [i64; 5], bytes: i64) -> Value {
+        let [seen, written, unchanged, held, refused] = files;
+        json!({
+            "dry_run": false,
+            "held_only": held_only,
+            "files": {
+                "seen": seen, "written": written, "unchanged": unchanged,
+                "held": held, "refused": refused, "skipped": 0,
+            },
+            "bytes": bytes,
+        })
+    }
+
+    /// A whole run, or a run of the held files, that ended in `state`.
+    fn run(state: &str, held_only: bool, files: [i64; 5], bytes: i64) -> Run {
+        Run::of(state, &report(held_only, files, bytes)).unwrap()
+    }
+
+    /// An identified dataset's counts from its probe and its runs, newest
+    /// first.
+    fn identified(originals: Probed, copy: Probed, runs: Vec<Run>) -> Counted {
+        Counted::new(true, (originals, copy), Runs::of(runs), None)
+    }
+
+    /// 2026-10-17: a pseudonymise run of a dataset of 30 million files ended
+    /// with nothing held, and the step stayed waiting with no file copied:
+    /// the run's own count of the trees after it stopped short of both
+    /// (78,570 originals, and none of the copy in its two seconds). Counted
+    /// from the run, the copy is what it wrote and nothing waits, since its
+    /// refused files are final.
+    #[test]
+    fn a_whole_run_counts_the_copy_where_the_probe_stopped_short_of_both_trees() {
+        let probe = (Some(78_570), Some(12_299_736_493), true);
+        let copy = (Some(0), Some(0), true);
+        let whole = run(
+            "done",
+            false,
+            [30_689_981, 30_654_432, 0, 0, 35_549],
+            4_915_477_070_489,
+        );
+        let c = identified(probe, copy, vec![whole.clone()]);
+        // before: two counts that stopped short, and the step never done
+        assert_eq!(
+            copy_of((probe.0, probe.2), (copy.0, copy.2)),
+            CopyCount {
+                files: 0,
+                waiting: 78_570,
+                partial: true,
+                waiting_partial: true
+            }
+        );
+        let (step, done) = c.step(0);
+        assert_eq!(
+            step,
+            CopyCount {
+                files: 30_654_432,
+                waiting: 0,
+                partial: false,
+                waiting_partial: false
+            }
+        );
+        assert!(done);
+        assert_eq!(chain_state(None, Some(&light(69, "done")), done), "done");
+        // the found step counts what the run saw, with every file's bytes
+        assert_eq!(
+            c.found,
+            Found {
+                files: Some(30_689_981),
+                bytes: Some(4_915_477_070_489),
+                partial: false,
+                counted_by: "pseudonymise"
+            }
+        );
+        // and the sources door's trees say the same
+        let mut trees = json!({
+            "originals": {"path": "o", "files": 78_570, "bytes": 12_299_736_493i64,
+                          "last_written": "w", "partial": true},
+            "anon": {"path": "a", "files": 0, "bytes": 0, "last_written": null, "partial": true},
+        });
+        c.overlay(&mut trees);
+        assert_eq!(
+            trees,
+            json!({
+                "originals": {"path": "o", "files": 30_689_981, "bytes": 4_915_477_070_489i64,
+                              "last_written": "w", "partial": false},
+                "anon": {"path": "a", "files": 30_654_432, "bytes": null,
+                         "last_written": null, "partial": false},
+            })
+        );
+        // a copy the probe counted whole keeps the probe's bytes
+        let c = identified(probe, (Some(9), Some(900), false), vec![whole]);
+        let mut trees = json!({"originals": {}, "anon": {}});
+        c.overlay(&mut trees);
+        assert_eq!(
+            trees["anon"],
+            json!({"files": 30_654_432, "bytes": 900, "partial": false})
+        );
+    }
+
+    /// A held file is in the step's `held`, never in `waiting`, and keeps
+    /// the step from done; a refused file is in neither, since it is final.
+    /// Files that arrived since the run, which the probe counts, wait.
+    #[test]
+    fn what_waits_leaves_out_the_held_and_the_refused_files() {
+        let probe = (Some(100), Some(1_000), false);
+        let c = identified(
+            probe,
+            (Some(80), Some(800), false),
+            vec![run("done", false, [100, 80, 0, 15, 5], 1_000)],
+        );
+        let (step, done) = c.step(15);
+        assert_eq!(
+            step,
+            CopyCount {
+                files: 80,
+                waiting: 0,
+                partial: false,
+                waiting_partial: false
+            }
+        );
+        assert!(!done, "15 files are held");
+        // before, the probe's count put the held and the refused in waiting
+        assert_eq!(copy_of((Some(100), false), (Some(80), false)).waiting, 20);
+        // a dataset whose refused files are its only ones not copied is done
+        let c = identified(
+            probe,
+            (Some(95), Some(950), false),
+            vec![run("done", false, [100, 95, 0, 0, 5], 1_000)],
+        );
+        let (step, done) = c.step(0);
+        assert_eq!((step.files, step.waiting, done), (95, 0, true));
+        // ten files arrived since and the probe counted them: they wait
+        let c = identified(
+            (Some(110), Some(1_100), false),
+            (Some(95), Some(950), false),
+            vec![run("done", false, [100, 95, 0, 0, 5], 1_000)],
+        );
+        let (step, done) = c.step(0);
+        assert_eq!(
+            (step.waiting, step.waiting_partial, done),
+            (10, false, false)
+        );
+        let mut trees = json!({"originals": {}, "anon": {}});
+        c.overlay(&mut trees);
+        assert_eq!(
+            trees["originals"],
+            json!({"files": 110, "bytes": 1_100, "partial": false})
+        );
+        // a probe that stopped short past what the run saw: at least that many
+        let c = identified(
+            (Some(200_000), Some(1), true),
+            (Some(95), Some(950), false),
+            vec![run("done", false, [100, 95, 0, 0, 5], 1_000)],
+        );
+        let (step, done) = c.step(0);
+        assert_eq!(
+            (step.waiting, step.waiting_partial, done),
+            (199_900, true, false)
+        );
+    }
+
+    /// An update or a person may cancel a run: what it decided is counted,
+    /// and neither the copy nor what waits is a whole count, so the step is
+    /// not done until a whole run ends done.
+    #[test]
+    fn a_cancelled_whole_run_counts_what_it_decided_and_says_its_counts_are_partial() {
+        let probe = (Some(100), Some(1_000), false);
+        let cancelled = run("cancelled", false, [40, 30, 10, 0, 0], 400);
+        let c = identified(probe, (Some(40), Some(400), false), vec![cancelled.clone()]);
+        // no whole run ended done: the found step is the probe's
+        assert_eq!(c.found.counted_by, "probe");
+        let (step, done) = c.step(0);
+        assert_eq!(
+            step,
+            CopyCount {
+                files: 40,
+                waiting: 60,
+                partial: true,
+                waiting_partial: true
+            }
+        );
+        assert!(!done);
+        let mut trees = json!({"originals": {}, "anon": {}});
+        c.overlay(&mut trees);
+        assert_eq!(
+            trees["anon"],
+            json!({"files": 40, "bytes": 400, "partial": true})
+        );
+        // a whole run done after the cancelled one is the step's again
+        let c = identified(
+            probe,
+            (Some(98), Some(980), false),
+            vec![run("done", false, [100, 0, 98, 0, 2], 1_000), cancelled],
+        );
+        let (step, done) = c.step(0);
+        assert_eq!((step.files, step.partial, done), (98, false, true));
+    }
+
+    /// 2026-10-17: a run cancelled early decided few files, and the copy an
+    /// earlier run wrote stands. The copy is at least the more of what the
+    /// cancelled run decided and what the whole run done before it and the
+    /// runs of the held files between them wrote or found unchanged, with
+    /// what the runs of the held files after it wrote; the refused files the
+    /// same way. It stays a lower bound until a whole run ends done.
+    #[test]
+    fn after_a_cancelled_run_the_copy_is_at_least_what_the_runs_before_it_wrote() {
+        let probe = (Some(7), Some(70), true);
+        let done_before = run("done", false, [100, 98, 0, 0, 2], 1_000);
+        let early = run("cancelled", false, [40, 0, 40, 0, 0], 400);
+        let c = identified(
+            probe,
+            (Some(0), Some(0), true),
+            vec![early.clone(), done_before.clone()],
+        );
+        // the run done is the found step's walk
+        assert_eq!(c.found.files, Some(100));
+        assert_eq!(c.found.counted_by, "pseudonymise");
+        let (step, done) = c.step(0);
+        assert_eq!(
+            step,
+            CopyCount {
+                files: 98,
+                waiting: 0,
+                partial: true,
+                waiting_partial: true
+            }
+        );
+        assert!(!done);
+        let mut trees = json!({"originals": {}, "anon": {}});
+        c.overlay(&mut trees);
+        assert_eq!(
+            trees,
+            json!({
+                "originals": {"files": 100, "bytes": 1_000, "partial": true},
+                "anon": {"files": 98, "bytes": null, "partial": true},
+            })
+        );
+        // the held files a run wrote between the two count on the side of
+        // the run done, and those written after the cancelled run on both
+        let whole = run("done", false, [100, 80, 0, 20, 0], 1_000);
+        let between = run("done", true, [20, 15, 0, 5, 0], 200);
+        let after = run("done", true, [5, 5, 0, 0, 0], 50);
+        let c = identified(
+            (Some(100), Some(1_000), false),
+            (Some(100), Some(1_000), false),
+            vec![after.clone(), early.clone(), between, whole],
+        );
+        let (step, done) = c.step(0);
+        assert_eq!(
+            step,
+            CopyCount {
+                files: 100,
+                waiting: 0,
+                partial: true,
+                waiting_partial: true
+            }
+        );
+        assert!(!done);
+        // a cancelled run that decided more than the run done before it
+        let late = run("cancelled", false, [100, 3, 96, 0, 1], 1_000);
+        let c = identified(
+            (Some(100), Some(1_000), false),
+            (Some(99), Some(990), false),
+            vec![late, done_before],
+        );
+        let (step, _) = c.step(0);
+        assert_eq!((step.files, step.waiting, step.partial), (99, 0, true));
+    }
+
+    /// A run of the held files reads those alone: what it writes joins the
+    /// copy and the found step still counts the whole run's originals.
+    #[test]
+    fn a_run_of_the_held_files_after_a_whole_run_adds_what_it_wrote() {
+        let probe = (Some(100), Some(1_000), false);
+        let whole = run("done", false, [100, 80, 0, 20, 0], 1_000);
+        let held = run("done", true, [20, 15, 0, 5, 0], 200);
+        let c = identified(
+            probe,
+            (Some(95), Some(950), false),
+            vec![held, whole.clone()],
+        );
+        assert_eq!(c.found.files, Some(100), "never the held run's 20");
+        assert_eq!(c.found.bytes, Some(1_000));
+        let (step, done) = c.step(5);
+        assert_eq!(
+            step,
+            CopyCount {
+                files: 95,
+                waiting: 0,
+                partial: false,
+                waiting_partial: false
+            }
+        );
+        assert!(!done, "5 files are still held");
+        // the rest written by another run of them, one refused: done
+        let rest = run("done", true, [5, 4, 0, 0, 1], 50);
+        let held = run("done", true, [20, 15, 0, 5, 0], 200);
+        let c = identified(
+            probe,
+            (Some(99), Some(990), false),
+            vec![rest, held, whole.clone()],
+        );
+        assert_eq!(
+            c.step(0),
+            (
+                CopyCount {
+                    files: 99,
+                    waiting: 0,
+                    partial: false,
+                    waiting_partial: false
+                },
+                true
+            )
+        );
+        // a run of the held files before the whole run adds nothing: the
+        // whole run read those files again
+        let before = run("done", true, [3, 3, 0, 0, 0], 30);
+        let c = identified(probe, (Some(80), Some(800), false), vec![whole, before]);
+        assert_eq!(c.step(20).0.files, 80);
+    }
+
+    /// Before a whole run has ended the step is the probe's, as before; a
+    /// dry run records no batch, and a report that says it was one is none.
+    #[test]
+    fn with_no_whole_run_the_step_is_the_probe_s() {
+        for (originals, copy) in [
+            ((Some(10), None, false), (Some(4), None, false)),
+            ((Some(200_000), None, true), (Some(4), None, false)),
+            ((Some(200_000), None, true), (Some(200_000), None, true)),
+            ((None, None, true), (None, None, true)),
+        ] {
+            let held_only = run("done", true, [4, 4, 0, 0, 0], 40);
+            for runs in [vec![], vec![held_only]] {
+                let c = identified(originals, copy, runs);
+                let expected = copy_of((originals.0, originals.2), (copy.0, copy.2));
+                assert_eq!(
+                    c.step(0),
+                    (expected, expected.files > 0 && expected.waiting == 0)
+                );
+                assert_eq!(c.found, found_of(originals, None, true));
+                let mut trees = json!({"originals": {"files": 1}, "anon": {"files": 2}});
+                c.overlay(&mut trees);
+                assert_eq!(
+                    trees,
+                    json!({"originals": {"files": 1}, "anon": {"files": 2}})
+                );
+            }
+        }
+        let mut dry = report(false, [4, 4, 0, 0, 0], 40);
+        dry["dry_run"] = json!(true);
+        assert_eq!(Run::of("done", &dry), None);
+        assert_eq!(Run::of("done", &json!({"files": {}})), None);
+    }
+
+    /// A de-identified dataset's tree, where the probe stopped short, is
+    /// counted on the sources door as its found step counts it: by the
+    /// newest finished read.
+    #[test]
+    fn a_de_identified_tree_the_probe_stopped_short_of_is_counted_by_its_read() {
+        let short = (Some(49_836), Some(16_000_000_000), true);
+        let c = Counted::new(
+            false,
+            ((None, None, false), short),
+            Runs::default(),
+            Some((1_112_026, Some(9))),
+        );
+        let mut trees = json!({"originals": null, "anon": {"files": 49_836, "partial": true}});
+        c.overlay(&mut trees);
+        assert_eq!(
+            trees,
+            json!({"originals": null, "anon": {"files": 1_112_026, "bytes": 9, "partial": false}})
+        );
+        // a probe that counted it whole, or no read yet: the probe's
+        let whole = (Some(4), Some(9), false);
+        for c in [
+            Counted::new(
+                false,
+                ((None, None, false), whole),
+                Runs::default(),
+                Some((3, None)),
+            ),
+            Counted::new(false, ((None, None, false), short), Runs::default(), None),
+        ] {
+            let mut trees = json!({"originals": null, "anon": {"files": 4}});
+            c.overlay(&mut trees);
+            assert_eq!(trees, json!({"originals": null, "anon": {"files": 4}}));
+        }
     }
 
     fn w(line: &str) -> Vec<String> {
