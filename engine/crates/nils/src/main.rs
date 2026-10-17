@@ -2952,6 +2952,7 @@ fn classify_previews(registry: &mut Registry, job: i64, cancel: &Cancel) -> bool
         &stacks,
         false,
         workers,
+        crate::preview::stacks_at_once(workers),
         &mut go_on,
     );
     let summary = many.as_json(&working.name);
@@ -6127,7 +6128,15 @@ fn preview_command(home: &Home, command: PreviewCommand) -> Result<(), Exit> {
                 Ok(nils_registry::job::Asked::Cancel)
             )
     };
-    let mut many = crate::preview::make_many(store, &root, &stacks, force, workers, &mut go_on);
+    let mut many = crate::preview::make_many(
+        store,
+        &root,
+        &stacks,
+        force,
+        workers,
+        crate::preview::stacks_at_once(workers),
+        &mut go_on,
+    );
     if all && !many.stopped {
         // #456: the stacks the registry holds now, not those it held when
         // the build began, and nothing written since it began

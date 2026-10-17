@@ -4982,3 +4982,110 @@ mod tests {
         assert_eq!(every_answer(&root, &mp), want);
     }
 }
+
+/// Stacks in a registry for the tests of a build over many stacks (record
+/// 55 H2): a registry in memory whose stacks are each a few planes of
+/// synthetic files in a folder of their own, filed as a digest files them.
+#[cfg(test)]
+pub(crate) mod test_stacks {
+    use std::path::Path;
+
+    use dicom_core::VR;
+    use dicom_dictionary_std::tags;
+    use nils_dicom::synth::{self, MetaFields};
+    use nils_registry::Param;
+    use nils_registry::store::Store;
+
+    /// A stack's planes, rows and columns.
+    pub(crate) const SHAPE: [u32; 3] = [5, 40, 32];
+
+    /// A registry in memory holding stacks 1 to `n`, stack `s` the files
+    /// `s<s>/<plane>.dcm` under `src`, its planes a gradient of its own.
+    pub(crate) fn registry(src: &Path, n: i64) -> Store {
+        let mut store = Store::sqlite_in_memory().unwrap();
+        nils_registry::migrate::migrate(&mut store, nils_registry::migrate::Kind::Registry)
+            .unwrap();
+        let root = src.display().to_string();
+        store
+            .execute(
+                "INSERT INTO source (root, root_canonical, first_seen_at) VALUES (?, ?, '2026-10-17T00:00:00Z')",
+                &[Param::from(root.as_str()), Param::from(root.as_str())],
+            )
+            .unwrap();
+        let [nz, ny, nx] = SHAPE;
+        let us = |tag, v: u16| synth::bytes(tag, VR::US, v.to_le_bytes().to_vec());
+        for stack in 1..=n {
+            let series = format!("1.2.826.0.{stack}.1");
+            for z in 0..nz {
+                let sop = format!("{series}.{}", z + 1);
+                let mut e = synth::minimal_mr(&format!("1.2.826.0.{stack}"), &series, &sop);
+                e.push(synth::text(
+                    tags::INSTANCE_NUMBER,
+                    VR::IS,
+                    &(z + 1).to_string(),
+                ));
+                e.push(synth::text(
+                    tags::IMAGE_POSITION_PATIENT,
+                    VR::DS,
+                    &format!("0\\0\\{}", z * 2),
+                ));
+                e.push(synth::text(
+                    tags::IMAGE_ORIENTATION_PATIENT,
+                    VR::DS,
+                    "1\\0\\0\\0\\1\\0",
+                ));
+                e.push(synth::text(tags::PIXEL_SPACING, VR::DS, "0.5\\0.5"));
+                e.push(us(tags::SAMPLES_PER_PIXEL, 1));
+                e.push(synth::text(
+                    tags::PHOTOMETRIC_INTERPRETATION,
+                    VR::CS,
+                    "MONOCHROME2",
+                ));
+                e.push(us(tags::ROWS, ny as u16));
+                e.push(us(tags::COLUMNS, nx as u16));
+                e.push(us(tags::BITS_ALLOCATED, 16));
+                e.push(us(tags::BITS_STORED, 16));
+                e.push(us(tags::HIGH_BIT, 15));
+                e.push(us(tags::PIXEL_REPRESENTATION, 0));
+                let px: Vec<u8> = (0..ny * nx)
+                    .flat_map(|i| {
+                        let (y, x) = (i / nx, i % nx);
+                        let v = (x * 7 + y * 3 + z * 101 + stack as u32 * 13) % 4096;
+                        (v as u16).to_le_bytes()
+                    })
+                    .collect();
+                e.push(synth::bytes(tags::PIXEL_DATA, VR::OW, px));
+                let bytes = synth::part10(&MetaFields::mr(&sop), &e, true);
+                let rel = format!("s{stack}/{z}.dcm");
+                let path = src.join(&rel);
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(&path, &bytes).unwrap();
+                store
+                    .execute(
+                        "INSERT INTO source_file (source_id, batch_id, dir, path, size, mtime_ns, status, seen_at) \
+                         VALUES (1, 1, ?, ?, ?, ?, 'ingested', '2026-10-17T00:00:00Z')",
+                        &[
+                            Param::from(format!("s{stack}").as_str()),
+                            Param::from(rel.as_str()),
+                            Param::Int(bytes.len() as i64),
+                            Param::Int(stack * 1000 + i64::from(z)),
+                        ],
+                    )
+                    .unwrap();
+                store
+                    .execute(
+                        "INSERT INTO instance (sop_instance_uid, series_id, stack_id, source_file_id, first_batch_id) \
+                         VALUES (?, ?, ?, (SELECT id FROM source_file WHERE path = ?), 1)",
+                        &[
+                            Param::from(sop.as_str()),
+                            Param::Int(stack),
+                            Param::Int(stack),
+                            Param::from(rel.as_str()),
+                        ],
+                    )
+                    .unwrap();
+            }
+        }
+        store
+    }
+}
