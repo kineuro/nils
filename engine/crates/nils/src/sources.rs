@@ -117,7 +117,7 @@ fn stamp(store: &mut Store, recent: usize) -> Result<(String, bool), StoreError>
         .map(|r| r.opt_text(0).map(|t| t.unwrap_or_default().to_string()))
         .transpose()?
         .unwrap_or_default();
-    let places: Vec<Value> = place::list(store)?.iter().map(Place::as_json).collect();
+    let listed = place::list(store)?;
     let batch = store.qualified("ingest_batch");
     let b = &store.query(
         &format!(
@@ -127,22 +127,47 @@ fn stamp(store: &mut Store, recent: usize) -> Result<(String, bool), StoreError>
         &[],
     )?[0];
     let (batches, last, running) = (b.int(0)?, b.int(1)?, b.int(2)?);
-    let files = store.qualified("pseudonym_file");
-    let f = &store.query(
-        &format!(
-            "SELECT COUNT(*), COALESCE(MAX(id), 0), \
-             COALESCE(SUM(CASE WHEN state = 'written' THEN 1 ELSE 0 END), 0) FROM {files}"
-        ),
-        &[],
-    )?[0];
+    let ids: Vec<i64> = listed.iter().map(|p| p.id).collect();
+    let files = copies(store, &ids)?;
+    let places: Vec<Value> = listed.iter().map(Place::as_json).collect();
     let key = format!(
-        "{epoch}|{recent}|{batches}|{last}|{running}|{}|{}|{}|{}",
-        f.int(0)?,
-        f.int(1)?,
-        f.int(2)?,
+        "{epoch}|{recent}|{batches}|{last}|{running}|{files}|{}",
         Value::Array(places)
     );
     Ok((key, running > 0))
+}
+
+/// What the pseudonymised files of the places say, read from indexes in
+/// milliseconds however many there are (2026-10-17: a count of every row of
+/// `pseudonym_file` cost 2.5 seconds, and up to 9 under load, on a registry
+/// of 34 million, on every request to the sources door): the newest row,
+/// which moves with every file a run records for the first time, and each
+/// place's files in every state but written, which move with every file a
+/// run holds, refuses or finds unchanged, and with every one it writes that
+/// was in one of those states. Its written files are all the others, so
+/// this moves wherever a count of every state of every file would; the
+/// document reads the held ones, and a run's counts with its batch.
+fn copies(store: &mut Store, places: &[i64]) -> Result<String, StoreError> {
+    let files = store.qualified("pseudonym_file");
+    let newest = store.query(&format!("SELECT MAX(id) FROM {files}"), &[])?[0]
+        .opt_int(0)?
+        .unwrap_or(0);
+    if places.is_empty() {
+        return Ok(newest.to_string());
+    }
+    let mut by_state = Vec::new();
+    for r in store.query(
+        &format!(
+            "SELECT place_id, state, COUNT(*) FROM {files} WHERE place_id IN ({}) \
+             AND state IN ('held', 'refused', 'unchanged') GROUP BY place_id, state \
+             ORDER BY place_id, state",
+            list(places)
+        ),
+        &[],
+    )? {
+        by_state.push(format!("{}:{}:{}", r.int(0)?, r.text(1)?, r.int(2)?));
+    }
+    Ok(format!("{newest}|{}", by_state.join(",")))
 }
 
 /// The sources door's document, from the kept one where it holds.
@@ -537,6 +562,108 @@ mod tests {
             .unwrap();
         assert_eq!(read(&mut registry).1, 1, "a batch ended");
         assert_eq!(read(&mut registry).1, 0);
+    }
+
+    /// 2026-10-17: the stamp reads an index and small tables, and still
+    /// moves wherever a count of every state of every pseudonymised file
+    /// would (the stamp before this one): when a run records a file it
+    /// wrote, held or refused for the first time, and when it writes, holds,
+    /// refuses or finds unchanged one it recorded before in another state.
+    /// A run that only touches a file it recorded, as it does an unchanged
+    /// copy, moves neither.
+    #[test]
+    fn the_stamp_moves_when_a_run_writes_holds_or_refuses_a_file() {
+        use nils_registry::home::{Home, InitOptions};
+        use nils_registry::place;
+        let dir = nils_dicom::synth::TempDir::new("sources-stamp");
+        let home = Home::new(dir.path().join("registry"));
+        home.keys(None).add("k", b"nils-fixture-key").unwrap();
+        let mut registry = home
+            .init(&InitOptions {
+                backend: nils_registry::Backend::Sqlite,
+                dsn: None,
+                schema: None,
+                scheme: nils_registry::pseudonym::Scheme::Blake2b32,
+                key: "k".to_string(),
+                display_length: nils_registry::pseudonym::DEFAULT_DISPLAY_LENGTH,
+                session_scheme: None,
+            })
+            .unwrap();
+        let folder = dir.path().join("ward");
+        std::fs::create_dir_all(&folder).unwrap();
+        let ward = place::add(
+            registry.store(),
+            &place::New {
+                name: "ward",
+                role: place::Role::Source,
+                path: &folder.display().to_string(),
+                guarantees: serde_json::json!({}),
+                probed: serde_json::json!({}),
+                handling: serde_json::Value::Null,
+                dataset: serde_json::json!({
+                    "kind": "legacy",
+                    "arrives": "deidentified",
+                    "state": "anonymised",
+                    "trees": {"originals": null, "anon": "."},
+                    "patient_id": "id-type:patient-id",
+                    "subjects": "map",
+                }),
+            },
+        )
+        .unwrap();
+        let store = registry.store();
+        let files = store.qualified("pseudonym_file");
+        // the stamp before: every row counted, with the written ones
+        let counted = |store: &mut nils_registry::Store| -> (i64, i64, i64) {
+            let r = &store
+                .query(
+                    &format!(
+                        "SELECT COUNT(*), COALESCE(MAX(id), 0), \
+                         COALESCE(SUM(CASE WHEN state = 'written' THEN 1 ELSE 0 END), 0) FROM {files}"
+                    ),
+                    &[],
+                )
+                .unwrap()[0];
+            (r.int(0).unwrap(), r.int(1).unwrap(), r.int(2).unwrap())
+        };
+        // a file as a run's flush records it: upserted on its place and path
+        let record = |store: &mut nils_registry::Store, path: &str, state: &str| {
+            store
+                .execute(
+                    &format!(
+                        "INSERT INTO {files} (place_id, path, size, mtime, state, batch_id, first_seen, code_anyway) \
+                         VALUES ({ward}, '{path}', 1, 1, '{state}', 1, '2026-10-17T00:00:00Z', 0) \
+                         ON CONFLICT (place_id, path) DO UPDATE SET state = excluded.state, batch_id = excluded.batch_id"
+                    ),
+                    &[],
+                )
+                .unwrap();
+        };
+        let mut was = (super::stamp(store, 12).unwrap().0, counted(store));
+        for (path, state, why) in [
+            ("a.dcm", "written", "a file written"),
+            ("b.dcm", "held", "a file held"),
+            ("c.dcm", "refused", "a file refused"),
+            ("d.dcm", "unchanged", "a file whose copy stands"),
+            ("a.dcm", "held", "a written file held"),
+            ("b.dcm", "written", "a held file written"),
+            ("a.dcm", "refused", "a held file refused"),
+            ("c.dcm", "written", "a refused file written"),
+            ("b.dcm", "refused", "a written file refused"),
+            ("c.dcm", "unchanged", "a written file found unchanged"),
+            ("c.dcm", "written", "an unchanged file written"),
+        ] {
+            record(store, path, state);
+            let now = (super::stamp(store, 12).unwrap().0, counted(store));
+            assert_ne!(now.0, was.0, "{why}: the stamp moves");
+            was = now;
+        }
+        // a run that touches its record of an unchanged copy moves nothing
+        store
+            .execute(&format!("UPDATE {files} SET batch_id = 2"), &[])
+            .unwrap();
+        let now = (super::stamp(store, 12).unwrap().0, counted(store));
+        assert_eq!(now, was, "a touch moves neither");
     }
 
     #[test]
