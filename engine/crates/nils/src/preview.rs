@@ -243,6 +243,21 @@ pub fn sources(store: &mut Store, stack: i64) -> Result<Vec<Source>, String> {
     Ok(out)
 }
 
+/// What a stack's volume comes to in memory, about, from what the registry
+/// says of its files: two bytes a pixel of every plane they give, a file
+/// whose rows and columns the registry does not know counted as 512 by
+/// 512. A build over many stacks holds the stacks it makes at once to a
+/// budget of it ([`pyramid::VOLUMES_AT_ONCE`]).
+pub fn volume_bytes(files: &[Source]) -> u64 {
+    files
+        .iter()
+        .map(|s| {
+            let (rows, cols) = s.matrix.unwrap_or((512, 512));
+            u64::from(s.planes()) * u64::from(rows) * u64::from(cols) * 2
+        })
+        .sum()
+}
+
 /// The stack's content digest: its files' paths, sizes, times and frames,
 /// and the preview's format, as 32 hex characters.
 pub fn digest(stack: i64, files: &[Source]) -> String {
@@ -859,11 +874,12 @@ pub fn stacks_at_once(workers: usize) -> usize {
 /// With `at_once` 1, one stack after another, each with every encoder.
 /// With more, this thread, which holds the registry, reads each stack's
 /// files and digest and counts a current preview at once; a stack to make
-/// goes to a builder of its own, at most `at_once` of them running, each
-/// reading its stack's files and writing its preview with `workers /
-/// at_once` encoders, and each result is counted, and `go_on` asked, here
-/// as it comes. A stop hands out no more stacks, waits for the ones being
-/// made (each preview is written whole or not at all) and counts them.
+/// goes to a builder of its own, at most `at_once` of them running and
+/// their volumes within [`pyramid::VOLUMES_AT_ONCE`], each reading its
+/// stack's files and writing its preview with `workers / at_once`
+/// encoders, and each result is counted, and `go_on` asked, here as it
+/// comes. A stop hands out no more stacks, waits for the ones being made
+/// (each preview is written whole or not at all) and counts them.
 pub fn make_many(
     store: &mut Store,
     working: &Path,
@@ -902,8 +918,11 @@ pub fn make_many(
         }
     };
     std::thread::scope(|s| {
-        let (ended, results) = std::sync::mpsc::channel::<(i64, Result<Made, (String, bool)>)>();
+        let (ended, results) =
+            std::sync::mpsc::channel::<(i64, u64, Result<Made, (String, bool)>)>();
         let mut running = 0usize;
+        // what the volumes of the stacks being made come to, about
+        let mut holding = 0u64;
         for &stack in stacks {
             if out.stopped {
                 break;
@@ -923,32 +942,36 @@ pub fn make_many(
                 counted(&mut out, store, stack, Ok(Made::Current));
                 continue;
             }
-            // a builder free first, the results that came meanwhile counted;
-            // every builder sends one result, so the wait ends
-            while running >= at_once && !out.stopped {
-                let Ok((done, made)) = results.recv() else {
+            // a builder free, and room for the stack's volume, first, the
+            // results that came meanwhile counted; every builder sends one
+            // result, so the wait ends
+            let bytes = volume_bytes(&files);
+            while !pyramid::may_start(running, at_once, holding, bytes) && !out.stopped {
+                let Ok((done, freed, made)) = results.recv() else {
                     break;
                 };
                 running -= 1;
+                holding = holding.saturating_sub(freed);
                 counted(&mut out, store, done, made);
             }
             if out.stopped {
                 break;
             }
             running += 1;
+            holding += bytes;
             let ended = ended.clone();
             s.spawn(move || {
                 let made = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     made_from(files, stack, &digest, working, encoders)
                 }))
                 .unwrap_or_else(|_| Err(("a preview's builder panicked".to_string(), false)));
-                let _ = ended.send((stack, made));
+                let _ = ended.send((stack, bytes, made));
             });
         }
         drop(ended);
         // the stacks being made end whole, after a stop as well
         while running > 0 {
-            let Ok((done, made)) = results.recv() else {
+            let Ok((done, _, made)) = results.recv() else {
                 break;
             };
             running -= 1;
@@ -2508,6 +2531,61 @@ mod tests {
         let rest = make_many(&mut store, &work, &stacks, false, 8, 4, &mut |_, _| true);
         assert_eq!(rest.current.len(), made);
         assert_eq!(rest.built.len(), 12 - made);
+        let _ = std::fs::remove_dir_all(&work);
+    }
+
+    #[test]
+    fn a_stack_s_volume_is_counted_from_what_the_registry_says_of_its_files() {
+        let s = |frames: Option<Vec<u32>>, in_file: Option<i64>, matrix| Source {
+            file: StackFile {
+                path: PathBuf::from("/a"),
+                frames,
+            },
+            size: 1,
+            mtime_ns: 1,
+            instance: None,
+            position: None,
+            frames_in_file: in_file,
+            matrix,
+        };
+        let two = [
+            s(None, None, Some((256, 200))),
+            s(None, None, Some((256, 200))),
+        ];
+        assert_eq!(volume_bytes(&two), 2 * 256 * 200 * 2);
+        // the frames of a file that are the stack's, or every frame it holds
+        assert_eq!(
+            volume_bytes(&[s(Some(vec![1, 2, 3]), Some(10), Some((100, 100)))]),
+            3 * 100 * 100 * 2
+        );
+        assert_eq!(
+            volume_bytes(&[s(None, Some(10), Some((100, 100)))]),
+            10 * 100 * 100 * 2
+        );
+        // a matrix the registry does not know counts as 512 by 512
+        assert_eq!(volume_bytes(&[s(None, None, None)]), 512 * 512 * 2);
+    }
+
+    /// Stacks whose volumes come to more than the budget each are made one
+    /// after another, in the order asked, however many at once were asked.
+    #[test]
+    fn previews_of_large_volumes_are_made_one_after_another() {
+        let src = nils_dicom::synth::TempDir::new("preview-large-src");
+        let mut store = crate::pyramid::test_stacks::registry(src.path(), 5);
+        // the registry says each stack's planes are 40,000 by 40,000
+        store
+            .execute("UPDATE instance SET rows = 40000, columns = 40000", &[])
+            .unwrap();
+        let work = scratch("large");
+        let stacks: Vec<i64> = (1..=5).collect();
+        let mut seen: Vec<Vec<i64>> = Vec::new();
+        let many = make_many(&mut store, &work, &stacks, false, 8, 4, &mut |_, so_far| {
+            seen.push(so_far.built.clone());
+            true
+        });
+        assert_eq!(many.built, stacks);
+        let prefixes: Vec<Vec<i64>> = (1..=5).map(|n| (1..=n).collect()).collect();
+        assert_eq!(seen, prefixes, "each made alone, in the order asked");
         let _ = std::fs::remove_dir_all(&work);
     }
 

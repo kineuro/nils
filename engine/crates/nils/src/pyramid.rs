@@ -2620,6 +2620,22 @@ pub fn stacks_at_once(workers: usize) -> usize {
     (workers / 8).clamp(1, 8)
 }
 
+/// What the volumes of the stacks a build over many makes at once come to
+/// between them, at most, about ([`crate::preview::volume_bytes`]): the
+/// previews and the pyramids hold a stack's whole volume and more while
+/// they are made, and a dataset of large scans, a CT of a thousand planes
+/// of 512 by 512 half a gigabyte each, must not be made sixteen at a time.
+/// A stack larger than this is made alone, as one at a time made every
+/// stack.
+pub const VOLUMES_AT_ONCE: u64 = 4 << 30;
+
+/// Whether a build over many hands out a stack whose volume comes to
+/// `bytes`: a builder is free and the volumes held stay within
+/// [`VOLUMES_AT_ONCE`], or no builder runs at all.
+pub(crate) fn may_start(running: usize, at_once: usize, holding: u64, bytes: u64) -> bool {
+    running == 0 || (running < at_once && holding.saturating_add(bytes) <= VOLUMES_AT_ONCE)
+}
+
 /// The pyramid folders a builder of this process writes now: the builders
 /// of a build over many stacks and a reader's build between its stacks
 /// ([`crate::worker::build_asked_pyramids`]) never write one stack's folder
@@ -2677,10 +2693,11 @@ pub(crate) fn writing_now(root: &Path) -> Option<Writing> {
 /// With more, this thread, which holds the registry, skips each stack that
 /// has its pyramid and reads the registry's list of every other one's
 /// files; a stack to build goes to a builder of its own, at most `at_once`
-/// of them running, each holding its stack's folder ([`writing`]) while it
-/// reads the files and builds with `workers / at_once` encoders, and each
-/// result is counted, and `go_on` asked, here as it comes. A stop hands
-/// out no more stacks, waits for the ones being built and counts them.
+/// of them running and their volumes within [`VOLUMES_AT_ONCE`], each
+/// holding its stack's folder ([`writing`]) while it reads the files and
+/// builds with `workers / at_once` encoders, and each result is counted,
+/// and `go_on` asked, here as it comes. A stop hands out no more stacks,
+/// waits for the ones being built and counts them.
 #[allow(clippy::too_many_arguments)]
 pub fn build_many(
     store: &mut Store,
@@ -2737,8 +2754,10 @@ pub fn build_many(
         }
     };
     std::thread::scope(|s| {
-        let (ended, results) = std::sync::mpsc::channel::<(i64, Result<u64, &'static str>)>();
+        let (ended, results) = std::sync::mpsc::channel::<(i64, u64, Result<u64, &'static str>)>();
         let mut running = 0usize;
+        // what the volumes of the stacks being built come to, about
+        let mut holding = 0u64;
         for &stack in stacks {
             if out.stopped {
                 break;
@@ -2761,13 +2780,17 @@ pub fn build_many(
                     continue;
                 }
             };
-            // a builder free first, the results that came meanwhile counted;
-            // every builder sends one result, so the wait ends
-            while running >= at_once && !out.stopped {
-                let Ok((done, built)) = results.recv() else {
+            // a builder free, and room for the stack's volume, first, the
+            // results that came meanwhile counted; every builder sends one
+            // result, so the wait ends
+            let bytes = crate::preview::sources(store, stack)
+                .map_or(0, |listed| crate::preview::volume_bytes(&listed));
+            while !may_start(running, at_once, holding, bytes) && !out.stopped {
+                let Ok((done, freed, built)) = results.recv() else {
                     break;
                 };
                 running -= 1;
+                holding = holding.saturating_sub(freed);
                 out.count(done, built);
                 ask(&mut out, store);
             }
@@ -2776,6 +2799,7 @@ pub fn build_many(
             }
             let held = writing(&root);
             running += 1;
+            holding += bytes;
             let ended = ended.clone();
             let pack_version = pack_version.clone();
             s.spawn(move || {
@@ -2795,13 +2819,13 @@ pub fn build_many(
                     let _ = std::fs::remove_file(root.join("manifest.json"));
                 }
                 drop(held);
-                let _ = ended.send((stack, built));
+                let _ = ended.send((stack, bytes, built));
             });
         }
         drop(ended);
         // the stacks being built end whole, after a stop as well
         while running > 0 {
-            let Ok((done, built)) = results.recv() else {
+            let Ok((done, _, built)) = results.recv() else {
                 break;
             };
             running -= 1;
@@ -5463,6 +5487,57 @@ mod tests {
         assert!(stopped.stopped);
         assert_eq!(stopped.built, vec![1, 2]);
         assert!(!dir(other.path(), 3).exists());
+    }
+
+    /// A dataset of large scans is built a few at a time: a stack is handed
+    /// out while a builder is free and the volumes held stay within the
+    /// budget, and one larger than the budget alone.
+    #[test]
+    fn large_volumes_are_built_a_few_at_a_time() {
+        let gib = 1u64 << 30;
+        let small = 35u64 << 20;
+        assert!(
+            may_start(0, 8, 0, 100 * gib),
+            "larger than the budget, alone"
+        );
+        assert!(!may_start(1, 8, 100 * gib, small), "and nothing beside it");
+        assert!(may_start(1, 8, 2 * gib, 2 * gib), "two of two gigabytes");
+        assert!(!may_start(2, 8, 4 * gib, 2 * gib), "but not three");
+        assert!(may_start(7, 8, 7 * small, small), "eight small ones");
+        assert!(!may_start(8, 8, 8 * small, small), "and no more than asked");
+        // stacks whose volumes the registry says are each larger than the
+        // budget are built one after another, in the order asked
+        let src = nils_dicom::synth::TempDir::new("pyramid-large-src");
+        let work = nils_dicom::synth::TempDir::new("pyramid-large-work");
+        let mut store = test_stacks::registry(src.path(), 5);
+        store
+            .execute("UPDATE instance SET rows = 40000, columns = 40000", &[])
+            .unwrap();
+        let stacks: Vec<i64> = (1..=5).collect();
+        let mut seen: Vec<Vec<i64>> = Vec::new();
+        // the folders of this build's stacks a builder holds now
+        let held = || {
+            let (lock, _) = &*WRITING;
+            let held = lock.lock().unwrap_or_else(|e| e.into_inner());
+            held.iter().filter(|p| p.starts_with(work.path())).count()
+        };
+        let many = build_many(
+            &mut store,
+            work.path(),
+            &stacks,
+            8,
+            4,
+            None,
+            false,
+            &mut |_, so_far| {
+                seen.push(so_far.built.clone());
+                assert_eq!(held(), 0, "no builder runs beside the one that ended");
+                true
+            },
+        );
+        assert_eq!(many.built, stacks);
+        let prefixes: Vec<Vec<i64>> = (1..=5).map(|n| (1..=n).collect()).collect();
+        assert_eq!(seen, prefixes, "each built alone, in the order asked");
     }
 
     /// Two writers of one stack's folder in this process: the second waits
