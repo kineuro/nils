@@ -5081,3 +5081,86 @@ fn migration_103_holds_every_line_from_before_as_kept_by_whoever_made_it() {
         assert_eq!(mark(&mut store, later), (None, None), "{name}");
     }
 }
+
+/// 2026-10-17, migration 106, on both backends: a registry from before,
+/// whose source files are indexed by source and folder but not by status
+/// and whose pseudonymised files are indexed by place and state alone,
+/// gains the index on a file's source and status and the one on a copy's
+/// place, state and subject the Data page's counts read, and loses the
+/// narrower one; no row moves, and a second migration finds nothing to do.
+/// A registry made new has the two and never the narrower one.
+#[test]
+fn migration_106_indexes_a_dataset_s_files_by_status_and_subject_on_both_backends() {
+    fn indexes(name: &str, store: &mut Store) -> Vec<String> {
+        let sql = match name {
+            "sqlite" => "SELECT name FROM sqlite_master WHERE type = 'index'".to_string(),
+            _ => format!(
+                "SELECT indexname FROM pg_indexes WHERE schemaname = '{}'",
+                store.schema().unwrap()
+            ),
+        };
+        store
+            .query(&sql, &[])
+            .unwrap()
+            .iter()
+            .map(|r| r.text(0).unwrap().to_string())
+            .collect()
+    }
+    const STATUS: &str = "ix_source_file_source_id_status";
+    const SUBJECT: &str = "ix_pseudonym_file_place_id_state_subject_id";
+    const NARROWER: &str = "ix_pseudonym_file_place_id_state";
+    for (name, _guard, mut store) in stores() {
+        migrate::migrate(&mut store, Kind::Registry).unwrap();
+        let made = indexes(&name, &mut store);
+        for ix in [STATUS, SUBJECT] {
+            assert!(made.iter().any(|n| n == ix), "{name}: {ix} in {made:?}");
+        }
+        assert!(!made.iter().any(|n| n == NARROWER), "{name}: {made:?}");
+        let (files, copies, meta) = (
+            store.qualified("source_file"),
+            store.qualified("pseudonym_file"),
+            store.qualified("registry_meta"),
+        );
+        store
+            .batch(&format!(
+                "DROP INDEX {};
+                 DROP INDEX {};
+                 CREATE INDEX {NARROWER} ON {copies} (place_id, state);
+                 INSERT INTO {files} (source_id, batch_id, dir, path, size, mtime_ns, status, seen_at)
+                   VALUES (1, 1, 'a', 'a/1.dcm', 1, 1, 'ingested', '2026-10-17T00:00:00Z');
+                 INSERT INTO {copies} (place_id, path, size, mtime, state, first_seen, code_anyway, subject_id)
+                   VALUES (1, 'o/1.dcm', 1, 1, 'written', '2026-10-17T00:00:00Z', 0, 7);
+                 UPDATE {meta} SET value = '105' WHERE key = 'schema_version'",
+                store.qualified(STATUS),
+                store.qualified(SUBJECT),
+            ))
+            .unwrap();
+        let before = indexes(&name, &mut store);
+        assert!(before.iter().any(|n| n == NARROWER), "{name}: {before:?}");
+        assert!(!before.iter().any(|n| n == STATUS || n == SUBJECT));
+        assert_eq!(
+            migrate::migrate(&mut store, Kind::Registry).unwrap(),
+            (106..=migrate::SCHEMA_VERSION).collect::<Vec<i64>>(),
+            "{name}"
+        );
+        let after = indexes(&name, &mut store);
+        for ix in [STATUS, SUBJECT] {
+            assert!(after.iter().any(|n| n == ix), "{name}: {ix} in {after:?}");
+        }
+        assert!(!after.iter().any(|n| n == NARROWER), "{name}: {after:?}");
+        for table in [&files, &copies] {
+            let n = store
+                .query(&format!("SELECT COUNT(*) FROM {table}"), &[])
+                .unwrap()[0]
+                .int(0)
+                .unwrap();
+            assert_eq!(n, 1, "{name}: {table}");
+        }
+        assert!(
+            migrate::migrate(&mut store, Kind::Registry)
+                .unwrap()
+                .is_empty(),
+            "{name}"
+        );
+    }
+}
