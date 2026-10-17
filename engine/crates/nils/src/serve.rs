@@ -2028,12 +2028,13 @@ fn route(
     // declaration, an explore, a move, the originals' act, a step's run
     // asked for) can change what a folder holds or how it is read, and what
     // the sources door answers. Once the door has written (its answer a
-    // success, its writes committed), the kept layouts and the kept sources
-    // document are read again; a read, or a door that refused, forgets
-    // nothing.
+    // success, its writes committed), the kept layouts, the kept sources
+    // document and the datasets' kept counts are read again; a read, or a
+    // door that refused, forgets nothing.
     if writes_a_place(method, path) && (200..300).contains(&reply.status) {
         crate::dataset::forget_layouts();
         crate::sources::forget();
+        crate::dataset_summary::forget();
     }
     reply
 }

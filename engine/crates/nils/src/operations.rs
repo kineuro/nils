@@ -1112,31 +1112,45 @@ pub(crate) fn steps(
     plans: &Plans,
     hide_sealed: bool,
 ) -> Result<Vec<Value>, StoreError> {
+    let names: Vec<&str> = plans.iter().map(|(n, _)| *n).collect();
+    let counted = counted(store, scope, hide_sealed, &names)?;
+    steps_counted(store, scope, target, scans, plans, &counted)
+}
+
+/// What an operation's step counts over the scans in scope, which a run, a
+/// sort or a person's act changes and the run's own progress never does:
+/// the scans its model answered, the ones a question about its axes waits
+/// on a person for, the ones its model would add an answer to (`hint`),
+/// and post-contrast's own label. Read apart from where its run is, so that
+/// a page asked again and again may keep them while the run's state and
+/// progress are read every time (the dataset's summary, 2026-10-17).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Counted {
+    name: &'static str,
+    answered: i64,
+    look: i64,
+    hint: Value,
+    label: Option<Value>,
+}
+
+/// The counts of the operations named, over the scans in scope.
+pub(crate) fn counted(
+    store: &mut Store,
+    scope: Scope<'_>,
+    hide_sealed: bool,
+    names: &[&str],
+) -> Result<Vec<Counted>, StoreError> {
     let holds = shown(store, scope.holds(store), hide_sealed);
-    let (member, item, stack, model, unit) = (
+    let (member, item, stack) = (
         store.qualified("review_member"),
         store.qualified("review_item"),
         store.qualified("stack"),
-        store.qualified("model"),
-        store.qualified("pipeline_unit"),
     );
     let mut out = Vec::new();
     for (name, axes) in OPERATIONS {
-        // a step no plan is given for is not asked about: `step_of` asks
-        // about one
-        let Some((_, planned)) = plans.iter().find(|(n, _)| *n == name) else {
+        if !names.contains(&name) {
             continue;
-        };
-        let (pipelines, active) = proposing(store, axes)?;
-        let tasks: Vec<String> = axes.iter().map(|a| format!("axis:{a}")).collect();
-        let models = count(
-            store,
-            &format!(
-                "SELECT COUNT(*) FROM {model} WHERE task IN ({}) AND state IN ('admitted', 'promoted')",
-                quoted(&tasks)
-            ),
-        )?;
-        let served = active && models > 0;
+        }
         let groups: Vec<String> = axes.iter().map(|a| format!("{a}:model")).collect();
         // the scans its model answered at or above its threshold: staged,
         // or put in force since
@@ -1157,6 +1171,59 @@ pub(crate) fn steps(
         })?
         .count(store, &holds)?
         .scans;
+        // ruling 35 (b): how many scans its model would add an answer to
+        let hint = hint(store, name, &holds, &groups)?;
+        // record 55 F5: post-contrast's own label, the time rule's, on the
+        // scans in scope
+        let label = if name == "post_contrast" {
+            Some(crate::contrast::counts(store, &holds)?)
+        } else {
+            None
+        };
+        out.push(Counted {
+            name,
+            answered,
+            look,
+            hint,
+            label,
+        });
+    }
+    Ok(out)
+}
+
+/// [`steps`] with each operation's counts read already ([`counted`]): where
+/// its run is, its job, its progress and why a run would be refused, read
+/// now.
+pub(crate) fn steps_counted(
+    store: &mut Store,
+    scope: Scope<'_>,
+    target: &str,
+    scans: i64,
+    plans: &Plans,
+    counted: &[Counted],
+) -> Result<Vec<Value>, StoreError> {
+    let (model, unit) = (store.qualified("model"), store.qualified("pipeline_unit"));
+    let mut out = Vec::new();
+    for (name, axes) in OPERATIONS {
+        // a step no plan is given for is not asked about: `step_of` asks
+        // about one
+        let Some((_, planned)) = plans.iter().find(|(n, _)| *n == name) else {
+            continue;
+        };
+        let Some(c) = counted.iter().find(|c| c.name == name) else {
+            continue;
+        };
+        let (answered, look) = (c.answered, c.look);
+        let (pipelines, active) = proposing(store, axes)?;
+        let tasks: Vec<String> = axes.iter().map(|a| format!("axis:{a}")).collect();
+        let models = count(
+            store,
+            &format!(
+                "SELECT COUNT(*) FROM {model} WHERE task IN ({}) AND state IN ('admitted', 'promoted')",
+                quoted(&tasks)
+            ),
+        )?;
+        let served = active && models > 0;
         let at = Attempts::of(store, name, &pipelines, scope, target)?;
         let going = at.going();
         let open = at.open();
@@ -1220,15 +1287,6 @@ pub(crate) fn steps(
             (None, None) => None,
         };
         let refused = refusal(name, at.busy(), planned, scans);
-        // ruling 35 (b): how many scans its model would add an answer to
-        let hint = hint(store, name, &holds, &groups)?;
-        // record 55 F5: post-contrast's own label, the time rule's, on the
-        // scans in scope
-        let label = if name == "post_contrast" {
-            Some(crate::contrast::counts(store, &holds)?)
-        } else {
-            None
-        };
         out.push(json!({
             "step": name,
             "state": state,
@@ -1243,8 +1301,8 @@ pub(crate) fn steps(
             "of": scans,
             "jobs": at.jobs(),
             "refusal": refused.map(|r| r.doc()),
-            "label": label,
-            "hint": hint,
+            "label": c.label,
+            "hint": c.hint,
         }));
     }
     Ok(out)
