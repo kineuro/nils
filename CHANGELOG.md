@@ -4,6 +4,16 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [1.0.0-alpha.90] - 2026-10-17
+
+### Fixed
+
+- A sort's previews and the 3D views are built for several scans at once, so a large dataset's pictures take hours, not days. Each scan's files were read a few at a time and one scan after another, and where the files lie on a network share every read waits on its round trip: the previews of a dataset of 30 million files went at two scans a second, about 19 MB/s where its digest had read 138 MB/s, and the sort would have held the main lane for more than two days with the pick and the score waiting behind it. A build over many scans now makes a quarter of its workers' worth of scans at once for the previews (one to sixteen), and an eighth for the 3D views the pictures lane builds after a sort (one to eight), each scan with its share of the workers; a machine of seven workers or fewer (fifteen for the 3D views) builds one scan after another, as before. What was built, current, skipped or failed is counted as before, a stop waits for the scans being built and keeps them, and a picture a reader asks for while the 3D views are built is still built between two scans, never beside a builder writing the same scan. The lists in a build's result are in the order the scans ended. A preview whose write fails leaves no part file.
+
+### Added
+
+- `nils preview build` and `nils pyramid build` take `--at-once N` (1 to 64), how many scans a build over many makes at once, and the jobs door queues it on `pyramid build`; the job's args say `at_once`. Tested by unit tests over twelve synthetic scans (several at once make the pictures one at a time makes, file for file; a failed scan is counted by its class; a stop keeps what was made and leaves no part file; one at a time keeps the order asked) and through both verbs and the jobs door.
+
 ## [1.0.0-alpha.89] - 2026-10-17
 
 ### Fixed
