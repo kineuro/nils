@@ -9,7 +9,9 @@
 //! run over them, as its door makes it, under the principal, grants and
 //! detail the chain recorded. The run goes to the pipeline lane, so a long
 //! score never holds up a digest, and the dataset's step shows it as it
-//! shows a run its door queued.
+//! shows a run its door queued. A batch of more new stacks than one
+//! container of the pipeline holds is run in parts (`--chunk`,
+//! `crate::pipelines::part_stacks`), each a run of its own, in one job.
 //!
 //! Body part and post-contrast are optional models that add value where the
 //! data need them: a person runs them from the dataset's step (its door,
@@ -435,6 +437,9 @@ fn score(
         let mut command = p.command[..2].to_vec();
         command.extend(["--handle".to_string(), handle.to_string()]);
         command.extend_from_slice(&p.command[2..]);
+        // 2026-10-17: more new stacks than one container of the pipeline
+        // holds are run in parts, each a run of its own
+        let command = crate::pipelines::in_parts(store, command, frozen);
         let mut extra = json!({
             "detail": me.args["detail"].clone(),
             "grants": me.args["grants"].clone(),

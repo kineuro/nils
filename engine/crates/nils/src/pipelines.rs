@@ -1954,6 +1954,64 @@ pub(crate) fn located(pack_dir: Option<&Path>, command: Vec<String>) -> Result<V
     Ok(out)
 }
 
+/// The stacks a part of a run holds for each GB of memory a unit of its
+/// pipeline declares, where the arrival score, a step's door or System 1's
+/// archive door queues the run over more (2026-10-17). A header model's units run together, in one
+/// container that reads every stack's rows at once: System 1's scored
+/// 5,220 stacks in a container of 4 GB (1,305 for each GB) and was killed
+/// for memory over 456,110, so a part holds no more for each GB than a run
+/// was seen to fit.
+pub(crate) const PART_STACKS_PER_GB: f64 = 1_250.0;
+
+/// A part's size the tests set, so a small batch is split; nothing else
+/// sets it.
+const PART_STACKS_VAR: &str = "NILS_TEST_PART_STACKS";
+
+/// The most stacks one run of a pipeline is given when the arrival score
+/// or a door queues it over a frozen handle ([`PART_STACKS_PER_GB`] for
+/// each GB a unit declares, at least one GB's worth), or none where its
+/// units run apart, a container each, which no number of stacks overfills.
+pub(crate) fn part_stacks(d: &Descriptor) -> Option<u64> {
+    let set = std::env::var(PART_STACKS_VAR)
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|n| *n > 0);
+    part_stacks_of(d, set)
+}
+
+/// [`part_stacks`], with the size the tests set.
+fn part_stacks_of(d: &Descriptor, set: Option<u64>) -> Option<u64> {
+    if d.units == Units::Apart {
+        return None;
+    }
+    // a whole number of stacks, never below one GB's worth
+    Some(set.unwrap_or((d.needs.memory_gb.max(1.0) * PART_STACKS_PER_GB).floor() as u64))
+}
+
+/// A `run` over a handle of `stacks` stacks as the arrival score, a step's
+/// door and System 1's archive door queue it (2026-10-17): with `--chunk`
+/// where they are more than a part of its pipeline holds
+/// ([`part_stacks`]), so each part is a run of its own, one after another,
+/// in one job.
+pub(crate) fn in_parts(store: &mut Store, command: Vec<String>, stacks: usize) -> Vec<String> {
+    let part = command
+        .get(1)
+        .and_then(|name| rows::resolve(store, name).ok().flatten())
+        .and_then(|p| descriptor::from_value(p.descriptor).ok())
+        .and_then(|d| part_stacks(&d));
+    with_chunk(command, stacks, part)
+}
+
+/// `command` with `--chunk <part>` where `stacks` are more than `part`.
+fn with_chunk(mut command: Vec<String>, stacks: usize, part: Option<u64>) -> Vec<String> {
+    if let Some(n) = part
+        && u64::try_from(stacks).is_ok_and(|s| s > n)
+    {
+        command.extend(["--chunk".to_string(), n.to_string()]);
+    }
+    command
+}
+
 // --------------------------------------------------------- the command line
 
 /// `nils pipeline`: the catalog and the runtime.
@@ -4800,11 +4858,35 @@ pub(crate) fn run_command(home: &Home, args: RunArgs) -> Result<(), Exit> {
         ..GoOn::default()
     };
     let pack = pack_of_bids(home, &args, &d);
+    // the job a worker took, which the parts take up in turn and which
+    // stays running between them
+    let mut kept: Option<i64> = None;
     for (k, &i) in todo.iter().enumerate() {
         let (handle_id, selection) = (parts[i].0, &parts[i].1);
+        // a stop asked between two parts stops the parts from this one
+        if let Some(j) = kept.take()
+            && matches!(job::beat(registry.store(), j, None), Ok(job::Asked::Cancel))
+        {
+            let _ = job::finish(
+                registry.store(),
+                j,
+                job::State::Cancelled,
+                Some("stopped between two parts"),
+            );
+            return Err(Exit {
+                code: crate::STOPPED,
+                message: format!(
+                    "stopped before part {} of {count}; the parts not run are handles {}: nils run {} --handle <id> runs one",
+                    i + 1,
+                    split.words(&todo[k..]),
+                    p.label()
+                ),
+            });
+        }
         // the part's run, once it is made, which the words of a part that
         // did not end name
         let mut made: Option<i64> = None;
+        let mut claimed: Option<i64> = None;
         let ran = (|| -> Result<(), Exit> {
             let stacks = handle_stacks(registry.store(), handle_id)?;
             if stacks.is_empty() {
@@ -4849,6 +4931,7 @@ pub(crate) fn run_command(home: &Home, args: RunArgs) -> Result<(), Exit> {
                     "params": args.params, "models": args.models, "labels": args.labels,
                 }),
             )?;
+            claimed = Some(job_id);
             let params_value = Value::Object(params.clone());
             let model_ids: Vec<i64> = models.iter().map(|m| m.id).collect();
             let started = nils_registry::time::now_iso();
@@ -4916,10 +4999,12 @@ pub(crate) fn run_command(home: &Home, args: RunArgs) -> Result<(), Exit> {
                     who: &who,
                     json: args.json,
                     resumed: false,
+                    more: k + 1 < todo.len(),
                 },
                 outcome,
             )
         })();
+        kept = claimed.filter(|j| adopted(*j));
         if let Err(e) = ran {
             if count == 1 {
                 return Err(e);
@@ -5501,6 +5586,30 @@ fn resume_command(home: &Home, args: &RunArgs, run_id: i64) -> Result<(), Exit> 
             resume: Some(&r),
         },
     );
+    // the parts after it that no run holds yet go on once it ends, one
+    // after another, as the split run would have run them; a part that a
+    // run holds already (run by hand) is left as it is
+    let mut go_on = split.as_ref().and_then(GoOn::recorded);
+    let mut after = 0;
+    if let Some(g) = go_on.as_mut() {
+        after = g
+            .handles
+            .iter()
+            .position(|h| *h == handle_id)
+            .map_or(g.handles.len(), |at| at + 1);
+        for i in after..g.handles.len() {
+            match run_over(registry.store(), g.handles[i])? {
+                Some(other) => eprintln!(
+                    "part {} of {} (handle {}) is run {other}, which is left as it is",
+                    i + 1,
+                    g.handles.len(),
+                    g.handles[i]
+                ),
+                None => g.next.push(i),
+            }
+        }
+    }
+    let go_on = go_on.filter(|g| !g.next.is_empty());
     let concluded = conclude(
         &mut registry,
         &Conclusion {
@@ -5513,52 +5622,28 @@ fn resume_command(home: &Home, args: &RunArgs, run_id: i64) -> Result<(), Exit> 
             who: &who,
             json: args.json,
             resumed: true,
+            more: go_on.is_some(),
         },
         outcome,
     );
-    // the parts after it that no run holds yet go on once it ends, one
-    // after another, as the split run would have run them; a part that a
-    // run holds already (run by hand) is left as it is
-    let Some(mut go_on) = split.as_ref().and_then(GoOn::recorded) else {
+    let Some(mut go_on) = go_on else {
         return concluded;
     };
-    let after = go_on
-        .handles
-        .iter()
-        .position(|h| *h == handle_id)
-        .map_or(go_on.handles.len(), |at| at + 1);
-    let mut next = Vec::new();
-    for i in after..go_on.handles.len() {
-        match run_over(registry.store(), go_on.handles[i])? {
-            Some(other) => eprintln!(
-                "part {} of {} (handle {}) is run {other}, which is left as it is",
-                i + 1,
-                go_on.handles.len(),
-                go_on.handles[i]
-            ),
-            None => next.push(i),
-        }
-    }
-    if next.is_empty() {
-        return concluded;
-    }
     if let Err(e) = concluded {
         return Err(Exit {
             code: e.code,
             message: format!(
                 "{}; the parts after it, handles {}, go on once it is taken up again and ends",
                 e.message,
-                go_on.words(&next)
+                go_on.words(&go_on.next)
             ),
         });
     }
     eprintln!(
-        "run {run_id} was part {} of {}: the parts after it go on, handles {}",
-        after,
+        "run {run_id} was part {after} of {}: the parts after it go on, handles {}",
         go_on.handles.len(),
-        go_on.words(&next)
+        go_on.words(&go_on.next)
     );
-    go_on.next = next;
     go_on.params = params;
     go_on.selection = r.selection.clone();
     drop(registry);
@@ -5765,6 +5850,17 @@ struct Conclusion<'a> {
     who: &'a str,
     json: bool,
     resumed: bool,
+    /// Parts of the same split run follow in this process.
+    more: bool,
+}
+
+/// Whether the job is the one a worker took for this process, which every
+/// part of a split run takes up in turn.
+fn adopted(job_id: i64) -> bool {
+    std::env::var(job::ADOPT_VAR)
+        .ok()
+        .and_then(|v| v.trim().parse::<i64>().ok())
+        == Some(job_id)
 }
 
 /// Close a run, audit it, finish its job and say how it ended.
@@ -5842,8 +5938,13 @@ fn conclude(
             "failure": failure,
         }),
     );
-    job::finish(registry.store(), c.job_id, job_state, error.as_deref())
-        .map_err(|e| fail(e.to_string()))?;
+    // 2026-10-17: a part of a split run a worker runs, with parts after
+    // it: the job is every part's, and stays running until the last one
+    // ends, so nothing reads it as over between two parts
+    if !(c.more && job_state == job::State::Done && adopted(c.job_id)) {
+        job::finish(registry.store(), c.job_id, job_state, error.as_deref())
+            .map_err(|e| fail(e.to_string()))?;
+    }
     let r = rows::run(registry.store(), run_id)?
         .ok_or_else(|| fail(format!("no pipeline run {run_id}")))?;
     let doc = run_doc(registry.store(), &r);
@@ -9720,6 +9821,60 @@ fn found_for(outputs: &[descriptor::Output], out: &Path, u: &Unit) -> Vec<String
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 2026-10-17: a run over more stacks than a part holds is queued with
+    /// `--chunk`: a part is what a GB of the declared memory was seen to
+    /// fit, times the GBs, where the units run together; units apart are
+    /// never split; the tests set their own size.
+    #[test]
+    fn a_large_batch_is_queued_in_parts_its_pipeline_s_memory_holds() {
+        let base = r#"name: header-model
+schema-version: "0.5"
+tool-version: "1"
+container-image:
+  type: docker
+  image: "example.org/header-model@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+command-line: "score [Manifest] [OutputLocation]"
+x-nils:
+  analysis-level: stack
+  input: {layout: stacks}
+  outputs:
+    - {id: opinion, kind: output, path-template: "s/{stack}.json", media-type: application/json}
+"#;
+        let of = |extra: &str| descriptor::parse(&format!("{base}{extra}")).unwrap();
+        // System 1's: 4 GB, together
+        let s1 = of("  needs: {gpu: none, memory-gb: 4, cores: 4}\n");
+        assert_eq!(s1.units, Units::Together);
+        assert_eq!(part_stacks_of(&s1, None), Some(5_000));
+        assert_eq!(part_stacks_of(&s1, Some(4)), Some(4));
+        // less than a GB is a GB's worth
+        let small = of("  needs: {memory-gb: 0.5}\n");
+        assert_eq!(part_stacks_of(&small, None), Some(1_250));
+        // units apart are a container each
+        let apart = of("  units: apart\n  needs: {memory-gb: 4}\n");
+        assert_eq!(part_stacks_of(&apart, None), None);
+        assert_eq!(part_stacks_of(&apart, Some(4)), None);
+        let words = |w: &[&str]| w.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let run = words(&["run", "system1-score@1", "--handle", "7", "--model", "3"]);
+        // 456,110 new stacks: in parts of 5,000
+        assert_eq!(
+            with_chunk(run.clone(), 456_110, Some(5_000)),
+            words(&[
+                "run",
+                "system1-score@1",
+                "--handle",
+                "7",
+                "--model",
+                "3",
+                "--chunk",
+                "5000"
+            ])
+        );
+        // 5,220 as before, and as many as a part holds
+        assert_eq!(with_chunk(run.clone(), 5_000, Some(5_000)), run);
+        assert_eq!(with_chunk(run.clone(), 4_999, Some(5_000)), run);
+        assert_eq!(with_chunk(run.clone(), 456_110, None), run);
+    }
 
     /// A handle of these stacks, each with a subject ten times its id,
     /// pinned with these selections.

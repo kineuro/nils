@@ -716,6 +716,8 @@ fn round(pg: Option<(String, String)>) {
     assert_eq!(run["args"]["arrival"]["batch"], "first", "{run}");
     let argv = run["args"]["queued"].to_string();
     assert!(argv.contains(&format!("\"--model\",\"{s1}\"")), "{run}");
+    // six new stacks are far fewer than a part of System 1's holds
+    assert!(!argv.contains("--chunk"), "{run}");
     assert_eq!(reads(&read_log), 0, "System 1 reads rows, no file");
     // every scan has System 1's opinion
     let opinions = {
@@ -878,6 +880,24 @@ fn round(pg: Option<(String, String)>) {
     drop(dir);
 }
 
+/// The runs a job ran, oldest first, each with how many stacks its handle
+/// holds.
+fn runs_of(home: &Home, job: i64) -> Vec<(i64, i64)> {
+    let mut store = home.store();
+    let sql = format!(
+        "SELECT r.id, (SELECT COUNT(*) FROM {} m WHERE m.handle_id = r.handle_id) \
+         FROM {} r WHERE r.job_id = {job} ORDER BY r.id",
+        store.qualified("handle_member"),
+        store.qualified("pipeline_run")
+    );
+    store
+        .query(&sql, &[])
+        .unwrap()
+        .iter()
+        .map(|r| (r.int(0).unwrap(), r.int(1).unwrap()))
+        .collect()
+}
+
 /// A job as `nils jobs show` gives it.
 fn job_doc(home: &Home, id: i64) -> Value {
     home.json(&["jobs", "show", &id.to_string(), "--json"])
@@ -897,7 +917,11 @@ fn opinions_of(home: &Home, model: i64) -> i64 {
 /// keyboard a step at a time (`nils jobs enqueue`) recorded no grants, so
 /// its score skipped System 1 for want of `pipelines:work`. A job queued at
 /// the keyboard records the keyboard's reach, so the score queues System
-/// 1's run over the batch's new stacks, and the worker runs it.
+/// 1's run over the batch's new stacks, and the worker runs it. The same
+/// day's run by hand put 456,110 stacks in one container, which was killed
+/// for memory: with parts of four stacks (as the tests set them), the six
+/// new stacks are queued with `--chunk 4` and run as two runs in the one
+/// job, and so is a step's run from its door.
 fn keyboard_round(pg: Option<(String, String)>) {
     let Lab {
         home,
@@ -930,11 +954,12 @@ fn keyboard_round(pg: Option<(String, String)>) {
     assert!(grants.iter().any(|g| g == "pipelines:work"), "{queued}");
     assert!(!grants.iter().any(|g| g == "sealed:see"), "{queued}");
     assert_eq!(queued["args"]["detail"], "sensitive", "{queued}");
-    let env: [(&str, &OsStr); 4] = [
+    let env: [(&str, &OsStr); 5] = [
         ("PATH", path.as_os_str()),
         ("NILS_PACK_DIR", OsStr::new(&packs)),
         ("FAKE_PODMAN_ARGS", args_log.as_os_str()),
         ("STANDIN_READS", read_log.as_os_str()),
+        ("NILS_TEST_PART_STACKS", OsStr::new("4")),
     ];
     let (good, out, err) = home.run_with(&["jobs", "work", "--once"], None, &env);
     assert!(good, "{err}\n{out}");
@@ -948,12 +973,62 @@ fn keyboard_round(pg: Option<(String, String)>) {
     assert_eq!(queued_runs.len(), 1, "{score}");
     assert_eq!(queued_runs[0]["step"], "system1", "{score}");
     assert_eq!(queued_runs[0]["stacks"], 6, "{score}");
-    // the run, under the reach the score's job recorded, ran and gave every
-    // scan its opinion
-    let run = job_doc(&home, queued_runs[0]["job"].as_i64().unwrap());
+    let command: Vec<&str> = queued_runs[0]["command"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|w| w.as_str().unwrap())
+        .collect();
+    assert!(command.windows(2).any(|w| w == ["--chunk", "4"]), "{score}");
+    // the run, under the reach the score's job recorded, ran in two parts,
+    // each a run of its own in the one job, and gave every scan its opinion
+    let job = queued_runs[0]["job"].as_i64().unwrap();
+    let run = job_doc(&home, job);
     assert_eq!(run["state"], "done", "{run}");
     assert_eq!(run["args"]["arrival"]["batch"], "kb", "{run}");
+    let parts = runs_of(&home, job);
+    assert_eq!(
+        parts.iter().map(|(_, n)| *n).collect::<Vec<_>>(),
+        [4, 2],
+        "{parts:?}"
+    );
     assert_eq!(opinions_of(&home, s1), 6);
+
+    // a step's run from its door, over the dataset's six scans, in parts too
+    let server = Served::start(
+        &home,
+        &path,
+        true,
+        &[
+            ("FAKE_PODMAN_ARGS", args_log.as_os_str()),
+            ("STANDIN_READS", read_log.as_os_str()),
+            ("NILS_TEST_PART_STACKS", OsStr::new("4")),
+        ],
+    );
+    let (status, started) = server.run("datasets/ds", "body_part", OPS);
+    assert_eq!(status, 202, "{started}");
+    let command: Vec<&str> = started["command"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|w| w.as_str().unwrap())
+        .collect();
+    assert!(
+        command.windows(2).any(|w| w == ["--chunk", "4"]),
+        "{started}"
+    );
+    let job = started["job"].as_i64().unwrap();
+    let done = server.over(job);
+    assert_eq!(done["state"], "done", "{done}");
+    let parts = runs_of(&home, job);
+    assert_eq!(
+        parts.iter().map(|(_, n)| *n).collect::<Vec<_>>(),
+        [4, 2],
+        "{parts:?}"
+    );
+    // every file was read once, over the two parts
+    assert_eq!(reads(&read_log), 12);
+    drop(server);
     drop(files);
     drop(bin);
     drop(work);

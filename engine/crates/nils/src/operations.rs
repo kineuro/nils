@@ -1714,6 +1714,9 @@ pub(crate) fn run_door(
         false,
     )?;
     let store = registry.store();
+    // 2026-10-17: more scans than one container of the pipeline holds are
+    // run in parts, each a run of its own, in this one job
+    let command = crate::pipelines::in_parts(store, command, frozen);
     // the step and what it is for, which its state and the dataset's log
     // find it by, beside who asked and under what
     let mut extra = crate::serve::queued_by(caller);

@@ -1491,6 +1491,9 @@ fn archive_run(doors: &Doors, registry: &mut Registry, caller: &Caller) -> Resul
         &command,
         false,
     )?;
+    // 2026-10-17: the archive is more scans than one container holds; it
+    // is run in parts, each a run of its own, in this one job
+    let command = crate::pipelines::in_parts(registry.store(), command, frozen);
     let mut extra = crate::serve::queued_by(caller);
     extra["step"] = json!(crate::system1::STEP);
     extra["for"] = json!("archive");
