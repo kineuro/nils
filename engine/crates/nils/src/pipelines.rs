@@ -2136,7 +2136,9 @@ pub(crate) struct RunArgs {
     pub(crate) pipeline: Option<String>,
     /// Take up again a run that stopped, was cancelled or whose engine went
     /// away (record 49 A1): the units it finished are kept, and those in
-    /// flight run again, with everything the run recorded
+    /// flight run again, with everything the run recorded; a part of a run
+    /// split with --chunk then goes on with the parts after it that no run
+    /// holds yet
     #[arg(
         long,
         value_name = "RUN",
@@ -2178,10 +2180,12 @@ pub(crate) struct RunArgs {
     /// The DICOM to NIfTI converter a bids input is released with
     #[arg(long, default_value = "dcm2niix", value_name = "PATH")]
     pub(crate) dcm2niix: PathBuf,
-    /// Split the selection into parts of at most N stacks, in stack order,
-    /// and run each part as a run of its own, one after another: for a
-    /// selection too large for one container's input
-    #[arg(long, value_name = "N", conflicts_with_all = ["resume", "handle"])]
+    /// Split the selection, or the handle, into parts of at most N stacks,
+    /// in stack order, and run each part as a run of its own over a handle
+    /// of its own, one after another: for a selection too large for one
+    /// container's input. A part that fails or is stopped stops the parts
+    /// after it; its run taken up again (--resume) goes on with them
+    #[arg(long, value_name = "N", conflicts_with = "resume")]
     pub(crate) chunk: Option<u64>,
     /// Run nothing: say what the run would do (record 49 A3), its units,
     /// the units that cannot run and what they lack, the time, the GPU, and
@@ -2197,6 +2201,65 @@ pub(crate) struct RunArgs {
     /// Machine-readable output
     #[arg(long)]
     pub(crate) json: bool,
+    /// The parts of a split run still to run after one of them was taken
+    /// up again; never on the command line
+    #[arg(skip)]
+    pub(crate) go_on: Option<GoOn>,
+}
+
+/// The parts a run split with `--chunk` was made of, as each part's job
+/// records them (`part`), and those still to run when one of them is taken
+/// up again (2026-10-17): every part's handle, in order, and the size.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct GoOn {
+    /// Every part's handle, in order.
+    handles: Vec<i64>,
+    /// The parts to run, by their place in `handles`.
+    next: Vec<usize>,
+    /// The `--chunk` the parts were made with.
+    chunk: Option<u64>,
+    /// The parameters every part runs with, as the part taken up recorded
+    /// them.
+    params: serde_json::Map<String, Value>,
+    /// The selection the parts were frozen from, where they were.
+    selection: Option<String>,
+}
+
+impl GoOn {
+    /// The parts a part's job recorded, read back: none for a run that is
+    /// no part of a split one.
+    fn recorded(part: &Value) -> Option<GoOn> {
+        let handles: Vec<i64> = part["handles"]
+            .as_array()?
+            .iter()
+            .filter_map(Value::as_i64)
+            .collect();
+        (handles.len() > 1).then(|| GoOn {
+            handles,
+            next: Vec::new(),
+            chunk: part["chunk"].as_u64(),
+            params: serde_json::Map::new(),
+            selection: None,
+        })
+    }
+
+    /// What a part's job records of the parts: which it is, of how many,
+    /// the size and every part's handle.
+    fn part(&self, i: usize) -> Value {
+        json!({
+            "part": i + 1, "of": self.handles.len(), "chunk": self.chunk,
+            "handles": self.handles,
+        })
+    }
+
+    /// The handles of these parts, as words.
+    fn words(&self, parts: &[usize]) -> String {
+        parts
+            .iter()
+            .map(|i| self.handles[*i].to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
 }
 
 fn print(v: &Value) -> Result<(), Exit> {
@@ -4561,11 +4624,20 @@ pub(crate) fn run_command(home: &Home, args: RunArgs) -> Result<(), Exit> {
     // record 55 T24: a unit that asks every core of the lane asks this
     // lane's, and its threads parameter is told as many
     let d = d.sized_to(lane_of(&mut registry).ledger.cores);
-    let given = pairs(&args.params)?;
-    let mut params = d.resolve(&given).map_err(usage)?;
-    // record 55 T24, second review: threads the caller set win; else each
-    // unit is told the cores it takes at its start, and the run records none
-    d.open_lane_threads(&mut params, &given);
+    // the parts of a split run that go on after one was taken up again run
+    // with the parameters it recorded
+    let params = match &args.go_on {
+        Some(g) => g.params.clone(),
+        None => {
+            let given = pairs(&args.params)?;
+            let mut params = d.resolve(&given).map_err(usage)?;
+            // record 55 T24, second review: threads the caller set win; else
+            // each unit is told the cores it takes at its start, and the run
+            // records none
+            d.open_lane_threads(&mut params, &given);
+            params
+        }
+    };
 
     // where it goes and what runs it; either absent is the capability off
     let places = run_places(registry.store()).map_err(usage)?;
@@ -4675,30 +4747,64 @@ pub(crate) fn run_command(home: &Home, args: RunArgs) -> Result<(), Exit> {
 
     // the selection, frozen, and the stacks it holds: whole, or with
     // --chunk in parts of at most that many stacks, each part a run of its
-    // own over a handle of its own
-    let parts: Vec<(i64, Option<String>)> = match (&args.select, args.handle) {
-        (Some(spec), _) => {
+    // own over a handle of its own; a handle the same way (2026-10-17), as
+    // the arrival score and a step's door queue a large one; and the parts
+    // of a split run still to run after one of them was taken up again
+    let (parts, todo): (Vec<(i64, Option<String>)>, Vec<usize>) = match (
+        &args.go_on,
+        &args.select,
+        args.handle,
+    ) {
+        (Some(g), _, _) => (
+            g.handles
+                .iter()
+                .map(|h| (*h, g.selection.clone()))
+                .collect(),
+            g.next.clone(),
+        ),
+        (None, Some(spec), _) => {
             drop(registry);
             let parts = freeze_parts(home, &args, spec, &d.roles)?;
             registry = crate::open(home)?;
-            parts.into_iter().map(|h| (h, Some(spec.clone()))).collect()
+            let n = parts.len();
+            (
+                parts.into_iter().map(|h| (h, Some(spec.clone()))).collect(),
+                (0..n).collect(),
+            )
         }
-        (None, Some(_)) if args.chunk.is_some() => {
-            return Err(usage(
-                "--chunk splits a selection as it is frozen; a handle is run as it is",
-            ));
+        (None, None, Some(h)) => {
+            let parts = match args.chunk {
+                Some(chunk) => split_handle(registry.store(), h, chunk)?,
+                None => vec![h],
+            };
+            let n = parts.len();
+            (
+                parts.into_iter().map(|h| (h, None)).collect(),
+                (0..n).collect(),
+            )
         }
-        (None, Some(h)) => vec![(h, None)],
-        (None, None) => {
+        (None, None, None) => {
             return Err(usage(
                 "a run is over a frozen selection: --select selection:<name>@<v>, a dataset's or a cohort's main scans (--select main:<role>@dataset:<name>, or main@dataset:<name> for each role the pipeline needs), or --handle <id>",
             ));
         }
     };
     let count = parts.len();
+    // what each part's job records of the parts, so a part taken up again
+    // goes on with those after it
+    let split = GoOn {
+        handles: parts.iter().map(|(h, _)| *h).collect(),
+        chunk: args
+            .chunk
+            .or_else(|| args.go_on.as_ref().and_then(|g| g.chunk)),
+        ..GoOn::default()
+    };
     let pack = pack_of_bids(home, &args, &d);
-    for (i, (handle_id, selection)) in parts.iter().enumerate() {
-        let handle_id = *handle_id;
+    for (k, &i) in todo.iter().enumerate() {
+        let (handle_id, selection) = (parts[i].0, &parts[i].1);
+        // the part's run, once it is made, which the words of a part that
+        // did not end name
+        let mut made: Option<i64> = None;
         let ran = (|| -> Result<(), Exit> {
             let stacks = handle_stacks(registry.store(), handle_id)?;
             if stacks.is_empty() {
@@ -4738,8 +4844,8 @@ pub(crate) fn run_command(home: &Home, args: RunArgs) -> Result<(), Exit> {
                 &p,
                 handle_id,
                 json!({
-                    "pipeline": p.label(), "select": args.select, "handle": handle_id,
-                    "part": (count > 1).then(|| json!({"part": i + 1, "of": count, "chunk": args.chunk})),
+                    "pipeline": p.label(), "select": selection, "handle": handle_id,
+                    "part": (count > 1).then(|| split.part(i)),
                     "params": args.params, "models": args.models, "labels": args.labels,
                 }),
             )?;
@@ -4768,6 +4874,7 @@ pub(crate) fn run_command(home: &Home, args: RunArgs) -> Result<(), Exit> {
                     started_at: &started,
                 },
             )?;
+            made = Some(run_id);
             rows::set_units(registry.store(), run_id, d.units.name(), args.threshold)?;
             let _ = job::set_arg(registry.store(), job_id, "run", json!(run_id));
 
@@ -4817,13 +4924,17 @@ pub(crate) fn run_command(home: &Home, args: RunArgs) -> Result<(), Exit> {
             if count == 1 {
                 return Err(e);
             }
-            let left: Vec<String> = parts[i + 1..].iter().map(|(h, _)| h.to_string()).collect();
+            let left = &todo[k + 1..];
             let rest = if left.is_empty() {
                 "it was the last part".to_string()
             } else {
                 format!(
-                    "the parts not run are handles {}, and nils run {} --handle <id> runs each",
-                    left.join(", "),
+                    "the parts not run are handles {}: {}nils run {} --handle <id> runs one",
+                    split.words(left),
+                    made.map(|run| format!(
+                        "nils run --resume {run} takes this part up again and goes on with them, and "
+                    ))
+                    .unwrap_or_default(),
                     p.label()
                 )
             };
@@ -4924,6 +5035,103 @@ fn freeze_parts(
         );
     }
     Ok(parts)
+}
+
+/// A handle run with `--chunk` (2026-10-17): as it is where it holds at
+/// most that many stacks, else one handle per part of at most that many,
+/// in stack order. Each part holds its stacks with their subjects, is
+/// pinned as the handle is (its selections, pack version, epoch, scheme
+/// and principal) and records which part of which handle it is. A
+/// handle of a scope's main scans of several roles is split only as it is
+/// frozen, in whole visits (`--select main@...:NAME --chunk N`).
+fn split_handle(store: &mut Store, handle: i64, chunk: u64) -> Result<Vec<i64>, Exit> {
+    if chunk == 0 {
+        return Err(usage("--chunk is a number of stacks, at least 1"));
+    }
+    let stacks = handle_stacks(store, handle)?;
+    let size = usize::try_from(chunk).unwrap_or(usize::MAX);
+    if stacks.len() <= size {
+        return Ok(vec![handle]);
+    }
+    let h = nils_ask::handle::get(store, handle)
+        .map_err(|e| fail(e.to_string()))?
+        .ok_or_else(|| usage(format!("no handle {handle}")))?;
+    if let Some(entry) = crate::main_input::entry_in(&h.selection_versions)
+        && entry["roles"].is_array()
+    {
+        return Err(usage(format!(
+            "handle {handle} holds the main scans of several roles, which are split in whole visits as they are frozen: nils run --select {} --chunk {chunk}",
+            entry["of"].as_str().unwrap_or("main@dataset:<name>")
+        )));
+    }
+    let subjects: HashMap<i64, Option<i64>> = nils_ask::handle::keys(store, handle)
+        .map_err(|e| fail(e.to_string()))?
+        .into_iter()
+        .collect();
+    let parts: Vec<&[i64]> = stacks.chunks(size).collect();
+    let of = parts.len();
+    let mut out = Vec::with_capacity(of);
+    for (i, part) in parts.iter().enumerate() {
+        let rows: Vec<nils_registry::store::Row> = part
+            .iter()
+            .map(|s| {
+                use nils_registry::store::{Cell, Row};
+                Row(vec![
+                    Cell::Int(*s),
+                    subjects
+                        .get(s)
+                        .copied()
+                        .flatten()
+                        .map_or(Cell::Null, Cell::Int),
+                ])
+            })
+            .collect();
+        let mut pins = h.selection_versions.as_array().cloned().unwrap_or_default();
+        // a scope's main scans of one role say their part, as a run's
+        // --select main:... records it
+        for pin in &mut pins {
+            if pin["main"].is_string() && pin["picks"].is_object() {
+                pin["part"] = json!({"part": i + 1, "of": of});
+            }
+        }
+        pins.push(json!({"handle": handle, "part": {"part": i + 1, "of": of}}));
+        let (id, _) = crate::operations::save_stacks(
+            store,
+            rows,
+            &h.principal,
+            h.epoch,
+            &crate::operations::Pinned {
+                versions: Value::Array(pins),
+                pack_version: h.pack_version.as_deref(),
+                scheme_digest: h.scheme_digest.as_deref(),
+            },
+        )
+        .map_err(fail)?;
+        out.push(id);
+    }
+    eprintln!(
+        "handle {handle}: {} stack(s) in {of} parts of at most {chunk}, handles {}",
+        stacks.len(),
+        out.iter()
+            .map(i64::to_string)
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    Ok(out)
+}
+
+/// The run that pins a handle, the first where there are several.
+fn run_over(store: &mut Store, handle: i64) -> Result<Option<i64>, Exit> {
+    let sql = format!(
+        "SELECT MIN(id) FROM {} WHERE handle_id = {}",
+        store.qualified("pipeline_run"),
+        store.dialect().param(1, Type::Int)
+    );
+    store
+        .query_opt(&sql, &[Param::Int(handle)])
+        .map_err(|e| fail(e.to_string()))?
+        .map_or(Ok(None), |r| r.opt_int(0))
+        .map_err(|e| fail(e.to_string()))
 }
 
 /// The registry locks runs take around what they read and then write that
@@ -5251,14 +5459,20 @@ fn resume_command(home: &Home, args: &RunArgs, run_id: i64) -> Result<(), Exit> 
     {
         return Err(fail(refused.words));
     }
+    // 2026-10-17: a part of a split run, as its job recorded the parts: the
+    // resume records them again, and goes on with those after it
+    let split = r
+        .job_id
+        .and_then(|j| job::show(registry.store(), j).ok().flatten())
+        .map(|j| j.args["part"].clone())
+        .filter(Value::is_object);
     let who = crate::actor();
     let actor = nils_registry::actor::current();
-    let job_id = claim_run(
-        registry.store(),
-        &p,
-        handle_id,
-        json!({"pipeline": p.label(), "resume": run_id, "handle": handle_id}),
-    )?;
+    let mut claimed = json!({"pipeline": p.label(), "resume": run_id, "handle": handle_id});
+    if let Some(part) = &split {
+        claimed["part"] = part.clone();
+    }
+    let job_id = claim_run(registry.store(), &p, handle_id, claimed)?;
     rows::resume(registry.store(), run_id, job_id)?;
     let _ = job::set_arg(registry.store(), job_id, "run", json!(run_id));
     let outcome = execute(
@@ -5287,7 +5501,7 @@ fn resume_command(home: &Home, args: &RunArgs, run_id: i64) -> Result<(), Exit> 
             resume: Some(&r),
         },
     );
-    conclude(
+    let concluded = conclude(
         &mut registry,
         &Conclusion {
             pipeline: &p,
@@ -5301,6 +5515,74 @@ fn resume_command(home: &Home, args: &RunArgs, run_id: i64) -> Result<(), Exit> 
             resumed: true,
         },
         outcome,
+    );
+    // the parts after it that no run holds yet go on once it ends, one
+    // after another, as the split run would have run them; a part that a
+    // run holds already (run by hand) is left as it is
+    let Some(mut go_on) = split.as_ref().and_then(GoOn::recorded) else {
+        return concluded;
+    };
+    let after = go_on
+        .handles
+        .iter()
+        .position(|h| *h == handle_id)
+        .map_or(go_on.handles.len(), |at| at + 1);
+    let mut next = Vec::new();
+    for i in after..go_on.handles.len() {
+        match run_over(registry.store(), go_on.handles[i])? {
+            Some(other) => eprintln!(
+                "part {} of {} (handle {}) is run {other}, which is left as it is",
+                i + 1,
+                go_on.handles.len(),
+                go_on.handles[i]
+            ),
+            None => next.push(i),
+        }
+    }
+    if next.is_empty() {
+        return concluded;
+    }
+    if let Err(e) = concluded {
+        return Err(Exit {
+            code: e.code,
+            message: format!(
+                "{}; the parts after it, handles {}, go on once it is taken up again and ends",
+                e.message,
+                go_on.words(&next)
+            ),
+        });
+    }
+    eprintln!(
+        "run {run_id} was part {} of {}: the parts after it go on, handles {}",
+        after,
+        go_on.handles.len(),
+        go_on.words(&next)
+    );
+    go_on.next = next;
+    go_on.params = params;
+    go_on.selection = r.selection.clone();
+    drop(registry);
+    run_command(
+        home,
+        RunArgs {
+            pipeline: Some(p.id.to_string()),
+            resume: None,
+            select: None,
+            handle: None,
+            params: Vec::new(),
+            models: models.iter().map(|m| m.id.to_string()).collect(),
+            labels: r.label_set_id,
+            threshold: r.threshold,
+            pack: args.pack.clone(),
+            pack_dir: args.pack_dir.clone(),
+            dcm2niix: args.dcm2niix.clone(),
+            chunk: None,
+            preflight: false,
+            // the parts go on with the version the run was split for
+            replaced: true,
+            json: args.json,
+            go_on: Some(go_on),
+        },
     )
 }
 
@@ -9438,6 +9720,88 @@ fn found_for(outputs: &[descriptor::Output], out: &Path, u: &Unit) -> Vec<String
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A handle of these stacks, each with a subject ten times its id,
+    /// pinned with these selections.
+    fn handle_of(store: &mut Store, stacks: &[i64], pins: Value) -> i64 {
+        use nils_registry::store::{Cell, Row};
+        let rows = stacks
+            .iter()
+            .map(|s| Row(vec![Cell::Int(*s), Cell::Int(s * 10)]))
+            .collect();
+        crate::operations::save_stacks(
+            store,
+            rows,
+            "ops@lab",
+            3,
+            &crate::operations::Pinned {
+                versions: pins,
+                pack_version: Some("mri-1"),
+                scheme_digest: None,
+            },
+        )
+        .unwrap()
+        .0
+    }
+
+    /// 2026-10-17: a handle run with `--chunk` is split in stack order into
+    /// handles of at most that many, each pinned as it is with its part
+    /// said; one that fits runs as it is; one of a scope's main scans of
+    /// several roles is split only as it is frozen, in whole visits.
+    #[test]
+    fn a_handle_is_split_in_stack_order_into_handles_pinned_as_it_is() {
+        let mut store = Store::sqlite_in_memory().unwrap();
+        nils_registry::migrate::migrate(&mut store, nils_registry::migrate::Kind::Registry)
+            .unwrap();
+        let split = |store: &mut Store, h: i64, chunk: u64| {
+            split_handle(store, h, chunk).unwrap_or_else(|e| panic!("{}", e.message))
+        };
+        let pin = json!({"selection": "every", "version": 1, "set": "every"});
+        let h = handle_of(&mut store, &[5, 1, 4, 2, 3], json!([pin]));
+        assert_eq!(split(&mut store, h, 5), [h]);
+        assert_eq!(split(&mut store, h, 9), [h]);
+        assert!(split_handle(&mut store, h, 0).is_err());
+        let parts = split(&mut store, h, 2);
+        assert_eq!(parts.len(), 3);
+        let mut held = Vec::new();
+        for (i, part) in parts.iter().enumerate() {
+            assert_ne!(*part, h);
+            let keys = nils_ask::handle::keys(&mut store, *part).unwrap();
+            assert!(keys.iter().all(|(s, subject)| *subject == Some(s * 10)));
+            held.push(keys.iter().map(|(s, _)| *s).collect::<Vec<_>>());
+            let got = nils_ask::handle::get(&mut store, *part).unwrap().unwrap();
+            assert_eq!(got.principal, "ops@lab");
+            assert_eq!(got.epoch, 3);
+            assert_eq!(got.pack_version.as_deref(), Some("mri-1"));
+            assert_eq!(
+                got.selection_versions,
+                json!([pin, {"handle": h, "part": {"part": i + 1, "of": 3}}])
+            );
+        }
+        assert_eq!(held, [vec![1, 2], vec![3, 4], vec![5]]);
+        // a scope's main scans of one role say their part; of several, the
+        // split is refused and says how to make it
+        let one = json!({"main": "t1w", "picks": {}, "of": "main:t1w@dataset:d"});
+        let h = handle_of(&mut store, &[1, 2, 3], json!([one]));
+        let parts = split(&mut store, h, 2);
+        let got = nils_ask::handle::get(&mut store, parts[1])
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            got.selection_versions[0]["part"],
+            json!({"part": 2, "of": 2})
+        );
+        let several = json!({"main": "t1w+flair", "roles": ["t1w", "flair"], "picks": {}, "of": "main@dataset:d"});
+        let h = handle_of(&mut store, &[1, 2, 3], json!([several]));
+        let refused = split_handle(&mut store, h, 2).unwrap_err();
+        assert!(
+            refused
+                .message
+                .contains("--select main@dataset:d --chunk 2"),
+            "{}",
+            refused.message
+        );
+    }
 
     /// Record 55, second review: the lane's start sweeps the work folders
     /// of the runs that ended (done, partial, failed, cancelled,
