@@ -329,6 +329,14 @@ pub fn frame_list(list: &str) -> Result<Vec<u32>, String> {
 /// `instance_frame` row lists for this stack, whichever stack its instance
 /// row names. The planes are ordered along the stack's normal.
 pub fn read_volume(store: &mut Store, stack: i64) -> Result<Volume, String> {
+    read_stack(&stack_files(store, stack)?)
+}
+
+/// A stack's files as the registry lists them, and the frames of each that
+/// are the stack's, for [`read_stack`]: the half of [`read_volume`] that
+/// needs the registry, so a build over many stacks reads the files of
+/// several at once on threads that hold none.
+pub fn stack_files(store: &mut Store, stack: i64) -> Result<Vec<StackFile>, String> {
     let p = store.dialect().param(1, Type::Int);
     let whole = format!(
         "SELECT so.root, f.path FROM {i} i JOIN {f} f ON f.id = i.source_file_id \
@@ -372,7 +380,7 @@ pub fn read_volume(store: &mut Store, stack: i64) -> Result<Volume, String> {
     if files.is_empty() {
         return Err(format!("stack {stack} has no files the registry can read"));
     }
-    read_stack(&files)
+    Ok(files)
 }
 
 /// One plane: a single-frame file, or one frame of a multi-frame file.
@@ -2521,7 +2529,9 @@ fn walk_count(dir: &Path) -> u64 {
         .sum()
 }
 
-/// What a build over many stacks did (record 45 E1).
+/// What a build over many stacks did (record 45 E1). Where several stacks
+/// are built at once, the lists are in the order the stacks ended, not the
+/// order asked.
 #[derive(Debug, Default)]
 pub struct Many {
     pub built: Vec<i64>,
@@ -2537,6 +2547,18 @@ pub struct Many {
 }
 
 impl Many {
+    /// Count what building one stack's pyramid did: its bytes, or the class
+    /// of why it was not built.
+    fn count(&mut self, stack: i64, built: Result<u64, &'static str>) {
+        match built {
+            Ok(bytes) => {
+                self.bytes += bytes;
+                self.built.push(stack);
+            }
+            Err(why) => self.failed.push((stack, why)),
+        }
+    }
+
     pub fn as_json(&self, place: &str) -> serde_json::Value {
         serde_json::json!({
             "place": place,
@@ -2588,54 +2610,205 @@ pub fn reason_of(why: &str, reading: bool) -> &'static str {
     }
 }
 
-/// Build the pyramids of `stacks` under a working place, one stack at a
-/// time, each with `workers` planes at once; a stack that has one is
-/// skipped, a stack that fails is counted with why and the rest go on;
-/// with `force` a stack that has one is built again (record 55 H2).
+/// How many stacks a build over many builds at once where nobody said: an
+/// eighth of the workers, one to eight. Several stacks at once keep many
+/// reads in flight where the files lie on a network share, as the previews
+/// do ([`crate::preview::stacks_at_once`]), and fewer of them, since a
+/// stack's volume and its levels are held whole while it is built. A
+/// machine of fifteen workers or fewer builds one at a time.
+pub fn stacks_at_once(workers: usize) -> usize {
+    (workers / 8).clamp(1, 8)
+}
+
+/// The pyramid folders a builder of this process writes now: the builders
+/// of a build over many stacks and a reader's build between its stacks
+/// ([`crate::worker::build_asked_pyramids`]) never write one stack's folder
+/// at once.
+static WRITING: std::sync::LazyLock<(
+    std::sync::Mutex<std::collections::BTreeSet<PathBuf>>,
+    std::sync::Condvar,
+)> = std::sync::LazyLock::new(Default::default);
+
+/// A pyramid's folder held for its one writer in this process, let go when
+/// dropped.
+pub(crate) struct Writing(PathBuf);
+
+impl Drop for Writing {
+    fn drop(&mut self) {
+        let (lock, cv) = &*WRITING;
+        lock.lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.0);
+        cv.notify_all();
+    }
+}
+
+/// Hold a pyramid's folder for one writer, waiting while another writer of
+/// this process holds it.
+pub(crate) fn writing(root: &Path) -> Writing {
+    let (lock, cv) = &*WRITING;
+    let mut held = lock.lock().unwrap_or_else(|e| e.into_inner());
+    while held.contains(root) {
+        held = cv.wait(held).unwrap_or_else(|e| e.into_inner());
+    }
+    held.insert(root.to_path_buf());
+    Writing(root.to_path_buf())
+}
+
+/// Hold a pyramid's folder where no other writer of this process holds it
+/// now; none where one does.
+pub(crate) fn writing_now(root: &Path) -> Option<Writing> {
+    let mut held = WRITING.0.lock().unwrap_or_else(|e| e.into_inner());
+    if held.insert(root.to_path_buf()) {
+        Some(Writing(root.to_path_buf()))
+    } else {
+        None
+    }
+}
+
+/// Build the pyramids of `stacks` under a working place, `at_once` stacks
+/// at a time, the `workers` encoders shared between them; a stack that has
+/// one is skipped, a stack that fails is counted with why and the rest go
+/// on; with `force` a stack that has one is built again (record 55 H2).
 /// `go_on` is asked after each stack with the counts so far, and a false
 /// stops the build there (a cancel).
+///
+/// With `at_once` 1, one stack after another, each with every encoder.
+/// With more, this thread, which holds the registry, skips each stack that
+/// has its pyramid and reads the registry's list of every other one's
+/// files; a stack to build goes to a builder of its own, at most `at_once`
+/// of them running, each holding its stack's folder ([`writing`]) while it
+/// reads the files and builds with `workers / at_once` encoders, and each
+/// result is counted, and `go_on` asked, here as it comes. A stop hands
+/// out no more stacks, waits for the ones being built and counts them.
+#[allow(clippy::too_many_arguments)]
 pub fn build_many(
     store: &mut Store,
     working: &Path,
     stacks: &[i64],
     workers: usize,
+    at_once: usize,
     pack_version: Option<String>,
     force: bool,
     go_on: &mut dyn FnMut(&mut Store, &Many) -> bool,
 ) -> Many {
     let mut out = Many::default();
     let mut seen = std::collections::BTreeSet::new();
-    for &stack in stacks {
-        if !seen.insert(stack) {
-            continue;
-        }
-        let root = dir(working, stack);
-        if !force && matches!(manifest(&root), Ok(Some(_))) {
-            out.skipped.push(stack);
-        } else {
-            match read_volume(store, stack)
-                .map_err(|why| reason_of(&why, true))
-                .and_then(|v| {
-                    build(&v, stack, &root, workers, pack_version.clone())
-                        .map_err(|why| reason_of(&why, false))
-                }) {
-                Ok(m) => {
-                    out.bytes += m.bytes_per_level.iter().sum::<u64>();
-                    out.built.push(stack);
+    if at_once <= 1 {
+        for &stack in stacks {
+            if !seen.insert(stack) {
+                continue;
+            }
+            let root = dir(working, stack);
+            if !force && matches!(manifest(&root), Ok(Some(_))) {
+                out.skipped.push(stack);
+            } else {
+                match read_volume(store, stack)
+                    .map_err(|why| reason_of(&why, true))
+                    .and_then(|v| {
+                        build(&v, stack, &root, workers, pack_version.clone())
+                            .map_err(|why| reason_of(&why, false))
+                    }) {
+                    Ok(m) => {
+                        out.bytes += m.bytes_per_level.iter().sum::<u64>();
+                        out.built.push(stack);
+                    }
+                    Err(why) => {
+                        // a half-written pyramid is not one: without its
+                        // manifest it is built again next time
+                        let _ = std::fs::remove_file(root.join("manifest.json"));
+                        out.failed.push((stack, why));
+                    }
                 }
+            }
+            if !go_on(store, &out) {
+                out.stopped = true;
+                break;
+            }
+        }
+        return out;
+    }
+    let encoders = (workers / at_once).max(1);
+    // `go_on` asked with what was counted, unless a stop came before: the
+    // stacks still being built after a stop are counted and nothing is asked
+    let mut ask = |out: &mut Many, store: &mut Store| {
+        if !out.stopped && !go_on(store, &*out) {
+            out.stopped = true;
+        }
+    };
+    std::thread::scope(|s| {
+        let (ended, results) = std::sync::mpsc::channel::<(i64, Result<u64, &'static str>)>();
+        let mut running = 0usize;
+        for &stack in stacks {
+            if out.stopped {
+                break;
+            }
+            if !seen.insert(stack) {
+                continue;
+            }
+            let root = dir(working, stack);
+            if !force && matches!(manifest(&root), Ok(Some(_))) {
+                out.skipped.push(stack);
+                ask(&mut out, store);
+                continue;
+            }
+            let files = match stack_files(store, stack) {
+                Ok(files) => files,
                 Err(why) => {
+                    let _ = std::fs::remove_file(root.join("manifest.json"));
+                    out.count(stack, Err(reason_of(&why, true)));
+                    ask(&mut out, store);
+                    continue;
+                }
+            };
+            // a builder free first, the results that came meanwhile counted;
+            // every builder sends one result, so the wait ends
+            while running >= at_once && !out.stopped {
+                let Ok((done, built)) = results.recv() else {
+                    break;
+                };
+                running -= 1;
+                out.count(done, built);
+                ask(&mut out, store);
+            }
+            if out.stopped {
+                break;
+            }
+            let held = writing(&root);
+            running += 1;
+            let ended = ended.clone();
+            let pack_version = pack_version.clone();
+            s.spawn(move || {
+                let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    read_stack(&files)
+                        .map_err(|why| reason_of(&why, true))
+                        .and_then(|v| {
+                            build(&v, stack, &root, encoders, pack_version)
+                                .map_err(|why| reason_of(&why, false))
+                        })
+                        .map(|m| m.bytes_per_level.iter().sum::<u64>())
+                }))
+                .unwrap_or(Err("build_failed"));
+                if built.is_err() {
                     // a half-written pyramid is not one: without its
                     // manifest it is built again next time
                     let _ = std::fs::remove_file(root.join("manifest.json"));
-                    out.failed.push((stack, why));
                 }
-            }
+                drop(held);
+                let _ = ended.send((stack, built));
+            });
         }
-        if !go_on(store, &out) {
-            out.stopped = true;
-            break;
+        drop(ended);
+        // the stacks being built end whole, after a stop as well
+        while running > 0 {
+            let Ok((done, built)) = results.recv() else {
+                break;
+            };
+            running -= 1;
+            out.count(done, built);
+            ask(&mut out, store);
         }
-    }
+    });
     out
 }
 
@@ -4980,6 +5153,339 @@ mod tests {
         let mp = build(&vol, 9, &root, 2, None).unwrap();
         assert_eq!(tile_files(&root), 0);
         assert_eq!(every_answer(&root, &mp), want);
+    }
+
+    /// Every file of a pyramid's folder with its bytes, but the manifest.
+    fn files_of(root: &Path) -> BTreeMap<String, Vec<u8>> {
+        let mut out = BTreeMap::new();
+        for e in std::fs::read_dir(root).unwrap() {
+            let p = e.unwrap().path();
+            let name = p.file_name().unwrap().to_string_lossy().to_string();
+            if p.is_dir() {
+                for (n, b) in files_of(&p) {
+                    out.insert(format!("{name}/{n}"), b);
+                }
+            } else if name != "manifest.json" {
+                out.insert(name, std::fs::read(&p).unwrap());
+            }
+        }
+        out
+    }
+
+    /// A pyramid's manifest, but when and how quickly it was built.
+    fn manifest_of(root: &Path) -> serde_json::Value {
+        let mut m: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(root.join("manifest.json")).unwrap())
+                .unwrap();
+        let o = m.as_object_mut().unwrap();
+        o.remove("built_at").unwrap();
+        o.remove("precompute").unwrap();
+        m
+    }
+
+    /// The part files under a working place's pyramids.
+    fn part_files(work: &Path) -> Vec<String> {
+        let mut out = Vec::new();
+        for d in std::fs::read_dir(work.join("pyramids"))
+            .into_iter()
+            .flatten()
+        {
+            for name in files_of(&d.unwrap().path()).into_keys() {
+                if name.contains(".part.") {
+                    out.push(name);
+                }
+            }
+        }
+        out
+    }
+
+    fn sorted(mut v: Vec<i64>) -> Vec<i64> {
+        v.sort_unstable();
+        v
+    }
+
+    fn manifest_time(work: &Path, stack: i64) -> std::time::SystemTime {
+        std::fs::metadata(dir(work, stack).join("manifest.json"))
+            .unwrap()
+            .modified()
+            .unwrap()
+    }
+
+    #[test]
+    fn the_stacks_built_at_once_are_an_eighth_of_the_workers() {
+        for (workers, at_once) in [(0, 1), (1, 1), (8, 1), (15, 1), (16, 2), (32, 4), (64, 8)] {
+            assert_eq!(stacks_at_once(workers), at_once, "{workers}");
+        }
+        assert_eq!(stacks_at_once(512), 8);
+    }
+
+    /// Record 55 H2: the 3D views a sort queues were built one stack at a
+    /// time, which over a large dataset on a network share takes days.
+    /// Several stacks at once build the pyramids one at a time builds, file
+    /// for file, and a second build skips every stack that has one.
+    #[test]
+    fn pyramids_built_several_at_once_are_the_ones_built_one_at_a_time() {
+        let src = nils_dicom::synth::TempDir::new("pyramid-many-src");
+        let serial = nils_dicom::synth::TempDir::new("pyramid-many-serial");
+        let pooled = nils_dicom::synth::TempDir::new("pyramid-many-pooled");
+        let mut store = test_stacks::registry(src.path(), 12);
+        let stacks: Vec<i64> = (1..=12).collect();
+        let one = build_many(
+            &mut store,
+            serial.path(),
+            &stacks,
+            4,
+            1,
+            None,
+            false,
+            &mut |_, _| true,
+        );
+        assert_eq!(one.built, stacks, "one at a time, in the order asked");
+        let mut asked = 0;
+        let many = build_many(
+            &mut store,
+            pooled.path(),
+            &stacks,
+            8,
+            4,
+            None,
+            false,
+            &mut |_, so_far| {
+                asked += 1;
+                // asked once a stack, with every stack counted so far
+                assert_eq!(so_far.built.len(), asked);
+                true
+            },
+        );
+        assert_eq!(asked, 12);
+        assert_eq!(sorted(many.built.clone()), stacks);
+        assert!(many.skipped.is_empty() && many.failed.is_empty() && !many.stopped);
+        assert_eq!(many.bytes, one.bytes);
+        for s in &stacks {
+            let (a, b) = (dir(serial.path(), *s), dir(pooled.path(), *s));
+            assert_eq!(files_of(&a), files_of(&b), "stack {s}");
+            assert_eq!(manifest_of(&a), manifest_of(&b), "stack {s}");
+            assert_eq!(
+                manifest_of(&b)["shape"],
+                serde_json::json!(test_stacks::SHAPE)
+            );
+        }
+        // a stack that has its pyramid is skipped, and never built again
+        let before: Vec<_> = stacks
+            .iter()
+            .map(|s| manifest_time(pooled.path(), *s))
+            .collect();
+        let again = build_many(
+            &mut store,
+            pooled.path(),
+            &stacks,
+            8,
+            4,
+            None,
+            false,
+            &mut |_, _| true,
+        );
+        assert!(again.built.is_empty() && again.failed.is_empty());
+        assert_eq!(sorted(again.skipped), stacks);
+        let after: Vec<_> = stacks
+            .iter()
+            .map(|s| manifest_time(pooled.path(), *s))
+            .collect();
+        assert_eq!(before, after, "no pyramid was built again");
+        assert!(part_files(pooled.path()).is_empty());
+    }
+
+    /// A stack whose files cannot be read, in a builder, and a stack the
+    /// registry lists no file of, read on the registry's thread, are each
+    /// counted by the class of why, never the reader's words, and a failed
+    /// stack's manifest goes; the others are built.
+    #[test]
+    fn a_stack_that_fails_among_many_is_counted_and_the_rest_are_built() {
+        let src = nils_dicom::synth::TempDir::new("pyramid-fail-src");
+        let work = nils_dicom::synth::TempDir::new("pyramid-fail-work");
+        let mut store = test_stacks::registry(src.path(), 8);
+        // stack 3 has its pyramid; its files go, so built again it fails
+        let first = build_many(
+            &mut store,
+            work.path(),
+            &[3],
+            2,
+            1,
+            None,
+            false,
+            &mut |_, _| true,
+        );
+        assert_eq!(first.built, vec![3]);
+        std::fs::remove_dir_all(src.path().join("s3")).unwrap();
+        let mut stacks: Vec<i64> = (1..=8).collect();
+        stacks.insert(4, 99);
+        let many = build_many(
+            &mut store,
+            work.path(),
+            &stacks,
+            8,
+            4,
+            None,
+            true,
+            &mut |_, _| true,
+        );
+        assert_eq!(sorted(many.built.clone()), vec![1, 2, 4, 5, 6, 7, 8]);
+        let mut failed = many.failed.clone();
+        failed.sort_unstable();
+        assert_eq!(failed, vec![(3, "unreadable"), (99, "no_files")]);
+        assert!(!many.stopped);
+        assert_eq!(
+            many.as_json("work")["failures_by_reason"],
+            serde_json::json!({"no_files": 1, "unreadable": 1})
+        );
+        let text = many.as_json("work").to_string();
+        assert!(!text.contains(&src.path().display().to_string()), "{text}");
+        assert!(!dir(work.path(), 3).join("manifest.json").exists());
+        assert!(!dir(work.path(), 99).join("manifest.json").exists());
+        assert!(part_files(work.path()).is_empty());
+    }
+
+    /// A stop asked after a few stacks hands out no more, lets the stacks
+    /// being built end whole and counts them; what was built stays built,
+    /// no part file is left, and the next build skips it and goes on.
+    #[test]
+    fn a_stop_among_many_keeps_what_was_built_and_leaves_no_part_file() {
+        let src = nils_dicom::synth::TempDir::new("pyramid-stop-src");
+        let work = nils_dicom::synth::TempDir::new("pyramid-stop-work");
+        let mut store = test_stacks::registry(src.path(), 12);
+        let stacks: Vec<i64> = (1..=12).collect();
+        let mut asked = 0;
+        let many = build_many(
+            &mut store,
+            work.path(),
+            &stacks,
+            8,
+            4,
+            None,
+            false,
+            &mut |_, _| {
+                asked += 1;
+                asked < 3
+            },
+        );
+        assert!(many.stopped);
+        assert_eq!(asked, 3, "nothing is asked after the stop");
+        // the third result stopped it, with at most three others being built
+        let made = many.built.len();
+        assert!((3..=6).contains(&made), "{made}");
+        for s in &stacks {
+            let built = manifest(&dir(work.path(), *s)).unwrap().is_some();
+            assert_eq!(built, many.built.contains(s), "stack {s}");
+        }
+        assert!(part_files(work.path()).is_empty());
+        let rest = build_many(
+            &mut store,
+            work.path(),
+            &stacks,
+            8,
+            4,
+            None,
+            false,
+            &mut |_, _| true,
+        );
+        assert_eq!(rest.skipped.len(), made);
+        assert_eq!(rest.built.len(), 12 - made);
+    }
+
+    /// One stack at a time is the build as it was: each stack built,
+    /// skipped or failed in the order asked, `go_on` asked after each, and
+    /// a stop ends it at once.
+    #[test]
+    fn one_stack_at_a_time_is_the_build_in_the_order_asked() {
+        let src = nils_dicom::synth::TempDir::new("pyramid-serial-src");
+        let work = nils_dicom::synth::TempDir::new("pyramid-serial-work");
+        let mut store = test_stacks::registry(src.path(), 6);
+        build_many(
+            &mut store,
+            work.path(),
+            &[2],
+            2,
+            1,
+            None,
+            false,
+            &mut |_, _| true,
+        );
+        std::fs::remove_dir_all(src.path().join("s4")).unwrap();
+        let stacks: Vec<i64> = (1..=6).collect();
+        let mut seen: Vec<(Vec<i64>, Vec<i64>, Vec<i64>)> = Vec::new();
+        let many = build_many(
+            &mut store,
+            work.path(),
+            &stacks,
+            8,
+            1,
+            None,
+            false,
+            &mut |_, so_far| {
+                seen.push((
+                    so_far.built.clone(),
+                    so_far.skipped.clone(),
+                    so_far.failed.iter().map(|(s, _)| *s).collect(),
+                ));
+                true
+            },
+        );
+        let v = |s: &[i64]| s.to_vec();
+        assert_eq!(
+            seen,
+            vec![
+                (v(&[1]), v(&[]), v(&[])),
+                (v(&[1]), v(&[2]), v(&[])),
+                (v(&[1, 3]), v(&[2]), v(&[])),
+                (v(&[1, 3]), v(&[2]), v(&[4])),
+                (v(&[1, 3, 5]), v(&[2]), v(&[4])),
+                (v(&[1, 3, 5, 6]), v(&[2]), v(&[4])),
+            ]
+        );
+        assert_eq!(many.failed, vec![(4, "unreadable")]);
+        // a stop after the second stack ends the build there
+        let other = nils_dicom::synth::TempDir::new("pyramid-serial-stop");
+        let mut asked = 0;
+        let stopped = build_many(
+            &mut store,
+            other.path(),
+            &stacks,
+            8,
+            1,
+            None,
+            false,
+            &mut |_, _| {
+                asked += 1;
+                asked < 2
+            },
+        );
+        assert!(stopped.stopped);
+        assert_eq!(stopped.built, vec![1, 2]);
+        assert!(!dir(other.path(), 3).exists());
+    }
+
+    /// Two writers of one stack's folder in this process: the second waits
+    /// for the first, and one that will not wait is told it is held.
+    #[test]
+    fn a_pyramid_s_folder_has_one_writer_at_a_time() {
+        let dir = nils_dicom::synth::TempDir::new("pyramid-writing");
+        let root = dir.path().join("pyramids").join("5");
+        let held = writing(&root);
+        assert!(writing_now(&root).is_none(), "held by the first writer");
+        let other = dir.path().join("pyramids").join("6");
+        assert!(writing_now(&other).is_some(), "another folder is free");
+        let waited = std::thread::scope(|s| {
+            let waiter = s.spawn(|| {
+                let _second = writing(&root);
+                std::time::Instant::now()
+            });
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            let let_go = std::time::Instant::now();
+            drop(held);
+            waiter.join().unwrap() >= let_go
+        });
+        assert!(waited, "the second writer waited for the first to let go");
+        assert!(writing_now(&root).is_some(), "free once both let go");
     }
 }
 

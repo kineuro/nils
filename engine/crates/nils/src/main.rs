@@ -5994,6 +5994,7 @@ fn pyramid_many(
         std::path::Path::new(&working.path),
         &stacks,
         workers,
+        crate::pyramid::stacks_at_once(workers),
         None,
         force,
         &mut go_on,

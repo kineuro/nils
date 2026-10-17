@@ -246,7 +246,9 @@ fn next_for(store: &mut Store, lane: job::Lane) -> Result<Option<job::Job>, job:
 /// background build's place, or names none and that place is the default
 /// working place (#460): any other is the lane's to run, so a picture is
 /// never written into another place's folder. `--force` builds again a
-/// stack that has its pyramid, as the verb does.
+/// stack that has its pyramid, as the verb does. A stack a builder of the
+/// background build writes now is left queued, never built beside it: that
+/// builder makes its picture, and a look after it ends finds it built.
 pub(crate) fn build_asked_pyramids(
     store: &mut Store,
     working: &nils_registry::place::Place,
@@ -274,10 +276,14 @@ pub(crate) fn build_asked_pyramids(
         if !ours {
             continue;
         }
+        let root = crate::pyramid::dir(folder, stack);
+        // two builders never write one stack's folder at once
+        let Some(_held) = crate::pyramid::writing_now(&root) else {
+            continue;
+        };
         if !matches!(job::take(store, j.id), Ok(true)) {
             continue;
         }
-        let root = crate::pyramid::dir(folder, stack);
         let built = if !force && matches!(crate::pyramid::manifest(&root), Ok(Some(_))) {
             Ok(serde_json::json!({"stack": stack, "skipped": true}))
         } else {
@@ -762,6 +768,72 @@ mod tests {
             outcome(None, String::new(), "signal: 9 (SIGKILL)".into()).0,
             State::Failed
         );
+    }
+
+    /// Record 55 H2: a picture a reader asks for while the background build
+    /// runs, several of its stacks at once, is built between two of its
+    /// stacks, at the first look after a stack ends; and a stack a builder
+    /// of this process writes now is left queued, never built beside it,
+    /// then built once it is let go.
+    #[test]
+    fn a_readers_picture_is_built_between_the_stacks_of_a_build_of_several_at_once() {
+        let src = nils_dicom::synth::TempDir::new("worker-asked-src");
+        let work = nils_dicom::synth::TempDir::new("worker-asked-work");
+        let mut store = crate::pyramid::test_stacks::registry(src.path(), 8);
+        nils_registry::place::add(
+            &mut store,
+            &nils_registry::place::New {
+                name: "work",
+                role: nils_registry::place::Role::Working,
+                path: work.path().to_str().unwrap(),
+                guarantees: serde_json::json!({}),
+                probed: serde_json::json!({}),
+                handling: serde_json::Value::Null,
+                dataset: serde_json::Value::Null,
+            },
+        )
+        .unwrap();
+        let working = crate::pyramid::working_place(&mut store, None).unwrap();
+        let state = |store: &mut Store, id: i64| job::show(store, id).unwrap().unwrap().state;
+        let asked = job::enqueue(&mut store, &argv("pyramid build --stack 8"), None, None).unwrap();
+        let mut looks = 0;
+        let mut at_first_look = None;
+        let many = crate::pyramid::build_many(
+            &mut store,
+            work.path(),
+            &[1, 2, 3, 4, 5, 6],
+            4,
+            2,
+            None,
+            false,
+            &mut |store, _| {
+                looks += 1;
+                build_asked_pyramids(store, &working, 2);
+                if at_first_look.is_none() {
+                    at_first_look = Some(state(store, asked));
+                }
+                true
+            },
+        );
+        assert_eq!(looks, 6, "a look after every stack");
+        assert_eq!(at_first_look, Some(State::Done));
+        assert_eq!(many.built.len(), 6);
+        assert!(
+            crate::pyramid::dir(work.path(), 8)
+                .join("manifest.json")
+                .exists()
+        );
+        // a stack a builder of this process writes now is left queued
+        let root = crate::pyramid::dir(work.path(), 7);
+        let asked = job::enqueue(&mut store, &argv("pyramid build --stack 7"), None, None).unwrap();
+        let held = crate::pyramid::writing_now(&root).unwrap();
+        build_asked_pyramids(&mut store, &working, 2);
+        assert_eq!(state(&mut store, asked), State::Queued);
+        assert!(!root.join("manifest.json").exists());
+        drop(held);
+        build_asked_pyramids(&mut store, &working, 2);
+        assert_eq!(state(&mut store, asked), State::Done);
+        assert!(root.join("manifest.json").exists());
     }
 
     #[test]
