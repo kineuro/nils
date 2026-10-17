@@ -232,6 +232,10 @@ pub fn targets(store: &mut Store, selection: &Selection) -> Result<Vec<i64>, Err
 /// on `instance.series_id`, and materialised, so that no planner walks
 /// `source_file` in id order looking for them; each is then joined to its
 /// `source_file` row by primary key. A page costs what one series holds.
+/// The source is compared as `+f.source_id`, which no index serves: with the
+/// index on a file's source and status (migration 106) a planner walked every
+/// file of the source in id order through it, looking each up among the
+/// series' instances.
 pub fn page_sql(store: &Store) -> String {
     let d = store.dialect();
     format!(
@@ -240,7 +244,7 @@ pub fn page_sql(store: &Store) -> String {
            WHERE i.series_id = {} AND i.source_file_id IS NOT NULL) \
          SELECT f.id, f.path, f.dir, f.size, f.mtime_ns, f.instance_id, f.batch_id \
          FROM own JOIN {files} AS f ON f.id = own.file_id AND f.instance_id = own.instance_id \
-         WHERE f.source_id = {} AND f.id > {} AND f.status = '{ingested}' \
+         WHERE +f.source_id = {} AND f.id > {} AND f.status = '{ingested}' \
          ORDER BY f.id LIMIT {}",
         d.param(1, Type::Int),
         d.param(2, Type::Int),
