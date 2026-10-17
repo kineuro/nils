@@ -2,7 +2,9 @@
 
 //! The tools the engine runs beside itself (2026-10-12): dcm2niix, whether
 //! it is here, and an admin's install of the pinned build into the
-//! registry's tools folder, from a mirror, offline, as the tests run it.
+//! registry's tools folder, from a mirror, offline, as the tests run it;
+//! and (gate T31, step 15.7) from an archive given whole, at its door and
+//! with `--from`, for an engine that cannot reach the releases.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
@@ -339,11 +341,23 @@ impl Server {
     }
 
     fn request(&self, method: &str, path: &str, token: &str) -> (u16, Value) {
+        self.send(method, path, token, &[])
+    }
+
+    /// A request carrying `body` as it stands, as a browser sends a file.
+    fn send(&self, method: &str, path: &str, token: &str, body: &[u8]) -> (u16, Value) {
         let mut stream = TcpStream::connect(("127.0.0.1", self.port)).unwrap();
+        let kind = if body.is_empty() {
+            String::new()
+        } else {
+            "Content-Type: application/zip\r\n".to_string()
+        };
         let head = format!(
-            "{method} {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: 0\r\nAuthorization: Bearer {token}\r\n\r\n"
+            "{method} {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n{kind}Content-Length: {}\r\nAuthorization: Bearer {token}\r\n\r\n",
+            body.len()
         );
         stream.write_all(head.as_bytes()).unwrap();
+        stream.write_all(body).unwrap();
         let mut response = String::new();
         stream.read_to_string(&mut response).unwrap();
         let (headers, body) = response.split_once("\r\n\r\n").unwrap_or((&response, ""));
@@ -428,4 +442,286 @@ fn the_install_door_is_an_admin_s() {
     assert_eq!(status, 200, "{doc}");
     assert_eq!(doc["tools"][0]["version"], json!(t["version"]), "{doc}");
     server.finish();
+}
+
+/// What an audit row says it did, its details read whether they are kept
+/// as text or as a document.
+fn details(row: &Value) -> Value {
+    match &row["details"] {
+        Value::String(s) => serde_json::from_str(s).unwrap(),
+        v => v.clone(),
+    }
+}
+
+/// The releases nobody answers at, as an engine that cannot reach them
+/// meets them.
+const UNREACHABLE: (&str, &str) = ("NILS_DCM2NIIX_RELEASES", "http://127.0.0.1:9");
+
+/// Gate T31, step 15.7, at the command line: the status names the file to
+/// fetch (its name, the release's own address and its sha256), and `nils
+/// tools install dcm2niix --from FILE` installs it with nothing downloaded.
+/// The archive is held to the pinned sha256 before anything is unpacked: a
+/// wrong one is refused with the file it takes named and nothing written,
+/// as are a file that is not there and one too large to be the archive;
+/// the right one is installed as the download is, and audited as given.
+#[test]
+fn dcm2niix_installs_from_a_file_given_whole_at_the_command_line() {
+    let Some(archive) = archive_here() else {
+        eprintln!("rordenlab builds no dcm2niix for this machine; skipped");
+        return;
+    };
+    let lab = Lab::new("tools-from");
+    let files = TempDir::new("dcm2niix-given");
+    let zip = zip_of(&[("dcm2niix", STAND_IN)]);
+    let given = files.file(archive, &zip);
+    let given = given.to_str().unwrap();
+    let digest = sha256(&zip);
+
+    let listed = lab.json(&["tools", "list", "--json"], &[UNREACHABLE]);
+    let file = &listed["tools"][0]["install"]["file"];
+    assert_eq!(
+        file["door"], "POST /api/tools/dcm2niix/install-file",
+        "{listed}"
+    );
+    assert_eq!(
+        file["command"], "nils tools install dcm2niix --from FILE",
+        "{listed}"
+    );
+    assert_eq!(file["archive"], archive, "{listed}");
+    assert_eq!(
+        file["url"],
+        format!("https://github.com/rordenlab/dcm2niix/releases/download/{VERSION}/{archive}"),
+        "{listed}"
+    );
+    assert_eq!(
+        file["sha256"], listed["tools"][0]["install"]["sha256"],
+        "{listed}"
+    );
+    assert_eq!(file["sha256"].as_str().unwrap().len(), 64, "{listed}");
+    assert_eq!(file["max_bytes"], 4 << 20, "{listed}");
+    let (good, out, err) = lab.run(&["tools", "list"], &[UNREACHABLE], None);
+    assert!(good, "{err}");
+    assert!(out.contains(&format!("fetch {archive} (")), "{out}");
+    assert!(
+        out.contains("nils tools install dcm2niix --from FILE"),
+        "{out}"
+    );
+
+    // the stand-in is not the pinned build: refused before anything is
+    // unpacked, with the file it takes named
+    let (good, _, err) = lab.run(
+        &["tools", "install", "dcm2niix", "--from", given],
+        &[UNREACHABLE],
+        None,
+    );
+    assert!(!good);
+    assert!(
+        err.contains(&format!("{given} is not {archive} of dcm2niix {VERSION}")),
+        "{err}"
+    );
+    assert!(err.contains("sha256"), "{err}");
+    assert!(err.contains("nothing was unpacked or written"), "{err}");
+    assert!(lab.tools_files().is_empty(), "{:?}", lab.tools_files());
+
+    // a file that is not there, and one too large to be the archive
+    let pinned = [UNREACHABLE, ("NILS_DCM2NIIX_TEST_SHA256", digest.as_str())];
+    let nowhere = files.path().join("nowhere").join(archive);
+    let (good, _, err) = lab.run(
+        &[
+            "tools",
+            "install",
+            "dcm2niix",
+            "--from",
+            nowhere.to_str().unwrap(),
+        ],
+        &pinned,
+        None,
+    );
+    assert!(!good);
+    assert!(err.contains(nowhere.to_str().unwrap()), "{err}");
+    let big = files.file("big.zip", &vec![0u8; (4 << 20) + 1]);
+    let (good, _, err) = lab.run(
+        &[
+            "tools",
+            "install",
+            "dcm2niix",
+            "--from",
+            big.to_str().unwrap(),
+        ],
+        &pinned,
+        None,
+    );
+    assert!(!good);
+    assert!(err.contains("more than 4194304 bytes"), "{err}");
+    assert!(lab.tools_files().is_empty(), "{:?}", lab.tools_files());
+
+    // held to its own digest, as a debug build lets a test hold it: the
+    // install the download makes, from the file, with the releases out of
+    // reach
+    let done = lab.json(
+        &["tools", "install", "dcm2niix", "--from", given, "--json"],
+        &pinned,
+    );
+    assert_eq!(done["installed"], true, "{done}");
+    assert_eq!(done["source"], given, "{done}");
+    assert_eq!(done["tool"]["present"], true, "{done}");
+    assert_eq!(done["tool"]["found_by"], "tools", "{done}");
+    assert_eq!(
+        done["tool"]["path"],
+        lab.installed().display().to_string(),
+        "{done}"
+    );
+    assert!(
+        done["tool"]["version"].as_str().unwrap().contains(VERSION),
+        "{done}"
+    );
+    assert_eq!(lab.tools_files(), vec![lab.installed()]);
+    let audit = lab.json(&["audit", "list", "--action", "tool.", "--json"], &[]);
+    let rows = audit.as_array().unwrap();
+    assert_eq!(rows.len(), 1, "{audit}");
+    assert_eq!(rows[0]["action"], "tool.install", "{audit}");
+    assert_eq!(details(&rows[0])["given"], true, "{audit}");
+    assert_eq!(details(&rows[0])["source"], given, "{audit}");
+
+    // found now: a second is left alone
+    let again = lab.json(
+        &["tools", "install", "dcm2niix", "--from", given, "--json"],
+        &pinned,
+    );
+    assert_eq!(again["installed"], false, "{again}");
+    assert!(
+        again["why"].as_str().unwrap().contains("here already"),
+        "{again}"
+    );
+}
+
+/// Gate T31, step 15.7, at the door: the capabilities list the install
+/// from a file with its policy row (install:work) and name the file to
+/// fetch. The install that cannot reach the releases says so and names the
+/// file and its door. An operator is refused before the body is read; a
+/// wrong archive and one too large are refused with nothing written; a
+/// tool the engine does not install is not found; and the pinned one is
+/// installed as the download is, audited as given, and left alone after.
+#[test]
+fn the_install_from_a_file_is_an_admin_s_door() {
+    let Some(archive) = archive_here() else {
+        eprintln!("rordenlab builds no dcm2niix for this machine; skipped");
+        return;
+    };
+    let lab = Lab::new("tools-file-door");
+    let zip = zip_of(&[("dcm2niix", STAND_IN)]);
+    let digest = sha256(&zip);
+    let server = Server::start(
+        &lab,
+        8,
+        &[UNREACHABLE, ("NILS_DCM2NIIX_TEST_SHA256", digest.as_str())],
+    );
+    let (operator, admin) = ("an-operator-token-of-len", "an-admin-token-of-length");
+    let door = "/api/tools/dcm2niix/install-file";
+
+    let (status, caps) = server.request("GET", "/api/capabilities", admin);
+    assert_eq!(status, 200, "{caps}");
+    assert!(
+        caps["doors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|d| d == "POST /api/tools/dcm2niix/install-file"),
+        "{}",
+        caps["doors"]
+    );
+    assert!(
+        caps["policy"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["door"] == "POST /api/tools/dcm2niix/install-file"
+                && r["grant"] == "install:work"
+                && r["writes"] == true),
+        "{}",
+        caps["policy"]
+    );
+    let file = &caps["tools"]["dcm2niix"]["install"]["file"];
+    assert_eq!(file["archive"], archive, "{file}");
+    assert_eq!(
+        file["door"], "POST /api/tools/dcm2niix/install-file",
+        "{file}"
+    );
+
+    // the releases out of reach: the install says so, and names the file
+    // to fetch and the door that takes it
+    let (status, doc) = server.request("POST", "/api/tools/dcm2niix/install", admin);
+    assert_eq!(status, 502, "{doc}");
+    assert_eq!(doc["offline"], true, "{doc}");
+    assert_eq!(doc["file"], *file, "{doc}");
+    let error = doc["error"].as_str().unwrap();
+    assert!(error.contains("Install from a file"), "{error}");
+    assert!(error.contains("--from FILE"), "{error}");
+    assert!(lab.tools_files().is_empty(), "{:?}", lab.tools_files());
+
+    // an operator: refused before the body is read, nothing written
+    let (status, doc) = server.send("POST", door, operator, &zip);
+    assert_eq!(status, 403, "{doc}");
+    assert!(
+        doc["error"].as_str().unwrap().contains("install:work"),
+        "{doc}"
+    );
+    assert!(lab.tools_files().is_empty(), "{:?}", lab.tools_files());
+
+    // an archive that is not the pinned build: refused before anything is
+    // unpacked, with the file it takes named
+    let wrong = zip_of(&[("dcm2niix", b"#!/bin/sh\nexit 0\n")]);
+    let (status, doc) = server.send("POST", door, admin, &wrong);
+    assert_eq!(status, 422, "{doc}");
+    let error = doc["error"].as_str().unwrap();
+    assert!(
+        error.contains(&format!(
+            "the archive uploaded is not {archive} of dcm2niix {VERSION}"
+        )),
+        "{error}"
+    );
+    assert!(error.contains(&sha256(&wrong)), "{error}");
+    assert!(error.contains("nothing was unpacked or written"), "{error}");
+    assert_eq!(doc["offline"], false, "{doc}");
+    assert_eq!(doc["file"], *file, "{doc}");
+    assert!(lab.tools_files().is_empty(), "{:?}", lab.tools_files());
+
+    // larger than any archive of the pinned build
+    let (status, doc) = server.send("POST", door, admin, &vec![0u8; (4 << 20) + 1]);
+    assert_eq!(status, 413, "{doc}");
+    assert!(lab.tools_files().is_empty(), "{:?}", lab.tools_files());
+
+    // a tool the engine does not install
+    let (status, doc) = server.send("POST", "/api/tools/fsl/install-file", admin, &zip);
+    assert_eq!(status, 404, "{doc}");
+
+    // the pinned one: installed as the download is
+    let (status, doc) = server.send("POST", door, admin, &zip);
+    assert_eq!(status, 200, "{doc}");
+    assert_eq!(doc["installed"], true, "{doc}");
+    assert_eq!(doc["source"], "the archive uploaded", "{doc}");
+    assert_eq!(doc["tool"]["found_by"], "tools", "{doc}");
+    assert_eq!(
+        doc["tool"]["path"],
+        lab.installed().display().to_string(),
+        "{doc}"
+    );
+    assert_eq!(lab.tools_files(), vec![lab.installed()]);
+
+    // found now: a second is left alone
+    let (status, doc) = server.send("POST", door, admin, &zip);
+    assert_eq!(status, 200, "{doc}");
+    assert_eq!(doc["installed"], false, "{doc}");
+    server.finish();
+
+    let audit = lab.json(&["audit", "list", "--action", "tool.", "--json"], &[]);
+    let rows = audit.as_array().unwrap();
+    assert_eq!(rows.len(), 1, "{audit}");
+    assert_eq!(rows[0]["principal"], "adm@lab", "{audit}");
+    assert_eq!(details(&rows[0])["given"], true, "{audit}");
+    assert_eq!(
+        details(&rows[0])["source"],
+        "the archive uploaded",
+        "{audit}"
+    );
 }

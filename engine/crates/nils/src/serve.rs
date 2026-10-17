@@ -1875,9 +1875,16 @@ fn handle(
     // Record 42 S4: a derivative's body is a file, read by its door once
     // the caller passes and streamed into its place, never into memory.
     let upload = method == Method::Post && path == "/api/derivatives";
+    // Gate T31, step 15.7: an archive of dcm2niix given whole is bytes,
+    // read by its door once the caller holds the install's grant.
+    let tool_file = method == Method::Post
+        && matches!(
+            segments(path).as_slice(),
+            ["api", "tools", _, "install-file"]
+        );
     // A body rides on a POST and on a PUT (the selection door); reading
     // it only on a POST was why a PUT selection could carry no document.
-    if matches!(method, Method::Post | Method::Put) && !upload {
+    if matches!(method, Method::Post | Method::Put) && !upload && !tool_file {
         let _ = request.as_reader().read_to_string(&mut body);
     }
     if path == "/api/events" && method == Method::Get {
@@ -1896,6 +1903,23 @@ fn handle(
     if upload {
         let reply = match &caller {
             Ok(c) => match crate::derivatives::upload(registry, c, &query, &mut request) {
+                Ok(r) | Err(r) => r,
+            },
+            Err(_) => caller.err().expect("an error"),
+        };
+        nils_registry::actor::clear();
+        let _ = respond(request, reply);
+        return;
+    }
+    if tool_file {
+        let reply = match &caller {
+            Ok(c) => match crate::tools::install_file(
+                doors.home.dir(),
+                registry,
+                c,
+                &segments(path),
+                &mut request,
+            ) {
                 Ok(r) | Err(r) => r,
             },
             Err(_) => caller.err().expect("an error"),
@@ -5669,7 +5693,8 @@ pub(crate) fn door(method: &str, segs: &[&str]) -> (Need, Detail) {
         // 2026-10-12: what the engine runs beside itself is read on the
         // Pipelines page and the Parts page; installing it is an admin's
         ("GET", ["api", "tools"]) => (Need::AnyOf(&["install:see", "pipelines:see"]), Plain),
-        ("POST", ["api", "tools", _, "install"]) => {
+        // gate T31, step 15.7: the install from a file is the same act
+        ("POST", ["api", "tools", _, "install" | "install-file"]) => {
             (Need::One(nils_pipeline::failure::INSTALL_GRANT), Plain)
         }
         ("POST", ["api", "derivatives"]) => (Need::One("pipelines:work"), Plain),
@@ -7566,6 +7591,16 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
             "one tool",
             "Installing dcm2niix",
             "Installed dcm2niix",
+        ),
+        // gate T31, step 15.7: the same install from an archive given whole
+        row(
+            crate::tools::FILE_DOOR,
+            true,
+            true,
+            "bounded",
+            "one tool",
+            "Installing dcm2niix from a file",
+            "Installed dcm2niix from a file",
         ),
         row(
             "GET /api/events",

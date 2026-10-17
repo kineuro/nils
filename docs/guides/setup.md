@@ -485,8 +485,17 @@ nils tools install dcm2niix
 which downloads the same pinned build into the registry's `tools/` folder,
 checks it and asks its version, and is audited. Where the engine cannot
 reach GitHub, it says so and gives the way by hand: the archive, its sha256,
-and where the binary goes. `nils tools list` says whether dcm2niix is here,
-where, which build, and how it was found.
+and where the binary goes. Fetch that archive on a machine that reaches
+GitHub and give it to the engine, from the desk (Install from a file) or
+with:
+
+```
+nils tools install dcm2niix --from dcm2niix_lnx.zip
+```
+
+which checks it against the pinned sha256 before anything is unpacked and
+installs it as the download does. `nils tools list` says whether dcm2niix is
+here, where, which build, how it was found, and which archive to fetch.
 
 An update takes the pinned build again when a newer `nils` pins another, a
 repair takes it again when the one setup placed is gone, and an uninstall
