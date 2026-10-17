@@ -3085,3 +3085,306 @@ fn a_found_count_that_stopped_short_says_so_on_postgres_too() {
     found_counts(Some((dsn.clone(), schema.to_string())));
     drop();
 }
+
+/// The bytes of every file under a folder.
+fn bytes_under(dir: &std::path::Path) -> i64 {
+    std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| {
+            let e = e.unwrap();
+            let kind = e.file_type().unwrap();
+            if kind.is_dir() {
+                bytes_under(&e.path())
+            } else {
+                e.metadata().unwrap().len() as i64
+            }
+        })
+        .sum()
+}
+
+/// 2026-10-17: a pseudonymise run of a dataset of 30 million files ended
+/// with nothing held, and its card still said nothing was pseudonymised:
+/// the step counted the copy from the probe, which is bounded, and the
+/// run's own count of the trees after it stopped short of both (part of the
+/// originals, none of the copy). The pseudonymised step, the found step and
+/// the sources door's trees count from the runs: the copy the whole run
+/// wrote and what a run of its held files wrote after it, the originals the
+/// whole run saw with their bytes, and what waits leaving out the held
+/// files and the refused ones, which are final. A cancelled whole run
+/// counts what it decided, and what waits after it is no whole count.
+fn copy_counts(pg: Option<(String, String)>) {
+    use nils_registry::schema::Type;
+    use nils_registry::store::Param;
+    let home = Home {
+        dir: TempDir::new("data-page-copy"),
+        pg,
+    };
+    let (good, _, err) = home.run(&["key", "add", "k"], Some("a data page test key\n"));
+    assert!(good, "{err}");
+    match &home.pg {
+        Some((dsn, schema)) => {
+            home.ok(&[
+                "init",
+                "--backend",
+                "postgres",
+                "--dsn",
+                dsn,
+                "--schema",
+                schema,
+                "--key",
+                "k",
+            ]);
+        }
+        None => {
+            home.ok(&["init", "--key", "k"]);
+        }
+    }
+    // three images of two people and a note no pseudonymiser reads, held
+    // for want of a map
+    let ids = TempDir::new("data-page-copy-ids");
+    original_file(&ids, "PAT-C1", "1.2.17.C", "1.2.17.C.1.1", None);
+    original_file(&ids, "PAT-C1", "1.2.17.C", "1.2.17.C.1.2", None);
+    original_file(&ids, "PAT-D2", "1.2.17.D", "1.2.17.D.1.1", None);
+    ids.file(
+        "PAT-D2/notes.txt",
+        b"not a scan, refused by the pseudonymiser",
+    );
+    home.ok(&[
+        "place",
+        "add",
+        "copied",
+        ids.path().to_str().unwrap(),
+        "--role",
+        "source",
+        "--move-into",
+        "originals",
+        "--confirm-move",
+        "--unmapped",
+        "hold",
+    ]);
+    let bytes = bytes_under(&ids.path().join("derivatives/dcm-original"));
+    let summary = |home: &Home| -> (Value, Value, Value) {
+        let server = Worked::serve(home, false);
+        let s = server.get("/api/datasets/copied/summary", READS);
+        let sources = server.get("/api/sources", READS);
+        let source = sources["sources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["name"] == "copied")
+            .cloned()
+            .unwrap_or_else(|| panic!("{sources}"));
+        (step(&s, "found"), step(&s, "pseudonymised"), source)
+    };
+
+    // a whole run holds every image and refuses the note: nothing waits,
+    // the held files are said apart and the refused one is final
+    home.ok(&["pseudonymize", "@copied"]);
+    let (found, copy, _) = summary(&home);
+    assert_eq!(found["files"], 4, "{found}");
+    assert_eq!(found["counted_by"], "pseudonymise", "{found}");
+    assert_eq!(copy["files"], 0, "{copy}");
+    assert_eq!(copy["held"], 3, "{copy}");
+    assert_eq!(copy["waiting"], 0, "{copy}");
+    assert_eq!(copy["waiting_partial"], false, "{copy}");
+    assert_eq!(copy["state"], "waiting", "{copy}");
+
+    // coded anyway, a run of the held files writes them
+    {
+        let mut store = home.store();
+        let files = store.qualified("pseudonym_file");
+        store
+            .execute(
+                &format!("UPDATE {files} SET code_anyway = 1 WHERE state = 'held'"),
+                &[],
+            )
+            .unwrap();
+    }
+    home.ok(&["pseudonymize", "@copied", "--held"]);
+    // and the probe stops short of both trees, as on a large dataset: two
+    // seconds reached part of the originals and none of the copy
+    {
+        let mut store = home.store();
+        let place = store.qualified("place");
+        let mut doc: Value =
+            serde_json::from_str(&probed_of(&mut store, &place, "copied")).unwrap();
+        assert_eq!(doc["trees"]["originals"]["files"], 4, "{doc}");
+        assert_eq!(doc["trees"]["anon"]["files"], 3, "{doc}");
+        doc["trees"]["originals"] = json!({"files": 2, "bytes": 100, "partial": true});
+        doc["trees"]["anon"] = json!({"files": 0, "bytes": 0, "partial": true});
+        let d = store.dialect();
+        store
+            .execute(
+                &format!(
+                    "UPDATE {place} SET probed = {} WHERE name = 'copied'",
+                    d.param(1, Type::Json)
+                ),
+                &[Param::from(doc.to_string())],
+            )
+            .unwrap();
+    }
+    let (found, copy, source) = summary(&home);
+    // the found step counts what the whole run saw, never the run of the
+    // held files, with every file's bytes
+    assert_eq!(found["files"], 4, "{found}");
+    assert_eq!(found["bytes"], bytes, "{found}");
+    assert_eq!(found["partial"], false, "{found}");
+    assert_eq!(found["counted_by"], "pseudonymise", "{found}");
+    // the copy is what the two runs wrote, and the step is done
+    assert_eq!(copy["files"], 3, "{copy}");
+    assert_eq!(copy["held"], 0, "{copy}");
+    assert_eq!(copy["waiting"], 0, "{copy}");
+    assert_eq!(copy["partial"], false, "{copy}");
+    assert_eq!(copy["waiting_partial"], false, "{copy}");
+    assert_eq!(copy["state"], "done", "{copy}");
+    // the sources door's trees say the same, and the place keeps its probe
+    for trees in [&source["trees"], &source["dataset"]["trees"]] {
+        assert_eq!(trees["originals"]["files"], 4, "{source}");
+        assert_eq!(trees["originals"]["bytes"], bytes, "{source}");
+        assert_eq!(trees["originals"]["partial"], false, "{source}");
+        assert_eq!(trees["anon"]["files"], 3, "{source}");
+        assert_eq!(trees["anon"]["bytes"], Value::Null, "{source}");
+        assert_eq!(trees["anon"]["partial"], false, "{source}");
+    }
+    assert_eq!(
+        source["probed"]["trees"]["originals"]["files"], 2,
+        "{source}"
+    );
+    assert_eq!(source["probed"]["trees"]["anon"]["files"], 0, "{source}");
+
+    // the whole run cancelled: what it decided counts, neither the copy nor
+    // what waits after it is a whole count, and the found step is the
+    // probe's again
+    let state_of = |home: &Home, id: i64, job_id: i64, state: &str| {
+        let mut store = home.store();
+        let (batch, job) = (store.qualified("ingest_batch"), store.qualified("job"));
+        store
+            .execute(
+                &format!("UPDATE {batch} SET state = '{state}' WHERE id = {id}"),
+                &[],
+            )
+            .unwrap();
+        store
+            .execute(
+                &format!("UPDATE {job} SET state = '{state}' WHERE id = {job_id}"),
+                &[],
+            )
+            .unwrap();
+    };
+    // the pseudonymise batches, newest first, with their jobs
+    let batches = |home: &Home| -> Vec<(i64, i64)> {
+        let mut store = home.store();
+        let batch = store.qualified("ingest_batch");
+        store
+            .query(
+                &format!(
+                    "SELECT id, job_id FROM {batch} WHERE kind = 'pseudonymize' ORDER BY id DESC"
+                ),
+                &[],
+            )
+            .unwrap()
+            .iter()
+            .map(|r| (r.int(0).unwrap(), r.int(1).unwrap()))
+            .collect()
+    };
+    let (whole, whole_job) = *batches(&home).last().unwrap();
+    state_of(&home, whole, whole_job, "cancelled");
+    let (found, copy, source) = summary(&home);
+    assert_eq!(found["files"], 2, "{found}");
+    assert_eq!(found["partial"], true, "{found}");
+    assert_eq!(found["counted_by"], "probe", "{found}");
+    assert_eq!(copy["files"], 3, "{copy}");
+    assert_eq!(copy["partial"], true, "{copy}");
+    assert_eq!(copy["waiting"], 0, "{copy}");
+    assert_eq!(copy["waiting_partial"], true, "{copy}");
+    assert_eq!(copy["state"], "waiting", "{copy}");
+    let originals = &source["trees"]["originals"];
+    assert_eq!(originals["files"], 4, "{source}");
+    assert_eq!(originals["bytes"], bytes, "{source}");
+    assert_eq!(originals["partial"], true, "{source}");
+    assert_eq!(source["trees"]["anon"]["files"], 3, "{source}");
+    assert_eq!(source["trees"]["anon"]["partial"], true, "{source}");
+
+    // the whole run done again, and a later whole run cancelled after it
+    // had decided two files: the copy is at least what the run done and the
+    // run of the held files after it wrote, and still a lower bound
+    state_of(&home, whole, whole_job, "done");
+    home.ok(&["pseudonymize", "@copied"]);
+    let (late, late_job) = batches(&home)[0];
+    state_of(&home, late, late_job, "cancelled");
+    {
+        let mut store = home.store();
+        let batch = store.qualified("ingest_batch");
+        let t = nils_registry::schema::table("ingest_batch");
+        let counts = store.dialect().text_of(t.column("counts").expect("counts"));
+        let mut report: Value = serde_json::from_str(
+            store
+                .query(
+                    &format!("SELECT {counts} FROM {batch} WHERE id = {late}"),
+                    &[],
+                )
+                .unwrap()[0]
+                .text(0)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(report["files"]["unchanged"], 3, "{report}");
+        assert_eq!(report["files"]["refused"], 1, "{report}");
+        report["files"]["seen"] = json!(2);
+        report["files"]["unchanged"] = json!(1);
+        let d = store.dialect();
+        store
+            .execute(
+                &format!(
+                    "UPDATE {batch} SET counts = {} WHERE id = {late}",
+                    d.param(1, Type::Json)
+                ),
+                &[Param::from(report.to_string())],
+            )
+            .unwrap();
+    }
+    let (found, copy, source) = summary(&home);
+    assert_eq!(found["files"], 4, "{found}");
+    assert_eq!(found["bytes"], bytes, "{found}");
+    assert_eq!(found["counted_by"], "pseudonymise", "{found}");
+    assert_eq!(copy["files"], 3, "{copy}");
+    assert_eq!(copy["partial"], true, "{copy}");
+    assert_eq!(copy["waiting"], 0, "{copy}");
+    assert_eq!(copy["waiting_partial"], true, "{copy}");
+    assert_eq!(copy["state"], "waiting", "{copy}");
+    for trees in [&source["trees"], &source["dataset"]["trees"]] {
+        assert_eq!(trees["originals"]["files"], 4, "{source}");
+        assert_eq!(trees["originals"]["bytes"], bytes, "{source}");
+        assert_eq!(trees["originals"]["partial"], true, "{source}");
+        assert_eq!(trees["anon"]["files"], 3, "{source}");
+        assert_eq!(trees["anon"]["partial"], true, "{source}");
+    }
+}
+
+#[test]
+fn the_copy_is_counted_from_the_runs_where_the_probe_stopped_short() {
+    copy_counts(None);
+}
+
+#[test]
+fn the_copy_is_counted_from_the_runs_on_postgres_too() {
+    let Some(dsn) = std::env::var("NILS_TEST_POSTGRES_DSN")
+        .ok()
+        .filter(|d| !d.is_empty())
+    else {
+        eprintln!("NILS_TEST_POSTGRES_DSN is not set; the Postgres half is skipped");
+        return;
+    };
+    let schema = "nils_data_page_copy";
+    let drop = || {
+        let mut store = Store::connect_postgres(&dsn, schema).expect("connect");
+        store
+            .batch(&format!(
+                "DROP SCHEMA IF EXISTS {schema} CASCADE; DROP SCHEMA IF EXISTS {schema}_linkage CASCADE"
+            ))
+            .expect("drop");
+    };
+    drop();
+    copy_counts(Some((dsn.clone(), schema.to_string())));
+    drop();
+}
