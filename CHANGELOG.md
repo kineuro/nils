@@ -4,6 +4,10 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Changed
+
+- A release builds only what changed. A model's image (body part, post-contrast, System 1) is built only when its package's files changed since the release that last shipped it, read from git against that release's tag; a change to the release workflow or to the descriptors script no longer rebuilds every image (1.0.0-alpha.86 rebuilt the body-part and System 1 images for a workflow change, with new digests for the same files, so an install that took its descriptors pulled the same models again). An unchanged image is taken by the digest the release's `IMAGES` names, and the release's notes say for each image whether it was built or taken, from which release, with its digest; `IMAGES` keeps its form. A release is refused on a commit no ci run passed, on main or on the pull request it is the squash merge of with the same tree, before anything is built or pushed; it takes the six binaries from whichever of those runs still keeps them (seven days) and builds them only where none does.
+
 ## [1.0.0-beta.1] - 2026-10-17
 
 The first beta (record 55, ruling 31 (g)).
