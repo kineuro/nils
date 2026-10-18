@@ -76,10 +76,13 @@ pub enum Cause {
     Input,
     /// The pipeline's own error, and anything not known.
     Pipeline,
+    /// A tool's terms not accepted, or its site licence file not in place
+    /// (record 57 P5, Wave 7b section 6.5).
+    Licence,
 }
 
 impl Cause {
-    pub const ALL: [Cause; 12] = [
+    pub const ALL: [Cause; 13] = [
         Cause::Dcm2niix,
         Cause::Runtime,
         Cause::Subuid,
@@ -92,13 +95,17 @@ impl Cause {
         Cause::Time,
         Cause::Input,
         Cause::Pipeline,
+        Cause::Licence,
     ];
 
     pub fn kind(self) -> Kind {
         match self {
-            Cause::Dcm2niix | Cause::Runtime | Cause::Subuid | Cause::Image | Cause::GpuDriver => {
-                Kind::Dependency
-            }
+            Cause::Dcm2niix
+            | Cause::Runtime
+            | Cause::Subuid
+            | Cause::Image
+            | Cause::GpuDriver
+            | Cause::Licence => Kind::Dependency,
             Cause::Memory | Cause::Disk | Cause::GpuMemory | Cause::Lane | Cause::Time => {
                 Kind::Resource
             }
@@ -121,6 +128,7 @@ impl Cause {
             Cause::Time => "time",
             Cause::Input => "input",
             Cause::Pipeline => "pipeline",
+            Cause::Licence => "licence",
         }
     }
 
@@ -129,8 +137,15 @@ impl Cause {
         match self {
             Cause::Dcm2niix => {
                 "dcm2niix is not installed where the engine can find it: an admin installs it \
-                 with nils tools install dcm2niix (the desk offers it), nils setup --update \
-                 installs it beside nils, or a run names one with --dcm2niix PATH"
+                 with nils software install dcm2niix (the desk offers it; nils tools install \
+                 dcm2niix is the same for one more release), nils setup --update installs it \
+                 beside nils, or a run names one with --dcm2niix PATH"
+            }
+            Cause::Licence => {
+                "the tool's terms need an administrator's acceptance, or its site licence file is \
+                 not in the software place: an admin accepts them with nils software accept \
+                 <app>@<version> (--file PATH places the licence file; the desk's Settings > \
+                 Software offers both)"
             }
             Cause::Runtime => {
                 "the container runtime is missing or failed on its own: install rootless podman, \
@@ -220,6 +235,13 @@ impl Cause {
                 "tool": "dcm2niix",
                 "door": DCM2NIIX_INSTALL_DOOR,
                 "command": DCM2NIIX_INSTALL_COMMAND,
+                "alias": DCM2NIIX_INSTALL_ALIAS,
+                "software_door": SOFTWARE_INSTALL_DOOR,
+                "grant": INSTALL_GRANT,
+            }),
+            Cause::Licence => json!({
+                "door": "POST /api/software/{app}/{version}/accept",
+                "command": "nils software accept <app>@<version>",
                 "grant": INSTALL_GRANT,
             }),
             _ => Value::Null,
@@ -243,9 +265,16 @@ impl Cause {
     }
 }
 
-/// The door that installs dcm2niix, and the command line's.
+/// The door that installs dcm2niix, and the command line's. The converter
+/// is one package of the software place (record 57 P5): the command is
+/// `nils software install dcm2niix`, and `nils tools install dcm2niix`
+/// stays as its alias for one release; the door stays as it is beside
+/// `POST /api/software/install` for the same release.
 pub const DCM2NIIX_INSTALL_DOOR: &str = "POST /api/tools/dcm2niix/install";
-pub const DCM2NIIX_INSTALL_COMMAND: &str = "nils tools install dcm2niix";
+pub const DCM2NIIX_INSTALL_COMMAND: &str = "nils software install dcm2niix";
+pub const DCM2NIIX_INSTALL_ALIAS: &str = "nils tools install dcm2niix";
+/// The software place's install door, which takes `{app, version}`.
+pub const SOFTWARE_INSTALL_DOOR: &str = "POST /api/software/install";
 /// The grant the install needs: an admin's.
 pub const INSTALL_GRANT: &str = "install:work";
 
@@ -523,7 +552,8 @@ mod tests {
         assert_eq!(doc["kind"], "dependency");
         assert_eq!(doc["cause"], "dcm2niix");
         assert_eq!(doc["fix"]["door"], "POST /api/tools/dcm2niix/install");
-        assert_eq!(doc["fix"]["command"], "nils tools install dcm2niix");
+        assert_eq!(doc["fix"]["command"], "nils software install dcm2niix");
+        assert_eq!(doc["fix"]["alias"], "nils tools install dcm2niix");
         assert_eq!(doc["fix"]["grant"], "install:work");
         assert!(
             doc["advice"]

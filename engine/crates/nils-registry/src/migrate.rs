@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 107;
+pub const SCHEMA_VERSION: i64 = 108;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -482,6 +482,10 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 107,
         apply: a_verify_campaign_plants_values,
     },
+    Migration {
+        version: 108,
+        apply: a_tool_s_terms_are_accepted_as_events,
+    },
 ];
 
 /// Record 58 P1 (Wave 7b spec §12): a verify campaign's planting
@@ -494,6 +498,17 @@ fn a_verify_campaign_plants_values(store: &mut Store, kind: Kind) -> Result<(), 
     }
     add_tables(store, kind, &["campaign_planted", "principal_name"])?;
     add_columns(store, "campaign", &["planted"])
+
+/// Record 57 P5 (Wave 7b, section 6.5): a tool's terms are accepted by an
+/// administrator once per site, and the acceptance is an event the
+/// registry keeps (who, when, which terms, the licence file's sha256; never
+/// its content), which a run of the tool is refused without. The table is
+/// added; nothing else changes.
+fn a_tool_s_terms_are_accepted_as_events(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_tables(store, kind, &["software_acceptance"])
 }
 
 /// The Data page on a dataset of 30 million files (2026-10-17): its summary
@@ -4137,7 +4152,7 @@ mod column_migration {
         assert_eq!(count(&mut store), 0);
         assert_eq!(
             migrate(&mut store, Kind::Linkage).unwrap(),
-            [104, 105, 106, 107]
+            [104, 105, 106, 107, 108]
         );
         assert_eq!(count(&mut store), 1);
         let t = crate::linkage::id_type_named(&mut store, "reserve-number")

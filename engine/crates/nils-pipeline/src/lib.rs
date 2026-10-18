@@ -18,6 +18,9 @@
 //!   GPU lease read from the card (record 49 A1, A2).
 //! - [`secrets`]: secret inputs, read at run time and swept from whatever a
 //!   container left (record 49 R3).
+//! - [`software`]: the software place (record 57 P5): its layout, manifests,
+//!   wrappers and modules, the fingerprint of an install, and the words a
+//!   runtime is given to pull an image by its digest.
 //! - [`table`]: a table output read into rows of its declared columns
 //!   (record 49 A3).
 //! - [`failure`]: what a failure was, its kind and what to do (2026-10-12).
@@ -32,6 +35,7 @@ pub mod lane;
 pub mod results;
 pub mod runtime;
 pub mod secrets;
+pub mod software;
 pub mod table;
 pub mod words;
 
