@@ -2,21 +2,30 @@ name: release
 # On a version tag: the binaries for the six targets, checked to carry the tag's
 # version, published as a GitHub release with the packs, their checksums, and the
 # matching section of CHANGELOG.md as the notes, in the form Bifrost uses
-# (docs/decisions/15, R4). A tag goes on a commit once ci passed on main, or once ci
-# passed on the pull request it is the squash merge of, with the same tree
-# (scripts/release-pr-head.sh). Either run built the six binaries with
-# engine-build.yml from this tree, so the release takes them from it, main's run
-# first; where no such run kept them, they are built here the same way.
+# (docs/decisions/15, R4). A release builds only what changed:
 #
-# A model's image is built from the tag only when its package's files changed since
-# the release that last shipped it (record 55 A5); else that release's image is
-# taken, by the digest its IMAGES names, once the registry says anyone may pull it
-# (scripts/release-image-reuse.sh). The release ships the descriptors of its model
-# pipelines, each naming its image by digest (pipelines.tar.gz, with IMAGES),
-# checked by the tag's own binary as a catalog takes them, and its notes say for
-# each image whether it was built or taken, and from which release. The release
-# waits for both, so a tag's descriptors never name an image older than its
-# package's files.
+# - The gate. A tag goes on a commit whose checks passed. The run that proves it is
+#   main's own ci run on the commit, or the ci run of the pull request the commit
+#   is the squash merge of, where the merge's tree is byte for byte the pull
+#   request head's tree and main's tip before the merge is in that head, so that
+#   run tested and built exactly this tree (scripts/release-pr-head.sh). ci.yml
+#   runs the same jobs for both, so either way every check main requires is green
+#   on some run of the same tree; the rule is never weaker than that. Where
+#   neither run passed, the release stops at its first job and nothing is built,
+#   pushed or published (scripts/release-ci-run.sh); once main's run on the commit
+#   has passed, the release run is started again.
+# - The binaries. Either run built the six with engine-build.yml from this tree, so
+#   the release takes them from the run that still keeps them (seven days), main's
+#   first; where none does, they are built here the same way.
+# - The model images (record 55 A5). A model's image is built from the tag only
+#   when its package's files changed since the release that last shipped it; else
+#   that release's image is taken, by the digest its IMAGES names, once the
+#   registry says anyone may pull it (scripts/release-image-reuse.sh). The release
+#   ships the descriptors of its model pipelines, each naming its image by digest
+#   (pipelines.tar.gz, with IMAGES), checked by the tag's own binary as a catalog
+#   takes them, and its notes say for each image whether it was built or taken,
+#   and from which release. The release waits for both, so a tag's descriptors
+#   never name an image older than its package's files.
 on:
   push:
     tags: ['v*']
@@ -35,25 +44,16 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - id: find
+        # the gate, and the run whose binaries the release takes (scripts/release-ci-run.sh):
+        # `passed` is a ci run that passed on this tree, main's or the pull request's with the
+        # same tree, and the step fails where there is none; `run` is the one of them that still
+        # keeps the six binaries, empty where none does
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          kept() { gh api "repos/$GITHUB_REPOSITORY/actions/runs/$1/artifacts?per_page=100" --jq '[.artifacts[] | select(.expired | not) | select(.name | startswith("nils-"))] | length'; }
-          run=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$GITHUB_SHA&branch=main&event=push&status=success" --jq '.workflow_runs[0].id // empty')
-          if [ -n "$run" ] && [ "$(kept "$run")" -lt 6 ]; then run=""; fi
-          if [ -n "$run" ]; then
-            echo "the binaries ci run $run built on main"
-          else
-            # main's run has not finished (the tag went on the pull request's checks) or kept
-            # nothing: the pull request's ci run built the same tree
-            # the script returns only that pull request's own run, made against main
-            pr="" head=""
-            read -r pr head run < <(scripts/release-pr-head.sh "$GITHUB_SHA") || true
-            if [ -n "$run" ] && [ "$(kept "$run")" -lt 6 ]; then run=""; fi
-            if [ -n "$run" ]; then echo "the binaries pull request #$pr's ci run $run built from this tree"; fi
-          fi
-          echo "run=$run" >> "$GITHUB_OUTPUT"
-          if [ -z "$run" ]; then echo "no ci run kept this tree's binaries, so they are built here"; fi
+          found=$(scripts/release-ci-run.sh "$GITHUB_SHA")
+          echo "$found" >> "$GITHUB_OUTPUT"
+          echo "the gate: $(echo "$found" | tr '\n' ' ')" >> "$GITHUB_STEP_SUMMARY"
 
   build:
     needs: built
@@ -77,8 +77,9 @@ jobs:
     # (scripts/release-image-reuse.sh). Otherwise the job takes that release's
     # image, by the digest its IMAGES names, after the registry says anyone may
     # pull it, and tags it with this release too; where any of that fails, it
-    # builds.
+    # builds. Nothing is built or pushed for a tag the gate refused.
     name: model image ${{ matrix.image }}
+    needs: built
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
