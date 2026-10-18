@@ -49,12 +49,22 @@ pub const DEFAULT_SALT: &str = "nils-review";
 
 /// What a campaign's answers are for. `decide` (the default) closes into
 /// decisions as before; `train` and `measure` are read blind first always;
-/// `audit` is read blind and its answers never train.
-pub const PURPOSES: [&str; 4] = ["decide", "train", "measure", "audit"];
+/// `audit` is read blind and its answers never train. Record 58 P1 (Wave 7b
+/// spec §12): `verify` shows each item's proposal first, guarded by planted
+/// values ([`crate::verify`]); its answers are never blind and never train.
+/// The first four keep their behaviour exactly (spec §4.5).
+pub const PURPOSES: [&str; 5] = ["decide", "train", "measure", "audit", "verify"];
 
 /// Whether a purpose is read blind first always.
 pub fn blind_purpose(purpose: &str) -> bool {
     matches!(purpose, "train" | "measure" | "audit")
+}
+
+/// Whether a purpose's answers never become training labels, whatever
+/// else holds: an audit's (record 55 D7) and a verify campaign's (record
+/// 58 P1), which are given with the proposal in view.
+pub fn never_trains(purpose: &str) -> bool {
+    matches!(purpose, "audit" | crate::verify::PURPOSE)
 }
 
 /// Whether a review question of this kind is one a mode is drawn for: a
@@ -468,6 +478,11 @@ pub fn campaign_answer_blind(
     principal: &str,
     purpose: &str,
 ) -> Result<bool, StoreError> {
+    // record 58 P1: a verify answer is given with the proposal in view,
+    // whatever the campaign suggests, and is never blind
+    if purpose == crate::verify::PURPOSE {
+        return Ok(false);
+    }
     if !shows_suggestions {
         return Ok(true);
     }
@@ -486,6 +501,17 @@ pub fn mark_answer(store: &mut Store, answer: i64, blind: bool) -> Result<(), St
         "id",
         answer,
     )?;
+    Ok(())
+}
+
+/// Record 58 P1: mark the decisions a verify campaign's close wrote as not
+/// given blind, so the labels of the decisions in force leave them out as
+/// they leave out a queue decision given after the suggestions showed. The
+/// seconds and the mode are left as they are.
+pub fn mark_decisions_not_blind(store: &mut Store, decisions: &[i64]) -> Result<(), StoreError> {
+    for id in decisions {
+        store.update_by_id(table("decision"), &[("blind", Param::Int(0))], "id", *id)?;
+    }
     Ok(())
 }
 
@@ -597,5 +623,46 @@ mod tests {
         assert!(blind_purpose("measure"));
         assert!(blind_purpose("audit"));
         assert!(!blind_purpose("decide"));
+    }
+
+    /// Wave 7b spec §4.5: the four purposes of Wave 7a keep their
+    /// behaviour exactly, and verify is added beside them: never blind
+    /// first, never training.
+    #[test]
+    fn the_four_purposes_of_wave_7a_are_unchanged_and_verify_is_beside_them() {
+        assert_eq!(&PURPOSES[..4], ["decide", "train", "measure", "audit"]);
+        assert_eq!(PURPOSES[4], crate::verify::PURPOSE);
+        for (purpose, blind, trains) in [
+            ("decide", false, true),
+            ("train", true, true),
+            ("measure", true, true),
+            ("audit", true, false),
+            ("verify", false, false),
+        ] {
+            assert_eq!(blind_purpose(purpose), blind, "{purpose}");
+            assert_eq!(!never_trains(purpose), trains, "{purpose}");
+        }
+        let mut store = crate::store::Store::sqlite_in_memory().unwrap();
+        crate::migrate::migrate(&mut store, crate::migrate::Kind::Registry).unwrap();
+        // a routine campaign's answer beside a suggestion is not blind, a
+        // campaign that suggests nothing is blind whatever its purpose, a
+        // blind-first purpose is blind until the reveal, and verify never
+        for (purpose, shows, blind) in [
+            ("decide", true, false),
+            ("decide", false, true),
+            ("train", true, true),
+            ("measure", true, true),
+            ("audit", false, true),
+            ("verify", true, false),
+            ("verify", false, false),
+        ] {
+            assert_eq!(
+                campaign_answer_blind(&mut store, shows, 1, "anna@lab", purpose).unwrap(),
+                blind,
+                "{purpose} shows {shows}"
+            );
+        }
+        campaign_reveal(&mut store, 1, 1, "anna@lab").unwrap();
+        assert!(!campaign_answer_blind(&mut store, true, 1, "anna@lab", "measure").unwrap());
     }
 }

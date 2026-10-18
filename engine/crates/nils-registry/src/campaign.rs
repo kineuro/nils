@@ -3837,6 +3837,11 @@ pub struct Answer {
     /// Record 48, the reference read by judges: on an A/B item, what the
     /// answer chose on each axis ([`crate::ab::choices`]).
     pub choices: Option<Value>,
+    /// Record 55 D6 (spec §11.4): whether the answer was given blind,
+    /// before the rater was shown any suggestion of the item; none on an
+    /// answer from before the mark. Record 58 P1: false on every answer of
+    /// a verify campaign.
+    pub blind: Option<bool>,
 }
 
 impl Answer {
@@ -3851,12 +3856,12 @@ impl Answer {
             "changed": self.changed, "via": self.via, "unsure": self.unsure,
             "derived": self.derived, "suggested_by": self.suggested_by,
             "supersedes_id": self.supersedes_id, "superseded_by": self.superseded_by,
-            "choices": self.choices,
+            "choices": self.choices, "blind": self.blind,
         })
     }
 }
 
-const ANSWER_COLUMNS: [&str; 25] = [
+const ANSWER_COLUMNS: [&str; 26] = [
     "id",
     "campaign_id",
     "item_id",
@@ -3882,6 +3887,7 @@ const ANSWER_COLUMNS: [&str; 25] = [
     "supersedes_id",
     "superseded_by",
     "choices",
+    "blind",
 ];
 
 fn answer_of(r: &Row) -> Result<Answer, StoreError> {
@@ -3918,6 +3924,7 @@ fn answer_of(r: &Row) -> Result<Answer, StoreError> {
             let c = json_at(r, 24)?;
             (!c.is_null()).then_some(c)
         },
+        blind: r.opt_int(25)?.map(|b| b != 0),
     })
 }
 
@@ -6493,7 +6500,16 @@ pub fn close(registry: &mut Registry, cl: &Close<'_>, now: &str) -> Result<Close
         return Err(refused(format!("campaign {} is {now_is}", c.name)));
     }
     match close_items(registry, cl, &c, &question, now) {
-        Ok(out) => Ok(out),
+        Ok(out) => {
+            // record 58 P1 (Wave 7b spec §12.4): a verify campaign's
+            // decisions were given with the proposal in view and never
+            // train; its planted list is opened by the close
+            if crate::blind::purpose(registry.store(), c.id)? == crate::verify::PURPOSE {
+                crate::blind::mark_decisions_not_blind(registry.store(), &out.decisions)?;
+                crate::verify::open(registry.store(), c.id, now)?;
+            }
+            Ok(out)
+        }
         Err(e) => {
             // a close that fails part way opens the campaign again; a later
             // close of a closed check leaves it closed
@@ -6526,6 +6542,9 @@ fn close_items(
     now: &str,
 ) -> Result<Closed, Error> {
     let staged = c.closes_into == "stage";
+    // record 58 P1 (Wave 7b spec §12.4): in a verify campaign the answer
+    // is a decision with the reader as its author
+    let verifying = crate::blind::purpose(registry.store(), c.id)? == crate::verify::PURPOSE;
     let mut out = Closed::default();
     let mut staged_ones: Vec<i64> = Vec::new();
     let all = items(registry.store(), c.id)?;
@@ -6597,6 +6616,17 @@ fn close_items(
             && behind
                 .iter()
                 .all(|a| a.author_kind == "model" && a.model_id.is_some());
+        // Record 58 P1: a verify campaign's decision is the reader's own,
+        // where one person's answers are all that stand behind it.
+        let one_reader = verifying
+            && !behind.is_empty()
+            && behind.iter().all(|a| a.author_kind == "person")
+            && behind
+                .iter()
+                .map(|a| a.principal.as_str())
+                .collect::<BTreeSet<_>>()
+                .len()
+                == 1;
         let (who, kind, model) = match adjudicator {
             Some(a) => (a.principal.clone(), a.author_kind.clone(), a.model_id),
             None if one_model => (
@@ -6604,6 +6634,7 @@ fn close_items(
                 "model".to_string(),
                 models.first().copied(),
             ),
+            None if one_reader => (behind[0].principal.clone(), "person".to_string(), None),
             None => (cl.who.to_string(), cl.author_kind.to_string(), cl.model),
         };
         // R6, which the ruling on wave 42 extends to agents: a model's or an
