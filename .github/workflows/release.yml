@@ -13,7 +13,8 @@ name: release
 #   on some run of the same tree; the rule is never weaker than that. Where
 #   neither run passed, the release stops at its first job and nothing is built,
 #   pushed or published (scripts/release-ci-run.sh); once main's run on the commit
-#   has passed, the release run is started again.
+#   has passed, whoever tagged starts the release run again (Re-run all jobs, or
+#   `gh run rerun <id>`); nothing here re-runs it.
 # - The binaries. Either run built the six with engine-build.yml from this tree, so
 #   the release takes them from the run that still keeps them (seven days), main's
 #   first; where none does, they are built here the same way.

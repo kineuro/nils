@@ -15,7 +15,7 @@
 # check main requires is green on some run of the same tree either way; the rule is never
 # weaker than that. Where neither passed, the script fails and the release with it: nothing is
 # built, pushed or published from a tree no ci run passed. Once main's run on the commit has
-# passed, the release run is started again. The binaries come from the first of those runs
+# passed, whoever tagged starts the release run again (`gh run rerun <id>`); nothing re-runs it. The binaries come from the first of those runs
 # that still keeps all six (an artifact lives seven days), main's first; `run` is empty where
 # none does, and the release builds them. Needs GH_TOKEN and GITHUB_REPOSITORY.
 set -euo pipefail
