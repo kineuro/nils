@@ -3517,12 +3517,34 @@ fn apptainer_runs_a_built_image_and_a_gpu_unit_waits_for_its_lease() {
         .collect();
     let builds: Vec<&Vec<String>> = calls.iter().filter(|c| c[0] == "build").collect();
     assert_eq!(builds.len(), 1, "{calls:?}");
-    let sif = lab
-        .work
-        .path()
-        .join("images")
-        .join(format!("{}.sif", "c".repeat(64)));
-    assert!(sif.is_file());
+    // record 57 P5: built into the software place as an install,
+    // <working>/software/<app>/<version>/image, with its manifest
+    let install = lab.work.path().join("software").join("gpu-slow").join("1");
+    let sif = install.join("image");
+    assert!(sif.is_file(), "{}", install.display());
+    let manifest: Value =
+        serde_json::from_str(&std::fs::read_to_string(install.join("manifest.json")).unwrap())
+            .unwrap();
+    assert_eq!(manifest["how"], "installed", "{manifest}");
+    assert_eq!(manifest["kind"], "sif", "{manifest}");
+    assert_eq!(
+        manifest["digest"],
+        format!("sha256:{}", "c".repeat(64)),
+        "{manifest}"
+    );
+    assert!(
+        manifest["fingerprint"]
+            .as_str()
+            .unwrap()
+            .starts_with("sha256:"),
+        "{manifest}"
+    );
+    assert!(
+        lab.work
+            .path()
+            .join("software/modules/gpu-slow/1.lua")
+            .is_file()
+    );
     assert_eq!(
         builds[0].last().unwrap(),
         &format!("docker://example.org/gpu-slow@sha256:{}", "c".repeat(64))
