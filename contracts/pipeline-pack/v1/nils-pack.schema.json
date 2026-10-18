@@ -1,0 +1,164 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nils.kineuro.se/contracts/pipeline-pack/v1/nils-pack.schema.json",
+  "title": "NILS pipeline pack (nils-pack.yaml)",
+  "description": "SPDX-License-Identifier: Apache-2.0. Record 57 (P1 to P4): what NILS adds to a pipeline beside its descriptor. The descriptor (contracts/job/v1, nils.job.yml) stays the knob layer; the pack beside it holds the needs a session must meet, what each knob does and whether it breaks comparability, the ordered rules that choose knob values or a variant per session from facts, the checks, the licence, the resources, the comparability key's members, the tests and the source. It pins the descriptor by the digest the catalog computes (pipeline.descriptor_sha256); a pipeline version is the pair. The file is YAML; this schema is of the value it parses to. Every `when` is an expression of the pack's language (comparisons, and, or, not, in, present(role), aligned(a, b), min, max), parsed and type-checked at load: an unknown fact, a wrong type or a value outside a fact's vocabulary refuses the pack. A reader keeps a key it does not know; a key this version names is checked.",
+  "$defs": {
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]*$"
+    },
+    "expression": {
+      "type": "string",
+      "minLength": 1,
+      "description": "An expression of the pack's language, over the facts of a unit: `t1w.dimension == '3D' and t1w.slice_thickness_mm <= 1.5`, `present(flair)`, `aligned(flair, t1w)`, `lesions == 'on'`, `host.memory_gb >= 32`. Inside a role's own needs a bare fact is that role's."
+    },
+    "source": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Where the need, rule or check comes from: a paper, a maintainer's statement, or `policy` where none exists"
+    },
+    "need": {
+      "type": "object",
+      "required": ["when", "words", "source"],
+      "properties": {
+        "when": {"$ref": "#/$defs/expression"},
+        "words": {"type": "string", "minLength": 1, "description": "What the person reads where the need is not met, in the pack's words"},
+        "source": {"$ref": "#/$defs/source"}
+      }
+    },
+    "role_needs": {
+      "type": "object",
+      "properties": {
+        "hard_if": {"$ref": "#/$defs/expression", "description": "The role's hard needs are hard only where this holds (a goal or a switch); where it does not, they are not checked"},
+        "hard": {"type": "array", "items": {"$ref": "#/$defs/need"}, "description": "A unit that fails one is skipped and names the need in its words"},
+        "soft": {"type": "array", "items": {"$ref": "#/$defs/need"}, "description": "A unit that fails one runs with the need's words as a caveat"}
+      }
+    },
+    "knob": {
+      "type": "object",
+      "properties": {
+        "what": {"type": "string", "description": "What the knob does, for the person"},
+        "default": {"description": "The pack's default where it differs from the descriptor's; checked against the descriptor's constraints"},
+        "cost": {"type": "string", "description": "What it costs in time or memory, in words"},
+        "changes": {"type": "array", "items": {"type": "string"}, "description": "The outputs it changes, by id"},
+        "comparability": {"type": "string", "enum": ["none", "additive", "breaks"], "description": "Whether results that differ in it compare: none (it changes nothing comparable), additive (it adds outputs, the rest compare), breaks (results of different values are never pooled)"},
+        "set_by": {"type": "string", "enum": ["person", "rule", "fixed"], "description": "Who may set it: a person, a rule, or nobody (fixed, never shown)"}
+      }
+    },
+    "goals": {
+      "type": "object",
+      "description": "The person's choices: `goal` and the pack's own switches, each a list of the values it takes; the first is the default",
+      "properties": {
+        "goal": {"type": "array", "minItems": 1, "items": {"type": "string", "enum": ["fast", "standard", "research"]}}
+      },
+      "additionalProperties": {"type": "array", "minItems": 1, "items": {"type": ["string", "boolean", "number"]}}
+    },
+    "variant": {
+      "type": "object",
+      "required": ["pipeline"],
+      "properties": {
+        "pipeline": {"type": "string", "description": "The sibling pipeline's name in the catalog"},
+        "words": {"type": "string"}
+      }
+    },
+    "rule": {
+      "type": "object",
+      "required": ["id", "when"],
+      "properties": {
+        "id": {"$ref": "#/$defs/id"},
+        "when": {"$ref": "#/$defs/expression"},
+        "set": {"type": "object", "minProperties": 1, "description": "Knob values the rule sets, each a Boutiques input of the descriptor; checked against its constraints at load"},
+        "route": {"type": "string", "description": "The variant the rule sends the unit to, one of `variants`"},
+        "why": {"type": "string"},
+        "source": {"$ref": "#/$defs/source"}
+      },
+      "anyOf": [{"required": ["set"]}, {"required": ["route"]}]
+    },
+    "check": {
+      "type": "object",
+      "required": ["metric", "op", "action"],
+      "properties": {
+        "metric": {"type": "string", "description": "A metric the unit's results carry, or a column of one of its tables"},
+        "op": {"type": "string", "enum": [">=", "<=", ">", "<", "==", "!="], "description": "What a good value is"},
+        "value": {"type": "number", "description": "The threshold of a fixed check; a cohort check has none"},
+        "action": {"type": "string", "enum": ["fail", "flag", "drop"], "description": "fail: the unit fails; flag: the result is kept and the unit flagged (never a failure); drop: the one value is dropped and the unit flagged"},
+        "words": {"type": "string"},
+        "source": {"$ref": "#/$defs/source"},
+        "cohort": {"type": "boolean", "description": "A cohort check: the metric as a robust z within a stratum, flagged above `z`"},
+        "stratum": {"type": "array", "items": {"type": "string", "enum": ["site", "vendor", "field_strength", "sequence", "post_contrast"]}},
+        "min_sessions": {"type": "integer", "minimum": 2, "description": "Below it the check reads `not yet: N of M sessions`; 30 by default"},
+        "z": {"type": "number", "exclusiveMinimum": 0, "description": "The robust z above which a cohort check flags; 3 by default"}
+      }
+    },
+    "licence": {
+      "type": "object",
+      "properties": {
+        "spdx": {"type": "string"},
+        "redistributable": {"type": "boolean"},
+        "site_file": {"type": "object", "properties": {"env": {"type": "string"}, "mount": {"type": "string"}}},
+        "terms": {"type": "object", "properties": {"url": {"type": "string"}, "version": {"type": "string"}}},
+        "accept": {"type": "boolean", "description": "Whether an administrator must accept the terms before the tool runs"}
+      }
+    },
+    "resources": {
+      "type": "object",
+      "properties": {
+        "memory_gb": {"type": "number", "exclusiveMinimum": 0},
+        "minutes": {"type": "number", "exclusiveMinimum": 0},
+        "gpu": {"type": "string", "enum": ["none", "optional", "required"]},
+        "gpu_memory_gb": {"type": "number", "exclusiveMinimum": 0},
+        "by_input": {"type": "array", "items": {"type": "object", "required": ["when"], "properties": {"when": {"$ref": "#/$defs/expression"}, "memory_gb": {"type": "number"}, "minutes": {"type": "number"}}}, "description": "Memory and minutes as the input drives them: the first entry whose `when` holds"}
+      }
+    },
+    "comparability": {
+      "type": "object",
+      "properties": {
+        "knobs": {"type": "array", "items": {"type": "string"}, "description": "Knobs that enter the comparability key beside every knob marked breaks"},
+        "facts": {"type": "array", "items": {"type": "string"}, "description": "Facts that enter the comparability key, such as t1w.base"}
+      }
+    },
+    "test": {
+      "type": "object",
+      "required": ["input"],
+      "properties": {
+        "input": {"type": "string", "description": "A small public input, by address with its sha256"},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "expect": {"type": "array", "items": {"type": "string"}, "description": "The outputs expected, by path or by a metric and its range"}
+      }
+    },
+    "source_block": {
+      "type": "object",
+      "properties": {
+        "image": {"type": "string", "pattern": "@sha256:[0-9a-f]{64}$", "description": "The image's OCI reference with its registry manifest digest; equal to the descriptor's"},
+        "probe": {"type": "object", "properties": {"command": {"type": "string"}, "expect": {"type": "string"}}, "description": "A command and the text it must print, which says the installed tool is this version"},
+        "key_files": {"type": "array", "items": {"type": "string"}, "description": "The files the fingerprint of a registered install reads"}
+      }
+    }
+  },
+  "type": "object",
+  "required": ["nils_pack", "pipeline"],
+  "properties": {
+    "nils_pack": {"const": 1},
+    "pipeline": {
+      "type": "object",
+      "required": ["name", "descriptor_sha256"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1, "description": "The descriptor's name"},
+        "descriptor_sha256": {"type": "string", "pattern": "^(sha256:)?[0-9a-f]{64}$", "description": "The digest the catalog computes of the descriptor beside the pack: sha256 of its canonical JSON. A pack whose digest is not the descriptor's refuses the version."},
+        "version": {"type": "string", "description": "The pack's own version, for the person; the catalog versions the pair by content"}
+      }
+    },
+    "needs": {"type": "object", "additionalProperties": {"$ref": "#/$defs/role_needs"}, "description": "Per role; `link` for needs on links between roles; `host` for needs on the host"},
+    "knobs": {"type": "object", "additionalProperties": {"$ref": "#/$defs/knob"}},
+    "goals": {"$ref": "#/$defs/goals"},
+    "variants": {"type": "object", "additionalProperties": {"$ref": "#/$defs/variant"}},
+    "rules": {"type": "array", "items": {"$ref": "#/$defs/rule"}},
+    "checks": {"type": "array", "items": {"$ref": "#/$defs/check"}},
+    "licence": {"$ref": "#/$defs/licence"},
+    "resources": {"$ref": "#/$defs/resources"},
+    "comparability": {"$ref": "#/$defs/comparability"},
+    "tests": {"type": "array", "items": {"$ref": "#/$defs/test"}},
+    "source": {"$ref": "#/$defs/source_block"}
+  }
+}
