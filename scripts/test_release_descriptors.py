@@ -23,10 +23,13 @@ def full_pin() -> str:
     return next(line.split('"')[1] for line in text.splitlines() if line.strip().startswith("image:"))
 
 
-def write(refs: dict[str, str], out: Path, refs_dir: Path, pullable: bool = True) -> subprocess.CompletedProcess:
+def write(refs: dict[str, str], out: Path, refs_dir: Path, pullable: bool = True,
+          taken: dict[str, str] | None = None) -> subprocess.CompletedProcess:
     refs_dir.mkdir(parents=True, exist_ok=True)
     for image, digest in refs.items():
         (refs_dir / f"{image}.ref").write_text(f"ghcr.io/kineuro/{image}@sha256:{digest * 64}\n")
+    for image, came in (taken or {}).items():
+        (refs_dir / f"{image}.from").write_text(f"{came}\n")
     env = dict(os.environ, NILS_RELEASE_PULLABLE=full_pin() if pullable else "")
     return subprocess.run([sys.executable, str(SCRIPT), "write", "--refs", str(refs_dir), "--out", str(out), "--tag", "v1.0.0-test",
                            "--expect", EXPECT], capture_output=True, text=True, env=env)
@@ -83,10 +86,48 @@ class Write(unittest.TestCase):
             self.assertEqual(r.returncode, 0, r.stderr)
             self.assertEqual((d / "out" / "NOT-SHIPPED").read_text(), "")
 
+    def test_the_notes_say_which_image_was_built_and_which_taken(self):
+        """A release that builds only what changed says so for each image: built by
+        this release, taken unchanged from the release named, or published apart."""
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            r = write({"nils-bodypart": "b", "nils-postcontrast": "c", "nils-system1": "a"}, d / "out", d / "refs",
+                      taken={"nils-bodypart": "v1.0.0-alpha.86", "nils-postcontrast": "built"})
+            self.assertEqual(r.returncode, 0, r.stderr)
+            notes = (d / "out" / "MODEL-IMAGES.md").read_text().splitlines()
+            self.assertEqual(notes[0], "### Model images")
+            lines = {line.split("`")[1]: line for line in notes[2:]}
+            self.assertEqual(set(lines), {"nils-bodypart", "nils-postcontrast", "nils-postcontrast-full", "nils-system1"})
+            self.assertIn(f"`ghcr.io/kineuro/nils-bodypart@sha256:{'b' * 64}`, unchanged since v1.0.0-alpha.86, whose image it is "
+                          "(bodypart-embed, bodypart-infer, bodypart-infer-fusion, bodypart-seed, bodypart-train)", lines["nils-bodypart"])
+            self.assertIn(f"`ghcr.io/kineuro/nils-postcontrast@sha256:{'c' * 64}`, built by this release (postcontrast-cascade)",
+                          lines["nils-postcontrast"])
+            # no .from file: built, as a release before the notes wrote one
+            self.assertIn(f"`ghcr.io/kineuro/nils-system1@sha256:{'a' * 64}`, built by this release (system1-score)", lines["nils-system1"])
+            self.assertIn(f"`{full_pin()}`, published apart from the release, as the tree pins it (postcontrast-full)",
+                          lines["nils-postcontrast-full"])
+            # every digest the notes name is one IMAGES names
+            images = {line.split("\t")[1] for line in (d / "out" / "IMAGES").read_text().splitlines()}
+            self.assertEqual({line.split("`")[3] for line in notes[2:]}, images)
+
+    def test_no_image_at_all_writes_no_notes(self):
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            r = write({}, d / "out", d / "refs", pullable=False)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual((d / "out" / "MODEL-IMAGES.md").read_text(), "")
+
 
 class Pullable(unittest.TestCase):
     """Only a clear 401, 403 or 404 says a pin is not public; a network
     error is tried again and then fails the step, never read as private."""
+
+    def test_the_command_line_answers_by_its_exit_code(self):
+        ref = "ghcr.io/kineuro/x@sha256:" + "a" * 64
+        env = dict(os.environ, NILS_RELEASE_PULLABLE=ref)
+        self.assertEqual(subprocess.run([sys.executable, str(SCRIPT), "pullable", ref], env=env).returncode, 0)
+        other = "ghcr.io/kineuro/x@sha256:" + "b" * 64
+        self.assertEqual(subprocess.run([sys.executable, str(SCRIPT), "pullable", other], env=env).returncode, 1)
 
     def setUp(self):
         import importlib.util

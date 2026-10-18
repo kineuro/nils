@@ -2,11 +2,13 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 """The model pipelines' descriptors a release ships (record 55 A5, 2026-10-14).
 
-A tag's release builds every model image (`release.yml`, the `model-images`
-job) and pushes it, and this script writes the descriptors that name those
-images, each by the digest the release pushed, so a release never ships a
-descriptor naming an older image than its own (1.0.0-alpha.80's tag named the
-image of 1.0.0-alpha.71, and its own was pinned one commit after it).
+A tag's release builds every model image whose package changed and pushes it,
+and takes every other from the release that last shipped it (`release.yml`,
+the `model-images` job, `release-image-reuse.sh`); this script writes the
+descriptors that name those images, each by its digest, so a release never
+ships a descriptor naming an older image than its own package (1.0.0-alpha.80's
+tag named the image of 1.0.0-alpha.71, and its own was pinned one commit after
+it).
 
     release-descriptors.py encoders <bodypart-embed/nils.job.yml>
         the encoder digests a descriptor pins, as a comma list: the build
@@ -15,9 +17,12 @@ image of 1.0.0-alpha.71, and its own was pinned one commit after it).
     release-descriptors.py write --refs <dir> --out <dir> [--tag <tag>]
                                  [--expect <image>,...]
         <dir>/<image>.ref holds `ghcr.io/kineuro/<image>@sha256:<hex>`, one
-        for each image the release pushed; writes <out>/pipelines/<package>/
-        <name>/nils.job.yml for every descriptor of this tree that names one
-        of them, pinned to it, and <out>/IMAGES (`<pipeline>\\t<image>`).
+        for each image the release pushed or took; writes <out>/pipelines/
+        <package>/<name>/nils.job.yml for every descriptor of this tree that
+        names one of them, pinned to it, <out>/IMAGES (`<pipeline>\\t<image>`),
+        and <out>/MODEL-IMAGES.md for the release's notes: each image by its
+        digest, built by this release, or taken unchanged from the release
+        <dir>/<image>.from names, or published apart from the release.
         A kineuro image the release does not build at all (not in --expect)
         ships with the digest the tree pins, where anyone may pull it (the
         registry asked anonymously); else NOT-SHIPPED names it. An expected image the release
@@ -27,6 +32,9 @@ image of 1.0.0-alpha.71, and its own was pinned one commit after it).
     release-descriptors.py added <out>/IMAGES < <nils pipeline add --json>
         the release's own binary took a descriptor into a catalog: the image
         it keeps is the one IMAGES names for that pipeline
+    release-descriptors.py pullable <ref>
+        exits 0 where anyone may pull `ghcr.io/kineuro/<image>@sha256:<hex>`
+        (the registry asked anonymously), 1 where not
 
 Only the standard library: it runs on a bare runner. A descriptor is changed
 in its `container-image.image` line alone, and gains one comment line.
@@ -215,6 +223,23 @@ def cmd_write(a: argparse.Namespace) -> None:
     (out / "IMAGES").write_text("".join(f"{n}\t{r}\n" for n, r in sorted(shipped.items())))
     for n, r in sorted(shipped.items()):
         print(f"{n}\t{r}")
+    # the notes: each image by its digest, built by this release, taken unchanged
+    # from the release <refs>/<image>.from names, or published apart from the release
+    by_ref: dict[str, list[str]] = {}
+    for n, r in sorted(shipped.items()):
+        by_ref.setdefault(r, []).append(n)
+    said = []
+    for r, names in sorted(by_ref.items()):
+        repository = r.split("@", 1)[0]
+        image = repository[len(REGISTRY):]
+        if repository in built:
+            came = Path(a.refs) / f"{image}.from"
+            came = came.read_text().strip() if came.is_file() else "built"
+            how = "built by this release" if came == "built" else f"unchanged since {came}, whose image it is"
+        else:
+            how = "published apart from the release, as the tree pins it"
+        said.append(f"- `{image}`: `{r}`, {how} ({', '.join(names)})\n")
+    (out / "MODEL-IMAGES.md").write_text("### Model images\n\n" + "".join(said) if said else "")
     for line in left:
         print(f"not shipped: {line}", file=sys.stderr)
     notes = []
@@ -236,6 +261,10 @@ def cmd_added(a: argparse.Namespace) -> None:
     print(f"{doc.get('label')}: {image}")
 
 
+def cmd_pullable(a: argparse.Namespace) -> None:
+    sys.exit(0 if pullable(a.ref) else 1)
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -251,6 +280,9 @@ def main() -> None:
     d = sub.add_parser("added")
     d.add_argument("images")
     d.set_defaults(fn=cmd_added)
+    u = sub.add_parser("pullable")
+    u.add_argument("ref")
+    u.set_defaults(fn=cmd_pullable)
     a = p.parse_args()
     a.fn(a)
 

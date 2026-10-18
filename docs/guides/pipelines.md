@@ -120,7 +120,7 @@ nils pipeline add pipelines/n4-bias-correction/nils.job.yml
 
 The descriptor is checked and kept whole with its digest. The image must be pinned by its registry manifest digest, `repository@sha256:<hex>`; a tag or an image id is refused. Adding the same descriptor again changes nothing; one that differs becomes the name's next version.
 
-The models' pipelines (body part, post-contrast's cascade and System 1) come from the engine's release, not from a checkout. Each release builds every model's image from its tag and ships the descriptors that name those images by the digests it pushed, in `pipelines.tar.gz` beside the binaries, listed in `IMAGES` and checked by `SHA256SUMS`. Take one by its name from the release this engine is:
+The models' pipelines (body part, post-contrast's cascade and System 1) come from the engine's release, not from a checkout. A release builds a model's image from its tag only when the package's files changed since the release that last shipped it, and otherwise ships that release's image, by its digest; either way its descriptors name every image by digest, in `pipelines.tar.gz` beside the binaries, listed in `IMAGES` and checked by `SHA256SUMS`, and the release's notes say for each image whether it was built or taken, and from which release. Take one by its name from the release this engine is:
 
 ```sh
 nils pipeline add --release bodypart-infer-fusion
