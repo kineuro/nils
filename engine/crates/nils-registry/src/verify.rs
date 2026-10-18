@@ -34,7 +34,11 @@
 //! An answer given in verify is recorded `blind: false` and never becomes a
 //! training label ([`crate::blind::campaign_answer_blind`],
 //! [`crate::blind::never_trains`]); the decisions its close writes are
-//! marked the same ([`crate::blind::mark_decisions_not_blind`]).
+//! marked the same ([`crate::blind::mark_decisions_not_blind`]). A planted
+//! value is known to be wrong, so a close into decisions never writes one:
+//! the planted axis of an item whose settled answer kept the plant is left
+//! out (`kept_plant`), the item's other axes are written as for any item,
+//! and an item whose reader corrected the plant is written whole.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -592,6 +596,30 @@ fn accepted(question: &Question, value: Option<&str>, row: &Planted) -> bool {
             .is_some_and(|held| held.iter().any(|v| v == wrong)),
         _ => false,
     }
+}
+
+/// The planted axis a close into decisions leaves out of an item (spec
+/// §12.4): that of a planted item whose settled answer kept the planted
+/// wrong value. A planted value is known to be wrong, so it is never
+/// written as a decision, whoever settled the item; the item's other axes
+/// are written as for any item. None for an item that is not planted, whose
+/// plant was never shown, or whose settled answer corrected the plant (a
+/// caught item is written whole).
+pub(crate) fn kept_plant(
+    store: &mut Store,
+    campaign: i64,
+    question: &Question,
+    item: i64,
+    settled: Option<&str>,
+) -> Result<Option<String>, StoreError> {
+    let Some(row) = planted_item(store, campaign, item)? else {
+        return Ok(None);
+    };
+    Ok(if accepted(question, settled, &row) {
+        row.axis
+    } else {
+        None
+    })
 }
 
 /// The catch (spec §12.5), over the raters' answers now: `planted`, the

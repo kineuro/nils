@@ -6411,11 +6411,17 @@ pub struct Closed {
     /// check's items whose result was made from one, which close into
     /// nothing.
     pub left_out_sealed: i64,
+    /// Record 58 P1 (Wave 7b spec §12.4), a verify campaign's close only:
+    /// the axes it left out of the decisions because the item's settled
+    /// answer kept the planted wrong value, which is known to be wrong and
+    /// never becomes a decision. None on every other purpose, whose close
+    /// says nothing of it.
+    pub planted_skipped: Option<i64>,
 }
 
 impl Closed {
     pub fn as_json(&self) -> Value {
-        json!({
+        let mut doc = json!({
             "decisions": self.decisions,
             "picks": self.picks,
             "resolved": self.resolved,
@@ -6425,7 +6431,19 @@ impl Closed {
             "staged": self.staged,
             "agreement": self.agreement,
             "left_out_sealed": self.left_out_sealed,
-        })
+        });
+        if let Some(n) = self.planted_skipped {
+            doc["planted_skipped"] = json!(n);
+        }
+        doc
+    }
+
+    /// Count planted axes the close left out; nothing outside a verify
+    /// campaign, whose close does not count them.
+    fn left_out_planted(&mut self, n: usize) {
+        if let Some(total) = self.planted_skipped.as_mut() {
+            *total += n as i64;
+        }
     }
 }
 
@@ -6545,7 +6563,10 @@ fn close_items(
     // record 58 P1 (Wave 7b spec §12.4): in a verify campaign the answer
     // is a decision with the reader as its author
     let verifying = crate::blind::purpose(registry.store(), c.id)? == crate::verify::PURPOSE;
-    let mut out = Closed::default();
+    let mut out = Closed {
+        planted_skipped: verifying.then_some(0),
+        ..Closed::default()
+    };
     let mut staged_ones: Vec<i64> = Vec::new();
     let all = items(registry.store(), c.id)?;
     // record 55, the rulings of 2026-10-12, item 6: a check never holds a
@@ -6763,6 +6784,32 @@ fn close_items(
                     )?;
                     continue;
                 }
+                // record 58 P1 (Wave 7b spec §12.4): a planted value the
+                // settled answer kept is known to be wrong and never becomes
+                // a decision. The close leaves that axis out and writes the
+                // item's others as for any item; an item whose reader
+                // corrected the plant is written whole.
+                let planted = if verifying {
+                    crate::verify::kept_plant(
+                        registry.store(),
+                        c.id,
+                        question,
+                        it.id,
+                        it.outcome["value"].as_str(),
+                    )?
+                } else {
+                    None
+                };
+                // with no other axis to write the item is refused whole,
+                // its question left open for a person
+                let unknown = unanswered_axes(&joint);
+                if let Some(axis) = &planted
+                    && axes.iter().all(|a| a == axis || unknown.contains(a))
+                {
+                    refuse(registry.store(), &mut out, it, planted_refusal(axis), now)?;
+                    out.left_out_planted(1);
+                    continue;
+                }
                 // Every decision of the item, its review items and the
                 // item's link are one transaction: the item closes whole,
                 // one decision per axis, or not at all.
@@ -6780,11 +6827,13 @@ fn close_items(
                     },
                     stage,
                     &path,
+                    planted.as_deref(),
                     now,
                 );
                 match written {
-                    Ok(Ok((decided, skipped))) => {
+                    Ok(Ok((decided, skipped, left_out))) => {
                         registry.store().commit()?;
+                        out.left_out_planted(left_out.len());
                         if !skipped.is_empty() {
                             out.skipped.push((
                                 it.id,
@@ -6827,6 +6876,22 @@ fn close_items(
                     )?;
                     continue;
                 };
+                // record 58 P1 (spec §12.4): where the one value asked is
+                // the planted wrong value, nothing is left to write; the item
+                // is refused and its question left open for a person
+                if verifying
+                    && let Some(axis) = crate::verify::kept_plant(
+                        registry.store(),
+                        c.id,
+                        question,
+                        it.id,
+                        Some(&value),
+                    )?
+                {
+                    refuse(registry.store(), &mut out, it, planted_refusal(&axis), now)?;
+                    out.left_out_planted(1);
+                    continue;
+                }
                 // The decision, its review item and the item's link to it
                 // are one transaction, so the link never lags the decision
                 // (a commit reads who answered through it).
@@ -7244,6 +7309,15 @@ fn close_items(
         "id",
         c.id,
     )?;
+    let mut details = json!({
+        "closes_into": c.closes_into, "decisions": out.decisions.len(),
+        "picks": out.picks.len(), "resolved": out.resolved,
+        "unresolved": out.unresolved, "refused": out.refused.len(), "skipped": out.skipped.len(),
+        "agreement": out.agreement,
+    });
+    if let Some(n) = out.planted_skipped {
+        details["planted_skipped"] = json!(n);
+    }
     audit::record(
         registry,
         &Entry {
@@ -7252,15 +7326,19 @@ fn close_items(
             scope: json!({"campaign": c.id, "name": c.name}),
             policy: None,
             job_id: None,
-            details: Some(json!({
-                "closes_into": c.closes_into, "decisions": out.decisions.len(),
-                "picks": out.picks.len(), "resolved": out.resolved,
-                "unresolved": out.unresolved, "refused": out.refused.len(), "skipped": out.skipped.len(),
-                "agreement": out.agreement,
-            })),
+            details: Some(details),
         },
     )?;
     Ok(out)
+}
+
+/// Why a close wrote nothing for an item whose settled answer kept the
+/// planted wrong value on `axis` and holds no other axis to write (spec
+/// §12.4).
+fn planted_refusal(axis: &str) -> String {
+    format!(
+        "the settled answer holds the planted wrong value on {axis}, which is never written as a decision, and no other axis of the item is left to write; its question stays open"
+    )
 }
 
 /// Who an item's decisions are by.
@@ -7271,8 +7349,8 @@ struct Author<'a> {
 }
 
 /// What an axes item's close wrote: each decision with whether it is
-/// staged, and the axes it skipped.
-type AxesClosed = (Vec<(i64, bool)>, Vec<String>);
+/// staged, the axes it skipped, and the planted axes it left out.
+type AxesClosed = (Vec<(i64, bool)>, Vec<String>, Vec<String>);
 
 /// Close one axes item inside the transaction the caller holds (record 45
 /// E4): one decision per axis, each through [`review::apply_within`], so
@@ -7282,8 +7360,12 @@ type AxesClosed = (Vec<(i64, bool)>, Vec<String>);
 /// on the item's own review item for that axis. An axis whose adopted
 /// question on this stack someone decided while the campaign was open keeps
 /// that decision and is skipped, as a group's member item is (wave 43's
-/// fix). Answers each decision and whether it is staged, with the axes
-/// skipped, or why the item was refused (the caller rolls back).
+/// fix). Record 58 P1 (Wave 7b spec §12.4): the `planted` axis, where the
+/// item's settled answer kept the planted wrong value of a verify
+/// campaign, is left out like a can't tell, since a known-wrong value is
+/// never a decision; the other axes are written as they are. Answers each
+/// decision and whether it is staged, with the axes skipped and the planted
+/// axis left out, or why the item was refused (the caller rolls back).
 #[allow(clippy::too_many_arguments)]
 fn close_axes(
     registry: &mut Registry,
@@ -7294,6 +7376,7 @@ fn close_axes(
     by: &Author<'_>,
     stage: bool,
     path: &str,
+    planted: Option<&str>,
     now: &str,
 ) -> Result<Result<AxesClosed, String>, Error> {
     let Some(stack) = it.stack_id else {
@@ -7333,6 +7416,7 @@ fn close_axes(
     }
     let mut decided: Vec<(i64, bool)> = Vec::new();
     let mut skipped: Vec<String> = Vec::new();
+    let mut left_out: Vec<String> = Vec::new();
     let mut by_axis = serde_json::Map::new();
     // record 48: an axis the item came to can't tell on is left out, with
     // no decision; its adopted question stays open
@@ -7343,6 +7427,10 @@ fn close_axes(
         }
         if decided_meanwhile.contains(axis) {
             skipped.push(axis.clone());
+            continue;
+        }
+        if planted == Some(axis.as_str()) {
+            left_out.push(axis.clone());
             continue;
         }
         let values = joint.get(axis).cloned().unwrap_or_default();
@@ -7397,13 +7485,23 @@ fn close_axes(
     }
     let staged = decided.iter().any(|(_, s)| *s);
     let first = decided.first().map(|(id, _)| *id);
+    // the review item says what was accepted: a planted value left out is
+    // named beside, never told as the answer
+    let mut told_value = told(joint);
+    for axis in &left_out {
+        told_value.remove(axis);
+    }
+    let mut evidence = json!({"campaign": c.id, "decisions": by_axis, "value": told_value, "cant_tell": cant_tell_axes(joint), "not_asked": not_asked_axes(joint)});
+    if !left_out.is_empty() {
+        evidence["planted_skipped"] = json!(left_out);
+    }
     let store = registry.store();
     finish_review_item(
         store,
         own.id,
         if staged { "staged" } else { "accepted" },
         by.who,
-        &json!({"campaign": c.id, "decisions": by_axis, "value": told(joint), "cant_tell": cant_tell_axes(joint), "not_asked": not_asked_axes(joint)}),
+        &evidence,
         first,
         now,
     )?;
@@ -7419,6 +7517,9 @@ fn close_axes(
     if !skipped.is_empty() {
         outcome["skipped"] = json!(skipped);
     }
+    if !left_out.is_empty() {
+        outcome["planted_skipped"] = json!(left_out);
+    }
     store.update_by_id(
         table("campaign_item"),
         &[
@@ -7432,7 +7533,7 @@ fn close_axes(
         "id",
         it.id,
     )?;
-    Ok(Ok((decided, skipped)))
+    Ok(Ok((decided, skipped, left_out)))
 }
 
 /// After type 3's pipe test (record 55 H3): an item its close cannot write

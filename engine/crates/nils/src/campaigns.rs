@@ -5965,6 +5965,11 @@ pub(crate) fn campaign_command(home: &Home, cmd: CampaignCommand) -> Result<(), 
                     closed.left_out_sealed
                 );
             }
+            // record 58 P1: a verify campaign's close never writes a planted
+            // value the reader accepted
+            if let Some(n) = closed.planted_skipped.filter(|n| *n > 0) {
+                println!("  {n} planted value(s) the reader accepted left out of the decisions");
+            }
             println!("  agreement {}", closed.agreement);
             Ok(())
         }

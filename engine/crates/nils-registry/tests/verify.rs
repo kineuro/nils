@@ -6,7 +6,8 @@
 //! answer is not blind and a label set of the campaign never trains; the
 //! planted list is opened by the close; a plant keeps the pack's
 //! constraints, and the decisions a verify close writes name the reader
-//! and are left out of the training labels.
+//! and are left out of the training labels. A planted value the reader
+//! accepted is known to be wrong and is never written as a decision.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
@@ -18,7 +19,9 @@ use nils_registry::home::{Home, InitOptions};
 use nils_registry::schema::{Type, table};
 use nils_registry::suggestion::{self, Given as Suggested, Import};
 use nils_registry::verify::{self, Planting};
-use nils_registry::{Backend, Insert, Param, Registry, Scheme, Store, blind, labels};
+use nils_registry::{
+    Backend, Insert, Param, Registry, Scheme, Store, audit, blind, labels, review,
+};
 use serde_json::json;
 
 static POSTGRES: Mutex<()> = Mutex::new(());
@@ -482,8 +485,12 @@ fn a_verify_campaign_of_two_hundred_items_plants_a_tenth_and_reports_its_catch()
             "{name}: {refused}"
         );
 
-        // the close opens the seed and the list; the catch reads the same
-        campaign::close(reg, &person_closes(c.id), &at(6)).unwrap();
+        // the close opens the seed and the list; the catch reads the same.
+        // It closes into nothing, a reference's check, so the three plants
+        // the reader kept leave nothing out
+        let closed = campaign::close(reg, &person_closes(c.id), &at(6)).unwrap();
+        assert!(closed.decisions.is_empty(), "{name}");
+        assert_eq!(closed.planted_skipped, Some(0), "{name}");
         let summary = verify::summary(reg.store(), c.id).unwrap().unwrap();
         assert_eq!(summary["opened"], true, "{name}: {summary}");
         assert_eq!(summary["seed"], "paper-2026", "{name}");
@@ -628,6 +635,8 @@ fn a_plant_keeps_the_constraints_and_a_verify_close_writes_decisions_that_never_
         let closed = campaign::close(reg, &person_closes(c.id), &at(5)).unwrap();
         assert_eq!(closed.decisions.len(), 60, "{name}: {closed:?}");
         assert_eq!(closed.resolved, 20, "{name}");
+        // every plant was caught, so every item is written whole
+        assert_eq!(closed.planted_skipped, Some(0), "{name}");
         let listed = closed
             .decisions
             .iter()
@@ -667,5 +676,521 @@ fn a_plant_keeps_the_constraints_and_a_verify_close_writes_decisions_that_never_
         assert!(summary["from"].is_null(), "{name}: {summary}");
         assert_eq!(summary["list"].as_array().unwrap().len(), 10, "{name}");
         eprintln!("{name}: 20 items, 10 planted on a legal axis, 60 decisions not blind");
+    }
+}
+
+/// The decisions a campaign's close wrote, as (stack, axis, value, actor,
+/// author kind, blind), in stack and axis order.
+type Written = (String, String, Option<String>, String, String, Option<i64>);
+
+fn decisions_of(reg: &mut Registry, campaign: i64) -> Vec<Written> {
+    select(reg, |s| {
+        format!(
+            "SELECT ref, axis, value, actor, author_kind, blind FROM {} \
+             WHERE campaign_id = {campaign} ORDER BY ref, axis",
+            s.qualified("decision")
+        )
+    })
+    .iter()
+    .map(|r| {
+        (
+            r.text(0).unwrap().to_string(),
+            r.text(1).unwrap().to_string(),
+            r.opt_text(2).unwrap().map(str::to_string),
+            r.text(3).unwrap().to_string(),
+            r.text(4).unwrap().to_string(),
+            r.opt_int(5).unwrap(),
+        )
+    })
+    .collect()
+}
+
+/// A verify campaign over these stacks that plants every item, with one
+/// proposal brought in for all of them and the plants fixed as a reader is
+/// shown them.
+struct Read {
+    c: campaign::Campaign,
+    items: Vec<campaign::Item>,
+    /// What each item shows its reader.
+    shown: BTreeMap<i64, String>,
+    /// The plant fixed on each item.
+    plants: BTreeMap<i64, verify::Planted>,
+}
+
+impl Read {
+    fn stack_of(&self, item: i64) -> String {
+        self.items
+            .iter()
+            .find(|i| i.id == item)
+            .and_then(|i| i.stack_id)
+            .unwrap()
+            .to_string()
+    }
+}
+
+fn verify_read(
+    reg: &mut Registry,
+    name: &str,
+    ids: Vec<i64>,
+    q: &serde_json::Value,
+    planting: serde_json::Value,
+    proposal: &str,
+) -> Read {
+    let adj = json!({"when": "never"});
+    let c = campaign::create(
+        reg,
+        &verify_new(name, q, &adj, Items::Stacks(ids), "decision"),
+    )
+    .unwrap();
+    blind::set_purpose(reg.store(), c.id, verify::PURPOSE).unwrap();
+    verify::plant(reg.store(), c.id, &Planting::parse(&planting).unwrap()).unwrap();
+    let items = campaign::items(reg.store(), c.id).unwrap();
+    let values: Vec<(i64, &str)> = items.iter().map(|it| (it.id, proposal)).collect();
+    suggest(reg, c.id, &values, "v0-model");
+    let mut shown = BTreeMap::new();
+    for it in &items {
+        shown.insert(
+            it.id,
+            verify::shown(reg.store(), &c, it.id, proposal, &at(1)).unwrap(),
+        );
+    }
+    let plants = verify::planted(reg.store(), c.id)
+        .unwrap()
+        .into_iter()
+        .map(|r| (r.item_id, r))
+        .collect();
+    Read {
+        c,
+        items,
+        shown,
+        plants,
+    }
+}
+
+/// The reader answers every item of the campaign with `answer(item)`, the
+/// proposal shown beside it kept as the doors keep it.
+fn read_every_item(reg: &mut Registry, r: &Read, answer: impl Fn(i64) -> String) {
+    for _ in 0..r.items.len() {
+        let cl = campaign::claim(reg, r.c.id, "anna@lab", Role::Rater, &at(3))
+            .unwrap()
+            .expect("an item to read");
+        campaign::answer_with(
+            reg,
+            &give(cl.assignment.id, "anna@lab", &answer(cl.item.id)),
+            &Timing {
+                suggested: Some(&r.shown[&cl.item.id]),
+                suggested_by: Some("v0-model"),
+                batch: false,
+                derived: None,
+            },
+            &at(4),
+        )
+        .unwrap();
+    }
+}
+
+/// Spec §12.4: where a verify campaign closes into decisions the answer is a
+/// decision with the reader as its author, but a planted value is known to be
+/// wrong and is never one. Of four planted items she keeps the plant on two
+/// (the seed plants a single-valued axis on one, a multi-valued axis on the
+/// other) and corrects it on two: each kept item has no decision on its
+/// planted axis and a decision on each other axis; each corrected item is
+/// written whole; every decision is hers and not blind, and the training
+/// labels leave all of them out.
+#[test]
+fn a_planted_value_the_reader_accepted_is_never_a_decision_and_a_caught_one_is_written_whole() {
+    for mut l in labs() {
+        let name = l.name;
+        let reg = &mut l.registry;
+        let ids = stacks(reg, 2);
+        assert_eq!(ids.len(), 4, "{name}");
+        let proposal = r#"{"base":"T1w","technique":"MPRAGE","modifier":["FatSat"]}"#;
+        let r = verify_read(
+            reg,
+            "verify-accepted",
+            ids,
+            &axes_question(),
+            json!({"share": 1.0, "seed": "accepted"}),
+            proposal,
+        );
+        assert_eq!(r.plants.len(), 4, "{name}");
+        assert!(r.plants.values().all(verify::Planted::fixed), "{name}");
+        let kept: Vec<i64> = r.items[..2].iter().map(|i| i.id).collect();
+        let caught: Vec<i64> = r.items[2..].iter().map(|i| i.id).collect();
+        let axis_of = |item: i64| r.plants[&item].axis.clone().unwrap();
+        let wrong_of = |item: i64| r.plants[&item].wrong_value.clone().unwrap();
+        // the seed's draw: the plants she keeps fall on two different axes
+        let planted_axes: BTreeSet<String> = kept.iter().map(|k| axis_of(*k)).collect();
+        assert_eq!(
+            planted_axes,
+            BTreeSet::from(["technique", "modifier"].map(String::from)),
+            "{name}"
+        );
+        for k in &kept {
+            // a plant is shown, differing from the proposal
+            assert_ne!(r.shown[k], proposal, "{name}");
+        }
+
+        // she keeps the first two plants shown and corrects the other two
+        read_every_item(reg, &r, |item| {
+            if kept.contains(&item) {
+                r.shown[&item].clone()
+            } else {
+                proposal.to_string()
+            }
+        });
+        let catch = verify::catch(reg.store(), &r.c).unwrap();
+        assert_eq!(catch["planted"], 4, "{name}: {catch}");
+        assert_eq!(catch["caught"], 2, "{name}: {catch}");
+        assert_eq!(catch["below_bar"], true, "{name}: {catch}");
+
+        let closed = campaign::close(reg, &person_closes(r.c.id), &at(5)).unwrap();
+        assert_eq!(closed.resolved, 4, "{name}: {closed:?}");
+        assert!(closed.refused.is_empty(), "{name}: {closed:?}");
+        // two axes of each kept item and all three of each corrected one
+        assert_eq!(closed.decisions.len(), 2 * 2 + 2 * 3, "{name}: {closed:?}");
+        assert_eq!(closed.planted_skipped, Some(2), "{name}: {closed:?}");
+        assert_eq!(closed.as_json()["planted_skipped"], 2, "{name}");
+        let entry = audit::list(
+            reg.store(),
+            &audit::Filter {
+                action: Some("campaign.close".into()),
+                limit: 1,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            entry[0].details.as_ref().unwrap()["planted_skipped"],
+            2,
+            "{name}"
+        );
+
+        let all: BTreeSet<String> = ["base", "technique", "modifier"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        let rows = decisions_of(reg, r.c.id);
+        assert_eq!(rows.len(), 10, "{name}: {rows:?}");
+        let axes_of = |item: i64| -> BTreeSet<String> {
+            rows.iter()
+                .filter(|d| d.0 == r.stack_of(item))
+                .map(|d| d.1.clone())
+                .collect()
+        };
+        let value_of = |item: i64, axis: &str| {
+            rows.iter()
+                .find(|d| d.0 == r.stack_of(item) && d.1 == axis)
+                .and_then(|d| d.2.clone())
+        };
+        let truth = [
+            ("base", "T1w"),
+            ("technique", "MPRAGE"),
+            ("modifier", "FatSat"),
+        ];
+        for k in &kept {
+            // no decision on the planted axis, the reader's on the others
+            let mut others = all.clone();
+            others.remove(&axis_of(*k));
+            assert_eq!(axes_of(*k), others, "{name}: {rows:?}");
+            assert!(
+                !rows.iter().any(|d| d.0 == r.stack_of(*k)
+                    && d.1 == axis_of(*k)
+                    && d.2.as_deref() == Some(wrong_of(*k).as_str())),
+                "{name}: {rows:?}"
+            );
+            for (axis, value) in truth {
+                if axis != axis_of(*k) {
+                    assert_eq!(value_of(*k, axis).as_deref(), Some(value), "{name}");
+                }
+            }
+        }
+        for c in &caught {
+            // the corrected plant is written whole
+            assert_eq!(axes_of(*c), all, "{name}: {rows:?}");
+            for (axis, value) in truth {
+                assert_eq!(value_of(*c, axis).as_deref(), Some(value), "{name}");
+            }
+        }
+        // each is the reader's own, a person's, and not blind
+        for d in &rows {
+            assert_eq!(d.3, "anna@lab", "{name}: {d:?}");
+            assert_eq!(d.4, "person", "{name}: {d:?}");
+            assert_eq!(d.5, Some(0), "{name}: {d:?}");
+        }
+
+        // the item says what the close left out, and a corrected one says nothing
+        let items = campaign::items(reg.store(), r.c.id).unwrap();
+        let of = |id: i64| items.iter().find(|i| i.id == id).unwrap();
+        for k in &kept {
+            assert_eq!(of(*k).state, "resolved", "{name}");
+            assert_eq!(
+                of(*k).outcome["planted_skipped"],
+                json!([axis_of(*k)]),
+                "{name}"
+            );
+            assert_eq!(
+                of(*k).outcome["decisions"].as_object().unwrap().len(),
+                2,
+                "{name}"
+            );
+            assert!(
+                of(*k).outcome["decisions"].get(axis_of(*k)).is_none(),
+                "{name}"
+            );
+            // the item's review item says what was accepted: the planted
+            // value is named beside it, never told as the answer
+            let review_item = of(*k).review_item_id;
+            let own = select(reg, |s| {
+                format!(
+                    "SELECT status, {} FROM {} WHERE id = {review_item}",
+                    s.dialect()
+                        .text_of(table("review_item").column("decision").expect("decision")),
+                    s.qualified("review_item")
+                )
+            });
+            assert_eq!(own[0].text(0).unwrap(), "accepted", "{name}");
+            let told: serde_json::Value =
+                serde_json::from_str(own[0].opt_text(1).unwrap().unwrap()).unwrap();
+            assert_eq!(
+                told["planted_skipped"],
+                json!([axis_of(*k)]),
+                "{name}: {told}"
+            );
+            let told_value = told["value"].as_object().unwrap();
+            assert_eq!(told_value.len(), 2, "{name}: {told}");
+            assert!(!told_value.contains_key(&axis_of(*k)), "{name}: {told}");
+        }
+        for c in &caught {
+            assert_eq!(of(*c).state, "resolved", "{name}");
+            assert!(of(*c).outcome.get("planted_skipped").is_none(), "{name}");
+            assert_eq!(
+                of(*c).outcome["decisions"].as_object().unwrap().len(),
+                3,
+                "{name}"
+            );
+        }
+
+        // the training labels leave every decision out; an axis loses one
+        // decision for each kept plant that fell on it
+        for axis in ["base", "technique", "modifier"] {
+            let want = 4 - kept.iter().filter(|k| axis_of(**k) == axis).count();
+            let standing = labels::decision_labels(
+                reg.store(),
+                &labels::DecisionQuery {
+                    axis,
+                    campaign: Some(r.c.id),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(standing.len(), want, "{name}: {axis}");
+            let (training, left_out) =
+                labels::training_labels(reg.store(), Some(axis), None, &[], Some(r.c.id)).unwrap();
+            assert!(training.is_empty(), "{name}: {axis} trains");
+            assert_eq!(left_out, want, "{name}: {axis}");
+        }
+
+        // the opened list still names all four plants, the kept ones among them
+        let summary = verify::summary(reg.store(), r.c.id).unwrap().unwrap();
+        let list = summary["list"].as_array().unwrap();
+        assert_eq!(list.len(), 4, "{name}: {summary}");
+        for k in &kept {
+            assert!(
+                list.iter().any(|p| p["item"] == *k
+                    && p["axis"] == axis_of(*k).as_str()
+                    && p["wrong"] == wrong_of(*k).as_str()),
+                "{name}: {list:?}"
+            );
+        }
+        eprintln!(
+            "{name}: two accepted plants left out ({}), two caught written whole",
+            planted_axes.into_iter().collect::<Vec<_>>().join(", ")
+        );
+    }
+}
+
+/// Where the settled answer keeps the planted value and nothing else is
+/// left to write, the close writes nothing for the item: it is refused, with
+/// why, and its question stays open for a person. That is a question of one
+/// axis, or an axes question whose reader could not tell on the others.
+#[test]
+fn an_accepted_plant_with_nothing_else_to_write_is_refused_and_its_question_left_open() {
+    for mut l in labs() {
+        let name = l.name;
+        let reg = &mut l.registry;
+        let ids = stacks(reg, 2);
+        assert_eq!(ids.len(), 4, "{name}");
+
+        // one axis asked: the reader keeps the plant on the first item
+        let one = verify_read(
+            reg,
+            "verify-one-axis",
+            ids[..2].to_vec(),
+            &body_part(),
+            json!({"share": 1.0, "seed": "one", "from": [{"true": "brain", "wrong": "neck", "count": 3}]}),
+            "brain",
+        );
+        assert!(one.shown.values().all(|s| s == "neck"), "{name}");
+        let (kept, caught) = (one.items[0].id, one.items[1].id);
+        read_every_item(reg, &one, |item| {
+            if item == kept { "neck" } else { "brain" }.to_string()
+        });
+        let closed = campaign::close(reg, &person_closes(one.c.id), &at(5)).unwrap();
+        assert_eq!(closed.planted_skipped, Some(1), "{name}: {closed:?}");
+        assert_eq!((closed.resolved, closed.unresolved), (1, 1), "{name}");
+        assert_eq!(closed.refused.len(), 1, "{name}: {closed:?}");
+        assert_eq!(closed.refused[0].0, kept, "{name}");
+        assert!(
+            closed.refused[0].1.contains(
+                "holds the planted wrong value on body_part, which is never written as a decision"
+            ),
+            "{name}: {}",
+            closed.refused[0].1
+        );
+        assert_eq!(closed.decisions.len(), 1, "{name}: {closed:?}");
+        let rows = decisions_of(reg, one.c.id);
+        assert_eq!(rows.len(), 1, "{name}: {rows:?}");
+        assert_eq!(rows[0].0, one.stack_of(caught), "{name}");
+        assert_eq!(rows[0].2.as_deref(), Some("brain"), "{name}");
+        assert_eq!(
+            (rows[0].3.as_str(), rows[0].4.as_str(), rows[0].5),
+            ("anna@lab", "person", Some(0)),
+            "{name}"
+        );
+        let items = campaign::items(reg.store(), one.c.id).unwrap();
+        let refused = items.iter().find(|i| i.id == kept).unwrap();
+        assert_eq!(refused.state, "refused", "{name}");
+        assert!(
+            refused
+                .refused_why
+                .as_deref()
+                .is_some_and(|w| w.contains("never written as a decision")),
+            "{name}: {refused:?}"
+        );
+        let waiting = review::item(reg.store(), refused.review_item_id)
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(waiting.status.as_str(), "open" | "staged"),
+            "{name}: {}",
+            waiting.status
+        );
+        assert_eq!(
+            items.iter().find(|i| i.id == caught).unwrap().state,
+            "resolved",
+            "{name}"
+        );
+
+        // three axes asked: the reader keeps the plant on the first item and
+        // cannot tell on the other two
+        let proposal = r#"{"base":"T1w","technique":"MPRAGE","modifier":["FatSat"]}"#;
+        let cant = verify_read(
+            reg,
+            "verify-cant-tell",
+            ids[2..].to_vec(),
+            &axes_question(),
+            json!({"share": 1.0, "seed": "cant"}),
+            proposal,
+        );
+        let (kept, caught) = (cant.items[0].id, cant.items[1].id);
+        let planted_axis = cant.plants[&kept].axis.clone().unwrap();
+        read_every_item(reg, &cant, |item| {
+            if item != kept {
+                return proposal.to_string();
+            }
+            let shown: serde_json::Value = serde_json::from_str(&cant.shown[&item]).unwrap();
+            let mut answer = serde_json::Map::new();
+            for axis in ["base", "technique", "modifier"] {
+                answer.insert(
+                    axis.to_string(),
+                    if axis == planted_axis {
+                        shown[axis].clone()
+                    } else {
+                        json!("cant_tell")
+                    },
+                );
+            }
+            serde_json::Value::Object(answer).to_string()
+        });
+        let closed = campaign::close(reg, &person_closes(cant.c.id), &at(6)).unwrap();
+        assert_eq!(closed.planted_skipped, Some(1), "{name}: {closed:?}");
+        assert_eq!(closed.refused.len(), 1, "{name}: {closed:?}");
+        assert_eq!(closed.refused[0].0, kept, "{name}");
+        assert_eq!(closed.decisions.len(), 3, "{name}: {closed:?}");
+        let rows = decisions_of(reg, cant.c.id);
+        assert!(
+            rows.iter().all(|d| d.0 == cant.stack_of(caught)),
+            "{name}: {rows:?}"
+        );
+        let items = campaign::items(reg.store(), cant.c.id).unwrap();
+        assert_eq!(
+            items.iter().find(|i| i.id == kept).unwrap().state,
+            "refused",
+            "{name}"
+        );
+        eprintln!("{name}: an accepted plant with nothing else to write is refused");
+    }
+}
+
+/// The four purposes of Wave 7a keep their close exactly: a decide campaign's
+/// close says nothing of planted values, in its answer or its audit entry.
+#[test]
+fn another_purpose_s_close_says_nothing_of_planted_values() {
+    for mut l in labs() {
+        let name = l.name;
+        let reg = &mut l.registry;
+        let ids = stacks(reg, 1);
+        let q = body_part();
+        let adj = json!({"when": "never"});
+        let c = campaign::create(
+            reg,
+            &verify_new("decide", &q, &adj, Items::Stacks(ids), "decision"),
+        )
+        .unwrap();
+        assert_eq!(
+            blind::purpose(reg.store(), c.id).unwrap(),
+            "decide",
+            "{name}"
+        );
+        for _ in 0..2 {
+            let cl = campaign::claim(reg, c.id, "anna@lab", Role::Rater, &at(3))
+                .unwrap()
+                .expect("an item to read");
+            campaign::answer_with(
+                reg,
+                &give(cl.assignment.id, "anna@lab", "brain"),
+                &Timing {
+                    suggested: None,
+                    suggested_by: None,
+                    batch: false,
+                    derived: None,
+                },
+                &at(4),
+            )
+            .unwrap();
+        }
+        let closed = campaign::close(reg, &person_closes(c.id), &at(5)).unwrap();
+        assert_eq!(closed.decisions.len(), 2, "{name}: {closed:?}");
+        assert_eq!(closed.planted_skipped, None, "{name}");
+        assert!(closed.as_json().get("planted_skipped").is_none(), "{name}");
+        let entry = audit::list(
+            reg.store(),
+            &audit::Filter {
+                action: Some("campaign.close".into()),
+                limit: 1,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            entry[0]
+                .details
+                .as_ref()
+                .unwrap()
+                .get("planted_skipped")
+                .is_none(),
+            "{name}"
+        );
     }
 }

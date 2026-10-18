@@ -621,9 +621,12 @@ fn a_verify_campaign_shows_the_proposal_first_plants_values_and_exports_counts()
         &cleo,
     );
     assert_eq!(closed["resolved"], items.len(), "{closed}");
+    // the one plant she kept leaves its axis out of the decisions: a planted
+    // value is known to be wrong and is never written as one (spec 12.4)
+    assert_eq!(closed["planted_skipped"], 1, "{closed}");
     assert_eq!(
         closed["decisions"].as_array().unwrap().len(),
-        items.len() * 2,
+        items.len() * 2 - 1,
         "{closed}"
     );
     let after = server.ok("GET", &format!("/api/campaigns/{id}"), None, &anna);
@@ -654,6 +657,35 @@ fn a_verify_campaign_shows_the_proposal_first_plants_values_and_exports_counts()
         results["catch"]["per_rater"][0]["name"], "Anna Rater",
         "{results}"
     );
+    // the item whose plant she kept says which axis the close left out, and
+    // its decisions are the other axis alone; every other item is whole
+    let left_out: Vec<&Value> = rows
+        .iter()
+        .filter(|it| it["outcome"]["planted_skipped"].is_array())
+        .collect();
+    assert_eq!(left_out.len(), 1, "{results}");
+    assert_eq!(
+        left_out[0]["outcome"]["planted_skipped"],
+        json!([left_out[0]["planted"]["axis"]]),
+        "{results}"
+    );
+    assert_eq!(
+        left_out[0]["outcome"]["decisions"]
+            .as_object()
+            .unwrap()
+            .len(),
+        1,
+        "{results}"
+    );
+    for it in rows.iter().filter(|it| it["outcome"].is_object()) {
+        if it["id"] != left_out[0]["id"] {
+            assert_eq!(
+                it["outcome"]["decisions"].as_object().map(|m| m.len()),
+                Some(2),
+                "{it}"
+            );
+        }
+    }
 
     // a label set of the campaign never trains
     let set = server.ok(
