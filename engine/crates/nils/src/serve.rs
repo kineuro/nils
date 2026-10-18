@@ -225,6 +225,9 @@ struct Known {
     access: Access,
     exp: u64,
     display: Option<String>,
+    /// Record 58 P1: the account's name the token carried (`name`), as
+    /// the desk's issuer mints the display name a site gave the account.
+    name: Option<String>,
     email: Option<String>,
     /// The `act` claim's subject, when the token was exchanged.
     act: Option<String>,
@@ -252,6 +255,9 @@ pub(crate) struct Caller {
     /// Wave 4c §5.9: the display name and mail the token carried, kept
     /// beside the subject and never a key.
     pub(crate) display: Option<String>,
+    /// Record 58 P1 (Wave 7b spec §12.5): the account's name the token
+    /// carried (`name`), which Results and Pace show a reader by.
+    pub(crate) name: Option<String>,
     pub(crate) email: Option<String>,
     /// Wave 4c §5.5: who acts for the principal on this call; absent is
     /// its own value.
@@ -273,11 +279,22 @@ impl Caller {
             principal: self.principal.clone(),
             access,
             display: self.display.clone(),
+            name: self.name.clone(),
             email: self.email.clone(),
             actor: self.actor.clone(),
             ceiling: self.ceiling,
             idempotency_key: None,
         }
+    }
+
+    /// Record 58 P1: the name the caller's account goes by, as their token
+    /// said it: `name`, else the display name; none from a plain token.
+    pub(crate) fn account_name(&self) -> Option<&str> {
+        self.name
+            .as_deref()
+            .or(self.display.as_deref())
+            .map(str::trim)
+            .filter(|n| !n.is_empty())
     }
 
     /// Whether the caller passes a door that needs `need` at `detail`, or
@@ -524,6 +541,7 @@ impl Auth {
                 principal: crate::actor(),
                 access: Access::everything(),
                 display: None,
+                name: None,
                 email: None,
                 actor: nils_registry::actor::absent(),
                 ceiling: None,
@@ -536,6 +554,7 @@ impl Auth {
                         principal: p.clone(),
                         access: access.clone(),
                         display: None,
+                        name: None,
                         email: None,
                         actor: nils_registry::actor::absent(),
                         ceiling: None,
@@ -573,6 +592,7 @@ impl Auth {
                     principal: known.principal,
                     access: known.access,
                     display: known.display,
+                    name: known.name,
                     email: known.email,
                     actor,
                     ceiling: None,
@@ -823,6 +843,7 @@ impl Oidc {
                     access,
                     exp: claims.exp,
                     display: claims.preferred_username.clone().or(claims.name.clone()),
+                    name: claims.name.clone(),
                     email: claims.email.clone(),
                     act: claims
                         .act

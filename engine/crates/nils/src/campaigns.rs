@@ -834,6 +834,9 @@ pub(crate) fn route(
                 if c.grain == "session" {
                     caller.allowed("a campaign of sessions", Need::Any, Detail::Quasi)?;
                 }
+                // record 58 P1 (spec §12.5): the rater's account name, for
+                // Results and Pace
+                nils_registry::names::note(registry.store(), principal, caller.account_name())?;
                 let role =
                     Role::parse(doc["role"].as_str().unwrap_or("rater")).map_err(campaign_err)?;
                 // record 48 R1: the most valuable item first, when asked
@@ -880,6 +883,7 @@ pub(crate) fn route(
                 let c = campaign::find(registry.store(), which).map_err(campaign_err)?;
                 let a = id_of(a)?;
                 belongs(registry.store(), c.id, "campaign_assignment", a)?;
+                nils_registry::names::note(registry.store(), principal, caller.account_name())?;
                 // record 55, the rulings of 2026-10-12, item 6: a check's item
                 // whose result is sealed now is answered by no rater who may
                 // not read it, whatever lease they held before
@@ -913,7 +917,7 @@ pub(crate) fn route(
                 // beside the answer with the time it took; the engine's own,
                 // never the caller's
                 let pack = crate::reader::served_pack(doors.pack_dir.as_deref(), &doors.ask_pack);
-                let suggested = suggested_for(registry.store(), &c, a, pack.as_deref())?;
+                let suggested = suggested_for(registry.store(), &c, a, pack.as_deref(), &now)?;
                 let (suggested, suggested_by) = match &suggested {
                     Some((v, by)) => (Some(v.as_str()), Some(by.as_str())),
                     None => (None, None),
@@ -1258,13 +1262,17 @@ pub(crate) fn route(
             ["api", "campaigns", which, "export"] if post => {
                 let doc = json_body(body)?;
                 let c = campaign::find(registry.store(), which).map_err(campaign_err)?;
+                // record 58 P1 (Wave 7b spec §12.6): the export for a paper
+                if doc["of"].as_str() == Some("counts") {
+                    return export_counts(registry, caller, &c, &doc, &now);
+                }
                 let of = match doc["of"].as_str().unwrap_or("outcomes") {
                     "outcomes" => Of::Outcomes,
                     "answers" => Of::Answers,
                     other => {
                         return Err(Reply::error(
                             400,
-                            format!("of: outcomes or answers, not {other}"),
+                            format!("of: outcomes, answers or counts, not {other}"),
                         ));
                     }
                 };
@@ -1356,7 +1364,12 @@ pub(crate) fn route(
                 // rater an item's suggestion only after their answer
                 let first = !revealed_to(registry.store(), &c, item, principal)?;
                 let blind = sealed || ab || first || c.suggest == campaign::Suggest::None;
-                let rules_hidden = sealed || ab || first || hides_rules(&c);
+                // record 58 P1 (Wave 7b spec §12): a verify campaign shows
+                // its proposal first and alone; the rules' own values on
+                // the evidence line would give a planted value away
+                let purpose = nils_registry::blind::purpose(registry.store(), c.id)?;
+                let verifying = nils_registry::verify::is_verify(&purpose);
+                let rules_hidden = sealed || ab || first || hides_rules(&c) || verifying;
                 let mut doc = crate::reader::why(
                     registry.store(),
                     stack,
@@ -1372,16 +1385,18 @@ pub(crate) fn route(
                 }
                 doc["blind"] = json!(blind);
                 doc["suggest"] = json!(c.suggest.name());
+                doc["purpose"] = json!(purpose);
                 let suggested = if blind {
                     None
                 } else {
-                    crate::reader::item_suggestion(
+                    proposal_shown(
                         registry.store(),
                         &c,
                         item,
                         Some(stack),
                         &q,
                         pack.as_deref(),
+                        &now,
                     )?
                 };
                 let mut s = json!(suggested.as_ref().map(|(v, _)| v));
@@ -1389,9 +1404,20 @@ pub(crate) fn route(
                 doc["item"] = json!(item);
                 doc["suggested"] = s;
                 doc["suggested_by"] = json!(suggested.as_ref().map(|(_, by)| by));
+                // record 58 P1 (spec §12.2): where two sources disagree on
+                // an item of a verify campaign, both, unlabelled
+                if verifying {
+                    doc["ab"] = if blind {
+                        Value::Null
+                    } else {
+                        ab_of(registry.store(), &c, item, stack, &q, pack.as_deref())?
+                    };
+                }
                 // record 50 R3: every outside suggestion for the item, with
-                // its author and its confidences; none on a stack read blind
-                let told = if blind || !c.suggest.shows_imported() {
+                // its author and its confidences; none on a stack read blind,
+                // and none in verify, where each author's value would give a
+                // planted value away
+                let told = if blind || verifying || !c.suggest.shows_imported() {
                     Vec::new()
                 } else {
                     nils_registry::suggestion::of_items(registry.store(), c.id, &[item])
@@ -1426,7 +1452,7 @@ pub(crate) fn route(
                     doc["header_door"] =
                         json!(format!("/api/campaigns/{}/items/{item}/header", c.id));
                 }
-                doc["worth"] = if blind {
+                doc["worth"] = if blind || verifying {
                     Value::Null
                 } else {
                     let mine = if rules_hidden {
@@ -1955,6 +1981,20 @@ pub(crate) fn route(
             ["api", "campaigns", which, "stats"] if get => {
                 let c = campaign::find(registry.store(), which).map_err(campaign_err)?;
                 let mut doc = campaign::stats(registry.store(), c.id).map_err(campaign_err)?;
+                // record 58 P1 (Wave 7b spec §12.5): each rater by their
+                // account's name, never the sign-in subject alone
+                let principals: Vec<String> = doc["raters"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|r| r["principal"].as_str().map(str::to_string))
+                    .collect();
+                let names = nils_registry::names::of(registry.store(), &principals)?;
+                for r in doc["raters"].as_array_mut().into_iter().flatten() {
+                    if let Some(p) = r["principal"].as_str().map(str::to_string) {
+                        r["name"] = json!(nils_registry::names::shown(&names, &p));
+                    }
+                }
                 // blind as the answers are: a rater reads their own row
                 if !sees_all(registry.store(), caller, principal, &c)? {
                     if let Some(list) = doc["raters"].as_array_mut() {
@@ -2509,6 +2549,18 @@ fn ab_one_by_one(c: &campaign::Campaign) -> Result<(), Reply> {
 /// many items' suggestions before any answer, so neither is served.
 fn blind_one_by_one(store: &mut Store, c: &campaign::Campaign) -> Result<(), Reply> {
     let purpose = nils_registry::blind::purpose(store, c.id)?;
+    // record 58 P1 (Wave 7b spec §12.2): a verify campaign is read one
+    // stack per screen, its proposal first; a batch or a gallery would
+    // show many proposals at once, planted values among them
+    if nils_registry::verify::is_verify(&purpose) {
+        return Err(Reply::error(
+            409,
+            format!(
+                "campaign {} is for verify, so it is read one stack per screen with its proposal first, never in a batch or a gallery",
+                c.name
+            ),
+        ));
+    }
     if nils_registry::blind::blind_purpose(&purpose) && c.suggest != campaign::Suggest::None {
         return Err(Reply::error(
             409,
@@ -3051,6 +3103,7 @@ fn suggested_for(
     c: &campaign::Campaign,
     assignment: i64,
     pack: Option<&nils_pack::Pack>,
+    now: &str,
 ) -> Result<Option<(String, String)>, Reply> {
     let Ok(q) = c.question() else {
         return Ok(None);
@@ -3072,9 +3125,88 @@ fn suggested_for(
         return Ok(None);
     };
     let (item, stack) = (r.int(0)?, r.opt_int(1)?);
-    Ok(crate::reader::item_suggestion(
-        store, c, item, stack, &q, pack,
-    )?)
+    proposal_shown(store, c, item, stack, &q, pack, now)
+}
+
+/// Record 58 P1 (Wave 7b spec §12.3): the proposal an item shows, with who
+/// made it. In a verify campaign a planted item's planted axis says the
+/// wrong value in place of the proposal's ([`nils_registry::verify::shown`]),
+/// fixed the first time it is served and kept beside the answer as what
+/// was shown; any other campaign's proposal is as the reader finds it.
+pub(crate) fn proposal_shown(
+    store: &mut Store,
+    c: &campaign::Campaign,
+    item: i64,
+    stack: Option<i64>,
+    q: &campaign::Question,
+    pack: Option<&nils_pack::Pack>,
+    now: &str,
+) -> Result<Option<(String, String)>, Reply> {
+    let Some((value, by)) = crate::reader::item_suggestion(store, c, item, stack, q, pack)? else {
+        return Ok(None);
+    };
+    if !nils_registry::verify::is_verify(&nils_registry::blind::purpose(store, c.id)?) {
+        return Ok(Some((value, by)));
+    }
+    let shown = nils_registry::verify::shown(store, c, item, &value, now).map_err(campaign_err)?;
+    Ok(Some((shown, by)))
+}
+
+/// Record 58 P1 (Wave 7b spec §12.2): where two sources disagree on an
+/// item of a verify campaign, both proposals as A and B, unlabelled, in an
+/// order the campaign's seed draws per item; null where the sources agree,
+/// one source alone spoke, or the item is planted, which shows its planted
+/// proposal alone. The sources of an imported campaign are its imports'
+/// authors (the latest first); of a rules campaign, the pack's rules and
+/// System 1.
+fn ab_of(
+    store: &mut Store,
+    c: &campaign::Campaign,
+    item: i64,
+    stack: i64,
+    q: &campaign::Question,
+    pack: Option<&nils_pack::Pack>,
+) -> Result<Value, Reply> {
+    if nils_registry::verify::planted_item(store, c.id, item)?.is_some() {
+        return Ok(Value::Null);
+    }
+    let said: Vec<String> = if c.suggest.shows_imported() {
+        let mut seen = std::collections::BTreeSet::new();
+        nils_registry::suggestion::of_items(store, c.id, &[item])
+            .map_err(campaign_err)?
+            .remove(&item)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|s| seen.insert(s.value.clone()))
+            .map(|s| s.value)
+            .collect()
+    } else {
+        crate::reader::sources(store, stack, q, pack)?
+            .into_iter()
+            .map(|(v, _)| v)
+            .collect()
+    };
+    if said.len() < 2 {
+        return Ok(Value::Null);
+    }
+    let seed = nils_registry::verify::planting(store, c.id)?
+        .map(|p| p.seed)
+        .unwrap_or_default();
+    let (a, b) = (said[0].clone(), said[1].clone());
+    let pair = if nils_registry::verify::coin(&seed, &format!("ab:{item}")) {
+        [b, a]
+    } else {
+        [a, b]
+    };
+    Ok(json!(
+        pair.iter()
+            .map(|v| {
+                let mut x = json!(v);
+                axes_value(&c.question, &mut x);
+                x
+            })
+            .collect::<Vec<_>>()
+    ))
 }
 
 /// Record 45: an axes answer is kept as one text, and read as the object
@@ -3093,6 +3225,10 @@ pub(crate) fn shown(store: &mut Store, c: &campaign::Campaign) -> Result<Value, 
     let mut v = c.as_json();
     // record 55 D6 and D7: what its answers are for
     v["purpose"] = json!(nils_registry::blind::purpose(store, c.id)?);
+    // record 58 P1 (Wave 7b spec §12.7): how a verify campaign plants, the
+    // share, the count and whether the list is opened; the seed and the
+    // list once it is. Null on any other campaign.
+    v["planted"] = json!(nils_registry::verify::summary(store, c.id)?);
     v["counts"] = campaign::counts(store, c.id).map_err(campaign_err)?;
     v["items"] = json!(
         campaign::items(store, c.id)
@@ -3471,6 +3607,37 @@ fn create_at_door(
             "an audit campaign suggests none and closes into none: its reads are blind and never train",
         ));
     }
+    // record 58 P1 (Wave 7b spec §12): a verify campaign shows its proposal
+    // first, so it suggests rules or imported and asks an axis or an axes
+    // question; planted values are its alone
+    let verifying = nils_registry::verify::is_verify(purpose);
+    if verifying {
+        if !matches!(
+            q,
+            campaign::Question::Axis { .. } | campaign::Question::Axes { .. }
+        ) {
+            return Err(Reply::error(
+                400,
+                "a verify campaign asks an axis or an axes question, whose proposal it shows first",
+            ));
+        }
+        if !suggest_of(&doc["suggest"])?.is_some_and(|s| s != campaign::Suggest::None) {
+            return Err(Reply::error(
+                400,
+                "a verify campaign shows its proposal first: suggest rules or imported",
+            ));
+        }
+    } else if !doc["planted"].is_null() {
+        return Err(Reply::error(
+            400,
+            "planted: only a verify campaign plants values",
+        ));
+    }
+    let planting = if verifying {
+        Some(nils_registry::verify::Planting::parse(&doc["planted"]).map_err(campaign_err)?)
+    } else {
+        None
+    };
     let pack_version = pack_version_of(doors);
     let adjudication = if doc["adjudication"].is_null() {
         json!({})
@@ -3508,6 +3675,13 @@ fn create_at_door(
         nils_registry::blind::set_purpose(registry.store(), made.id, purpose)
             .map_err(|e| Reply::error(500, e))?;
     }
+    // record 58 P1 (Wave 7b spec §12.3): the planted items are drawn now,
+    // from the seed; their wrong values are fixed as each is first served
+    if let Some(p) = &planting {
+        nils_registry::verify::plant(registry.store(), made.id, p).map_err(campaign_err)?;
+    }
+    // record 58 P1 (spec §12.5): the maker's account name, for Results
+    nils_registry::names::note(registry.store(), &caller.principal, caller.account_name())?;
     let mut v = shown(registry.store(), &made)?;
     v["pictures"] = pictures_of(registry.store(), &made)?;
     Ok(v)
@@ -4243,7 +4417,138 @@ fn sha256_of_file(path: &Path) -> Result<String, Exit> {
 
 /// Where a door writes a set: under `labels/<name>` in the export place it
 /// names, or in the one export place there is.
+/// Record 58 P1 (Wave 7b spec §12.6): the export for a paper, `of: counts`.
+/// Writes `counts.json` into `counts/<name>/v<N>` of the export place:
+/// counts (items by state, answers by rater as `rater N`, planted, caught,
+/// unsure), the catch against its bar, the agreement, and digests (the
+/// frame's sha256, the handle's content hash where the campaign pins one,
+/// else of its items' keys; and the planted list's). No header text, no
+/// path and no subject code is in the file; the raters are numbered in the
+/// order they first answered, never named. Blind as the other exports: an
+/// open campaign's counts are exported by an adjudicator of it or a holder
+/// of review:work.
+fn export_counts(
+    registry: &mut Registry,
+    caller: &Caller,
+    c: &campaign::Campaign,
+    doc: &Value,
+    now: &str,
+) -> Result<Reply, Reply> {
+    let principal = caller.principal.as_str();
+    no_sealed_flag(doc)?;
+    if !sees_all(registry.store(), caller, principal, c)? {
+        return Err(Reply::error(
+            403,
+            format!(
+                "rating in {} is blind until it closes: its counts are exported by an adjudicator or a holder of review:work",
+                c.name
+            ),
+        ));
+    }
+    let q = c.question().map_err(campaign_err)?;
+    let store = registry.store();
+    let purpose = nils_registry::blind::purpose(store, c.id)?;
+    let items = campaign::items(store, c.id).map_err(campaign_err)?;
+    let counts = campaign::counts(store, c.id).map_err(campaign_err)?;
+    let agreement = campaign::agreement(store, c.id).map_err(campaign_err)?;
+    let answers = campaign::current_answers(store, c.id).map_err(campaign_err)?;
+    // the raters as "rater N", in the order they first answered
+    let mut alias: BTreeMap<String, String> = BTreeMap::new();
+    let mut per_rater: Vec<(String, usize)> = Vec::new();
+    for a in answers.iter().filter(|a| a.role == "rater") {
+        let n = match alias.get(&a.principal) {
+            Some(n) => n.clone(),
+            None => {
+                let n = format!("rater {}", alias.len() + 1);
+                alias.insert(a.principal.clone(), n.clone());
+                per_rater.push((n.clone(), 0));
+                n
+            }
+        };
+        if let Some(row) = per_rater.iter_mut().find(|(r, _)| *r == n) {
+            row.1 += 1;
+        }
+    }
+    let frame = match &c.content_hash {
+        Some(h) => json!({"sha256": h, "of": "the handle's content"}),
+        None => json!({
+            "sha256": sha256(items.iter().map(|i| i.key.as_str()).collect::<Vec<_>>().join("\n").as_bytes()),
+            "of": "the items' keys",
+        }),
+    };
+    let planted_rows = nils_registry::verify::planted(store, c.id)?;
+    let catch = if nils_registry::verify::is_verify(&purpose) {
+        let mut found = nils_registry::verify::catch(store, c).map_err(campaign_err)?;
+        for r in found["per_rater"].as_array_mut().into_iter().flatten() {
+            if let Some(p) = r["rater"].as_str().map(str::to_string) {
+                r["rater"] = json!(alias.get(&p).cloned().unwrap_or_else(|| "rater".into()));
+            }
+        }
+        found
+    } else {
+        Value::Null
+    };
+    let document = json!({
+        "of": "counts",
+        "campaign": {
+            "id": c.id, "name": c.name, "status": c.status, "purpose": purpose,
+            "question": {"kind": c.question["kind"], "axes": campaign::axes_of(&q)},
+            "suggest": c.suggest.name(), "pack_version": c.pack_version,
+            "raters_per_item": c.raters_per_item, "closes_into": c.closes_into,
+            "created_at": c.created_at, "closed_at": c.closed_at,
+        },
+        "counts": {
+            "items": items.len(),
+            "items_by_state": counts["items"],
+            "answers": answers.iter().filter(|a| a.role == "rater").count(),
+            "adjudications": answers.iter().filter(|a| a.role == "adjudicator").count(),
+            "answers_by_rater": per_rater.iter().map(|(r, n)| json!({"rater": r, "answers": n})).collect::<Vec<_>>(),
+            "unsure": agreement["unsure"],
+            "planted": planted_rows.len(),
+            "planted_shown": planted_rows.iter().filter(|r| r.fixed()).count(),
+            "caught": catch["caught"],
+        },
+        "catch": catch,
+        "agreement": agreement,
+        "digests": {
+            "frame": frame,
+            "planted": {"sha256": nils_registry::verify::list_digest(&planted_rows), "of": "the planted list"},
+        },
+        "exported_at": now,
+        "engine": env!("CARGO_PKG_VERSION"),
+    });
+    let name = doc["name"].as_str().unwrap_or(&c.name).to_string();
+    let base = export_dir_in(registry.store(), doc["place"].as_str(), "counts", &name)?;
+    let e500 = |e: std::io::Error, p: &Path| Reply::error(500, format!("{}: {e}", p.display()));
+    let mut version = 1;
+    while base.join(format!("v{version}")).exists() {
+        version += 1;
+    }
+    let dir = base.join(format!("v{version}"));
+    std::fs::create_dir_all(&dir).map_err(|e| e500(e, &dir))?;
+    let text = serde_json::to_string_pretty(&document).unwrap_or_default() + "\n";
+    let file = dir.join("counts.json");
+    std::fs::write(&file, &text).map_err(|e| e500(e, &file))?;
+    Ok(Reply::created(json!({
+        "of": "counts", "campaign": c.id, "name": name, "version": version,
+        "path": dir.display().to_string(),
+        "files": {"counts.json": sha256(text.as_bytes())},
+        "counts": document,
+    })))
+}
+
 fn export_dir(store: &mut Store, place: Option<&str>, name: &str) -> Result<PathBuf, Reply> {
+    export_dir_in(store, place, "labels", name)
+}
+
+/// The directory a campaign's export of `folder` (labels, counts) goes to
+/// under the export place `place` names, or the one there is.
+fn export_dir_in(
+    store: &mut Store,
+    place: Option<&str>,
+    folder: &str,
+    name: &str,
+) -> Result<PathBuf, Reply> {
     use nils_registry::place::{self, Role as PlaceRole};
     let chosen = match place {
         Some(n) => {
@@ -4289,7 +4594,7 @@ fn export_dir(store: &mut Store, place: Option<&str>, name: &str) -> Result<Path
             }
         })
         .collect();
-    Ok(PathBuf::from(chosen.path).join("labels").join(safe))
+    Ok(PathBuf::from(chosen.path).join(folder).join(safe))
 }
 
 /// Write `labels.tsv` and `provenance.json` into a directory and record
@@ -5473,9 +5778,14 @@ pub(crate) fn campaign_command(home: &Home, cmd: CampaignCommand) -> Result<(), 
                     let pack = crate::pack_dir(home, None)
                         .ok()
                         .and_then(|d| crate::reader::served_pack(Some(&d), &name));
-                    let suggested =
-                        suggested_for(registry.store(), &c, assignment, pack.as_deref())
-                            .map_err(rerr)?;
+                    let suggested = suggested_for(
+                        registry.store(),
+                        &c,
+                        assignment,
+                        pack.as_deref(),
+                        &nils_registry::time::now_iso(),
+                    )
+                    .map_err(rerr)?;
                     // record 48: what the answer derives, under the pack the
                     // campaign was made under
                     let pack = pack.filter(|p| {

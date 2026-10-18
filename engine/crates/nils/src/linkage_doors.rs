@@ -2103,6 +2103,7 @@ mod tests {
             principal: "anna@lab".to_string(),
             access,
             display: None,
+            name: None,
             email: None,
             actor: nils_registry::actor::absent(),
             ceiling: None,

@@ -900,6 +900,105 @@ pub(crate) fn suggestion(
     Ok(suggest_from(&rules, asked.as_ref(), question))
 }
 
+/// Record 58 P1 (Wave 7b spec §12.2): what each source says of a stack
+/// under a question, as an answer to it says it, with who said it: the
+/// pack's rules where they reach a legal answer, and System 1's first
+/// candidate where it covers every asked axis; distinct, the rules first.
+/// None for a stack of a sample sealed now.
+pub(crate) fn sources(
+    store: &mut Store,
+    stack: i64,
+    question: &Question,
+    pack: Option<&nils_pack::Pack>,
+) -> Result<Vec<(String, String)>, StoreError> {
+    if blind(store, stack)? {
+        return Ok(Vec::new());
+    }
+    let rules = rules_values(store, &[stack], pack)?
+        .remove(&stack)
+        .unwrap_or_default();
+    let asked = asked_many(store, &[stack])?
+        .remove(&stack)
+        .map(|(_, ev)| ev);
+    Ok(sources_from(&rules, asked.as_ref(), question))
+}
+
+/// Who said what System 1's candidate said.
+pub(crate) const BY_SYSTEM_ONE: &str = "system1";
+
+fn sources_from(
+    rules: &BTreeMap<String, Vec<String>>,
+    asked: Option<&Value>,
+    question: &Question,
+) -> Vec<(String, String)> {
+    let asks = campaign::axes_of(question);
+    let top: Option<serde_json::Map<String, Value>> = asked.and_then(|ev| {
+        let covered: Vec<&str> = ev["axes"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .collect();
+        if asks.is_empty() || !asks.iter().all(|a| covered.contains(&a.as_str())) {
+            return None;
+        }
+        let first = &ev["candidates"][0]["values"];
+        Some(
+            asks.iter()
+                .map(|a| (a.clone(), first[a.as_str()].clone()))
+                .collect(),
+        )
+    });
+    let mut out: Vec<(String, String)> = Vec::new();
+    match question {
+        Question::Axis { axis, .. } => {
+            let mut mine = rules.get(axis).cloned().unwrap_or_default();
+            mine.sort();
+            if !mine.is_empty() {
+                out.push((mine.join(","), BY_RULES.to_string()));
+            }
+            if let Some(t) = top {
+                let theirs = one_text(&t[axis]);
+                if !theirs.is_empty() {
+                    out.push((theirs, BY_SYSTEM_ONE.to_string()));
+                }
+            }
+        }
+        Question::Axes {
+            axes, constraints, ..
+        } => {
+            let obj: serde_json::Map<String, Value> = axes
+                .iter()
+                .map(|a| (a.clone(), json!(rules.get(a).cloned().unwrap_or_default())))
+                .collect();
+            if let Ok(joint) =
+                campaign::joint_of(axes, constraints, &Value::Object(obj).to_string())
+                && campaign::legal(constraints, &joint).is_ok()
+                && joint.values().any(|v| !v.is_empty())
+            {
+                out.push((
+                    campaign::canonical_joint(constraints, &joint),
+                    BY_RULES.to_string(),
+                ));
+            }
+            if let Some(t) = top
+                && let Ok(joint) =
+                    campaign::joint_of(axes, constraints, &Value::Object(t).to_string())
+                && campaign::legal(constraints, &joint).is_ok()
+            {
+                out.push((
+                    campaign::canonical_joint(constraints, &joint),
+                    BY_SYSTEM_ONE.to_string(),
+                ));
+            }
+        }
+        _ => {}
+    }
+    let mut seen = BTreeSet::new();
+    out.retain(|(v, _)| seen.insert(v.clone()));
+    out
+}
+
 /// Round a header value for a signature, so a TR of 2300 and 2300.0001 are
 /// one sequence.
 fn rounded(v: &Value) -> Value {
