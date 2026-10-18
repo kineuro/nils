@@ -150,9 +150,9 @@ wave, in small releases.
 ### 4.3 Registered before drawn
 
 As in Wave 7a (§4.3): the audit raters' check and every audit round (§13), the
-drift series' runs (§14), the funnel's pilot (§15) and the paper's verify
-campaigns (§12) have their plan written and committed before their data is
-drawn: the sample, the measures, the bars and what counts as a pass. A change
+drift series' runs (§14), the funnel's pilot (§15, registered and run by the
+paper's own work) and the paper's verify campaigns (§12) have their plan written
+and committed before their data is drawn: the sample, the measures, the bars and what counts as a pass. A change
 after registration is written beside the plan with its date.
 
 ### 4.4 Nothing of the site in the code
@@ -605,9 +605,11 @@ item, both are shown as A and B, unlabelled, and the reader picks one or neither
 
 A campaign is made with `planted: {share, seed, from}`: a seeded share of its
 items (10 % by default) carries one axis whose proposal is replaced by a
-plausible wrong value, the commonest wrong value for that true value in the
-label set `from` names (a development read), kept legal with the item's other
-axes. The seed and the planted list are recorded with the campaign, never shown
+plausible wrong value, kept legal with the item's other axes. `from` is a
+confusion table (rows of true value, wrong value and count, with no stack
+identities), made on the research side from a development read; the commonest
+wrong value for the true value is planted, and where no table is given a random
+other legal value is. The seed and the planted list are recorded with the campaign, never shown
 to a reader, and opened at the close. The reader is told that planted values
 exist, not where.
 
@@ -656,26 +658,38 @@ stack was accepted with.
 
 ### 13.2 The raters, and their check
 
-The raters are two models per item on the site's own model gateway, the
-stations' model with thinking on, acting as agents outside the engine through
-the campaign doors as Wave 7a built them. Before the first round they are
-checked once against a settled key, under one vocabulary for the key, the
-prompts and the served rules (the words of the key are the served pack's), at
-the bar of Wave 7a's T21: at most 3 % of answered cells wrong and at least 90 %
-answered on every axis. The check is an evidence run with its manifest. If they
-miss it, the rounds are read by people alone in verify mode and every report
-says so; no bigger model is tried.
+The raters are two local models of different weights, one item read by both:
+the stations' model with thinking on and the site's second model, acting as
+agents outside the engine through the campaign doors as Wave 7a built them. Two
+raters of one model agree when both are wrong, which is also why the settle of
+§13.3 does not rest on their disagreement. Before the first round they are
+checked once against a key made by another model family: the certificate's
+registered reference (the settled read that graded the rules) and the protocol
+printouts, through the grade of the registered local reproduction of that
+reference, never against a key the raters' own model produced. The raters pass
+when the local reference is fit (every axis under the 2 % shared-error bar) and
+meets the bar of Wave 7a's T21 on answered cells (at most 3 % of answered cells
+wrong and at least 90 % answered on every axis), under one vocabulary for the
+key, the prompts and the served rules (the words of the key are the served
+pack's). The check is an evidence run with its manifest; it waits for the local
+reproduction's grade. The human-adjudicated subset of the paper's audit campaign
+re-checks the raters. If they miss, the rounds are read by people alone in
+verify mode and every report says so; no bigger model is tried.
 
 ### 13.3 The settle
 
-The raters' disagreements go to a person in verify mode: a campaign of purpose
-`verify` over the disagreed items, with the two raters' answers as A and B. The
-settled answers are the round's.
+Every stack where a rater's answer differs from the accepted answer goes to a
+person in verify mode, plus a seeded 10 % of the stacks where both raters agree
+with it: a campaign of purpose `verify` over those items, with the accepted
+answer and the differing answers shown as A and B, unlabelled. A disagreement
+between the raters alone decides nothing. The settled answers are the round's;
+a stack not settled stands as the raters' agreement with the accepted answer.
 
 ### 13.4 The round's report
 
 `POST /api/audit/draws/{id}/grade` reports, as today, the stacks read, the wrong
-ones, the exact one-sided 95 % bound and the wrong by axis, and gains counts by
+ones (every settled difference from the accepted answer is a rules error), the
+exact one-sided 95 % bound and the wrong by axis, and gains counts by
 vendor and acquisition year and the registered rule `{max_wrong: 1, passed}`.
 Six rounds pool to 900 stacks. A month over the rule opens a rule review through
 the loop of record 56, never a certificate (ruling 27). These reads never train
@@ -703,9 +717,10 @@ the selection filtered on (the certificate's per-axis bound; the stack bound
 where an axis has none) by the count filtered on it and reads "at most N stacks
 misplaced by label error". `GET /api/funnel?selection=<id>&pipeline=<id>` and
 `nils funnel <selection> <pipeline>` return the same numbers; the desk shows
-them beside the selection. **The definition is fixed by a pilot run by hand on
-existing labels before anything is built** (§4.3), and the record is amended
-with it before the slice starts (E4).
+them beside the selection. **The definition is fixed by a pilot before anything
+is built:** a registered pilot on existing labels, run on the research side by
+the paper's own work, not by a slice of this wave (§4.3); the record is amended
+with its definition before the slice starts (E4).
 
 ## 16. The sealed protocol as a command (58-P6, stretch)
 
@@ -842,17 +857,20 @@ where they can run there.
 
 **The paper's evidence**
 - **E1.** On the development install, a verify campaign of 200 items with 10 %
-  planted: every planted item recorded and its catch reported in Results; the
+  planted from a fixture confusion table: every planted item recorded and its catch reported in Results; the
   proposal shown first on every item of a verify campaign and on no item of a
   measuring or training campaign before its answer (a test per door); every
   verify answer `blind: false` and in no training label set; the export of
   §12.6 holds no header text, path or subject code, checked by a scan of its
   files. CI where it can run.
-- **E2.** The raters' check against the settled key reported before any round,
-  under one vocabulary; on the production install, 150 stacks drawn by seed,
-  read, the disagreements settled by a person in verify mode, the wrong count
-  and exact bound reported with counts by vendor and year; 0 audit reads in any
-  training set.
+- **E2.** The raters' check against the certificate's registered reference and
+  the protocol printouts, through the local reproduction's grade, reported
+  before any round, under one vocabulary; on the production install, 150 stacks
+  drawn by seed, read by both raters, every difference from the accepted answer
+  and a seeded 10 % of the agreements settled by a person in verify mode, the
+  wrong count and exact bound reported with counts by vendor and year; the
+  human-adjudicated subset re-checks the raters; 0 audit reads in any training
+  set.
 - **E3.** One evidence run per rules version since 1.0.0 (seven today, and the
   wave's), each reproducible from its manifest (the same counts on a rerun); the
   moves of each version relative to 1.0.0 by year, vendor and scanner model;
@@ -893,10 +911,13 @@ is a study.
 - The provenance door is `/api/provenance/{kind}/{id}`; a result whose input's
   rules version changed reads `stale` (§8.6).
 - The goal defaults to `standard`, chosen per run; a cohort may fix it (57-Q3).
-- A verify campaign plants 10 % of its items by default and is reported against
-  a catch-rate bar of 90 %; the export for a paper is `of: counts` (§12).
-- The monthly audit draws 150 stacks by count since the last draw, two raters
-  per item, and passes with at most 1 wrong (§13).
+- A verify campaign plants 10 % of its items by default from a confusion table,
+  a random other legal value where none is given, and is reported against a
+  catch-rate bar of 90 %; the export for a paper is `of: counts` (§12).
+- The monthly audit draws 150 stacks by count since the last draw, read by two
+  raters of different weights; every difference from the accepted answer and a
+  seeded 10 % of the agreements are settled by a person; the round passes with
+  at most 1 wrong (§13).
 - The minimum cell of an exported count is 5 (§16).
 
 ## 21. Order of work
@@ -926,9 +947,10 @@ risk 8, as amended).
   build only what changed (§18).
 - **B2** the desk rounds' first list, written from the screenshots and the task
   table (§17).
-- **S1** the audit raters' check, registered and run against the settled key
-  (§13.2). **S2** the drift series' tools and its first runs (§14). **S3** the
-  funnel's pilot by hand, registered (§15).
+- **S1** the audit raters' check, registered now and run after the local
+  reproduction's grade, against the certificate's registered reference and the
+  protocol printouts (§13.2). **S2** the drift series' tools and its first runs
+  (§14). The funnel's pilot is the paper's own work, not a slice (§15).
 
 **Step 2, the packs and the audit (November)**
 - **P1** the first packs of §11, each replayed before it ships (§10); **R1** the
@@ -976,8 +998,9 @@ into the record with its date.
 1. The funnel's exact definition, after the pilot (§15): which filters are
    rows, how the per-axis bounds combine where a selection filters on several
    axes.
-2. The label set the planted values are drawn from (`planted.from`, §12.3), per
-   verify campaign.
+2. The confusion table each verify campaign of the paper plants from
+   (`planted.from`, §12.3): which development read it is made from, on the
+   research side.
 3. The policy thresholds of the registration family's checks (§7), calibrated
    on the pilot.
 4. Which key accepts an item on the verify screen, and whether a change of one
@@ -986,6 +1009,6 @@ into the record with its date.
    (§6.8), the setup record's.
 6. Whether a family's row in the catalog expands in place or opens its own page
    (§7, §8.1).
-7. Whether an audit round's disagreements are settled by one person or by two
+7. Whether an audit round's differences are settled by one person or by two
    with a third to adjudicate (§13.3).
 8. Record 58's P6, which exists only if a partner says yes (§16).
