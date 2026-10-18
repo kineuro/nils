@@ -2166,6 +2166,18 @@ fn routed(
     ) {
         return r;
     }
+    // record 57 P5: the software place, its installs, registrations,
+    // verifications, acceptances and removals
+    if let Some(r) = crate::software::route(
+        doors.home.dir(),
+        registry,
+        &caller.principal,
+        method.as_str(),
+        &segs,
+        body,
+    ) {
+        return r;
+    }
     // record 49 A3: the pre-flight of a run
     if let Some(r) = crate::preflight::route(
         &doors.home,
@@ -5715,6 +5727,14 @@ pub(crate) fn door(method: &str, segs: &[&str]) -> (Need, Detail) {
         // 2026-10-12: what the engine runs beside itself is read on the
         // Pipelines page and the Parts page; installing it is an admin's
         ("GET", ["api", "tools"]) => (Need::AnyOf(&["install:see", "pipelines:see"]), Plain),
+        // record 57 P5: the software place is read on the Settings > Software
+        // page and the Pipelines page; every act in it is an admin's
+        ("GET", ["api", "software"]) => (Need::AnyOf(&["install:see", "pipelines:see"]), Plain),
+        ("POST", ["api", "software", "install" | "register"])
+        | ("POST", ["api", "software", _, _, "verify" | "accept"])
+        | ("DELETE", ["api", "software", _, _]) => {
+            (Need::One(nils_pipeline::failure::INSTALL_GRANT), Plain)
+        }
         // gate T31, step 15.7: the install from a file is the same act
         ("POST", ["api", "tools", _, "install" | "install-file"]) => {
             (Need::One(nils_pipeline::failure::INSTALL_GRANT), Plain)
@@ -6495,6 +6515,7 @@ pub(crate) fn doors_list() -> Vec<String> {
     .chain(crate::pipelines::DOORS.iter())
     .chain(std::iter::once(&crate::preflight::DOOR))
     .chain(crate::tools::DOORS.iter())
+    .chain(crate::software::DOORS.iter())
     .chain(crate::pipelines::SETUP_DOORS.iter())
     .chain(crate::pipelines::RUNTIME_DOORS.iter())
     .chain(crate::clinical_doors::DOORS.iter())
@@ -7623,6 +7644,61 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
             "one tool",
             "Installing dcm2niix from a file",
             "Installed dcm2niix from a file",
+        ),
+        // record 57 P5: the software place
+        row(
+            "GET /api/software",
+            false,
+            false,
+            "free",
+            "the packages",
+            "Reading the software place",
+            "Read the software place",
+        ),
+        row(
+            "POST /api/software/install",
+            true,
+            true,
+            "bounded",
+            "one package",
+            "Installing a tool",
+            "Installed a tool",
+        ),
+        row(
+            "POST /api/software/register",
+            true,
+            true,
+            "bounded",
+            "one package",
+            "Registering an install",
+            "Registered an install",
+        ),
+        row(
+            "POST /api/software/{app}/{version}/verify",
+            true,
+            true,
+            "bounded",
+            "one package",
+            "Verifying an install",
+            "Verified an install",
+        ),
+        row(
+            "POST /api/software/{app}/{version}/accept",
+            true,
+            true,
+            "bounded",
+            "one package",
+            "Accepting a tool's terms",
+            "Accepted a tool's terms",
+        ),
+        row(
+            "DELETE /api/software/{app}/{version}",
+            true,
+            true,
+            "bounded",
+            "one package",
+            "Removing an install",
+            "Removed an install",
         ),
         row(
             "GET /api/events",

@@ -553,7 +553,7 @@ pub(crate) struct SetupArgs {
     source: Option<PathBuf>,
     /// A place this site has: a name, a directory, and the words that say
     /// what it is, as archives=/data/archives,role=backup,protected. The
-    /// words are role=source|registry|working|export|share|exchange|backup,
+    /// words are role=source|registry|working|export|share|exchange|backup|software,
     /// backup=NAME, snapshots, protected, fast and read, which makes it a
     /// directory the engine reads DICOM from. Named once for each place,
     /// and where none is named an install has the five of a laptop

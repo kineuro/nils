@@ -309,7 +309,7 @@ A run that failed, and each unit that failed, says why beside its error, which i
 | `input` | `input` | a unit's input is missing or was refused: the pre-flight names each unit and why |
 | `pipeline` | `pipeline` | the pipeline's own error, and whatever else is not known: the error and the run's log say why |
 
-`advice` is one sentence of what to do, in the engine's own words, so it is shown at any detail; the error, a tool's own words, is not below detail quasi. `fix` is the install the engine offers itself, where it has one: for dcm2niix, `nils tools install dcm2niix` and `POST /api/tools/dcm2niix/install`, an admin's (`install:work`). A run's summary counts its units' failures by cause (`failures_by_cause`), so a partial run says why its units failed. A run that failed before this was recorded is read from its error when it is shown.
+`advice` is one sentence of what to do, in the engine's own words, so it is shown at any detail; the error, a tool's own words, is not below detail quasi. `fix` is the install the engine offers itself, where it has one: for dcm2niix, `nils software install dcm2niix` (`nils tools install dcm2niix` is its alias for one release) and `POST /api/tools/dcm2niix/install`, an admin's (`install:work`); for a tool whose terms are not accepted (`licence`), `nils software accept <app>@<version>` and `POST /api/software/{app}/{version}/accept`. A run's summary counts its units' failures by cause (`failures_by_cause`), so a partial run says why its units failed. A run that failed before this was recorded is read from its error when it is shown.
 
 ## dcm2niix
 
@@ -331,6 +331,33 @@ nils tools install dcm2niix --from dcm2niix_lnx.zip
 ```
 
 The desk offers the same beside Try again, as Install from a file, through `POST /api/tools/dcm2niix/install-file` with the archive as the body. The archive is checked against the pinned sha256 before anything is unpacked, a file that is not the pinned build is refused with the archive it takes named, and the right one is installed as the download is.
+
+## The software place
+
+The tools the engine runs live in one place, for NILS and for people (record 57 P5): the setup record's place of role `software` (`nils setup --place software=/data/shared/software/nils,role=software`, or `nils place add software DIR --role software`), else `software/` under the pipelines' scratch working place, where apptainer's image cache was. It is laid out as a site's shared software folder is:
+
+```text
+<place>/
+  <app>/<version>/image            the SIF or sandbox; on docker or podman the manifest names image@sha256
+  <app>/<version>/manifest.json    source and digest, pack hash, size, installed or registered, by whom, when, verified when
+  <app>/<version>/bin/<cmd>        one command per tool entry point
+  <app>/bin/<app>-run              the launcher people use today
+  bin/                             links for people's PATH
+  modules/<app>/<version>.lua      Lmod modules: module use <place>/modules
+  licences/<app>/                  site licence files, readable by the engine's account alone
+  externals.yaml                   registered installs
+```
+
+The wrappers find the place from their own location, so moving the folder does not break them; `NILS_SOFTWARE_FLAGS` adds flags for the runtime they call (`--nv` for a card under apptainer). Two ways in:
+
+```sh
+nils software install freesurfer@8.2.0 --pack pipelines/freesurfer-recon-all/nils-pack.yaml
+nils software register freesurfer@8.2.0 --kind sandbox --path /data/shared/software/freesurfer/8.2.0 --pack ...
+```
+
+`install` pulls the image by its digest from the pack's `source` (or `--source repository@sha256:<hex>`, or the one the catalog's pipeline of that tool pins), builds it into the place under apptainer or leaves it in the docker or podman store, and fails unless the digest got is the digest asked. `register` records an existing install as Spack records externals (`managed: false`, in `externals.yaml` and the manifest); the engine never updates or removes it, and `nils software remove` on it is refused. Both are verified, and `nils software verify <app>@<version>` verifies again: the pack's version probe, the fingerprint (the sha256 of a SIF; of the pack's `key_files` in a sandbox or a home, so a viewer's libraries change nothing), and the pack's test run on its small public input. A run uses the install whose digest is its pipeline's, builds its apptainer image into the place where there is none, and records "installed (or registered) install, version, fingerprint" in its `manifest.json` and its summary (`summary.software`); a registered install whose key-file fingerprint equals the pinned image's is the same tool for the comparability key.
+
+Licences are recorded acceptances: `nils software accept <app>@<version> [--file PATH] [--terms URL --terms-version V]` records who, when and which terms, and the licence file's sha256, never its content; the file goes under `licences/<app>/`, readable by the engine's account alone, and reaches the pipeline read-only as a secret input with the variable the pack names (`FS_LICENSE`; `FS_ALLOW_DEEP` the same way). Until an administrator accepts the terms, or places the file, a run of the tool is refused before it starts (the `licence` check, 409). The dependencies are checked at install as the pre-flight checks them (runtime, image, memory, GPU, disk, converter, licence), each `ok`, `warn` or `missing` with its fix. `nils software list` shows every package; the doors are `GET /api/software`, `POST /api/software/install`, `POST /api/software/register`, `POST /api/software/{app}/{version}/verify`, `POST /api/software/{app}/{version}/accept` and `DELETE /api/software/{app}/{version}` (install:work; the listing install:see or pipelines:see). The converter is one package among the others: `nils software install dcm2niix`.
 
 ## Run several at once
 

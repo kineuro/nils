@@ -65,8 +65,10 @@ A site that has places of its own names them instead, once each, with the
 role and the guarantees they really have: `--place
 archives=/data/archives,role=backup,snapshots,protected`. After the name and
 the directory come the words that describe it. `role=` is one of source,
-registry, working, export, share, exchange or backup, and it is what binds
-what may be written there. `backup=` names the backup place that backs this
+registry, working, export, share, exchange, backup or software, and it is
+what binds what may be written there (a software place is where the engine
+installs the tools it runs and registers the ones the site holds; see the
+pipelines guide, *The software place*). `backup=` names the backup place that backs this
 one up. `snapshots`, `protected` and `fast` are what the site declares about
 the storage behind it. `read` makes it one of the directories the engine
 reads DICOM from, which the desk offers by name and a queued job may name; a

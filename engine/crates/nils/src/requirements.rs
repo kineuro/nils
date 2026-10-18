@@ -31,37 +31,64 @@ const IMAGE_CAP: Duration = Duration::from_secs(10);
 pub(crate) struct Check {
     pub(crate) check: &'static str,
     pub(crate) ok: bool,
+    /// Holds, with a caveat (record 57 P5, G10: ok, warn or missing).
+    pub(crate) warn: bool,
     pub(crate) said: String,
     pub(crate) cause: Option<Cause>,
     pub(crate) extra: Value,
 }
 
 impl Check {
-    fn ok(check: &'static str, said: String, extra: Value) -> Check {
+    pub(crate) fn ok(check: &'static str, said: String, extra: Value) -> Check {
         Check {
             check,
             ok: true,
+            warn: false,
             said,
             cause: None,
             extra,
         }
     }
 
-    fn failed(check: &'static str, cause: Cause, said: String, extra: Value) -> Check {
+    /// Holds, but with a caveat a person should read: nothing is refused.
+    pub(crate) fn warned(check: &'static str, said: String, extra: Value) -> Check {
+        Check {
+            check,
+            ok: true,
+            warn: true,
+            said,
+            cause: None,
+            extra,
+        }
+    }
+
+    pub(crate) fn failed(check: &'static str, cause: Cause, said: String, extra: Value) -> Check {
         Check {
             check,
             ok: false,
+            warn: false,
             said,
             cause: Some(cause),
             extra,
         }
     }
 
-    /// `{check, ok, said, failure, ...}`, as the pre-flight answers it.
+    /// `ok`, `warn` or `missing`.
+    pub(crate) fn state(&self) -> &'static str {
+        match (self.ok, self.warn) {
+            (false, _) => "missing",
+            (true, true) => "warn",
+            (true, false) => "ok",
+        }
+    }
+
+    /// `{check, ok, state, said, failure, ...}`, as the pre-flight answers
+    /// it; `failure.advice` is the fix where the check does not hold.
     pub(crate) fn doc(&self) -> Value {
         let mut v = json!({
             "check": self.check,
             "ok": self.ok,
+            "state": self.state(),
             "said": self.said,
             "failure": self.cause.map_or(Value::Null, Cause::refusal_doc),
         });
@@ -228,20 +255,41 @@ fn runtime_and_image(
         format!("{} {}", rt.kind.name(), rt.version),
         json!({"runtime": rt.kind.name(), "version": rt.version}),
     )];
+    // record 57 P5: the install in the software place a run uses, where
+    // there is one, installed or registered
+    let software = crate::software::for_run(registry, p).ok().flatten();
     let here = match rt.kind {
-        runtime::Kind::Apptainer => {
-            crate::pipelines::run_places(registry.store())
+        runtime::Kind::Apptainer => match &software {
+            Some(u) if u.manifest.kind.on_disk() => Some(true),
+            _ => crate::pipelines::run_places(registry.store())
                 .ok()
                 .map(|places| {
                     let form = crate::pipelines::image_form(registry);
                     let dir = Path::new(&places.scratch.path).join(crate::pipelines::IMAGES);
                     runtime::image_recorded(&runtime::local_image(&dir, &p.image_digest, form))
-                })
-        }
+                }),
+        },
         _ => runtime::image_here(&rt, &p.image, IMAGE_CAP),
     };
-    let extra = json!({"image": p.image, "present": here});
+    let extra = json!({
+        "image": p.image, "present": here,
+        "software": software.as_ref().map(crate::software::Used::doc),
+        // the tool's part of a result's comparability key (section 5.6,
+        // 57-Q4), for the pack to read
+        "key": crate::software::key_part(registry, p),
+    });
     out.push(match here {
+        Some(true) if software.is_some() => Check::ok(
+            "image",
+            format!(
+                "the image is here: {}",
+                software
+                    .as_ref()
+                    .map(crate::software::Used::words)
+                    .unwrap_or_default()
+            ),
+            extra,
+        ),
         Some(true) => Check::ok("image", "the image is here".to_string(), extra),
         Some(false) if rt.kind == runtime::Kind::Podman && subids_here() == Some(false) => {
             Check::failed(
@@ -343,6 +391,29 @@ fn memory_and_card(
                 json!({"available": c, "card": n}),
             ),
         });
+    } else if d.gpu == Gpu::Optional {
+        // record 57 P5, G10: an optional GPU missing is a caveat, not a refusal
+        let card = detected.runtime.as_ref().and_then(|r| r.gpu.clone());
+        out.push(match (card, lane.card) {
+            (Some(c), Some(n)) => Check::ok(
+                "gpu",
+                format!("card {n}, {c}"),
+                json!({"available": c, "card": n}),
+            ),
+            (card, _) => Check::warned(
+                "gpu",
+                format!(
+                    "{} can use a GPU, and {}: its units run on the CPU, slower",
+                    p.label(),
+                    if card.is_none() {
+                        "this engine's runtime offers none"
+                    } else {
+                        "the pipeline lane uses no card here"
+                    }
+                ),
+                json!({"available": card}),
+            ),
+        });
     }
     out
 }
@@ -417,6 +488,10 @@ pub(crate) fn checks(registry: &mut Registry, home: &Path, a: &Asked<'_>) -> Vec
         &detected,
     ));
     out.extend(disk(registry, a.descriptor, a.units));
+    // record 57 P5: the tool's terms and its site licence file (G9, G10)
+    if let Some(c) = crate::software::licence_check(registry, a.pipeline, a.descriptor) {
+        out.push(c);
+    }
     out
 }
 
