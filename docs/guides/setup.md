@@ -481,10 +481,10 @@ input are refused before they start, with what to do. An admin then
 installs it from the desk, or with:
 
 ```
-nils tools install dcm2niix
+nils software install dcm2niix
 ```
 
-which downloads the same pinned build into the registry's `tools/` folder,
+(`nils tools install dcm2niix` is its alias for one more release) which downloads the same pinned build into the registry's `tools/` folder,
 checks it and asks its version, and is audited. Where the engine cannot
 reach GitHub, it says so and gives the way by hand: the archive, its sha256,
 and where the binary goes. Fetch that archive on a machine that reaches
@@ -505,7 +505,7 @@ removes the one setup placed with the install's other programs. A converter
 the site gave, or one setup found, is never touched.
 
 The engine's container image does not carry dcm2niix. In a container install
-an admin installs it with `nils tools install dcm2niix` or from the desk; the
+an admin installs it with `nils software install dcm2niix` or from the desk; the
 registry's folder is mounted, so it stays across updates.
 
 `<dir>/assistant/assistant.env` holds everything the assistant reads: the

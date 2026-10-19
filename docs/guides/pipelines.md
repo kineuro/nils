@@ -318,9 +318,11 @@ A run with a bids input is given a release of its selection, which dcm2niix conv
 `nils setup` places the pinned build beside `nils` on an install on this machine (see the setup guide). Where none is found, an admin installs it:
 
 ```sh
-nils tools install dcm2niix
+nils software install dcm2niix
 nils tools list
 ```
+
+`nils tools install dcm2niix` is its alias for one more release.
 
 The install downloads the build this version of `nils` pins from rordenlab's releases (or the mirror `NILS_DCM2NIIX_RELEASES` names), checks its sha256, unpacks it into the registry's `tools/` folder and asks its version; it is audited as `tool.install`. One found already is left alone. Where the engine cannot reach GitHub, it says so and gives the way by hand. The desk offers the same install through `POST /api/tools/dcm2niix/install`, and `GET /api/tools` and the capabilities' `tools` say whether dcm2niix is here, where and which build.
 

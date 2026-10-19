@@ -1260,11 +1260,12 @@ fn real_docker() -> bool {
 #[test]
 fn a_real_image_is_pulled_by_digest_verified_and_removed() {
     if !real_docker() {
-        eprintln!("NILS_TEST_PIPELINE_RUNTIME is not docker, or docker is not here; the live pull is not run");
+        eprintln!(
+            "NILS_TEST_PIPELINE_RUNTIME is not docker, or docker is not here; the live pull is not run"
+        );
         return;
     }
-    const BUSYBOX: &str =
-        "docker.io/library/busybox@sha256:66a6306db78bf2dbf3487f293aa8d6990d8e506fdffab9cc43fe422becf886e4";
+    const BUSYBOX: &str = "docker.io/library/busybox@sha256:66a6306db78bf2dbf3487f293aa8d6990d8e506fdffab9cc43fe422becf886e4";
     const BUSYBOX_DIGEST: &str =
         "sha256:66a6306db78bf2dbf3487f293aa8d6990d8e506fdffab9cc43fe422becf886e4";
     let pack = format!(
@@ -1278,10 +1279,23 @@ tests: {{command: ["sh", "-c", "echo the test ran"], expect: "the test ran"}}
 "#
     );
     let lab = Lab::with_real_docker("software-live");
-    lab.add_pipeline(&descriptor("busybox-echo", "1.37.0", BUSYBOX, "gpu: none", ""));
+    lab.add_pipeline(&descriptor(
+        "busybox-echo",
+        "1.37.0",
+        BUSYBOX,
+        "gpu: none",
+        "",
+    ));
     let pack = lab.pack_file("busybox", &pack);
     let done = lab.json(
-        &["software", "install", "busybox-echo@1.37.0", "--pack", pack.to_str().unwrap(), "--json"],
+        &[
+            "software",
+            "install",
+            "busybox-echo@1.37.0",
+            "--pack",
+            pack.to_str().unwrap(),
+            "--json",
+        ],
         &[],
     );
     assert_eq!(done["installed"], true, "{done}");
@@ -1292,7 +1306,13 @@ tests: {{command: ["sh", "-c", "echo the test ran"], expect: "the test ran"}}
     assert_eq!(p["fingerprint"], BUSYBOX_DIGEST, "{p}");
     assert!(p["size_bytes"].as_u64().unwrap() > 1_000_000, "{p}");
     assert_eq!(p["verification"]["probe"]["passed"], true, "{p}");
-    assert!(p["verification"]["probe"]["said"].as_str().unwrap().contains("BusyBox v1.37.0"), "{p}");
+    assert!(
+        p["verification"]["probe"]["said"]
+            .as_str()
+            .unwrap()
+            .contains("BusyBox v1.37.0"),
+        "{p}"
+    );
     assert_eq!(p["verification"]["test"]["passed"], true, "{p}");
     // by hand, through the same image
     let said = Command::new(lab.place().join("bin").join("busybox"))
@@ -1300,13 +1320,20 @@ tests: {{command: ["sh", "-c", "echo the test ran"], expect: "the test ran"}}
         .env("PATH", &lab.path)
         .output()
         .unwrap();
-    assert!(said.status.success(), "{}", String::from_utf8_lossy(&said.stderr));
+    assert!(
+        said.status.success(),
+        "{}",
+        String::from_utf8_lossy(&said.stderr)
+    );
     assert!(
         String::from_utf8_lossy(&said.stdout).contains("BusyBox v1.37.0"),
         "{}",
         String::from_utf8_lossy(&said.stdout)
     );
-    let removed = lab.json(&["software", "remove", "busybox-echo@1.37.0", "--json"], &[]);
+    let removed = lab.json(
+        &["software", "remove", "busybox-echo@1.37.0", "--json"],
+        &[],
+    );
     assert_eq!(removed["removed"], true, "{removed}");
     assert!(!lab.place().join("busybox-echo").exists());
 }

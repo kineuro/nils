@@ -4118,7 +4118,7 @@ fn a_dcm2niix_given_is_taken_and_an_unreachable_one_stops_nothing() {
         assert!(o.ok, "{}\n{}", o.stdout, o.stderr);
         let said = format!("{}{}", o.stdout, o.stderr);
         assert!(said.contains("was not installed"), "{said}");
-        assert!(said.contains("nils tools install dcm2niix"), "{said}");
+        assert!(said.contains("nils software install dcm2niix"), "{said}");
         assert!(!nils.path().parent().unwrap().join("dcm2niix").exists());
         assert!(!state_of(config.path()).contains("[dcm2niix]"));
     }
