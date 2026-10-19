@@ -124,6 +124,9 @@ pub(crate) fn seed(registry: &mut Registry) -> Result<Vec<Value>, String> {
                 level: d.level.name(),
                 added_by: BY,
                 added_at: &now,
+                pack: None,
+                pack_digest: None,
+                version_digest: &nils_pipeline::pack::version_digest(&digest, None),
             },
         )
         .map_err(|e| e.to_string())?;

@@ -71,6 +71,7 @@ mod packs;
 mod pair;
 mod pick_after;
 mod pick_scopes;
+mod pipeline_pack;
 mod pipelines;
 mod place_transfer;
 mod places;
@@ -337,6 +338,7 @@ enum Command {
         command: contrast::ContrastCommand,
     },
     /// The pipeline catalog: descriptors (nils.job.yml) with their images pinned by digest, the runtime, the runs (record 43)
+    #[command(alias = "pipelines")]
     Pipeline {
         #[command(subcommand)]
         command: pipelines::PipelineCommand,

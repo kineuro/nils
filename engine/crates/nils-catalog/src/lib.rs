@@ -1434,6 +1434,25 @@ fn measure_fields(store: &mut Store) -> Result<Vec<Field>, Error> {
             table: MEASURE_TABLE.into(),
             column: format!("checked:{pipeline}:"),
         });
+        // record 57 P3 (Wave 7b A1): the comparability key of that run's
+        // results, to group by where a pipeline's results hold several
+        out.push(Field {
+            level: scope.clone(),
+            path: format!("measure.{pipeline}.key"),
+            type_: "text".into(),
+            class: Class::Technical,
+            dated: false,
+            federated: false,
+            description: format!(
+                "the comparability key of the {scope}'s newest {pipeline} results (record 57 P3): results of one key may be pooled, results of several never are; group by it to answer per key"
+            ),
+            caveats: None,
+            ai_context: None,
+            curated: false,
+            provenance: "pipeline",
+            table: MEASURE_TABLE.into(),
+            column: format!("key:{pipeline}:"),
+        });
     }
     Ok(out)
 }

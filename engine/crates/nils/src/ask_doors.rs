@@ -746,6 +746,12 @@ fn answer(
                 },
             )
             .ok();
+            // record 57 P3 (Wave 7b A1): a measure over results of several
+            // comparability keys is answered per key or refused, in the
+            // words every door says
+            if let Some(words) = crate::pipeline_pack::pooling_refusal(registry.store(), &ask) {
+                return Err(Reply::error(409, words));
+            }
             let asked = ask.clone();
             let out = run::run(
                 registry,
@@ -815,6 +821,11 @@ fn answer(
         }
         ["api", "ask", "jobs"] if post => {
             let (ask, id) = document_of(registry, &doc)?;
+            // record 57 P3: nor is a measure pooled across comparability
+            // keys by a job
+            if let Some(words) = crate::pipeline_pack::pooling_refusal(registry.store(), &ask) {
+                return Err(Reply::error(409, words));
+            }
             // Wave 4c §6.1: the job path refuses what the synchronous door
             // refuses, before anything is queued.
             if !ask.out.identifiers.is_empty() && !may_project_raw(caller) {

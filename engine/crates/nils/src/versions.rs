@@ -232,6 +232,9 @@ mod tests {
             added_by: "t".into(),
             added_at: "t".into(),
             origin: None,
+            pack: Value::Null,
+            pack_digest: None,
+            version_digest: None,
         }
     }
 
