@@ -63,16 +63,19 @@ const INSPECT_CAP: Duration = Duration::from_secs(60);
 const PULL_CAP: Duration = Duration::from_secs(4 * 3600);
 /// The most a test input fetched over the network may hold.
 const INPUT_CAP: u64 = 512 << 20;
+/// How much of a probe's or a test's output is searched for its expected text.
+const SEARCH_CAP: u64 = 1 << 20;
 /// The grant every write here needs.
 const GRANT: &str = nils_pipeline::failure::INSTALL_GRANT;
 
 /// The doors, as the capabilities list them.
-pub(crate) const DOORS: [&str; 6] = [
+pub(crate) const DOORS: [&str; 7] = [
     "GET /api/software",
     "POST /api/software/install",
     "POST /api/software/register",
     "POST /api/software/{app}/{version}/verify",
     "POST /api/software/{app}/{version}/accept",
+    "POST /api/software/{app}/{version}/forget",
     "DELETE /api/software/{app}/{version}",
 ];
 
@@ -220,6 +223,46 @@ impl Used {
     }
 }
 
+/// Whether the runtime of this machine can run an install: apptainer runs a
+/// SIF or a sandbox kept on disk, docker or podman an image in their own
+/// store. Any, where the runtime is not known.
+fn runs_under(m: &Manifest, runtime: Option<runtime::Kind>) -> bool {
+    match runtime {
+        None => true,
+        Some(runtime::Kind::Apptainer) => matches!(m.kind, Kind::Sif | Kind::Sandbox),
+        Some(k) => m.kind == Kind::Image && m.runtime.as_deref().is_none_or(|r| r == k.name()),
+    }
+}
+
+/// Why a run must not use an install whose last verification failed, with
+/// the fix; None where it passed (or none ran yet).
+pub(crate) fn failed_verification(u: &Used) -> Option<String> {
+    let m = &u.manifest;
+    if !m.verification.failed() {
+        return None;
+    }
+    let what: Vec<String> = [
+        ("probe", &m.verification.probe),
+        ("fingerprint", &m.verification.fingerprint),
+        ("test", &m.verification.test),
+    ]
+    .into_iter()
+    .filter_map(|(n, c)| {
+        c.as_ref()
+            .filter(|c| c.failed())
+            .map(|c| format!("the {n}: {}", c.said))
+    })
+    .collect();
+    Some(format!(
+        "the {} failed its verification ({}); fix the install, then nils software verify {} \
+         (or nils software remove {} and install it again)",
+        u.words(),
+        what.join("; "),
+        m.spec(),
+        m.spec()
+    ))
+}
+
 /// The install a run of `p` uses, where the place holds one: an install
 /// whose digest is the pipeline's pinned image, else a registered install
 /// that stands in for it (its pack pins that image, its pack names the
@@ -231,7 +274,16 @@ pub(crate) fn for_run(registry: &mut Registry, p: &Pipeline) -> Result<Option<Us
         Err(_) => return Ok(None),
     };
     let l = place.layout();
-    let installs = l.installs();
+    // only an install this machine's runtime can run is the run's: a copy
+    // in the docker store is no image for apptainer, nor a SIF for docker
+    let here = crate::pipelines::detect_cached(registry)
+        .runtime
+        .map(|r| r.kind);
+    let installs: Vec<Manifest> = l
+        .installs()
+        .into_iter()
+        .filter(|m| runs_under(m, here))
+        .collect();
     let used = |m: &Manifest| -> Used {
         let pack = pack_copy(&l, &m.app, &m.version).map(|(_, s, _)| s);
         Used {
@@ -243,7 +295,7 @@ pub(crate) fn for_run(registry: &mut Registry, p: &Pipeline) -> Result<Option<Us
     if let Some(m) = installs
         .iter()
         .filter(|m| m.digest.as_deref() == Some(p.image_digest.as_str()))
-        .max_by_key(|m| (m.verified_at.is_some(), m.how == How::Installed))
+        .max_by_key(|m| (m.verified_ok(), m.how == How::Installed))
     {
         return Ok(Some(used(m)));
     }
@@ -724,6 +776,17 @@ fn log_tail(log: &Path) -> String {
     String::from_utf8_lossy(&bytes[start..]).trim().to_string()
 }
 
+/// The output a command left in `log`, up to 1 MiB from its start, for an
+/// expected text to be searched in; the record keeps the tail.
+fn log_search(log: &Path) -> String {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    if let Ok(f) = std::fs::File::open(log) {
+        let _ = f.take(SEARCH_CAP).read_to_end(&mut bytes);
+    }
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
 /// What docker or podman says of an image in its store.
 fn inspect(rt: &runtime::Cli, reference: &str, log: &Path) -> Result<layout::Inspected, String> {
     let (ok, _) = run_logged(
@@ -829,15 +892,23 @@ fn verify_install(
             let (ok, said) =
                 run_logged(&rt.program, &argv, PROBE_CAP, &dir.join("probe.log"), None)?;
             let expected = probe.expect.trim();
-            let passed =
-                (expected.is_empty() && ok) || (!expected.is_empty() && said.contains(expected));
+            let whole = log_search(&dir.join("probe.log"));
+            let passed = (expected.is_empty() && ok)
+                || (!expected.is_empty() && (whole.contains(expected) || said.contains(expected)));
             v.probe = Some(Checked::result(
                 passed,
                 if passed {
                     format!(
                         "{} said {}",
                         probe.command.join(" "),
-                        one_line(&said, expected)
+                        one_line(
+                            if said.contains(expected) {
+                                &said
+                            } else {
+                                &whole
+                            },
+                            expected
+                        )
                     )
                 } else {
                     format!(
@@ -875,7 +946,11 @@ fn verify_install(
                     let (ok, said) =
                         run_logged(&rt.program, &argv, TEST_CAP, &dir.join("test.log"), None)?;
                     let expected = test.expect.trim();
-                    let passed = ok && (expected.is_empty() || said.contains(expected));
+                    let whole = log_search(&dir.join("test.log"));
+                    let passed = ok
+                        && (expected.is_empty()
+                            || whole.contains(expected)
+                            || said.contains(expected));
                     Checked::result(
                         passed,
                         if passed {
@@ -935,7 +1010,9 @@ fn test_input(input: &str, into: &Path) -> Result<PathBuf, String> {
         return Ok(p.to_path_buf());
     }
     let done = into.join(".fetched");
-    if done.is_file() {
+    // kept only for the address it was fetched from: a pack that names
+    // another address is tested on that one
+    if std::fs::read_to_string(&done).is_ok_and(|had| had.trim() == input) {
         return Ok(into.to_path_buf());
     }
     let _ = std::fs::remove_dir_all(into);
@@ -1413,8 +1490,14 @@ pub(crate) fn install(
     }
     commands.sort();
     commands.dedup();
+    let _lock = lock_install(&l, &app, &version).map_err(|e| refused(500, e))?;
+    if Manifest::read(&l.manifest(&app, &version)).is_some() {
+        return Err(refused(
+            409,
+            format!("{app}@{version} was put in the software place by another process meanwhile"),
+        ));
+    }
     let dir = l.install_dir(&app, &version);
-    std::fs::create_dir_all(&dir).map_err(|e| refused(500, format!("{}: {e}", dir.display())))?;
     let now = nils_registry::time::now_iso();
     let mut m = Manifest {
         app: app.clone(),
@@ -1587,37 +1670,56 @@ pub(crate) fn adopt_built(
     let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
     let place = place_made(registry)?;
     let l = place.layout();
-    let (app, version) = identity(p, None);
-    if let Some(m) = Manifest::read(&l.manifest(&app, &version)) {
-        if m.digest.as_deref() == Some(p.image_digest.as_str()) {
-            let _ = std::fs::remove_dir_all(built);
-            let _ = std::fs::remove_file(built);
-            return Ok(Used {
-                runnable: m.runnable(&l),
-                manifest: m,
-                pack: None,
-            });
-        }
-        return Err(format!(
-            "{app}@{version} is {} in the software place with another image ({}); nils software \
-             remove {app}@{version} or a pack naming this version first",
-            m.how.name(),
-            m.digest.as_deref().unwrap_or("none")
-        ));
+    let kind = Kind::of_form(form);
+    let drop_built = || {
+        let _ = std::fs::remove_dir_all(built);
+        let _ = std::fs::remove_file(built);
+    };
+    let used_of = |m: Manifest| Used {
+        runnable: m.runnable(&l),
+        manifest: m,
+        pack: None,
+    };
+    // another builder may have installed it already
+    if let Some(m) = existing_entry(&l, p)? {
+        drop_built();
+        return Ok(used_of(m));
     }
+    // the hash of a multi-GB file is taken outside the lock; the lock is
+    // held for the check and the move alone
+    let (fingerprint, size) = layout::fingerprint(kind, built, &[]).map_err(|e| e.to_string())?;
+    let (base_app, base_version) = identity(p, None);
+    let _lock = lock_install(&l, &base_app, &base_version)?;
+    // re-checked under the lock, after the hash: a builder that finished
+    // meanwhile has its manifest and file in place and keeps them
+    if let Some(m) = existing_entry(&l, p)? {
+        drop_built();
+        return Ok(used_of(m));
+    }
+    let (app, version) = entry_of(&l, p)?;
     let dir = l.install_dir(&app, &version);
     std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let target = l.image(&app, &version);
+    // no manifest here, and every writer holds the lock: what lies at the
+    // target is a leftover of a build that did not finish
     let _ = std::fs::remove_dir_all(&target);
     let _ = std::fs::remove_file(&target);
     std::fs::rename(built, &target).map_err(|e| format!("{}: {e}", target.display()))?;
+    // the file in place is the file hashed
+    let now_is = layout::fingerprint(kind, &target, &[]).map_err(|e| e.to_string());
+    if now_is.as_ref().map(|(f, _)| f) != Ok(&fingerprint) {
+        let _ = std::fs::remove_dir_all(&target);
+        let _ = std::fs::remove_file(&target);
+        return Err(format!(
+            "the image built for {app}@{version} is not the image hashed after the move; it was \
+             removed, and the next run builds it again"
+        ));
+    }
     let d = descriptor::from_value(p.descriptor.clone()).ok();
-    let (fingerprint, size) =
-        layout::fingerprint(Kind::of_form(form), &target, &[]).map_err(|e| e.to_string())?;
     let m = Manifest {
         app: app.clone(),
         version: version.clone(),
-        kind: Kind::of_form(form),
+        kind,
         how: How::Installed,
         managed: true,
         source: Some(p.image.clone()),
@@ -1664,11 +1766,69 @@ pub(crate) fn adopt_built(
             })),
         },
     );
-    Ok(Used {
-        runnable: m.runnable(&l),
-        manifest: m,
-        pack: None,
-    })
+    Ok(used_of(m))
+}
+
+/// The entry in the place a pipeline's apptainer image is kept under: the
+/// pipeline's own name and tool version, else that version with
+/// `-apptainer` where the first entry holds the same image in the docker
+/// or podman store (an image there is no file for apptainer). Refused
+/// where the entry holds another image.
+fn entry_of(l: &Layout, p: &Pipeline) -> Result<(String, String), String> {
+    let (app, version) = identity(p, None);
+    let other = |m: &Manifest, v: &str| {
+        format!(
+            "{app}@{v} is {} in the software place with another image ({}); nils software \
+             remove {app}@{v} or a pack naming this version first",
+            m.how.name(),
+            m.digest.as_deref().unwrap_or("none")
+        )
+    };
+    match Manifest::read(&l.manifest(&app, &version)) {
+        None => Ok((app, version)),
+        Some(m) if m.digest.as_deref() == Some(p.image_digest.as_str()) && m.kind.on_disk() => {
+            Ok((app, version))
+        }
+        Some(m) if m.digest.as_deref() == Some(p.image_digest.as_str()) => {
+            let alt = format!("{version}-apptainer");
+            match Manifest::read(&l.manifest(&app, &alt)) {
+                Some(a) if a.digest.as_deref() != Some(p.image_digest.as_str()) => {
+                    Err(other(&a, &alt))
+                }
+                _ => Ok((app, alt)),
+            }
+        }
+        Some(m) => Err(other(&m, &version)),
+    }
+}
+
+/// The install of the pipeline's image kept on disk already in its entry,
+/// with its file in place.
+fn existing_entry(l: &Layout, p: &Pipeline) -> Result<Option<Manifest>, String> {
+    let (app, version) = entry_of(l, p)?;
+    Ok(Manifest::read(&l.manifest(&app, &version)).filter(|m| {
+        m.digest.as_deref() == Some(p.image_digest.as_str())
+            && m.kind.on_disk()
+            && m.image_path(l)
+                .is_some_and(|f| std::fs::symlink_metadata(f).is_ok())
+    }))
+}
+
+/// An exclusive lock on an install's folder, `<app>/<version>/.lock`, held
+/// until the returned file is dropped: the engine's processes (two runs,
+/// the server and the CLI) take it before they write an install.
+fn lock_install(l: &Layout, app: &str, version: &str) -> Result<std::fs::File, String> {
+    let dir = l.install_dir(app, version);
+    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let path = dir.join(".lock");
+    let f = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    f.lock().map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(f)
 }
 
 /// Where a run stages the apptainer image it builds: the install's own
@@ -1678,17 +1838,7 @@ pub(crate) fn adopt_built(
 pub(crate) fn staging_dir(registry: &mut Registry, p: &Pipeline) -> Result<PathBuf, String> {
     let place = place_made(registry)?;
     let l = place.layout();
-    let (app, version) = identity(p, None);
-    if let Some(m) = Manifest::read(&l.manifest(&app, &version))
-        && m.digest.as_deref() != Some(p.image_digest.as_str())
-    {
-        return Err(format!(
-            "{app}@{version} is {} in the software place with another image ({}); nils software \
-             remove {app}@{version} or a pack naming this version first",
-            m.how.name(),
-            m.digest.as_deref().unwrap_or("none")
-        ));
-    }
+    let (app, version) = entry_of(&l, p)?;
     let dir = l.install_dir(&app, &version);
     std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     Ok(dir)
@@ -1699,6 +1849,9 @@ pub(crate) fn staging_dir(registry: &mut Registry, p: &Pipeline) -> Result<PathB
 /// or its tree). What a run asks before it runs the file.
 pub(crate) fn still_verified(u: &Used) -> Result<bool, String> {
     let m = &u.manifest;
+    if m.verification.failed() {
+        return Ok(false);
+    }
     if !m.kind.on_disk() {
         return Ok(true);
     }
@@ -1895,8 +2048,13 @@ pub(crate) fn register(
             .map(Licence::doc)
             .unwrap_or(Value::Null),
     };
-    let dir = l.install_dir(&app, &version);
-    std::fs::create_dir_all(&dir).map_err(|e| refused(500, format!("{}: {e}", dir.display())))?;
+    let _lock = lock_install(&l, &app, &version).map_err(|e| refused(500, e))?;
+    if Manifest::read(&l.manifest(&app, &version)).is_some() {
+        return Err(refused(
+            409,
+            format!("{app}@{version} was put in the software place by another process meanwhile"),
+        ));
+    }
     if let Some(text) = &req.pack {
         std::fs::write(l.pack(&app, &version), text)
             .map_err(|e| refused(500, format!("the pack's copy: {e}")))?;
@@ -1954,6 +2112,12 @@ pub(crate) fn verify(
     pack: Option<&str>,
     principal: &str,
 ) -> Result<Value, Refused> {
+    if !layout::name_ok(app) || !layout::name_ok(version) {
+        return Err(refused(
+            400,
+            format!("{app}@{version} is not a package name"),
+        ));
+    }
     let place = place(registry).map_err(|e| refused(409, e))?;
     let l = place.layout();
     let Some(mut m) = Manifest::read(&l.manifest(app, version)) else {
@@ -2192,6 +2356,12 @@ pub(crate) fn remove(
         );
         return Ok(json!({"removed": true, "app": app, "version": version}));
     }
+    if !layout::name_ok(app) || !layout::name_ok(version) {
+        return Err(refused(
+            400,
+            format!("{app}@{version} is not a package name"),
+        ));
+    }
     let place = place(registry).map_err(|e| refused(409, e))?;
     let l = place.layout();
     let Some(m) = Manifest::read(&l.manifest(app, version)) else {
@@ -2206,7 +2376,8 @@ pub(crate) fn remove(
             format!(
                 "{app}@{version} is registered as the site's install at {}, not installed by the \
                  engine, which never updates or removes what it did not install; it stays recorded \
-                 in externals.yaml",
+                 in externals.yaml (nils software forget {app}@{version} takes the registration \
+                 back and leaves the install where it is)",
                 m.image
             ),
         ));
@@ -2222,6 +2393,7 @@ pub(crate) fn remove(
             None,
         );
     }
+    let _lock = lock_install(&l, app, version).map_err(|e| refused(500, e))?;
     layout::remove_wrappers(&l, &m).map_err(|e| refused(500, format!("the wrappers: {e}")))?;
     let dir = l.install_dir(app, version);
     std::fs::remove_dir_all(&dir).map_err(|e| refused(500, format!("{}: {e}", dir.display())))?;
@@ -2238,6 +2410,88 @@ pub(crate) fn remove(
         },
     );
     Ok(json!({"removed": true, "app": app, "version": version, "kind": m.kind.name()}))
+}
+
+// --------------------------------------------------------------- forget
+
+/// `nils software forget <app>@<version>`: a registration taken back. The
+/// engine's own writings about it go (the manifest and the folder around
+/// it, the wrappers, the links, the module, the entry in `externals.yaml`);
+/// the registered path, the SIF, the folder or the image in the store, is
+/// never touched. An install the engine made is refused (409): that is
+/// `remove`.
+pub(crate) fn forget(
+    registry: &mut Registry,
+    app: &str,
+    version: &str,
+    principal: &str,
+) -> Result<Value, Refused> {
+    let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    if !layout::name_ok(app) || !layout::name_ok(version) {
+        return Err(refused(
+            400,
+            format!("{app}@{version} is not a package name"),
+        ));
+    }
+    let place = place(registry).map_err(|e| refused(409, e))?;
+    let l = place.layout();
+    let Some(m) = Manifest::read(&l.manifest(app, version)) else {
+        return Err(refused(
+            404,
+            format!("{app}@{version} is not in the software place"),
+        ));
+    };
+    if m.how != How::Registered || m.managed {
+        return Err(refused(
+            409,
+            format!(
+                "{app}@{version} was installed by the engine, which forgets nothing it installed; \
+                 nils software remove {app}@{version} takes it away"
+            ),
+        ));
+    }
+    let dir = l.install_dir(app, version);
+    // the registered path is the site's: nothing is removed that lies on it
+    if let Some(path) = m.image_path(&l)
+        && (path.starts_with(&dir) || dir.starts_with(&path))
+    {
+        return Err(refused(
+            409,
+            format!(
+                "{app}@{version} is registered at {}, which holds the engine's own folder for it; \
+                 nothing is removed",
+                path.display()
+            ),
+        ));
+    }
+    layout::remove_wrappers(&l, &m).map_err(|e| refused(500, format!("the wrappers: {e}")))?;
+    let _lock = lock_install(&l, app, version).map_err(|e| refused(500, e))?;
+    let mut externals = layout::read_externals(&l.externals()).map_err(|e| refused(500, e))?;
+    let before = externals.len();
+    externals.retain(|e| e.spec != m.spec());
+    if externals.len() != before {
+        layout::write_externals(&l.externals(), &externals)
+            .map_err(|e| refused(500, format!("externals.yaml: {e}")))?;
+    }
+    std::fs::remove_dir_all(&dir).map_err(|e| refused(500, format!("{}: {e}", dir.display())))?;
+    let _ = std::fs::remove_dir(l.place.join(app));
+    let _ = nils_registry::audit::record(
+        registry,
+        &nils_registry::audit::Entry {
+            principal,
+            action: nils_registry::audit::Action::SoftwareRemove,
+            scope: json!({"app": app, "version": version}),
+            policy: None,
+            job_id: None,
+            details: Some(json!({
+                "forgotten": true, "kind": m.kind.name(), "path": m.image, "managed": false,
+            })),
+        },
+    );
+    Ok(json!({
+        "forgotten": true, "app": app, "version": version, "kind": m.kind.name(),
+        "path": m.image,
+    }))
 }
 
 // ---------------------------------------------------------------- doors
@@ -2355,6 +2609,9 @@ pub(crate) fn route(
                 },
             ))
         })()),
+        ("POST", ["api", "software", app, version, "forget"]) => {
+            Some(replied(forget(registry, app, version, principal)))
+        }
         ("DELETE", ["api", "software", app, version]) => {
             Some(replied(remove(registry, home, app, version, principal)))
         }
@@ -2440,9 +2697,23 @@ pub(crate) enum SoftwareCommand {
         /// The terms' version
         #[arg(long, value_name = "VERSION")]
         terms_version: Option<String>,
+        /// The name the file is placed under, where the pack names none or
+        /// another (the default is the pack's, never the source file's)
+        #[arg(long, value_name = "NAME")]
+        name: Option<String>,
         /// A note kept with the acceptance
         #[arg(long)]
         note: Option<String>,
+        /// Machine-readable output
+        #[arg(long)]
+        json: bool,
+    },
+    /// Take a registration back: the engine's own writings about it go, the
+    /// registered path is never touched; an install the engine made is
+    /// refused (remove)
+    Forget {
+        /// <app>@<version>
+        spec: String,
         /// Machine-readable output
         #[arg(long)]
         json: bool,
@@ -2705,6 +2976,7 @@ pub(crate) fn command(
             file,
             terms,
             terms_version,
+            name,
             note,
             json,
         } => {
@@ -2723,10 +2995,9 @@ pub(crate) fn command(
                     terms_address: terms,
                     terms_version,
                     file: bytes,
-                    file_name: file
-                        .as_ref()
-                        .and_then(|p| p.file_name())
-                        .map(|n| n.to_string_lossy().into_owned()),
+                    // the placed file takes the pack's name; the path given is
+                    // only where the content comes from
+                    file_name: name,
                     note,
                     principal,
                 },
@@ -2751,6 +3022,20 @@ pub(crate) fn command(
                         f["sha256"].as_str().unwrap_or_default()
                     );
                 }
+            }
+            Ok(())
+        }
+        SoftwareCommand::Forget { spec, json } => {
+            let (app, version) = layout::parse_spec(&spec).map_err(crate::usage)?;
+            let done =
+                forget(&mut registry, &app, &version, &principal).map_err(|(s, b)| said(s, b))?;
+            if json {
+                print(&done);
+            } else {
+                println!(
+                    "forgot {app}@{version}; {} is left as it was",
+                    done["path"].as_str().unwrap_or_default()
+                );
             }
             Ok(())
         }

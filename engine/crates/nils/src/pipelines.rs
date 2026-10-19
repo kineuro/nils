@@ -7487,6 +7487,9 @@ fn ensure_image(
     if let Some(used) = crate::software::for_run(registry, x.pipeline)?
         && used.manifest.kind.on_disk()
     {
+        if let Some(why) = crate::software::failed_verification(&used) {
+            return Err(why);
+        }
         // used only as verified (record 49, after review): what fails its
         // recorded fingerprint is not run
         if crate::software::still_verified(&used)? {

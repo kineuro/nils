@@ -61,6 +61,11 @@ if a[0] == "image" and a[1] == "inspect":
 if a[0] == "image" and a[1] == "rm":
     sys.exit(0)
 if a[0] == "run":
+    if os.environ.get("FAKE_DOCKER_FLOOD"):
+        # the text a pack expects comes first; a long output follows it
+        print("the early marker 7731")
+        for n in range(400):
+            print("filler line %04d " % n + "x" * 60)
     i = 0
     while i < len(a) and "@sha256:" not in a[i]:
         i += 1
@@ -1336,4 +1341,433 @@ tests: {{command: ["sh", "-c", "echo the test ran"], expect: "the test ran"}}
     );
     assert_eq!(removed["removed"], true, "{removed}");
     assert!(!lab.place().join("busybox-echo").exists());
+}
+
+// ------------------------------------------------- the review's fixes
+
+const PACK_EARLY: &str = r#"nils_pack: 1
+pipeline: {name: echo-tool, descriptor_sha256: "sha256:00"}
+source:
+  image: "example.org/echo-tool@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  probe: {command: ["echo-tool", "--version"], expect: "the early marker 7731"}
+tests: {command: ["echo-tool", "run", "/input"], expect: "the early marker 7731"}
+"#;
+
+fn echo_lab(name: &str) -> Lab {
+    let lab = Lab::new(name);
+    lab.add_pipeline(&descriptor("echo-tool", "2.0", IMAGE_ECHO, "gpu: none", ""));
+    lab
+}
+
+/// Fix 1: verify and remove take their names from the URL, so a `..` is
+/// refused (400) at both doors and at the keyboard, and nothing outside the
+/// place is read or removed.
+#[test]
+fn a_dot_dot_package_name_is_refused_at_verify_remove_and_forget() {
+    let lab = echo_lab("software-dotdot");
+    // a folder beside the place that a `..` would reach
+    let outside = lab.work.path().join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("keep"), b"kept").unwrap();
+    let server = Server::start(&lab, 6);
+    for (method, path) in [
+        ("POST", "/api/software/../outside/verify"),
+        ("DELETE", "/api/software/../outside"),
+        ("POST", "/api/software/../outside/forget"),
+    ] {
+        let (status, body) = server.send(method, path, ADMIN, Some(&json!({})));
+        assert_eq!(status, 400, "{method} {path}: {body}");
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap()
+                .contains("not a package name"),
+            "{body}"
+        );
+    }
+    drop(server);
+    assert!(outside.join("keep").is_file());
+    for args in [
+        ["software", "verify", "..@outside"],
+        ["software", "remove", "..@outside"],
+        ["software", "forget", "..@outside"],
+        ["software", "remove", "outside@.."],
+    ] {
+        let (good, _, err) = lab.run(&args, &[], None);
+        assert!(!good, "{args:?}");
+        assert!(err.contains("not a package name"), "{err}");
+    }
+    assert!(outside.join("keep").is_file());
+}
+
+/// Fix 2: a run uses no install whose last verification failed. It is
+/// refused before it starts (409) with the fix, and runs again once the
+/// install verifies.
+#[test]
+fn a_run_is_refused_on_an_install_whose_verification_failed() {
+    let lab = echo_lab("software-failed");
+    let pack = lab.pack_file("echo", PACK_ECHO);
+    let done = lab.json(
+        &[
+            "software",
+            "install",
+            "echo-tool@2.0",
+            "--pack",
+            pack.to_str().unwrap(),
+            "--json",
+        ],
+        &[],
+    );
+    assert_eq!(done["verified"], true, "{done}");
+    let wrong = lab.pack_file(
+        "echo-wrong",
+        &PACK_ECHO.replace("stand-in tool 1.2.3", "a version it does not print"),
+    );
+    let failed = lab.json(
+        &[
+            "software",
+            "verify",
+            "echo-tool@2.0",
+            "--pack",
+            wrong.to_str().unwrap(),
+            "--json",
+        ],
+        &[],
+    );
+    assert_eq!(failed["verified"], false, "{failed}");
+    let server = Server::start(&lab, 4);
+    let job = json!({"command": ["run", "echo-tool", "--select", "selection:every@1"]});
+    let (status, refused) = server.send("POST", "/api/jobs", ADMIN, Some(&job));
+    assert_eq!(status, 409, "{refused}");
+    let error = refused["error"].as_str().unwrap();
+    assert!(error.contains("failed its verification"), "{error}");
+    assert!(
+        error.contains("nils software verify echo-tool@2.0"),
+        "{error}"
+    );
+    let image = refused["requirements"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["check"] == "image")
+        .unwrap();
+    assert_eq!(image["ok"], false, "{refused}");
+    // verified again with the right probe: no longer refused for it
+    let ok = lab.json(
+        &[
+            "software",
+            "verify",
+            "echo-tool@2.0",
+            "--pack",
+            pack.to_str().unwrap(),
+            "--json",
+        ],
+        &[],
+    );
+    assert_eq!(ok["verified"], true, "{ok}");
+    let (status, after) = server.send("POST", "/api/jobs", ADMIN, Some(&job));
+    assert!(
+        !after.to_string().contains("failed its verification"),
+        "{status} {after}"
+    );
+}
+
+/// Fix 3: `accept --file PATH` places the file under the pack's name, not
+/// the source's, so the run finds it; `--name` overrides on purpose.
+#[test]
+fn an_accepted_licence_file_takes_the_pack_s_name_not_the_source_s() {
+    let lab = Lab::new("software-accept-name");
+    lab.add_pipeline(&descriptor(
+        "licensed-tool",
+        "3.0",
+        IMAGE_LICENSED,
+        "gpu: none",
+        "  secrets:\n    - {id: tool_license, mount: /license.txt, env: TOOL_LICENSE}\n",
+    ));
+    let pack = lab.pack_file("licensed", PACK_LICENSED);
+    let done = lab.json(
+        &[
+            "software",
+            "install",
+            "licensed-tool@3.0",
+            "--pack",
+            pack.to_str().unwrap(),
+            "--json",
+        ],
+        &[],
+    );
+    assert_eq!(done["installed"], true, "{done}");
+    let source = lab
+        .bin
+        .file("downloads/my-licence-2026.dat", b"a licence text\n");
+    let accepted = lab.json(
+        &[
+            "software",
+            "accept",
+            "licensed-tool@3.0",
+            "--file",
+            source.to_str().unwrap(),
+            "--json",
+        ],
+        &[],
+    );
+    assert_eq!(accepted["file"]["name"], "license.txt", "{accepted}");
+    let dir = lab.place().join("licences/licensed-tool");
+    assert!(dir.join("license.txt").is_file());
+    assert!(!dir.join("my-licence-2026.dat").exists());
+    let listed = lab.json(&["software", "list", "--json"], &[]);
+    let p = Lab::package(&listed, "licensed-tool@3.0");
+    assert_eq!(p["licence"]["file"]["present"], true, "{p}");
+    assert_eq!(Lab::need(p, "licence")["state"], "ok", "{p}");
+    // an explicit name wins
+    let named = lab.json(
+        &[
+            "software",
+            "accept",
+            "licensed-tool@3.0",
+            "--file",
+            source.to_str().unwrap(),
+            "--name",
+            "other.txt",
+            "--json",
+        ],
+        &[],
+    );
+    assert_eq!(named["file"]["name"], "other.txt", "{named}");
+    assert!(dir.join("other.txt").is_file());
+}
+
+/// Fix 6: a probe's or a test's expected text is searched in the whole
+/// output, not its last 4 KiB.
+#[test]
+fn an_expected_text_early_in_a_long_output_still_verifies() {
+    let lab = echo_lab("software-early");
+    let pack = lab.pack_file("early", PACK_EARLY);
+    let done = lab.json(
+        &[
+            "software",
+            "install",
+            "echo-tool@2.0",
+            "--pack",
+            pack.to_str().unwrap(),
+            "--json",
+        ],
+        &[("FAKE_DOCKER_FLOOD", "1")],
+    );
+    assert_eq!(done["verified"], true, "{done}");
+    let v = &done["package"]["verification"];
+    assert_eq!(v["probe"]["passed"], true, "{v}");
+    assert_eq!(v["test"]["passed"], true, "{v}");
+    // and a text that is nowhere in it still fails
+    let missing = lab.pack_file(
+        "early-missing",
+        &PACK_EARLY.replace("the early marker 7731", "a marker never printed"),
+    );
+    let failed = lab.json(
+        &[
+            "software",
+            "verify",
+            "echo-tool@2.0",
+            "--pack",
+            missing.to_str().unwrap(),
+            "--json",
+        ],
+        &[("FAKE_DOCKER_FLOOD", "1")],
+    );
+    assert_eq!(failed["verified"], false, "{failed}");
+}
+
+/// Fix 7: a test input fetched from an address is fetched again when the
+/// pack names another address.
+#[test]
+fn a_changed_test_input_address_is_fetched_again() {
+    use std::net::TcpListener;
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let served = std::thread::spawn(move || {
+        for _ in 0..2 {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut head = [0u8; 2048];
+            let n = stream.read(&mut head).unwrap();
+            let line = String::from_utf8_lossy(&head[..n]).to_string();
+            let body = if line.contains("/first.txt") {
+                "first"
+            } else {
+                "second"
+            };
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap();
+        }
+    });
+    let lab = echo_lab("software-input");
+    let pack_for = |file: &str| {
+        PACK_ECHO.replace(
+            "tests: {",
+            &format!("tests: {{input: \"http://127.0.0.1:{port}/{file}\", "),
+        )
+    };
+    let first = lab.pack_file("input-first", &pack_for("first.txt"));
+    let done = lab.json(
+        &[
+            "software",
+            "install",
+            "echo-tool@2.0",
+            "--pack",
+            first.to_str().unwrap(),
+            "--json",
+        ],
+        &[],
+    );
+    assert_eq!(done["verified"], true, "{done}");
+    let kept = lab.place().join("echo-tool/2.0/test-input");
+    assert_eq!(
+        std::fs::read_to_string(kept.join("first.txt")).unwrap(),
+        "first"
+    );
+    let second = lab.pack_file("input-second", &pack_for("second.txt"));
+    let again = lab.json(
+        &[
+            "software",
+            "verify",
+            "echo-tool@2.0",
+            "--pack",
+            second.to_str().unwrap(),
+            "--json",
+        ],
+        &[],
+    );
+    assert_eq!(again["verified"], true, "{again}");
+    assert_eq!(
+        std::fs::read_to_string(kept.join("second.txt")).unwrap(),
+        "second"
+    );
+    assert!(!kept.join("first.txt").exists(), "the old input is gone");
+    served.join().unwrap();
+}
+
+/// Fix 8: a registration is taken back with forget: the engine's writings
+/// go, the registered path is untouched, an install of the engine's own is
+/// refused (it is remove's), and the name can be registered again.
+#[test]
+fn a_registration_is_taken_back_with_forget_and_the_site_s_bytes_stay() {
+    let lab = Lab::new("software-forget");
+    let site = TempDir::new("software-forget-site");
+    let home = site.path().join("site-tool-1.0");
+    std::fs::create_dir_all(home.join("bin")).unwrap();
+    std::fs::create_dir_all(home.join("models")).unwrap();
+    std::fs::write(home.join("bin/site-tool"), b"#!/bin/sh\necho site\n").unwrap();
+    std::fs::write(home.join("models/w.bin"), b"weights").unwrap();
+    let pack = lab.pack_file("site", PACK_SITE);
+    let register = |lab: &Lab| {
+        lab.json(
+            &[
+                "software",
+                "register",
+                "site-tool@1.0",
+                "--kind",
+                "sandbox",
+                "--path",
+                home.to_str().unwrap(),
+                "--pack",
+                pack.to_str().unwrap(),
+                "--json",
+            ],
+            &[],
+        )
+    };
+    assert_eq!(register(&lab)["registered"], true);
+    let (good, _, err) = lab.run(&["software", "remove", "site-tool@1.0"], &[], None);
+    assert!(!good);
+    assert!(err.contains("nils software forget site-tool@1.0"), "{err}");
+
+    let server = Server::start(&lab, 4);
+    let (status, _) = server.send("POST", "/api/software/site-tool/1.0/forget", READER, None);
+    assert_eq!(status, 403);
+    let (status, done) = server.send(
+        "POST",
+        "/api/software/site-tool/1.0/forget",
+        ADMIN,
+        Some(&json!({})),
+    );
+    assert_eq!(status, 200, "{done}");
+    assert_eq!(done["forgotten"], true, "{done}");
+    assert_eq!(done["path"], home.display().to_string(), "{done}");
+    let (status, _) = server.send(
+        "POST",
+        "/api/software/site-tool/1.0/forget",
+        ADMIN,
+        Some(&json!({})),
+    );
+    assert_eq!(status, 404);
+    drop(server);
+
+    // the engine's writings are gone, the site's bytes are not
+    let place = lab.place();
+    assert!(!place.join("site-tool/1.0").exists());
+    assert!(!place.join("site-tool").exists());
+    assert!(!place.join("modules/site-tool/1.0.lua").exists());
+    let externals = std::fs::read_to_string(place.join("externals.yaml")).unwrap_or_default();
+    assert!(!externals.contains("site-tool"), "{externals}");
+    assert_eq!(
+        std::fs::read(home.join("models/w.bin")).unwrap(),
+        b"weights"
+    );
+    assert!(home.join("bin/site-tool").is_file());
+    let listed = lab.json(&["software", "list", "--json"], &[]);
+    assert!(
+        listed["packages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|p| p["spec"] != "site-tool@1.0"),
+        "{listed}"
+    );
+    // registered again, then forgotten at the keyboard
+    assert_eq!(register(&lab)["registered"], true);
+    let (good, out, err) = lab.run(&["software", "forget", "site-tool@1.0"], &[], None);
+    assert!(good, "{err}");
+    assert!(out.contains("forgot site-tool@1.0"), "{out}");
+    assert!(home.join("models/w.bin").is_file());
+
+    // an install of the engine's own is remove's
+    lab.add_pipeline(&descriptor("echo-tool", "2.0", IMAGE_ECHO, "gpu: none", ""));
+    lab.json(&["software", "install", "echo-tool@2.0", "--json"], &[]);
+    let (good, _, err) = lab.run(&["software", "forget", "echo-tool@2.0"], &[], None);
+    assert!(!good);
+    assert!(err.contains("nils software remove echo-tool@2.0"), "{err}");
+    assert!(place.join("echo-tool/2.0/manifest.json").is_file());
+}
+
+/// Fix 4: the engine's processes serialise on `<app>/<version>/.lock`: a
+/// remove waits while another process holds it, and then proceeds.
+#[test]
+fn a_second_process_waits_for_the_install_s_lock() {
+    let lab = echo_lab("software-lock");
+    lab.json(&["software", "install", "echo-tool@2.0", "--json"], &[]);
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(lab.place().join("echo-tool/2.0/.lock"))
+        .unwrap();
+    lock.lock().unwrap();
+    let mut child = lab
+        .command(&[])
+        .args(["software", "remove", "echo-tool@2.0"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+    assert!(child.try_wait().unwrap().is_none(), "remove did not wait");
+    assert!(lab.place().join("echo-tool/2.0/manifest.json").is_file());
+    drop(lock);
+    let status = child.wait().unwrap();
+    assert!(status.success());
+    assert!(!lab.place().join("echo-tool/2.0").exists());
 }

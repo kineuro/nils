@@ -278,7 +278,14 @@ fn runtime_and_image(
         // 57-Q4), for the pack to read
         "key": crate::software::key_part(registry, p),
     });
+    // an install whose last verification failed is not run
+    let failed = software
+        .as_ref()
+        .and_then(crate::software::failed_verification);
     out.push(match here {
+        _ if failed.is_some() => {
+            Check::failed("image", Cause::Image, failed.unwrap_or_default(), extra)
+        }
         Some(true) if software.is_some() => Check::ok(
             "image",
             format!(

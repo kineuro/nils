@@ -5731,7 +5731,7 @@ pub(crate) fn door(method: &str, segs: &[&str]) -> (Need, Detail) {
         // page and the Pipelines page; every act in it is an admin's
         ("GET", ["api", "software"]) => (Need::AnyOf(&["install:see", "pipelines:see"]), Plain),
         ("POST", ["api", "software", "install" | "register"])
-        | ("POST", ["api", "software", _, _, "verify" | "accept"])
+        | ("POST", ["api", "software", _, _, "verify" | "accept" | "forget"])
         | ("DELETE", ["api", "software", _, _]) => {
             (Need::One(nils_pipeline::failure::INSTALL_GRANT), Plain)
         }
@@ -7690,6 +7690,15 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
             "one package",
             "Accepting a tool's terms",
             "Accepted a tool's terms",
+        ),
+        row(
+            "POST /api/software/{app}/{version}/forget",
+            true,
+            true,
+            "bounded",
+            "one package",
+            "Taking a registration back",
+            "Took a registration back",
         ),
         row(
             "DELETE /api/software/{app}/{version}",

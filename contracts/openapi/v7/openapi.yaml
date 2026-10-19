@@ -2595,6 +2595,7 @@ paths:
         - {name: version, in: path, required: true, schema: {type: string}}
       responses:
         "200": {description: "{verified, verification: {probe, fingerprint, test}, package, needs}"}
+        "400": {description: "The app or the version is not a package name"}
         "403": {description: "No install:work"}
         "404": {description: "Not in the software place"}
         "409": {description: "No software place"}
@@ -2611,6 +2612,19 @@ paths:
         "403": {description: "No install:work"}
         "409": {description: "No software place"}
         "422": {description: "No terms' address (the pack names none and the body gives none), a file that is empty or over 64 KiB, or a file name that is not one"}
+  /api/software/{app}/{version}/forget:
+    post:
+      summary: Take a registration back (nils software forget app@version; record 57 P5, Wave 7b section 6.3; added in place, additively, on 2026-10-19)
+      description: "An admin's (install:work), audited as `software.remove` with `forgotten: true`. A registered install (`managed: false`) is taken out of the software place: its manifest and the folder around it (pack copy, logs), its wrappers, its links, its module and its entry in externals.yaml. The registered path, the SIF, the sandbox or the image in the runtime's store, is never touched; the engine only removes what it wrote. An install the engine made is refused (409): that is DELETE /api/software/{app}/{version}, which in turn still refuses a registered one. The app and the version are package names (letters, digits, '.', '-', '_' and '+', no slash, none starting with a dot), else 400."
+      parameters:
+        - {name: app, in: path, required: true, schema: {type: string}}
+        - {name: version, in: path, required: true, schema: {type: string}}
+      responses:
+        "200": {description: "{forgotten: true, app, version, kind, path}"}
+        "400": {description: "The app or the version is not a package name"}
+        "403": {description: "No install:work"}
+        "404": {description: "Not in the software place"}
+        "409": {description: "An install the engine made, or no software place"}
   /api/software/{app}/{version}:
     delete:
       summary: Remove an install the engine made (nils software remove app@version; record 57 P5, Wave 7b section 6.3; added in place, additively, on 2026-10-18)
@@ -2621,8 +2635,9 @@ paths:
       responses:
         "200": {description: "{removed: true, app, version, kind}"}
         "403": {description: "No install:work"}
+        "400": {description: "The app or the version is not a package name"}
         "404": {description: "Not in the software place, or no install of the converter of the engine's own"}
-        "409": {description: "A registered install, which the engine never removes, or no software place"}
+        "409": {description: "A registered install, which the engine never removes (POST .../forget takes the registration back), or no software place"}
   /api/instances/{stack}/manifest:
     get:
       summary: The viewing pyramid of a stack, as its manifest (Wave 5 section 12.7)

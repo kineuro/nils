@@ -380,6 +380,12 @@ impl Manifest {
     }
 
     /// `<app>@<version>`.
+    /// Whether the last verification ran and passed: `verified_at` is the
+    /// time of the last one, whatever it found, so a run asks this.
+    pub fn verified_ok(&self) -> bool {
+        self.verified_at.is_some() && !self.verification.failed()
+    }
+
     pub fn spec(&self) -> String {
         format!("{}@{}", self.app, self.version)
     }
