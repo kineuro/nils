@@ -185,7 +185,8 @@ impl Vocabulary {
     /// reads (`base`, `body_part`) rather than this crate's list.
     pub fn widened(mut self, fact: &str, more: &[String]) -> Vocabulary {
         for role in self.roles.clone() {
-            if let Some(FactType::Text(Some(list))) = self.facts.get_mut(&format!("{role}.{fact}")) {
+            if let Some(FactType::Text(Some(list))) = self.facts.get_mut(&format!("{role}.{fact}"))
+            {
                 for w in more {
                     if !list.contains(w) {
                         list.push(w.clone());
@@ -269,7 +270,8 @@ impl Val {
 
     /// A number as a fact, where the registry holds one.
     pub fn number(n: Option<f64>) -> Val {
-        n.filter(|n| n.is_finite()).map_or(Val::Unknown, Val::Number)
+        n.filter(|n| n.is_finite())
+            .map_or(Val::Unknown, Val::Number)
     }
 
     /// A text as a fact, where the registry holds one that is not empty.
@@ -362,10 +364,22 @@ mod tests {
             assert!(v.facts.contains_key(&format!("t1w.{fact}")), "{fact}");
             assert!(v.facts.contains_key(&format!("stack.{fact}")), "{fact}");
         }
-        for bare in ["age_years", "diagnosis", "goal", "host.cores", "host.memory_gb", "host.gpu", "host.gpu_memory_gb", "host.runtime"] {
+        for bare in [
+            "age_years",
+            "diagnosis",
+            "goal",
+            "host.cores",
+            "host.memory_gb",
+            "host.gpu",
+            "host.gpu_memory_gb",
+            "host.runtime",
+        ] {
             assert!(v.facts.contains_key(bare), "{bare}");
         }
-        assert_eq!(v.facts["goal"], FactType::Text(Some(GOALS.iter().map(|g| g.to_string()).collect())));
+        assert_eq!(
+            v.facts["goal"],
+            FactType::Text(Some(GOALS.iter().map(|g| g.to_string()).collect()))
+        );
         let v = v.widened("base", &["T2map".into()]);
         let FactType::Text(Some(words)) = &v.facts["t1w.base"] else {
             panic!()

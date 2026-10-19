@@ -1861,6 +1861,9 @@ fn the_runs_ended_since_a_sweep_on_both_backends() {
                 level: "stack",
                 added_by: "test",
                 added_at: "2026-10-15T10:00:00Z",
+                pack: None,
+                pack_digest: None,
+                version_digest: "d1",
             },
         )
         .unwrap();

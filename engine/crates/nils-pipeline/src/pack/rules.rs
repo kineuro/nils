@@ -56,7 +56,8 @@ pub struct Chosen {
 
 impl Chosen {
     pub fn doc(&self) -> Value {
-        let mut v = json!({"value": self.value, "by": self.by, "rule": self.rule, "facts": self.facts});
+        let mut v =
+            json!({"value": self.value, "by": self.by, "rule": self.rule, "facts": self.facts});
         if let Some(p) = &self.proposed {
             v["proposed"] = json!(p);
         }
@@ -165,7 +166,12 @@ impl Judgement {
         Value::Object(
             self.knobs
                 .iter()
-                .map(|(k, c)| (k.clone(), json!({"value": c.value, "by": c.by, "rule": c.rule})))
+                .map(|(k, c)| {
+                    (
+                        k.clone(),
+                        json!({"value": c.value, "by": c.by, "rule": c.rule}),
+                    )
+                })
                 .collect(),
         )
     }
@@ -198,8 +204,10 @@ pub fn judge(
 ) -> Judgement {
     let vocab = pack.vocabulary(d);
     let f = with_person(pack, facts, person);
-    let mut read = Facts::default();
-    read.roles = f.roles.clone();
+    let mut read = Facts {
+        roles: f.roles.clone(),
+        ..Facts::default()
+    };
     let mut note = |e: &Expr| {
         for (name, v) in expr::read(e, &f) {
             if let Some(r) = name.strip_prefix("present:") {
@@ -306,7 +314,10 @@ pub fn judge(
                     by: format!("person:{}", person.user),
                     rule: None,
                     facts: BTreeMap::new(),
-                    proposed: person.proposed.contains(id).then(|| "assistant".to_string()),
+                    proposed: person
+                        .proposed
+                        .contains(id)
+                        .then(|| "assistant".to_string()),
                 },
             );
         }
@@ -488,7 +499,10 @@ mod tests {
         let resolved = d.resolve(&[]).unwrap();
         let j = judge(&p, &d, &resolved, &facts(true, "2D", 5.0), &person("anna"));
         assert_eq!(j.status, Status::Skipped);
-        assert_eq!(j.need.as_deref(), Some("t1w: dimension == '3D' and slice_thickness_mm <= 1.5"));
+        assert_eq!(
+            j.need.as_deref(),
+            Some("t1w: dimension == '3D' and slice_thickness_mm <= 1.5")
+        );
         assert!(j.words.as_deref().unwrap().starts_with("the T1 is 2D"));
         // no FLAIR with lesions on: skipped by the FLAIR's need
         let j = judge(&p, &d, &resolved, &facts(false, "3D", 1.0), &person("anna"));
@@ -503,10 +517,18 @@ mod tests {
         assert_eq!(j.knobs["lesion"].value, "off");
         assert_eq!(j.knobs["lesion"].by, "rule:lesions-off-without-flair");
         assert_eq!(j.knobs["pallidum_separate"].value, false);
-        assert_eq!(j.knobs["pallidum_separate"].by, "rule:pallidum-needs-t2-or-flair");
+        assert_eq!(
+            j.knobs["pallidum_separate"].by,
+            "rule:pallidum-needs-t2-or-flair"
+        );
         assert_eq!(
             j.knobs["pallidum_separate"].facts,
-            [("present:flair".to_string(), json!(false)), ("present:t2w".to_string(), json!(false))].into_iter().collect()
+            [
+                ("present:flair".to_string(), json!(false)),
+                ("present:t2w".to_string(), json!(false))
+            ]
+            .into_iter()
+            .collect()
         );
     }
 
@@ -525,20 +547,36 @@ mod tests {
         let j = judge(&p, &d, &resolved, &f, &let_run);
         assert_eq!(j.status, Status::Ready);
         assert_eq!(j.let_run_by.as_deref(), Some("person:anna"));
-        assert!(j.caveats.iter().any(|c| c.cannot_tell.as_deref() == Some("aligned:flair:t1w")));
+        assert!(
+            j.caveats
+                .iter()
+                .any(|c| c.cannot_tell.as_deref() == Some("aligned:flair:t1w"))
+        );
         // a soft need on an unknown fact is a caveat
         let mut f = facts(true, "3D", 1.0);
         f.values.remove("t1w.field_strength_t");
         let j = judge(&p, &d, &resolved, &f, &person("anna"));
         assert_eq!(j.status, Status::Ready);
         assert_eq!(j.caveats.len(), 1);
-        assert_eq!(j.caveats[0].words, "cannot tell: t1w.field_strength_t; the T1 was acquired below 1.5 T");
+        assert_eq!(
+            j.caveats[0].words,
+            "cannot tell: t1w.field_strength_t; the T1 was acquired below 1.5 T"
+        );
         // a soft need that fails is a caveat in the pack's words
         let mut f = facts(true, "3D", 1.0);
         f.set("t1w.field_strength_t", Val::Number(1.0));
         f.set("host.memory_gb", Val::Number(8.0));
         let j = judge(&p, &d, &resolved, &f, &person("anna"));
-        assert_eq!(j.caveats.iter().map(|c| c.words.as_str()).collect::<Vec<_>>(), ["the host has less than 16 GB", "the T1 was acquired below 1.5 T"]);
+        assert_eq!(
+            j.caveats
+                .iter()
+                .map(|c| c.words.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "the host has less than 16 GB",
+                "the T1 was acquired below 1.5 T"
+            ]
+        );
     }
 
     #[test]
@@ -561,13 +599,29 @@ mod tests {
         let again = replay(&p, &d, &doc).unwrap();
         assert_eq!(again, j.params().into_iter().collect::<BTreeMap<_, _>>());
         // without the person's value the fast goal's rule sets the threads
-        let j = judge(&p, &d, &d.resolve(&[]).unwrap(), &facts(true, "3D", 1.0), &Person { choices: [("goal".to_string(), json!("fast"))].into_iter().collect(), ..person("anna") });
+        let j = judge(
+            &p,
+            &d,
+            &d.resolve(&[]).unwrap(),
+            &facts(true, "3D", 1.0),
+            &Person {
+                choices: [("goal".to_string(), json!("fast"))].into_iter().collect(),
+                ..person("anna")
+            },
+        );
         assert_eq!(j.knobs["threads"].value, 2);
         assert_eq!(j.knobs["threads"].by, "rule:fast-goal-fewer-threads");
-        assert_eq!(j.knobs["threads"].facts, [("goal".to_string(), json!("fast"))].into_iter().collect());
+        assert_eq!(
+            j.knobs["threads"].facts,
+            [("goal".to_string(), json!("fast"))].into_iter().collect()
+        );
         let again = replay(&p, &d, &j.doc()).unwrap();
         assert_eq!(again["threads"], 2);
-        assert!(person_may_set(&p, &["lesion".to_string()].into_iter().collect()).unwrap_err().contains("rules"));
+        assert!(
+            person_may_set(&p, &["lesion".to_string()].into_iter().collect())
+                .unwrap_err()
+                .contains("rules")
+        );
         assert!(person_may_set(&p, &["threads".to_string()].into_iter().collect()).is_ok());
     }
 }

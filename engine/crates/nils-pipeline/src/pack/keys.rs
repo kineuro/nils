@@ -67,7 +67,11 @@ pub fn comparability(m: &Members) -> (String, Value) {
 
 /// The result key: the comparability key, every knob's value, and the
 /// inputs by content (each input file's identity, sorted).
-pub fn result(comparability_key: &str, knobs: &Map<String, Value>, inputs: &[String]) -> (String, Value) {
+pub fn result(
+    comparability_key: &str,
+    knobs: &Map<String, Value>,
+    inputs: &[String],
+) -> (String, Value) {
     let mut inputs: Vec<&String> = inputs.iter().collect();
     inputs.sort();
     inputs.dedup();
@@ -147,7 +151,10 @@ mod tests {
         let (r3, _) = result(&a, &knobs, &["x".into()]);
         assert_ne!(r1, r3);
         let words = pooling_words(&[a.clone(), b.clone(), a.clone()]);
-        assert!(words.starts_with("these results hold 2 comparability keys ("), "{words}");
+        assert!(
+            words.starts_with("these results hold 2 comparability keys ("),
+            "{words}"
+        );
         assert!(words.contains(&short(&a)) && words.contains(&short(&b)));
         assert!(words.contains("never summed together"));
         let (groups, w) = by_key(&[(a.clone(), 1), (b.clone(), 2), (a.clone(), 3)]);

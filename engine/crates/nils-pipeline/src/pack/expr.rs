@@ -129,7 +129,8 @@ fn lex(text: &str) -> Result<Vec<Tok>, String> {
             out.push(Tok::Ident(word));
             continue;
         }
-        if c.is_ascii_digit() || (c == '-' && chars.get(i + 1).is_some_and(|d| d.is_ascii_digit())) {
+        if c.is_ascii_digit() || (c == '-' && chars.get(i + 1).is_some_and(|d| d.is_ascii_digit()))
+        {
             let start = i;
             i += 1;
             while i < chars.len() && (chars[i].is_ascii_digit() || chars[i] == '.') {
@@ -535,7 +536,9 @@ pub fn check(e: &Expr, vocab: &Vocabulary) -> Result<Ty, String> {
                 match &ty {
                     None => ty = Some(t),
                     Some(have) if *have != t => {
-                        return Err(format!("a list holds values of one type; this one holds {have} and {t}"));
+                        return Err(format!(
+                            "a list holds values of one type; this one holds {have} and {t}"
+                        ));
                     }
                     _ => {}
                 }
@@ -548,16 +551,10 @@ pub fn check(e: &Expr, vocab: &Vocabulary) -> Result<Ty, String> {
                 return Err(format!("`{}` compares values, not lists", op.text()));
             }
             if ta != tb {
-                return Err(format!(
-                    "`{a} {} {b}` compares {ta} with {tb}",
-                    op.text()
-                ));
+                return Err(format!("`{a} {} {b}` compares {ta} with {tb}", op.text()));
             }
             if op.orders() && ta != Ty::Number {
-                return Err(format!(
-                    "`{}` orders numbers, and `{a}` is {ta}",
-                    op.text()
-                ));
+                return Err(format!("`{}` orders numbers, and `{a}` is {ta}", op.text()));
             }
             // a text compared to a fact with a vocabulary is one of its words
             in_vocabulary(a, b, vocab)?;
@@ -573,7 +570,9 @@ pub fn check(e: &Expr, vocab: &Vocabulary) -> Result<Ty, String> {
                 && !items.is_empty()
                 && *inner != ta
             {
-                return Err(format!("`{a} in {b}`: `{a}` is {ta}, the list holds {inner}"));
+                return Err(format!(
+                    "`{a} in {b}`: `{a}` is {ta}, the list holds {inner}"
+                ));
             }
             if let Expr::List(items) = b.as_ref() {
                 for item in items {
@@ -583,11 +582,17 @@ pub fn check(e: &Expr, vocab: &Vocabulary) -> Result<Ty, String> {
             Ok(Ty::Bool)
         }
         Expr::And(a, b) | Expr::Or(a, b) => {
-            let word = if matches!(e, Expr::And(..)) { "and" } else { "or" };
+            let word = if matches!(e, Expr::And(..)) {
+                "and"
+            } else {
+                "or"
+            };
             for side in [a, b] {
                 let t = check(side, vocab)?;
                 if t != Ty::Bool {
-                    return Err(format!("`{word}` joins true-or-false values, and `{side}` is {t}"));
+                    return Err(format!(
+                        "`{word}` joins true-or-false values, and `{side}` is {t}"
+                    ));
                 }
             }
             Ok(Ty::Bool)
@@ -595,7 +600,9 @@ pub fn check(e: &Expr, vocab: &Vocabulary) -> Result<Ty, String> {
         Expr::Not(a) => {
             let t = check(a, vocab)?;
             if t != Ty::Bool {
-                return Err(format!("`not` takes a true-or-false value, and `{a}` is {t}"));
+                return Err(format!(
+                    "`not` takes a true-or-false value, and `{a}` is {t}"
+                ));
             }
             Ok(Ty::Bool)
         }
@@ -612,7 +619,11 @@ pub fn check(e: &Expr, vocab: &Vocabulary) -> Result<Ty, String> {
             Ok(Ty::Bool)
         }
         Expr::Min(items) | Expr::Max(items) => {
-            let word = if matches!(e, Expr::Min(_)) { "min" } else { "max" };
+            let word = if matches!(e, Expr::Min(_)) {
+                "min"
+            } else {
+                "max"
+            };
             for item in items {
                 let t = check(item, vocab)?;
                 if t != Ty::Number {
@@ -675,7 +686,7 @@ pub fn eval(e: &Expr, facts: &Facts) -> Val {
             }
             match eval(b, facts) {
                 Val::List(items) => {
-                    if items.iter().any(|i| *i == Val::Unknown) {
+                    if items.contains(&Val::Unknown) {
                         return Val::Unknown;
                     }
                     Val::Bool(items.contains(&va))
@@ -763,9 +774,12 @@ mod tests {
             &["t1w".into(), "flair".into()],
             &Goals {
                 goal: vec!["fast".into(), "standard".into(), "research".into()],
-                switches: [("lesions".to_string(), vec![Value::from("on"), Value::from("off")])]
-                    .into_iter()
-                    .collect(),
+                switches: [(
+                    "lesions".to_string(),
+                    vec![Value::from("on"), Value::from("off")],
+                )]
+                .into_iter()
+                .collect(),
             },
         )
     }
@@ -800,11 +814,20 @@ mod tests {
             good("min(t1w.slice_thickness_mm, 2) < max(t1w.slice_thickness_mm, 3)"),
             Val::Bool(true)
         );
-        assert_eq!(good("(flair.dimension == '3D') or t1w.dimension == '3D'"), Val::Bool(true));
+        assert_eq!(
+            good("(flair.dimension == '3D') or t1w.dimension == '3D'"),
+            Val::Bool(true)
+        );
         // unknown propagates, and Kleene's values decide what it can
         assert_eq!(good("t1w.field_strength_t >= 3"), Val::Unknown);
-        assert_eq!(good("t1w.field_strength_t >= 3 and present(t2w)"), Val::Bool(false));
-        assert_eq!(good("t1w.field_strength_t >= 3 or present(t1w)"), Val::Bool(true));
+        assert_eq!(
+            good("t1w.field_strength_t >= 3 and present(t2w)"),
+            Val::Bool(false)
+        );
+        assert_eq!(
+            good("t1w.field_strength_t >= 3 or present(t1w)"),
+            Val::Bool(true)
+        );
         assert_eq!(good("not t1w.field_strength_t >= 3"), Val::Unknown);
         assert_eq!(good("aligned(flair, t1w)"), Val::Unknown);
         let e = parse("t1w.dimension == '3D'").unwrap();
@@ -823,7 +846,10 @@ mod tests {
             .unwrap()
             .scoped(Some("t1w"), &vocab());
         assert_eq!(check(&e, &vocab()).unwrap(), Ty::Bool);
-        assert_eq!(e.to_string(), "(t1w.dimension == '3D' and t1w.slice_thickness_mm <= 1.5)");
+        assert_eq!(
+            e.to_string(),
+            "(t1w.dimension == '3D' and t1w.slice_thickness_mm <= 1.5)"
+        );
         assert_eq!(eval(&e, &facts()), Val::Bool(true));
     }
 
@@ -832,7 +858,9 @@ mod tests {
             Ok(e) => e.scoped(None, &vocab()),
             Err(err) => return err,
         };
-        check(&e, &vocab()).err().unwrap_or_else(|| panic!("{text} was taken"))
+        check(&e, &vocab())
+            .err()
+            .unwrap_or_else(|| panic!("{text} was taken"))
     }
 
     #[test]

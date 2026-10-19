@@ -164,7 +164,13 @@ impl Action {
 pub const CHECK_OPS: [&str; 6] = [">=", "<=", ">", "<", "==", "!="];
 
 /// The strata a cohort check may be run within.
-pub const STRATA: [&str; 5] = ["site", "vendor", "field_strength", "sequence", "post_contrast"];
+pub const STRATA: [&str; 5] = [
+    "site",
+    "vendor",
+    "field_strength",
+    "sequence",
+    "post_contrast",
+];
 
 /// One check of the pack.
 #[derive(Debug, Clone, PartialEq)]
@@ -326,7 +332,11 @@ pub fn from_value(document: Value) -> Result<PipelinePack, String> {
     let name = text(p, "name", "pipeline.")?;
     let digest = text(p, "descriptor_sha256", "pipeline.")?;
     let hex = digest.strip_prefix("sha256:").unwrap_or(&digest);
-    if hex.len() != 64 || !hex.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()) {
+    if hex.len() != 64
+        || !hex
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+    {
         return Err(
             "pipeline.descriptor_sha256 is the descriptor's digest, sha256:<64 lowercase hex>, as the catalog computes it (nils pipelines validate <dir> prints it)".into(),
         );
@@ -625,7 +635,10 @@ impl PipelinePack {
             return if offered.iter().any(|g| g == v) {
                 Ok(value.clone())
             } else {
-                Err(format!("the goal is one of {}, not {v}", offered.join(", ")))
+                Err(format!(
+                    "the goal is one of {}, not {v}",
+                    offered.join(", ")
+                ))
             };
         }
         let Some(values) = self.goals.switches.get(name) else {
@@ -635,17 +648,26 @@ impl PipelinePack {
                 if self.goals.switches.is_empty() {
                     "none".to_string()
                 } else {
-                    self.goals.switches.keys().cloned().collect::<Vec<_>>().join(", ")
+                    self.goals
+                        .switches
+                        .keys()
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 }
             ));
         };
-        let same = values.iter().find(|v| {
-            *v == value || facts::text_of(v) == facts::text_of(value)
-        });
+        let same = values
+            .iter()
+            .find(|v| *v == value || facts::text_of(v) == facts::text_of(value));
         same.cloned().ok_or_else(|| {
             format!(
                 "{name} is one of {}, not {}",
-                values.iter().map(facts::text_of).collect::<Vec<_>>().join(", "),
+                values
+                    .iter()
+                    .map(facts::text_of)
+                    .collect::<Vec<_>>()
+                    .join(", "),
                 facts::text_of(value)
             )
         })
@@ -671,16 +693,19 @@ impl PipelinePack {
         for (role, rn) in &self.needs {
             let scope = (role != LINK && role != HOST).then_some(role.as_str());
             if let Some(s) = scope {
-                vocab
-                    .role(s)
-                    .map_err(|e| format!("needs.{role}: {e}"))?;
+                vocab.role(s).map_err(|e| format!("needs.{role}: {e}"))?;
             }
             if let Some(h) = &rn.hard_if {
                 typed(h, scope, vocab, &format!("needs.{role}.hard_if"))?;
             }
             for (kind, list) in [("hard", &rn.hard), ("soft", &rn.soft)] {
                 for (i, n) in list.iter().enumerate() {
-                    typed(&n.when, scope, vocab, &format!("needs.{role}.{kind}[{i}].when"))?;
+                    typed(
+                        &n.when,
+                        scope,
+                        vocab,
+                        &format!("needs.{role}.{kind}[{i}].when"),
+                    )?;
                 }
             }
         }
@@ -695,7 +720,11 @@ impl PipelinePack {
         }
         for (id, k) in &self.knobs {
             if let Some(v) = &k.default {
-                let p = d.params.iter().find(|p| &p.id == id).expect("checked above");
+                let p = d
+                    .params
+                    .iter()
+                    .find(|p| &p.id == id)
+                    .expect("checked above");
                 descriptor::check_value(p, v).map_err(|e| format!("knobs.{id}.default: {e}"))?;
             }
         }
@@ -719,9 +748,7 @@ impl PipelinePack {
             if let Some(v) = &r.route
                 && !self.variants.contains_key(v)
             {
-                return Err(format!(
-                    "{at} routes to {v}, which variants does not name"
-                ));
+                return Err(format!("{at} routes to {v}, which variants does not name"));
             }
             if r.set.is_empty() {
                 continue;
@@ -738,7 +765,9 @@ impl PipelinePack {
                 if let Some(knob) = self.knobs.get(k)
                     && knob.set_by == SetBy::Fixed
                 {
-                    return Err(format!("{at} sets {k}, which the pack fixes (set_by: fixed)"));
+                    return Err(format!(
+                        "{at} sets {k}, which the pack fixes (set_by: fixed)"
+                    ));
                 }
                 descriptor::check_value(p, v).map_err(|e| {
                     format!("{at} sets {k} to {v}, which the descriptor forbids: {e}")
@@ -746,7 +775,10 @@ impl PipelinePack {
                 params.insert(k.clone(), v.clone());
             }
             invocation_holds(d, &params).map_err(|e| {
-                format!("{at} sets {}, which the descriptor forbids: {e}", set_words(&r.set))
+                format!(
+                    "{at} sets {}, which the descriptor forbids: {e}",
+                    set_words(&r.set)
+                )
             })?;
         }
         for (i, c) in self.checks.iter().enumerate() {
@@ -789,7 +821,11 @@ fn params_named(d: &Descriptor) -> String {
     if d.params.is_empty() {
         "none".into()
     } else {
-        d.params.iter().map(|p| p.id.as_str()).collect::<Vec<_>>().join(", ")
+        d.params
+            .iter()
+            .map(|p| p.id.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
     }
 }
 
@@ -803,7 +839,11 @@ fn set_words(set: &BTreeMap<String, Value>) -> String {
 /// Parse a pack and check it against the descriptor beside it, under the
 /// vocabulary given (the engine's, widened by the MRI pack's words) or the
 /// pack's own.
-pub fn load(text_: &str, d: &Descriptor, vocab: Option<&Vocabulary>) -> Result<PipelinePack, String> {
+pub fn load(
+    text_: &str,
+    d: &Descriptor,
+    vocab: Option<&Vocabulary>,
+) -> Result<PipelinePack, String> {
     let pack = parse(text_)?;
     let own;
     let vocab = match vocab {
@@ -819,17 +859,20 @@ pub fn load(text_: &str, d: &Descriptor, vocab: Option<&Vocabulary>) -> Result<P
 
 /// A pipeline's folder read: its descriptor, and its pack where
 /// `nils-pack.yaml` lies beside the descriptor, each checked.
-pub fn load_dir(dir: &Path, vocab: Option<&Vocabulary>) -> Result<(Descriptor, Option<PipelinePack>), String> {
+pub fn load_dir(
+    dir: &Path,
+    vocab: Option<&Vocabulary>,
+) -> Result<(Descriptor, Option<PipelinePack>), String> {
     let d_path = dir.join(DESCRIPTOR_FILE);
-    let text_ = std::fs::read_to_string(&d_path)
-        .map_err(|e| format!("{}: {e}", d_path.display()))?;
+    let text_ =
+        std::fs::read_to_string(&d_path).map_err(|e| format!("{}: {e}", d_path.display()))?;
     let d = descriptor::parse(&text_).map_err(|e| format!("{}: {e}", d_path.display()))?;
     let p_path = dir.join(FILE);
     if !p_path.is_file() {
         return Ok((d, None));
     }
-    let p_text = std::fs::read_to_string(&p_path)
-        .map_err(|e| format!("{}: {e}", p_path.display()))?;
+    let p_text =
+        std::fs::read_to_string(&p_path).map_err(|e| format!("{}: {e}", p_path.display()))?;
     let pack = load(&p_text, &d, vocab).map_err(|e| format!("{}: {e}", p_path.display()))?;
     Ok((d, Some(pack)))
 }
@@ -847,10 +890,7 @@ pub fn version_digest(descriptor_digest: &str, pack_digest: Option<&str>) -> Str
 /// Whether a parameter is given, as Boutiques reads it for its constraints:
 /// a flag that is true, or any other value that is not null.
 fn given(v: Option<&Value>) -> bool {
-    match v {
-        None | Some(Value::Null) | Some(Value::Bool(false)) => false,
-        _ => true,
-    }
+    !matches!(v, None | Some(Value::Null) | Some(Value::Bool(false)))
 }
 
 fn ids(v: &Value) -> Vec<String> {
@@ -882,7 +922,9 @@ pub fn invocation_holds(d: &Descriptor, params: &Map<String, Value>) -> Result<(
         .collect();
     let on = |id: &str| given(params.get(id));
     for input in &inputs {
-        let Some(id) = input["id"].as_str() else { continue };
+        let Some(id) = input["id"].as_str() else {
+            continue;
+        };
         if !on(id) {
             continue;
         }
@@ -899,10 +941,7 @@ pub fn invocation_holds(d: &Descriptor, params: &Map<String, Value>) -> Result<(
     }
     for g in d.document["groups"].as_array().into_iter().flatten() {
         let members = ids(&g["members"]);
-        let name = g["id"]
-            .as_str()
-            .or(g["name"].as_str())
-            .unwrap_or("a group");
+        let name = g["id"].as_str().or(g["name"].as_str()).unwrap_or("a group");
         let given_n = members.iter().filter(|m| on(m)).count();
         if g["mutually-exclusive"].as_bool() == Some(true) && given_n > 1 {
             return Err(format!(
@@ -1028,7 +1067,10 @@ comparability: {{facts: [t1w.base]}}
         assert_ne!(a, b);
         assert_eq!(a, version_digest(&dd, None));
         assert!(p.digest().starts_with("sha256:"));
-        assert_eq!(p.checks[2].text(), "intracranial within its stratum (robust z at most 3)");
+        assert_eq!(
+            p.checks[2].text(),
+            "intracranial within its stratum (robust z at most 3)"
+        );
         assert_eq!(p.checks[0].text(), "flair_t1_brain_dice >= 0.85");
         assert_eq!(p.choice("lesions", &json!("off")).unwrap(), json!("off"));
         assert!(p.choice("lesions", &json!("maybe")).is_err());
@@ -1038,38 +1080,73 @@ comparability: {{facts: [t1w.base]}}
     fn refused(edit: impl Fn(String) -> String) -> String {
         let d = descriptor();
         let text_ = edit(pack_text(&d.digest()));
-        load(&text_, &d, None).err().unwrap_or_else(|| panic!("taken: {text_}"))
+        load(&text_, &d, None)
+            .err()
+            .unwrap_or_else(|| panic!("taken: {text_}"))
     }
 
     #[test]
     fn g1_a_pack_with_an_unknown_fact_a_wrong_type_or_a_forbidden_set_is_refused() {
         let e = refused(|t| t.replace("dimension == '3D'", "colour == 'red'"));
-        assert!(e.contains("needs.t1w.hard[0].when") && e.contains("unknown fact"), "{e}");
+        assert!(
+            e.contains("needs.t1w.hard[0].when") && e.contains("unknown fact"),
+            "{e}"
+        );
         let e = refused(|t| t.replace("slice_thickness_mm <= 1.5", "slice_thickness_mm <= 'thin'"));
         assert!(e.contains("compares a number with text"), "{e}");
         let e = refused(|t| t.replace("dimension == '3D'", "dimension == '4D'"));
         assert!(e.contains("outside the vocabulary"), "{e}");
         let e = refused(|t| t.replace("set: {threads: 2}", "set: {threads: 64}"));
-        assert!(e.contains("rule fast-goal-fewer-threads sets threads to 64") && e.contains("at most 32"), "{e}");
-        let e = refused(|t| t.replace("set: {threads: 2}", "set: {fast: true, pallidum_separate: true}"));
+        assert!(
+            e.contains("rule fast-goal-fewer-threads sets threads to 64")
+                && e.contains("at most 32"),
+            "{e}"
+        );
+        let e = refused(|t| {
+            t.replace(
+                "set: {threads: 2}",
+                "set: {fast: true, pallidum_separate: true}",
+            )
+        });
         assert!(e.contains("fast disables pallidum_separate"), "{e}");
         let e = refused(|t| t.replace("set: {threads: 2}", "set: {colour: 2}"));
-        assert!(e.contains("sets colour, which samseg-test has no input of"), "{e}");
-        let e = refused(|t| t.replace("set: {lesion: \"off\"}, why", "set: {lesion: \"maybe\"}, why"));
+        assert!(
+            e.contains("sets colour, which samseg-test has no input of"),
+            "{e}"
+        );
+        let e = refused(|t| {
+            t.replace(
+                "set: {lesion: \"off\"}, why",
+                "set: {lesion: \"maybe\"}, why",
+            )
+        });
         assert!(e.contains("one of") && e.contains("forbids"), "{e}");
         let e = refused(|t| t.replace("present(flair)\"", "present(elbow)\""));
         assert!(e.contains("elbow"), "{e}");
         let d = descriptor();
         let other = format!("sha256:{}", "0".repeat(64));
         let e = load(&pack_text(&other), &d, None).unwrap_err();
-        assert!(e.contains("pins descriptor") && e.contains("changed after"), "{e}");
+        assert!(
+            e.contains("pins descriptor") && e.contains("changed after"),
+            "{e}"
+        );
         let e = refused(|t| t.replace("nils_pack: 1", "nils_pack: 2"));
         assert!(e.contains("not a version this engine reads"), "{e}");
-        let e = refused(|t| t.replace("route: ", "route: ").replace("set: {threads: 2}", "route: elsewhere"));
+        let e = refused(|t| t.replace("set: {threads: 2}", "route: elsewhere"));
         assert!(e.contains("variants does not name"), "{e}");
-        let e = refused(|t| t.replace("knobs:\n  lesion", "knobs:\n  colour: {comparability: none}\n  lesion"));
+        let e = refused(|t| {
+            t.replace(
+                "knobs:\n  lesion",
+                "knobs:\n  colour: {comparability: none}\n  lesion",
+            )
+        });
         assert!(e.contains("knobs.colour"), "{e}");
-        let e = refused(|t| t.replace("metric: intracranial, op: \">=\", value: 900000", "metric: note, op: \">=\", value: 1"));
+        let e = refused(|t| {
+            t.replace(
+                "metric: intracranial, op: \">=\", value: 900000",
+                "metric: note, op: \">=\", value: 1",
+            )
+        });
         assert!(e.contains("declares it as text"), "{e}");
     }
 
@@ -1093,13 +1170,15 @@ comparability: {{facts: [t1w.base]}}
     #[test]
     fn the_shipped_example_loads_against_the_shipped_samseg_descriptor() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
-        let d_text = std::fs::read_to_string(root.join("pipelines/samseg-lesions/nils.job.yml")).unwrap();
+        let d_text =
+            std::fs::read_to_string(root.join("pipelines/samseg-lesions/nils.job.yml")).unwrap();
         let d = descriptor::parse(&d_text).unwrap();
         let p_text = std::fs::read_to_string(
             root.join("contracts/pipeline-pack/v1/examples/samseg-lesions/nils-pack.yaml"),
         )
         .unwrap();
-        let p = load(&p_text, &d, None).unwrap_or_else(|e| panic!("{e}; the descriptor's digest is {}", d.digest()));
+        let p = load(&p_text, &d, None)
+            .unwrap_or_else(|e| panic!("{e}; the descriptor's digest is {}", d.digest()));
         assert_eq!(p.name, "samseg-lesions");
         assert!(p.rules.iter().any(|r| r.id == "pallidum-needs-t2-or-flair"));
     }
