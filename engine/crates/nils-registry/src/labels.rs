@@ -1105,11 +1105,19 @@ pub fn usable_for_training(store: &mut Store, id: i64) -> Result<LabelSet, Error
         )))
     };
     // record 55 D6 and D7 (spec §11.4, §11.5): an audit's reads never
-    // train, and only blind answers become training labels
+    // train, and only blind answers become training labels; record 58 P1:
+    // nor do a verify campaign's, given with the proposal in view
     if let Some(c) = set.campaign_id {
-        if crate::blind::purpose(store, c)? == "audit" {
+        let purpose = crate::blind::purpose(store, c)?;
+        if crate::blind::never_trains(&purpose) {
             return Err(Error::Refused(format!(
-                "label set {id} is of an audit campaign, whose reads never train (record 55 D7)"
+                "label set {id} is of {} campaign, whose reads never train ({})",
+                crate::a_or_an(&purpose),
+                if purpose == "audit" {
+                    "record 55 D7"
+                } else {
+                    "record 58 P1"
+                }
             )));
         }
         let seen = crate::blind::answers_not_blind(store, c)?;

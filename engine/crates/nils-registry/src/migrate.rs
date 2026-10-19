@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 106;
+pub const SCHEMA_VERSION: i64 = 107;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -478,7 +478,23 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 106,
         apply: a_dataset_s_files_are_counted_from_the_indexes,
     },
+    Migration {
+        version: 107,
+        apply: a_verify_campaign_plants_values,
+    },
 ];
+
+/// Record 58 P1 (Wave 7b spec §12): a verify campaign's planting
+/// (`campaign.planted`), its planted items (`campaign_planted`) and the
+/// names accounts go by (`principal_name`). Only a column and two tables
+/// are added; no row is touched, and a campaign from before plants nothing.
+fn a_verify_campaign_plants_values(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_tables(store, kind, &["campaign_planted", "principal_name"])?;
+    add_columns(store, "campaign", &["planted"])
+}
 
 /// The Data page on a dataset of 30 million files (2026-10-17): its summary
 /// counted the files by status, found the subjects of its set-aside files
@@ -4119,7 +4135,10 @@ mod column_migration {
         let mut store = Store::sqlite_in_memory().unwrap();
         before(&mut store);
         assert_eq!(count(&mut store), 0);
-        assert_eq!(migrate(&mut store, Kind::Linkage).unwrap(), [104, 105, 106]);
+        assert_eq!(
+            migrate(&mut store, Kind::Linkage).unwrap(),
+            [104, 105, 106, 107]
+        );
         assert_eq!(count(&mut store), 1);
         let t = crate::linkage::id_type_named(&mut store, "reserve-number")
             .unwrap()

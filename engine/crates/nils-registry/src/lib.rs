@@ -48,6 +48,7 @@ pub mod measure;
 pub mod merge;
 pub mod migrate;
 pub mod model;
+pub mod names;
 pub mod opinion;
 pub mod overlay;
 pub mod pair;
@@ -67,6 +68,7 @@ pub mod session;
 pub mod store;
 pub mod suggestion;
 pub mod time;
+pub mod verify;
 
 /// A word with the article a sentence gives it, by its first letter: "an
 /// agent", "an adjudicator", "an export place", "a mask", "a unit". The

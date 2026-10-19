@@ -1884,6 +1884,7 @@ mod tests {
             supersedes_id: None,
             superseded_by: None,
             choices: None,
+            blind: None,
         }
     }
 

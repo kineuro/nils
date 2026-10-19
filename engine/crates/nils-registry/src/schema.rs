@@ -1577,6 +1577,40 @@ fn build_registry() -> Vec<Table> {
             ],
         )
         .unique(&["item_id", "principal"]),
+        // Record 58 P1 (Wave 7b spec §12.3): the planted items of a verify
+        // campaign, drawn from its seed when it is made. The axis, the
+        // proposal's true value and the plausible wrong value shown in its
+        // place are fixed when the item's proposal is first served; an item
+        // never served keeps them null. Never served to a reader while the
+        // campaign is open; opened at the close.
+        Table::new(
+            "campaign_planted",
+            vec![
+                col("id", Type::Id),
+                req("campaign_id", Type::Int),
+                req("item_id", Type::Int),
+                col("axis", Type::Text),
+                col("true_value", Type::Text),
+                col("wrong_value", Type::Text),
+                col("served_at", Type::Timestamp),
+            ],
+        )
+        .unique(&["campaign_id", "item_id"]),
+        // Record 58 P1 (Wave 7b spec §12.5): the name an account goes by,
+        // as the token that last made, claimed or answered in a campaign
+        // carried it, so Results and Pace name a reader by their account's
+        // name and never by the sign-in subject. The engine keeps no user
+        // table; this is what its tokens told it.
+        Table::new(
+            "principal_name",
+            vec![
+                col("id", Type::Id),
+                req("principal", Type::Text),
+                req("name", Type::Text),
+                req("seen_at", Type::Timestamp),
+            ],
+        )
+        .unique(&["principal"]),
         // Record 55 D7 (spec §11.5): a round's blind audit draw, a seeded
         // share of its accepted stacks keyed by DICOM identity, the frame
         // it was drawn from (its size and the digest of its identities),
@@ -2572,6 +2606,11 @@ fn build_registry() -> Vec<Table> {
                 // are for: decide (null), train or measure, read blind
                 // first always, or audit, read blind and never training.
                 col("purpose", Type::Text),
+                // Record 58 P1 (Wave 7b spec §12.3): how a verify campaign
+                // plants, {share, seed, from, opened_at}, said when it is
+                // made. The seed is returned by no door before the close.
+                // Null on any other campaign.
+                col("planted", Type::Json),
             ],
         )
         .unique(&["name"]),

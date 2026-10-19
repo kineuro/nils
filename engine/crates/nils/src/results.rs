@@ -13,6 +13,13 @@
 //! maker and to a holder of review:work alone; anyone else reads them as
 //! "rater 1", "adjudicator 1" and so on, and their own answers by their
 //! own name.
+//!
+//! Record 58 P1 (Wave 7b spec §12.5): every rater is shown by their
+//! account's `name` beside the principal, never the sign-in subject alone;
+//! a verify campaign reports its `catch`, the share of planted items whose
+//! planted axis the reader did not accept, against the registered bar, and
+//! `below_bar` where it falls short; once the close opened the planted
+//! list, each item says whether and how it was planted.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -65,6 +72,16 @@ pub(crate) fn door(
     let answers = campaign::current_answers(store, c.id).map_err(campaign_err)?;
     let items = campaign::items(store, c.id).map_err(campaign_err)?;
     let agreement = campaign::agreement(store, c.id).map_err(campaign_err)?;
+    // record 58 P1: the accounts' names, as their tokens said them
+    let principals: Vec<String> = answers
+        .iter()
+        .map(|a| a.principal.clone())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let names = nils_registry::names::of(store, &principals)?;
+    let purpose = nils_registry::blind::purpose(store, c.id)?;
+    let verifying = nils_registry::verify::is_verify(&purpose);
 
     // a stand-in name per person, in the order they first answered
     let mut aliases: HashMap<String, String> = HashMap::new();
@@ -87,16 +104,28 @@ pub(crate) fn door(
         aliases.insert(p.to_string(), a.clone());
         a
     };
+    // record 58 P1: the account's name where the rater is named, else the
+    // stand-in, which gives nothing away
+    let name_of = |p: &str, who: &str| -> String {
+        if named || p == principal {
+            nils_registry::names::shown(&names, p)
+        } else {
+            who.to_string()
+        }
+    };
 
     // per rater: answers, adjudications and those marked unsure
-    let mut raters: BTreeMap<String, (usize, usize, usize)> = BTreeMap::new();
+    let mut raters: BTreeMap<String, (usize, usize, usize, String)> = BTreeMap::new();
     let mut by_item: BTreeMap<i64, Vec<Value>> = BTreeMap::new();
     let mut adjudicated: BTreeMap<i64, bool> = BTreeMap::new();
     // counts by value: (axis, value) -> (answers, settled)
     let mut values: BTreeMap<(String, String), (usize, usize)> = BTreeMap::new();
     for a in &answers {
         let who = alias(&a.principal, &a.role);
-        let row = raters.entry(who.clone()).or_default();
+        let name = name_of(&a.principal, &who);
+        let row = raters
+            .entry(who.clone())
+            .or_insert_with(|| (0, 0, 0, name.clone()));
         if a.role == "adjudicator" {
             row.1 += 1;
             adjudicated.insert(a.item_id, true);
@@ -112,7 +141,7 @@ pub(crate) fn door(
             }
         }
         let mut v = json!({
-            "id": a.id, "rater": who, "role": a.role, "round": a.round,
+            "id": a.id, "rater": who, "name": name, "role": a.role, "round": a.round,
             "author_kind": a.author_kind, "value": a.value, "form": a.form,
             "derivative_id": a.derivative_id, "why": a.why, "unsure": a.unsure,
             "answered_at": a.answered_at, "derived": a.derived,
@@ -122,6 +151,33 @@ pub(crate) fn door(
             plain_answer(&mut v, free);
         }
         by_item.entry(a.item_id).or_default().push(v);
+    }
+
+    // record 58 P1: the catch of a verify campaign, each rater as the
+    // caller reads them; and, once the close opened the planted list, each
+    // item's plant
+    let mut catch = Value::Null;
+    let mut planted_by_item: BTreeMap<i64, Value> = BTreeMap::new();
+    if verifying {
+        let mut found = nils_registry::verify::catch(store, c).map_err(campaign_err)?;
+        for r in found["per_rater"].as_array_mut().into_iter().flatten() {
+            if let Some(p) = r["rater"].as_str().map(str::to_string) {
+                let who = alias(&p, "rater");
+                r["name"] = json!(name_of(&p, &who));
+                r["rater"] = json!(who);
+            }
+        }
+        catch = found;
+        let opened =
+            nils_registry::verify::planting(store, c.id)?.is_some_and(|p| p.opened_at.is_some());
+        if opened {
+            for row in nils_registry::verify::planted(store, c.id)? {
+                planted_by_item.insert(
+                    row.item_id,
+                    json!({"axis": row.axis, "true": row.true_value, "wrong": row.wrong_value}),
+                );
+            }
+        }
     }
 
     let mut rows = Vec::with_capacity(items.len());
@@ -157,6 +213,9 @@ pub(crate) fn door(
         }
         j["answers"] = json!(by_item.remove(&it.id).unwrap_or_default());
         j["adjudicated"] = json!(adjudicated.get(&it.id).copied().unwrap_or(false));
+        if verifying && !planted_by_item.is_empty() {
+            j["planted"] = planted_by_item.remove(&it.id).unwrap_or(Value::Null);
+        }
         rows.push(j);
     }
 
@@ -176,16 +235,19 @@ pub(crate) fn door(
             .then(a["value"].as_str().cmp(&b["value"].as_str()))
     });
     let unsure = agreement["unsure"].as_u64().unwrap_or(0);
+    let below_bar = catch["below_bar"].as_bool().unwrap_or(false);
     Ok(Reply::ok(json!({
         "campaign": c.id, "name": c.name, "status": c.status, "owner": c.owner,
+        "purpose": purpose,
         "closes_into": c.closes_into, "closed_at": c.closed_at, "named": named,
         "agreement": agreement, "unsure": unsure,
         "settled": settled, "adjudicated": adjudicated.len(),
         "decisions": decisions.len(), "picks": picks,
-        "raters": raters.into_iter().map(|(rater, (answers, adjudications, unsure))| json!({
-            "rater": rater, "answers": answers, "adjudications": adjudications, "unsure": unsure,
+        "raters": raters.into_iter().map(|(rater, (answers, adjudications, unsure, name))| json!({
+            "rater": rater, "name": name, "answers": answers, "adjudications": adjudications, "unsure": unsure,
         })).collect::<Vec<_>>(),
         "values": if free { Value::Null } else { json!(counts) },
+        "catch": catch, "below_bar": below_bar,
         "count": rows.len(), "items": rows,
     })))
 }
