@@ -498,6 +498,7 @@ fn a_verify_campaign_plants_values(store: &mut Store, kind: Kind) -> Result<(), 
     }
     add_tables(store, kind, &["campaign_planted", "principal_name"])?;
     add_columns(store, "campaign", &["planted"])
+}
 
 /// Record 57 P5 (Wave 7b, section 6.5): a tool's terms are accepted by an
 /// administrator once per site, and the acceptance is an event the
