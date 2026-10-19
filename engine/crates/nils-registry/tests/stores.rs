@@ -2378,6 +2378,9 @@ fn migration_59_gives_pipelines_a_catalog_and_runs_on_both_backends() {
                 level: "session",
                 added_by: "ops@lab",
                 added_at: "2026-09-24T10:00:00Z",
+                pack: None,
+                pack_digest: None,
+                version_digest: "sha256:01",
             },
         )
         .unwrap();
@@ -4353,6 +4356,9 @@ fn migration_93_keeps_a_run_s_failure_on_both_backends() {
                 level: "session",
                 added_by: "ops@lab",
                 added_at: "2026-09-24T10:00:00Z",
+                pack: None,
+                pack_digest: None,
+                version_digest: "sha256:01",
             },
         )
         .unwrap();

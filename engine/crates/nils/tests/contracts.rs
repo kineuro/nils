@@ -1051,3 +1051,124 @@ fn the_openapi_document_reads_as_it_is_written() {
     }
     assert!(wrong.is_empty(), "{wrong:#?}");
 }
+
+/// The pipeline pack contract (`contracts/pipeline-pack/v1`, record 57 P1
+/// to P4, Wave 7b A1): its schema names the loader's own words, its example
+/// validates and loads against the descriptor it pins, every pack a
+/// pipeline folder of this repository ships loads (G1), and the schema
+/// refuses what the loader refuses.
+#[test]
+fn the_pipeline_pack_contract_is_the_loader_s_and_every_shipped_pack_loads() {
+    use nils_pipeline::pack;
+    let v = version("pipeline-pack");
+    assert_eq!(v, 1);
+    let schema = json("pipeline-pack/v1/nils-pack.schema.json");
+    assert_eq!(
+        schema["$schema"],
+        "https://json-schema.org/draft/2020-12/schema"
+    );
+    assert_eq!(
+        strings(&schema["$defs"]["check"]["properties"]["op"]["enum"]),
+        pack::CHECK_OPS
+    );
+    assert_eq!(
+        strings(&schema["$defs"]["check"]["properties"]["stratum"]["items"]["enum"]),
+        pack::STRATA
+    );
+    assert_eq!(
+        strings(&schema["$defs"]["check"]["properties"]["action"]["enum"]),
+        ["fail", "flag", "drop"]
+    );
+    assert_eq!(
+        strings(&schema["$defs"]["knob"]["properties"]["comparability"]["enum"]),
+        ["none", "additive", "breaks"]
+    );
+    assert_eq!(
+        strings(&schema["$defs"]["knob"]["properties"]["set_by"]["enum"]),
+        ["person", "rule", "fixed"]
+    );
+    assert_eq!(
+        strings(&schema["$defs"]["goals"]["properties"]["goal"]["items"]["enum"]),
+        pack::facts::GOALS
+    );
+    // the example of the spec validates against the schema and loads
+    // against the shipped SAMSEG descriptor it pins
+    let example = contracts().join("pipeline-pack/v1/examples/samseg-lesions/nils-pack.yaml");
+    let text = std::fs::read_to_string(&example).unwrap();
+    let value: serde_json::Value = serde_saphyr::from_str(&text).unwrap();
+    let broken = breaks(&schema, &schema, &value, "pack");
+    assert!(broken.is_empty(), "{}: {broken:#?}", example.display());
+    let samseg =
+        std::fs::read_to_string(contracts().join("../pipelines/samseg-lesions/nils.job.yml"))
+            .unwrap();
+    let d = nils_pipeline::descriptor::parse(&samseg).unwrap();
+    let p = pack::load(&text, &d, None).unwrap_or_else(|e| panic!("{}: {e}", example.display()));
+    assert_eq!(p.descriptor_sha256, d.digest());
+    // G1: every pipeline folder of this repository that has a pack loads,
+    // and its pack validates against the schema
+    let pipelines = contracts().join("../pipelines");
+    let mut with_pack = 0;
+    for entry in std::fs::read_dir(&pipelines).unwrap().flatten() {
+        let dir = entry.path();
+        let mut dirs = vec![dir.clone()];
+        for sub in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+            if sub.path().join("nils.job.yml").is_file() {
+                dirs.push(sub.path());
+            }
+        }
+        for dir in dirs {
+            if !dir.join(pack::FILE).is_file() {
+                continue;
+            }
+            with_pack += 1;
+            let text = std::fs::read_to_string(dir.join(pack::FILE)).unwrap();
+            let value: serde_json::Value = serde_saphyr::from_str(&text).unwrap();
+            let broken = breaks(&schema, &schema, &value, "pack");
+            assert!(broken.is_empty(), "{}: {broken:#?}", dir.display());
+            let (_, loaded) =
+                pack::load_dir(&dir, None).unwrap_or_else(|e| panic!("{}: {e}", dir.display()));
+            assert!(loaded.is_some(), "{}", dir.display());
+        }
+    }
+    // the first packs are written in the wave's step 2 (slice P1); until
+    // then the example is the one pack the tests load
+    eprintln!("{with_pack} pipeline folders ship a pack");
+    // and the schema refuses what the loader refuses: a check with no
+    // action, a rule that neither sets nor routes, a knob's comparability
+    // outside its three words
+    let bad: serde_json::Value = serde_saphyr::from_str(
+        "nils_pack: 1\npipeline: {name: x, descriptor_sha256: \"sha256:0000000000000000000000000000000000000000000000000000000000000000\"}\nknobs: {a: {comparability: sometimes}}\nrules: [{id: r, when: \"present(t1w)\"}]\nchecks: [{metric: m, op: \">=\", value: 1}]\n",
+    )
+    .unwrap();
+    let broken = breaks(&schema, &schema, &bad, "pack");
+    assert!(
+        broken
+            .iter()
+            .any(|b| b == "pack.checks[0]: action is required"),
+        "{broken:#?}"
+    );
+    // what this validator does not reach (additionalProperties, anyOf) the
+    // loader refuses with its words
+    let e = pack::parse(&bad.to_string()).unwrap_err();
+    assert!(
+        e.contains("comparability is none, additive or breaks"),
+        "{e}"
+    );
+    let no_set = bad.to_string().replace(
+        "\"comparability\":\"sometimes\"",
+        "\"comparability\":\"none\"",
+    );
+    let e = pack::parse(&no_set).unwrap_err();
+    assert!(e.contains("rule r sets no knob and routes nowhere"), "{e}");
+    let d_text = "name: x\nschema-version: \"0.5\"\ntool-version: \"1\"\ncontainer-image: {type: docker, image: \"a/b@sha256:0000000000000000000000000000000000000000000000000000000000000000\"}\nx-nils: {analysis-level: stack, input: {layout: stacks}, outputs: [{id: o, kind: output, path-template: \"stack-{stack}/o.txt\"}]}\n";
+    let d = nils_pipeline::descriptor::parse(d_text).unwrap();
+    let with_action = no_set
+        .replace("\"value\":1", "\"value\":1,\"action\":\"flag\"")
+        .replace(
+            "\"when\":\"present(t1w)\"",
+            "\"when\":\"present(t1w)\",\"set\":{\"a\":1}",
+        )
+        .replace(&"0".repeat(64), d.digest().trim_start_matches("sha256:"));
+    let e = pack::load(&with_action, &d, None).unwrap_err();
+    assert!(e.contains("knobs.a") && e.contains("has no input a"), "{e}");
+}

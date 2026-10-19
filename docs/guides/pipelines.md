@@ -142,6 +142,31 @@ nils pipeline list
 nils pipeline show n4-bias-correction
 ```
 
+## Give a pipeline a pack
+
+A pack, `nils-pack.yaml` beside `nils.job.yml` (the contract is `contracts/pipeline-pack/v1`), holds what the descriptor cannot say: the needs a session must meet, what each knob does and whether it breaks comparability, the ordered rules that choose knob values (or a variant) per session from the registry's facts and the person's goal, the checks, the licence, the resources and the comparability key's members. It pins the descriptor by its digest. A pipeline version is the pair: adding a folder adds both, the same pair again is the version it is, and a version with no pack reads `pack: none`.
+
+1. Check the folder offline. The loader's words say what is wrong (an unknown fact, a wrong type, a word outside a fact's vocabulary, a knob the descriptor has not, a rule whose `set` breaks a Boutiques constraint), and the answer prints the descriptor's digest the pack must pin:
+
+   ```sh
+   nils pipelines validate pipelines/samseg-lesions
+   ```
+
+2. Add the pair, and read it back:
+
+   ```sh
+   nils pipeline add pipelines/samseg-lesions
+   nils pipeline show samseg-lesions --json | jq .pack
+   ```
+
+3. Run with a goal, the pack's switches, and the pre-flight first:
+
+   ```sh
+   nils run samseg-lesions --select selection:ms@3 --goal standard --switch lesions=on --preflight
+   ```
+
+The pre-flight judges every unit with the pack (`units_judged`): a hard need it lacks skips it in the pack's words, a hard need on a fact the registry cannot tell skips it with `cannot tell: <fact>` (`--let-run` lets it run as your choice, recorded on the unit), a soft need is a caveat that travels with the unit's results, and each knob says `{value, by, rule}` where `by` is `default`, `rule:<id>` or `person:<user>`. A knob the pack marks `set_by: rule` or `fixed` refuses a `--param` of yours. The run records the same per unit, with the facts each rule read, the flags its checks raised (a flag keeps the result and raises a `pipeline:qc` item of status `flag`; a fail fails the unit; a drop drops the one value) and the two keys of its results; `GET /api/pipeline-runs/{id}` returns them per unit and `GET /api/pipelines/{id}/pack` the pack as loaded with the facts it reads. Cohort checks (`cohort: true`) run within a stratum of site, vendor, field strength, sequence and post-contrast state once it holds `min_sessions` (30 by default) and flag a robust z above 3; below that they read `not yet: 12 of 30 sessions`, and a flag that comes after the run closed says when.
+
 ## Choose a version
 
 A name keeps every version added under it. A version that fixes the earlier ones says so in its descriptor, and a new run no longer takes them:
@@ -465,6 +490,8 @@ A table output (`kind: table`) is a file of numbers a unit or a run writes, with
    ```
 
 > **Warning:** a measure is quasi identifying. Below detail quasi the ask refuses it in a column, an order, a group's key and any binding but a total (count, distinct, sum, avg, min or max) of a group set, and allows it in a predicate. A group's totals of a measure, its `_rows` and its `_subjects` show below detail quasi only for a group of 5 scans or more, and so does a count of scans filtered on a measure (other than none); a smaller group's are withheld. A list of the scans a measure filter keeps is refused below detail quasi.
+
+Results of one pipeline may hold several comparability keys (a knob that breaks comparability set differently, another pack or image). The ask never pools across them silently: a total over `measure.<pipeline>.<name>` is refused with the words "these results hold N comparability keys (...) and are never summed together" until it is grouped by `measure.<pipeline>.key`, and `GET /api/pipeline-runs/{id}/numbers` (and its `?format=csv` export) answers per key in the same words.
 
 A descriptor also declares its checks under `x-nils.qc`, as `snr >= 8` or `{metric, op, value}`. Each unit that succeeded is held to them, the metric read from its `results.json` metrics or else from its tables; a breach is one `pipeline:qc` review item, status `breach`, whose error names the metric, its value and the check. A breach does not make a run partial. A metric a check reads from `results.json` is kept as a measure too.
 

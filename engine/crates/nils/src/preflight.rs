@@ -92,6 +92,21 @@ pub(crate) struct Asked<'a> {
     /// 2026-10-12: a version a later one replaces is asked for at the
     /// keyboard with `--replaced`; a door never asks so.
     pub replaced: bool,
+    /// Record 57 P2 (Wave 7b A1): the goal, the switches and whether a
+    /// unit whose hard need cannot be told runs.
+    pub person: crate::pipeline_pack::PersonAsk,
+}
+
+/// Record 57 P2: the roles each stack of a run is picked for, under the
+/// live picks, so the runner reads a unit's facts by role as the pre-flight
+/// does.
+pub(crate) fn roles_of_stacks(
+    store: &mut Store,
+    stacks: &[i64],
+) -> Result<BTreeMap<i64, BTreeSet<String>>, String> {
+    let of = nils_registry::pick_truth::Of::own(store).map_err(|e| e.to_string())?;
+    let picks = pick_roles(store, stacks, &nils_registry::pick_truth::Picks::Live(of))?;
+    Ok(picks.into_iter().map(|(s, p)| (s, p.roles)).collect())
 }
 
 /// The lane's budget (record 49 A1, R6), as the lane itself reads it: the
@@ -116,6 +131,10 @@ struct Unit {
     stack_id: Option<i64>,
     stacks: Vec<i64>,
     roles: BTreeSet<String>,
+    /// Record 57 P2: the unit's stacks by the role each was taken for (a
+    /// stacks unit's one stack under `stack`), which the pack's facts are
+    /// read by.
+    by_role: BTreeMap<String, Vec<i64>>,
     missing: Vec<String>,
 }
 
@@ -344,6 +363,7 @@ fn stack_units(
                 stack_id: Some(s),
                 subject_id: subject.get(&s).copied(),
                 stacks: vec![s],
+                by_role: [("stack".to_string(), vec![s])].into_iter().collect(),
                 ..Unit::default()
             };
             if !subject.contains_key(&s) {
@@ -699,6 +719,7 @@ fn bids_units(
                 let stem = (p.route == "raw").then(|| p.stem.clone()).flatten();
                 for role in roles {
                     u.roles.insert(role.clone());
+                    u.by_role.entry(role.clone()).or_default().push(p.stack);
                     held.entry(id.clone())
                         .or_default()
                         .entry(role.clone())
@@ -728,6 +749,7 @@ fn bids_units(
                 u.stacks.push(*stack);
                 for role in roles {
                     u.roles.insert(role.clone());
+                    u.by_role.entry(role.clone()).or_default().push(*stack);
                     held.entry(key.clone())
                         .or_default()
                         .entry(role.clone())
@@ -1075,6 +1097,73 @@ pub(crate) fn check(registry: &mut Registry, asked: &Asked<'_>) -> Result<Value,
     if !units.is_empty() && ready_units == 0 && made == 0 {
         blockers.push(none_can_run(word, units.len(), &cannot));
     }
+    // record 57 P2 to P4 (Wave 7b A1): the pack judges every unit that has
+    // its inputs: a hard need skips it in the pack's words (or "cannot
+    // tell"), a soft need is a caveat, the rules choose each knob and say
+    // who chose; a run whose every unit the pack skips would make nothing
+    let mut judged_doc = Value::Null;
+    let mut pack_skipped = 0usize;
+    if let Some(e) = crate::pipeline_pack::pack_error(&p) {
+        blockers.push(e);
+    }
+    if let Some(pack) = crate::pipeline_pack::pack_of(&p) {
+        match asked.person.person(&pack, &crate::actor(), asked.params) {
+            Err(e) => blockers.push(e),
+            Ok(person) => {
+                let resolved: serde_json::Map<String, Value> =
+                    params.as_object().cloned().unwrap_or_default();
+                let with_inputs: Vec<&Unit> =
+                    units.iter().filter(|u| u.missing.is_empty()).collect();
+                let of: Vec<crate::pipeline_pack::UnitOf> = with_inputs
+                    .iter()
+                    .map(|u| crate::pipeline_pack::UnitOf {
+                        by_role: u.by_role.clone(),
+                        subject_id: u.subject_id,
+                        session_day: u.session_day.clone(),
+                    })
+                    .collect();
+                let host = crate::pipeline_pack::host_facts(registry);
+                let judged = crate::pipeline_pack::judge_units(
+                    registry.store(),
+                    &pack,
+                    &d,
+                    &resolved,
+                    &of,
+                    &host,
+                    &person,
+                );
+                let names: Vec<String> = with_inputs.iter().map(|u| u.name()).collect();
+                pack_skipped = judged
+                    .iter()
+                    .filter(|j| j.status == nils_pipeline::pack::rules::Status::Skipped)
+                    .count();
+                if d.units == descriptor::Units::Together
+                    && let Some(words) = crate::pipeline_pack::together_disagree(&judged)
+                {
+                    blockers.push(words);
+                }
+                judged_doc = crate::pipeline_pack::judged_doc(&names, &judged);
+                judged_doc["pack_digest"] = json!(p.pack_digest);
+            }
+        }
+    }
+    let ready_units = ready_units.saturating_sub(pack_skipped);
+    if !units.is_empty() && ready_units == 0 && made == 0 && pack_skipped > 0 {
+        let why: Vec<String> = judged_doc["skipped_by_why"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|w| w["why"].as_str().map(str::to_string))
+                    .take(3)
+                    .collect()
+            })
+            .unwrap_or_default();
+        blockers.push(format!(
+            "no {word} can run: {pack_skipped} of {} are skipped by the pack's needs ({})",
+            units.len(),
+            why.join("; ")
+        ));
+    }
 
     // the runtime, the working place and the GPU
     let detected = crate::pipelines::detect_cached(registry);
@@ -1224,6 +1313,15 @@ pub(crate) fn check(registry: &mut Registry, asked: &Asked<'_>) -> Result<Value,
         .and_then(|c| c.cause)
         .map_or(Value::Null, nils_pipeline::failure::Cause::doc);
     let ready = blockers.is_empty();
+    // `skipped_by_pack` only where the pipeline has a pack
+    let mut units_doc = json!({
+        "total": units.len(),
+        "ready": ready_units,
+        "missing": missing.len(),
+    });
+    if !judged_doc.is_null() {
+        units_doc["skipped_by_pack"] = json!(pack_skipped);
+    }
     Ok(json!({
         "pipeline": p.label(),
         "pipeline_id": p.id,
@@ -1235,11 +1333,11 @@ pub(crate) fn check(registry: &mut Registry, asked: &Asked<'_>) -> Result<Value,
         "level": d.level.name(),
         "unit": word,
         "stacks": stacks.len(),
-        "units": {
-            "total": units.len(),
-            "ready": ready_units,
-            "missing": missing.len(),
-        },
+        "units": units_doc,
+        // record 57 P2 to P4: per unit {status, need, words, variant, caveats,
+        // knobs {value, by, rule}}, and the counts
+        "units_judged": judged_doc,
+        "person": asked.person.doc(),
         "missing": missing.iter().map(|u| json!({
             "unit": u.name(), "subject_id": u.subject_id, "session_day": u.session_day,
             "stack_id": u.stack_id, "why": u.missing, "lacks": briefs(&u.missing),
@@ -1615,6 +1713,8 @@ pub(crate) fn route(
                 main,
                 resume,
                 replaced: false,
+                person: crate::pipeline_pack::PersonAsk::of_body(&doc)
+                    .map_err(|e| Reply::error(400, e))?,
             },
         )
         .map_err(|e| {
@@ -1696,6 +1796,12 @@ pub(crate) fn command(home: &Home, args: &crate::pipelines::RunArgs) -> Result<(
             main,
             resume: args.resume,
             replaced: args.replaced,
+            person: crate::pipeline_pack::PersonAsk::of_args(
+                args.goal.as_deref(),
+                &args.switches,
+                args.let_run,
+            )
+            .map_err(usage)?,
         },
     )
     .map_err(usage)?;

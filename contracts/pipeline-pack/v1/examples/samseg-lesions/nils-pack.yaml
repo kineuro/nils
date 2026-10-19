@@ -1,0 +1,88 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# The SAMSEG example of the Wave 7b spec (section 5.2), as a pack the
+# engine's tests load against pipelines/samseg-lesions/nils.job.yml. The
+# first real packs are written in the wave's step 2 (slice P1); this one
+# shows the format. Its sources name the pack research of record 57
+# (results/02): the FLAIR need and the pallidum rule come from SAMSEG's own
+# documentation, the Dice check is a NILS policy.
+nils_pack: 1
+pipeline:
+  name: samseg-lesions
+  descriptor_sha256: "sha256:88c8b67c628267c588f76579253b374b0d071a6ff41cd63015a9d24a735cbc66"
+  version: "0.1"
+goals:
+  goal: [fast, standard, research]
+  lesions: ["on", "off"]
+needs:
+  t1w:
+    hard:
+      - when: "dimension == '3D'"
+        words: "the T1 is 2D; SAMSEG reads its contrasts on one 3D grid"
+        source: "SAMSEG's documentation (record 57, research 02)"
+    soft:
+      - when: "field_strength_t >= 1.5"
+        words: "the T1 was acquired below 1.5 T"
+        source: policy
+  flair:
+    hard_if: "lesions == 'on'"
+    hard:
+      - when: "present(flair)"
+        words: "no FLAIR picked, so no lesions"
+        source: "SAMSEG's documentation (record 57, research 02)"
+  link:
+    hard:
+      - when: "aligned(flair, t1w)"
+        words: "the FLAIR is not registered to the T1w"
+        source: "SAMSEG's documentation (record 57, research 02)"
+knobs:
+  lesion:
+    what: "segment white-matter lesions from the FLAIR beside the T1w"
+    comparability: breaks
+    set_by: rule
+  pallidum_separate:
+    what: "segment the pallidum apart from the white matter; only with a T2w or a FLAIR among the inputs"
+    comparability: breaks
+    set_by: rule
+  threads:
+    what: "the threads one session uses"
+    comparability: none
+    set_by: person
+rules:
+  - id: lesions-follow-the-switch
+    when: "lesions == 'off'"
+    set: {lesion: "off"}
+    why: "the person turned lesions off"
+    source: policy
+  - id: lesions-off-without-flair
+    when: "not present(flair)"
+    set: {lesion: "off"}
+    why: "no FLAIR, so no lesions"
+    source: "SAMSEG's documentation (record 57, research 02)"
+  - id: pallidum-needs-t2-or-flair
+    when: "not present(flair) and not present(t2w)"
+    set: {pallidum_separate: false}
+    why: "on a T1w alone the pallidum cannot be told from the white matter"
+    source: "SAMSEG's wiki (record 57, research 02)"
+checks:
+  - {metric: flair_t1_brain_dice, op: ">=", value: 0.85, action: flag, source: policy, words: "FLAIR and T1 may not be aligned: their brain masks agree below 0.85"}
+  - {metric: intracranial, op: ">=", value: 900000, action: flag, source: policy, words: "an intracranial volume under 0.9 litres is a failed segmentation more often than a head"}
+  - {metric: intracranial, op: "<=", value: 2300000, action: flag, source: policy, words: "over 2.3 litres the segmentation took more than the head"}
+  - {metric: intracranial, op: "<=", action: flag, cohort: true, stratum: [site, vendor, field_strength, sequence, post_contrast], min_sessions: 30, z: 3, source: policy}
+licence:
+  spdx: "LicenseRef-FreeSurfer"
+  redistributable: false
+  site_file: {env: FS_LICENSE, mount: /license.txt}
+  terms: {url: "https://surfer.nmr.mgh.harvard.edu/registration.html", version: "2024"}
+  accept: true
+resources:
+  memory_gb: 16
+  minutes: 45
+  gpu: none
+comparability:
+  facts: [t1w.base]
+tests: []
+source:
+  image: "docker.io/freesurfer/freesurfer@sha256:5648104ca75a24f6ee5a8786146f99b405c2bda1da12bff723a15056da8ddf6b"
+  probe: {command: "recon-all -version", expect: "freesurfer-linux"}
+  key_files: ["bin/run_samseg", "build-stamp.txt"]

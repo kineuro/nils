@@ -12830,3 +12830,802 @@ fn the_runtime_and_the_starters_are_set_at_their_doors_by_an_admin() {
         "{rows:?}"
     );
 }
+
+/// Record 57 P1 to P4 (Wave 7b A1): a stacks pipeline with a pack beside
+/// it. Every unit reports a `files` metric; `tag` is a knob the pack's
+/// rules set from the stack's base, so a run over a T1w and a FLAIR holds
+/// two comparability keys; `mode` stays the person's.
+fn pack_echo(image: &str) -> String {
+    format!(
+        r#"# SPDX-License-Identifier: AGPL-3.0-only
+name: pack-echo
+schema-version: "0.5"
+tool-version: "1"
+container-image:
+  type: docker
+  image: "{image}"
+inputs:
+  - id: mode
+    name: What to do
+    type: String
+    value-key: "[MODE]"
+    default-value: all
+    value-choices: [all, silent]
+  - id: tag
+    name: A tag the pack chooses
+    type: String
+    value-key: "[TAG]"
+    default-value: a
+    value-choices: [a, b]
+command-line: |
+  python3 -c '
+  import json, os, sys
+  m = json.load(open(sys.argv[1])); out = sys.argv[2]; mode = sys.argv[4]
+  units = []
+  for s in m["stacks"]:
+      u = s["unit"]; d = os.path.join(out, u); os.makedirs(d, exist_ok=True)
+      open(os.path.join(d, "out.txt"), "w").write("stack %d holds %d files, tag %s\n" % (s["stack_id"], len(s["files"]), sys.argv[5]))
+      units.append({{"unit_id": u, "status": "succeeded", "derivatives": [u + "/out.txt"], "metrics": {{"files": len(s["files"])}}}})
+  if mode != "silent":
+      json.dump({{"schema_version": "1", "units": units}}, open(os.path.join(out, "results.json"), "w"))
+  ' [Manifest] [OutputLocation] [Inputs] [MODE] [TAG]
+x-nils:
+  analysis-level: stack
+  input: {{layout: stacks}}
+  units: apart
+  outputs:
+    - id: echo
+      kind: output
+      path-template: "stack-{{stack}}/out.txt"
+      media-type: text/plain
+  needs: {{gpu: none}}
+"#
+    )
+}
+
+/// The pack of [`pack_echo`], pinned to `digest`, with the hard need on
+/// the stack given.
+fn pack_echo_pack(digest: &str, hard: &str) -> String {
+    format!(
+        r#"nils_pack: 1
+pipeline: {{name: pack-echo, descriptor_sha256: "{digest}", version: "0.1"}}
+goals: {{goal: [fast, standard, research], strict: ["on", "off"]}}
+needs:
+  stack:
+    hard:
+      - {{when: "{hard}", words: "the stack does not meet the need", source: policy}}
+    soft:
+      - {{when: "field_strength_t >= 1.5", words: "the field strength is below 1.5 T", source: policy}}
+  host:
+    soft: [{{when: "host.memory_gb >= 1", words: "the host has less than 1 GB", source: policy}}]
+knobs:
+  mode: {{comparability: none, set_by: person}}
+  tag: {{comparability: breaks, set_by: rule}}
+rules:
+  - {{id: tag-by-base, when: "stack.base == 'T1w'", set: {{tag: a}}, why: "a T1w is tagged a", source: policy}}
+  - {{id: tag-other, when: "stack.base != 'T1w'", set: {{tag: b}}, why: "anything else is tagged b", source: policy}}
+checks:
+  - {{metric: files, op: ">=", value: 20, action: flag, source: policy, words: "fewer files than a whole stack"}}
+  - {{metric: files, op: "<=", action: flag, cohort: true, min_sessions: 30, source: policy}}
+"#
+    )
+}
+
+impl Lab {
+    /// Add a descriptor with a pack beside it, from a folder, as `nils
+    /// pipeline add <folder>` adds the pair.
+    fn add_pair(&self, name: &str, descriptor: &str, pack: &str) -> Value {
+        let dir = self.work.path().join(format!("pair-{name}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("nils.job.yml"), descriptor).unwrap();
+        std::fs::write(dir.join("nils-pack.yaml"), pack).unwrap();
+        self.json(&["pipeline", "add", dir.to_str().unwrap(), "--json"])
+    }
+}
+
+#[test]
+fn g1_g2_a_pack_judges_every_unit_at_the_pre_flight_and_at_the_run() {
+    if !have("python3") {
+        eprintln!(
+            "python3 is not installed; the stand-in podman needs it, so this test is skipped"
+        );
+        return;
+    }
+    let lab = Lab::new("pipelines-pack-judge");
+    let image = format!("example.org/pack-echo@sha256:{}", "c".repeat(64));
+    let descriptor = pack_echo(&image);
+    let digest = nils_pipeline::descriptor::parse(&descriptor)
+        .unwrap()
+        .digest();
+
+    // G1 at the catalog: a pack with an unknown fact is refused with the
+    // loader's words, and nothing is added
+    let dir = lab.work.path().join("pair-bad");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("nils.job.yml"), &descriptor).unwrap();
+    std::fs::write(
+        dir.join("nils-pack.yaml"),
+        pack_echo_pack(&digest, "colour == 'red'"),
+    )
+    .unwrap();
+    let (good, _, err) = lab.run(&["pipeline", "add", dir.to_str().unwrap(), "--json"], None);
+    assert!(!good, "a pack with an unknown fact was added");
+    assert!(err.contains("unknown fact"), "{err}");
+    let (good, out, err) = lab.run(&["pipeline", "validate", dir.to_str().unwrap()], None);
+    assert!(!good && err.contains("unknown fact"), "{out}{err}");
+    assert_eq!(
+        lab.json(&["pipeline", "list", "--json"])["pipelines"]
+            .as_array()
+            .unwrap()
+            .len(),
+        0
+    );
+
+    // the pair is added; the same pair again is the version it is; the
+    // catalog says the pack and the digests
+    let v = lab.add_pair(
+        "one",
+        &descriptor,
+        &pack_echo_pack(&digest, "dimension == '3D'"),
+    );
+    assert_eq!(v["added"], true, "{v}");
+    assert_eq!(v["version"], 1, "{v}");
+    assert_eq!(v["pack"]["nils_pack"], 1, "{v}");
+    assert!(
+        v["pack_digest"].as_str().unwrap().starts_with("sha256:"),
+        "{v}"
+    );
+    assert!(
+        v["version_digest"].as_str().unwrap().starts_with("sha256:"),
+        "{v}"
+    );
+    let again = lab.add_pair(
+        "one",
+        &descriptor,
+        &pack_echo_pack(&digest, "dimension == '3D'"),
+    );
+    assert_eq!(again["added"], false, "{again}");
+    assert_eq!(again["id"], v["id"]);
+    // nils pipeline validate says the digest the pack must pin
+    let dir = lab.work.path().join("pair-one");
+    let checked = lab.json(&["pipeline", "validate", dir.to_str().unwrap(), "--json"]);
+    assert_eq!(checked["descriptor_digest"], digest, "{checked}");
+    assert_eq!(checked["pack"]["rules"], 2, "{checked}");
+    assert_eq!(checked["version_digest"], v["version_digest"], "{checked}");
+
+    // the pre-flight judges both units: ready, the tag chosen by a rule
+    // from the stack's base, the field strength a caveat it cannot tell
+    let pf = lab.json(&[
+        "run",
+        "pack-echo",
+        "--select",
+        "selection:every@1",
+        "--preflight",
+        "--json",
+    ]);
+    assert_eq!(pf["ready"], true, "{pf}");
+    let judged = &pf["units_judged"];
+    assert_eq!(judged["ready"], 4, "{pf}");
+    assert_eq!(judged["skipped"], 0, "{pf}");
+    assert_eq!(pf["units"]["skipped_by_pack"], 0, "{pf}");
+    let units = judged["units"].as_array().unwrap();
+    assert_eq!(units.len(), 4, "two people, a T1w and a FLAIR each: {pf}");
+    let mut tags: Vec<String> = Vec::new();
+    for u in units {
+        assert_eq!(u["status"], "ready", "{u}");
+        let by = u["knobs"]["tag"]["by"].as_str().unwrap();
+        assert!(by == "rule:tag-by-base" || by == "rule:tag-other", "{u}");
+        assert_eq!(u["knobs"]["mode"]["by"], "default", "{u}");
+        tags.push(u["knobs"]["tag"]["value"].as_str().unwrap().to_string());
+        let caveats: Vec<&str> = u["caveats"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        assert!(
+            caveats
+                .iter()
+                .any(|c| c.starts_with("cannot tell: stack.field_strength_t")),
+            "{u}"
+        );
+    }
+    tags.sort();
+    assert_eq!(
+        tags,
+        ["a", "a", "b", "b"],
+        "a T1w is tagged a and a FLAIR b"
+    );
+    assert_eq!(pf["person"]["goal"], Value::Null);
+    // a person may not set a knob the rules set; a goal the pack does not
+    // offer is a blocker
+    let pf = lab.json(&[
+        "run",
+        "pack-echo",
+        "--select",
+        "selection:every@1",
+        "--preflight",
+        "--json",
+        "--param",
+        "tag=b",
+    ]);
+    assert_eq!(pf["ready"], false, "{pf}");
+    assert!(
+        pf["blockers"]
+            .to_string()
+            .contains("set by pack-echo's rules"),
+        "{pf}"
+    );
+    let pf = lab.json(&[
+        "run",
+        "pack-echo",
+        "--select",
+        "selection:every@1",
+        "--preflight",
+        "--json",
+        "--goal",
+        "slow",
+    ]);
+    assert_eq!(pf["ready"], false, "{pf}");
+    assert!(
+        pf["blockers"]
+            .to_string()
+            .contains("the goal is one of fast, standard, research, not slow"),
+        "{pf}"
+    );
+
+    // G2: a hard need no unit meets skips every unit in the pack's words,
+    // at the pre-flight (not ready) and at the run (0 run, nothing made)
+    let v2 = lab.add_pair(
+        "two",
+        &descriptor,
+        &pack_echo_pack(&digest, "dimension == '2D'"),
+    );
+    assert_eq!(
+        v2["version"], 2,
+        "a pack that differs is the name's next version: {v2}"
+    );
+    let pf = lab.json(&[
+        "run",
+        "pack-echo",
+        "--select",
+        "selection:every@1",
+        "--preflight",
+        "--json",
+    ]);
+    assert_eq!(pf["ready"], false, "{pf}");
+    assert_eq!(pf["units_judged"]["skipped"], 4, "{pf}");
+    assert_eq!(pf["units"]["ready"], 0, "{pf}");
+    let words = pf["units_judged"]["units"][0]["words"].as_str().unwrap();
+    assert_eq!(words, "the stack does not meet the need");
+    assert_eq!(
+        pf["units_judged"]["units"][0]["need"],
+        "stack: dimension == '2D'"
+    );
+    assert!(
+        pf["blockers"].to_string().contains("no stack can run: 4 of 4 are skipped by the pack's needs (the stack does not meet the need)"),
+        "{pf}"
+    );
+    let run = lab.json(&[
+        "run",
+        "pack-echo",
+        "--select",
+        "selection:every@1",
+        "--json",
+    ]);
+    assert_eq!(run["status"], "done", "{run}");
+    assert_eq!(run["summary"]["units"]["skipped"], 4, "{run}");
+    assert_eq!(run["summary"]["units"]["succeeded"], 0, "{run}");
+    assert_eq!(run["summary"]["derivatives"], 0, "{run}");
+    for u in run["units_run"].as_array().unwrap() {
+        assert_eq!(u["status"], "skipped", "{u}");
+        assert_eq!(u["words"], "the stack does not meet the need", "{u}");
+        assert_eq!(u["error"], "the stack does not meet the need", "{u}");
+    }
+    assert!(
+        lab.podman_runs().is_empty(),
+        "no container ran for a skipped unit"
+    );
+
+    // a hard need on a fact the registry cannot tell skips with "cannot
+    // tell", and the person may let it run, recorded as their choice
+    let v3 = lab.add_pair(
+        "three",
+        &descriptor,
+        &pack_echo_pack(&digest, "field_strength_t >= 1"),
+    );
+    assert_eq!(v3["version"], 3, "{v3}");
+    let pf = lab.json(&[
+        "run",
+        "pack-echo",
+        "--select",
+        "selection:every@1",
+        "--preflight",
+        "--json",
+    ]);
+    assert_eq!(pf["ready"], false, "{pf}");
+    assert_eq!(pf["units_judged"]["cannot_tell"], 4, "{pf}");
+    assert_eq!(
+        pf["units_judged"]["units"][0]["words"], "cannot tell: stack.field_strength_t",
+        "{pf}"
+    );
+    let pf = lab.json(&[
+        "run",
+        "pack-echo",
+        "--select",
+        "selection:every@1",
+        "--preflight",
+        "--json",
+        "--let-run",
+    ]);
+    assert_eq!(pf["ready"], true, "{pf}");
+    assert_eq!(pf["units_judged"]["ready"], 4, "{pf}");
+    assert!(
+        pf["units_judged"]["units"][0]["let_run_by"]
+            .as_str()
+            .unwrap()
+            .starts_with("person:anna"),
+        "{pf}"
+    );
+    assert_eq!(pf["person"]["let_run"], true, "{pf}");
+    let run = lab.json(&[
+        "run",
+        "pack-echo",
+        "--select",
+        "selection:every@1",
+        "--json",
+        "--let-run",
+    ]);
+    assert_eq!(run["status"], "done", "{run}");
+    assert_eq!(run["summary"]["units"]["succeeded"], 4, "{run}");
+    let u = &run["units_run"][0];
+    assert_eq!(u["pack_status"], "ready", "{u}");
+    assert!(
+        u["caveats"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["cannot_tell"] == "stack.field_strength_t"
+                && c["words"].as_str().unwrap().contains("let it run")),
+        "{u}"
+    );
+}
+
+#[test]
+fn g3_g4_g5_a_run_records_who_chose_its_flags_and_its_keys_and_no_door_pools_across_keys() {
+    if !have("python3") {
+        eprintln!(
+            "python3 is not installed; the stand-in podman needs it, so this test is skipped"
+        );
+        return;
+    }
+    let lab = Lab::new("pipelines-pack-keys");
+    let image = format!("example.org/pack-echo@sha256:{}", "d".repeat(64));
+    let descriptor = pack_echo(&image);
+    let d = nils_pipeline::descriptor::parse(&descriptor).unwrap();
+    let pack_text = pack_echo_pack(&d.digest(), "dimension == '3D'");
+    let pack = nils_pipeline::pack::load(&pack_text, &d, None).unwrap();
+    let added = lab.add_pair("one", &descriptor, &pack_text);
+    let pipeline_id = added["id"].as_i64().unwrap();
+
+    let run = lab.json(&[
+        "run",
+        "pack-echo",
+        "--select",
+        "selection:every@1",
+        "--json",
+        "--goal",
+        "fast",
+    ]);
+    assert_eq!(run["status"], "done", "{run}");
+    assert_eq!(run["summary"]["units"]["succeeded"], 4, "{run}");
+    let run_id = run["id"].as_i64().unwrap();
+    // G3: every unit records each knob's value, by and the facts read
+    let units = run["units_run"].as_array().unwrap();
+    assert_eq!(units.len(), 4);
+    let mut keys: BTreeSet<String> = BTreeSet::new();
+    for u in units {
+        assert_eq!(u["pack_status"], "ready", "{u}");
+        let tag = &u["knobs"]["tag"];
+        assert!(tag["by"].as_str().unwrap().starts_with("rule:"), "{u}");
+        assert!(
+            tag["facts"]["stack.base"].is_string(),
+            "the rule's facts are kept: {u}"
+        );
+        assert_eq!(u["knobs"]["mode"]["by"], "default", "{u}");
+        assert_eq!(u["knobs"]["mode"]["value"], "all", "{u}");
+        // G4: a fixture's bad output (12 files, the check wants 20) gives
+        // the flagged status, never a failure; the cohort check says not yet
+        let flags = u["flags"].as_array().unwrap();
+        assert_eq!(flags.len(), 1, "{u}");
+        assert_eq!(flags[0]["check"], "files >= 20", "{u}");
+        assert_eq!(flags[0]["value"], 12.0, "{u}");
+        assert_eq!(flags[0]["action"], "flag", "{u}");
+        let cohort = u["cohort_checks"].as_array().unwrap();
+        assert_eq!(cohort.len(), 1, "{u}");
+        assert_eq!(cohort[0]["status"], "not yet", "{u}");
+        // a cohort is the sessions of one comparability key: the two
+        // keys here hold two stacks each
+        assert_eq!(cohort[0]["words"], "not yet: 2 of 30 sessions", "{u}");
+        let key = u["keys"]["comparability"].as_str().unwrap().to_string();
+        assert!(
+            key.starts_with("sha256:")
+                && u["keys"]["result"].as_str().unwrap().starts_with("sha256:"),
+            "{u}"
+        );
+        keys.insert(key);
+    }
+    assert_eq!(
+        keys.len(),
+        2,
+        "a breaking knob set differently is another key: {keys:?}"
+    );
+    assert_eq!(
+        run["summary"]["flags"].as_array().unwrap().len(),
+        4,
+        "{run}"
+    );
+    // the tag reached each container: a unit that runs apart takes the
+    // knobs its pack chose
+    let tags: BTreeSet<String> = lab
+        .podman_runs()
+        .iter()
+        .map(|words| words.last().unwrap().clone())
+        .collect();
+    assert_eq!(
+        tags,
+        ["a".to_string(), "b".to_string()].into_iter().collect(),
+        "{:?}",
+        lab.podman_runs()
+    );
+    // G3: replaying the rules on the recorded facts gives the recorded values
+    let mut store = lab.store();
+    for u in nils_registry::pipeline::units(&mut store, run_id).unwrap() {
+        let again = nils_pipeline::pack::rules::replay(&pack, &d, &u.pack).unwrap();
+        for (k, c) in u.pack["knobs"].as_object().unwrap() {
+            assert_eq!(again[k], c["value"], "{}: {k}", u.unit);
+        }
+        assert_eq!(u.pack["facts"]["values"]["goal"], "fast", "{}", u.pack);
+    }
+    drop(store);
+
+    // G5: every door that returns measures answers per comparability key
+    // or refuses, in the same words
+    let server = Server::start(&lab);
+    let (status, doc) = server.call(
+        "GET",
+        &format!("/api/pipelines/{pipeline_id}/pack"),
+        None,
+        OPERATOR,
+    );
+    assert_eq!(status, 200, "{doc}");
+    assert_eq!(doc["pack"]["nils_pack"], 1, "{doc}");
+    assert!(
+        doc["facts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f == "stack.base"),
+        "{doc}"
+    );
+    assert_eq!(doc["breaking_knobs"], json!(["tag"]), "{doc}");
+    // the run's numbers door
+    let (status, numbers) = server.call(
+        "GET",
+        &format!("/api/pipeline-runs/{run_id}/numbers"),
+        None,
+        OPERATOR,
+    );
+    assert_eq!(status, 200, "{numbers}");
+    assert_eq!(numbers["pooled"], false, "{numbers}");
+    assert_eq!(numbers["keys"].as_array().unwrap().len(), 2, "{numbers}");
+    let words = numbers["words"].as_str().unwrap();
+    assert!(
+        words.starts_with("these results hold 2 comparability keys ("),
+        "{words}"
+    );
+    assert!(words.contains("never summed together"), "{words}");
+    for k in numbers["keys"].as_array().unwrap() {
+        assert_eq!(k["units"], 2, "{k}");
+        assert_eq!(k["measures"]["files"]["count"], 2, "{k}");
+        assert_eq!(k["measures"]["files"]["sum"], 24.0, "{k}");
+    }
+    // the export
+    let (status, csv) = server.call(
+        "GET",
+        &format!("/api/pipeline-runs/{run_id}/numbers?format=csv"),
+        None,
+        OPERATOR,
+    );
+    assert_eq!(status, 200, "{csv}");
+    let csv = csv.as_str().unwrap();
+    assert!(
+        csv.starts_with("# these results hold 2 comparability keys ("),
+        "{csv}"
+    );
+    assert!(
+        csv.contains("run,unit,comparability_key,name,value,unit_of_measure\n"),
+        "{csv}"
+    );
+    assert_eq!(csv.matches(",files,12,").count(), 4, "{csv}");
+    // the ask door: a sum over the measure is refused while the pipeline's
+    // results hold two keys; grouped by the key it answers per key
+    let pooled = json!({"document": {
+        "ast_version": 1,
+        "sets": {"s": {"grain": "stack"}},
+        "out": {"set": "s", "level": "aggregate", "columns": [["sum", {"set": "s"}, ["field", {}, "measure.pack-echo.files"]]]},
+    }});
+    let (status, refused) = server.call("POST", "/api/ask/run", Some(pooled.clone()), OPERATOR);
+    assert_eq!(status, 409, "{refused}");
+    let said = refused["error"].as_str().unwrap_or_default();
+    assert!(
+        said.starts_with("these results hold 2 comparability keys ("),
+        "{refused}"
+    );
+    assert!(said.contains("group by measure.pack-echo.key"), "{refused}");
+    let (status, refused) = server.call("POST", "/api/ask/jobs", Some(pooled), OPERATOR);
+    assert_eq!(status, 409, "{refused}");
+    // read per unit with its key, nothing is pooled: the ask answers, and
+    // the key field tells the two keys apart
+    let per_key = json!({"document": {
+        "ast_version": 1,
+        "sets": {"s": {"grain": "stack"}},
+        "out": {"set": "s", "level": "record", "columns": [["field", {}, "measure.pack-echo.key"], ["field", {}, "measure.pack-echo.files"]]},
+    }});
+    let (status, answered) = server.call("POST", "/api/ask/run", Some(per_key), OPERATOR);
+    assert_eq!(status, 200, "{answered}");
+    let at = answered["columns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .position(|c| c == "measure.pack-echo.key")
+        .expect("the key column");
+    let seen: BTreeSet<String> = answered["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|r| r[at].as_str().map(str::to_string))
+        .collect();
+    assert_eq!(
+        seen.len(),
+        2,
+        "two comparability keys among the rows: {answered}"
+    );
+    assert!(seen.iter().all(|k| k.starts_with("sha256:")), "{answered}");
+}
+
+/// Review of 2026-10-19, finding 1: a pipeline that runs its units together
+/// in one container takes the values its pack's rules chose (they agree, or
+/// the run is refused), and the unit rows record what ran.
+#[test]
+fn a_together_run_takes_the_values_the_rules_chose() {
+    if !have("python3") {
+        eprintln!(
+            "python3 is not installed; the stand-in podman needs it, so this test is skipped"
+        );
+        return;
+    }
+    let lab = Lab::new("pipelines-pack-together");
+    let image = format!("example.org/pack-echo@sha256:{}", "e".repeat(64));
+    let descriptor = pack_echo(&image).replace("units: apart", "units: together");
+    assert!(descriptor.contains("units: together"));
+    let d = nils_pipeline::descriptor::parse(&descriptor).unwrap();
+    // both rules choose b, whatever the stack: the descriptor's default is a
+    let pack_text =
+        pack_echo_pack(&d.digest(), "dimension == '3D'").replace("set: {tag: a}", "set: {tag: b}");
+    let added = lab.add_pair("together", &descriptor, &pack_text);
+    assert_eq!(added["added"], true, "{added}");
+    let run = lab.json(&[
+        "run",
+        "pack-echo",
+        "--select",
+        "selection:every@1",
+        "--json",
+    ]);
+    assert_eq!(run["status"], "done", "{run}");
+    let runs = lab.podman_runs();
+    assert_eq!(runs.len(), 1, "one container for the whole run: {runs:?}");
+    assert_eq!(
+        runs[0].last().unwrap(),
+        "b",
+        "the container got the rules' value, not the descriptor's default: {runs:?}"
+    );
+    for u in run["units_run"].as_array().unwrap() {
+        assert_eq!(u["knobs"]["tag"]["value"], "b", "{u}");
+        assert!(
+            u["knobs"]["tag"]["by"]
+                .as_str()
+                .unwrap()
+                .starts_with("rule:"),
+            "{u}"
+        );
+    }
+}
+
+/// Review of 2026-10-19, finding 5: the person's choices stay with the run,
+/// and a resume judges only the units still to run, under them.
+#[test]
+fn a_resume_keeps_a_finished_unit_s_record_and_judges_the_rest_under_the_runs_goal() {
+    if !have("python3") {
+        eprintln!(
+            "python3 is not installed; the stand-in podman needs it, so this test is skipped"
+        );
+        return;
+    }
+    let lab = Lab::new("pipelines-pack-resume");
+    let image = format!("example.org/pack-echo@sha256:{}", "f".repeat(64));
+    let descriptor = pack_echo(&image);
+    let d = nils_pipeline::descriptor::parse(&descriptor).unwrap();
+    lab.add_pair(
+        "one",
+        &descriptor,
+        &pack_echo_pack(&d.digest(), "dimension == '3D'"),
+    );
+    let run = lab.json(&[
+        "run",
+        "pack-echo",
+        "--select",
+        "selection:every@1",
+        "--json",
+        "--goal",
+        "fast",
+    ]);
+    assert_eq!(run["status"], "done", "{run}");
+    assert_eq!(lab.podman_runs().len(), 4);
+    // the run began with the person's goal, and kept it
+    let mut store = lab.store();
+    let kept = nils_registry::pipeline::run(&mut store, 1)
+        .unwrap()
+        .unwrap();
+    assert_eq!(kept.person["goal"], "fast", "{}", kept.person);
+    // stop it as a cancel would have: one unit back in the queue
+    let units = nils_registry::pipeline::units(&mut store, 1).unwrap();
+    let before: Vec<Value> = units.iter().map(|u| u.pack.clone()).collect();
+    for u in &before {
+        assert_eq!(u["flags"].as_array().unwrap().len(), 1, "{u}");
+        assert!(u["cohort_checks"].is_array(), "{u}");
+    }
+    let again = units[0].id;
+    nils_registry::pipeline::unit_requeued(&mut store, again).unwrap();
+    let sql = format!(
+        "UPDATE {} SET status = 'cancelled', results_digest = NULL, finished_at = NULL WHERE id = 1",
+        store.qualified("pipeline_run")
+    );
+    store.execute(&sql, &[]).unwrap();
+    drop(store);
+    // taken up again with no flag at all
+    let resumed = lab.json(&["run", "--resume", "1", "--json"]);
+    assert_eq!(resumed["status"], "done", "{resumed}");
+    assert_eq!(lab.podman_runs().len(), 5, "only the unit left ran");
+    let mut store = lab.store();
+    let after = nils_registry::pipeline::units(&mut store, 1).unwrap();
+    for (i, u) in after.iter().enumerate() {
+        assert_eq!(
+            u.pack["flags"].as_array().unwrap().len(),
+            1,
+            "{}: flags kept: {}",
+            u.unit,
+            u.pack
+        );
+        assert!(u.pack["cohort_checks"].is_array(), "{}: {}", u.unit, u.pack);
+        assert_eq!(u.pack["facts"]["values"]["goal"], "fast", "{}", u.pack);
+        if i > 0 {
+            // a finished unit's record is the one it was run under
+            assert_eq!(u.pack["knobs"], before[i]["knobs"], "{}", u.unit);
+            assert_eq!(u.pack["flagged_at"], before[i]["flagged_at"], "{}", u.unit);
+            assert_eq!(u.comparability_key, units[i].comparability_key);
+        }
+    }
+}
+
+/// Review of 2026-10-19, finding 6: a stored pack this engine cannot parse
+/// is said so by the pack door, the catalog and the pre-flight, never read
+/// as no pack.
+#[test]
+fn a_stored_pack_the_engine_cannot_read_is_named_not_taken_for_none() {
+    if !have("python3") {
+        eprintln!(
+            "python3 is not installed; the stand-in podman needs it, so this test is skipped"
+        );
+        return;
+    }
+    let lab = Lab::new("pipelines-pack-unreadable");
+    let image = format!("example.org/pack-echo@sha256:{}", "1".repeat(64));
+    let descriptor = pack_echo(&image);
+    let d = nils_pipeline::descriptor::parse(&descriptor).unwrap();
+    let added = lab.add_pair(
+        "one",
+        &descriptor,
+        &pack_echo_pack(&d.digest(), "dimension == '3D'"),
+    );
+    let id = added["id"].as_i64().unwrap();
+    let digest = added["pack_digest"].as_str().unwrap().to_string();
+    // a pack of a newer contract than this engine's
+    let mut store = lab.store();
+    let sql = format!(
+        "UPDATE {} SET pack = '{{\"nils_pack\": 99}}' WHERE id = {id}",
+        store.qualified("pipeline")
+    );
+    store.execute(&sql, &[]).unwrap();
+    drop(store);
+    let server = Server::start(&lab);
+    let (status, doc) = server.call("GET", &format!("/api/pipelines/{id}/pack"), None, OPERATOR);
+    assert_eq!(status, 200, "{doc}");
+    let words = doc["pack"]["error"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{doc}"));
+    assert!(words.contains("cannot read"), "{doc}");
+    assert_eq!(doc["pack_digest"], digest, "{doc}");
+    let (status, one) = server.call("GET", &format!("/api/pipelines/{id}"), None, OPERATOR);
+    assert_eq!(status, 200, "{one}");
+    assert_eq!(
+        one["pack"]["error"], words,
+        "the catalog marks the version: {one}"
+    );
+    assert_eq!(one["pack_error"], words, "{one}");
+    // the pre-flight refuses with those words, the jobs door with a 409
+    let pf = lab.json(&[
+        "run",
+        "pack-echo",
+        "--select",
+        "selection:every@1",
+        "--preflight",
+        "--json",
+    ]);
+    assert_eq!(pf["ready"], false, "{pf}");
+    assert!(pf["blockers"].to_string().contains("cannot read"), "{pf}");
+    let (status, refused) = server.call(
+        "POST",
+        "/api/jobs",
+        Some(json!({"command": ["run", "pack-echo", "--select", "selection:every@1"]})),
+        OPERATOR,
+    );
+    assert_eq!(status, 409, "{refused}");
+    assert!(refused.to_string().contains("cannot read"), "{refused}");
+    assert!(lab.podman_runs().is_empty(), "nothing ran");
+}
+
+/// Review of 2026-10-19, finding 7: `nils pipelines validate` is offline,
+/// whatever the machine holds.
+#[test]
+fn validate_runs_on_a_machine_with_no_install() {
+    let work = TempDir::new("pipelines-validate-offline");
+    let image = format!("example.org/pack-echo@sha256:{}", "2".repeat(64));
+    let descriptor = pack_echo(&image);
+    let d = nils_pipeline::descriptor::parse(&descriptor).unwrap();
+    let dir = work.path().join("pair");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("nils.job.yml"), &descriptor).unwrap();
+    std::fs::write(
+        dir.join("nils-pack.yaml"),
+        pack_echo_pack(&d.digest(), "dimension == '3D'"),
+    )
+    .unwrap();
+    let home = work.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let out = nils()
+        .arg("--registry")
+        .arg(work.path().join("no-install-here"))
+        .args(["pipelines", "validate"])
+        .arg(&dir)
+        .arg("--json")
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", home.join("config"))
+        .env_remove("NILS_DSN")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "{said}{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let doc: Value = serde_json::from_str(&said).unwrap();
+    assert_eq!(doc["ok"], true, "{doc}");
+    assert_eq!(doc["descriptor_digest"], d.digest(), "{doc}");
+    assert!(
+        !work.path().join("no-install-here").exists(),
+        "validate made no install"
+    );
+}

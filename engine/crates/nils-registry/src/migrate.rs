@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 108;
+pub const SCHEMA_VERSION: i64 = 109;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -486,6 +486,10 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 108,
         apply: a_tool_s_terms_are_accepted_as_events,
     },
+    Migration {
+        version: 109,
+        apply: a_pipeline_version_is_the_pair_and_a_unit_records_its_pack,
+    },
 ];
 
 /// Record 58 P1 (Wave 7b spec §12): a verify campaign's planting
@@ -537,6 +541,33 @@ fn a_dataset_s_files_are_counted_from_the_indexes(
         store.batch(&format!("DROP INDEX IF EXISTS {narrower}"))?;
     }
     Ok(())
+}
+
+/// Record 57 P1 to P4 (Wave 7b A1, 2026-10-18): a pipeline version is the
+/// pair of descriptor and pack (`pipeline.pack`, `pack_digest`,
+/// `version_digest`), and a unit records what the pack decided of it and
+/// the two keys its results carry (`pipeline_unit.pack`,
+/// `comparability_key`, `result_key`). The columns are added and left
+/// empty: a version from before is one with no pack, and a unit from before
+/// recorded no knobs and has no key.
+fn a_pipeline_version_is_the_pair_and_a_unit_records_its_pack(
+    store: &mut Store,
+    kind: Kind,
+) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_columns(
+        store,
+        "pipeline",
+        &["pack", "pack_digest", "version_digest"],
+    )?;
+    add_columns(
+        store,
+        "pipeline_unit",
+        &["pack", "comparability_key", "result_key"],
+    )?;
+    add_columns(store, "pipeline_run", &["person"])
 }
 
 /// Record 55, ruling 35 (c), Nima 2026-10-16: each handover has its own
@@ -4153,7 +4184,11 @@ mod column_migration {
         assert_eq!(count(&mut store), 0);
         assert_eq!(
             migrate(&mut store, Kind::Linkage).unwrap(),
-            [104, 105, 106, 107, 108]
+            MIGRATIONS
+                .iter()
+                .filter(|m| m.version >= 104)
+                .map(|m| m.version)
+                .collect::<Vec<_>>()
         );
         assert_eq!(count(&mut store), 1);
         let t = crate::linkage::id_type_named(&mut store, "reserve-number")

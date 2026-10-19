@@ -1788,7 +1788,7 @@ fn check_run_template(template: &str) -> Result<(), String> {
 }
 
 /// Whether a value is one a parameter takes.
-fn check_value(p: &Param, v: &Value) -> Result<(), String> {
+pub(crate) fn check_value(p: &Param, v: &Value) -> Result<(), String> {
     match p.ty {
         ParamType::Flag => {
             if !v.is_boolean() {

@@ -1149,7 +1149,7 @@ impl<'a> Builder<'a> {
             "number" => "nm.number",
             "text" => "nm.text",
             "run" => "nm.run_id",
-            "checked" => "",
+            "checked" | "key" => "",
             _ => return None,
         };
         let unit = |a: &str| match level {
@@ -1204,6 +1204,19 @@ impl<'a> Builder<'a> {
         );
         if what == "run" {
             return Some(Term::plain(run));
+        }
+        // record 57 P3: the comparability key of that run's results of the
+        // unit, from the unit's row
+        if what == "key" {
+            return Some(Term::plain(format!(
+                "(SELECT pu.comparability_key FROM {} pu WHERE pu.run_id = {run} AND pu.unit = \
+                 (SELECT nm.unit_id FROM {} nm WHERE nm.pipeline = {} AND nm.scope = {} \
+                 AND {mu} AND nm.run_id = {run} ORDER BY nm.id DESC LIMIT 1))",
+                self.q("pipeline_unit"),
+                self.q("measure"),
+                quote(pipeline),
+                quote(level),
+            )));
         }
         if what == "checked" {
             return Some(Term::plain(format!(

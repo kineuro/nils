@@ -3081,6 +3081,14 @@ fn build_registry() -> Vec<Table> {
                 // Record 49 A4: `starter` for a version the engine seeded
                 // from its starter catalog, null for one a person added.
                 col("origin", Type::Text),
+                // Record 57 P1 (Wave 7b A1): the pack beside the descriptor
+                // (contracts/pipeline-pack/v1), kept whole with its digest,
+                // null for a version with no pack; and the digest of the
+                // pair, which is what a version is. A row from before has
+                // none, and is read as a version with no pack.
+                col("pack", Type::Json),
+                col("pack_digest", Type::Text),
+                col("version_digest", Type::Text),
             ],
         )
         .unique(&["name", "version"])
@@ -3143,6 +3151,9 @@ fn build_registry() -> Vec<Table> {
                 // and on one from before, which the doors read from its
                 // error
                 col("failure", Type::Json),
+                // Wave 7b A1: the person's choices at the pack (goal, switches,
+                // let-run), kept so a resume judges under the same ones
+                col("person", Type::Json),
             ],
         )
         .index(&["pipeline_id"])
@@ -3181,6 +3192,14 @@ fn build_registry() -> Vec<Table> {
                 // status, error, metrics, the files hashed and registered,
                 // the files refused
                 col("outcome", Type::Json),
+                // Record 57 P2 to P4 (Wave 7b A1): what the pack decided of
+                // the unit, {status, need, words, variant, caveats, knobs
+                // {value, by, rule, facts}, facts, flags}, and the two keys
+                // every result of the unit carries: the comparability key
+                // and the result key, sha256:<hex> each
+                col("pack", Type::Json),
+                col("comparability_key", Type::Text),
+                col("result_key", Type::Text),
             ],
         )
         .unique(&["run_id", "unit"])

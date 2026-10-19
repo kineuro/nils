@@ -332,9 +332,24 @@ fn capability_base(store: &mut Store, d: &Detected) -> Value {
 /// entry with `added`, `replaces` (the earlier versions a new run no longer
 /// takes) and `replaces_why`. A descriptor that does not parse, or names an
 /// image not pinned by digest, is a usage error in plain words.
-pub(crate) fn add_descriptor(registry: &mut Registry, text: &str) -> Result<Value, Exit> {
+pub(crate) fn add_descriptor(
+    registry: &mut Registry,
+    text: &str,
+    pack_text: Option<&str>,
+) -> Result<Value, Exit> {
     let d = descriptor::parse(text).map_err(|e| usage(e.to_string()))?;
     let digest = d.digest();
+    // record 57 P1 (Wave 7b A1): the pack beside the descriptor, checked
+    // against it with the loader's words; a version is the pair
+    let pack = match pack_text {
+        Some(t) => Some(
+            crate::pipeline_pack::load(registry.store(), &d, t)
+                .map_err(|e| usage(format!("{}: {e}", nils_pipeline::pack::FILE)))?,
+        ),
+        None => None,
+    };
+    let pack_digest = pack.as_ref().map(nils_pipeline::pack::PipelinePack::digest);
+    let version_digest = nils_pipeline::pack::version_digest(&digest, pack_digest.as_deref());
     let who = crate::actor();
     let now = nils_registry::time::now_iso();
     let (p, fresh) = rows::add(
@@ -350,6 +365,9 @@ pub(crate) fn add_descriptor(registry: &mut Registry, text: &str) -> Result<Valu
             level: d.level.name(),
             added_by: &who,
             added_at: &now,
+            pack: pack.as_ref().map(|p| &p.document),
+            pack_digest: pack_digest.as_deref(),
+            version_digest: &version_digest,
         },
     )?;
     if fresh {
@@ -357,7 +375,9 @@ pub(crate) fn add_descriptor(registry: &mut Registry, text: &str) -> Result<Valu
             registry,
             nils_registry::audit::Action::PipelineAdd,
             json!({"pipeline": p.id, "name": p.name, "version": p.version}),
-            Some(json!({"descriptor": p.descriptor_digest, "image": p.image_digest})),
+            Some(
+                json!({"descriptor": p.descriptor_digest, "image": p.image_digest, "pack": p.pack_digest, "version_digest": p.version_digest}),
+            ),
         )?;
     }
     // 2026-10-12: the earlier versions it replaces, which a new run no
@@ -753,7 +773,8 @@ pub(crate) fn setup_route(
                     "descriptor is the text of a nils.job.yml",
                 ));
             };
-            let doc = add_descriptor(registry, text)?;
+            let pack_text = v["pack"].as_str().filter(|t| !t.trim().is_empty());
+            let doc = add_descriptor(registry, text, pack_text)?;
             Ok(if doc["added"] == true {
                 Reply::created(doc)
             } else {
@@ -1081,6 +1102,16 @@ pub(crate) fn pipeline_doc(p: &Pipeline) -> Value {
         "parameters": p.descriptor["inputs"], "inputs": x["inputs"], "outputs": x["outputs"],
         "needs": x["needs"], "proposals": x["proposals"],
         "descriptor": p.descriptor,
+        // record 57 P1: the pack beside the descriptor, `none` for a version
+        // with no pack, and the digests of the pack and the pair
+        "pack": match crate::pipeline_pack::pack_error(p) {
+            Some(e) => json!({"error": e}),
+            None if p.pack.is_null() => json!("none"),
+            None => p.pack.clone(),
+        },
+        "pack_error": crate::pipeline_pack::pack_error(p),
+        "pack_digest": p.pack_digest,
+        "version_digest": p.version_digest,
     })
 }
 
@@ -1144,6 +1175,12 @@ pub(crate) fn run_doc(store: &mut Store, r: &Run) -> Value {
                 "failure": crate::failures::of_unit(&u.outcome),
                 // 2026-10-12: what a skipped unit lacked, in a few words
                 "lacks": crate::made::lacks(&u.outcome),
+                // record 57 P2 to P4: what the pack decided, who chose each
+                // knob, the caveats, the flags and the two keys
+                "pack_status": u.pack["status"], "need": u.pack["need"], "words": u.pack["words"],
+                "variant": u.pack["variant"], "knobs": u.pack["knobs"], "caveats": u.pack["caveats"],
+                "flags": u.pack["flags"], "cohort_checks": u.pack["cohort_checks"],
+                "keys": {"comparability": u.comparability_key, "result": u.result_key},
             }))
             .collect::<Vec<_>>()
     );
@@ -1728,6 +1765,88 @@ pub(crate) fn route(
                 .ok_or_else(|| Reply::error(404, format!("no pipeline {id}")))?;
             Ok(Reply::ok(pipeline_doc_of(registry.store(), &p)))
         })(),
+        // record 57 P1 (Wave 7b A1): the pack as loaded, with its digest and
+        // the facts it reads
+        ["api", "pipelines", id, "pack"] => (|| {
+            let id = id_of(id, "pipeline")?;
+            let p = rows::get(registry.store(), id)
+                .map_err(err)?
+                .ok_or_else(|| Reply::error(404, format!("no pipeline {id}")))?;
+            if let Some(e) = crate::pipeline_pack::pack_error(&p) {
+                return Ok(Reply::ok(json!({
+                    "pipeline": p.label(), "pipeline_id": p.id, "pack": {"error": e},
+                    "pack_digest": p.pack_digest, "version_digest": p.version_digest,
+                    "descriptor_digest": p.descriptor_digest,
+                    "contract": nils_pipeline::pack::CONTRACT,
+                })));
+            }
+            let Some(pack) = crate::pipeline_pack::pack_of(&p) else {
+                return Ok(Reply::ok(json!({
+                    "pipeline": p.label(), "pipeline_id": p.id, "pack": "none",
+                    "pack_digest": Value::Null, "version_digest": p.version_digest,
+                    "contract": nils_pipeline::pack::CONTRACT,
+                })));
+            };
+            let d = descriptor::from_value(p.descriptor.clone()).ok();
+            let vocab = d.as_ref().map(|d| pack.vocabulary(d));
+            let mut reads: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+            for (role, rn) in &pack.needs {
+                let scope = (role != nils_pipeline::pack::LINK
+                    && role != nils_pipeline::pack::HOST)
+                    .then_some(role.as_str());
+                for e in rn
+                    .hard_if
+                    .iter()
+                    .chain(rn.hard.iter().map(|n| &n.when))
+                    .chain(rn.soft.iter().map(|n| &n.when))
+                {
+                    let e = match &vocab {
+                        Some(v) => e.scoped(scope, v),
+                        None => e.clone(),
+                    };
+                    reads.extend(e.reads());
+                }
+            }
+            for r in &pack.rules {
+                let e = match &vocab {
+                    Some(v) => r.when.scoped(None, v),
+                    None => r.when.clone(),
+                };
+                reads.extend(e.reads());
+            }
+            Ok(Reply::ok(json!({
+                "pipeline": p.label(), "pipeline_id": p.id,
+                "pack": pack.document, "pack_digest": p.pack_digest, "version_digest": p.version_digest,
+                "descriptor_digest": p.descriptor_digest,
+                "contract": nils_pipeline::pack::CONTRACT,
+                "facts": reads,
+                "breaking_knobs": pack.breaking_knobs(),
+                "goals": {"goal": pack.goals.goal, "switches": pack.goals.switches, "defaults": pack.default_choices()},
+                "rules": pack.rules.iter().map(|r| json!({"id": r.id, "when": r.text, "set": r.set, "route": r.route, "why": r.why, "source": r.source})).collect::<Vec<_>>(),
+                "checks": pack.checks.iter().map(|c| json!({"metric": c.metric, "check": c.text(), "action": c.action.name(), "cohort": c.cohort, "stratum": c.stratum, "min_sessions": c.min_sessions, "source": c.source})).collect::<Vec<_>>(),
+            })))
+        })(),
+        // record 57 P3 (Wave 7b A1): a run's numbers per comparability key,
+        // never pooled across keys; ?format=csv is the export
+        ["api", "pipeline-runs", id, "numbers"] => (|| {
+            let id = id_of(id, "run")?;
+            let r = rows::run(registry.store(), id)
+                .map_err(err)?
+                .ok_or_else(|| Reply::error(404, format!("no pipeline run {id}")))?;
+            if query.get("format").map(String::as_str) == Some("csv") {
+                let text = crate::pipeline_pack::numbers_csv(registry.store(), r.id)
+                    .map_err(|e| Reply::error(500, e))?;
+                return Ok(Reply::raw(
+                    "text/csv; charset=utf-8",
+                    text.into_bytes(),
+                    Vec::new(),
+                ));
+            }
+            let mut doc = crate::pipeline_pack::numbers_by_key(registry.store(), r.id)
+                .map_err(|e| Reply::error(500, e))?;
+            doc["pipeline_id"] = json!(r.pipeline_id);
+            Ok(Reply::ok(doc))
+        })(),
         ["api", "pipeline-runs"] => (|| {
             let pipeline = query
                 .get("pipeline")
@@ -1919,7 +2038,7 @@ pub(crate) fn located(pack_dir: Option<&Path>, command: Vec<String>) -> Result<V
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "--select" | "--handle" | "--param" | "--model" | "--labels" | "--pack"
-            | "--threshold" | "--resume" => {
+            | "--threshold" | "--resume" | "--goal" | "--switch" => {
                 resume |= arg == "--resume";
                 let value = it
                     .next()
@@ -1927,11 +2046,14 @@ pub(crate) fn located(pack_dir: Option<&Path>, command: Vec<String>) -> Result<V
                 out.push(arg);
                 out.push(value);
             }
+            // record 57 P2: the person lets a unit run whose hard need the
+            // registry cannot tell
+            "--let-run" => out.push(arg),
             a if a.starts_with('-') => {
                 return Err(Reply::error(
                     400,
                     format!(
-                        "run takes --select, --handle, --param, --model, --labels, --threshold, --pack and --resume, not {a}"
+                        "run takes --select, --handle, --param, --model, --labels, --threshold, --pack, --resume, --goal, --switch and --let-run, not {a}"
                     ),
                 ));
             }
@@ -2035,6 +2157,16 @@ pub(crate) enum PipelineCommand {
         /// the same thing
         #[arg(long, value_name = "URL", requires = "release")]
         channel: Option<String>,
+        /// Machine-readable output
+        #[arg(long)]
+        json: bool,
+    },
+    /// Record 57 P1: check a pipeline's folder offline, its nils.job.yml and
+    /// the nils-pack.yaml beside it, with the loader's words; prints the
+    /// descriptor's digest the pack must pin
+    Validate {
+        /// The folder, or its nils.job.yml
+        dir: PathBuf,
         /// Machine-readable output
         #[arg(long)]
         json: bool,
@@ -2256,6 +2388,17 @@ pub(crate) struct RunArgs {
     /// and the doors never take it
     #[arg(long, conflicts_with = "resume")]
     pub(crate) replaced: bool,
+    /// Record 57 P2: the goal of the run, where the pipeline has a pack
+    /// (fast, standard or research; standard when not given)
+    #[arg(long, value_name = "GOAL")]
+    pub(crate) goal: Option<String>,
+    /// Record 57 P2: a switch of the pipeline's pack, name=value
+    #[arg(long = "switch", value_name = "NAME=VALUE")]
+    pub(crate) switches: Vec<String>,
+    /// Record 57 P2: run a unit whose hard need the registry cannot tell,
+    /// recorded as the person's choice
+    #[arg(long)]
+    pub(crate) let_run: bool,
     /// Machine-readable output
     #[arg(long)]
     pub(crate) json: bool,
@@ -2331,9 +2474,63 @@ fn print(v: &Value) -> Result<(), Exit> {
     Ok(())
 }
 
+/// `nils pipelines validate <dir>`: offline, it opens no registry and needs
+/// no install on this machine.
+fn validate(dir: PathBuf, json: bool) -> Result<(), Exit> {
+    let dir = if dir.is_dir() {
+        dir
+    } else {
+        dir.parent().map(Path::to_path_buf).unwrap_or(dir)
+    };
+    let (d, pack) = nils_pipeline::pack::load_dir(&dir, None).map_err(usage)?;
+    let pack_digest = pack.as_ref().map(nils_pipeline::pack::PipelinePack::digest);
+    let doc = json!({
+        "folder": dir.display().to_string(),
+        "pipeline": d.name,
+        "descriptor_digest": d.digest(),
+        "pack": pack.as_ref().map_or(json!("none"), |p| json!({
+            "digest": pack_digest, "version": p.version, "rules": p.rules.len(),
+            "needs": p.needs.keys().cloned().collect::<Vec<_>>(), "checks": p.checks.len(),
+            "breaking_knobs": p.breaking_knobs(),
+        })),
+        "version_digest": nils_pipeline::pack::version_digest(&d.digest(), pack_digest.as_deref()),
+        "ok": true,
+    });
+    if json {
+        print(&doc)?;
+    } else {
+        println!("{}: descriptor {}", d.name, d.digest());
+        match &pack {
+            Some(p) => println!(
+                "pack {}: {} rules, {} checks, needs on {}; version {}",
+                pack_digest.clone().unwrap_or_default(),
+                p.rules.len(),
+                p.checks.len(),
+                if p.needs.is_empty() {
+                    "nothing".to_string()
+                } else {
+                    p.needs.keys().cloned().collect::<Vec<_>>().join(", ")
+                },
+                doc["version_digest"].as_str().unwrap_or_default()
+            ),
+            None => println!(
+                "pack: none ({} is not beside it); version {}",
+                nils_pipeline::pack::FILE,
+                doc["version_digest"].as_str().unwrap_or_default()
+            ),
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn command(home: &Home, command: PipelineCommand) -> Result<(), Exit> {
+    // validate is offline: it matches before the registry is opened
+    if let PipelineCommand::Validate { dir, json } = command {
+        return validate(dir, json);
+    }
     let mut registry = crate::open(home)?;
     match command {
+        PipelineCommand::Validate { .. } => unreachable!("matched before the registry opens"),
         PipelineCommand::Add {
             file,
             release,
@@ -2341,11 +2538,19 @@ pub(crate) fn command(home: &Home, command: PipelineCommand) -> Result<(), Exit>
             json,
         } => {
             let (text, from) = match release.as_deref().map(str::trim) {
-                None => (
-                    std::fs::read_to_string(&file)
-                        .map_err(|e| usage(format!("{}: {e}", file.display())))?,
-                    file.display().to_string(),
-                ),
+                None => {
+                    // a folder names its nils.job.yml (record 57 P1)
+                    let path = if file.is_dir() {
+                        file.join(nils_pipeline::pack::DESCRIPTOR_FILE)
+                    } else {
+                        file.clone()
+                    };
+                    (
+                        std::fs::read_to_string(&path)
+                            .map_err(|e| usage(format!("{}: {e}", path.display())))?,
+                        path.display().to_string(),
+                    )
+                }
                 // record 55 A5: the descriptor a release ships, which names
                 // the image that release built
                 Some(asked) => {
@@ -2361,7 +2566,27 @@ pub(crate) fn command(home: &Home, command: PipelineCommand) -> Result<(), Exit>
                     )
                 }
             };
-            let v = add_descriptor(&mut registry, &text)
+            // record 57 P1: a folder, or a nils.job.yml with nils-pack.yaml
+            // beside it, adds the pair
+            let pack_text = match release {
+                Some(_) => None,
+                None => {
+                    let beside = if file.is_dir() {
+                        file.join(nils_pipeline::pack::FILE)
+                    } else {
+                        file.with_file_name(nils_pipeline::pack::FILE)
+                    };
+                    if beside.is_file() {
+                        Some(
+                            std::fs::read_to_string(&beside)
+                                .map_err(|e| usage(format!("{}: {e}", beside.display())))?,
+                        )
+                    } else {
+                        None
+                    }
+                }
+            };
+            let v = add_descriptor(&mut registry, &text, pack_text.as_deref())
                 .map_err(|e| usage(format!("{from}: {}", e.message)))?;
             if json {
                 return print(&v);
@@ -5010,6 +5235,24 @@ pub(crate) fn run_command(home: &Home, args: RunArgs) -> Result<(), Exit> {
             )?;
             made = Some(run_id);
             rows::set_units(registry.store(), run_id, d.units.name(), args.threshold)?;
+            // Wave 7b A1: the person's choices at the pack stay with the run,
+            // so a resume judges under the same ones
+            if crate::pipeline_pack::pack_of(&p).is_some() {
+                let asked = crate::pipeline_pack::PersonAsk::of_args(
+                    args.goal.as_deref(),
+                    &args.switches,
+                    args.let_run,
+                )
+                .map_err(fail)?;
+                let mut kept = asked.doc();
+                kept["given"] = json!(
+                    pairs(&args.params)?
+                        .into_iter()
+                        .map(|(k, _)| k)
+                        .collect::<Vec<_>>()
+                );
+                rows::set_person(registry.store(), run_id, &kept)?;
+            }
             let _ = job::set_arg(registry.store(), job_id, "run", json!(run_id));
             let licence_env = crate::software::licence_env(&mut registry, &p);
 
@@ -5721,6 +5964,10 @@ fn resume_command(home: &Home, args: &RunArgs, run_id: i64) -> Result<(), Exit> 
             preflight: false,
             // the parts go on with the version the run was split for
             replaced: true,
+            // record 57 P2: and with the goal and switches the run was given
+            goal: args.goal.clone(),
+            switches: args.switches.clone(),
+            let_run: args.let_run,
             json: args.json,
             go_on: Some(go_on),
         },
@@ -6125,6 +6372,9 @@ struct Shared {
     /// What the first container's log says before its own words: where the
     /// files another run left in this run's folder went (2026-10-17).
     said: Mutex<Option<String>>,
+    /// Record 57 P2: the knobs the pack chose for each unit, by the unit's
+    /// id, which a unit that runs apart is given in place of the run's.
+    unit_params: BTreeMap<String, serde_json::Map<String, Value>>,
 }
 
 /// A unit's id as a folder name: the characters a unit's id is made of.
@@ -6509,6 +6759,165 @@ fn execute_run(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Resul
             }
         }
     }
+    // record 57 P2 to P4 (Wave 7b A1): the pack judges every unit that has
+    // its inputs, as the pre-flight did: a hard need skips it in the pack's
+    // words, the rules choose its knobs, and the unit records who chose,
+    // its caveats and the two keys its results carry
+    let mut unit_params: BTreeMap<String, serde_json::Map<String, Value>> = BTreeMap::new();
+    if let Some(e) = crate::pipeline_pack::pack_error(x.pipeline) {
+        return Err(e);
+    }
+    if let Some(pack) = crate::pipeline_pack::pack_of(x.pipeline) {
+        // a resume goes on under the choices the run began with
+        let person_ask = match x.resume.map(|r| &r.person) {
+            Some(kept) if kept.is_object() => crate::pipeline_pack::PersonAsk::of_body(kept)?,
+            _ => crate::pipeline_pack::PersonAsk::of_args(
+                x.args.goal.as_deref(),
+                &x.args.switches,
+                x.args.let_run,
+            )?,
+        };
+        let given = match x.resume.map(|r| &r.person) {
+            Some(kept) if kept.is_object() => kept["given"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|k| k.as_str().map(|k| (k.to_string(), String::new())))
+                .collect(),
+            _ => pairs(&x.args.params).map_err(|e| e.message)?,
+        };
+        let person = person_ask.person(&pack, x.who, &given)?;
+        let roles_of = match d.layout {
+            Layout::Bids => crate::preflight::roles_of_stacks(registry.store(), x.stacks)?,
+            Layout::Stacks => BTreeMap::new(),
+        };
+        // a unit that is over keeps the judgement it was run under: only
+        // the units still to run are judged (a resume never rewrites a
+        // finished unit's flags and checks)
+        let still_to_run: std::collections::BTreeSet<String> =
+            rows::units(registry.store(), x.run_id)
+                .map_err(err)?
+                .into_iter()
+                .filter(|u| u.state == "queued" || u.state == "running")
+                .map(|u| u.unit)
+                .collect();
+        let with_inputs: Vec<&Unit> = m
+            .units
+            .iter()
+            .filter(|u| !missing.contains_key(&u.id) && still_to_run.contains(&u.id))
+            .collect();
+        let of: Vec<crate::pipeline_pack::UnitOf> = with_inputs
+            .iter()
+            .map(|u| {
+                let mut by_role: BTreeMap<String, Vec<i64>> = BTreeMap::new();
+                for s in &u.stacks {
+                    match (d.layout, roles_of.get(s)) {
+                        (Layout::Stacks, _) => by_role.entry("stack".into()).or_default().push(*s),
+                        (Layout::Bids, Some(roles)) => {
+                            for r in roles {
+                                by_role.entry(r.clone()).or_default().push(*s);
+                            }
+                        }
+                        (Layout::Bids, None) => {}
+                    }
+                }
+                crate::pipeline_pack::UnitOf {
+                    by_role,
+                    subject_id: u.subject_id,
+                    session_day: u.session_day.clone(),
+                }
+            })
+            .collect();
+        let host = crate::pipeline_pack::host_facts(registry);
+        let judged = crate::pipeline_pack::judge_units(
+            registry.store(),
+            &pack,
+            d,
+            x.params,
+            &of,
+            &host,
+            &person,
+        );
+        if d.units == Units::Together
+            && let Some(words) = crate::pipeline_pack::together_disagree(&judged)
+        {
+            return Err(words);
+        }
+        let converter = m.converter["version"]
+            .as_str()
+            .map(|v| ("dcm2niix".to_string(), v.to_string()));
+        let made_by_runs: Vec<i64> = manifest["inputs"]
+            .as_object()
+            .into_iter()
+            .flat_map(|o| o.values())
+            .flat_map(|v| v.as_array().cloned().unwrap_or_default())
+            .filter_map(|e| e["made_by"]["run"].as_i64())
+            .collect();
+        let upstream = crate::pipeline_pack::upstream_keys(registry.store(), &made_by_runs);
+        let now = nils_registry::time::now_iso();
+        let row_ids: BTreeMap<String, i64> = rows::units(registry.store(), x.run_id)
+            .map_err(err)?
+            .into_iter()
+            .map(|u| (u.unit, u.id))
+            .collect();
+        for ((u, of), j) in with_inputs.iter().zip(&of).zip(&judged) {
+            let Some(&row_id) = row_ids.get(&u.id) else {
+                continue;
+            };
+            let roles: std::collections::BTreeSet<String> = of.by_role.keys().cloned().collect();
+            let inputs = crate::pipeline_pack::input_identities(registry.store(), &u.stacks);
+            let (ck, rk, members) = crate::pipeline_pack::keys(&crate::pipeline_pack::KeysOf {
+                pipeline: x.pipeline,
+                pack: Some(&pack),
+                judgement: Some(j),
+                params: x.params,
+                roles: &roles,
+                converter: converter.clone(),
+                upstream: upstream.clone(),
+                inputs,
+            });
+            let mut doc = j.doc();
+            doc["key_members"] = members;
+            // the main scan of the unit, which a cohort check stratifies
+            // it by: the first of the pipeline's roles that has a stack,
+            // else the first stack the unit read
+            let main_role = d
+                .roles
+                .iter()
+                .find(|r| of.by_role.get(*r).is_some_and(|s| !s.is_empty()));
+            doc["stratum_stack"] = match (main_role, u.stacks.first()) {
+                (Some(r), _) => {
+                    json!({"stack": of.by_role[r][0], "from": format!("the {r} stack")})
+                }
+                (None, Some(s)) => json!({"stack": s, "from": "the unit's first input stack"}),
+                _ => Value::Null,
+            };
+            rows::set_unit_pack(registry.store(), row_id, &doc, Some(&ck), Some(&rk))
+                .map_err(err)?;
+            if j.status == nils_pipeline::pack::rules::Status::Skipped {
+                let words = j.words.clone().unwrap_or_default();
+                let outcome = json!({
+                    "status": "skipped",
+                    "error": words,
+                    "need": j.need, "words": words, "missing": [words],
+                    "metrics": {}, "files": [], "refused": [],
+                    "failure": nils_pipeline::failure::Cause::Input.doc(),
+                    "pack_skipped": true,
+                });
+                rows::unit_over(registry.store(), row_id, None, &outcome, &now).map_err(err)?;
+            } else {
+                // together, one container takes the knobs every ready unit
+                // agreed on (together_disagree refused a run where they
+                // differ), kept under the empty key
+                if d.units == Units::Together {
+                    unit_params
+                        .entry(String::new())
+                        .or_insert_with(|| j.params());
+                }
+                unit_params.insert(u.id.clone(), j.params());
+            }
+        }
+    }
     let unit_rows = rows::units(registry.store(), x.run_id).map_err(err)?;
     let row_of: BTreeMap<String, (i64, String)> = unit_rows
         .iter()
@@ -6556,6 +6965,7 @@ fn execute_run(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Resul
         local_image,
         limits: runtime::limits_here(x.runtime),
         said: Mutex::new(moved.as_ref().map(|to| moved_words(&run_dir, to))),
+        unit_params,
     };
 
     // the batches: those whose container ended and whose taking in a stop
@@ -7321,8 +7731,13 @@ fn invocation_of(
     for (k, v) in x.licence_env {
         env.push((k.clone(), v.clone()));
     }
-    // the threads parameter told the cores this start was given
-    let argv = d.argv(&d.params_for_cores(x.params, cores), &participants)?;
+    // the threads parameter told the cores this start was given; record 57
+    // P2: a unit that runs apart takes the knobs its pack chose for it
+    let unit_params = shared
+        .unit_params
+        .get(b.key.as_deref().unwrap_or(""))
+        .unwrap_or(x.params);
+    let argv = d.argv(&d.params_for_cores(unit_params, cores), &participants)?;
     // who the process is: for podman the engine's own account, which
     // `--userns keep-id` maps to itself, never the group of a shared
     // (setgid) working place, which keep-id does not map and which would
@@ -8268,6 +8683,7 @@ fn finalize(
         breached,
         measures_written,
         proposed,
+        pack_flags,
     ) = with_lock(registry, INTAKE_LOCK, Some(x.job_id), |registry| {
         // the run's own files (record 43): a model it fitted, registered from
         // its card, and any other run-level output; only a run that completed
@@ -8643,8 +9059,184 @@ fn finalize(
                 }
             }
         }
+        // record 57 P4 (Wave 7b A1): the pack's checks, held after the
+        // descriptor's: a flag keeps the result and names the check, its
+        // value and its threshold; a fail fails the unit; a drop drops the
+        // one value and flags the unit
+        let mut pack_flags: Vec<Value> = Vec::new();
+        let pack = crate::pipeline_pack::pack_of(p);
+        if let Some(pack) = &pack
+            && !pack.checks.is_empty()
+        {
+            let mut dropped: Vec<(String, String)> = Vec::new();
+            for (i, status, error, metrics, _) in statuses.iter_mut() {
+                if status != "succeeded" {
+                    continue;
+                }
+                let u = &m.units[*i];
+                let mine: BTreeMap<String, f64> = measured
+                    .iter()
+                    .filter(|q| q.unit_id == u.id)
+                    .filter_map(|q| Some((q.name.clone(), q.number?)))
+                    .collect();
+                // a metric a pack check reads from results.json is a measure
+                // too, as the descriptor's checks make it one
+                if let Some(b) = u.belongs() {
+                    for c in &pack.checks {
+                        if mine.contains_key(&c.metric)
+                            || measured
+                                .iter()
+                                .any(|q| q.unit_id == u.id && q.name == c.metric)
+                        {
+                            continue;
+                        }
+                        if let Some(v) = metrics[&c.metric].as_f64().filter(|v| v.is_finite()) {
+                            measured.push(crate::measures::Pending {
+                                unit_id: u.id.clone(),
+                                belongs: b.clone(),
+                                derivative_id: None,
+                                source: nils_registry::measure::METRICS.into(),
+                                name: c.metric.clone(),
+                                ty: "number".into(),
+                                number: Some(v),
+                                text: None,
+                                unit: None,
+                            });
+                        }
+                    }
+                }
+                let held = crate::pipeline_pack::hold_checks(pack, metrics, &mine);
+                if held.flags.is_empty() && held.failed.is_empty() {
+                    continue;
+                }
+                let Some(row) = by_name.get(u.id.as_str()) else {
+                    continue;
+                };
+                let mut record = row.pack.clone();
+                if record.is_null() {
+                    record = json!({});
+                }
+                // a unit over before a resume holds the same flags again, and
+                // keeps the time it was flagged
+                if record["flags"] != json!(held.flags) || record["flagged_at"].is_null() {
+                    record["flagged_at"] = json!(now);
+                }
+                record["flags"] = json!(held.flags);
+                rows::set_unit_pack(
+                    registry.store(),
+                    row.id,
+                    &record,
+                    row.comparability_key.as_deref(),
+                    row.result_key.as_deref(),
+                )
+                .map_err(|e| e.to_string())?;
+                for name in &held.dropped {
+                    dropped.push((u.id.clone(), name.clone()));
+                }
+                if !held.failed.is_empty() {
+                    let words = crate::pipeline_pack::flag_words(&held.failed);
+                    *status = "failed".into();
+                    *error = Some(words.clone());
+                    let mut outcome = row.outcome.clone();
+                    outcome["status"] = json!("failed");
+                    outcome["error"] = json!(words);
+                    outcome["failure"] = nils_pipeline::failure::Cause::Pipeline.doc();
+                    outcome["pack_failed"] = json!(held.failed);
+                    rows::unit_over(registry.store(), row.id, row.exit_code, &outcome, &now)
+                        .map_err(|e| e.to_string())?;
+                }
+                if !held.flags.is_empty() {
+                    let words = crate::pipeline_pack::flag_words(&held.flags);
+                    pack_flags.push(json!({"unit": u.id, "flags": held.flags, "words": words}));
+                    let id = nils_registry::review::raise_pipeline_qc(
+                        registry.store(),
+                        &nils_registry::review::PipelineQc {
+                            run_id: x.run_id,
+                            pipeline: &label,
+                            unit: &u.id,
+                            stack_id: u.stack_id,
+                            subject_id: u.subject_id,
+                            session_day: u.session_day.as_deref(),
+                            status: "flag",
+                            error: Some(&words),
+                            metrics: &json!({"flags": held.flags, "metrics": metrics}),
+                            job_id: Some(x.job_id),
+                        },
+                        &now,
+                    )
+                    .map_err(|e| e.to_string())?;
+                    if !items.contains(&id) {
+                        items.push(id);
+                    }
+                }
+            }
+            measured.retain(|q| !dropped.iter().any(|(u, n)| *u == q.unit_id && *n == q.name));
+        }
         let measures_written =
             crate::measures::write(registry.store(), x.run_id, p.id, &p.name, &measured, &now)?;
+        // record 57, 57-Q8: the cohort checks over every unit of the name
+        // that measured the metric, now this run's measures are written; a
+        // unit flagged after its run closed says when the flag came
+        if let Some(pack) = &pack {
+            let cohort: Vec<&nils_pipeline::pack::Check> =
+                pack.checks.iter().filter(|c| c.cohort).collect();
+            if !cohort.is_empty() {
+                // every unit row of the name's recent runs, with its run
+                let mut all_units: Vec<(i64, rows::Unit)> = Vec::new();
+                for r in rows::runs(registry.store(), Some(p.id), 50).map_err(|e| e.to_string())? {
+                    for u in rows::units(registry.store(), r.id).map_err(|e| e.to_string())? {
+                        all_units.push((r.id, u));
+                    }
+                }
+                let named: Vec<(i64, String)> = all_units
+                    .iter()
+                    .map(|(r, u)| (*r, u.unit.clone()))
+                    .collect();
+                let mut results: Vec<Vec<Value>> = vec![Vec::new(); named.len()];
+                for c in &cohort {
+                    for (i, v) in
+                        crate::pipeline_pack::cohort_check(registry.store(), &p.name, c, &named)
+                            .into_iter()
+                            .enumerate()
+                    {
+                        results[i].push(v);
+                    }
+                }
+                for ((run_id, u), checks) in all_units.into_iter().zip(results) {
+                    if checks.iter().all(|c| c["status"] == "unchecked") {
+                        continue;
+                    }
+                    let (row_id, unit, ck, rk) = (u.id, u.unit, u.comparability_key, u.result_key);
+                    let mut record = if u.pack.is_null() { json!({}) } else { u.pack };
+                    let before = record["cohort_checks"].clone();
+                    let mut checks = checks;
+                    for c in checks.iter_mut() {
+                        if c["status"] == "flagged" {
+                            let was =
+                                before.as_array().into_iter().flatten().find(|b| {
+                                    b["metric"] == c["metric"] && b["status"] == "flagged"
+                                });
+                            c["came_at"] = was
+                                .and_then(|b| b["came_at"].clone().into())
+                                .unwrap_or_else(|| json!(now));
+                            c["after_run_closed"] = json!(run_id != x.run_id);
+                            if was.is_none() {
+                                pack_flags.push(json!({"unit": unit, "run": run_id, "cohort": c.clone(), "words": c["words"]}));
+                            }
+                        }
+                    }
+                    record["cohort_checks"] = json!(checks);
+                    rows::set_unit_pack(
+                        registry.store(),
+                        row_id,
+                        &record,
+                        ck.as_deref(),
+                        rk.as_deref(),
+                    )
+                    .map_err(|e| e.to_string())?;
+                }
+            }
+        }
 
         // the proposals on the axes it declares, through the review spine
         // (record 43 S6): grouped model items, staged at the model's threshold
@@ -8735,6 +9327,7 @@ fn finalize(
             breached,
             measures_written,
             proposed,
+            pack_flags,
         ))
     })?;
 
@@ -8772,6 +9365,9 @@ fn finalize(
         "seeds": seeds_doc,
         "refused_files": refused,
         "review_items": items,
+        // record 57 P4: the units the pack's checks flagged, each with the
+        // check, its value and its threshold
+        "flags": pack_flags,
         "proposals": proposed,
         "results": match (reports.is_empty(), unreadable) {
             (false, _) if apart => json!("results.json, one per unit"),
@@ -10154,6 +10750,9 @@ x-nils:
                 level: "stack",
                 added_by: "test",
                 added_at: "2026-10-15T10:00:00Z",
+                pack: None,
+                pack_digest: None,
+                version_digest: "d1",
             },
         )
         .unwrap();

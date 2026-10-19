@@ -13,6 +13,7 @@ The interfaces that other software builds against, each versioned on its own and
 | `model/` | A registered model's card and lifecycle, the one idea the engine's model registry and Kvasir's both keep (D15, record 42) | version 1 |
 | `patch/` | A pack patch: rule edits as typed operations, each with its scope, reason and evidence, applied by the engine to a pack's own documents and checked by its loader (record 56) | version 1 |
 | `job/` | `nils.job.yml`, the pipeline descriptor, with the stack manifest a runner hands a pipeline and the results it hands back (D9, record 43); since record 49 also how its units meet their containers (`x-nils.units`), what a unit needs of the lane and the card (`x-nils.needs`) and its secret inputs (`x-nils.secrets`), and since 2026-10-12 the earlier versions a version replaces because it fixes them (`x-nils.replaces`), added in place | version 1 (record 43 S1) |
+| `pipeline-pack/` | `nils-pack.yaml`, the pipeline pack beside a descriptor (record 57 P1 to P4): the needs a session must meet, the knobs and their comparability, the rules that choose knob values per session from the registry's facts, the checks, the licence, the resources, the comparability key and the tests; a pipeline version is the pair of descriptor and pack | version 1 (Wave 7b slice A1) |
 | `federation/` | The request, disclosure and result protocol between nodes (D27, D28, D29) | Wave 7 |
 
 Each contract directory carries a `VERSION` file and one `vN/` directory per

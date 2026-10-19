@@ -59,6 +59,13 @@ pub struct Pipeline {
     /// `starter` for a version the engine seeded (record 49 A4), none for
     /// one a person added.
     pub origin: Option<String>,
+    /// Record 57 P1: the pack beside the descriptor, kept whole; null for a
+    /// version with no pack.
+    pub pack: Value,
+    pub pack_digest: Option<String>,
+    /// The digest of the pair; none on a row from before, which is a
+    /// version with no pack.
+    pub version_digest: Option<String>,
 }
 
 impl Pipeline {
@@ -81,9 +88,16 @@ pub struct New<'a> {
     pub level: &'a str,
     pub added_by: &'a str,
     pub added_at: &'a str,
+    /// Record 57 P1: the pack beside the descriptor, checked already, and
+    /// its digest; none for a version with no pack.
+    pub pack: Option<&'a Value>,
+    pub pack_digest: Option<&'a str>,
+    /// The digest of the pair, which decides whether the version is one the
+    /// catalog holds already.
+    pub version_digest: &'a str,
 }
 
-const COLUMNS: [&str; 14] = [
+const COLUMNS: [&str; 17] = [
     "id",
     "name",
     "version",
@@ -98,6 +112,9 @@ const COLUMNS: [&str; 14] = [
     "added_by",
     "added_at",
     "origin",
+    "pack",
+    "pack_digest",
+    "version_digest",
 ];
 
 fn select(store: &mut Store) -> String {
@@ -135,6 +152,9 @@ fn of(r: &Row) -> Result<Pipeline, Error> {
         added_by: r.text(11)?.to_string(),
         added_at: r.text(12)?.to_string(),
         origin: r.opt_text(13)?.map(str::to_string),
+        pack: json(r.opt_text(14)?),
+        pack_digest: r.opt_text(15)?.map(str::to_string),
+        version_digest: r.opt_text(16)?.map(str::to_string),
     })
 }
 
@@ -158,10 +178,12 @@ pub fn set_origin(store: &mut Store, id: i64, origin: &str) -> Result<(), Error>
 /// has this digest. Answers the entry and whether it is new.
 pub fn add(store: &mut Store, n: &New<'_>) -> Result<(Pipeline, bool), Error> {
     let versions = versions(store, n.name)?;
-    if let Some(same) = versions
-        .iter()
-        .find(|p| p.descriptor_digest == n.descriptor_digest)
-    {
+    // record 57 P1: the same pair is the version it already is; a row from
+    // before, with no pair digest, is a version with no pack
+    if let Some(same) = versions.iter().find(|p| match &p.version_digest {
+        Some(v) => v == n.version_digest,
+        None => p.descriptor_digest == n.descriptor_digest && n.pack_digest.is_none(),
+    }) {
         return Ok((same.clone(), false));
     }
     let version = versions.iter().map(|p| p.version).max().unwrap_or(0) + 1;
@@ -181,6 +203,9 @@ pub fn add(store: &mut Store, n: &New<'_>) -> Result<(Pipeline, bool), Error> {
                 "state",
                 "added_by",
                 "added_at",
+                "pack",
+                "pack_digest",
+                "version_digest",
             ],
         )
         .returning(&["id"]),
@@ -197,6 +222,9 @@ pub fn add(store: &mut Store, n: &New<'_>) -> Result<(Pipeline, bool), Error> {
             Param::from("active"),
             Param::from(n.added_by),
             Param::from(n.added_at),
+            n.pack.map_or(Param::Null, |p| Param::from(p.to_string())),
+            n.pack_digest.map_or(Param::Null, Param::from),
+            Param::from(n.version_digest),
         ]],
     )?;
     let id = rows
@@ -295,6 +323,10 @@ pub struct Run {
     /// 2026-10-12: what its failure was, `{kind, cause, advice, fix}`;
     /// null where it did not fail, or failed before this was recorded.
     pub failure: Value,
+    /// Wave 7b A1: what the person chose at the pack when the run began
+    /// (`{goal, switches, let_run}`); null on a run from before or one
+    /// without a pack. A resume judges under it.
+    pub person: Value,
 }
 
 /// A run to start.
@@ -319,7 +351,7 @@ pub struct NewRun<'a> {
     pub started_at: &'a str,
 }
 
-const RUN_COLUMNS: [&str; 29] = [
+const RUN_COLUMNS: [&str; 30] = [
     "id",
     "pipeline_id",
     "job_id",
@@ -349,6 +381,7 @@ const RUN_COLUMNS: [&str; 29] = [
     "threshold",
     "scratch_place_id",
     "failure",
+    "person",
 ];
 
 fn select_runs(store: &mut Store) -> String {
@@ -396,6 +429,7 @@ fn run_of(r: &Row) -> Result<Run, Error> {
         threshold: r.opt_double(26)?,
         scratch_place_id: r.opt_int(27)?,
         failure: json(r.opt_text(28)?),
+        person: json(r.opt_text(29)?),
     })
 }
 
@@ -604,6 +638,17 @@ pub fn resume(store: &mut Store, id: i64, job_id: i64) -> Result<(), Error> {
     Ok(())
 }
 
+/// Keep the person's choices at the pack with the run (Wave 7b A1).
+pub fn set_person(store: &mut Store, id: i64, person: &Value) -> Result<(), Error> {
+    store.update_by_id(
+        table("pipeline_run"),
+        &[("person", Param::from(person.to_string()))],
+        "id",
+        id,
+    )?;
+    Ok(())
+}
+
 /// Mark a running run whose engine went away as interrupted, so the lane
 /// queues it once to be taken up again. Answers whether this call did.
 pub fn interrupt(store: &mut Store, id: i64, why: &str) -> Result<bool, Error> {
@@ -701,9 +746,14 @@ pub struct Unit {
     pub finished_at: Option<String>,
     pub exit_code: Option<i64>,
     pub outcome: Value,
+    /// Record 57 P2 to P4: what the pack decided of the unit; null where
+    /// its pipeline has no pack or the unit is from before.
+    pub pack: Value,
+    pub comparability_key: Option<String>,
+    pub result_key: Option<String>,
 }
 
-const UNIT_COLUMNS: [&str; 18] = [
+const UNIT_COLUMNS: [&str; 21] = [
     "id",
     "run_id",
     "unit",
@@ -722,6 +772,9 @@ const UNIT_COLUMNS: [&str; 18] = [
     "finished_at",
     "exit_code",
     "outcome",
+    "pack",
+    "comparability_key",
+    "result_key",
 ];
 
 fn unit_of(r: &Row) -> Result<Unit, Error> {
@@ -744,7 +797,87 @@ fn unit_of(r: &Row) -> Result<Unit, Error> {
         finished_at: r.opt_text(15)?.map(str::to_string),
         exit_code: r.opt_int(16)?,
         outcome: json(r.opt_text(17)?),
+        pack: json(r.opt_text(18)?),
+        comparability_key: r.opt_text(19)?.map(str::to_string),
+        result_key: r.opt_text(20)?.map(str::to_string),
     })
+}
+
+/// Record 57 P2 to P4: what the pack decided of a unit, and the two keys
+/// its results carry; written at the run's start and amended as checks
+/// flag it.
+pub fn set_unit_pack(
+    store: &mut Store,
+    id: i64,
+    pack: &Value,
+    comparability_key: Option<&str>,
+    result_key: Option<&str>,
+) -> Result<(), Error> {
+    store.update_by_id(
+        table("pipeline_unit"),
+        &[
+            ("pack", Param::from(pack.to_string())),
+            (
+                "comparability_key",
+                comparability_key.map_or(Param::Null, Param::from),
+            ),
+            ("result_key", result_key.map_or(Param::Null, Param::from)),
+        ],
+        "id",
+        id,
+    )?;
+    Ok(())
+}
+
+/// The units of every run of a pipeline name that recorded a key, for the
+/// doors that answer per comparability key: `(run_id, unit, key)`.
+pub fn unit_keys(store: &mut Store, run_ids: &[i64]) -> Result<Vec<(i64, String, String)>, Error> {
+    if run_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let ids: Vec<String> = run_ids.iter().map(i64::to_string).collect();
+    let sql = format!(
+        "SELECT run_id, unit, comparability_key FROM {} WHERE run_id IN ({}) AND comparability_key IS NOT NULL",
+        store.qualified("pipeline_unit"),
+        ids.join(", ")
+    );
+    store
+        .query(&sql, &[])?
+        .iter()
+        .map(|r| Ok((r.int(0)?, r.text(1)?.to_string(), r.text(2)?.to_string())))
+        .collect()
+}
+
+/// A unit's pack record as `(run_id, unit, comparability key, pack)`.
+pub type UnitRecord = (i64, String, Option<String>, Value);
+
+/// What the units of some runs recorded of the pack: `(run_id, unit,
+/// comparability key, pack record)`.
+pub fn unit_records(store: &mut Store, run_ids: &[i64]) -> Result<Vec<UnitRecord>, Error> {
+    if run_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let pack = store
+        .dialect()
+        .text_of(table("pipeline_unit").column("pack").expect("pack"));
+    let ids: Vec<String> = run_ids.iter().map(i64::to_string).collect();
+    let sql = format!(
+        "SELECT run_id, unit, comparability_key, {pack} FROM {} WHERE run_id IN ({})",
+        store.qualified("pipeline_unit"),
+        ids.join(", ")
+    );
+    store
+        .query(&sql, &[])?
+        .iter()
+        .map(|r| {
+            Ok((
+                r.int(0)?,
+                r.text(1)?.to_string(),
+                r.opt_text(2)?.map(str::to_string),
+                json(r.opt_text(3)?),
+            ))
+        })
+        .collect()
 }
 
 /// The units of a run, in their order.
@@ -940,7 +1073,83 @@ mod tests {
             level: "session",
             added_by: "ops@lab",
             added_at: "2026-09-24T00:00:00Z",
+            pack: None,
+            pack_digest: None,
+            version_digest: digest,
         }
+    }
+
+    #[test]
+    fn a_version_is_the_pair_and_a_unit_records_its_pack_and_keys() {
+        // record 57 P1 to P4: the same descriptor with a pack is the name's
+        // next version; the same pair again is the version it is; a unit
+        // keeps what the pack decided and the two keys its results carry
+        let mut store = store();
+        let one = serde_json::json!({"name": "n4", "a": 1});
+        let (plain, _) = add(&mut store, &new(&one, "sha256:1")).unwrap();
+        let pack = serde_json::json!({"nils_pack": 1, "pipeline": {"name": "n4"}});
+        let with_pack = New {
+            pack: Some(&pack),
+            pack_digest: Some("sha256:p"),
+            version_digest: "sha256:1+p",
+            ..new(&one, "sha256:1")
+        };
+        let (paired, fresh) = add(&mut store, &with_pack).unwrap();
+        assert!(fresh);
+        assert_eq!(paired.version, 2);
+        assert_eq!(paired.pack, pack);
+        assert_eq!(paired.pack_digest.as_deref(), Some("sha256:p"));
+        assert_eq!(paired.version_digest.as_deref(), Some("sha256:1+p"));
+        let (again, fresh) = add(&mut store, &with_pack).unwrap();
+        assert!(!fresh);
+        assert_eq!(again.id, paired.id);
+        assert!(plain.pack.is_null());
+        let (same_plain, fresh) = add(&mut store, &new(&one, "sha256:1")).unwrap();
+        assert!(!fresh);
+        assert_eq!(same_plain.id, plain.id);
+        let params = serde_json::json!({});
+        let run = start(
+            &mut store,
+            &NewRun {
+                pipeline_id: paired.id,
+                job_id: None,
+                handle_id: None,
+                selection: None,
+                params: &params,
+                runtime: "podman",
+                runtime_version: "5",
+                host: "h",
+                device: "cpu",
+                model_ids: &[],
+                label_set_id: None,
+                place_id: None,
+                scratch_place_id: None,
+                principal: "ops@lab",
+                actor: None,
+                started_at: "2026-10-18T10:00:00Z",
+            },
+        )
+        .unwrap();
+        let made = ensure_units(&mut store, run, &["stack-1".into(), "stack-2".into()]).unwrap();
+        assert!(made[0].pack.is_null() && made[0].comparability_key.is_none());
+        let decided = serde_json::json!({"status": "ready", "knobs": {"mode": {"value": "all", "by": "rule:r1"}}});
+        set_unit_pack(
+            &mut store,
+            made[0].id,
+            &decided,
+            Some("sha256:ck"),
+            Some("sha256:rk"),
+        )
+        .unwrap();
+        let back = units(&mut store, run).unwrap();
+        assert_eq!(back[0].pack, decided);
+        assert_eq!(back[0].comparability_key.as_deref(), Some("sha256:ck"));
+        assert_eq!(back[0].result_key.as_deref(), Some("sha256:rk"));
+        assert!(back[1].comparability_key.is_none());
+        assert_eq!(
+            unit_keys(&mut store, &[run]).unwrap(),
+            vec![(run, "stack-1".to_string(), "sha256:ck".to_string())]
+        );
     }
 
     #[test]
