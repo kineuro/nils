@@ -176,6 +176,17 @@ impl Lab {
         Lab::with_runtime(name, true)
     }
 
+    /// Over the host's own docker, with no stand-in but for nvidia-smi, so
+    /// no card is touched: for the one live test.
+    fn with_real_docker(name: &str) -> Lab {
+        let bin = TempDir::new(&format!("{name}-bin"));
+        executable(&bin.file("nvidia-smi", b"#!/bin/sh\nexit 1\n"));
+        let mut path = bin.path().as_os_str().to_owned();
+        path.push(":");
+        path.push(std::env::var_os("PATH").unwrap_or_default());
+        Lab::finish(name, bin, path)
+    }
+
     fn with_runtime(name: &str, docker: bool) -> Lab {
         let bin = TempDir::new(&format!("{name}-bin"));
         if docker {
@@ -199,6 +210,10 @@ impl Lab {
         let mut path = bin.path().as_os_str().to_owned();
         path.push(":");
         path.push(tools.as_os_str());
+        Lab::finish(name, bin, path)
+    }
+
+    fn finish(name: &str, bin: TempDir, path: OsString) -> Lab {
         let lab = Lab {
             home: TempDir::new(&format!("{name}-home")),
             work: TempDir::new(&format!("{name}-work")),
@@ -1225,4 +1240,73 @@ fn the_converter_is_one_package_among_the_others() {
     let (good, _, err) = lab.run(&["software", "remove", "dcm2niix"], &[], None);
     assert!(!good);
     assert!(err.contains("no install of dcm2niix of its own"), "{err}");
+}
+
+/// Which real docker this machine offers a test, if any: the host's, where
+/// an operator lets a test run it (`NILS_TEST_PIPELINE_RUNTIME=docker`, as
+/// the pipeline tests take it).
+fn real_docker() -> bool {
+    std::env::var("NILS_TEST_PIPELINE_RUNTIME").as_deref() == Ok("docker")
+        && std::env::var_os("PATH")
+            .is_some_and(|p| std::env::split_paths(&p).any(|d| d.join("docker").is_file()))
+}
+
+/// G7 on a real runtime: a small public image pulled by its digest from its
+/// own source, the digest the store reports equal to the one asked, the
+/// probe and the test run in the real container, the wrapper run by hand
+/// through the same image, and the image taken out of the store again on
+/// remove. Runs where NILS_TEST_PIPELINE_RUNTIME is docker and docker is
+/// here, and says so and passes elsewhere.
+#[test]
+fn a_real_image_is_pulled_by_digest_verified_and_removed() {
+    if !real_docker() {
+        eprintln!("NILS_TEST_PIPELINE_RUNTIME is not docker, or docker is not here; the live pull is not run");
+        return;
+    }
+    const BUSYBOX: &str =
+        "docker.io/library/busybox@sha256:66a6306db78bf2dbf3487f293aa8d6990d8e506fdffab9cc43fe422becf886e4";
+    const BUSYBOX_DIGEST: &str =
+        "sha256:66a6306db78bf2dbf3487f293aa8d6990d8e506fdffab9cc43fe422becf886e4";
+    let pack = format!(
+        r#"nils_pack: 1
+pipeline: {{name: busybox-echo, descriptor_sha256: "sha256:00"}}
+source:
+  image: "{BUSYBOX}"
+  probe: {{command: ["busybox", "--help"], expect: "BusyBox v1.37.0"}}
+licence: {{spdx: GPL-2.0-only, redistributable: true, accept: false}}
+tests: {{command: ["sh", "-c", "echo the test ran"], expect: "the test ran"}}
+"#
+    );
+    let lab = Lab::with_real_docker("software-live");
+    lab.add_pipeline(&descriptor("busybox-echo", "1.37.0", BUSYBOX, "gpu: none", ""));
+    let pack = lab.pack_file("busybox", &pack);
+    let done = lab.json(
+        &["software", "install", "busybox-echo@1.37.0", "--pack", pack.to_str().unwrap(), "--json"],
+        &[],
+    );
+    assert_eq!(done["installed"], true, "{done}");
+    assert_eq!(done["verified"], true, "{done}");
+    let p = &done["package"];
+    assert_eq!(p["digest_asked"], BUSYBOX_DIGEST, "{p}");
+    assert_eq!(p["digest"], BUSYBOX_DIGEST, "{p}");
+    assert_eq!(p["fingerprint"], BUSYBOX_DIGEST, "{p}");
+    assert!(p["size_bytes"].as_u64().unwrap() > 1_000_000, "{p}");
+    assert_eq!(p["verification"]["probe"]["passed"], true, "{p}");
+    assert!(p["verification"]["probe"]["said"].as_str().unwrap().contains("BusyBox v1.37.0"), "{p}");
+    assert_eq!(p["verification"]["test"]["passed"], true, "{p}");
+    // by hand, through the same image
+    let said = Command::new(lab.place().join("bin").join("busybox"))
+        .arg("--help")
+        .env("PATH", &lab.path)
+        .output()
+        .unwrap();
+    assert!(said.status.success(), "{}", String::from_utf8_lossy(&said.stderr));
+    assert!(
+        String::from_utf8_lossy(&said.stdout).contains("BusyBox v1.37.0"),
+        "{}",
+        String::from_utf8_lossy(&said.stdout)
+    );
+    let removed = lab.json(&["software", "remove", "busybox-echo@1.37.0", "--json"], &[]);
+    assert_eq!(removed["removed"], true, "{removed}");
+    assert!(!lab.place().join("busybox-echo").exists());
 }
