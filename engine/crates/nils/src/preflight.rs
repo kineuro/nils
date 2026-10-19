@@ -1103,6 +1103,9 @@ pub(crate) fn check(registry: &mut Registry, asked: &Asked<'_>) -> Result<Value,
     // who chose; a run whose every unit the pack skips would make nothing
     let mut judged_doc = Value::Null;
     let mut pack_skipped = 0usize;
+    if let Some(e) = crate::pipeline_pack::pack_error(&p) {
+        blockers.push(e);
+    }
     if let Some(pack) = crate::pipeline_pack::pack_of(&p) {
         match asked.person.person(&pack, &crate::actor(), asked.params) {
             Err(e) => blockers.push(e),
@@ -1310,6 +1313,15 @@ pub(crate) fn check(registry: &mut Registry, asked: &Asked<'_>) -> Result<Value,
         .and_then(|c| c.cause)
         .map_or(Value::Null, nils_pipeline::failure::Cause::doc);
     let ready = blockers.is_empty();
+    // `skipped_by_pack` only where the pipeline has a pack
+    let mut units_doc = json!({
+        "total": units.len(),
+        "ready": ready_units,
+        "missing": missing.len(),
+    });
+    if !judged_doc.is_null() {
+        units_doc["skipped_by_pack"] = json!(pack_skipped);
+    }
     Ok(json!({
         "pipeline": p.label(),
         "pipeline_id": p.id,
@@ -1321,12 +1333,7 @@ pub(crate) fn check(registry: &mut Registry, asked: &Asked<'_>) -> Result<Value,
         "level": d.level.name(),
         "unit": word,
         "stacks": stacks.len(),
-        "units": {
-            "total": units.len(),
-            "ready": ready_units,
-            "missing": missing.len(),
-            "skipped_by_pack": pack_skipped,
-        },
+        "units": units_doc,
         // record 57 P2 to P4: per unit {status, need, words, variant, caveats,
         // knobs {value, by, rule}}, and the counts
         "units_judged": judged_doc,

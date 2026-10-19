@@ -13244,7 +13244,9 @@ fn g3_g4_g5_a_run_records_who_chose_its_flags_and_its_keys_and_no_door_pools_acr
         let cohort = u["cohort_checks"].as_array().unwrap();
         assert_eq!(cohort.len(), 1, "{u}");
         assert_eq!(cohort[0]["status"], "not yet", "{u}");
-        assert_eq!(cohort[0]["words"], "not yet: 4 of 30 sessions", "{u}");
+        // a cohort is the sessions of one comparability key: the two
+        // keys here hold two stacks each
+        assert_eq!(cohort[0]["words"], "not yet: 2 of 30 sessions", "{u}");
         let key = u["keys"]["comparability"].as_str().unwrap().to_string();
         assert!(
             key.starts_with("sha256:")
@@ -13390,4 +13392,240 @@ fn g3_g4_g5_a_run_records_who_chose_its_flags_and_its_keys_and_no_door_pools_acr
         "two comparability keys among the rows: {answered}"
     );
     assert!(seen.iter().all(|k| k.starts_with("sha256:")), "{answered}");
+}
+
+/// Review of 2026-10-19, finding 1: a pipeline that runs its units together
+/// in one container takes the values its pack's rules chose (they agree, or
+/// the run is refused), and the unit rows record what ran.
+#[test]
+fn a_together_run_takes_the_values_the_rules_chose() {
+    if !have("python3") {
+        eprintln!(
+            "python3 is not installed; the stand-in podman needs it, so this test is skipped"
+        );
+        return;
+    }
+    let lab = Lab::new("pipelines-pack-together");
+    let image = format!("example.org/pack-echo@sha256:{}", "e".repeat(64));
+    let descriptor = pack_echo(&image).replace("units: apart", "units: together");
+    assert!(descriptor.contains("units: together"));
+    let d = nils_pipeline::descriptor::parse(&descriptor).unwrap();
+    // both rules choose b, whatever the stack: the descriptor's default is a
+    let pack_text =
+        pack_echo_pack(&d.digest(), "dimension == '3D'").replace("set: {tag: a}", "set: {tag: b}");
+    let added = lab.add_pair("together", &descriptor, &pack_text);
+    assert_eq!(added["added"], true, "{added}");
+    let run = lab.json(&[
+        "run",
+        "pack-echo",
+        "--select",
+        "selection:every@1",
+        "--json",
+    ]);
+    assert_eq!(run["status"], "done", "{run}");
+    let runs = lab.podman_runs();
+    assert_eq!(runs.len(), 1, "one container for the whole run: {runs:?}");
+    assert_eq!(
+        runs[0].last().unwrap(),
+        "b",
+        "the container got the rules' value, not the descriptor's default: {runs:?}"
+    );
+    for u in run["units_run"].as_array().unwrap() {
+        assert_eq!(u["knobs"]["tag"]["value"], "b", "{u}");
+        assert!(
+            u["knobs"]["tag"]["by"]
+                .as_str()
+                .unwrap()
+                .starts_with("rule:"),
+            "{u}"
+        );
+    }
+}
+
+/// Review of 2026-10-19, finding 5: the person's choices stay with the run,
+/// and a resume judges only the units still to run, under them.
+#[test]
+fn a_resume_keeps_a_finished_unit_s_record_and_judges_the_rest_under_the_runs_goal() {
+    if !have("python3") {
+        eprintln!(
+            "python3 is not installed; the stand-in podman needs it, so this test is skipped"
+        );
+        return;
+    }
+    let lab = Lab::new("pipelines-pack-resume");
+    let image = format!("example.org/pack-echo@sha256:{}", "f".repeat(64));
+    let descriptor = pack_echo(&image);
+    let d = nils_pipeline::descriptor::parse(&descriptor).unwrap();
+    lab.add_pair(
+        "one",
+        &descriptor,
+        &pack_echo_pack(&d.digest(), "dimension == '3D'"),
+    );
+    let run = lab.json(&[
+        "run",
+        "pack-echo",
+        "--select",
+        "selection:every@1",
+        "--json",
+        "--goal",
+        "fast",
+    ]);
+    assert_eq!(run["status"], "done", "{run}");
+    assert_eq!(lab.podman_runs().len(), 4);
+    // the run began with the person's goal, and kept it
+    let mut store = lab.store();
+    let kept = nils_registry::pipeline::run(&mut store, 1)
+        .unwrap()
+        .unwrap();
+    assert_eq!(kept.person["goal"], "fast", "{}", kept.person);
+    // stop it as a cancel would have: one unit back in the queue
+    let units = nils_registry::pipeline::units(&mut store, 1).unwrap();
+    let before: Vec<Value> = units.iter().map(|u| u.pack.clone()).collect();
+    for u in &before {
+        assert_eq!(u["flags"].as_array().unwrap().len(), 1, "{u}");
+        assert!(u["cohort_checks"].is_array(), "{u}");
+    }
+    let again = units[0].id;
+    nils_registry::pipeline::unit_requeued(&mut store, again).unwrap();
+    let sql = format!(
+        "UPDATE {} SET status = 'cancelled', results_digest = NULL, finished_at = NULL WHERE id = 1",
+        store.qualified("pipeline_run")
+    );
+    store.execute(&sql, &[]).unwrap();
+    drop(store);
+    // taken up again with no flag at all
+    let resumed = lab.json(&["run", "--resume", "1", "--json"]);
+    assert_eq!(resumed["status"], "done", "{resumed}");
+    assert_eq!(lab.podman_runs().len(), 5, "only the unit left ran");
+    let mut store = lab.store();
+    let after = nils_registry::pipeline::units(&mut store, 1).unwrap();
+    for (i, u) in after.iter().enumerate() {
+        assert_eq!(
+            u.pack["flags"].as_array().unwrap().len(),
+            1,
+            "{}: flags kept: {}",
+            u.unit,
+            u.pack
+        );
+        assert!(u.pack["cohort_checks"].is_array(), "{}: {}", u.unit, u.pack);
+        assert_eq!(u.pack["facts"]["values"]["goal"], "fast", "{}", u.pack);
+        if i > 0 {
+            // a finished unit's record is the one it was run under
+            assert_eq!(u.pack["knobs"], before[i]["knobs"], "{}", u.unit);
+            assert_eq!(u.pack["flagged_at"], before[i]["flagged_at"], "{}", u.unit);
+            assert_eq!(u.comparability_key, units[i].comparability_key);
+        }
+    }
+}
+
+/// Review of 2026-10-19, finding 6: a stored pack this engine cannot parse
+/// is said so by the pack door, the catalog and the pre-flight, never read
+/// as no pack.
+#[test]
+fn a_stored_pack_the_engine_cannot_read_is_named_not_taken_for_none() {
+    if !have("python3") {
+        eprintln!(
+            "python3 is not installed; the stand-in podman needs it, so this test is skipped"
+        );
+        return;
+    }
+    let lab = Lab::new("pipelines-pack-unreadable");
+    let image = format!("example.org/pack-echo@sha256:{}", "1".repeat(64));
+    let descriptor = pack_echo(&image);
+    let d = nils_pipeline::descriptor::parse(&descriptor).unwrap();
+    let added = lab.add_pair(
+        "one",
+        &descriptor,
+        &pack_echo_pack(&d.digest(), "dimension == '3D'"),
+    );
+    let id = added["id"].as_i64().unwrap();
+    let digest = added["pack_digest"].as_str().unwrap().to_string();
+    // a pack of a newer contract than this engine's
+    let mut store = lab.store();
+    let sql = format!(
+        "UPDATE {} SET pack = '{{\"nils_pack\": 99}}' WHERE id = {id}",
+        store.qualified("pipeline")
+    );
+    store.execute(&sql, &[]).unwrap();
+    drop(store);
+    let server = Server::start(&lab);
+    let (status, doc) = server.call("GET", &format!("/api/pipelines/{id}/pack"), None, OPERATOR);
+    assert_eq!(status, 200, "{doc}");
+    let words = doc["pack"]["error"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{doc}"));
+    assert!(words.contains("cannot read"), "{doc}");
+    assert_eq!(doc["pack_digest"], digest, "{doc}");
+    let (status, one) = server.call("GET", &format!("/api/pipelines/{id}"), None, OPERATOR);
+    assert_eq!(status, 200, "{one}");
+    assert_eq!(
+        one["pack"]["error"], words,
+        "the catalog marks the version: {one}"
+    );
+    assert_eq!(one["pack_error"], words, "{one}");
+    // the pre-flight refuses with those words, the jobs door with a 409
+    let pf = lab.json(&[
+        "run",
+        "pack-echo",
+        "--select",
+        "selection:every@1",
+        "--preflight",
+        "--json",
+    ]);
+    assert_eq!(pf["ready"], false, "{pf}");
+    assert!(pf["blockers"].to_string().contains("cannot read"), "{pf}");
+    let (status, refused) = server.call(
+        "POST",
+        "/api/jobs",
+        Some(json!({"command": ["run", "pack-echo", "--select", "selection:every@1"]})),
+        OPERATOR,
+    );
+    assert_eq!(status, 409, "{refused}");
+    assert!(refused.to_string().contains("cannot read"), "{refused}");
+    assert!(lab.podman_runs().is_empty(), "nothing ran");
+}
+
+/// Review of 2026-10-19, finding 7: `nils pipelines validate` is offline,
+/// whatever the machine holds.
+#[test]
+fn validate_runs_on_a_machine_with_no_install() {
+    let work = TempDir::new("pipelines-validate-offline");
+    let image = format!("example.org/pack-echo@sha256:{}", "2".repeat(64));
+    let descriptor = pack_echo(&image);
+    let d = nils_pipeline::descriptor::parse(&descriptor).unwrap();
+    let dir = work.path().join("pair");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("nils.job.yml"), &descriptor).unwrap();
+    std::fs::write(
+        dir.join("nils-pack.yaml"),
+        pack_echo_pack(&d.digest(), "dimension == '3D'"),
+    )
+    .unwrap();
+    let home = work.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let out = nils()
+        .arg("--registry")
+        .arg(work.path().join("no-install-here"))
+        .args(["pipelines", "validate"])
+        .arg(&dir)
+        .arg("--json")
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", home.join("config"))
+        .env_remove("NILS_DSN")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "{said}{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let doc: Value = serde_json::from_str(&said).unwrap();
+    assert_eq!(doc["ok"], true, "{doc}");
+    assert_eq!(doc["descriptor_digest"], d.digest(), "{doc}");
+    assert!(
+        !work.path().join("no-install-here").exists(),
+        "validate made no install"
+    );
 }

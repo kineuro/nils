@@ -30,6 +30,22 @@ pub(crate) fn pack_of(p: &Pipeline) -> Option<PipelinePack> {
     pack::from_value(p.pack.clone()).ok()
 }
 
+/// Why the stored pack of a catalog row cannot be read by this engine
+/// (a newer contract, say), where it has one: `pack_of` reads that row as
+/// having none, which a run must never take for the truth.
+pub(crate) fn pack_error(p: &Pipeline) -> Option<String> {
+    if p.pack.is_null() {
+        return None;
+    }
+    pack::from_value(p.pack.clone()).err().map(|e| {
+        format!(
+            "{} has a pack (digest {}) that this engine cannot read: {e}",
+            p.label(),
+            p.pack_digest.as_deref().unwrap_or("unrecorded")
+        )
+    })
+}
+
 /// The vocabulary a pack is checked against here: the crate's, widened by
 /// the words the registry's classification holds for `base` and
 /// `body_part`, so a newer MRI pack's word is not refused.
@@ -366,8 +382,9 @@ impl PersonAsk {
                 "true" => json!(true),
                 "false" => json!(false),
                 other => other
-                    .parse::<f64>()
+                    .parse::<i64>()
                     .map(|n| json!(n))
+                    .or_else(|_| other.parse::<f64>().map(|n| json!(n)))
                     .unwrap_or_else(|_| json!(other)),
             };
             out.switches.insert(k.trim().to_string(), v);
@@ -703,114 +720,229 @@ pub(crate) fn stratum_of(store: &mut Store, stack: Option<i64>, members: &[Strin
     parts.join(",")
 }
 
+/// How far a value sits from the middle of its stratum, and by which
+/// spread (spec section 5.8). The robust z reads the median and the MAD;
+/// where more than half the values are identical the MAD is 0, and the
+/// mean absolute deviation stands in; where that is 0 as well every value
+/// is the same, and any value that differs from the median is flagged
+/// whatever its distance. Answers `(median, spread, z, how)`; `z` is
+/// infinite (and `how` says so) in the last case.
+pub(crate) fn standardise(xs: &[f64], n: f64) -> Option<(f64, f64, f64, &'static str)> {
+    if xs.is_empty() {
+        return None;
+    }
+    let median = |v: &[f64]| {
+        let mut s = v.to_vec();
+        s.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let k = s.len();
+        if k % 2 == 1 {
+            s[k / 2]
+        } else {
+            (s[k / 2 - 1] + s[k / 2]) / 2.0
+        }
+    };
+    let med = median(xs);
+    let dev: Vec<f64> = xs.iter().map(|x| (x - med).abs()).collect();
+    let mad = 1.4826 * median(&dev);
+    if mad > 0.0 {
+        return Some((med, mad, (n - med) / mad, "the MAD"));
+    }
+    let mean = xs.iter().sum::<f64>() / xs.len() as f64;
+    // 1.2533 turns a mean absolute deviation into the scale of a standard
+    // deviation, as 1.4826 does for the MAD
+    let mean_dev = 1.2533 * xs.iter().map(|x| (x - mean).abs()).sum::<f64>() / xs.len() as f64;
+    if mean_dev > 0.0 {
+        return Some((
+            med,
+            mean_dev,
+            (n - med) / mean_dev,
+            "the mean absolute deviation (the MAD is 0)",
+        ));
+    }
+    let z = if n > med {
+        f64::INFINITY
+    } else if n < med {
+        f64::NEG_INFINITY
+    } else {
+        0.0
+    };
+    Some((
+        med,
+        0.0,
+        z,
+        "any difference from the median (every value is the same)",
+    ))
+}
+
+/// One measure of a cohort check's metric, whose it is and where it sits.
+#[derive(Debug, Clone)]
+struct Seen {
+    number: f64,
+    key: String,
+    stack: Option<i64>,
+    from: String,
+}
+
 /// A cohort check over the units of a pipeline name whose measures of the
 /// metric the registry holds (spec section 5.8): within each stratum of at
 /// least `min_sessions` sessions, a robust z (the median and the MAD) above
 /// `z` flags the unit; below the size the check reads "not yet: N of M
-/// sessions". Answers, per unit of `units` (as `(run_id, unit)`), the
-/// check's standing: `{metric, status: flagged | not yet | within, words,
-/// z, stratum, sessions, min_sessions}`.
+/// sessions". A session counts once: its latest kept value across the runs
+/// of the name that share its comparability key. A unit's stratum is read
+/// from the stack its measure names, else from the main scan of the session
+/// the unit read (the first of the pipeline's roles that has a stack; else
+/// its first input stack), which the unit recorded when its run began.
+/// Answers, per unit of `units` (as `(run_id, unit)`), the check's standing:
+/// `{metric, status: flagged | not yet | within, words, z, stratum,
+/// stratum_from, sessions, min_sessions}`.
 pub(crate) fn cohort_check(
     store: &mut Store,
     pipeline: &str,
     check: &pack::Check,
-    units: &[(i64, String, Option<i64>)],
+    units: &[(i64, String)],
 ) -> Vec<Value> {
-    // every measure of the metric of this pipeline name, by unit, with its
-    // stratum: one value a unit (its newest)
     let d = store.dialect();
+    let day = d.text_of(
+        nils_registry::schema::table("measure")
+            .column("session_day")
+            .expect("session_day"),
+    );
     let sql = format!(
-        "SELECT run_id, unit_id, stack_id, subject_id, number FROM {} WHERE pipeline = {} AND name = {} \
+        "SELECT run_id, unit_id, stack_id, subject_id, {day}, number, scope FROM {} WHERE pipeline = {} AND name = {} \
          AND number IS NOT NULL ORDER BY id",
         store.qualified("measure"),
         d.param(1, nils_registry::schema::Type::Text),
         d.param(2, nils_registry::schema::Type::Text),
     );
-    let mut values: BTreeMap<(i64, String), (Option<i64>, f64)> = BTreeMap::new();
-    for r in store
+    let measured = store
         .query(
             &sql,
             &[Param::from(pipeline), Param::from(check.metric.as_str())],
         )
-        .unwrap_or_default()
-    {
-        if let (Ok(run), Ok(unit), Ok(stack), Ok(n)) =
-            (r.int(0), r.text(1), r.opt_int(2), r.double(4))
-        {
-            values.insert((run, unit.to_string()), (stack, n));
-        }
-    }
-    // a session's stack for its stratum: the measure's stack, else the
-    // first stack of the unit the caller named
-    let mut stratum_cache: BTreeMap<Option<i64>, String> = BTreeMap::new();
-    let mut by_stratum: BTreeMap<String, Vec<f64>> = BTreeMap::new();
-    let mut of_unit: BTreeMap<(i64, String), (String, f64)> = BTreeMap::new();
-    let first_stack: BTreeMap<(i64, String), Option<i64>> = units
+        .unwrap_or_default();
+    let run_ids: Vec<i64> = measured
         .iter()
-        .map(|(r, u, s)| ((*r, u.clone()), *s))
+        .filter_map(|r| r.int(0).ok())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
         .collect();
-    for ((run, unit), (stack, n)) in &values {
-        let stack = stack.or_else(|| first_stack.get(&(*run, unit.clone())).copied().flatten());
-        let stratum = stratum_cache
-            .entry(stack)
-            .or_insert_with(|| stratum_of(store, stack, &check.stratum))
-            .clone();
-        by_stratum.entry(stratum.clone()).or_default().push(*n);
-        of_unit.insert((*run, unit.clone()), (stratum, *n));
-    }
-    let robust = |xs: &[f64]| -> Option<(f64, f64)> {
-        if xs.is_empty() {
-            return None;
-        }
-        let mut s = xs.to_vec();
-        s.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        let median = |v: &[f64]| {
-            let n = v.len();
-            if n % 2 == 1 {
-                v[n / 2]
-            } else {
-                (v[n / 2 - 1] + v[n / 2]) / 2.0
-            }
+    let records: BTreeMap<(i64, String), (Option<String>, Value)> =
+        rows::unit_records(store, &run_ids)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(run, unit, key, pack)| ((run, unit), (key, pack)))
+            .collect();
+    // every measure with its owner, its key and the stack that says its
+    // stratum; later rows replace earlier ones of the same session and key
+    let mut own: BTreeMap<(i64, String), Seen> = BTreeMap::new();
+    let mut latest: BTreeMap<(String, String), Seen> = BTreeMap::new();
+    for r in &measured {
+        let (Ok(run), Ok(unit), Ok(n)) = (r.int(0), r.text(1), r.double(5)) else {
+            continue;
         };
-        let med = median(&s);
-        let mut dev: Vec<f64> = s.iter().map(|x| (x - med).abs()).collect();
-        dev.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        Some((med, 1.4826 * median(&dev)))
+        let (stack, subject, session) = (
+            r.opt_int(2).ok().flatten(),
+            r.opt_int(3).ok().flatten(),
+            r.opt_text(4).ok().flatten(),
+        );
+        let (key, pack) = records
+            .get(&(run, unit.to_string()))
+            .cloned()
+            .unwrap_or((None, Value::Null));
+        let key = key.unwrap_or_default();
+        let (stack, from) = match (
+            stack,
+            pack["stratum_stack"]["stack"].as_i64(),
+            unit.strip_prefix("stack-")
+                .and_then(|s| s.parse::<i64>().ok()),
+        ) {
+            (Some(s), _, _) => (Some(s), "the measure's stack".to_string()),
+            (None, Some(s), _) => (
+                Some(s),
+                pack["stratum_stack"]["from"]
+                    .as_str()
+                    .unwrap_or("the unit's input stack")
+                    .to_string(),
+            ),
+            (None, None, Some(s)) => (Some(s), "the unit's stack".to_string()),
+            _ => (None, "no stack recorded".to_string()),
+        };
+        // what a value is of: a stack's own for a stack-level pipeline, a
+        // session's (or a subject's) otherwise
+        let who = match (r.text(6).unwrap_or_default(), subject, session, stack) {
+            ("stack", _, _, Some(k)) => format!("stack:{k}"),
+            (_, Some(s), Some(t), _) => format!("session:{s}:{t}"),
+            (_, Some(s), None, _) => format!("subject:{s}"),
+            (_, None, _, Some(k)) => format!("stack:{k}"),
+            _ => format!("unit:{run}:{unit}"),
+        };
+        let seen = Seen {
+            number: n,
+            key: key.clone(),
+            stack,
+            from,
+        };
+        latest.insert((who, key), seen.clone());
+        own.insert((run, unit.to_string()), seen);
+    }
+    let mut stratum_cache: BTreeMap<Option<i64>, String> = BTreeMap::new();
+    let mut stratum_for = |store: &mut Store, s: &Seen| -> String {
+        stratum_cache
+            .entry(s.stack)
+            .or_insert_with(|| stratum_of(store, s.stack, &check.stratum))
+            .clone()
     };
+    let mut by_stratum: BTreeMap<(String, String), Vec<f64>> = BTreeMap::new();
+    for s in latest.values() {
+        let stratum = stratum_for(store, s);
+        by_stratum
+            .entry((s.key.clone(), stratum))
+            .or_default()
+            .push(s.number);
+    }
     units
         .iter()
-        .map(|(run, unit, _)| {
-            let Some((stratum, n)) = of_unit.get(&(*run, unit.clone())) else {
+        .map(|(run, unit)| {
+            let Some(seen) = own.get(&(*run, unit.clone())) else {
                 return json!({
                     "metric": check.metric, "status": "unchecked", "check": check.text(),
                     "words": format!("{} was not measured for this unit", check.metric),
                 });
             };
-            let xs = &by_stratum[stratum];
+            let stratum = stratum_for(store, seen);
+            let n = seen.number;
+            let xs = &by_stratum[&(seen.key.clone(), stratum.clone())];
             let sessions = xs.len();
             if sessions < check.min_sessions {
                 return json!({
                     "metric": check.metric, "status": "not yet", "check": check.text(),
                     "words": format!("not yet: {sessions} of {} sessions", check.min_sessions),
-                    "stratum": stratum, "sessions": sessions, "min_sessions": check.min_sessions,
+                    "stratum": stratum, "stratum_from": seen.from,
+                    "sessions": sessions, "min_sessions": check.min_sessions,
                 });
             }
-            let (med, mad) = robust(xs).unwrap_or((0.0, 0.0));
-            let z = if mad > 0.0 { (n - med) / mad } else { 0.0 };
+            let (med, spread, z, how) = standardise(xs, n).unwrap_or((0.0, 0.0, 0.0, "the MAD"));
             let above = match check.op.as_str() {
                 ">=" | ">" => z < -check.z,
                 "<=" | "<" => z > check.z,
                 _ => z.abs() > check.z,
             };
+            let z_text = if z.is_finite() {
+                format!("robust z {z:.1}")
+            } else {
+                "it differs from the median, which all the other values equal".to_string()
+            };
             json!({
                 "metric": check.metric, "status": if above { "flagged" } else { "within" }, "check": check.text(),
-                "value": n, "z": (z * 100.0).round() / 100.0, "median": med, "mad": mad,
-                "stratum": stratum, "sessions": sessions, "min_sessions": check.min_sessions,
+                "value": n, "z": if z.is_finite() { json!((z * 100.0).round() / 100.0) } else { Value::Null },
+                "median": med, "mad": spread, "spread_by": how,
+                "stratum": stratum, "stratum_from": seen.from,
+                "sessions": sessions, "min_sessions": check.min_sessions,
                 "words": if above {
-                    format!("{} is {} (robust z {:.1} against its stratum of {sessions} sessions; the check flags above {})",
-                        check.metric, nils_pipeline::descriptor::number_text(*n), z, nils_pipeline::descriptor::number_text(check.z))
+                    format!("{} is {} ({z_text}, by {how}, against its stratum of {sessions} sessions; the check flags above {})",
+                        check.metric, nils_pipeline::descriptor::number_text(n), nils_pipeline::descriptor::number_text(check.z))
                 } else {
-                    format!("within its stratum of {sessions} sessions (robust z {:.1})", z)
+                    format!("within its stratum of {sessions} sessions ({z_text})")
                 },
             })
         })
@@ -838,11 +970,16 @@ pub(crate) fn numbers_by_key(store: &mut Store, run_id: i64) -> Result<Value, St
         unit_of: BTreeMap<String, Option<String>>,
     }
     let mut groups: BTreeMap<String, Group> = BTreeMap::new();
+    // units that carry no key (a run from before the pack) are reported
+    // apart, never as a key of their own
+    let mut unkeyed_units: BTreeSet<String> = BTreeSet::new();
+    let mut unkeyed_measures = 0usize;
     for m in &measures {
-        let key = key_of
-            .get(&m.unit_id)
-            .cloned()
-            .unwrap_or_else(|| "none".to_string());
+        let Some(key) = key_of.get(&m.unit_id).cloned() else {
+            unkeyed_units.insert(m.unit_id.clone());
+            unkeyed_measures += 1;
+            continue;
+        };
         let g = groups.entry(key).or_default();
         g.units.insert(m.unit_id.clone());
         if let Some(n) = m.number {
@@ -878,6 +1015,8 @@ pub(crate) fn numbers_by_key(store: &mut Store, run_id: i64) -> Result<Value, St
         })).collect::<Vec<_>>(),
         "pooled": keys.len() <= 1,
         "words": words,
+        "unkeyed": unkeyed_units.len(),
+        "unkeyed_measures": unkeyed_measures,
         "measures": measures.len(),
     }))
 }
@@ -893,6 +1032,17 @@ pub(crate) fn numbers_csv(store: &mut Store, run_id: i64) -> Result<String, Stri
     let measures = nils_registry::measure::of_run(store, run_id).map_err(|e| e.to_string())?;
     let keys: BTreeSet<String> = key_of.values().cloned().collect();
     let mut out = String::new();
+    let unkeyed: BTreeSet<&str> = measures
+        .iter()
+        .filter(|m| !key_of.contains_key(&m.unit_id))
+        .map(|m| m.unit_id.as_str())
+        .collect();
+    if !unkeyed.is_empty() {
+        out.push_str(&format!(
+            "# unkeyed: {} (units with no comparability key, listed with an empty key)\n",
+            unkeyed.len()
+        ));
+    }
     if keys.len() > 1 {
         out.push_str(&format!(
             "# {}\n",
@@ -917,7 +1067,7 @@ pub(crate) fn numbers_csv(store: &mut Store, run_id: i64) -> Result<String, Stri
             "{},{},{},{},{},{}\n",
             run_id,
             cell(&m.unit_id),
-            key_of.get(&m.unit_id).map(String::as_str).unwrap_or("none"),
+            key_of.get(&m.unit_id).map(String::as_str).unwrap_or(""),
             cell(&m.name),
             value,
             m.unit.as_deref().map(cell).unwrap_or_default()
@@ -1122,5 +1272,413 @@ checks:
         }))
         .unwrap();
         assert_eq!(pooled_pipelines(&ask), vec![("synthseg".to_string(), true)]);
+    }
+
+    // ---- the review fixes of 2026-10-19 ----
+
+    #[test]
+    fn a_numeric_switch_on_the_command_line_is_the_integer_the_pack_offers() {
+        let pack = pack::parse(
+            r#"nils_pack: 1
+pipeline: {name: t, descriptor_sha256: "sha256:0000000000000000000000000000000000000000000000000000000000000000"}
+goals: {goal: [fast, standard], workers: [2, 4], ratio: [0.5, 1.5]}
+"#,
+        )
+        .unwrap();
+        let ask =
+            PersonAsk::of_args(None, &["workers=4".into(), "ratio=1.5".into()], false).unwrap();
+        assert_eq!(ask.switches["workers"], json!(4));
+        assert_eq!(ask.switches["ratio"], json!(1.5));
+        let person = ask
+            .person(&pack, "anna", &[])
+            .expect("the door accepts it, so must the flag");
+        assert_eq!(person.choices["workers"], json!(4));
+        assert!(
+            PersonAsk::of_args(None, &["workers=3".into()], false)
+                .unwrap()
+                .person(&pack, "anna", &[])
+                .is_err()
+        );
+    }
+
+    fn registry_store() -> Store {
+        let mut store = Store::sqlite_in_memory().unwrap();
+        nils_registry::migrate::migrate(&mut store, nils_registry::migrate::Kind::Registry)
+            .unwrap();
+        store
+    }
+
+    fn put_stack(store: &mut Store, id: i64, field: f64) {
+        store
+            .batch(&format!(
+                "INSERT INTO stack_fingerprint (stack_id, series_id, study_id, subject_id, modality, \
+                 orientation, n_instances, stack_index, stacks_in_series, job_id, epoch, magnetic_field_strength, manufacturer) \
+                 VALUES ({id}, {id}, {id}, {id}, 'MR', 'axial', 1, 0, 1, 1, 1, {field}, 'SIEMENS')"
+            ))
+            .unwrap();
+    }
+
+    /// A unit row of run `run`, with its key and the pack record it kept.
+    fn put_unit(store: &mut Store, run: i64, unit: &str, key: Option<&str>, pack: &Value) {
+        store
+            .batch(&format!(
+                "INSERT INTO pipeline_unit (run_id, unit, position, state, attempts, pack, comparability_key) \
+                 VALUES ({run}, '{unit}', 0, 'over', 1, '{}', {})",
+                pack.to_string().replace('\'', "''"),
+                key.map_or("NULL".to_string(), |k| format!("'{k}'"))
+            ))
+            .unwrap();
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn put_measure(
+        store: &mut Store,
+        run: i64,
+        unit: &str,
+        subject: i64,
+        day: &str,
+        stack: Option<i64>,
+        name: &str,
+        number: f64,
+    ) {
+        store
+            .batch(&format!(
+                "INSERT INTO measure (run_id, pipeline_id, pipeline, source, scope, subject_id, session_day, \
+                 stack_id, unit_id, name, type, number, created_at) VALUES ({run}, 1, 'samseg-lesions', 'metrics', \
+                 'session', {subject}, '{day}', {}, '{unit}', '{name}', 'number', {number}, '2026-10-19T10:00:00Z')",
+                stack.map_or("NULL".to_string(), |s| s.to_string())
+            ))
+            .unwrap();
+    }
+
+    fn cohort(min_sessions: usize) -> pack::Check {
+        let p = pack::parse(&format!(
+            r#"nils_pack: 1
+pipeline: {{name: samseg-lesions, descriptor_sha256: "sha256:0000000000000000000000000000000000000000000000000000000000000000"}}
+checks:
+  - {{metric: intracranial, op: "<=", action: flag, cohort: true, stratum: [site, field_strength], min_sessions: {min_sessions}, source: policy}}
+"#
+        ))
+        .unwrap();
+        p.checks[0].clone()
+    }
+
+    fn stratum_pack(stack: i64) -> Value {
+        json!({"stratum_stack": {"stack": stack, "from": "the t1w stack"}})
+    }
+
+    #[test]
+    fn a_session_unit_is_stratified_by_the_stack_its_unit_read() {
+        let mut store = registry_store();
+        let check = cohort(5);
+        // ten sessions, five at 1.5 T and five at 3 T, one unit each; a
+        // session unit's measure has no stack of its own
+        let mut units = Vec::new();
+        for (i, (field, value)) in [
+            (1.5, 10.0),
+            (1.5, 10.5),
+            (1.5, 11.0),
+            (1.5, 11.5),
+            (1.5, 30.0),
+            (3.0, 20.0),
+            (3.0, 20.5),
+            (3.0, 21.0),
+            (3.0, 21.5),
+            (3.0, 22.0),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let i = i as i64 + 1;
+            put_stack(&mut store, i, field);
+            let unit = format!("sub-{i}_ses-a");
+            put_unit(&mut store, 1, &unit, Some("sha256:k"), &stratum_pack(i));
+            put_measure(
+                &mut store,
+                1,
+                &unit,
+                i,
+                "2026-01-01",
+                None,
+                "intracranial",
+                value,
+            );
+            units.push((1, unit));
+        }
+        let out = cohort_check(&mut store, "samseg-lesions", &check, &units);
+        for (i, c) in out.iter().enumerate() {
+            let field = if i < 5 { "1.5" } else { "3" };
+            assert_eq!(c["stratum"], format!("site=here,field={field}"), "{c}");
+            assert_eq!(
+                c["sessions"], 5,
+                "two strata of five, not one unknown of ten: {c}"
+            );
+            assert_eq!(c["stratum_from"], "the t1w stack", "{c}");
+        }
+        assert_eq!(out[4]["status"], "flagged", "{}", out[4]);
+        assert_eq!(out[5]["status"], "within", "{}", out[5]);
+        // a unit that kept no stack falls in the unknown stratum, and says so
+        put_unit(&mut store, 1, "sub-99_ses-a", Some("sha256:k"), &json!({}));
+        put_measure(
+            &mut store,
+            1,
+            "sub-99_ses-a",
+            99,
+            "2026-01-01",
+            None,
+            "intracranial",
+            5.0,
+        );
+        let out = cohort_check(
+            &mut store,
+            "samseg-lesions",
+            &check,
+            &[(1, "sub-99_ses-a".into())],
+        );
+        assert_eq!(out[0]["stratum"], "site=here,field=unknown", "{}", out[0]);
+        assert_eq!(out[0]["stratum_from"], "no stack recorded", "{}", out[0]);
+    }
+
+    #[test]
+    fn a_session_run_again_counts_once_and_a_key_is_its_own_population() {
+        let mut store = registry_store();
+        let check = cohort(3);
+        put_stack(&mut store, 1, 3.0);
+        put_stack(&mut store, 2, 3.0);
+        // two sessions, each run three times under one key: two sessions
+        let mut units = Vec::new();
+        for run in 1..=3 {
+            for (s, stack) in [(1, 1), (2, 2)] {
+                let unit = format!("sub-{s}_ses-a");
+                put_unit(
+                    &mut store,
+                    run,
+                    &unit,
+                    Some("sha256:k"),
+                    &stratum_pack(stack),
+                );
+                put_measure(
+                    &mut store,
+                    run,
+                    &unit,
+                    s,
+                    "2026-01-01",
+                    None,
+                    "intracranial",
+                    10.0 + run as f64,
+                );
+                units.push((run, unit));
+            }
+        }
+        let out = cohort_check(&mut store, "samseg-lesions", &check, &units);
+        for c in &out {
+            assert_eq!(c["status"], "not yet", "six values are two sessions: {c}");
+            assert_eq!(c["words"], "not yet: 2 of 3 sessions", "{c}");
+        }
+        // a third session opens the guard, still counting each once
+        put_stack(&mut store, 3, 3.0);
+        put_unit(
+            &mut store,
+            3,
+            "sub-3_ses-a",
+            Some("sha256:k"),
+            &stratum_pack(3),
+        );
+        put_measure(
+            &mut store,
+            3,
+            "sub-3_ses-a",
+            3,
+            "2026-01-01",
+            None,
+            "intracranial",
+            11.0,
+        );
+        let out = cohort_check(&mut store, "samseg-lesions", &check, &units);
+        assert!(out.iter().all(|c| c["sessions"] == 3), "{out:?}");
+        assert!(out.iter().all(|c| c["status"] == "within"), "{out:?}");
+        // the same session under another key is a session of that key's own
+        // population, not of the first
+        put_unit(
+            &mut store,
+            4,
+            "sub-1_ses-a",
+            Some("sha256:other"),
+            &stratum_pack(1),
+        );
+        put_measure(
+            &mut store,
+            4,
+            "sub-1_ses-a",
+            1,
+            "2026-01-01",
+            None,
+            "intracranial",
+            12.0,
+        );
+        let out = cohort_check(
+            &mut store,
+            "samseg-lesions",
+            &check,
+            &[(4, "sub-1_ses-a".into()), (3, "sub-3_ses-a".into())],
+        );
+        assert_eq!(out[0]["sessions"], 1, "{}", out[0]);
+        assert_eq!(out[1]["sessions"], 3, "{}", out[1]);
+    }
+
+    #[test]
+    fn a_stratum_of_identical_values_still_flags_an_outlier() {
+        // the MAD is 0 where more than half the values are identical: the
+        // mean absolute deviation stands in
+        let mut xs = vec![5.0; 9];
+        xs.push(50.0);
+        let (med, spread, z, how) = standardise(&xs, 50.0).unwrap();
+        assert_eq!(med, 5.0);
+        assert!(spread > 0.0 && z > 3.0, "{spread} {z}");
+        assert!(how.starts_with("the mean absolute deviation"), "{how}");
+        let (_, _, z, how) = standardise(&xs, 5.0).unwrap();
+        assert!(z.abs() < 1.0, "{z}");
+        assert!(how.starts_with("the mean absolute deviation"), "{how}");
+        // a spread the MAD sees is the MAD's
+        let (_, _, _, how) = standardise(&[1.0, 2.0, 3.0, 4.0, 5.0], 5.0).unwrap();
+        assert_eq!(how, "the MAD");
+        // nothing varies: any value that differs from the median flags
+        let (_, spread, z, how) = standardise(&[5.0, 5.0, 5.0], 7.0).unwrap();
+        assert!(spread == 0.0 && z == f64::INFINITY, "{spread} {z}");
+        assert!(how.starts_with("any difference from the median"), "{how}");
+        let (_, _, z, _) = standardise(&[5.0, 5.0, 5.0], 5.0).unwrap();
+        assert_eq!(z, 0.0);
+
+        // through the check: the outlier flags, and the record says by what
+        let mut store = registry_store();
+        let check = cohort(5);
+        let mut units = Vec::new();
+        for i in 1..=10_i64 {
+            put_stack(&mut store, i, 3.0);
+            let unit = format!("sub-{i}_ses-a");
+            put_unit(&mut store, 1, &unit, Some("sha256:k"), &stratum_pack(i));
+            put_measure(
+                &mut store,
+                1,
+                &unit,
+                i,
+                "2026-01-01",
+                None,
+                "intracranial",
+                if i == 10 { 50.0 } else { 5.0 },
+            );
+            units.push((1, unit));
+        }
+        let out = cohort_check(&mut store, "samseg-lesions", &check, &units);
+        assert_eq!(out[9]["status"], "flagged", "{}", out[9]);
+        assert!(
+            out[9]["spread_by"]
+                .as_str()
+                .unwrap()
+                .starts_with("the mean absolute deviation"),
+            "{}",
+            out[9]
+        );
+        assert!(
+            out[9]["words"]
+                .as_str()
+                .unwrap()
+                .contains("by the mean absolute deviation"),
+            "{}",
+            out[9]
+        );
+        assert_eq!(out[0]["status"], "within", "{}", out[0]);
+    }
+
+    #[test]
+    fn units_with_no_key_are_reported_apart_at_both_doors() {
+        let mut store = registry_store();
+        put_unit(
+            &mut store,
+            7,
+            "sub-1_ses-a",
+            Some("sha256:aaaa"),
+            &json!({}),
+        );
+        put_unit(&mut store, 7, "sub-2_ses-a", None, &json!({}));
+        put_unit(&mut store, 7, "sub-3_ses-a", None, &json!({}));
+        put_measure(
+            &mut store,
+            7,
+            "sub-1_ses-a",
+            1,
+            "2026-01-01",
+            None,
+            "volume",
+            10.0,
+        );
+        put_measure(
+            &mut store,
+            7,
+            "sub-2_ses-a",
+            2,
+            "2026-01-01",
+            None,
+            "volume",
+            20.0,
+        );
+        put_measure(
+            &mut store,
+            7,
+            "sub-3_ses-a",
+            3,
+            "2026-01-01",
+            None,
+            "volume",
+            30.0,
+        );
+        let doc = numbers_by_key(&mut store, 7).unwrap();
+        assert_eq!(doc["keys"].as_array().unwrap().len(), 1, "{doc}");
+        assert_eq!(doc["keys"][0]["comparability_key"], "sha256:aaaa", "{doc}");
+        assert_eq!(doc["keys"][0]["measures"]["volume"]["count"], 1, "{doc}");
+        assert_eq!(doc["unkeyed"], 2, "{doc}");
+        assert_eq!(doc["unkeyed_measures"], 2, "{doc}");
+        assert_eq!(
+            doc["pooled"], true,
+            "one key is not a pool across keys: {doc}"
+        );
+        assert_eq!(doc["measures"], 3, "{doc}");
+        let csv = numbers_csv(&mut store, 7).unwrap();
+        assert!(csv.starts_with("# unkeyed: 2 ("), "{csv}");
+        assert!(!csv.contains("none"), "{csv}");
+        assert_eq!(csv.matches(",volume,").count(), 3, "{csv}");
+        assert!(csv.contains("7,sub-2_ses-a,,volume,20,"), "{csv}");
+        // two real keys and one unkeyed: the pooling words count the keys
+        put_unit(
+            &mut store,
+            7,
+            "sub-4_ses-a",
+            Some("sha256:bbbb"),
+            &json!({}),
+        );
+        put_measure(
+            &mut store,
+            7,
+            "sub-4_ses-a",
+            4,
+            "2026-01-01",
+            None,
+            "volume",
+            40.0,
+        );
+        let doc = numbers_by_key(&mut store, 7).unwrap();
+        assert!(
+            doc["words"]
+                .as_str()
+                .unwrap()
+                .starts_with("these results hold 2 comparability keys ("),
+            "{doc}"
+        );
+        let csv = numbers_csv(&mut store, 7).unwrap();
+        assert!(
+            csv.contains("# these results hold 2 comparability keys ("),
+            "{csv}"
+        );
+        assert!(csv.contains("# unkeyed: 2 ("), "{csv}");
     }
 }

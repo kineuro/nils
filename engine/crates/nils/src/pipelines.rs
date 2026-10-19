@@ -1104,7 +1104,12 @@ pub(crate) fn pipeline_doc(p: &Pipeline) -> Value {
         "descriptor": p.descriptor,
         // record 57 P1: the pack beside the descriptor, `none` for a version
         // with no pack, and the digests of the pack and the pair
-        "pack": if p.pack.is_null() { json!("none") } else { p.pack.clone() },
+        "pack": match crate::pipeline_pack::pack_error(p) {
+            Some(e) => json!({"error": e}),
+            None if p.pack.is_null() => json!("none"),
+            None => p.pack.clone(),
+        },
+        "pack_error": crate::pipeline_pack::pack_error(p),
         "pack_digest": p.pack_digest,
         "version_digest": p.version_digest,
     })
@@ -1767,6 +1772,14 @@ pub(crate) fn route(
             let p = rows::get(registry.store(), id)
                 .map_err(err)?
                 .ok_or_else(|| Reply::error(404, format!("no pipeline {id}")))?;
+            if let Some(e) = crate::pipeline_pack::pack_error(&p) {
+                return Ok(Reply::ok(json!({
+                    "pipeline": p.label(), "pipeline_id": p.id, "pack": {"error": e},
+                    "pack_digest": p.pack_digest, "version_digest": p.version_digest,
+                    "descriptor_digest": p.descriptor_digest,
+                    "contract": nils_pipeline::pack::CONTRACT,
+                })));
+            }
             let Some(pack) = crate::pipeline_pack::pack_of(&p) else {
                 return Ok(Reply::ok(json!({
                     "pipeline": p.label(), "pipeline_id": p.id, "pack": "none",
@@ -2461,55 +2474,63 @@ fn print(v: &Value) -> Result<(), Exit> {
     Ok(())
 }
 
+/// `nils pipelines validate <dir>`: offline, it opens no registry and needs
+/// no install on this machine.
+fn validate(dir: PathBuf, json: bool) -> Result<(), Exit> {
+    let dir = if dir.is_dir() {
+        dir
+    } else {
+        dir.parent().map(Path::to_path_buf).unwrap_or(dir)
+    };
+    let (d, pack) = nils_pipeline::pack::load_dir(&dir, None).map_err(usage)?;
+    let pack_digest = pack.as_ref().map(nils_pipeline::pack::PipelinePack::digest);
+    let doc = json!({
+        "folder": dir.display().to_string(),
+        "pipeline": d.name,
+        "descriptor_digest": d.digest(),
+        "pack": pack.as_ref().map_or(json!("none"), |p| json!({
+            "digest": pack_digest, "version": p.version, "rules": p.rules.len(),
+            "needs": p.needs.keys().cloned().collect::<Vec<_>>(), "checks": p.checks.len(),
+            "breaking_knobs": p.breaking_knobs(),
+        })),
+        "version_digest": nils_pipeline::pack::version_digest(&d.digest(), pack_digest.as_deref()),
+        "ok": true,
+    });
+    if json {
+        print(&doc)?;
+    } else {
+        println!("{}: descriptor {}", d.name, d.digest());
+        match &pack {
+            Some(p) => println!(
+                "pack {}: {} rules, {} checks, needs on {}; version {}",
+                pack_digest.clone().unwrap_or_default(),
+                p.rules.len(),
+                p.checks.len(),
+                if p.needs.is_empty() {
+                    "nothing".to_string()
+                } else {
+                    p.needs.keys().cloned().collect::<Vec<_>>().join(", ")
+                },
+                doc["version_digest"].as_str().unwrap_or_default()
+            ),
+            None => println!(
+                "pack: none ({} is not beside it); version {}",
+                nils_pipeline::pack::FILE,
+                doc["version_digest"].as_str().unwrap_or_default()
+            ),
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn command(home: &Home, command: PipelineCommand) -> Result<(), Exit> {
+    // validate is offline: it matches before the registry is opened
+    if let PipelineCommand::Validate { dir, json } = command {
+        return validate(dir, json);
+    }
     let mut registry = crate::open(home)?;
     match command {
-        PipelineCommand::Validate { dir, json } => {
-            let dir = if dir.is_dir() {
-                dir
-            } else {
-                dir.parent().map(Path::to_path_buf).unwrap_or(dir)
-            };
-            let (d, pack) = nils_pipeline::pack::load_dir(&dir, None).map_err(usage)?;
-            let pack_digest = pack.as_ref().map(nils_pipeline::pack::PipelinePack::digest);
-            let doc = json!({
-                "folder": dir.display().to_string(),
-                "pipeline": d.name,
-                "descriptor_digest": d.digest(),
-                "pack": pack.as_ref().map_or(json!("none"), |p| json!({
-                    "digest": pack_digest, "version": p.version, "rules": p.rules.len(),
-                    "needs": p.needs.keys().cloned().collect::<Vec<_>>(), "checks": p.checks.len(),
-                    "breaking_knobs": p.breaking_knobs(),
-                })),
-                "version_digest": nils_pipeline::pack::version_digest(&d.digest(), pack_digest.as_deref()),
-                "ok": true,
-            });
-            if json {
-                print(&doc)?;
-            } else {
-                println!("{}: descriptor {}", d.name, d.digest());
-                match &pack {
-                    Some(p) => println!(
-                        "pack {}: {} rules, {} checks, needs on {}; version {}",
-                        pack_digest.clone().unwrap_or_default(),
-                        p.rules.len(),
-                        p.checks.len(),
-                        if p.needs.is_empty() {
-                            "nothing".to_string()
-                        } else {
-                            p.needs.keys().cloned().collect::<Vec<_>>().join(", ")
-                        },
-                        doc["version_digest"].as_str().unwrap_or_default()
-                    ),
-                    None => println!(
-                        "pack: none ({} is not beside it); version {}",
-                        nils_pipeline::pack::FILE,
-                        doc["version_digest"].as_str().unwrap_or_default()
-                    ),
-                }
-            }
-            Ok(())
-        }
+        PipelineCommand::Validate { .. } => unreachable!("matched before the registry opens"),
         PipelineCommand::Add {
             file,
             release,
@@ -5214,6 +5235,24 @@ pub(crate) fn run_command(home: &Home, args: RunArgs) -> Result<(), Exit> {
             )?;
             made = Some(run_id);
             rows::set_units(registry.store(), run_id, d.units.name(), args.threshold)?;
+            // Wave 7b A1: the person's choices at the pack stay with the run,
+            // so a resume judges under the same ones
+            if crate::pipeline_pack::pack_of(&p).is_some() {
+                let asked = crate::pipeline_pack::PersonAsk::of_args(
+                    args.goal.as_deref(),
+                    &args.switches,
+                    args.let_run,
+                )
+                .map_err(fail)?;
+                let mut kept = asked.doc();
+                kept["given"] = json!(
+                    pairs(&args.params)?
+                        .into_iter()
+                        .map(|(k, _)| k)
+                        .collect::<Vec<_>>()
+                );
+                rows::set_person(registry.store(), run_id, &kept)?;
+            }
             let _ = job::set_arg(registry.store(), job_id, "run", json!(run_id));
             let licence_env = crate::software::licence_env(&mut registry, &p);
 
@@ -6725,22 +6764,47 @@ fn execute_run(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Resul
     // words, the rules choose its knobs, and the unit records who chose,
     // its caveats and the two keys its results carry
     let mut unit_params: BTreeMap<String, serde_json::Map<String, Value>> = BTreeMap::new();
+    if let Some(e) = crate::pipeline_pack::pack_error(x.pipeline) {
+        return Err(e);
+    }
     if let Some(pack) = crate::pipeline_pack::pack_of(x.pipeline) {
-        let person_ask = crate::pipeline_pack::PersonAsk::of_args(
-            x.args.goal.as_deref(),
-            &x.args.switches,
-            x.args.let_run,
-        )?;
-        let given = pairs(&x.args.params).map_err(|e| e.message)?;
+        // a resume goes on under the choices the run began with
+        let person_ask = match x.resume.map(|r| &r.person) {
+            Some(kept) if kept.is_object() => crate::pipeline_pack::PersonAsk::of_body(kept)?,
+            _ => crate::pipeline_pack::PersonAsk::of_args(
+                x.args.goal.as_deref(),
+                &x.args.switches,
+                x.args.let_run,
+            )?,
+        };
+        let given = match x.resume.map(|r| &r.person) {
+            Some(kept) if kept.is_object() => kept["given"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|k| k.as_str().map(|k| (k.to_string(), String::new())))
+                .collect(),
+            _ => pairs(&x.args.params).map_err(|e| e.message)?,
+        };
         let person = person_ask.person(&pack, x.who, &given)?;
         let roles_of = match d.layout {
             Layout::Bids => crate::preflight::roles_of_stacks(registry.store(), x.stacks)?,
             Layout::Stacks => BTreeMap::new(),
         };
+        // a unit that is over keeps the judgement it was run under: only
+        // the units still to run are judged (a resume never rewrites a
+        // finished unit's flags and checks)
+        let still_to_run: std::collections::BTreeSet<String> =
+            rows::units(registry.store(), x.run_id)
+                .map_err(err)?
+                .into_iter()
+                .filter(|u| u.state == "queued" || u.state == "running")
+                .map(|u| u.unit)
+                .collect();
         let with_inputs: Vec<&Unit> = m
             .units
             .iter()
-            .filter(|u| !missing.contains_key(&u.id))
+            .filter(|u| !missing.contains_key(&u.id) && still_to_run.contains(&u.id))
             .collect();
         let of: Vec<crate::pipeline_pack::UnitOf> = with_inputs
             .iter()
@@ -6814,6 +6878,20 @@ fn execute_run(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Resul
             });
             let mut doc = j.doc();
             doc["key_members"] = members;
+            // the main scan of the unit, which a cohort check stratifies
+            // it by: the first of the pipeline's roles that has a stack,
+            // else the first stack the unit read
+            let main_role = d
+                .roles
+                .iter()
+                .find(|r| of.by_role.get(*r).is_some_and(|s| !s.is_empty()));
+            doc["stratum_stack"] = match (main_role, u.stacks.first()) {
+                (Some(r), _) => {
+                    json!({"stack": of.by_role[r][0], "from": format!("the {r} stack")})
+                }
+                (None, Some(s)) => json!({"stack": s, "from": "the unit's first input stack"}),
+                _ => Value::Null,
+            };
             rows::set_unit_pack(registry.store(), row_id, &doc, Some(&ck), Some(&rk))
                 .map_err(err)?;
             if j.status == nils_pipeline::pack::rules::Status::Skipped {
@@ -6828,6 +6906,14 @@ fn execute_run(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Resul
                 });
                 rows::unit_over(registry.store(), row_id, None, &outcome, &now).map_err(err)?;
             } else {
+                // together, one container takes the knobs every ready unit
+                // agreed on (together_disagree refused a run where they
+                // differ), kept under the empty key
+                if d.units == Units::Together {
+                    unit_params
+                        .entry(String::new())
+                        .or_insert_with(|| j.params());
+                }
                 unit_params.insert(u.id.clone(), j.params());
             }
         }
@@ -7647,10 +7733,9 @@ fn invocation_of(
     }
     // the threads parameter told the cores this start was given; record 57
     // P2: a unit that runs apart takes the knobs its pack chose for it
-    let unit_params = b
-        .key
-        .as_ref()
-        .and_then(|k| shared.unit_params.get(k))
+    let unit_params = shared
+        .unit_params
+        .get(b.key.as_deref().unwrap_or(""))
         .unwrap_or(x.params);
     let argv = d.argv(&d.params_for_cores(unit_params, cores), &participants)?;
     // who the process is: for podman the engine's own account, which
@@ -9031,8 +9116,12 @@ fn finalize(
                 if record.is_null() {
                     record = json!({});
                 }
+                // a unit over before a resume holds the same flags again, and
+                // keeps the time it was flagged
+                if record["flags"] != json!(held.flags) || record["flagged_at"].is_null() {
+                    record["flagged_at"] = json!(now);
+                }
                 record["flags"] = json!(held.flags);
-                record["flagged_at"] = json!(now);
                 rows::set_unit_pack(
                     registry.store(),
                     row.id,
@@ -9099,15 +9188,9 @@ fn finalize(
                         all_units.push((r.id, u));
                     }
                 }
-                let named: Vec<(i64, String, Option<i64>)> = all_units
+                let named: Vec<(i64, String)> = all_units
                     .iter()
-                    .map(|(r, u)| {
-                        let stack = u
-                            .unit
-                            .strip_prefix("stack-")
-                            .and_then(|s| s.parse::<i64>().ok());
-                        (*r, u.unit.clone(), stack)
-                    })
+                    .map(|(r, u)| (*r, u.unit.clone()))
                     .collect();
                 let mut results: Vec<Vec<Value>> = vec![Vec::new(); named.len()];
                 for c in &cohort {

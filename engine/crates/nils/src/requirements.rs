@@ -600,6 +600,14 @@ pub(crate) fn at_the_door(
         });
         return Err(r);
     }
+    // Wave 7b A1 (review of 2026-10-19): a stored pack this engine cannot
+    // read is no pack to run without; the door refuses with the loader's
+    // words
+    if let Some(words) = crate::pipeline_pack::pack_error(&p) {
+        let mut r = Reply::error(409, words.clone());
+        r.body["pack"] = json!({"error": words, "pack_digest": p.pack_digest});
+        return Err(r);
+    }
     let Ok(d) = nils_pipeline::descriptor::from_value(p.descriptor.clone()) else {
         return Ok(());
     };
