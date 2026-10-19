@@ -3151,6 +3151,9 @@ fn build_registry() -> Vec<Table> {
                 // and on one from before, which the doors read from its
                 // error
                 col("failure", Type::Json),
+                // Wave 7b A1: the person's choices at the pack (goal, switches,
+                // let-run), kept so a resume judges under the same ones
+                col("person", Type::Json),
             ],
         )
         .index(&["pipeline_id"])

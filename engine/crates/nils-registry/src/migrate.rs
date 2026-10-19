@@ -566,7 +566,8 @@ fn a_pipeline_version_is_the_pair_and_a_unit_records_its_pack(
         store,
         "pipeline_unit",
         &["pack", "comparability_key", "result_key"],
-    )
+    )?;
+    add_columns(store, "pipeline_run", &["person"])
 }
 
 /// Record 55, ruling 35 (c), Nima 2026-10-16: each handover has its own

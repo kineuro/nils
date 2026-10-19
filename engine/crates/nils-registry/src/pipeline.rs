@@ -323,6 +323,10 @@ pub struct Run {
     /// 2026-10-12: what its failure was, `{kind, cause, advice, fix}`;
     /// null where it did not fail, or failed before this was recorded.
     pub failure: Value,
+    /// Wave 7b A1: what the person chose at the pack when the run began
+    /// (`{goal, switches, let_run}`); null on a run from before or one
+    /// without a pack. A resume judges under it.
+    pub person: Value,
 }
 
 /// A run to start.
@@ -347,7 +351,7 @@ pub struct NewRun<'a> {
     pub started_at: &'a str,
 }
 
-const RUN_COLUMNS: [&str; 29] = [
+const RUN_COLUMNS: [&str; 30] = [
     "id",
     "pipeline_id",
     "job_id",
@@ -377,6 +381,7 @@ const RUN_COLUMNS: [&str; 29] = [
     "threshold",
     "scratch_place_id",
     "failure",
+    "person",
 ];
 
 fn select_runs(store: &mut Store) -> String {
@@ -424,6 +429,7 @@ fn run_of(r: &Row) -> Result<Run, Error> {
         threshold: r.opt_double(26)?,
         scratch_place_id: r.opt_int(27)?,
         failure: json(r.opt_text(28)?),
+        person: json(r.opt_text(29)?),
     })
 }
 
@@ -632,6 +638,17 @@ pub fn resume(store: &mut Store, id: i64, job_id: i64) -> Result<(), Error> {
     Ok(())
 }
 
+/// Keep the person's choices at the pack with the run (Wave 7b A1).
+pub fn set_person(store: &mut Store, id: i64, person: &Value) -> Result<(), Error> {
+    store.update_by_id(
+        table("pipeline_run"),
+        &[("person", Param::from(person.to_string()))],
+        "id",
+        id,
+    )?;
+    Ok(())
+}
+
 /// Mark a running run whose engine went away as interrupted, so the lane
 /// queues it once to be taken up again. Answers whether this call did.
 pub fn interrupt(store: &mut Store, id: i64, why: &str) -> Result<bool, Error> {
@@ -828,6 +845,38 @@ pub fn unit_keys(store: &mut Store, run_ids: &[i64]) -> Result<Vec<(i64, String,
         .query(&sql, &[])?
         .iter()
         .map(|r| Ok((r.int(0)?, r.text(1)?.to_string(), r.text(2)?.to_string())))
+        .collect()
+}
+
+/// A unit's pack record as `(run_id, unit, comparability key, pack)`.
+pub type UnitRecord = (i64, String, Option<String>, Value);
+
+/// What the units of some runs recorded of the pack: `(run_id, unit,
+/// comparability key, pack record)`.
+pub fn unit_records(store: &mut Store, run_ids: &[i64]) -> Result<Vec<UnitRecord>, Error> {
+    if run_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let pack = store
+        .dialect()
+        .text_of(table("pipeline_unit").column("pack").expect("pack"));
+    let ids: Vec<String> = run_ids.iter().map(i64::to_string).collect();
+    let sql = format!(
+        "SELECT run_id, unit, comparability_key, {pack} FROM {} WHERE run_id IN ({})",
+        store.qualified("pipeline_unit"),
+        ids.join(", ")
+    );
+    store
+        .query(&sql, &[])?
+        .iter()
+        .map(|r| {
+            Ok((
+                r.int(0)?,
+                r.text(1)?.to_string(),
+                r.opt_text(2)?.map(str::to_string),
+                json(r.opt_text(3)?),
+            ))
+        })
         .collect()
 }
 
