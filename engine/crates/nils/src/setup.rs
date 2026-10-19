@@ -553,7 +553,7 @@ pub(crate) struct SetupArgs {
     source: Option<PathBuf>,
     /// A place this site has: a name, a directory, and the words that say
     /// what it is, as archives=/data/archives,role=backup,protected. The
-    /// words are role=source|registry|working|export|share|exchange|backup,
+    /// words are role=source|registry|working|export|share|exchange|backup|software,
     /// backup=NAME, snapshots, protected, fast and read, which makes it a
     /// directory the engine reads DICOM from. Named once for each place,
     /// and where none is named an install has the five of a laptop
@@ -2580,7 +2580,8 @@ fn which_on_path(program: &str) -> Option<PathBuf> {
 fn converter_row(plan: &Plan) -> String {
     match &plan.dcm2niix {
         None => "not in the engine's image: an admin installs it into the registry's tools \
-                 folder from the desk, or with nils tools install dcm2niix"
+                 folder from the desk, or with nils software install dcm2niix (nils tools \
+                 install dcm2niix for one more release)"
             .to_string(),
         Some(Converter::Given(path)) => format!("{}, as given with --dcm2niix", path.display()),
         Some(Converter::Found { path, placed: true }) => format!(
@@ -2672,7 +2673,7 @@ fn place_converter(c: &Converter, state: &mut State, console: &Console) {
                 Err(e) => console.warn(&format!(
                     "dcm2niix {}, which a BIDS release and a run with a bids input convert with, \
                      was not installed: {e}; until it is, they are refused with what to do, and \
-                     nils tools install dcm2niix installs it",
+                     nils software install dcm2niix installs it",
                     tools::DCM2NIIX_VERSION
                 )),
             }
@@ -31689,7 +31690,7 @@ mod tests {
             converter_row(&printed).ends_with(&format!("into {}, its sha256 pinned", at.display()))
         );
         printed.dcm2niix = None;
-        assert!(converter_row(&printed).contains("nils tools install dcm2niix"));
+        assert!(converter_row(&printed).contains("nils software install dcm2niix"));
         let _ = std::fs::remove_dir_all(&root);
     }
 

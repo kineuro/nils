@@ -240,6 +240,26 @@ fn build_registry() -> Vec<Table> {
             vec![req("key", Type::Text), req("value", Type::Text)],
         )
         .keyed_by("key"),
+        // Record 57 P5 (Wave 7b, section 6.5; migration 108): a tool's terms
+        // accepted by an administrator, as an event: who, when, which terms
+        // (address and version) and, for a site licence file, its sha256.
+        // The file's content is never recorded.
+        Table::new(
+            "software_acceptance",
+            vec![
+                col("id", Type::Id),
+                req("app", Type::Text),
+                req("version", Type::Text),
+                req("principal", Type::Text),
+                req("accepted_at", Type::Timestamp),
+                req("terms_address", Type::Text),
+                col("terms_version", Type::Text),
+                col("file_sha256", Type::Text),
+                col("file_name", Type::Text),
+                col("note", Type::Text),
+                col("spdx", Type::Text),
+            ],
+        ),
         // Wave 3 §5. A scheme says HOW a subject's studies become sessions; it
         // never stores the sessions. Labels are derived on read, so
         // re-labelling a cohort is an edit to one row rather than a migration

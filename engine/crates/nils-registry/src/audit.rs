@@ -208,6 +208,17 @@ pub enum Action {
     /// at its door for the person receiving the archives. The row names the
     /// key; never the password.
     HandoverPassword,
+    /// Record 57 P5 (Wave 7b, section 6): the software place. A tool
+    /// installed by digest, an existing install registered as the site's,
+    /// an install verified again, a tool's terms accepted by an
+    /// administrator (who, when, which terms, the licence file's sha256;
+    /// never its content), and an install the engine made removed. None
+    /// changes a judgement.
+    SoftwareInstall,
+    SoftwareRegister,
+    SoftwareVerify,
+    SoftwareAccept,
+    SoftwareRemove,
 }
 
 impl Action {
@@ -299,6 +310,11 @@ impl Action {
             Action::KeyAdd => "key.add",
             Action::KeyRemove => "key.remove",
             Action::HandoverPassword => "handover.password",
+            Action::SoftwareInstall => "software.install",
+            Action::SoftwareRegister => "software.register",
+            Action::SoftwareVerify => "software.verify",
+            Action::SoftwareAccept => "software.accept",
+            Action::SoftwareRemove => "software.remove",
         }
     }
 
@@ -359,6 +375,11 @@ impl Action {
                 | Action::ToolInstall
                 | Action::SessionScheme
                 | Action::InstallChange
+                | Action::SoftwareInstall
+                | Action::SoftwareRegister
+                | Action::SoftwareVerify
+                | Action::SoftwareAccept
+                | Action::SoftwareRemove
         )
     }
 }

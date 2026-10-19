@@ -1212,7 +1212,9 @@ pub(crate) fn check(registry: &mut Registry, asked: &Asked<'_>) -> Result<Value,
         },
     );
     for c in requirements.iter().filter(|c| !c.ok) {
-        if matches!(c.check, "converter" | "image" | "disk")
+        // record 57 P5: a tool's terms not accepted, or its licence file not
+        // placed, refuse the run before it starts (G9)
+        if matches!(c.check, "converter" | "image" | "disk" | "licence")
             || c.cause == Some(nils_pipeline::failure::Cause::Memory)
         {
             blockers.push(c.said.clone());

@@ -95,6 +95,7 @@ mod serve;
 mod session_schemes;
 mod setup;
 mod slice_cache;
+mod software;
 mod sources;
 mod starter;
 mod summary;
@@ -342,10 +343,15 @@ enum Command {
     },
     /// Run a pipeline over a frozen selection: its outputs become derivatives, its failed units review items (record 43)
     Run(Box<pipelines::RunArgs>),
-    /// The tools the engine runs beside itself: dcm2niix, whether it is here, and its install from the pinned release
+    /// The tools the engine runs beside itself: dcm2niix, whether it is here, and its install from the pinned release (an alias of nils software install dcm2niix for this release)
     Tools {
         #[command(subcommand)]
         command: Option<tools::ToolsCommand>,
+    },
+    /// The software place (record 57 P5): the tools installed by digest and the installs a site registers, verified, with their licences as recorded acceptances
+    Software {
+        #[command(subcommand)]
+        command: Option<software::SoftwareCommand>,
     },
     /// The registry's settings: the timezone and the week start its dates are read under (Wave 5 section 12.6)
     Settings {
@@ -981,7 +987,7 @@ enum PlaceCommand {
         name: String,
         /// The directory
         path: PathBuf,
-        /// source, registry, working, export, share, exchange or backup
+        /// source, registry, working, export, share, exchange, backup or software
         #[arg(long, value_name = "ROLE")]
         role: String,
         /// The place that backs this one up (required for the registry role)
@@ -2388,6 +2394,7 @@ fn main() -> ExitCode {
         Command::Pipeline { command } => pipelines::command(&home, command),
         Command::Run(args) => pipelines::run_command(&home, *args),
         Command::Tools { command } => tools::command(&home, command),
+        Command::Software { command } => software::command(&home, command),
         Command::Login(args) => login_command(args),
         Command::Logout => {
             if login::logout() {

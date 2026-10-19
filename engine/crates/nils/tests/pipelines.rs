@@ -3517,12 +3517,34 @@ fn apptainer_runs_a_built_image_and_a_gpu_unit_waits_for_its_lease() {
         .collect();
     let builds: Vec<&Vec<String>> = calls.iter().filter(|c| c[0] == "build").collect();
     assert_eq!(builds.len(), 1, "{calls:?}");
-    let sif = lab
-        .work
-        .path()
-        .join("images")
-        .join(format!("{}.sif", "c".repeat(64)));
-    assert!(sif.is_file());
+    // record 57 P5: built into the software place as an install,
+    // <working>/software/<app>/<version>/image, with its manifest
+    let install = lab.work.path().join("software").join("gpu-slow").join("1");
+    let sif = install.join("image");
+    assert!(sif.is_file(), "{}", install.display());
+    let manifest: Value =
+        serde_json::from_str(&std::fs::read_to_string(install.join("manifest.json")).unwrap())
+            .unwrap();
+    assert_eq!(manifest["how"], "installed", "{manifest}");
+    assert_eq!(manifest["kind"], "sif", "{manifest}");
+    assert_eq!(
+        manifest["digest"],
+        format!("sha256:{}", "c".repeat(64)),
+        "{manifest}"
+    );
+    assert!(
+        manifest["fingerprint"]
+            .as_str()
+            .unwrap()
+            .starts_with("sha256:"),
+        "{manifest}"
+    );
+    assert!(
+        lab.work
+            .path()
+            .join("software/modules/gpu-slow/1.lua")
+            .is_file()
+    );
     assert_eq!(
         builds[0].last().unwrap(),
         &format!("docker://example.org/gpu-slow@sha256:{}", "c".repeat(64))
@@ -3605,6 +3627,85 @@ fn apptainer_runs_a_built_image_and_a_gpu_unit_waits_for_its_lease() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
+}
+
+/// Review of the software place, fix 5: an install in the docker or podman
+/// store is no image for apptainer. A run under apptainer builds its own
+/// SIF and keeps it as a second entry beside the store's, and the next run
+/// finds that one and builds nothing.
+#[test]
+fn an_image_in_another_runtime_s_store_is_not_the_apptainer_install() {
+    if !have("python3") {
+        eprintln!("python3 is not installed; the stand-ins need it, so this test is skipped");
+        return;
+    }
+    let lab = Lab::new("pipelines-other-store");
+    let fake = lab.bin.file("apptainer", FAKE_APPTAINER.as_bytes());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let apptainer_args = lab.bin.path().join("apptainer.log");
+    let t = lab.work.path().join("trace");
+    lab.add_descriptor(
+        "cpu-slow",
+        &stack_slow("cpu-slow", "{gpu: none, cores: 1, memory-gb: 1}", ""),
+    );
+    lab.ok(&["pipeline", "runtime", "--set", "apptainer"], None);
+    let run = |lab: &Lab| {
+        let mut c = lab.command(&lab.path);
+        c.args([
+            "run",
+            "cpu-slow",
+            "--select",
+            "selection:every@1",
+            "--param",
+            "sleep=0",
+        ])
+        .env("LANE_TRACE", &t)
+        .env("FAKE_APPTAINER_ARGS", &apptainer_args);
+        let out = c.output().unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    let builds = || {
+        std::fs::read_to_string(&apptainer_args)
+            .unwrap_or_default()
+            .lines()
+            .filter(|l| l.starts_with("[\"build\""))
+            .count()
+    };
+    run(&lab);
+    assert_eq!(builds(), 1);
+    // the first entry becomes an install in a docker store: no file for apptainer
+    let entry = lab.work.path().join("software/cpu-slow/1");
+    let manifest_path = entry.join("manifest.json");
+    let mut manifest: Value =
+        serde_json::from_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap();
+    manifest["kind"] = json!("image");
+    manifest["runtime"] = json!("docker");
+    manifest["image"] = manifest["source"].clone();
+    std::fs::write(&manifest_path, manifest.to_string()).unwrap();
+    std::fs::remove_file(entry.join("image")).unwrap();
+    run(&lab);
+    assert_eq!(builds(), 2, "the store's image is not the run's");
+    let sif = lab.work.path().join("software/cpu-slow/1-apptainer");
+    assert!(sif.join("image").is_file());
+    let own: Value =
+        serde_json::from_str(&std::fs::read_to_string(sif.join("manifest.json")).unwrap()).unwrap();
+    assert_eq!(own["kind"], "sif", "{own}");
+    assert_eq!(own["digest"], manifest["digest"], "{own}");
+    // the store's entry is as it was
+    let kept: Value =
+        serde_json::from_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap();
+    assert_eq!(kept["kind"], "image", "{kept}");
+    // the next run finds the second entry
+    run(&lab);
+    assert_eq!(builds(), 2, "the second entry is found, not rebuilt");
 }
 
 /// Record 49 R3: a secret the site sets is mounted read-only into the

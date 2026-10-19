@@ -987,6 +987,10 @@ pub(crate) fn command(
                         }
                         say(&done["tool"]);
                     }
+                    eprintln!(
+                        "note: nils tools install dcm2niix is an alias of {} for this release",
+                        nils_pipeline::failure::DCM2NIIX_INSTALL_COMMAND
+                    );
                     Ok(())
                 }
                 Err((_, body)) => Err(crate::fail(

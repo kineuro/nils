@@ -31,7 +31,9 @@ use crate::schema::{Type, table};
 use crate::store::{Error, Insert, Param, Store};
 use crate::time::now_iso;
 
-/// The seven roles of §10.2.
+/// The seven roles of §10.2, and `software` (record 57 P5; Wave 7b, section
+/// 6): the software place, where the engine installs the tools it runs and
+/// registers the ones a site holds, one copy for NILS and for people.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
     Source,
@@ -41,10 +43,11 @@ pub enum Role {
     Share,
     Exchange,
     Backup,
+    Software,
 }
 
 impl Role {
-    pub const ALL: [Role; 7] = [
+    pub const ALL: [Role; 8] = [
         Role::Source,
         Role::Registry,
         Role::Working,
@@ -52,6 +55,7 @@ impl Role {
         Role::Share,
         Role::Exchange,
         Role::Backup,
+        Role::Software,
     ];
 
     pub fn name(self) -> &'static str {
@@ -63,6 +67,7 @@ impl Role {
             Role::Share => "share",
             Role::Exchange => "exchange",
             Role::Backup => "backup",
+            Role::Software => "software",
         }
     }
 
@@ -82,6 +87,9 @@ impl Role {
             Role::Share => "subsets a question wrote out, results handed to a colleague",
             Role::Exchange => "what leaves or arrives through a bridge",
             Role::Backup => "the engine's archives",
+            Role::Software => {
+                "the software place: the tools the engine installs by digest and the installs a site registers, with their wrappers and modules"
+            }
         }
     }
 
@@ -97,6 +105,9 @@ impl Role {
             Role::Share => "reachable by the group",
             Role::Exchange => "its own rules",
             Role::Backup => "protected, elsewhere from the registry",
+            Role::Software => {
+                "written by the engine's account alone; readable by the people who run the tools"
+            }
         }
     }
 }

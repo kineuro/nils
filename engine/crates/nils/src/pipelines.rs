@@ -4418,13 +4418,20 @@ pub(crate) fn secret_path(registry: &mut Registry, id: &str) -> Option<String> {
 fn secrets_for(registry: &mut Registry, d: &Descriptor, p: &Pipeline) -> Result<Vec<Given>, Exit> {
     let mut out = Vec::new();
     for s in &d.secrets {
-        match secret_path(registry, &s.id) {
+        // record 57 P5: a licence file placed in the software place
+        // (licences/<app>/) stands where the site set no file
+        let path = secret_path(registry, &s.id).or_else(|| {
+            crate::software::licence_file_for(registry, p, d, s).map(|f| f.display().to_string())
+        });
+        match path {
             None if s.optional => {}
             None => {
                 return Err(usage(format!(
-                    "{} reads the secret {}, which this site has not set: nils pipeline secret set {} --file <path>",
+                    "{} reads the secret {}, which this site has not set: nils software accept {}@{} --file <path> places it in the software place, or nils pipeline secret set {} --file <path>",
                     p.label(),
                     s.id,
+                    p.name,
+                    p.tool_version,
                     s.id
                 )));
             }
@@ -5004,6 +5011,7 @@ pub(crate) fn run_command(home: &Home, args: RunArgs) -> Result<(), Exit> {
             made = Some(run_id);
             rows::set_units(registry.store(), run_id, d.units.name(), args.threshold)?;
             let _ = job::set_arg(registry.store(), job_id, "run", json!(run_id));
+            let licence_env = crate::software::licence_env(&mut registry, &p);
 
             let outcome = execute(
                 home,
@@ -5028,6 +5036,7 @@ pub(crate) fn run_command(home: &Home, args: RunArgs) -> Result<(), Exit> {
                     args: &args,
                     lane: &lane,
                     secrets: &given,
+                    licence_env: &licence_env,
                     resume: None,
                 },
             );
@@ -5604,6 +5613,7 @@ fn resume_command(home: &Home, args: &RunArgs, run_id: i64) -> Result<(), Exit> 
     let job_id = claim_run(registry.store(), &p, handle_id, claimed)?;
     rows::resume(registry.store(), run_id, job_id)?;
     let _ = job::set_arg(registry.store(), job_id, "run", json!(run_id));
+    let licence_env = crate::software::licence_env(&mut registry, &p);
     let outcome = execute(
         home,
         &mut registry,
@@ -5627,6 +5637,7 @@ fn resume_command(home: &Home, args: &RunArgs, run_id: i64) -> Result<(), Exit> 
             args,
             lane: &lane,
             secrets: &given,
+            licence_env: &licence_env,
             resume: Some(&r),
         },
     );
@@ -5924,6 +5935,16 @@ fn conclude(
         crate::failures::of_run(error.as_deref().unwrap_or_default(), exit_code, &summary)
     });
     let finished = nils_registry::time::now_iso();
+    // record 57 P5: the install that made it, installed or registered, with
+    // its version and fingerprint
+    let mut summary = summary;
+    if summary.is_object()
+        && let Some(u) = crate::software::for_run(registry, c.pipeline)
+            .ok()
+            .flatten()
+    {
+        summary["software"] = u.doc();
+    }
     rows::finish(
         registry.store(),
         run_id,
@@ -6048,6 +6069,9 @@ struct Execution<'a> {
     lane: &'a Lane,
     /// The secrets it was given (record 49 R3).
     secrets: &'a [Given],
+    /// The variables a tool's terms want set beside its licence file
+    /// (record 57 P5: `FS_ALLOW_DEEP`), from the pack of the install it uses.
+    licence_env: &'a [(String, String)],
     /// The run as it stood, where this takes it up again.
     resume: Option<&'a Run>,
 }
@@ -6422,6 +6446,9 @@ fn execute_run(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Resul
         // the secrets it reads, by id and where it sees them: never a path
         // on the host or a byte of the file (record 49 R3)
         "secrets": x.secrets.iter().map(|g| json!({"id": g.secret.id, "mount": g.secret.mount})).collect::<Vec<_>>(),
+        // record 57 P5: the install that made it, installed or registered,
+        // with its version and fingerprint, so a result says what made it
+        "software": crate::software::for_run(registry, p).ok().flatten().map(|u| u.doc()),
     });
     std::fs::write(
         inputs.join("manifest.json"),
@@ -7290,6 +7317,10 @@ fn invocation_of(
             env.push((var.clone(), g.secret.mount.clone()));
         }
     }
+    // record 57 P5: what the tool's terms want set beside its licence file
+    for (k, v) in x.licence_env {
+        env.push((k.clone(), v.clone()));
+    }
     // the threads parameter told the cores this start was given
     let argv = d.argv(&d.params_for_cores(x.params, cores), &participants)?;
     // who the process is: for podman the engine's own account, which
@@ -7438,10 +7469,14 @@ fn stop_left(rt: &runtime::Cli, together: bool, units: &[rows::Unit], out: &Path
     }
 }
 
-/// The image apptainer runs (record 49 A2): built once from the pinned
-/// digest into the working place's image folder, as a SIF file or a
-/// sandbox folder, and kept there by the digest. Answers none when the run
-/// was cancelled while it built.
+/// The image apptainer runs (record 49 A2; record 57 P5): the install in
+/// the software place whose digest is the pipeline's, installed or
+/// registered, verified before it is run; else built once from the pinned
+/// digest into the place as an install, `<app>/<version>/image`, with its
+/// manifest, wrappers and module, so the next run and people find it there
+/// (the image cache of Wave 7a becomes the place; a verified copy left in
+/// the old cache is adopted). Answers none when the run was cancelled while
+/// it built.
 fn ensure_image(
     registry: &mut Registry,
     x: &Execution<'_>,
@@ -7449,30 +7484,36 @@ fn ensure_image(
     run_dir: &Path,
 ) -> Result<Option<PathBuf>, String> {
     let form = image_form(registry);
-    let dir = working.join(IMAGES);
-    std::fs::create_dir_all(&dir).map_err(|e| format!("the image folder: {e}"))?;
-    let target = runtime::local_image(&dir, &x.pipeline.image_digest, form);
-    // a cached copy is used only as the engine built it (record 49, after
-    // review): what fails its recorded digest, or is not what the engine
-    // builds, is built again
-    if runtime::image_verified(&target, form) {
-        return Ok(Some(target));
-    }
-    if std::fs::symlink_metadata(&target).is_ok() {
-        let _ = std::fs::remove_file(&target);
-        let _ = std::fs::remove_dir_all(&target);
-        if std::fs::symlink_metadata(&target).is_ok() {
-            return Err(format!(
-                "the cached image {} is not what the engine built and cannot be removed",
-                target.display()
-            ));
+    if let Some(used) = crate::software::for_run(registry, x.pipeline)?
+        && used.manifest.kind.on_disk()
+    {
+        if let Some(why) = crate::software::failed_verification(&used) {
+            return Err(why);
         }
+        // used only as verified (record 49, after review): what fails its
+        // recorded fingerprint is not run
+        if crate::software::still_verified(&used)? {
+            return Ok(Some(PathBuf::from(&used.runnable)));
+        }
+        return Err(format!(
+            "the {} at {} is not what was verified: nils software verify {} says what changed",
+            used.words(),
+            used.runnable,
+            used.manifest.spec()
+        ));
     }
-    let name = target
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let part = dir.join(format!(".{name}.part-{}", nonce()));
+    // a verified copy in the old image cache is adopted into the place
+    let cache = runtime::local_image(&working.join(IMAGES), &x.pipeline.image_digest, form);
+    if runtime::image_verified(&cache, form)
+        && let Ok(used) = crate::software::adopt_built(registry, x.pipeline, &cache, form, x.who)
+    {
+        let mut record = cache.file_name().unwrap_or_default().to_os_string();
+        record.push(".digest");
+        let _ = std::fs::remove_file(cache.with_file_name(record));
+        return Ok(Some(PathBuf::from(&used.runnable)));
+    }
+    let staging = crate::software::staging_dir(registry, x.pipeline)?;
+    let part = staging.join(format!(".image.part-{}", nonce()));
     let log = std::fs::File::create(run_dir.join("image.log"))
         .map_err(|e| format!("the run's folder: {e}"))?;
     let err_log = log
@@ -7511,15 +7552,11 @@ fn ensure_image(
             x.pipeline.image, x.run_id
         ));
     }
-    if runtime::image_verified(&target, form) {
-        // another run built it meanwhile
-        clean(&part);
-    } else {
-        clean(&target);
-        std::fs::rename(&part, &target).map_err(|e| format!("the image folder: {e}"))?;
-        runtime::record_image(&target, form).map_err(|e| format!("the image folder: {e}"))?;
-    }
-    Ok(Some(target))
+    // into the place, as an install: another run that built it meanwhile
+    // is found there, and this build is let go
+    let used = crate::software::adopt_built(registry, x.pipeline, &part, form, x.who)
+        .inspect_err(|_| clean(&part))?;
+    Ok(Some(PathBuf::from(&used.runnable)))
 }
 
 /// What a run's `results.json` in a folder says, read only where it lies
