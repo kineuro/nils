@@ -8,7 +8,7 @@
 //! changes nothing; and every run is told there is no terminal, so it takes
 //! the defaults instead of waiting for an answer.
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use nils_dicom::synth::TempDir;
 
@@ -4669,5 +4669,91 @@ fn the_supervisor_uninstalls_for_the_desk_behind_the_typed_name_and_nothing_else
         before,
         outside_snapshot(&real),
         "an uninstall in the test's own directories changed something outside them"
+    );
+}
+
+/// Wave 7b §18: an uninstall that keeps the data leaves a row in the
+/// registry's audit log, `install.change` with what was left, under who
+/// asked.
+#[test]
+fn an_uninstall_that_keeps_the_data_leaves_an_audit_row() {
+    let nils = Installed::new("nils-setup-uninstall-audit");
+    let config = TempDir::new("nils-setup-uninstall-audit-config");
+    let base = TempDir::new("nils-setup-uninstall-audit-base");
+    let dir = base.path().join("nils");
+    let registry = dir.join("registry");
+    std::fs::create_dir_all(&dir).unwrap();
+    let run = |args: &[&str], stdin: Option<&str>| {
+        use std::io::Write as _;
+        let mut command = Command::new(nils.path());
+        command
+            .arg("--registry")
+            .arg(&registry)
+            .args(args)
+            .env("NILS_NO_TTY", "1")
+            .env("NO_COLOR", "1")
+            .env("XDG_CONFIG_HOME", config.path())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        // a binary just written may still be busy for a moment
+        let mut child = loop {
+            match command.spawn() {
+                Ok(c) => break c,
+                Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                    std::thread::sleep(std::time::Duration::from_millis(25));
+                }
+                Err(e) => panic!("nils runs: {e}"),
+            }
+        };
+        if let Some(text) = stdin {
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(text.as_bytes())
+                .unwrap();
+        }
+        drop(child.stdin.take());
+        let out = child.wait_with_output().unwrap();
+        assert!(
+            out.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).to_string()
+    };
+    run(&["key", "add", "k"], Some("an uninstall test key\n"));
+    run(&["init", "--key", "k"], None);
+    let record = config.path().join("nils");
+    std::fs::create_dir_all(&record).unwrap();
+    std::fs::write(
+        record.join("setup.toml"),
+        format!(
+            "dir = \"{}\"\nmode = \"off\"\nruntime = \"machine\"\nservice = \"none\"\n",
+            dir.display()
+        ),
+    )
+    .unwrap();
+    let out = output(
+        Command::new(nils.path())
+            .args(["uninstall", "--keep-data", "--yes", "--by", "ops@lab"])
+            .env("NILS_NO_TTY", "1")
+            .env("NO_COLOR", "1")
+            .env("XDG_CONFIG_HOME", config.path()),
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(
+        out.status.success(),
+        "{stdout}\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let rows = run(
+        &["audit", "list", "--action", "install.change", "--json"],
+        None,
+    );
+    assert!(
+        rows.contains("\"uninstall\"") && rows.contains("keep-data") && rows.contains("ops@lab"),
+        "{rows}\n{stdout}"
     );
 }
