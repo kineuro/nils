@@ -495,6 +495,35 @@ pub fn set_output(store: &mut Store, id: i64, output: &str) -> Result<(), Error>
     Ok(())
 }
 
+/// Whether this registry already names `output` as a run's output folder
+/// (another run's `output`) or holds a derivative at or under it. A folder
+/// there that no row names is what an older registry left.
+pub fn output_is_named(store: &mut Store, output: &str, run_id: i64) -> Result<bool, Error> {
+    let d = store.dialect();
+    let under = format!("{output}/");
+    let sql = format!(
+        "SELECT (SELECT COUNT(*) FROM {runs} WHERE output = {a} AND id <> {b}) \
+         + (SELECT COUNT(*) FROM {ders} WHERE path = {c} OR substr(path, 1, {n}) = {e})",
+        runs = store.qualified("pipeline_run"),
+        ders = store.qualified("derivative"),
+        a = d.param(1, Type::Text),
+        b = d.param(2, Type::Int),
+        c = d.param(3, Type::Text),
+        e = d.param(4, Type::Text),
+        n = under.chars().count(),
+    );
+    let rows = store.query(
+        &sql,
+        &[
+            Param::from(output),
+            Param::Int(run_id),
+            Param::from(output),
+            Param::from(under.as_str()),
+        ],
+    )?;
+    Ok(rows.first().map(|r| r.int(0)).transpose()?.unwrap_or(0) > 0)
+}
+
 /// The release that materialised a run's bids input.
 pub fn set_input_release(store: &mut Store, id: i64, release_id: i64) -> Result<(), Error> {
     store.update_by_id(

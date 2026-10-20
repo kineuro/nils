@@ -514,7 +514,7 @@ fn import_digest_show_and_link_go_round() {
     assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
     assert!(
         stderr(&out)
-            .contains("no column \"pid\" in the header (code, identifier); --id-column names it"),
+            .contains("no column \"pid\" in the header, which has 2 columns; --id-column names it"),
         "{}",
         stderr(&out)
     );

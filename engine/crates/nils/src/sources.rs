@@ -170,27 +170,68 @@ fn copies(store: &mut Store, places: &[i64]) -> Result<String, StoreError> {
     Ok(format!("{newest}|{}", by_state.join(",")))
 }
 
+/// The readers of the document, one lock for each key being read (Wave 7b,
+/// single flight): requests that miss the kept document at once under one key
+/// wait for the one reading it and take what it kept; a request under another
+/// key waits for nobody.
+static READING: std::sync::Mutex<Vec<(String, std::sync::Arc<std::sync::Mutex<()>>)>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// The lock of the readers of `key`, made if none is there.
+fn flight(key: &str) -> std::sync::Arc<std::sync::Mutex<()>> {
+    let mut all = READING.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((_, lock)) = all.iter().find(|(k, _)| k == key) {
+        return lock.clone();
+    }
+    let lock = std::sync::Arc::new(std::sync::Mutex::new(()));
+    all.push((key.to_string(), lock.clone()));
+    lock
+}
+
+/// Forget the locks nobody holds or waits on.
+fn landed() {
+    READING
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .retain(|(_, lock)| std::sync::Arc::strong_count(lock) > 1);
+}
+
+/// The kept document, where it was kept under `key` and is fresh.
+fn kept_under(key: &str) -> Option<Value> {
+    let kept = KEPT.lock().unwrap_or_else(|e| e.into_inner());
+    kept.as_ref()
+        .filter(|k| k.key == key && k.at.elapsed() < k.ttl)
+        .map(|k| k.doc.clone())
+}
+
 /// The sources door's document, from the kept one where it holds.
 pub fn document_kept(registry: &mut Registry, recent: usize) -> Result<Value, StoreError> {
     let (key, running) = stamp(registry.store(), recent)?;
-    {
-        let kept = KEPT.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(k) = kept.as_ref()
-            && k.key == key
-            && k.at.elapsed() < k.ttl
-        {
-            return Ok(k.doc.clone());
-        }
+    if let Some(doc) = kept_under(&key) {
+        return Ok(doc);
     }
-    READS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    let doc = document(registry, recent)?;
-    *KEPT.lock().unwrap_or_else(|e| e.into_inner()) = Some(KeptSources {
-        key,
-        at: std::time::Instant::now(),
-        ttl: std::time::Duration::from_secs(if running { 3 } else { 60 }),
-        doc: doc.clone(),
-    });
-    Ok(doc)
+    let lock = flight(&key);
+    let doc = {
+        let _reading = lock.lock().unwrap_or_else(|e| e.into_inner());
+        // another request read it while this one waited
+        match kept_under(&key) {
+            Some(doc) => Ok(doc),
+            None => {
+                READS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                document(registry, recent).inspect(|doc| {
+                    *KEPT.lock().unwrap_or_else(|e| e.into_inner()) = Some(KeptSources {
+                        key: key.clone(),
+                        at: std::time::Instant::now(),
+                        ttl: std::time::Duration::from_secs(if running { 3 } else { 60 }),
+                        doc: doc.clone(),
+                    });
+                })
+            }
+        }
+    };
+    drop(lock);
+    landed();
+    doc
 }
 
 /// Forget the kept document: a write at a door may have changed it.
@@ -562,6 +603,51 @@ mod tests {
             .unwrap();
         assert_eq!(read(&mut registry).1, 1, "a batch ended");
         assert_eq!(read(&mut registry).1, 0);
+        // Wave 7b, single flight: requests that miss at once read the
+        // document once, and the others take what that one kept
+        super::forget();
+        let before = super::reads();
+        let gate = std::sync::Arc::new(std::sync::Barrier::new(6));
+        let docs: Vec<serde_json::Value> = (0..6)
+            .map(|_| {
+                let (gate, home) = (gate.clone(), home.clone());
+                std::thread::spawn(move || {
+                    let mut mine = home.open().unwrap();
+                    gate.wait();
+                    super::document_kept(&mut mine, 12).unwrap()
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|t| t.join().unwrap())
+            .collect();
+        assert_eq!(super::reads() - before, 1, "one read for six requests");
+        assert!(docs.windows(2).all(|w| w[0] == w[1]));
+    }
+
+    /// Wave 7b, review of 2026-10-20: the single flight is by key. A reader
+    /// of one key holds nobody else up; a second request under the same key
+    /// waits for it. The locks are forgotten when nobody uses them.
+    #[test]
+    fn single_flight_waits_only_for_a_reader_of_the_same_key() {
+        let a = super::flight("test-key-a");
+        let held = a.lock().unwrap();
+        let b = super::flight("test-key-b");
+        assert!(b.try_lock().is_ok(), "another key does not wait");
+        let again = super::flight("test-key-a");
+        assert!(again.try_lock().is_err(), "the same key waits");
+        drop(held);
+        assert!(again.try_lock().is_ok());
+        drop((a, b, again));
+        super::landed();
+        assert!(
+            super::READING
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|(k, _)| !k.starts_with("test-key-")),
+            "forgotten"
+        );
     }
 
     /// 2026-10-17: the stamp reads an index and small tables, and still
@@ -664,6 +750,14 @@ mod tests {
             .unwrap();
         let now = (super::stamp(store, 12).unwrap().0, counted(store));
         assert_eq!(now, was, "a touch moves neither");
+        // writers outside a batch: an originals purge moves the epoch, and a
+        // place removed changes the places' rows; both move the stamp
+        registry.next_epoch().unwrap();
+        let after_purge = super::stamp(registry.store(), 12).unwrap().0;
+        assert_ne!(after_purge, now.0, "the epoch moved");
+        place::retire(registry.store(), ward).unwrap();
+        let after_removal = super::stamp(registry.store(), 12).unwrap().0;
+        assert_ne!(after_removal, after_purge, "a place removed");
     }
 
     #[test]

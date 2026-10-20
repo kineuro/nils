@@ -139,6 +139,15 @@ pub struct Acquisition {
     pub stacks_in_series: Option<i64>,
 }
 
+/// Whether two stacks are one acquisition written twice (Wave 7b, agenda
+/// 3.4b): both acquisition times recorded and equal, and nothing else the
+/// test reads differs, so they are one stack with several paths rather than
+/// a repeat or two acquisitions.
+pub fn written_twice(a: &Acquisition, b: &Acquisition) -> bool {
+    let d = differences(a, b);
+    d.len() == 1 && d[0] == SAME_MOMENT
+}
+
 /// What separates two stacks, in words a review item can carry. Empty means
 /// they are one acquisition made again.
 pub fn differences(a: &Acquisition, b: &Acquisition) -> Vec<String> {

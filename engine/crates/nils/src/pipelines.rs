@@ -2049,11 +2049,23 @@ pub(crate) fn located(pack_dir: Option<&Path>, command: Vec<String>) -> Result<V
             // record 57 P2: the person lets a unit run whose hard need the
             // registry cannot tell
             "--let-run" => out.push(arg),
+            // Wave 7b: the parts a run over a handle is cut into, a whole
+            // number of stacks, as `nils run --chunk` takes it
+            "--chunk" => {
+                let value = it
+                    .next()
+                    .filter(|v| v.parse::<u64>().is_ok_and(|n| n > 0))
+                    .ok_or_else(|| {
+                        Reply::error(400, "run --chunk takes a whole number of stacks, above 0")
+                    })?;
+                out.push(arg);
+                out.push(value);
+            }
             a if a.starts_with('-') => {
                 return Err(Reply::error(
                     400,
                     format!(
-                        "run takes --select, --handle, --param, --model, --labels, --threshold, --pack, --resume, --goal, --switch and --let-run, not {a}"
+                        "run takes --select, --handle, --param, --model, --labels, --threshold, --pack, --resume, --goal, --switch, --chunk and --let-run, not {a}"
                     ),
                 ));
             }
@@ -4733,7 +4745,8 @@ pub(crate) fn drop_workdirs(run_dir: &Path) {
     }
 }
 
-/// A new run's folder made its own (2026-10-17): where `dir` is there
+/// A new run's folder made its own (2026-10-17), and its output folder
+/// (Wave 7b): where `dir` is there
 /// already, it holds another run's files, and it is moved aside to
 /// `<id>.before-<when>` beside it, never deleted. Answers where it went;
 /// a folder that cannot be moved refuses the run, which never starts among
@@ -4758,7 +4771,7 @@ fn set_aside(dir: &Path) -> Result<Option<PathBuf>, String> {
     }
     std::fs::rename(dir, &to).map_err(|e| {
         format!(
-            "the run's folder {} holds another run's files, and could not be moved aside: {e}",
+            "the folder {} holds another run's files, and could not be moved aside: {e}",
             dir.display()
         )
     })?;
@@ -6473,15 +6486,25 @@ fn execute_run(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Resul
     let rel_out = format!("{}/{}/{}", derivative::TREE, p.name, x.run_id);
     let out = working.join(&rel_out);
     let err = |e: nils_registry::Error| e.to_string();
+    let mut moved_out: Option<PathBuf> = None;
     match x.resume {
         None => {
             for dir in [&input, &inputs] {
                 std::fs::create_dir_all(dir).map_err(|e| format!("the run's folder: {e}"))?;
             }
-            if out.exists() {
+            // Wave 7b: so is its output folder, when no row of this registry
+            // names it: what is there is what a registry before this one left
+            // under the same run number, and it is moved aside as the run's
+            // folder is, never deleted. A folder a row names is this
+            // registry's own, and the run is refused as it always was.
+            if rows::output_is_named(registry.store(), &rel_out, x.run_id).map_err(err)? {
                 return Err(format!(
                     "the output folder {rel_out} is there already; a run writes a folder of its own"
                 ));
+            }
+            if let Some(to) = set_aside(&out)? {
+                eprintln!("nils: run {}: {}", x.run_id, moved_words(&out, &to));
+                moved_out = Some(to);
             }
             std::fs::create_dir_all(&out).map_err(|e| format!("the output folder: {e}"))?;
             rows::set_output(registry.store(), x.run_id, &rel_out).map_err(err)?;
@@ -6964,7 +6987,16 @@ fn execute_run(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Resul
         manifest,
         local_image,
         limits: runtime::limits_here(x.runtime),
-        said: Mutex::new(moved.as_ref().map(|to| moved_words(&run_dir, to))),
+        said: Mutex::new({
+            let said: Vec<String> = [
+                moved.as_ref().map(|to| moved_words(&run_dir, to)),
+                moved_out.as_ref().map(|to| moved_words(&out, to)),
+            ]
+            .into_iter()
+            .flatten()
+            .collect();
+            (!said.is_empty()).then(|| said.join("; "))
+        }),
         unit_params,
     };
 
@@ -11222,6 +11254,22 @@ x-nils:
         assert!(located(None, words(&["run"])).is_err());
         assert!(located(None, words(&["run", "--resume"])).is_err());
         assert!(located(None, words(&["run", "--resume", "7", "--dcm2niix", "/x"])).is_err());
+        // Wave 7b: --chunk from a door, a whole number of stacks
+        assert_eq!(
+            located(
+                None,
+                words(&["run", "p", "--handle", "3", "--chunk", "500"])
+            )
+            .ok(),
+            Some(words(&["run", "p", "--handle", "3", "--chunk", "500"]))
+        );
+        for bad in ["0", "-1", "x", "1.5"] {
+            assert!(
+                located(None, words(&["run", "p", "--chunk", bad])).is_err(),
+                "{bad}"
+            );
+        }
+        assert!(located(None, words(&["run", "p", "--chunk"])).is_err());
     }
 
     /// Record 49: a unit's id becomes a folder only where it is a plain word.

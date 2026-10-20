@@ -387,7 +387,9 @@ impl Value {
     }
 }
 
-/// Parse one raw cell under its source's parser.
+/// Parse one raw cell under its source's parser. The fault names the kind
+/// of fault and never the cell (Wave 7b, the import privacy fix): a reason
+/// is shown at doors, kept in reports and counted by its text.
 fn parse(src: &Source, raw: &str) -> Result<Value, String> {
     let raw = raw.trim();
     match src.parser {
@@ -395,16 +397,16 @@ fn parse(src: &Source, raw: &str) -> Result<Value, String> {
         Parser::Int => raw
             .parse::<i64>()
             .map(Value::Int)
-            .map_err(|_| format!("{raw} is not an integer")),
+            .map_err(|_| "not an integer".to_string()),
         Parser::Float => raw
             .replace(',', ".")
             .parse::<f64>()
             .map(Value::Float)
-            .map_err(|_| format!("{raw} is not a number")),
+            .map_err(|_| "not a number".to_string()),
         Parser::Bool => match raw.to_ascii_lowercase().as_str() {
             "1" | "true" | "t" | "yes" | "y" => Ok(Value::Bool(true)),
             "0" | "false" | "f" | "no" | "n" => Ok(Value::Bool(false)),
-            _ => Err(format!("{raw} is not a yes or a no")),
+            _ => Err("not a yes or a no".to_string()),
         },
         Parser::Date => {
             let f = src.format.as_deref().unwrap_or("%Y-%m-%d");
@@ -416,7 +418,7 @@ fn parse(src: &Source, raw: &str) -> Result<Value, String> {
             );
             Day::new(y as i32, m as u32, d as u32)
                 .map(|_| Value::Date(format!("{y:04}-{m:02}-{d:02}")))
-                .ok_or_else(|| format!("{raw} is not a day of the calendar"))
+                .ok_or_else(|| "not a day of the calendar".to_string())
         }
         Parser::Time => {
             let f = src.format.as_deref().unwrap_or("%H:%M:%S");
@@ -427,7 +429,7 @@ fn parse(src: &Source, raw: &str) -> Result<Value, String> {
                 parts.get(&'S').copied().unwrap_or(0),
             );
             if h > 23 || mi > 59 || s > 59 {
-                return Err(format!("{raw} is not a time of day"));
+                return Err("not a time of day".to_string());
             }
             Ok(Value::Time(format!("{h:02}:{mi:02}:{s:02}")))
         }
@@ -454,21 +456,21 @@ fn strptime(text: &str, format: &str) -> Result<HashMap<char, i64>, String> {
                 at += 1;
             }
             if digits.is_empty() {
-                return Err(format!("{text} does not read as {format}"));
+                return Err(format!("does not read as {format}"));
             }
             let n: i64 = digits
                 .parse()
-                .map_err(|_| format!("{text} does not read as {format}"))?;
+                .map_err(|_| format!("does not read as {format}"))?;
             out.insert(token, n);
         } else {
             if at >= bytes.len() || bytes[at] != c {
-                return Err(format!("{text} does not read as {format}"));
+                return Err(format!("does not read as {format}"));
             }
             at += 1;
         }
     }
     if at != bytes.len() {
-        return Err(format!("{text} does not read as {format}"));
+        return Err(format!("does not read as {format}"));
     }
     Ok(out)
 }
@@ -618,7 +620,19 @@ struct Parsed {
     subject: Option<String>,
     reference: Option<String>,
     reference2: Option<String>,
+    /// Where each reference was read: the column's place (from 1), or
+    /// nothing when the mapping gives it as a value.
+    reference_at: Option<usize>,
+    reference2_at: Option<usize>,
     fields: BTreeMap<String, Value>,
+}
+
+/// Where a refused name came from, for a reason that never carries it.
+fn named_in(at: Option<usize>) -> String {
+    match at {
+        Some(place) => format!("the name in column {place}"),
+        None => "the mapping's name".to_string(),
+    }
 }
 
 fn read_rows(mapping: &Mapping, csv_text: &str) -> Result<(Vec<Parsed>, Vec<Outcome>), Error> {
@@ -640,47 +654,73 @@ fn read_rows(mapping: &Mapping, csv_text: &str) -> Result<(Vec<Parsed>, Vec<Outc
             .or_else(|| headers.iter().position(|h| h.eq_ignore_ascii_case(name)))
     };
     // Every column the mapping names must be there, before a row is read.
-    let mut named: Vec<&str> = mapping
+    // The header row of a file without one is its first row of values, so
+    // neither the missing name nor the header row is echoed: the fault
+    // names the mapping's field and the count of columns.
+    let mut wanted: Vec<(String, &str)> = mapping
         .columns
-        .values()
-        .filter_map(|s| s.column.as_deref())
+        .iter()
+        .filter_map(|(f, s)| {
+            s.column
+                .as_deref()
+                .map(|c| (format!("the column of {f}"), c))
+        })
         .collect();
     if let Some(s) = &mapping.subject {
-        named.push(&s.column);
+        wanted.push(("the subject's column".to_string(), &s.column));
     }
-    for r in [
-        &mapping.observation_type,
-        &mapping.cohort,
-        &mapping.disease,
-        &mapping.disease_type,
-    ]
-    .into_iter()
-    .flatten()
-    {
-        if let Ref::Column { column } = r {
-            named.push(column);
+    for (what, r) in [
+        ("observation_type", &mapping.observation_type),
+        ("cohort", &mapping.cohort),
+        ("disease", &mapping.disease),
+        ("disease_type", &mapping.disease_type),
+    ] {
+        if let Some(Ref::Column { column }) = r {
+            wanted.push((format!("the column of {what}"), column));
         }
     }
-    for c in &named {
+    for (what, c) in &wanted {
         if index(c).is_none() {
             return Err(Error::Csv(format!(
-                "the file has no column {c}; its columns are {}",
-                headers.join(", ")
+                "the mapping's {what} is not a header of the file, whose first line has {} column{}",
+                headers.len(),
+                if headers.len() == 1 { "" } else { "s" }
             )));
         }
     }
-    let cell = |record: &csv::StringRecord, name: &str| -> String {
-        index(name)
-            .and_then(|i| record.get(i))
+    // Every column is looked up once, here, and not for every field of every
+    // row: the positions of the mapping's columns, of the subject's and of
+    // the references.
+    let cell_at = |record: &csv::StringRecord, at: Option<usize>| -> String {
+        at.and_then(|i| record.get(i))
             .map(|v| v.trim().to_string())
             .unwrap_or_default()
     };
-    let reference = |record: &csv::StringRecord, r: &Option<Ref>| -> Option<String> {
+    let at_of = |r: &Option<Ref>| -> Option<usize> {
         match r {
-            Some(Ref::Value(v)) => Some(v.clone()),
-            Some(Ref::Column { column }) => Some(cell(record, column)),
-            None => None,
+            Some(Ref::Column { column }) => index(column),
+            _ => None,
         }
+    };
+    let subject_at = mapping.subject.as_ref().and_then(|s| index(&s.column));
+    let sources: Vec<_> = mapping
+        .columns
+        .iter()
+        .map(|(field, src)| (field, src, src.column.as_deref().and_then(index)))
+        .collect();
+    let (ref_at, ref2_at) = match mapping.target {
+        Target::Event => (at_of(&mapping.observation_type), None),
+        Target::CohortMember => (at_of(&mapping.cohort), None),
+        Target::SubjectDisease => (at_of(&mapping.disease), None),
+        Target::SubjectDiseaseType => (at_of(&mapping.disease), at_of(&mapping.disease_type)),
+        Target::Subject | Target::Cohort => (None, None),
+    };
+    // the places the answer names are counted from 1
+    let (reference_at, reference2_at) = (ref_at.map(|i| i + 1), ref2_at.map(|i| i + 1));
+    let reference = |record: &csv::StringRecord, r: &Option<Ref>, at: Option<usize>| match r {
+        Some(Ref::Value(v)) => Some(v.clone()),
+        Some(Ref::Column { .. }) => Some(cell_at(record, at)),
+        None => None,
     };
     let mut rows = Vec::new();
     let mut refused = Vec::new();
@@ -697,7 +737,10 @@ fn read_rows(mapping: &Mapping, csv_text: &str) -> Result<(Vec<Parsed>, Vec<Outc
                 continue;
             }
         };
-        let subject = mapping.subject.as_ref().map(|s| cell(&record, &s.column));
+        let subject = mapping
+            .subject
+            .as_ref()
+            .map(|_| cell_at(&record, subject_at));
         if let Some(s) = &subject
             && s.is_empty()
         {
@@ -709,37 +752,38 @@ fn read_rows(mapping: &Mapping, csv_text: &str) -> Result<(Vec<Parsed>, Vec<Outc
             continue;
         }
         let (reference, reference2) = match mapping.target {
-            Target::Event => (reference(&record, &mapping.observation_type), None),
-            Target::CohortMember => (reference(&record, &mapping.cohort), None),
-            Target::SubjectDisease => (reference(&record, &mapping.disease), None),
+            Target::Event => (reference(&record, &mapping.observation_type, ref_at), None),
+            Target::CohortMember => (reference(&record, &mapping.cohort, ref_at), None),
+            Target::SubjectDisease => (reference(&record, &mapping.disease, ref_at), None),
             Target::SubjectDiseaseType => (
-                reference(&record, &mapping.disease),
-                reference(&record, &mapping.disease_type),
+                reference(&record, &mapping.disease, ref_at),
+                reference(&record, &mapping.disease_type, ref2_at),
             ),
             Target::Subject | Target::Cohort => (None, None),
         };
         let mut fields = BTreeMap::new();
         let mut bad = None;
-        for (field, src) in &mapping.columns {
-            let mut raw = src
-                .column
-                .as_deref()
-                .map(|c| cell(&record, c))
-                .unwrap_or_default();
+        for (field, src, at) in &sources {
+            let mut raw = cell_at(&record, *at);
+            let mut from = at.map(|i| format!("column {}", i + 1));
             if raw.is_empty()
                 && let Some(v) = &src.value
             {
                 raw = v.clone();
+                from = None;
             }
             if raw.is_empty() {
                 continue;
             }
             match parse(src, &raw) {
                 Ok(v) => {
-                    fields.insert(field.clone(), v);
+                    fields.insert((*field).clone(), v);
                 }
                 Err(why) => {
-                    bad = Some(format!("{field}: {why}"));
+                    bad = Some(match from {
+                        Some(at) => format!("{field} ({at}): {why}"),
+                        None => format!("{field} (the mapping's value): {why}"),
+                    });
                     break;
                 }
             }
@@ -771,6 +815,8 @@ fn read_rows(mapping: &Mapping, csv_text: &str) -> Result<(Vec<Parsed>, Vec<Outc
             subject,
             reference,
             reference2,
+            reference_at,
+            reference2_at,
             fields,
         });
     }
@@ -962,7 +1008,8 @@ fn run(
                             do_apply,
                         )?],
                         None => vec![Verdict::Refused(format!(
-                            "no observation kind named {name}; load the vocabulary first"
+                            "no observation kind by {}; load the vocabulary first",
+                            named_in(r.reference_at)
                         ))],
                     }
                 }
@@ -986,7 +1033,10 @@ fn run(
                             &now,
                             do_apply,
                         )?],
-                        None => vec![Verdict::Refused(format!("no cohort named {name}"))],
+                        None => vec![Verdict::Refused(format!(
+                            "no cohort by {}",
+                            named_in(r.reference_at)
+                        ))],
                     }
                 }
                 Target::SubjectDisease => {
@@ -1003,7 +1053,10 @@ fn run(
                             &now,
                             do_apply,
                         )?],
-                        None => vec![Verdict::Refused(format!("no disease named {name}"))],
+                        None => vec![Verdict::Refused(format!(
+                            "no disease by {}",
+                            named_in(r.reference_at)
+                        ))],
                     }
                 }
                 Target::SubjectDiseaseType => {
@@ -1025,7 +1078,11 @@ fn run(
                             &now,
                             do_apply,
                         )?],
-                        None => vec![Verdict::Refused(format!("no type {kind} of {name}"))],
+                        None => vec![Verdict::Refused(format!(
+                            "no disease type by {} of the disease by {}",
+                            named_in(r.reference2_at),
+                            named_in(r.reference_at)
+                        ))],
                     }
                 }
             };

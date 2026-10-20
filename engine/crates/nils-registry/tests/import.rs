@@ -488,3 +488,112 @@ fn a_sex_written_as_a_word_agrees_with_the_letter_the_scanner_wrote() {
         assert_eq!(r.reviewed, 0, "{name}");
     }
 }
+
+/// Wave 7b, the import privacy fix: a refusal names the row (its outcome),
+/// the column by its place and the kind of fault, and never the cell, so a
+/// value in a file never reaches a door's answer, a report or a job; a
+/// missing column never echoes the first line of a file without a header.
+#[test]
+fn a_refusal_names_the_place_and_the_fault_and_never_the_cell() {
+    for mut l in labs() {
+        let name = l.name;
+        seed(&mut l.registry);
+        // Values a person would not want shown, planted in every refusable cell.
+        let planted = [
+            "31/02/1961",
+            "SEVEN-POINT",
+            "Planted Cohort",
+            "Planted Kind",
+            "Planted Course",
+        ];
+        let mut seen = Vec::new();
+        let edss = Mapping::parse(EDSS).unwrap();
+        let csv = format!(
+            "code,date,edss\ns-one,{},2\ns-two,15/01/2022,{}\n",
+            planted[0], planted[1]
+        );
+        let r = import::preview(&mut l.registry, &edss, &csv, "tester").unwrap();
+        seen.push(format!("{r:?}"));
+        assert_eq!(r.refused_total(), 2, "{name}: {r:?}");
+        assert!(
+            r.refused
+                .contains_key("event_date (column 2): not a day of the calendar"),
+            "{name}: {r:?}"
+        );
+        assert!(
+            r.refused.contains_key("value (column 3): not a number"),
+            "{name}: {r:?}"
+        );
+        let rows: Vec<usize> = r.samples.iter().map(|o| o.row).collect();
+        assert_eq!(rows, vec![1, 2], "{name}: the row is the outcome's");
+
+        let member = Mapping::parse(
+            "import:\n  target: cohort_member\n  subject: {column: code}\n  cohort: {column: study}\n",
+        )
+        .unwrap();
+        let r = import::preview(
+            &mut l.registry,
+            &member,
+            &format!("code,study\ns-one,{}\n", planted[2]),
+            "tester",
+        )
+        .unwrap();
+        seen.push(format!("{r:?}"));
+        assert!(
+            r.refused.contains_key("no cohort by the name in column 2"),
+            "{name}: {r:?}"
+        );
+        let kind = Mapping::parse(
+            "import:\n  target: event\n  subject: {column: code}\n  observation_type: {column: kind}\n  columns:\n    event_date: {column: date, parser: date, format: '%Y-%m-%d'}\n",
+        )
+        .unwrap();
+        let r = import::preview(
+            &mut l.registry,
+            &kind,
+            &format!("code,kind,date\ns-one,{},2020-01-01\n", planted[3]),
+            "tester",
+        )
+        .unwrap();
+        seen.push(format!("{r:?}"));
+        assert!(
+            r.refused.contains_key(
+                "no observation kind by the name in column 2; load the vocabulary first"
+            ),
+            "{name}: {r:?}"
+        );
+        let dtype = Mapping::parse(
+            "import:\n  target: subject_disease_type\n  subject: {column: code}\n  disease: Multiple Sclerosis\n  disease_type: {column: course}\n",
+        )
+        .unwrap();
+        let r = import::preview(
+            &mut l.registry,
+            &dtype,
+            &format!("code,course\ns-one,{}\n", planted[4]),
+            "tester",
+        )
+        .unwrap();
+        seen.push(format!("{r:?}"));
+        assert_eq!(r.refused_total(), 1, "{name}: {r:?}");
+        // whatever was refused, nothing planted is anywhere in a report
+        for report in &seen {
+            for p in planted {
+                assert!(!report.contains(p), "{name}: {p} in {report}");
+            }
+        }
+
+        // a file without a header: its first row is values, never echoed
+        let e = import::preview(
+            &mut l.registry,
+            &edss,
+            &format!("s-one,{},2\n", planted[0]),
+            "tester",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            !e.contains(planted[0]) && !e.contains("s-one"),
+            "{name}: {e}"
+        );
+        assert!(e.contains("first line has 3 columns"), "{name}: {e}");
+    }
+}

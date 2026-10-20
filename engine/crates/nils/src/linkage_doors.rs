@@ -235,10 +235,11 @@ fn columns_of(doc: &serde_json::Value) -> Result<Vec<Column>, Reply> {
             .map(str::trim)
             .filter(|h| !h.is_empty())
             .ok_or_else(|| Reply::error(400, format!("columns[{i}].header: the column's name")))?;
-        if headers.contains(&header) {
+        // refused by place: a header is a value of the file, never echoed
+        if let Some(j) = headers.iter().position(|h| *h == header) {
             return Err(Reply::error(
                 400,
-                format!("columns[{i}].header: {header} names two columns"),
+                format!("columns[{i}].header names the same column as columns[{j}]"),
             ));
         }
         headers.push(header);
@@ -445,12 +446,18 @@ fn imports(
         "import".to_string(),
         path.display().to_string(),
     ];
-    for c in &columns {
+    // Wave 7b, the import privacy fix: a header can be a value (a file
+    // without one), so the job's command line and its map file name each
+    // column by its place, never by the header the person's file gave it.
+    for (i, c) in columns.iter().enumerate() {
         let role = match c.role.id_type() {
             Some(t) => format!("{}:{t}", c.role.name()),
             None => c.role.name().to_string(),
         };
-        command.extend(["--column".to_string(), format!("{}={role}", c.header)]);
+        command.extend([
+            "--column".to_string(),
+            format!("{}={role}", place_header(i)),
+        ]);
     }
     if make_types {
         command.push("--make-types".to_string());
@@ -484,6 +491,11 @@ fn imports(
 
 static WRITTEN: AtomicUsize = AtomicUsize::new(0);
 
+/// The header a job's map file gives the column at `i` (from 0): its place.
+fn place_header(i: usize) -> String {
+    format!("column {}", i + 1)
+}
+
 /// The map as a CSV the job reads and removes: under the registry home,
 /// the directory 700, the file 600 and new.
 fn write_map(home: &Home, columns: &[Column], rows: &[Row]) -> Result<PathBuf, String> {
@@ -513,7 +525,7 @@ fn write_map(home: &Home, columns: &[Column], rows: &[Row]) -> Result<PathBuf, S
         .map_err(|e| format!("{}: {e}", path.display()))?;
     let mut writer = csv::Writer::from_writer(file);
     let written = (|| -> Result<(), csv::Error> {
-        writer.write_record(columns.iter().map(|c| c.header.as_str()))?;
+        writer.write_record((0..columns.len()).map(place_header))?;
         for r in rows {
             let mut cells: Vec<&str> = r.cells.iter().map(String::as_str).collect();
             cells.resize(columns.len(), "");
@@ -2007,6 +2019,29 @@ mod tests {
     use crate::grants::Access;
     use nils_dicom::synth::TempDir;
 
+    /// Review of 2026-10-20, item 6: a header can be a value of the file, so
+    /// the refusal of two columns with one header names their places and
+    /// never the header.
+    #[test]
+    fn two_columns_of_one_header_are_refused_by_place() {
+        let planted = "19800101-1234";
+        let doc = serde_json::json!({"columns": [
+            {"header": planted, "role": "identifier", "id_type": "patient-id"},
+            {"header": "note", "role": "ignore"},
+            {"header": planted, "role": "ignore"},
+        ]});
+        let Err(refused) = columns_of(&doc) else {
+            panic!("refused")
+        };
+        assert_eq!(refused.status, 400);
+        let said = refused.body["error"].as_str().unwrap();
+        assert_eq!(
+            said,
+            "columns[2].header names the same column as columns[0]"
+        );
+        assert!(!refused.body.to_string().contains(planted));
+    }
+
     /// The door table: what each door needs.
     #[test]
     fn the_linkage_doors_need_their_grants_and_detail() {
@@ -2398,9 +2433,14 @@ mod tests {
         let argv = job.argv().unwrap();
         assert_eq!(argv[0..2], ["linkage", "import"]);
         assert!(argv.contains(&"--column".to_string()));
-        assert!(argv.contains(&"pid=identifier:patient-id".to_string()));
-        assert!(argv.contains(&"person=canonical:registry-id".to_string()));
-        assert!(argv.contains(&"note=ignore".to_string()));
+        assert!(argv.contains(&"column 1=identifier:patient-id".to_string()));
+        assert!(argv.contains(&"column 2=canonical:registry-id".to_string()));
+        assert!(argv.contains(&"column 3=ignore".to_string()));
+        // no header of the person's file is on the job's row
+        let row = format!("{:?} {}", job.argv().unwrap(), job.args);
+        for header in ["pid", "person", "note"] {
+            assert!(!row.contains(header), "{header} in {row}");
+        }
         assert!(argv.contains(&"--make-types".to_string()));
         assert!(argv.contains(&"--consume".to_string()));
         assert_eq!(job.args["detail"], "sensitive");
@@ -2410,7 +2450,7 @@ mod tests {
         let text = std::fs::read_to_string(&file).unwrap();
         assert_eq!(
             text,
-            "pid,person,note\nP1,PID-0001,x\nP2,PID-0001,\nP3,7,\n"
+            "column 1,column 2,column 3\nP1,PID-0001,x\nP2,PID-0001,\nP3,7,\n"
         );
         #[cfg(unix)]
         {

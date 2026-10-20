@@ -214,6 +214,14 @@ pub struct Report {
     /// Of `not_repeats`, the stacks nothing that can be spelled told apart,
     /// which carry the plain fallback number (Wave 7a §8.1).
     pub numbered: i64,
+    /// Wave 7b (agenda 3.4b): the stacks this version did not write because
+    /// each is one acquisition written twice, a copy of a stack it wrote;
+    /// each is in `release_absent` as `written_twice`, naming that stack.
+    /// It is not in `left_out`: its content is in the version, under the other
+    /// path, so the rows of `release_absent` number `left_out + written_twice`.
+    /// Among the copies of one acquisition whose original this version does
+    /// not write, the first in stack order is written itself.
+    pub written_twice: i64,
     /// Wave 7a §8.1: every name a difference or a number decided, with the
     /// property and the value, which is the release's record of them.
     pub decided: Vec<DecidedName>,
@@ -806,7 +814,37 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
         for i in mine {
             grouped.entry(i.stack).or_default().push(i);
         }
-        for (stack, instances) in grouped {
+        // Wave 7b (agenda 3.4b): a copy of an acquisition is that stack's
+        // other path, so it is decided after the subject's other stacks are
+        // planned. When its original is in this version it is not written and
+        // is recorded as written_twice; when it is not (not selected, held,
+        // nowhere, no session), the first copy of that original in stack
+        // order is written itself, under the original's name, and the others
+        // are recorded as its copies.
+        let (copies, firsts): (Vec<_>, Vec<_>) = grouped
+            .into_iter()
+            .partition(|(stack, _)| shared.copies.contains_key(stack));
+        let mut written_for: HashMap<i64, i64> = HashMap::new();
+        for (stack, instances) in firsts.into_iter().chain(copies) {
+            if let Some(of) = shared.copies.get(&stack).copied() {
+                let other = if in_version.contains(&of) {
+                    Some(of)
+                } else {
+                    written_for.get(&of).copied()
+                };
+                if let Some(other) = other {
+                    report.written_twice += 1;
+                    absent.push((
+                        stack,
+                        "written_twice".to_string(),
+                        format!(
+                            "one acquisition written twice: its files are another path of stack \
+                             {other}, which is written once"
+                        ),
+                    ));
+                    continue;
+                }
+            }
             let study = instances[0].study;
             let under = policies.of_root(&instances[0].root);
             policy_of.insert(stack, under);
@@ -861,6 +899,9 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
                 } => (unjudged, label, route, place, fallback),
             };
             in_version.insert(stack);
+            if let Some(of) = shared.copies.get(&stack) {
+                written_for.insert(*of, stack);
+            }
             if unjudged {
                 report.unjudged += 1;
             }
@@ -1337,8 +1378,13 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
     }
     // Record 37 S2. A refusal on its own would be blunt; the question is what
     // carries it, and it is also where the missing axis gets named.
-    if settings.layout == Layout::Bids && !shared.groups.is_empty() {
-        raise_shared(registry.store(), &report, &shared.groups)?;
+    // Wave 7b (agenda 3.4a): only for the names this version writes, two or
+    // more stacks of a group in it, never for the rest of the registry,
+    // whose names are settled with it so that a name never depends on what
+    // a release took.
+    let ours = of_version(&shared.groups, &in_version);
+    if settings.layout == Layout::Bids && !ours.is_empty() {
+        raise_shared(registry.store(), &report, &ours)?;
     }
     // §9.2. `func` requires `task` and no rule can invent one, so a person is
     // asked, **per study**: what the subject was doing is a property of the
@@ -4952,6 +4998,33 @@ fn places(
     // marks go on one at a time and the bucket is grouped again after each,
     // so that two true repeats inside a wider group still end as runs.
     let mut shared = Shared::default();
+    // Wave 7b (agenda 3.4b): one acquisition written twice, both acquisition
+    // times recorded and equal and every fingerprint field the same, is one
+    // stack with several paths. In the bucket's order the first is the one
+    // written and the later ones are its copies, which take no name of their
+    // own and share none, so no question is asked about them.
+    for bucket in bids_buckets.values_mut() {
+        bucket.sort();
+        let mut kept: Vec<i64> = Vec::new();
+        for (_, stack, _) in bucket.iter() {
+            let of = acquisitions.get(stack).and_then(|a| {
+                kept.iter()
+                    .find(|k| {
+                        acquisitions
+                            .get(k)
+                            .is_some_and(|b| crate::bids::repeat::written_twice(b, a))
+                    })
+                    .copied()
+            });
+            match of {
+                Some(k) => {
+                    shared.copies.insert(*stack, k);
+                }
+                None => kept.push(*stack),
+            }
+        }
+        bucket.retain(|(_, stack, _)| !shared.copies.contains_key(stack));
+    }
     for bucket in bids_buckets.values_mut() {
         bucket.sort();
         let order: Vec<i64> = bucket.iter().map(|(_, stack, _)| *stack).collect();
@@ -4975,6 +5048,8 @@ fn places(
 
     let mut out = HashMap::new();
     for bucket in buckets.values_mut() {
+        // a copy takes the name of the stack it is a copy of (below)
+        bucket.retain(|n| !shared.copies.contains_key(&n.stack));
         // Wave 7a §8.1, record 55 C4: a descriptive name a measured
         // difference separates says it in a slot of its own before any
         // counter, from the same marks a BIDS name takes.
@@ -5009,6 +5084,15 @@ fn places(
                     body_part,
                 },
             );
+        }
+    }
+    // A copy is placed where the stack it copies is, so a selection that
+    // holds the copy alone still writes the acquisition, under its one name.
+    for (copy, of) in &shared.copies {
+        if let Some(p) = out.get(of).cloned() {
+            let mut p = p;
+            p.descriptive.stack = *copy;
+            out.insert(*copy, p);
         }
     }
     Ok(Placements {
@@ -5119,6 +5203,11 @@ struct Shared {
     /// One per group a person is asked about: two or more stacks that differ
     /// in nothing the engine can see and are not a repeat.
     groups: Vec<SharedGroup>,
+    /// Wave 7b (agenda 3.4b, the ruling of 2026-10-12: a duplicate is one
+    /// stack with several paths): each stack that is one acquisition written
+    /// twice, by the stack it is a copy of, which is the one written. Over
+    /// the whole registry, so which is written never depends on the release.
+    copies: BTreeMap<i64, i64>,
 }
 
 /// What decided one stack's name where it shared one with others
@@ -5366,6 +5455,7 @@ type BidsBuckets = BTreeMap<(i64, String, &'static str), Ordered>;
 /// the BIDS layout falls back to the descriptive name wherever the standard has
 /// no word: `sourcedata/` and `derivatives/nils/` are named by §9.1, which is
 /// most of why §9.1 names everything.
+#[derive(Clone)]
 struct Placed {
     descriptive: name::Named,
     bids: Result<crate::bids::name::Name, crate::bids::name::Why>,
@@ -5731,6 +5821,20 @@ fn raise_review(
     }
 }
 
+/// The groups a version is asked about (Wave 7b, agenda 3.4a): those with
+/// two or more of their stacks in it, which share a name in its tree. A
+/// group of other stacks of the registry is never this version's question,
+/// so a test release of a few subjects spends no other dataset's questions.
+fn of_version<'a>(
+    groups: &'a [SharedGroup],
+    in_version: &std::collections::BTreeSet<i64>,
+) -> Vec<&'a SharedGroup> {
+    groups
+        .iter()
+        .filter(|g| g.stacks.iter().filter(|s| in_version.contains(*s)).count() > 1)
+        .collect()
+}
+
 /// One question per name that more than one acquisition wanted (record 37
 /// S2).
 ///
@@ -5746,7 +5850,7 @@ fn raise_review(
 /// and stacks whose files say what they said last time raise the same
 /// question with the same answer. A group already asked about, answered or
 /// not, is not asked about again; what recurs is the number in the report.
-fn raise_shared(store: &mut Store, report: &Report, groups: &[SharedGroup]) -> Result<(), Error> {
+fn raise_shared(store: &mut Store, report: &Report, groups: &[&SharedGroup]) -> Result<(), Error> {
     let now = now_iso();
     let reference = table("review_item")
         .column("ref")
@@ -5823,6 +5927,25 @@ fn raise_shared(store: &mut Store, report: &Report, groups: &[SharedGroup]) -> R
 mod tests {
     use super::*;
     use nils_dicom::synth::TempDir;
+
+    #[test]
+    fn a_version_is_asked_only_about_the_names_it_writes() {
+        let group = |stacks: &[i64]| SharedGroup {
+            stacks: stacks.to_vec(),
+            suffix: "T1w".into(),
+            differs: vec![],
+            why: String::new(),
+        };
+        let groups = [group(&[1, 2]), group(&[3, 4]), group(&[5, 6, 7])];
+        let version: std::collections::BTreeSet<i64> = [1, 2, 3, 5, 6].into();
+        let asked: Vec<&[i64]> = of_version(&groups, &version)
+            .iter()
+            .map(|g| g.stacks.as_slice())
+            .collect();
+        // [3, 4] has one stack in the version, so no shared name in its tree
+        assert_eq!(asked, [&[1, 2][..], &[5, 6, 7][..]]);
+        assert!(of_version(&groups, &[8, 9].into()).is_empty());
+    }
 
     /// The MRI pack as the repository holds it.
     fn mri() -> &'static nils_pack::pack::Pack {
