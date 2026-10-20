@@ -1002,7 +1002,7 @@ paths:
       responses:
         "200": {description: "{draw, round_id, grade: {read, wrong, error, bound, confidence, method, wrong_by_axis, not_settled, cant_tell, drawn, campaign_closed, by_vendor, by_year, rule: {max_wrong: 1, passed}, wrong_stacks: [{stack_id, axes}], settle, trains: false}, rule_review: {campaign_id, opened, ...}}. Record 58 P2, added in place, additively: a settled draw is graded from the settle campaign's settled answers (a planted value the person kept is left out of its stack's read), and a stack the settle does not hold stands as the raters' agreement with the accepted answer; settle says {campaign_id, closed, items, settled, stood, planted_kept, seed, share} (null for a draw adjudicated as in Wave 7a). by_vendor and by_year count {drawn, read, wrong} per vendor and acquisition year (unknown where the registry cannot tell). rule.passed is false over one wrong, null while a stack is still to be settled, true otherwise. A round over the rule opens a rule review once (record 56's loop, never a certificate): a campaign over its wrong stacks that suggests the rules' answer and closes into nothing, recorded on the draw."}
         "404": {description: No such draw}
-        "409": {description: A draw with no campaign}
+        "409": {description: "A draw with no campaign, or a draw by count not settled yet"}
   /api/audit/draws/{id}/settle:
     post:
       summary: The verify campaign a person settles an audit round in (record 58 P2, spec 13.3; review:work and campaigns:work)

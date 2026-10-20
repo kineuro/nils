@@ -1699,6 +1699,16 @@ fn grade_door(
     let c = nils_registry::campaign::get(registry.store(), campaign)
         .map_err(crate::campaigns::campaign_err)?
         .ok_or_else(|| Reply::error(404, format!("no campaign {campaign}")))?;
+    // record 58 P2: a draw by count is graded from its settle alone, never
+    // from the raters' agreement with each other
+    if d.count.is_some() && d.settle_campaign_id.is_none() {
+        return Err(Reply::error(
+            409,
+            format!(
+                "audit draw {id} is graded from its settle: once both raters have answered, POST /api/audit/draws/{id}/settle"
+            ),
+        ));
+    }
     let (reads, closed, settle) = if d.settle_campaign_id.is_some() {
         let (reads, settle) =
             audit_draw::settled_reads(registry.store(), &d).map_err(|e| Reply::error(500, e))?;

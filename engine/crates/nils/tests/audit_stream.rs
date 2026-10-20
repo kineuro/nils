@@ -408,6 +408,16 @@ fn stream(pg: Option<(String, String)>) {
     assert_eq!(n, 150);
     let (status, doc) = server.call(
         "POST",
+        &format!("/api/audit/draws/{d1}/grade"),
+        Some(json!({})),
+        &cleo,
+    );
+    assert_eq!(
+        status, 409,
+        "a draw by count is graded from its settle: {doc}"
+    );
+    let (status, doc) = server.call(
+        "POST",
         &format!("/api/audit/draws/{d1}/settle"),
         Some(json!({"settlers": [nora_p]})),
         &cleo,
