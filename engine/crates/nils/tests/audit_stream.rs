@@ -814,14 +814,17 @@ fn edges(pg: Option<(String, String)>) {
         let text = why.to_string();
         if stack == ids[0] {
             // no value accepted: no proposal on the axis, never the word null
-            // the differing answer is what is shown
+            // nothing is pre-filled: a rater's answer is offered first among
+            // the legal values, never what Enter accepts
             assert!(!text.contains("\"base\":\"null\""), "{why}");
-            assert_eq!(why["suggested"]["base"], "PDw", "{why}");
+            assert!(why["suggested"].is_null(), "{why}");
+            assert_eq!(why["offered"][0]["base"], "PDw", "{why}");
         }
         if stack == ids[1] {
             // a can't tell offers no alternative
             assert!(why["ab"].is_null(), "{why}");
             assert_eq!(why["suggested"]["base"], accepted[&stack], "{why}");
+            assert_eq!(why["offered"], json!([]), "{why}");
         }
         if stack == ids[2] {
             assert!(!why["ab"].is_null(), "a real difference is shown: {why}");

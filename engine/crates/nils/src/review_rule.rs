@@ -1724,7 +1724,10 @@ fn settle_door(
     let names = BTreeMap::new();
     let mut imported = Vec::new();
     let mut refused = 0i64;
-    for rows in [&differing, &proposals] {
+    for (rows, source) in [
+        (&differing, audit_draw::RATER_SOURCE),
+        (&proposals, "audit settle"),
+    ] {
         if rows.is_empty() {
             continue;
         }
@@ -1734,7 +1737,7 @@ fn settle_door(
                 campaign: settle_campaign.id,
                 rows,
                 author: None,
-                source: Some("audit settle"),
+                source: Some(source),
                 who: &caller.principal,
                 names: &names,
                 dry_run: false,

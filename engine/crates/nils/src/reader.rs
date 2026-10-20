@@ -1488,9 +1488,20 @@ pub(crate) fn item_suggestion(
     if c.suggest.shows_imported() {
         let told = nils_registry::suggestion::of_items(store, c.id, &[item])
             .map_err(|e| StoreError::Message(e.to_string()))?;
-        return Ok(told
+        // a rater's answer brought by an audit settle is offered, never
+        // proposed (`offered` in the item's why)
+        let proposals: Vec<_> = told
             .get(&item)
-            .and_then(|l| nils_registry::suggestion::primary(l))
+            .map(|l| {
+                l.iter()
+                    .filter(|s| {
+                        s.source.as_deref() != Some(nils_registry::audit_draw::RATER_SOURCE)
+                    })
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        return Ok(nils_registry::suggestion::primary(&proposals)
             .map(|p| (p.value.clone(), p.author.clone())));
     }
     match stack {

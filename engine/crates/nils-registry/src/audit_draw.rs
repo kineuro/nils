@@ -827,6 +827,11 @@ pub fn comparable(v: &Value) -> Option<String> {
     (!words.is_empty()).then(|| words.join(","))
 }
 
+/// The source a settle names the imports of the raters' differing answers
+/// by. What it brings is offered beside the item, never proposed: only the
+/// rules' accepted answer is what Enter accepts.
+pub const RATER_SOURCE: &str = "audit settle: rater answer";
+
 /// The words a settled answer uses for "cannot tell".
 pub const CANT_TELL: [&str; 2] = ["cant_tell", "can't tell"];
 

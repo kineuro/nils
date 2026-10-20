@@ -1412,6 +1412,33 @@ pub(crate) fn route(
                     } else {
                         ab_of(registry.store(), &c, item, stack, &q, pack.as_deref())?
                     };
+                    // what a rater said where the rules proposed nothing:
+                    // offered first among the legal values, never the
+                    // proposal Enter accepts
+                    doc["offered"] = if blind || !c.suggest.shows_imported() {
+                        json!([])
+                    } else {
+                        let told =
+                            nils_registry::suggestion::of_items(registry.store(), c.id, &[item])
+                                .map_err(campaign_err)?
+                                .remove(&item)
+                                .unwrap_or_default();
+                        let mut seen = std::collections::BTreeSet::new();
+                        json!(
+                            told.iter()
+                                .filter(|t| {
+                                    t.source.as_deref()
+                                        == Some(nils_registry::audit_draw::RATER_SOURCE)
+                                        && seen.insert(t.value.clone())
+                                })
+                                .map(|t| {
+                                    let mut v = json!(t.value);
+                                    axes_value(&c.question, &mut v);
+                                    v
+                                })
+                                .collect::<Vec<_>>()
+                        )
+                    };
                 }
                 // record 50 R3: every outside suggestion for the item, with
                 // its author and its confidences; none on a stack read blind,
