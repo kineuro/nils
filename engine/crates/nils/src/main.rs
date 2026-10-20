@@ -12273,6 +12273,13 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
         // made twice, and the three numbers behind every one of them are
         // printed because the failure they replace was silent: a counter
         // looks the same whether it is true or invented.
+        // Wave 7b (agenda 3.4b): one acquisition written twice is written once
+        if report.written_twice > 0 {
+            println!(
+                "  {:>10}   stack(s) not written: each one acquisition written twice, another path of a stack written once",
+                report.written_twice
+            );
+        }
         if report.shared_names > 0 {
             println!("  one name, more than one stack");
             println!(

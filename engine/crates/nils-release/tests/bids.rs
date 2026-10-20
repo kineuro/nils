@@ -2094,18 +2094,69 @@ fn two_stations_that_differ_only_in_position_are_two_acquisitions() {
 }
 
 #[test]
-fn two_series_made_at_one_moment_are_numbered_and_asked_about() {
-    // One acquisition written twice is not a rescan, whatever its UIDs.
+fn one_acquisition_written_twice_is_one_stack_written_once() {
+    // Wave 7b (agenda 3.4b, the ruling of 2026-10-12): two series made at
+    // one moment and the same in every field the fingerprint holds are one
+    // acquisition written twice, whatever their UIDs and series numbers: one
+    // stack with several paths, written once, and nobody is asked.
+    let Some(converter) = converter() else { return };
     let one = Twin {
         acquired: Some("102000"),
         ..twin("t1_mprage_sag", "T1 MPRAGE")
     };
-    // The one case the engine sees nothing in: numbered, and asked about.
-    numbered_with(
-        one,
-        one,
-        serde_json::json!(["acquired at the same moment"]),
-        true,
+    let source = twins(one, one);
+    let home_dir = TempDir::new("bids-home");
+    let out = TempDir::new("bids-out");
+    let (mut reg, report) = released(&source, &home_dir, &out, &converter);
+
+    let names = anat_names(out.path());
+    assert_eq!(names.len(), 1, "written once: {names:?}");
+    assert!(!names[0].contains("_run-"), "{names:?}");
+    assert_eq!(report.written_twice, 1, "{report:?}");
+    assert_eq!(report.shared_names, 0, "{report:?}");
+    assert_eq!(report.numbered, 0, "{report:?}");
+    assert!(shared_differs(&mut reg).is_empty(), "nobody is asked");
+    // the other path is recorded, naming the stack written
+    let store = reg.store();
+    let sql = format!(
+        "SELECT stack_id, why FROM {} WHERE kind = 'written_twice'",
+        store.qualified("release_absent")
+    );
+    let rows = store.query(&sql, &[]).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert!(
+        rows[0].text(1).unwrap().contains("another path of stack"),
+        "{:?}",
+        rows[0].text(1)
+    );
+    // and a release of the copy alone writes the acquisition under its name
+    let copy = rows[0].int(0).unwrap();
+    let alone = TempDir::new("bids-out-copy");
+    let policy = Policy::default();
+    let scheme = SessionScheme::default();
+    let mut s = settings(
+        alone.path(),
+        &policy,
+        &scheme,
+        Options::default(),
+        Some(&converter),
+    );
+    s.selection = Selection {
+        stacks: vec![copy],
+        ..Selection::default()
+    };
+    let again = run::run(&mut reg, &s).unwrap();
+    assert_eq!(again.written_twice, 0, "{again:?}");
+    let alone_names = anat_names(alone.path());
+    let strip = |v: &[String]| -> Vec<String> {
+        v.iter()
+            .map(|n| n.rsplit('/').next().unwrap().to_string())
+            .collect()
+    };
+    assert_eq!(
+        strip(&alone_names),
+        strip(&names),
+        "one name, whichever path"
     );
 }
 
