@@ -604,6 +604,52 @@ impl Auth {
     }
 }
 
+/// The calls one turn of an assistant may make by default (wave 7b §18):
+/// a turn that answers takes a few dozen; one past this loops.
+pub(crate) const TURN_CALLS: u32 = 64;
+
+/// The turn cap this server holds (`nils serve --turn-calls`), 0 for none.
+static TURN_CAP: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(TURN_CALLS);
+
+/// The calls each turn made, by principal, conversation and turn, with
+/// when the turn last called; a turn quiet for an hour is forgotten.
+type Turns = std::sync::Mutex<HashMap<String, (u32, Instant)>>;
+static TURNS: std::sync::OnceLock<Turns> = std::sync::OnceLock::new();
+
+/// Wave 7b §18: a call of an assistant's turn past the turn cap, refused
+/// with 429 and words a model reads as "answer now". A turn is what the
+/// actor names (`turn`, with its `conversation`); a call that names none
+/// is never counted.
+fn turn_refused(caller: &Caller) -> Option<Reply> {
+    let cap = TURN_CAP.load(Ordering::Relaxed);
+    let turn = caller
+        .actor
+        .get("turn")
+        .filter(|t| t.is_string() || t.is_number())?;
+    if cap == 0 {
+        return None;
+    }
+    let key = format!(
+        "{}\n{}\n{}",
+        caller.principal, caller.actor["conversation"], turn
+    );
+    let turns = TURNS.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    let mut turns = turns.lock().ok()?;
+    let now = Instant::now();
+    turns.retain(|_, (_, at)| now.duration_since(*at) < Duration::from_secs(3600));
+    let entry = turns.entry(key).or_insert((0, now));
+    entry.0 = entry.0.saturating_add(1);
+    entry.1 = now;
+    (entry.0 > cap).then(|| {
+        Reply::error(
+            429,
+            format!(
+                "this turn has made {cap} calls, the most one turn may make; answer with what the calls so far found, or say what is still unknown"
+            ),
+        )
+    })
+}
+
 /// Wave 4c §5.5: the two headers a call may carry. `X-Nils-Ceiling` names a
 /// ladder step and can only narrow: the caller keeps the grants of the
 /// step's set and the assistant, and detail is lowered to the step's.
@@ -690,6 +736,9 @@ fn narrow(mut caller: Caller, request: &Request) -> Result<Caller, Reply> {
             }
         }
         caller.actor = value;
+    }
+    if let Some(refused) = turn_refused(&caller) {
+        return Err(refused);
     }
     if let Some(ceiling) = header("X-Nils-Ceiling") {
         let Some(step) = Step::parse(&ceiling) else {
@@ -1097,6 +1146,7 @@ pub fn serve(home: &Home, args: ServeArgs) -> Result<(), Exit> {
     // 2026-10-02: the watchdog is fed from here while the engine starts,
     // and the soft limit on open files is raised to the hard one
     let watchdog = Watchdog::start();
+    TURN_CAP.store(args.turn_calls, Ordering::Relaxed);
     let files = intake::raise_file_limit();
     let auth = Auth::parse(&args)?;
     // §12: a fresh install has no --pack-dir, so the packs are looked for
@@ -1141,13 +1191,23 @@ pub fn serve(home: &Home, args: ServeArgs) -> Result<(), Exit> {
     // a failure is said and the engine serves on
     // (never a panic: a caller that read the listening line and closed
     // the pipe is not a reason to stop)
-    if let Ok(mut registry) = home.open() {
-        let line = crate::starter::at_start(&mut registry);
-        let _ = std::io::Write::write_all(&mut std::io::stdout(), format!("{line}\n").as_bytes());
-        // 2026-10-11: the look for a container runtime runs behind the
-        // doors from here on, never on a door's thread
-        crate::pipelines::look_behind(&mut registry);
-    }
+    // wave 7b §18: while the registry is migrated, where this binary's
+    // schema is newer, every door answers 503 with the migration's
+    // progress, so a supervisor that waits for the new version waits for
+    // the migration rather than roll it back
+    let opening = std::sync::atomic::AtomicBool::new(true);
+    std::thread::scope(|scope| {
+        scope.spawn(|| answer_while_starting(&server, &opening));
+        if let Ok(mut registry) = home.open() {
+            let line = crate::starter::at_start(&mut registry);
+            let _ =
+                std::io::Write::write_all(&mut std::io::stdout(), format!("{line}\n").as_bytes());
+            // 2026-10-11: the look for a container runtime runs behind the
+            // doors from here on, never on a door's thread
+            crate::pipelines::look_behind(&mut registry);
+        }
+        opening.store(false, Ordering::SeqCst);
+    });
     let ask_caps = match &args.ask_caps {
         Some(text) => {
             let over: serde_json::Value = serde_json::from_str(text)
@@ -1702,6 +1762,38 @@ const ANSWER_WITHIN: Duration = Duration::from_secs(2);
 /// open, the body otherwise waits for the acknowledgement of the head,
 /// which the other side delays by some 40 ms, so every picture and every
 /// manifest a reader's page asked for arrived 40 ms late.
+/// What every door answers while the engine migrates its registry as it
+/// starts (wave 7b §18): 503, with the migration's progress. A request
+/// while it opens a registry it need not migrate waits for the doors, as
+/// it always did.
+pub(crate) fn starting_body() -> serde_json::Value {
+    serde_json::json!({
+        "error": "the engine is starting; ask again shortly",
+        "disclosure": "safe",
+        "starting": {"migrating": nils_registry::migrate::progress()},
+    })
+}
+
+fn answer_while_starting(server: &tiny_http::Server, opening: &std::sync::atomic::AtomicBool) {
+    while opening.load(Ordering::SeqCst) {
+        if nils_registry::migrate::progress().is_none() {
+            std::thread::sleep(Duration::from_millis(50));
+            continue;
+        }
+        let Ok(Some(request)) = server.recv_timeout(Duration::from_millis(100)) else {
+            continue;
+        };
+        let body = starting_body().to_string();
+        let response = tiny_http::Response::from_string(body)
+            .with_status_code(503)
+            .with_header(
+                tiny_http::Header::from_bytes("Content-Type", "application/json").expect("header"),
+            )
+            .with_header(tiny_http::Header::from_bytes("Retry-After", "5").expect("header"));
+        let _ = request.respond(response);
+    }
+}
+
 fn listen(bind: &str) -> Result<tiny_http::Server, String> {
     let listener = std::net::TcpListener::bind(bind).map_err(|e| e.to_string())?;
     no_delay(&listener);
@@ -8974,5 +9066,44 @@ mod forgets {
         assert!(!writes_a_place(&Method::Get, "/api/sources"));
         assert!(!writes_a_place(&Method::Post, "/api/picks/map"));
         assert!(!writes_a_place(&Method::Post, "/api/ask"));
+    }
+}
+
+#[cfg(test)]
+mod turn_cap_tests {
+    use super::*;
+
+    fn caller(actor: serde_json::Value) -> Caller {
+        Caller {
+            principal: "anna@lab".to_string(),
+            access: Access::default(),
+            display: None,
+            name: None,
+            email: None,
+            actor,
+            ceiling: None,
+            idempotency_key: None,
+        }
+    }
+
+    /// Wave 7b §18: the calls of one turn are counted and the one past the
+    /// cap is refused with 429; another turn counts afresh, and a call that
+    /// names no turn is never counted.
+    #[test]
+    fn a_turn_past_its_calls_is_refused() {
+        let one =
+            caller(serde_json::json!({"kind": "agent", "conversation": "c-test", "turn": "t1"}));
+        for _ in 0..TURN_CALLS {
+            assert!(turn_refused(&one).is_none());
+        }
+        let refused = turn_refused(&one).expect("the call past the cap");
+        assert_eq!(refused.status, 429);
+        let other =
+            caller(serde_json::json!({"kind": "agent", "conversation": "c-test", "turn": "t2"}));
+        assert!(turn_refused(&other).is_none());
+        let unnamed = caller(serde_json::json!({"kind": "agent", "conversation": "c-test"}));
+        for _ in 0..=TURN_CALLS {
+            assert!(turn_refused(&unnamed).is_none());
+        }
     }
 }

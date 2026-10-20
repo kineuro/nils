@@ -709,6 +709,12 @@ struct ServeArgs {
     /// Request handlers, each with a registry connection of its own
     #[arg(long, default_value = "4", value_name = "N")]
     workers: usize,
+    /// Wave 7b §18: the calls one turn of an assistant may make, counted by
+    /// the turn its X-Nils-Actor names (`conversation` and `turn`); past it a
+    /// call is refused with 429, so a check that loops on tool calls ends
+    /// and holds no model slot. 0 counts nothing
+    #[arg(long, default_value_t = crate::serve::TURN_CALLS, value_name = "N")]
+    turn_calls: u32,
     /// The cap on open event streams (Wave 4c section 6.1); half the
     /// workers, at least one, when absent
     #[arg(long, value_name = "N")]

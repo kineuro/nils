@@ -3310,7 +3310,31 @@ pub fn standing(store: &mut Store, kind: Kind) -> Result<Standing, Error> {
 
 /// Apply every migration after the store's version, each in its own
 /// transaction, and record the version. Returns the versions applied.
+/// The migration this process is making now, where it makes one (wave 7b
+/// §18): the version it started from, the version it goes to, the step it
+/// is at and since when. A server that starts while it migrates answers
+/// this at its doors, so a supervisor that waits for its new version waits
+/// for the migration rather than roll it back.
+static PROGRESS: std::sync::Mutex<Option<serde_json::Value>> = std::sync::Mutex::new(None);
+
+/// [`PROGRESS`] as it stands: `None` while nothing migrates.
+pub fn progress() -> Option<serde_json::Value> {
+    PROGRESS.lock().ok().and_then(|p| p.clone())
+}
+
+fn report(now: Option<serde_json::Value>) {
+    if let Ok(mut p) = PROGRESS.lock() {
+        *p = now;
+    }
+}
+
 pub fn migrate(store: &mut Store, kind: Kind) -> Result<Vec<i64>, Error> {
+    let applied = migrate_reporting(store, kind);
+    report(None);
+    applied
+}
+
+fn migrate_reporting(store: &mut Store, kind: Kind) -> Result<Vec<i64>, Error> {
     let from = match standing(store, kind)? {
         Standing::Empty => 0,
         Standing::Current => return Ok(Vec::new()),
@@ -3323,7 +3347,16 @@ pub fn migrate(store: &mut Store, kind: Kind) -> Result<Vec<i64>, Error> {
         }
     };
     let mut applied = Vec::new();
+    let started = crate::time::now_iso();
     for m in MIGRATIONS.iter().filter(|m| m.version > from) {
+        report(Some(serde_json::json!({
+            "kind": kind.name(),
+            "from": from,
+            "to": SCHEMA_VERSION,
+            "step": m.version,
+            "started_at": started,
+            "step_started_at": crate::time::now_iso(),
+        })));
         store.begin()?;
         let result = (m.apply)(store, kind).and_then(|()| set_version(store, kind, m.version));
         match result {

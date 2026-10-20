@@ -73,11 +73,12 @@
 # registry holds already runs the graded fast path: the stages overlapped in
 # one worker pool (overlap on), as many workers as the lane has cores
 # (x-nils.needs.cores lane, at most 64, the threads maximum), and no cache,
-# since the overlapped pool reads none. A dataset's bring-in scores its new
-# stacks without a manual run (x-nils.on-arrival) with the slice cache: the
-# stages one after the other (overlap off), the cache read and written at
-# /cache, and the touched planes filled for it (cache_fill touched, ruling
-# R5), as E5 ruled (the cache is filled at arrival for new data only). A
+# since the overlapped pool reads none. Body part is an optional model a
+# person runs from the dataset's step, never at arrival (record 55, ruling
+# 35 (b)); x-nils.on-arrival gives the parameters of a run over a batch's
+# new stacks (nils score --step body_part) with the slice cache: the stages
+# one after the other (overlap off), the cache read and written at /cache,
+# and the touched planes filled for it (cache_fill touched, ruling R5). A
 # re-score that should read the cache asks cache=/cache. Both modes give the
 # same answers (A5.2.3d: the overlap is class I against the sequential
 # path).
@@ -137,7 +138,8 @@ inputs:
       touched also builds the touched planes of the stacks an earlier stage
       answered, for the slice cache, so a later head or calibration update
       re-scores them from the cache; none keeps only what the answers read.
-      A run at arrival takes touched.
+      A run over a batch's new stacks (nils score --step body_part) takes
+      touched.
     value-key: "[CACHE_FILL]"
     command-line-flag: --cache-fill
     value-choices: [none, touched]
@@ -161,7 +163,7 @@ inputs:
     type: String
     description: >-
       /cache reads and keeps the inputs the stages read in the site's
-      slice cache, as scoring at arrival does and a re-score after a head
+      slice cache, as a run over a batch's new stacks does and a re-score after a head
       or calibration update may; left out, the run reads and keeps none, as
       a pass over stacks the registry holds does.
     value-key: "[CACHE]"
@@ -195,8 +197,10 @@ suggested-resources:
 x-nils:
   contract: 1
   analysis-level: stack
-  # record 55 E5: a dataset's new stacks are scored as they arrive, with
-  # the slice cache, and the touched planes kept for it (ruling R5)
+  # record 55 E5 as ruling 35 (b) amended it: never run at arrival; these
+  # are the parameters of a run over a batch's new stacks a person asks for
+  # (nils score --step body_part), with the slice cache, and the touched
+  # planes kept for it (ruling R5)
   on-arrival:
     params:
       cache: /cache
@@ -280,7 +284,7 @@ x-nils:
     cores-input: threads
     # measured (2026-10-14, this image, 48 workers, the PSS of all the
     # run's processes): 8.3 GiB on the CPU and 9.9 on a card for a pass,
-    # 8.7 and 9.4 at arrival; earlier 10.4 GiB at 32 workers (2026-10-12).
+    # 8.7 and 9.4 with the slice cache; earlier 10.4 GiB at 32 workers (2026-10-12).
     # 16 holds the 64 workers a lane may give with a margin
     memory-gb: 16
   proposals:

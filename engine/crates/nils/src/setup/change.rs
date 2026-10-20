@@ -707,8 +707,13 @@ fn restore_as(plan: &Plan, archive: &Path, by: &str) -> Result<String, String> {
 /// for it, written as the engine's account where the services are the
 /// machine's own.
 fn audit(state: &State, request: &Request) -> Result<(), String> {
+    audit_act(state, &request.by, request.scope())
+}
+
+/// An `install.change` row under `by` with `scope`, written as [`audit`]
+/// writes a change's (the uninstall's too, wave 7b §18).
+pub(crate) fn audit_act(state: &State, by: &str, scope: Value) -> Result<(), String> {
     let plan = plan_from_state(state, None);
-    let scope = request.scope();
     let acting = plan
         .system
         .as_ref()
@@ -716,16 +721,12 @@ fn audit(state: &State, request: &Request) -> Result<(), String> {
     match acting {
         Some(acting) => {
             let ran = acting.run(
-                &owned_words(&[REGISTRY_STEP, "audit", "--by", &request.by]),
+                &owned_words(&[REGISTRY_STEP, "audit", "--by", by]),
                 Some(scope.to_string().as_bytes()),
             );
             if ran.ok { Ok(()) } else { Err(ran.why) }
         }
-        None => audit_here(
-            &home_on_machine(&Home::new(plan.registry())),
-            &request.by,
-            scope,
-        ),
+        None => audit_here(&home_on_machine(&Home::new(plan.registry())), by, scope),
     }
 }
 

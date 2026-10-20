@@ -463,6 +463,11 @@ pub(crate) struct Config {
     /// Seconds to wait for a part to answer with its new version after a restart.
     #[serde(default = "default_settle")]
     pub settle_seconds: u64,
+    /// Wave 7b §18: how long the settle waits past `settle_seconds` while
+    /// the part's door says it is migrating its registry (an index over
+    /// tens of millions of rows takes minutes); six hours by default.
+    #[serde(default = "default_migration")]
+    pub migration_seconds: u64,
     /// Bearer tokens and who they name; every door asks for one (the admin entitlement).
     #[serde(default)]
     pub tokens: BTreeMap<String, String>,
@@ -481,6 +486,9 @@ fn default_look_again() -> u64 {
 }
 fn default_settle() -> u64 {
     30
+}
+fn default_migration() -> u64 {
+    6 * 3600
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -569,17 +577,63 @@ fn observed(check: &Check) -> Option<String> {
     }
 }
 
-fn settled(check: &Check, version: &str, within: Duration) -> bool {
+/// The migration a part's door says it is making while it starts (wave 7b
+/// §18): the engine answers 503 with `starting.migrating` until its
+/// registry is open. `None` where the door answers otherwise or not at all.
+fn migrating(check: &Check) -> Option<Value> {
+    let Check::Capabilities(url) = check else {
+        return None;
+    };
+    let bytes = if let Some(path) = url.strip_prefix("file://") {
+        std::fs::read(path).ok()?
+    } else {
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .timeout_global(Some(Duration::from_secs(10)))
+            .http_status_as_error(false)
+            .build()
+            .into();
+        let mut response = agent.get(url).call().ok()?;
+        let mut bytes = Vec::new();
+        response
+            .body_mut()
+            .as_reader()
+            .read_to_end(&mut bytes)
+            .ok()?;
+        bytes
+    };
+    let doc: Value = serde_json::from_slice(&bytes).ok()?;
+    doc.pointer("/starting/migrating")
+        .filter(|m| m.is_object())
+        .cloned()
+}
+
+/// Whether the part answers with `version` within `within`; past it, the
+/// settle waits on while the part's door says it is migrating, up to
+/// `migration` in all, so an update is never rolled back in the middle of
+/// a migration the new version is making (the old binary would refuse the
+/// newer schema). How it ended, and the last migration it saw.
+fn settled(
+    check: &Check,
+    version: &str,
+    within: Duration,
+    migration: Duration,
+) -> (bool, Option<Value>) {
     if matches!(check, Check::None) {
-        return true;
+        return (true, None);
     }
     let start = Instant::now();
+    let mut seen = None;
     loop {
         if observed(check).as_deref() == Some(version) {
-            return true;
+            return (true, seen);
         }
         if start.elapsed() > within {
-            return false;
+            match migrating(check) {
+                Some(m) if start.elapsed() <= within.max(migration) => seen = Some(m),
+                _ => return (false, seen),
+            }
+            std::thread::sleep(Duration::from_secs(1));
+            continue;
         }
         std::thread::sleep(Duration::from_millis(250));
     }
@@ -775,19 +829,32 @@ pub(crate) fn update(
         .map_err(|w| refuse(w, &manifest.version, &manifest.sha256))?;
     swap(part, &manifest, &staging).map_err(|w| refuse(w, &manifest.version, &manifest.sha256))?;
     let restarted = restart(&part.restart);
-    let ok = restarted.is_ok()
-        && settled(
+    let (ok, migrated) = match &restarted {
+        Ok(()) => settled(
             &part.check(),
             &manifest.version,
             Duration::from_secs(config.settle_seconds),
-        );
+            Duration::from_secs(config.migration_seconds),
+        ),
+        Err(_) => (false, None),
+    };
     if !ok {
         let why = match restarted {
             Err(e) => format!("the restart failed: {e}"),
-            Ok(()) => format!(
-                "{} did not answer with {} within {} s",
-                part.name, manifest.version, config.settle_seconds
-            ),
+            Ok(()) => match &migrated {
+                Some(m) => format!(
+                    "{} did not answer with {} within {} s, and its migration to schema {} stopped answering or ran past {} s",
+                    part.name,
+                    manifest.version,
+                    config.settle_seconds,
+                    m["to"],
+                    config.migration_seconds
+                ),
+                None => format!(
+                    "{} did not answer with {} within {} s",
+                    part.name, manifest.version, config.settle_seconds
+                ),
+            },
         };
         let back =
             roll_back(part, &manifest, before.as_ref()).and_then(|()| restart(&part.restart));
@@ -994,15 +1061,31 @@ struct Runs {
 
 impl Runs {
     /// The run still going, where one is: one runs at a time.
+    ///
+    /// A run whose recorder has written its ending is over, though the
+    /// recorder may not have exited yet: the door already answers it ended
+    /// (`show` reads the record), so it is waited for here, briefly, rather
+    /// than refuse the next run with 409 (the race since the one-run rule).
     fn going(&self) -> Result<(), (u16, String)> {
         let mut children = self
             .children
             .lock()
             .map_err(|_| (500, "the runs are held".to_string()))?;
+        let mut over = Vec::new();
         for (id, child) in children.iter_mut() {
-            if matches!(child.try_wait(), Ok(None)) {
-                return Err((409, format!("run {id} is still going; one run at a time")));
+            match child.try_wait() {
+                Ok(None) => {
+                    let ended = read_run(&self.dir, id).is_some_and(|d| d["state"] != "running");
+                    if !(ended && exits_soon(child)) {
+                        return Err((409, format!("run {id} is still going; one run at a time")));
+                    }
+                    over.push(id.clone());
+                }
+                _ => over.push(id.clone()),
             }
+        }
+        for id in over {
+            children.remove(&id);
         }
         Ok(())
     }
@@ -1114,6 +1197,19 @@ impl Runs {
         doc["tail"] = json!(lines[lines.len().saturating_sub(40)..].to_vec());
         Some(doc)
     }
+}
+
+/// Whether a recorder that wrote its run's ending exits within ten
+/// seconds, as it does right after the write; reaped where it does.
+fn exits_soon(child: &mut Child) -> bool {
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(10) {
+        if !matches!(child.try_wait(), Ok(None)) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    false
 }
 
 /// Run one command of this binary for a run the service started, and write
@@ -1874,6 +1970,8 @@ fn uninstall_door(config: &Config, runs: &Runs, doc: &Value, by: &str) -> (u16, 
         "uninstall".to_string(),
         "--leave".to_string(),
         word.to_string(),
+        "--by".to_string(),
+        by.to_string(),
     ];
     let act = json!({
         "at": nils_registry::time::now_iso(),
@@ -2022,6 +2120,9 @@ pub(crate) enum SuperviseCommand {
     Uninstall {
         #[arg(long)]
         leave: String,
+        /// The person the desk named, for the registry's audit row
+        #[arg(long)]
+        by: Option<String>,
     },
     /// Run a command of this binary for a run the service started, and record how it ended
     #[command(hide = true)]
@@ -2161,7 +2262,7 @@ pub(crate) fn command(command: SuperviseCommand) -> Result<(), Exit> {
         SuperviseCommand::Record { dir, id, command } => record(&dir, &id, &command),
         SuperviseCommand::Change => crate::setup::change::change_command(),
         SuperviseCommand::Restore => crate::setup::change::restore_command(),
-        SuperviseCommand::Uninstall { leave } => crate::setup::uninstall_supervised(&leave),
+        SuperviseCommand::Uninstall { leave, by } => crate::setup::uninstall_supervised(&leave, by),
         SuperviseCommand::Restart { part } => {
             let state = recorded()?;
             crate::setup::restart_units(&state, part.as_deref()).map(|_| ())

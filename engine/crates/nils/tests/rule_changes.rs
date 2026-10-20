@@ -1465,13 +1465,22 @@ fn rules_are_proposed_adopted_and_re_sorted_on_postgres() {
         return;
     };
     let schema = "rules_page";
+    // the server is killed when its round ends, and a job it started may
+    // still be writing as the schema is dropped: a drop that deadlocks with
+    // that write (40P01) is tried again once the write has had its time
     let drop = || {
-        let mut store = Store::connect_postgres(&dsn, schema).expect("connect");
-        store
-            .batch(&format!(
+        let mut last = String::new();
+        for _ in 0..40 {
+            let mut store = Store::connect_postgres(&dsn, schema).expect("connect");
+            match store.batch(&format!(
                 "DROP SCHEMA IF EXISTS {schema} CASCADE; DROP SCHEMA IF EXISTS {schema}_linkage CASCADE"
-            ))
-            .expect("drop");
+            )) {
+                Ok(()) => return,
+                Err(e) => last = e.to_string(),
+            }
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
+        panic!("the test schema could not be dropped: {last}");
     };
     drop();
     round(Some((dsn.clone(), schema.to_string())));

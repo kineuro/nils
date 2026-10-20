@@ -20,9 +20,11 @@
 # pipeline (postcontrast-full), which the engine runs over the stacks this
 # run's tables mark deferred.
 #
-# A dataset's bring-in runs it over its new stacks without a manual run
-# (x-nils.on-arrival, record 55 E5), once the body part's run over them has
-# ended, since it answers only on brain.
+# Post-contrast is an optional model a person runs from the dataset's step,
+# never at arrival (record 55, ruling 35 (b)); x-nils.on-arrival gives the
+# parameters of a run over a batch's new stacks (nils score --step
+# post_contrast), queued after the body part's run over them ends, since it
+# answers only on brain.
 #
 # The weights are the run's model inputs (student, fusion, cascade), never
 # part of the image; the image checks each against the digest the run's
