@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 109;
+pub const SCHEMA_VERSION: i64 = 110;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -490,12 +490,40 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 109,
         apply: a_pipeline_version_is_the_pair_and_a_unit_records_its_pack,
     },
+    Migration {
+        version: 110,
+        apply: an_audit_draws_by_count_and_is_settled,
+    },
 ];
 
 /// Record 58 P1 (Wave 7b spec §12): a verify campaign's planting
 /// (`campaign.planted`), its planted items (`campaign_planted`) and the
 /// names accounts go by (`principal_name`). Only a column and two tables
 /// are added; no row is touched, and a campaign from before plants nothing.
+/// Record 58 P2 (Wave 7b spec §13): an audit draw by count since a time,
+/// the settle campaign and its seed and share, the rule review a round
+/// over the rule opened, and each drawn stack's vendor and acquisition
+/// year. Only columns are added; a draw from before is a draw by share,
+/// unsettled, and its stacks' vendor and year are unknown.
+fn an_audit_draws_by_count_and_is_settled(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_columns(
+        store,
+        "audit_draw",
+        &[
+            "count",
+            "since",
+            "settle_campaign_id",
+            "settle_seed",
+            "settle_share",
+            "review_campaign_id",
+        ],
+    )?;
+    add_columns(store, "audit_draw_stack", &["vendor", "year"])
+}
+
 fn a_verify_campaign_plants_values(store: &mut Store, kind: Kind) -> Result<(), Error> {
     if kind != Kind::Registry {
         return Ok(());
