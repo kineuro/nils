@@ -41,12 +41,20 @@
 # beside the corrected image, as a second output, for a check of the
 # field itself.
 #
-# Pack rules for later, not dependencies of this starter: a brain mask (-x)
-# restricts the fit to the brain, as the wiki advises, but it needs a
-# SynthStrip run first, so a pack rule will run synthstrip and hand its
-# mask to N4; and N4 is redundant before FreeSurfer's recon-all and SAMSEG,
-# which correct the bias themselves, so a pack will not chain it before
-# them.
+# With the pack beside it (record 57 P11, Wave 7b P1; research 03): a
+# brain mask restricts the fit to the brain, as the wiki advises, so where
+# a session has a brain mask from a run of the synthstrip starter (the
+# optional input brain_mask, the newest run's) the fit is held to it with
+# -x, and the unit says so; where it has none the whole image is read, and
+# the table's mask_used tells the two apart, since they do not compare.
+# The pack's rules set the shrink factor from the slices (2 for 1.5 to 3
+# mm, 1 above 3 mm; ANTs' 4 is for 1 mm volumes) and the levels (3 for the
+# fast goal). The bias field's range is measured with ANTs' own
+# MeasureMinMaxMean, inside the mask where one was given, for the pack's
+# check that a field is positive. N4 is redundant before FreeSurfer's
+# recon-all and SAMSEG, which correct the bias themselves, and can lower a
+# FLAIR lesion model's Dice: a workflow will not chain it before them
+# (record 57 P7).
 #
 # Add it:  nils pipeline add pipelines/n4-bias-correction/nils.job.yml
 # Run it:  nils run n4-bias-correction --select selection:<name>@<v>
@@ -91,15 +99,30 @@ inputs:
     minimum: 100
     maximum: 200
     unit: mm
+  - id: levels
+    name: Levels
+    type: Number
+    description: "The resolution levels N4 fits, 50 iterations each, the spline distance halving at each: 4 is ANTs' default; 3 is a smoother, faster field for the fast goal, and its results are not compared with four-level ones."
+    value-key: "[LEVELS]"
+    default-value: 4
+    integer: true
+    minimum: 2
+    maximum: 4
 
 command-line: >-
-  bash -c 'set -eu; shopt -s nullglob; cd [InputDataset]; n=0;
+  bash -c 'set -u; shopt -s nullglob; cd [InputDataset]; n=0; rc=0;
+  c=50; l=[LEVELS]; while [ "$l" -gt 1 ]; do c="${c}x50"; l=$((l-1)); done;
   for f in sub-*/ses-*/anat/*_T1w.nii.gz sub-*/ses-*/anat/*_T1w.nii; do
-  d=[OutputLocation]/$(dirname "$f"); mkdir -p "$d";
+  a=$(dirname "$f"); d=[OutputLocation]/$a; mkdir -p "$d";
   b=$(basename "$f"); b=${b%.gz}; b=${b%.nii}; b=${b%_T1w};
-  N4BiasFieldCorrection -d [DIM] -s [SHRINK] -b "[[SPLINE],3]" -c "[50x50x50x50,0.0]" -t "[0.15,0.01,200]"
-  -i "$f" -o "[$d/${b}_desc-n4_T1w.nii.gz,$d/${b}_desc-n4_biasfield.nii.gz]";
-  n=$((n+1)); done; echo "N4 corrected $n images"'
+  m=""; k=-1; for p in $(find [Inputs]/brain_mask -path "*/$a/${b}_desc-brain_mask.nii.gz" 2>/dev/null | sort); do
+  q=${p#[Inputs]/brain_mask/}; q=${q#*/}; r=${q%%/*}; if [ "$r" -eq "$r" ] 2>/dev/null && [ "$r" -gt "$k" ]; then k=$r; m=$p; fi; done;
+  if [ -n "$m" ]; then echo "$a: the fit is held to the brain mask of synthstrip run $k"; else echo "$a: no brain mask of a synthstrip run, so the fit reads the whole image"; fi;
+  N4BiasFieldCorrection -d [DIM] -s [SHRINK] -b "[[SPLINE],3]" -c "[$c,0.0]" -t "[0.15,0.01,200]" ${m:+-x "$m"}
+  -i "$f" -o "[$d/${b}_desc-n4_T1w.nii.gz,$d/${b}_desc-n4_biasfield.nii.gz]" || { echo "$a: N4 failed"; rc=1; continue; };
+  s=$(MeasureMinMaxMean 3 "$d/${b}_desc-n4_biasfield.nii.gz" ${m:+"$m"} 2>/dev/null | tr -s " " | awk "{for(i=1;i<=NF;i++){v=(\$i ~ /:\$/) ? \$(i+1) : \$(i+2); if(\$i ~ /^Min/) mn=v; if(\$i ~ /^Max/) mx=v; if(\$i ~ /^Mean/) me=v}} END{if(mn==\"\") mn=\"null\"; if(mx==\"\") mx=\"null\"; if(me==\"\") me=\"null\"; printf \"%s %s %s\", mn, mx, me}");
+  set -- $s; printf "{\"bias_field_min\": %s, \"bias_field_max\": %s, \"bias_field_mean\": %s, \"mask_used\": %d, \"levels\": %d}\n" "${1:-null}" "${2:-null}" "${3:-null}" "$([ -n "$m" ] && echo 1 || echo 0)" [LEVELS] > "$d/${b}_desc-n4_field.json";
+  n=$((n+1)); done; echo "N4 corrected $n images"; exit $rc'
 
 output-files:
   - id: n4_image
@@ -117,9 +140,17 @@ suggested-resources:
 x-nils:
   contract: 1
   analysis-level: session
+  # No version list: every earlier version of the name in a catalog.
+  replaces:
+    why: "It holds the fit to the brain mask of a synthstrip run where the session has one (the ANTs wiki's advice, research 03), takes the pack's levels knob, and writes the bias field's range for the pack's check; the earlier versions fitted the whole image and measured nothing of the field."
   input:
     layout: bids
     roles: [t1w]
+  inputs:
+    - id: brain_mask
+      type: "derivative:mask"
+      optional: true
+      description: "The sessions' brain masks (*_desc-brain_mask.nii.gz) from a run of the synthstrip starter; where a session has one the fit is held to it (-x), where it has none the whole image is read"
   units: apart
   outputs:
     - id: n4_image
@@ -130,6 +161,16 @@ x-nils:
       kind: output
       path-template: "sub-{subject}/ses-{session}/anat/*_desc-n4_biasfield.nii.gz"
       media-type: application/x-nifti+gzip
+    - id: field
+      kind: table
+      format: json
+      path-template: "sub-{subject}/ses-{session}/anat/*_desc-n4_field.json"
+      columns:
+        - {name: bias_field_min, description: "The smallest value of the estimated bias field, inside the brain mask where one was given: a field is positive everywhere it is right (the pack's check)"}
+        - {name: bias_field_max, description: "Its largest value"}
+        - {name: bias_field_mean, description: "Its mean"}
+        - {name: mask_used, type: integer, description: "1 where the fit was held to a synthstrip brain mask, 0 where it read the whole image; the two are not comparable"}
+        - {name: levels, type: integer, description: "The resolution levels fitted"}
   needs:
     gpu: none
     memory-gb: 4

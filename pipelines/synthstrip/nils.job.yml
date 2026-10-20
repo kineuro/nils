@@ -17,6 +17,15 @@
 # walk a run's sessions. FreeSurfer 8.2.0 is also the image of SynthSeg,
 # SAMSEG and recon-all, so one pull serves four starters.
 #
+# The pack beside this descriptor (record 57 P11, Wave 7b P1) keeps the
+# border (1 mm, SynthStrip's own; -b is in millimetres, research 02) and
+# --no-csf (off unless a registration mask needs tight edges: it loads
+# another model) as the two knobs that break comparability, and checks the
+# mask against its cohort, for parts and for touching the image's edge. So
+# the table gained the mask's connected components and the voxels on the
+# image's outer faces beside the volume; the earlier versions wrote the
+# volume alone (x-nils.replaces).
+#
 # Memory: mri_synthstrip on the CPU peaked at 5.7 GB on a 1 mm MPRAGE, so a
 # unit declares 8 GB. At 4 GB, where the runtime holds a unit to what it
 # declares, every unit was killed while it processed its frame.
@@ -65,12 +74,17 @@ command-line: >-
   d=[OutputLocation]/$(dirname "$f"); mkdir -p "$d";
   b=$(basename "$f" .nii.gz); b=${b%_T1w};
   mri_synthstrip -i "$f" -o "$d/${b}_desc-brain_T1w.nii.gz" -m "$d/${b}_desc-brain_mask.nii.gz" -b [BORDER] -t [THREADS] [NOCSF] || continue;
-  v=$(fspython -c "import sys, numpy, nibabel; i = nibabel.load(sys.argv[1]); print(float(numpy.count_nonzero(i.get_fdata() > 0) * numpy.prod(i.header.get_zooms()[:3])))" "$d/${b}_desc-brain_mask.nii.gz") || continue;
-  printf "brain_volume\n%s\n" "$v" > "$d/${b}_desc-brain_volume.csv"; done'
+  fspython -c "import sys, numpy, nibabel, scipy.ndimage as d; i = nibabel.load(sys.argv[1]); m = numpy.asarray(i.dataobj) > 0;
+  v = float(m.sum() * numpy.prod(i.header.get_zooms()[:3])); c = int(d.label(m, d.generate_binary_structure(3, 3))[1]);
+  e = int(m[0].sum() + m[-1].sum() + m[:, 0].sum() + m[:, -1].sum() + m[:, :, 0].sum() + m[:, :, -1].sum());
+  print(\"brain_volume,mask_components,mask_edge_voxels\\n%s,%d,%d\" % (v, c, e))" "$d/${b}_desc-brain_mask.nii.gz" > "$d/${b}_desc-brain_volume.csv" || continue; done'
 
 x-nils:
   contract: 1
   analysis-level: session
+  # No version list: every earlier version of the name in a catalog.
+  replaces:
+    why: "Its table carries the mask's connected components and its voxels on the image's edge, which the pack's checks read; the earlier versions wrote the volume alone."
   input:
     layout: bids
     roles: [t1w]
@@ -90,6 +104,8 @@ x-nils:
       path-template: "sub-{subject}/ses-{session}/anat/*_desc-brain_volume.csv"
       columns:
         - {name: brain_volume, type: number, unit: mm3, description: "The volume inside the brain mask"}
+        - {name: mask_components, type: integer, description: "The mask's 26-connected components: a brain is one, and more is a mask that broke or took something else (the pack's check, a NILS policy)"}
+        - {name: mask_edge_voxels, type: integer, description: "The mask's voxels on the image's outer faces: a mask touching the edge is a brain the field of view cut (the pack's check, a NILS policy)"}
   qc:
     - {metric: brain_volume, op: ">=", value: 700000, description: "A mask smaller than 0.7 litres has cut into the brain"}
     - {metric: brain_volume, op: "<=", value: 2200000, description: "A mask larger than 2.2 litres has taken skull or neck"}

@@ -58,6 +58,12 @@
 # with one line of HD-BET's paths.py naming that folder, whatever the
 # account's home is. The command line below is what runs in it.
 #
+# The pack beside this descriptor (record 57 P11, Wave 7b P1) offers the
+# denormal flush as a switch, off until one same-conversion repeat on a
+# server says whether it changes the lesions (Wave 7b, section 18); the
+# knob flush_denormals carries it into the unit through a sitecustomize
+# module every Python process of the container imports.
+#
 # Run under job contract v1's conditions (docker; an account with no passwd
 # entry and no home, on a read-only root; no network; /input read-only,
 # /output the one writable folder; 4 cores, 16 GB) on one session's 3D T1w
@@ -100,6 +106,13 @@ inputs:
     value-key: "[FAST]"
     command-line-flag: "--fast-mode"
     default-value: false
+  - id: flush_denormals
+    name: Flush denormal floats
+    type: Flag
+    description: "Have PyTorch flush denormal floats to zero (torch.set_flush_denormal) in every Python process of the unit, through a sitecustomize module on PYTHONPATH: HD-BET's forward pass fell from over 18 minutes to 27 seconds with it on one Intel CPU. Off until one same-conversion repeat decides whether it changes the lesions (Wave 7b, section 18); the pack's switch sets it."
+    value-key: "[FLUSH]"
+    command-line-flag: "--flush-denormals"
+    default-value: false
   - id: threads
     name: Threads
     type: Number
@@ -113,6 +126,8 @@ inputs:
 command-line: >-
   bash -c 'set -u; shopt -s nullglob; cd [InputDataset];
   export OMP_NUM_THREADS=[THREADS] ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS=[THREADS];
+  if [ -n "[FLUSH]" ]; then mkdir -p [OutputLocation]/.site; printf "import torch\ntorch.set_flush_denormal(True)\n" > [OutputLocation]/.site/sitecustomize.py;
+  export PYTHONPATH="[OutputLocation]/.site${PYTHONPATH:+:$PYTHONPATH}"; echo "denormal floats are flushed to zero"; fi;
   flair() { local g s q; for g in "$1"/*_T2w.nii.gz "$1"/*_FLAIR.nii.gz; do s=$(basename "$g" .nii.gz);
   case "$s" in *_FLAIR) echo "$g"; return;; *_acq-*) q=${s#*_acq-};; *) continue;; esac;
   case "+${q%%_*}+" in *+FLAIR+*) echo "$g"; return;; esac; done; };
@@ -132,6 +147,9 @@ command-line: >-
 x-nils:
   contract: 1
   analysis-level: session
+  # No version list: every earlier version of the name in a catalog.
+  replaces:
+    why: "It takes the pack's switch for flushing denormal floats (off by default, decided by one same-conversion repeat), which the earlier versions could not."
   input:
     layout: bids
     roles: [t1w, flair]
