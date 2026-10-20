@@ -536,6 +536,11 @@ struct Lab {
 }
 
 fn lab(pg: Option<(String, String)>) -> Lab {
+    lab_with(pg, &system1_stand_in())
+}
+
+/// [`lab`] with System 1's pipeline added from `system1`'s text.
+fn lab_with(pg: Option<(String, String)>, system1: &str) -> Lab {
     let home = Home {
         dir: TempDir::new("arrival-home"),
         pg,
@@ -595,7 +600,7 @@ fn lab(pg: Option<(String, String)>) -> Lab {
     let added = home.json(&["pipeline", "add", descriptor.to_str().unwrap(), "--json"]);
     std::fs::remove_file(&descriptor).unwrap();
     assert_eq!(added["label"], "bodypart-infer-fusion@1", "{added}");
-    let descriptor = work.file("system1-score.yml", system1_stand_in().as_bytes());
+    let descriptor = work.file("system1-score.yml", system1.as_bytes());
     let added = home.json(&["pipeline", "add", descriptor.to_str().unwrap(), "--json"]);
     std::fs::remove_file(&descriptor).unwrap();
     assert_eq!(added["label"], "system1-score@1", "{added}");
@@ -1113,4 +1118,332 @@ fn a_dataset_brought_in_is_scored_on_postgres_too() {
     drop();
     round(Some((dsn.clone(), schema.to_string())));
     drop();
+}
+
+/// The image's command, `nils-system1`, as a stand-in on the host: like a
+/// bundle that brings its own code, it refuses unless the run says it
+/// trusts the code (`--trust-code true`), and it says base T1w for every
+/// stack. It keeps its words in `S1_ARGS`.
+const NILS_SYSTEM1: &str = r#"#!/usr/bin/env python3
+import json, os, sys
+a = sys.argv[1:]
+with open(os.environ["S1_ARGS"], "a") as log:
+    log.write(json.dumps(a) + "\n")
+assert a[0] == "score", a
+o = dict(zip(a[1::2], a[2::2]))
+if o.get("--trust-code") != "true":
+    print("the bundle's predictor is code the site's model brings; the run must say it trusts it", file=sys.stderr)
+    sys.exit(2)
+m = json.load(open(o["--stacks"])); out = o["--output"]
+man = json.load(open(os.path.join(o["--inputs"], "manifest.json")))
+ids = [x["model_id"] for x in man["models"] if x["input"] == "model"]
+assert len(ids) == 1, man
+mounts = json.loads(os.environ["FAKE_MOUNTS"])
+artifact = man["models"][0]["artifact"]
+assert artifact and os.path.isfile(mounts["/inputs/model"] + "/" + os.path.basename(artifact)), man
+units, opinions = [], []
+for s in m["stacks"]:
+    d = os.path.join(out, "system1"); os.makedirs(d, exist_ok=True)
+    json.dump({"value": "T1w"}, open(os.path.join(d, "%d.json" % s["stack_id"]), "w"))
+    units.append({"unit_id": s["unit"], "status": "succeeded", "derivatives": ["system1/%d.json" % s["stack_id"]]})
+    opinions.append({"stack_id": s["stack_id"], "axis": "base", "value": "T1w", "p": 0.9, "reliability": 0.9,
+                     "model_id": ids[0], "rules_read": {"value": "none"}})
+json.dump({"schema_version": "1", "units": units, "opinions": opinions}, open(os.path.join(out, "results.json"), "w"))
+"#;
+
+/// The files under a folder whose bytes are `bytes`.
+fn files_holding(dir: &Path, bytes: &[u8]) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut todo = vec![dir.to_path_buf()];
+    while let Some(d) = todo.pop() {
+        for e in std::fs::read_dir(&d).unwrap().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                todo.push(p);
+            } else if std::fs::read(&p).is_ok_and(|b| b == bytes) {
+                out.push(p);
+            }
+        }
+    }
+    out
+}
+
+/// Wave 7b §18, System 1 at arrival on a fresh install: the System 1
+/// pipeline the engine ships, as it is, and an admitted model whose bundle
+/// brings code. The bring-in's score queues System 1, the run is given
+/// `--trust-code true` by the model's admission with no hand-registered
+/// version, and every scan gets its opinion. A model file that is no longer
+/// the bytes admitted is refused before its code runs.
+#[test]
+fn the_shipped_system_one_scores_at_arrival_on_a_fresh_install() {
+    if !have("python3") {
+        eprintln!(
+            "python3 is not installed; the stand-in podman needs it, so this test is skipped"
+        );
+        return;
+    }
+    if std::thread::available_parallelism().map_or(1, |n| n.get()) < 4 {
+        eprintln!("System 1's pipeline asks 4 cores of the lane; this machine has fewer");
+        return;
+    }
+    let shipped = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../pipelines/nils-system1/system1-score/nils.job.yml"),
+    )
+    .unwrap();
+    let Lab {
+        home,
+        dir,
+        work,
+        files,
+        bin,
+        path,
+        args_log,
+        s1,
+        ..
+    } = lab_with(None, &shipped);
+    // the model kept where a run finds it, as a site keeps its own
+    home.ok(&[
+        "model",
+        "keep",
+        &s1.to_string(),
+        "--artifact",
+        files.path().join("s1.bin").to_str().unwrap(),
+    ]);
+    let stand_in = bin.file("nils-system1", NILS_SYSTEM1.as_bytes());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&stand_in, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let s1_args = bin.path().join("s1-args.log");
+    let packs = packs();
+    for step in [
+        &["pseudonymize", "@ds", "--name", "fresh"][..],
+        &["digest", "@ds", "--name", "fresh"],
+        &["fingerprint"],
+        &["classify", "--pack-dir", &packs],
+        &["score", "@ds", "--name", "fresh", "--pack-dir", &packs],
+    ] {
+        let mut args = vec!["jobs", "enqueue", "--"];
+        args.extend_from_slice(step);
+        home.ok(&args);
+    }
+    let env: [(&str, &OsStr); 4] = [
+        ("PATH", path.as_os_str()),
+        ("NILS_PACK_DIR", OsStr::new(&packs)),
+        ("FAKE_PODMAN_ARGS", args_log.as_os_str()),
+        ("S1_ARGS", s1_args.as_os_str()),
+    ];
+    let (good, out, err) = home.run_with(&["jobs", "work", "--once"], None, &env);
+    assert!(good, "{err}\n{out}");
+    let score = job_doc(&home, jobs_of(&home, "score")[0]);
+    assert_eq!(score["state"], "done", "{score}");
+    let queued = score["result"]["queued"].as_array().unwrap();
+    assert_eq!(queued.len(), 1, "{score}");
+    assert_eq!(queued[0]["step"], "system1", "{score}");
+    // no hand step: the command names no trust, the run is given it
+    assert!(
+        !queued[0]["command"].to_string().contains("trust_code"),
+        "{score}"
+    );
+    let run = job_doc(&home, queued[0]["job"].as_i64().unwrap());
+    assert_eq!(run["state"], "done", "{run}");
+    assert_eq!(opinions_of(&home, s1), 6);
+    let words = std::fs::read_to_string(&s1_args).unwrap();
+    assert!(words.contains(r#""--trust-code", "true""#), "{words}");
+
+    // the model's file changed after its admission: its code is not run
+    let kept = files_holding(work.path(), b"a system one");
+    assert_eq!(kept.len(), 1, "{kept:?}");
+    std::fs::write(&kept[0], b"another system").unwrap();
+    std::fs::remove_file(&s1_args).unwrap();
+    let server = Served::start(
+        &home,
+        &path,
+        true,
+        &[
+            ("FAKE_PODMAN_ARGS", args_log.as_os_str()),
+            ("S1_ARGS", s1_args.as_os_str()),
+        ],
+    );
+    let (status, started) = server.run("datasets/ds", "system1", OPS);
+    assert_eq!(status, 202, "{started}");
+    let done = server.over(started["job"].as_i64().unwrap());
+    assert_eq!(done["state"], "failed", "{done}");
+    assert!(done.to_string().contains("not the digest"), "{done}");
+    assert!(!s1_args.exists(), "the model's code ran");
+    drop(server);
+    drop(files);
+    drop(bin);
+    drop(work);
+    drop(dir);
+}
+
+/// The stacks and values of the opinions of a job's runs (`of` true) or
+/// of every other job's, in stack order.
+fn opinions_by_job(home: &Home, job: i64, of: bool) -> Vec<(i64, String, String)> {
+    let mut store = home.store();
+    let op = if of { "=" } else { "<>" };
+    let sql = format!(
+        "SELECT o.stack_id, o.axis, COALESCE(o.value, '') FROM {} o JOIN {} r ON r.id = o.run_id \
+         WHERE r.job_id {op} {job} ORDER BY o.stack_id, o.axis",
+        store.qualified("opinion"),
+        store.qualified("pipeline_run")
+    );
+    store
+        .query(&sql, &[])
+        .unwrap()
+        .iter()
+        .map(|r| {
+            (
+                r.int(0).unwrap(),
+                r.text(1).unwrap().to_string(),
+                r.text(2).unwrap().to_string(),
+            )
+        })
+        .collect()
+}
+
+/// The most containers that ran at once, by the start and end each wrote.
+fn most_at_once(log: &Path) -> usize {
+    let text = std::fs::read_to_string(log).unwrap_or_default();
+    let mut events: Vec<(f64, i32)> = text
+        .lines()
+        .filter_map(|l| {
+            let (t, what) = l.split_once(' ')?;
+            Some((t.parse().ok()?, if what == "start" { 1 } else { -1 }))
+        })
+        .collect();
+    // an end before a start at the same instant
+    events.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let (mut now, mut most) = (0i32, 0i32);
+    for (_, d) in events {
+        now += d;
+        most = most.max(now);
+    }
+    most as usize
+}
+
+/// Wave 7b §18: System 1's parts run several at once within the lane's
+/// budget. Six parts of one stack, each a container that asks 2 cores of a
+/// lane of 4: two run at once, never more; the runs are made in part
+/// order; and the opinions are those of the same parts run one after
+/// another (`--parts-at-once 1`).
+#[test]
+fn system_ones_parts_run_several_at_once_within_the_lanes_budget() {
+    if !have("python3") {
+        eprintln!(
+            "python3 is not installed; the stand-in podman needs it, so this test is skipped"
+        );
+        return;
+    }
+    if std::thread::available_parallelism().map_or(1, |n| n.get()) < 4 {
+        eprintln!("the lane of this test asks 4 cores; this machine has fewer");
+        return;
+    }
+    let bounded = system1_stand_in()
+        .replace(
+            "  import json, os, sys\n",
+            "  import json, os, sys, time\n  open(os.environ[\"S1_TIMES\"], \"a\").write(\"%f start\\n\" % time.time()); time.sleep(1.5)\n",
+        )
+        .replace(
+            "open(os.path.join(out, \"results.json\"), \"w\"))\n",
+            "open(os.path.join(out, \"results.json\"), \"w\"))\n  open(os.environ[\"S1_TIMES\"], \"a\").write(\"%f end\\n\" % time.time())\n",
+        )
+        .replace("needs: {gpu: none}", "needs: {gpu: none, cores: 2, memory-gb: 1}");
+    assert!(bounded.contains("S1_TIMES") && bounded.contains("cores: 2"));
+    let Lab {
+        home,
+        dir,
+        work,
+        files,
+        bin,
+        path,
+        args_log,
+        s1,
+        ..
+    } = lab_with(None, &bounded);
+    home.ok(&["pipeline", "lane", "--cores", "4", "--memory-gb", "100"]);
+    let times = bin.path().join("times.log");
+    let packs = packs();
+    for step in [
+        &["pseudonymize", "@ds", "--name", "at-once"][..],
+        &["digest", "@ds", "--name", "at-once"],
+        &["fingerprint"],
+        &["classify", "--pack-dir", &packs],
+        &["score", "@ds", "--name", "at-once", "--pack-dir", &packs],
+    ] {
+        let mut args = vec!["jobs", "enqueue", "--"];
+        args.extend_from_slice(step);
+        home.ok(&args);
+    }
+    let env: [(&str, &OsStr); 5] = [
+        ("PATH", path.as_os_str()),
+        ("NILS_PACK_DIR", OsStr::new(&packs)),
+        ("FAKE_PODMAN_ARGS", args_log.as_os_str()),
+        ("S1_TIMES", times.as_os_str()),
+        ("NILS_TEST_PART_STACKS", OsStr::new("1")),
+    ];
+    let (good, out, err) = home.run_with(&["jobs", "work", "--once"], None, &env);
+    assert!(good, "{err}\n{out}");
+    let score = job_doc(&home, jobs_of(&home, "score")[0]);
+    let job = score["result"]["queued"][0]["job"].as_i64().unwrap();
+    let run = job_doc(&home, job);
+    assert_eq!(run["state"], "done", "{run}");
+    let parts = runs_of(&home, job);
+    assert_eq!(parts.len(), 6, "{parts:?}");
+    assert!(parts.iter().all(|(_, n)| *n == 1), "{parts:?}");
+    assert_eq!(opinions_of(&home, s1), 6);
+    let at_once = most_at_once(&times);
+    assert_eq!(at_once, 2, "{}", std::fs::read_to_string(&times).unwrap());
+    // the runs are made in part order: their handles' stacks ascend
+    let handle_stack = |run: i64| -> i64 {
+        let mut store = home.store();
+        let sql = format!(
+            "SELECT MIN(m.key) FROM {} m JOIN {} r ON r.handle_id = m.handle_id WHERE r.id = {run}",
+            store.qualified("handle_member"),
+            store.qualified("pipeline_run")
+        );
+        store.query(&sql, &[]).unwrap()[0].int(0).unwrap()
+    };
+    let firsts: Vec<i64> = parts.iter().map(|(r, _)| handle_stack(*r)).collect();
+    let mut sorted = firsts.clone();
+    sorted.sort();
+    assert_eq!(firsts, sorted, "{parts:?}");
+    let at_once_opinions = opinions_by_job(&home, job, true);
+    assert_eq!(at_once_opinions.len(), 6);
+
+    // the same parts one after another give the same opinions
+    let handle = score["result"]["queued"][0]["command"]
+        .as_array()
+        .unwrap()
+        .windows(2)
+        .find(|w| w[0] == "--handle")
+        .and_then(|w| w[1].as_str().map(str::to_string))
+        .expect("the score's run names its handle");
+    std::fs::remove_file(&times).unwrap();
+    let (good, out, err) = home.run_with(
+        &[
+            "run",
+            "system1-score@1",
+            "--model",
+            &s1.to_string(),
+            "--handle",
+            &handle,
+            "--chunk",
+            "1",
+            "--parts-at-once",
+            "1",
+        ],
+        None,
+        &env,
+    );
+    assert!(good, "{err}\n{out}");
+    assert_eq!(most_at_once(&times), 1);
+    assert_eq!(opinions_by_job(&home, job, false), at_once_opinions);
+    drop(files);
+    drop(bin);
+    drop(work);
+    drop(dir);
 }

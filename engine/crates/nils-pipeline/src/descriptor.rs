@@ -340,6 +340,13 @@ pub struct TypedInput {
     /// For a `derivative:<kind>` input (record 55 H3): what it takes of a
     /// check's status, one of [`CHECKED`]; none is `not_rejected`.
     pub checked: Option<String>,
+    /// For a `model` input (wave 7b §18, System 1 at arrival): the
+    /// parameter that says the run trusts the code the model brings
+    /// (`x-nils.inputs[].trusted-by-admission`). A run given an admitted or
+    /// promoted model sets it true unless the caller set it: the model's
+    /// admission is the site's check of its bytes, so a kept model's code
+    /// runs at arrival with no hand step.
+    pub trust: Option<String>,
 }
 
 /// One part set a mask output declares (record 55 H3, section 3).
@@ -925,11 +932,18 @@ pub fn from_value(document: Value) -> Result<Descriptor, String> {
                 ));
             }
         }
+        let trust = opt_text(t, "trusted-by-admission", &at)?;
+        if trust.is_some() && ty != "model" {
+            return Err(format!(
+                "{at}trusted-by-admission belongs to a model input: the parameter an admitted model's run sets true"
+            ));
+        }
         inputs.push(TypedInput {
             id,
             ty,
             optional: opt_bool(t, "optional", &at)?.unwrap_or(false),
             checked,
+            trust,
         });
     }
     if inputs.iter().filter(|t| t.ty == "label_set").count() > 1 {
@@ -1312,6 +1326,26 @@ pub fn from_value(document: Value) -> Result<Descriptor, String> {
         );
     }
     let on_arrival = on_arrival_of(x, &params)?;
+    for (i, t) in inputs.iter().enumerate() {
+        let Some(id) = &t.trust else { continue };
+        let at = format!("x-nils.inputs[{i}].trusted-by-admission");
+        let Some(p) = params.iter().find(|p| &p.id == id) else {
+            return Err(format!("{at}: {id} is not a parameter of the descriptor"));
+        };
+        let says_true = match p.ty {
+            ParamType::Flag => true,
+            ParamType::String => p
+                .choices
+                .as_ref()
+                .is_none_or(|c| c.iter().any(|v| v == "true")),
+            ParamType::Number => false,
+        };
+        if !says_true {
+            return Err(format!(
+                "{at}: {id} is a flag or a string that can be true, which a run given an admitted model sets"
+            ));
+        }
+    }
     Ok(Descriptor {
         name,
         tool_version,
@@ -1838,6 +1872,38 @@ pub(crate) fn check_value(p: &Param, v: &Value) -> Result<(), String> {
 }
 
 impl Descriptor {
+    /// Wave 7b §18: the run's code trust from its models' admission. For
+    /// each model input that names a `trusted-by-admission` parameter the
+    /// caller did not set, the parameter is set true where the model given
+    /// to it is admitted or promoted (`admitted`, by the model inputs in
+    /// their order); a model only registered, or retired, leaves the
+    /// parameter as it resolved. The parameters it set, by id.
+    pub fn trust_admitted(
+        &self,
+        params: &mut Map<String, Value>,
+        given: &[(String, String)],
+        admitted: &[bool],
+    ) -> Vec<String> {
+        let mut set = Vec::new();
+        let models = self.inputs.iter().filter(|t| t.ty == "model");
+        for (t, ok) in models.zip(admitted) {
+            let Some(id) = &t.trust else { continue };
+            if !ok || given.iter().any(|(g, _)| g == id) {
+                continue;
+            }
+            let Some(p) = self.params.iter().find(|p| &p.id == id) else {
+                continue;
+            };
+            let value = match p.ty {
+                ParamType::Flag => Value::Bool(true),
+                _ => Value::String("true".into()),
+            };
+            params.insert(id.clone(), value);
+            set.push(id.clone());
+        }
+        set
+    }
+
     /// The digest of the descriptor: sha256 of its canonical JSON, so the
     /// same descriptor written with its keys in another order is the same.
     pub fn digest(&self) -> String {
@@ -2535,6 +2601,41 @@ x-nils:
         ))
         .unwrap_err();
         assert!(e.contains("for a stacks input only"), "{e}");
+    }
+
+    /// Wave 7b §18: System 1's shipped descriptor names the parameter its
+    /// model's admission sets, and a run given an admitted model is given
+    /// it true unless the caller set it; a model not admitted leaves it.
+    #[test]
+    fn an_admitted_models_code_is_trusted_by_its_admission() {
+        let shipped = include_str!("../../../../pipelines/nils-system1/system1-score/nils.job.yml");
+        let d = parse(shipped).unwrap();
+        let model = d.inputs.iter().find(|t| t.ty == "model").unwrap();
+        assert_eq!(model.trust.as_deref(), Some("trust_code"));
+        let resolved = d.resolve(&[]).unwrap();
+        assert_eq!(resolved["trust_code"], "false");
+        let mut p = resolved.clone();
+        assert_eq!(d.trust_admitted(&mut p, &[], &[true]), ["trust_code"]);
+        assert_eq!(p["trust_code"], "true");
+        let mut p = resolved.clone();
+        assert!(d.trust_admitted(&mut p, &[], &[false]).is_empty());
+        assert_eq!(p["trust_code"], "false");
+        let given = [("trust_code".to_string(), "false".to_string())];
+        let mut p = d.resolve(&given).unwrap();
+        assert!(d.trust_admitted(&mut p, &given, &[true]).is_empty());
+        assert_eq!(p["trust_code"], "false", "the caller's word wins");
+        let e = parse(&shipped.replace(
+            "trusted-by-admission: trust_code",
+            "trusted-by-admission: nope",
+        ))
+        .unwrap_err();
+        assert!(e.contains("nope is not a parameter"), "{e}");
+        let e = parse(&shipped.replace(
+            "default-value: \"false\"",
+            "default-value: \"false\"\n  - id: count\n    name: Count\n    type: Number\n    value-key: \"[COUNT]\"",
+        ).replace("trusted-by-admission: trust_code", "trusted-by-admission: count"))
+        .unwrap_err();
+        assert!(e.contains("a flag or a string that can be true"), "{e}");
     }
 
     /// Record 55 E5: a pipeline may score at arrival, with parameters of

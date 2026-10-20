@@ -34,7 +34,11 @@ task `system1`.
    ```
 
 A bundle that brings its own code runs only with the pipeline input
-`trust_code` true, after its bytes match. The run's opinions are kept beside
+`trust_code` true, after its bytes match. A run given an admitted or
+promoted model is given it true by the model's admission (the descriptor's
+`trusted-by-admission`), so System 1 scores at arrival with no hand step;
+the engine first checks that the kept file has the digest the model was
+admitted with, and refuses a file changed since. The run's opinions are kept beside
 the rules' answers; they never become decisions.
 
 > **Warning: the gate waits for a chosen model.** On a dataset flagged as
