@@ -29,6 +29,22 @@
 # such a file (by -expert, or left in the subject by an earlier run); this
 # one starts each session in a new folder without one.
 #
+# The pack beside this descriptor (nils-pack.yaml, record 57 P11, Wave 7b
+# P1) chooses the knobs below per session from the registry's facts and
+# the person's goal, as research 01 of the pack study found them: SynthSR
+# before recon-all for a post-contrast 3D T1 (Iglesias, Gopinath), -hires
+# under 0.9 mm at research grade, -3T as a cohort's fixed choice,
+# -bigventricles as a person's switch, -qcache at research grade, and the
+# voxel class that keeps a 1.3 to 1.5 mm T1 apart in the comparability
+# key. Two of the research's fixed settings are set in the command for
+# every unit: FS_V8_XOPTS=1, the 8.x bundle recon-all runs by default, made
+# explicit so a reader sees it, and mris_fix_topology -threads 1 through an
+# expert-options file, so a run is the same whatever its thread count (the
+# 7.4.0 known issue). The Euler number of each hemisphere's unfixed surface
+# is a second table, the pack's cohort check (Rosen 2018). A T1 the pack's
+# hard needs refuse (2D, or coarser than 1.5 mm) is routed to the
+# freesurfer-recon-all-clinical starter by the pack's rule.
+#
 # Memory: FreeSurfer 8's deep-learning steps hold far more than 7 did. Its
 # release notes give about 24 GB, and its install notes (rel8notes) about
 # 80 GB in use at one point of a recon-all, which a machine of 32 GB
@@ -57,13 +73,61 @@ inputs:
     integer: true
     minimum: 1
     maximum: 32
+  - id: synthsr
+    name: SynthSR first
+    type: Flag
+    description: "Make a synthetic 1 mm MPRAGE of the T1 with mri_synthsr and run recon-all on it: the maintainers' route for a post-contrast 3D T1, whose surfaces would otherwise likely fail (record 57, research 01). A rule turns it on where the T1 is labelled post-contrast; the unit is flagged by the pack's caveat. Its outputs are not compared with those of a native T1."
+    value-key: "[SYNTHSR]"
+    command-line-flag: "--synthsr"
+    default-value: false
+  - id: hires
+    name: Native submillimetre
+    type: Flag
+    description: "recon-all -hires: conform to the scan's own voxel size rather than 1 mm, for a 3D T1 finer than 0.9 mm at research grade (the SubmillimeterRecon wiki). Longer, more memory; its outputs are not compared with 1 mm ones."
+    value-key: "[HIRES]"
+    command-line-flag: "-hires"
+    default-value: false
+  - id: three_t
+    name: 3 T parameters
+    type: Flag
+    description: "recon-all -3T: the 3 T N3 parameters and the Schwartz 3 T atlas (OtherUsefulFlags). A cohort's fixed choice, never mixed within one: it changes the talairach and the nu volumes."
+    value-key: "[THREE_T]"
+    command-line-flag: "-3T"
+    default-value: false
+  - id: bigventricles
+    name: Big ventricles
+    type: Flag
+    description: "recon-all -bigventricles: the ventricle-aware registration for hydrocephalus or severe atrophy (the 6.0 release notes). It changes the aseg and the surfaces."
+    value-key: "[BIGVENTRICLES]"
+    command-line-flag: "-bigventricles"
+    default-value: false
+  - id: qcache
+    name: Smoothed maps
+    type: Flag
+    description: "recon-all -qcache: the smoothed fsaverage maps (0 to 25 mm FWHM), files added for research grade; nothing else changes."
+    value-key: "[QCACHE]"
+    command-line-flag: "-qcache"
+    default-value: false
+  - id: voxel_class
+    name: Voxel class
+    type: String
+    description: "fine where every side of the T1's voxel is 1.3 mm or finer, the input recon-all is made for (Fischl); coarse where a side is between 1.3 and 1.5 mm, which the pack admits flagged and keeps apart in the comparability key. A rule sets it from the registry's facts; the unit's log says it."
+    value-key: "[VOXEL_CLASS]"
+    value-choices: [fine, coarse]
+    default-value: fine
 
 command-line: >-
-  bash -c 'set -u; shopt -s nullglob; cd [InputDataset];
+  bash -c 'set -u; shopt -s nullglob; cd [InputDataset]; export FS_V8_XOPTS=1;
   for f in sub-*/ses-*/anat/*_T1w.nii.gz; do
   a=$(dirname "$f"); s=$(echo "${a%/anat}" | tr / _); d=[OutputLocation]/$a; mkdir -p "$d"; w=$(mktemp -d [OutputLocation]/.work-XXXXXX);
-  recon-all -all -s "$s" -i "$f" -sd "$w" -threads [THREADS] || { rm -rf "$w"; continue; };
+  echo "$a: voxel class [VOXEL_CLASS]"; printf "mris_fix_topology -threads 1\n" > "$w/expert.opts";
+  i="$f"; if [ -n "[SYNTHSR]" ]; then echo "$a: SynthSR first, then recon-all on its image";
+  mri_synthsr --i "$f" --o "$w/synthsr.nii.gz" --threads [THREADS] --cpu || { rm -rf "$w"; continue; }; i="$w/synthsr.nii.gz"; fi;
+  recon-all -all -s "$s" -i "$i" -sd "$w" -threads [THREADS] -expert "$w/expert.opts" [HIRES] [THREE_T] [BIGVENTRICLES] [QCACHE] || { rm -rf "$w"; continue; };
   SUBJECTS_DIR="$w" asegstats2table --subjects "$s" --meas volume --tablefile "$d/${s}_desc-aseg_volumes.tsv";
+  e() { mris_euler_number "$1" 2>/dev/null | sed -n "s/.* = \(-\{0,1\}[0-9][0-9]*\) --> .*/\1/p" | head -n 1; };
+  el=$(e "$w/$s/surf/lh.orig.nofix"); er=$(e "$w/$s/surf/rh.orig.nofix");
+  printf "{\"euler_lh\": %s, \"euler_rh\": %s}\n" "${el:-null}" "${er:-null}" > "$d/${s}_desc-recon_quality.json";
   tar -C "$w" -czf "$d/${s}_desc-freesurfer_subject.tar.gz" "$s";
   rm -rf "$w"; done'
 
@@ -74,7 +138,7 @@ x-nils:
   # run no longer takes them; their runs and results keep their names.
   # No version list: every earlier version of the name in a catalog.
   replaces:
-    why: "It declares the 32 GB FreeSurfer 8's recon-all takes; the earlier versions declared 8 GB, and a unit held to that could be killed for memory."
+    why: "It takes the knobs the pack's rules choose per session (SynthSR before recon-all for a post-contrast T1, -hires, -3T, -bigventricles, -qcache, the voxel class), fixes FS_V8_XOPTS=1 and mris_fix_topology -threads 1 (an expert-options file, which this image's recon-all reads correctly), and writes the Euler numbers for the cohort check; the earlier versions had none of these, and the one before them declared 8 GB where FreeSurfer 8 takes 32."
   input:
     layout: bids
     roles: [t1w]
@@ -107,6 +171,13 @@ x-nils:
         - {name: left_lateral_ventricle, unit: mm3}
         - {name: right_lateral_ventricle, unit: mm3}
         - {name: wm_hypointensities, from: "WM-hypointensities", unit: mm3}
+    - id: quality
+      kind: table
+      format: json
+      path-template: "sub-{subject}/ses-{session}/anat/sub-{subject}_ses-{session}_desc-recon_quality.json"
+      columns:
+        - {name: euler_lh, type: integer, description: "The Euler number of the left hemisphere's surface before the topology fix (lh.orig.nofix): 2 - 2 x holes, falling as the defects grow; the pack holds it against the cohort"}
+        - {name: euler_rh, type: integer, description: "The right hemisphere's"}
   qc:
     - {metric: surface_holes, op: "<=", value: 200, description: "More holes than 200 is a surface a person should look at"}
   needs:

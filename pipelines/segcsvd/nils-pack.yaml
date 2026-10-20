@@ -1,0 +1,104 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# The pack of segcsvd rc03 (record 57 P11, Wave 7b P1), from the pack
+# study's research 04 and its fact counts (step 2): the WMH model is
+# validated on 3 T FLAIR of 2D 3 mm or 3D 1 mm in vascular and
+# neurodegenerative cohorts, never on MS, 1.5 T or contrast; the PVS model
+# on 3 T T1 near 1 mm. On the archive 20,212 sessions hold a FLAIR at 3 mm
+# or thinner, 8,773 one of 3 to 5 mm (a caveat; 8,302 of them at 1.5 T, so
+# the two caveats fall together), 25 one over 5 mm (skipped), 2,056 none
+# (the PVS alone, with an empty prior). For the PVS 10,085 sessions hold a
+# 3D non-contrast T1 at 1.0 mm or finer, 678 one of 1.0 to 1.2 mm (a
+# caveat), 20,303 none. The thresholds are the authors' 0.35, fixed;
+# skip_mask_and_bias is false and the undocumented positionals are frozen
+# in the descriptor's command. The comparability key carries the two
+# thresholds, the contrast set (a session without a FLAIR runs the PVS on
+# an empty prior, another key) and, through the derivative it read, the
+# SynthSeg run's own key (robust and not are different networks).
+nils_pack: 1
+pipeline:
+  name: segcsvd
+  descriptor_sha256: "sha256:b16b3fcccf9cc8546921f2757a3dc4b74244a48568e043554e32e6a3582d69f3"
+  version: "1.0"
+goals:
+  goal: [fast, standard, research]
+needs:
+  flair:
+    hard_if: "present(flair)"
+    hard:
+      - when: "slice_thickness_mm <= 5"
+        words: "the FLAIR's slices are over 5 mm; the WMH model has no evidence beyond 3 mm, and 5 mm is the line (NILS policy)"
+        source: "Gibson et al. 2024, limitations; policy (record 57, research 04)"
+    soft:
+      - when: "not present(flair) or slice_thickness_mm <= 3"
+        words: "the FLAIR's slices are 3 to 5 mm, outside the validated 2D range of 3 mm"
+        source: "Gibson et al., Human Brain Mapping 2024 (record 57, research 04)"
+      - when: "not present(flair) or field_strength_t >= 2.5"
+        words: "the FLAIR is below 3 T; the WMH model was trained and tested at 3 T only"
+        source: "Gibson et al. 2024 (record 57, research 04)"
+      - when: "not present(flair) or post_contrast != 'given'"
+        words: "the FLAIR is labelled post-contrast; no evidence covers it"
+        source: "no published evidence (record 57, research 04)"
+  t1w:
+    hard:
+      - when: "dimension == '3D'"
+        words: "the T1 is 2D; perivascular spaces are 2 to 5 mm wide and the PVS model was trained on 3D T1 near 1 mm"
+        source: "Gibson et al. 2026, the PVS paper (record 57, research 04)"
+      - when: "voxel_max_mm <= 1.2"
+        words: "a side of the T1's voxel is over 1.2 mm; the PVS model was trained at 0.9 to 1.0 mm, and 1.2 mm is the line (NILS policy)"
+        source: "Gibson et al. 2026; policy (record 57, research 04)"
+      - when: "post_contrast != 'given'"
+        words: "the T1 is labelled post-contrast; the PVS model was trained on non-contrast T1, and enhancing vessels change what it reads (NILS policy)"
+        source: "no published evidence; policy (record 57, research 04)"
+    soft:
+      - when: "voxel_max_mm <= 1.0"
+        words: "a side of the T1's voxel is between 1.0 and 1.2 mm, just outside the training range"
+        source: "Gibson et al. 2026 (record 57, research 04)"
+      - when: "field_strength_t >= 2.5"
+        words: "the T1 is below 3 T; the PVS model was trained at 3 T only"
+        source: "Gibson et al. 2026 (record 57, research 04)"
+      - when: "not (diagnosis == 'MS' or diagnosis == 'multiple sclerosis' or diagnosis == 'Multiple sclerosis')"
+        words: "MS: the WMH model is of white-matter hyperintensities of vascular origin and not validated for MS lesions; measure them with samseg-lesions or lst-ai"
+        source: "Gibson et al. 2024, scope; Wiltgen et al. 2024 (record 57, research 04)"
+  link:
+    soft:
+      - when: "not present(flair) or aligned(flair, t1w)"
+        words: "the FLAIR is not known to be registered to the T1w: the shared scanner coordinates are trusted, and the brain-mask Dice of the unit checks it at 0.85"
+        source: "segcsvd README (co-registered inputs); policy until the registration family (record 57, research 04)"
+knobs:
+  wmh_threshold:
+    what: "the probability a voxel of the WMH map is counted in its mask at: the authors' 0.35, between the Dice-best 0.4 and the sensitivity-best 0.3; re-threshold the stored map offline instead"
+    changes: [wmh, volumes]
+    comparability: breaks
+    set_by: fixed
+  pvs_threshold:
+    what: "the probability a voxel of the PVS map is counted in its mask at: the authors' 0.35"
+    changes: [pvs, volumes]
+    comparability: breaks
+    set_by: fixed
+  threads:
+    what: "the threads the network and the tools use; segcsvd has no threads option of its own, so this is a cap"
+    comparability: none
+    set_by: person
+rules: []
+checks:
+  - {metric: pvs_volume, op: ">", value: 0, action: flag, source: "the segcsvd starter; Gibson et al. 2026 (a cohort of mean age 63) (record 57, research 04)", words: "no enlarged perivascular space at all is more often a failed segmentation than an adult brain without any"}
+  - {metric: wmh_volume, op: ">", value: 0, action: flag, source: "Gibson et al. 2024, a burden of 0.1 to 7 % of ICV in training (record 57, research 04)", words: "a WMH volume of exactly 0 with a FLAIR present is a failed segmentation more often than a clean brain"}
+  - {metric: flair_t1_brain_dice, op: ">=", value: 0.85, action: flag, source: policy, words: "FLAIR and T1 may not be aligned: their brain masks agree below 0.85"}
+  - {metric: wmh_volume, op: "<=", action: flag, cohort: true, stratum: [site, vendor, field_strength, sequence, post_contrast], min_sessions: 30, source: "policy: a WMH burden far above its cohort's, where the training range ended at 7 % of ICV (record 57, research 04)"}
+  - {metric: pvs_volume, op: "!=", action: flag, cohort: true, stratum: [site, vendor, field_strength, sequence, post_contrast], min_sessions: 30, source: "policy (record 57, research 04)"}
+licence:
+  spdx: "GPL-3.0-only"
+  redistributable: false
+  terms: {url: "https://github.com/AICONSlab/segcsvd", version: "rc03"}
+  accept: false
+resources:
+  memory_gb: 8
+  minutes: 30
+  gpu: none
+comparability: {}
+tests: []
+source:
+  image: "docker.io/frheault/sf-lesionflow-segcsvd@sha256:a4126556fe7fc88802f8813f5ab0d904e117dc799b8eee73a070bf83fe843ff3"
+  probe: {command: "segment_wmh", expect: "segment_wmh"}
+  key_files: ["usr/local/bin/segment_wmh", "usr/local/bin/segment_pvs"]

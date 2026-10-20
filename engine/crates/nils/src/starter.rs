@@ -241,7 +241,9 @@ mod tests {
         let line = n4.command_line.as_deref().unwrap_or_default();
         for words in [
             r#"-b "[[SPLINE],3]""#,
-            r#"-c "[50x50x50x50,0.0]""#,
+            // the levels knob builds the convergence, 50 iterations a level
+            r#"-c "[$c,0.0]""#,
+            "c=50;",
             r#"-t "[0.15,0.01,200]""#,
             r#"_desc-n4_biasfield.nii.gz]""#,
         ] {
@@ -270,8 +272,15 @@ mod tests {
         // so its earlier version stays selectable
         for (name, _) in CATALOG {
             let r = starter(name).replaces;
-            let fixes =
-                ["freesurfer-recon-all", "mriqc", "samseg-lesions", "segcsvd"].contains(&name);
+            let fixes = [
+                "freesurfer-recon-all",
+                "mriqc",
+                "samseg-lesions",
+                "segcsvd",
+                "n4-bias-correction",
+                "synthstrip",
+            ]
+            .contains(&name);
             assert_eq!(r.is_some(), fixes, "{name} replaces the earlier versions");
             if let Some(r) = r {
                 assert_eq!(

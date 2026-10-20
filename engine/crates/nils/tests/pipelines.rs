@@ -2034,7 +2034,8 @@ fn real_containers_run_n4_rootless_with_no_network() {
     }
 
     // N4 over the frozen selection: the corrected image and the bias field
-    // of each session, and the same digests again
+    // of each session, and the same digests again; the shrink factor is the
+    // pack's rule's choice from the scan's facts, never a value given by hand
     let n4 = repo().join("pipelines/n4-bias-correction/nils.job.yml");
     ok(&["pipeline", "add", n4.to_str().unwrap()]);
     let first = ok(&[
@@ -2042,15 +2043,13 @@ fn real_containers_run_n4_rootless_with_no_network() {
         "n4-bias-correction",
         "--select",
         "selection:every@1",
-        "--param",
-        "shrink_factor=2",
         "--json",
     ]);
     assert_eq!(first["status"], "done", "{first}");
     assert_eq!(first["summary"]["units"]["succeeded"], 2, "{first}");
     assert_eq!(
-        first["summary"]["derivatives"], 4,
-        "two per session: {first}"
+        first["summary"]["derivatives"], 6,
+        "three per session, the corrected image, the bias field and its range: {first}"
     );
     let rows = ok(&[
         "derivative",
@@ -2072,7 +2071,9 @@ fn real_containers_run_n4_rootless_with_no_network() {
             "T1w.nii.gz",
             "T1w.nii.gz",
             "biasfield.nii.gz",
-            "biasfield.nii.gz"
+            "biasfield.nii.gz",
+            "field.json",
+            "field.json"
         ],
         "{rows}"
     );
@@ -2081,8 +2082,6 @@ fn real_containers_run_n4_rootless_with_no_network() {
         "n4-bias-correction",
         "--select",
         "selection:every@1",
-        "--param",
-        "shrink_factor=2",
         "--json",
     ]);
     assert_eq!(
@@ -12127,7 +12126,8 @@ fn the_starters_that_fix_their_older_versions_replace_them_and_n4_leaves_its_own
     };
     assert!(why("samseg-lesions@1").contains("pallidum"), "{listed}");
     assert!(why("segcsvd@1").contains("SynthSeg"), "{listed}");
-    assert_eq!(standing("n4-bias-correction@1"), "selectable");
+    // N4 replaces its earlier version since the mask input and the levels knob (record 57 P11)
+    assert_eq!(standing("n4-bias-correction@1"), "replaced");
     assert_eq!(standing("n4-bias-correction@2"), "current");
     assert_eq!(standing("synthstrip@1"), "current");
     let (good, _, err) = lab.run(
@@ -13274,6 +13274,11 @@ fn g3_g4_g5_a_run_records_who_chose_its_flags_and_its_keys_and_no_door_pools_acr
                 && u["keys"]["result"].as_str().unwrap().starts_with("sha256:"),
             "{u}"
         );
+        // the names and values that made the key are named beside it
+        assert!(
+            u["key_members"].is_object() && !u["key_members"].as_object().unwrap().is_empty(),
+            "{u}"
+        );
         keys.insert(key);
     }
     assert_eq!(
@@ -13648,5 +13653,284 @@ fn validate_runs_on_a_machine_with_no_install() {
     assert!(
         !work.path().join("no-install-here").exists(),
         "validate made no install"
+    );
+}
+
+/// Wave 7b P1 (record 57 P11), G2 and section 10 (G14): the shipped packs
+/// over the lab's registry. A hard need skips every session it excludes in
+/// the pack's words and nothing runs; a session the needs refuse is routed
+/// to the variant; every pack replays over the registry read-only, with its
+/// counts, against the version the catalog runs, and through the door.
+#[test]
+fn g2_g14_the_shipped_packs_skip_in_their_words_run_nothing_and_replay_read_only() {
+    if !have("python3") {
+        eprintln!(
+            "python3 is not installed; the stand-in podman needs it, so this test is skipped"
+        );
+        return;
+    }
+    let lab = Lab::new("pipelines-shipped-packs");
+    const SHIPPED: [&str; 9] = [
+        "freesurfer-recon-all",
+        "freesurfer-recon-all-clinical",
+        "samseg-lesions",
+        "synthseg",
+        "synthstrip",
+        "mriqc",
+        "n4-bias-correction",
+        "segcsvd",
+        "lst-ai",
+    ];
+    let folder = |name: &str| repo().join("pipelines").join(name);
+    let mut ids: BTreeMap<&str, i64> = BTreeMap::new();
+    for name in SHIPPED {
+        let v = lab.json(&["pipeline", "add", folder(name).to_str().unwrap(), "--json"]);
+        assert_eq!(v["added"], true, "{name}: {v}");
+        assert_eq!(v["pack"]["nils_pack"], 1, "{name}: {v}");
+        assert_eq!(v["pack"]["pipeline"]["name"], name, "{v}");
+        ids.insert(name, v["id"].as_i64().unwrap());
+    }
+    // the licence recon-all reads
+    let licence = lab.work.path().join("license.txt");
+    std::fs::write(&licence, "a licence for the lab\n").unwrap();
+    lab.ok(
+        &[
+            "pipeline",
+            "secret",
+            "set",
+            "freesurfer_license",
+            "--file",
+            licence.to_str().unwrap(),
+        ],
+        None,
+    );
+
+    // G2 at the pre-flight: the lab's T1s have 8 mm pixels, so recon-all's
+    // hard need on the voxel skips both sessions in the pack's words and
+    // routes them to recon-all-clinical
+    let pf = lab.json(&[
+        "run",
+        "freesurfer-recon-all",
+        "--select",
+        "selection:every@1",
+        "--preflight",
+        "--json",
+    ]);
+    let judged = &pf["units_judged"];
+    assert_eq!(judged["skipped"], 2, "{pf}");
+    assert_eq!(
+        judged["routed"], 0,
+        "a skipped unit is skipped, its variant recorded: {pf}"
+    );
+    for u in judged["units"].as_array().unwrap() {
+        assert_eq!(u["status"], "skipped", "{u}");
+        assert!(u["words"].as_str().unwrap().contains("over 1.5 mm"), "{u}");
+        assert_eq!(u["need"], "t1w: voxel_max_mm <= 1.5", "{u}");
+        assert_eq!(u["variant"]["variant"], "clinical", "{u}");
+        assert_eq!(
+            u["variant"]["pipeline"], "freesurfer-recon-all-clinical",
+            "{u}"
+        );
+        assert_eq!(u["variant"]["rule"], "route-to-recon-all-clinical", "{u}");
+    }
+    assert!(
+        pf["blockers"]
+            .to_string()
+            .contains("skipped by the pack's needs"),
+        "{pf}"
+    );
+
+    // section 10: every pack replayed over the registry, read-only, against
+    // the version the catalog runs (its own: nothing changes)
+    for name in SHIPPED {
+        let doc = lab.json(&[
+            "pipeline",
+            "replay",
+            folder(name).to_str().unwrap(),
+            "--json",
+        ]);
+        assert_eq!(doc["read_only"], true, "{name}: {doc}");
+        assert_eq!(doc["pipeline"], name, "{doc}");
+        assert_eq!(
+            doc["against"]["pipeline"],
+            format!("{name}@1"),
+            "{name}: {doc}"
+        );
+        assert_eq!(doc["against"]["same_pack"], true, "{name}: {doc}");
+        assert_eq!(doc["sessions"], 2, "{name}: {doc}");
+        let now = &doc["now"];
+        assert_eq!(
+            now["run"].as_u64().unwrap() + now["skipped"].as_u64().unwrap(),
+            doc["with_inputs"].as_u64().unwrap(),
+            "{name}: {doc}"
+        );
+        assert_eq!(doc["changes"]["run_to_skipped"], 0, "{name}: {doc}");
+        assert_eq!(doc["changes"]["skipped_to_run"], 0, "{name}: {doc}");
+        assert_eq!(doc["changes"]["knobs"], json!({}), "{name}: {doc}");
+        eprintln!(
+            "replay {name}: with_inputs {} run {} skipped {} routed {} cannot_tell {} caveats {} skipped_by_need {} kept {}",
+            doc["with_inputs"],
+            now["run"],
+            now["skipped"],
+            now["routed"],
+            now["cannot_tell"],
+            now["with_caveats"],
+            now["skipped_by_need"],
+            doc["kept"]
+        );
+        let (good, text, err) = lab.run(
+            &["pipeline", "replay", folder(name).to_str().unwrap()],
+            None,
+        );
+        assert!(good, "{err}");
+        assert!(
+            text.contains("read-only") && text.contains("kept results:"),
+            "{text}"
+        );
+    }
+    let doc = lab.json(&[
+        "pipeline",
+        "replay",
+        folder("freesurfer-recon-all").to_str().unwrap(),
+        "--json",
+    ]);
+    assert_eq!(doc["now"]["skipped"], 2, "{doc}");
+    assert_eq!(doc["now"]["routed_to"]["clinical"], 2, "{doc}");
+    assert_eq!(doc["now"]["skipped_by_need"][0]["sessions"], 2, "{doc}");
+    // review item 5: a skipped session that names a variant is counted
+    // apart; routed is a subset of run
+    assert_eq!(doc["now"]["routed"], 0, "{doc}");
+    assert_eq!(doc["now"]["skipped_routed"], 2, "{doc}");
+    let (good, text, err) = lab.run(
+        &[
+            "pipeline",
+            "replay",
+            folder("freesurfer-recon-all").to_str().unwrap(),
+        ],
+        None,
+    );
+    assert!(good, "{err}");
+    assert!(
+        text.contains("0 run (0 routed to a variant), 2 skipped (2 of them routed to a variant"),
+        "{text}"
+    );
+    // review item 10: a raw series is never skull-stripped, so MRIQC's units
+    // are judged to run (the lab's stacks are acquisitions); the replay and
+    // the pre-flight agree, and nothing is "cannot tell"
+    let doc = lab.json(&[
+        "pipeline",
+        "replay",
+        folder("mriqc").to_str().unwrap(),
+        "--json",
+    ]);
+    assert_eq!(doc["now"]["run"], 2, "{doc}");
+    assert_eq!(doc["now"]["cannot_tell"], 0, "{doc}");
+    assert_eq!(doc["now"]["skipped"], 0, "{doc}");
+    // the lab's machine is small, so the pair runs as version 2 with the
+    // descriptor's memory lowered and the pack pinned to that descriptor
+    let descriptor = std::fs::read_to_string(folder("mriqc").join("nils.job.yml")).unwrap();
+    let pack = std::fs::read_to_string(folder("mriqc").join("nils-pack.yaml")).unwrap();
+    let small = descriptor
+        .replace("    memory-gb: 12\n", "    memory-gb: 2\n")
+        .replace("    default-value: 12\n", "    default-value: 2\n");
+    assert_ne!(small, descriptor);
+    let small_digest = nils_pipeline::descriptor::parse(&small).unwrap().digest();
+    let pinned = pack
+        .lines()
+        .find(|l| l.contains("descriptor_sha256:"))
+        .unwrap()
+        .to_string();
+    let v2 = lab.add_pair(
+        "mriqc-small",
+        &small,
+        &pack.replace(&pinned, &format!("  descriptor_sha256: \"{small_digest}\"")),
+    );
+    assert_eq!(v2["version"], 2, "{v2}");
+    let pf = lab.json(&[
+        "run",
+        "mriqc",
+        "--select",
+        "selection:every@1",
+        "--preflight",
+        "--json",
+    ]);
+    let judged = &pf["units_judged"];
+    assert_eq!(judged["skipped"], 0, "{pf}");
+    assert_eq!(judged["units"].as_array().unwrap().len(), 2, "{pf}");
+    for u in judged["units"].as_array().unwrap() {
+        assert_ne!(u["status"], "skipped", "{u}");
+    }
+
+    // a pack change: recon-all's pack with the voxel need relaxed is version
+    // 2; the folder's pack replayed against it moves 2 sessions from run to
+    // skipped, and names the need
+    let descriptor =
+        std::fs::read_to_string(folder("freesurfer-recon-all").join("nils.job.yml")).unwrap();
+    let pack =
+        std::fs::read_to_string(folder("freesurfer-recon-all").join("nils-pack.yaml")).unwrap();
+    let relaxed = pack.replace(
+        "when: \"voxel_max_mm <= 1.5\"",
+        "when: \"voxel_max_mm <= 20\"",
+    );
+    assert_ne!(relaxed, pack);
+    let r2 = lab.add_pair("recon-all-relaxed", &descriptor, &relaxed);
+    assert_eq!(r2["version"], 2, "{r2}");
+    let doc = lab.json(&[
+        "pipeline",
+        "replay",
+        folder("freesurfer-recon-all").to_str().unwrap(),
+        "--against",
+        "freesurfer-recon-all@2",
+        "--json",
+    ]);
+    assert_eq!(doc["against"]["same_pack"], false, "{doc}");
+    assert_eq!(doc["before"]["run"], 2, "{doc}");
+    assert_eq!(doc["changes"]["run_to_skipped"], 2, "{doc}");
+    assert!(
+        doc["changes"]["run_to_skipped_by_need"][0]["words"]
+            .as_str()
+            .unwrap()
+            .contains("over 1.5 mm"),
+        "{doc}"
+    );
+    // the door: version 2 against version 1 moves them from skipped to run;
+    // with no version named it is read against the newest active earlier one
+    let server = Server::start(&lab);
+    let (status, doc) = server.call(
+        "GET",
+        &format!(
+            "/api/pipelines/{}/replay?against={}",
+            r2["id"], ids["freesurfer-recon-all"]
+        ),
+        None,
+        OPERATOR,
+    );
+    assert_eq!(status, 200, "{doc}");
+    assert_eq!(doc["pipeline_id"], r2["id"], "{doc}");
+    assert_eq!(doc["changes"]["skipped_to_run"], 2, "{doc}");
+    assert_eq!(doc["read_only"], true, "{doc}");
+    let (status, again) = server.call(
+        "GET",
+        &format!("/api/pipelines/{}/replay", r2["id"]),
+        None,
+        OPERATOR,
+    );
+    assert_eq!(status, 200, "{again}");
+    assert_eq!(
+        again["against"]["pipeline_id"], ids["freesurfer-recon-all"],
+        "{again}"
+    );
+    let (status, _) = server.call(
+        "GET",
+        &format!("/api/pipelines/{}/replay?against=999", r2["id"]),
+        None,
+        OPERATOR,
+    );
+    assert_eq!(status, 404);
+    // item 7: nothing saved to pick from says why, in the answer and the words
+    assert_eq!(
+        doc["population"],
+        json!({"sessions": 2}),
+        "the lab saved its picks: {doc}"
     );
 }

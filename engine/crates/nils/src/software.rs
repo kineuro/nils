@@ -92,7 +92,15 @@ pub(crate) struct Place {
 
 impl Place {
     pub(crate) fn doc(&self) -> Value {
-        json!({"path": self.path.display().to_string(), "declared": self.declared})
+        // read_only: the engine cannot write the place (a folder a site shares
+        // read-only still lists, verifies and runs what it holds, but installs
+        // and registrations into it fail). The place has no notion of a
+        // shared folder yet, so no `shared` is named.
+        json!({
+            "path": self.path.display().to_string(),
+            "declared": self.declared,
+            "read_only": !crate::places::may_write(&self.path),
+        })
     }
 
     pub(crate) fn layout(&self) -> Layout {

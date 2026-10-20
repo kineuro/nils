@@ -1158,6 +1158,11 @@ pub(crate) fn check(registry: &mut Registry, asked: &Asked<'_>) -> Result<Value,
                     .collect()
             })
             .unwrap_or_default();
+        let mut why = why;
+        let told_not = judged_doc["cannot_tell"].as_u64().unwrap_or(0);
+        if told_not > 0 {
+            why.push(format!("the registry cannot tell for {told_not}"));
+        }
         blockers.push(format!(
             "no {word} can run: {pack_skipped} of {} are skipped by the pack's needs ({})",
             units.len(),

@@ -138,6 +138,7 @@ struct StackRow {
     base: Option<String>,
     body_part: Option<String>,
     post_contrast: Option<String>,
+    disposition: Option<String>,
 }
 
 fn stack_rows(store: &mut Store, stacks: &[i64]) -> BTreeMap<i64, StackRow> {
@@ -171,7 +172,7 @@ fn stack_rows(store: &mut Store, stacks: &[i64]) -> BTreeMap<i64, StackRow> {
     }
     let sql = format!(
         "SELECT stack_id, axis, value FROM {} WHERE stack_id IN ({ids}) \
-         AND axis IN ('base', 'body_part', 'post_contrast') AND value IS NOT NULL",
+         AND axis IN ('base', 'body_part', 'post_contrast', 'disposition') AND value IS NOT NULL",
         store.qualified("classification_axis")
     );
     for r in store.query(&sql, &[]).unwrap_or_default() {
@@ -183,6 +184,7 @@ fn stack_rows(store: &mut Store, stacks: &[i64]) -> BTreeMap<i64, StackRow> {
             "base" => row.base = Some(value.to_string()),
             "body_part" => row.body_part = Some(value.to_string()),
             "post_contrast" => row.post_contrast = Some(value.to_string()),
+            "disposition" => row.disposition = Some(value.to_string()),
             _ => {}
         }
     }
@@ -234,9 +236,18 @@ fn stack_facts(f: &mut Facts, role: &str, row: Option<&StackRow>) {
             }),
     );
     set(f, "body_part", Val::text(r.body_part.as_deref()));
-    // the registry records neither (spec section 5.4): unknown until a
-    // derivative or a step says
-    set(f, "skull_stripped", Val::Unknown);
+    // a raw series (disposition acquisition) is never skull-stripped; of a
+    // derivative the registry cannot tell (spec section 5.4)
+    set(
+        f,
+        "skull_stripped",
+        if r.disposition.as_deref() == Some("acquisition") {
+            Val::Bool(false)
+        } else {
+            Val::Unknown
+        },
+    );
+    // the registry records no defacing: unknown until a step says
     set(f, "defaced", Val::Unknown);
 }
 
@@ -465,7 +476,13 @@ pub(crate) fn judged_doc(names: &[String], judged: &[Judgement]) -> Value {
         .collect();
     let count = |s: Status| judged.iter().filter(|j| j.status == s).count();
     let mut by_words: BTreeMap<String, usize> = BTreeMap::new();
-    for j in judged.iter().filter(|j| j.status == Status::Skipped) {
+    // a unit the registry cannot tell about is skipped, and counted once, in
+    // cannot_tell; the need lines are the units a need refused outright
+    let told_not = |j: &&Judgement| j.status == Status::Skipped && j.cannot_tell.is_some();
+    for j in judged
+        .iter()
+        .filter(|j| j.status == Status::Skipped && j.cannot_tell.is_none())
+    {
         *by_words
             .entry(j.words.clone().unwrap_or_default())
             .or_default() += 1;
@@ -480,7 +497,7 @@ pub(crate) fn judged_doc(names: &[String], judged: &[Judgement]) -> Value {
         "ready": count(Status::Ready),
         "skipped": count(Status::Skipped),
         "routed": count(Status::Routed),
-        "cannot_tell": judged.iter().filter(|j| j.cannot_tell.is_some()).count(),
+        "cannot_tell": judged.iter().filter(told_not).count(),
         "with_caveats": judged.iter().filter(|j| !j.caveats.is_empty()).count(),
         "skipped_by_why": skipped_by_why,
     })
@@ -1195,6 +1212,27 @@ pub(crate) fn pooling_refusal(store: &mut Store, ask: &nils_ask::ast::Ask) -> Op
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nils_pipeline::pack::rules::Status;
+
+    #[test]
+    fn a_raw_series_is_never_skull_stripped_and_a_derivative_is_not_told() {
+        let mut f = Facts::default();
+        let acquisition = StackRow {
+            disposition: Some("acquisition".into()),
+            ..StackRow::default()
+        };
+        stack_facts(&mut f, "t1w", Some(&acquisition));
+        assert_eq!(f.get("t1w.skull_stripped"), Val::Bool(false));
+        let derived = StackRow {
+            disposition: Some("scanner_derived".into()),
+            ..StackRow::default()
+        };
+        stack_facts(&mut f, "flair", Some(&derived));
+        assert_eq!(f.get("flair.skull_stripped"), Val::Unknown);
+        stack_facts(&mut f, "t2w", None);
+        assert_eq!(f.get("t2w.skull_stripped"), Val::Unknown);
+        assert_eq!(f.get("t1w.defaced"), Val::Unknown);
+    }
 
     #[test]
     fn a_person_s_ask_reads_from_a_body_and_from_flags() {
@@ -1341,10 +1379,35 @@ goals: {goal: [fast, standard], workers: [2, 4], ratio: [0.5, 1.5]}
         name: &str,
         number: f64,
     ) {
+        put_measure_of(
+            store,
+            "samseg-lesions",
+            run,
+            unit,
+            subject,
+            day,
+            stack,
+            name,
+            number,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn put_measure_of(
+        store: &mut Store,
+        pipeline: &str,
+        run: i64,
+        unit: &str,
+        subject: i64,
+        day: &str,
+        stack: Option<i64>,
+        name: &str,
+        number: f64,
+    ) {
         store
             .batch(&format!(
                 "INSERT INTO measure (run_id, pipeline_id, pipeline, source, scope, subject_id, session_day, \
-                 stack_id, unit_id, name, type, number, created_at) VALUES ({run}, 1, 'samseg-lesions', 'metrics', \
+                 stack_id, unit_id, name, type, number, created_at) VALUES ({run}, 1, '{pipeline}', 'metrics', \
                  'session', {subject}, '{day}', {}, '{unit}', '{name}', 'number', {number}, '2026-10-19T10:00:00Z')",
                 stack.map_or("NULL".to_string(), |s| s.to_string())
             ))
@@ -1680,5 +1743,739 @@ checks:
             "{csv}"
         );
         assert!(csv.contains("# unkeyed: 2 ("), "{csv}");
+    }
+
+    // ---- the first packs (Wave 7b P1): G2 and G4 fixtures ----
+
+    /// The shipped pipelines that carry a pack.
+    const SHIPPED: [&str; 9] = [
+        "freesurfer-recon-all",
+        "freesurfer-recon-all-clinical",
+        "samseg-lesions",
+        "synthseg",
+        "synthstrip",
+        "mriqc",
+        "n4-bias-correction",
+        "segcsvd",
+        "lst-ai",
+    ];
+
+    fn shipped(name: &str) -> (Descriptor, PipelinePack) {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../pipelines")
+            .join(name);
+        let (d, p) = pack::load_dir(&dir, None).unwrap_or_else(|e| panic!("{name}: {e}"));
+        (d, p.unwrap_or_else(|| panic!("{name} has no pack")))
+    }
+
+    /// A session every first pack runs without a caveat: a 3D T1w and a 3D
+    /// FLAIR at 1 mm, 3 T, not post-contrast, aligned, an adult control, a
+    /// host of 64 GB.
+    fn good() -> Facts {
+        let mut f = Facts::default();
+        for (role, base) in [("t1w", "T1w"), ("flair", "T2w")] {
+            f.roles.insert(role.into());
+            let set = |f: &mut Facts, n: &str, v: Val| f.set(&format!("{role}.{n}"), v);
+            set(&mut f, "base", Val::Text(base.into()));
+            set(&mut f, "dimension", Val::Text("3D".into()));
+            set(&mut f, "voxel_max_mm", Val::Number(1.0));
+            set(&mut f, "voxel_min_mm", Val::Number(1.0));
+            set(&mut f, "slice_thickness_mm", Val::Number(1.0));
+            set(&mut f, "field_strength_t", Val::Number(3.0));
+            set(&mut f, "post_contrast", Val::Text("not_given".into()));
+            set(&mut f, "vendor", Val::Text("siemens".into()));
+            set(&mut f, "body_part", Val::Text("brain".into()));
+            set(&mut f, "skull_stripped", Val::Bool(false));
+        }
+        f.set_aligned("flair", "t1w", Val::Bool(true));
+        f.set("diagnosis", Val::Text("control".into()));
+        f.set("host.cores", Val::Number(8.0));
+        f.set("host.memory_gb", Val::Number(64.0));
+        f.set("host.gpu", Val::Bool(false));
+        f.set("host.runtime", Val::Text("podman".into()));
+        f
+    }
+
+    fn judged(name: &str, f: &Facts, choices: &[(&str, &str)]) -> Judgement {
+        let (d, p) = shipped(name);
+        let resolved = d.resolve(&[]).unwrap();
+        let person = Person {
+            user: "anna".into(),
+            choices: choices
+                .iter()
+                .map(|(k, v)| (k.to_string(), json!(v)))
+                .collect(),
+            ..Person::default()
+        };
+        nils_pipeline::pack::rules::judge(&p, &d, &resolved, f, &person)
+    }
+
+    /// What a case expects of its unit.
+    enum Expect {
+        /// Skipped, the words holding this text.
+        Skipped(&'static str),
+        /// Runs, with a caveat holding this text.
+        Caveat(&'static str),
+    }
+
+    fn check_case(
+        name: &str,
+        mutate: &dyn Fn(&mut Facts),
+        choices: &[(&str, &str)],
+        expect: Expect,
+    ) {
+        let mut f = good();
+        if name == "lst-ai" {
+            f.set("diagnosis", Val::Text("MS".into()));
+        }
+        mutate(&mut f);
+        let j = judged(name, &f, choices);
+        match expect {
+            Expect::Skipped(text) => {
+                assert_eq!(j.status, Status::Skipped, "{name}: {text}: {j:?}");
+                let words = j.words.clone().unwrap_or_default();
+                assert!(
+                    words.contains(text),
+                    "{name}: skipped with {words:?}, not {text:?}"
+                );
+            }
+            Expect::Caveat(text) => {
+                assert_ne!(j.status, Status::Skipped, "{name}: {text}: {j:?}");
+                assert!(
+                    j.caveats.iter().any(|c| c.words.contains(text)),
+                    "{name}: caveats {:?} hold no {text:?}",
+                    j.caveats
+                        .iter()
+                        .map(|c| c.words.as_str())
+                        .collect::<Vec<_>>()
+                );
+            }
+        }
+    }
+
+    /// Review item 15: a unit the registry cannot tell about is skipped and
+    /// counted once, in cannot_tell; the counts add up to the units.
+    #[test]
+    fn a_cannot_tell_unit_is_counted_once_and_the_counts_add_up() {
+        let mut unknown = good();
+        unknown.set("t1w.skull_stripped", Val::Unknown);
+        let mut flat = good();
+        flat.set("t1w.dimension", Val::Text("2D".into()));
+        let list = vec![
+            judged("mriqc", &good(), &[]),
+            judged("mriqc", &unknown, &[]),
+            judged("mriqc", &flat, &[]),
+        ];
+        let names: Vec<String> = (1..=3).map(|n| format!("stack-{n}")).collect();
+        let doc = judged_doc(&names, &list);
+        let n = |k: &str| doc[k].as_u64().unwrap();
+        assert_eq!(
+            (n("ready"), n("skipped"), n("cannot_tell")),
+            (1, 2, 1),
+            "{doc}"
+        );
+        let by_why: u64 = doc["skipped_by_why"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|w| w["units"].as_u64().unwrap())
+            .sum();
+        assert_eq!(by_why, 1, "{doc}");
+        assert_eq!(
+            n("ready") + n("routed") + by_why + n("cannot_tell"),
+            3,
+            "{doc}"
+        );
+        assert!(
+            !doc["skipped_by_why"].to_string().contains("cannot tell"),
+            "{doc}"
+        );
+    }
+
+    #[test]
+    fn g2_every_first_pack_runs_the_good_session_without_a_caveat() {
+        for name in SHIPPED {
+            let mut f = good();
+            if name == "lst-ai" {
+                f.set("diagnosis", Val::Text("MS".into()));
+            }
+            let j = judged(name, &f, &[]);
+            assert_eq!(j.status, Status::Ready, "{name}: {j:?}");
+            assert!(j.caveats.is_empty(), "{name}: {:?}", j.caveats);
+            assert!(j.variant.is_none(), "{name}: {:?}", j.variant);
+        }
+    }
+
+    #[test]
+    fn g2_a_case_per_hard_and_soft_need_of_every_first_pack() {
+        use Expect::{Caveat, Skipped};
+        let t1 =
+            |n: &'static str, v: Val| move |f: &mut Facts| f.set(&format!("t1w.{n}"), v.clone());
+        let fl =
+            |n: &'static str, v: Val| move |f: &mut Facts| f.set(&format!("flair.{n}"), v.clone());
+        let two_d = Val::Text("2D".into());
+        let given = Val::Text("given".into());
+        let no_flair = |f: &mut Facts| {
+            f.roles.remove("flair");
+        };
+        let unaligned = |f: &mut Facts| f.aligned.clear();
+        let ms = |f: &mut Facts| f.set("diagnosis", Val::Text("MS".into()));
+        let small_host = |f: &mut Facts| f.set("host.memory_gb", Val::Number(16.0));
+
+        // recon-all: 3D and 1.5 mm hard (routed to recon-all-clinical), 1.3 to
+        // 1.5 mm, post-contrast, age, MS and the host soft
+        let r = "freesurfer-recon-all";
+        check_case(
+            r,
+            &t1("dimension", two_d.clone()),
+            &[],
+            Skipped("the T1 is 2D; recon-all needs a 3D T1"),
+        );
+        check_case(
+            r,
+            &t1("voxel_max_mm", Val::Number(2.0)),
+            &[],
+            Skipped("over 1.5 mm"),
+        );
+        let j = judged(
+            r,
+            &{
+                let mut f = good();
+                f.set("t1w.voxel_max_mm", Val::Number(2.0));
+                f
+            },
+            &[],
+        );
+        let v = j.variant.expect("routed");
+        assert_eq!(v.variant, "clinical");
+        assert_eq!(v.pipeline, "freesurfer-recon-all-clinical");
+        assert_eq!(v.rule, "route-to-recon-all-clinical");
+        check_case(
+            r,
+            &t1("voxel_max_mm", Val::Number(1.4)),
+            &[],
+            Caveat("between 1.3 and 1.5 mm"),
+        );
+        let j = judged(
+            r,
+            &{
+                let mut f = good();
+                f.set("t1w.voxel_max_mm", Val::Number(1.4));
+                f
+            },
+            &[],
+        );
+        assert_eq!(j.knobs["voxel_class"].value, "coarse");
+        assert_eq!(j.knobs["voxel_class"].by, "rule:coarse-voxel-kept-apart");
+        check_case(
+            r,
+            &t1("post_contrast", given.clone()),
+            &[],
+            Caveat("labelled post-contrast"),
+        );
+        let j = judged(
+            r,
+            &{
+                let mut f = good();
+                f.set("t1w.post_contrast", given.clone());
+                f
+            },
+            &[],
+        );
+        assert_eq!(j.knobs["synthsr"].value, true, "{:?}", j.knobs["synthsr"]);
+        check_case(r, &ms, &[], Caveat("MS: the white and pial"));
+        check_case(r, &small_host, &[], Caveat("less than 32 GB"));
+        // its rules at research grade and under the switches
+        let j = judged(
+            r,
+            &{
+                let mut f = good();
+                f.set("t1w.voxel_max_mm", Val::Number(0.8));
+                f
+            },
+            &[("goal", "research")],
+        );
+        assert_eq!(j.knobs["hires"].value, true);
+        assert_eq!(j.knobs["qcache"].value, true);
+        assert_eq!(j.knobs["hires"].by, "rule:hires-at-research-grade");
+        let j = judged(
+            r,
+            &good(),
+            &[("three_tesla", "on"), ("big_ventricles", "on")],
+        );
+        assert_eq!(j.knobs["three_t"].value, true);
+        assert_eq!(j.knobs["bigventricles"].value, true);
+        let j = judged(r, &good(), &[]);
+        for k in ["hires", "qcache", "three_t", "bigventricles", "synthsr"] {
+            assert_eq!(j.knobs[k].value, false, "{k}");
+        }
+        assert_eq!(j.knobs["voxel_class"].value, "fine");
+
+        // recon-all-clinical: thick slices and the host soft
+        let c = "freesurfer-recon-all-clinical";
+        check_case(
+            c,
+            &t1("slice_thickness_mm", Val::Number(4.0)),
+            &[],
+            Caveat("over 3 mm"),
+        );
+        check_case(c, &small_host, &[], Caveat("less than 32 GB"));
+        let j = judged(
+            c,
+            &{
+                let mut f = good();
+                f.set("t1w.dimension", two_d.clone());
+                f.set("t1w.slice_thickness_mm", Val::Number(5.0));
+                f
+            },
+            &[],
+        );
+        assert_eq!(j.status, Status::Ready, "any single scan runs: {j:?}");
+
+        // SAMSEG: a FLAIR hard with lesions on; post-contrast and 2D soft;
+        // the link soft
+        let s = "samseg-lesions";
+        check_case(
+            s,
+            &t1("post_contrast", given.clone()),
+            &[],
+            Caveat("labelled post-contrast"),
+        );
+        check_case(
+            s,
+            &t1("dimension", two_d.clone()),
+            &[],
+            Caveat("the T1 is 2D"),
+        );
+        check_case(s, &no_flair, &[], Skipped("no FLAIR picked, so no lesions"));
+        check_case(s, &unaligned, &[], Caveat("cannot tell: aligned:flair:t1w"));
+        let j = judged(
+            s,
+            &{
+                let mut f = good();
+                no_flair(&mut f);
+                f
+            },
+            &[("lesions", "off")],
+        );
+        assert_eq!(j.status, Status::Ready, "{j:?}");
+        assert_eq!(j.knobs["lesion"].value, "off");
+        assert_eq!(j.knobs["pallidum_separate"].value, false);
+        assert!(
+            j.caveats.iter().all(|c| !c.words.contains("FLAIR")),
+            "{:?}",
+            j.caveats
+        );
+        let j = judged(s, &good(), &[]);
+        assert_eq!(j.knobs["lesion"].value, "on");
+        assert_eq!(j.knobs["pallidum_separate"].value, true);
+
+        // SynthSeg: the host soft; robust unless the fast goal on a fine 3D T1
+        let y = "synthseg";
+        check_case(y, &small_host, &[], Caveat("less than 24 GB"));
+        assert_eq!(judged(y, &good(), &[]).knobs["robust"].value, true);
+        let j = judged(y, &good(), &[("goal", "fast")]);
+        assert_eq!(j.knobs["robust"].value, false);
+        assert_eq!(
+            j.knobs["robust"].by,
+            "rule:standard-network-for-fast-on-a-fine-3d-t1"
+        );
+        let j = judged(
+            y,
+            &{
+                let mut f = good();
+                f.set("t1w.dimension", two_d.clone());
+                f
+            },
+            &[("goal", "fast")],
+        );
+        assert_eq!(
+            j.knobs["robust"].value, true,
+            "a 2D scan is robust whatever the goal"
+        );
+
+        // SynthStrip: no need; the tight-edges switch
+        assert_eq!(
+            judged("synthstrip", &good(), &[]).knobs["no_csf"].value,
+            false
+        );
+        assert_eq!(
+            judged("synthstrip", &good(), &[("tight_edges", "on")]).knobs["no_csf"].value,
+            true
+        );
+
+        // MRIQC: 3D and not skull-stripped hard; voxels and post-contrast soft
+        let m = "mriqc";
+        check_case(
+            m,
+            &t1("dimension", two_d.clone()),
+            &[],
+            Skipped("the T1 is 2D; MRIQC"),
+        );
+        check_case(
+            m,
+            &t1("skull_stripped", Val::Bool(true)),
+            &[],
+            Skipped("skull-stripped"),
+        );
+        check_case(
+            m,
+            &t1("skull_stripped", Val::Unknown),
+            &[],
+            Skipped("cannot tell: t1w.skull_stripped"),
+        );
+        check_case(
+            m,
+            &t1("voxel_max_mm", Val::Number(2.0)),
+            &[],
+            Caveat("over 1.5 mm"),
+        );
+        check_case(
+            m,
+            &t1("post_contrast", given.clone()),
+            &[],
+            Caveat("labelled post-contrast"),
+        );
+
+        // N4: 3D hard; the contrast and the slices soft; the shrink and the levels
+        let n = "n4-bias-correction";
+        check_case(n, &t1("dimension", two_d.clone()), &[], Skipped("N4 fits"));
+        check_case(
+            n,
+            &t1("base", Val::Text("T2w".into())),
+            &[],
+            Caveat("optimised for brain T1w"),
+        );
+        check_case(
+            n,
+            &t1("slice_thickness_mm", Val::Number(4.0)),
+            &[],
+            Caveat("over 3 mm"),
+        );
+        let j = judged(
+            n,
+            &{
+                let mut f = good();
+                f.set("t1w.slice_thickness_mm", Val::Number(4.0));
+                f
+            },
+            &[],
+        );
+        assert_eq!(j.knobs["shrink_factor"].value, 1);
+        let j = judged(
+            n,
+            &{
+                let mut f = good();
+                f.set("t1w.slice_thickness_mm", Val::Number(2.0));
+                f
+            },
+            &[],
+        );
+        assert_eq!(j.knobs["shrink_factor"].value, 2);
+        let j = judged(n, &good(), &[("goal", "fast")]);
+        assert_eq!(j.knobs["shrink_factor"].value, 4);
+        assert_eq!(j.knobs["levels"].value, 3);
+        assert_eq!(judged(n, &good(), &[]).knobs["levels"].value, 4);
+
+        // segcsvd: the FLAIR's 5 mm hard, 3 mm, 3 T and post-contrast soft; the
+        // T1's 3D, 1.2 mm and non-contrast hard, 1.0 mm, 3 T and MS soft; the
+        // link soft; no FLAIR runs the PVS alone
+        let g = "segcsvd";
+        check_case(
+            g,
+            &fl("slice_thickness_mm", Val::Number(6.0)),
+            &[],
+            Skipped("over 5 mm"),
+        );
+        check_case(
+            g,
+            &fl("slice_thickness_mm", Val::Number(4.0)),
+            &[],
+            Caveat("3 to 5 mm"),
+        );
+        check_case(
+            g,
+            &fl("field_strength_t", Val::Number(1.5)),
+            &[],
+            Caveat("below 3 T; the WMH"),
+        );
+        check_case(
+            g,
+            &fl("post_contrast", given.clone()),
+            &[],
+            Caveat("FLAIR is labelled post-contrast"),
+        );
+        check_case(
+            g,
+            &t1("dimension", two_d.clone()),
+            &[],
+            Skipped("perivascular"),
+        );
+        check_case(
+            g,
+            &t1("voxel_max_mm", Val::Number(1.3)),
+            &[],
+            Skipped("over 1.2 mm"),
+        );
+        check_case(
+            g,
+            &t1("post_contrast", given.clone()),
+            &[],
+            Skipped("trained on non-contrast"),
+        );
+        check_case(
+            g,
+            &t1("voxel_max_mm", Val::Number(1.1)),
+            &[],
+            Caveat("between 1.0 and 1.2"),
+        );
+        check_case(
+            g,
+            &t1("field_strength_t", Val::Number(1.5)),
+            &[],
+            Caveat("below 3 T; the PVS"),
+        );
+        check_case(g, &ms, &[], Caveat("not validated for MS"));
+        check_case(g, &unaligned, &[], Caveat("cannot tell: aligned:flair:t1w"));
+        let j = judged(
+            g,
+            &{
+                let mut f = good();
+                no_flair(&mut f);
+                f
+            },
+            &[],
+        );
+        assert_eq!(j.status, Status::Ready, "{j:?}");
+        assert!(
+            j.caveats.iter().all(|c| !c.words.contains("FLAIR")),
+            "{:?}",
+            j.caveats
+        );
+        let j = judged(
+            g,
+            &{
+                let mut f = good();
+                no_flair(&mut f);
+                f.set("t1w.dimension", two_d.clone());
+                f
+            },
+            &[],
+        );
+        assert_eq!(
+            j.status,
+            Status::Skipped,
+            "a T1 the PVS cannot read is skipped without a FLAIR too"
+        );
+
+        // LST-AI: both 3D hard; MS and the link soft; the denormal switch
+        let l = "lst-ai";
+        check_case(
+            l,
+            &t1("dimension", two_d.clone()),
+            &[],
+            Skipped("the T1 is 2D; LST-AI"),
+        );
+        check_case(
+            l,
+            &fl("dimension", two_d.clone()),
+            &[],
+            Skipped("the FLAIR is 2D"),
+        );
+        check_case(
+            l,
+            &|f: &mut Facts| f.set("diagnosis", Val::Text("control".into())),
+            &[],
+            Caveat("trained and validated on MS"),
+        );
+        check_case(l, &unaligned, &[], Caveat("cannot tell: aligned:flair:t1w"));
+        assert_eq!(
+            judged(l, &good(), &[]).knobs["flush_denormals"].value,
+            false
+        );
+        assert_eq!(
+            judged(l, &good(), &[("denormal_flush", "on")]).knobs["flush_denormals"].value,
+            true
+        );
+    }
+
+    /// The flags and failures a pack's checks give one unit's metrics.
+    fn held_of(name: &str, metrics: Value) -> (Vec<String>, Vec<String>) {
+        let (_, p) = shipped(name);
+        let held = hold_checks(&p, &metrics, &BTreeMap::new());
+        let names = |v: &[Value]| {
+            v.iter()
+                .map(|f| f["check"].as_str().unwrap_or_default().to_string())
+                .collect::<Vec<_>>()
+        };
+        (names(&held.flags), names(&held.failed))
+    }
+
+    #[test]
+    fn g4_known_bad_outputs_give_the_specified_status_and_good_ones_none() {
+        // SynthSeg's quality score under 0.65 flags, never fails
+        let (flags, failed) = held_of(
+            "synthseg",
+            json!({"qc_general_white_matter": 0.6, "qc_cerebellum": 0.9}),
+        );
+        assert_eq!(flags, ["qc_general_white_matter >= 0.65"]);
+        assert!(failed.is_empty());
+        let (flags, failed) = held_of(
+            "freesurfer-recon-all-clinical",
+            json!({"qc_general_csf": 0.5, "intracranial": 1500000.0}),
+        );
+        assert_eq!(flags, ["qc_general_csf >= 0.65"]);
+        assert!(failed.is_empty());
+        // MRIQC's fber or qi_1 of -1 fails the unit; wm2max outside 0.6 to 0.8 flags
+        let (flags, failed) = held_of("mriqc", json!({"fber": -1.0, "qi_1": 0.01, "wm2max": 0.7}));
+        assert_eq!(failed, ["fber != -1"]);
+        assert!(flags.is_empty());
+        let (_, failed) = held_of("mriqc", json!({"fber": 300.0, "qi_1": -1.0}));
+        assert_eq!(failed, ["qi_1 != -1"]);
+        let (flags, failed) = held_of("mriqc", json!({"fber": 300.0, "qi_1": 0.01, "wm2max": 0.5}));
+        assert_eq!(flags, ["wm2max >= 0.6"]);
+        assert!(failed.is_empty());
+        let (flags, _) = held_of("mriqc", json!({"wm2max": 0.9}));
+        assert_eq!(flags, ["wm2max <= 0.8"]);
+        // a FLAIR moved 15 mm: the brain masks agree at 0.80, under 0.85, a flag
+        let (flags, failed) = held_of(
+            "samseg-lesions",
+            json!({"flair_t1_brain_dice": 0.80, "intracranial": 1500000.0, "lesions": 1200.0}),
+        );
+        assert_eq!(flags, ["flair_t1_brain_dice >= 0.85"]);
+        assert!(failed.is_empty());
+        let (flags, _) = held_of(
+            "segcsvd",
+            json!({"flair_t1_brain_dice": 0.77, "pvs_volume": 300.0, "wmh_volume": 2000.0}),
+        );
+        assert_eq!(flags, ["flair_t1_brain_dice >= 0.85"]);
+        // SAMSEG's intracranial volume outside 0.9 to 2.3 litres flags
+        let (flags, _) = held_of("samseg-lesions", json!({"intracranial": 800000.0}));
+        assert_eq!(flags, ["intracranial >= 900000"]);
+        let (flags, _) = held_of("samseg-lesions", json!({"intracranial": 2400000.0}));
+        assert_eq!(flags, ["intracranial <= 2300000"]);
+        // an empty PVS mask, and a WMH volume of 0 with a FLAIR, flag
+        let (flags, failed) = held_of(
+            "segcsvd",
+            json!({"pvs_volume": 0.0, "wmh_volume": 2000.0, "flair_t1_brain_dice": 0.95}),
+        );
+        assert_eq!(flags, ["pvs_volume > 0"]);
+        assert!(failed.is_empty());
+        let (flags, _) = held_of("segcsvd", json!({"pvs_volume": 300.0, "wmh_volume": 0.0}));
+        assert_eq!(flags, ["wmh_volume > 0"]);
+        // SynthStrip's mask in pieces or at the image's edge flags
+        let (flags, _) = held_of(
+            "synthstrip",
+            json!({"mask_components": 2, "mask_edge_voxels": 0, "brain_volume": 1400000.0}),
+        );
+        assert_eq!(flags, ["mask_components <= 1"]);
+        let (flags, _) = held_of(
+            "synthstrip",
+            json!({"mask_components": 1, "mask_edge_voxels": 12}),
+        );
+        assert_eq!(flags, ["mask_edge_voxels <= 0"]);
+        // recon-all's intracranial volume of 0 is the csvprint fault: a failure
+        let (flags, failed) = held_of(
+            "freesurfer-recon-all",
+            json!({"intracranial": 0.0, "euler_lh": -20, "euler_rh": -22}),
+        );
+        assert_eq!(failed, ["intracranial > 0"]);
+        assert!(flags.is_empty());
+        // N4's bias field not positive inside the mask fails
+        let (_, failed) = held_of(
+            "n4-bias-correction",
+            json!({"bias_field_min": -0.1, "bias_field_max": 1.3}),
+        );
+        assert_eq!(failed, ["bias_field_min > 0"]);
+        // good outputs: nothing
+        for (name, good) in [
+            (
+                "synthseg",
+                json!({"qc_general_white_matter": 0.9, "qc_general_grey_matter": 0.9, "qc_general_csf": 0.9, "qc_cerebellum": 0.9, "qc_brainstem": 0.9, "qc_thalamus": 0.9, "qc_putamen_pallidum": 0.9, "qc_hippocampus_amygdala": 0.9, "total_intracranial": 1500000.0}),
+            ),
+            (
+                "mriqc",
+                json!({"fber": 300.0, "qi_1": 0.01, "wm2max": 0.7, "cjv": 0.4}),
+            ),
+            (
+                "samseg-lesions",
+                json!({"flair_t1_brain_dice": 0.95, "intracranial": 1500000.0, "lesions": 1200.0}),
+            ),
+            (
+                "segcsvd",
+                json!({"pvs_volume": 300.0, "wmh_volume": 2000.0, "flair_t1_brain_dice": 0.95}),
+            ),
+            (
+                "synthstrip",
+                json!({"mask_components": 1, "mask_edge_voxels": 0, "brain_volume": 1400000.0}),
+            ),
+            (
+                "freesurfer-recon-all",
+                json!({"intracranial": 1500000.0, "euler_lh": -20, "euler_rh": -22}),
+            ),
+            (
+                "freesurfer-recon-all-clinical",
+                json!({"intracranial": 1500000.0, "qc_general_csf": 0.9}),
+            ),
+            (
+                "n4-bias-correction",
+                json!({"bias_field_min": 0.7, "bias_field_max": 1.3}),
+            ),
+            (
+                "lst-ai",
+                json!({"lesion_volume": 2000.0, "lesion_count": 12}),
+            ),
+        ] {
+            let (flags, failed) = held_of(name, good);
+            assert!(
+                flags.is_empty() && failed.is_empty(),
+                "{name}: {flags:?} {failed:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn g4_cohort_checks_of_the_first_packs_say_not_yet_below_their_stratum() {
+        let mut store = registry_store();
+        for (k, (name, metric)) in [
+            ("mriqc", "cjv"),
+            ("segcsvd", "pvs_volume"),
+            ("freesurfer-recon-all", "euler_lh"),
+            ("lst-ai", "lesion_volume"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let (_, p) = shipped(name);
+            let check = p
+                .checks
+                .iter()
+                .find(|c| c.cohort && c.metric == metric)
+                .unwrap_or_else(|| panic!("{name} has a cohort check on {metric}"));
+            assert_eq!(check.min_sessions, 30, "{name}: {metric}");
+            let mut units = Vec::new();
+            for i in (1..=2_i64).map(|i| i + 10 * k as i64) {
+                put_stack(&mut store, i, 3.0);
+                let unit = format!("sub-{i}_ses-{name}");
+                put_unit(&mut store, 1, &unit, Some("sha256:k"), &stratum_pack(i));
+                put_measure_of(
+                    &mut store,
+                    name,
+                    1,
+                    &unit,
+                    i,
+                    "2026-01-01",
+                    None,
+                    metric,
+                    1.0 + i as f64,
+                );
+                units.push((1, unit));
+            }
+            let out = cohort_check(&mut store, name, check, &units);
+            for c in &out {
+                assert_eq!(c["status"], "not yet", "{name}: {c}");
+                assert_eq!(c["words"], "not yet: 2 of 30 sessions", "{name}: {c}");
+            }
+        }
     }
 }

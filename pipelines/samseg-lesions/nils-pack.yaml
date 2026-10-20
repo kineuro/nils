@@ -1,0 +1,94 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# The pack of SAMSEG with lesions (record 57 P11, Wave 7b P1), from the
+# pack study's research 02 (SAMSEG, SynthSeg, SynthStrip) and its fact
+# counts (step 2): on the archive 27,919 sessions hold a T1 and a FLAIR
+# (the FLAIR 3D in 17,003, 2D in 10,791), 1,606 a T1 and a T2 only (whose
+# lesions this version does not yet read: the T2 route is not built), 230 a
+# T1 alone (lesions off, or skipped with lesions on), 1,311 no T1. The
+# pallidum rule of research 02 is the descriptor's since 2026-10-12 (it
+# passes --pallidum-separate only with the FLAIR among SAMSEG's inputs);
+# the pack pins it as a rule and keeps the knob in the comparability key.
+nils_pack: 1
+pipeline:
+  name: samseg-lesions
+  descriptor_sha256: "sha256:88c8b67c628267c588f76579253b374b0d071a6ff41cd63015a9d24a735cbc66"
+  version: "1.0"
+goals:
+  goal: [fast, standard, research]
+  lesions: ["on", "off"]
+needs:
+  t1w:
+    soft:
+      - when: "post_contrast != 'given'"
+        words: "the T1 is labelled post-contrast: SAMSEG's contrast-adaptive model accepts it, but no evidence covers an enhanced T1"
+        source: "Samseg wiki; no published test (record 57, research 02)"
+      - when: "dimension == '3D'"
+        words: "the T1 is 2D: SAMSEG accepts it as the reference grid, but its validations are on 3D"
+        source: "Samseg wiki (record 57, research 02)"
+  flair:
+    hard_if: "lesions == 'on'"
+    hard:
+      - when: "present(flair)"
+        words: "no FLAIR picked, so no lesions: lesion mode needs a lesion-bright contrast with its mask pattern (a T2 would do, which this version does not yet take)"
+        source: "Samseg wiki; Van Leemput on the FreeSurfer list (record 57, research 02)"
+  link:
+    soft:
+      - when: "not present(flair) or aligned(flair, t1w)"
+        words: "the FLAIR is not known to be registered to the T1w: the header resampling is trusted, and the brain-mask Dice of the unit checks it at 0.85"
+        source: "Samseg wiki (inputs co-registered on one grid); policy until the registration family (record 57, research 02)"
+knobs:
+  lesion:
+    what: "segment white-matter lesions from the FLAIR beside the T1w (label 99); off segments the anatomy from the T1w alone"
+    cost: "about four times the time of a T1-only run"
+    changes: [labels, volumes]
+    comparability: breaks
+    set_by: rule
+  pallidum_separate:
+    what: "segment the pallidum apart from the white matter; only with a T2w or a FLAIR among the inputs, since on a T1w alone the two cannot be told apart"
+    changes: [labels, volumes]
+    comparability: breaks
+    set_by: rule
+  threads:
+    what: "the threads one session uses"
+    comparability: none
+    set_by: person
+rules:
+  - id: lesions-follow-the-switch
+    when: "lesions == 'off'"
+    set: {lesion: "off", pallidum_separate: false}
+    why: "the person turned lesions off: the T1w alone, where the pallidum is white matter"
+    source: policy
+  - id: lesions-off-without-flair
+    when: "not present(flair)"
+    set: {lesion: "off"}
+    why: "no FLAIR, so no lesion-bright contrast and no lesions"
+    source: "Samseg wiki; Van Leemput on the FreeSurfer list (record 57, research 02)"
+  - id: pallidum-needs-t2-or-flair
+    when: "not present(flair) and not present(t2w)"
+    set: {pallidum_separate: false}
+    why: "on a T1w alone the pallidum cannot be told from the white matter"
+    source: "Samseg wiki (record 57, research 02)"
+checks:
+  - {metric: flair_t1_brain_dice, op: ">=", value: 0.85, action: flag, source: policy, words: "FLAIR and T1 may not be aligned: their brain masks agree below 0.85"}
+  - {metric: intracranial, op: ">=", value: 900000, action: flag, source: policy, words: "an intracranial volume under 0.9 litres is a failed segmentation more often than a head"}
+  - {metric: intracranial, op: "<=", value: 2300000, action: flag, source: policy, words: "over 2.3 litres the segmentation took more than the head"}
+  - {metric: lesions, op: "<=", action: flag, cohort: true, stratum: [site, vendor, field_strength, sequence, post_contrast], min_sessions: 30, source: "policy (a lesion volume far above its cohort's, where controls should have none)"}
+  - {metric: intracranial, op: "!=", action: flag, cohort: true, stratum: [site, vendor, field_strength, sequence, post_contrast], min_sessions: 30, source: policy}
+licence:
+  spdx: "LicenseRef-FreeSurfer"
+  redistributable: false
+  terms: {url: "https://surfer.nmr.mgh.harvard.edu/fswiki/FreeSurferSoftwareLicense", version: "1.0 (2011)"}
+  accept: false
+resources:
+  memory_gb: 16
+  minutes: 45
+  gpu: none
+  by_input:
+    - {when: "lesions == 'off'", memory_gb: 16, minutes: 12}
+comparability: {}
+tests: []
+source:
+  image: "docker.io/freesurfer/freesurfer@sha256:5648104ca75a24f6ee5a8786146f99b405c2bda1da12bff723a15056da8ddf6b"
+  probe: {command: "recon-all -version", expect: "freesurfer"}
+  key_files: ["bin/run_samseg", "build-stamp.txt"]

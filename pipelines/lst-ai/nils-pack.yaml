@@ -1,0 +1,83 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# The pack of LST-AI (record 57 P11, Wave 7b P1), from the pack study's
+# research 02 and 04: the lesion family's first choice for MS with a 3D T1
+# and a 3D FLAIR (Wiltgen et al. 2024: Dice 0.67 and lesion-wise F1 0.63
+# on 103 public cases, against 0.42 to 0.55 for LST, SAMSEG and nnU-Net).
+# On the archive 16,194 sessions hold a 3D T1 and a 3D FLAIR; 11,725 hold
+# the pair with one of them 2D (skipped), 3,147 no pair (step 2). Whether
+# the denormal-float flush is on is decided by one same-conversion repeat
+# (Wave 7b, section 18): until then it is a switch, off.
+nils_pack: 1
+pipeline:
+  name: lst-ai
+  descriptor_sha256: "sha256:59db74ea85d89c484d2e45f593584abfd2b9d31f84496db452798bc32dd6fd7f"
+  version: "1.0"
+goals:
+  goal: [fast, standard, research]
+  # decided by one same-conversion repeat, then fixed in the pack
+  denormal_flush: ["off", "on"]
+needs:
+  t1w:
+    hard:
+      - when: "dimension == '3D'"
+        words: "the T1 is 2D; LST-AI was trained on 3D T1 and FLAIR pairs"
+        source: "Wiltgen et al., NeuroImage: Clinical 2024 (record 57, research 02)"
+    soft:
+      - when: "diagnosis == 'MS' or diagnosis == 'multiple sclerosis' or diagnosis == 'Multiple sclerosis'"
+        words: "LST-AI is trained and validated on MS lesions; another diagnosis is outside its evidence"
+        source: "Wiltgen et al. 2024 (record 57, research 02)"
+  flair:
+    hard:
+      - when: "dimension == '3D'"
+        words: "the FLAIR is 2D; LST-AI was trained on 3D T1 and FLAIR pairs"
+        source: "Wiltgen et al., NeuroImage: Clinical 2024 (record 57, research 02)"
+  link:
+    soft:
+      - when: "aligned(flair, t1w)"
+        words: "the FLAIR is not known to be registered to the T1w: LST-AI registers both to MNI itself, so the pair's alignment is read from a registration step or an earlier check"
+        source: "LST-AI's method; policy until the registration family (record 57, research 02)"
+knobs:
+  threshold:
+    what: "the probability a voxel of the ensemble's map is counted a lesion at; 0.5 is LST-AI's own"
+    changes: [lesions, regions, volumes]
+    comparability: breaks
+    set_by: person
+  fast:
+    what: "one HD-BET model for the skull strip instead of five"
+    cost: "a fifth of the skull strip's time"
+    changes: [lesions, regions, volumes]
+    comparability: breaks
+    set_by: person
+  flush_denormals:
+    what: "flush denormal floats to zero in PyTorch, which brought one Intel CPU's skull strip from over 18 minutes to 27 seconds; off until one same-conversion repeat says it changes nothing"
+    changes: [lesions, regions, volumes]
+    comparability: breaks
+    set_by: rule
+  threads:
+    what: "the threads the registration uses"
+    comparability: none
+    set_by: person
+rules:
+  - id: flush-denormals-as-chosen
+    when: "denormal_flush == 'on'"
+    set: {flush_denormals: true}
+    why: "the switch is the person's until the same-conversion repeat decides; off by default"
+    source: "the lst-ai starter's measurement; Wave 7b section 18"
+checks:
+  - {metric: lesion_volume, op: "<=", action: flag, cohort: true, stratum: [site, vendor, field_strength, sequence, post_contrast], min_sessions: 30, source: "policy (record 57, research 02)"}
+  - {metric: lesion_count, op: "<=", action: flag, cohort: true, stratum: [site, vendor, field_strength, sequence, post_contrast], min_sessions: 30, source: "policy (record 57, research 02)"}
+licence:
+  spdx: "MIT"
+  redistributable: true
+  terms: {url: "https://github.com/CompImg/LST-AI/blob/main/LICENSE", version: "1.2.0"}
+  accept: false
+resources:
+  memory_gb: 16
+  gpu: none
+comparability: {}
+tests: []
+source:
+  image: "ghcr.io/kineuro/nils-lst-ai@sha256:85d9647e8be753bd7c354a228750db81566f339283284565a3e2e8eacb458dae"
+  probe: {command: "lst --help", expect: "--flair"}
+  key_files: ["opt/conda/bin/lst", "opt/hd-bet_params"]

@@ -542,7 +542,7 @@ fn the_job_contract_is_the_runner_s() {
     assert_eq!(n4.layout, descriptor::Layout::Bids);
     assert_eq!(
         serde_json::Value::Object(n4.resolve(&[]).unwrap()),
-        serde_json::json!({"dimension": 3, "shrink_factor": 4, "spline_distance": 180})
+        serde_json::json!({"dimension": 3, "shrink_factor": 4, "spline_distance": 180, "levels": 4})
     );
 }
 
@@ -1108,6 +1108,9 @@ fn the_pipeline_pack_contract_is_the_loader_s_and_every_shipped_pack_loads() {
     // and its pack validates against the schema
     let pipelines = contracts().join("../pipelines");
     let mut with_pack = 0;
+    // the first packs are the starters' (Wave 7b P1); the models' packages
+    // (nils-bodypart, nils-postcontrast, nils-system1) are not among them
+    let mut without_pack: Vec<String> = Vec::new();
     for entry in std::fs::read_dir(&pipelines).unwrap().flatten() {
         let dir = entry.path();
         let mut dirs = vec![dir.clone()];
@@ -1118,6 +1121,10 @@ fn the_pipeline_pack_contract_is_the_loader_s_and_every_shipped_pack_loads() {
         }
         for dir in dirs {
             if !dir.join(pack::FILE).is_file() {
+                let folder = dir.display().to_string();
+                if dir.join("nils.job.yml").is_file() && !folder.contains("/pipelines/nils-") {
+                    without_pack.push(folder);
+                }
                 continue;
             }
             with_pack += 1;
@@ -1130,9 +1137,12 @@ fn the_pipeline_pack_contract_is_the_loader_s_and_every_shipped_pack_loads() {
             assert!(loaded.is_some(), "{}", dir.display());
         }
     }
-    // the first packs are written in the wave's step 2 (slice P1); until
-    // then the example is the one pack the tests load
-    eprintln!("{with_pack} pipeline folders ship a pack");
+    // G1: every starter pipeline has a pack (the first packs, Wave 7b P1)
+    assert!(
+        without_pack.is_empty(),
+        "pipeline folders with a descriptor and no nils-pack.yaml: {without_pack:?}"
+    );
+    assert!(with_pack >= 9, "{with_pack} pipeline folders ship a pack");
     // and the schema refuses what the loader refuses: a check with no
     // action, a rule that neither sets nor routes, a knob's comparability
     // outside its three words

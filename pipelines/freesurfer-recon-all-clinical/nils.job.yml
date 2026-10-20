@@ -1,0 +1,115 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# FreeSurfer recon-all-clinical: cortical surfaces and volumes from a
+# clinical scan of any contrast and resolution (Gopinath et al., Medical
+# Image Analysis 2025), the variant the recon-all pack routes a session to
+# when its T1 is 2D or coarser than 1.5 mm (record 57 P11, Wave 7b P1;
+# research 01: Greve, "this is what it is made for"). Not a starter the
+# engine seeds: it is added beside freesurfer-recon-all, whose pack names
+# it under `variants`.
+#
+# One session's T1-weighted image in, whatever its slices; the FreeSurfer
+# subject folder as one archive, the aseg volumes as a table, and
+# SynthSeg's quality scores of the input as a second table, the pack's
+# check (Billot et al., PNAS 2023: a region under 0.65 is a likely
+# failure). recon-all-clinical.sh takes the input, the subject, the
+# threads and the subjects folder, and no other option (the wiki): its
+# segmentation is SynthSeg's, its surfaces SynthDist's, its norm and brain
+# volumes synthetic (SynthSR). Cortical thickness degrades quickly with
+# slice spacing (Gopinath 2025), which the pack says as a caveat on a thick
+# T1; the model is trained on adults.
+#
+# The image is FreeSurfer 8.2.0, the one recon-all, SAMSEG, SynthSeg and
+# SynthStrip run in, pinned by its registry manifest digest (resolved
+# 2026-09-24 by a registry manifest request, not pulled). It reads the
+# lab's FreeSurfer licence as recon-all does (record 49 R3). Gopinath 2025
+# gives 3 to 4 hours on a 4-core CPU with 32 GB; a unit declares both.
+name: freesurfer-recon-all-clinical
+schema-version: "0.5"
+tool-version: "8.2.0"
+description: >-
+  Run FreeSurfer 8.2.0 recon-all-clinical on each session's T1-weighted
+  image, whatever its resolution: the subject folder as one archive, the
+  aseg volumes as a table, and SynthSeg's quality scores of the input. One
+  session is one unit; CPU, three to four hours a session, the lab's
+  licence.
+
+container-image:
+  type: docker
+  image: "docker.io/freesurfer/freesurfer@sha256:5648104ca75a24f6ee5a8786146f99b405c2bda1da12bff723a15056da8ddf6b"
+
+inputs:
+  - id: threads
+    name: Threads
+    type: Number
+    description: The threads recon-all-clinical's steps use.
+    value-key: "[THREADS]"
+    default-value: 4
+    integer: true
+    minimum: 1
+    maximum: 32
+
+command-line: >-
+  bash -c 'set -u; shopt -s nullglob; cd [InputDataset]; export FS_V8_XOPTS=1;
+  for f in sub-*/ses-*/anat/*_T1w.nii.gz; do
+  a=$(dirname "$f"); s=$(echo "${a%/anat}" | tr / _); d=[OutputLocation]/$a; mkdir -p "$d"; w=$(mktemp -d [OutputLocation]/.work-XXXXXX);
+  mri_synthseg --i "$f" --o "$w/input_synthseg.nii.gz" --qc "$d/${s}_desc-synthseg_qc.csv" --threads [THREADS] --cpu --robust || echo "$a: SynthSeg could not score the input";
+  recon-all-clinical.sh "$f" "$s" [THREADS] "$w" || { rm -rf "$w"; continue; };
+  SUBJECTS_DIR="$w" asegstats2table --subjects "$s" --meas volume --tablefile "$d/${s}_desc-aseg_volumes.tsv";
+  tar -C "$w" -czf "$d/${s}_desc-freesurfer_subject.tar.gz" "$s";
+  rm -rf "$w"; done'
+
+x-nils:
+  contract: 1
+  analysis-level: session
+  input:
+    layout: bids
+    roles: [t1w]
+  units: apart
+  secrets:
+    - id: freesurfer_license
+      mount: /opt/fs/license.txt
+      env: FS_LICENSE
+  outputs:
+    - id: subject
+      kind: output
+      path-template: "sub-{subject}/ses-{session}/anat/sub-{subject}_ses-{session}_desc-freesurfer_subject.tar.gz"
+      media-type: application/gzip
+    - id: aseg
+      kind: table
+      format: tsv
+      path-template: "sub-{subject}/ses-{session}/anat/sub-{subject}_ses-{session}_desc-aseg_volumes.tsv"
+      columns:
+        - {name: intracranial, from: "EstimatedTotalIntraCranialVol", unit: mm3, description: "The estimated total intracranial volume (eTIV)"}
+        - {name: brain_segmentation, from: "BrainSegVol", unit: mm3}
+        - {name: cortex, from: "CortexVol", unit: mm3}
+        - {name: cerebral_white_matter, from: "CerebralWhiteMatterVol", unit: mm3}
+        - {name: surface_holes, from: "SurfaceHoles", type: integer, description: "Topological defects of the surfaces before fixing"}
+        - {name: left_hippocampus, unit: mm3}
+        - {name: right_hippocampus, unit: mm3}
+        - {name: left_amygdala, unit: mm3}
+        - {name: right_amygdala, unit: mm3}
+        - {name: left_thalamus, unit: mm3}
+        - {name: right_thalamus, unit: mm3}
+        - {name: left_lateral_ventricle, unit: mm3}
+        - {name: right_lateral_ventricle, unit: mm3}
+        - {name: wm_hypointensities, from: "WM-hypointensities", unit: mm3}
+    - id: quality
+      kind: table
+      format: csv
+      path-template: "sub-{subject}/ses-{session}/anat/sub-{subject}_ses-{session}_desc-synthseg_qc.csv"
+      columns:
+        - {name: qc_general_white_matter, from: "general white matter", description: "SynthSeg's quality score of the input, 0 to 1"}
+        - {name: qc_general_grey_matter, from: "general grey matter"}
+        - {name: qc_general_csf, from: "general csf"}
+        - {name: qc_cerebellum, from: "cerebellum"}
+        - {name: qc_brainstem, from: "brainstem"}
+        - {name: qc_thalamus, from: "thalamus"}
+        - {name: qc_putamen_pallidum, from: "putamen+pallidum"}
+        - {name: qc_hippocampus_amygdala, from: "hippocampus+amygdala"}
+  needs:
+    cores-input: threads
+    gpu: none
+    cores: 4
+    memory-gb: 32
+    unit-minutes: 240

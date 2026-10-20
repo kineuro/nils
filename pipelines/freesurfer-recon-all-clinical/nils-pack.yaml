@@ -1,0 +1,60 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# The pack of FreeSurfer recon-all-clinical (record 57 P11, Wave 7b P1),
+# the variant the recon-all pack routes a session to, from research 01 of
+# the pack study: any single scan, adults, thick slices as a caveat. On the
+# archive 13,620 sessions come here from recon-all's rules (step 2), 5,773
+# of them with a spin-echo T1 of 3 to 5 mm slices, its weakest case.
+nils_pack: 1
+pipeline:
+  name: freesurfer-recon-all-clinical
+  descriptor_sha256: "sha256:cc2bf24487209154fc1b3694dc36d1df0e6ce4c18149417100fd8598de9cafbe"
+  version: "1.0"
+goals:
+  goal: [fast, standard, research]
+needs:
+  t1w:
+    soft:
+      - when: "slice_thickness_mm <= 3"
+        words: "the T1's slices are over 3 mm: the parcellation holds at nearly any resolution, but cortical thickness degrades quickly with slice spacing"
+        source: "Gopinath et al., Medical Image Analysis 2025 (record 57, research 01)"
+      # not a need yet: age at scan (adults only) waits for a provider; the registry
+      # gives no age until the clinical import carries one, so a need on age_years
+      # would put a cannot-tell caveat on every unit
+  host:
+    soft:
+      - when: "host.memory_gb >= 32"
+        words: "the host has less than 32 GB; recon-all-clinical takes about 32 GB"
+        source: "Gopinath et al. 2025 (record 57, research 01)"
+knobs:
+  threads:
+    what: "the threads one session uses"
+    comparability: none
+    set_by: person
+rules: []
+checks:
+  - {metric: qc_general_white_matter, op: ">=", value: 0.65, action: flag, source: "Billot et al., PNAS 2023 (record 57, research 01)", words: "SynthSeg scores the input's white matter under 0.65: a likely failure"}
+  - {metric: qc_general_grey_matter, op: ">=", value: 0.65, action: flag, source: "Billot et al., PNAS 2023 (record 57, research 01)", words: "SynthSeg scores the input's grey matter under 0.65: a likely failure"}
+  - {metric: qc_general_csf, op: ">=", value: 0.65, action: flag, source: "Billot et al., PNAS 2023 (record 57, research 01)", words: "SynthSeg scores the input's CSF under 0.65: a likely failure"}
+  - {metric: qc_cerebellum, op: ">=", value: 0.65, action: flag, source: "Billot et al., PNAS 2023 (record 57, research 01)"}
+  - {metric: qc_brainstem, op: ">=", value: 0.65, action: flag, source: "Billot et al., PNAS 2023 (record 57, research 01)"}
+  - {metric: qc_thalamus, op: ">=", value: 0.65, action: flag, source: "Billot et al., PNAS 2023 (record 57, research 01)"}
+  - {metric: qc_putamen_pallidum, op: ">=", value: 0.65, action: flag, source: "Billot et al., PNAS 2023 (record 57, research 01)"}
+  - {metric: qc_hippocampus_amygdala, op: ">=", value: 0.65, action: flag, source: "Billot et al., PNAS 2023 (record 57, research 01)"}
+  - {metric: intracranial, op: ">", value: 0, action: fail, source: "FreeSurfer 8.0 known issues (record 57, research 01)", words: "an intracranial volume of 0 is FreeSurfer 8.0's csvprint fault, not a head"}
+licence:
+  spdx: "LicenseRef-FreeSurfer"
+  redistributable: false
+  site_file: {env: FS_LICENSE, mount: /opt/fs/license.txt}
+  terms: {url: "https://surfer.nmr.mgh.harvard.edu/fswiki/FreeSurferSoftwareLicense", version: "1.0 (2011)"}
+  accept: true
+resources:
+  memory_gb: 32
+  minutes: 240
+  gpu: none
+comparability: {}
+tests: []
+source:
+  image: "docker.io/freesurfer/freesurfer@sha256:5648104ca75a24f6ee5a8786146f99b405c2bda1da12bff723a15056da8ddf6b"
+  probe: {command: "recon-all -version", expect: "freesurfer"}
+  key_files: ["bin/recon-all-clinical.sh", "bin/mri_synthseg", "build-stamp.txt"]

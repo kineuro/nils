@@ -1,0 +1,58 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# The pack of SynthStrip (record 57 P11, Wave 7b P1), from the pack study's
+# research 02: any single scan; the border is 1 mm (SynthStrip's -b is in
+# millimetres, not voxels) and --no-csf off unless a registration mask
+# needs tight edges, both in the comparability key since each changes the
+# mask and its volume (--no-csf loads another model). The checks are NILS
+# policy: SynthStrip publishes no threshold.
+nils_pack: 1
+pipeline:
+  name: synthstrip
+  descriptor_sha256: "sha256:6df0474d8551bb081d7e713ba4905e8760d06ace9a7b41eb855ed347cd532ff6"
+  version: "1.0"
+goals:
+  goal: [fast, standard, research]
+  # a registration mask that needs tight edges: --no-csf
+  tight_edges: ["off", "on"]
+needs: {}
+knobs:
+  border:
+    what: "grow or shrink the mask's boundary, in millimetres; 1 is SynthStrip's own"
+    changes: [brain_mask, brain, brain_volume]
+    comparability: breaks
+    set_by: person
+  no_csf:
+    what: "exclude the CSF from the mask: another model, a tighter brain, for registration masks"
+    changes: [brain_mask, brain, brain_volume]
+    comparability: breaks
+    set_by: rule
+  threads:
+    what: "the threads one session uses"
+    comparability: none
+    set_by: person
+rules:
+  - id: no-csf-for-tight-edges
+    when: "tight_edges == 'on'"
+    set: {no_csf: true}
+    why: "a registration mask that needs tight edges takes the no-CSF model; everything else keeps the CSF"
+    source: "synthstrip.io; the qsiprep template-registration mask (record 57, research 02)"
+checks:
+  - {metric: mask_components, op: "<=", value: 1, action: flag, source: policy, words: "the mask is in more than one piece: it broke, or took something beside the brain"}
+  - {metric: mask_edge_voxels, op: "<=", value: 0, action: flag, source: policy, words: "the mask touches the image's edge: the field of view may cut the brain"}
+  - {metric: brain_volume, op: "!=", action: flag, cohort: true, stratum: [site, vendor, field_strength, sequence, post_contrast], min_sessions: 30, source: "policy (outside the cohort's range)"}
+licence:
+  spdx: "LicenseRef-FreeSurfer"
+  redistributable: false
+  terms: {url: "https://surfer.nmr.mgh.harvard.edu/fswiki/FreeSurferSoftwareLicense", version: "1.0 (2011)"}
+  accept: false
+resources:
+  memory_gb: 8
+  minutes: 1
+  gpu: none
+comparability: {}
+tests: []
+source:
+  image: "docker.io/freesurfer/freesurfer@sha256:5648104ca75a24f6ee5a8786146f99b405c2bda1da12bff723a15056da8ddf6b"
+  probe: {command: "recon-all -version", expect: "freesurfer"}
+  key_files: ["bin/mri_synthstrip", "build-stamp.txt"]

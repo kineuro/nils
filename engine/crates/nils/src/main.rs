@@ -72,6 +72,7 @@ mod pair;
 mod pick_after;
 mod pick_scopes;
 mod pipeline_pack;
+mod pipeline_replay;
 mod pipelines;
 mod place_transfer;
 mod places;

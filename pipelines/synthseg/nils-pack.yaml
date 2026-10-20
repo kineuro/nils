@@ -1,0 +1,64 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# The pack of SynthSeg (record 57 P11, Wave 7b P1), from the pack study's
+# research 02: any single scan; --robust for clinical, 2D, thick or non-T1
+# input, off only for the fast goal on a 3D T1 near 1 mm, and the two are
+# different networks, never pooled. On the archive every session with a
+# T1 runs (29,755); 22,665 hold a 3D T1 and 15,591 of those a largest
+# voxel side of 0.9 to 1.05 mm, the ones the fast goal may run without
+# --robust (step 2).
+nils_pack: 1
+pipeline:
+  name: synthseg
+  descriptor_sha256: "sha256:7aabbd8b6a1b4186965156974b194d702d930bf85dc00683e45a856483717c1b"
+  version: "1.0"
+goals:
+  goal: [fast, standard, research]
+needs:
+  host:
+    soft:
+      - when: "host.memory_gb >= 24"
+        words: "the host has less than 24 GB; robust SynthSeg on a 1 mm T1 was killed under 12 GB and finished under 24"
+        source: "the synthseg starter's measurement (record 57, research 02)"
+knobs:
+  robust:
+    what: "SynthSeg-robust, another network for low resolution, odd contrast or low SNR; its results and the standard network's are never pooled"
+    cost: "slower"
+    changes: [labels, volumes, quality]
+    comparability: breaks
+    set_by: rule
+  threads:
+    what: "the threads one session uses"
+    comparability: none
+    set_by: person
+rules:
+  - id: standard-network-for-fast-on-a-fine-3d-t1
+    when: "goal == 'fast' and t1w.dimension == '3D' and t1w.voxel_max_mm <= 1.05 and t1w.base == 'T1w'"
+    set: {robust: false}
+    why: "the fast goal on a 3D T1 near 1 mm may take the standard network; everything else is robust, the default"
+    source: "SynthSeg wiki; Billot et al., PNAS 2023 (record 57, research 02)"
+checks:
+  - {metric: qc_general_white_matter, op: ">=", value: 0.65, action: flag, source: "Billot et al., PNAS 2023 (record 57, research 02)", words: "a region's quality score under 0.65 is a likely failure"}
+  - {metric: qc_general_grey_matter, op: ">=", value: 0.65, action: flag, source: "Billot et al., PNAS 2023 (record 57, research 02)", words: "a region's quality score under 0.65 is a likely failure"}
+  - {metric: qc_general_csf, op: ">=", value: 0.65, action: flag, source: "Billot et al., PNAS 2023 (record 57, research 02)", words: "a region's quality score under 0.65 is a likely failure"}
+  - {metric: qc_cerebellum, op: ">=", value: 0.65, action: flag, source: "Billot et al., PNAS 2023 (record 57, research 02)", words: "a region's quality score under 0.65 is a likely failure"}
+  - {metric: qc_brainstem, op: ">=", value: 0.65, action: flag, source: "Billot et al., PNAS 2023 (record 57, research 02)", words: "a region's quality score under 0.65 is a likely failure"}
+  - {metric: qc_thalamus, op: ">=", value: 0.65, action: flag, source: "Billot et al., PNAS 2023 (record 57, research 02)", words: "a region's quality score under 0.65 is a likely failure"}
+  - {metric: qc_putamen_pallidum, op: ">=", value: 0.65, action: flag, source: "Billot et al., PNAS 2023 (record 57, research 02)", words: "a region's quality score under 0.65 is a likely failure"}
+  - {metric: qc_hippocampus_amygdala, op: ">=", value: 0.65, action: flag, source: "Billot et al., PNAS 2023 (record 57, research 02)", words: "a region's quality score under 0.65 is a likely failure"}
+  - {metric: total_intracranial, op: "!=", action: flag, cohort: true, stratum: [site, vendor, field_strength, sequence, post_contrast], min_sessions: 30, source: policy}
+licence:
+  spdx: "LicenseRef-FreeSurfer"
+  redistributable: false
+  terms: {url: "https://surfer.nmr.mgh.harvard.edu/fswiki/FreeSurferSoftwareLicense", version: "1.0 (2011)"}
+  accept: false
+resources:
+  memory_gb: 24
+  minutes: 5
+  gpu: none
+comparability: {}
+tests: []
+source:
+  image: "docker.io/freesurfer/freesurfer@sha256:5648104ca75a24f6ee5a8786146f99b405c2bda1da12bff723a15056da8ddf6b"
+  probe: {command: "recon-all -version", expect: "freesurfer"}
+  key_files: ["bin/mri_synthseg", "build-stamp.txt"]

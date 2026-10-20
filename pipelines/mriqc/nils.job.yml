@@ -20,6 +20,15 @@
 # the lane runs as many side by side as its budget holds, each with its own
 # work folder under a private /tmp.
 #
+# The pack beside this descriptor (record 57 P11, Wave 7b P1) fixes what
+# research 03 found every production run must pass: -m T1w (a T2w in its
+# own invocation, never here, since a T2w crash in 24.0.2 can lose the T1w
+# metrics), --species human, --no-sub and --notrack, with the float
+# settings (-f, --ants-float) left off. All are in the command, so no unit
+# can run without them. The pack reads the metrics' sentinels (fber or qi_1
+# of -1: a skull-stripped input) as a failure, wm2max outside 0.6 to 0.8 as
+# a flag, and the rest as robust z-scores within a stratum of the cohort.
+#
 # MRIQC sends two things out unless told not to: the IQMs with the scan's
 # parameters to its public web API (`--no-sub` stops it), and usage
 # telemetry to the NiPreps developers (`--notrack` stops it). Both are on by
@@ -61,7 +70,7 @@ inputs:
 
 command-line: >-
   [InputDataset] [OutputLocation] participant --participant-label [ParticipantLabels]
-  -m T1w --no-sub --notrack -w [OutputLocation]/.work-mriqc --nprocs [NPROCS] --omp-nthreads [NPROCS] --mem-gb [MEM]
+  -m T1w --species human --no-sub --notrack -w [OutputLocation]/.work-mriqc --nprocs [NPROCS] --omp-nthreads [NPROCS] --mem-gb [MEM]
 
 x-nils:
   contract: 1
@@ -70,7 +79,7 @@ x-nils:
   # run no longer takes them; their runs and results keep their names.
   # No version list: every earlier version of the name in a catalog.
   replaces:
-    why: "It passes --notrack, so MRIQC sends no usage report; the earlier versions left that on."
+    why: "It fixes --species human in the command, as the pack beside it says every unit runs (record 57, research 03), beside -m T1w, --no-sub and --notrack; the version before it added --notrack, so MRIQC sends no usage report."
   input:
     layout: bids
     roles: [t1w]

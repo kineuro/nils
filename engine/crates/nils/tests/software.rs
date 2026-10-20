@@ -437,6 +437,26 @@ fn a_tool_is_installed_by_digest_verified_and_run_by_hand_from_bin() {
         "{before}"
     );
     assert!(before["place"]["declared"].is_null());
+    // section 6.8: the place says whether the engine can write it; there is
+    // no shared-folder notion yet, so no `shared` is named
+    assert_eq!(before["place"]["read_only"], false, "{before}");
+    assert!(before["place"].get("shared").is_none(), "{before}");
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let place = lab.place();
+        std::fs::create_dir_all(&place).unwrap();
+        let is_root = Command::new("id")
+            .arg("-u")
+            .output()
+            .map(|o| o.stdout == b"0\n")
+            .unwrap_or(false);
+        std::fs::set_permissions(&place, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let held = lab.json(&["software", "list", "--json"], &[]);
+        std::fs::set_permissions(&place, std::fs::Permissions::from_mode(0o755)).unwrap();
+        if !is_root {
+            assert_eq!(held["place"]["read_only"], true, "{held}");
+        }
+    }
     let p = Lab::package(&before, "echo-tool@2.0");
     assert_eq!(p["status"], "missing", "{p}");
     assert_eq!(p["pipelines"], json!(["echo-tool@1"]), "{p}");
