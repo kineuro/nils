@@ -2034,7 +2034,8 @@ fn real_containers_run_n4_rootless_with_no_network() {
     }
 
     // N4 over the frozen selection: the corrected image and the bias field
-    // of each session, and the same digests again
+    // of each session, and the same digests again; the shrink factor is the
+    // pack's rule's choice from the scan's facts, never a value given by hand
     let n4 = repo().join("pipelines/n4-bias-correction/nils.job.yml");
     ok(&["pipeline", "add", n4.to_str().unwrap()]);
     let first = ok(&[
@@ -2042,8 +2043,6 @@ fn real_containers_run_n4_rootless_with_no_network() {
         "n4-bias-correction",
         "--select",
         "selection:every@1",
-        "--param",
-        "shrink_factor=2",
         "--json",
     ]);
     assert_eq!(first["status"], "done", "{first}");
@@ -2081,8 +2080,6 @@ fn real_containers_run_n4_rootless_with_no_network() {
         "n4-bias-correction",
         "--select",
         "selection:every@1",
-        "--param",
-        "shrink_factor=2",
         "--json",
     ]);
     assert_eq!(
