@@ -1,0 +1,86 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# The pack of ANTs N4 (record 57 P11, Wave 7b P1), from the pack study's
+# research 03: the B-spline distance set explicitly (180 mm, the wiki's
+# example, fixed), the shrink factor from the slices (ANTs' 4 is for 1 mm
+# volumes; 2 for 1.5 to 3 mm, 1 above 3 mm, an inference with no published
+# test), fewer levels for the fast goal (not comparable), a brain mask
+# where a synthstrip run left one (the descriptor finds it), and never
+# before recon-all, SAMSEG or a FLAIR lesion model (a workflow's link
+# warning, record 57 P7). N4 is validated on brain T1w; a positive input is
+# no fact of the registry, so the check reads the field instead.
+nils_pack: 1
+pipeline:
+  name: n4-bias-correction
+  descriptor_sha256: "sha256:d89fd508c6e830d05e94950be4bc4894e291d90c64a9897476171911c75bf468"
+  version: "1.0"
+goals:
+  goal: [fast, standard, research]
+needs:
+  t1w:
+    hard:
+      - when: "dimension == '3D'"
+        words: "the T1 is 2D; N4 fits a three-dimensional field (never -d 4), and a 2D series would need its own run per slice"
+        source: "ANTs wiki, N4BiasFieldCorrection (record 57, research 03)"
+    soft:
+      - when: "base == 'T1w'"
+        words: "N4's defaults are optimised for brain T1w; other contrasts are untested, and N4 before a FLAIR lesion model lowered its Dice"
+        source: "ANTs wiki; Preloznik and Spiclin, Frontiers in Medicine 2026 (record 57, research 03)"
+      - when: "slice_thickness_mm <= 3"
+        words: "the slices are over 3 mm: the shrink factor is lowered to 1, with no published guidance"
+        source: "inference, no published test (record 57, research 03)"
+knobs:
+  dimension:
+    what: "the image's dimensionality, 3 for a volume; never 4"
+    comparability: breaks
+    set_by: fixed
+  spline_distance:
+    what: "the B-spline mesh spacing at the coarsest level, halving at each: 180 mm, the wiki's example, fixed"
+    changes: [n4_image, bias_field, field]
+    comparability: breaks
+    set_by: fixed
+  shrink_factor:
+    what: "the downsampling the field is fitted at: 4 for 1 mm volumes, 2 for 1.5 to 3 mm slices, 1 above 3 mm"
+    cost: "time grows as it falls"
+    changes: [n4_image, bias_field, field]
+    comparability: breaks
+    set_by: rule
+  levels:
+    what: "the resolution levels fitted, 50 iterations each: 4 is ANTs' own; 3 is smoother and faster"
+    changes: [n4_image, bias_field, field]
+    comparability: breaks
+    set_by: rule
+rules:
+  - id: shrink-1-for-slices-over-3-mm
+    when: "t1w.slice_thickness_mm > 3"
+    set: {shrink_factor: 1}
+    why: "a shrink of 4 on slices over 3 mm samples the field every 12 mm or more along the slices"
+    source: "inference, no published test (record 57, research 03)"
+  - id: shrink-2-for-slices-1-5-to-3-mm
+    when: "t1w.slice_thickness_mm > 1.5"
+    set: {shrink_factor: 2}
+    why: "keep enough samples along the slice axis"
+    source: "inference, no published test (record 57, research 03)"
+  - id: fewer-levels-for-fast
+    when: "goal == 'fast'"
+    set: {levels: 3}
+    why: "three levels fit a smoother field faster; its results are not compared with four-level ones"
+    source: "ANTs wiki, the levels and the spacing interact (record 57, research 03)"
+checks:
+  - {metric: bias_field_min, op: ">", value: 0, action: fail, source: "ANTs wiki, N4BiasFieldCorrection; NILS convention (record 57, research 03)", words: "the bias field is not positive everywhere inside the mask: the fit failed"}
+  - {metric: bias_field_max, op: "<=", action: flag, cohort: true, stratum: [site, vendor, field_strength, sequence, post_contrast], min_sessions: 30, source: "policy: the field's range against the cohort (record 57, research 03)"}
+licence:
+  spdx: "Apache-2.0"
+  redistributable: true
+  terms: {url: "https://github.com/ANTsX/ANTs/blob/master/LICENSE", version: "2.6"}
+  accept: false
+resources:
+  memory_gb: 4
+  minutes: 2
+  gpu: none
+comparability: {}
+tests: []
+source:
+  image: "docker.io/antsx/ants@sha256:59c45f54a1f1dc69134f63bec91a726e41c71c64a16cc21cda0b54526910a3c3"
+  probe: {command: "N4BiasFieldCorrection --version", expect: "2.6"}
+  key_files: ["opt/ants/bin/N4BiasFieldCorrection"]

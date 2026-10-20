@@ -1,0 +1,74 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# The pack of MRIQC 24.0.2 (record 57 P11, Wave 7b P1), from the pack
+# study's research 03 and its fact counts (step 2): on the archive 16,788
+# sessions hold a 3D T1 up to 1.5 mm not labelled post-contrast, 5,431 a
+# 3D T1 labelled post-contrast only and 446 one coarser than 1.5 mm (both
+# caveats), and 8,401 no 3D T1 (skipped). A 3D T2w (1,885 sessions) would
+# be MRIQC's own invocation, a pipeline not yet built. The fixed settings
+# of research 03 are the descriptor's command: -m T1w, --species human,
+# --no-sub, --notrack, the float settings off. No metric has a published
+# exclusion threshold: the sentinels fail, wm2max's documented range flags,
+# and the rest are read as robust z-scores within a stratum of the cohort;
+# the bundled classifier never runs.
+nils_pack: 1
+pipeline:
+  name: mriqc
+  descriptor_sha256: "sha256:56d4d1501edf9f408d7efcc66a96667af225d66709044f73b6d5d51764e4a89a"
+  version: "1.0"
+goals:
+  goal: [fast, standard, research]
+needs:
+  t1w:
+    hard:
+      - when: "dimension == '3D'"
+        words: "the T1 is 2D; MRIQC's metrics are validated on 3D research T1w, and clinical 2D volumes are discarded by its users"
+        source: "Esteban et al. 2017; Sciarra et al., arXiv 2206.06725 (record 57, research 03)"
+      - when: "skull_stripped == false"
+        words: "the T1 is skull-stripped; MRIQC's fber and qi_1 need the background, and such an image was invalid in ABIDE"
+        source: "MRIQC IQM documentation; Esteban et al. 2017 (record 57, research 03)"
+    soft:
+      - when: "voxel_max_mm <= 1.5"
+        words: "a side of the T1's voxel is over 1.5 mm: fwhm, rpve and tpm_overlap depend on the resolution"
+        source: "MRIQC IQM definitions, in voxel units (record 57, research 03)"
+      - when: "post_contrast != 'given'"
+        words: "the T1 is labelled post-contrast: no validation covers an enhanced T1; its metrics are read in their own stratum"
+        source: "no published evidence (record 57, research 03)"
+      - when: "defaced == false"
+        words: "the T1 is defaced: efc is the one metric defacing moves, so it is not compared with undefaced scans"
+        source: "Provins et al., PLoS Biology 2025 (record 57, research 03)"
+knobs:
+  processes:
+    what: "the processes and threads MRIQC uses; whether the thread count moves the registration-based metrics is untested"
+    comparability: none
+    set_by: person
+  memory_gb:
+    what: "the memory MRIQC plans its work within"
+    comparability: none
+    set_by: person
+rules: []
+checks:
+  - {metric: fber, op: "!=", value: -1, action: fail, source: "MRIQC IQM documentation (record 57, research 03)", words: "fber of -1 means no background: a skull-stripped or processed input, whose metrics say nothing of quality"}
+  - {metric: qi_1, op: "!=", value: -1, action: fail, source: "MRIQC IQM documentation (record 57, research 03)", words: "qi_1 of -1 means an empty background mask: a skull-stripped or processed input"}
+  - {metric: wm2max, op: ">=", value: 0.6, action: flag, source: "MRIQC IQM documentation, the one documented range (record 57, research 03)", words: "wm2max under 0.6: the white matter sits low against the image's brightest voxels"}
+  - {metric: wm2max, op: "<=", value: 0.8, action: flag, source: "MRIQC IQM documentation, the one documented range (record 57, research 03)", words: "wm2max over 0.8: little between the white matter and the image's brightest voxels"}
+  - {metric: cjv, op: "<=", action: flag, cohort: true, stratum: [site, vendor, field_strength, sequence, post_contrast], min_sessions: 30, z: 3, source: "policy: no published threshold; Esteban et al. 2019 and Nielson et al. 2019 show scanner and sequence structure (record 57, research 03)"}
+  - {metric: cnr, op: ">=", action: flag, cohort: true, stratum: [site, vendor, field_strength, sequence, post_contrast], min_sessions: 30, z: 3, source: "policy (record 57, research 03)"}
+  - {metric: snr_total, op: ">=", action: flag, cohort: true, stratum: [site, vendor, field_strength, sequence, post_contrast], min_sessions: 30, z: 3, source: "policy (record 57, research 03)"}
+  - {metric: efc, op: "<=", action: flag, cohort: true, stratum: [site, vendor, field_strength, sequence, post_contrast], min_sessions: 30, z: 3, source: "policy (record 57, research 03)"}
+  - {metric: fwhm_avg, op: "<=", action: flag, cohort: true, stratum: [site, vendor, field_strength, sequence, post_contrast], min_sessions: 30, z: 3, source: "policy (record 57, research 03)"}
+licence:
+  spdx: "Apache-2.0"
+  redistributable: true
+  terms: {url: "https://mriqc.readthedocs.io/en/24.0.2/license.html", version: "24.0.2"}
+  accept: false
+resources:
+  memory_gb: 12
+  minutes: 20
+  gpu: none
+comparability: {facts: [t1w.post_contrast]}
+tests: []
+source:
+  image: "docker.io/nipreps/mriqc@sha256:dabe930dd0d1180c565a42f2c6a34f2b23026d9642db5d110f05b427413b829f"
+  probe: {command: "mriqc --version", expect: "24.0.2"}
+  key_files: ["opt/conda/envs/mriqc/bin/mriqc"]
