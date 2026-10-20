@@ -2997,7 +2997,7 @@ fn the_clinical_vocabulary_and_import_doors_do_what_the_command_line_does() {
     };
     let server = Server::start(
         &home,
-        14,
+        16,
         &[
             "--auth",
             "token",
@@ -3091,6 +3091,24 @@ fn the_clinical_vocabulary_and_import_doors_do_what_the_command_line_does() {
         plain,
     );
     assert_eq!(status, 400, "{refused}");
+    // Wave 7b, the import privacy fix: a refused cell is never in the
+    // answer (the place and the fault are), and a file without a header is
+    // never echoed in the 400 for a missing column
+    let planted = format!("code,date,edss\n{code},1961-02-31,2\n");
+    let body = serde_json::json!({"mapping": mapping, "csv": planted}).to_string();
+    let (status, refused) = server.request("POST", "/api/clinical/import", Some(&body), quasi);
+    assert_eq!(status, 200, "{refused}");
+    assert_eq!(
+        refused["refused"]["event_date (column 2): not a day of the calendar"], 1,
+        "{refused}"
+    );
+    assert!(!refused.to_string().contains("1961"), "{refused}");
+    let headerless = format!("{code},1961-02-31,2\n");
+    let body = serde_json::json!({"mapping": mapping, "csv": headerless}).to_string();
+    let (status, refused) = server.request("POST", "/api/clinical/import", Some(&body), quasi);
+    assert_eq!(status, 400, "{refused}");
+    let text = refused.to_string();
+    assert!(!text.contains("1961") && !text.contains(&code), "{refused}");
     // rows named by an identifier: sensitive, checked before anything is read
     let by_id = mapping.replace(
         "{column: code}",

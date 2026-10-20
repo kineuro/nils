@@ -8909,10 +8909,11 @@ fn import_map(registry: &mut Registry, store: &mut Store, args: &ImportArgs) -> 
         .clone();
     let column = |name: &str, flag: &str| -> Result<usize, Exit> {
         headers.iter().position(|h| h == name).ok_or_else(|| {
+            // the header row of a file without one is values: never echoed
             usage(format!(
-                "{}: no column {name:?} in the header ({}); {flag} names it",
+                "{}: no column {name:?} in the header, which has {} columns; {flag} names it",
                 args.csv.display(),
-                headers.iter().collect::<Vec<_>>().join(", ")
+                headers.len()
             ))
         })
     };

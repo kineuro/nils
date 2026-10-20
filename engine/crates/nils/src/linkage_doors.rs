@@ -445,12 +445,18 @@ fn imports(
         "import".to_string(),
         path.display().to_string(),
     ];
-    for c in &columns {
+    // Wave 7b, the import privacy fix: a header can be a value (a file
+    // without one), so the job's command line and its map file name each
+    // column by its place, never by the header the person's file gave it.
+    for (i, c) in columns.iter().enumerate() {
         let role = match c.role.id_type() {
             Some(t) => format!("{}:{t}", c.role.name()),
             None => c.role.name().to_string(),
         };
-        command.extend(["--column".to_string(), format!("{}={role}", c.header)]);
+        command.extend([
+            "--column".to_string(),
+            format!("{}={role}", place_header(i)),
+        ]);
     }
     if make_types {
         command.push("--make-types".to_string());
@@ -484,6 +490,11 @@ fn imports(
 
 static WRITTEN: AtomicUsize = AtomicUsize::new(0);
 
+/// The header a job's map file gives the column at `i` (from 0): its place.
+fn place_header(i: usize) -> String {
+    format!("column {}", i + 1)
+}
+
 /// The map as a CSV the job reads and removes: under the registry home,
 /// the directory 700, the file 600 and new.
 fn write_map(home: &Home, columns: &[Column], rows: &[Row]) -> Result<PathBuf, String> {
@@ -513,7 +524,7 @@ fn write_map(home: &Home, columns: &[Column], rows: &[Row]) -> Result<PathBuf, S
         .map_err(|e| format!("{}: {e}", path.display()))?;
     let mut writer = csv::Writer::from_writer(file);
     let written = (|| -> Result<(), csv::Error> {
-        writer.write_record(columns.iter().map(|c| c.header.as_str()))?;
+        writer.write_record((0..columns.len()).map(place_header))?;
         for r in rows {
             let mut cells: Vec<&str> = r.cells.iter().map(String::as_str).collect();
             cells.resize(columns.len(), "");
@@ -2398,9 +2409,14 @@ mod tests {
         let argv = job.argv().unwrap();
         assert_eq!(argv[0..2], ["linkage", "import"]);
         assert!(argv.contains(&"--column".to_string()));
-        assert!(argv.contains(&"pid=identifier:patient-id".to_string()));
-        assert!(argv.contains(&"person=canonical:registry-id".to_string()));
-        assert!(argv.contains(&"note=ignore".to_string()));
+        assert!(argv.contains(&"column 1=identifier:patient-id".to_string()));
+        assert!(argv.contains(&"column 2=canonical:registry-id".to_string()));
+        assert!(argv.contains(&"column 3=ignore".to_string()));
+        // no header of the person's file is on the job's row
+        let row = format!("{:?} {}", job.argv().unwrap(), job.args);
+        for header in ["pid", "person", "note"] {
+            assert!(!row.contains(header), "{header} in {row}");
+        }
         assert!(argv.contains(&"--make-types".to_string()));
         assert!(argv.contains(&"--consume".to_string()));
         assert_eq!(job.args["detail"], "sensitive");
@@ -2410,7 +2426,7 @@ mod tests {
         let text = std::fs::read_to_string(&file).unwrap();
         assert_eq!(
             text,
-            "pid,person,note\nP1,PID-0001,x\nP2,PID-0001,\nP3,7,\n"
+            "column 1,column 2,column 3\nP1,PID-0001,x\nP2,PID-0001,\nP3,7,\n"
         );
         #[cfg(unix)]
         {
