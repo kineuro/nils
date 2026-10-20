@@ -4656,6 +4656,19 @@ fn the_supervisor_uninstalls_for_the_desk_behind_the_typed_name_and_nothing_else
             assert_eq!(act["by"], "ada@lab", "{acts}");
             assert_eq!(act["act"], "uninstall", "{acts}");
             assert_eq!(act["leave"], "nils", "{acts}");
+            // the registry's audit row names the person the desk named,
+            // once, whoever the supervisor and the run are
+            let rows = Command::new(env!("CARGO_BIN_EXE_nils"))
+                .arg("--registry")
+                .arg(dir.join("registry"))
+                .args(["audit", "list", "--action", "install.change", "--json"])
+                .env("NILS_NO_TTY", "1")
+                .env("XDG_CONFIG_HOME", config.path())
+                .output()
+                .expect("audit list runs");
+            let rows = String::from_utf8_lossy(&rows.stdout).to_string();
+            assert_eq!(rows.matches("keep-data").count(), 1, "{rows}");
+            assert!(rows.contains("ada@lab"), "{rows}");
             assert_eq!(
                 acts.lines().count(),
                 1,
@@ -4737,7 +4750,7 @@ fn an_uninstall_that_keeps_the_data_leaves_an_audit_row() {
     .unwrap();
     let out = output(
         Command::new(nils.path())
-            .args(["uninstall", "--keep-data", "--yes", "--by", "ops@lab"])
+            .args(["uninstall", "--keep-data", "--yes"])
             .env("NILS_NO_TTY", "1")
             .env("NO_COLOR", "1")
             .env("XDG_CONFIG_HOME", config.path()),
@@ -4753,7 +4766,16 @@ fn an_uninstall_that_keeps_the_data_leaves_an_audit_row() {
         None,
     );
     assert!(
-        rows.contains("\"uninstall\"") && rows.contains("keep-data") && rows.contains("ops@lab"),
+        rows.contains("\"uninstall\"") && rows.contains("keep-data") && !rows.contains("ops@lab"),
         "{rows}\n{stdout}"
     );
+    // the row is the account at the keyboard; no flag names anyone else
+    assert_eq!(rows.matches("keep-data").count(), 1, "{rows}");
+    let refused = output(
+        Command::new(nils.path())
+            .args(["uninstall", "--keep-data", "--yes", "--by", "ops@lab"])
+            .env("NILS_NO_TTY", "1")
+            .env("XDG_CONFIG_HOME", config.path()),
+    );
+    assert!(!refused.status.success(), "--by is no flag any more");
 }

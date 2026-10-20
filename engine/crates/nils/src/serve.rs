@@ -1766,24 +1766,51 @@ const ANSWER_WITHIN: Duration = Duration::from_secs(2);
 /// starts (wave 7b §18): 503, with the migration's progress. A request
 /// while it opens a registry it need not migrate waits for the doors, as
 /// it always did.
-pub(crate) fn starting_body() -> serde_json::Value {
+pub(crate) fn starting_body(progress: serde_json::Value) -> serde_json::Value {
     serde_json::json!({
         "error": "the engine is starting; ask again shortly",
         "disclosure": "safe",
-        "starting": {"migrating": nils_registry::migrate::progress()},
+        "starting": {"migrating": progress},
     })
 }
 
+/// The progress to answer with: the migration's own while it runs, and
+/// once it has ended the last one seen with `finished: true`, until the
+/// doors open, so a supervisor that polls never reads "no migration" in
+/// the gap between the migration's end and the doors' opening. `None`
+/// where no migration was seen (a start that migrates nothing queues
+/// requests as it always did).
+fn starting_progress(
+    now: Option<serde_json::Value>,
+    last: &mut Option<serde_json::Value>,
+) -> Option<serde_json::Value> {
+    match now {
+        Some(now) => {
+            *last = Some(now.clone());
+            Some(now)
+        }
+        None => last.as_mut().map(|seen| {
+            seen["finished"] = serde_json::json!(true);
+            seen.clone()
+        }),
+    }
+}
+
 fn answer_while_starting(server: &tiny_http::Server, opening: &std::sync::atomic::AtomicBool) {
+    let mut last = None;
     while opening.load(Ordering::SeqCst) {
-        if nils_registry::migrate::progress().is_none() {
+        let Some(progress) = starting_progress(nils_registry::migrate::progress(), &mut last)
+        else {
             std::thread::sleep(Duration::from_millis(50));
             continue;
-        }
+        };
         let Ok(Some(request)) = server.recv_timeout(Duration::from_millis(100)) else {
             continue;
         };
-        let body = starting_body().to_string();
+        let body = starting_body(
+            starting_progress(nils_registry::migrate::progress(), &mut last).unwrap_or(progress),
+        )
+        .to_string();
         let response = tiny_http::Response::from_string(body)
             .with_status_code(503)
             .with_header(
@@ -9104,6 +9131,31 @@ mod turn_cap_tests {
         let unnamed = caller(serde_json::json!({"kind": "agent", "conversation": "c-test"}));
         for _ in 0..=TURN_CALLS {
             assert!(turn_refused(&unnamed).is_none());
+        }
+    }
+}
+
+#[cfg(test)]
+mod starting_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// The gap between a migration's end and the doors' opening still
+    /// reads as a migration, with a `finished` marker; nothing seen, nothing
+    /// answered.
+    #[test]
+    fn a_finished_migration_is_still_answered_until_the_doors_open() {
+        let mut last = None;
+        assert!(starting_progress(None, &mut last).is_none());
+        let step = json!({"from": 105, "to": 106, "step": 106});
+        let live = starting_progress(Some(step.clone()), &mut last).expect("live");
+        assert_eq!(live, step);
+        assert!(live.get("finished").is_none());
+        for _ in 0..3 {
+            let after = starting_progress(None, &mut last).expect("kept");
+            assert_eq!(after["finished"], json!(true));
+            assert_eq!(after["to"], json!(106));
+            assert!(starting_body(after)["starting"]["migrating"].is_object());
         }
     }
 }

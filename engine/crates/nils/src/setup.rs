@@ -6497,7 +6497,7 @@ pub(crate) fn setup(args: SetupArgs) -> Result<(), Exit> {
             yes: false,
             print: args.print,
             dir: None,
-            by: None,
+            audited: false,
         }),
         Flow::Printed => Ok(()),
         Flow::Unready(missing) => Err(fail(format!(
@@ -18999,10 +18999,11 @@ pub(crate) struct UninstallArgs {
     /// data left its setup in (the default is ~/nils)
     #[arg(long, value_name = "DIR")]
     dir: Option<PathBuf>,
-    /// Who asked, as user@node, for the registry's audit row: the person
-    /// the desk named to the supervisor; this account at the keyboard
-    #[arg(long, value_name = "USER@NODE", hide = true)]
-    by: Option<String>,
+    /// Set by the supervised uninstall, whose door wrote the audit row
+    /// under the person who asked before the run started; never a flag,
+    /// since any caller could then name anyone
+    #[arg(skip)]
+    audited: bool,
 }
 
 /// The first-party packs a release carries. A pack directory holding only
@@ -19430,8 +19431,9 @@ pub(crate) fn uninstall(args: UninstallArgs) -> Result<(), Exit> {
     }
 
     println!();
-    if !from_kept {
-        audit_uninstall(&state, args.by.as_deref(), leaving);
+    let audited = take_audit_mark(&state);
+    if !from_kept && !args.audited && !audited {
+        audit_uninstall(&state, leaving);
     }
     let left = carry_out(&removal, leaving, &console);
     println!();
@@ -19470,27 +19472,55 @@ pub(crate) fn uninstall(args: UninstallArgs) -> Result<(), Exit> {
 /// whose scope says what was left. A registry that keeps the data keeps the
 /// row; a purge's goes with the registry, and `acts.log` beside the
 /// supervisor still holds the ask. A row that cannot be written is said and
-/// the uninstall goes on.
-fn audit_uninstall(state: &State, by: Option<&str>, leaving: Leaving) {
-    // a person the desk named; else whoever ran it, as sudo's caller where
-    // it ran under sudo
-    let named = by.filter(|b| nils_registry::principal::Principal::parse(b).is_some());
-    let by = named.map(str::to_string).unwrap_or_else(|| {
-        match std::env::var("SUDO_USER").ok().filter(|u| !u.is_empty()) {
-            Some(user) => format!("{user}@{}", nils_registry::job::hostname()),
-            None => crate::actor(),
-        }
-    });
-    let scope = serde_json::json!({
-        "what": "uninstall",
-        "leave": match leaving {
-            Leaving::KeepData => "keep-data",
-            Leaving::Purge => "purge",
-        },
-    });
-    if let Err(why) = change::audit_act(state, &by, scope) {
+/// the uninstall goes on. At the keyboard the person is this account, as
+/// sudo's caller where it ran under sudo; the desk's asks are written by
+/// the supervisor's door ([`audit_uninstall_row`]), which knows who asked.
+fn audit_uninstall(state: &State, leaving: Leaving) {
+    let by = match std::env::var("SUDO_USER").ok().filter(|u| !u.is_empty()) {
+        Some(user) => format!("{user}@{}", nils_registry::job::hostname()),
+        None => crate::actor(),
+    };
+    if let Err(why) = audit_uninstall_row(state, &by, leaving == Leaving::Purge) {
         println!("  the registry's audit row of the uninstall was not written: {why}");
     }
+}
+
+/// The audit row of an uninstall, under `by`, with a mark beside the
+/// supervisor's files that tells the uninstall a helper runs as root (whose
+/// command line is fixed, so cannot say so) that the row is written.
+pub(crate) fn audit_uninstall_row(state: &State, by: &str, purge: bool) -> Result<(), String> {
+    let scope = serde_json::json!({
+        "what": "uninstall",
+        "leave": if purge { "purge" } else { "keep-data" },
+    });
+    change::audit_act(state, by, scope)?;
+    let _ = std::fs::write(audit_mark(state), by);
+    Ok(())
+}
+
+/// Forget the mark, for a run that did not start.
+pub(crate) fn forget_audit_mark(state: &State) {
+    let _ = std::fs::remove_file(audit_mark(state));
+}
+
+fn audit_mark(state: &State) -> PathBuf {
+    Path::new(&state.dir)
+        .join("supervise")
+        .join("uninstall.audited")
+}
+
+/// Whether the supervisor's door wrote this uninstall's row a moment ago;
+/// the mark is used up either way, and one older than ten minutes is not
+/// believed.
+fn take_audit_mark(state: &State) -> bool {
+    let mark = audit_mark(state);
+    let fresh = std::fs::metadata(&mark)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.elapsed().ok())
+        .is_some_and(|age| age < std::time::Duration::from_secs(600));
+    let _ = std::fs::remove_file(&mark);
+    fresh
 }
 
 /// The word a person types to uninstall an install from the desk: the name
@@ -19557,7 +19587,7 @@ fn plain_words(line: &str) -> String {
 /// first. Where the services are the machine's own and this is the account
 /// the supervisor runs as, the helper does it as root, with a command line
 /// the rule names; otherwise this process does it, as `nils uninstall` does.
-pub(crate) fn uninstall_supervised(leave: &str, by: Option<String>) -> Result<(), Exit> {
+pub(crate) fn uninstall_supervised(leave: &str) -> Result<(), Exit> {
     let (keep_data, purge) = match leave {
         "keep-data" => (true, false),
         "purge" => (false, true),
@@ -19567,7 +19597,7 @@ pub(crate) fn uninstall_supervised(leave: &str, by: Option<String>) -> Result<()
             )));
         }
     };
-    // a helper that runs as root writes the registry's row as its caller
+    // the supervisor's door wrote the audit row before it started this run
     if let Some(state) = read_state()
         && let Some(argv) = helper_call(&state, &["uninstall", leave])
     {
@@ -19579,7 +19609,7 @@ pub(crate) fn uninstall_supervised(leave: &str, by: Option<String>) -> Result<()
         yes: true,
         print: false,
         dir: None,
-        by,
+        audited: true,
     })
 }
 

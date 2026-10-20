@@ -508,6 +508,46 @@ fn an_update_is_not_rolled_back_while_its_migration_reports_progress() {
     );
 }
 
+/// A migration that ends between two polls, the door silent for a moment
+/// before the new version answers, is not rolled back.
+#[test]
+fn an_update_whose_migration_has_just_ended_is_not_rolled_back() {
+    let c = Channel::new();
+    let install = c.dir.path().join("install");
+    std::fs::create_dir_all(&install).unwrap();
+    std::fs::write(install.join("VERSION"), "1.0.0\n").unwrap();
+    let caps = c.dir.path().join("caps.json");
+    std::fs::write(&caps, r#"{"version": "1.0.0"}"#).unwrap();
+    let migrating = r#"{"error": "the engine is starting", "starting": {"migrating": {"from": 105, "to": 106, "step": 106}}}"#;
+    // migrating for three seconds (past the settle's two), then nothing
+    // answers for two more, then the new version
+    let restart = c.dir.path().join("restart.sh");
+    std::fs::write(
+        &restart,
+        format!(
+            "printf '%s' '{migrating}' > {caps}\n(sleep 3; rm -f {caps}; sleep 2; printf '%s' '{{\"version\": \"1.0.1\"}}' > {caps}.new && mv {caps}.new {caps}) > /dev/null 2>&1 &\n",
+            caps = caps.display()
+        ),
+    )
+    .unwrap();
+    let config = config_with_door(&c, &install, &restart, &caps, "");
+    c.publish("engine", "1.0.1", &[], true);
+    let o = run(&[
+        "supervise",
+        "update",
+        "--config",
+        config.to_str().unwrap(),
+        "engine",
+    ]);
+    assert!(o.ok, "{}", o.stderr);
+    assert_eq!(
+        std::fs::read_to_string(install.join("VERSION"))
+            .unwrap()
+            .trim(),
+        "1.0.1"
+    );
+}
+
 struct Service {
     child: Child,
     url: String,

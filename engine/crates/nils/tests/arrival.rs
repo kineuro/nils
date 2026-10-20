@@ -1442,6 +1442,49 @@ fn system_ones_parts_run_several_at_once_within_the_lanes_budget() {
     assert!(good, "{err}\n{out}");
     assert_eq!(most_at_once(&times), 1);
     assert_eq!(opinions_by_job(&home, job, false), at_once_opinions);
+
+    // at the keyboard the parts that end together print whole blocks: each
+    // run's words in one piece, never a line among another's
+    std::fs::remove_file(&times).unwrap();
+    let (good, out, err) = home.run_with(
+        &[
+            "run",
+            "system1-score@1",
+            "--model",
+            &s1.to_string(),
+            "--handle",
+            &handle,
+            "--chunk",
+            "1",
+            "--parts-at-once",
+            "2",
+        ],
+        None,
+        &env,
+    );
+    assert!(good, "{err}\n{out}");
+    assert_eq!(most_at_once(&times), 2);
+    let mut blocks: Vec<Vec<&str>> = Vec::new();
+    for line in out.lines() {
+        if line.starts_with("run ") {
+            blocks.push(Vec::new());
+        }
+        blocks
+            .last_mut()
+            .expect("the output begins with a run's line")
+            .push(line);
+    }
+    assert_eq!(blocks.len(), 6, "{out}");
+    let shape = |b: &Vec<&str>| -> Vec<String> {
+        b.iter()
+            .map(|l| l.split_whitespace().next().unwrap_or("").to_string())
+            .collect()
+    };
+    let first = shape(&blocks[0]);
+    assert!(first.len() >= 6, "{out}");
+    for b in &blocks {
+        assert_eq!(shape(b), first, "a run's words were broken up:\n{out}");
+    }
     drop(files);
     drop(bin);
     drop(work);
