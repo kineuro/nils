@@ -14,7 +14,10 @@
 # the task system1 (the Models page), kept as one bundle file whose
 # system1.json names every file it holds by sha256 (src/nils_system1/bundle.py).
 # A bundle that brings its own code runs only with trust_code true, after
-# its bytes match.
+# its bytes match. A run given an admitted or promoted model sets trust_code
+# true itself (the model input's trusted-by-admission), after the engine has
+# checked the file is the one admitted: the admission is the site's check,
+# so a fresh install scores at arrival with no hand step.
 #
 # It reads the registry's rows a header model needs (x-nils.input.rows):
 # each stack's whole fingerprint row and votes, and each series's frame of
@@ -45,7 +48,8 @@ inputs:
       A site's System 1 bundle may bring its own predictor as code, which
       runs when it is loaded. true runs it, and only after its bytes match
       the digest the bundle's system1.json names, whose own digest is the
-      model's; false (the default) refuses it.
+      model's; false (the default) refuses it. A run given an admitted or
+      promoted model is given true unless it says otherwise.
     value-key: "[TRUSTCODE]"
     command-line-flag: --trust-code
     value-choices: ["true", "false"]
@@ -86,6 +90,8 @@ x-nils:
     - id: model
       type: model
       description: The System 1 model chosen for the task system1, a site model kept as one bundle file
+      # wave 7b: an admitted model's code is trusted by its admission
+      trusted-by-admission: trust_code
   outputs:
     - id: opinion
       kind: output

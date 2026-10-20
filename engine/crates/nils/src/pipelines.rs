@@ -39,7 +39,7 @@
 //! The doors read the catalog and the runs; the derivatives a run made are
 //! served by the derivative doors, by bytes or by a shared path (S3).
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -2389,6 +2389,12 @@ pub(crate) struct RunArgs {
     /// after it; its run taken up again (--resume) goes on with them
     #[arg(long, value_name = "N", conflicts_with = "resume")]
     pub(crate) chunk: Option<u64>,
+    /// At most N parts of a split run at once (wave 7b): by default, where
+    /// a part's units run together in one container on the CPU, as many as
+    /// the lane's budget holds of the cores and memory a part declares; 1
+    /// runs them one after another
+    #[arg(long, value_name = "N")]
+    pub(crate) parts_at_once: Option<usize>,
     /// Run nothing: say what the run would do (record 49 A3), its units,
     /// the units that cannot run and what they lack, the time, the GPU, and
     /// what a unit needs against the lane's budget; with --resume, what a
@@ -3083,9 +3089,19 @@ pub(crate) fn command(home: &Home, command: PipelineCommand) -> Result<(), Exit>
     }
 }
 
+/// A run's words, printed in one call: parts that end at the same moment
+/// on their own threads each print a whole block, never lines among
+/// another's.
 fn print_run(doc: &Value) {
+    print!("{}", run_text(doc));
+}
+
+fn run_text(doc: &Value) -> String {
+    use std::fmt::Write as _;
+    let mut text = String::new();
     // 2026-10-12: its units summed beside its status, never a bare done
-    println!(
+    let _ = writeln!(
+        text,
         "run {} of {}: {}{}",
         doc["id"],
         doc["pipeline"].as_str().unwrap_or("-"),
@@ -3095,20 +3111,23 @@ fn print_run(doc: &Value) {
             .map(|l| format!(" · {l}"))
             .unwrap_or_default()
     );
-    println!(
+    let _ = writeln!(
+        text,
         "  over             {} (handle {})",
         doc["selection"].as_str().unwrap_or("a handle"),
         doc["handle_id"]
     );
     // record 55: a dataset's or a cohort's main scans, and what was read
     if doc["main"].is_object() {
-        println!(
+        let _ = writeln!(
+            text,
             "  main scans       {}",
             crate::main_input::line(&doc["main"])
         );
     }
-    println!("  parameters       {}", doc["params"]);
-    println!(
+    let _ = writeln!(text, "  parameters       {}", doc["params"]);
+    let _ = writeln!(
+        text,
         "  runtime          {} {} on {}, {}",
         doc["runtime"].as_str().unwrap_or_default(),
         doc["runtime_version"].as_str().unwrap_or_default(),
@@ -3116,35 +3135,39 @@ fn print_run(doc: &Value) {
         doc["device"].as_str().unwrap_or_default()
     );
     let units = &doc["summary"]["units"];
-    println!(
+    let _ = writeln!(
+        text,
         "  units            {} succeeded, {} failed, {} skipped, {} unreported",
         units["succeeded"], units["failed"], units["skipped"], units["unreported"]
     );
-    println!(
+    let _ = writeln!(
+        text,
         "  derivatives      {}",
         doc["derivatives"].as_array().map_or(0, Vec::len)
     );
     if let Some(d) = doc["results_digest"].as_str() {
-        println!("  results          {d}");
+        let _ = writeln!(text, "  results          {d}");
     }
     if let Some(e) = doc["error"].as_str() {
-        println!("  error            {e}");
+        let _ = writeln!(text, "  error            {e}");
     }
     if let Some(f) = crate::failures::line(&doc["failure"]) {
-        println!("  failure          {f}");
+        let _ = writeln!(text, "  failure          {f}");
     }
     for f in doc["summary"]["failures_by_cause"]
         .as_array()
         .into_iter()
         .flatten()
     {
-        println!(
+        let _ = writeln!(
+            text,
             "  units failed     {} for {} ({})",
             f["units"],
             f["cause"].as_str().unwrap_or_default(),
             f["kind"].as_str().unwrap_or_default()
         );
     }
+    text
 }
 
 // ------------------------------------------------------------------ the run
@@ -4973,7 +4996,7 @@ pub(crate) fn run_command(home: &Home, args: RunArgs) -> Result<(), Exit> {
     let d = d.sized_to(lane_of(&mut registry).ledger.cores);
     // the parts of a split run that go on after one was taken up again run
     // with the parameters it recorded
-    let params = match &args.go_on {
+    let mut params = match &args.go_on {
         Some(g) => g.params.clone(),
         None => {
             let given = pairs(&args.params)?;
@@ -5058,6 +5081,18 @@ pub(crate) fn run_command(home: &Home, args: RunArgs) -> Result<(), Exit> {
             nils_registry::proposals::threshold(&m, Some(t)).map_err(|e| usage(e.to_string()))?;
         }
         models.push(m);
+    }
+    // wave 7b §18: an admitted or promoted model's code is trusted by its
+    // admission, where the descriptor names the parameter that says so and
+    // the caller left it; the parts of a split run keep what the first set
+    if args.go_on.is_none() {
+        let given = pairs(&args.params)?;
+        let admitted: Vec<bool> = models.iter().map(|m| m.answers()).collect();
+        for id in d.trust_admitted(&mut params, &given, &admitted) {
+            eprintln!(
+                "{id} is true: the model's admission trusts the code it brings, after its bytes match"
+            );
+        }
     }
     if let Some(t) = args.threshold
         && !(t > 0.0 && t <= 1.0)
@@ -5147,31 +5182,20 @@ pub(crate) fn run_command(home: &Home, args: RunArgs) -> Result<(), Exit> {
         ..GoOn::default()
     };
     let pack = pack_of_bids(home, &args, &d);
-    // the job a worker took, which the parts take up in turn and which
-    // stays running between them
-    let mut kept: Option<i64> = args.go_on.as_ref().and_then(|g| g.kept);
-    for (k, &i) in todo.iter().enumerate() {
+    // the trust check of a model's bytes, made once for all the parts
+    let verified = Verified::default();
+    // one part's run over its handle: claimed, made, executed and
+    // concluded; with the run it made and the job it claimed. `made` is
+    // called once the part's run is made (or it is not to be), so parts
+    // run at once are made in their order; `hold` leaves the job a worker
+    // took to the caller, which finishes it once every part is over
+    let run_part = |registry: &mut Registry,
+                    i: usize,
+                    more: bool,
+                    hold: bool,
+                    started_in_turn: &dyn Fn(bool)|
+     -> (Result<(), Exit>, Option<i64>, Option<i64>) {
         let (handle_id, selection) = (parts[i].0, &parts[i].1);
-        // a stop asked between two parts stops the parts from this one
-        if let Some(j) = kept.take()
-            && matches!(job::beat(registry.store(), j, None), Ok(job::Asked::Cancel))
-        {
-            let _ = job::finish(
-                registry.store(),
-                j,
-                job::State::Cancelled,
-                Some("stopped between two parts"),
-            );
-            return Err(Exit {
-                code: crate::STOPPED,
-                message: format!(
-                    "stopped before part {} of {count}; the parts not run are handles {}: nils run {} --handle <id> runs one",
-                    i + 1,
-                    split.words(&todo[k..]),
-                    p.label()
-                ),
-            });
-        }
         // the part's run, once it is made, which the words of a part that
         // did not end name
         let mut made: Option<i64> = None;
@@ -5185,7 +5209,7 @@ pub(crate) fn run_command(home: &Home, args: RunArgs) -> Result<(), Exit> {
             }
             // 2026-10-12: the disk its units take, now their count is known
             if d.layout == Layout::Stacks
-                && let Some(c) = crate::requirements::disk(&mut registry, &d, stacks.len())
+                && let Some(c) = crate::requirements::disk(registry, &d, stacks.len())
                 && !c.ok
             {
                 return Err(fail(c.refusal()));
@@ -5193,15 +5217,9 @@ pub(crate) fn run_command(home: &Home, args: RunArgs) -> Result<(), Exit> {
             // 2026-10-12: a run none of whose units could run would make
             // nothing: refused before it is made, with why, as its
             // pre-flight says it
-            if let Some(refused) = crate::preflight::units_refusal(
-                &mut registry,
-                &d,
-                handle_id,
-                pack.as_ref(),
-                None,
-                None,
-            )
-            .map_err(fail)?
+            if let Some(refused) =
+                crate::preflight::units_refusal(registry, &d, handle_id, pack.as_ref(), None, None)
+                    .map_err(fail)?
             {
                 return Err(fail(refused.words));
             }
@@ -5247,6 +5265,7 @@ pub(crate) fn run_command(home: &Home, args: RunArgs) -> Result<(), Exit> {
                 },
             )?;
             made = Some(run_id);
+            started_in_turn(false);
             rows::set_units(registry.store(), run_id, d.units.name(), args.threshold)?;
             // Wave 7b A1: the person's choices at the pack stay with the run,
             // so a resume judges under the same ones
@@ -5267,11 +5286,11 @@ pub(crate) fn run_command(home: &Home, args: RunArgs) -> Result<(), Exit> {
                 rows::set_person(registry.store(), run_id, &kept)?;
             }
             let _ = job::set_arg(registry.store(), job_id, "run", json!(run_id));
-            let licence_env = crate::software::licence_env(&mut registry, &p);
+            let licence_env = crate::software::licence_env(registry, &p);
 
             let outcome = execute(
                 home,
-                &mut registry,
+                registry,
                 &Execution {
                     pipeline: &p,
                     descriptor: &d,
@@ -5294,10 +5313,11 @@ pub(crate) fn run_command(home: &Home, args: RunArgs) -> Result<(), Exit> {
                     secrets: &given,
                     licence_env: &licence_env,
                     resume: None,
+                    verified: &verified,
                 },
             );
             conclude(
-                &mut registry,
+                registry,
                 &Conclusion {
                     pipeline: &p,
                     run_id,
@@ -5308,11 +5328,61 @@ pub(crate) fn run_command(home: &Home, args: RunArgs) -> Result<(), Exit> {
                     who: &who,
                     json: args.json,
                     resumed: false,
-                    more: k + 1 < todo.len(),
+                    more,
+                    hold,
                 },
                 outcome,
             )
         })();
+        // the turn passes on, with word of a part that did not begin or end well
+        started_in_turn(ran.is_err());
+        (ran, made, claimed)
+    };
+    // record 55 §18 (wave 7b): the parts of a split run whose units run
+    // together in one container on the CPU run several at once, as many as
+    // the lane's budget holds of the part's declared cores and memory; the
+    // lane's admission still starts each container only where it fits
+    let at_once = parts_at_once(&d, &lane, todo.len(), args.parts_at_once);
+    if at_once > 1 {
+        return run_parts_at_once(
+            home,
+            &mut registry,
+            &run_part,
+            &PartsPlan {
+                pipeline: &p,
+                parts: &parts,
+                todo: &todo,
+                split: &split,
+                at_once,
+            },
+        );
+    }
+    // the job a worker took, which the parts take up in turn and which
+    // stays running between them
+    let mut kept: Option<i64> = args.go_on.as_ref().and_then(|g| g.kept);
+    for (k, &i) in todo.iter().enumerate() {
+        let handle_id = parts[i].0;
+        // a stop asked between two parts stops the parts from this one
+        if let Some(j) = kept.take()
+            && matches!(job::beat(registry.store(), j, None), Ok(job::Asked::Cancel))
+        {
+            let _ = job::finish(
+                registry.store(),
+                j,
+                job::State::Cancelled,
+                Some("stopped between two parts"),
+            );
+            return Err(Exit {
+                code: crate::STOPPED,
+                message: format!(
+                    "stopped before part {} of {count}; the parts not run are handles {}: nils run {} --handle <id> runs one",
+                    i + 1,
+                    split.words(&todo[k..]),
+                    p.label()
+                ),
+            });
+        }
+        let (ran, made, claimed) = run_part(&mut registry, i, k + 1 < todo.len(), false, &|_| {});
         kept = claimed.filter(|j| adopted(*j));
         if let Err(e) = ran {
             if count == 1 {
@@ -5343,6 +5413,254 @@ pub(crate) fn run_command(home: &Home, args: RunArgs) -> Result<(), Exit> {
         }
     }
     Ok(())
+}
+
+/// How many parts of a split run go at once (wave 7b §18): one, unless
+/// there are several parts, each one container on the CPU (units together,
+/// no GPU, not every core of the lane); then as many as the lane's budget
+/// holds of the cores and memory a part declares, at most `asked`.
+fn parts_at_once(d: &Descriptor, lane: &Lane, parts: usize, asked: Option<usize>) -> usize {
+    if parts < 2 || d.units != Units::Together || d.gpu != Gpu::None || d.needs.lane_cores {
+        return 1;
+    }
+    let ask = ask_of(d);
+    let by_cores = (lane.ledger.cores / ask.cores.max(1)) as usize;
+    let by_memory = (lane.ledger.memory_mib / ask.memory_mib.max(1)) as usize;
+    let fits = by_cores.min(by_memory).max(1);
+    fits.min(parts).min(asked.unwrap_or(usize::MAX)).max(1)
+}
+
+/// A part that ended: its place in the parts to run, how, and its run.
+type PartEnded = (usize, Result<(), Exit>, Option<i64>);
+
+/// What the parts run at once share: the pipeline, every part, those to run
+/// in their order, how they are named and how many go at once.
+struct PartsPlan<'a> {
+    pipeline: &'a Pipeline,
+    parts: &'a [(i64, Option<String>)],
+    todo: &'a [usize],
+    split: &'a GoOn,
+    at_once: usize,
+}
+
+/// One part's run as `run_command` makes it: the registry, the part's
+/// place in the parts, whether more follow, whether the job is held for
+/// the caller, and what to call once its run is made.
+type RunPart<'a> = dyn Fn(
+        &mut Registry,
+        usize,
+        bool,
+        bool,
+        &dyn Fn(bool),
+    ) -> (Result<(), Exit>, Option<i64>, Option<i64>)
+    + Sync
+    + 'a;
+
+/// The threads of [`run_parts_at_once`]: `at_once` of them take the parts
+/// in `todo` in order, a part's turn coming once the one before has made
+/// its run (or failed, or stopped the rest). What ended, in part order, and
+/// whether the parts were stopped.
+fn schedule_parts(
+    home: &Home,
+    todo: &[usize],
+    at_once: usize,
+    of: usize,
+    adopt: Option<i64>,
+    run_part: &RunPart<'_>,
+) -> (Vec<PartEnded>, bool) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Condvar, Mutex};
+    let count = of;
+    let next = Mutex::new(0usize);
+    // the parts whose run is made, in their order
+    let turn = (Mutex::new(0usize), Condvar::new());
+    let stop = AtomicBool::new(false);
+    let ended: Mutex<Vec<PartEnded>> = Mutex::new(Vec::new());
+    let wait_turn = |k: usize| {
+        let (lock, cv) = &turn;
+        let mut at = lock.lock().unwrap_or_else(|e| e.into_inner());
+        while *at < k {
+            at = cv.wait(at).unwrap_or_else(|e| e.into_inner());
+        }
+    };
+    let pass_turn = |k: usize| {
+        let (lock, cv) = &turn;
+        let mut at = lock.lock().unwrap_or_else(|e| e.into_inner());
+        if *at == k {
+            *at = k + 1;
+        }
+        cv.notify_all();
+    };
+    std::thread::scope(|scope| {
+        for _ in 0..at_once {
+            scope.spawn(|| {
+                let mut own = crate::open(home);
+                loop {
+                    let k = {
+                        let mut n = next.lock().unwrap_or_else(|e| e.into_inner());
+                        if *n >= todo.len() || stop.load(Ordering::SeqCst) {
+                            return;
+                        }
+                        *n += 1;
+                        *n - 1
+                    };
+                    wait_turn(k);
+                    let reg = match own.as_mut() {
+                        Ok(r) => r,
+                        Err(e) => {
+                            stop.store(true, Ordering::SeqCst);
+                            pass_turn(k);
+                            let e = Exit {
+                                code: e.code,
+                                message: e.message.clone(),
+                            };
+                            ended
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .push((k, Err(e), None));
+                            return;
+                        }
+                    };
+                    // a stop asked of the job stops the parts not yet begun
+                    if stop.load(Ordering::SeqCst)
+                        || adopt.is_some_and(|j| {
+                            matches!(job::beat(reg.store(), j, None), Ok(job::Asked::Cancel))
+                        })
+                    {
+                        stop.store(true, Ordering::SeqCst);
+                        pass_turn(k);
+                        return;
+                    }
+                    let i = todo[k];
+                    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        run_part(reg, i, true, true, &|failed| {
+                            // a part that fails stops the next before its turn
+                            // comes, so the next never starts after it
+                            if failed {
+                                stop.store(true, Ordering::SeqCst);
+                            }
+                            pass_turn(k);
+                        })
+                    }));
+                    pass_turn(k);
+                    let (ran, made) = match outcome {
+                        Ok((ran, made, _)) => (ran, made),
+                        Err(_) => (
+                            Err(fail(format!("part {} of {count} panicked", i + 1))),
+                            None,
+                        ),
+                    };
+                    if ran.is_err() {
+                        stop.store(true, Ordering::SeqCst);
+                    }
+                    ended
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .push((k, ran, made));
+                }
+            });
+        }
+    });
+    let mut ended = ended.into_inner().unwrap_or_else(|e| e.into_inner());
+    ended.sort_by_key(|(k, _, _)| *k);
+    (ended, stop.load(Ordering::SeqCst))
+}
+
+/// The parts of a split run, `plan.at_once` at a time, each on a thread of
+/// its own with a registry connection of its own (wave 7b §18). They are
+/// handed out and their runs made in their order, so run numbers, handles
+/// and results read as the parts one after another would; each part is a
+/// run of its own with its own folder and log. A part that fails or is
+/// stopped stops the parts not yet begun, and those already going end as
+/// they end. The job a worker took is every part's and ends once all are
+/// over: done, or as the first part in order that did not end done.
+fn run_parts_at_once(
+    home: &Home,
+    registry: &mut Registry,
+    run_part: &RunPart<'_>,
+    plan: &PartsPlan<'_>,
+) -> Result<(), Exit> {
+    let count = plan.parts.len();
+    let todo = plan.todo;
+    eprintln!(
+        "{} parts, {} at once within the lane's budget",
+        todo.len(),
+        plan.at_once
+    );
+    let adopt: Option<i64> = std::env::var(job::ADOPT_VAR)
+        .ok()
+        .and_then(|v| v.trim().parse().ok());
+    let (ended, stopped) = schedule_parts(home, todo, plan.at_once, count, adopt, run_part);
+    let done: std::collections::BTreeSet<usize> = ended
+        .iter()
+        .filter(|(_, r, _)| r.is_ok())
+        .map(|(k, _, _)| *k)
+        .collect();
+    let first = ended.into_iter().find(|(_, r, _)| r.is_err());
+    let left: Vec<usize> = (0..todo.len())
+        .filter(|k| !done.contains(k))
+        .map(|k| todo[k])
+        .collect();
+    let failed = first.as_ref().map(|(_, r, _)| match r {
+        Err(e) => e.code,
+        Ok(()) => 0,
+    });
+    // the job every part held: over now
+    if let Some(j) = adopt {
+        let (state, why) = match (&first, stopped) {
+            (None, false) => (job::State::Done, None),
+            (None, true) => (
+                job::State::Cancelled,
+                Some("stopped between two parts".to_string()),
+            ),
+            (Some(_), _) if failed == Some(crate::STOPPED) => (
+                job::State::Cancelled,
+                Some("a part was stopped".to_string()),
+            ),
+            (Some((_, Err(e), _)), _) => (job::State::Failed, Some(e.message.clone())),
+            (Some(_), _) => (job::State::Failed, None),
+        };
+        job::finish(registry.store(), j, state, why.as_deref()).map_err(|e| fail(e.to_string()))?;
+    }
+    let p = plan.pipeline;
+    match first {
+        None if left.is_empty() => Ok(()),
+        None => Err(Exit {
+            code: crate::STOPPED,
+            message: format!(
+                "stopped between two parts; the parts not run are handles {}: nils run {} --handle <id> runs one",
+                plan.split.words(&left),
+                p.label()
+            ),
+        }),
+        Some((k, Err(e), made)) => {
+            let i = todo[k];
+            let others: Vec<usize> = left.into_iter().filter(|x| *x != i).collect();
+            let rest = if others.is_empty() {
+                "every other part ended done".to_string()
+            } else {
+                format!(
+                    "the parts not done are handles {}: {}nils run {} --handle <id> runs one",
+                    plan.split.words(&others),
+                    made.map(|run| format!(
+                        "nils run --resume {run} takes this part up again, and "
+                    ))
+                    .unwrap_or_default(),
+                    p.label()
+                )
+            };
+            Err(Exit {
+                code: e.code,
+                message: format!(
+                    "{} (part {} of {count}, handle {}); {rest}",
+                    e.message,
+                    i + 1,
+                    plan.parts[i].0
+                ),
+            })
+        }
+        Some(_) => Ok(()),
+    }
 }
 
 /// A selection frozen for a run: whole, one handle of every stack it
@@ -5895,6 +6213,7 @@ fn resume_command(home: &Home, args: &RunArgs, run_id: i64) -> Result<(), Exit> 
             secrets: &given,
             licence_env: &licence_env,
             resume: Some(&r),
+            verified: &Verified::default(),
         },
     );
     // the parts after it that no run holds yet go on once it ends, one
@@ -5934,6 +6253,7 @@ fn resume_command(home: &Home, args: &RunArgs, run_id: i64) -> Result<(), Exit> 
             json: args.json,
             resumed: true,
             more: go_on.is_some(),
+            hold: false,
         },
         outcome,
     );
@@ -5974,6 +6294,7 @@ fn resume_command(home: &Home, args: &RunArgs, run_id: i64) -> Result<(), Exit> 
             pack_dir: args.pack_dir.clone(),
             dcm2niix: args.dcm2niix.clone(),
             chunk: None,
+            parts_at_once: args.parts_at_once,
             preflight: false,
             // the parts go on with the version the run was split for
             replaced: true,
@@ -6168,6 +6489,9 @@ struct Conclusion<'a> {
     resumed: bool,
     /// Parts of the same split run follow in this process.
     more: bool,
+    /// Parts of the same split run go on at once in this process: the job a
+    /// worker took is every part's, and the caller finishes it.
+    hold: bool,
 }
 
 /// Whether the job is the one a worker took for this process, which every
@@ -6267,7 +6591,7 @@ fn conclude(
     // 2026-10-17: a part of a split run a worker runs, with parts after
     // it: the job is every part's, and stays running until the last one
     // ends, so nothing reads it as over between two parts
-    if !(c.more && job_state == job::State::Done && adopted(c.job_id)) {
+    if !((c.hold || c.more && job_state == job::State::Done) && adopted(c.job_id)) {
         job::finish(registry.store(), c.job_id, job_state, error.as_deref())
             .map_err(|e| fail(e.to_string()))?;
     }
@@ -6334,6 +6658,40 @@ struct Execution<'a> {
     licence_env: &'a [(String, String)],
     /// The run as it stood, where this takes it up again.
     resume: Option<&'a Run>,
+    /// The models whose bytes were found to be the admitted ones, once for
+    /// all the parts of a run command.
+    verified: &'a Verified,
+}
+
+/// The models whose files were hashed and found to be the bytes admitted.
+/// The check holds the lock while it hashes, so the parts of a run that go
+/// at once wait for the first one's verdict and hash a bundle once.
+#[derive(Default)]
+struct Verified(Mutex<BTreeSet<i64>>);
+
+impl Verified {
+    /// Hash `host` with `hash` unless this model's file was found right
+    /// already; an error says what the file is and what it was admitted as.
+    fn check(
+        &self,
+        model: (i64, &str),
+        host: &Path,
+        hash: &dyn Fn(&Path) -> Result<String, String>,
+    ) -> Result<(), String> {
+        let mut known = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let (id, digest) = model;
+        if known.contains(&id) {
+            return Ok(());
+        }
+        let got = hash(host).map_err(|e| format!("{}: {e}", host.display()))?;
+        if got != digest.strip_prefix("sha256:").unwrap_or(digest) {
+            return Err(format!(
+                "its file is sha256:{got}, not the digest {digest} it was admitted with; its code is not run"
+            ));
+        }
+        known.insert(id);
+        Ok(())
+    }
 }
 
 /// How a run ended: its status, its summary, the digest of what it said,
@@ -6612,6 +6970,21 @@ fn execute_run(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Resul
             })
             .find_map(Result::transpose)
             .transpose()?;
+        // wave 7b §18: code trusted by the model's admission runs only from
+        // the bytes that were admitted, so the file is the registered one
+        let trusted = t.trust.as_ref().is_some_and(|id| {
+            matches!(x.params.get(id), Some(Value::Bool(true)))
+                || x.params.get(id).and_then(Value::as_str) == Some("true")
+        });
+        if trusted && let Some((host, _)) = &artifact {
+            x.verified
+                .check((model.id, &model.digest), host, &|path| {
+                    nils_pipeline::files::sha256_file(path)
+                        .map(|(_, got)| got)
+                        .map_err(|e| e.to_string())
+                })
+                .map_err(|why| format!("model {}: {why}", model.label()))?;
+        }
         if let Some((host, _)) = &artifact
             && let Some(dir) = host.parent().filter(|d| d.is_dir())
         {
@@ -10551,6 +10924,89 @@ fn found_for(outputs: &[descriptor::Output], out: &Path, u: &Unit) -> Vec<String
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The trust check hashes a model's file once for all the parts of a
+    /// run, however many go at once, and a file that is not the admitted
+    /// one is refused every time.
+    #[test]
+    fn the_trust_check_hashes_a_bundle_once_for_all_the_parts() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let verified = Verified::default();
+        let hashed = AtomicUsize::new(0);
+        let hash = |_: &Path| -> Result<String, String> {
+            hashed.fetch_add(1, Ordering::SeqCst);
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            Ok("abc".to_string())
+        };
+        std::thread::scope(|scope| {
+            for _ in 0..4 {
+                scope.spawn(|| {
+                    verified
+                        .check((7, "sha256:abc"), Path::new("/model"), &hash)
+                        .unwrap();
+                });
+            }
+        });
+        assert_eq!(hashed.load(Ordering::SeqCst), 1);
+        let wrong = Verified::default();
+        for _ in 0..2 {
+            let why = wrong
+                .check((8, "sha256:def"), Path::new("/model"), &hash)
+                .unwrap_err();
+            assert!(why.contains("not the digest sha256:def"), "{why}");
+        }
+        assert_eq!(hashed.load(Ordering::SeqCst), 3);
+    }
+
+    /// A part that is refused or fails stops the next before its turn
+    /// comes: the turn passed on by a failed part comes with the stop
+    /// already set, so with two going at once the second never starts.
+    #[test]
+    fn a_failed_part_leaves_the_next_unstarted() {
+        use std::sync::Mutex;
+        let dir = nils_dicom::synth::TempDir::new("parts-stop");
+        let home = Home::new(dir.path().join("registry"));
+        home.keys(None).add("k", b"nils-fixture-key").unwrap();
+        drop(
+            home.init(&nils_registry::InitOptions {
+                backend: nils_registry::Backend::Sqlite,
+                dsn: None,
+                schema: None,
+                scheme: nils_registry::pseudonym::Scheme::Blake2b32,
+                key: "k".to_string(),
+                display_length: nils_registry::pseudonym::DEFAULT_DISPLAY_LENGTH,
+                session_scheme: None,
+            })
+            .unwrap(),
+        );
+        for _ in 0..20 {
+            let started = Mutex::new(Vec::new());
+            let run_part = |_: &mut Registry,
+                            i: usize,
+                            _: bool,
+                            _: bool,
+                            turn: &dyn Fn(bool)|
+             -> (Result<(), Exit>, Option<i64>, Option<i64>) {
+                started.lock().unwrap().push(i);
+                if i == 0 {
+                    // refused before its run is made: the turn passes on with the news
+                    turn(true);
+                    return (Err(fail("refused before it started")), None, None);
+                }
+                turn(false);
+                (Ok(()), Some(i as i64), None)
+            };
+            let (ended, stopped) = schedule_parts(&home, &[0, 1, 2], 2, 3, None, &run_part);
+            assert_eq!(
+                *started.lock().unwrap(),
+                [0],
+                "a part started after a failed one"
+            );
+            assert!(stopped);
+            assert_eq!(ended.len(), 1);
+            assert!(ended[0].1.is_err());
+        }
+    }
 
     /// 2026-10-17: a run over more stacks than a part holds is queued with
     /// `--chunk`: a part is what a GB of the declared memory was seen to

@@ -463,6 +463,11 @@ pub(crate) struct Config {
     /// Seconds to wait for a part to answer with its new version after a restart.
     #[serde(default = "default_settle")]
     pub settle_seconds: u64,
+    /// Wave 7b §18: how long the settle waits past `settle_seconds` while
+    /// the part's door says it is migrating its registry (an index over
+    /// tens of millions of rows takes minutes); six hours by default.
+    #[serde(default = "default_migration")]
+    pub migration_seconds: u64,
     /// Bearer tokens and who they name; every door asks for one (the admin entitlement).
     #[serde(default)]
     pub tokens: BTreeMap<String, String>,
@@ -481,6 +486,9 @@ fn default_look_again() -> u64 {
 }
 fn default_settle() -> u64 {
     30
+}
+fn default_migration() -> u64 {
+    6 * 3600
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -569,21 +577,87 @@ fn observed(check: &Check) -> Option<String> {
     }
 }
 
-fn settled(check: &Check, version: &str, within: Duration) -> bool {
+/// The migration a part's door says it is making while it starts (wave 7b
+/// §18): the engine answers 503 with `starting.migrating` until its
+/// registry is open. `None` where the door answers otherwise or not at all.
+fn migrating(check: &Check) -> Option<Value> {
+    let Check::Capabilities(url) = check else {
+        return None;
+    };
+    let bytes = if let Some(path) = url.strip_prefix("file://") {
+        std::fs::read(path).ok()?
+    } else {
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .timeout_global(Some(Duration::from_secs(10)))
+            .http_status_as_error(false)
+            .build()
+            .into();
+        let mut response = agent.get(url).call().ok()?;
+        let mut bytes = Vec::new();
+        response
+            .body_mut()
+            .as_reader()
+            .read_to_end(&mut bytes)
+            .ok()?;
+        bytes
+    };
+    let doc: Value = serde_json::from_slice(&bytes).ok()?;
+    doc.pointer("/starting/migrating")
+        .filter(|m| m.is_object())
+        .cloned()
+}
+
+/// Whether the part answers with `version` within `within`; past it, the
+/// settle waits on while the part's door says it is migrating, up to
+/// `migration` in all, so an update is never rolled back in the middle of
+/// a migration the new version is making (the old binary would refuse the
+/// newer schema). How it ended, and the last migration it saw.
+fn settled(
+    check: &Check,
+    version: &str,
+    within: Duration,
+    migration: Duration,
+) -> (bool, Option<Value>) {
     if matches!(check, Check::None) {
-        return true;
+        return (true, None);
     }
     let start = Instant::now();
+    let mut seen = None;
+    // when the door last said it migrates (or the settle ended): a door
+    // that stops saying so is given a few seconds to answer with the new
+    // version, as the migration that has just ended is followed by the
+    // doors opening
+    let mut quiet_since: Option<Instant> = None;
     loop {
         if observed(check).as_deref() == Some(version) {
-            return true;
+            return (true, seen);
         }
         if start.elapsed() > within {
-            return false;
+            match migrating(check) {
+                Some(m) if start.elapsed() <= within.max(migration) => {
+                    seen = Some(m);
+                    quiet_since = None;
+                }
+                Some(_) => return (false, seen),
+                None => {
+                    let since = *quiet_since.get_or_insert_with(Instant::now);
+                    if seen.is_none() || since.elapsed() > SETTLE_GRACE {
+                        return (false, seen);
+                    }
+                    std::thread::sleep(Duration::from_millis(250));
+                    continue;
+                }
+            }
+            std::thread::sleep(Duration::from_secs(1));
+            continue;
         }
         std::thread::sleep(Duration::from_millis(250));
     }
 }
+
+/// How long a door that has stopped saying it migrates is given to answer
+/// with the new version before the update is rolled back.
+const SETTLE_GRACE: Duration = Duration::from_secs(5);
 
 fn restart(command: &str) -> Result<(), String> {
     let status = std::process::Command::new("sh")
@@ -775,19 +849,32 @@ pub(crate) fn update(
         .map_err(|w| refuse(w, &manifest.version, &manifest.sha256))?;
     swap(part, &manifest, &staging).map_err(|w| refuse(w, &manifest.version, &manifest.sha256))?;
     let restarted = restart(&part.restart);
-    let ok = restarted.is_ok()
-        && settled(
+    let (ok, migrated) = match &restarted {
+        Ok(()) => settled(
             &part.check(),
             &manifest.version,
             Duration::from_secs(config.settle_seconds),
-        );
+            Duration::from_secs(config.migration_seconds),
+        ),
+        Err(_) => (false, None),
+    };
     if !ok {
         let why = match restarted {
             Err(e) => format!("the restart failed: {e}"),
-            Ok(()) => format!(
-                "{} did not answer with {} within {} s",
-                part.name, manifest.version, config.settle_seconds
-            ),
+            Ok(()) => match &migrated {
+                Some(m) => format!(
+                    "{} did not answer with {} within {} s, and its migration to schema {} stopped answering or ran past {} s",
+                    part.name,
+                    manifest.version,
+                    config.settle_seconds,
+                    m["to"],
+                    config.migration_seconds
+                ),
+                None => format!(
+                    "{} did not answer with {} within {} s",
+                    part.name, manifest.version, config.settle_seconds
+                ),
+            },
         };
         let back =
             roll_back(part, &manifest, before.as_ref()).and_then(|()| restart(&part.restart));
@@ -994,13 +1081,59 @@ struct Runs {
 
 impl Runs {
     /// The run still going, where one is: one runs at a time.
+    ///
+    /// A run whose recorder has written its ending is over, though the
+    /// recorder may not have exited yet: the door already answers it ended
+    /// (`show` reads the record), so it is waited for here, briefly, rather
+    /// than refuse the next run with 409 (the race since the one-run rule).
     fn going(&self) -> Result<(), (u16, String)> {
-        let mut children = self
-            .children
-            .lock()
-            .map_err(|_| (500, "the runs are held".to_string()))?;
-        for (id, child) in children.iter_mut() {
-            if matches!(child.try_wait(), Ok(None)) {
+        // under the lock only the look: a child that ended is dropped, one
+        // that wrote its ending but lingers is taken out to be waited for
+        // below, so no door that needs the lock waits behind the wait
+        let mut lingering = Vec::new();
+        {
+            let mut children = self
+                .children
+                .lock()
+                .map_err(|_| (500, "the runs are held".to_string()))?;
+            let mut over = Vec::new();
+            let mut busy = None;
+            for (id, child) in children.iter_mut() {
+                match child.try_wait() {
+                    Ok(None) => {
+                        if read_run(&self.dir, id).is_some_and(|d| d["state"] != "running") {
+                            lingering.push(id.clone());
+                        } else {
+                            busy = Some(id.clone());
+                        }
+                    }
+                    _ => over.push(id.clone()),
+                }
+            }
+            if let Some(id) = busy {
+                return Err((409, format!("run {id} is still going; one run at a time")));
+            }
+            for id in over {
+                children.remove(&id);
+            }
+            let taken: Vec<(String, Child)> = lingering
+                .iter()
+                .filter_map(|id| children.remove(id).map(|c| (id.clone(), c)))
+                .collect();
+            drop(children);
+            let mut stuck = None;
+            let mut back = Vec::new();
+            for (id, mut child) in taken {
+                if exits_soon(&mut child) {
+                    continue;
+                }
+                stuck.get_or_insert(id.clone());
+                back.push((id, child));
+            }
+            if let Ok(mut children) = self.children.lock() {
+                children.extend(back);
+            }
+            if let Some(id) = stuck {
                 return Err((409, format!("run {id} is still going; one run at a time")));
             }
         }
@@ -1114,6 +1247,19 @@ impl Runs {
         doc["tail"] = json!(lines[lines.len().saturating_sub(40)..].to_vec());
         Some(doc)
     }
+}
+
+/// Whether a recorder that wrote its run's ending exits within ten
+/// seconds, as it does right after the write; reaped where it does.
+fn exits_soon(child: &mut Child) -> bool {
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(10) {
+        if !matches!(child.try_wait(), Ok(None)) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    false
 }
 
 /// Run one command of this binary for a run the service started, and write
@@ -1875,12 +2021,16 @@ fn uninstall_door(config: &Config, runs: &Runs, doc: &Value, by: &str) -> (u16, 
         "--leave".to_string(),
         word.to_string(),
     ];
+    // the registry's audit row, under the person the desk named, written
+    // here where that person is known and before the run starts
+    let audit = crate::setup::audit_uninstall_row(&state, by, word == "purge");
     let act = json!({
         "at": nils_registry::time::now_iso(),
         "by": by,
         "act": "uninstall",
         "leave": doc["leave"],
         "dir": state.dir,
+        "audit": audit.as_ref().err(),
     });
     if let Err(e) = act_row(config, &act) {
         return error(
@@ -1891,6 +2041,7 @@ fn uninstall_door(config: &Config, runs: &Runs, doc: &Value, by: &str) -> (u16, 
     let run = runs.start_by("uninstall", &args, Some(by));
     if let Err((_, why)) = &run {
         // the ask is on record; so is that nothing started
+        crate::setup::forget_audit_mark(&state);
         let mut refused = act;
         refused["started"] = json!(false);
         refused["why"] = json!(why);
@@ -2258,6 +2409,44 @@ mod tests {
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .collect();
         assert_eq!(names, ["r1.json"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A recorder that has written its run's ending but lingers is waited
+    /// for without the runs' lock held: a door that needs the lock (a
+    /// running run's document) answers meanwhile.
+    #[test]
+    fn a_lingering_recorder_does_not_hold_the_runs_for_the_others() {
+        let dir = std::env::temp_dir().join(format!("nils-runs-linger-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        write_run(&dir, "r1", &json!({"id": "r1", "state": "ok"})).unwrap();
+        write_run(&dir, "r2", &json!({"id": "r2", "state": "running"})).unwrap();
+        let child = std::process::Command::new("sleep")
+            .arg("2")
+            .spawn()
+            .unwrap();
+        let runs = Arc::new(Runs {
+            dir: dir.clone(),
+            children: Mutex::new(HashMap::from([("r1".to_string(), child)])),
+        });
+        let waiting = {
+            let runs = Arc::clone(&runs);
+            std::thread::spawn(move || runs.going())
+        };
+        std::thread::sleep(Duration::from_millis(300));
+        let asked = Instant::now();
+        let _ = runs.show("r2");
+        assert!(
+            asked.elapsed() < Duration::from_millis(500),
+            "show waited {:?} behind the lingering recorder",
+            asked.elapsed()
+        );
+        assert!(
+            !waiting.is_finished(),
+            "going did not wait for the recorder"
+        );
+        assert!(waiting.join().unwrap().is_ok());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
