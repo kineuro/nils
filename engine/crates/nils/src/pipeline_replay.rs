@@ -76,14 +76,21 @@ fn runs_of(store: &mut Store, name: &str) -> Result<Vec<i64>, String> {
         .collect())
 }
 
-/// Nothing a replay does writes; on Postgres the session says so.
-fn read_only(store: &mut Store) -> Result<(), String> {
+/// Nothing a replay does writes: on Postgres it reads inside one read-only
+/// transaction that ends with the replay on every path, so the connection
+/// (the server keeps one per handler thread) is not left read-only.
+fn begin_read_only(store: &mut Store) -> Result<(), String> {
     if store.backend() == nils_registry::Backend::Postgres {
-        store
-            .execute("SET default_transaction_read_only = on", &[])
-            .map_err(|e| e.to_string())?;
+        store.batch("BEGIN READ ONLY").map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+fn end_read_only(store: &mut Store) {
+    if store.backend() == nils_registry::Backend::Postgres {
+        // a transaction the replay's reads aborted is rolled back all the same
+        let _ = store.rollback();
+    }
 }
 
 fn runs(j: &Judgement) -> bool {
@@ -127,7 +134,10 @@ fn counts(judged: &[Judgement]) -> Value {
         "run": judged.iter().filter(|j| runs(j)).count(),
         "ready": count(Status::Ready),
         "skipped": count(Status::Skipped),
-        "routed": judged.iter().filter(|j| j.variant.is_some()).count(),
+        // routed is a subset of run; a skipped session that names the variant
+        // it goes to is counted apart
+        "routed": judged.iter().filter(|j| runs(j) && j.variant.is_some()).count(),
+        "skipped_routed": judged.iter().filter(|j| !runs(j) && j.variant.is_some()).count(),
         "cannot_tell": judged.iter().filter(|j| j.cannot_tell.is_some()).count(),
         "with_caveats": judged.iter().filter(|j| !j.caveats.is_empty()).count(),
         "skipped_by_need": skipped_by_need,
@@ -136,12 +146,32 @@ fn counts(judged: &[Judgement]) -> Value {
     })
 }
 
+/// Sessions per (from, to) change, each side a value kept as JSON text.
+type ChangeCounts = BTreeMap<(Option<String>, Option<String>), usize>;
+
+/// A value kept as JSON text, back as the value; none is null.
+fn json_of(text: Option<String>) -> Value {
+    text.and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or(Value::Null)
+}
+
+/// A value as a person reads it: a string bare, none as "(none)".
+fn shown(v: &Value) -> String {
+    match v {
+        Value::Null => "(none)".to_string(),
+        Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
+}
+
 /// What changes from `before` to `now` over the same sessions.
 fn changes(before: &[Judgement], now: &[Judgement]) -> Value {
     let mut run_to_skipped: BTreeMap<String, usize> = BTreeMap::new();
     let mut skipped_to_run = 0usize;
-    let mut variant: BTreeMap<(String, String), usize> = BTreeMap::new();
-    let mut knobs: BTreeMap<String, BTreeMap<(String, String), usize>> = BTreeMap::new();
+    // from and to are JSON values as the engine holds them, null for none;
+    // keyed by their JSON text so equal values count together
+    let mut variant: BTreeMap<(Option<String>, Option<String>), usize> = BTreeMap::new();
+    let mut knobs: BTreeMap<String, ChangeCounts> = BTreeMap::new();
     for (b, n) in before.iter().zip(now) {
         match (runs(b), runs(n)) {
             (true, false) => {
@@ -157,12 +187,7 @@ fn changes(before: &[Judgement], now: &[Judgement]) -> Value {
             n.variant.as_ref().map(|v| v.variant.clone()),
         );
         if bv != nv {
-            *variant
-                .entry((
-                    bv.unwrap_or_else(|| "(none)".into()),
-                    nv.unwrap_or_else(|| "(none)".into()),
-                ))
-                .or_default() += 1;
+            *variant.entry((bv, nv)).or_default() += 1;
         }
         if !runs(n) {
             continue;
@@ -173,10 +198,7 @@ fn changes(before: &[Judgement], now: &[Judgement]) -> Value {
                 *knobs
                     .entry(k.clone())
                     .or_default()
-                    .entry((
-                        was.map_or("(none)".to_string(), |v| v.to_string()),
-                        c.value.to_string(),
-                    ))
+                    .entry((was.map(|v| v.to_string()), Some(c.value.to_string())))
                     .or_default() += 1;
             }
         }
@@ -191,7 +213,7 @@ fn changes(before: &[Judgement], now: &[Judgement]) -> Value {
         "run_to_skipped_by_need": run_to_skipped_by,
         "skipped_to_run": skipped_to_run,
         "variant": variant.into_iter().map(|((from, to), n)| json!({"from": from, "to": to, "sessions": n})).collect::<Vec<_>>(),
-        "knobs": knobs.into_iter().map(|(k, m)| (k, json!(m.into_iter().map(|((from, to), n)| json!({"from": from, "to": to, "sessions": n})).collect::<Vec<_>>()))).collect::<Map<_, _>>(),
+        "knobs": knobs.into_iter().map(|(k, m)| (k, json!(m.into_iter().map(|((from, to), n)| json!({"from": json_of(from), "to": json_of(to), "sessions": n})).collect::<Vec<_>>()))).collect::<Map<_, _>>(),
     })
 }
 
@@ -204,7 +226,8 @@ fn stale(
     pack: &PipelinePack,
 ) -> Result<Value, String> {
     let run_ids = runs_of(store, name)?;
-    let records = rows::unit_records(store, &run_ids).map_err(|e| e.to_string())?;
+    // only the units that made a result, in runs that ended, with a pack record
+    let records = rows::kept_unit_records(store, name).map_err(|e| e.to_string())?;
     let (mut kept, mut by_knobs, mut by_needs, mut unreplayable, mut unjudged, mut skipped) =
         (0, 0, 0, 0, 0, 0);
     let mut stale_runs: BTreeSet<i64> = BTreeSet::new();
@@ -276,12 +299,25 @@ pub(crate) fn replay_folder(
 ) -> Result<Value, String> {
     let host = pipeline_pack::host_facts(registry);
     let store = registry.store();
-    read_only(store)?;
+    begin_read_only(store)?;
+    let done = replay_in(store, d, pack, against, ask, &host);
+    end_read_only(store);
+    done
+}
+
+fn replay_in(
+    store: &mut Store,
+    d: &Descriptor,
+    pack: &PipelinePack,
+    against: Option<&Pipeline>,
+    ask: &PersonAsk,
+    host: &pipeline_pack::HostFacts,
+) -> Result<Value, String> {
     let all = sessions(store)?;
     let (units, without): (Vec<UnitOf>, Vec<UnitOf>) = all
         .into_iter()
         .partition(|u| d.roles.iter().all(|r| u.by_role.contains_key(r)));
-    let facts = pipeline_pack::facts_for(store, &units, &host);
+    let facts = pipeline_pack::facts_for(store, &units, host);
     let person = ask.person(pack, &crate::actor(), &[])?;
     let resolved = d.resolve(&[])?;
     let now: Vec<Judgement> = facts
@@ -292,13 +328,13 @@ pub(crate) fn replay_folder(
     let mut changes_doc = Value::Null;
     let mut against_doc = Value::Null;
     if let Some(p) = against {
+        if let Some(e) = pipeline_pack::pack_error(p) {
+            return Err(e);
+        }
         against_doc = json!({
             "pipeline": p.label(), "pipeline_id": p.id, "pack_digest": p.pack_digest,
             "same_pack": p.pack_digest.as_deref() == Some(pack.digest().as_str()),
         });
-        if let Some(e) = pipeline_pack::pack_error(p) {
-            return Err(e);
-        }
         let old_d = descriptor::from_value(p.descriptor.clone())?;
         let old_resolved = old_d.resolve(&[])?;
         let before: Vec<Judgement> = match pipeline_pack::pack_of(p) {
@@ -362,6 +398,11 @@ pub(crate) fn replay_folder(
         "sessions": units.len() + without.len(),
         "with_inputs": units.len(),
         "without_inputs": without.len(),
+        "population": if units.len() + without.len() == 0 {
+            json!({"sessions": 0, "note": "no main-scan picks are saved; nothing was judged"})
+        } else {
+            json!({"sessions": units.len() + without.len()})
+        },
         "person": ask.doc(),
         "now": counts(&now),
         "before": before_doc,
@@ -383,12 +424,16 @@ pub(crate) fn words(doc: &Value) -> String {
         n(&doc["with_inputs"]),
         n(&doc["without_inputs"])
     ));
+    if let Some(note) = doc["population"]["note"].as_str() {
+        out.push(format!("note: {note}"));
+    }
     let now = &doc["now"];
     out.push(format!(
-        "now: {} run ({} routed to a variant), {} skipped ({} cannot tell), {} with caveats",
+        "now: {} run ({} routed to a variant), {} skipped ({} of them routed to a variant, {} cannot tell), {} with caveats",
         n(&now["run"]),
         n(&now["routed"]),
         n(&now["skipped"]),
+        n(&now["skipped_routed"]),
         n(&now["cannot_tell"]),
         n(&now["with_caveats"])
     ));
@@ -432,8 +477,8 @@ pub(crate) fn words(doc: &Value) -> String {
             out.push(format!(
                 "  variant {}: {} to {}",
                 n(&v["sessions"]),
-                v["from"].as_str().unwrap_or_default(),
-                v["to"].as_str().unwrap_or_default()
+                shown(&v["from"]),
+                shown(&v["to"])
             ));
         }
         for (k, list) in ch["knobs"].as_object().into_iter().flatten() {
@@ -441,8 +486,8 @@ pub(crate) fn words(doc: &Value) -> String {
                 out.push(format!(
                     "  knob {k} {}: {} to {}",
                     n(&c["sessions"]),
-                    c["from"].as_str().unwrap_or_default(),
-                    c["to"].as_str().unwrap_or_default()
+                    shown(&c["from"]),
+                    shown(&c["to"])
                 ));
             }
         }
@@ -460,4 +505,164 @@ pub(crate) fn words(doc: &Value) -> String {
         n(&kept["unjudged"])
     ));
     out.join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nils_registry::home::{Home, InitOptions};
+    use nils_registry::{Backend, Scheme};
+
+    /// Item 1 of the review: a replay on Postgres reads inside a read-only
+    /// transaction that ends with it, so the connection (the server keeps one
+    /// per handler thread) still writes afterwards, on every path.
+    #[test]
+    fn a_replay_leaves_the_postgres_connection_writable() {
+        let Some(dsn) = std::env::var("NILS_TEST_POSTGRES_DSN")
+            .ok()
+            .filter(|d| !d.is_empty())
+        else {
+            eprintln!("NILS_TEST_POSTGRES_DSN is not set; the Postgres half is skipped");
+            return;
+        };
+        const SCHEMA: &str = "nils_replay_read_only";
+        let mut admin = Store::connect_postgres(&dsn, SCHEMA).expect("connect");
+        admin
+            .batch(&format!(
+                "DROP SCHEMA IF EXISTS {SCHEMA} CASCADE; DROP SCHEMA IF EXISTS {SCHEMA}_linkage CASCADE"
+            ))
+            .unwrap();
+        let dir = nils_dicom::synth::TempDir::new("replay-read-only");
+        let home = Home::new(dir.path());
+        home.keys(None).add("k", b"replay-read-only-key").unwrap();
+        let mut registry = home
+            .init(&InitOptions {
+                backend: Backend::Postgres,
+                dsn: Some(dsn.clone()),
+                schema: Some(SCHEMA.to_string()),
+                scheme: Scheme::Blake2b32,
+                key: "k".to_string(),
+                display_length: 12,
+                session_scheme: None,
+            })
+            .unwrap();
+        let folder =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../pipelines/synthstrip");
+        let d = descriptor::parse(
+            &std::fs::read_to_string(folder.join(nils_pipeline::pack::DESCRIPTOR_FILE)).unwrap(),
+        )
+        .unwrap();
+        let pack = pipeline_pack::load(
+            registry.store(),
+            &d,
+            &std::fs::read_to_string(folder.join(nils_pipeline::pack::FILE)).unwrap(),
+        )
+        .unwrap();
+        let ask = PersonAsk::default();
+        let write = |registry: &mut Registry, n: i64| {
+            let store = registry.store();
+            store
+                .batch(&format!(
+                    "CREATE TABLE IF NOT EXISTS {SCHEMA}.replay_probe (n bigint)"
+                ))
+                .unwrap();
+            store
+                .execute(
+                    &format!("INSERT INTO {SCHEMA}.replay_probe (n) VALUES ({n})"),
+                    &[],
+                )
+                .unwrap();
+        };
+        // the answer path, then the path of an error: a replay against a
+        // version whose pack cannot be read ends before it judges
+        let doc = replay_folder(&mut registry, &d, &pack, None, &ask).unwrap();
+        assert_eq!(doc["read_only"], true);
+        write(&mut registry, 1);
+        // a replay that fails halfway still ends its transaction
+        let store = registry.store();
+        begin_read_only(store).unwrap();
+        assert!(
+            store
+                .execute(
+                    &format!("INSERT INTO {SCHEMA}.replay_probe (n) VALUES (9)"),
+                    &[]
+                )
+                .is_err(),
+            "the replay's transaction refuses writes"
+        );
+        end_read_only(store);
+        write(&mut registry, 2);
+        let rows = registry
+            .store()
+            .query(
+                &format!("SELECT n FROM {SCHEMA}.replay_probe ORDER BY n"),
+                &[],
+            )
+            .unwrap();
+        assert_eq!(
+            rows.iter()
+                .filter_map(|r| r.int(0).ok())
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        admin
+            .batch(&format!(
+                "DROP SCHEMA IF EXISTS {SCHEMA} CASCADE; DROP SCHEMA IF EXISTS {SCHEMA}_linkage CASCADE"
+            ))
+            .ok();
+    }
+
+    /// Item 7 of the review: no saved pick rules means no sessions, and the
+    /// answer and the words say why.
+    #[test]
+    fn a_registry_with_no_saved_picks_says_why_nothing_was_judged() {
+        let dir = nils_dicom::synth::TempDir::new("replay-no-picks");
+        let home = Home::new(dir.path());
+        home.keys(None).add("k", b"replay-no-picks-key").unwrap();
+        let mut registry = home
+            .init(&InitOptions {
+                backend: Backend::Sqlite,
+                dsn: None,
+                schema: None,
+                scheme: Scheme::Blake2b32,
+                key: "k".to_string(),
+                display_length: 12,
+                session_scheme: None,
+            })
+            .unwrap();
+        let folder =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../pipelines/synthstrip");
+        let d = descriptor::parse(
+            &std::fs::read_to_string(folder.join(nils_pipeline::pack::DESCRIPTOR_FILE)).unwrap(),
+        )
+        .unwrap();
+        let pack = pipeline_pack::load(
+            registry.store(),
+            &d,
+            &std::fs::read_to_string(folder.join(nils_pipeline::pack::FILE)).unwrap(),
+        )
+        .unwrap();
+        let doc = replay_folder(&mut registry, &d, &pack, None, &PersonAsk::default()).unwrap();
+        assert_eq!(doc["population"]["sessions"], 0, "{doc}");
+        assert_eq!(
+            doc["population"]["note"],
+            "no main-scan picks are saved; nothing was judged"
+        );
+        assert!(
+            words(&doc).contains("note: no main-scan picks are saved; nothing was judged"),
+            "{}",
+            words(&doc)
+        );
+    }
+
+    #[test]
+    fn values_are_shown_bare_and_none_is_not_a_value() {
+        assert_eq!(shown(&json!("clinical")), "clinical");
+        assert_eq!(shown(&json!(true)), "true");
+        assert_eq!(shown(&json!(1.5)), "1.5");
+        assert_eq!(shown(&Value::Null), "(none)");
+        assert_eq!(shown(&json!("(none)")), "(none)");
+        assert_eq!(json_of(None), Value::Null);
+        assert_eq!(json_of(Some("\"a\"".into())), json!("a"));
+    }
 }

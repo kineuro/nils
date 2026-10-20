@@ -34,9 +34,9 @@ needs:
       - when: "post_contrast != 'given'"
         words: "the T1 is labelled post-contrast: no validation covers an enhanced T1; its metrics are read in their own stratum"
         source: "no published evidence (record 57, research 03)"
-      - when: "defaced == false"
-        words: "the T1 is defaced: efc is the one metric defacing moves, so it is not compared with undefaced scans"
-        source: "Provins et al., PLoS Biology 2025 (record 57, research 03)"
+      # not a need yet: whether the T1 is defaced (efc is the one metric defacing
+      # moves) has no source in the registry, so a need on defaced would put a
+      # cannot-tell caveat on every unit; it waits for a provider
 knobs:
   processes:
     what: "the processes and threads MRIQC uses; whether the thread count moves the registration-based metrics is untested"

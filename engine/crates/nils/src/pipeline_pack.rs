@@ -138,6 +138,7 @@ struct StackRow {
     base: Option<String>,
     body_part: Option<String>,
     post_contrast: Option<String>,
+    disposition: Option<String>,
 }
 
 fn stack_rows(store: &mut Store, stacks: &[i64]) -> BTreeMap<i64, StackRow> {
@@ -171,7 +172,7 @@ fn stack_rows(store: &mut Store, stacks: &[i64]) -> BTreeMap<i64, StackRow> {
     }
     let sql = format!(
         "SELECT stack_id, axis, value FROM {} WHERE stack_id IN ({ids}) \
-         AND axis IN ('base', 'body_part', 'post_contrast') AND value IS NOT NULL",
+         AND axis IN ('base', 'body_part', 'post_contrast', 'disposition') AND value IS NOT NULL",
         store.qualified("classification_axis")
     );
     for r in store.query(&sql, &[]).unwrap_or_default() {
@@ -183,6 +184,7 @@ fn stack_rows(store: &mut Store, stacks: &[i64]) -> BTreeMap<i64, StackRow> {
             "base" => row.base = Some(value.to_string()),
             "body_part" => row.body_part = Some(value.to_string()),
             "post_contrast" => row.post_contrast = Some(value.to_string()),
+            "disposition" => row.disposition = Some(value.to_string()),
             _ => {}
         }
     }
@@ -234,9 +236,18 @@ fn stack_facts(f: &mut Facts, role: &str, row: Option<&StackRow>) {
             }),
     );
     set(f, "body_part", Val::text(r.body_part.as_deref()));
-    // the registry records neither (spec section 5.4): unknown until a
-    // derivative or a step says
-    set(f, "skull_stripped", Val::Unknown);
+    // a raw series (disposition acquisition) is never skull-stripped; of a
+    // derivative the registry cannot tell (spec section 5.4)
+    set(
+        f,
+        "skull_stripped",
+        if r.disposition.as_deref() == Some("acquisition") {
+            Val::Bool(false)
+        } else {
+            Val::Unknown
+        },
+    );
+    // the registry records no defacing: unknown until a step says
     set(f, "defaced", Val::Unknown);
 }
 
@@ -465,7 +476,13 @@ pub(crate) fn judged_doc(names: &[String], judged: &[Judgement]) -> Value {
         .collect();
     let count = |s: Status| judged.iter().filter(|j| j.status == s).count();
     let mut by_words: BTreeMap<String, usize> = BTreeMap::new();
-    for j in judged.iter().filter(|j| j.status == Status::Skipped) {
+    // a unit the registry cannot tell about is skipped, and counted once, in
+    // cannot_tell; the need lines are the units a need refused outright
+    let told_not = |j: &&Judgement| j.status == Status::Skipped && j.cannot_tell.is_some();
+    for j in judged
+        .iter()
+        .filter(|j| j.status == Status::Skipped && j.cannot_tell.is_none())
+    {
         *by_words
             .entry(j.words.clone().unwrap_or_default())
             .or_default() += 1;
@@ -480,7 +497,7 @@ pub(crate) fn judged_doc(names: &[String], judged: &[Judgement]) -> Value {
         "ready": count(Status::Ready),
         "skipped": count(Status::Skipped),
         "routed": count(Status::Routed),
-        "cannot_tell": judged.iter().filter(|j| j.cannot_tell.is_some()).count(),
+        "cannot_tell": judged.iter().filter(told_not).count(),
         "with_caveats": judged.iter().filter(|j| !j.caveats.is_empty()).count(),
         "skipped_by_why": skipped_by_why,
     })
@@ -1198,6 +1215,26 @@ mod tests {
     use nils_pipeline::pack::rules::Status;
 
     #[test]
+    fn a_raw_series_is_never_skull_stripped_and_a_derivative_is_not_told() {
+        let mut f = Facts::default();
+        let acquisition = StackRow {
+            disposition: Some("acquisition".into()),
+            ..StackRow::default()
+        };
+        stack_facts(&mut f, "t1w", Some(&acquisition));
+        assert_eq!(f.get("t1w.skull_stripped"), Val::Bool(false));
+        let derived = StackRow {
+            disposition: Some("scanner_derived".into()),
+            ..StackRow::default()
+        };
+        stack_facts(&mut f, "flair", Some(&derived));
+        assert_eq!(f.get("flair.skull_stripped"), Val::Unknown);
+        stack_facts(&mut f, "t2w", None);
+        assert_eq!(f.get("t2w.skull_stripped"), Val::Unknown);
+        assert_eq!(f.get("t1w.defaced"), Val::Unknown);
+    }
+
+    #[test]
     fn a_person_s_ask_reads_from_a_body_and_from_flags() {
         let a = PersonAsk::of_body(
             &json!({"goal": "fast", "switches": {"lesions": "off"}, "let_run": true}),
@@ -1749,10 +1786,8 @@ checks:
             set(&mut f, "vendor", Val::Text("siemens".into()));
             set(&mut f, "body_part", Val::Text("brain".into()));
             set(&mut f, "skull_stripped", Val::Bool(false));
-            set(&mut f, "defaced", Val::Bool(false));
         }
         f.set_aligned("flair", "t1w", Val::Bool(true));
-        f.set("age_years", Val::Number(40.0));
         f.set("diagnosis", Val::Text("control".into()));
         f.set("host.cores", Val::Number(8.0));
         f.set("host.memory_gb", Val::Number(64.0));
@@ -1818,6 +1853,45 @@ checks:
         }
     }
 
+    /// Review item 15: a unit the registry cannot tell about is skipped and
+    /// counted once, in cannot_tell; the counts add up to the units.
+    #[test]
+    fn a_cannot_tell_unit_is_counted_once_and_the_counts_add_up() {
+        let mut unknown = good();
+        unknown.set("t1w.skull_stripped", Val::Unknown);
+        let mut flat = good();
+        flat.set("t1w.dimension", Val::Text("2D".into()));
+        let list = vec![
+            judged("mriqc", &good(), &[]),
+            judged("mriqc", &unknown, &[]),
+            judged("mriqc", &flat, &[]),
+        ];
+        let names: Vec<String> = (1..=3).map(|n| format!("stack-{n}")).collect();
+        let doc = judged_doc(&names, &list);
+        let n = |k: &str| doc[k].as_u64().unwrap();
+        assert_eq!(
+            (n("ready"), n("skipped"), n("cannot_tell")),
+            (1, 2, 1),
+            "{doc}"
+        );
+        let by_why: u64 = doc["skipped_by_why"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|w| w["units"].as_u64().unwrap())
+            .sum();
+        assert_eq!(by_why, 1, "{doc}");
+        assert_eq!(
+            n("ready") + n("routed") + by_why + n("cannot_tell"),
+            3,
+            "{doc}"
+        );
+        assert!(
+            !doc["skipped_by_why"].to_string().contains("cannot tell"),
+            "{doc}"
+        );
+    }
+
     #[test]
     fn g2_every_first_pack_runs_the_good_session_without_a_caveat() {
         for name in SHIPPED {
@@ -1845,9 +1919,6 @@ checks:
             f.roles.remove("flair");
         };
         let unaligned = |f: &mut Facts| f.aligned.clear();
-        let no_age = |f: &mut Facts| {
-            f.values.remove("age_years");
-        };
         let ms = |f: &mut Facts| f.set("diagnosis", Val::Text("MS".into()));
         let small_host = |f: &mut Facts| f.set("host.memory_gb", Val::Number(16.0));
 
@@ -1912,7 +1983,6 @@ checks:
             &[],
         );
         assert_eq!(j.knobs["synthsr"].value, true, "{:?}", j.knobs["synthsr"]);
-        check_case(r, &no_age, &[], Caveat("cannot tell: age_years"));
         check_case(r, &ms, &[], Caveat("MS: the white and pial"));
         check_case(r, &small_host, &[], Caveat("less than 32 GB"));
         // its rules at research grade and under the switches
@@ -1941,7 +2011,7 @@ checks:
         }
         assert_eq!(j.knobs["voxel_class"].value, "fine");
 
-        // recon-all-clinical: thick slices, age and the host soft
+        // recon-all-clinical: thick slices and the host soft
         let c = "freesurfer-recon-all-clinical";
         check_case(
             c,
@@ -1949,7 +2019,6 @@ checks:
             &[],
             Caveat("over 3 mm"),
         );
-        check_case(c, &no_age, &[], Caveat("cannot tell: age_years"));
         check_case(c, &small_host, &[], Caveat("less than 32 GB"));
         let j = judged(
             c,
@@ -2035,8 +2104,7 @@ checks:
             true
         );
 
-        // MRIQC: 3D and not skull-stripped hard; voxels, post-contrast and
-        // defaced soft
+        // MRIQC: 3D and not skull-stripped hard; voxels and post-contrast soft
         let m = "mriqc";
         check_case(
             m,
@@ -2067,13 +2135,6 @@ checks:
             &t1("post_contrast", given.clone()),
             &[],
             Caveat("labelled post-contrast"),
-        );
-        check_case(m, &t1("defaced", Val::Bool(true)), &[], Caveat("defaced"));
-        check_case(
-            m,
-            &t1("defaced", Val::Unknown),
-            &[],
-            Caveat("cannot tell: t1w.defaced"),
         );
 
         // N4: 3D hard; the contrast and the slices soft; the shrink and the levels

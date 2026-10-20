@@ -5841,6 +5841,10 @@ pub(crate) fn door(method: &str, segs: &[&str]) -> (Need, Detail) {
         // record 43: the catalog and the runs are the Pipelines page's
         ("GET", ["api", "pipelines" | "pipeline-runs"])
         | ("GET", ["api", "pipelines" | "pipeline-runs", _]) => (Need::One("pipelines:see"), Plain),
+        // record 57 P1 and P10: a catalog version's pack and its replay over
+        // the registry read the Pipelines page's data and write nothing
+        ("GET", ["api", "pipelines", _, "pack" | "replay"]) => (Need::One("pipelines:see"), Plain),
+        ("GET", ["api", "pipeline-runs", _, "numbers"]) => (Need::One("pipelines:see"), Plain),
         // record 49 A3: the pre-flight reads and starts nothing
         ("POST", ["api", "pipelines", _, "preflight"]) => (Need::One("pipelines:see"), Plain),
         // 2026-10-12: what the engine runs beside itself is read on the
@@ -7623,6 +7627,33 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
             "one pipeline",
             "Reading a pipeline",
             "Read a pipeline",
+        ),
+        row(
+            "GET /api/pipelines/{id}/pack",
+            false,
+            false,
+            "free",
+            "one pack",
+            "Reading a pack",
+            "Read a pack",
+        ),
+        row(
+            "GET /api/pipelines/{id}/replay",
+            false,
+            false,
+            "bounded",
+            "the registry's picks",
+            "Replaying a pack",
+            "Replayed a pack",
+        ),
+        row(
+            "GET /api/pipeline-runs/{id}/numbers",
+            false,
+            false,
+            "bounded",
+            "one run",
+            "Reading a run's numbers",
+            "Read a run's numbers",
         ),
         row(
             "GET /api/pipeline-runs",

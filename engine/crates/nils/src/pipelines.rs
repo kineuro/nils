@@ -61,9 +61,13 @@ use crate::serve::{Caller, Reply};
 use crate::{Exit, fail, usage};
 
 /// The doors, as the capabilities list them.
-pub(crate) const DOORS: [&str; 6] = [
+pub(crate) const DOORS: [&str; 9] = [
     "GET /api/pipelines",
     "GET /api/pipelines/{id}",
+    // Wave 7b: the pack as loaded, its replay, a run's numbers per key; the desk gates its features on these being listed
+    "GET /api/pipelines/{id}/pack",
+    "GET /api/pipelines/{id}/replay",
+    "GET /api/pipeline-runs/{id}/numbers",
     "GET /api/pipeline-runs",
     "GET /api/pipeline-runs/{id}",
     "GET /api/pipeline-runs/{id}/log",
@@ -1180,6 +1184,7 @@ pub(crate) fn run_doc(store: &mut Store, r: &Run) -> Value {
                 "pack_status": u.pack["status"], "need": u.pack["need"], "words": u.pack["words"],
                 "variant": u.pack["variant"], "knobs": u.pack["knobs"], "caveats": u.pack["caveats"],
                 "flags": u.pack["flags"], "cohort_checks": u.pack["cohort_checks"],
+                "key_members": u.pack["key_members"],
                 "keys": {"comparability": u.comparability_key, "result": u.result_key},
             }))
             .collect::<Vec<_>>()
@@ -1789,13 +1794,19 @@ pub(crate) fn route(
                         .map_err(err)?
                         .ok_or_else(|| Reply::error(404, format!("no pipeline {reference}")))?,
                 ),
-                // the name's newest version other than this one, where there is one
+                // the name's newest active version before this one, where there
+                // is one (the CLI's default too)
                 None => rows::versions(registry.store(), &p.name)
                     .map_err(err)?
                     .into_iter()
-                    .filter(|o| o.id != p.id && o.version < p.version)
+                    .filter(|o| o.id != p.id && o.version < p.version && o.state == "active")
                     .max_by_key(|o| o.version),
             };
+            if let Some(o) = &against
+                && let Some(e) = crate::pipeline_pack::pack_error(o)
+            {
+                return Err(Reply::error(409, e));
+            }
             let ask = crate::pipeline_pack::PersonAsk::of_body(&json!({
                 "goal": query.get("goal"),
                 "switches": query.iter().filter_map(|(k, v)| k.strip_prefix("switch.").map(|s| (s.to_string(), json!(v)))).collect::<serde_json::Map<_, _>>(),
@@ -11031,6 +11042,63 @@ fn found_for(outputs: &[descriptor::Output], out: &Path, u: &Unit) -> Vec<String
 
 #[cfg(test)]
 mod tests {
+    /// Wave 7b review: every `api/pipelines` and `api/pipeline-runs` route
+    /// this file serves is in the doors list, which the desk reads to
+    /// decide what to show.
+    #[test]
+    fn every_route_of_the_pipelines_table_is_in_the_doors_list() {
+        let doors = crate::serve::doors_list();
+        let mut missing = Vec::new();
+        let mut seen = 0;
+        for line in include_str!("pipelines.rs").lines() {
+            let t = line.trim_start();
+            let (method, rest) = if let Some(r) = t.strip_prefix("(\"") {
+                let Some((m, r)) = r.split_once("\", [") else {
+                    continue;
+                };
+                (m.to_string(), format!("[{r}"))
+            } else if t.starts_with("[\"api\", \"pipeline") {
+                ("GET".to_string(), t.to_string())
+            } else {
+                continue;
+            };
+            let Some(body) = rest
+                .strip_prefix("[\"api\", \"pipeline")
+                .map(|_| &rest[1..])
+                .and_then(|r| r.split_once(']'))
+                .map(|(b, _)| b)
+            else {
+                continue;
+            };
+            if !matches!(method.as_str(), "GET" | "POST" | "PUT" | "DELETE") {
+                continue;
+            }
+            let segs: Vec<&str> = body.split(',').map(str::trim).collect();
+            let shape: Vec<Option<&str>> = segs
+                .iter()
+                .map(|s| s.strip_prefix('"').map(|w| w.trim_end_matches('"')))
+                .collect();
+            seen += 1;
+            let found = doors.iter().any(|d| {
+                let Some((m, p)) = d.split_once(' ') else {
+                    return false;
+                };
+                let ds: Vec<&str> = p.trim_start_matches('/').split('/').collect();
+                m == method
+                    && ds.len() == shape.len()
+                    && ds.iter().zip(&shape).all(|(d, w)| match w {
+                        Some(w) => d == w || (d.starts_with('{') && d.ends_with('}')),
+                        None => d.starts_with('{') && d.ends_with('}'),
+                    })
+            });
+            if !found {
+                missing.push(format!("{method} {body}"));
+            }
+        }
+        assert!(seen >= 15, "the routes were not read ({seen})");
+        assert!(missing.is_empty(), "served and not listed: {missing:?}");
+    }
+
     use super::*;
 
     /// The trust check hashes a model's file once for all the parts of a

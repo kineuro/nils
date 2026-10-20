@@ -18,9 +18,9 @@ needs:
       - when: "slice_thickness_mm <= 3"
         words: "the T1's slices are over 3 mm: the parcellation holds at nearly any resolution, but cortical thickness degrades quickly with slice spacing"
         source: "Gopinath et al., Medical Image Analysis 2025 (record 57, research 01)"
-      - when: "age_years >= 18"
-        words: "recon-all-clinical's models are trained on adults"
-        source: "recon-all-clinical wiki (record 57, research 01)"
+      # not a need yet: age at scan (adults only) waits for a provider; the registry
+      # gives no age until the clinical import carries one, so a need on age_years
+      # would put a cannot-tell caveat on every unit
   host:
     soft:
       - when: "host.memory_gb >= 32"

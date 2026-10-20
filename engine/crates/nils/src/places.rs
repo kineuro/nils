@@ -517,6 +517,35 @@ pub(crate) fn may_enter(path: &Path) -> bool {
     std::fs::read_dir(path).is_ok()
 }
 
+/// Whether the engine can write into `path`, or into the nearest folder
+/// above it that exists where `path` is not made yet. Nothing is written.
+#[cfg(unix)]
+#[allow(
+    unsafe_code,
+    reason = "access reads the NUL-terminated path it is given and nothing else"
+)]
+pub(crate) fn may_write(path: &Path) -> bool {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    let mut at = path;
+    while !at.exists() {
+        match at.parent() {
+            Some(p) if !p.as_os_str().is_empty() => at = p,
+            _ => return false,
+        }
+    }
+    let Ok(c) = CString::new(at.as_os_str().as_bytes()) else {
+        return false;
+    };
+    // SAFETY: `c` is a valid NUL-terminated path that lives for the whole call.
+    unsafe { libc::access(c.as_ptr(), libc::W_OK | libc::X_OK) == 0 }
+}
+
+#[cfg(not(unix))]
+pub(crate) fn may_write(path: &Path) -> bool {
+    std::fs::metadata(path).is_ok_and(|m| !m.permissions().readonly())
+}
+
 /// The paths a running engine has bound, for the listing: which of the
 /// deployment's configured paths sit under each place.
 pub fn bound_paths(place: &Place, configured: &[(&str, &Path)]) -> Vec<Value> {

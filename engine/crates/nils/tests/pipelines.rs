@@ -12127,7 +12127,8 @@ fn the_starters_that_fix_their_older_versions_replace_them_and_n4_leaves_its_own
     };
     assert!(why("samseg-lesions@1").contains("pallidum"), "{listed}");
     assert!(why("segcsvd@1").contains("SynthSeg"), "{listed}");
-    assert_eq!(standing("n4-bias-correction@1"), "selectable");
+    // N4 replaces its earlier version since the mask input and the levels knob (record 57 P11)
+    assert_eq!(standing("n4-bias-correction@1"), "replaced");
     assert_eq!(standing("n4-bias-correction@2"), "current");
     assert_eq!(standing("synthstrip@1"), "current");
     let (good, _, err) = lab.run(
@@ -13274,6 +13275,11 @@ fn g3_g4_g5_a_run_records_who_chose_its_flags_and_its_keys_and_no_door_pools_acr
                 && u["keys"]["result"].as_str().unwrap().starts_with("sha256:"),
             "{u}"
         );
+        // the names and values that made the key are named beside it
+        assert!(
+            u["key_members"].is_object() && !u["key_members"].as_object().unwrap().is_empty(),
+            "{u}"
+        );
         keys.insert(key);
     }
     assert_eq!(
@@ -13792,9 +13798,36 @@ fn g2_g14_the_shipped_packs_skip_in_their_words_run_nothing_and_replay_read_only
     assert_eq!(doc["now"]["skipped"], 2, "{doc}");
     assert_eq!(doc["now"]["routed_to"]["clinical"], 2, "{doc}");
     assert_eq!(doc["now"]["skipped_by_need"][0]["sessions"], 2, "{doc}");
-    // G2 at the run: MRIQC's hard need on a fact the registry cannot tell
-    // (skull_stripped) skips every unit with "cannot tell", and 0 run. The
-    // lab's machine is small, so the pair runs as version 2 with the
+    // review item 5: a skipped session that names a variant is counted
+    // apart; routed is a subset of run
+    assert_eq!(doc["now"]["routed"], 0, "{doc}");
+    assert_eq!(doc["now"]["skipped_routed"], 2, "{doc}");
+    let (good, text, err) = lab.run(
+        &[
+            "pipeline",
+            "replay",
+            folder("freesurfer-recon-all").to_str().unwrap(),
+        ],
+        None,
+    );
+    assert!(good, "{err}");
+    assert!(
+        text.contains("0 run (0 routed to a variant), 2 skipped (2 of them routed to a variant"),
+        "{text}"
+    );
+    // review item 10: a raw series is never skull-stripped, so MRIQC's units
+    // are judged to run (the lab's stacks are acquisitions); the replay and
+    // the pre-flight agree, and nothing is "cannot tell"
+    let doc = lab.json(&[
+        "pipeline",
+        "replay",
+        folder("mriqc").to_str().unwrap(),
+        "--json",
+    ]);
+    assert_eq!(doc["now"]["run"], 2, "{doc}");
+    assert_eq!(doc["now"]["cannot_tell"], 0, "{doc}");
+    assert_eq!(doc["now"]["skipped"], 0, "{doc}");
+    // the lab's machine is small, so the pair runs as version 2 with the
     // descriptor's memory lowered and the pack pinned to that descriptor
     let descriptor = std::fs::read_to_string(folder("mriqc").join("nils.job.yml")).unwrap();
     let pack = std::fs::read_to_string(folder("mriqc").join("nils-pack.yaml")).unwrap();
@@ -13814,82 +13847,91 @@ fn g2_g14_the_shipped_packs_skip_in_their_words_run_nothing_and_replay_read_only
         &pack.replace(&pinned, &format!("  descriptor_sha256: \"{small_digest}\"")),
     );
     assert_eq!(v2["version"], 2, "{v2}");
-    let run = lab.json(&["run", "mriqc", "--select", "selection:every@1", "--json"]);
-    assert_eq!(run["status"], "done", "{run}");
-    assert_eq!(run["summary"]["units"]["skipped"], 2, "{run}");
-    assert_eq!(run["summary"]["units"]["succeeded"], 0, "{run}");
-    for u in run["units_run"].as_array().unwrap() {
-        assert_eq!(u["status"], "skipped", "{u}");
-        assert_eq!(u["words"], "cannot tell: t1w.skull_stripped", "{u}");
-    }
-    assert!(lab.podman_runs().is_empty(), "no container ran");
-    let doc = lab.json(&[
-        "pipeline",
-        "replay",
-        folder("mriqc").to_str().unwrap(),
+    let pf = lab.json(&[
+        "run",
+        "mriqc",
+        "--select",
+        "selection:every@1",
+        "--preflight",
         "--json",
     ]);
-    assert_eq!(doc["now"]["cannot_tell"], 2, "{doc}");
-    assert_eq!(
-        doc["kept"]["skipped"], 2,
-        "the run's skipped units made nothing: {doc}"
-    );
-    assert_eq!(doc["kept"]["stale"], 0, "{doc}");
+    let judged = &pf["units_judged"];
+    assert_eq!(judged["skipped"], 0, "{pf}");
+    assert_eq!(judged["units"].as_array().unwrap().len(), 2, "{pf}");
+    for u in judged["units"].as_array().unwrap() {
+        assert_ne!(u["status"], "skipped", "{u}");
+    }
 
-    // a pack change: MRIQC without the skull-stripped need is version 3; the
-    // folder's pack replayed against it moves 2 sessions from run to skipped,
-    // and names the need
+    // a pack change: recon-all's pack with the voxel need relaxed is version
+    // 2; the folder's pack replayed against it moves 2 sessions from run to
+    // skipped, and names the need
+    let descriptor =
+        std::fs::read_to_string(folder("freesurfer-recon-all").join("nils.job.yml")).unwrap();
+    let pack =
+        std::fs::read_to_string(folder("freesurfer-recon-all").join("nils-pack.yaml")).unwrap();
     let relaxed = pack.replace(
-        "when: \"skull_stripped == false\"",
-        "when: \"dimension == '3D'\"",
+        "when: \"voxel_max_mm <= 1.5\"",
+        "when: \"voxel_max_mm <= 20\"",
     );
     assert_ne!(relaxed, pack);
-    let v3 = lab.add_pair("mriqc-relaxed", &descriptor, &relaxed);
-    assert_eq!(v3["version"], 3, "{v3}");
+    let r2 = lab.add_pair("recon-all-relaxed", &descriptor, &relaxed);
+    assert_eq!(r2["version"], 2, "{r2}");
     let doc = lab.json(&[
         "pipeline",
         "replay",
-        folder("mriqc").to_str().unwrap(),
+        folder("freesurfer-recon-all").to_str().unwrap(),
         "--against",
-        "mriqc@3",
+        "freesurfer-recon-all@2",
         "--json",
     ]);
     assert_eq!(doc["against"]["same_pack"], false, "{doc}");
     assert_eq!(doc["before"]["run"], 2, "{doc}");
     assert_eq!(doc["changes"]["run_to_skipped"], 2, "{doc}");
-    assert_eq!(
-        doc["changes"]["run_to_skipped_by_need"][0]["words"], "cannot tell: t1w.skull_stripped",
+    assert!(
+        doc["changes"]["run_to_skipped_by_need"][0]["words"]
+            .as_str()
+            .unwrap()
+            .contains("over 1.5 mm"),
         "{doc}"
     );
-    // the door: version 3 against version 1 moves them from skipped to run;
-    // with no version named it is read against the newest earlier one
+    // the door: version 2 against version 1 moves them from skipped to run;
+    // with no version named it is read against the newest active earlier one
     let server = Server::start(&lab);
     let (status, doc) = server.call(
         "GET",
         &format!(
             "/api/pipelines/{}/replay?against={}",
-            v3["id"], ids["mriqc"]
+            r2["id"], ids["freesurfer-recon-all"]
         ),
         None,
         OPERATOR,
     );
     assert_eq!(status, 200, "{doc}");
-    assert_eq!(doc["pipeline_id"], v3["id"], "{doc}");
+    assert_eq!(doc["pipeline_id"], r2["id"], "{doc}");
     assert_eq!(doc["changes"]["skipped_to_run"], 2, "{doc}");
     assert_eq!(doc["read_only"], true, "{doc}");
     let (status, again) = server.call(
         "GET",
-        &format!("/api/pipelines/{}/replay", v3["id"]),
+        &format!("/api/pipelines/{}/replay", r2["id"]),
         None,
         OPERATOR,
     );
     assert_eq!(status, 200, "{again}");
-    assert_eq!(again["against"]["pipeline_id"], v2["id"], "{again}");
+    assert_eq!(
+        again["against"]["pipeline_id"], ids["freesurfer-recon-all"],
+        "{again}"
+    );
     let (status, _) = server.call(
         "GET",
-        &format!("/api/pipelines/{}/replay?against=999", v3["id"]),
+        &format!("/api/pipelines/{}/replay?against=999", r2["id"]),
         None,
         OPERATOR,
     );
     assert_eq!(status, 404);
+    // item 7: nothing saved to pick from says why, in the answer and the words
+    assert_eq!(
+        doc["population"],
+        json!({"sessions": 2}),
+        "the lab saved its picks: {doc}"
+    );
 }

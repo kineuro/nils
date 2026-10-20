@@ -5135,6 +5135,24 @@ fn every_door_needs_its_grant_and_a_refusal_names_it() {
             "reader",
             "pipelines:see",
         ),
+        // Wave 7b review: a pack and its replay over the whole registry are
+        // read on the Pipelines page's grant, not by any signed-in holder
+        (
+            "GET",
+            "/api/pipelines/1/replay",
+            "",
+            "pipelines-see",
+            "reader",
+            "pipelines:see",
+        ),
+        (
+            "GET",
+            "/api/pipelines/1/pack",
+            "",
+            "pipelines-see",
+            "reader",
+            "pipelines:see",
+        ),
         (
             "POST",
             "/api/sessions/rebuild",

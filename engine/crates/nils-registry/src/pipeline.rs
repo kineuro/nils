@@ -909,6 +909,41 @@ pub fn unit_records(store: &mut Store, run_ids: &[i64]) -> Result<Vec<UnitRecord
         .collect()
 }
 
+/// The kept results of a pipeline name: the pack record of every unit that
+/// made a result (it is over and its outcome says succeeded) in a run that
+/// has ended (not running, not interrupted), every version of the name.
+/// Failed, cancelled and in-flight units made nothing to keep. Units with
+/// no pack record are left out.
+pub fn kept_unit_records(store: &mut Store, name: &str) -> Result<Vec<UnitRecord>, Error> {
+    let d = store.dialect();
+    let t = table("pipeline_unit");
+    let pack = d.text_of_qualified(Some("u"), t.column("pack").expect("pack"));
+    let outcome = d.text_of_qualified(Some("u"), t.column("outcome").expect("outcome"));
+    let sql = format!(
+        "SELECT u.run_id, u.unit, u.comparability_key, {pack}, {outcome} FROM {} u \
+         JOIN {} pr ON pr.id = u.run_id JOIN {} pl ON pl.id = pr.pipeline_id \
+         WHERE pl.name = {} AND u.state = 'over' AND u.pack IS NOT NULL \
+         AND pr.status NOT IN ('running', 'interrupted') ORDER BY u.run_id, u.position, u.id",
+        store.qualified("pipeline_unit"),
+        store.qualified("pipeline_run"),
+        store.qualified("pipeline"),
+        d.param(1, Type::Text)
+    );
+    let mut out = Vec::new();
+    for r in store.query(&sql, &[Param::from(name)])? {
+        if json(r.opt_text(4)?)["status"] != "succeeded" {
+            continue;
+        }
+        out.push((
+            r.int(0)?,
+            r.text(1)?.to_string(),
+            r.opt_text(2)?.map(str::to_string),
+            json(r.opt_text(3)?),
+        ));
+    }
+    Ok(out)
+}
+
 /// The units of a run, in their order.
 pub fn units(store: &mut Store, run_id: i64) -> Result<Vec<Unit>, Error> {
     let d = store.dialect();
@@ -1179,6 +1214,95 @@ mod tests {
             unit_keys(&mut store, &[run]).unwrap(),
             vec![(run, "stack-1".to_string(), "sha256:ck".to_string())]
         );
+    }
+
+    #[test]
+    fn kept_results_are_the_succeeded_units_of_ended_runs_with_a_pack() {
+        let mut store = store();
+        let d = serde_json::json!({"name": "n4"});
+        let (p, _) = add(&mut store, &new(&d, "sha256:1")).unwrap();
+        let params = serde_json::json!({});
+        let start_run = |store: &mut Store| {
+            start(
+                store,
+                &NewRun {
+                    pipeline_id: p.id,
+                    job_id: None,
+                    handle_id: None,
+                    selection: None,
+                    params: &params,
+                    runtime: "podman",
+                    runtime_version: "5",
+                    host: "h",
+                    device: "cpu",
+                    model_ids: &[],
+                    label_set_id: None,
+                    place_id: None,
+                    scratch_place_id: None,
+                    principal: "ops@lab",
+                    actor: None,
+                    started_at: "2026-10-18T10:00:00Z",
+                },
+            )
+            .unwrap()
+        };
+        let ended = start_run(&mut store);
+        let running = start_run(&mut store);
+        let units_of = ["stack-1", "stack-2", "stack-3", "stack-4", "stack-5"]
+            .map(String::from)
+            .to_vec();
+        let a = ensure_units(&mut store, ended, &units_of).unwrap();
+        let b = ensure_units(&mut store, running, &units_of[..1]).unwrap();
+        let decided = serde_json::json!({"status": "ready", "knobs": {}});
+        for u in a.iter().chain(&b) {
+            set_unit_pack(&mut store, u.id, &decided, Some("sha256:ck"), None).unwrap();
+        }
+        // stack-1 succeeded, stack-2 failed, stack-3 skipped (no result),
+        // stack-4 never finished, stack-5 succeeded without a pack record
+        let over = |store: &mut Store, id: i64, status: &str| {
+            unit_over(
+                store,
+                id,
+                Some(0),
+                &serde_json::json!({"status": status}),
+                "2026-10-18T10:01:00Z",
+            )
+            .unwrap()
+        };
+        over(&mut store, a[0].id, "succeeded");
+        over(&mut store, a[1].id, "failed");
+        over(&mut store, a[2].id, "skipped");
+        over(&mut store, b[0].id, "succeeded");
+        store
+            .execute(
+                &format!(
+                    "UPDATE {} SET pack = NULL WHERE id = {}",
+                    store.qualified("pipeline_unit"),
+                    a[4].id
+                ),
+                &[],
+            )
+            .unwrap();
+        over(&mut store, a[4].id, "succeeded");
+        store
+            .execute(
+                &format!(
+                    "UPDATE {} SET status = 'done' WHERE id = {ended}",
+                    store.qualified("pipeline_run")
+                ),
+                &[],
+            )
+            .unwrap();
+        let kept = kept_unit_records(&mut store, "n4").unwrap();
+        assert_eq!(
+            kept.iter()
+                .map(|(r, u, _, _)| (*r, u.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(ended, "stack-1")],
+            "failed, skipped, unfinished, pack-less and running-run units keep nothing"
+        );
+        assert_eq!(kept[0].3, decided);
+        assert!(kept_unit_records(&mut store, "other").unwrap().is_empty());
     }
 
     #[test]

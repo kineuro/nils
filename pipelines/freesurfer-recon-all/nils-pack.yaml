@@ -39,9 +39,9 @@ needs:
       - when: "post_contrast != 'given'"
         words: "the T1 is labelled post-contrast: grey matter and thickness read 3 to 17 % high and white matter 1.7 % low in FreeSurfer 6 and 7, so SynthSR makes a synthetic T1 first; the label itself is a filled contrast tag in many sessions"
         source: "Eur Radiol 2022 (doi 10.1007/s00330-021-08405-8); Iglesias and Gopinath on the FreeSurfer list (record 57, research 01; step 2)"
-      - when: "age_years >= 18"
-        words: "recon-all and its SynthSeg steps are trained on adults; under 2 years infant_recon_all is the tool"
-        source: "FreeSurfer wiki, recon-all-clinical and infantFS (record 57, research 01)"
+      # not a need yet: age at scan (adults only) waits for a provider; the registry
+      # gives no age until the clinical import carries one, so a need on age_years
+      # would put a cannot-tell caveat on every unit
       - when: "not (diagnosis == 'MS' or diagnosis == 'multiple sclerosis' or diagnosis == 'Multiple sclerosis')"
         words: "MS: the white and pial surfaces can be wrong near lesions, which are labelled WM-hypointensities; lesion filling changed no FreeSurfer volume"
         source: "Eur Radiol 2018 (doi 10.1007/s00330-018-5710-x) (record 57, research 01)"
