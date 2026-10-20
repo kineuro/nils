@@ -416,16 +416,12 @@ pub fn person_may_set(pack: &PipelinePack, given: &BTreeSet<String>) -> Result<(
     Ok(())
 }
 
-/// Replay the rules on the facts a unit recorded (G3): the knobs as the
-/// rules choose them now from `recorded` (a unit's `{knobs, facts}` as
-/// [`Judgement::doc`] wrote it), the person's values read back from the
-/// knobs recorded `person:<user>`. Equal to the recorded values where the
-/// pack has not changed.
-pub fn replay(
-    pack: &PipelinePack,
-    d: &Descriptor,
-    recorded: &Value,
-) -> Result<BTreeMap<String, Value>, String> {
+/// Judge a unit again from what it recorded (`{knobs, facts}` as
+/// [`Judgement::doc`] wrote it): the facts read back, the person's values
+/// read from the knobs recorded `person:<user>`, the goal and the switches
+/// from the facts. The replay of G3 and the archive replay of section 10
+/// both read it; under an unchanged pack it is the recorded judgement.
+pub fn rejudge(pack: &PipelinePack, d: &Descriptor, recorded: &Value) -> Result<Judgement, String> {
     let facts = Facts::from_json(&recorded["facts"]);
     let mut person = Person::default();
     let mut given: Vec<(String, String)> = Vec::new();
@@ -448,7 +444,18 @@ pub fn replay(
         }
     }
     let resolved = d.resolve(&given)?;
-    let j = judge(pack, d, &resolved, &facts, &person);
+    Ok(judge(pack, d, &resolved, &facts, &person))
+}
+
+/// Replay the rules on the facts a unit recorded (G3): the knobs as the
+/// rules choose them now from `recorded`. Equal to the recorded values
+/// where the pack has not changed.
+pub fn replay(
+    pack: &PipelinePack,
+    d: &Descriptor,
+    recorded: &Value,
+) -> Result<BTreeMap<String, Value>, String> {
+    let j = rejudge(pack, d, recorded)?;
     Ok(j.knobs.into_iter().map(|(k, c)| (k, c.value)).collect())
 }
 

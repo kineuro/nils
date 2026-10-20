@@ -1765,6 +1765,48 @@ pub(crate) fn route(
                 .ok_or_else(|| Reply::error(404, format!("no pipeline {id}")))?;
             Ok(Reply::ok(pipeline_doc_of(registry.store(), &p)))
         })(),
+        // record 57 P10 (Wave 7b, section 10): a catalog version's pack
+        // replayed over the registry against another version's, read-only
+        ["api", "pipelines", id, "replay"] => (|| {
+            let id = id_of(id, "pipeline")?;
+            let p = rows::get(registry.store(), id)
+                .map_err(err)?
+                .ok_or_else(|| Reply::error(404, format!("no pipeline {id}")))?;
+            if let Some(e) = crate::pipeline_pack::pack_error(&p) {
+                return Err(Reply::error(409, e));
+            }
+            let Some(pack) = crate::pipeline_pack::pack_of(&p) else {
+                return Err(Reply::error(
+                    409,
+                    format!("{} has no pack to replay", p.label()),
+                ));
+            };
+            let d =
+                descriptor::from_value(p.descriptor.clone()).map_err(|e| Reply::error(500, e))?;
+            let against = match query.get("against") {
+                Some(reference) => Some(
+                    rows::resolve(registry.store(), reference)
+                        .map_err(err)?
+                        .ok_or_else(|| Reply::error(404, format!("no pipeline {reference}")))?,
+                ),
+                // the name's newest version other than this one, where there is one
+                None => rows::versions(registry.store(), &p.name)
+                    .map_err(err)?
+                    .into_iter()
+                    .filter(|o| o.id != p.id && o.version < p.version)
+                    .max_by_key(|o| o.version),
+            };
+            let ask = crate::pipeline_pack::PersonAsk::of_body(&json!({
+                "goal": query.get("goal"),
+                "switches": query.iter().filter_map(|(k, v)| k.strip_prefix("switch.").map(|s| (s.to_string(), json!(v)))).collect::<serde_json::Map<_, _>>(),
+            }))
+            .map_err(|e| Reply::error(400, e))?;
+            let mut doc =
+                crate::pipeline_replay::replay_folder(registry, &d, &pack, against.as_ref(), &ask)
+                    .map_err(|e| Reply::error(500, e))?;
+            doc["pipeline_id"] = json!(p.id);
+            Ok(Reply::ok(doc))
+        })(),
         // record 57 P1 (Wave 7b A1): the pack as loaded, with its digest and
         // the facts it reads
         ["api", "pipelines", id, "pack"] => (|| {
@@ -2179,6 +2221,30 @@ pub(crate) enum PipelineCommand {
     Validate {
         /// The folder, or its nils.job.yml
         dir: PathBuf,
+        /// Machine-readable output
+        #[arg(long)]
+        json: bool,
+    },
+    /// Record 57 P10 (Wave 7b, section 10): replay a pipeline folder's pack
+    /// over this registry, read-only, before it ships: over every session
+    /// the registry's main-scan picks make, how many change from run to
+    /// skipped and why, which variant they are routed to, which knob values
+    /// change and from what to what, against the pack the catalog runs
+    /// today; and which kept results the new pack would make stale
+    Replay {
+        /// The folder, or its nils.job.yml, with the nils-pack.yaml beside it
+        dir: PathBuf,
+        /// The catalog version replayed against: a name (its newest version),
+        /// name@version or an id; the folder's name when not given
+        #[arg(long, value_name = "PIPELINE")]
+        against: Option<String>,
+        /// The goal the sessions are judged under (the pack's default when
+        /// not given)
+        #[arg(long, value_name = "GOAL")]
+        goal: Option<String>,
+        /// A switch of the pack, name=value; may repeat
+        #[arg(long = "switch", value_name = "NAME=VALUE")]
+        switches: Vec<String>,
         /// Machine-readable output
         #[arg(long)]
         json: bool,
@@ -2691,6 +2757,48 @@ pub(crate) fn command(home: &Home, command: PipelineCommand) -> Result<(), Exit>
                     cap["reason"].as_str().unwrap_or("pipelines are off")
                 );
             }
+            Ok(())
+        }
+        PipelineCommand::Replay {
+            dir,
+            against,
+            goal,
+            switches,
+            json,
+        } => {
+            let dir = if dir.is_dir() {
+                dir
+            } else {
+                dir.parent().map(Path::to_path_buf).unwrap_or(dir)
+            };
+            let d_path = dir.join(nils_pipeline::pack::DESCRIPTOR_FILE);
+            let d_text = std::fs::read_to_string(&d_path)
+                .map_err(|e| usage(format!("{}: {e}", d_path.display())))?;
+            let d = descriptor::parse(&d_text)
+                .map_err(|e| usage(format!("{}: {e}", d_path.display())))?;
+            let p_path = dir.join(nils_pipeline::pack::FILE);
+            let p_text = std::fs::read_to_string(&p_path).map_err(|e| {
+                usage(format!(
+                    "{}: {e}; a replay needs the pack beside the descriptor",
+                    p_path.display()
+                ))
+            })?;
+            let pack = crate::pipeline_pack::load(registry.store(), &d, &p_text)
+                .map_err(|e| usage(format!("{}: {e}", p_path.display())))?;
+            let reference = against.clone().unwrap_or_else(|| d.name.clone());
+            let row = rows::resolve(registry.store(), &reference)?;
+            if against.is_some() && row.is_none() {
+                return Err(usage(format!("no pipeline {reference} in the catalog")));
+            }
+            let ask = crate::pipeline_pack::PersonAsk::of_args(goal.as_deref(), &switches, false)
+                .map_err(usage)?;
+            let doc =
+                crate::pipeline_replay::replay_folder(&mut registry, &d, &pack, row.as_ref(), &ask)
+                    .map_err(fail)?;
+            if json {
+                return print(&doc);
+            }
+            println!("{}", crate::pipeline_replay::words(&doc));
             Ok(())
         }
         PipelineCommand::Show { pipeline, json } => {

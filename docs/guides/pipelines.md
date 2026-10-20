@@ -167,6 +167,21 @@ A pack, `nils-pack.yaml` beside `nils.job.yml` (the contract is `contracts/pipel
 
 The pre-flight judges every unit with the pack (`units_judged`): a hard need it lacks skips it in the pack's words, a hard need on a fact the registry cannot tell skips it with `cannot tell: <fact>` (`--let-run` lets it run as your choice, recorded on the unit), a soft need is a caveat that travels with the unit's results, and each knob says `{value, by, rule}` where `by` is `default`, `rule:<id>` or `person:<user>`. A knob the pack marks `set_by: rule` or `fixed` refuses a `--param` of yours. The run records the same per unit, with the facts each rule read, the flags its checks raised (a flag keeps the result and raises a `pipeline:qc` item of status `flag`; a fail fails the unit; a drop drops the one value) and the two keys of its results; `GET /api/pipeline-runs/{id}` returns them per unit and `GET /api/pipelines/{id}/pack` the pack as loaded with the facts it reads. Cohort checks (`cohort: true`) run within a stratum of site, vendor, field strength, sequence and post-contrast state once it holds `min_sessions` (30 by default) and flag a robust z above 3; below that they read `not yet: 12 of 30 sessions`, and a flag that comes after the run closed says when.
 
+### The first packs
+
+Every shipped pipeline carries a pack, written from the pack study's research and the archive's fact counts, so each rule was written knowing how many sessions it touches: `freesurfer-recon-all` (hard: a 3D T1 at 1.5 mm or finer; 1.3 to 1.5 mm flagged and kept apart; SynthSR first for a post-contrast T1; `-hires` under 0.9 mm at research grade; `-3T` and `-bigventricles` as switches; the Euler number against the cohort), `freesurfer-recon-all-clinical` (the variant recon-all routes a 2D or coarser T1 to; SynthSeg's quality scores of the input), `samseg-lesions` (a FLAIR with lesions on; the pallidum separate only with a T2 or FLAIR; the brain-mask Dice at 0.85), `synthseg` (robust unless the fast goal on a 3D T1 near 1 mm; any of its quality scores under 0.65 flags), `synthstrip` (border 1 mm and `--no-csf` in the comparability key; a mask in pieces or at the image's edge flags), `mriqc` (a 3D T1 that is not skull-stripped; `fber` or `qi_1` of -1 fails; `wm2max` outside 0.6 to 0.8 flags; the rest as robust z-scores within the stratum), `n4-bias-correction` (the spline distance fixed at 180 mm; the shrink factor from the slices; a synthstrip mask where one exists; the field positive), `segcsvd` (WMH on a FLAIR up to 5 mm, over 3 mm flagged; PVS on a 3D non-contrast T1 up to 1.2 mm, over 1.0 mm flagged; thresholds 0.35 fixed; not validated for MS) and `lst-ai` (a 3D T1 and a 3D FLAIR; the denormal flush as a switch, off). A fact the registry cannot tell (`age_years`, `skull_stripped`, `defaced`, and `aligned` before a run checked it) reads `cannot tell` on the unit.
+
+### Replay a pack before it ships
+
+Every pack change is replayed over the registry before it ships, as the MRI pack is: read-only, over every session the registry's main-scan picks make, the new pack against the one the catalog runs today.
+
+```sh
+nils pipeline replay pipelines/segcsvd
+nils pipeline replay pipelines/segcsvd --against segcsvd@3 --goal research --json
+```
+
+The answer counts how many sessions run, are skipped (by need, in the pack's words), are routed to a variant or carry a caveat under the new pack; against the catalog's version, how many change from run to skipped and why, from skipped to run, which variant they move to, and which knob values change and from what to what; and, over the units the pipeline's kept runs recorded, how many results the new pack would make stale (a knob its rules now choose differently, or a need the recorded facts now fail). `GET /api/pipelines/{id}/replay?against=<id or name@version>` replays one catalog version against another the same way. Nothing is written.
+
 ## Choose a version
 
 A name keeps every version added under it. A version that fixes the earlier ones says so in its descriptor, and a new run no longer takes them:

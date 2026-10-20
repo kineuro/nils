@@ -2534,6 +2534,19 @@ paths:
       responses:
         "200": {description: "{seeding, starters, added}"}
         "403": {description: No install:work}
+  /api/pipelines/{id}/replay:
+    get:
+      summary: A catalog version's pack replayed over the registry against another version's, read-only (record 57 P10, Wave 7b section 10; nils pipeline replay <folder> replays a folder's pack the same way)
+      description: "pipelines:see. Over every session the registry's main-scan picks make, the version's pack and the version `against` (query, an id or name@version; the name's newest earlier version when not given) judge each session under the same facts, and nothing is written. {pipeline, pipeline_id, pack {digest, version, descriptor_digest}, against {pipeline, pipeline_id, pack_digest, same_pack} or null, sessions, with_inputs, without_inputs, person {goal, switches}, now {run, ready, skipped, routed, cannot_tell, with_caveats, skipped_by_need [{need, words, sessions}], routed_to {variant: sessions}, caveats [{words, sessions}]}, before (the same of the version against), changes {run_to_skipped, run_to_skipped_by_need [{words, sessions}], skipped_to_run, variant [{from, to, sessions}], knobs {knob: [{from, to, sessions}]}}, kept {runs, units, unjudged, stale, stale_by_knobs, stale_by_needs, knobs {knob: units}, unreplayable, runs_touched}, read_only: true}. `goal` and `switch.<name>` in the query set the person's choices."
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: integer}}
+        - {name: against, in: query, required: false, schema: {type: string}}
+        - {name: goal, in: query, required: false, schema: {type: string}}
+      responses:
+        "200": {description: The replay's counts}
+        "403": {description: No pipelines:see}
+        "404": {description: No such pipeline, or no such version against}
+        "409": {description: The version has no pack, or one this engine cannot read}
   /api/pipelines/{id}/pack:
     get:
       summary: A pipeline version's pack as loaded, with its digest and the facts it reads (record 57 P1, Wave 7b A1; nils pipeline validate <dir> checks a folder offline)
