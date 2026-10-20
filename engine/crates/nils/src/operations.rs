@@ -208,42 +208,52 @@ fn hint(
              AND a.value IS NOT NULL AND a.value <> '')"
         )
     };
-    let greatest = |name: &str| {
-        format!(
-            "COALESCE((SELECT MAX(a.value) FROM {axis} a WHERE a.stack_id = x.id AND a.axis = '{name}' \
-             AND a.value IS NOT NULL AND a.value <> ''), '')"
-        )
-    };
     // what its model answered already, staged or put in force since
     let answered = format!(
         "EXISTS (SELECT 1 FROM {member} rm JOIN {item} ri ON ri.id = rm.item_id \
          WHERE rm.stack_id = x.id AND ri.kind IN ({}) AND ri.status IN ('staged', 'accepted'))",
         quoted(groups)
     );
-    let (kind, wanting) = if step == "post_contrast" {
-        let brain = format!(
-            "((NOT {} AND NOT {}) OR {} LIKE '%brain%' OR EXISTS (SELECT 1 FROM {axis} a \
-             WHERE a.stack_id = x.id AND a.axis = 'body_region' AND a.value = 'head'))",
-            has("body_part"),
-            has("body_region"),
-            greatest("body_part"),
+    let (kind, scans) = if step == "post_contrast" {
+        // Wave 7b: one grouped pass over the axes of the stacks whose base
+        // is T1w, rather than eight lookups a stack over every stack in
+        // scope (on 450,000 synthetic stacks under PostgreSQL, 3.7 s against
+        // 20 s, the same count). The test is the one `can_be_t1_brain`
+        // applies: the greatest base T1w and technique neither TOF nor PC;
+        // neither body axis answered, or a body part of the brain, or a
+        // region of the head; and no post-contrast answer.
+        let sql = format!(
+            "SELECT COUNT(*) FROM {stack} x JOIN (\
+               SELECT a.stack_id, \
+                 MAX(CASE WHEN a.axis = 'base' THEN a.value END) AS base, \
+                 MAX(CASE WHEN a.axis = 'technique' THEN a.value END) AS technique, \
+                 MAX(CASE WHEN a.axis = 'body_part' THEN a.value END) AS body_part, \
+                 MAX(CASE WHEN a.axis = 'body_region' THEN 1 ELSE 0 END) AS region, \
+                 MAX(CASE WHEN a.axis = 'body_region' AND a.value = 'head' THEN 1 ELSE 0 END) AS head, \
+                 MAX(CASE WHEN a.axis = 'post_contrast' THEN 1 ELSE 0 END) AS told \
+               FROM {axis} a \
+               WHERE a.axis IN ('base', 'technique', 'body_part', 'body_region', 'post_contrast') \
+                 AND a.value IS NOT NULL AND a.value <> '' \
+                 AND a.stack_id IN (SELECT b.stack_id FROM {axis} b WHERE b.axis = 'base' AND b.value = 'T1w') \
+               GROUP BY a.stack_id\
+             ) t ON t.stack_id = x.id \
+             WHERE {holds} AND t.base = 'T1w' AND COALESCE(t.technique, '') NOT IN ('TOF', 'PC') \
+               AND ((t.body_part IS NULL AND t.region = 0) OR t.body_part LIKE '%brain%' OR t.head = 1) \
+               AND t.told = 0 AND NOT {answered}"
         );
-        (
-            "t1_brain_contrast_unknown",
-            format!(
-                "{} = 'T1w' AND {} NOT IN ('TOF', 'PC') AND {brain} AND NOT {}",
-                greatest("base"),
-                greatest("technique"),
-                has("post_contrast"),
-            ),
-        )
+        ("t1_brain_contrast_unknown", count(store, &sql)?)
     } else {
-        ("no_body_part", format!("NOT {}", has("body_part")))
+        (
+            "no_body_part",
+            count(
+                store,
+                &format!(
+                    "SELECT COUNT(*) FROM {stack} x WHERE {holds} AND NOT {} AND NOT {answered}",
+                    has("body_part")
+                ),
+            )?,
+        )
     };
-    let scans = count(
-        store,
-        &format!("SELECT COUNT(*) FROM {stack} x WHERE {holds} AND {wanting} AND NOT {answered}"),
-    )?;
     Ok(json!({"kind": kind, "scans": scans}))
 }
 

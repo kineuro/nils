@@ -152,7 +152,8 @@ fn converter(home: &Path, given: &Path) -> Check {
             "converter",
             Cause::Dcm2niix,
             "dcm2niix is not on the engine's search path, beside nils, where the setup record \
-             names one, or in the registry's tools folder"
+             names one, or in the registry's tools folder; an admin installs it from the software \
+             place (nils software install dcm2niix, or the desk's Settings > Software)"
                 .to_string(),
             json!({"path": null, "found_by": null}),
         );

@@ -2049,11 +2049,23 @@ pub(crate) fn located(pack_dir: Option<&Path>, command: Vec<String>) -> Result<V
             // record 57 P2: the person lets a unit run whose hard need the
             // registry cannot tell
             "--let-run" => out.push(arg),
+            // Wave 7b: the parts a run over a handle is cut into, a whole
+            // number of stacks, as `nils run --chunk` takes it
+            "--chunk" => {
+                let value = it
+                    .next()
+                    .filter(|v| v.parse::<u64>().is_ok_and(|n| n > 0))
+                    .ok_or_else(|| {
+                        Reply::error(400, "run --chunk takes a whole number of stacks, above 0")
+                    })?;
+                out.push(arg);
+                out.push(value);
+            }
             a if a.starts_with('-') => {
                 return Err(Reply::error(
                     400,
                     format!(
-                        "run takes --select, --handle, --param, --model, --labels, --threshold, --pack, --resume, --goal, --switch and --let-run, not {a}"
+                        "run takes --select, --handle, --param, --model, --labels, --threshold, --pack, --resume, --goal, --switch, --chunk and --let-run, not {a}"
                     ),
                 ));
             }
@@ -11235,6 +11247,22 @@ x-nils:
         assert!(located(None, words(&["run"])).is_err());
         assert!(located(None, words(&["run", "--resume"])).is_err());
         assert!(located(None, words(&["run", "--resume", "7", "--dcm2niix", "/x"])).is_err());
+        // Wave 7b: --chunk from a door, a whole number of stacks
+        assert_eq!(
+            located(
+                None,
+                words(&["run", "p", "--handle", "3", "--chunk", "500"])
+            )
+            .ok(),
+            Some(words(&["run", "p", "--handle", "3", "--chunk", "500"]))
+        );
+        for bad in ["0", "-1", "x", "1.5"] {
+            assert!(
+                located(None, words(&["run", "p", "--chunk", bad])).is_err(),
+                "{bad}"
+            );
+        }
+        assert!(located(None, words(&["run", "p", "--chunk"])).is_err());
     }
 
     /// Record 49: a unit's id becomes a folder only where it is a plain word.

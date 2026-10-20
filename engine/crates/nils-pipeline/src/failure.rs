@@ -137,8 +137,9 @@ impl Cause {
         match self {
             Cause::Dcm2niix => {
                 "dcm2niix is not installed where the engine can find it: an admin installs it \
-                 with nils software install dcm2niix (the desk offers it; nils tools install \
-                 dcm2niix is the same for one more release), nils setup --update installs it \
+                 from the software place, with nils software install dcm2niix or the desk's \
+                 Settings > Software (nils tools install dcm2niix is the same for one more \
+                 release), nils setup --update installs it \
                  beside nils, or a run names one with --dcm2niix PATH"
             }
             Cause::Licence => {

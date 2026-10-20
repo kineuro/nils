@@ -170,17 +170,29 @@ fn copies(store: &mut Store, places: &[i64]) -> Result<String, StoreError> {
     Ok(format!("{newest}|{}", by_state.join(",")))
 }
 
+/// Held while the document is read from the registry (Wave 7b, single
+/// flight): requests that miss the kept document at once wait for the one
+/// reading it and take what it kept, rather than each reading it again.
+static READING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// The kept document, where it was kept under `key` and is fresh.
+fn kept_under(key: &str) -> Option<Value> {
+    let kept = KEPT.lock().unwrap_or_else(|e| e.into_inner());
+    kept.as_ref()
+        .filter(|k| k.key == key && k.at.elapsed() < k.ttl)
+        .map(|k| k.doc.clone())
+}
+
 /// The sources door's document, from the kept one where it holds.
 pub fn document_kept(registry: &mut Registry, recent: usize) -> Result<Value, StoreError> {
     let (key, running) = stamp(registry.store(), recent)?;
-    {
-        let kept = KEPT.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(k) = kept.as_ref()
-            && k.key == key
-            && k.at.elapsed() < k.ttl
-        {
-            return Ok(k.doc.clone());
-        }
+    if let Some(doc) = kept_under(&key) {
+        return Ok(doc);
+    }
+    let _reading = READING.lock().unwrap_or_else(|e| e.into_inner());
+    // another request read it while this one waited
+    if let Some(doc) = kept_under(&key) {
+        return Ok(doc);
     }
     READS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let doc = document(registry, recent)?;
@@ -562,6 +574,26 @@ mod tests {
             .unwrap();
         assert_eq!(read(&mut registry).1, 1, "a batch ended");
         assert_eq!(read(&mut registry).1, 0);
+        // Wave 7b, single flight: requests that miss at once read the
+        // document once, and the others take what that one kept
+        super::forget();
+        let before = super::reads();
+        let gate = std::sync::Arc::new(std::sync::Barrier::new(6));
+        let docs: Vec<serde_json::Value> = (0..6)
+            .map(|_| {
+                let (gate, home) = (gate.clone(), home.clone());
+                std::thread::spawn(move || {
+                    let mut mine = home.open().unwrap();
+                    gate.wait();
+                    super::document_kept(&mut mine, 12).unwrap()
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|t| t.join().unwrap())
+            .collect();
+        assert_eq!(super::reads() - before, 1, "one read for six requests");
+        assert!(docs.windows(2).all(|w| w[0] == w[1]));
     }
 
     /// 2026-10-17: the stamp reads an index and small tables, and still
@@ -664,6 +696,14 @@ mod tests {
             .unwrap();
         let now = (super::stamp(store, 12).unwrap().0, counted(store));
         assert_eq!(now, was, "a touch moves neither");
+        // writers outside a batch: an originals purge moves the epoch, and a
+        // place removed changes the places' rows; both move the stamp
+        registry.next_epoch().unwrap();
+        let after_purge = super::stamp(registry.store(), 12).unwrap().0;
+        assert_ne!(after_purge, now.0, "the epoch moved");
+        place::retire(registry.store(), ward).unwrap();
+        let after_removal = super::stamp(registry.store(), 12).unwrap().0;
+        assert_ne!(after_removal, after_purge, "a place removed");
     }
 
     #[test]
