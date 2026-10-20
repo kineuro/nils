@@ -2048,8 +2048,8 @@ fn real_containers_run_n4_rootless_with_no_network() {
     assert_eq!(first["status"], "done", "{first}");
     assert_eq!(first["summary"]["units"]["succeeded"], 2, "{first}");
     assert_eq!(
-        first["summary"]["derivatives"], 4,
-        "two per session: {first}"
+        first["summary"]["derivatives"], 6,
+        "three per session, the corrected image, the bias field and its range: {first}"
     );
     let rows = ok(&[
         "derivative",
@@ -2071,7 +2071,9 @@ fn real_containers_run_n4_rootless_with_no_network() {
             "T1w.nii.gz",
             "T1w.nii.gz",
             "biasfield.nii.gz",
-            "biasfield.nii.gz"
+            "biasfield.nii.gz",
+            "field.json",
+            "field.json"
         ],
         "{rows}"
     );
