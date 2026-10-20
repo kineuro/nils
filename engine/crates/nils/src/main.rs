@@ -12276,7 +12276,7 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
         // Wave 7b (agenda 3.4b): one acquisition written twice is written once
         if report.written_twice > 0 {
             println!(
-                "  {:>10}   stack(s) not written: each one acquisition written twice, another path of a stack written once",
+                "  {:>10}   stack(s) written once for two paths: one acquisition written twice (not counted as left out)",
                 report.written_twice
             );
         }

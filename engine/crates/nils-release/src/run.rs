@@ -217,6 +217,10 @@ pub struct Report {
     /// Wave 7b (agenda 3.4b): the stacks this version did not write because
     /// each is one acquisition written twice, a copy of a stack it wrote;
     /// each is in `release_absent` as `written_twice`, naming that stack.
+    /// It is not in `left_out`: its content is in the version, under the other
+    /// path, so the rows of `release_absent` number `left_out + written_twice`.
+    /// Among the copies of one acquisition whose original this version does
+    /// not write, the first in stack order is written itself.
     pub written_twice: i64,
     /// Wave 7a §8.1: every name a difference or a number decided, with the
     /// property and the value, which is the release's record of them.
@@ -810,24 +814,36 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
         for i in mine {
             grouped.entry(i.stack).or_default().push(i);
         }
-        let taken: std::collections::BTreeSet<i64> = grouped.keys().copied().collect();
-        for (stack, instances) in grouped {
-            // Wave 7b (agenda 3.4b): a copy of an acquisition this version
-            // takes is that stack's other path, written once as that stack,
-            // and recorded so
-            if let Some(of) = shared.copies.get(&stack)
-                && taken.contains(of)
-            {
-                report.written_twice += 1;
-                absent.push((
-                    stack,
-                    "written_twice".to_string(),
-                    format!(
-                        "one acquisition written twice: its files are another path of stack {of}, \
-                         which is written once"
-                    ),
-                ));
-                continue;
+        // Wave 7b (agenda 3.4b): a copy of an acquisition is that stack's
+        // other path, so it is decided after the subject's other stacks are
+        // planned. When its original is in this version it is not written and
+        // is recorded as written_twice; when it is not (not selected, held,
+        // nowhere, no session), the first copy of that original in stack
+        // order is written itself, under the original's name, and the others
+        // are recorded as its copies.
+        let (copies, firsts): (Vec<_>, Vec<_>) = grouped
+            .into_iter()
+            .partition(|(stack, _)| shared.copies.contains_key(stack));
+        let mut written_for: HashMap<i64, i64> = HashMap::new();
+        for (stack, instances) in firsts.into_iter().chain(copies) {
+            if let Some(of) = shared.copies.get(&stack).copied() {
+                let other = if in_version.contains(&of) {
+                    Some(of)
+                } else {
+                    written_for.get(&of).copied()
+                };
+                if let Some(other) = other {
+                    report.written_twice += 1;
+                    absent.push((
+                        stack,
+                        "written_twice".to_string(),
+                        format!(
+                            "one acquisition written twice: its files are another path of stack \
+                             {other}, which is written once"
+                        ),
+                    ));
+                    continue;
+                }
             }
             let study = instances[0].study;
             let under = policies.of_root(&instances[0].root);
@@ -883,6 +899,9 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
                 } => (unjudged, label, route, place, fallback),
             };
             in_version.insert(stack);
+            if let Some(of) = shared.copies.get(&stack) {
+                written_for.insert(*of, stack);
+            }
             if unjudged {
                 report.unjudged += 1;
             }

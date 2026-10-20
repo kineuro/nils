@@ -235,10 +235,11 @@ fn columns_of(doc: &serde_json::Value) -> Result<Vec<Column>, Reply> {
             .map(str::trim)
             .filter(|h| !h.is_empty())
             .ok_or_else(|| Reply::error(400, format!("columns[{i}].header: the column's name")))?;
-        if headers.contains(&header) {
+        // refused by place: a header is a value of the file, never echoed
+        if let Some(j) = headers.iter().position(|h| *h == header) {
             return Err(Reply::error(
                 400,
-                format!("columns[{i}].header: {header} names two columns"),
+                format!("columns[{i}].header names the same column as columns[{j}]"),
             ));
         }
         headers.push(header);
@@ -2017,6 +2018,29 @@ mod tests {
     use super::*;
     use crate::grants::Access;
     use nils_dicom::synth::TempDir;
+
+    /// Review of 2026-10-20, item 6: a header can be a value of the file, so
+    /// the refusal of two columns with one header names their places and
+    /// never the header.
+    #[test]
+    fn two_columns_of_one_header_are_refused_by_place() {
+        let planted = "19800101-1234";
+        let doc = serde_json::json!({"columns": [
+            {"header": planted, "role": "identifier", "id_type": "patient-id"},
+            {"header": "note", "role": "ignore"},
+            {"header": planted, "role": "ignore"},
+        ]});
+        let Err(refused) = columns_of(&doc) else {
+            panic!("refused")
+        };
+        assert_eq!(refused.status, 400);
+        let said = refused.body["error"].as_str().unwrap();
+        assert_eq!(
+            said,
+            "columns[2].header names the same column as columns[0]"
+        );
+        assert!(!refused.body.to_string().contains(planted));
+    }
 
     /// The door table: what each door needs.
     #[test]

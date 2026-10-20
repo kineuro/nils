@@ -688,24 +688,39 @@ fn read_rows(mapping: &Mapping, csv_text: &str) -> Result<(Vec<Parsed>, Vec<Outc
             )));
         }
     }
-    let cell = |record: &csv::StringRecord, name: &str| -> String {
-        index(name)
-            .and_then(|i| record.get(i))
+    // Every column is looked up once, here, and not for every field of every
+    // row: the positions of the mapping's columns, of the subject's and of
+    // the references.
+    let cell_at = |record: &csv::StringRecord, at: Option<usize>| -> String {
+        at.and_then(|i| record.get(i))
             .map(|v| v.trim().to_string())
             .unwrap_or_default()
     };
-    let reference = |record: &csv::StringRecord, r: &Option<Ref>| -> Option<String> {
+    let at_of = |r: &Option<Ref>| -> Option<usize> {
         match r {
-            Some(Ref::Value(v)) => Some(v.clone()),
-            Some(Ref::Column { column }) => Some(cell(record, column)),
-            None => None,
-        }
-    };
-    let place = |r: &Option<Ref>| -> Option<usize> {
-        match r {
-            Some(Ref::Column { column }) => index(column).map(|i| i + 1),
+            Some(Ref::Column { column }) => index(column),
             _ => None,
         }
+    };
+    let subject_at = mapping.subject.as_ref().and_then(|s| index(&s.column));
+    let sources: Vec<_> = mapping
+        .columns
+        .iter()
+        .map(|(field, src)| (field, src, src.column.as_deref().and_then(index)))
+        .collect();
+    let (ref_at, ref2_at) = match mapping.target {
+        Target::Event => (at_of(&mapping.observation_type), None),
+        Target::CohortMember => (at_of(&mapping.cohort), None),
+        Target::SubjectDisease => (at_of(&mapping.disease), None),
+        Target::SubjectDiseaseType => (at_of(&mapping.disease), at_of(&mapping.disease_type)),
+        Target::Subject | Target::Cohort => (None, None),
+    };
+    // the places the answer names are counted from 1
+    let (reference_at, reference2_at) = (ref_at.map(|i| i + 1), ref2_at.map(|i| i + 1));
+    let reference = |record: &csv::StringRecord, r: &Option<Ref>, at: Option<usize>| match r {
+        Some(Ref::Value(v)) => Some(v.clone()),
+        Some(Ref::Column { .. }) => Some(cell_at(record, at)),
+        None => None,
     };
     let mut rows = Vec::new();
     let mut refused = Vec::new();
@@ -722,7 +737,10 @@ fn read_rows(mapping: &Mapping, csv_text: &str) -> Result<(Vec<Parsed>, Vec<Outc
                 continue;
             }
         };
-        let subject = mapping.subject.as_ref().map(|s| cell(&record, &s.column));
+        let subject = mapping
+            .subject
+            .as_ref()
+            .map(|_| cell_at(&record, subject_at));
         if let Some(s) = &subject
             && s.is_empty()
         {
@@ -734,35 +752,20 @@ fn read_rows(mapping: &Mapping, csv_text: &str) -> Result<(Vec<Parsed>, Vec<Outc
             continue;
         }
         let (reference, reference2) = match mapping.target {
-            Target::Event => (reference(&record, &mapping.observation_type), None),
-            Target::CohortMember => (reference(&record, &mapping.cohort), None),
-            Target::SubjectDisease => (reference(&record, &mapping.disease), None),
+            Target::Event => (reference(&record, &mapping.observation_type, ref_at), None),
+            Target::CohortMember => (reference(&record, &mapping.cohort, ref_at), None),
+            Target::SubjectDisease => (reference(&record, &mapping.disease, ref_at), None),
             Target::SubjectDiseaseType => (
-                reference(&record, &mapping.disease),
-                reference(&record, &mapping.disease_type),
+                reference(&record, &mapping.disease, ref_at),
+                reference(&record, &mapping.disease_type, ref2_at),
             ),
-            Target::Subject | Target::Cohort => (None, None),
-        };
-        let (reference_at, reference2_at) = match mapping.target {
-            Target::Event => (place(&mapping.observation_type), None),
-            Target::CohortMember => (place(&mapping.cohort), None),
-            Target::SubjectDisease => (place(&mapping.disease), None),
-            Target::SubjectDiseaseType => (place(&mapping.disease), place(&mapping.disease_type)),
             Target::Subject | Target::Cohort => (None, None),
         };
         let mut fields = BTreeMap::new();
         let mut bad = None;
-        for (field, src) in &mapping.columns {
-            let mut raw = src
-                .column
-                .as_deref()
-                .map(|c| cell(&record, c))
-                .unwrap_or_default();
-            let mut from = src
-                .column
-                .as_deref()
-                .and_then(index)
-                .map(|i| format!("column {}", i + 1));
+        for (field, src, at) in &sources {
+            let mut raw = cell_at(&record, *at);
+            let mut from = at.map(|i| format!("column {}", i + 1));
             if raw.is_empty()
                 && let Some(v) = &src.value
             {
@@ -774,7 +777,7 @@ fn read_rows(mapping: &Mapping, csv_text: &str) -> Result<(Vec<Parsed>, Vec<Outc
             }
             match parse(src, &raw) {
                 Ok(v) => {
-                    fields.insert(field.clone(), v);
+                    fields.insert((*field).clone(), v);
                 }
                 Err(why) => {
                     bad = Some(match from {

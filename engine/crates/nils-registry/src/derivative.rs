@@ -1125,6 +1125,43 @@ mod tests {
     }
 
     #[test]
+    fn an_output_folder_is_named_by_a_derivative_under_it_and_by_nothing_else() {
+        // Review of 2026-10-20, item 3: a folder no row names is an older
+        // registry's and is moved aside; one a row names is this registry's.
+        let mut store = store();
+        let b = Belongs {
+            scope: "session".into(),
+            stack_id: None,
+            series_id: None,
+            subject_id: Some(3),
+            session_day: Some("2021-02-03".into()),
+        };
+        let n = New {
+            kind: "mask",
+            belongs: &b,
+            place_id: 1,
+            path: "derivatives/seg/7/out.nii.gz",
+            bytes: 12,
+            sha256: "abcd",
+            media_type: "application/octet-stream",
+            registered_by: "ana@node",
+            actor: None,
+            model_id: None,
+            run_id: None,
+            preprocess_version: None,
+            supersedes_id: None,
+            created_at: "2026-09-24T00:00:00Z",
+        };
+        assert!(!crate::pipeline::output_is_named(&mut store, "derivatives/seg/7", 9).unwrap());
+        insert(&mut store, &n).unwrap();
+        assert!(crate::pipeline::output_is_named(&mut store, "derivatives/seg/7", 9).unwrap());
+        // another number, another pipeline: not named
+        assert!(!crate::pipeline::output_is_named(&mut store, "derivatives/seg/70", 9).unwrap());
+        assert!(!crate::pipeline::output_is_named(&mut store, "derivatives/seg/1", 9).unwrap());
+        assert!(!crate::pipeline::output_is_named(&mut store, "derivatives/other/7", 9).unwrap());
+    }
+
+    #[test]
     fn a_row_reads_back_as_it_was_written_and_lists_newest_first() {
         let mut store = store();
         let b = Belongs {

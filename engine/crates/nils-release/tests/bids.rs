@@ -1813,6 +1813,8 @@ struct Twin<'a> {
     sagittal_at: Option<f64>,
     /// The slice thickness, in millimetres.
     thickness: &'a str,
+    /// What the file says about burned-in annotation.
+    burned_in: &'a str,
 }
 
 fn twin<'a>(description: &'a str, protocol: &'a str) -> Twin<'a> {
@@ -1823,6 +1825,7 @@ fn twin<'a>(description: &'a str, protocol: &'a str) -> Twin<'a> {
         acquired: None,
         sagittal_at: None,
         thickness: "1.0",
+        burned_in: "NO",
     }
 }
 
@@ -1857,7 +1860,7 @@ fn scans(series: &[Twin]) -> TempDir {
                 synth::text(tags::MR_ACQUISITION_TYPE, VR::CS, "3D"),
                 synth::text(tags::IMAGE_TYPE, VR::CS, "ORIGINAL\\PRIMARY\\M\\ND"),
                 synth::text(tags::MANUFACTURER, VR::LO, "SYNTHETIC"),
-                synth::text(tags::BURNED_IN_ANNOTATION, VR::CS, "NO"),
+                synth::text(tags::BURNED_IN_ANNOTATION, VR::CS, t.burned_in),
                 synth::text(tags::ECHO_TIME, VR::DS, "3"),
                 synth::text(tags::REPETITION_TIME, VR::DS, "2000"),
                 synth::text(tags::FLIP_ANGLE, VR::DS, "9"),
@@ -2158,6 +2161,104 @@ fn one_acquisition_written_twice_is_one_stack_written_once() {
         strip(&names),
         "one name, whichever path"
     );
+}
+
+/// The rows of `release_absent` of one kind: (stack, why).
+fn absent_rows(reg: &mut Registry, release: i64, kind: &str) -> Vec<(i64, String)> {
+    let store = reg.store();
+    let sql = format!(
+        "SELECT stack_id, why FROM {} WHERE kind = '{kind}' AND release_id = {release} ORDER BY stack_id",
+        store.qualified("release_absent")
+    );
+    store
+        .query(&sql, &[])
+        .unwrap()
+        .iter()
+        .map(|r| (r.int(0).unwrap(), r.text(1).unwrap().to_string()))
+        .collect()
+}
+
+/// Release again from the same registry, taking only these stacks.
+fn released_stacks(
+    reg: &mut Registry,
+    converter: &nils_release::bids::convert::Converter,
+    out: &TempDir,
+    stacks: Vec<i64>,
+) -> run::Report {
+    let policy = Policy::default();
+    let scheme = SessionScheme::default();
+    let mut s = settings(
+        out.path(),
+        &policy,
+        &scheme,
+        Options::default(),
+        Some(converter),
+    );
+    s.selection = Selection {
+        stacks,
+        ..Selection::default()
+    };
+    run::run(reg, &s).unwrap()
+}
+
+#[test]
+fn copies_of_one_acquisition_whose_original_is_not_selected_write_one_file() {
+    // Review of 2026-10-20, item 1: three series that are one acquisition
+    // written three times; a selection of two of the copies, without the
+    // original, writes the acquisition once and records the other copy.
+    let Some(converter) = converter() else { return };
+    let one = Twin {
+        acquired: Some("102000"),
+        ..twin("t1_mprage_sag", "T1 MPRAGE")
+    };
+    let source = scans(&[one, one, one]);
+    let home_dir = TempDir::new("bids-home");
+    let out = TempDir::new("bids-out");
+    let (mut reg, report) = released(&source, &home_dir, &out, &converter);
+    assert_eq!(report.written_twice, 2, "{report:?}");
+    assert_eq!(anat_names(out.path()).len(), 1);
+    let copies = absent_rows(&mut reg, report.release_id, "written_twice");
+    assert_eq!(copies.len(), 2);
+    // the invariant of the report: absent rows = left_out + written_twice
+    assert_eq!(report.left_out + report.written_twice, 2, "{report:?}");
+
+    let alone = TempDir::new("bids-out-copies");
+    let again = released_stacks(
+        &mut reg,
+        &converter,
+        &alone,
+        copies.iter().map(|(s, _)| *s).collect(),
+    );
+    assert_eq!(anat_names(alone.path()).len(), 1, "written once");
+    assert_eq!(again.written_twice, 1, "{again:?}");
+    assert_eq!(again.left_out, 0, "{again:?}");
+    let rows = absent_rows(&mut reg, again.release_id, "written_twice");
+    assert_eq!(rows.len(), 1, "one absent: {rows:?}");
+}
+
+#[test]
+fn a_copy_is_written_when_its_original_is_held() {
+    // Review of 2026-10-20, item 2: the original is selected and then held
+    // (burned-in annotation), so nobody writes the acquisition unless its
+    // copy does.
+    let Some(converter) = converter() else { return };
+    let held = Twin {
+        acquired: Some("102000"),
+        burned_in: "YES",
+        ..twin("t1_mprage_sag", "T1 MPRAGE")
+    };
+    let copy = Twin {
+        burned_in: "NO",
+        ..held
+    };
+    let source = scans(&[held, copy]);
+    let home_dir = TempDir::new("bids-home");
+    let out = TempDir::new("bids-out");
+    let (mut reg, report) = released(&source, &home_dir, &out, &converter);
+    assert_eq!(report.burned_in, 1, "{report:?}");
+    assert_eq!(anat_names(out.path()).len(), 1, "the copy is written");
+    assert_eq!(report.written_twice, 0, "{report:?}");
+    assert!(absent_rows(&mut reg, report.release_id, "written_twice").is_empty());
 }
 
 #[test]

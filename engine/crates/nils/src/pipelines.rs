@@ -6492,9 +6492,16 @@ fn execute_run(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Resul
             for dir in [&input, &inputs] {
                 std::fs::create_dir_all(dir).map_err(|e| format!("the run's folder: {e}"))?;
             }
-            // Wave 7b: so is its output folder. One there already is what a
-            // registry before this one left under the same run number; it is
-            // moved aside as the run's folder is, never deleted
+            // Wave 7b: so is its output folder, when no row of this registry
+            // names it: what is there is what a registry before this one left
+            // under the same run number, and it is moved aside as the run's
+            // folder is, never deleted. A folder a row names is this
+            // registry's own, and the run is refused as it always was.
+            if rows::output_is_named(registry.store(), &rel_out, x.run_id).map_err(err)? {
+                return Err(format!(
+                    "the output folder {rel_out} is there already; a run writes a folder of its own"
+                ));
+            }
             if let Some(to) = set_aside(&out)? {
                 eprintln!("nils: run {}: {}", x.run_id, moved_words(&out, &to));
                 moved_out = Some(to);
