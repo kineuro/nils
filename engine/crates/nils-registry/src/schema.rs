@@ -1652,6 +1652,18 @@ fn build_registry() -> Vec<Table> {
                 col("grade", Type::Json),
                 col("graded_at", Type::Timestamp),
                 col("graded_by", Type::Text),
+                // Record 58 P2 (Wave 7b spec §13): a draw by count reads a
+                // fixed number of the stacks accepted since a time (the last
+                // draw's, or one given); the settle campaign a person reads
+                // in verify mode, with the seed and share of the agreements
+                // it settles; and the rule review a round over the rule
+                // opened.
+                col("count", Type::Int),
+                col("since", Type::Timestamp),
+                col("settle_campaign_id", Type::Int),
+                col("settle_seed", Type::Text),
+                col("settle_share", Type::Double),
+                col("review_campaign_id", Type::Int),
             ],
         )
         .index(&["round_id"]),
@@ -1669,6 +1681,10 @@ fn build_registry() -> Vec<Table> {
                 req("stack_key", Type::Text),
                 // {axis: value} the rules gave it when it was drawn
                 req("accepted", Type::Json),
+                // Record 58 P2: its vendor and acquisition year, frozen at
+                // the draw, which the round's report counts by
+                col("vendor", Type::Text),
+                col("year", Type::Int),
             ],
         )
         .unique(&["draw_id", "stack_id"]),

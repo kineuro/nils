@@ -53,7 +53,7 @@ use crate::grants::{Detail, Need};
 use crate::serve::{Caller, Doors, Reply, json_body};
 
 /// The doors, as the capabilities list them.
-pub(crate) const DOORS: [&str; 13] = [
+pub(crate) const DOORS: [&str; 15] = [
     "GET /api/review/{id}/suggestions",
     "POST /api/review/{id}/provisional",
     "GET /api/review/rounds",
@@ -67,6 +67,8 @@ pub(crate) const DOORS: [&str; 13] = [
     "GET /api/audit/draws",
     "GET /api/audit/draws/{id}",
     "POST /api/audit/draws/{id}/grade",
+    "POST /api/audit/draws/{id}/settle",
+    "GET /api/audit/draws/pooled",
 ];
 
 /// Each door's policy row, as `serve::policy` reads them.
@@ -188,6 +190,24 @@ pub(crate) const POLICY: &[(&str, bool, bool, &str, &str, &str, &str)] = &[
         "Grading an audit",
         "Graded an audit",
     ),
+    (
+        "POST /api/audit/draws/{id}/settle",
+        true,
+        false,
+        "bounded",
+        "one settle campaign",
+        "Settling an audit",
+        "Settled an audit",
+    ),
+    (
+        "GET /api/audit/draws/pooled",
+        false,
+        false,
+        "bounded",
+        "the draws named",
+        "Pooling audit rounds",
+        "Pooled audit rounds",
+    ),
 ];
 
 /// What each door needs, read by `serve::door` before its own table.
@@ -214,6 +234,9 @@ pub(crate) fn door(method: &str, segs: &[&str]) -> Option<(Need, Detail)> {
         }
         ("POST", ["api", "audit", "draws"]) => (Need::Both("review:work", "campaigns:work"), Plain),
         ("POST", ["api", "audit", "draws", _, "grade"]) => (Need::One("review:work"), Plain),
+        ("POST", ["api", "audit", "draws", _, "settle"]) => {
+            (Need::Both("review:work", "campaigns:work"), Plain)
+        }
         _ => return None,
     })
 }
@@ -1031,26 +1054,88 @@ pub(crate) const AUDIT_AXES: [&str; 5] =
 /// a sample sealed now, that no sort question waits on and the gate did not
 /// hold back, each with its DICOM identity and the rules' answer on the
 /// audit's axes (a person's decision on an axis is left out of what was
-/// accepted).
-fn frame(store: &mut Store, r: &Round, axes: &[String]) -> Result<Vec<Framed>, StoreError> {
+/// accepted). Record 58 P2 (spec §13.1): with `since`, only the stacks
+/// accepted after it, by the time the sort that judged them ended; each
+/// with its vendor and acquisition year (the study's date where the
+/// fingerprint has no acquisition date).
+/// Where a draw's frame starts: nowhere, a given time, or just after a
+/// draw (its stored time, compared in the database).
+#[derive(Clone, Copy)]
+enum Cutoff<'a> {
+    None,
+    Time(&'a str),
+    Draw(i64),
+}
+
+fn frame(
+    store: &mut Store,
+    r: &Round,
+    axes: &[String],
+    since: Cutoff<'_>,
+) -> Result<Vec<Framed>, StoreError> {
     let holds = of_round(store, r);
+    let d = store.dialect();
+    let fp = nils_registry::schema::table("stack_fingerprint");
+    let study = nils_registry::schema::table("study");
+    let (after, params) = match since {
+        Cutoff::Time(t) => (
+            format!(
+                " AND x.id IN (SELECT c.stack_id FROM {} c JOIN {} j ON j.id = c.job_id WHERE COALESCE(j.finished_at, j.started_at) > {})",
+                store.qualified("classification"),
+                store.qualified("job"),
+                d.param(1, nils_registry::schema::Type::Timestamp)
+            ),
+            vec![nils_registry::store::Param::from(t)],
+        ),
+        // the last draw's own stored time, compared in the database and
+        // never read back as text
+        Cutoff::Draw(id) => (
+            format!(
+                " AND x.id IN (SELECT c.stack_id FROM {} c JOIN {} j ON j.id = c.job_id WHERE COALESCE(j.finished_at, j.started_at) > (SELECT created_at FROM {} WHERE id = {}))",
+                store.qualified("classification"),
+                store.qualified("job"),
+                store.qualified("audit_draw"),
+                d.param(1, nils_registry::schema::Type::Int)
+            ),
+            vec![nils_registry::store::Param::Int(id)],
+        ),
+        Cutoff::None => (String::new(), Vec::new()),
+    };
     let sql = format!(
-        "SELECT x.id, st.study_instance_uid, se.series_instance_uid, x.stack_key FROM {} x \
+        "SELECT x.id, st.study_instance_uid, se.series_instance_uid, x.stack_key, f.manufacturer, {}, {} FROM {} x \
          JOIN {} se ON se.id = x.series_id JOIN {} st ON st.id = se.study_id \
          LEFT JOIN {} f ON f.stack_id = x.id \
-         WHERE {holds} AND UPPER(COALESCE(NULLIF(x.modality, ''), f.modality, '')) = 'MR' ORDER BY x.id",
+         WHERE {holds}{after} AND UPPER(COALESCE(NULLIF(x.modality, ''), f.modality, '')) = 'MR' ORDER BY x.id",
+        d.text_of_qualified(
+            Some("f"),
+            fp.column("earliest_acquisition_date")
+                .expect("earliest_acquisition_date"),
+        ),
+        d.text_of_qualified(Some("st"), study.column("study_date").expect("study_date")),
         store.qualified("stack"),
         store.qualified("series"),
         store.qualified("study"),
         store.qualified("stack_fingerprint"),
     );
-    let mut rows: Vec<(i64, String, String, String)> = Vec::new();
-    for row in store.query(&sql, &[])? {
+    type Row = (i64, String, String, String, Option<String>, Option<i64>);
+    let year_of = |t: Option<&str>| -> Option<i64> {
+        t.and_then(|t| t.get(0..4))
+            .and_then(|y| y.parse::<i64>().ok())
+    };
+    let mut rows: Vec<Row> = Vec::new();
+    for row in store.query(&sql, &params)? {
+        let vendor = row
+            .opt_text(4)?
+            .filter(|m| !m.trim().is_empty())
+            .map(|m| nils_pipeline::pack::facts::vendor_of(m).to_string());
+        let year = year_of(row.opt_text(5)?).or(year_of(row.opt_text(6)?));
         rows.push((
             row.int(0)?,
             row.text(1)?.to_string(),
             row.text(2)?.to_string(),
             row.text(3)?.to_string(),
+            vendor,
+            year,
         ));
     }
     let ids: Vec<i64> = rows.iter().map(|r| r.0).collect();
@@ -1069,7 +1154,7 @@ fn frame(store: &mut Store, r: &Round, axes: &[String]) -> Result<Vec<Framed>, S
     let answers = round::rules_answers(store, &keep)?;
     let keep: BTreeSet<i64> = keep.into_iter().collect();
     let mut out = Vec::new();
-    for (id, study, series, key) in rows {
+    for (id, study, series, key, vendor, year) in rows {
         if !keep.contains(&id) {
             continue;
         }
@@ -1092,18 +1177,135 @@ fn frame(store: &mut Store, r: &Round, axes: &[String]) -> Result<Vec<Framed>, S
             series_uid: series,
             stack_key: key,
             accepted: Value::Object(accepted),
+            vendor,
+            year,
         });
     }
     Ok(out)
 }
 
+/// What a campaign the audit makes over stacks is made with.
+struct Over<'a> {
+    name: String,
+    question: Value,
+    source: Value,
+    pack_version: &'a str,
+    raters_per_item: i64,
+    raters: Vec<String>,
+    adjudicators: Vec<String>,
+    adjudication: Value,
+    lease_seconds: i64,
+    suggest: nils_registry::campaign::Suggest,
+}
+
+/// A campaign over stacks, frozen as a saved selection, closing into
+/// nothing: the raters' campaign of a draw, its settle and its rule review.
+fn campaign_over(
+    registry: &mut Registry,
+    caller: &Caller,
+    stacks: &[i64],
+    o: Over<'_>,
+) -> Result<nils_registry::campaign::Campaign, Reply> {
+    let epoch = registry.meta().epoch;
+    let rows: Vec<nils_registry::store::Row> = {
+        let store = registry.store();
+        let mut subject: BTreeMap<i64, i64> = BTreeMap::new();
+        for chunk in stacks.chunks(500) {
+            let sql = format!(
+                "SELECT x.id, se.subject_id FROM {} x JOIN {} se ON se.id = x.series_id WHERE x.id IN ({})",
+                store.qualified("stack"),
+                store.qualified("series"),
+                chunk
+                    .iter()
+                    .map(i64::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            for row in store.query(&sql, &[]).map_err(failed)? {
+                subject.insert(row.int(0).map_err(failed)?, row.int(1).map_err(failed)?);
+            }
+        }
+        stacks
+            .iter()
+            .map(|s| {
+                nils_registry::store::Row(vec![
+                    nils_registry::store::Cell::Int(*s),
+                    subject
+                        .get(s)
+                        .map_or(nils_registry::store::Cell::Null, |v| {
+                            nils_registry::store::Cell::Int(*v)
+                        }),
+                ])
+            })
+            .collect()
+    };
+    let (handle, _) = crate::operations::save_stacks(
+        registry.store(),
+        rows,
+        &caller.principal,
+        epoch,
+        &crate::operations::Pinned {
+            pack_version: Some(o.pack_version),
+            ..Default::default()
+        },
+    )
+    .map_err(|e| Reply::error(500, e))?;
+    let keys =
+        crate::campaigns::handle_keys(registry.store(), handle, nils_ask::ast::Grain::Stack)?;
+    let items = crate::campaigns::items_of(registry.store(), nils_ask::ast::Grain::Stack, &keys)?;
+    let hash = crate::campaigns::content_hash(registry.store(), handle)?;
+    let mut source = json!({"handle": handle});
+    if let Some(m) = o.source.as_object() {
+        for (k, v) in m {
+            source[k] = v.clone();
+        }
+    }
+    nils_registry::campaign::create(
+        registry,
+        &nils_registry::campaign::New {
+            name: &o.name,
+            owner: &caller.principal,
+            question: &o.question,
+            source,
+            items,
+            handle_id: Some(handle),
+            content_hash: hash.as_deref(),
+            pack_version: Some(o.pack_version),
+            raters_per_item: o.raters_per_item,
+            raters: o.raters,
+            adjudicators: o.adjudicators,
+            adjudication: &o.adjudication,
+            closes_into: "none",
+            lease_seconds: o.lease_seconds,
+            inputs: BTreeMap::new(),
+            hold_back: None,
+            suggest: Some(o.suggest),
+            hide_header: false,
+        },
+    )
+    .map_err(crate::campaigns::campaign_err)
+}
+
+fn strings_of(v: &Value) -> Vec<String> {
+    v.as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|x| x.as_str().map(str::to_string))
+        .collect()
+}
+
 /// `POST /api/audit/draws`: a round's audit draw and the campaign that
 /// reads it. Body: `round` (a round's id; the round of the served rules
 /// and the chosen model where none is named), `seed` (a word; one is drawn
-/// and kept where none is given), `share` (1 % by default), `axes` (the
-/// header certificate's by default), `raters` and `adjudicators` (the
-/// agent principals; anyone with `campaigns:work` where none are named),
-/// `raters_per_item` (two by default) and `name`.
+/// and kept where none is given), `share` (1 % by default) or, record 58
+/// P2 (spec §13.1), `count` (a fixed number of stacks, 150 for the monthly
+/// audit) with `since` (the stacks accepted after this time; after the
+/// last draw where none is given), `axes` (the header certificate's by
+/// default), `raters` and `adjudicators` (the agent principals; anyone
+/// with `campaigns:work` where none are named), `raters_per_item` (two by
+/// default) and `name`. A draw by count is settled by a person
+/// (`/settle`), so its raters' campaign is never adjudicated: a
+/// disagreement between the raters alone decides nothing.
 fn draw_door(
     doors: &Doors,
     registry: &mut Registry,
@@ -1129,7 +1331,52 @@ fn draw_door(
             .map_err(failed)?
         }
     };
-    let share = doc["share"].as_f64().unwrap_or(audit_draw::DEFAULT_SHARE);
+    let by_count = !doc["count"].is_null();
+    if by_count && !doc["share"].is_null() {
+        return Err(Reply::error(
+            400,
+            "count or share: a draw takes a fixed number of stacks or a share of the round's, not both",
+        ));
+    }
+    if !by_count && !doc["since"].is_null() {
+        return Err(Reply::error(
+            400,
+            "since: a draw by count reads the stacks accepted since a time; give count with it",
+        ));
+    }
+    let (size, since) = if by_count {
+        let n = doc["count"]
+            .as_u64()
+            .filter(|n| *n >= 1)
+            .ok_or_else(|| Reply::error(400, "count: a whole number of stacks, at least one"))?;
+        let since = match &doc["since"] {
+            Value::Null => {
+                let last = audit_draw::last_count_draw(registry.store(), r.id).map_err(failed)?;
+                last.map(|(id, at)| (Some(id), at))
+            }
+            Value::String(t) => Some((
+                None,
+                nils_registry::time::secs_of(t)
+                    .or_else(|| nils_registry::time::secs_of(&format!("{t}T00:00:00Z")))
+                    .map(nils_registry::time::iso_of)
+                    .ok_or_else(|| {
+                        Reply::error(400, "since: a time such as 2026-11-01T00:00:00Z")
+                    })?,
+            )),
+            _ => {
+                return Err(Reply::error(
+                    400,
+                    "since: a time such as 2026-11-01T00:00:00Z",
+                ));
+            }
+        };
+        (audit_draw::Size::Count(n as usize), since)
+    } else {
+        (
+            audit_draw::Size::Share(doc["share"].as_f64().unwrap_or(audit_draw::DEFAULT_SHARE)),
+            None,
+        )
+    };
     let seed = doc["seed"]
         .as_str()
         .map(str::to_string)
@@ -1145,62 +1392,25 @@ fn draw_door(
             .collect::<Result<_, _>>()?,
         _ => AUDIT_AXES.iter().map(|a| a.to_string()).collect(),
     };
-    let framed = frame(registry.store(), &r, &axes).map_err(failed)?;
+    let cutoff = match &since {
+        Some((Some(last), _)) => Cutoff::Draw(*last),
+        Some((None, t)) => Cutoff::Time(t),
+        None => Cutoff::None,
+    };
+    let framed = frame(registry.store(), &r, &axes, cutoff).map_err(failed)?;
+    let since: Option<String> = since.map(|(_, t)| t);
     let (d, chosen) = audit_draw::draw(
         registry.store(),
         r.id,
         &seed,
-        share,
+        size,
+        since.as_deref(),
         &framed,
         &caller.principal,
     )
     .map_err(|e| Reply::error(409, e))?;
     // the campaign: the drawn stacks frozen, an axes question as the
     // reference reads were asked, nothing suggested, closing into nothing
-    let epoch = registry.meta().epoch;
-    let rows: Vec<nils_registry::store::Row> = {
-        let store = registry.store();
-        let ids: Vec<i64> = chosen.iter().map(|f| f.stack_id).collect();
-        let mut subject: BTreeMap<i64, i64> = BTreeMap::new();
-        for chunk in ids.chunks(500) {
-            let sql = format!(
-                "SELECT x.id, se.subject_id FROM {} x JOIN {} se ON se.id = x.series_id WHERE x.id IN ({})",
-                store.qualified("stack"),
-                store.qualified("series"),
-                chunk
-                    .iter()
-                    .map(i64::to_string)
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            );
-            for row in store.query(&sql, &[]).map_err(failed)? {
-                subject.insert(row.int(0).map_err(failed)?, row.int(1).map_err(failed)?);
-            }
-        }
-        ids.iter()
-            .map(|s| {
-                nils_registry::store::Row(vec![
-                    nils_registry::store::Cell::Int(*s),
-                    subject
-                        .get(s)
-                        .map_or(nils_registry::store::Cell::Null, |v| {
-                            nils_registry::store::Cell::Int(*v)
-                        }),
-                ])
-            })
-            .collect()
-    };
-    let (handle, _) = crate::operations::save_stacks(
-        registry.store(),
-        rows,
-        &caller.principal,
-        epoch,
-        &crate::operations::Pinned {
-            pack_version: Some(&r.pack_version),
-            ..Default::default()
-        },
-    )
-    .map_err(|e| Reply::error(500, e))?;
     let mut question = json!({"kind": "axes", "axes": axes});
     let pack = doors
         .pack_dir
@@ -1208,64 +1418,386 @@ fn draw_door(
         .and_then(|dir| nils_pack::load(&dir.join(&doors.ask_pack), None).ok());
     crate::campaigns::complete_axes(&mut question, pack.as_ref())
         .map_err(|(s, m)| Reply::error(s, m))?;
-    let keys =
-        crate::campaigns::handle_keys(registry.store(), handle, nils_ask::ast::Grain::Stack)?;
-    let items = crate::campaigns::items_of(registry.store(), nils_ask::ast::Grain::Stack, &keys)?;
-    let hash = crate::campaigns::content_hash(registry.store(), handle)?;
-    let strings = |v: &Value| -> Vec<String> {
-        v.as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|x| x.as_str().map(str::to_string))
-            .collect()
-    };
     let name = doc["name"]
         .as_str()
         .map(str::to_string)
         .unwrap_or_else(|| format!("audit-round-{}-draw-{}", r.id, d.id));
-    let adjudication = json!({"when": "disagree", "metric": "exact"});
-    let made = nils_registry::campaign::create(
+    // record 58 P2: a draw by count is settled by a person against the
+    // accepted answer, never by an adjudicator between the raters
+    let adjudication = if by_count {
+        json!({"when": "never", "metric": "exact"})
+    } else {
+        json!({"when": "disagree", "metric": "exact"})
+    };
+    let ids: Vec<i64> = chosen.iter().map(|f| f.stack_id).collect();
+    let made = campaign_over(
         registry,
-        &nils_registry::campaign::New {
-            name: &name,
-            owner: &caller.principal,
-            question: &question,
-            source: json!({"handle": handle, "audit_draw": d.id}),
-            items,
-            handle_id: Some(handle),
-            content_hash: hash.as_deref(),
-            pack_version: Some(&r.pack_version),
+        caller,
+        &ids,
+        Over {
+            name,
+            question,
+            source: json!({"audit_draw": d.id}),
+            pack_version: &r.pack_version,
             raters_per_item: doc["raters_per_item"].as_i64().unwrap_or(2),
-            raters: strings(&doc["raters"]),
-            adjudicators: strings(&doc["adjudicators"]),
-            adjudication: &adjudication,
-            closes_into: "none",
+            raters: strings_of(&doc["raters"]),
+            adjudicators: strings_of(&doc["adjudicators"]),
+            adjudication,
             lease_seconds: doc["lease_seconds"].as_i64().unwrap_or(3600),
-            inputs: BTreeMap::new(),
-            hold_back: None,
-            suggest: Some(nils_registry::campaign::Suggest::None),
-            hide_header: false,
+            suggest: nils_registry::campaign::Suggest::None,
         },
-    )
-    .map_err(crate::campaigns::campaign_err)?;
+    )?;
     blind::set_purpose(registry.store(), made.id, "audit").map_err(|e| Reply::error(500, e))?;
     audit_draw::set_campaign(registry.store(), d.id, made.id).map_err(failed)?;
     let d = audit_draw::get(registry.store(), d.id)
         .map_err(failed)?
         .ok_or_else(|| Reply::error(500, "the draw was not kept"))?;
+    let raters = if by_count {
+        "two raters, agents outside the engine, read each item blind through the campaign doors; a person settles in verify mode every stack where a rater differs from the accepted answer and a seeded share of the agreements (POST /api/audit/draws/{id}/settle); a disagreement between the raters alone decides nothing (record 58 P2)"
+    } else {
+        "agents outside the engine read each item blind through the campaign doors; their disagreements are settled by the adjudicator; no person reads (record 55, ruling 13)"
+    };
     Ok(Reply::ok(json!({
         "draw": d.as_json(), "round": r.as_json(),
         "campaign": {"id": made.id, "name": made.name, "purpose": "audit", "suggest": "none",
                       "closes_into": "none", "raters_per_item": made.raters_per_item,
+                      "adjudication": made.adjudication().map(|a| a.to_json()).unwrap_or(Value::Null),
                       "trains": false},
         "axes": axes,
-        "raters": "agents outside the engine read each item blind through the campaign doors; their disagreements are settled by the adjudicator; no person reads (record 55, ruling 13)",
+        "raters": raters,
+    })))
+}
+
+/// The neutral names the sources of a settle item are imported under,
+/// rotated per item by the seed, so that no name says which is the
+/// accepted answer.
+fn source_names(seed: &str, item: i64) -> [&'static str; 3] {
+    const NAMES: [&str; 3] = ["source-a", "source-b", "source-c"];
+    let h = ring::digest::digest(
+        &ring::digest::SHA256,
+        format!("{seed}:sources:{item}").as_bytes(),
+    );
+    let k = (h.as_ref()[0] % 3) as usize;
+    [NAMES[k], NAMES[(k + 1) % 3], NAMES[(k + 2) % 3]]
+}
+
+/// An accepted answer as an axes answer's text: every audited axis named,
+/// null where the rules gave it no value.
+fn accepted_text(accepted: &Value) -> String {
+    match accepted {
+        Value::Object(_) => accepted.to_string(),
+        _ => "{}".into(),
+    }
+}
+
+/// `POST /api/audit/draws/{id}/settle` (record 58 P2, spec §13.3): once
+/// both raters have answered every drawn stack, the verify campaign a
+/// person settles the round in: every stack where a rater's answer differs
+/// from the accepted answer, and a seeded share of the stacks where both
+/// agree with it. Its proposal is the accepted answer; where a rater
+/// differs, the accepted answer and the differing answer are shown as A
+/// and B, unlabelled. Body: `seed` (the draw's where none is given),
+/// `share` (0.10), `planted` (as a verify campaign takes it; planted from
+/// the settle's seed where none is given), `settlers` and `adjudicators`
+/// (the people; anyone with `campaigns:work` where none are named),
+/// `raters_per_item` (one person by default), `lease_seconds` and `name`.
+fn settle_door(
+    registry: &mut Registry,
+    caller: &Caller,
+    id: i64,
+    body: &str,
+) -> Result<Reply, Reply> {
+    let doc = json_body(body)?;
+    let d = audit_draw::get(registry.store(), id)
+        .map_err(failed)?
+        .ok_or_else(|| Reply::error(404, format!("no audit draw {id}")))?;
+    if d.settled() {
+        return Err(Reply::error(
+            409,
+            match d.settle_campaign_id {
+                Some(c) => format!("audit draw {id} is settled in campaign {c} already"),
+                None => {
+                    format!("audit draw {id} is settled already, with nothing left to a person")
+                }
+            },
+        ));
+    }
+    let raters_campaign = d
+        .campaign_id
+        .ok_or_else(|| Reply::error(409, format!("audit draw {id} has no raters' campaign")))?;
+    let c = nils_registry::campaign::get(registry.store(), raters_campaign)
+        .map_err(crate::campaigns::campaign_err)?
+        .ok_or_else(|| Reply::error(404, format!("no campaign {raters_campaign}")))?;
+    let seed = match &doc["seed"] {
+        Value::Null => d.seed.clone(),
+        Value::String(s) if !s.trim().is_empty() => s.clone(),
+        _ => {
+            return Err(Reply::error(
+                400,
+                "seed: a word the settle's share is drawn by",
+            ));
+        }
+    };
+    let share = match &doc["share"] {
+        Value::Null => audit_draw::SETTLE_SHARE,
+        v => v
+            .as_f64()
+            .filter(|s| (0.0..=1.0).contains(s))
+            .ok_or_else(|| Reply::error(400, "share: of the agreements, from 0 to 1"))?,
+    };
+    let drawn = audit_draw::stacks(registry.store(), id).map_err(failed)?;
+    let answers = audit_draw::raters_answers(registry.store(), raters_campaign)
+        .map_err(crate::campaigns::campaign_err)?;
+    let reads: BTreeMap<i64, Vec<audit_draw::Answered>> = answers
+        .iter()
+        .map(|(s, l)| (*s, l.iter().map(|(_, _, a)| a.clone()).collect()))
+        .collect();
+    let raters = c.raters_per_item.max(1) as usize;
+    let ts = audit_draw::to_settle(&seed, share, &drawn, &reads, raters);
+    if !ts.waiting.is_empty() {
+        return Err(Reply::error(
+            409,
+            format!(
+                "{} of the draw's {} stacks wait on a rater's answer; the settle is made once {raters} raters have answered every stack",
+                ts.waiting.len(),
+                drawn.len()
+            ),
+        ));
+    }
+    let held = ts.stacks(&drawn);
+    if held.is_empty() {
+        // every rater agrees with the accepted answer and the seeded share
+        // of the agreements is none: the draw is settled with no campaign,
+        // and its grade takes every stack as the raters' agreement
+        audit_draw::set_settle(registry.store(), id, None, &seed, share).map_err(failed)?;
+        let d = audit_draw::get(registry.store(), id)
+            .map_err(failed)?
+            .ok_or_else(|| Reply::error(500, "the draw was not kept"))?;
+        return Ok(Reply::ok(json!({
+            "draw": d.as_json(),
+            "settle": {
+                "campaign": Value::Null,
+                "items": 0, "differences": 0, "agreements": ts.agree,
+                "agreements_settled": 0, "seed": seed, "share": share,
+                "planted": Value::Null, "proposals": [],
+                "note": "nothing to settle: no rater differs from the accepted answer and the share of the agreements is none; the draw is graded with every stack standing as the raters' agreement",
+            },
+        })));
+    }
+    let name = doc["name"]
+        .as_str()
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("audit-draw-{id}-settle"));
+    let made = campaign_over(
+        registry,
+        caller,
+        &held,
+        Over {
+            name,
+            question: c.question.clone(),
+            source: json!({"audit_draw": id, "settles": raters_campaign}),
+            pack_version: c.pack_version.as_deref().unwrap_or_default(),
+            raters_per_item: doc["raters_per_item"].as_i64().unwrap_or(1),
+            raters: strings_of(&doc["settlers"]),
+            adjudicators: strings_of(&doc["adjudicators"]),
+            adjudication: json!({"when": "disagree", "metric": "exact"}),
+            lease_seconds: doc["lease_seconds"].as_i64().unwrap_or(3600),
+            suggest: nils_registry::campaign::Suggest::Imported,
+        },
+    )?;
+    blind::set_purpose(registry.store(), made.id, nils_registry::verify::PURPOSE)
+        .map_err(|e| Reply::error(500, e))?;
+    let planted = if doc["planted"].is_null() {
+        json!({"seed": seed})
+    } else {
+        doc["planted"].clone()
+    };
+    let planting =
+        nils_registry::verify::Planting::parse(&planted).map_err(crate::campaigns::campaign_err)?;
+    nils_registry::verify::plant(registry.store(), made.id, &planting)
+        .map_err(crate::campaigns::campaign_err)?;
+    // the proposals: the differing answers first and the accepted answer
+    // last, so that the accepted answer is the proposal shown and, where a
+    // rater differs, A and B are it and a differing answer
+    let item_of: BTreeMap<i64, i64> = nils_registry::campaign::items(registry.store(), made.id)
+        .map_err(crate::campaigns::campaign_err)?
+        .into_iter()
+        .filter_map(|i| i.stack_id.map(|s| (s, i.id)))
+        .collect();
+    let accepted: BTreeMap<i64, &Value> = drawn.iter().map(|f| (f.stack_id, &f.accepted)).collect();
+    // a question of one axis takes the axis's value, as its answers do; a
+    // question of several, the joint's text
+    let single = c
+        .question()
+        .ok()
+        .and_then(|q| nils_registry::campaign::single_axis(&q));
+    // the accepted answer as a proposal: none where its asked axis has no
+    // value (the item still goes to the settle, with nothing filled in)
+    let proposal_of = |read: &Value| -> Option<String> {
+        match &single {
+            Some(axis) => match &read[axis.as_str()] {
+                Value::Null => None,
+                Value::String(v) if v.trim().is_empty() => None,
+                Value::String(v) => Some(v.clone()),
+                Value::Array(l) => {
+                    let words = l
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    (!words.is_empty()).then_some(words)
+                }
+                other => Some(other.to_string()),
+            },
+            None => Some(accepted_text(read)),
+        }
+    };
+    // a rater's differing answer as an alternative (A or B): the same rule
+    // for one axis and for several. A can't tell, whole or on one axis, is
+    // a difference but never an alternative: on a joint answer the axis
+    // keeps the accepted value, and an answer that then equals the accepted
+    // answer offers nothing. A missing value on a single axis offers nothing.
+    let alternative_of = |accepted: &Value, read: &audit_draw::Answered| -> Option<String> {
+        let cant = |v: &Value| {
+            audit_draw::comparable(v).is_some_and(|w| audit_draw::CANT_TELL.contains(&w.as_str()))
+        };
+        match &single {
+            Some(axis) => {
+                let v = read.get(axis.as_str())?;
+                if cant(v) {
+                    return None;
+                }
+                let joint = json!({ axis.as_str(): v });
+                proposal_of(&joint)
+            }
+            None => {
+                let mut kept = read.clone();
+                for (axis, v) in read {
+                    if cant(v) {
+                        kept.insert(axis.clone(), accepted[axis.as_str()].clone());
+                    }
+                }
+                if audit_draw::agrees(accepted, &kept) {
+                    return None;
+                }
+                Some(Value::Object(kept.into_iter().collect()).to_string())
+            }
+        }
+    };
+    let (mut differing, mut proposals) = (Vec::new(), Vec::new());
+    for (stack, item) in &item_of {
+        let names = source_names(&seed, *item);
+        let a = accepted.get(stack).copied().unwrap_or(&Value::Null);
+        if let Some(value) = proposal_of(a) {
+            proposals.push(nils_registry::suggestion::Given {
+                item: Some(*item),
+                stack: None,
+                series: None,
+                value: Some(value),
+                confidences: BTreeMap::new(),
+                author: Some(names[0].to_string()),
+            });
+        }
+        let mut seen: Vec<audit_draw::Answered> = Vec::new();
+        for (_, _, read) in answers.get(stack).into_iter().flatten() {
+            if audit_draw::agrees(a, read) || seen.contains(read) || seen.len() >= 2 {
+                continue;
+            }
+            seen.push(read.clone());
+            let Some(value) = alternative_of(a, read) else {
+                continue;
+            };
+            differing.push(nils_registry::suggestion::Given {
+                item: Some(*item),
+                stack: None,
+                series: None,
+                value: Some(value),
+                confidences: BTreeMap::new(),
+                author: Some(names[seen.len()].to_string()),
+            });
+        }
+    }
+    let settle_campaign = nils_registry::campaign::get(registry.store(), made.id)
+        .map_err(crate::campaigns::campaign_err)?
+        .ok_or_else(|| Reply::error(500, "the settle campaign was not kept"))?;
+    let now = nils_registry::time::now_iso();
+    let names = BTreeMap::new();
+    let mut imported = Vec::new();
+    let mut refused = 0i64;
+    for (rows, source) in [
+        (&differing, audit_draw::RATER_SOURCE),
+        (&proposals, "audit settle"),
+    ] {
+        if rows.is_empty() {
+            continue;
+        }
+        let done = nils_registry::suggestion::import(
+            registry,
+            &nils_registry::suggestion::Import {
+                campaign: settle_campaign.id,
+                rows,
+                author: None,
+                source: Some(source),
+                who: &caller.principal,
+                names: &names,
+                dry_run: false,
+            },
+            &now,
+        )
+        .map_err(crate::campaigns::campaign_err)?;
+        imported.push(json!({"rows": done.rows, "suggestions": done.suggestions,
+                             "refused_values": done.refused_values}));
+        refused += done.refused_values;
+    }
+    // the draw is tied to its settle campaign before anything is reported,
+    // so a second call cannot make a second one
+    audit_draw::set_settle(registry.store(), id, Some(made.id), &seed, share).map_err(failed)?;
+    if refused > 0 {
+        return Err(Reply::error(
+            409,
+            format!(
+                "{refused} proposals of settle campaign {} were refused by its question (an accepted or differing value the question does not take); the campaign is kept, with those items left without a proposal or an alternative",
+                made.id
+            ),
+        ));
+    }
+    let d = audit_draw::get(registry.store(), id)
+        .map_err(failed)?
+        .ok_or_else(|| Reply::error(500, "the draw was not kept"))?;
+    Ok(Reply::ok(json!({
+        "draw": d.as_json(),
+        "settle": {
+            "campaign": {"id": made.id, "name": made.name, "purpose": "verify",
+                         "suggest": "imported", "closes_into": "none",
+                         "raters_per_item": made.raters_per_item, "trains": false},
+            "items": held.len(), "differences": ts.differ.len(), "agreements": ts.agree,
+            "agreements_settled": ts.agreements_drawn.len(), "seed": seed, "share": share,
+            "planted": nils_registry::verify::summary(registry.store(), made.id).map_err(failed)?,
+            "proposals": imported,
+        },
     })))
 }
 
 /// `POST /api/audit/draws/{id}/grade`: the accepted error of the draw's
-/// round and its exact bound, from the audit campaign's settled answers.
-fn grade_door(registry: &mut Registry, caller: &Caller, id: i64) -> Result<Reply, Reply> {
+/// round and its exact bound. A settled draw (record 58 P2) is graded from
+/// the settle's answers, a stack not settled standing as the raters'
+/// agreement with the accepted answer; a draw from before, from its
+/// campaign's settled answers. A round over the registered rule opens a
+/// rule review (record 56's loop), never a certificate: a campaign over its
+/// wrong stacks showing the rules' answer and evidence, closing into
+/// nothing, recorded on the draw. Body: `reviewers` (anyone with
+/// `campaigns:work` where none are named).
+fn grade_door(
+    registry: &mut Registry,
+    caller: &Caller,
+    id: i64,
+    body: &str,
+) -> Result<Reply, Reply> {
+    let doc = if body.trim().is_empty() {
+        json!({})
+    } else {
+        json_body(body)?
+    };
     let d = audit_draw::get(registry.store(), id)
         .map_err(failed)?
         .ok_or_else(|| Reply::error(404, format!("no audit draw {id}")))?;
@@ -1275,31 +1807,131 @@ fn grade_door(registry: &mut Registry, caller: &Caller, id: i64) -> Result<Reply
     let c = nils_registry::campaign::get(registry.store(), campaign)
         .map_err(crate::campaigns::campaign_err)?
         .ok_or_else(|| Reply::error(404, format!("no campaign {campaign}")))?;
-    let labels = nils_registry::labels::campaign_labels(
-        registry.store(),
-        campaign,
-        nils_registry::labels::Of::Outcomes,
-    )
-    .map_err(|e| Reply::error(500, e.to_string()))?;
-    let mut reads: BTreeMap<i64, BTreeMap<String, Value>> = BTreeMap::new();
-    for l in labels {
-        if let Some(s) = l.stack_id {
-            reads
-                .entry(s)
-                .or_default()
-                .insert(l.what.clone(), l.value.map_or(Value::Null, Value::String));
-        }
+    // record 58 P2: a draw by count is graded from its settle alone, never
+    // from the raters' agreement with each other
+    if d.count.is_some() && !d.settled() {
+        return Err(Reply::error(
+            409,
+            format!(
+                "audit draw {id} is graded from its settle: once both raters have answered, POST /api/audit/draws/{id}/settle"
+            ),
+        ));
     }
-    let reads: Vec<audit_draw::Read> = reads
-        .into_iter()
-        .map(|(stack_id, settled)| audit_draw::Read { stack_id, settled })
-        .collect();
-    let closed = c.status == "closed";
-    let g = audit_draw::grade(registry.store(), &d, &reads, closed, &caller.principal)
-        .map_err(failed)?;
+    let (reads, closed, settle) = if d.settled() {
+        let (reads, settle) =
+            audit_draw::settled_reads(registry.store(), &d).map_err(|e| Reply::error(500, e))?;
+        let closed = settle["closed"] == true;
+        (reads, closed, settle)
+    } else {
+        let labels = nils_registry::labels::campaign_labels(
+            registry.store(),
+            campaign,
+            nils_registry::labels::Of::Outcomes,
+        )
+        .map_err(|e| Reply::error(500, e.to_string()))?;
+        let mut reads: BTreeMap<i64, BTreeMap<String, Value>> = BTreeMap::new();
+        for l in labels {
+            if let Some(s) = l.stack_id {
+                reads
+                    .entry(s)
+                    .or_default()
+                    .insert(l.what.clone(), l.value.map_or(Value::Null, Value::String));
+            }
+        }
+        let reads: Vec<audit_draw::Read> = reads
+            .into_iter()
+            .map(|(stack_id, settled)| audit_draw::Read {
+                stack_id,
+                settled,
+                stood: false,
+            })
+            .collect();
+        (reads, c.status == "closed", Value::Null)
+    };
+    let g = audit_draw::grade(
+        registry.store(),
+        &d,
+        &reads,
+        closed,
+        settle,
+        &caller.principal,
+    )
+    .map_err(failed)?;
+    // record 58 P2: a month over the rule opens a rule review, once
+    let mut review = json!({"campaign_id": d.review_campaign_id, "opened": false});
+    if g["rule"]["passed"] == false && d.review_campaign_id.is_none() {
+        let stacks: Vec<i64> = g["wrong_stacks"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|w| w["stack_id"].as_i64())
+            .collect();
+        let r = round::get(registry.store(), d.round_id)
+            .map_err(failed)?
+            .ok_or_else(|| Reply::error(404, format!("no review round {}", d.round_id)))?;
+        let made = campaign_over(
+            registry,
+            caller,
+            &stacks,
+            Over {
+                name: format!("audit-draw-{id}-rule-review"),
+                question: c.question.clone(),
+                source: json!({"audit_draw": id, "rule_review": true}),
+                pack_version: &r.pack_version,
+                raters_per_item: 1,
+                raters: strings_of(&doc["reviewers"]),
+                adjudicators: Vec::new(),
+                adjudication: json!({"when": "disagree", "metric": "exact"}),
+                lease_seconds: 3600,
+                suggest: nils_registry::campaign::Suggest::Rules,
+            },
+        )?;
+        audit_draw::set_review(registry.store(), id, made.id).map_err(failed)?;
+        review = json!({"campaign_id": made.id, "name": made.name, "opened": true,
+                        "stacks": stacks.len(), "suggest": "rules", "closes_into": "none",
+                        "loop": "record 56: the round's wrong stacks with the rules' answer and evidence, for proposals at /api/packs/{name}/proposals; never a certificate"});
+    }
     Ok(Reply::ok(
-        json!({"draw": id, "round_id": d.round_id, "grade": g}),
+        json!({"draw": id, "round_id": d.round_id, "grade": g, "rule_review": review}),
     ))
+}
+
+/// `GET /api/audit/draws/pooled?ids=1,2,3` (record 58 P2, spec §13.4):
+/// several graded rounds pooled, with the same fields as a round's grade.
+fn pooled_door(
+    registry: &mut Registry,
+    query: &std::collections::HashMap<String, String>,
+) -> Result<Reply, Reply> {
+    let ids: Vec<i64> = query
+        .get("ids")
+        .map(|t| {
+            t.split(',')
+                .filter(|x| !x.trim().is_empty())
+                .map(|x| {
+                    x.trim()
+                        .parse::<i64>()
+                        .map_err(|_| Reply::error(400, "ids: draw ids, comma separated"))
+                })
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .transpose()?
+        .unwrap_or_default();
+    if ids.is_empty() {
+        return Err(Reply::error(
+            400,
+            "ids: the graded draws to pool, comma separated",
+        ));
+    }
+    let mut draws = Vec::new();
+    for id in ids {
+        draws.push(
+            audit_draw::get(registry.store(), id)
+                .map_err(failed)?
+                .ok_or_else(|| Reply::error(404, format!("no audit draw {id}")))?,
+        );
+    }
+    let p = audit_draw::pool(&draws).map_err(|e| Reply::error(409, e))?;
+    Ok(Reply::ok(json!({"pooled": p})))
 }
 
 // ------------------------------------------------------------- routing
@@ -1400,6 +2032,7 @@ pub(crate) fn route(
                 .collect();
             Ok(Reply::ok(json!({"draws": draws})))
         })(),
+        ["api", "audit", "draws", "pooled"] if get => pooled_door(registry, query),
         ["api", "audit", "draws", id] if get => (|| {
             let id = id_of(id)?;
             let d = audit_draw::get(registry.store(), id)
@@ -1416,7 +2049,7 @@ pub(crate) fn route(
                     .map(|f| {
                         json!({"stack_id": f.stack_id, "study_uid": f.study_uid,
                                "series_uid": f.series_uid, "stack_key": f.stack_key,
-                               "accepted": f.accepted})
+                               "accepted": f.accepted, "vendor": f.vendor, "year": f.year})
                     })
                     .collect();
                 v["stacks"] = json!(drawn);
@@ -1424,7 +2057,10 @@ pub(crate) fn route(
             Ok(Reply::ok(v))
         })(),
         ["api", "audit", "draws", id, "grade"] if post => {
-            id_of(id).and_then(|id| grade_door(registry, caller, id))
+            id_of(id).and_then(|id| grade_door(registry, caller, id, body))
+        }
+        ["api", "audit", "draws", id, "settle"] if post => {
+            id_of(id).and_then(|id| settle_door(registry, caller, id, body))
         }
         _ => return None,
     })

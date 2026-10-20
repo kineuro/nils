@@ -615,11 +615,21 @@ pub(crate) fn kept_plant(
     let Some(row) = planted_item(store, campaign, item)? else {
         return Ok(None);
     };
-    Ok(if accepted(question, settled, &row) {
-        row.axis
+    Ok(kept_plant_of(question, &row, settled))
+}
+
+/// [`kept_plant`] over a plant already read, for a caller that holds every
+/// plant of a campaign (one query, not one per item).
+pub(crate) fn kept_plant_of(
+    question: &Question,
+    row: &Planted,
+    settled: Option<&str>,
+) -> Option<String> {
+    if accepted(question, settled, row) {
+        row.axis.clone()
     } else {
         None
-    })
+    }
 }
 
 /// The catch (spec §12.5), over the raters' answers now: `planted`, the

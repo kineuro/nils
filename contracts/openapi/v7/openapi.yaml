@@ -948,7 +948,7 @@ paths:
       summary: The audit draws (record 55 D7, spec 11.5; review:see or campaigns:see)
       parameters: [{name: round, in: query, schema: {type: integer}}]
       responses:
-        "200": {description: "{draws: [{id, round_id, seed, share, frame: {stacks, digest}, drawn, campaign_id, grade, trains: false}]}"}
+        "200": {description: "{draws: [{id, round_id, seed, share, count, since, frame: {stacks, digest}, drawn, campaign_id, campaigns: {raters, settle, rule_review}, settle: {seed, share} | null, grade, trains: false}]}. count, since, campaigns and settle were added in place, additively, by record 58 P2."}
     post:
       summary: Draw a round's blind audit and make the campaign that reads it (review:work and campaigns:work)
       description: "Added in place, additively, by record 55. A seeded share of a round's accepted stacks (1 % by default), drawn by the sha256 of the seed and each stack's DICOM identity (study and series instance UIDs and the stack key), so a seed over a frame draws the same stacks in any registry. The frame is the round's stacks sorted under its rules version, MR, not of a sample sealed now, with no sort question waiting and not held back by the gate; the draw records its round, seed, frame size and digest, and the rules' answer each drawn stack was accepted with. The audit campaign asks the header certificate's axes (provenance, technique, modifier, construct, base, with what the pack derives), suggests nothing, closes into nothing and has purpose audit: its reads are blind and never train. Its raters are agents outside the engine, through the campaign doors, and their disagreements go to the adjudicator."
@@ -961,15 +961,28 @@ paths:
                 round: {type: integer}
                 seed: {type: string}
                 share: {type: number, default: 0.01}
+                count: {type: integer, minimum: 1, description: "Record 58 P2 (Wave 7b spec 13.1), added in place, additively: a fixed number of stacks (150 for the monthly audit) in place of a share; the whole frame where it holds fewer. Drawn in the same seeded order as a share, so a seed draws the same stacks in any registry. Not with share (400). A draw by count is settled by a person (settle), so its raters' campaign is never adjudicated."}
+                since: {type: string, description: "With count: the frame is the stacks accepted after this time (the end of the sort that judged them), an ISO time or a date; after the round's newest draw by count where none is given (a draw by share or of another round does not move it), and every accepted stack where there is no draw yet. Kept on the draw."}
                 axes: {type: array, items: {type: string}}
                 raters: {type: array, items: {type: string}}
                 adjudicators: {type: array, items: {type: string}}
                 raters_per_item: {type: integer, default: 2}
                 name: {type: string}
       responses:
-        "200": {description: "{draw, round, campaign: {id, name, purpose, suggest, closes_into, raters_per_item, trains}, axes}"}
+        "200": {description: "{draw, round, campaign: {id, name, purpose, suggest, closes_into, raters_per_item, adjudication, trains}, axes}"}
+        "400": {description: "count with share, since without count, or a count or time that is not one"}
         "404": {description: No such round}
-        "409": {description: "No accepted stacks to draw from, or no pack served"}
+        "409": {description: "No accepted stacks to draw from (none since the time asked), or no pack served"}
+  /api/audit/draws/pooled:
+    get:
+      summary: Several graded audit rounds pooled (record 58 P2, spec 13.4; review:see or campaigns:see)
+      description: "Added by record 58 P2. Six monthly rounds pool to 900 stacks. The same fields as a round's grade, summed over the draws named (read, wrong, wrong_by_axis, not_settled, cant_tell, drawn, by_vendor, by_year), with the exact one-sided Clopper-Pearson bound over the pool and the rule over it (max_wrong 1, passed) with rounds, rounds_over (the draws over the rule) and rounds_not_known."
+      parameters: [{name: ids, in: query, required: true, schema: {type: string}, description: "draw ids, comma separated"}]
+      responses:
+        "200": {description: "{pooled: {draws, read, wrong, error, bound, confidence, method, wrong_by_axis, not_settled, cant_tell, drawn, by_vendor, by_year, rule: {max_wrong, passed, rounds, rounds_over, rounds_not_known}, trains: false}}"}
+        "400": {description: No ids}
+        "404": {description: No such draw}
+        "409": {description: "A draw not graded yet, or named twice"}
   /api/audit/draws/{id}:
     get:
       summary: One audit draw, with its drawn stacks for a holder of review:see
@@ -982,10 +995,38 @@ paths:
       summary: The accepted error of a draw's round and its exact bound (review:work)
       description: "From the audit campaign's settled answers: a stack is wrong where any axis its settled answer names differs from the rules' accepted answer; one settled as cannot tell, or not settled yet, is counted apart. The bound is the exact one-sided Clopper-Pearson upper bound at 95 %. Kept on the draw beside its round."
       parameters: [{name: id, in: path, required: true, schema: {type: integer}}]
+      requestBody:
+        content:
+          application/json:
+            schema: {type: object, properties: {reviewers: {type: array, items: {type: string}, description: "Record 58 P2: who reads the rule review a round over the rule opens; anyone with campaigns:work where none are named"}}}
       responses:
-        "200": {description: "{draw, round_id, grade: {read, wrong, error, bound, confidence, method, wrong_by_axis, not_settled, cant_tell, drawn, campaign_closed, trains: false}}"}
+        "200": {description: "{draw, round_id, grade: {read, wrong, error, bound, confidence, method, wrong_by_axis, not_settled, cant_tell, drawn, campaign_closed, by_vendor, by_year, rule: {max_wrong: 1, passed}, wrong_stacks: [{stack_id, axes}], settle, trains: false}, rule_review: {campaign_id, opened, ...}}. Record 58 P2, added in place, additively: a settled draw is graded from the settle campaign's settled answers (a planted value the person kept is left out of its stack's read), and a stack the settle does not hold stands as the raters' agreement with the accepted answer; settle says {campaign_id, closed, items, settled, stood, planted_kept, seed, share} (null for a draw adjudicated as in Wave 7a). by_vendor and by_year count {drawn, read, wrong} per vendor and acquisition year (unknown where the registry cannot tell). rule.passed is false over one wrong, null while a stack is still to be settled, true otherwise. A round over the rule opens a rule review once (record 56's loop, never a certificate): a campaign over its wrong stacks that suggests the rules' answer and closes into nothing, recorded on the draw."}
         "404": {description: No such draw}
-        "409": {description: A draw with no campaign}
+        "409": {description: "A draw with no campaign, or a draw by count not settled yet"}
+  /api/audit/draws/{id}/settle:
+    post:
+      summary: The verify campaign a person settles an audit round in (record 58 P2, spec 13.3; review:work and campaigns:work)
+      description: "Added by record 58 P2. Once the raters have answered every drawn stack (409 before), a campaign of purpose verify over every stack where a rater's answer differs from the accepted answer (a cannot tell, whole or on one axis, counts as a difference but is never an alternative: the accepted answer is shown alone on that axis) and a seeded share of the stacks where every rater agrees with it (10 %, rounded up, drawn by the sha256 of the seed and each stack's DICOM identity). A disagreement between the raters alone decides nothing. It suggests imported: the proposal shown is the accepted answer, and where a rater differs the accepted answer and a differing answer are the item's A and B, unlabelled, under neutral source names. It plants values as any verify campaign (from the settle's seed where planted is not given), closes into nothing, and its answers are never blind and never train. Where the accepted answer has no value on the asked axis, the item has no proposal there (nothing is pre-filled); a rater's value is offered instead, first among the legal values, in the item's `offered` list (see the item's why), and is never the proposal Enter accepts: only the rules' accepted answer is. A value its question refuses is an error (409 naming the campaign), never a silent count. Recorded on the draw; a draw is settled once (409). When no rater differs and the seeded share of the agreements is none, nothing is left to a person: the draw is settled with no campaign (`settle.campaign` is null, `items` is 0, with a `note`) and is graded with every stack standing as the raters' agreement."
+      parameters: [{name: id, in: path, required: true, schema: {type: integer}}]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                seed: {type: string, description: "the draw's seed where none is given"}
+                share: {type: number, default: 0.1, description: "of the agreements, from 0 to 1"}
+                planted: {type: object, description: "as POST /api/campaigns takes it for a verify campaign"}
+                settlers: {type: array, items: {type: string}}
+                adjudicators: {type: array, items: {type: string}}
+                raters_per_item: {type: integer, default: 1}
+                lease_seconds: {type: integer, default: 3600}
+                name: {type: string}
+      responses:
+        "200": {description: "{draw, settle: {campaign: {id, name, purpose: verify, suggest: imported, closes_into: none, raters_per_item, trains: false} | null (an empty settle, with a note), items, differences, agreements, agreements_settled, seed, share, planted, proposals}}"}
+        "400": {description: "A seed or share that is not one"}
+        "404": {description: No such draw}
+        "409": {description: "Settled already, no raters' campaign, a stack waiting on a rater's answer, or a proposal value the settle's question refused"}
   /api/decisions/{id}/commit:
     post:
       summary: Put a staged decision in force (nils review commit)

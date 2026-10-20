@@ -296,6 +296,64 @@ The grade is the share of read stacks where any axis the settled answer names
 differs from what the rules accepted, with its exact one-sided Clopper-Pearson
 bound at 95 %. An audit's reads never train.
 
+## 7. Run the monthly audit
+
+Each month the audit reads a fixed 150 of the stacks accepted since the last
+draw, with two local raters of different weights, and a person settles what
+matters against the accepted answer in verify mode. A disagreement between the
+raters alone decides nothing.
+
+1. Draw 150 stacks accepted since the last draw (or since a time you give), by
+   a seed you register first:
+
+   ```
+   POST /api/audit/draws  {"count": 150, "seed": "<registered seed>", "raters": ["<rater-a>", "<rater-b>"]}
+   ```
+
+   Give `"since": "2026-11-01T00:00:00Z"` to start the frame at a time. The
+   same seed over the same frame draws the same stacks in any registry; the
+   draw keeps its frame's size and digest and each stack's accepted answer,
+   vendor and acquisition year.
+
+2. The two raters read each item blind through the campaign doors, as in
+   section 6. Their campaign is never adjudicated.
+
+3. Once both raters have answered every stack, make the settle:
+
+   ```
+   POST /api/audit/draws/<draw>/settle  {"settlers": ["<person>"]}
+   ```
+
+   It is a verify campaign over every stack where a rater differs from the
+   accepted answer and a seeded 10 % of the stacks where both agree with it. The
+   person sees the accepted answer filled in, and where a rater differs, the
+   accepted and the differing answer as A and B, unlabelled. Planted values
+   guard against accepting without looking.
+
+4. The person reads the settle campaign, then close it and grade the draw:
+
+   ```
+   POST /api/campaigns/<settle>/close
+   POST /api/audit/draws/<draw>/grade
+   ```
+
+   The grade counts every settled difference from the accepted answer as a
+   rules error; a stack not settled stands as the raters' agreement. It
+   reports the wrong count, the exact bound, the wrong by axis, counts by
+   vendor and year, and the registered rule `{max_wrong: 1, passed}`.
+
+5. Pool the rounds (six rounds are 900 stacks):
+
+   ```
+   GET /api/audit/draws/pooled?ids=<d1>,<d2>,<d3>,<d4>,<d5>,<d6>
+   ```
+
+> **Warning: a month over the rule opens a rule review, never a certificate.**
+> The grade makes a campaign over the round's wrong stacks that shows the
+> rules' answer and evidence and closes into nothing (`rule_review` in the
+> grade, `campaigns.rule_review` on the draw). Fixes go through the proposals
+> of section 5. The audit's and the settle's reads never train a model.
+
 ## Reference
 
 | Door | Grant |
@@ -318,3 +376,5 @@ bound at 95 %. An audit's reads never train.
 | `POST /api/audit/draws` | review:work and campaigns:work |
 | `GET /api/audit/draws`, `/draws/{id}` | review:see or campaigns:see |
 | `POST /api/audit/draws/{id}/grade` | review:work |
+| `POST /api/audit/draws/{id}/settle` | review:work and campaigns:work |
+| `GET /api/audit/draws/pooled` | review:see or campaigns:see |
