@@ -110,6 +110,13 @@ pub struct Draw {
 }
 
 impl Draw {
+    /// Whether the draw has been settled: in a campaign, or, where no rater
+    /// differed and the seeded share of the agreements was none, with no
+    /// campaign at all (the seed and share are kept, the campaign is not).
+    pub fn settled(&self) -> bool {
+        self.settle_campaign_id.is_some() || self.settle_seed.is_some()
+    }
+
     pub fn as_json(&self) -> Value {
         json!({
             "id": self.id, "round_id": self.round_id, "seed": self.seed, "share": self.share,
@@ -118,7 +125,7 @@ impl Draw {
             "drawn": self.drawn, "campaign_id": self.campaign_id,
             "campaigns": {"raters": self.campaign_id, "settle": self.settle_campaign_id,
                           "rule_review": self.review_campaign_id},
-            "settle": self.settle_campaign_id.map(|_| json!({
+            "settle": self.settled().then(|| json!({
                 "seed": self.settle_seed, "share": self.settle_share,
             })),
             "created_by": self.created_by, "created_at": self.created_at,
@@ -372,19 +379,24 @@ fn of_row(r: &Row) -> Result<Draw, StoreError> {
     })
 }
 
-/// When the newest draw was made: where a draw by count starts its frame
-/// when no time is given (spec §13.1, "since the last draw").
-pub fn last_drawn_at(store: &mut Store) -> Result<Option<String>, StoreError> {
+/// The newest draw by count of a round, with when it was made: where the
+/// round's next draw by count starts its frame when no time is given (spec
+/// §13.1, "since the last draw"). A draw by share, or a draw of another
+/// round, does not move it. The frame compares against the stored time
+/// (see `Cutoff` in the door), never this text read back.
+pub fn last_count_draw(store: &mut Store, round: i64) -> Result<Option<(i64, String)>, StoreError> {
     let d = store.dialect();
     let t = table("audit_draw");
     let sql = format!(
-        "SELECT {} FROM {} ORDER BY id DESC LIMIT 1",
+        "SELECT id, {} FROM {} WHERE round_id = {} AND count IS NOT NULL ORDER BY id DESC LIMIT 1",
         d.text_of(t.column("created_at").expect("created_at")),
         store.qualified("audit_draw"),
+        d.param(1, Type::Int),
     );
-    Ok(store
-        .query_opt(&sql, &[])?
-        .and_then(|r| r.opt_text(0).ok().flatten().map(str::to_string)))
+    store
+        .query_opt(&sql, &[Param::Int(round)])?
+        .map(|r| Ok((r.int(0)?, r.text(1)?.to_string())))
+        .transpose()
 }
 
 pub fn get(store: &mut Store, id: i64) -> Result<Option<Draw>, StoreError> {
@@ -464,18 +476,24 @@ pub fn set_campaign(store: &mut Store, draw: i64, campaign: i64) -> Result<(), S
 }
 
 /// Record 58 P2: tie a draw to the verify campaign its differences and a
-/// seeded share of its agreements are settled in.
+/// seeded share of its agreements are settled in. With no campaign, the
+/// draw is settled empty: every rater agreed and the share drawn none, so
+/// nothing is left to a person and every stack stands as the raters'
+/// agreement.
 pub fn set_settle(
     store: &mut Store,
     draw: i64,
-    campaign: i64,
+    campaign: Option<i64>,
     seed: &str,
     share: f64,
 ) -> Result<(), StoreError> {
     store.update_by_id(
         table("audit_draw"),
         &[
-            ("settle_campaign_id", Param::Int(campaign)),
+            (
+                "settle_campaign_id",
+                campaign.map_or(Param::Null, Param::Int),
+            ),
             ("settle_seed", Param::from(seed)),
             ("settle_share", Param::Double(share)),
         ],
@@ -624,14 +642,37 @@ pub fn raters_answers(
 /// With what the grade says of the settle.
 pub fn settled_reads(store: &mut Store, d: &Draw) -> Result<(Vec<Read>, Value), String> {
     let e = |e: &dyn std::fmt::Display| e.to_string();
-    let campaign = d
-        .settle_campaign_id
-        .ok_or_else(|| format!("audit draw {} is not settled", d.id))?;
+    if !d.settled() {
+        return Err(format!("audit draw {} is not settled", d.id));
+    }
+    let drawn = stacks(store, d.id).map_err(|x| e(&x))?;
+    let Some(campaign) = d.settle_campaign_id else {
+        // settled empty: no person had anything to settle, every stack stands
+        let reads: Vec<Read> = drawn
+            .iter()
+            .map(|f| Read {
+                stack_id: f.stack_id,
+                settled: f
+                    .accepted
+                    .as_object()
+                    .map(|m| m.clone().into_iter().collect())
+                    .unwrap_or_default(),
+                stood: true,
+            })
+            .collect();
+        return Ok((
+            reads,
+            json!({
+                "campaign_id": Value::Null, "closed": true, "items": 0, "settled": 0,
+                "stood": drawn.len(), "planted_kept": 0,
+                "seed": d.settle_seed, "share": d.settle_share,
+            }),
+        ));
+    };
     let c = crate::campaign::get(store, campaign)
         .map_err(|x| e(&x))?
         .ok_or_else(|| format!("no campaign {campaign}"))?;
     let question = c.question().map_err(|x| e(&x))?;
-    let drawn = stacks(store, d.id).map_err(|x| e(&x))?;
     let items = crate::campaign::items(store, campaign).map_err(|x| e(&x))?;
     let mut by_stack: BTreeMap<i64, Answered> = BTreeMap::new();
     for l in crate::labels::campaign_labels(store, campaign, crate::labels::Of::Outcomes)
@@ -644,6 +685,12 @@ pub fn settled_reads(store: &mut Store, d: &Draw) -> Result<(Vec<Read>, Value), 
                 .insert(l.what.clone(), l.value.map_or(Value::Null, Value::String));
         }
     }
+    // every plant of the campaign, read once
+    let plants: BTreeMap<i64, crate::verify::Planted> = crate::verify::planted(store, campaign)
+        .map_err(|x| e(&x))?
+        .into_iter()
+        .map(|p| (p.item_id, p))
+        .collect();
     let mut held: std::collections::BTreeSet<i64> = std::collections::BTreeSet::new();
     let mut kept_plants = 0u64;
     for it in &items {
@@ -654,8 +701,9 @@ pub fn settled_reads(store: &mut Store, d: &Draw) -> Result<(Vec<Read>, Value), 
             by_stack.remove(&s);
             continue;
         }
-        if let Some(axis) = crate::verify::kept_plant(store, campaign, &question, it.id, settled)
-            .map_err(|x| e(&x))?
+        if let Some(axis) = plants
+            .get(&it.id)
+            .and_then(|p| crate::verify::kept_plant_of(&question, p, settled))
         {
             kept_plants += 1;
             if let Some(m) = by_stack.get_mut(&s) {

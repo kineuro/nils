@@ -630,7 +630,9 @@ fn stream(pg: Option<(String, String)>) {
     let c3 = s3["settle"]["campaign"]["id"].as_i64().unwrap();
     answer_all(&server, c3, &nora, |stack, why| {
         if stack == odd {
-            assert!(!why["ab"].is_null(), "{why}");
+            // a can't tell is a difference, never an alternative: the
+            // accepted answer is shown alone on that axis
+            assert!(why["ab"].is_null(), "{why}");
         }
         whole[&stack].clone()
     });
@@ -698,6 +700,236 @@ fn stream(pg: Option<(String, String)>) {
     );
 }
 
+/// The edges of the settle and of the default frame: an accepted answer
+/// with no value on the asked axis, a can't tell on one axis, a settle with
+/// nothing in it, and the default `since` of a round.
+fn edges(pg: Option<(String, String)>) {
+    let (home, _src) = registry(pg.as_ref());
+    let open = || match &pg {
+        Some((dsn, schema)) => Store::connect_postgres(dsn, schema).unwrap(),
+        None => Store::open_sqlite(&home.path().join("registry.db")).unwrap(),
+    };
+    let tokens = |server: &Server| {
+        let rater = |sub: &str| token(sub, sub, &["campaigns:see", "campaigns:work"], "quasi");
+        let (a, b, nora) = (rater("rater-a"), rater("rater-b"), rater("nora"));
+        let p = |t: &str| {
+            server.ok("GET", "/api/capabilities", None, t)["principal"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        let ps = (p(&a), p(&b), p(&nora));
+        (a, b, nora, ps)
+    };
+    let cleo = token(
+        "cleo",
+        "Cleo Curator",
+        &[
+            "review:see",
+            "review:work",
+            "campaigns:see",
+            "campaigns:work",
+        ],
+        "quasi",
+    );
+    let mut server = Server::start(&home);
+    let (rater_a, rater_b, nora, (a_p, b_p, nora_p)) = tokens(&server);
+    let since = "2000-01-01T00:00:00Z";
+    let draw = |server: &Server, count: i64, seed: &str| {
+        server.ok(
+            "POST",
+            "/api/audit/draws",
+            Some(
+                json!({"count": count, "since": since, "seed": seed, "axes": ["base"],
+                        "raters": [a_p, b_p]}),
+            ),
+            &cleo,
+        )
+    };
+
+    // ---------- 1 and 2: a null accepted answer, and a can't tell on one axis
+    let made = draw(&server, 4, "edge-1");
+    let made1_frame = made["draw"]["frame"]["stacks"].as_i64().unwrap();
+    let d1 = made["draw"]["id"].as_i64().unwrap();
+    let rc1 = made["campaign"]["id"].as_i64().unwrap();
+    let ids: Vec<i64> = drawn(&server, d1, &cleo).iter().map(|x| x.0).collect();
+    let accepted: BTreeMap<i64, String> = drawn(&server, d1, &cleo)
+        .into_iter()
+        .map(|x| (x.0, x.2))
+        .collect();
+    drop(server);
+    {
+        // the first stack has no value for its base in the frame
+        let mut store = open();
+        let d = store.dialect();
+        store
+            .execute(
+                &format!(
+                    "UPDATE {} SET accepted = {} WHERE draw_id = {} AND stack_id = {}",
+                    store.qualified("audit_draw_stack"),
+                    d.param(1, nils_registry::schema::Type::Json),
+                    d1,
+                    ids[0]
+                ),
+                &[nils_registry::store::Param::from(r#"{"base":null}"#)],
+            )
+            .unwrap();
+    }
+    server = Server::start(&home);
+    let other = |b: &str| if b == "PDw" { "T2w" } else { "PDw" }.to_string();
+    // the first rater names a base where the frame has none, cannot tell the
+    // second stack's, and differs on the third; the second rater agrees
+    answer_all(&server, rc1, &rater_a, |stack, _| {
+        if stack == ids[0] {
+            json!({"base": "PDw"})
+        } else if stack == ids[1] {
+            json!({"base": "cant_tell"})
+        } else if stack == ids[2] {
+            json!({"base": other(&accepted[&stack])})
+        } else {
+            json!({"base": accepted[&stack]})
+        }
+    });
+    answer_all(&server, rc1, &rater_b, |stack, _| {
+        if stack == ids[0] {
+            json!({"base": null})
+        } else {
+            json!({"base": accepted[&stack]})
+        }
+    });
+    let s1 = server.ok(
+        "POST",
+        &format!("/api/audit/draws/{d1}/settle"),
+        Some(json!({"settlers": [nora_p], "planted": {"share": 0.0}, "share": 0.0})),
+        &cleo,
+    );
+    assert_eq!(s1["settle"]["differences"], 3, "{s1}");
+    for p in s1["settle"]["proposals"].as_array().unwrap() {
+        assert_eq!(p["refused_values"], 0, "nothing is refused silently: {s1}");
+    }
+    let c1 = s1["settle"]["campaign"]["id"].as_i64().unwrap();
+    let mut seen = 0;
+    answer_all(&server, c1, &nora, |stack, why| {
+        seen += 1;
+        let text = why.to_string();
+        if stack == ids[0] {
+            // no value accepted: no proposal on the axis, never the word null
+            // the differing answer is what is shown
+            assert!(!text.contains("\"base\":\"null\""), "{why}");
+            assert_eq!(why["suggested"]["base"], "PDw", "{why}");
+        }
+        if stack == ids[1] {
+            // a can't tell offers no alternative
+            assert!(why["ab"].is_null(), "{why}");
+            assert_eq!(why["suggested"]["base"], accepted[&stack], "{why}");
+        }
+        if stack == ids[2] {
+            assert!(!why["ab"].is_null(), "a real difference is shown: {why}");
+        }
+        json!({"base": accepted[&stack]})
+    });
+    assert_eq!(seen, 3);
+
+    // ------------------------------------------- 4: a settle with nothing in it
+    let made = draw(&server, 3, "edge-4");
+    let d4 = made["draw"]["id"].as_i64().unwrap();
+    let rc4 = made["campaign"]["id"].as_i64().unwrap();
+    let acc4: BTreeMap<i64, String> = drawn(&server, d4, &cleo)
+        .into_iter()
+        .map(|x| (x.0, x.2))
+        .collect();
+    for t in [&rater_a, &rater_b] {
+        answer_all(&server, rc4, t, |stack, _| json!({"base": acc4[&stack]}));
+    }
+    let s4 = server.ok(
+        "POST",
+        &format!("/api/audit/draws/{d4}/settle"),
+        Some(json!({"settlers": [nora_p], "share": 0.0})),
+        &cleo,
+    );
+    assert_eq!(s4["settle"]["items"], 0, "{s4}");
+    assert_eq!(s4["settle"]["campaign"], Value::Null, "{s4}");
+    assert!(s4["settle"]["note"].as_str().is_some(), "{s4}");
+    let (status, doc) = server.call(
+        "POST",
+        &format!("/api/audit/draws/{d4}/settle"),
+        Some(json!({"settlers": [nora_p]})),
+        &cleo,
+    );
+    assert_eq!(status, 409, "settled once: {doc}");
+    let g4 = server.ok("POST", &format!("/api/audit/draws/{d4}/grade"), None, &cleo);
+    assert_eq!(g4["grade"]["read"], 3, "every stack stands: {g4}");
+    assert_eq!(g4["grade"]["wrong"], 0, "{g4}");
+    assert_eq!(g4["grade"]["rule"]["passed"], true, "{g4}");
+    assert_eq!(g4["grade"]["settle"]["stood"], 3, "{g4}");
+
+    // ------- 3 and 6: the default since is the round's last draw by count
+    // a stack is sorted after the last count draw; a draw by share then comes
+    // later than that sort, and does not move the default
+    let a_id = d4;
+    drop(server);
+    {
+        let mut store = open();
+        let d = store.dialect();
+        let ts = nils_registry::schema::Type::Timestamp;
+        // the count draw was made a minute ago; one stack was sorted
+        // half a minute after it
+        let minute = |secs: i64| {
+            nils_registry::time::iso_of(
+                (nils_registry::time::now_secs() as i64 + secs).max(0) as u64
+            )
+        };
+        store
+            .execute(
+                &format!(
+                    "UPDATE {} SET created_at = {} WHERE id = {a_id}",
+                    store.qualified("audit_draw"),
+                    d.param(1, ts)
+                ),
+                &[nils_registry::store::Param::from(minute(-60).as_str())],
+            )
+            .unwrap();
+        // every classification was finished half a minute after the draw
+        store
+            .execute(
+                &format!(
+                    "UPDATE {} SET finished_at = {}",
+                    store.qualified("job"),
+                    d.param(1, ts)
+                ),
+                &[nils_registry::store::Param::from(minute(-30).as_str())],
+            )
+            .unwrap();
+    }
+    let server = Server::start(&home);
+    // a draw by share, later than the sort, of the same round
+    let share = server.ok(
+        "POST",
+        "/api/audit/draws",
+        Some(json!({"share": 0.5, "axes": ["base"], "seed": "edge-share", "raters": [a_p, b_p]})),
+        &cleo,
+    );
+    assert!(share["draw"]["count"].is_null(), "{share}");
+    let next = server.ok(
+        "POST",
+        "/api/audit/draws",
+        Some(json!({"count": 10, "axes": ["base"], "seed": "edge-next", "raters": [a_p, b_p]})),
+        &cleo,
+    );
+    assert_eq!(
+        next["draw"]["frame"]["stacks"], made1_frame,
+        "the share draw did not cut the frame: {next}"
+    );
+    // and two frames in a row are disjoint: nothing was sorted since
+    let (status, doc) = server.call(
+        "POST",
+        "/api/audit/draws",
+        Some(json!({"count": 10, "axes": ["base"], "seed": "edge-again", "raters": [a_p, b_p]})),
+        &cleo,
+    );
+    assert_eq!(status, 409, "the frame after a draw is empty: {doc}");
+}
+
 #[test]
 fn the_monthly_audit_draws_by_count_is_settled_against_the_accepted_answer_and_pools() {
     stream(None);
@@ -723,5 +955,33 @@ fn the_monthly_audit_on_postgres_too() {
     };
     drop();
     stream(Some((dsn.clone(), schema.to_string())));
+    drop();
+}
+
+#[test]
+fn the_audit_edges_settle_and_frame() {
+    edges(None);
+}
+
+#[test]
+fn the_audit_edges_on_postgres_too() {
+    let Some(dsn) = std::env::var("NILS_TEST_POSTGRES_DSN")
+        .ok()
+        .filter(|d| !d.is_empty())
+    else {
+        eprintln!("NILS_TEST_POSTGRES_DSN is not set; the Postgres half is skipped");
+        return;
+    };
+    let schema = "nils_audit_edges";
+    let drop = || {
+        let mut store = Store::connect_postgres(&dsn, schema).expect("connect");
+        store
+            .batch(&format!(
+                "DROP SCHEMA IF EXISTS {schema} CASCADE; DROP SCHEMA IF EXISTS {schema}_linkage CASCADE"
+            ))
+            .expect("drop");
+    };
+    drop();
+    edges(Some((dsn.clone(), schema.to_string())));
     drop();
 }

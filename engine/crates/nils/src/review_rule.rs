@@ -1058,18 +1058,27 @@ pub(crate) const AUDIT_AXES: [&str; 5] =
 /// accepted after it, by the time the sort that judged them ended; each
 /// with its vendor and acquisition year (the study's date where the
 /// fingerprint has no acquisition date).
+/// Where a draw's frame starts: nowhere, a given time, or just after a
+/// draw (its stored time, compared in the database).
+#[derive(Clone, Copy)]
+enum Cutoff<'a> {
+    None,
+    Time(&'a str),
+    Draw(i64),
+}
+
 fn frame(
     store: &mut Store,
     r: &Round,
     axes: &[String],
-    since: Option<&str>,
+    since: Cutoff<'_>,
 ) -> Result<Vec<Framed>, StoreError> {
     let holds = of_round(store, r);
     let d = store.dialect();
     let fp = nils_registry::schema::table("stack_fingerprint");
     let study = nils_registry::schema::table("study");
     let (after, params) = match since {
-        Some(t) => (
+        Cutoff::Time(t) => (
             format!(
                 " AND x.id IN (SELECT c.stack_id FROM {} c JOIN {} j ON j.id = c.job_id WHERE COALESCE(j.finished_at, j.started_at) > {})",
                 store.qualified("classification"),
@@ -1078,7 +1087,19 @@ fn frame(
             ),
             vec![nils_registry::store::Param::from(t)],
         ),
-        None => (String::new(), Vec::new()),
+        // the last draw's own stored time, compared in the database and
+        // never read back as text
+        Cutoff::Draw(id) => (
+            format!(
+                " AND x.id IN (SELECT c.stack_id FROM {} c JOIN {} j ON j.id = c.job_id WHERE COALESCE(j.finished_at, j.started_at) > (SELECT created_at FROM {} WHERE id = {}))",
+                store.qualified("classification"),
+                store.qualified("job"),
+                store.qualified("audit_draw"),
+                d.param(1, nils_registry::schema::Type::Int)
+            ),
+            vec![nils_registry::store::Param::Int(id)],
+        ),
+        Cutoff::None => (String::new(), Vec::new()),
     };
     let sql = format!(
         "SELECT x.id, st.study_instance_uid, se.series_instance_uid, x.stack_key, f.manufacturer, {}, {} FROM {} x \
@@ -1329,15 +1350,19 @@ fn draw_door(
             .filter(|n| *n >= 1)
             .ok_or_else(|| Reply::error(400, "count: a whole number of stacks, at least one"))?;
         let since = match &doc["since"] {
-            Value::Null => audit_draw::last_drawn_at(registry.store()).map_err(failed)?,
-            Value::String(t) => Some(
+            Value::Null => {
+                let last = audit_draw::last_count_draw(registry.store(), r.id).map_err(failed)?;
+                last.map(|(id, at)| (Some(id), at))
+            }
+            Value::String(t) => Some((
+                None,
                 nils_registry::time::secs_of(t)
                     .or_else(|| nils_registry::time::secs_of(&format!("{t}T00:00:00Z")))
                     .map(nils_registry::time::iso_of)
                     .ok_or_else(|| {
                         Reply::error(400, "since: a time such as 2026-11-01T00:00:00Z")
                     })?,
-            ),
+            )),
             _ => {
                 return Err(Reply::error(
                     400,
@@ -1367,7 +1392,13 @@ fn draw_door(
             .collect::<Result<_, _>>()?,
         _ => AUDIT_AXES.iter().map(|a| a.to_string()).collect(),
     };
-    let framed = frame(registry.store(), &r, &axes, since.as_deref()).map_err(failed)?;
+    let cutoff = match &since {
+        Some((Some(last), _)) => Cutoff::Draw(*last),
+        Some((None, t)) => Cutoff::Time(t),
+        None => Cutoff::None,
+    };
+    let framed = frame(registry.store(), &r, &axes, cutoff).map_err(failed)?;
+    let since: Option<String> = since.map(|(_, t)| t);
     let (d, chosen) = audit_draw::draw(
         registry.store(),
         r.id,
@@ -1480,10 +1511,15 @@ fn settle_door(
     let d = audit_draw::get(registry.store(), id)
         .map_err(failed)?
         .ok_or_else(|| Reply::error(404, format!("no audit draw {id}")))?;
-    if let Some(c) = d.settle_campaign_id {
+    if d.settled() {
         return Err(Reply::error(
             409,
-            format!("audit draw {id} is settled in campaign {c} already"),
+            match d.settle_campaign_id {
+                Some(c) => format!("audit draw {id} is settled in campaign {c} already"),
+                None => {
+                    format!("audit draw {id} is settled already, with nothing left to a person")
+                }
+            },
         ));
     }
     let raters_campaign = d
@@ -1530,10 +1566,23 @@ fn settle_door(
     }
     let held = ts.stacks(&drawn);
     if held.is_empty() {
-        return Err(Reply::error(
-            409,
-            "nothing to settle: no rater differs from the accepted answer and the share of the agreements is none",
-        ));
+        // every rater agrees with the accepted answer and the seeded share
+        // of the agreements is none: the draw is settled with no campaign,
+        // and its grade takes every stack as the raters' agreement
+        audit_draw::set_settle(registry.store(), id, None, &seed, share).map_err(failed)?;
+        let d = audit_draw::get(registry.store(), id)
+            .map_err(failed)?
+            .ok_or_else(|| Reply::error(500, "the draw was not kept"))?;
+        return Ok(Reply::ok(json!({
+            "draw": d.as_json(),
+            "settle": {
+                "campaign": Value::Null,
+                "items": 0, "differences": 0, "agreements": ts.agree,
+                "agreements_settled": 0, "seed": seed, "share": share,
+                "planted": Value::Null, "proposals": [],
+                "note": "nothing to settle: no rater differs from the accepted answer and the share of the agreements is none; the draw is graded with every stack standing as the raters' agreement",
+            },
+        })));
     }
     let name = doc["name"]
         .as_str()
@@ -1582,44 +1631,87 @@ fn settle_door(
         .question()
         .ok()
         .and_then(|q| nils_registry::campaign::single_axis(&q));
-    let as_value = |read: &Value, text: Option<&str>| -> String {
+    // the accepted answer as a proposal: none where its asked axis has no
+    // value (the item still goes to the settle, with nothing filled in)
+    let proposal_of = |read: &Value| -> Option<String> {
         match &single {
             Some(axis) => match &read[axis.as_str()] {
-                Value::String(v) => v.clone(),
-                Value::Array(l) => l
-                    .iter()
-                    .filter_map(Value::as_str)
-                    .collect::<Vec<_>>()
-                    .join(","),
-                other => other.to_string(),
+                Value::Null => None,
+                Value::String(v) if v.trim().is_empty() => None,
+                Value::String(v) => Some(v.clone()),
+                Value::Array(l) => {
+                    let words = l
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    (!words.is_empty()).then_some(words)
+                }
+                other => Some(other.to_string()),
             },
-            None => text.map_or_else(|| accepted_text(read), str::to_string),
+            None => Some(accepted_text(read)),
+        }
+    };
+    // a rater's differing answer as an alternative (A or B): the same rule
+    // for one axis and for several. A can't tell, whole or on one axis, is
+    // a difference but never an alternative: on a joint answer the axis
+    // keeps the accepted value, and an answer that then equals the accepted
+    // answer offers nothing. A missing value on a single axis offers nothing.
+    let alternative_of = |accepted: &Value, read: &audit_draw::Answered| -> Option<String> {
+        let cant = |v: &Value| {
+            audit_draw::comparable(v).is_some_and(|w| audit_draw::CANT_TELL.contains(&w.as_str()))
+        };
+        match &single {
+            Some(axis) => {
+                let v = read.get(axis.as_str())?;
+                if cant(v) {
+                    return None;
+                }
+                let joint = json!({ axis.as_str(): v });
+                proposal_of(&joint)
+            }
+            None => {
+                let mut kept = read.clone();
+                for (axis, v) in read {
+                    if cant(v) {
+                        kept.insert(axis.clone(), accepted[axis.as_str()].clone());
+                    }
+                }
+                if audit_draw::agrees(accepted, &kept) {
+                    return None;
+                }
+                Some(Value::Object(kept.into_iter().collect()).to_string())
+            }
         }
     };
     let (mut differing, mut proposals) = (Vec::new(), Vec::new());
     for (stack, item) in &item_of {
         let names = source_names(&seed, *item);
         let a = accepted.get(stack).copied().unwrap_or(&Value::Null);
-        proposals.push(nils_registry::suggestion::Given {
-            item: Some(*item),
-            stack: None,
-            series: None,
-            value: Some(as_value(a, None)),
-            confidences: BTreeMap::new(),
-            author: Some(names[0].to_string()),
-        });
+        if let Some(value) = proposal_of(a) {
+            proposals.push(nils_registry::suggestion::Given {
+                item: Some(*item),
+                stack: None,
+                series: None,
+                value: Some(value),
+                confidences: BTreeMap::new(),
+                author: Some(names[0].to_string()),
+            });
+        }
         let mut seen: Vec<audit_draw::Answered> = Vec::new();
-        for (_, text, read) in answers.get(stack).into_iter().flatten() {
+        for (_, _, read) in answers.get(stack).into_iter().flatten() {
             if audit_draw::agrees(a, read) || seen.contains(read) || seen.len() >= 2 {
                 continue;
             }
             seen.push(read.clone());
-            let joint = Value::Object(read.clone().into_iter().collect());
+            let Some(value) = alternative_of(a, read) else {
+                continue;
+            };
             differing.push(nils_registry::suggestion::Given {
                 item: Some(*item),
                 stack: None,
                 series: None,
-                value: Some(as_value(&joint, Some(text))),
+                value: Some(value),
                 confidences: BTreeMap::new(),
                 author: Some(names[seen.len()].to_string()),
             });
@@ -1631,6 +1723,7 @@ fn settle_door(
     let now = nils_registry::time::now_iso();
     let names = BTreeMap::new();
     let mut imported = Vec::new();
+    let mut refused = 0i64;
     for rows in [&differing, &proposals] {
         if rows.is_empty() {
             continue;
@@ -1651,8 +1744,20 @@ fn settle_door(
         .map_err(crate::campaigns::campaign_err)?;
         imported.push(json!({"rows": done.rows, "suggestions": done.suggestions,
                              "refused_values": done.refused_values}));
+        refused += done.refused_values;
     }
-    audit_draw::set_settle(registry.store(), id, made.id, &seed, share).map_err(failed)?;
+    // the draw is tied to its settle campaign before anything is reported,
+    // so a second call cannot make a second one
+    audit_draw::set_settle(registry.store(), id, Some(made.id), &seed, share).map_err(failed)?;
+    if refused > 0 {
+        return Err(Reply::error(
+            409,
+            format!(
+                "{refused} proposals of settle campaign {} were refused by its question (an accepted or differing value the question does not take); the campaign is kept, with those items left without a proposal or an alternative",
+                made.id
+            ),
+        ));
+    }
     let d = audit_draw::get(registry.store(), id)
         .map_err(failed)?
         .ok_or_else(|| Reply::error(500, "the draw was not kept"))?;
@@ -1701,7 +1806,7 @@ fn grade_door(
         .ok_or_else(|| Reply::error(404, format!("no campaign {campaign}")))?;
     // record 58 P2: a draw by count is graded from its settle alone, never
     // from the raters' agreement with each other
-    if d.count.is_some() && d.settle_campaign_id.is_none() {
+    if d.count.is_some() && !d.settled() {
         return Err(Reply::error(
             409,
             format!(
@@ -1709,7 +1814,7 @@ fn grade_door(
             ),
         ));
     }
-    let (reads, closed, settle) = if d.settle_campaign_id.is_some() {
+    let (reads, closed, settle) = if d.settled() {
         let (reads, settle) =
             audit_draw::settled_reads(registry.store(), &d).map_err(|e| Reply::error(500, e))?;
         let closed = settle["closed"] == true;
