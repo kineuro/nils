@@ -4843,6 +4843,10 @@ fn a_handle_runs_in_parts_and_a_part_taken_up_again_goes_on_with_the_rest() {
         .unwrap();
         std::fs::write(folders.join(old).join("input/old.txt"), "old").unwrap();
     }
+    // Wave 7b: and its run 1's output folder, under the output place
+    let outputs = lab.work.path().join("derivatives/slow");
+    std::fs::create_dir_all(outputs.join("1")).unwrap();
+    std::fs::write(outputs.join("1/old.out"), "an older registry's output").unwrap();
     let aside = |id: &str| -> Vec<PathBuf> {
         std::fs::read_dir(&folders)
             .unwrap()
@@ -4927,6 +4931,23 @@ fn a_handle_runs_in_parts_and_a_part_taken_up_again_goes_on_with_the_rest() {
     assert!(!folders.join("1/input/old.txt").exists());
     assert!(
         err.contains("nils: run 1: this run's folder") && err.contains("moved to"),
+        "{err}"
+    );
+    // the output folder the older run 1 left is moved aside the same way
+    let out_aside: Vec<PathBuf> = std::fs::read_dir(&outputs)
+        .unwrap()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with("1.before-"))
+        .map(|e| e.path())
+        .collect();
+    assert_eq!(out_aside.len(), 1, "{out_aside:?}");
+    assert_eq!(
+        std::fs::read_to_string(out_aside[0].join("old.out")).unwrap(),
+        "an older registry's output"
+    );
+    assert!(!outputs.join("1/old.out").exists());
+    assert!(
+        err.contains("derivatives/slow/1 held another run's files"),
         "{err}"
     );
     let log =

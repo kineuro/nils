@@ -4733,7 +4733,8 @@ pub(crate) fn drop_workdirs(run_dir: &Path) {
     }
 }
 
-/// A new run's folder made its own (2026-10-17): where `dir` is there
+/// A new run's folder made its own (2026-10-17), and its output folder
+/// (Wave 7b): where `dir` is there
 /// already, it holds another run's files, and it is moved aside to
 /// `<id>.before-<when>` beside it, never deleted. Answers where it went;
 /// a folder that cannot be moved refuses the run, which never starts among
@@ -4758,7 +4759,7 @@ fn set_aside(dir: &Path) -> Result<Option<PathBuf>, String> {
     }
     std::fs::rename(dir, &to).map_err(|e| {
         format!(
-            "the run's folder {} holds another run's files, and could not be moved aside: {e}",
+            "the folder {} holds another run's files, and could not be moved aside: {e}",
             dir.display()
         )
     })?;
@@ -6473,15 +6474,18 @@ fn execute_run(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Resul
     let rel_out = format!("{}/{}/{}", derivative::TREE, p.name, x.run_id);
     let out = working.join(&rel_out);
     let err = |e: nils_registry::Error| e.to_string();
+    let mut moved_out: Option<PathBuf> = None;
     match x.resume {
         None => {
             for dir in [&input, &inputs] {
                 std::fs::create_dir_all(dir).map_err(|e| format!("the run's folder: {e}"))?;
             }
-            if out.exists() {
-                return Err(format!(
-                    "the output folder {rel_out} is there already; a run writes a folder of its own"
-                ));
+            // Wave 7b: so is its output folder. One there already is what a
+            // registry before this one left under the same run number; it is
+            // moved aside as the run's folder is, never deleted
+            if let Some(to) = set_aside(&out)? {
+                eprintln!("nils: run {}: {}", x.run_id, moved_words(&out, &to));
+                moved_out = Some(to);
             }
             std::fs::create_dir_all(&out).map_err(|e| format!("the output folder: {e}"))?;
             rows::set_output(registry.store(), x.run_id, &rel_out).map_err(err)?;
@@ -6964,7 +6968,16 @@ fn execute_run(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Resul
         manifest,
         local_image,
         limits: runtime::limits_here(x.runtime),
-        said: Mutex::new(moved.as_ref().map(|to| moved_words(&run_dir, to))),
+        said: Mutex::new({
+            let said: Vec<String> = [
+                moved.as_ref().map(|to| moved_words(&run_dir, to)),
+                moved_out.as_ref().map(|to| moved_words(&out, to)),
+            ]
+            .into_iter()
+            .flatten()
+            .collect();
+            (!said.is_empty()).then(|| said.join("; "))
+        }),
         unit_params,
     };
 
