@@ -12,8 +12,8 @@
 nils_pack: 1
 pipeline:
   name: samseg-lesions
-  descriptor_sha256: "sha256:88c8b67c628267c588f76579253b374b0d071a6ff41cd63015a9d24a735cbc66"
-  version: "1.0"
+  descriptor_sha256: "sha256:492dfe7566ce40920694d95cf158f0409b79a35dfe9a22edd2bb8fd93ed9ca24"
+  version: "1.1"
 goals:
   goal: [fast, standard, research]
   lesions: ["on", "off"]
@@ -35,8 +35,8 @@ needs:
   link:
     soft:
       - when: "not present(flair) or aligned(flair, t1w)"
-        words: "the FLAIR is not known to be registered to the T1w: the header resampling is trusted, and the brain-mask Dice of the unit checks it at 0.85"
-        source: "Samseg wiki (inputs co-registered on one grid); policy until the registration family (record 57, research 02)"
+        words: "the FLAIR is not known to be registered to the T1w: no registration run has aligned it (the registration family, task within_session, makes the typed input aligned_flair), so the header resampling is trusted and the brain-mask Dice of the unit checks it at 0.85"
+        source: "Samseg wiki (inputs co-registered on one grid); the registration family (Wave 7b section 7) or the check (record 57, research 02)"
 knobs:
   lesion:
     what: "segment white-matter lesions from the FLAIR beside the T1w (label 99); off segments the anatomy from the T1w alone"
