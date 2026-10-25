@@ -2613,6 +2613,80 @@ paths:
         "400": {description: "from or limit is not a count of bytes"}
         "403": {description: "Not pipelines:see at detail quasi, or a sealed unit's words without sealed:see"}
         "404": {description: "No such run, no such unit of it, its working place is gone, or the unit kept no log, the error saying why"}
+  /api/workflows:
+    get:
+      summary: The workflow catalog (record 57 P7, Wave 7b section 8.2; nils workflow list --json)
+      description: "pipelines:see. {workflows: [{id, name, version, label, digest, state, added_by, added_at, origin (starter for a shipped one), contract (workflow/v1), workflow {name, title, what, replaces, steps [{id, of (pipeline or family), name, version, reference, goal, knobs, switches}], links [{from, to}]}}], names: [{name, current, current_label, versions [{id, version, label, standing (current, selectable, replaced, retired)}]}]}. The engine seeds its shipped workflows (flair-lesions, cortical) beside the starter pipelines."
+      responses:
+        "200": {description: The catalog}
+        "403": {description: No pipelines:see}
+    post:
+      summary: Add a workflow document to the catalog (nils workflow add <folder>)
+      description: "install:work. Body {document}: the nils.workflow.yml text, or the document as JSON. The name's next version, or the version that already is this document (added false). The loader's words refuse a document that does not check (400): a step naming both a pipeline and a family, a link that runs backwards, an input fed by two links."
+      requestBody: {required: true, content: {application/json: {schema: {type: object, required: [document], properties: {document: {}}}}}}
+      responses:
+        "200": {description: "The catalog row, with added"}
+        "400": {description: "The loader's words"}
+        "403": {description: No install:work}
+  /api/workflows/{id}:
+    get:
+      summary: One workflow version as the catalog holds it (nils workflow show)
+      description: "pipelines:see. The id, name@version or a name for its newest version."
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: The row as the catalog lists it}
+        "403": {description: No pipelines:see}
+        "404": {description: No such workflow}
+  /api/workflows/{id}/plan:
+    post:
+      summary: Plan a workflow over a scope before anything runs (record 57 P7, section 8.3, G12; nils workflow plan)
+      description: "pipelines:see. Body {select: \"selection:<name>@<v>\" or \"main:<role>@dataset:<name>\" or \"main@dataset:<name>\", or handle: <id>; pack; goal; knobs {step: {knob: value}}}. The scope is frozen as a run freezes it. Answers {workflow, workflow_id, name, version, handle, selection, main, person, steps [{step, of, name, reference, pipeline, pipeline_id, goal, switches, knobs, refused (why the step cannot run: a family the catalog does not hold, a pipeline it does not hold), waits_for, preflight (POST /api/pipelines/{name}/preflight's answer for the step)}], links [{link, from {step, output, pipeline, type {kind, role, contrast, grid, space}}, to {step, input, pipeline, type}, verdict, words, implicit}], verdicts {satisfied, missing, redundant, refused, fed}, runnable, words}. The verdicts: satisfied (the output meets a need of the next step, registration's aligned FLAIR meets SAMSEG's aligned(flair, t1w)); missing (SAMSEG with lesions and no registration step: accepted only with its header-alignment check on, which the words say; a typed input no step feeds: the run takes the newest kept result); redundant (N4 before SAMSEG or recon-all, which correct bias themselves; N4 before a FLAIR lesion model, possibly harmful, from the packs' links section); refused (an output type that does not meet the input, both types named; a step the catalog cannot resolve); fed (a typed input fed by a step, the words naming what the next step's key carries). Units are named only at detail quasi. Nothing runs."
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      requestBody: {required: true, content: {application/json: {schema: {type: object, properties: {select: {type: string}, handle: {type: integer}, pack: {type: string}, goal: {type: string}, knobs: {type: object}}}}}}
+      responses:
+        "200": {description: The plan}
+        "400": {description: "No scope, a knob a step does not let a person set, or a scope that cannot be frozen"}
+        "403": {description: No pipelines:see}
+        "404": {description: No such workflow}
+  /api/workflows/{id}/run:
+    post:
+      summary: Run a workflow over a scope, step by step per unit (record 57 P7, section 8.4; nils workflow run)
+      description: "pipelines:work. The same body as the plan. The plan is made first and a workflow it refuses is refused (409 with the plan's words); else `workflow run <name@version> --handle <id> [--goal] [--knob step.knob=value]` is queued on the pipelines lane (202 {job, state, workflow, workflow_id, handle, plan (the verdict counts), message}). The run makes a workflow run (GET /api/workflow-runs) and one pipeline run per step over the handle, each step's unit starting when the same unit of the step before is over, a unit skipped or failed there skipped here with the same reason, a step fed by another's files starting when that step is done; a unit whose result key matches a kept result is not run again and says `reused from run N` (section 8.5), unless a person rejected the result in a check, a newer version replaced its pipeline, or its files fail their sha256."
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      requestBody: {required: true, content: {application/json: {schema: {type: object, properties: {select: {type: string}, handle: {type: integer}, pack: {type: string}, goal: {type: string}, knobs: {type: object}}}}}}
+      responses:
+        "202": {description: "{job, state: queued, workflow, workflow_id, handle, plan, message}"}
+        "400": {description: "No scope, or a scope that cannot be frozen"}
+        "403": {description: No pipelines:work}
+        "404": {description: No such workflow}
+        "409": {description: "The plan refused the workflow: its words"}
+  /api/workflow-runs:
+    get:
+      summary: The workflow runs, newest first (nils workflow runs --json)
+      description: "pipelines:see. {runs: [{id, workflow, workflow_id, job, handle, selection, person, status (running, done, partial, failed, cancelled, interrupted), started_at, finished_at, steps [{step, id, of, name, reference, pipeline, pipeline_id, run, status, units {total, succeeded, failed, skipped, reused, unreported}, error, waits_for, waits_whole}], summary {steps, units (each step's units summed), steps_done, steps_total}, principal, error}]}."
+      responses:
+        "200": {description: The runs}
+        "403": {description: No pipelines:see}
+  /api/workflow-runs/{id}:
+    get:
+      summary: One workflow run with its steps' runs (nils workflow runs <id> --json)
+      description: "pipelines:see. As the list answers one run; a running step's units are counted as they stand. Units are named only at detail quasi."
+      parameters: [{name: id, in: path, required: true, schema: {type: integer}}]
+      responses:
+        "200": {description: The run}
+        "403": {description: No pipelines:see}
+        "404": {description: No such workflow run}
+  /api/provenance/{kind}/{id}:
+    get:
+      summary: Which steps ran on a subject, a session or a stack, with which keys and results, and each result's curation state (record 57 P8, record 58 P5, section 8.6; nils provenance <kind> <id>)
+      description: "pipelines:see or data:see. kind is subject, session or stack; id a subject's or a stack's id, or <subject id>@<session label> for a session, as the runs name it (sub-<s>_ses-<label>). {of {kind, id}, stacks, steps [{run, pipeline, pipeline_id, run_status, started_at, finished_at, workflow_run, step, unit, state, status, reused_from, keys {comparability, result, short, members}, knobs, caveats, flags, pack_status, words, results {derivatives [{id, kind, path, sha256, check, run, created_at}], measures, from_run}, stacks, curation {state (current, stale, unknown), words, recorded {rules [{stack, pack, version, overlay, epoch}], pack_digest, label_set {id, digest, label}, system1 [{stack, axis, model, version}], overrides [{stack, axis, by, kind, at}], at}, changes [{pack, was, now}], overrides_now}}], counts {steps, stale, unknown}, stale_words, withheld {steps, why}}. A result whose input's rules version changed since it ran reads `stale: the rules version on an input changed (...)`, the same words GET /api/pipeline-runs/{id} says of the unit (units_run[].curation) and nils provenance prints; a unit from before the door recorded no state and reads `unknown`. Units are named only at detail quasi; the steps of a stack of a sample sealed now are withheld without sealed:see, and counted in withheld."
+      parameters:
+        - {name: kind, in: path, required: true, schema: {type: string, enum: [subject, session, stack]}}
+        - {name: id, in: path, required: true, schema: {type: string}}
+      responses:
+        "200": {description: The steps and their curation state}
+        "403": {description: Neither pipelines:see nor data:see}
+        "404": {description: "kind is not subject, session or stack, or the id is not of that form"}
   /api/tools:
     get:
       summary: The tools the engine runs beside itself, and whether each is here (nils tools list; added in place, additively, on 2026-10-12)

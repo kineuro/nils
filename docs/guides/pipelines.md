@@ -220,6 +220,49 @@ A family is one entry for you and several pipelines behind it, its members, with
 
 The checks of the registration family are its members' packs': SynthSeg's quality score of either input under 0.65 fails the unit (the FreeSurfer members score both inputs first), a flip fails, and the determinant near 1, a translation under 50 mm and a rotation under 30 degrees within a session, folding above 0.01 % of brain voxels and inverse consistency above 0.1 mm flag; these last are policy, to be calibrated on the family's pilot on the research side (`pipelines/registration/PILOT.md`), which has not run yet. The ANTs member's template task reads the site file `mni_template` (TemplateFlow's `tpl-MNI152NLin2009cAsym_res-01_T1w.nii.gz`, set with `nils pipeline secret set mni_template --file <path>`); the SynthMorph member falls back to FreeSurfer's own copy of the template.
 
+## Chain pipelines into a workflow
+
+A workflow is a document, `nils.workflow.yml` (the contract is `contracts/workflow/v1`), kept in the catalog beside the pipelines and versioned as a pipeline is: `steps`, each a pipeline or a family at a version or `current`, with the goal, the pack's switches fixed for the step and the knobs a person may set, and `links`, an output of one step wired to an input of a later one. Outputs are typed where their descriptor declares them (kind, `role`, `contrast`, `grid` or `space`), and a derivative input may say what it takes, so the plan can check every link. The engine ships `flair-lesions` (the registration family, then SAMSEG with lesions, SynthSeg, then segcsvd over it) and `cortical` (SynthStrip, then recon-all), seeded with the starters.
+
+1. Write the document and check it offline, then add it:
+
+   ```sh
+   nils workflow validate workflows/my-chain
+   nils workflow add workflows/my-chain
+   nils workflow list
+   ```
+
+2. Plan it over a scope. Nothing runs; every link gets a verdict with words, and every step its pre-flight:
+
+   ```sh
+   nils workflow plan flair-lesions --select main@dataset:study-anon
+   ```
+
+   The verdicts: `satisfied` (the registration's aligned FLAIR meets SAMSEG's `aligned(flair, t1w)`), `missing` (SAMSEG with lesions and no registration step is accepted only with its header-alignment check on, and the plan says so; a typed input no step feeds takes the newest kept result of each session), `redundant` (N4 before SAMSEG or recon-all, which correct bias themselves; N4 before a FLAIR lesion model, possibly harmful: what a pack says of its links is its `links` section), `refused` (a type that does not meet the input, both types named; a family or a pipeline the catalog does not hold, refused by name) and `fed` (SynthSeg before segcsvd, naming which SynthSeg the segcsvd key carries). A workflow with a refused step or link does not run.
+
+3. Run it. Each step is a pipeline run over the same frozen scope; a session's next step starts when its previous step is done, without waiting for the whole selection; a unit skipped or failed at one step is skipped downstream with the same reason; a step that reads another's files (a typed input) starts when that step is done. The run's line sums each step's units:
+
+   ```sh
+   nils workflow run flair-lesions --select main@dataset:study-anon --goal standard --knob segcsvd.wmh_threshold=0.4
+   nils workflow runs
+   ```
+
+   `POST /api/workflows/{id}/plan` and `POST /api/workflows/{id}/run` do the same at the doors (the run is queued as a job on the pipelines lane); `GET /api/workflows`, `GET /api/workflow-runs` and `GET /api/workflow-runs/{id}` list the catalog and the runs.
+
+**Results are kept and reused.** Every result is kept with its two keys; a step whose result key matches a kept result is not run again: the unit records `reused from run N` and links the result, and the run counts it under `reused`. The same workflow run twice over the same inputs runs nothing and says so; a `breaks` knob changed reruns that step and the steps after it, since their keys carry the step before. A result is never reused when a person rejected it in a check, when a newer version replaced its pipeline as wrong (`replaces`), or when its files fail their sha256.
+
+## Read a result's provenance
+
+For a subject, a session or a stack, the provenance door answers which steps ran on it, with which keys and which results, and for every result its curation state: the MRI pack and version that classified its inputs (with the pack folder's digest), the label set digest, System 1's answers with the model's version, and whether a person overrode an axis on an input, and which. A change of the rules version on an input marks the result `stale`, in the same words at every door.
+
+```sh
+nils provenance stack 4821
+nils provenance session 17@20230310
+nils provenance subject 17 --json
+```
+
+`GET /api/provenance/{subject|session|stack}/{id}` answers the same (`pipelines:see` or `data:see`); `GET /api/pipeline-runs/{id}` says each unit's state under `units_run[].curation`. A unit from before the door recorded no state and reads `unknown`. Units are named only at detail quasi, and the steps of a stack of a sample sealed now are withheld without `sealed:see`.
+
 ## Choose a version
 
 A name keeps every version added under it. A version that fixes the earlier ones says so in its descriptor, and a new run no longer takes them:
