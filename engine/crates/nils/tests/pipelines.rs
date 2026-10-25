@@ -14795,6 +14795,29 @@ fn g6_e5_a_workflow_runs_per_unit_reuses_kept_results_and_answers_provenance() {
         "{words}"
     );
     assert!(words.contains("9.9.9 now"), "{words}");
+    // the registration family in the catalog (Wave 7b section 7), so the
+    // shipped flair-lesions plans over its members; and a workflow naming
+    // a family the catalog does not hold, refused by name at plan time
+    let fam = lab.json(&[
+        "pipeline",
+        "add",
+        repo()
+            .join("pipelines")
+            .join("registration")
+            .to_str()
+            .unwrap(),
+        "--json",
+    ]);
+    assert_eq!(fam["family"], true, "{fam}");
+    let nowhere = lab.work.path().join("wf-nowhere");
+    std::fs::create_dir_all(&nowhere).unwrap();
+    std::fs::write(
+        nowhere.join("nils.workflow.yml"),
+        "nils_workflow: 1\nname: nowhere\nsteps:\n  - {id: reg, family: nowhere-family, switches: {task: within_session}}\n  - {id: samseg, pipeline: samseg-lesions}\nlinks:\n  - {from: reg.flair_aligned, to: samseg.aligned_flair}\n",
+    )
+    .unwrap();
+    let added_nowhere = lab.json(&["workflow", "add", nowhere.to_str().unwrap(), "--json"]);
+    assert_eq!(added_nowhere["added"], true, "{added_nowhere}");
     let served = lab.serve();
     let (status, door) = served.call(
         "GET",
@@ -14854,9 +14877,11 @@ fn g6_e5_a_workflow_runs_per_unit_reuses_kept_results_and_answers_provenance() {
     assert_eq!(status, 200, "{planned}");
     assert_eq!(planned["verdicts"]["fed"], 1, "{planned}");
     assert_eq!(planned["runnable"], true, "{planned}");
-    // the shipped flair-lesions workflow plans: its family step is refused
-    // by name, SAMSEG's alignment need is said missing, and SynthSeg feeds
-    // segcsvd; nothing runs
+    // the shipped flair-lesions workflow plans over the registration
+    // family's members (Wave 7b section 7): its aligned FLAIR feeds
+    // SAMSEG's and segcsvd's typed input and meets their alignment need,
+    // SynthSeg feeds segcsvd, the family step carries its members and the
+    // family's routing of the scope, and nothing runs
     let (status, shipped) = served.call(
         "POST",
         "/api/workflows/flair-lesions/plan",
@@ -14864,13 +14889,58 @@ fn g6_e5_a_workflow_runs_per_unit_reuses_kept_results_and_answers_provenance() {
         "a-token-that-sees",
     );
     assert_eq!(status, 200, "{shipped}");
-    assert_eq!(shipped["runnable"], false, "{shipped}");
+    assert_eq!(shipped["runnable"], true, "{shipped}");
+    assert_eq!(shipped["verdicts"]["refused"], 0, "{shipped}");
+    assert_eq!(shipped["verdicts"]["fed"], 3, "{shipped}");
+    let register = &shipped["steps"][0];
+    assert_eq!(register["family"], "registration", "{register}");
+    assert_eq!(register["pipeline"], "registration", "{register}");
+    assert_eq!(
+        register["members"].as_array().unwrap().len(),
+        3,
+        "{register}"
+    );
+    assert_eq!(
+        register["preflight"]["family"], "registration",
+        "{register}"
+    );
+    assert_eq!(
+        register["preflight"]["task"], "within_session",
+        "{register}"
+    );
+    assert!(register["preflight"]["counts"].is_object(), "{register}");
+    let into_samseg = shipped["links"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|l| l["link"] == "register.flair_aligned -> samseg.aligned_flair")
+        .unwrap_or_else(|| panic!("{shipped}"));
+    assert_eq!(into_samseg["verdict"], "fed", "{into_samseg}");
+    // the lab's starters carry no pack, so the words name no alignment
+    // need here; the contracts test plans the fed-and-meets case over the
+    // shipped pack
     assert!(
-        shipped["words"]
+        into_samseg["words"]
             .as_str()
             .unwrap()
-            .contains("the family registration is not in this catalog"),
-        "{shipped}"
+            .contains("samseg.aligned_flair is fed by register"),
+        "{into_samseg}"
+    );
+    // a family the catalog does not hold is refused by name, as before
+    let (status, nowhere) = served.call(
+        "POST",
+        "/api/workflows/nowhere/plan",
+        Some(json!({"select": "selection:every@1"})),
+        "a-token-that-sees",
+    );
+    assert_eq!(status, 200, "{nowhere}");
+    assert_eq!(nowhere["runnable"], false, "{nowhere}");
+    assert!(
+        nowhere["words"]
+            .as_str()
+            .unwrap()
+            .contains("the family nowhere-family is not in this catalog"),
+        "{nowhere}"
     );
     let (status, refused) = served.call(
         "POST",

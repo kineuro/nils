@@ -630,18 +630,62 @@ pub(crate) fn scope_from(
     }))
 }
 
+/// One member of a family a step names (Wave 7b section 7): its catalog
+/// row, as the family record pins it, with its descriptor, whose typed
+/// outputs the links read. The member's pack judges the member's run; the
+/// plan's link verdicts read a pipeline step's pack, and a family has none.
+pub(crate) struct FamilyMember {
+    pub key: String,
+    pub pipeline: prows::Pipeline,
+    pub descriptor: Descriptor,
+}
+
 /// A step resolved against the catalog: the pipeline, its descriptor and
-/// pack, or why it is refused.
+/// pack; or the family it names with its member rows, whose typed outputs
+/// are the step's link sources; or why it is refused.
 pub(crate) struct Resolved {
     pub pipeline: Option<prows::Pipeline>,
     pub descriptor: Option<Descriptor>,
     pub pack: Option<PipelinePack>,
+    pub family: Option<(crate::pipeline_family::Stored, Vec<FamilyMember>)>,
     pub refusal: Option<String>,
+}
+
+impl Resolved {
+    /// The descriptors the step resolves to: the pipeline's, or every
+    /// member's of the family.
+    pub(crate) fn descriptors(&self) -> Vec<&Descriptor> {
+        match &self.family {
+            Some((_, members)) => members.iter().map(|m| &m.descriptor).collect(),
+            None => self.descriptor.iter().collect(),
+        }
+    }
+
+    /// What the step's run is given as `nils run <this>`: the pipeline's
+    /// label, or the family's name, which the run command routes to the
+    /// family's run (one member run per member the units route to).
+    pub(crate) fn run_label(&self) -> Option<String> {
+        self.pipeline
+            .as_ref()
+            .map(|p| p.label())
+            .or_else(|| self.family.as_ref().map(|(s, _)| s.name.clone()))
+    }
+
+    /// As the planner reads the step.
+    fn label(&self, s: &doc::Step) -> String {
+        match (&self.pipeline, &self.family) {
+            (Some(p), _) => p.label(),
+            (None, Some((f, _))) => format!("family {}", f.name),
+            (None, None) => s.reference(),
+        }
+    }
 }
 
 /// Resolve every step of a document against the catalog (section 8.3): a
 /// family the catalog does not hold, or a pipeline it does not hold, is a
-/// plan-time refusal, never a load error.
+/// plan-time refusal, never a load error. A family the catalog holds
+/// (Wave 7b section 7) resolves to its member rows, as the family record
+/// pins them.
 pub(crate) fn resolve_steps(store: &mut Store, d: &Workflow) -> Vec<Resolved> {
     d.steps
         .iter()
@@ -650,13 +694,20 @@ pub(crate) fn resolve_steps(store: &mut Store, d: &Workflow) -> Vec<Resolved> {
                 pipeline: None,
                 descriptor: None,
                 pack: None,
+                family: None,
                 refusal: Some(refusal),
             };
             if s.of == "family" {
-                return none(format!(
-                    "the family {} is not in this catalog: no member to plan (a family is one catalog row that opens to its members, Wave 7b section 7)",
-                    s.name
-                ));
+                return match resolve_family(store, &s.name) {
+                    Ok(f) => Resolved {
+                        pipeline: None,
+                        descriptor: None,
+                        pack: None,
+                        family: Some(f),
+                        refusal: None,
+                    },
+                    Err(e) => none(e),
+                };
             }
             let p = match prows::resolve(store, &s.reference()) {
                 Ok(Some(p)) => p,
@@ -673,17 +724,60 @@ pub(crate) fn resolve_steps(store: &mut Store, d: &Workflow) -> Vec<Resolved> {
             }
             let descriptor = match descriptor::from_value(p.descriptor.clone()) {
                 Ok(d) => d,
-                Err(e) => return none(format!("{}: the catalog's descriptor no longer checks: {e}", p.label())),
+                Err(e) => {
+                    return none(format!(
+                        "{}: the catalog's descriptor no longer checks: {e}",
+                        p.label()
+                    ));
+                }
             };
             let pack = crate::pipeline_pack::pack_of(&p);
             Resolved {
                 pipeline: Some(p),
                 descriptor: Some(descriptor),
                 pack,
+                family: None,
                 refusal: None,
             }
         })
         .collect()
+}
+
+/// The family a step names, with its members' catalog rows: the registry
+/// holds one version of a family, the document it was added with, so the
+/// step's version is not read; a family the catalog does not hold, or one
+/// whose member rows are gone or no longer read, is the step's refusal.
+fn resolve_family(
+    store: &mut Store,
+    name: &str,
+) -> Result<(crate::pipeline_family::Stored, Vec<FamilyMember>), String> {
+    let stored = crate::pipeline_family::get(store, name)?.ok_or_else(|| {
+        format!(
+            "the family {name} is not in this catalog: no member to plan (a family is one catalog row that opens to its members, Wave 7b section 7; nils pipeline add <folder> adds one)"
+        )
+    })?;
+    stored.members_exist(store)?;
+    let mut members = Vec::new();
+    for (key, id) in &stored.members {
+        let p = prows::get(store, *id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("family {name}: its member {key} is not in the catalog"))?;
+        if let Some(e) = crate::pipeline_pack::pack_error(&p) {
+            return Err(format!("family {name}, member {key}: {e}"));
+        }
+        let descriptor = descriptor::from_value(p.descriptor.clone()).map_err(|e| {
+            format!(
+                "family {name}, member {key} ({}): the catalog's descriptor no longer checks: {e}",
+                p.label()
+            )
+        })?;
+        members.push(FamilyMember {
+            key: key.clone(),
+            pipeline: p,
+            descriptor,
+        });
+    }
+    Ok((stored, members))
 }
 
 /// The members a document's steps resolve to, for the link planner.
@@ -693,15 +787,31 @@ pub(crate) fn members<'a>(d: &'a Workflow, resolved: &'a [Resolved]) -> Vec<Memb
         .zip(resolved)
         .map(|(s, r)| Member {
             step: s,
-            label: r
-                .pipeline
-                .as_ref()
-                .map_or_else(|| s.reference(), |p| p.label()),
-            descriptor: r.descriptor.as_ref(),
+            label: r.label(s),
+            descriptors: r.descriptors(),
             pack: r.pack.as_ref(),
             refusal: r.refusal.clone(),
         })
         .collect()
+}
+
+/// A family step's pre-flight for the plan: the family's routing of the
+/// scope's units under the step's goal and switches (its task among them),
+/// as `nils run <family> --preflight` answers it.
+fn family_preflight(
+    registry: &mut Registry,
+    s: &crate::pipeline_family::Stored,
+    scope: &Scope,
+    ask: &crate::pipeline_pack::PersonAsk,
+) -> Result<Value, String> {
+    let f = s.family()?;
+    let person = crate::pipeline_family::person_of(f, ask, &crate::actor())?;
+    let stacks =
+        crate::pipelines::handle_stacks(registry.store(), scope.handle).map_err(|e| e.message)?;
+    let units = crate::pipeline_family::route_stacks(registry, f, &stacks, &person)?;
+    Ok(crate::pipeline_family::preflight_doc(
+        s, f, &person, ask, &units,
+    ))
 }
 
 /// The steps a person's knobs name, checked against the document's: a knob
@@ -792,7 +902,7 @@ pub(crate) fn plan(
     for (s, r) in d.steps.iter().zip(&resolved) {
         let mut doc_ = json!({
             "step": s.id, "of": s.of, "name": s.name, "reference": s.reference(),
-            "pipeline": r.pipeline.as_ref().map(|p| p.label()),
+            "pipeline": r.run_label(),
             "pipeline_id": r.pipeline.as_ref().map(|p| p.id),
             "goal": s.goal.clone().or_else(|| person.goal.clone()),
             "switches": s.switches, "knobs": s.knobs,
@@ -821,6 +931,23 @@ pub(crate) fn plan(
                 Ok(v) => v,
                 Err(e) => json!({"error": e}),
             };
+        }
+        if let Some((stored, fm)) = &r.family {
+            // Wave 7b section 7: a family step plans as the family's
+            // pre-flight routes the scope's units, over its member rows
+            doc_["family"] = json!(stored.name);
+            doc_["members"] = json!(
+                fm.iter()
+                    .map(|m| json!({
+                        "member": m.key, "pipeline": m.pipeline.label(), "pipeline_id": m.pipeline.id,
+                    }))
+                    .collect::<Vec<_>>()
+            );
+            doc_["preflight"] =
+                match family_preflight(registry, stored, scope, &step_person(s, person)) {
+                    Ok(v) => v,
+                    Err(e) => json!({"error": e}),
+                };
         }
         steps.push(doc_);
     }

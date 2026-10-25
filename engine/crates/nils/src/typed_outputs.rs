@@ -44,20 +44,24 @@ impl Outputs {
     }
 
     /// The typed output that made this derivative: of its run's pipeline,
-    /// the output of its kind whose path template its path matches.
+    /// the output of its kind whose path template its path matches. A
+    /// registered path is the run's folder, then the unit's folder where
+    /// the units ran apart, then the template's path, so the template is
+    /// held to the path's last components, as many as it has.
     pub(crate) fn of_derivative(&mut self, store: &mut Store, row: &Derivative) -> Option<Typed> {
         let run_id = row.run_id?;
-        let marker = format!("/{run_id}/");
-        let rel = row
-            .path
-            .split_once(&marker)
-            .map(|(_, rel)| rel.to_string())
-            .unwrap_or_else(|| row.path.clone());
         let outputs = self.of_run(store, run_id)?;
+        let parts: Vec<&str> = row.path.split('/').filter(|p| !p.is_empty()).collect();
         outputs
             .iter()
             .find(|o| {
-                o.kind == row.kind && nils_pipeline::files::matches_template(&o.template, &rel)
+                let n = o.template.split('/').count();
+                o.kind == row.kind
+                    && parts.len() >= n
+                    && nils_pipeline::files::matches_template(
+                        &o.template,
+                        &parts[parts.len() - n..].join("/"),
+                    )
             })
             .map(|o| Typed {
                 kind: o.kind.clone(),

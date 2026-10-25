@@ -6,10 +6,11 @@
 # verdict carries. The engine's contracts test plans each case against the
 # shipped descriptors and packs and holds the plan to it, 100 %.
 #
-# `stubs` are descriptors the catalog does not ship yet, so a case can name
-# them: the registration family's aligned FLAIR (section 7) as its member
-# would declare it, and a T1w image for the wrong-contrast case. A step
-# naming a family is refused by the plan until the catalog holds it.
+# `stubs` are descriptors a case names outside the shipped folders: a
+# registration member's aligned FLAIR (section 7) as the family's members
+# declare it, and a T1w image for the wrong-contrast case. A step naming a
+# family is refused by the plan where the catalog does not hold it; this
+# test plans without a catalog, so its family case is the refusal.
 stubs:
   registration-stub: |
     name: registration-stub
@@ -48,6 +49,18 @@ cases:
         - {from: register.aligned_flair, to: samseg.flair}
     expect:
       - {link: "register.aligned_flair -> samseg.flair", verdict: satisfied, words: "aligned(flair, t1w)"}
+  - name: the aligned FLAIR fed into SAMSEG's typed input meets aligned
+    workflow:
+      nils_workflow: 1
+      name: case-fed-aligned
+      steps:
+        - {id: register, pipeline: registration-stub}
+        - {id: samseg, pipeline: samseg-lesions, switches: {lesions: "on"}}
+      links:
+        - {from: register.aligned_flair, to: samseg.aligned_flair}
+    expect:
+      - {link: "register.aligned_flair -> samseg.aligned_flair", verdict: fed, words: "samseg.aligned_flair is fed by register"}
+      - {link: "register.aligned_flair -> samseg.aligned_flair", verdict: fed, words: "aligned(flair, t1w)"}
   - name: SAMSEG with lesions and no registration is missing, accepted with the header check on
     workflow:
       nils_workflow: 1

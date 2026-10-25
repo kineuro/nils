@@ -12,9 +12,11 @@
 use std::collections::BTreeMap;
 
 use serde::Serialize;
+use std::collections::BTreeSet;
+
 use serde_json::{Map, Value, json};
 
-use crate::descriptor::Descriptor;
+use crate::descriptor::{Descriptor, Output, TypedInput};
 use crate::pack::PipelinePack;
 
 /// The file a workflow folder holds.
@@ -403,16 +405,103 @@ impl Workflow {
 }
 
 /// One step as the catalog answers it for a plan: its pipeline's descriptor
-/// and pack where the catalog holds them, else why the step is refused (a
-/// family the catalog does not hold, a pipeline it does not hold).
+/// and pack where the catalog holds them, every member's descriptor where
+/// the step is a family (Wave 7b section 7), else why the step is refused
+/// (a family the catalog does not hold, a pipeline it does not hold).
 #[derive(Debug, Clone)]
 pub struct Member<'a> {
     pub step: &'a Step,
-    /// `name@version` as resolved, or the step's reference where refused.
+    /// `name@version` as resolved, `family <name>` for a family, or the
+    /// step's reference where refused.
     pub label: String,
-    pub descriptor: Option<&'a Descriptor>,
+    /// The descriptors the step resolves to: a pipeline's one, or each
+    /// member's where the step is a family, whose typed outputs are the
+    /// sources of the links out of it and whose roles and typed inputs the
+    /// links into it feed. Empty where the step is refused.
+    pub descriptors: Vec<&'a Descriptor>,
+    /// The pipeline's pack; a family has none of its own (its members'
+    /// packs judge each member's run).
     pub pack: Option<&'a PipelinePack>,
     pub refusal: Option<String>,
+}
+
+impl<'a> Member<'a> {
+    /// The one descriptor of a pipeline step, or a family's first member's.
+    fn descriptor(&self) -> Option<&'a Descriptor> {
+        self.descriptors.first().copied()
+    }
+
+    /// The output a link reads from the step: declared by its pipeline, or
+    /// by the family's members, which must type it alike. `Err` says what
+    /// the step declares instead, or which members type it differently.
+    fn output(&self, id: &str) -> Result<&'a Output, String> {
+        let declared: Vec<(&Descriptor, &Output)> = self
+            .descriptors
+            .iter()
+            .filter_map(|d| d.outputs.iter().find(|o| o.id == id).map(|o| (*d, o)))
+            .collect();
+        let Some((first_of, first)) = declared.first() else {
+            let ids: BTreeSet<&str> = self
+                .descriptors
+                .iter()
+                .flat_map(|d| d.outputs.iter().map(|o| o.id.as_str()))
+                .collect();
+            return Err(format!(
+                "declares no output {id}; it declares {}",
+                ids.into_iter().collect::<Vec<_>>().join(", ")
+            ));
+        };
+        if let Some((d, o)) = declared.iter().find(|(_, o)| o.typing() != first.typing()) {
+            return Err(format!(
+                "the members type the output {id} differently: {} declares {}, {} {}",
+                first_of.name,
+                type_words(&first.typing()),
+                d.name,
+                type_words(&o.typing())
+            ));
+        }
+        Ok(first)
+    }
+
+    /// The typed input of this id, of the pipeline or of the first member
+    /// declaring it.
+    fn input(&self, id: &str) -> Option<&'a TypedInput> {
+        self.descriptors
+            .iter()
+            .find_map(|d| d.inputs.iter().find(|t| t.id == id))
+    }
+
+    fn has_role(&self, role: &str) -> bool {
+        self.descriptors
+            .iter()
+            .any(|d| d.roles.iter().any(|r| r == role))
+    }
+
+    /// The roles the step reads, each once, in the order declared.
+    fn roles(&self) -> Vec<&'a str> {
+        let mut out: Vec<&str> = Vec::new();
+        for d in &self.descriptors {
+            for r in &d.roles {
+                if !out.contains(&r.as_str()) {
+                    out.push(r);
+                }
+            }
+        }
+        out
+    }
+
+    /// The typed inputs the step takes, each id once.
+    fn inputs(&self) -> Vec<&'a TypedInput> {
+        let mut out: Vec<&TypedInput> = Vec::new();
+        for d in &self.descriptors {
+            for t in &d.inputs {
+                if !out.iter().any(|x| x.id == t.id) {
+                    out.push(t);
+                }
+            }
+        }
+        out
+    }
 }
 
 /// One link's verdict (section 8.3, G12).
@@ -523,7 +612,7 @@ fn header_alignment_check(pack: &PipelinePack) -> Option<&crate::pack::Check> {
 /// still set them per session.
 fn carries(m: &Member<'_>) -> String {
     let mut words = m.label.clone();
-    if let (Some(d), Some(p)) = (m.descriptor, m.pack) {
+    if let (Some(d), Some(p)) = (m.descriptor(), m.pack) {
         let defaults = d.resolve(&[]).unwrap_or_default();
         let knobs: Vec<String> = p
             .breaking_knobs()
@@ -600,26 +689,19 @@ pub fn plan_links(w: &Workflow, members: &[Member<'_>]) -> Vec<Verdict> {
             ));
             continue;
         }
-        let (Some(fd), Some(td)) = (from.descriptor, to.descriptor) else {
+        if from.descriptors.is_empty() || to.descriptors.is_empty() {
             continue;
-        };
-        let Some(output) = fd.outputs.iter().find(|o| o.id == l.output) else {
-            out.push(refused(
-                format!(
-                    "{} ({}) declares no output {}; it declares {}",
-                    l.from_step,
-                    from.label,
-                    l.output,
-                    fd.outputs
-                        .iter()
-                        .map(|o| o.id.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ),
-                from_doc,
-                to_doc,
-            ));
-            continue;
+        }
+        let output = match from.output(&l.output) {
+            Ok(o) => o,
+            Err(e) => {
+                out.push(refused(
+                    format!("{} ({}) {e}", l.from_step, from.label),
+                    from_doc,
+                    to_doc,
+                ));
+                continue;
+            }
         };
         let out_type = output.typing();
         from_doc["type"] = out_type.clone();
@@ -636,7 +718,7 @@ pub fn plan_links(w: &Workflow, members: &[Member<'_>]) -> Vec<Verdict> {
                 })
             })
         });
-        if let Some(input) = td.inputs.iter().find(|t| t.id == l.input) {
+        if let Some(input) = to.input(&l.input) {
             let takes = input.ty.trim_start_matches("derivative:");
             let in_type = json!({
                 "kind": takes, "role": input.role, "contrast": input.contrast, "grid": input.grid,
@@ -702,24 +784,49 @@ pub fn plan_links(w: &Workflow, members: &[Member<'_>]) -> Vec<Verdict> {
                 });
                 continue;
             }
+            // a need the typed input meets once fed: aligned(a, b) where the
+            // input stands for a on b's grid (the registration's aligned
+            // FLAIR into SAMSEG's aligned_flair, Wave 7b section 7)
+            let meets = to.pack.and_then(|tp| {
+                alignment_needs(tp).into_iter().find(|(_, text_, _, _)| {
+                    let roles = aligned_roles(text_);
+                    input
+                        .role
+                        .as_deref()
+                        .is_some_and(|r| roles.iter().any(|x| x == r))
+                        && input
+                            .grid
+                            .as_deref()
+                            .is_none_or(|g| roles.iter().any(|x| x == g))
+                })
+            });
+            let mut words = format!(
+                "{}.{} is fed by {}: the {} key carries {}",
+                l.to_step,
+                l.input,
+                l.from_step,
+                to.label,
+                carries(from)
+            );
+            if let Some((_, text_, need_words, _)) = meets {
+                words.push_str(&format!(
+                    "; {} meets {}'s {}: {need_words}",
+                    type_words(&out_type),
+                    to.label,
+                    text_.trim()
+                ));
+            }
             out.push(Verdict {
                 link,
                 from: from_doc,
                 to: to_doc,
                 verdict: "fed",
-                words: format!(
-                    "{}.{} is fed by {}: the {} key carries {}",
-                    l.to_step,
-                    l.input,
-                    l.from_step,
-                    to.label,
-                    carries(from)
-                ),
+                words,
                 implicit: false,
             });
             continue;
         }
-        if td.roles.iter().any(|r| r == &l.input) {
+        if to.has_role(&l.input) {
             to_doc["type"] = json!({"kind": "image", "role": l.input});
             if !matches!(output.kind.as_str(), "image" | "output") {
                 out.push(refused(
@@ -799,21 +906,23 @@ pub fn plan_links(w: &Workflow, members: &[Member<'_>]) -> Vec<Verdict> {
             });
             continue;
         }
+        let roles = to.roles();
+        let inputs = to.inputs();
         out.push(refused(
             format!(
                 "{} ({}) has no input {}: its roles are {} and its typed inputs {}",
                 l.to_step,
                 to.label,
                 l.input,
-                if td.roles.is_empty() {
+                if roles.is_empty() {
                     "none".into()
                 } else {
-                    td.roles.join(", ")
+                    roles.join(", ")
                 },
-                if td.inputs.is_empty() {
+                if inputs.is_empty() {
                     "none".into()
                 } else {
-                    td.inputs
+                    inputs
                         .iter()
                         .map(|t| t.id.as_str())
                         .collect::<Vec<_>>()
@@ -863,16 +972,29 @@ pub fn plan_links(w: &Workflow, members: &[Member<'_>]) -> Vec<Verdict> {
     // what no link feeds: an alignment need met by no step, a typed input
     // fed by no step
     for m in members {
-        let Some(d) = m.descriptor else { continue };
+        if m.descriptors.is_empty() {
+            continue;
+        }
         let into = w.links_into(&m.step.id);
         if let Some(p) = m.pack {
             for (role, text_, need_words, hard) in alignment_needs(p) {
                 let roles = aligned_roles(&text_);
-                if roles.iter().any(|r| into.contains_key(r)) {
+                let moving = roles.first().cloned().unwrap_or(role.clone());
+                // met by a link into the moving role, or into a typed input
+                // that stands for it on the other's grid (aligned_flair)
+                let met = roles.iter().any(|r| into.contains_key(r))
+                    || into.keys().any(|i| {
+                        m.input(i).is_some_and(|t| {
+                            t.role.as_deref() == Some(moving.as_str())
+                                && t.grid
+                                    .as_deref()
+                                    .is_none_or(|g| roles.iter().any(|x| x == g))
+                        })
+                    });
+                if met {
                     continue;
                 }
-                let moving = roles.first().cloned().unwrap_or(role.clone());
-                if !d.roles.contains(&moving) {
+                if !m.has_role(&moving) {
                     continue;
                 }
                 let link = format!("(no step) -> {}.{moving}", m.step.id);
@@ -908,7 +1030,11 @@ pub fn plan_links(w: &Workflow, members: &[Member<'_>]) -> Vec<Verdict> {
                 }
             }
         }
-        for t in d.inputs.iter().filter(|t| t.ty.starts_with("derivative:")) {
+        for t in m
+            .inputs()
+            .into_iter()
+            .filter(|t| t.ty.starts_with("derivative:"))
+        {
             if into.contains_key(&t.id) {
                 continue;
             }

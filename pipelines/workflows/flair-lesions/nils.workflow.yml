@@ -6,12 +6,16 @@
 # the SynthSeg label map as its typed input.
 #
 # The plan checks each link before anything runs (section 8.3): the
-# registration's aligned FLAIR satisfies SAMSEG's and segcsvd's
-# `aligned(flair, t1w)`; SynthSeg's label map feeds segcsvd's synthseg
-# input, and the plan names which SynthSeg (version, robust, of the T1w) the
-# segcsvd key carries. Until the registration family is in the catalog the
-# plan refuses the register step by name, and says that SAMSEG with lesions
-# is then accepted only with its header-alignment check on.
+# registration's aligned FLAIR (the members' typed output flair_aligned:
+# kind image, role flair, contrast FLAIR, on the t1w grid) feeds SAMSEG's
+# and segcsvd's typed input aligned_flair, which each reads in place of
+# the header resampling, and so meets their `aligned(flair, t1w)`;
+# SynthSeg's label map feeds segcsvd's synthseg input, and the plan names
+# which SynthSeg (version, robust, of the T1w) the segcsvd key carries.
+# The register step runs the family's within_session task over the scope;
+# a site whose catalog does not hold the registration family has the step
+# refused by name, and SAMSEG with lesions is then accepted only with its
+# header-alignment check on.
 nils_workflow: 1
 name: flair-lesions
 title: FLAIR lesions
@@ -21,6 +25,7 @@ steps:
     family: registration
     version: current
     goal: standard
+    switches: {task: within_session}
   - id: samseg
     pipeline: samseg-lesions
     version: current
@@ -36,6 +41,6 @@ steps:
     goal: standard
     knobs: [wmh_threshold, pvs_threshold]
 links:
-  - {from: register.aligned_flair, to: samseg.flair}
-  - {from: register.aligned_flair, to: segcsvd.flair}
+  - {from: register.flair_aligned, to: samseg.aligned_flair}
+  - {from: register.flair_aligned, to: segcsvd.aligned_flair}
   - {from: synthseg.labels, to: segcsvd.synthseg}

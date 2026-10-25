@@ -1521,7 +1521,7 @@ fn the_workflow_contract_is_the_loader_s_and_the_link_fixtures_plan_as_specified
             .map(|(s, (d, p, r))| workflow::Member {
                 step: s,
                 label: format!("{}@1", s.name),
-                descriptor: d.as_ref(),
+                descriptors: d.iter().collect(),
                 pack: p.as_ref(),
                 refusal: r.clone(),
             })

@@ -668,6 +668,16 @@ pub(crate) fn run(
             per_member.entry(m.clone()).or_default().push(u);
         }
     }
+    // Wave 7b A7: a workflow step is one run, so under a chain the units
+    // must route to one member; several members are refused in words
+    if args.chain.is_some() && per_member.len() > 1 {
+        return Err(usage(format!(
+            "family {}: a workflow step is one run, and this scope routes its units to {} members ({}); plan the workflow over a selection whose units route to one member, or run the family on its own",
+            s.name,
+            per_member.len(),
+            per_member.keys().cloned().collect::<Vec<_>>().join(", ")
+        )));
+    }
     for (member, list) in per_member {
         let Some(m) = f.members.get(&member) else {
             continue;
@@ -724,7 +734,9 @@ pub(crate) fn run(
             handle: Some(h),
             switches,
             family: Some(route),
-            chain: None,
+            // the chain, where a workflow step runs the family, is the
+            // member run's: it records itself on the step and binds the
+            // links
             ..args.clone()
         };
         crate::pipelines::run_command(home, member_args)?;

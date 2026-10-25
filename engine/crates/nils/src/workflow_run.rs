@@ -263,12 +263,14 @@ pub(crate) fn start_with(
         .iter()
         .zip(&resolved)
         .map(|(s, r)| {
-            let Some(desc) = r.descriptor.as_ref() else {
-                return Vec::new();
-            };
+            let descs = r.descriptors();
             let mut out = Vec::new();
             for l in d.links.iter().filter(|l| l.to_step == s.id) {
-                if desc.inputs.iter().any(|t| t.id == l.input) && !out.contains(&l.from_step) {
+                if descs
+                    .iter()
+                    .any(|desc| desc.inputs.iter().any(|t| t.id == l.input))
+                    && !out.contains(&l.from_step)
+                {
                     out.push(l.from_step.clone());
                 }
             }
@@ -283,8 +285,9 @@ pub(crate) fn start_with(
         .map(|(i, (s, r))| {
             json!({
                 "step": i, "id": s.id, "of": s.of, "name": s.name, "reference": s.reference(),
-                "pipeline": r.pipeline.as_ref().map(|p| p.label()),
+                "pipeline": r.run_label(),
                 "pipeline_id": r.pipeline.as_ref().map(|p| p.id),
+                "family": r.family.as_ref().map(|(f, _)| f.name.clone()),
                 "waits_for": d.fed_by(&s.id), "waits_whole": fed_whole[i],
                 "goal": s.goal.clone().or_else(|| person.goal.clone()), "switches": s.switches,
             })
@@ -319,9 +322,14 @@ pub(crate) fn start_with(
             .iter()
             .filter(|l| l.to_step == s.id)
             .filter_map(|l| {
-                let desc = resolved[i].descriptor.as_ref()?;
-                let role = desc.roles.contains(&l.input);
-                let typed = desc.inputs.iter().any(|t| t.id == l.input);
+                let descs = resolved[i].descriptors();
+                if descs.is_empty() {
+                    return None;
+                }
+                let role = descs.iter().any(|desc| desc.roles.contains(&l.input));
+                let typed = descs
+                    .iter()
+                    .any(|desc| desc.inputs.iter().any(|t| t.id == l.input));
                 let from_step = position(&l.from_step)?;
                 (role || typed).then(|| StepLink {
                     from_step,
@@ -337,7 +345,7 @@ pub(crate) fn start_with(
             workflow_run: id,
             step: i,
             s: s.clone(),
-            label: resolved[i].pipeline.as_ref().map(|p| p.label()),
+            label: resolved[i].run_label(),
             params: params[i].clone(),
             goal: s.goal.clone().or_else(|| person.goal.clone()),
             waits_for: d.fed_by(&s.id).iter().filter_map(|q| position(q)).collect(),
