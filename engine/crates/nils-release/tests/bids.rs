@@ -1815,6 +1815,9 @@ struct Twin<'a> {
     thickness: &'a str,
     /// What the file says about burned-in annotation.
     burned_in: &'a str,
+    /// ImageType, whose third value says which part of the complex signal
+    /// the image is (`M`, `P`).
+    image_type: &'a str,
 }
 
 fn twin<'a>(description: &'a str, protocol: &'a str) -> Twin<'a> {
@@ -1826,6 +1829,7 @@ fn twin<'a>(description: &'a str, protocol: &'a str) -> Twin<'a> {
         sagittal_at: None,
         thickness: "1.0",
         burned_in: "NO",
+        image_type: "ORIGINAL\\PRIMARY\\M\\ND",
     }
 }
 
@@ -1858,7 +1862,7 @@ fn scans(series: &[Twin]) -> TempDir {
                 synth::text(tags::SERIES_DESCRIPTION, VR::LO, t.description),
                 synth::text(tags::PROTOCOL_NAME, VR::LO, t.protocol),
                 synth::text(tags::MR_ACQUISITION_TYPE, VR::CS, "3D"),
-                synth::text(tags::IMAGE_TYPE, VR::CS, "ORIGINAL\\PRIMARY\\M\\ND"),
+                synth::text(tags::IMAGE_TYPE, VR::CS, t.image_type),
                 synth::text(tags::MANUFACTURER, VR::LO, "SYNTHETIC"),
                 synth::text(tags::BURNED_IN_ANNOTATION, VR::CS, t.burned_in),
                 synth::text(tags::ECHO_TIME, VR::DS, "3"),
@@ -2094,6 +2098,95 @@ fn two_stations_that_differ_only_in_position_are_two_acquisitions() {
         ..upper
     };
     numbered_with(upper, lower, serde_json::json!(["where it sits"]), false);
+}
+
+#[test]
+fn a_phase_image_is_named_part_phase_after_its_magnitude() {
+    // Wave 7b (agenda 3.8, a partner site's finding): the pack gives a phase
+    // image no base, so nothing it says names a BIDS suffix, and it went
+    // nowhere. Named after the magnitude image of its acquisition (same
+    // session, same protocol, same echo) it is `part-phase` under that
+    // suffix, and the magnitude takes `part-mag` beside it; the report counts
+    // the name decided. A phase with no magnitude keeps its reason.
+    let Some(converter) = converter() else { return };
+    let magnitude = twin("t1_mprage_sag", "T1 MPRAGE");
+    let phase = Twin {
+        image_type: "ORIGINAL\\PRIMARY\\P\\ND",
+        ..magnitude
+    };
+    let source = twins(magnitude, phase);
+    let home_dir = TempDir::new("bids-home");
+    let out = TempDir::new("bids-out");
+    let (mut reg, report) = released(&source, &home_dir, &out, &converter);
+    let names = anat_names(out.path());
+    assert_eq!(names.len(), 2, "{names:?} {report:?}");
+    assert!(
+        names.iter().any(|n| n.ends_with("_part-mag_T1w.nii.gz")),
+        "{names:?}"
+    );
+    assert!(
+        names.iter().any(|n| n.ends_with("_part-phase_T1w.nii.gz")),
+        "{names:?}"
+    );
+    // BIDS requires Units of a phase image; the pixels are as stored
+    let phase_name = names
+        .iter()
+        .find(|n| n.ends_with("_part-phase_T1w.nii.gz"))
+        .unwrap();
+    let sidecar = out.path().join(phase_name.replace(".nii.gz", ".json"));
+    let sidecar: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&sidecar).unwrap()).unwrap();
+    assert_eq!(sidecar["Units"], "arbitrary", "{sidecar}");
+    assert_eq!(report.part_phase, 1, "{report:?}");
+    assert_eq!(report.routes.get("nowhere"), None, "{report:?}");
+    assert_eq!(report.shared_names, 0, "{report:?}");
+    assert!(shared_differs(&mut reg).is_empty(), "nobody is asked");
+
+    // a version that takes the magnitude without its phase leaves it its
+    // plain name; the phase, taken alone, is still named after it
+    let ids: Vec<i64> = {
+        let store = reg.store();
+        let sql = format!(
+            "SELECT stack_id FROM {} ORDER BY stack_id",
+            store.qualified("stack_fingerprint")
+        );
+        store
+            .query(&sql, &[])
+            .unwrap()
+            .iter()
+            .map(|r| r.int(0).unwrap())
+            .collect()
+    };
+    let mut singles: Vec<String> = Vec::new();
+    for id in ids {
+        let one = TempDir::new("bids-out-single");
+        released_stacks(&mut reg, &converter, &one, vec![id]);
+        let got = anat_names(one.path());
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert!(!got[0].contains("_part-mag_"), "{got:?}");
+        singles.extend(got);
+    }
+    assert!(
+        singles
+            .iter()
+            .any(|n| n.ends_with("_part-phase_T1w.nii.gz")),
+        "{singles:?}"
+    );
+    assert!(
+        singles
+            .iter()
+            .any(|n| n.ends_with("_T1w.nii.gz") && !n.contains("_part-")),
+        "{singles:?}"
+    );
+
+    // alone, a phase image has no suffix and goes where it went
+    let alone = scans(&[phase]);
+    let home_dir = TempDir::new("bids-home-alone");
+    let out = TempDir::new("bids-out-alone");
+    let (_, report) = released(&alone, &home_dir, &out, &converter);
+    assert!(anat_names(out.path()).is_empty(), "{report:?}");
+    assert_eq!(report.part_phase, 0, "{report:?}");
+    assert_eq!(report.routes.get("nowhere"), Some(&1), "{report:?}");
 }
 
 #[test]

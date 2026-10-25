@@ -6,6 +6,13 @@ name: engine-build
 # two can never drift. Each target is built on its own kind of machine except the
 # Intel Mac, which is built on Apple silicon in half the time and runs there under
 # Rosetta. A failing target is a finding on its own; the matrix never stops early.
+#
+# The two Linux binaries are static (musl): a binary built against the runner's
+# glibc 2.39 refused to start on an enterprise Linux 9 cluster (glibc 2.34), so a
+# site had to run it in a container. Every C dependency is compiled from source
+# (ring, the bundled SQLite, openjpeg) with musl-gcc; nothing links a system
+# library. The binary is then run inside a Rocky Linux 9 container, which is the
+# glibc claim tested rather than stated. The artifact names do not change.
 on:
   workflow_call:
 
@@ -21,12 +28,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { target: linux-x86_64, runner: ubuntu-latest, exe: "", triple: "" }
-          - { target: linux-arm64, runner: ubuntu-24.04-arm, exe: "", triple: "" }
-          - { target: macos-x86_64, runner: macos-latest, exe: "", triple: x86_64-apple-darwin }
-          - { target: macos-arm64, runner: macos-latest, exe: "", triple: "" }
-          - { target: windows-x86_64, runner: windows-latest, exe: ".exe", triple: "" }
-          - { target: windows-arm64, runner: windows-11-arm, exe: ".exe", triple: "" }
+          - { target: linux-x86_64, runner: ubuntu-latest, exe: "", triple: x86_64-unknown-linux-musl, static: true }
+          - { target: linux-arm64, runner: ubuntu-24.04-arm, exe: "", triple: aarch64-unknown-linux-musl, static: true }
+          - { target: macos-x86_64, runner: macos-latest, exe: "", triple: x86_64-apple-darwin, static: false }
+          - { target: macos-arm64, runner: macos-latest, exe: "", triple: "", static: false }
+          - { target: windows-x86_64, runner: windows-latest, exe: ".exe", triple: "", static: false }
+          - { target: windows-arm64, runner: windows-11-arm, exe: ".exe", triple: "", static: false }
     defaults:
       run:
         shell: bash
@@ -39,6 +46,20 @@ jobs:
         with:
           toolchain: ${{ steps.toolchain.outputs.channel }}
           targets: ${{ matrix.triple }}
+      - name: the musl C toolchain
+        if: matrix.static
+        # musl-tools gives the musl headers and `musl-gcc` for the runner's own
+        # architecture, which is the one built here (each Linux target runs on its
+        # own kind of machine, so neither build is a cross build). The cc crate
+        # looks for `<arch>-linux-musl-gcc`, which the package does not name, so
+        # the compiler and the archiver are told to it for this target alone.
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q musl-tools
+          musl-gcc --version | head -1
+          triple_env=$(echo "${{ matrix.triple }}" | tr '-' '_')
+          echo "CC_${triple_env}=musl-gcc" >> "$GITHUB_ENV"
+          echo "AR_${triple_env}=ar" >> "$GITHUB_ENV"
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: engine
@@ -54,6 +75,8 @@ jobs:
           run=""
           if [ -n "${{ matrix.triple }}" ]; then
             built=target/${{ matrix.triple }}/release
+          fi
+          if [ "${{ matrix.target }}" = macos-x86_64 ]; then
             # an Intel binary on Apple silicon runs under Rosetta, installed where the image lacks it
             arch -x86_64 /usr/bin/true 2>/dev/null || sudo softwareupdate --install-rosetta --agree-to-license > /dev/null
             run="arch -x86_64"
@@ -61,6 +84,36 @@ jobs:
           $run ./$built/nils${{ matrix.exe }} --version
           mkdir -p ../bin
           cp ./$built/nils${{ matrix.exe }} ../bin/nils-${{ matrix.target }}${{ matrix.exe }}
+      - name: the binary is static
+        if: matrix.static
+        # Rust's musl targets build static-pie executables, which glibc's `ldd`
+        # reports as "statically linked" with exit 0, so `ldd` cannot tell. A
+        # dynamic executable names a program interpreter; a static one has none.
+        run: |
+          file bin/nils-${{ matrix.target }}
+          if readelf -l bin/nils-${{ matrix.target }} | grep -q INTERP; then
+            echo "nils-${{ matrix.target }} names an interpreter, so it is dynamically linked" >&2
+            exit 1
+          fi
+      - name: runs on Rocky Linux 9
+        if: matrix.static
+        # The claim the static build makes, tested where it was first refused: an
+        # enterprise Linux 9 userland with glibc 2.34 and nothing installed. The
+        # version, then one read-only command that loads the shipped MRI pack and
+        # runs its own corpus, so the binary does more than print a string. The
+        # image for the runner's own architecture is pulled, so the arm64 binary
+        # is tested on arm64 too.
+        run: |
+          docker run --rm --pull always \
+            -v "$PWD/bin:/nils:ro" -v "$PWD/packs:/packs:ro" \
+            -e HOME=/tmp/home -e XDG_CONFIG_HOME=/tmp/config \
+            rockylinux/rockylinux:9 bash -ec '
+              rpm -q glibc
+              /nils/nils-${{ matrix.target }} --version
+              mkdir -p /tmp/home /tmp/config
+              cd /tmp
+              /nils/nils-${{ matrix.target }} pack validate /packs/mri
+            '
       - uses: actions/upload-artifact@v7
         with:
           name: nils-${{ matrix.target }}

@@ -2200,6 +2200,11 @@ pub(crate) struct AcceptRequest {
 /// site file given with it, the file's sha256; its content is written under
 /// `licences/<app>/`, readable by the engine's account alone, and never
 /// recorded. Audited as `software.accept`.
+///
+/// Wave 7b (agenda 3.8, from the desk): a call that brings only the file (and
+/// its name) to a package whose terms are accepted already places the file
+/// and records no new acceptance; the acceptance that stands is answered,
+/// with `recorded: false`. A call with terms or a note records as before.
 pub(crate) fn accept(registry: &mut Registry, req: AcceptRequest) -> Result<Value, Refused> {
     let (app, version) = (req.app.clone(), req.version.clone());
     if !layout::name_ok(&app) || !layout::name_ok(&version) {
@@ -2211,10 +2216,26 @@ pub(crate) fn accept(registry: &mut Registry, req: AcceptRequest) -> Result<Valu
     let place = place_made(registry).map_err(|e| refused(409, e))?;
     let l = place.layout();
     let licence = pack_copy(&l, &app, &version).and_then(|(_, s, _)| s.licence);
-    let address = req
-        .terms_address
-        .clone()
-        .or_else(|| licence.as_ref().and_then(|k| k.terms_address.clone()));
+    // the file alone, to a package accepted already: the acceptance that
+    // stands is kept and answered, and only the file is placed
+    let file_only = req.file.is_some()
+        && req.terms_address.is_none()
+        && req.terms_version.is_none()
+        && req.note.is_none();
+    let existing = match file_only {
+        true => acceptances(registry.store(), &app)
+            .map_err(|e| refused(500, e))?
+            .into_iter()
+            .find(|a| a.version == version),
+        false => None,
+    };
+    let address = match &existing {
+        Some(a) => Some(a.terms_address.clone()),
+        None => req
+            .terms_address
+            .clone()
+            .or_else(|| licence.as_ref().and_then(|k| k.terms_address.clone())),
+    };
     let Some(address) = address.filter(|a| !a.trim().is_empty()) else {
         return Err(refused(
             422,
@@ -2224,13 +2245,17 @@ pub(crate) fn accept(registry: &mut Registry, req: AcceptRequest) -> Result<Valu
             ),
         ));
     };
-    let terms_version = req
-        .terms_version
-        .clone()
-        .or_else(|| licence.as_ref().and_then(|k| k.terms_version.clone()));
+    let terms_version = match &existing {
+        Some(a) => a.terms_version.clone(),
+        None => req
+            .terms_version
+            .clone()
+            .or_else(|| licence.as_ref().and_then(|k| k.terms_version.clone())),
+    };
     // the site file, placed
     let mut file_sha256 = None;
     let mut file_name = None;
+    let mut replaced: Vec<(String, Option<String>)> = Vec::new();
     if let Some(bytes) = &req.file {
         if bytes.is_empty() || bytes.len() as u64 > nils_pipeline::secrets::MAX_BYTES {
             return Err(refused(
@@ -2267,6 +2292,21 @@ pub(crate) fn accept(registry: &mut Registry, req: AcceptRequest) -> Result<Valu
             let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
         }
         let path = dir.join(&name);
+        // the files there now, named in the audit row once they are replaced
+        let before: Vec<(String, Option<String>)> = std::fs::read_dir(&dir)
+            .map(|rd| {
+                rd.flatten()
+                    .filter(|e| std::fs::symlink_metadata(e.path()).is_ok_and(|m| m.is_file()))
+                    .filter(|e| !e.file_name().to_string_lossy().starts_with('.'))
+                    .map(|e| {
+                        let sha = nils_pipeline::files::sha256_file(&e.path())
+                            .ok()
+                            .map(|(_, hex)| format!("sha256:{hex}"));
+                        (e.file_name().to_string_lossy().into_owned(), sha)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         let part = dir.join(format!(".{name}.part"));
         let _ = std::fs::remove_file(&part);
         nils_pipeline::files::write_new(&part, bytes)
@@ -2278,6 +2318,14 @@ pub(crate) fn accept(registry: &mut Registry, req: AcceptRequest) -> Result<Valu
         }
         std::fs::rename(&part, &path)
             .map_err(|e| refused(500, format!("{}: {e}", path.display())))?;
+        // a renewal under a new name leaves one file, not two: the pre-flight
+        // finds a licence file only where exactly one is there
+        for (old, _) in &before {
+            if *old != name {
+                let _ = std::fs::remove_file(dir.join(old));
+            }
+        }
+        replaced = before;
         file_sha256 = Some(nils_pipeline::sha256(bytes));
         file_name = Some(name);
     } else if let Some(existing) = licence_file(&l, &app, licence.as_ref()) {
@@ -2288,6 +2336,53 @@ pub(crate) fn accept(registry: &mut Registry, req: AcceptRequest) -> Result<Valu
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned());
         }
+    }
+    if let Some(a) = existing {
+        // the standing acceptance names the file now on disk
+        let mut a = a;
+        if req.file.is_some() {
+            let sets = [
+                (
+                    "file_sha256",
+                    file_sha256.as_deref().map_or(Param::Null, Param::from),
+                ),
+                (
+                    "file_name",
+                    file_name.as_deref().map_or(Param::Null, Param::from),
+                ),
+            ];
+            registry
+                .store()
+                .update_by_id(table("software_acceptance"), &sets, "id", a.id)
+                .map_err(|e| refused(500, e.to_string()))?;
+            a.file_sha256.clone_from(&file_sha256);
+            a.file_name.clone_from(&file_name);
+        }
+        let replaced_doc: Vec<Value> = replaced
+            .iter()
+            .map(|(n, h)| json!({"name": n, "sha256": h}))
+            .collect();
+        let _ = nils_registry::audit::record(
+            registry,
+            &nils_registry::audit::Entry {
+                principal: &req.principal,
+                action: nils_registry::audit::Action::SoftwareAccept,
+                scope: json!({"app": app, "version": version}),
+                policy: None,
+                job_id: None,
+                details: Some(json!({
+                    "recorded": false, "acceptance": a.id,
+                    "file_sha256": file_sha256, "file_name": file_name,
+                    "replaced": replaced_doc,
+                })),
+            },
+        );
+        return Ok(json!({
+            "accepted": true,
+            "recorded": false,
+            "acceptance": a.doc(),
+            "file": file_sha256.as_ref().map(|s| json!({"sha256": s, "name": file_name, "under": l.licences(&app).display().to_string()})),
+        }));
     }
     let a = record_acceptance(
         registry.store(),
@@ -2320,6 +2415,7 @@ pub(crate) fn accept(registry: &mut Registry, req: AcceptRequest) -> Result<Valu
     );
     Ok(json!({
         "accepted": true,
+        "recorded": true,
         "acceptance": a.doc(),
         "file": file_sha256.as_ref().map(|s| json!({"sha256": s, "name": file_name, "under": l.licences(&app).display().to_string()})),
     }))
@@ -2696,7 +2792,8 @@ pub(crate) enum SoftwareCommand {
         /// <app>@<version>
         spec: String,
         /// The site's licence file, placed under licences/<app>/ and hashed;
-        /// its content is never recorded
+        /// its content is never recorded. Alone, on a package whose terms
+        /// are accepted already, it places the file and records nothing new
         #[arg(long, value_name = "FILE")]
         file: Option<PathBuf>,
         /// The terms' address, where the pack names none
@@ -3015,13 +3112,23 @@ pub(crate) fn command(
                 print(&done);
             } else {
                 let a = &done["acceptance"];
-                println!(
-                    "accepted the terms of {} at {} by {} on {}",
-                    a["app"].as_str().unwrap_or_default(),
-                    a["terms"]["address"].as_str().unwrap_or_default(),
-                    a["by"].as_str().unwrap_or_default(),
-                    a["at"].as_str().unwrap_or_default()
-                );
+                if done["recorded"] == false {
+                    println!(
+                        "the terms of {} at {} were accepted by {} on {} already; nothing new recorded",
+                        a["app"].as_str().unwrap_or_default(),
+                        a["terms"]["address"].as_str().unwrap_or_default(),
+                        a["by"].as_str().unwrap_or_default(),
+                        a["at"].as_str().unwrap_or_default()
+                    );
+                } else {
+                    println!(
+                        "accepted the terms of {} at {} by {} on {}",
+                        a["app"].as_str().unwrap_or_default(),
+                        a["terms"]["address"].as_str().unwrap_or_default(),
+                        a["by"].as_str().unwrap_or_default(),
+                        a["at"].as_str().unwrap_or_default()
+                    );
+                }
                 if let Some(f) = done["file"].as_object() {
                     println!(
                         "licence file {} placed under {}, sha256 {}",

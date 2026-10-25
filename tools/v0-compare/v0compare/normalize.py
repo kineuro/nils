@@ -40,14 +40,14 @@ CREATE OR REPLACE MACRO norm_list(v) AS
         WHEN regexp_matches(v, '^\[.*\]$')
             THEN list_transform(
                 regexp_split_to_array(v[2:-2], ',\s*'),
-                x -> trim(x, ' ' || chr(39) || chr(34)))
+                lambda x: trim(x, ' ' || chr(39) || chr(34)))
         ELSE string_split(v, '\')
     END;
 
 CREATE OR REPLACE MACRO norm_text(v) AS
     NULLIF(
         array_to_string(
-            list_transform(norm_list(v), x -> canon_token(trim(x, ' ' || chr(0)))),
+            list_transform(norm_list(v), lambda x: canon_token(trim(x, ' ' || chr(0)))),
             '\'),
         '');
 

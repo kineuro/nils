@@ -203,12 +203,44 @@ fn entities(stem: &str) -> Vec<(&str, &str)> {
 /// written, a readout time not stated, a T1w of more than three dimensions.
 /// `files` are what the conversion wrote, in `dir`. Empty when nothing lacks.
 pub fn gaps(datatype: &str, stem: &str, dir: &Path, files: &[String]) -> Vec<String> {
-    let suffix = stem.rsplit('_').next().unwrap_or(stem);
-    let entities = entities(stem);
-    let sidecar: Value = std::fs::read(dir.join(format!("{stem}.json")))
+    gaps_in(datatype, stem, &read(dir, stem), dir, files)
+}
+
+/// The sidecar of `stem` in `dir`, parsed; null where there is none.
+pub fn read(dir: &Path, stem: &str) -> Value {
+    std::fs::read(dir.join(format!("{stem}.json")))
         .ok()
         .and_then(|b| serde_json::from_slice(&b).ok())
-        .unwrap_or(Value::Null);
+        .unwrap_or(Value::Null)
+}
+
+/// The fields the release states where the converter wrote none, for the
+/// name `stem` and the sidecar as read: `Units` of a phase image
+/// (`part-phase`) is `arbitrary`, since the pixels are written as stored.
+/// A field the sidecar states already is kept.
+pub fn defaults(stem: &str, sidecar: &Value) -> Vec<(&'static str, Value)> {
+    let has = |field: &str| sidecar.get(field).is_some_and(|v| !v.is_null());
+    let mut fills = Vec::new();
+    if entities(stem)
+        .iter()
+        .any(|(k, v)| *k == "part" && *v == "phase")
+        && !has("Units")
+    {
+        fills.push(("Units", Value::from("arbitrary")));
+    }
+    fills
+}
+
+/// [`gaps`] over a sidecar already read (and filled by [`defaults`]).
+pub fn gaps_in(
+    datatype: &str,
+    stem: &str,
+    sidecar: &Value,
+    dir: &Path,
+    files: &[String],
+) -> Vec<String> {
+    let suffix = stem.rsplit('_').next().unwrap_or(stem);
+    let entities = entities(stem);
     let has = |field: &str| sidecar.get(field).is_some_and(|v| !v.is_null());
     let mut lacks: Vec<String> = Vec::new();
     let mut need = |field: &str| {
