@@ -1149,6 +1149,29 @@ pub(crate) fn pipeline_doc_of(store: &mut Store, p: &Pipeline) -> Value {
     doc
 }
 
+/// What the provenance door is asked for a unit: a session unit
+/// (`sub-<code>_ses-<label>`) is `<code>@<label>`, a participant unit
+/// (`sub-<code>`) the code, a stack unit (`stack-<id>`) the stack id; null
+/// for a name of none of these shapes.
+pub(crate) fn unit_provenance(unit: &str) -> Value {
+    if let Some(id) = unit
+        .strip_prefix("stack-")
+        .and_then(|s| s.parse::<i64>().ok())
+    {
+        return json!({"kind": "stack", "id": id});
+    }
+    let Some(rest) = unit.strip_prefix("sub-").filter(|r| !r.is_empty()) else {
+        return Value::Null;
+    };
+    match rest.split_once("_ses-") {
+        Some((code, label)) if !code.is_empty() && !label.is_empty() => {
+            json!({"kind": "session", "id": format!("{code}@{label}")})
+        }
+        Some(_) => Value::Null,
+        None => json!({"kind": "subject", "id": rest}),
+    }
+}
+
 /// A run as `--json` answers it at the keyboard: the row, the pipeline by
 /// its label, the derivatives it made, and each unit with its curation
 /// state.
@@ -1204,6 +1227,8 @@ pub(crate) fn run_doc_at(store: &mut Store, r: &Run, quasi: bool) -> Result<Valu
             .iter()
             .map(|u| json!({
                 "unit": u.unit, "state": u.state, "status": u.outcome["status"],
+                // the unit's provenance target, so a client need not parse names
+                "provenance": unit_provenance(&u.unit),
                 // Wave 7b A7: the run whose kept result the unit reused (section
                 // 8.5), and the curation state of its inputs (record 58 P5)
                 "reused_from": u.reused_from_run,

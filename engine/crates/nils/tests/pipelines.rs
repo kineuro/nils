@@ -1303,6 +1303,50 @@ fn a_bids_run_takes_what_an_earlier_bids_run_made_of_its_sessions() {
         }
     }
 
+    // 2026-10-25: every unit names its provenance target by the subject
+    // code, and the command and the door take that name
+    let shown = lab.json(&["pipeline", "runs", &run.to_string(), "--json"]);
+    let served = lab.serve();
+    for u in shown["units_run"].as_array().unwrap() {
+        let name = u["unit"].as_str().unwrap();
+        let (code, label) = name
+            .strip_prefix("sub-")
+            .unwrap()
+            .split_once("_ses-")
+            .unwrap();
+        assert_eq!(u["provenance"]["kind"], "session", "{u}");
+        let target = format!("{code}@{label}");
+        assert_eq!(u["provenance"]["id"], target, "{u}");
+        let at_command = lab.json(&["provenance", "session", &target, "--json"]);
+        assert!(
+            at_command["steps"].as_array().unwrap().len() >= 2,
+            "{at_command}"
+        );
+        let (status, door) = served.call(
+            "GET",
+            &format!("/api/provenance/session/{code}%40{label}"),
+            None,
+            "a-token-that-sees",
+        );
+        assert_eq!(status, 200, "{door}");
+        assert_eq!(
+            door["steps"].as_array().unwrap().len(),
+            at_command["steps"].as_array().unwrap().len(),
+            "{door}"
+        );
+    }
+    let (status, door) = served.call(
+        "GET",
+        "/api/provenance/subject/ffffffffffffffff",
+        None,
+        "a-token-that-sees",
+    );
+    assert_eq!(status, 404, "{door}");
+    assert!(
+        door.to_string().contains("no subject has the code"),
+        "{door}"
+    );
+
     // only the selection's own sessions and subjects: a file of another
     // day of one of its subjects is never taken, a file of the whole
     // subject is, and a run over one subject's stacks takes nothing of the
@@ -14846,6 +14890,11 @@ fn g6_e5_a_workflow_runs_per_unit_reuses_kept_results_and_answers_provenance() {
         .iter()
         .find(|u| u["unit"] == format!("stack-{rejected_stack}"))
         .unwrap();
+    assert_eq!(
+        unit["provenance"],
+        json!({"kind": "stack", "id": rejected_stack}),
+        "{unit}"
+    );
     assert_eq!(unit["curation"]["state"], "stale", "{unit}");
     assert_eq!(unit["curation"]["words"], words, "{unit}");
     // a caller without the grant is refused; the catalog and the runs are
