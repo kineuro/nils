@@ -640,11 +640,18 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
     // borrowing the sessions of whoever owns the study its series were filed
     // under.
     let with_a_study = subjects_with_a_study(registry.store())?;
+    let in_selection = selected_stacks(registry.store(), &settings.selection, &live)?;
     let Placements {
         by_stack: named,
         mut shared,
         facts,
-    } = places(registry.store(), &by_study, settings.pack, settings.naming)?;
+    } = places(
+        registry.store(),
+        &by_study,
+        settings.pack,
+        settings.naming,
+        Some(&in_selection),
+    )?;
     let named_by = std::mem::take(&mut shared.decided);
     // §9.4 with record 37 S6: where in the body, for the sidecar, by stack.
     // The name carries it too, because two files must not overwrite each
@@ -2246,7 +2253,13 @@ pub fn plan_picked(
     let pixels = pixel_verdicts(registry.store())?;
     let Placements {
         by_stack: named, ..
-    } = places(registry.store(), &by_study, pack, name::Naming::Full)?;
+    } = places(
+        registry.store(),
+        &by_study,
+        pack,
+        name::Naming::Full,
+        Some(&stacks.iter().copied().collect()),
+    )?;
     let planner = Planner {
         layout: Layout::Bids,
         options: crate::bids::place::Options::default(),
@@ -3439,6 +3452,24 @@ fn selection_bytes(store: &mut Store, selection: &Selection, picks: &Picks) -> R
         .unwrap_or(0))
 }
 
+/// The stacks a selection reaches, which a phase image's magnitude is
+/// renamed for (`part-mag`): only a phase the version takes names it so.
+fn selected_stacks(
+    store: &mut Store,
+    selection: &Selection,
+    picks: &Picks,
+) -> Result<std::collections::BTreeSet<i64>, Error> {
+    let filter = selection_where(store, selection, picks);
+    let rows = both_ways(store, "UNION", |from| {
+        format!("SELECT k.id AS c {from} WHERE 1 = 1{filter}")
+    });
+    store
+        .query(&rows, &[])?
+        .iter()
+        .map(|r| r.int(0).map_err(Error::from))
+        .collect()
+}
+
 /// What a selection reaches, counted (Wave 4a §8, `nils select`): the
 /// subjects, studies, stacks and files, and the bytes. Sessions are not
 /// here, because a session is derived under a scheme on read and matched
@@ -3809,22 +3840,21 @@ fn write_bids(
     let made = made.and_then(|made| {
         let datatype = job.place.dir.rsplit('/').next().unwrap_or("");
         let raw = job.place.dir.starts_with("sub-") && job.place.dir.split('/').count() == 3;
-        // Wave 7b (agenda 3.8): BIDS requires `Units` of a phase image, `rad`
-        // or `arbitrary`, and the converter writes none since no header says.
-        // The pixels are written as stored, so they are in arbitrary units;
-        // a sidecar that states its units already is kept.
-        if raw && stem.contains("_part-phase_") {
-            let sidecar = into.join(format!("{stem}.json"));
-            let stated = std::fs::read_to_string(&sidecar)
-                .ok()
-                .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
-                .is_some_and(|d| d.get("Units").is_some_and(|u| !u.is_null()));
-            if !stated {
-                add_to_sidecar(&sidecar, "Units", serde_json::Value::from("arbitrary"));
-            }
-        }
+        // The sidecar is read once: what the release states where the
+        // converter wrote none (`Units` of a phase image, Wave 7b agenda 3.8)
+        // is added, and the gaps are read from the same parse.
         let lacks = match raw {
-            true => crate::bids::sidecar::gaps(datatype, &stem, &into, &made.files),
+            true => {
+                let mut card = crate::bids::sidecar::read(&into, &stem);
+                let sidecar = into.join(format!("{stem}.json"));
+                for (key, value) in crate::bids::sidecar::defaults(&stem, &card) {
+                    add_to_sidecar(&sidecar, key, value.clone());
+                    if let Some(map) = card.as_object_mut() {
+                        map.insert(key.to_string(), value);
+                    }
+                }
+                crate::bids::sidecar::gaps_in(datatype, &stem, &card, &into, &made.files)
+            }
             false => Vec::new(),
         };
         if lacks.is_empty() {
@@ -4596,6 +4626,7 @@ fn places(
     by_study: &HashMap<i64, nils_session::Labelled>,
     pack: &nils_pack::pack::Pack,
     naming: crate::name::Naming,
+    selected: Option<&std::collections::BTreeSet<i64>>,
 ) -> Result<Placements, Error> {
     let axes = axis_values(store)?;
     // record 55, ruling 23: each stack's acquisition family, as the
@@ -4701,6 +4732,9 @@ fn places(
     // named once every stack is read.
     let mut mates: HashMap<i64, Mate> = HashMap::new();
     let mut phases: Vec<(i64, PhaseFacts)> = Vec::new();
+    // the stacks of each subject and session, so a phase image looks among
+    // its own session's stacks and not the registry's
+    let mut by_session: HashMap<(i64, String), Vec<i64>> = HashMap::new();
 
     for r in &rows {
         let stack = r.int(0)?;
@@ -4974,23 +5008,20 @@ fn places(
             true => format!("{label}#derivatives"),
             false => label.clone(),
         };
+        let when: When = (
+            acquired_time.is_none(),
+            acquired_date.clone().unwrap_or_default(),
+            acquired_time.clone().unwrap_or_default(),
+            r.opt_int(54)?.is_none(),
+            r.opt_int(54)?.unwrap_or(0),
+        );
         if let Ok(n) = &built
             && !matches!(get("disposition"), Some("scout" | "working_scan"))
         {
             bids_buckets
-                .entry((subject, bucket_label, n.datatype))
+                .entry((subject, bucket_label.clone(), n.datatype))
                 .or_default()
-                .push((
-                    (
-                        acquired_time.is_none(),
-                        acquired_date.clone().unwrap_or_default(),
-                        acquired_time.clone().unwrap_or_default(),
-                        r.opt_int(54)?.is_none(),
-                        r.opt_int(54)?.unwrap_or(0),
-                    ),
-                    stack,
-                    n.stem("s", "s"),
-                ));
+                .push((when.clone(), stack, n.stem("s", "s")));
         }
         // Wave 7b (agenda 3.8): what a phase image's partner search reads
         let part = pack
@@ -5006,11 +5037,16 @@ fn places(
         {
             phases.push((stack, PhaseFacts::of(&facts)));
         }
+        by_session
+            .entry((subject, label.clone()))
+            .or_default()
+            .push(stack);
         mates.insert(
             stack,
             Mate {
                 subject,
                 label: label.clone(),
+                bucket_label,
                 series: r.int(3)?,
                 series_number: r.opt_int(54)?,
                 echo: facts.echo,
@@ -5024,13 +5060,7 @@ fn places(
                 part,
                 derivative,
                 placed: !matches!(get("disposition"), Some("scout" | "working_scan")),
-                when: (
-                    acquired_time.is_none(),
-                    acquired_date.clone().unwrap_or_default(),
-                    acquired_time.clone().unwrap_or_default(),
-                    r.opt_int(54)?.is_none(),
-                    r.opt_int(54)?.unwrap_or(0),
-                ),
+                when,
             },
         );
         bids.insert(stack, built);
@@ -5085,12 +5115,22 @@ fn places(
         let Some(me) = mates.get(stack) else {
             continue;
         };
+        // a scout or a working scan takes no BIDS name, so it names no partner
+        if !me.placed {
+            continue;
+        }
         let mut candidates: Vec<(i64, i64)> = Vec::new();
-        for (other, m) in &mates {
+        let session = by_session
+            .get(&(me.subject, me.label.clone()))
+            .map_or(&[][..], Vec::as_slice);
+        for other in session {
+            let Some(m) = mates.get(other) else {
+                continue;
+            };
             if other == stack
-                || m.subject != me.subject
-                || m.label != me.label
-                || m.derivative
+                // a derivative pairs only with a derivative, and a raw
+                // image only with a raw image
+                || m.derivative != me.derivative
                 || !m.placed
                 || m.echo != me.echo
                 || m.part.as_deref().is_some_and(|p| p != "mag")
@@ -5143,21 +5183,28 @@ fn places(
         let Some(both) = partner_name.with_part("mag") else {
             continue;
         };
-        if both != partner_name {
+        // the magnitude takes `part-mag` when its phase is in the version; a
+        // phase the version leaves out leaves its magnitude its plain name
+        let in_version = selected.is_none_or(|s| s.contains(stack));
+        if in_version && both != partner_name {
             let stem = both.stem("s", "s");
-            for bucket in bids_buckets.values_mut() {
+            if let Some(m) = mates.get(&partner)
+                && let Some(bucket) = bids_buckets.get_mut(&(
+                    m.subject,
+                    m.bucket_label.clone(),
+                    partner_name.datatype,
+                ))
+            {
                 for entry in bucket.iter_mut().filter(|e| e.1 == partner) {
                     entry.2 = stem.clone();
                 }
             }
             bids.insert(partner, Ok(both));
         }
-        if me.placed {
-            bids_buckets
-                .entry((me.subject, me.label.clone(), named.datatype))
-                .or_default()
-                .push((me.when.clone(), *stack, named.stem("s", "s")));
-        }
+        bids_buckets
+            .entry((me.subject, me.bucket_label.clone(), named.datatype))
+            .or_default()
+            .push((me.when.clone(), *stack, named.stem("s", "s")));
         bids.insert(*stack, Ok(named));
         shared.part_phase.insert(*stack);
     }
@@ -5394,6 +5441,9 @@ struct Mate {
     /// The `part` label the pack gives its constructs, where it gives one.
     part: Option<String>,
     derivative: bool,
+    /// The label its name bucket is under: the session's, with `#derivatives`
+    /// for a derivative.
+    bucket_label: String,
     /// Whether it takes a BIDS name at all: a scout or a working scan does not.
     placed: bool,
     when: When,

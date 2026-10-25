@@ -2142,6 +2142,43 @@ fn a_phase_image_is_named_part_phase_after_its_magnitude() {
     assert_eq!(report.shared_names, 0, "{report:?}");
     assert!(shared_differs(&mut reg).is_empty(), "nobody is asked");
 
+    // a version that takes the magnitude without its phase leaves it its
+    // plain name; the phase, taken alone, is still named after it
+    let ids: Vec<i64> = {
+        let store = reg.store();
+        let sql = format!(
+            "SELECT stack_id FROM {} ORDER BY stack_id",
+            store.qualified("stack_fingerprint")
+        );
+        store
+            .query(&sql, &[])
+            .unwrap()
+            .iter()
+            .map(|r| r.int(0).unwrap())
+            .collect()
+    };
+    let mut singles: Vec<String> = Vec::new();
+    for id in ids {
+        let one = TempDir::new("bids-out-single");
+        released_stacks(&mut reg, &converter, &one, vec![id]);
+        let got = anat_names(one.path());
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert!(!got[0].contains("_part-mag_"), "{got:?}");
+        singles.extend(got);
+    }
+    assert!(
+        singles
+            .iter()
+            .any(|n| n.ends_with("_part-phase_T1w.nii.gz")),
+        "{singles:?}"
+    );
+    assert!(
+        singles
+            .iter()
+            .any(|n| n.ends_with("_T1w.nii.gz") && !n.contains("_part-")),
+        "{singles:?}"
+    );
+
     // alone, a phase image has no suffix and goes where it went
     let alone = scans(&[phase]);
     let home_dir = TempDir::new("bids-home-alone");
