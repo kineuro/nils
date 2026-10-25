@@ -5153,6 +5153,49 @@ fn every_door_needs_its_grant_and_a_refusal_names_it() {
             "reader",
             "pipelines:see",
         ),
+        // Wave 7b A7: the workflow catalog, its plan and its runs are the
+        // Pipelines page's; starting one is pipelines:work; provenance is
+        // read by whoever reads pipelines or data
+        (
+            "GET",
+            "/api/workflows",
+            "",
+            "pipelines-see",
+            "reader",
+            "pipelines:see",
+        ),
+        (
+            "POST",
+            "/api/workflows/1/plan",
+            "{}",
+            "pipelines-see",
+            "reader",
+            "pipelines:see",
+        ),
+        (
+            "POST",
+            "/api/workflows/1/run",
+            "{}",
+            "pipelines-work",
+            "pipelines-see",
+            "pipelines:work",
+        ),
+        (
+            "GET",
+            "/api/workflow-runs",
+            "",
+            "pipelines-see",
+            "reader",
+            "pipelines:see",
+        ),
+        (
+            "GET",
+            "/api/provenance/stack/1",
+            "",
+            "data-see",
+            "query-see",
+            "pipelines:see",
+        ),
         (
             "POST",
             "/api/sessions/rebuild",

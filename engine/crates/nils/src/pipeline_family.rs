@@ -724,6 +724,7 @@ pub(crate) fn run(
             handle: Some(h),
             switches,
             family: Some(route),
+            chain: None,
             ..args.clone()
         };
         crate::pipelines::run_command(home, member_args)?;

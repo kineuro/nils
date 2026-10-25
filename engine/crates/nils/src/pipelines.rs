@@ -1168,11 +1168,26 @@ pub(crate) fn run_doc(store: &mut Store, r: &Run) -> Value {
         .handle_id
         .and_then(|h| crate::main_input::entry_of(store, h))
         .map_or(Value::Null, |e| crate::main_input::shown(&e));
+    // Wave 7b A7 (record 58 P5): each unit's stacks, for its curation
+    // state now against the one it recorded
+    let stacks_of: BTreeMap<String, Vec<i64>> = unit_stacks(store, r.id)
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
     doc["units_run"] = json!(
         units
             .iter()
             .map(|u| json!({
                 "unit": u.unit, "state": u.state, "status": u.outcome["status"],
+                // Wave 7b A7: the run whose kept result the unit reused (section
+                // 8.5), and the curation state of its inputs (record 58 P5)
+                "reused_from": u.reused_from_run,
+                "words_reused": u.reused_from_run.map(|_| u.outcome["words"].clone()),
+                "curation": crate::provenance::state_of(
+                    store,
+                    &u.curation,
+                    stacks_of.get(&u.unit).map_or(&[][..], Vec::as_slice),
+                ),
                 "attempts": u.attempts, "device": u.device, "gpu_card": u.gpu_card,
                 "cores": u.cores, "memory_mb": u.memory_mb, "exit_code": u.exit_code,
                 "started_at": u.started_at, "finished_at": u.finished_at,
@@ -2521,6 +2536,33 @@ pub(crate) struct RunArgs {
     /// up again; never on the command line
     #[arg(skip)]
     pub(crate) go_on: Option<GoOn>,
+    /// Wave 7b A7 (section 8.4): the step of a workflow run this run is,
+    /// and the runs of the steps it waits for per unit; never on the
+    /// command line
+    #[arg(skip)]
+    pub(crate) chain: Option<Chain>,
+}
+
+impl RunArgs {
+    /// The pack directory the run reads, as given or the deployment's.
+    pub(crate) fn pack_dir_or_default(&self, home: &Home) -> Option<PathBuf> {
+        self.pack_dir
+            .clone()
+            .or_else(|| crate::pack_dir(home, None).ok())
+            .map(|dir| dir.join(&self.pack))
+    }
+}
+
+/// Wave 7b A7 (section 8.4): what makes a run a step of a workflow run. A
+/// unit of this run starts when the same unit of every run in `after` is
+/// over and made a result; a unit skipped or failed there is skipped here
+/// with the same reason, and a unit the run before never had is skipped
+/// too.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Chain {
+    pub(crate) workflow_run: i64,
+    pub(crate) step: usize,
+    pub(crate) after: Vec<i64>,
 }
 
 /// The parts a run split with `--chunk` was made of, as each part's job
@@ -5575,6 +5617,18 @@ pub(crate) fn run_command(home: &Home, args: RunArgs) -> Result<(), Exit> {
                 rows::set_person(registry.store(), run_id, &kept)?;
             }
             let _ = job::set_arg(registry.store(), job_id, "run", json!(run_id));
+            // Wave 7b A7: a step of a workflow run says which, and the
+            // workflow run learns its run as soon as it is claimed
+            if let Some(c) = &args.chain {
+                rows::set_workflow_step(registry.store(), run_id, c.workflow_run, c.step as i64)?;
+                crate::workflow_run::record_step_run(
+                    registry.store(),
+                    c.workflow_run,
+                    c.step,
+                    run_id,
+                )
+                .map_err(fail)?;
+            }
             let licence_env = crate::software::licence_env(registry, &p);
 
             let outcome = execute(
@@ -5616,6 +5670,7 @@ pub(crate) fn run_command(home: &Home, args: RunArgs) -> Result<(), Exit> {
                     device: &device,
                     who: &who,
                     json: args.json,
+                    quiet: args.chain.is_some(),
                     resumed: false,
                     more,
                     hold,
@@ -6540,6 +6595,7 @@ fn resume_command(home: &Home, args: &RunArgs, run_id: i64) -> Result<(), Exit> 
             device: &device,
             who: &who,
             json: args.json,
+            quiet: args.chain.is_some(),
             resumed: true,
             more: go_on.is_some(),
             hold: false,
@@ -6594,6 +6650,7 @@ fn resume_command(home: &Home, args: &RunArgs, run_id: i64) -> Result<(), Exit> 
             json: args.json,
             go_on: Some(go_on),
             family: None,
+            chain: args.chain.clone(),
         },
     )
 }
@@ -6776,6 +6833,9 @@ struct Conclusion<'a> {
     device: &'a str,
     who: &'a str,
     json: bool,
+    /// Wave 7b A7: a step of a workflow run prints nothing of its own; the
+    /// workflow run prints the chain once every step is over.
+    quiet: bool,
     resumed: bool,
     /// Parts of the same split run follow in this process.
     more: bool,
@@ -6787,10 +6847,7 @@ struct Conclusion<'a> {
 /// Whether the job is the one a worker took for this process, which every
 /// part of a split run takes up in turn.
 fn adopted(job_id: i64) -> bool {
-    std::env::var(job::ADOPT_VAR)
-        .ok()
-        .and_then(|v| v.trim().parse::<i64>().ok())
-        == Some(job_id)
+    job::adopted_job() == Some(job_id)
 }
 
 /// Close a run, audit it, finish its job and say how it ended.
@@ -6888,7 +6945,9 @@ fn conclude(
     let r = rows::run(registry.store(), run_id)?
         .ok_or_else(|| fail(format!("no pipeline run {run_id}")))?;
     let doc = run_doc(registry.store(), &r);
-    if c.json {
+    if c.quiet {
+        // the workflow run says it
+    } else if c.json {
         print(&doc)?;
     } else {
         print_run(&doc);
@@ -7532,14 +7591,38 @@ fn execute_run(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Resul
         let converter = m.converter["version"]
             .as_str()
             .map(|v| ("dcm2niix".to_string(), v.to_string()));
-        let made_by_runs: Vec<i64> = manifest["inputs"]
+        // the runs that made the derivative inputs (the manifest lists them
+        // under `derivatives`; Wave 7b A7 fixed the key read here, which
+        // left every upstream key out before), and their units' keys: a
+        // unit's key carries the keys of the same-named units upstream, or
+        // of every unit where the names differ (a run over other units)
+        let made_by_runs: Vec<i64> = manifest["derivatives"]
             .as_object()
             .into_iter()
             .flat_map(|o| o.values())
             .flat_map(|v| v.as_array().cloned().unwrap_or_default())
             .filter_map(|e| e["made_by"]["run"].as_i64())
+            .collect::<BTreeSet<i64>>()
+            .into_iter()
             .collect();
-        let upstream = crate::pipeline_pack::upstream_keys(registry.store(), &made_by_runs);
+        let upstream_units: Vec<(i64, String, String)> =
+            rows::unit_keys(registry.store(), &made_by_runs).unwrap_or_default();
+        let upstream_of = |unit: &str| -> Vec<String> {
+            let same: BTreeSet<String> = upstream_units
+                .iter()
+                .filter(|(_, u, _)| u == unit)
+                .map(|(_, _, k)| k.clone())
+                .collect();
+            if !same.is_empty() {
+                return same.into_iter().collect();
+            }
+            upstream_units
+                .iter()
+                .map(|(_, _, k)| k.clone())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect()
+        };
         let now = nils_registry::time::now_iso();
         let row_ids: BTreeMap<String, i64> = rows::units(registry.store(), x.run_id)
             .map_err(err)?
@@ -7559,7 +7642,7 @@ fn execute_run(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Resul
                 params: x.params,
                 roles: &roles,
                 converter: converter.clone(),
-                upstream: upstream.clone(),
+                upstream: upstream_of(&u.id),
                 inputs,
             });
             let mut doc = j.doc();
@@ -7594,6 +7677,36 @@ fn execute_run(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Resul
             };
             rows::set_unit_pack(registry.store(), row_id, &doc, Some(&ck), Some(&rk))
                 .map_err(err)?;
+            // record 58 P5: the curation state of the unit's inputs as it
+            // runs, which the provenance door compares with their state later
+            let curation = crate::provenance::curation_now(
+                registry,
+                &u.stacks,
+                x.label_set,
+                &x.args.pack_dir_or_default(home),
+            );
+            rows::set_unit_curation(registry.store(), row_id, &curation).map_err(err)?;
+            // section 8.5 (G6): a step whose result key matches a kept result
+            // is not run again; the unit records "reused from run N"
+            if j.status != nils_pipeline::pack::rules::Status::Skipped
+                && x.resume.is_none()
+                && let Some(reused) = crate::reuse::kept_for(
+                    registry.store(),
+                    &crate::reuse::Of {
+                        run_id: x.run_id,
+                        pipeline: x.pipeline,
+                        unit: &u.id,
+                        stacks: &u.stacks,
+                        subject_id: u.subject_id,
+                        session_day: u.session_day.as_deref(),
+                    },
+                    &rk,
+                )?
+            {
+                rows::unit_reused(registry.store(), row_id, reused.run, &reused.outcome, &now)
+                    .map_err(err)?;
+                continue;
+            }
             if j.status == nils_pipeline::pack::rules::Status::Skipped {
                 let words = j.words.clone().unwrap_or_default();
                 let outcome = json!({
@@ -8155,9 +8268,23 @@ fn schedule(
         lane_grace: lane_grace(),
         card_stall: card_stall(),
     };
+    let mut watch = ChainWatch::default();
     loop {
         // start what fits
         while !pending.is_empty() {
+            // Wave 7b A7 (section 8.4): a step of a workflow starts a unit
+            // when the same unit of the step before is over; one skipped
+            // or failed there is skipped here with the same reason
+            if let Some(c) = x.args.chain.as_ref().filter(|c| !c.after.is_empty()) {
+                match chain_gate(registry, c, m, row_of, pending, &mut watch)? {
+                    Gate::Ready => {}
+                    Gate::Waiting(words) => {
+                        l.waiting = Some(words);
+                        break;
+                    }
+                    Gate::Empty => break,
+                }
+            }
             if !ledger.fits(least) {
                 l.waiting = Some(format!(
                     "the lane's budget: {} of {} cores and {} of {} MiB held",
@@ -8250,6 +8377,183 @@ fn schedule(
         }
         std::thread::sleep(Duration::from_millis(100));
     }
+}
+
+/// What the chain's gate says of the batch at the front of the queue.
+enum Gate {
+    /// The front batch may start: every unit of it is over and made a
+    /// result at the step before.
+    Ready,
+    /// No pending batch may start yet; the words say what is waited for.
+    Waiting(String),
+    /// Nothing is pending any more (every waiting unit was skipped).
+    Empty,
+}
+
+/// What a step of a workflow run knows of the runs before it, read again
+/// once a second: each run's status and its units' states and outcomes.
+#[derive(Default)]
+struct ChainWatch {
+    looked: Option<Instant>,
+    runs: BTreeMap<i64, WatchedRun>,
+}
+
+/// One run before this step: its status and its units' states and outcomes.
+type WatchedRun = (String, BTreeMap<String, (String, Value)>);
+
+impl ChainWatch {
+    fn refresh(&mut self, store: &mut Store, after: &[i64]) -> Result<(), String> {
+        if self
+            .looked
+            .is_some_and(|t| t.elapsed() < Duration::from_secs(1))
+        {
+            return Ok(());
+        }
+        self.looked = Some(Instant::now());
+        for run in after {
+            let status = rows::run(store, *run)
+                .map_err(|e| e.to_string())?
+                .map_or("gone".to_string(), |r| r.status);
+            let units = rows::units(store, *run)
+                .map_err(|e| e.to_string())?
+                .into_iter()
+                .map(|u| (u.unit, (u.state, u.outcome)))
+                .collect();
+            self.runs.insert(*run, (status, units));
+        }
+        Ok(())
+    }
+
+    /// What the runs before say of one unit: ready, skipped with the reason
+    /// and the run that skipped it, or not yet over.
+    fn of(&self, unit: &str) -> Upstream {
+        for (run, (status, units)) in &self.runs {
+            match units.get(unit) {
+                Some((state, outcome)) if state == "over" => {
+                    match outcome["status"].as_str().unwrap_or("failed") {
+                        "succeeded" | "reused" => {}
+                        other => {
+                            return Upstream::Skipped {
+                                run: *run,
+                                status: other.to_string(),
+                                words: outcome["error"]
+                                    .as_str()
+                                    .or(outcome["words"].as_str())
+                                    .unwrap_or("no reason recorded")
+                                    .to_string(),
+                            };
+                        }
+                    }
+                }
+                Some(_) if matches!(status.as_str(), "running" | "interrupted") => {
+                    return Upstream::NotYet;
+                }
+                Some((state, _)) => {
+                    return Upstream::Skipped {
+                        run: *run,
+                        status: status.clone(),
+                        words: format!(
+                            "the step before ended {status} while this unit was {state}"
+                        ),
+                    };
+                }
+                None if matches!(status.as_str(), "running" | "interrupted") => {
+                    // its units may not be made yet
+                    return Upstream::NotYet;
+                }
+                None => {
+                    return Upstream::Skipped {
+                        run: *run,
+                        status: status.clone(),
+                        words: format!("the step before (run {run}) had no unit {unit}"),
+                    };
+                }
+            }
+        }
+        Upstream::Ready
+    }
+}
+
+enum Upstream {
+    Ready,
+    NotYet,
+    Skipped {
+        run: i64,
+        status: String,
+        words: String,
+    },
+}
+
+/// Wave 7b A7 (section 8.4): rotate the queue so that a batch whose units
+/// are over at the steps before stands at the front; skip, with the same
+/// reason, the units skipped or failed there; say what is waited for where
+/// none may start.
+fn chain_gate(
+    registry: &mut Registry,
+    c: &Chain,
+    m: &Materialised,
+    row_of: &BTreeMap<String, (i64, String)>,
+    pending: &mut std::collections::VecDeque<Batch>,
+    watch: &mut ChainWatch,
+) -> Result<Gate, String> {
+    watch.refresh(registry.store(), &c.after)?;
+    let n = pending.len();
+    let mut waiting = 0usize;
+    for _ in 0..n {
+        let Some(b) = pending.pop_front() else { break };
+        let mut skipped: Option<(String, i64, String, String)> = None;
+        let mut not_yet = false;
+        for &i in &b.units {
+            let id = &m.units[i].id;
+            match watch.of(id) {
+                Upstream::Ready => {}
+                Upstream::NotYet => not_yet = true,
+                Upstream::Skipped { run, status, words } => {
+                    skipped = Some((id.clone(), run, status, words));
+                    break;
+                }
+            }
+        }
+        if let Some((unit, run, status, words)) = skipped {
+            // every unit of the batch is skipped downstream with the reason
+            let now = nils_registry::time::now_iso();
+            let error = format!("skipped at step {} (run {run}): {words}", c.step);
+            for &i in &b.units {
+                if let Some((row_id, _)) = row_of.get(&m.units[i].id) {
+                    let outcome = json!({
+                        "status": "skipped",
+                        "error": error,
+                        "words": words, "missing": [error],
+                        "metrics": {}, "files": [], "refused": [],
+                        "failure": nils_pipeline::failure::Cause::Input.doc(),
+                        "chain_skipped": {"step": c.step, "run": run, "unit": unit, "status": status},
+                    });
+                    rows::unit_over(registry.store(), *row_id, None, &outcome, &now)
+                        .map_err(|e| e.to_string())?;
+                }
+            }
+            continue;
+        }
+        if not_yet {
+            waiting += 1;
+            pending.push_back(b);
+            continue;
+        }
+        pending.push_front(b);
+        return Ok(Gate::Ready);
+    }
+    if pending.is_empty() {
+        return Ok(Gate::Empty);
+    }
+    Ok(Gate::Waiting(format!(
+        "step {}: {waiting} unit(s) wait for the step before (run {})",
+        c.step + 1,
+        c.after
+            .iter()
+            .map(i64::to_string)
+            .collect::<Vec<_>>()
+            .join(", ")
+    )))
 }
 
 /// The signal a container's process was ended by, where one ended it: how
@@ -10062,6 +10366,7 @@ fn finalize(
         "units": {
             "total": m.units.len(), "succeeded": count("succeeded"), "failed": count("failed"),
             "skipped": count("skipped"), "unreported": count("unreported"),
+            "reused": count("reused"),
             "missing_input": missing_input,
         },
         "failures_by_cause": failures_by_cause,

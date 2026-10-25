@@ -159,8 +159,8 @@ pub(crate) fn at_start(registry: &mut Registry) -> String {
     if !enabled(registry) {
         return "starter catalog: off (nils pipeline starter --on seeds it)".into();
     }
-    match seed(registry) {
-        Ok(added) if added.is_empty() => "starter catalog: in place".into(),
+    let pipelines = match seed(registry) {
+        Ok(added) if added.is_empty() => "starter catalog: in place".to_string(),
         Ok(added) => format!(
             "starter catalog: seeded {}",
             added
@@ -170,6 +170,19 @@ pub(crate) fn at_start(registry: &mut Registry) -> String {
                 .join(", ")
         ),
         Err(e) => format!("starter catalog: not seeded: {e}"),
+    };
+    // Wave 7b A7: the shipped workflows beside the starters
+    match crate::workflows::seed(registry) {
+        Ok(added) if added.is_empty() => pipelines,
+        Ok(added) => format!(
+            "{pipelines}; workflows seeded {}",
+            added
+                .iter()
+                .filter_map(|a| a["label"].as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        Err(e) => format!("{pipelines}; workflows not seeded: {e}"),
     }
 }
 

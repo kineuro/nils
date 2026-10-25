@@ -1573,7 +1573,7 @@ pub(crate) fn plain(v: &mut Value) {
 /// The pick roles a pipeline's units need (`x-nils.input.roles`), which a
 /// scope's main scans written without a role take (2026-10-12); none where
 /// the catalog holds no such pipeline, which the pre-flight says itself.
-fn needs_of(store: &mut Store, pipeline: &str) -> Vec<String> {
+pub(crate) fn needs_of(store: &mut Store, pipeline: &str) -> Vec<String> {
     rows::resolve(store, pipeline)
         .ok()
         .flatten()

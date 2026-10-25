@@ -264,6 +264,26 @@ fn stamp(store: &Store, column: &str) -> String {
 /// and the id a door answered 202 with is the id whose progress is read.
 pub const ADOPT_VAR: &str = "NILS_JOB_ID";
 
+static ADOPTION_OFF: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The worker's job this process runs as, named by [`ADOPT_VAR`], which a
+/// claim adopts; none once [`disown_adoption`] was called.
+pub fn adopted_job() -> Option<i64> {
+    if ADOPTION_OFF.load(std::sync::atomic::Ordering::SeqCst) {
+        return None;
+    }
+    std::env::var(ADOPT_VAR)
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+}
+
+/// Wave 7b A7: a command that runs several runs' worth of work in one
+/// process (a workflow run's steps) stops adopting the worker's job, so
+/// that each step claims a job of its own and none takes the worker's.
+pub fn disown_adoption() {
+    ADOPTION_OFF.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
 /// A process's command line as the words after `nils` and its registry:
 /// what a queued command line looks like, so that a job claimed at the
 /// keyboard and one queued at a door read alike under `queued`.
@@ -319,7 +339,7 @@ fn claim_with(
     let host = hostname();
     let pid = i64::from(std::process::id());
     let job_t = table("job");
-    let adopted: Option<i64> = std::env::var(ADOPT_VAR).ok().and_then(|v| v.parse().ok());
+    let adopted: Option<i64> = adopted_job();
     // Every running or cancelling job: a stale one of any kind is failed,
     // a fresh one of this kind refuses. The stamps are read as text (the
     // store reads a Postgres timestamp only so), and the select sees a row
@@ -767,6 +787,8 @@ pub fn kind_of(argv: &[String]) -> &str {
         (Some("place"), Some("originals")) => "originals",
         // record 43 S2: `run` is a `pipeline` job
         (Some("run"), _) => "pipeline",
+        // Wave 7b A7: a workflow run is run by the pipeline lane too
+        (Some("workflow"), Some("run")) => "pipeline",
         (Some(verb), _) => verb,
         (None, _) => "",
     }
