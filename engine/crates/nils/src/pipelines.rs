@@ -1149,9 +1149,17 @@ pub(crate) fn pipeline_doc_of(store: &mut Store, p: &Pipeline) -> Value {
     doc
 }
 
-/// A run as the doors and `--json` answer it: the row, the pipeline by its
-/// label, and the derivatives it made.
+/// A run as `--json` answers it at the keyboard: the row, the pipeline by
+/// its label, the derivatives it made, and each unit with its curation
+/// state.
 pub(crate) fn run_doc(store: &mut Store, r: &Run) -> Value {
+    run_doc_at(store, r, true)
+}
+
+/// [`run_doc`] as a door answers it: the units' curation state (the rules
+/// now against those that ran, record 58 P5) is read, once for every unit
+/// of the run, at detail quasi or above only.
+pub(crate) fn run_doc_at(store: &mut Store, r: &Run, quasi: bool) -> Value {
     let mut doc = runs_docs(store, std::slice::from_ref(r))
         .pop()
         .unwrap_or(Value::Null);
@@ -1169,11 +1177,24 @@ pub(crate) fn run_doc(store: &mut Store, r: &Run) -> Value {
         .and_then(|h| crate::main_input::entry_of(store, h))
         .map_or(Value::Null, |e| crate::main_input::shown(&e));
     // Wave 7b A7 (record 58 P5): each unit's stacks, for its curation
-    // state now against the one it recorded
-    let stacks_of: BTreeMap<String, Vec<i64>> = unit_stacks(store, r.id)
-        .unwrap_or_default()
+    // state now against the one it recorded, the state now read once for
+    // every stack of the run (after review, finding 6)
+    let stacks_of: BTreeMap<String, Vec<i64>> = if quasi {
+        unit_stacks(store, r.id)
+            .unwrap_or_default()
+            .into_iter()
+            .collect()
+    } else {
+        BTreeMap::new()
+    };
+    let every_stack: Vec<i64> = stacks_of
+        .values()
+        .flatten()
+        .copied()
+        .collect::<std::collections::BTreeSet<i64>>()
         .into_iter()
         .collect();
+    let states = quasi.then(|| crate::provenance::States::read(store, &every_stack));
     doc["units_run"] = json!(
         units
             .iter()
@@ -1183,11 +1204,10 @@ pub(crate) fn run_doc(store: &mut Store, r: &Run) -> Value {
                 // 8.5), and the curation state of its inputs (record 58 P5)
                 "reused_from": u.reused_from_run,
                 "words_reused": u.reused_from_run.map(|_| u.outcome["words"].clone()),
-                "curation": crate::provenance::state_of(
-                    store,
+                "curation": states.as_ref().map(|st| st.of(
                     &u.curation,
                     stacks_of.get(&u.unit).map_or(&[][..], Vec::as_slice),
-                ),
+                )),
                 "attempts": u.attempts, "device": u.device, "gpu_card": u.gpu_card,
                 "cores": u.cores, "memory_mb": u.memory_mb, "exit_code": u.exit_code,
                 "started_at": u.started_at, "finished_at": u.finished_at,
@@ -1205,6 +1225,10 @@ pub(crate) fn run_doc(store: &mut Store, r: &Run) -> Value {
                 "flags": u.pack["flags"], "cohort_checks": u.pack["cohort_checks"],
                 "key_members": u.pack["key_members"],
                 "keys": {"comparability": u.comparability_key, "result": u.result_key},
+                // after review (finding 10): when the pack judged the unit
+                // (`run`, or `start` for a chained unit judged again as it
+                // started), and the judgement at the run's start it replaced
+                "judged_at": u.pack["judged_at"], "forecast": u.pack["forecast"],
             }))
             .collect::<Vec<_>>()
     );
@@ -1963,7 +1987,7 @@ pub(crate) fn route(
             let r = rows::run(registry.store(), id)
                 .map_err(err)?
                 .ok_or_else(|| Reply::error(404, format!("no pipeline run {id}")))?;
-            let mut doc = run_doc(registry.store(), &r);
+            let mut doc = run_doc_at(registry.store(), &r, quasi);
             shown_unsealed(
                 registry,
                 caller,
@@ -5567,6 +5591,9 @@ pub(crate) fn run_command(home: &Home, args: RunArgs) -> Result<(), Exit> {
                     "pipeline": p.label(), "select": selection, "handle": handle_id,
                     "part": (count > 1).then(|| split.part(i)),
                     "params": args.params, "models": args.models, "labels": args.labels,
+                    // Wave 7b A7: a step of a workflow run, whose other steps
+                    // share the handle
+                    "workflow_run": args.chain.as_ref().map(|c| c.workflow_run),
                 }),
             )?;
             claimed = Some(job_id);
@@ -6264,12 +6291,21 @@ fn with_lock<T>(
 /// Whether a running pipeline job holds any of the stacks of `handle`:
 /// the words that say which run and how many, where it does. A job that
 /// has not said which stacks it runs over holds them all until it does.
+/// Wave 7b A7 (section 8.4): the steps of one workflow run share the
+/// handle by design, so a run that is a step of the same workflow run
+/// (`workflow_run` in its args) never holds this one off.
 fn holds_stacks(
     store: &mut Store,
     handle: i64,
+    workflow_run: Option<i64>,
     job_id: i64,
     args: &Value,
 ) -> Result<Option<String>, job::Error> {
+    if let (Some(ours), Some(theirs)) = (workflow_run, args["workflow_run"].as_i64())
+        && ours == theirs
+    {
+        return Ok(None);
+    }
     let who = match (
         args["run"].as_i64().or(args["resume"].as_i64()),
         args["pipeline"].as_str(),
@@ -6320,6 +6356,7 @@ fn claim_run(store: &mut Store, p: &Pipeline, handle: i64, args: Value) -> Resul
     let lock = wait_lock(store, CLAIM_LOCK, None, false)
         .map_err(fail)?
         .ok_or_else(|| fail("the claim lock was not taken"))?;
+    let workflow_run = args["workflow_run"].as_i64();
     let claimed = job::claim_beside(
         store,
         &job::Claim {
@@ -6327,7 +6364,9 @@ fn claim_run(store: &mut Store, p: &Pipeline, handle: i64, args: Value) -> Resul
             name: &p.label(),
             args,
         },
-        &mut |store: &mut Store, id: i64, its: &Value| holds_stacks(store, handle, id, its),
+        &mut |store: &mut Store, id: i64, its: &Value| {
+            holds_stacks(store, handle, workflow_run, id, its)
+        },
     );
     let released = nils_registry::lock::release(store, lock);
     let id = claimed.map_err(|e| match e {
@@ -6524,7 +6563,10 @@ fn resume_command(home: &Home, args: &RunArgs, run_id: i64) -> Result<(), Exit> 
         .filter(Value::is_object);
     let who = crate::actor();
     let actor = nils_registry::actor::current();
-    let mut claimed = json!({"pipeline": p.label(), "resume": run_id, "handle": handle_id});
+    let mut claimed = json!({
+        "pipeline": p.label(), "resume": run_id, "handle": handle_id,
+        "workflow_run": r.workflow_run_id,
+    });
     if let Some(part) = &split {
         claimed["part"] = part.clone();
     }
@@ -7064,6 +7106,20 @@ struct Batch {
     out: PathBuf,
     rel_out: String,
     log: PathBuf,
+    /// Whether its units were judged again as the chain released them
+    /// (after review, finding 10).
+    judged_at_start: bool,
+}
+
+/// What a reuse check answers for each unit of a batch: the unit, whether
+/// its kept files are as registered, and the result it reuses.
+type Checked = Vec<(usize, Result<(), String>, crate::reuse::Candidate)>;
+
+/// A batch whose kept result is being checked, file by file, in a thread
+/// of the pool, in place of a container (after review, finding 9).
+struct Checking {
+    batch: Batch,
+    handle: std::thread::JoinHandle<Checked>,
 }
 
 /// A batch whose container runs.
@@ -7093,8 +7149,177 @@ struct Shared {
     /// files another run left in this run's folder went (2026-10-17).
     said: Mutex<Option<String>>,
     /// Record 57 P2: the knobs the pack chose for each unit, by the unit's
-    /// id, which a unit that runs apart is given in place of the run's.
-    unit_params: BTreeMap<String, serde_json::Map<String, Value>>,
+    /// id, which a unit that runs apart is given in place of the run's;
+    /// under a lock, since a chained unit is judged again as it starts
+    /// (after review, finding 10).
+    unit_params: Mutex<BTreeMap<String, serde_json::Map<String, Value>>>,
+    /// Section 8.5 (G6), after review (finding 9): the kept result each unit
+    /// may reuse, by the unit's id, its files not yet checked; the
+    /// scheduler checks them in its pool where the unit would start.
+    reuse: Mutex<BTreeMap<String, crate::reuse::Candidate>>,
+    /// The registry's places by id, read once for the run.
+    places: BTreeMap<i64, String>,
+}
+
+/// What judges a unit by its pack (record 57 P2 to P4): at the run's start
+/// for every unit, and again for a chained unit as the chain releases it
+/// (after review, finding 10), when the step before has made the results
+/// its facts read (an upstream registration's aligned FLAIR makes
+/// `aligned(flair, t1w)` true for SAMSEG at its start).
+struct Judge<'a> {
+    pack: nils_pipeline::pack::PipelinePack,
+    person: nils_pipeline::pack::rules::Person,
+    host: crate::pipeline_pack::HostFacts,
+    roles_of: BTreeMap<i64, BTreeSet<String>>,
+    converter: Option<(String, String)>,
+    /// `(run, unit, key)` of the units that made the derivative inputs.
+    upstream_units: Vec<(i64, String, String)>,
+    d: &'a Descriptor,
+    params: &'a serde_json::Map<String, Value>,
+    pipeline: &'a Pipeline,
+    /// Wave 7b section 7: the family's routing where this run is a
+    /// member's under a family, recorded on every unit.
+    family: Option<&'a crate::pipeline_family::Route>,
+}
+
+impl Judge<'_> {
+    /// A unit as the pack judges it: its stacks by role.
+    fn unit_of(&self, u: &Unit) -> crate::pipeline_pack::UnitOf {
+        let mut by_role: BTreeMap<String, Vec<i64>> = BTreeMap::new();
+        for s in &u.stacks {
+            match (self.d.layout, self.roles_of.get(s)) {
+                (Layout::Stacks, _) => by_role.entry("stack".into()).or_default().push(*s),
+                (Layout::Bids, Some(roles)) => {
+                    for r in roles {
+                        by_role.entry(r.clone()).or_default().push(*s);
+                    }
+                }
+                (Layout::Bids, None) => {}
+            }
+        }
+        crate::pipeline_pack::UnitOf {
+            by_role,
+            subject_id: u.subject_id,
+            session_day: u.session_day.clone(),
+        }
+    }
+
+    fn judge(
+        &self,
+        store: &mut Store,
+        units: &[crate::pipeline_pack::UnitOf],
+    ) -> Vec<nils_pipeline::pack::rules::Judgement> {
+        crate::pipeline_pack::judge_units(
+            store,
+            &self.pack,
+            self.d,
+            self.params,
+            units,
+            &self.host,
+            &self.person,
+        )
+    }
+
+    /// The keys of the same-named units upstream, or of every unit where
+    /// the names differ (a run over other units).
+    fn upstream_of(&self, unit: &str) -> Vec<String> {
+        let same: BTreeSet<String> = self
+            .upstream_units
+            .iter()
+            .filter(|(_, u, _)| u == unit)
+            .map(|(_, _, k)| k.clone())
+            .collect();
+        if !same.is_empty() {
+            return same.into_iter().collect();
+        }
+        self.upstream_units
+            .iter()
+            .map(|(_, _, k)| k.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
+
+    /// The two keys of a unit's results and their members.
+    fn keys(
+        &self,
+        store: &mut Store,
+        u: &Unit,
+        of: &crate::pipeline_pack::UnitOf,
+        j: &nils_pipeline::pack::rules::Judgement,
+    ) -> (String, String, Value) {
+        let roles: BTreeSet<String> = of.by_role.keys().cloned().collect();
+        let inputs = crate::pipeline_pack::input_identities(store, &u.stacks);
+        crate::pipeline_pack::keys(&crate::pipeline_pack::KeysOf {
+            pipeline: self.pipeline,
+            pack: Some(&self.pack),
+            judgement: Some(j),
+            params: self.params,
+            roles: &roles,
+            converter: self.converter.clone(),
+            upstream: self.upstream_of(&u.id),
+            inputs,
+        })
+    }
+
+    /// What the unit records of its judgement: the judgement, the key
+    /// members, the main scan a cohort check stratifies it by, and when it
+    /// was judged (`run`: at the run's start; `start`: as the unit started).
+    fn record(
+        &self,
+        u: &Unit,
+        of: &crate::pipeline_pack::UnitOf,
+        j: &nils_pipeline::pack::rules::Judgement,
+        members: Value,
+        judged_at: &str,
+    ) -> Value {
+        let mut doc = j.doc();
+        doc["key_members"] = members;
+        // Wave 7b section 7: a member's run under a family records on
+        // every unit the member and the rule that chose, and the family
+        if let Some(route) = self.family
+            && let Some((variant, fam)) = route.record(&crate::pipeline_family::unit_key(
+                u.subject_id,
+                u.session_day.as_deref(),
+            ))
+        {
+            doc["variant"] = variant;
+            doc["family"] = fam;
+            if doc["status"] == json!("ready") {
+                doc["status"] = json!("routed");
+            }
+        }
+        // the main scan of the unit, which a cohort check stratifies it
+        // by: the first of the pipeline's roles that has a stack, else the
+        // first stack the unit read
+        let main_role = self
+            .d
+            .roles
+            .iter()
+            .find(|r| of.by_role.get(*r).is_some_and(|s| !s.is_empty()));
+        doc["stratum_stack"] = match (main_role, u.stacks.first()) {
+            (Some(r), _) => {
+                json!({"stack": of.by_role[r][0], "from": format!("the {r} stack")})
+            }
+            (None, Some(s)) => json!({"stack": s, "from": "the unit's first input stack"}),
+            _ => Value::Null,
+        };
+        doc["judged_at"] = json!(judged_at);
+        doc
+    }
+}
+
+/// A unit the pack skipped: over, in the pack's words.
+fn pack_skipped(j: &nils_pipeline::pack::rules::Judgement) -> Value {
+    let words = j.words.clone().unwrap_or_default();
+    json!({
+        "status": "skipped",
+        "error": words,
+        "need": j.need, "words": words, "missing": [words],
+        "metrics": {}, "files": [], "refused": [],
+        "failure": nils_pipeline::failure::Cause::Input.doc(),
+        "pack_skipped": true,
+    })
 }
 
 /// A unit's id as a folder name: the characters a unit's id is made of.
@@ -7509,33 +7734,72 @@ fn execute_run(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Resul
     // words, the rules choose its knobs, and the unit records who chose,
     // its caveats and the two keys its results carry
     let mut unit_params: BTreeMap<String, serde_json::Map<String, Value>> = BTreeMap::new();
+    let mut reuse_candidates: BTreeMap<String, crate::reuse::Candidate> = BTreeMap::new();
+    let places = crate::reuse::places(registry.store())?;
     if let Some(e) = crate::pipeline_pack::pack_error(x.pipeline) {
         return Err(e);
     }
-    if let Some(pack) = crate::pipeline_pack::pack_of(x.pipeline) {
-        // a resume goes on under the choices the run began with
-        let person_ask = match x.resume.map(|r| &r.person) {
-            Some(kept) if kept.is_object() => crate::pipeline_pack::PersonAsk::of_body(kept)?,
-            _ => crate::pipeline_pack::PersonAsk::of_args(
-                x.args.goal.as_deref(),
-                &x.args.switches,
-                x.args.let_run,
-            )?,
-        };
-        let given = match x.resume.map(|r| &r.person) {
-            Some(kept) if kept.is_object() => kept["given"]
-                .as_array()
+    let judge: Option<Judge<'_>> = match crate::pipeline_pack::pack_of(x.pipeline) {
+        None => None,
+        Some(pack) => {
+            // a resume goes on under the choices the run began with
+            let person_ask = match x.resume.map(|r| &r.person) {
+                Some(kept) if kept.is_object() => crate::pipeline_pack::PersonAsk::of_body(kept)?,
+                _ => crate::pipeline_pack::PersonAsk::of_args(
+                    x.args.goal.as_deref(),
+                    &x.args.switches,
+                    x.args.let_run,
+                )?,
+            };
+            let given = match x.resume.map(|r| &r.person) {
+                Some(kept) if kept.is_object() => kept["given"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|k| k.as_str().map(|k| (k.to_string(), String::new())))
+                    .collect(),
+                _ => pairs(&x.args.params).map_err(|e| e.message)?,
+            };
+            let person = person_ask.person(&pack, x.who, &given)?;
+            let roles_of = match d.layout {
+                Layout::Bids => crate::preflight::roles_of_stacks(registry.store(), x.stacks)?,
+                Layout::Stacks => BTreeMap::new(),
+            };
+            // the runs that made the derivative inputs (the manifest lists
+            // them under `derivatives`; Wave 7b A7 fixed the key read here,
+            // which left every upstream key out before), and their units'
+            // keys
+            let made_by_runs: Vec<i64> = manifest["derivatives"]
+                .as_object()
                 .into_iter()
-                .flatten()
-                .filter_map(|k| k.as_str().map(|k| (k.to_string(), String::new())))
-                .collect(),
-            _ => pairs(&x.args.params).map_err(|e| e.message)?,
-        };
-        let person = person_ask.person(&pack, x.who, &given)?;
-        let roles_of = match d.layout {
-            Layout::Bids => crate::preflight::roles_of_stacks(registry.store(), x.stacks)?,
-            Layout::Stacks => BTreeMap::new(),
-        };
+                .flat_map(|o| o.values())
+                .flat_map(|v| v.as_array().cloned().unwrap_or_default())
+                .filter_map(|e| e["made_by"]["run"].as_i64())
+                .collect::<BTreeSet<i64>>()
+                .into_iter()
+                .collect();
+            Some(Judge {
+                pack,
+                person,
+                host: crate::pipeline_pack::host_facts(registry),
+                roles_of,
+                converter: m.converter["version"]
+                    .as_str()
+                    .map(|v| ("dcm2niix".to_string(), v.to_string())),
+                upstream_units: rows::unit_keys(registry.store(), &made_by_runs)
+                    .unwrap_or_default(),
+                d,
+                params: x.params,
+                pipeline: x.pipeline,
+                family: x.args.family.as_ref(),
+            })
+        }
+    };
+    // record 57 P2 to P4 (Wave 7b A1): the pack judges every unit that has
+    // its inputs, as the pre-flight did: a hard need skips it in the pack's
+    // words, the rules choose its knobs, and the unit records who chose,
+    // its caveats and the two keys its results carry
+    if let Some(jd) = &judge {
         // a unit that is over keeps the judgement it was run under: only
         // the units still to run are judged (a resume never rewrites a
         // finished unit's flags and checks)
@@ -7551,78 +7815,29 @@ fn execute_run(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Resul
             .iter()
             .filter(|u| !missing.contains_key(&u.id) && still_to_run.contains(&u.id))
             .collect();
-        let of: Vec<crate::pipeline_pack::UnitOf> = with_inputs
-            .iter()
-            .map(|u| {
-                let mut by_role: BTreeMap<String, Vec<i64>> = BTreeMap::new();
-                for s in &u.stacks {
-                    match (d.layout, roles_of.get(s)) {
-                        (Layout::Stacks, _) => by_role.entry("stack".into()).or_default().push(*s),
-                        (Layout::Bids, Some(roles)) => {
-                            for r in roles {
-                                by_role.entry(r.clone()).or_default().push(*s);
-                            }
-                        }
-                        (Layout::Bids, None) => {}
-                    }
-                }
-                crate::pipeline_pack::UnitOf {
-                    by_role,
-                    subject_id: u.subject_id,
-                    session_day: u.session_day.clone(),
-                }
-            })
-            .collect();
-        let host = crate::pipeline_pack::host_facts(registry);
-        let judged = crate::pipeline_pack::judge_units(
-            registry.store(),
-            &pack,
-            d,
-            x.params,
-            &of,
-            &host,
-            &person,
-        );
+        let of: Vec<crate::pipeline_pack::UnitOf> =
+            with_inputs.iter().map(|u| jd.unit_of(u)).collect();
+        let judged = jd.judge(registry.store(), &of);
         if d.units == Units::Together
             && let Some(words) = crate::pipeline_pack::together_disagree(&judged)
         {
             return Err(words);
         }
-        let converter = m.converter["version"]
-            .as_str()
-            .map(|v| ("dcm2niix".to_string(), v.to_string()));
-        // the runs that made the derivative inputs (the manifest lists them
-        // under `derivatives`; Wave 7b A7 fixed the key read here, which
-        // left every upstream key out before), and their units' keys: a
-        // unit's key carries the keys of the same-named units upstream, or
-        // of every unit where the names differ (a run over other units)
-        let made_by_runs: Vec<i64> = manifest["derivatives"]
-            .as_object()
-            .into_iter()
-            .flat_map(|o| o.values())
-            .flat_map(|v| v.as_array().cloned().unwrap_or_default())
-            .filter_map(|e| e["made_by"]["run"].as_i64())
+        // record 58 P5: the curation state of the units' inputs as they
+        // run, read once for every stack of the run (after review, finding
+        // 5), which the provenance door compares with their state later
+        let every_stack: Vec<i64> = with_inputs
+            .iter()
+            .flat_map(|u| u.stacks.iter().copied())
             .collect::<BTreeSet<i64>>()
             .into_iter()
             .collect();
-        let upstream_units: Vec<(i64, String, String)> =
-            rows::unit_keys(registry.store(), &made_by_runs).unwrap_or_default();
-        let upstream_of = |unit: &str| -> Vec<String> {
-            let same: BTreeSet<String> = upstream_units
-                .iter()
-                .filter(|(_, u, _)| u == unit)
-                .map(|(_, _, k)| k.clone())
-                .collect();
-            if !same.is_empty() {
-                return same.into_iter().collect();
-            }
-            upstream_units
-                .iter()
-                .map(|(_, _, k)| k.clone())
-                .collect::<BTreeSet<_>>()
-                .into_iter()
-                .collect()
-        };
+        let curation = crate::provenance::Curation::read(
+            registry,
+            &every_stack,
+            x.label_set,
+            &x.args.pack_dir_or_default(home),
+        );
         let now = nils_registry::time::now_iso();
         let row_ids: BTreeMap<String, i64> = rows::units(registry.store(), x.run_id)
             .map_err(err)?
@@ -7633,91 +7848,55 @@ fn execute_run(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Resul
             let Some(&row_id) = row_ids.get(&u.id) else {
                 continue;
             };
-            let roles: std::collections::BTreeSet<String> = of.by_role.keys().cloned().collect();
-            let inputs = crate::pipeline_pack::input_identities(registry.store(), &u.stacks);
-            let (ck, rk, members) = crate::pipeline_pack::keys(&crate::pipeline_pack::KeysOf {
-                pipeline: x.pipeline,
-                pack: Some(&pack),
-                judgement: Some(j),
-                params: x.params,
-                roles: &roles,
-                converter: converter.clone(),
-                upstream: upstream_of(&u.id),
-                inputs,
-            });
-            let mut doc = j.doc();
-            doc["key_members"] = members;
-            // Wave 7b section 7: a member's run under a family records on
-            // every unit the member and the rule that chose, and the family
-            if let Some(route) = &x.args.family
-                && let Some((variant, fam)) = route.record(&crate::pipeline_family::unit_key(
-                    u.subject_id,
-                    u.session_day.as_deref(),
-                ))
-            {
-                doc["variant"] = variant;
-                doc["family"] = fam;
-                if doc["status"] == json!("ready") {
-                    doc["status"] = json!("routed");
-                }
-            }
-            // the main scan of the unit, which a cohort check stratifies
-            // it by: the first of the pipeline's roles that has a stack,
-            // else the first stack the unit read
-            let main_role = d
-                .roles
-                .iter()
-                .find(|r| of.by_role.get(*r).is_some_and(|s| !s.is_empty()));
-            doc["stratum_stack"] = match (main_role, u.stacks.first()) {
-                (Some(r), _) => {
-                    json!({"stack": of.by_role[r][0], "from": format!("the {r} stack")})
-                }
-                (None, Some(s)) => json!({"stack": s, "from": "the unit's first input stack"}),
-                _ => Value::Null,
-            };
+            let (ck, rk, members) = jd.keys(registry.store(), u, of, j);
+            let doc = jd.record(u, of, j, members, "run");
             rows::set_unit_pack(registry.store(), row_id, &doc, Some(&ck), Some(&rk))
                 .map_err(err)?;
-            // record 58 P5: the curation state of the unit's inputs as it
-            // runs, which the provenance door compares with their state later
-            let curation = crate::provenance::curation_now(
-                registry,
-                &u.stacks,
-                x.label_set,
-                &x.args.pack_dir_or_default(home),
-            );
-            rows::set_unit_curation(registry.store(), row_id, &curation).map_err(err)?;
+            rows::set_unit_curation(registry.store(), row_id, &curation.of(&u.stacks))
+                .map_err(err)?;
             // section 8.5 (G6): a step whose result key matches a kept result
-            // is not run again; the unit records "reused from run N"
-            if j.status != nils_pipeline::pack::rules::Status::Skipped
-                && x.resume.is_none()
-                && let Some(reused) = crate::reuse::kept_for(
-                    registry.store(),
-                    &crate::reuse::Of {
-                        run_id: x.run_id,
-                        pipeline: x.pipeline,
-                        unit: &u.id,
-                        stacks: &u.stacks,
-                        subject_id: u.subject_id,
-                        session_day: u.session_day.as_deref(),
-                    },
-                    &rk,
-                )?
-            {
-                rows::unit_reused(registry.store(), row_id, reused.run, &reused.outcome, &now)
-                    .map_err(err)?;
-                continue;
+            // is not run again; the unit records "reused from run N". After
+            // review (finding 9): the kept result is found here without
+            // reading a file; its files are checked where the unit would
+            // start, in the scheduler's pool, where units run apart (units
+            // together are checked here, since one container runs them all)
+            if j.status != nils_pipeline::pack::rules::Status::Skipped && x.resume.is_none() {
+                let of_unit = crate::reuse::Of {
+                    run_id: x.run_id,
+                    pipeline: x.pipeline,
+                    unit: &u.id,
+                    stacks: &u.stacks,
+                    subject_id: u.subject_id,
+                    session_day: u.session_day.as_deref(),
+                };
+                match d.units {
+                    Units::Apart => {
+                        if let Some(c) =
+                            crate::reuse::candidate(registry.store(), &places, &of_unit, &rk)?
+                        {
+                            reuse_candidates.insert(u.id.clone(), c);
+                        }
+                    }
+                    Units::Together => {
+                        if let Some(reused) =
+                            crate::reuse::kept_for(registry.store(), &places, &of_unit, &rk)?
+                        {
+                            rows::unit_reused(
+                                registry.store(),
+                                row_id,
+                                reused.run,
+                                &reused.outcome,
+                                &now,
+                            )
+                            .map_err(err)?;
+                            continue;
+                        }
+                    }
+                }
             }
             if j.status == nils_pipeline::pack::rules::Status::Skipped {
-                let words = j.words.clone().unwrap_or_default();
-                let outcome = json!({
-                    "status": "skipped",
-                    "error": words,
-                    "need": j.need, "words": words, "missing": [words],
-                    "metrics": {}, "files": [], "refused": [],
-                    "failure": nils_pipeline::failure::Cause::Input.doc(),
-                    "pack_skipped": true,
-                });
-                rows::unit_over(registry.store(), row_id, None, &outcome, &now).map_err(err)?;
+                rows::unit_over(registry.store(), row_id, None, &pack_skipped(j), &now)
+                    .map_err(err)?;
             } else {
                 // together, one container takes the knobs every ready unit
                 // agreed on (together_disagree refused a run where they
@@ -7787,7 +7966,9 @@ fn execute_run(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Resul
             .collect();
             (!said.is_empty()).then(|| said.join("; "))
         }),
-        unit_params,
+        unit_params: Mutex::new(unit_params),
+        reuse: Mutex::new(reuse_candidates),
+        places,
     };
 
     // the batches: those whose container ended and whose taking in a stop
@@ -7800,6 +7981,7 @@ fn execute_run(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Resul
                 out: out.clone(),
                 rel_out: rel_out.clone(),
                 log: run_dir.join("log.txt"),
+                judged_at_start: false,
             },
             Units::Apart => {
                 let key = folder_word(&m.units[units[0]].id)?.to_string();
@@ -7809,6 +7991,7 @@ fn execute_run(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Resul
                     rel_out: format!("{rel_out}/{key}"),
                     log: run_dir.join("units").join(&key).join("log.txt"),
                     key: Some(key),
+                    judged_at_start: false,
                 }
             }
         })
@@ -7848,6 +8031,7 @@ fn execute_run(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Resul
         &mut pending,
         &mut running,
         &mut taken_files,
+        judge.as_ref(),
     );
     // whatever ended the schedule, no container outlives it: a stop, a
     // cancel and an error each give their units back to the queue
@@ -8230,9 +8414,12 @@ fn schedule(
     pending: &mut std::collections::VecDeque<Batch>,
     running: &mut Vec<Running>,
     taken_files: &mut std::collections::BTreeSet<PathBuf>,
+    judge: Option<&Judge<'_>>,
 ) -> Result<Scheduled, String> {
     let d = x.descriptor;
     let ask = ask_of(d);
+    // the batches whose kept results are being checked in the pool
+    let mut checks: Vec<Checking> = Vec::new();
     // the least a unit starts with: a unit that asks the lane's cores takes
     // one where no more is free
     let least = lane::Ask {
@@ -8275,7 +8462,8 @@ fn schedule(
             // Wave 7b A7 (section 8.4): a step of a workflow starts a unit
             // when the same unit of the step before is over; one skipped
             // or failed there is skipped here with the same reason
-            if let Some(c) = x.args.chain.as_ref().filter(|c| !c.after.is_empty()) {
+            let chained = x.args.chain.as_ref().filter(|c| !c.after.is_empty());
+            if let Some(c) = chained {
                 match chain_gate(registry, c, m, row_of, pending, &mut watch)? {
                     Gate::Ready => {}
                     Gate::Waiting(words) => {
@@ -8284,6 +8472,53 @@ fn schedule(
                     }
                     Gate::Empty => break,
                 }
+            }
+            // after review (finding 10): a chained unit's pack facts are read
+            // again as the chain releases it, now that the step before has
+            // made the results they read; a unit the pack skips now is over
+            if let (Some(jd), Some(_)) = (judge, chained)
+                && d.units == Units::Apart
+                && pending.front().is_some_and(|b| !b.judged_at_start)
+                && let Some(mut b) = pending.pop_front()
+            {
+                b.judged_at_start = true;
+                judge_again(registry, x, m, shared, row_of, jd, &mut b)?;
+                if b.units.is_empty() {
+                    continue;
+                }
+                pending.push_front(b);
+            }
+            // after review (finding 9): a unit whose kept result may be
+            // reused checks that result's files in the pool, in place of a
+            // container, and never takes the lane's budget for it
+            if pending.front().is_some_and(|b| {
+                shared
+                    .reuse
+                    .lock()
+                    .is_ok_and(|r| b.units.iter().all(|i| r.contains_key(&m.units[*i].id)))
+            }) && let Some(b) = pending.pop_front()
+            {
+                let candidates: Vec<(usize, crate::reuse::Candidate)> = {
+                    let r = shared
+                        .reuse
+                        .lock()
+                        .map_err(|_| "the reuse candidates were poisoned".to_string())?;
+                    b.units
+                        .iter()
+                        .filter_map(|i| r.get(&m.units[*i].id).map(|c| (*i, c.clone())))
+                        .collect()
+                };
+                let handle = std::thread::spawn(move || {
+                    candidates
+                        .into_iter()
+                        .map(|(i, c)| {
+                            let v = c.verify();
+                            (i, v, c)
+                        })
+                        .collect::<Checked>()
+                });
+                checks.push(Checking { batch: b, handle });
+                continue;
             }
             if !ledger.fits(least) {
                 l.waiting = Some(format!(
@@ -8331,7 +8566,8 @@ fn schedule(
                 l.seen.held_memory_mib = held.memory_mib;
             }
             let in_flight: usize = running.iter().map(|r| r.batch.units.len()).sum();
-            let queued: usize = pending.iter().map(|b| b.units.len()).sum();
+            let queued: usize = pending.iter().map(|b| b.units.len()).sum::<usize>()
+                + checks.iter().map(|c| c.batch.units.len()).sum::<usize>();
             let progress = json!({
                 "run": x.run_id, "phase": "run", "units": total,
                 "over": total - in_flight - queued, "running": in_flight, "queued": queued,
@@ -8372,11 +8608,135 @@ fn schedule(
                 Err(e) => return Err(format!("a container of the run: {e}")),
             }
         }
-        if running.is_empty() && pending.is_empty() {
+        // take in the kept results whose files were checked: good, the
+        // unit is reused; changed, the unit runs after all
+        let mut i = 0;
+        while i < checks.len() {
+            if !checks[i].handle.is_finished() {
+                i += 1;
+                continue;
+            }
+            let c = checks.remove(i);
+            let verdicts = c
+                .handle
+                .join()
+                .map_err(|_| "a reuse check's thread ended in a panic".to_string())?;
+            let now = nils_registry::time::now_iso();
+            let mut rerun: Vec<usize> = Vec::new();
+            for (u, verdict, cand) in verdicts {
+                let id = &m.units[u].id;
+                match verdict {
+                    Ok(()) => {
+                        if let Some((row_id, _)) = row_of.get(id) {
+                            rows::unit_reused(
+                                registry.store(),
+                                *row_id,
+                                cand.run,
+                                &cand.outcome(),
+                                &now,
+                            )
+                            .map_err(|e| e.to_string())?;
+                        }
+                    }
+                    Err(_) => {
+                        if let Ok(mut r) = shared.reuse.lock() {
+                            r.remove(id);
+                        }
+                        rerun.push(u);
+                    }
+                }
+            }
+            if !rerun.is_empty() {
+                let mut b = c.batch;
+                b.units = rerun;
+                pending.push_front(b);
+            }
+        }
+        if running.is_empty() && pending.is_empty() && checks.is_empty() {
             return Ok(Scheduled::Done);
         }
         std::thread::sleep(Duration::from_millis(100));
     }
+}
+
+/// After review (finding 10): judge the units of a batch again as the
+/// chain releases them, with the facts as they stand now that the step
+/// before made its results; the unit's record is updated with `judged_at:
+/// start` and keeps the judgement at the run's start as `forecast`; its
+/// knobs and keys follow, and so does the kept result it may reuse; a unit
+/// the pack skips now is over, and leaves the batch.
+fn judge_again(
+    registry: &mut Registry,
+    x: &Execution<'_>,
+    m: &Materialised,
+    shared: &Shared,
+    row_of: &BTreeMap<String, (i64, String)>,
+    jd: &Judge<'_>,
+    b: &mut Batch,
+) -> Result<(), String> {
+    let err = |e: nils_registry::Error| e.to_string();
+    let now = nils_registry::time::now_iso();
+    let recorded = rows::units(registry.store(), x.run_id).map_err(err)?;
+    let mut keep: Vec<usize> = Vec::new();
+    for &i in &b.units {
+        let u = &m.units[i];
+        let Some((row_id, _)) = row_of.get(&u.id) else {
+            keep.push(i);
+            continue;
+        };
+        let Some(was) = recorded.iter().find(|r| r.id == *row_id) else {
+            keep.push(i);
+            continue;
+        };
+        let of = jd.unit_of(u);
+        let Some(j) = jd.judge(registry.store(), std::slice::from_ref(&of)).pop() else {
+            keep.push(i);
+            continue;
+        };
+        let (ck, rk, members) = jd.keys(registry.store(), u, &of, &j);
+        let mut doc = jd.record(u, &of, &j, members, "start");
+        doc["forecast"] = json!({
+            "judged_at": was.pack["judged_at"], "status": was.pack["status"], "words": was.pack["words"],
+            "caveats": was.pack["caveats"], "knobs": was.pack["knobs"], "facts": was.pack["facts"],
+        });
+        rows::set_unit_pack(registry.store(), *row_id, &doc, Some(&ck), Some(&rk)).map_err(err)?;
+        if j.status == nils_pipeline::pack::rules::Status::Skipped {
+            rows::unit_over(registry.store(), *row_id, None, &pack_skipped(&j), &now)
+                .map_err(err)?;
+            if let Ok(mut r) = shared.reuse.lock() {
+                r.remove(&u.id);
+            }
+            continue;
+        }
+        if let Ok(mut p) = shared.unit_params.lock() {
+            p.insert(u.id.clone(), j.params());
+        }
+        // the kept result under the key as it stands now
+        if was.result_key.as_deref() != Some(rk.as_str()) && x.resume.is_none() {
+            let c = crate::reuse::candidate(
+                registry.store(),
+                &shared.places,
+                &crate::reuse::Of {
+                    run_id: x.run_id,
+                    pipeline: x.pipeline,
+                    unit: &u.id,
+                    stacks: &u.stacks,
+                    subject_id: u.subject_id,
+                    session_day: u.session_day.as_deref(),
+                },
+                &rk,
+            )?;
+            if let Ok(mut r) = shared.reuse.lock() {
+                match c {
+                    Some(c) => r.insert(u.id.clone(), c),
+                    None => r.remove(&u.id),
+                };
+            }
+        }
+        keep.push(i);
+    }
+    b.units = keep;
+    Ok(())
 }
 
 /// What the chain's gate says of the batch at the front of the queue.
@@ -8391,15 +8751,24 @@ enum Gate {
 }
 
 /// What a step of a workflow run knows of the runs before it, read again
-/// once a second: each run's status and its units' states and outcomes.
+/// once a second: each run's status, its units' states and outcomes, and
+/// which unit holds which stack (after review, finding 8), so a step of
+/// another grain (a session step after a stack step, or the reverse) is
+/// fed by the stacks its units hold, not by the units' names.
 #[derive(Default)]
 struct ChainWatch {
     looked: Option<Instant>,
     runs: BTreeMap<i64, WatchedRun>,
 }
 
-/// One run before this step: its status and its units' states and outcomes.
-type WatchedRun = (String, BTreeMap<String, (String, Value)>);
+/// One run before this step: its status, its units' states and outcomes,
+/// and the unit that holds each stack.
+#[derive(Default)]
+struct WatchedRun {
+    status: String,
+    units: BTreeMap<String, (String, Value)>,
+    held: BTreeMap<i64, String>,
+}
 
 impl ChainWatch {
     fn refresh(&mut self, store: &mut Store, after: &[i64]) -> Result<(), String> {
@@ -8414,59 +8783,105 @@ impl ChainWatch {
             let status = rows::run(store, *run)
                 .map_err(|e| e.to_string())?
                 .map_or("gone".to_string(), |r| r.status);
-            let units = rows::units(store, *run)
+            let units: BTreeMap<String, (String, Value)> = rows::units(store, *run)
                 .map_err(|e| e.to_string())?
                 .into_iter()
                 .map(|u| (u.unit, (u.state, u.outcome)))
                 .collect();
-            self.runs.insert(*run, (status, units));
+            // the stacks each unit holds, read when the units appear and
+            // again only when their count changes (a unit's stacks never do)
+            let seen = self.runs.entry(*run).or_default();
+            if seen.units.len() != units.len() || (seen.held.is_empty() && !units.is_empty()) {
+                seen.held = unit_stacks(store, *run)?
+                    .into_iter()
+                    .flat_map(|(unit, stacks)| stacks.into_iter().map(move |s| (s, unit.clone())))
+                    .collect();
+            }
+            seen.status = status;
+            seen.units = units;
         }
         Ok(())
     }
 
-    /// What the runs before say of one unit: ready, skipped with the reason
-    /// and the run that skipped it, or not yet over.
-    fn of(&self, unit: &str) -> Upstream {
-        for (run, (status, units)) in &self.runs {
-            match units.get(unit) {
-                Some((state, outcome)) if state == "over" => {
-                    match outcome["status"].as_str().unwrap_or("failed") {
-                        "succeeded" | "reused" => {}
-                        other => {
-                            return Upstream::Skipped {
-                                run: *run,
-                                status: other.to_string(),
-                                words: outcome["error"]
-                                    .as_str()
-                                    .or(outcome["words"].as_str())
-                                    .unwrap_or("no reason recorded")
-                                    .to_string(),
-                            };
-                        }
-                    }
+    /// What one unit of a run before says: none where it is over and made
+    /// a result, else why this unit waits or is skipped.
+    fn unit_says(
+        run: i64,
+        run_status: &str,
+        name: &str,
+        state: &str,
+        outcome: &Value,
+    ) -> Option<Upstream> {
+        if state == "over" {
+            return match outcome["status"].as_str().unwrap_or("failed") {
+                "succeeded" | "reused" => None,
+                other => Some(Upstream::Skipped {
+                    run,
+                    status: other.to_string(),
+                    words: outcome["error"]
+                        .as_str()
+                        .or(outcome["words"].as_str())
+                        .unwrap_or("no reason recorded")
+                        .to_string(),
+                }),
+            };
+        }
+        if matches!(run_status, "running" | "interrupted") {
+            return Some(Upstream::NotYet);
+        }
+        Some(Upstream::Skipped {
+            run,
+            status: run_status.to_string(),
+            words: format!("the step before ended {run_status} while its unit {name} was {state}"),
+        })
+    }
+
+    /// What the runs before say of one unit, by its name where a run
+    /// before has a unit of that name, else by the stacks it holds: fed
+    /// when every stack of it was in a unit before that is over and made a
+    /// result; skipped with the reason where one of them was skipped or
+    /// failed, or no unit before held it once that run is over; not yet
+    /// while the run before still runs.
+    fn of(&self, unit: &str, stacks: &[i64]) -> Upstream {
+        for (run, w) in &self.runs {
+            let running = matches!(w.status.as_str(), "running" | "interrupted");
+            if let Some((state, outcome)) = w.units.get(unit) {
+                if let Some(says) = Self::unit_says(*run, &w.status, unit, state, outcome) {
+                    return says;
                 }
-                Some(_) if matches!(status.as_str(), "running" | "interrupted") => {
-                    return Upstream::NotYet;
-                }
-                Some((state, _)) => {
-                    return Upstream::Skipped {
-                        run: *run,
-                        status: status.clone(),
-                        words: format!(
-                            "the step before ended {status} while this unit was {state}"
-                        ),
-                    };
-                }
-                None if matches!(status.as_str(), "running" | "interrupted") => {
+                continue;
+            }
+            if stacks.is_empty() || w.held.is_empty() {
+                if running {
                     // its units may not be made yet
                     return Upstream::NotYet;
                 }
-                None => {
-                    return Upstream::Skipped {
-                        run: *run,
-                        status: status.clone(),
-                        words: format!("the step before (run {run}) had no unit {unit}"),
-                    };
+                return Upstream::Skipped {
+                    run: *run,
+                    status: w.status.clone(),
+                    words: format!("the step before (run {run}) had no unit {unit}"),
+                };
+            }
+            for s in stacks {
+                match w.held.get(s) {
+                    None if running => return Upstream::NotYet,
+                    None => {
+                        return Upstream::Skipped {
+                            run: *run,
+                            status: w.status.clone(),
+                            words: format!(
+                                "the step before (run {run}) had no unit holding stack {s}"
+                            ),
+                        };
+                    }
+                    Some(name) => {
+                        let Some((state, outcome)) = w.units.get(name) else {
+                            return Upstream::NotYet;
+                        };
+                        if let Some(says) = Self::unit_says(*run, &w.status, name, state, outcome) {
+                            return says;
+                        }
+                    }
                 }
             }
         }
@@ -8505,7 +8920,7 @@ fn chain_gate(
         let mut not_yet = false;
         for &i in &b.units {
             let id = &m.units[i].id;
-            match watch.of(id) {
+            match watch.of(id, &m.units[i].stacks) {
                 Upstream::Ready => {}
                 Upstream::NotYet => not_yet = true,
                 Upstream::Skipped { run, status, words } => {
@@ -8746,11 +9161,15 @@ fn invocation_of(
     }
     // the threads parameter told the cores this start was given; record 57
     // P2: a unit that runs apart takes the knobs its pack chose for it
-    let unit_params = shared
+    let chosen = shared
         .unit_params
+        .lock()
+        .map_err(|_| "the units' knobs were poisoned".to_string())?;
+    let unit_params = chosen
         .get(b.key.as_deref().unwrap_or(""))
         .unwrap_or(x.params);
     let argv = d.argv(&d.params_for_cores(unit_params, cores), &participants)?;
+    drop(chosen);
     // who the process is: for podman the engine's own account, which
     // `--userns keep-id` maps to itself, never the group of a shared
     // (setgid) working place, which keep-id does not map and which would
@@ -12408,6 +12827,76 @@ x-nils:
         assert!(folder_word("stack-12").is_ok());
         for bad in ["", "..", ".hidden", "a/b", "sub-1 x"] {
             assert!(folder_word(bad).is_err(), "{bad}");
+        }
+    }
+
+    /// After review (finding 8): a step of another grain is fed by the
+    /// stacks its units hold, not by the units' names: a session unit over
+    /// a stack step's run is ready when every stack of it is over there,
+    /// skipped with the reason where one of them was, waits while one has
+    /// no unit yet, and is skipped once the run before is over without one;
+    /// a unit of the same name is matched by its name as before.
+    #[test]
+    fn the_chain_feeds_a_unit_of_another_grain_by_its_stacks() {
+        let over = |status: &str| {
+            (
+                "over".to_string(),
+                json!({"status": status, "error": format!("{status} upstream")}),
+            )
+        };
+        let mut w = ChainWatch::default();
+        w.runs.insert(
+            7,
+            WatchedRun {
+                status: "running".into(),
+                units: [
+                    ("stack-1".to_string(), over("succeeded")),
+                    ("stack-2".to_string(), over("reused")),
+                    ("stack-3".to_string(), over("failed")),
+                    ("stack-4".to_string(), ("running".to_string(), Value::Null)),
+                ]
+                .into_iter()
+                .collect(),
+                held: [
+                    (1, "stack-1"),
+                    (2, "stack-2"),
+                    (3, "stack-3"),
+                    (4, "stack-4"),
+                ]
+                .into_iter()
+                .map(|(s, u)| (s, u.to_string()))
+                .collect(),
+            },
+        );
+        assert!(matches!(w.of("sub-1_ses-a", &[1, 2]), Upstream::Ready));
+        match w.of("sub-1_ses-b", &[2, 3]) {
+            Upstream::Skipped { run, status, words } => {
+                assert_eq!(
+                    (run, status.as_str(), words.as_str()),
+                    (7, "failed", "failed upstream")
+                );
+            }
+            _ => panic!("a session over a failed stack is skipped"),
+        }
+        assert!(matches!(w.of("sub-2_ses-a", &[1, 4]), Upstream::NotYet));
+        assert!(matches!(w.of("sub-3_ses-a", &[9]), Upstream::NotYet));
+        // the same name still matches by name
+        assert!(matches!(w.of("stack-1", &[1]), Upstream::Ready));
+        assert!(matches!(w.of("stack-4", &[4]), Upstream::NotYet));
+        // the run before over: a stack no unit held is skipped and says so
+        w.runs.get_mut(&7).unwrap().status = "done".into();
+        match w.of("sub-3_ses-a", &[1, 9]) {
+            Upstream::Skipped { words, .. } => {
+                assert_eq!(words, "the step before (run 7) had no unit holding stack 9");
+            }
+            _ => panic!("a stack no unit before held is skipped once that run is over"),
+        }
+        // a unit whose stacks the registry does not know is matched by name only
+        match w.of("sub-4", &[]) {
+            Upstream::Skipped { words, .. } => {
+                assert_eq!(words, "the step before (run 7) had no unit sub-4");
+            }
+            _ => panic!("no stacks and no such name: skipped"),
         }
     }
 }

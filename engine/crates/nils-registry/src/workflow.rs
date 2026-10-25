@@ -186,7 +186,8 @@ pub struct Run {
     pub started_at: String,
     pub finished_at: Option<String>,
     /// `[{step, of, name, pipeline, pipeline_id, run, status, ...}]`, one
-    /// per step of the document, in order.
+    /// per step of the document, in order: the `workflow_step` rows, each
+    /// its document fields with what the chain recorded laid over them.
     pub steps: Value,
     pub summary: Value,
     pub principal: String,
@@ -194,7 +195,7 @@ pub struct Run {
     pub error: Option<String>,
 }
 
-const RUN_COLUMNS: [&str; 14] = [
+const RUN_COLUMNS: [&str; 13] = [
     "id",
     "workflow_id",
     "job_id",
@@ -204,7 +205,6 @@ const RUN_COLUMNS: [&str; 14] = [
     "status",
     "started_at",
     "finished_at",
-    "steps",
     "summary",
     "principal",
     "actor",
@@ -236,12 +236,82 @@ fn run_of(r: &Row) -> Result<Run, Error> {
         status: r.text(6)?.to_string(),
         started_at: r.text(7)?.to_string(),
         finished_at: r.opt_text(8)?.map(str::to_string),
-        steps: json(r.opt_text(9)?),
-        summary: json(r.opt_text(10)?),
-        principal: r.text(11)?.to_string(),
-        actor: json(r.opt_text(12)?),
-        error: r.opt_text(13)?.map(str::to_string),
+        steps: Value::Array(Vec::new()),
+        summary: json(r.opt_text(9)?),
+        principal: r.text(10)?.to_string(),
+        actor: json(r.opt_text(11)?),
+        error: r.opt_text(12)?.map(str::to_string),
     })
+}
+
+const STEP_COLUMNS: [&str; 8] = [
+    "workflow_run_id",
+    "step",
+    "doc",
+    "run_id",
+    "status",
+    "error",
+    "units",
+    "finished_at",
+];
+
+fn select_steps(store: &mut Store) -> String {
+    let d = store.dialect();
+    let t = table("workflow_step");
+    let cols: Vec<String> = STEP_COLUMNS
+        .iter()
+        .map(|c| d.text_of(t.column(c).expect("a workflow_step column")))
+        .collect();
+    format!(
+        "SELECT {} FROM {}",
+        cols.join(", "),
+        store.qualified("workflow_step")
+    )
+}
+
+/// One step row as the `steps` value carries it: the document's fields
+/// with `run`, `status`, `error`, `units` and `finished_at` laid over.
+fn step_of(r: &Row) -> Result<(i64, i64, Value), Error> {
+    let mut v = json(r.opt_text(2)?);
+    if !v.is_object() {
+        v = Value::Object(Default::default());
+    }
+    v["step"] = Value::from(r.int(1)?);
+    v["run"] = r.opt_int(3)?.map_or(Value::Null, Value::from);
+    v["status"] = Value::from(r.text(4)?);
+    v["error"] = r.opt_text(5)?.map_or(Value::Null, Value::from);
+    v["units"] = json(r.opt_text(6)?);
+    v["finished_at"] = r.opt_text(7)?.map_or(Value::Null, Value::from);
+    Ok((r.int(0)?, r.int(1)?, v))
+}
+
+/// The steps of some runs, by run, each in step order.
+fn steps_of(store: &mut Store, run_ids: &[i64]) -> Result<Vec<(i64, i64, Value)>, Error> {
+    if run_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let ids: Vec<String> = run_ids.iter().map(i64::to_string).collect();
+    let sql = format!(
+        "{} WHERE workflow_run_id IN ({}) ORDER BY workflow_run_id, step",
+        select_steps(store),
+        ids.join(", ")
+    );
+    store.query(&sql, &[])?.iter().map(step_of).collect()
+}
+
+/// Lay the step rows into the runs' `steps`.
+fn with_steps(store: &mut Store, runs: &mut [Run]) -> Result<(), Error> {
+    let ids: Vec<i64> = runs.iter().map(|r| r.id).collect();
+    let rows = steps_of(store, &ids)?;
+    for r in runs.iter_mut() {
+        r.steps = Value::Array(
+            rows.iter()
+                .filter(|(run, ..)| *run == r.id)
+                .map(|(_, _, v)| v.clone())
+                .collect(),
+        );
+    }
+    Ok(())
 }
 
 /// A workflow run to start.
@@ -252,6 +322,8 @@ pub struct NewRun<'a> {
     pub handle_id: Option<i64>,
     pub selection: Option<&'a str>,
     pub person: &'a Value,
+    /// One document a step, in order; each becomes a `workflow_step` row
+    /// at status `queued`.
     pub steps: &'a Value,
     pub principal: &'a str,
     pub actor: Option<&'a Value>,
@@ -270,7 +342,6 @@ pub fn start(store: &mut Store, n: &NewRun<'_>) -> Result<i64, Error> {
                 "person",
                 "status",
                 "started_at",
-                "steps",
                 "principal",
                 "actor",
             ],
@@ -284,14 +355,40 @@ pub fn start(store: &mut Store, n: &NewRun<'_>) -> Result<i64, Error> {
             Param::from(n.person.to_string()),
             Param::from("running"),
             Param::from(n.started_at),
-            Param::from(n.steps.to_string()),
             Param::from(n.principal),
             n.actor.map_or(Param::Null, |a| Param::from(a.to_string())),
         ]],
     )?;
-    rows.first()
+    let id = rows
+        .first()
         .ok_or_else(|| Error::Message("the workflow run was not written back".into()))?
-        .int(0)
+        .int(0)?;
+    let steps: Vec<Vec<Param>> = n
+        .steps
+        .as_array()
+        .into_iter()
+        .flatten()
+        .enumerate()
+        .map(|(i, doc)| {
+            let status = doc["status"].as_str().unwrap_or("queued").to_string();
+            vec![
+                Param::Int(id),
+                Param::Int(i as i64),
+                Param::from(doc.to_string()),
+                Param::from(status),
+            ]
+        })
+        .collect();
+    if !steps.is_empty() {
+        store.insert(
+            &Insert::new(
+                table("workflow_step"),
+                &["workflow_run_id", "step", "doc", "status"],
+            ),
+            &steps,
+        )?;
+    }
+    Ok(id)
 }
 
 pub fn run(store: &mut Store, id: i64) -> Result<Option<Run>, Error> {
@@ -301,9 +398,27 @@ pub fn run(store: &mut Store, id: i64) -> Result<Option<Run>, Error> {
         select_runs(store),
         d.param(1, Type::Int)
     );
+    let Some(r) = store.query_opt(&sql, &[Param::Int(id)])? else {
+        return Ok(None);
+    };
+    let mut runs = vec![run_of(&r)?];
+    with_steps(store, &mut runs)?;
+    Ok(runs.pop())
+}
+
+/// One step of a run as the chain recorded it, `(step, doc)`; none where
+/// the run has no such step.
+pub fn step(store: &mut Store, workflow_run: i64, step: usize) -> Result<Option<Value>, Error> {
+    let d = store.dialect();
+    let sql = format!(
+        "{} WHERE workflow_run_id = {} AND step = {}",
+        select_steps(store),
+        d.param(1, Type::Int),
+        d.param(2, Type::Int)
+    );
     store
-        .query_opt(&sql, &[Param::Int(id)])?
-        .map(|r| run_of(&r))
+        .query_opt(&sql, &[Param::Int(workflow_run), Param::Int(step as i64)])?
+        .map(|r| step_of(&r).map(|(_, _, v)| v))
         .transpose()
 }
 
@@ -318,17 +433,65 @@ pub fn runs(store: &mut Store, workflow_id: Option<i64>, limit: usize) -> Result
         sql.push_str(&format!(" WHERE workflow_id = {}", d.param(1, Type::Int)));
     }
     sql.push_str(&format!(" ORDER BY id DESC LIMIT {}", limit.max(1)));
-    store.query(&sql, &params)?.iter().map(run_of).collect()
+    let mut runs: Vec<Run> = store
+        .query(&sql, &params)?
+        .iter()
+        .map(run_of)
+        .collect::<Result<_, _>>()?;
+    with_steps(store, &mut runs)?;
+    Ok(runs)
 }
 
-/// The steps as the chain records them, whole.
-pub fn set_steps(store: &mut Store, id: i64, steps: &Value) -> Result<(), Error> {
-    store.update_by_id(
-        table("workflow_run"),
-        &[("steps", Param::from(steps.to_string()))],
-        "id",
-        id,
-    )?;
+/// What the chain records of one step as it goes; a field left none is
+/// kept as it was.
+#[derive(Debug, Clone, Default)]
+pub struct StepUpdate<'a> {
+    pub run_id: Option<i64>,
+    pub status: Option<&'a str>,
+    pub error: Option<&'a str>,
+    pub units: Option<&'a Value>,
+    pub finished_at: Option<&'a str>,
+}
+
+/// Record what the chain learned of one step, by (run, step): its own row,
+/// so two steps recording at once never write over each other.
+pub fn update_step(
+    store: &mut Store,
+    workflow_run: i64,
+    step: usize,
+    u: &StepUpdate<'_>,
+) -> Result<(), Error> {
+    let d = store.dialect();
+    let sql = format!(
+        "SELECT id FROM {} WHERE workflow_run_id = {} AND step = {}",
+        store.qualified("workflow_step"),
+        d.param(1, Type::Int),
+        d.param(2, Type::Int)
+    );
+    let id = store
+        .query_opt(&sql, &[Param::Int(workflow_run), Param::Int(step as i64)])?
+        .ok_or_else(|| Error::Message(format!("workflow run {workflow_run} has no step {step}")))?
+        .int(0)?;
+    let mut fields: Vec<(&str, Param)> = Vec::new();
+    if let Some(r) = u.run_id {
+        fields.push(("run_id", Param::Int(r)));
+    }
+    if let Some(s) = u.status {
+        fields.push(("status", Param::from(s)));
+    }
+    if let Some(e) = u.error {
+        fields.push(("error", Param::from(e)));
+    }
+    if let Some(v) = u.units {
+        fields.push(("units", Param::from(v.to_string())));
+    }
+    if let Some(t) = u.finished_at {
+        fields.push(("finished_at", Param::from(t)));
+    }
+    if fields.is_empty() {
+        return Ok(());
+    }
+    store.update_by_id(table("workflow_step"), &fields, "id", id)?;
     Ok(())
 }
 

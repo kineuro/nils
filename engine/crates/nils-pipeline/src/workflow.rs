@@ -559,7 +559,13 @@ fn carries(m: &Member<'_>) -> String {
 /// Plan the links of a workflow against the catalog's members (section 8.3,
 /// G12): each link the document wrote gets its verdict, and the plan adds
 /// what the steps' order and the inputs no link feeds imply, marked
-/// `implicit`. Nothing is run and nothing is read of the registry.
+/// `implicit`. Nothing is run and nothing is read of the registry. A link
+/// between steps of different grains (a stack step into a session step, or
+/// the reverse) needs no verdict of its own: the chain feeds a unit by the
+/// stacks it holds, which the registry keeps for every grain (a stack unit
+/// is its stack; a session's or a subject's units run the bids layout,
+/// whose release places the stacks, since the loader refuses session or
+/// subject units over the stacks layout).
 pub fn plan_links(w: &Workflow, members: &[Member<'_>]) -> Vec<Verdict> {
     let member = |id: &str| members.iter().find(|m| m.step.id == id);
     let mut out: Vec<Verdict> = Vec::new();

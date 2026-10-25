@@ -48,30 +48,61 @@ pub(crate) fn stale_words(changes: &[(String, String, String)]) -> String {
     )
 }
 
-/// The curation state of a unit's inputs now: per stack the pack and
-/// version that classified it (and under which overlay), the deployment
-/// pack's digest where its folder is readable, the label set the run read,
-/// System 1's answers on the stacks (a model's committed decisions, with
-/// its version), and the axes a person overrode. Recorded on the unit at
-/// its run (record 58 P5); read again at the door to tell `stale`.
-pub(crate) fn curation_now(
-    registry: &mut Registry,
-    stacks: &[i64],
-    label_set: Option<&nils_registry::labels::LabelSet>,
-    pack_dir: &Option<std::path::PathBuf>,
-) -> Value {
-    let store = registry.store();
-    let rules = rules_of(store, stacks);
-    let (overrides, system1) = decisions_of(store, stacks);
-    let digest = pack_dir.as_deref().and_then(pack_digest);
-    json!({
-        "rules": rules,
-        "pack_digest": digest,
-        "label_set": label_set.map(|l| json!({"id": l.id, "digest": l.digest, "label": format!("{}@{}", l.name, l.version)})),
-        "system1": system1,
-        "overrides": overrides,
-        "at": nils_registry::time::now_iso(),
-    })
+/// The curation state of a run's inputs, read once for every stack the
+/// run's units hold (after review, finding 5: not once per unit): per
+/// stack the pack and version that classified it (and under which
+/// overlay), the deployment pack's digest where its folder is readable,
+/// the label set the run read, System 1's answers on the stacks (a model's
+/// committed decisions, with its version), and the axes a person
+/// overrode. [`Curation::of`] slices it per unit, which the unit records
+/// at its run (record 58 P5); the door reads the state again to tell
+/// `stale`.
+pub(crate) struct Curation {
+    rules: Vec<Value>,
+    overrides: Vec<Value>,
+    system1: Vec<Value>,
+    pack_digest: Option<String>,
+    label_set: Value,
+}
+
+impl Curation {
+    pub(crate) fn read(
+        registry: &mut Registry,
+        stacks: &[i64],
+        label_set: Option<&nils_registry::labels::LabelSet>,
+        pack_dir: &Option<std::path::PathBuf>,
+    ) -> Curation {
+        let store = registry.store();
+        let rules = rules_of(store, stacks);
+        let (overrides, system1) = decisions_of(store, stacks);
+        Curation {
+            rules,
+            overrides,
+            system1,
+            pack_digest: pack_dir.as_deref().and_then(pack_digest),
+            label_set: label_set.map_or(Value::Null, |l| {
+                json!({"id": l.id, "digest": l.digest, "label": format!("{}@{}", l.name, l.version)})
+            }),
+        }
+    }
+
+    /// The state of one unit's stacks, as the unit records it.
+    pub(crate) fn of(&self, stacks: &[i64]) -> Value {
+        let mine = |rows: &[Value]| -> Vec<Value> {
+            rows.iter()
+                .filter(|r| r["stack"].as_i64().is_some_and(|s| stacks.contains(&s)))
+                .cloned()
+                .collect()
+        };
+        json!({
+            "rules": mine(&self.rules),
+            "pack_digest": self.pack_digest,
+            "label_set": self.label_set,
+            "system1": mine(&self.system1),
+            "overrides": mine(&self.overrides),
+            "at": nils_registry::time::now_iso(),
+        })
+    }
 }
 
 /// Per stack, `{stack, pack, version, overlay, epoch}` of its
@@ -169,64 +200,87 @@ pub(crate) fn pack_digest(dir: &std::path::Path) -> Option<String> {
     Some(nils_pipeline::sha256(&all))
 }
 
-/// The curation state of a unit as a door answers it: what was recorded,
-/// what holds now, and `state`: `current`, `stale` (a rules version on an
-/// input changed, with [`stale_words`]) or `unknown` (a unit from before
-/// recorded none).
-pub(crate) fn state_of(store: &mut Store, recorded: &Value, stacks: &[i64]) -> Value {
-    if !recorded.is_object() {
-        return json!({
-            "state": "unknown",
-            "words": "no curation state was recorded for this unit (it ran before the provenance door)",
-            "recorded": Value::Null,
-        });
+/// What holds now of some stacks' curation, read once for every unit a
+/// door answers (after review, finding 6: not twice per unit): the rules
+/// per stack and the overrides.
+pub(crate) struct States {
+    now: Vec<Value>,
+    overrides: Vec<Value>,
+}
+
+impl States {
+    pub(crate) fn read(store: &mut Store, stacks: &[i64]) -> States {
+        let now = rules_of(store, stacks);
+        let (overrides, _) = decisions_of(store, stacks);
+        States { now, overrides }
     }
-    let now = rules_of(store, stacks);
-    let then: BTreeMap<i64, (String, String)> = recorded["rules"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|r| {
-            Some((
-                r["stack"].as_i64()?,
-                (
-                    r["pack"].as_str()?.to_string(),
-                    r["version"].as_str()?.to_string(),
-                ),
-            ))
-        })
-        .collect();
-    let mut changes: Vec<(String, String, String)> = Vec::new();
-    for r in &now {
-        let Some(stack) = r["stack"].as_i64() else {
-            continue;
-        };
-        if let Some((pack, was)) = then.get(&stack) {
-            let now_v = r["version"].as_str().unwrap_or_default();
-            if now_v != was {
-                let c = (pack.clone(), was.clone(), now_v.to_string());
-                if !changes.contains(&c) {
-                    changes.push(c);
+
+    /// The curation state of a unit as a door answers it: what was
+    /// recorded, what holds now, and `state`: `current`, `stale` (a rules
+    /// version on an input changed, with [`stale_words`]) or `unknown` (a
+    /// unit from before recorded none).
+    pub(crate) fn of(&self, recorded: &Value, stacks: &[i64]) -> Value {
+        if !recorded.is_object() {
+            return json!({
+                "state": "unknown",
+                "words": "no curation state was recorded for this unit (it ran before the provenance door)",
+                "recorded": Value::Null,
+            });
+        }
+        let then: BTreeMap<i64, (String, String)> = recorded["rules"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|r| {
+                Some((
+                    r["stack"].as_i64()?,
+                    (
+                        r["pack"].as_str()?.to_string(),
+                        r["version"].as_str()?.to_string(),
+                    ),
+                ))
+            })
+            .collect();
+        let mut changes: Vec<(String, String, String)> = Vec::new();
+        for r in &self.now {
+            let Some(stack) = r["stack"].as_i64() else {
+                continue;
+            };
+            if !stacks.contains(&stack) {
+                continue;
+            }
+            if let Some((pack, was)) = then.get(&stack) {
+                let now_v = r["version"].as_str().unwrap_or_default();
+                if now_v != was {
+                    let c = (pack.clone(), was.clone(), now_v.to_string());
+                    if !changes.contains(&c) {
+                        changes.push(c);
+                    }
                 }
             }
         }
-    }
-    let (overrides_now, _) = decisions_of(store, stacks);
-    if changes.is_empty() {
-        json!({
-            "state": "current",
-            "words": "current: the rules version on every input is the one that ran",
-            "recorded": recorded,
-            "overrides_now": overrides_now,
-        })
-    } else {
-        json!({
-            "state": "stale",
-            "words": stale_words(&changes),
-            "changes": changes.iter().map(|(p, w, n)| json!({"pack": p, "was": w, "now": n})).collect::<Vec<_>>(),
-            "recorded": recorded,
-            "overrides_now": overrides_now,
-        })
+        let overrides_now: Vec<Value> = self
+            .overrides
+            .iter()
+            .filter(|o| o["stack"].as_i64().is_some_and(|s| stacks.contains(&s)))
+            .cloned()
+            .collect();
+        if changes.is_empty() {
+            json!({
+                "state": "current",
+                "words": "current: the rules version on every input is the one that ran",
+                "recorded": recorded,
+                "overrides_now": overrides_now,
+            })
+        } else {
+            json!({
+                "state": "stale",
+                "words": stale_words(&changes),
+                "changes": changes.iter().map(|(p, w, n)| json!({"pack": p, "was": w, "now": n})).collect::<Vec<_>>(),
+                "recorded": recorded,
+                "overrides_now": overrides_now,
+            })
+        }
     }
 }
 
@@ -345,23 +399,52 @@ fn runs_touching(store: &mut Store, stacks: &[i64]) -> Result<Vec<i64>, String> 
     Ok(out.into_iter().collect())
 }
 
-/// The results of one unit: its files as derivatives and how many measures
-/// it wrote.
-fn results_of(store: &mut Store, run: i64, unit: &rows::Unit, stacks: &[i64]) -> Value {
-    let source = unit.reused_from_run.unwrap_or(run);
-    let files: Vec<Value> = nils_registry::derivative::list(
-        store,
-        &nils_registry::derivative::Filter {
-            run_id: Some(source),
-            limit: 10_000,
-            ..Default::default()
-        },
-    )
-    .unwrap_or_default()
-    .into_iter()
-    .filter(|d| {
-        d.withdrawn_at.is_none()
-            && match (d.scope.as_str(), d.stack_id) {
+/// What the runs a door answers made, read once per source run (after
+/// review, finding 7: not once per unit): the derivatives of each run and
+/// its measures counted by unit.
+#[derive(Default)]
+struct Made {
+    derivatives: BTreeMap<i64, Vec<nils_registry::derivative::Derivative>>,
+    measures: BTreeMap<i64, BTreeMap<String, usize>>,
+}
+
+impl Made {
+    fn read(&mut self, store: &mut Store, run: i64) {
+        if self.derivatives.contains_key(&run) {
+            return;
+        }
+        let files = nils_registry::derivative::list(
+            store,
+            &nils_registry::derivative::Filter {
+                run_id: Some(run),
+                limit: 10_000,
+                ..Default::default()
+            },
+        )
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|d| d.withdrawn_at.is_none())
+        .collect();
+        self.derivatives.insert(run, files);
+        let mut by_unit: BTreeMap<String, usize> = BTreeMap::new();
+        for m in nils_registry::measure::of_run(store, run).unwrap_or_default() {
+            *by_unit.entry(m.unit_id).or_default() += 1;
+        }
+        self.measures.insert(run, by_unit);
+    }
+
+    /// The results of one unit: its files as derivatives and how many
+    /// measures it wrote, from the run that made them (the unit's own, or
+    /// the one it reused).
+    fn of(&mut self, store: &mut Store, run: i64, unit: &rows::Unit, stacks: &[i64]) -> Value {
+        let source = unit.reused_from_run.unwrap_or(run);
+        self.read(store, source);
+        let files: Vec<Value> = self
+            .derivatives
+            .get(&source)
+            .into_iter()
+            .flatten()
+            .filter(|d| match (d.scope.as_str(), d.stack_id) {
                 ("stack", Some(s)) => stacks.contains(&s),
                 _ => {
                     unit.outcome["derivatives"]
@@ -369,22 +452,27 @@ fn results_of(store: &mut Store, run: i64, unit: &rows::Unit, stacks: &[i64]) ->
                         .is_none_or(|ids| ids.iter().any(|i| i.as_i64() == Some(d.id)))
                         && unit.unit.starts_with("sub-")
                 }
-            }
-    })
-    .map(|d| {
-        json!({
-            "id": d.id, "kind": d.kind, "path": d.path, "sha256": d.sha256,
-            "check": d.check_status, "run": d.run_id, "created_at": d.created_at,
-        })
-    })
-    .collect();
-    let measures = nils_registry::measure::of_run(store, source)
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|m| m.unit_id == unit.unit)
-        .count();
-    json!({"derivatives": files, "measures": measures, "from_run": source})
+            })
+            .map(|d| {
+                json!({
+                    "id": d.id, "kind": d.kind, "path": d.path, "sha256": d.sha256,
+                    "check": d.check_status, "run": d.run_id, "created_at": d.created_at,
+                })
+            })
+            .collect();
+        let measures = self
+            .measures
+            .get(&source)
+            .and_then(|m| m.get(&unit.unit))
+            .copied()
+            .unwrap_or(0);
+        json!({"derivatives": files, "measures": measures, "from_run": source})
+    }
 }
+
+/// A run that touched the target: the run, its pipeline, and the units of
+/// it that hold a stack of the target, each with its stacks.
+type Touched = (rows::Run, rows::Pipeline, Vec<(rows::Unit, Vec<i64>)>);
 
 /// `GET /api/provenance/{subject|session|stack}/{id}` and `nils provenance`:
 /// every step that ran on the target, with its keys, its results and its
@@ -393,9 +481,10 @@ pub(crate) fn answer(store: &mut Store, t: &Target) -> Result<Value, String> {
     let err = |e: nils_registry::Error| e.to_string();
     let stacks = stacks_of(store, t)?;
     let runs = runs_touching(store, &stacks)?;
-    let mut steps: Vec<Value> = Vec::new();
-    let mut stale = 0usize;
-    let mut unknown = 0usize;
+    // the units of every run that touched the target, with their stacks,
+    // and the curation now of every stack they hold, read once
+    let mut touched: Vec<Touched> = Vec::new();
+    let mut every_stack: BTreeSet<i64> = BTreeSet::new();
     for run_id in runs {
         let Some(run) = rows::run(store, run_id).map_err(err)? else {
             continue;
@@ -406,12 +495,27 @@ pub(crate) fn answer(store: &mut Store, t: &Target) -> Result<Value, String> {
         let of_units: BTreeMap<String, Vec<i64>> = crate::pipelines::unit_stacks(store, run_id)?
             .into_iter()
             .collect();
+        let mut units = Vec::new();
         for u in rows::units(store, run_id).map_err(err)? {
             let its: Vec<i64> = of_units.get(&u.unit).cloned().unwrap_or_default();
             if !its.iter().any(|s| stacks.contains(s)) {
                 continue;
             }
-            let curation = state_of(store, &u.curation, &its);
+            every_stack.extend(its.iter().copied());
+            units.push((u, its));
+        }
+        touched.push((run, p, units));
+    }
+    let every_stack: Vec<i64> = every_stack.into_iter().collect();
+    let states = States::read(store, &every_stack);
+    let mut made = Made::default();
+    let mut steps: Vec<Value> = Vec::new();
+    let mut stale = 0usize;
+    let mut unknown = 0usize;
+    for (run, p, units) in &touched {
+        let run_id = run.id;
+        for (u, its) in units {
+            let curation = states.of(&u.curation, its);
             match curation["state"].as_str() {
                 Some("stale") => stale += 1,
                 Some("unknown") => unknown += 1,
@@ -431,7 +535,7 @@ pub(crate) fn answer(store: &mut Store, t: &Target) -> Result<Value, String> {
                 },
                 "knobs": u.pack["knobs"], "caveats": u.pack["caveats"], "flags": u.pack["flags"],
                 "pack_status": u.pack["status"], "words": u.pack["words"],
-                "results": results_of(store, run_id, &u, &its),
+                "results": made.of(store, run_id, u, its),
                 "stacks": its,
                 "curation": curation,
             }));

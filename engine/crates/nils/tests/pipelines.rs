@@ -14269,13 +14269,21 @@ inputs:
     value-choices: [a, b]
 command-line: |
   python3 -c '
-  import json, os, sys
+  import json, os, sys, time
   m = json.load(open(sys.argv[1])); out = sys.argv[2]
+  def mark(w, u):
+      t = os.environ.get("LANE_TRACE")
+      if t:
+          open(t, "a").write("%s %.6f %s chain-a\n" % (w, time.time(), u))
   units = []
   for s in m["stacks"]:
       u = s["unit"]; d = os.path.join(out, u); os.makedirs(d, exist_ok=True)
+      mark("start", u)
+      if s["stack_id"] % 2 == 1:
+          time.sleep(float(os.environ.get("CHAIN_A_SLEEP", "0")))
       open(os.path.join(d, "out.txt"), "w").write("stack %d tag %s\n" % (s["stack_id"], sys.argv[3]))
       units.append({{"unit_id": u, "status": "succeeded", "derivatives": [u + "/out.txt"], "metrics": {{"files": len(s["files"])}}}})
+      mark("end", u)
   json.dump({{"schema_version": "1", "units": units}}, open(os.path.join(out, "results.json"), "w"))
   ' [Manifest] [OutputLocation] [TAG]
 x-nils:
@@ -14315,14 +14323,20 @@ container-image:
   image: "{image}"
 command-line: |
   python3 -c '
-  import glob, json, os, sys
+  import glob, json, os, sys, time
   m = json.load(open(sys.argv[1])); out = sys.argv[2]; prev = sys.argv[3]
+  def mark(w, u):
+      t = os.environ.get("LANE_TRACE")
+      if t:
+          open(t, "a").write("%s %.6f %s chain-b\n" % (w, time.time(), u))
   units = []
   for s in m["stacks"]:
       u = s["unit"]; d = os.path.join(out, u); os.makedirs(d, exist_ok=True)
+      mark("start", u)
       seen = sorted(glob.glob(prev + "/*/" + u + "/out.txt"))
       open(os.path.join(d, "seen.txt"), "w").write("\n".join(open(f).read().strip() for f in seen) + "\n")
       units.append({{"unit_id": u, "status": "succeeded", "derivatives": [u + "/seen.txt"]}})
+      mark("end", u)
   json.dump({{"schema_version": "1", "units": units}}, open(os.path.join(out, "results.json"), "w"))
   ' [Manifest] [OutputLocation] [Inputs]/prev
 x-nils:
@@ -14384,7 +14398,7 @@ impl Lab {
             .args(["--pack-dir", packs().to_str().unwrap()])
             .env(
                 "NILS_TOKENS",
-                "a-token-that-sees=lou@lab:pipelines:see,data:see,sealed:see,a-token-of-a-reviewer=rev@lab:reviewer,a-token-with-nothing=nob@lab:query:see",
+                "a-token-that-sees=lou@lab:pipelines:see,data:see,sealed:see,a-token-of-a-reviewer=rev@lab:reviewer,a-token-with-nothing=nob@lab:query:see,a-token-that-works=wrk@lab:operator",
             )
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -14548,7 +14562,9 @@ fn g6_e5_a_workflow_runs_per_unit_reuses_kept_results_and_answers_provenance() {
     let rb = lab.json(&["pipeline", "runs", &run_b.to_string(), "--json"]);
     assert_eq!(rb["workflow_run_id"], first["id"], "{rb}");
     assert_eq!(rb["step"], 1, "{rb}");
-    // and chain-b read chain-a's file of its own stack: the key carries it
+    // and chain-b read chain-a's file of its own stack: the key carries it;
+    // after review (finding 10): a chained unit's pack judged it again as
+    // the chain released it, keeping the run-start judgement as the forecast
     for u in rb["units_run"].as_array().unwrap() {
         assert_eq!(u["status"], "succeeded", "{u}");
         assert!(
@@ -14557,6 +14573,14 @@ fn g6_e5_a_workflow_runs_per_unit_reuses_kept_results_and_answers_provenance() {
                 .is_some_and(|k| k.len() == 1),
             "the upstream key: {u}"
         );
+        assert_eq!(u["judged_at"], "start", "{u}");
+        assert_eq!(u["forecast"]["judged_at"], "run", "{u}");
+        assert_eq!(u["forecast"]["status"], u["pack_status"], "{u}");
+    }
+    let ra = lab.json(&["pipeline", "runs", &run_a.to_string(), "--json"]);
+    for u in ra["units_run"].as_array().unwrap() {
+        assert_eq!(u["judged_at"], "run", "the first step is judged once: {u}");
+        assert!(u["forecast"].is_null(), "{u}");
     }
 
     // G6: the same workflow over the same inputs runs 0 steps and says so
@@ -14779,4 +14803,173 @@ fn g6_e5_a_workflow_runs_per_unit_reuses_kept_results_and_answers_provenance() {
         "a-token-that-sees",
     );
     assert_eq!(status, 403, "pipelines:work starts a run: {refused}");
+
+    // after review (finding 1): a run started at the door is a `workflow`
+    // job the pipelines lane's worker runs; each step claims a pipeline
+    // job of its own beside it, which the worker's job never holds off,
+    // and the run ends done
+    let (status, started) = served.call(
+        "POST",
+        "/api/workflows/chain/run",
+        Some(json!({"select": "selection:every@1"})),
+        "a-token-that-works",
+    );
+    assert_eq!(status, 202, "{started}");
+    let job = started["job"]
+        .as_i64()
+        .unwrap_or_else(|| panic!("{started}"));
+    drop(served);
+    let said = lab.work.path().join("worker-stderr");
+    let mut worker = lab
+        .command(&lab.path)
+        .args(["jobs", "work", "--lane", "pipelines", "--once"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(std::fs::File::create(&said).unwrap())
+        .spawn()
+        .unwrap();
+    let begun = std::time::Instant::now();
+    let status = loop {
+        if let Some(status) = worker.try_wait().unwrap() {
+            break status;
+        }
+        if begun.elapsed().as_secs() >= 180 {
+            let _ = worker.kill();
+            let _ = worker.wait();
+            panic!(
+                "the lane's worker did not end within 180 s: {}",
+                std::fs::read_to_string(&said).unwrap_or_default()
+            );
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    };
+    assert!(
+        status.success(),
+        "{}",
+        std::fs::read_to_string(&said).unwrap_or_default()
+    );
+    let jobs: Value =
+        serde_json::from_str(&lab.ok(&["jobs", "list", "--all", "--json"], None)).unwrap();
+    let ours = jobs
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|j| j["id"] == job)
+        .unwrap_or_else(|| panic!("{jobs}"));
+    assert_eq!(ours["kind"], "workflow", "{ours}");
+    assert_eq!(ours["state"], "done", "{ours}");
+    let runs = lab.json(&["workflow", "runs", "--json"]);
+    let newest = &runs["runs"][0];
+    assert_eq!(newest["job"], job, "{newest}");
+    assert_eq!(newest["status"], "done", "{newest}");
+    assert_eq!(newest["summary"]["steps_done"], 2, "{newest}");
+    assert_eq!(newest["summary"]["units"]["reused"], 8, "{newest}");
+    // the steps' own jobs ran beside the worker's, as pipeline jobs
+    let steps_jobs = jobs
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|j| j["kind"] == "pipeline" && j["args"]["workflow_run"] == newest["id"])
+        .count();
+    assert_eq!(steps_jobs, 2, "{jobs}");
+}
+
+/// After review (finding 2): the steps of one workflow run share the
+/// handle by design. With a slow first step, the second step (ordered
+/// after the first, fed by no typed input, so it waits for no whole run)
+/// claims its run while the first still runs, where two runs over the
+/// same stacks are otherwise refused, and its units run while the first
+/// step's do.
+#[test]
+fn a_later_step_claims_its_run_while_the_step_before_still_runs() {
+    if !have("python3") {
+        eprintln!(
+            "python3 is not installed; the stand-in podman needs it, so this test is skipped"
+        );
+        return;
+    }
+    let lab = Lab::new("pipelines-workflow-slow");
+    let image_a = format!("example.org/chain-a@sha256:{}", "a".repeat(64));
+    let image_c = format!("example.org/chain-c@sha256:{}", "c".repeat(64));
+    let da = chain_a(&image_a);
+    let dc = chain_a(&image_c).replace("chain-a", "chain-c");
+    let dig = |d: &str| nils_pipeline::descriptor::parse(d).unwrap().digest();
+    lab.add_pair("chain-a", &da, &chain_a_pack(&dig(&da)));
+    lab.add_pair(
+        "chain-c",
+        &dc,
+        &chain_a_pack(&dig(&dc)).replace("chain-a", "chain-c"),
+    );
+    let dir = lab.work.path().join("wf-pair");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("nils.workflow.yml"),
+        "nils_workflow: 1\nname: pair\ntitle: Two in a row\nsteps:\n  - {id: a, pipeline: chain-a}\n  - {id: c, pipeline: chain-c}\n",
+    )
+    .unwrap();
+    lab.json(&["workflow", "add", dir.to_str().unwrap(), "--json"]);
+
+    let t = lab.work.path().join("trace");
+    let out = lab
+        .command(&lab.path)
+        .args([
+            "workflow",
+            "run",
+            "pair",
+            "--select",
+            "selection:every@1",
+            "--json",
+        ])
+        .env("LANE_TRACE", &t)
+        .env("CHAIN_A_SLEEP", "4")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap()
+        .wait_with_output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(out.status.success(), "{stdout}{stderr}");
+    let run: Value = serde_json::from_str(&stdout).unwrap_or_else(|e| panic!("{e}: {stdout}"));
+    assert_eq!(run["status"], "done", "{run}");
+    assert_eq!(run["summary"]["units"]["succeeded"], 8, "{run}");
+
+    let events = trace(&t);
+    let a_ended_last = events
+        .iter()
+        .filter(|e| e.0 == "end" && e.3 == "chain-a")
+        .map(|e| e.1)
+        .fold(0.0, f64::max);
+    let c_started_first = events
+        .iter()
+        .filter(|e| e.0 == "start" && e.3 == "chain-c")
+        .map(|e| e.1)
+        .fold(f64::MAX, f64::min);
+    assert!(
+        c_started_first < a_ended_last,
+        "no unit of the second step started before the first step's run ended: {events:?}"
+    );
+    // the second step's run was claimed while the first one ran, and both
+    // are steps of the one workflow run
+    let run_a = run["steps"][0]["run"].as_i64().unwrap();
+    let run_c = run["steps"][1]["run"].as_i64().unwrap();
+    let ra = lab.json(&["pipeline", "runs", &run_a.to_string(), "--json"]);
+    let rc = lab.json(&["pipeline", "runs", &run_c.to_string(), "--json"]);
+    assert!(
+        rc["started_at"].as_str().unwrap() <= ra["finished_at"].as_str().unwrap(),
+        "the second step waited for the whole first step: {ra} {rc}"
+    );
+    assert_eq!(rc["workflow_run_id"], run["id"], "{rc}");
+    let jobs: Value =
+        serde_json::from_str(&lab.ok(&["jobs", "list", "--all", "--json"], None)).unwrap();
+    let steps_jobs: Vec<&Value> = jobs
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|j| j["kind"] == "pipeline" && j["args"]["workflow_run"] == run["id"])
+        .collect();
+    assert_eq!(steps_jobs.len(), 2, "{jobs}");
+    assert!(steps_jobs.iter().all(|j| j["state"] == "done"), "{jobs}");
 }

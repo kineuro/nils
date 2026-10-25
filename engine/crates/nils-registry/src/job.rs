@@ -787,8 +787,11 @@ pub fn kind_of(argv: &[String]) -> &str {
         (Some("place"), Some("originals")) => "originals",
         // record 43 S2: `run` is a `pipeline` job
         (Some("run"), _) => "pipeline",
-        // Wave 7b A7: a workflow run is run by the pipeline lane too
-        (Some("workflow"), Some("run")) => "pipeline",
+        // Wave 7b A7: a workflow run is a kind of its own, which the
+        // pipelines lane runs beside the pipeline runs; its steps claim
+        // pipeline jobs of their own, which a running workflow job never
+        // holds off (the claim looks only at jobs of its own kind)
+        (Some("workflow"), Some("run")) => WORKFLOW,
         (Some(verb), _) => verb,
         (None, _) => "",
     }
@@ -926,6 +929,11 @@ impl Lane {
 /// The kind of the pipeline lane's worker row.
 pub const PIPELINE_WORKER: &str = "pipeline-worker";
 
+/// The kind of a `workflow run` job (Wave 7b A7): run by the pipelines
+/// lane, counted there, and not a pipeline job, so the steps' own claims
+/// never take it for a run over their stacks.
+pub const WORKFLOW: &str = "workflow";
+
 /// The kind of the pictures lane's worker row (record 55 H2).
 pub const PICTURE_WORKER: &str = "picture-worker";
 
@@ -949,8 +957,8 @@ pub fn queued_in(store: &mut Store, lane: Lane, limit: usize) -> Result<Vec<Job>
 fn lane_filter(lane: Lane) -> &'static str {
     match lane {
         Lane::All => "",
-        Lane::Main => " AND kind NOT IN ('pipeline', 'pyramid', 'preview')",
-        Lane::Pipelines => " AND kind = 'pipeline'",
+        Lane::Main => " AND kind NOT IN ('pipeline', 'workflow', 'pyramid', 'preview')",
+        Lane::Pipelines => " AND kind IN ('pipeline', 'workflow')",
         Lane::Pictures => " AND kind IN ('pyramid', 'preview')",
     }
 }

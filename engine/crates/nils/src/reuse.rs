@@ -22,13 +22,6 @@ pub(crate) struct Of<'a> {
     pub session_day: Option<&'a str>,
 }
 
-/// A kept result the unit reuses: the run it came from and the outcome the
-/// unit records.
-pub(crate) struct Reused {
-    pub run: i64,
-    pub outcome: Value,
-}
-
 /// Whether a derivative of a run belongs to this unit: its stack, or its
 /// session or subject.
 fn of_unit(d: &derivative::Derivative, of: &Of<'_>) -> bool {
@@ -47,23 +40,89 @@ fn of_unit(d: &derivative::Derivative, of: &Of<'_>) -> bool {
     }
 }
 
-/// The kept result whose result key is `result_key`, where it may be
-/// reused; none where no run kept one, or every kept one is refused (a
-/// person rejected it, its pipeline version was replaced as wrong, its
-/// files changed). The refusals are returned in the outcome's `considered`
-/// for the run's words.
-pub(crate) fn kept_for(
-    store: &mut Store,
-    of: &Of<'_>,
-    result_key: &str,
-) -> Result<Option<Reused>, String> {
-    let err = |e: nils_registry::Error| e.to_string();
-    let candidates = rows::kept_by_result_key(store, result_key).map_err(err)?;
-    let places: std::collections::BTreeMap<i64, String> = nils_registry::place::list(store)
-        .map_err(err)?
+/// A kept result the unit reuses: the run it came from and the outcome the
+/// unit records.
+pub(crate) struct Reused {
+    pub run: i64,
+    pub outcome: Value,
+}
+
+/// A kept result a unit may reuse once its files prove to be as they were
+/// registered (after review, finding 9): found without reading a file, so
+/// the run's start reads none; the scheduler checks the files in its pool,
+/// in parallel, where the unit would otherwise start a container.
+#[derive(Debug, Clone)]
+pub(crate) struct Candidate {
+    pub run: i64,
+    pipeline: String,
+    derivatives: Vec<i64>,
+    /// Each kept file: its registered path, where it is, and its sha256 as
+    /// registered (bare hex).
+    files: Vec<(String, std::path::PathBuf, String)>,
+    considered: Vec<Value>,
+}
+
+impl Candidate {
+    /// Every file as it was registered: the sha256 of each, read now.
+    pub(crate) fn verify(&self) -> Result<(), String> {
+        for (path, file, sha) in &self.files {
+            match std::fs::read(file) {
+                Ok(bytes) => {
+                    // the registry keeps the bare hex, the engine writes it
+                    // with its prefix: compared without either
+                    let got = bare(&nils_pipeline::sha256(&bytes));
+                    if got != *sha {
+                        return Err(format!("{path} fails its sha256"));
+                    }
+                }
+                Err(e) => return Err(format!("{path}: {e}")),
+            }
+        }
+        Ok(())
+    }
+
+    /// The outcome the unit records once the files proved good.
+    pub(crate) fn outcome(&self) -> Value {
+        json!({
+            "status": "reused",
+            "reused_from": self.run,
+            "words": format!("reused from run {} ({})", self.run, self.pipeline),
+            "pipeline": self.pipeline,
+            "derivatives": self.derivatives,
+            "files": self.files.iter().map(|(p, ..)| p.as_str()).collect::<Vec<_>>(),
+            "metrics": {},
+            "refused": [],
+            "considered": self.considered,
+        })
+    }
+}
+
+fn bare(s: &str) -> String {
+    s.trim_start_matches("sha256:").to_string()
+}
+
+/// The registry's places by id, read once for a run.
+pub(crate) fn places(store: &mut Store) -> Result<std::collections::BTreeMap<i64, String>, String> {
+    Ok(nils_registry::place::list(store)
+        .map_err(|e| e.to_string())?
         .into_iter()
         .map(|p| (p.id, p.path))
-        .collect();
+        .collect())
+}
+
+/// The kept result whose result key is `result_key`, where it may be
+/// reused, its files not yet read; none where no run kept one, or every
+/// kept one is refused (a person rejected it, its pipeline version was
+/// replaced as wrong, a place of its files is gone). The refusals go into
+/// the outcome's `considered` for the run's words.
+pub(crate) fn candidate(
+    store: &mut Store,
+    places: &std::collections::BTreeMap<i64, String>,
+    of: &Of<'_>,
+    result_key: &str,
+) -> Result<Option<Candidate>, String> {
+    let err = |e: nils_registry::Error| e.to_string();
+    let candidates = rows::kept_by_result_key(store, result_key).map_err(err)?;
     let mut considered: Vec<Value> = Vec::new();
     for (run, _unit_row, unit, pipeline_id) in candidates {
         if run == of.run_id {
@@ -131,50 +190,51 @@ pub(crate) fn kept_for(
             }));
             continue;
         }
-        // every file as it was registered: the sha256 of each
-        let mut changed: Option<String> = None;
+        let mut files = Vec::new();
+        let mut gone: Option<String> = None;
         for d in &made {
             let Some(root) = places.get(&d.place_id) else {
-                changed = Some(format!("the place {} of {} is gone", d.place_id, d.path));
+                gone = Some(format!("the place {} of {} is gone", d.place_id, d.path));
                 break;
             };
-            let file = std::path::Path::new(root).join(&d.path);
-            match std::fs::read(&file) {
-                Ok(bytes) => {
-                    // the registry keeps the bare hex, the engine writes it
-                    // with its prefix: compared without either
-                    let bare = |s: &str| s.trim_start_matches("sha256:").to_string();
-                    let got = bare(&nils_pipeline::sha256(&bytes));
-                    if got != bare(&d.sha256) {
-                        changed = Some(format!("{} fails its sha256", d.path));
-                        break;
-                    }
-                }
-                Err(e) => {
-                    changed = Some(format!("{}: {e}", d.path));
-                    break;
-                }
-            }
+            files.push((
+                d.path.clone(),
+                std::path::Path::new(root).join(&d.path),
+                bare(&d.sha256),
+            ));
         }
-        if let Some(why) = changed {
+        if let Some(why) = gone {
             considered.push(json!({"run": run, "unit": unit, "reused": false, "why": why}));
             continue;
         }
-        let files: Vec<&str> = made.iter().map(|d| d.path.as_str()).collect();
-        return Ok(Some(Reused {
+        return Ok(Some(Candidate {
             run,
-            outcome: json!({
-                "status": "reused",
-                "reused_from": run,
-                "words": format!("reused from run {run} ({})", p.label()),
-                "pipeline": p.label(),
-                "derivatives": made.iter().map(|d| d.id).collect::<Vec<_>>(),
-                "files": files,
-                "metrics": {},
-                "refused": [],
-                "considered": considered,
-            }),
+            pipeline: p.label(),
+            derivatives: made.iter().map(|d| d.id).collect(),
+            files,
+            considered,
         }));
     }
     Ok(None)
+}
+
+/// [`candidate`] with its files checked here and now: the kept result the
+/// unit reuses, or none. Where the newest candidate's files fail, no older
+/// one is looked at: a result whose files changed is one to run again.
+pub(crate) fn kept_for(
+    store: &mut Store,
+    places: &std::collections::BTreeMap<i64, String>,
+    of: &Of<'_>,
+    result_key: &str,
+) -> Result<Option<Reused>, String> {
+    let Some(c) = candidate(store, places, of, result_key)? else {
+        return Ok(None);
+    };
+    match c.verify() {
+        Ok(()) => Ok(Some(Reused {
+            run: c.run,
+            outcome: c.outcome(),
+        })),
+        Err(_) => Ok(None),
+    }
 }

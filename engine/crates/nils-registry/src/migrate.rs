@@ -501,7 +501,8 @@ pub static MIGRATIONS: &[Migration] = &[
 ];
 
 /// Wave 7b A7 (record 57 P7 and P8, record 58 P5; 2026-10-25): workflows in
-/// the catalog (`workflow`) and their runs (`workflow_run`); a pipeline run
+/// the catalog (`workflow`), their runs (`workflow_run`) and each run's
+/// steps, one row a step (`workflow_step`); a pipeline run
 /// names the workflow run and the step it is (`pipeline_run.workflow_run_id`,
 /// `step`); a unit names the run whose kept result it reused in place of
 /// running (`pipeline_unit.reused_from_run`) and records the curation state
@@ -516,7 +517,7 @@ fn a_workflow_chains_runs_and_a_unit_says_what_it_reused_and_its_curation(
     if kind != Kind::Registry {
         return Ok(());
     }
-    add_tables(store, kind, &["workflow", "workflow_run"])?;
+    add_tables(store, kind, &["workflow", "workflow_run", "workflow_step"])?;
     add_columns(store, "pipeline_run", &["workflow_run_id", "step"])?;
     add_columns(store, "pipeline_unit", &["reused_from_run", "curation"])
 }
