@@ -69,6 +69,7 @@ pub mod store;
 pub mod suggestion;
 pub mod time;
 pub mod verify;
+pub mod workflow;
 
 /// A word with the article a sentence gives it, by its first letter: "an
 /// agent", "an adjudicator", "an export place", "a mask", "a unit". The

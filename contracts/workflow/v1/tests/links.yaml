@@ -1,0 +1,166 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# The link fixture set of G12 (Wave 7b, section 8.3): workflows over the
+# pipelines this repository ships (pipelines/<name>), each with the verdict
+# every link must get when the workflow is planned, and the words the
+# verdict carries. The engine's contracts test plans each case against the
+# shipped descriptors and packs and holds the plan to it, 100 %.
+#
+# `stubs` are descriptors the catalog does not ship yet, so a case can name
+# them: the registration family's aligned FLAIR (section 7) as its member
+# would declare it, and a T1w image for the wrong-contrast case. A step
+# naming a family is refused by the plan until the catalog holds it.
+stubs:
+  registration-stub: |
+    name: registration-stub
+    schema-version: "0.5"
+    tool-version: "1"
+    container-image: {type: docker, image: "example.org/registration@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+    command-line: "true"
+    x-nils:
+      analysis-level: session
+      input: {layout: bids, roles: [t1w, flair]}
+      units: apart
+      outputs:
+        - {id: aligned_flair, kind: image, path-template: "sub-{subject}/ses-{session}/anat/*_space-T1w_FLAIR.nii.gz", role: flair, contrast: FLAIR, grid: t1w}
+        - {id: transform, kind: transform, path-template: "sub-{subject}/ses-{session}/anat/*_from-FLAIR_to-T1w_mode-image_xfm.h5", role: flair, grid: t1w}
+  t1w-stub: |
+    name: t1w-stub
+    schema-version: "0.5"
+    tool-version: "1"
+    container-image: {type: docker, image: "example.org/t1w@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}
+    command-line: "true"
+    x-nils:
+      analysis-level: session
+      input: {layout: bids, roles: [t1w]}
+      units: apart
+      outputs:
+        - {id: image, kind: image, path-template: "sub-{subject}/ses-{session}/anat/*_desc-x_T1w.nii.gz", role: t1w, contrast: T1w, grid: t1w}
+cases:
+  - name: registration before SAMSEG satisfies aligned
+    workflow:
+      nils_workflow: 1
+      name: case-satisfied
+      steps:
+        - {id: register, pipeline: registration-stub}
+        - {id: samseg, pipeline: samseg-lesions, switches: {lesions: "on"}}
+      links:
+        - {from: register.aligned_flair, to: samseg.flair}
+    expect:
+      - {link: "register.aligned_flair -> samseg.flair", verdict: satisfied, words: "aligned(flair, t1w)"}
+  - name: SAMSEG with lesions and no registration is missing, accepted with the header check on
+    workflow:
+      nils_workflow: 1
+      name: case-missing
+      steps:
+        - {id: samseg, pipeline: samseg-lesions, switches: {lesions: "on"}}
+    expect:
+      - {link: "(no step) -> samseg.flair", verdict: missing, words: "header-alignment check on"}
+      - {link: "(no step) -> samseg.flair", verdict: missing, words: "flair_t1_brain_dice >= 0.85"}
+  - name: N4 before SAMSEG is redundant
+    workflow:
+      nils_workflow: 1
+      name: case-redundant-samseg
+      steps:
+        - {id: n4, pipeline: n4-bias-correction}
+        - {id: samseg, pipeline: samseg-lesions}
+    expect:
+      - {link: "n4 -> samseg", verdict: redundant, words: "SAMSEG estimates and corrects the bias field itself"}
+  - name: N4 before recon-all is redundant
+    workflow:
+      nils_workflow: 1
+      name: case-redundant-recon
+      steps:
+        - {id: n4, pipeline: n4-bias-correction}
+        - {id: recon, pipeline: freesurfer-recon-all}
+    expect:
+      - {link: "n4 -> recon", verdict: redundant, words: "recon-all corrects the bias itself"}
+  - name: N4 before a FLAIR lesion model is possibly harmful
+    workflow:
+      nils_workflow: 1
+      name: case-harmful
+      steps:
+        - {id: n4, pipeline: n4-bias-correction}
+        - {id: lst, pipeline: lst-ai}
+        - {id: segcsvd, pipeline: segcsvd}
+    expect:
+      - {link: "n4 -> lst", verdict: redundant, words: "possibly harmful"}
+      - {link: "n4 -> segcsvd", verdict: redundant, words: "possibly harmful"}
+  - name: a mask into a FLAIR role is refused with both types named
+    workflow:
+      nils_workflow: 1
+      name: case-refused-kind
+      steps:
+        - {id: strip, pipeline: synthstrip}
+        - {id: samseg, pipeline: samseg-lesions}
+      links:
+        - {from: strip.brain_mask, to: samseg.flair}
+    expect:
+      - {link: "strip.brain_mask -> samseg.flair", verdict: refused, words: "T1w mask of the t1w on the t1w grid into the flair role"}
+  - name: a T1w image into the FLAIR role is refused, both named
+    workflow:
+      nils_workflow: 1
+      name: case-refused-role
+      steps:
+        - {id: t1, pipeline: t1w-stub}
+        - {id: samseg, pipeline: samseg-lesions}
+      links:
+        - {from: t1.image, to: samseg.flair}
+    expect:
+      - {link: "t1.image -> samseg.flair", verdict: refused, words: "t1w does not meet flair"}
+  - name: a FLAIR mask into segcsvd's SynthSeg input is refused, both named
+    workflow:
+      nils_workflow: 1
+      name: case-refused-typed
+      steps:
+        - {id: first, pipeline: segcsvd}
+        - {id: second, pipeline: segcsvd}
+      links:
+        - {from: first.wmh, to: second.synthseg}
+    expect:
+      - {link: "first.wmh -> second.synthseg", verdict: refused, words: "flair does not meet t1w"}
+  - name: SynthSeg before segcsvd is fed, naming which SynthSeg the key carries
+    workflow:
+      nils_workflow: 1
+      name: case-fed
+      steps:
+        - {id: synthseg, pipeline: synthseg}
+        - {id: segcsvd, pipeline: segcsvd}
+      links:
+        - {from: synthseg.labels, to: segcsvd.synthseg}
+    expect:
+      - {link: "synthseg.labels -> segcsvd.synthseg", verdict: fed, words: "the segcsvd"}
+      - {link: "synthseg.labels -> segcsvd.synthseg", verdict: fed, words: "robust true"}
+  - name: a family the catalog does not hold refuses its links by name
+    workflow:
+      nils_workflow: 1
+      name: case-family
+      steps:
+        - {id: register, family: registration}
+        - {id: samseg, pipeline: samseg-lesions}
+      links:
+        - {from: register.aligned_flair, to: samseg.flair}
+    expect:
+      - {link: "register.aligned_flair -> samseg.flair", verdict: refused, words: "the family registration is not in this catalog"}
+  - name: an output the step does not declare is refused
+    workflow:
+      nils_workflow: 1
+      name: case-no-output
+      steps:
+        - {id: strip, pipeline: synthstrip}
+        - {id: n4, pipeline: n4-bias-correction}
+      links:
+        - {from: strip.skull, to: n4.brain_mask}
+    expect:
+      - {link: "strip.skull -> n4.brain_mask", verdict: refused, words: "declares no output skull"}
+  - name: SynthStrip's mask feeds N4's optional mask input
+    workflow:
+      nils_workflow: 1
+      name: case-fed-optional
+      steps:
+        - {id: strip, pipeline: synthstrip}
+        - {id: n4, pipeline: n4-bias-correction}
+      links:
+        - {from: strip.brain_mask, to: n4.brain_mask}
+    expect:
+      - {link: "strip.brain_mask -> n4.brain_mask", verdict: fed, words: "n4.brain_mask is fed by strip"}

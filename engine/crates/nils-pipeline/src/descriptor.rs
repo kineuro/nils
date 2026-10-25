@@ -416,6 +416,17 @@ pub struct Output {
     pub space: Option<String>,
 }
 
+impl Output {
+    /// The output's type as a workflow's link reads it (Wave 7b section
+    /// 8.3): `{kind, role, contrast, grid, space}`.
+    pub fn typing(&self) -> Value {
+        serde_json::json!({
+            "kind": self.kind, "role": self.role, "contrast": self.contrast,
+            "grid": self.grid, "space": self.space,
+        })
+    }
+}
+
 /// The type of a table's column.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ColumnType {
@@ -1096,6 +1107,13 @@ pub fn from_value(document: Value) -> Result<Descriptor, String> {
                 "{at}role {r} is a role: lowercase letters, digits and _"
             ));
         }
+        let contrast = opt_text(o, "contrast", &at)?;
+        let space = opt_text(o, "space", &at)?;
+        if grid.is_some() && space.is_some() {
+            return Err(format!(
+                "{at}grid and space: an output is on a scan's grid or in a space, not both"
+            ));
+        }
         outputs.push(Output {
             id,
             kind,
@@ -1108,8 +1126,8 @@ pub fn from_value(document: Value) -> Result<Descriptor, String> {
             grid,
             parts,
             role,
-            contrast: opt_text(o, "contrast", &at)?,
-            space: opt_text(o, "space", &at)?,
+            contrast,
+            space,
         });
     }
     if outputs.is_empty() {
@@ -2451,6 +2469,21 @@ x-nils:
             e.contains("grid belongs to a mask, image or transform output"),
             "{e}"
         );
+        let e = parse(&base.replace(
+            "kind: output",
+            "kind: image\n      grid: t1w\n      space: MNI",
+        ))
+        .unwrap_err();
+        assert!(e.contains("grid and space"), "{e}");
+        let typed = parse(&base.replace(
+            "kind: output",
+            "kind: image\n      grid: t1w\n      role: t1w\n      contrast: T1w",
+        ))
+        .unwrap();
+        let o = typed.outputs.iter().find(|o| o.kind == "image").unwrap();
+        assert_eq!(o.typing()["contrast"], "T1w");
+        assert_eq!(o.typing()["grid"], "t1w");
+        assert!(o.typing()["space"].is_null());
         let e = parse(&base.replace(
             "kind: output",
             "kind: output\n      parts: [{key: a, words: A, kind: labels}]",

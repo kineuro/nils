@@ -327,6 +327,10 @@ pub struct Run {
     /// (`{goal, switches, let_run}`); null on a run from before or one
     /// without a pack. A resume judges under it.
     pub person: Value,
+    /// Wave 7b A7 (section 8.4): the workflow run this run is a step of,
+    /// and which step (from 0); none for a run of its own.
+    pub workflow_run_id: Option<i64>,
+    pub step: Option<i64>,
 }
 
 /// A run to start.
@@ -351,7 +355,7 @@ pub struct NewRun<'a> {
     pub started_at: &'a str,
 }
 
-const RUN_COLUMNS: [&str; 30] = [
+const RUN_COLUMNS: [&str; 32] = [
     "id",
     "pipeline_id",
     "job_id",
@@ -382,6 +386,8 @@ const RUN_COLUMNS: [&str; 30] = [
     "scratch_place_id",
     "failure",
     "person",
+    "workflow_run_id",
+    "step",
 ];
 
 fn select_runs(store: &mut Store) -> String {
@@ -430,6 +436,8 @@ fn run_of(r: &Row) -> Result<Run, Error> {
         scratch_place_id: r.opt_int(27)?,
         failure: json(r.opt_text(28)?),
         person: json(r.opt_text(29)?),
+        workflow_run_id: r.opt_int(30)?,
+        step: r.opt_int(31)?,
     })
 }
 
@@ -780,9 +788,15 @@ pub struct Unit {
     pub pack: Value,
     pub comparability_key: Option<String>,
     pub result_key: Option<String>,
+    /// Wave 7b A7 (section 8.5): the run whose kept result the unit reused
+    /// in place of running; none where it ran.
+    pub reused_from_run: Option<i64>,
+    /// Wave 7b A7 (record 58 P5): the curation state of its inputs when it
+    /// ran; null on a unit from before.
+    pub curation: Value,
 }
 
-const UNIT_COLUMNS: [&str; 21] = [
+const UNIT_COLUMNS: [&str; 23] = [
     "id",
     "run_id",
     "unit",
@@ -804,6 +818,8 @@ const UNIT_COLUMNS: [&str; 21] = [
     "pack",
     "comparability_key",
     "result_key",
+    "reused_from_run",
+    "curation",
 ];
 
 fn unit_of(r: &Row) -> Result<Unit, Error> {
@@ -829,7 +845,93 @@ fn unit_of(r: &Row) -> Result<Unit, Error> {
         pack: json(r.opt_text(18)?),
         comparability_key: r.opt_text(19)?.map(str::to_string),
         result_key: r.opt_text(20)?.map(str::to_string),
+        reused_from_run: r.opt_int(21)?,
+        curation: json(r.opt_text(22)?),
     })
+}
+
+/// Wave 7b A7 (section 8.5, G6): a unit reused a kept result in place of
+/// running: it is over, its outcome says `reused` and names the run.
+pub fn unit_reused(
+    store: &mut Store,
+    id: i64,
+    from_run: i64,
+    outcome: &Value,
+    finished_at: &str,
+) -> Result<(), Error> {
+    store.update_by_id(
+        table("pipeline_unit"),
+        &[
+            ("state", Param::from("over")),
+            ("outcome", Param::from(outcome.to_string())),
+            ("finished_at", Param::from(finished_at)),
+            ("reused_from_run", Param::Int(from_run)),
+        ],
+        "id",
+        id,
+    )?;
+    Ok(())
+}
+
+/// Wave 7b A7 (record 58 P5): the curation state of a unit's inputs when
+/// it ran.
+pub fn set_unit_curation(store: &mut Store, id: i64, curation: &Value) -> Result<(), Error> {
+    store.update_by_id(
+        table("pipeline_unit"),
+        &[("curation", Param::from(curation.to_string()))],
+        "id",
+        id,
+    )?;
+    Ok(())
+}
+
+/// Wave 7b A7 (section 8.5): the kept results whose result key is this one,
+/// in runs that ended (not running, not interrupted), newest first: `(run,
+/// unit id, unit, pipeline id)`. A unit that itself reused a result is left
+/// out: the result is its source run's.
+pub fn kept_by_result_key(
+    store: &mut Store,
+    result_key: &str,
+) -> Result<Vec<(i64, i64, String, i64)>, Error> {
+    let d = store.dialect();
+    let t = table("pipeline_unit");
+    let outcome = d.text_of_qualified(Some("u"), t.column("outcome").expect("outcome"));
+    let sql = format!(
+        "SELECT u.run_id, u.id, u.unit, pr.pipeline_id, {outcome} FROM {} u \
+         JOIN {} pr ON pr.id = u.run_id \
+         WHERE u.result_key = {} AND u.state = 'over' AND u.reused_from_run IS NULL \
+         AND pr.status NOT IN ('running', 'interrupted') ORDER BY u.run_id DESC, u.id DESC",
+        store.qualified("pipeline_unit"),
+        store.qualified("pipeline_run"),
+        d.param(1, Type::Text)
+    );
+    let mut out = Vec::new();
+    for r in store.query(&sql, &[Param::from(result_key)])? {
+        if json(r.opt_text(4)?)["status"] != "succeeded" {
+            continue;
+        }
+        out.push((r.int(0)?, r.int(1)?, r.text(2)?.to_string(), r.int(3)?));
+    }
+    Ok(out)
+}
+
+/// Wave 7b A7 (section 8.4): a run is a step of a workflow run.
+pub fn set_workflow_step(
+    store: &mut Store,
+    id: i64,
+    workflow_run: i64,
+    step: i64,
+) -> Result<(), Error> {
+    store.update_by_id(
+        table("pipeline_run"),
+        &[
+            ("workflow_run_id", Param::Int(workflow_run)),
+            ("step", Param::Int(step)),
+        ],
+        "id",
+        id,
+    )?;
+    Ok(())
 }
 
 /// Record 57 P2 to P4: what the pack decided of a unit, and the two keys

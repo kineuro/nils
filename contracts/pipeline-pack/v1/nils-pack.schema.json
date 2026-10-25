@@ -4,6 +4,7 @@
   "title": "NILS pipeline pack (nils-pack.yaml)",
   "description": "SPDX-License-Identifier: Apache-2.0. Record 57 (P1 to P4): what NILS adds to a pipeline beside its descriptor. The descriptor (contracts/job/v1, nils.job.yml) stays the knob layer; the pack beside it holds the needs a session must meet, what each knob does and whether it breaks comparability, the ordered rules that choose knob values or a variant per session from facts, the checks, the licence, the resources, the comparability key's members, the tests and the source. It pins the descriptor by the digest the catalog computes (pipeline.descriptor_sha256); a pipeline version is the pair. The file is YAML; this schema is of the value it parses to. Every `when` is an expression of the pack's language (comparisons, and, or, not, in, present(role), aligned(a, b), min, max), parsed and type-checked at load: an unknown fact, a wrong type or a value outside a fact's vocabulary refuses the pack. A reader keeps a key it does not know; a key this version names is checked.",
   "$defs": {
+    "links": {"type": "object", "description": "Wave 7b, section 8.3 (added in place and additively): what the pack says of a workflow's links to and from its pipeline. provides names the preprocessing the pipeline provides (N4 provides bias_correction); redundant maps a preprocessing the pipeline does itself to the words the plan says when a step before it provides it; harmful maps a preprocessing that may harm it to the words the plan says", "properties": {"provides": {"type": "array", "items": {"type": "string"}}, "redundant": {"type": "object", "additionalProperties": {"type": "string"}}, "harmful": {"type": "object", "additionalProperties": {"type": "string"}}}, "additionalProperties": false},
     "id": {
       "type": "string",
       "pattern": "^[a-z][a-z0-9_-]*$"
@@ -157,6 +158,7 @@
     "checks": {"type": "array", "items": {"$ref": "#/$defs/check"}},
     "licence": {"$ref": "#/$defs/licence"},
     "resources": {"$ref": "#/$defs/resources"},
+    "links": {"$ref": "#/$defs/links"},
     "comparability": {"$ref": "#/$defs/comparability"},
     "tests": {"type": "array", "items": {"$ref": "#/$defs/test"}},
     "source": {"$ref": "#/$defs/source_block"}

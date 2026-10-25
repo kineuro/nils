@@ -238,8 +238,42 @@ pub struct PipelinePack {
     pub comparability_facts: Vec<String>,
     pub tests: Value,
     pub source: Value,
+    /// Wave 7b, section 8.3: what the pack says of a workflow's links to
+    /// and from it.
+    pub links: Links,
     /// The document as it parsed, kept whole.
     pub document: Value,
+}
+
+/// What a pack says of the links a workflow may make to and from its
+/// pipeline (`links`, Wave 7b, section 8.3, additive): the preprocessing
+/// the pipeline provides (`provides`, N4 provides `bias_correction`), the
+/// preprocessing it does itself so a step before it that provides it is
+/// redundant (`redundant`, with the words), and the preprocessing that may
+/// harm it (`harmful`, with the words).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Links {
+    pub provides: Vec<String>,
+    pub redundant: BTreeMap<String, String>,
+    pub harmful: BTreeMap<String, String>,
+}
+
+fn words_map(v: &Value, key: &str, at: &str) -> Result<BTreeMap<String, String>, String> {
+    match &v[key] {
+        Value::Null => Ok(BTreeMap::new()),
+        Value::Object(o) => o
+            .iter()
+            .map(|(k, w)| {
+                w.as_str()
+                    .filter(|w| !w.trim().is_empty())
+                    .map(|w| (k.clone(), w.to_string()))
+                    .ok_or_else(|| format!("{at}{key}.{k} is the words a plan says"))
+            })
+            .collect(),
+        _ => Err(format!(
+            "{at}{key} is a mapping of a preprocessing to words"
+        )),
+    }
 }
 
 fn text(v: &Value, key: &str, at: &str) -> Result<String, String> {
@@ -576,6 +610,15 @@ pub fn from_value(document: Value) -> Result<PipelinePack, String> {
 
     let comparability_knobs = string_list(&document["comparability"], "knobs", "comparability.")?;
     let comparability_facts = string_list(&document["comparability"], "facts", "comparability.")?;
+    let links = match &document["links"] {
+        Value::Null => Links::default(),
+        Value::Object(_) => Links {
+            provides: string_list(&document["links"], "provides", "links.")?,
+            redundant: words_map(&document["links"], "redundant", "links.")?,
+            harmful: words_map(&document["links"], "harmful", "links.")?,
+        },
+        _ => return Err("links is a mapping: provides, redundant, harmful".into()),
+    };
     Ok(PipelinePack {
         name,
         descriptor_sha256,
@@ -592,6 +635,7 @@ pub fn from_value(document: Value) -> Result<PipelinePack, String> {
         comparability_facts,
         tests: document["tests"].clone(),
         source: document["source"].clone(),
+        links,
         document,
     })
 }

@@ -1,0 +1,24 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# The smallest workflow (Wave 7b, section 8.2): SynthStrip's brain mask,
+# then recon-all. recon-all takes no derivative input and strips the skull
+# itself, so the two steps share no link: the workflow fixes their order,
+# SynthStrip's mask is kept with its pack's checks (a mask in pieces or at
+# the image's edge flags the session before the long step), and recon-all
+# runs after it, session by session, as soon as each session's mask is
+# done.
+nils_workflow: 1
+name: cortical
+title: Cortical reconstruction
+what: "Skull-strip the T1w with SynthStrip, then reconstruct the cortex with recon-all"
+steps:
+  - id: strip
+    pipeline: synthstrip
+    version: current
+    goal: standard
+  - id: recon
+    pipeline: freesurfer-recon-all
+    version: current
+    goal: standard
+    knobs: [three_tesla, big_ventricles]
+links: []

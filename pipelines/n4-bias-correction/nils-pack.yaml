@@ -12,7 +12,7 @@
 nils_pack: 1
 pipeline:
   name: n4-bias-correction
-  descriptor_sha256: "sha256:d89fd508c6e830d05e94950be4bc4894e291d90c64a9897476171911c75bf468"
+  descriptor_sha256: "sha256:c69513d62bad4f8e04bd65e123f394efd923e3c7714cf3abaf42d1538bebafac"
   version: "1.0"
 goals:
   goal: [fast, standard, research]
@@ -78,6 +78,9 @@ resources:
   memory_gb: 4
   minutes: 2
   gpu: none
+# Wave 7b, section 8.3: what a workflow's plan says of a link from N4.
+links:
+  provides: [bias_correction]
 comparability: {}
 tests: []
 source:

@@ -146,6 +146,10 @@ resources:
   gpu: none
   by_input:
     - {when: "goal == 'research' and t1w.voxel_max_mm < 0.9", memory_gb: 48, minutes: 900}
+# Wave 7b, section 8.3: what a workflow's plan says of a link into recon-all.
+links:
+  redundant:
+    bias_correction: "N4 before recon-all is redundant: recon-all corrects the bias itself in its own steps (record 57, research 03)"
 comparability: {}
 tests: []
 source:

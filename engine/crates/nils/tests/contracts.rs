@@ -1393,3 +1393,158 @@ fn the_registration_scripts_hand_ants_its_bracket_arguments_whole() {
     assert!(std::fs::read_to_string(&log).unwrap().is_empty());
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// The workflow contract (`contracts/workflow/v1`, record 57 P7, Wave 7b
+/// A7): its schema validates the shipped workflows and the example, the
+/// loader loads them, the schema refuses what the loader refuses, and the
+/// link fixture set of G12 plans to the specified verdict, 100 %.
+#[test]
+fn the_workflow_contract_is_the_loader_s_and_the_link_fixtures_plan_as_specified() {
+    use nils_pipeline::workflow;
+    let v = version("workflow");
+    assert_eq!(v, 1);
+    assert_eq!(workflow::CONTRACT, 1);
+    let schema = json("workflow/v1/nils.workflow.schema.json");
+    assert_eq!(
+        schema["$schema"],
+        "https://json-schema.org/draft/2020-12/schema"
+    );
+    assert_eq!(
+        strings(&schema["$defs"]["step"]["properties"]["goal"]["enum"]),
+        nils_pipeline::pack::facts::GOALS
+    );
+    // the shipped workflows and the example validate and load
+    let shipped = contracts().join("../pipelines/workflows");
+    let mut loaded = 0;
+    for dir in std::fs::read_dir(&shipped)
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .chain(std::iter::once(
+            contracts().join("workflow/v1/examples/cortical"),
+        ))
+    {
+        let file = dir.join(workflow::FILE);
+        let text =
+            std::fs::read_to_string(&file).unwrap_or_else(|e| panic!("{}: {e}", file.display()));
+        let value: serde_json::Value = serde_saphyr::from_str(&text).unwrap();
+        let broken = breaks(&schema, &schema, &value, "workflow");
+        assert!(broken.is_empty(), "{}: {broken:#?}", file.display());
+        let w = workflow::parse(&text).unwrap_or_else(|e| panic!("{}: {e}", file.display()));
+        assert!(!w.steps.is_empty());
+        loaded += 1;
+    }
+    assert_eq!(loaded, 3, "flair-lesions, cortical and the example");
+    // the schema refuses what the loader refuses
+    for (text, words) in [
+        (
+            "nils_workflow: 2\nname: x\nsteps: [{id: a, pipeline: p}]\n",
+            "nils_workflow 2",
+        ),
+        (
+            "nils_workflow: 1\nname: x\nsteps: []\n",
+            "at least one step",
+        ),
+        (
+            "nils_workflow: 1\nname: x\nsteps: [{id: a, pipeline: p, family: f}]\n",
+            "not both",
+        ),
+        (
+            "nils_workflow: 1\nname: x\nsteps: [{id: a, pipeline: p}]\nlinks: [{from: a, to: a.i}]\n",
+            "<step>.<output>",
+        ),
+    ] {
+        let value: serde_json::Value = serde_saphyr::from_str(text).unwrap();
+        assert!(
+            !breaks(&schema, &schema, &value, "workflow").is_empty(),
+            "the schema takes {text}"
+        );
+        let e = workflow::parse(text).unwrap_err();
+        assert!(e.contains(words), "{text}: {e}");
+    }
+
+    // G12: every case of the link fixture set plans to its verdict
+    let fixture = contracts().join("workflow/v1/tests/links.yaml");
+    let cases: serde_json::Value =
+        serde_saphyr::from_str(&std::fs::read_to_string(&fixture).unwrap()).unwrap();
+    let stubs: std::collections::BTreeMap<String, nils_pipeline::Descriptor> = cases["stubs"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .map(|(k, v)| {
+            (
+                k.clone(),
+                nils_pipeline::descriptor::parse(v.as_str().unwrap())
+                    .unwrap_or_else(|e| panic!("stub {k}: {e}")),
+            )
+        })
+        .collect();
+    let pipelines = contracts().join("../pipelines");
+    let mut planned = 0;
+    let mut wrong: Vec<String> = Vec::new();
+    for case in cases["cases"].as_array().unwrap() {
+        let name = case["name"].as_str().unwrap();
+        let w = workflow::from_value(case["workflow"].clone())
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+        // the members: a shipped folder's pair, a stub, or a refusal
+        let loaded: Vec<(
+            Option<nils_pipeline::Descriptor>,
+            Option<nils_pipeline::pack::PipelinePack>,
+            Option<String>,
+        )> = w
+            .steps
+            .iter()
+            .map(|s| {
+                if s.of == "family" {
+                    return (
+                        None,
+                        None,
+                        Some(format!(
+                            "the family {} is not in this catalog: no member to plan",
+                            s.name
+                        )),
+                    );
+                }
+                if let Some(d) = stubs.get(&s.name) {
+                    return (Some(d.clone()), None, None);
+                }
+                let dir = pipelines.join(&s.name);
+                let (d, p) = nils_pipeline::pack::load_dir(&dir, None)
+                    .unwrap_or_else(|e| panic!("{name}: {}: {e}", dir.display()));
+                (Some(d), p, None)
+            })
+            .collect();
+        let members: Vec<workflow::Member<'_>> = w
+            .steps
+            .iter()
+            .zip(&loaded)
+            .map(|(s, (d, p, r))| workflow::Member {
+                step: s,
+                label: format!("{}@1", s.name),
+                descriptor: d.as_ref(),
+                pack: p.as_ref(),
+                refusal: r.clone(),
+            })
+            .collect();
+        let verdicts = workflow::plan_links(&w, &members);
+        for e in case["expect"].as_array().unwrap() {
+            planned += 1;
+            let link = e["link"].as_str().unwrap();
+            let want = e["verdict"].as_str().unwrap();
+            let words = e["words"].as_str().unwrap();
+            match verdicts.iter().find(|v| v.link == link) {
+                Some(v) if v.verdict == want && v.words.contains(words) => {}
+                Some(v) => wrong.push(format!(
+                    "{name}: {link} is {} ({}), expected {want} with {words:?}",
+                    v.verdict, v.words
+                )),
+                None => wrong.push(format!(
+                    "{name}: no verdict for {link}; planned: {:?}",
+                    verdicts.iter().map(|v| v.link.as_str()).collect::<Vec<_>>()
+                )),
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "G12: {wrong:#?}");
+    assert!(planned >= 12, "{planned} links planned");
+}

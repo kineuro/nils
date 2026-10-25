@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 110;
+pub const SCHEMA_VERSION: i64 = 111;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -494,7 +494,32 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 110,
         apply: an_audit_draws_by_count_and_is_settled,
     },
+    Migration {
+        version: 111,
+        apply: a_workflow_chains_runs_and_a_unit_says_what_it_reused_and_its_curation,
+    },
 ];
+
+/// Wave 7b A7 (record 57 P7 and P8, record 58 P5; 2026-10-25): workflows in
+/// the catalog (`workflow`) and their runs (`workflow_run`); a pipeline run
+/// names the workflow run and the step it is (`pipeline_run.workflow_run_id`,
+/// `step`); a unit names the run whose kept result it reused in place of
+/// running (`pipeline_unit.reused_from_run`) and records the curation state
+/// of its inputs when it ran (`pipeline_unit.curation`). The columns are
+/// added and left empty: a run from before is one of its own, a unit from
+/// before ran and recorded no curation state, which the provenance door
+/// says.
+fn a_workflow_chains_runs_and_a_unit_says_what_it_reused_and_its_curation(
+    store: &mut Store,
+    kind: Kind,
+) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_tables(store, kind, &["workflow", "workflow_run"])?;
+    add_columns(store, "pipeline_run", &["workflow_run_id", "step"])?;
+    add_columns(store, "pipeline_unit", &["reused_from_run", "curation"])
+}
 
 /// Record 58 P1 (Wave 7b spec §12): a verify campaign's planting
 /// (`campaign.planted`), its planted items (`campaign_planted`) and the

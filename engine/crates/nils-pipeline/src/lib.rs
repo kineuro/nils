@@ -42,6 +42,7 @@ pub mod secrets;
 pub mod software;
 pub mod table;
 pub mod words;
+pub mod workflow;
 
 pub use descriptor::Descriptor;
 pub use results::Results;
