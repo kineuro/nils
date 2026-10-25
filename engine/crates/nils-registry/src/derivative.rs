@@ -26,7 +26,7 @@ use crate::store::{Error, Insert, Param, Row, Store};
 /// artifact of a model a run fitted and the registry registered. Record 49
 /// adds table: a file of numbers with declared columns, whose rows the
 /// runner loads as measures the ask reads.
-pub const KINDS: [&str; 7] = [
+pub const KINDS: [&str; 9] = [
     "mask",
     "embedding",
     "pyramid",
@@ -34,6 +34,10 @@ pub const KINDS: [&str; 7] = [
     "seeds",
     "model",
     "table",
+    // Wave 7b section 8.2: an aligned image and a transform, typed by the
+    // role, contrast and grid their output declares
+    "image",
+    "transform",
 ];
 
 /// The kinds only a pipeline run writes (record 43).

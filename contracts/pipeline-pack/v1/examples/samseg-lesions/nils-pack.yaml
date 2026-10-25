@@ -9,7 +9,7 @@
 nils_pack: 1
 pipeline:
   name: samseg-lesions
-  descriptor_sha256: "sha256:88c8b67c628267c588f76579253b374b0d071a6ff41cd63015a9d24a735cbc66"
+  descriptor_sha256: "sha256:492dfe7566ce40920694d95cf158f0409b79a35dfe9a22edd2bb8fd93ed9ca24"
   version: "0.1"
 goals:
   goal: [fast, standard, research]

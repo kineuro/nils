@@ -54,7 +54,20 @@ pub const INPUT_TYPES: [&str; 2] = ["model", "label_set"];
 /// A3) is a file of numbers with declared columns, one row per unit, whose
 /// rows the runner loads for the ask. The registry's `seeds` is the
 /// runner's own, written from the results, never declared.
-pub const OUTPUT_KINDS: [&str; 6] = ["mask", "embedding", "pyramid", "output", "model", "table"];
+pub const OUTPUT_KINDS: [&str; 8] = [
+    "mask",
+    "embedding",
+    "pyramid",
+    "output",
+    "model",
+    "table",
+    "image",
+    "transform",
+];
+
+/// The output kinds that lie on a grid (Wave 7b section 8.2): a mask, an
+/// image or a transform may say the input role whose stack its grid is on.
+pub const GRID_KINDS: [&str; 3] = ["mask", "image", "transform"];
 
 /// The file formats a table output may be written in (record 49 A3).
 pub const TABLE_FORMATS: [&str; 3] = ["csv", "tsv", "json"];
@@ -347,6 +360,13 @@ pub struct TypedInput {
     /// admission is the site's check of its bytes, so a kept model's code
     /// runs at arrival with no hand step.
     pub trust: Option<String>,
+    /// For a `derivative:<kind>` input (Wave 7b section 8.2, typed links):
+    /// the role the derivative stands for, the contrast it has and the
+    /// input role whose grid it is on, each matched against the typed
+    /// output that made the derivative; none is any.
+    pub role: Option<String>,
+    pub contrast: Option<String>,
+    pub grid: Option<String>,
 }
 
 /// One part set a mask output declares (record 55 H3, section 3).
@@ -388,6 +408,12 @@ pub struct Output {
     /// (`parts`); a mask declaring none is read as one set, whole.
     pub grid: Option<String>,
     pub parts: Vec<PartSet>,
+    /// Wave 7b section 8.2 (typed outputs): the role the output stands for
+    /// (`flair` for an aligned FLAIR), the contrast it has, and the space
+    /// it is in where that is not an input's grid (`MNI152NLin2009cAsym`).
+    pub role: Option<String>,
+    pub contrast: Option<String>,
+    pub space: Option<String>,
 }
 
 /// The type of a table's column.
@@ -938,12 +964,30 @@ pub fn from_value(document: Value) -> Result<Descriptor, String> {
                 "{at}trusted-by-admission belongs to a model input: the parameter an admitted model's run sets true"
             ));
         }
+        let role = opt_text(t, "role", &at)?;
+        let contrast = opt_text(t, "contrast", &at)?;
+        let grid = opt_text(t, "grid", &at)?;
+        if (role.is_some() || contrast.is_some() || grid.is_some()) && !ty.starts_with("derivative:") {
+            return Err(format!(
+                "{at}role, contrast and grid belong to a derivative input: the typed output it takes"
+            ));
+        }
+        for (key, v) in [("role", &role), ("grid", &grid)] {
+            if let Some(v) = v
+                && !is_ident(v, true)
+            {
+                return Err(format!("{at}{key} {v} is a role: lowercase letters, digits and _"));
+            }
+        }
         inputs.push(TypedInput {
             id,
             ty,
             optional: opt_bool(t, "optional", &at)?.unwrap_or(false),
             checked,
             trust,
+            role,
+            contrast,
+            grid,
         });
     }
     if inputs.iter().filter(|t| t.ty == "label_set").count() > 1 {
@@ -1032,15 +1076,19 @@ pub fn from_value(document: Value) -> Result<Descriptor, String> {
         };
         let grid = opt_text(o, "grid", &at)?;
         let parts = parts_of(o, &at)?;
-        if kind != "mask" {
-            if grid.is_some() {
-                return Err(format!(
-                    "{at}grid belongs to a mask output: the input role whose stack its grid is on"
-                ));
-            }
-            if !o["parts"].is_null() {
-                return Err(format!("{at}parts belong to a mask output"));
-            }
+        if grid.is_some() && !GRID_KINDS.contains(&kind.as_str()) {
+            return Err(format!(
+                "{at}grid belongs to a mask, image or transform output: the input role whose stack its grid is on"
+            ));
+        }
+        if kind != "mask" && !o["parts"].is_null() {
+            return Err(format!("{at}parts belong to a mask output"));
+        }
+        let role = opt_text(o, "role", &at)?;
+        if let Some(r) = &role
+            && !is_ident(r, true)
+        {
+            return Err(format!("{at}role {r} is a role: lowercase letters, digits and _"));
         }
         outputs.push(Output {
             id,
@@ -1053,6 +1101,9 @@ pub fn from_value(document: Value) -> Result<Descriptor, String> {
             table,
             grid,
             parts,
+            role,
+            contrast: opt_text(o, "contrast", &at)?,
+            space: opt_text(o, "space", &at)?,
         });
     }
     if outputs.is_empty() {
@@ -2390,7 +2441,7 @@ x-nils:
         }
         // only a mask has a grid and parts, and only a derivative input a check
         let e = parse(&base.replace("kind: output", "kind: output\n      grid: t1w")).unwrap_err();
-        assert!(e.contains("grid belongs to a mask output"), "{e}");
+        assert!(e.contains("grid belongs to a mask, image or transform output"), "{e}");
         let e = parse(&base.replace(
             "kind: output",
             "kind: output\n      parts: [{key: a, words: A, kind: labels}]",

@@ -111,6 +111,38 @@ pub fn unit_output<'a>(
     })
 }
 
+/// Whether a path relative to a run's output folder is one a path template
+/// names (Wave 7b section 8.2, typed links): the template's `{name}` words
+/// match any one segment's text, `*` matches inside one segment.
+pub fn matches_template(template: &str, rel: &str) -> bool {
+    let mut expanded = String::new();
+    let mut rest = template;
+    while let Some(i) = rest.find('{') {
+        expanded.push_str(&rest[..i]);
+        match rest[i..].find('}') {
+            Some(j) => {
+                expanded.push('*');
+                rest = &rest[i + j + 1..];
+            }
+            None => {
+                rest = &rest[i..];
+                break;
+            }
+        }
+    }
+    expanded.push_str(rest);
+    glob::Pattern::new(&expanded).is_ok_and(|p| {
+        p.matches_with(
+            rel,
+            glob::MatchOptions {
+                case_sensitive: true,
+                require_literal_separator: true,
+                require_literal_leading_dot: true,
+            },
+        )
+    })
+}
+
 /// The files under `root` a path template finds for one unit, relative to
 /// `root` and sorted: the template's `{name}` words replaced by the unit's
 /// values, `*` matching inside one segment.
@@ -310,6 +342,9 @@ mod tests {
             table: None,
             grid: None,
             parts: Vec::new(),
+            role: None,
+            contrast: None,
+            space: None,
         }];
         assert!(unit_output(&outputs, "stack-4/out.txt", &[("stack", "4")]).is_some());
         assert!(unit_output(&outputs, "stack-5/out.txt", &[("stack", "4")]).is_none());
@@ -320,5 +355,28 @@ mod tests {
             ..outputs[0].clone()
         }];
         assert!(unit_output(&loose, "45.nii", &[("stack", "4")]).is_none());
+    }
+}
+
+#[cfg(test)]
+mod template_tests {
+    use super::matches_template;
+
+    #[test]
+    fn a_path_template_matches_a_run_s_relative_path_by_segment() {
+        let t = "sub-{subject}/ses-{session}/anat/*_space-T1w_desc-aligned_FLAIR.nii.gz";
+        assert!(matches_template(
+            t,
+            "sub-01/ses-a/anat/sub-01_ses-a_acq-Ax+2D+FLAIR_space-T1w_desc-aligned_FLAIR.nii.gz"
+        ));
+        assert!(!matches_template(
+            t,
+            "sub-01/ses-a/anat/sub-01_ses-a_from-FLAIR_to-T1w_mode-image_xfm.mat"
+        ));
+        assert!(!matches_template(t, "sub-01/anat/x_space-T1w_desc-aligned_FLAIR.nii.gz"));
+        assert!(matches_template(
+            "sub-{subject}/anat/*_desc-registration_metrics.json",
+            "sub-01/anat/sub-01_desc-registration_metrics.json"
+        ));
     }
 }

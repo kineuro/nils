@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nils.kineuro.se/contracts/pipeline-pack/v1/nils-family.schema.json",
+  "title": "NILS pipeline family (nils-family.yaml)",
+  "description": "SPDX-License-Identifier: Apache-2.0. Record 57 (P6): a family is one entry for the person and several pipelines behind it, with rules choosing the member per unit. The family document lies in a folder whose subfolders, named as the members are, each hold a member's pair of descriptor (nils.job.yml) and pack (nils-pack.yaml); each member is a pipeline of the catalog in its own right. The document holds the roles the members read, the goals (the goal, the `task` switch whose values are the family's tasks, and the family's other switches), the tasks with the unit level each runs at and the members it may route to, the family-level needs in the pack's shape (hard needs skip a unit in the family's words, soft needs travel as caveats) and the ordered routing rules, each `when` an expression of the pack's language over the unit's facts, the person's choices and two facts of the unit itself: `unit.visits` (the sessions a participant unit holds; 1 for a session) and `unit.same_protocol` (whether every visit's T1w shares base, dimension, vendor and field strength). The first rule that holds names the member; a unit no rule takes, or whose rule names a member the task does not run, is skipped in words. Every expression is parsed and type-checked at load; a member a task routes to must be a pipeline at the task's level, and a member may read only roles the family names. A reader keeps a key it does not know; a key this version names is checked.",
+  "$defs": {
+    "id": {"type": "string", "pattern": "^[a-z][a-z0-9_-]*$"},
+    "expression": {"type": "string", "minLength": 1, "description": "An expression of the pack's language over the facts of a unit, the goal and the switches, and `unit.visits`, `unit.same_protocol`"},
+    "source": {"type": "string", "minLength": 1},
+    "need": {
+      "type": "object",
+      "required": ["when", "words", "source"],
+      "properties": {
+        "when": {"$ref": "#/$defs/expression"},
+        "words": {"type": "string", "minLength": 1},
+        "source": {"$ref": "#/$defs/source"}
+      }
+    },
+    "role_needs": {
+      "type": "object",
+      "properties": {
+        "hard_if": {"$ref": "#/$defs/expression"},
+        "hard": {"type": "array", "items": {"$ref": "#/$defs/need"}},
+        "soft": {"type": "array", "items": {"$ref": "#/$defs/need"}}
+      }
+    },
+    "task": {
+      "type": "object",
+      "required": ["level", "members"],
+      "properties": {
+        "level": {"type": "string", "enum": ["session", "participant"], "description": "The unit the task runs over: a session, or a participant with every session of the person"},
+        "words": {"type": "string"},
+        "members": {"type": "array", "minItems": 1, "items": {"type": "string"}, "description": "The members a rule of this task may route to, each a pipeline at the task's level"}
+      }
+    },
+    "member": {
+      "type": "object",
+      "required": ["pipeline"],
+      "properties": {
+        "pipeline": {"type": "string", "minLength": 1, "description": "The member's name in the catalog, the descriptor's name in its folder beside the family"},
+        "method": {"type": "string", "description": "The method and tool version, for the person"},
+        "words": {"type": "string"}
+      }
+    },
+    "rule": {
+      "type": "object",
+      "required": ["id", "when", "route"],
+      "properties": {
+        "id": {"$ref": "#/$defs/id"},
+        "when": {"$ref": "#/$defs/expression"},
+        "route": {"type": "string", "description": "The member the rule sends the unit to, one of `members`"},
+        "why": {"type": "string"},
+        "source": {"$ref": "#/$defs/source"}
+      }
+    }
+  },
+  "type": "object",
+  "required": ["nils_family", "family", "roles", "goals", "tasks", "members", "rules"],
+  "properties": {
+    "nils_family": {"const": 1},
+    "family": {
+      "type": "object",
+      "required": ["name"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1, "description": "The family's name, the catalog's one row"},
+        "version": {"type": "string"},
+        "words": {"type": "string"}
+      }
+    },
+    "roles": {"type": "array", "minItems": 1, "items": {"type": "string"}, "description": "The roles the members read, which the needs and rules may name"},
+    "goals": {
+      "type": "object",
+      "required": ["task"],
+      "properties": {
+        "goal": {"type": "array", "minItems": 1, "items": {"type": "string", "enum": ["fast", "standard", "research"]}},
+        "task": {"type": "array", "minItems": 1, "items": {"type": "string"}, "description": "The family's tasks; the first is the default"}
+      },
+      "additionalProperties": {"type": "array", "minItems": 1, "items": {"type": ["string", "boolean", "number"]}}
+    },
+    "tasks": {"type": "object", "minProperties": 1, "additionalProperties": {"$ref": "#/$defs/task"}, "description": "One entry per value of goals.task"},
+    "members": {"type": "object", "minProperties": 1, "additionalProperties": {"$ref": "#/$defs/member"}},
+    "needs": {"type": "object", "additionalProperties": {"$ref": "#/$defs/role_needs"}},
+    "rules": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/rule"}}
+  }
+}

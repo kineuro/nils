@@ -29,6 +29,7 @@
 
 pub mod expr;
 pub mod facts;
+pub mod family;
 pub mod keys;
 pub mod rules;
 
@@ -303,6 +304,73 @@ fn string_list(v: &Value, key: &str, at: &str) -> Result<Vec<String>, String> {
     }
 }
 
+
+/// The `needs` of a document, per role (a pack's, or a family's: the
+/// family document reads the same shape).
+pub(crate) fn needs_of(document: &Value) -> Result<BTreeMap<String, RoleNeeds>, String> {
+    let mut needs = BTreeMap::new();
+    match &document["needs"] {
+        Value::Null => {}
+        Value::Object(roles) => {
+            for (role, v) in roles {
+                let at = format!("needs.{role}.");
+                if !v.is_object() {
+                    return Err(format!("needs.{role} is a mapping: hard_if, hard, soft"));
+                }
+                let hard_if = match &v["hard_if"] {
+                    Value::Null => None,
+                    _ => Some(expression(v, "hard_if", &at)?.0),
+                };
+                needs.insert(
+                    role.clone(),
+                    RoleNeeds {
+                        hard_if,
+                        hard: needs_list(v, "hard", &at)?,
+                        soft: needs_list(v, "soft", &at)?,
+                    },
+                );
+            }
+        }
+        _ => return Err("needs is a mapping of roles".into()),
+    }
+    Ok(needs)
+}
+
+/// The `goals` of a document: the goal's values and the switches.
+pub(crate) fn goals_of(document: &Value) -> Result<Goals, String> {
+    let mut goals = Goals::default();
+    match &document["goals"] {
+        Value::Null => {}
+        Value::Object(map) => {
+            for (k, v) in map {
+                let Value::Array(items) = v else {
+                    return Err(format!("goals.{k} is a list of its values"));
+                };
+                if items.is_empty() {
+                    return Err(format!("goals.{k} names at least one value"));
+                }
+                if k == "goal" {
+                    for g in items {
+                        match g.as_str() {
+                            Some(w) if facts::GOALS.contains(&w) => goals.goal.push(w.to_string()),
+                            _ => {
+                                return Err(format!(
+                                    "goals.goal takes {}; not {g}",
+                                    facts::GOALS.join(", ")
+                                ));
+                            }
+                        }
+                    }
+                } else {
+                    goals.switches.insert(k.clone(), items.clone());
+                }
+            }
+        }
+        _ => return Err("goals is a mapping: goal and the pack's switches".into()),
+    }
+    Ok(goals)
+}
+
 /// Parse a pack from its YAML (JSON is YAML) and check its shape and its
 /// expressions' grammar; [`load`] checks it against its descriptor too.
 pub fn parse(text_: &str) -> Result<PipelinePack, String> {
@@ -344,31 +412,7 @@ pub fn from_value(document: Value) -> Result<PipelinePack, String> {
     let descriptor_sha256 = format!("sha256:{hex}");
     let version = opt_text(p, "version", "pipeline.")?;
 
-    let mut needs = BTreeMap::new();
-    match &document["needs"] {
-        Value::Null => {}
-        Value::Object(roles) => {
-            for (role, v) in roles {
-                let at = format!("needs.{role}.");
-                if !v.is_object() {
-                    return Err(format!("needs.{role} is a mapping: hard_if, hard, soft"));
-                }
-                let hard_if = match &v["hard_if"] {
-                    Value::Null => None,
-                    _ => Some(expression(v, "hard_if", &at)?.0),
-                };
-                needs.insert(
-                    role.clone(),
-                    RoleNeeds {
-                        hard_if,
-                        hard: needs_list(v, "hard", &at)?,
-                        soft: needs_list(v, "soft", &at)?,
-                    },
-                );
-            }
-        }
-        _ => return Err("needs is a mapping of roles".into()),
-    }
+    let needs = needs_of(&document)?;
 
     let mut knobs = BTreeMap::new();
     match &document["knobs"] {
@@ -413,36 +457,7 @@ pub fn from_value(document: Value) -> Result<PipelinePack, String> {
         _ => return Err("knobs is a mapping of the descriptor's inputs".into()),
     }
 
-    let mut goals = Goals::default();
-    match &document["goals"] {
-        Value::Null => {}
-        Value::Object(map) => {
-            for (k, v) in map {
-                let Value::Array(items) = v else {
-                    return Err(format!("goals.{k} is a list of its values"));
-                };
-                if items.is_empty() {
-                    return Err(format!("goals.{k} names at least one value"));
-                }
-                if k == "goal" {
-                    for g in items {
-                        match g.as_str() {
-                            Some(w) if facts::GOALS.contains(&w) => goals.goal.push(w.to_string()),
-                            _ => {
-                                return Err(format!(
-                                    "goals.goal takes {}; not {g}",
-                                    facts::GOALS.join(", ")
-                                ));
-                            }
-                        }
-                    }
-                } else {
-                    goals.switches.insert(k.clone(), items.clone());
-                }
-            }
-        }
-        _ => return Err("goals is a mapping: goal and the pack's switches".into()),
-    }
+    let goals = goals_of(&document)?;
 
     let mut variants = BTreeMap::new();
     match &document["variants"] {
