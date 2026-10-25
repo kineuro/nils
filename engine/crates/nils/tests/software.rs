@@ -1082,16 +1082,103 @@ fn terms_are_accepted_as_events_and_a_run_is_refused_until_then() {
         audit.to_string().contains(&sha256(licence_text.as_bytes())),
         "{audit}"
     );
+
+    // Wave 7b (agenda 3.8, from the desk): a later call that brings only the
+    // file (a renewed licence, say) to an accepted package places it and
+    // records no new acceptance; the one that stands is answered, with the
+    // file it was recorded with
+    let renewed = "licence text renewed, never recorded either: q8zt-m2vk-5rdp-x1yn\n";
+    let (status, placed) = server.send(
+        "POST",
+        "/api/software/licensed-tool/3.0/accept",
+        ADMIN,
+        Some(&json!({"file": renewed, "file_name": "license.txt"})),
+    );
+    assert_eq!(status, 200, "{placed}");
+    assert_eq!(placed["accepted"], true, "{placed}");
+    assert_eq!(placed["recorded"], false, "{placed}");
+    assert_eq!(placed["acceptance"]["id"], a["id"], "{placed}");
+    assert_eq!(
+        placed["acceptance"]["file"]["sha256"],
+        sha256(licence_text.as_bytes()),
+        "{placed}"
+    );
+    assert_eq!(
+        placed["file"]["sha256"],
+        sha256(renewed.as_bytes()),
+        "{placed}"
+    );
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), renewed);
+    let (_, listed) = server.send("GET", "/api/software", ADMIN, None);
+    let p = Lab::package(&listed, "licensed-tool@3.0");
+    assert_eq!(
+        p["licence"]["accepted"]["id"], a["id"],
+        "one acceptance: {p}"
+    );
+    assert_eq!(p["licence"]["file"]["present"], true, "{p}");
+    // a body with terms (or a note) records anew
+    let (status, again) = server.send(
+        "POST",
+        "/api/software/licensed-tool/3.0/accept",
+        ADMIN,
+        Some(&json!({"terms": {"address": "https://example.org/terms", "version": "2026"}, "note": "renewed"})),
+    );
+    assert_eq!(status, 200, "{again}");
+    assert_eq!(again["recorded"], true, "{again}");
+    assert_ne!(again["acceptance"]["id"], a["id"], "{again}");
+    assert_eq!(again["acceptance"]["note"], "renewed", "{again}");
+    assert_eq!(
+        again["acceptance"]["file"]["sha256"],
+        sha256(renewed.as_bytes()),
+        "the file in place is recorded with it: {again}"
+    );
     drop(server);
     let registry = std::fs::read(lab.home.path().join("registry.db")).unwrap();
-    let needle = b"n4x7-q2zv-8kpm-w3rt";
-    assert!(
-        !registry.windows(needle.len()).any(|w| w == needle),
-        "the licence's content is in the registry"
-    );
+    for needle in [b"n4x7-q2zv-8kpm-w3rt".as_slice(), b"q8zt-m2vk-5rdp-x1yn"] {
+        assert!(
+            !registry.windows(needle.len()).any(|w| w == needle),
+            "the licence's content is in the registry"
+        );
+    }
     let (_, out, _) = lab.run(&["software", "list"], &[], None);
     assert!(out.contains("terms accepted by adm"), "{out}");
     assert!(!out.contains("n4x7"), "{out}");
+
+    // at the keyboard, --file alone on an accepted package does the same:
+    // the file is placed, nothing new is recorded
+    let renewed_file = lab.bin.file("renewed-licence.txt", renewed.as_bytes());
+    let renewed_path = renewed_file.to_str().unwrap();
+    let placed = lab.json(
+        &[
+            "software",
+            "accept",
+            "licensed-tool@3.0",
+            "--file",
+            renewed_path,
+            "--json",
+        ],
+        &[],
+    );
+    assert_eq!(placed["recorded"], false, "{placed}");
+    assert_eq!(
+        placed["acceptance"]["id"], again["acceptance"]["id"],
+        "{placed}"
+    );
+    assert_eq!(placed["file"]["name"], "license.txt", "{placed}");
+    let (good, out, err) = lab.run(
+        &[
+            "software",
+            "accept",
+            "licensed-tool@3.0",
+            "--file",
+            renewed_path,
+        ],
+        &[],
+        None,
+    );
+    assert!(good, "{err}");
+    assert!(out.contains("already; nothing new recorded"), "{out}");
+    assert!(out.contains("licence file license.txt placed"), "{out}");
 
     // the acceptance at the keyboard needs the terms where no pack names them
     let (good, _, err) = lab.run(&["software", "accept", "other@1"], &[], None);
