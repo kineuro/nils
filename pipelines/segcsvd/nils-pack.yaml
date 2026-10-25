@@ -18,8 +18,8 @@
 nils_pack: 1
 pipeline:
   name: segcsvd
-  descriptor_sha256: "sha256:b16b3fcccf9cc8546921f2757a3dc4b74244a48568e043554e32e6a3582d69f3"
-  version: "1.0"
+  descriptor_sha256: "sha256:d01ecd21ec8975f301a7dec825650d08da4bd84050f55a96b5fcf8a120216ac9"
+  version: "1.1"
 goals:
   goal: [fast, standard, research]
 needs:
@@ -63,8 +63,8 @@ needs:
   link:
     soft:
       - when: "not present(flair) or aligned(flair, t1w)"
-        words: "the FLAIR is not known to be registered to the T1w: the shared scanner coordinates are trusted, and the brain-mask Dice of the unit checks it at 0.85"
-        source: "segcsvd README (co-registered inputs); policy until the registration family (record 57, research 04)"
+        words: "the FLAIR is not known to be registered to the T1w: no registration run has aligned it (the registration family, task within_session, makes the typed input aligned_flair), so the shared scanner coordinates are trusted and the brain-mask Dice of the unit checks it at 0.85"
+        source: "segcsvd README (co-registered inputs); the registration family (Wave 7b section 7) or the check (record 57, research 04)"
 knobs:
   wmh_threshold:
     what: "the probability a voxel of the WMH map is counted in its mask at: the authors' 0.35, between the Dice-best 0.4 and the sensitivity-best 0.3; re-threshold the stored map offline instead"

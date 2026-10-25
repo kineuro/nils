@@ -1182,3 +1182,214 @@ fn the_pipeline_pack_contract_is_the_loader_s_and_every_shipped_pack_loads() {
     let e = pack::load(&with_action, &d, None).unwrap_err();
     assert!(e.contains("knobs.a") && e.contains("has no input a"), "{e}");
 }
+
+/// The family document (`contracts/pipeline-pack/v1/nils-family.schema.json`,
+/// record 57 P6, Wave 7b section 7): the registration family validates
+/// against its schema and loads with its members, each member runs at its
+/// tasks' level, its outputs are typed (section 8.2), and each member's
+/// entry script is the descriptor's command.
+#[test]
+fn the_family_contract_is_the_loader_s_and_the_registration_family_loads() {
+    use nils_pipeline::pack::family;
+    let schema = json("pipeline-pack/v1/nils-family.schema.json");
+    assert_eq!(
+        schema["$schema"],
+        "https://json-schema.org/draft/2020-12/schema"
+    );
+    assert_eq!(
+        strings(&schema["$defs"]["task"]["properties"]["level"]["enum"]),
+        ["session", "participant"]
+    );
+    let dir = contracts().join("../pipelines/registration");
+    let text = std::fs::read_to_string(dir.join(family::FILE)).unwrap();
+    let value: serde_json::Value = serde_saphyr::from_str(&text).unwrap();
+    let broken = breaks(&schema, &schema, &value, "family");
+    assert!(broken.is_empty(), "{broken:#?}");
+    let (f, members) = family::load_dir(&dir, None).unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(f.name, "registration");
+    assert_eq!(
+        members.keys().cloned().collect::<Vec<_>>(),
+        ["ants", "robust", "synthmorph"]
+    );
+    for (k, (d, p)) in &members {
+        let p = p.as_ref().unwrap_or_else(|| panic!("{k} has no pack"));
+        assert_eq!(
+            p.descriptor_sha256,
+            d.digest(),
+            "{k}: the pack pins its descriptor"
+        );
+        // typed outputs (section 8.2): every image and transform says its
+        // role and lies on a grid or in a space
+        for o in &d.outputs {
+            if o.kind == "image" || o.kind == "transform" {
+                assert!(o.role.is_some(), "{k}: {} has no role", o.id);
+                assert!(
+                    o.grid.is_some() || o.space.is_some(),
+                    "{k}: {} is on no grid and in no space",
+                    o.id
+                );
+            }
+            if o.kind == "image" {
+                assert!(o.contrast.is_some(), "{k}: {} has no contrast", o.id);
+            }
+        }
+        // the entry script beside the descriptor is its command
+        let script = std::fs::read_to_string(dir.join(k).join("entry.sh")).unwrap();
+        let command = d.document["command-line"].as_str().unwrap();
+        let inner = command
+            .strip_prefix("bash -c '")
+            .and_then(|c| c.strip_suffix('\''))
+            .unwrap_or_else(|| panic!("{k}: the command is bash -c '<entry.sh>'"));
+        assert_eq!(
+            inner.trim_end(),
+            script.trim_end(),
+            "{k}: entry.sh and the command differ"
+        );
+        assert!(
+            !script.contains('\''),
+            "{k}: a single quote would end the command"
+        );
+    }
+    // the levels: a session member for the session tasks, a participant
+    // member for the visits
+    assert_eq!(members["ants"].0.level.name(), "session");
+    assert_eq!(members["synthmorph"].0.level.name(), "session");
+    assert_eq!(members["robust"].0.level.name(), "participant");
+    assert_eq!(f.tasks["across_visits"].members, ["robust"]);
+    // the two images, pinned by digest
+    let images: std::collections::BTreeSet<String> = members
+        .values()
+        .map(|(d, _)| d.image.reference.clone())
+        .collect();
+    assert_eq!(images.len(), 2, "{images:?}");
+    assert!(images.iter().all(|i| i.contains("@sha256:")), "{images:?}");
+    // SAMSEG and segcsvd declare the aligned FLAIR as a typed input
+    for name in ["samseg-lesions", "segcsvd"] {
+        let d = nils_pipeline::descriptor::parse(
+            &std::fs::read_to_string(contracts().join(format!("../pipelines/{name}/nils.job.yml")))
+                .unwrap(),
+        )
+        .unwrap();
+        let t = d
+            .inputs
+            .iter()
+            .find(|t| t.id == "aligned_flair")
+            .unwrap_or_else(|| panic!("{name} has no aligned_flair input"));
+        assert_eq!(t.ty, "derivative:image");
+        assert!(t.optional, "{name}: the header path stays as the fallback");
+        assert_eq!(t.role.as_deref(), Some("flair"));
+        assert_eq!(t.grid.as_deref(), Some("t1w"));
+    }
+}
+
+/// The registration members' scripts parse, run no `nullglob` (it empties an
+/// unquoted ANTs bracket argument), and hand every bracket argument to the
+/// tool whole: the ANTs member runs both tasks against stand-in tools that
+/// record their arguments.
+#[test]
+fn the_registration_scripts_hand_ants_its_bracket_arguments_whole() {
+    use std::process::Command;
+    let dir = contracts().join("../pipelines/registration");
+    for k in ["ants", "synthmorph", "robust"] {
+        let p = dir.join(k).join("entry.sh");
+        let script = std::fs::read_to_string(&p).unwrap();
+        assert!(!script.contains("nullglob"), "{k}: nullglob");
+        let ok = Command::new("bash").arg("-n").arg(&p).status().unwrap();
+        assert!(ok.success(), "{k}: bash -n");
+    }
+    let script = std::fs::read_to_string(dir.join("ants/entry.sh")).unwrap();
+    let root = std::env::temp_dir().join(format!("nils-reg-script-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let stubs = root.join("stubs");
+    let data = root.join("data");
+    let out = root.join("out");
+    let log = root.join("argv.log");
+    let tpl = root.join("tpl.nii.gz");
+    for d in [&stubs, &out, &data.join("sub-01/ses-01/anat")] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    std::fs::write(&tpl, "").unwrap();
+    for f in [
+        "sub-01_ses-01_T1w",
+        "sub-01_ses-01_FLAIR",
+        "sub-01_ses-01_T2w",
+    ] {
+        std::fs::write(data.join(format!("sub-01/ses-01/anat/{f}.nii.gz")), "").unwrap();
+    }
+    // every ANTs tool is a stand-in that writes its arguments one per line
+    // and leaves the files the script copies next
+    let stub = "#!/bin/bash\n{ echo \"== $(basename \"$0\")\"; for a; do echo \"$a\"; done; } >> \"$ARGV_LOG\"\n\
+                case \"$(basename \"$0\")\" in\n\
+                ConvertTransformFile) exit 1;;\n\
+                antsRegistration) while [ $# -gt 0 ]; do case \"$1\" in -o) o=${2#[}; o=${o%,]}; : > \"${o}0GenericAffine.mat\";; esac; shift; done;;\n\
+                antsApplyTransforms) while [ $# -gt 0 ]; do case \"$1\" in -o) o=${2#[}; o=${o%,1]}; : > \"$o\";; esac; shift; done;;\n\
+                antsRegistrationSyN.sh) while [ $# -gt 0 ]; do case \"$1\" in -o) for s in Warped.nii.gz 0GenericAffine.mat 1Warp.nii.gz 1InverseWarp.nii.gz; do : > \"${2}$s\"; done;; esac; shift; done;;\n\
+                N4BiasFieldCorrection) while [ $# -gt 0 ]; do case \"$1\" in -o) : > \"$2\";; esac; shift; done;;\n\
+                esac\nexit 0\n";
+    for t in [
+        "antsRegistration",
+        "antsApplyTransforms",
+        "antsRegistrationSyN.sh",
+        "N4BiasFieldCorrection",
+        "ConvertTransformFile",
+        "ThresholdImage",
+        "ImageMath",
+        "CreateJacobianDeterminantImage",
+        "ImageIntensityStatistics",
+    ] {
+        let p = stubs.join(t);
+        std::fs::write(&p, stub).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let run = |task: &str, script: &str| {
+        let s = script
+            .replace("[InputDataset]", data.to_str().unwrap())
+            .replace("[OutputLocation]", out.to_str().unwrap())
+            .replace("[TASK]", task)
+            .replace("[LESIONS]", "off")
+            .replace("[THREADS]", "2")
+            .replace(
+                "/opt/templates/MNI152NLin2009cAsym_T1w.nii.gz",
+                tpl.to_str().unwrap(),
+            );
+        let path = format!(
+            "{}:{}",
+            stubs.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let o = Command::new("bash")
+            .arg("-c")
+            .arg(&s)
+            .env("PATH", path)
+            .env("ARGV_LOG", &log)
+            .output()
+            .unwrap();
+        assert!(o.status.success(), "{task}: {o:?}");
+    };
+    run("within_session", &script);
+    run("to_template", &script);
+    let argv = std::fs::read_to_string(&log).unwrap();
+    let has = |lines: &[&str]| {
+        assert!(
+            argv.contains(&format!("\n{}\n", lines.join("\n"))),
+            "arguments missing or split: {lines:?}\n{argv}"
+        );
+    };
+    has(&["-w", "[0.005,0.995]"]);
+    has(&["-t", "Rigid[0.1]"]);
+    has(&["-c", "[1000x500x250x100,1e-6,10]"]);
+    assert!(argv.contains("\n-r\n[sub-01/ses-01/anat/sub-01_ses-01_T1w.nii.gz,"));
+    assert!(argv.contains("\n-m\nMattes[sub-01/ses-01/anat/sub-01_ses-01_T1w.nii.gz,"));
+    assert!(argv.contains(",1,32,Regular,0.25]\n"));
+    assert!(argv.contains("\n-o\n[") && argv.contains("FLAIR_,]\n"));
+    has(&["-b", "[180]", "-c", "[50x50x50x50,0.0]"]);
+    assert!(argv.contains("_xfm.h5,1]\n"), "{argv}");
+    assert!(argv.contains("0GenericAffine.mat,1]\n"), "{argv}");
+    // a dataset with no match runs nothing and still succeeds
+    std::fs::remove_dir_all(data.join("sub-01")).unwrap();
+    std::fs::write(&log, "").unwrap();
+    run("within_session", &script);
+    assert!(std::fs::read_to_string(&log).unwrap().is_empty());
+    let _ = std::fs::remove_dir_all(&root);
+}

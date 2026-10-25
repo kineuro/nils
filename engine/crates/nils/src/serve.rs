@@ -7629,6 +7629,15 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
             "Read a pipeline",
         ),
         row(
+            "GET /api/pipelines/family/{name}",
+            false,
+            false,
+            "free",
+            "one family",
+            "Reading a family",
+            "Read a family",
+        ),
+        row(
             "GET /api/pipelines/{id}/pack",
             false,
             false,

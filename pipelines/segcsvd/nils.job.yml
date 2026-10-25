@@ -149,7 +149,9 @@ command-line: >-
   + ([\"synthseg_robust\", str(int(r))] if isinstance(r, bool) else []) + ([\"synthseg_contrast\", c] if c.isalnum() else [])))" [Inputs]/manifest.json "${s#[Inputs]/synthseg/}" "$n") || k="synthseg_run $n";
   echo "$f: the SynthSeg label map of run $n ($k)";
   w=$(mktemp -d [OutputLocation]/.work-XXXXXX); mkdir -p "$w/outdir"; export MPLCONFIGDIR=$w HOME=$w;
-  fl=$(flair "$a"); c=$(basename "$fl" .nii.gz); c=${c%_*};
+  fl=$(flair "$a"); c=$(basename "$fl" .nii.gz); c=${c%_*}; fs=header;
+  ra=$(find /inputs/aligned_flair -path "*/$a/*_space-T1w_desc-aligned_FLAIR.nii.gz" 2>/dev/null | sort | head -n 1);
+  if [ -n "$fl" ] && [ -n "$ra" ]; then fl=$ra; fs=registration; echo "$a: the FLAIR a registration run aligned onto the T1w is read"; fi;
   sbtResliceLike "$s" "$f" "$w/synthseg.nii.gz" 1 || { rc=1; rm -rf "$w"; continue; };
   v=""; al="";
   if [ -n "$fl" ]; then
@@ -177,8 +179,8 @@ command-line: >-
   mv "$w/outdir/thr_pvs.nii.gz" "$d/${b}_label-PVS_desc-segcsvd_mask.nii.gz";
   mv "$w/outdir/pvs.nii.gz" "$d/${b}_label-PVS_desc-segcsvd_probseg.nii.gz";
   python3 -c "import sys, json, nibabel as n, numpy as np; a = sys.argv[1:]; m = lambda p: float((np.asarray(n.load(p).dataobj) > 0).sum() * np.prod(n.load(p).header.get_zooms()[:3]));
-  t = (\"synthseg_pipeline\", \"synthseg_contrast\");
-  print(json.dumps(dict((a[i], m(a[i + 1]) if a[i].endswith(\"_volume\") else a[i + 1] if a[i] in t else float(a[i + 1])) for i in range(0, len(a), 2))))" pvs_volume "$d/${b}_label-PVS_desc-segcsvd_mask.nii.gz" $v ${al:+flair_t1_brain_dice $al} $k > "$d/${b}_desc-segcsvd_volumes.json" || { echo "$a: the volumes were not measured"; rc=1; };
+  t = (\"synthseg_pipeline\", \"synthseg_contrast\", \"flair_source\");
+  print(json.dumps(dict((a[i], m(a[i + 1]) if a[i].endswith(\"_volume\") else a[i + 1] if a[i] in t else float(a[i + 1])) for i in range(0, len(a), 2))))" pvs_volume "$d/${b}_label-PVS_desc-segcsvd_mask.nii.gz" $v ${al:+flair_t1_brain_dice $al} ${fl:+flair_source $fs} $k > "$d/${b}_desc-segcsvd_volumes.json" || { echo "$a: the volumes were not measured"; rc=1; };
   rm -rf "$w"; done; exit $rc'
 
 x-nils:
@@ -196,6 +198,12 @@ x-nils:
     - id: synthseg
       type: "derivative:mask"
       description: "The sessions' SynthSeg label maps (*_desc-synthseg_dseg.nii.gz), from a run of the synthseg starter"
+    - id: aligned_flair
+      type: "derivative:image"
+      optional: true
+      role: flair
+      grid: t1w
+      description: "The session's FLAIR aligned onto its T1w by a run of the registration family (kind image, role flair, grid t1w): read in place of the FLAIR as acquired where one exists; where none does the acquired FLAIR is read, as before, and the brain-mask Dice checks the alignment at 0.85 on either path"
   units: apart
   outputs:
     - id: wmh
@@ -227,6 +235,7 @@ x-nils:
         - {name: wmh_volume, unit: mm3, description: "White-matter hyperintensity volume on the FLAIR, by a model validated for WMH of vascular origin at 3 T and not for MS lesions; absent where the session has no FLAIR"}
         - {name: pvs_volume, unit: mm3, description: "Enlarged perivascular space volume on the T1w"}
         - {name: flair_t1_brain_dice, description: "How well the FLAIR sits on the T1w: the Dice of the T1w's SynthSeg brain mask and a threshold brain mask of the FLAIR on the T1w's grid, inside the FLAIR's field of view; absent where the session has no FLAIR"}
+        - {name: flair_source, type: text, description: "Where the FLAIR came from: registration (the aligned FLAIR a registration run wrote onto the T1w's grid, the typed input aligned_flair) or header (the FLAIR as acquired, resampled by the headers alone, the fallback); absent where the session has no FLAIR"}
         - {name: synthseg_run, type: integer, description: "The run whose SynthSeg label map the unit read"}
         - {name: synthseg_pipeline, type: text, description: "That run's pipeline, as name@version"}
         - {name: synthseg_robust, type: integer, description: "1 where that run was SynthSeg-robust, 0 where not: the two are different networks, so the WMH and PVS read from one are not comparable with the other's"}

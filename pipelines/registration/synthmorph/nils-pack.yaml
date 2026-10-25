@@ -1,0 +1,85 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# The pack of the SynthMorph member of the registration family (record 57
+# P6, Wave 7b P2; research 07, Tables 5 and 6). The family's rules decide
+# which session comes here: within a session the 2D and the thick pairs,
+# to the template the fast goal or a session without a fine 3D T1w. The
+# pack carries the member's switch (the task, set from the family's), the
+# checks of section 7 (SynthSeg's quality scores at 0.65 fail the unit;
+# the rigid sanity, the folding and the inverse consistency are policy,
+# calibrated on the pilot; the label Dice against the cohort) and the
+# comparability key, in which affine_used is a knob the unit records: an
+# affine alignment and a rigid one are not pooled.
+nils_pack: 1
+pipeline:
+  name: registration-synthmorph
+  descriptor_sha256: "sha256:d18203da06c74f626102543bc37007c276fe814153cb8192cf0b4ba06369031e"
+  version: "1.0"
+goals:
+  goal: [fast, standard, research]
+  task: [within_session, to_template]
+needs:
+  t1w:
+    soft:
+      - when: "task != 'to_template' or dimension == '3D'"
+        words: "the T1w is 2D: SynthMorph takes it, but the joint model to the template is validated on 3D"
+        source: "record 57 research 07, Table 2 (SynthMorph)"
+  host:
+    soft:
+      - when: "host.memory_gb >= 24"
+        words: "the deformable model wants about 24 GB of memory"
+        source: "record 57 research 07, Table 2 (SynthMorph, about 24 GB deformable)"
+knobs:
+  task:
+    what: "within a session, the FLAIR and the T2w onto the T1w; to the template, the joint model of the T1w onto MNI152NLin2009cAsym"
+    changes: [flair_xfm, flair_aligned, t2w_xfm, t2w_aligned, template_xfm, template_xfm_inverse, template_aligned, metrics]
+    comparability: breaks
+    set_by: rule
+  threads:
+    what: "the threads one session uses"
+    comparability: none
+    set_by: person
+rules:
+  - id: task-follows-the-family
+    when: "task == 'to_template'"
+    set: {task: "to_template"}
+    why: "the family's task is this run's"
+    source: policy
+  - id: within-session-follows-the-family
+    when: "task == 'within_session'"
+    set: {task: "within_session"}
+    why: "the family's task is this run's"
+    source: policy
+checks:
+  - {metric: refused, op: "==", value: 0, action: fail, source: "Billot et al. 2023 (SynthSeg QC rejects at 0.65)", words: "an input scored under 0.65 on SynthSeg's quality scores: the pair was not registered"}
+  - {metric: qc_fixed, op: ">=", value: 0.65, action: fail, source: "Billot et al. 2023 (SynthSeg QC rejects at 0.65)", words: "the T1w scores under 0.65 on SynthSeg's quality scores"}
+  - {metric: qc_moving, op: ">=", value: 0.65, action: fail, source: "Billot et al. 2023 (SynthSeg QC rejects at 0.65)", words: "the moving image scores under 0.65 on SynthSeg's quality scores"}
+  - {metric: affine_used, op: "==", value: 0, action: flag, source: policy, words: "the pair was aligned affinely, scale and shear allowed, since the build has no rigid model"}
+  - {metric: rigid_flip, op: "==", value: 0, action: fail, source: policy, words: "the transform flips the image: a registration that found a mirror image is wrong"}
+  - {metric: rigid_determinant, op: ">=", value: 0.98, action: flag, source: policy, words: "the transform's determinant is not near 1"}
+  - {metric: rigid_determinant, op: "<=", value: 1.02, action: flag, source: policy, words: "the transform's determinant is not near 1"}
+  - {metric: rigid_translation_mm, op: "<=", value: 50, action: flag, source: policy, words: "the images moved more than 50 mm within a session: a patient who moved, or another series"}
+  - {metric: rigid_rotation_deg, op: "<=", value: 30, action: flag, source: policy, words: "the images turned more than 30 degrees within a session"}
+  - {metric: folding_pct, op: "<=", value: 0.01, action: flag, source: policy, words: "the deformation folds in more than 0.01 % of brain voxels"}
+  - {metric: inverse_consistency_mm, op: "<=", value: 0.1, action: flag, source: policy, words: "the forward and inverse fields disagree by more than 0.1 mm on average"}
+  - {metric: alignment_dice, op: ">=", action: flag, cohort: true, stratum: [site, vendor, field_strength, sequence, post_contrast], min_sessions: 30, source: "policy (the label Dice after alignment far below the cohort's)", words: "the labels of the aligned image agree with the fixed image's far below the cohort"}
+licence:
+  spdx: "LicenseRef-FreeSurfer"
+  redistributable: false
+  site_file: {env: FS_LICENSE, mount: /opt/fs/license.txt}
+  terms: {url: "https://surfer.nmr.mgh.harvard.edu/fswiki/FreeSurferSoftwareLicense", version: "1.0 (2011)"}
+  accept: false
+resources:
+  memory_gb: 24
+  minutes: 20
+  gpu: optional
+  gpu_memory_gb: 24
+  by_input:
+    - {when: "task == 'within_session'", memory_gb: 16, minutes: 8}
+comparability:
+  facts: [t1w.base]
+tests: []
+source:
+  image: "docker.io/freesurfer/freesurfer@sha256:5648104ca75a24f6ee5a8786146f99b405c2bda1da12bff723a15056da8ddf6b"
+  probe: {command: "recon-all -version", expect: "freesurfer"}
+  key_files: ["bin/mri_synthmorph", "bin/mri_synthseg", "build-stamp.txt"]

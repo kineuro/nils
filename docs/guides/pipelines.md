@@ -182,6 +182,44 @@ nils pipeline replay pipelines/segcsvd --against segcsvd@3 --goal research --jso
 
 The answer counts how many sessions run, are skipped (by need, in the pack's words), are routed to a variant or carry a caveat under the new pack; against the catalog's version, how many change from run to skipped and why, from skipped to run, which variant they move to, and which knob values change and from what to what; and, over the units the pipeline's kept runs recorded, how many results the new pack would make stale (a knob its rules now choose differently, or a need the recorded facts now fail). `GET /api/pipelines/{id}/replay?against=<id or name@version>` replays one catalog version against another the same way. Nothing is written.
 
+## Run a family
+
+A family is one entry for you and several pipelines behind it, its members, with the family's rules choosing the member per unit (record 57 P6). Registration is the first: `pipelines/registration` holds the family document, `nils-family.yaml` (the contract is `contracts/pipeline-pack/v1`, beside the pack's schema), and a folder per member, each a descriptor and a pack of its own: `ants` (ANTs 2.6.2: rigid with mutual information within a session, SyN to the template), `synthmorph` (FreeSurfer 8.2.0: any contrast and resolution, no skull stripping) and `robust` (FreeSurfer 8.2.0: `mri_robust_register` and `mri_robust_template` across a person's visits). The family document names the roles its members read, the goals (the goal, the `task` switch and the family's own switches), the tasks with the unit each runs over (a session, or a participant with every visit) and the members a task may route to, the family-level needs (the refusals, in the pack's words) and the ordered routing rules; the first rule that holds names the member.
+
+1. Check the folder offline, members included, and add it. Every member becomes a pipeline of the catalog in its own right; the family is one row that opens to them:
+
+   ```sh
+   nils pipelines validate pipelines/registration
+   nils pipeline add pipelines/registration
+   nils pipeline show registration
+   ```
+
+2. Pre-flight a run with the task, and read where each unit goes:
+
+   ```sh
+   nils run registration --select main@dataset:ms --switch task=within_session --preflight
+   nils run registration --select main@dataset:ms --switch task=across_visits --preflight
+   nils run registration --select main@dataset:ms --switch task=to_template --goal fast --preflight
+   ```
+
+   The answer says, per unit, `routed` with the member, the rule and why, or `skipped` with the family's words (a hard need it lacks; `cannot tell: <fact>` where the registry cannot tell), and the counts per member and per rule. Within a session, both images 3D at 1.5 mm or finer go to ANTs rigid, the rest to SynthMorph; across visits, the same contrast acquired alike and 3D goes to `robust` (two visits halfway, three or more onto their template), and a changed protocol or 2D visits are skipped in words, since the SynthMorph visits member is not shipped; to the template, a 3D T1w at 1.2 mm or finer at the standard or research goal is SyN, the fast goal or a coarser T1w is SynthMorph joint.
+
+3. Run. The family makes one handle and one ordinary run per member over the units it was sent, in turn; each member's own pack judges its knobs as any pack does:
+
+   ```sh
+   nils run registration --select main@dataset:ms --switch task=within_session
+   ```
+
+   Every unit of a member's run records the member and the rule that chose (`variant {variant, pipeline, rule, why}`) and the family with its digest (`family`) in its pack record, and reads `routed`; `GET /api/pipeline-runs/{id}` returns them per unit. The outputs are typed derivatives: the transform in the tool's native form (ITK `.mat` and `.h5`, LTA, a displacement field and its inverse), named `_from-<X>_to-<Y>_mode-image_xfm`, with the role it maps and the grid or space it lands on, and the aligned image with its role, contrast and grid (`kind: image, role: flair, grid: t1w` for a FLAIR on the T1w). SAMSEG with lesions and segcsvd read such an aligned FLAIR as their typed input `aligned_flair` where a registration run made one, and resample by the headers alone where none has, as before; their table says which (`flair_source`), and the 0.85 brain-mask check stays on either path.
+
+4. Replay a change to the family before it ships, as a pack is replayed: over the registry's main-scan sessions (persons, for the visits task), the folder's family against the one the registry holds, counting per member and what moves:
+
+   ```sh
+   nils pipeline replay pipelines/registration --switch task=within_session
+   ```
+
+The checks of the registration family are its members' packs': SynthSeg's quality score of either input under 0.65 fails the unit (the FreeSurfer members score both inputs first), a flip fails, and the determinant near 1, a translation under 50 mm and a rotation under 30 degrees within a session, folding above 0.01 % of brain voxels and inverse consistency above 0.1 mm flag; these last are policy, to be calibrated on the family's pilot on the research side (`pipelines/registration/PILOT.md`), which has not run yet. The ANTs member's template task reads the site file `mni_template` (TemplateFlow's `tpl-MNI152NLin2009cAsym_res-01_T1w.nii.gz`, set with `nils pipeline secret set mni_template --file <path>`); the SynthMorph member falls back to FreeSurfer's own copy of the template.
+
 ## Choose a version
 
 A name keeps every version added under it. A version that fixes the earlier ones says so in its descriptor, and a new run no longer takes them:

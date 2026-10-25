@@ -458,14 +458,14 @@ mod tests {
             // there, so the unit names the run by its folder alone
             (
                 "python3",
-                r#"case "$2" in *made_by*) exit 1;; *threshold_otsu*) echo 0.97;; *json.dumps*) shift 2; s=; while [ $# -gt 1 ]; do v=$2; case "$1" in *_volume) [ -s "$2" ] || exit 1; v=1.0;; esac; s="$s${s:+, }\"$1\": $v"; shift 2; done; echo "{$s}";; *) for l; do :; done; printf x > "$l";; esac"#,
+                r#"case "$2" in *made_by*) exit 1;; *threshold_otsu*) echo 0.97;; *json.dumps*) shift 2; s=; while [ $# -gt 1 ]; do v=$2; case "$1" in *_volume) [ -s "$2" ] || exit 1; v=1.0;; flair_source|synthseg_pipeline|synthseg_contrast) v=\"$2\";; esac; s="$s${s:+, }\"$1\": $v"; shift 2; done; echo "{$s}";; *) for l; do :; done; printf x > "$l";; esac"#,
             ),
             // the alignment check, masks that agree; SAMSEG's folder read
             // for its measures, and the numbers after it; otherwise an
             // image written to its last word
             (
                 "fspython",
-                r#"case "$2" in *affine_transform*) echo 0.97;; *samseg.stats*) shift 3; s='"Intra-Cranial": 1500000.0'; while [ $# -gt 1 ]; do s="$s, \"$1\": $2"; shift 2; done; echo "{$s}";; *) for l; do :; done; printf x > "$l";; esac"#,
+                r#"case "$2" in *affine_transform*) echo 0.97;; *samseg.stats*) shift 3; s='"Intra-Cranial": 1500000.0'; while [ $# -gt 1 ]; do v=$2; [ "$1" = flair_source ] && v=\"$2\"; s="$s, \"$1\": $v"; shift 2; done; echo "{$s}";; *) for l; do :; done; printf x > "$l";; esac"#,
             ),
             (
                 "run_samseg",
@@ -772,7 +772,7 @@ mod tests {
         let tools: Vec<(&str, String)> = vec![
             (
                 "fspython",
-                r#"case "$2" in *affine_transform*) echo 0.97;; *samseg.stats*) shift 3; s='"Intra-Cranial": 1500000.0'; while [ $# -gt 1 ]; do s="$s, \"$1\": $2"; shift 2; done; echo "{$s}";; *) for l; do :; done; printf x > "$l";; esac"#.into(),
+                r#"case "$2" in *affine_transform*) echo 0.97;; *samseg.stats*) shift 3; s='"Intra-Cranial": 1500000.0'; while [ $# -gt 1 ]; do v=$2; [ "$1" = flair_source ] && v=\"$2\"; s="$s, \"$1\": $v"; shift 2; done; echo "{$s}";; *) for l; do :; done; printf x > "$l";; esac"#.into(),
             ),
             (
                 "run_samseg",

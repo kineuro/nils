@@ -14,7 +14,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use nils_pipeline::descriptor::Descriptor;
-use nils_pipeline::pack::facts::{Facts, Val, Vocabulary};
+use nils_pipeline::pack::facts::{self, Facts, Val, Vocabulary};
 use nils_pipeline::pack::rules::{Judgement, Person};
 use nils_pipeline::pack::{self, PipelinePack};
 use nils_registry::Registry;
@@ -191,6 +191,28 @@ fn stack_rows(store: &mut Store, stacks: &[i64]) -> BTreeMap<i64, StackRow> {
     out
 }
 
+/// Whether these stacks were acquired alike (Wave 7b section 7, a family's
+/// `unit.same_protocol`): every one shares base, dimension, vendor and
+/// field strength. None where a stack lacks one of them, or there is none.
+pub(crate) fn same_protocol(store: &mut Store, stacks: &[i64]) -> Option<bool> {
+    if stacks.is_empty() {
+        return None;
+    }
+    let rows = stack_rows(store, stacks);
+    let mut seen: BTreeSet<(String, String, String, String)> = BTreeSet::new();
+    for s in stacks {
+        let r = rows.get(s)?;
+        let field = r.field.map(|f| format!("{f:.1}"))?;
+        seen.insert((
+            r.base.clone()?,
+            r.dimension.clone()?.trim().to_string(),
+            facts::vendor_of(r.manufacturer.as_deref()?).to_string(),
+            field,
+        ));
+    }
+    Some(seen.len() == 1)
+}
+
 fn dimension_of(text: Option<&str>) -> Val {
     match text.map(str::trim) {
         Some("2D") => Val::Text("2D".into()),
@@ -304,6 +326,31 @@ pub(crate) fn facts_for(store: &mut Store, units: &[UnitOf], host: &HostFacts) -
     for chunk in all.chunks(500) {
         rows.extend(stack_rows(store, chunk));
     }
+    // a registration step's aligned FLAIR on the T1w's grid says aligned
+    // (Wave 7b section 7), read for every unit's session at once
+    let flair_sessions: Vec<(i64, String)> = units
+        .iter()
+        .filter_map(|u| match (u.subject_id, u.session_day.as_deref()) {
+            (Some(s), Some(day))
+                if u.by_role.get("flair").is_some_and(|v| !v.is_empty())
+                    && u.by_role.get("t1w").is_some_and(|v| !v.is_empty()) =>
+            {
+                Some((s, day.to_string()))
+            }
+            _ => None,
+        })
+        .collect();
+    let registered = crate::typed_outputs::aligned_by_registration(
+        store,
+        &mut crate::typed_outputs::Outputs::default(),
+        &flair_sessions,
+        "flair",
+        "t1w",
+    )
+    .unwrap_or_else(|e| {
+        eprintln!("the registration's aligned images could not be read: {e}");
+        BTreeSet::new()
+    });
     let mut diagnosis: BTreeMap<i64, Val> = BTreeMap::new();
     units
         .iter()
@@ -321,7 +368,13 @@ pub(crate) fn facts_for(store: &mut Store, units: &[UnitOf], host: &HostFacts) -
                 && f.roles.contains("flair")
                 && f.roles.contains("t1w")
             {
-                f.set_aligned("flair", "t1w", aligned_from_check(store, s, day));
+                // else what a check measured
+                let aligned = if registered.contains(&(s, day.to_string())) {
+                    Val::Bool(true)
+                } else {
+                    aligned_from_check(store, s, day)
+                };
+                f.set_aligned("flair", "t1w", aligned);
             }
             if let Some(s) = u.subject_id {
                 let v = diagnosis

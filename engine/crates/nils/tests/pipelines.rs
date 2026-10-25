@@ -6103,7 +6103,7 @@ printf 'subject,general white matter,general grey matter,general csf\nx,0.9,0.9,
             "fspython",
             r#"case "$2" in
 *affine_transform*) if mkdir "$(dirname "$0")/samseg-low" 2>/dev/null; then echo 0.60; else echo 0.97; fi;;
-*samseg.stats*) shift 3; s='"Intra-Cranial": 1500000.0, "Lesions": 1200.0'; while [ $# -gt 1 ]; do s="$s, \"$1\": $2"; shift 2; done; echo "{$s}";;
+*samseg.stats*) shift 3; s='"Intra-Cranial": 1500000.0, "Lesions": 1200.0'; while [ $# -gt 1 ]; do v=$2; [ "$1" = flair_source ] && v=\"$2\"; s="$s, \"$1\": $v"; shift 2; done; echo "{$s}";;
 *) for l; do :; done; printf x > "$l";;
 esac"#,
         ),
@@ -13933,4 +13933,318 @@ fn g2_g14_the_shipped_packs_skip_in_their_words_run_nothing_and_replay_read_only
         json!({"sessions": 2}),
         "the lab saved its picks: {doc}"
     );
+}
+
+/// The registration family in the lab (record 57 P6, Wave 7b section 7;
+/// G11's first half): added as one row over three members, the routing at
+/// the pre-flight on the lab's sessions (whose T1 and FLAIR have 8 mm
+/// pixels, so within a session they go to SynthMorph; one visit each, so
+/// across visits they are skipped in words), the replay per member, and a
+/// run that makes one member run whose units record the member, the rule
+/// and the family.
+#[test]
+fn g11_the_registration_family_routes_lists_replays_and_records_the_member() {
+    if !have("python3") {
+        eprintln!(
+            "python3 is not installed; the stand-in podman needs it, so this test is skipped"
+        );
+        return;
+    }
+    let lab = Lab::new("pipelines-registration-family");
+    let folder = repo().join("pipelines").join("registration");
+    // validated offline, then added: three members, one family
+    let v = lab.json(&["pipelines", "validate", folder.to_str().unwrap(), "--json"]);
+    assert_eq!(v["family"], "registration", "{v}");
+    assert_eq!(v["members"].as_array().unwrap().len(), 3, "{v}");
+    let v = lab.json(&["pipeline", "add", folder.to_str().unwrap(), "--json"]);
+    assert_eq!(v["added"], true, "{v}");
+    assert_eq!(v["family"], true, "{v}");
+    assert_eq!(v["name"], "registration", "{v}");
+    let members = v["members"].as_array().unwrap();
+    assert_eq!(members.len(), 3, "{v}");
+    for m in members {
+        assert!(m["pipeline_id"].is_i64(), "{m}");
+        assert_eq!(m["standing"], "current", "{m}");
+    }
+    assert_eq!(
+        members
+            .iter()
+            .map(|m| m["level"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["session", "participant", "session"],
+        "{v}"
+    );
+    // the same folder again is the family it is
+    let again = lab.json(&["pipeline", "add", folder.to_str().unwrap(), "--json"]);
+    assert_eq!(again["added"], false, "{again}");
+    // the catalog: one family row that opens to its members, and each
+    // member's row names its family
+    let list = lab.json(&["pipeline", "list", "--json"]);
+    let families = list["families"].as_array().unwrap();
+    assert_eq!(families.len(), 1, "{list}");
+    assert_eq!(families[0]["name"], "registration");
+    assert_eq!(families[0]["opens"], "/api/pipelines/family/registration");
+    let member_rows: Vec<&Value> = list["pipelines"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|p| p["family"] == "registration")
+        .collect();
+    assert_eq!(member_rows.len(), 3, "{list}");
+    let show = lab.json(&["pipeline", "show", "registration", "--json"]);
+    assert_eq!(show["rules"].as_array().unwrap().len(), 6, "{show}");
+
+    // the pre-flight: the lab's stacks have no body part the registry can
+    // tell, so the family's refusal reads cannot tell and skips, the member
+    // the rules would send them to recorded
+    let pf = lab.json(&[
+        "run",
+        "registration",
+        "--select",
+        "selection:every@1",
+        "--switch",
+        "task=within_session",
+        "--preflight",
+        "--json",
+    ]);
+    assert_eq!(pf["counts"]["units"], 2, "{pf}");
+    assert_eq!(pf["counts"]["skipped"], 2, "{pf}");
+    assert_eq!(pf["counts"]["cannot_tell"], 2, "{pf}");
+    for u in pf["units"].as_array().unwrap() {
+        assert_eq!(u["status"], "skipped", "{u}");
+        assert_eq!(u["words"], "cannot tell: flair.body_part", "{u}");
+        assert_eq!(u["member"], "synthmorph", "{u}");
+    }
+    // let run: within a session the lab's coarse pairs go to SynthMorph by
+    // the thick-or-2D rule, the cannot-tell as a caveat
+    let pf = lab.json(&[
+        "run",
+        "registration",
+        "--select",
+        "selection:every@1",
+        "--switch",
+        "task=within_session",
+        "--let-run",
+        "--preflight",
+        "--json",
+    ]);
+    assert_eq!(pf["task"], "within_session", "{pf}");
+    assert_eq!(pf["level"], "session", "{pf}");
+    assert_eq!(pf["counts"]["units"], 2, "{pf}");
+    assert_eq!(pf["counts"]["routed"], 2, "{pf}");
+    assert_eq!(pf["counts"]["with_caveats"], 2, "{pf}");
+    assert_eq!(pf["counts"]["by_member"]["synthmorph"], 2, "{pf}");
+    for u in pf["units"].as_array().unwrap() {
+        assert_eq!(u["status"], "routed", "{u}");
+        assert!(
+            u["let_run_by"].as_str().unwrap().starts_with("person:"),
+            "{u}"
+        );
+        assert_eq!(u["member"], "synthmorph", "{u}");
+        assert_eq!(u["pipeline"], "registration-synthmorph", "{u}");
+        assert_eq!(u["rule"], "within-session-thick-or-2d", "{u}");
+        assert!(u["unit"].as_str().unwrap().starts_with("sub-"), "{u}");
+    }
+    // across visits: one visit each, skipped in the family's words, as
+    // participant units
+    let pf = lab.json(&[
+        "run",
+        "registration",
+        "--select",
+        "selection:every@1",
+        "--switch",
+        "task=across_visits",
+        "--let-run",
+        "--preflight",
+        "--json",
+    ]);
+    assert_eq!(pf["level"], "participant", "{pf}");
+    assert_eq!(pf["counts"]["skipped"], 2, "{pf}");
+    let words = pf["counts"]["skipped_by_words"][0]["words"]
+        .as_str()
+        .unwrap();
+    assert!(words.contains("one visit alone"), "{pf}");
+    // a switch the family has not, or a task it has not, is refused
+    let (good, _, err) = lab.run(
+        &[
+            "run",
+            "registration",
+            "--select",
+            "selection:every@1",
+            "--switch",
+            "task=labels_back",
+            "--preflight",
+        ],
+        None,
+    );
+    assert!(!good && err.contains("task takes"), "{err}");
+
+    // the replay over the registry's main-scan picks, per member, against
+    // the family the registry holds (the same document)
+    let rp = lab.json(&[
+        "pipeline",
+        "replay",
+        folder.to_str().unwrap(),
+        "--switch",
+        "task=within_session",
+        "--json",
+    ]);
+    assert_eq!(rp["read_only"], true, "{rp}");
+    assert_eq!(rp["units"], 2, "{rp}");
+    // a replay lets nothing run: the body part the registry cannot tell
+    // skips both, and the words say so
+    assert_eq!(rp["now"]["cannot_tell"], 2, "{rp}");
+    assert_eq!(rp["against"]["same"], true, "{rp}");
+    assert_eq!(rp["changes"]["member"].as_array().unwrap().len(), 0, "{rp}");
+    let text = lab.ok(
+        &[
+            "pipeline",
+            "replay",
+            folder.to_str().unwrap(),
+            "--switch",
+            "task=across_visits",
+        ],
+        None,
+    );
+    assert!(
+        text.contains("skipped 2: cannot tell: t1w.body_part"),
+        "{text}"
+    );
+
+    // the run: the shipped members ask more memory than this lab has, so a
+    // small family of two echo members stands in for it: one member run
+    // over the units the rules sent, each unit's pack record naming the
+    // member, the rule and the family
+    if !have("dcm2niix") {
+        eprintln!("dcm2niix is not installed; the family run over a bids input is skipped");
+        return;
+    }
+    let fam = lab.work.path().join("fam");
+    for (member, tag) in [("fine", "fine"), ("coarse", "coarse")] {
+        let dir = fam.join(member);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("nils.job.yml"),
+            bids_echo(&format!("echo-{member}"), tag),
+        )
+        .unwrap();
+        let v = lab.json(&["pipelines", "validate", dir.to_str().unwrap(), "--json"]);
+        let digest = v["descriptor_digest"].as_str().unwrap();
+        std::fs::write(
+            dir.join("nils-pack.yaml"),
+            format!(
+                "nils_pack: 1\npipeline: {{name: echo-{member}, descriptor_sha256: \"{digest}\", version: \"0.1\"}}\ngoals: {{goal: [fast, standard, research], task: [within_session]}}\nknobs:\n  threads: {{comparability: none, set_by: person}}\n"
+            ),
+        )
+        .unwrap();
+    }
+    std::fs::write(
+        fam.join("nils-family.yaml"),
+        r#"nils_family: 1
+family: {name: fam, version: "0.1", words: "two echoes"}
+roles: [t1w, flair]
+goals: {goal: [fast, standard, research], task: [within_session]}
+tasks:
+  within_session: {level: session, members: [fine, coarse]}
+members:
+  fine: {pipeline: echo-fine}
+  coarse: {pipeline: echo-coarse}
+rules:
+  - {id: fine, when: "t1w.voxel_max_mm <= 1.5", route: fine, why: "a fine T1w", source: policy}
+  - {id: coarse, when: "task == 'within_session'", route: coarse, why: "a coarse T1w", source: policy}
+"#,
+    )
+    .unwrap();
+    let v = lab.json(&["pipeline", "add", fam.to_str().unwrap(), "--json"]);
+    assert_eq!(v["added"], true, "{v}");
+    let fam_digest = v["digest"].as_str().unwrap().to_string();
+    let (good, _out, err) = lab.run(
+        &[
+            "run",
+            "fam",
+            "--select",
+            "selection:every@1",
+            "--switch",
+            "task=within_session",
+        ],
+        None,
+    );
+    assert!(good, "{err}");
+    assert!(err.contains("2 unit(s) to coarse (echo-coarse)"), "{err}");
+    let runs = lab.json(&["pipeline", "runs", "--limit", "100", "--json"]);
+    let run = runs
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| {
+            r["pipeline"]
+                .as_str()
+                .is_some_and(|p| p.starts_with("echo-coarse"))
+        })
+        .unwrap_or_else(|| panic!("no member run: {runs}"));
+    assert!(
+        runs.as_array().unwrap().iter().all(|r| !r["pipeline"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("echo-fine")),
+        "no unit went to the fine member: {runs}"
+    );
+    let id = run["id"].as_i64().unwrap().to_string();
+    let doc = lab.json(&["pipeline", "runs", &id, "--json"]);
+    let units = doc["units_run"].as_array().unwrap();
+    assert_eq!(units.len(), 2, "{doc}");
+    for u in units {
+        assert_eq!(u["status"], "succeeded", "{u}");
+        assert_eq!(u["pack_status"], "routed", "{u}");
+        assert_eq!(u["variant"]["variant"], "coarse", "{u}");
+        assert_eq!(u["variant"]["pipeline"], "echo-coarse", "{u}");
+        assert_eq!(u["variant"]["rule"], "coarse", "{u}");
+        assert_eq!(u["variant"]["why"], "a coarse T1w", "{u}");
+        assert_eq!(u["family"]["name"], "fam", "{u}");
+        assert_eq!(u["family"]["digest"], fam_digest, "{u}");
+    }
+}
+
+/// A bids echo pipeline at the session level: for each session it writes
+/// one file with the tag, so a family run has a member that runs in the lab.
+fn bids_echo(name: &str, tag: &str) -> String {
+    format!(
+        r#"# SPDX-License-Identifier: AGPL-3.0-only
+name: {name}
+schema-version: "0.5"
+tool-version: "1"
+container-image:
+  type: docker
+  image: "example.org/echo@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+inputs:
+  - id: threads
+    name: Threads
+    type: Number
+    value-key: "[THREADS]"
+    default-value: 1
+    integer: true
+    minimum: 1
+    maximum: 4
+command-line: >-
+  bash -c 'cd [InputDataset]; for f in sub-*/ses-*/anat/*_T1w.nii.gz; do a=$(dirname "$f"); mkdir -p [OutputLocation]/$a;
+  b=$(basename "$f" .nii.gz); echo "{tag} [THREADS]" > [OutputLocation]/$a/${{b%_T1w}}_desc-echo_tag.txt; done'
+x-nils:
+  contract: 1
+  analysis-level: session
+  input:
+    layout: bids
+    roles: [t1w, flair]
+  units: apart
+  outputs:
+    - id: tag
+      kind: output
+      path-template: "sub-{{subject}}/ses-{{session}}/anat/*_desc-echo_tag.txt"
+      media-type: text/plain
+  needs:
+    gpu: none
+    cores: 1
+    memory-gb: 1
+    unit-minutes: 1
+"#
+    )
 }
