@@ -311,6 +311,33 @@ impl States {
     }
 }
 
+/// The registry id of a subject named by its id (all digits) or its code.
+fn subject_named(store: &mut Store, name: &str) -> Result<i64, String> {
+    let name = name.strip_prefix("sub-").unwrap_or(name);
+    if name.is_empty() {
+        return Err("a subject is named by its subject code or its id".to_string());
+    }
+    if name.bytes().all(|b| b.is_ascii_digit()) {
+        return name
+            .parse()
+            .map_err(|_| format!("no subject has the id {name}"));
+    }
+    let sql = format!(
+        "SELECT id FROM {} WHERE code = {}",
+        store.qualified("subject"),
+        store.dialect().param(1, Type::Text)
+    );
+    match store
+        .query_opt(&sql, &[Param::from(name)])
+        .map_err(|e| e.to_string())?
+    {
+        Some(r) => r.int(0).map_err(|e| e.to_string()),
+        None => Err(format!(
+            "no subject has the code {name}: a subject is named by its subject code (as in sub-<code>) or its id"
+        )),
+    }
+}
+
 /// What the door is asked about.
 pub(crate) enum Target {
     Subject(i64),
@@ -320,26 +347,22 @@ pub(crate) enum Target {
 }
 
 impl Target {
-    pub(crate) fn parse(kind: &str, id: &str) -> Result<Target, String> {
+    /// A subject is named by its registry id or by its subject code (the
+    /// name the runs' units carry, `sub-<code>`): a value that is not all
+    /// digits is looked up as a code.
+    pub(crate) fn parse(store: &mut Store, kind: &str, id: &str) -> Result<Target, String> {
         match kind {
-            "subject" => id
-                .parse()
-                .map(Target::Subject)
-                .map_err(|_| "a subject is named by its id".to_string()),
+            "subject" => subject_named(store, id).map(Target::Subject),
             "stack" => id
                 .parse()
                 .map(Target::Stack)
                 .map_err(|_| "a stack is named by its id".to_string()),
             "session" => {
-                let (s, label) = id
-                    .split_once('@')
-                    .ok_or("a session is named <subject id>@<session label>, as the runs name it (sub-<s>_ses-<label>)")?;
-                Ok(Target::Session(
-                    s.parse().map_err(|_| {
-                        "a session is named <subject id>@<session label>".to_string()
-                    })?,
-                    label.to_string(),
-                ))
+                let (s, label) = id.split_once('@').ok_or(
+                    "a session is named <subject code or id>@<session label>, as the runs name it (sub-<code>_ses-<label>)",
+                )?;
+                let label = label.strip_prefix("ses-").unwrap_or(label);
+                Ok(Target::Session(subject_named(store, s)?, label.to_string()))
             }
             other => Err(format!(
                 "provenance is of a subject, a session or a stack, not {other}"
@@ -379,10 +402,14 @@ fn stacks_of(store: &mut Store, t: &Target) -> Result<Vec<i64>, String> {
                 .collect();
             match t {
                 Target::Session(_, label) => {
+                    // the registry's day is `2023-03-10`, the runs name the
+                    // session `ses-20230310`: the label is the day either way
+                    let plain = |l: &str| l.replace('-', "");
+                    let want = plain(label);
                     let sessions = crate::pipelines::stack_sessions(store, &all)?;
                     Ok(all
                         .into_iter()
-                        .filter(|st| sessions.get(st).is_some_and(|(_, l)| l == label))
+                        .filter(|st| sessions.get(st).is_some_and(|(_, l)| plain(l) == want))
                         .collect())
                 }
                 _ => Ok(all),
@@ -673,7 +700,7 @@ pub(crate) fn route(
         return None;
     }
     Some((|| {
-        let t = Target::parse(kind, id).map_err(|e| Reply::error(404, e))?;
+        let t = Target::parse(registry.store(), kind, id).map_err(|e| Reply::error(404, e))?;
         let v = answer(registry.store(), &t).map_err(|e| Reply::error(500, e))?;
         // every stack a step answered holds, not only the target's: a
         // session's step may hold a stack of the target's subject that the
@@ -703,15 +730,15 @@ pub(crate) fn route(
 pub(crate) struct ProvenanceArgs {
     /// subject, session or stack
     pub(crate) kind: String,
-    /// The id: a subject's or a stack's id, or <subject id>@<session label> for a session
+    /// The name: a subject's code or id, a stack's id, or <subject code or id>@<session label> for a session
     pub(crate) id: String,
     #[arg(long)]
     pub(crate) json: bool,
 }
 
 pub(crate) fn command(home: &Home, args: ProvenanceArgs) -> Result<(), Exit> {
-    let t = Target::parse(&args.kind, &args.id).map_err(usage)?;
     let mut registry = crate::open(home)?;
+    let t = Target::parse(registry.store(), &args.kind, &args.id).map_err(usage)?;
     let v = answer(registry.store(), &t).map_err(fail)?;
     if args.json {
         println!(
@@ -903,5 +930,98 @@ mod tests {
         ));
         assert!(belongs(&d("stack", Some(1), None), &[1], None, None));
         assert!(!belongs(&d("stack", Some(3), None), &[1], None, None));
+    }
+
+    fn parse_case(mut store: Store) {
+        nils_registry::migrate::migrate(&mut store, nils_registry::migrate::Kind::Registry)
+            .unwrap();
+        store
+            .execute(
+                &format!(
+                    "INSERT INTO {} (code, created_at) VALUES ('1a9c46b76b0aa6e4', '2026-01-01T00:00:00Z'), ('1234567890123456', '2026-01-01T00:00:00Z')",
+                    store.qualified("subject")
+                ),
+                &[],
+            )
+            .unwrap();
+        let subject = |t: Result<Target, String>| match t.unwrap() {
+            Target::Subject(s) => s,
+            _ => panic!("not a subject"),
+        };
+        assert_eq!(subject(Target::parse(&mut store, "subject", "1")), 1);
+        assert_eq!(
+            subject(Target::parse(&mut store, "subject", "1a9c46b76b0aa6e4")),
+            1
+        );
+        assert_eq!(
+            subject(Target::parse(&mut store, "subject", "sub-1a9c46b76b0aa6e4")),
+            1
+        );
+        match Target::parse(&mut store, "session", "1a9c46b76b0aa6e4@20241119").unwrap() {
+            Target::Session(1, l) => assert_eq!(l, "20241119"),
+            _ => panic!("not session 7"),
+        }
+        match Target::parse(&mut store, "session", "2@ses-20241119").unwrap() {
+            Target::Session(2, l) => assert_eq!(l, "20241119"),
+            _ => panic!("not session 8"),
+        }
+        let unknown = Target::parse(&mut store, "subject", "ffffffffffffffff")
+            .err()
+            .unwrap();
+        assert!(
+            unknown.contains("no subject has the code ffffffffffffffff"),
+            "{unknown}"
+        );
+        let unknown = Target::parse(&mut store, "session", "ffffffffffffffff@x")
+            .err()
+            .unwrap();
+        assert!(unknown.contains("no subject has the code"), "{unknown}");
+        let bare = Target::parse(&mut store, "session", "1").err().unwrap();
+        assert!(
+            bare.contains("<subject code or id>@<session label>"),
+            "{bare}"
+        );
+    }
+
+    #[test]
+    fn a_subject_is_named_by_its_code_or_its_id() {
+        parse_case(Store::sqlite_in_memory().unwrap());
+        let Some(dsn) = std::env::var("NILS_TEST_POSTGRES_DSN")
+            .ok()
+            .filter(|d| !d.is_empty())
+        else {
+            eprintln!("NILS_TEST_POSTGRES_DSN is not set; the Postgres half is skipped");
+            return;
+        };
+        let schema = "nils_prov_code_test";
+        let mut admin = Store::connect_postgres(&dsn, "public").unwrap();
+        admin
+            .batch(&format!(
+                "DROP SCHEMA IF EXISTS {schema} CASCADE; CREATE SCHEMA {schema}"
+            ))
+            .unwrap();
+        drop(admin);
+        parse_case(Store::connect_postgres(&dsn, schema).unwrap());
+        let mut admin = Store::connect_postgres(&dsn, "public").unwrap();
+        admin
+            .batch(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+            .unwrap();
+    }
+
+    #[test]
+    fn a_unit_names_its_provenance_target() {
+        use crate::pipelines::unit_provenance as u;
+        assert_eq!(
+            u("sub-1a9c46b76b0aa6e4_ses-20241119"),
+            json!({"kind": "session", "id": "1a9c46b76b0aa6e4@20241119"})
+        );
+        assert_eq!(
+            u("sub-1a9c46b76b0aa6e4"),
+            json!({"kind": "subject", "id": "1a9c46b76b0aa6e4"})
+        );
+        assert_eq!(u("stack-12"), json!({"kind": "stack", "id": 12}));
+        assert_eq!(u("other"), Value::Null);
+        assert_eq!(u("sub-_ses-1"), Value::Null);
+        assert_eq!(u("stack-x"), Value::Null);
     }
 }
