@@ -1281,3 +1281,115 @@ fn the_family_contract_is_the_loader_s_and_the_registration_family_loads() {
         assert_eq!(t.grid.as_deref(), Some("t1w"));
     }
 }
+
+/// The registration members' scripts parse, run no `nullglob` (it empties an
+/// unquoted ANTs bracket argument), and hand every bracket argument to the
+/// tool whole: the ANTs member runs both tasks against stand-in tools that
+/// record their arguments.
+#[test]
+fn the_registration_scripts_hand_ants_its_bracket_arguments_whole() {
+    use std::process::Command;
+    let dir = contracts().join("../pipelines/registration");
+    for k in ["ants", "synthmorph", "robust"] {
+        let p = dir.join(k).join("entry.sh");
+        let script = std::fs::read_to_string(&p).unwrap();
+        assert!(!script.contains("nullglob"), "{k}: nullglob");
+        let ok = Command::new("bash").arg("-n").arg(&p).status().unwrap();
+        assert!(ok.success(), "{k}: bash -n");
+    }
+    let script = std::fs::read_to_string(dir.join("ants/entry.sh")).unwrap();
+    let root = std::env::temp_dir().join(format!("nils-reg-script-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let stubs = root.join("stubs");
+    let data = root.join("data");
+    let out = root.join("out");
+    let log = root.join("argv.log");
+    let tpl = root.join("tpl.nii.gz");
+    for d in [&stubs, &out, &data.join("sub-01/ses-01/anat")] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    std::fs::write(&tpl, "").unwrap();
+    for f in [
+        "sub-01_ses-01_T1w",
+        "sub-01_ses-01_FLAIR",
+        "sub-01_ses-01_T2w",
+    ] {
+        std::fs::write(data.join(format!("sub-01/ses-01/anat/{f}.nii.gz")), "").unwrap();
+    }
+    // every ANTs tool is a stand-in that writes its arguments one per line
+    // and leaves the files the script copies next
+    let stub = "#!/bin/bash\n{ echo \"== $(basename \"$0\")\"; for a; do echo \"$a\"; done; } >> \"$ARGV_LOG\"\n\
+                case \"$(basename \"$0\")\" in\n\
+                ConvertTransformFile) exit 1;;\n\
+                antsRegistration) while [ $# -gt 0 ]; do case \"$1\" in -o) o=${2#[}; o=${o%,]}; : > \"${o}0GenericAffine.mat\";; esac; shift; done;;\n\
+                antsApplyTransforms) while [ $# -gt 0 ]; do case \"$1\" in -o) o=${2#[}; o=${o%,1]}; : > \"$o\";; esac; shift; done;;\n\
+                antsRegistrationSyN.sh) while [ $# -gt 0 ]; do case \"$1\" in -o) for s in Warped.nii.gz 0GenericAffine.mat 1Warp.nii.gz 1InverseWarp.nii.gz; do : > \"${2}$s\"; done;; esac; shift; done;;\n\
+                N4BiasFieldCorrection) while [ $# -gt 0 ]; do case \"$1\" in -o) : > \"$2\";; esac; shift; done;;\n\
+                esac\nexit 0\n";
+    for t in [
+        "antsRegistration",
+        "antsApplyTransforms",
+        "antsRegistrationSyN.sh",
+        "N4BiasFieldCorrection",
+        "ConvertTransformFile",
+        "ThresholdImage",
+        "ImageMath",
+        "CreateJacobianDeterminantImage",
+        "ImageIntensityStatistics",
+    ] {
+        let p = stubs.join(t);
+        std::fs::write(&p, stub).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let run = |task: &str, script: &str| {
+        let s = script
+            .replace("[InputDataset]", data.to_str().unwrap())
+            .replace("[OutputLocation]", out.to_str().unwrap())
+            .replace("[TASK]", task)
+            .replace("[LESIONS]", "off")
+            .replace("[THREADS]", "2")
+            .replace(
+                "/opt/templates/MNI152NLin2009cAsym_T1w.nii.gz",
+                tpl.to_str().unwrap(),
+            );
+        let path = format!(
+            "{}:{}",
+            stubs.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let o = Command::new("bash")
+            .arg("-c")
+            .arg(&s)
+            .env("PATH", path)
+            .env("ARGV_LOG", &log)
+            .output()
+            .unwrap();
+        assert!(o.status.success(), "{task}: {o:?}");
+    };
+    run("within_session", &script);
+    run("to_template", &script);
+    let argv = std::fs::read_to_string(&log).unwrap();
+    let has = |lines: &[&str]| {
+        assert!(
+            argv.contains(&format!("\n{}\n", lines.join("\n"))),
+            "arguments missing or split: {lines:?}\n{argv}"
+        );
+    };
+    has(&["-w", "[0.005,0.995]"]);
+    has(&["-t", "Rigid[0.1]"]);
+    has(&["-c", "[1000x500x250x100,1e-6,10]"]);
+    assert!(argv.contains("\n-r\n[sub-01/ses-01/anat/sub-01_ses-01_T1w.nii.gz,"));
+    assert!(argv.contains("\n-m\nMattes[sub-01/ses-01/anat/sub-01_ses-01_T1w.nii.gz,"));
+    assert!(argv.contains(",1,32,Regular,0.25]\n"));
+    assert!(argv.contains("\n-o\n[") && argv.contains("FLAIR_,]\n"));
+    has(&["-b", "[180]", "-c", "[50x50x50x50,0.0]"]);
+    assert!(argv.contains("_xfm.h5,1]\n"), "{argv}");
+    assert!(argv.contains("0GenericAffine.mat,1]\n"), "{argv}");
+    // a dataset with no match runs nothing and still succeeds
+    std::fs::remove_dir_all(data.join("sub-01")).unwrap();
+    std::fs::write(&log, "").unwrap();
+    run("within_session", &script);
+    assert!(std::fs::read_to_string(&log).unwrap().is_empty());
+    let _ = std::fs::remove_dir_all(&root);
+}

@@ -11,7 +11,7 @@
 nils_pack: 1
 pipeline:
   name: registration-robust
-  descriptor_sha256: "sha256:d8d988102aa7e96e44bf61ffc3f06626dd3d913c24c2c758ab5f2f9611e10d16"
+  descriptor_sha256: "sha256:8e9cbde8faf55df9f6380e8f7a50a22450f4b7865f480ab2cb0806fe679c91e4"
   version: "1.0"
 goals:
   goal: [fast, standard, research]

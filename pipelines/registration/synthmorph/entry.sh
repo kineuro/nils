@@ -1,8 +1,8 @@
-set -u; shopt -s nullglob; cd [InputDataset];
-flair() { local g s q; for g in "$1"/*_T2w.nii.gz "$1"/*_FLAIR.nii.gz; do s=$(basename "$g" .nii.gz);
+set -u; cd [InputDataset];
+flair() { local g s q; for g in "$1"/*_T2w.nii.gz "$1"/*_FLAIR.nii.gz; do [ -e "$g" ] || continue; s=$(basename "$g" .nii.gz);
 case "$s" in *_FLAIR) echo "$g"; return;; *_acq-*) q=${s#*_acq-};; *) continue;; esac;
 case "+${q%%_*}+" in *+FLAIR+*) echo "$g"; return;; esac; done; };
-t2w() { local g s q; for g in "$1"/*_T2w.nii.gz; do s=$(basename "$g" .nii.gz);
+t2w() { local g s q; for g in "$1"/*_T2w.nii.gz; do [ -e "$g" ] || continue; s=$(basename "$g" .nii.gz);
 case "$s" in *_acq-*) q=${s#*_acq-}; case "+${q%%_*}+" in *+FLAIR+*) continue;; esac;; esac; echo "$g"; return; done; };
 qc() { mri_synthseg --i "$1" --o "$2/seg_$3.nii.gz" --qc "$2/qc_$3.csv" --robust --cpu --threads [THREADS] >/dev/null 2>&1 || return 1;
 fspython -c "import sys, csv; r = list(csv.reader(open(sys.argv[1])))[-1]; v = [float(x) for x in r[1:] if x.strip()]; print(\"%.3f\" % min(v))" "$2/qc_$3.csv"; };
@@ -21,6 +21,7 @@ print(\"%.4f %.3f\" % (fold, float(rt[m].mean()) if m.any() else 0.0))" "$1" "$2
 rigid=0; mri_synthmorph register -h 2>&1 | grep -q rigid && rigid=1;
 tpl=/opt/templates/MNI152NLin2009cAsym_T1w.nii.gz; [ -f "$tpl" ] || tpl=$FREESURFER_HOME/average/mni_icbm152_nlin_asym_09c/mni_icbm152_t1_tal_nlin_asym_09c.nii;
 for f in sub-*/ses-*/anat/*_T1w.nii.gz; do
+[ -e "$f" ] || continue;
 a=$(dirname "$f"); d=[OutputLocation]/$a; mkdir -p "$d"; b=$(basename "$f" .nii.gz); b=${b%_T1w};
 w=$(mktemp -d [OutputLocation]/.work-XXXXXX);
 qf=$(qc "$f" "$w" fixed) || { echo "$a: SynthSeg could not read the T1w, so its quality was not scored"; qf=""; };

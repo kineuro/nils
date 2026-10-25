@@ -1,4 +1,4 @@
-set -u; shopt -s nullglob; cd [InputDataset];
+set -u; cd [InputDataset];
 qc() { mri_synthseg --i "$1" --o "$2" --qc "$3" --robust --cpu --threads [THREADS] >/dev/null 2>&1 || return 1;
 fspython -c "import sys, csv; r = list(csv.reader(open(sys.argv[1])))[-1]; v = [float(x) for x in r[1:] if x.strip()]; print(\"%.3f\" % min(v))" "$3"; };
 dice() { fspython -c "import sys, numpy as np, nibabel as n; a = np.asarray(n.load(sys.argv[1]).dataobj).astype(int); b = np.asarray(n.load(sys.argv[2]).dataobj).astype(int);
@@ -8,8 +8,8 @@ rows = [l.split() for l in open(sys.argv[1]) if len(l.split()) == 4 and all(x.re
 M = np.array(rows, float); R = M[:3, :3]; det = float(np.linalg.det(R)); a = max(-1.0, min(1.0, (np.trace(R) - 1) / 2)); rot = float(np.degrees(np.arccos(a))); tl = float(np.linalg.norm(M[:3, 3]));
 print(\"%.4f %d %.2f %.2f\" % (det, 1 if det < 0 else 0, tl, rot))" "$1"; };
 for s in sub-*/; do
-s=${s%/}; d=[OutputLocation]/$s/anat; mkdir -p "$d"; w=$(mktemp -d [OutputLocation]/.work-XXXXXX);
-vis=(); for f in "$s"/ses-*/anat/*_T1w.nii.gz; do vis+=("$f"); done; n=${#vis[@]};
+[ -d "$s" ] || continue; s=${s%/}; d=[OutputLocation]/$s/anat; mkdir -p "$d"; w=$(mktemp -d [OutputLocation]/.work-XXXXXX);
+vis=(); for f in "$s"/ses-*/anat/*_T1w.nii.gz; do [ -e "$f" ] && vis+=("$f"); done; n=${#vis[@]};
 if [ $n -lt 2 ]; then echo "$s: $n visit with a T1w, nothing to align across visits"; rm -rf "$w"; continue; fi;
 refused=0; qcs=(); for f in "${vis[@]}"; do ses=$(basename "$(dirname "$(dirname "$f")")"); q=$(qc "$f" "$w/seg_$ses.nii.gz" "$w/qc_$ses.csv") || q="";
 qcs+=("${q:-?}"); if [ -n "$q" ] && fspython -c "import sys; sys.exit(0 if float(sys.argv[1]) < 0.65 else 1)" "$q"; then refused=1; fi; done;
