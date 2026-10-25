@@ -25,17 +25,29 @@ pub(crate) struct Of<'a> {
 /// Whether a derivative of a run belongs to this unit: its stack, or its
 /// session or subject.
 fn of_unit(d: &derivative::Derivative, of: &Of<'_>) -> bool {
+    belongs(d, of.stacks, of.subject_id, of.session_day)
+}
+
+/// Whether a derivative belongs to a unit given by its stacks, its subject
+/// and its session's day (none for a subject's or a stack's unit): a stack
+/// derivative by its stack, a session's by subject and day, a subject's by
+/// the subject of a subject unit. The reuse and the provenance door agree
+/// on it (after review, finding 1 of the second review).
+pub(crate) fn belongs(
+    d: &derivative::Derivative,
+    stacks: &[i64],
+    subject_id: Option<i64>,
+    session_day: Option<&str>,
+) -> bool {
     match (
         d.scope.as_str(),
         d.stack_id,
         d.subject_id,
         d.session_day.as_deref(),
     ) {
-        ("stack", Some(s), _, _) => of.stacks.contains(&s),
-        ("session", _, Some(s), Some(day)) => {
-            of.subject_id == Some(s) && of.session_day == Some(day)
-        }
-        ("subject", _, Some(s), _) => of.subject_id == Some(s) && of.session_day.is_none(),
+        ("stack", Some(s), _, _) => stacks.contains(&s),
+        ("session", _, Some(s), Some(day)) => subject_id == Some(s) && session_day == Some(day),
+        ("subject", _, Some(s), _) => subject_id == Some(s) && session_day.is_none(),
         _ => false,
     }
 }
@@ -46,6 +58,12 @@ pub(crate) struct Reused {
     pub run: i64,
     pub outcome: Value,
 }
+
+/// Why kept results were not reused, each `{run, unit, reused: false,
+/// why}`: what the unit records under `reuse.considered` where none is
+/// reused, and what a reused unit's outcome carries of the ones passed
+/// over (after review, finding 8 of the second review).
+pub(crate) type Refusals = Vec<Value>;
 
 /// A kept result a unit may reuse once its files prove to be as they were
 /// registered (after review, finding 9): found without reading a file, so
@@ -63,15 +81,15 @@ pub(crate) struct Candidate {
 }
 
 impl Candidate {
-    /// Every file as it was registered: the sha256 of each, read now.
+    /// Every file as it was registered: the sha256 of each, read through
+    /// now (streamed, never the file whole in memory).
     pub(crate) fn verify(&self) -> Result<(), String> {
         for (path, file, sha) in &self.files {
-            match std::fs::read(file) {
-                Ok(bytes) => {
+            match nils_pipeline::files::sha256_file(file) {
+                Ok((_, got)) => {
                     // the registry keeps the bare hex, the engine writes it
                     // with its prefix: compared without either
-                    let got = bare(&nils_pipeline::sha256(&bytes));
-                    if got != *sha {
+                    if bare(&got) != *sha {
                         return Err(format!("{path} fails its sha256"));
                     }
                 }
@@ -79,6 +97,13 @@ impl Candidate {
             }
         }
         Ok(())
+    }
+
+    /// The refusal a unit records when this candidate's files failed.
+    pub(crate) fn refused(&self, why: &str) -> Refusals {
+        let mut out = self.considered.clone();
+        out.push(json!({"run": self.run, "reused": false, "why": why}));
+        out
     }
 
     /// The outcome the unit records once the files proved good.
@@ -111,16 +136,16 @@ pub(crate) fn places(store: &mut Store) -> Result<std::collections::BTreeMap<i64
 }
 
 /// The kept result whose result key is `result_key`, where it may be
-/// reused, its files not yet read; none where no run kept one, or every
-/// kept one is refused (a person rejected it, its pipeline version was
-/// replaced as wrong, a place of its files is gone). The refusals go into
-/// the outcome's `considered` for the run's words.
+/// reused, its files not yet read; else the refusals, one for every kept
+/// one passed over (a person rejected it, its pipeline version was replaced
+/// as wrong, a place of its files is gone), empty where no run kept one.
+/// The refusals go into the outcome's `considered` for the run's words.
 pub(crate) fn candidate(
     store: &mut Store,
     places: &std::collections::BTreeMap<i64, String>,
     of: &Of<'_>,
     result_key: &str,
-) -> Result<Option<Candidate>, String> {
+) -> Result<Result<Candidate, Refusals>, String> {
     let err = |e: nils_registry::Error| e.to_string();
     let candidates = rows::kept_by_result_key(store, result_key).map_err(err)?;
     let mut considered: Vec<Value> = Vec::new();
@@ -207,7 +232,7 @@ pub(crate) fn candidate(
             considered.push(json!({"run": run, "unit": unit, "reused": false, "why": why}));
             continue;
         }
-        return Ok(Some(Candidate {
+        return Ok(Ok(Candidate {
             run,
             pipeline: p.label(),
             derivatives: made.iter().map(|d| d.id).collect(),
@@ -215,26 +240,28 @@ pub(crate) fn candidate(
             considered,
         }));
     }
-    Ok(None)
+    Ok(Err(considered))
 }
 
 /// [`candidate`] with its files checked here and now: the kept result the
-/// unit reuses, or none. Where the newest candidate's files fail, no older
-/// one is looked at: a result whose files changed is one to run again.
+/// unit reuses, or why none is (the refusals, the sha256 failure among
+/// them). Where the newest candidate's files fail, no older one is looked
+/// at: a result whose files changed is one to run again.
 pub(crate) fn kept_for(
     store: &mut Store,
     places: &std::collections::BTreeMap<i64, String>,
     of: &Of<'_>,
     result_key: &str,
-) -> Result<Option<Reused>, String> {
-    let Some(c) = candidate(store, places, of, result_key)? else {
-        return Ok(None);
+) -> Result<Result<Reused, Refusals>, String> {
+    let c = match candidate(store, places, of, result_key)? {
+        Ok(c) => c,
+        Err(refusals) => return Ok(Err(refusals)),
     };
     match c.verify() {
-        Ok(()) => Ok(Some(Reused {
+        Ok(()) => Ok(Ok(Reused {
             run: c.run,
             outcome: c.outcome(),
         })),
-        Err(_) => Ok(None),
+        Err(why) => Ok(Err(c.refused(&why))),
     }
 }

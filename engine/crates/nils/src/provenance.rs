@@ -57,6 +57,7 @@ pub(crate) fn stale_words(changes: &[(String, String, String)]) -> String {
 /// overrode. [`Curation::of`] slices it per unit, which the unit records
 /// at its run (record 58 P5); the door reads the state again to tell
 /// `stale`.
+#[derive(Debug)]
 pub(crate) struct Curation {
     rules: Vec<Value>,
     overrides: Vec<Value>,
@@ -66,16 +67,20 @@ pub(crate) struct Curation {
 }
 
 impl Curation {
+    /// The state as the registry answers it, or the registry's error: a
+    /// query that fails never reads as a state with no rules and no
+    /// overrides (after review, finding 4 of the second review); the run
+    /// records [`Curation::unknown`] for its units then.
     pub(crate) fn read(
         registry: &mut Registry,
         stacks: &[i64],
         label_set: Option<&nils_registry::labels::LabelSet>,
         pack_dir: &Option<std::path::PathBuf>,
-    ) -> Curation {
+    ) -> Result<Curation, String> {
         let store = registry.store();
-        let rules = rules_of(store, stacks);
-        let (overrides, system1) = decisions_of(store, stacks);
-        Curation {
+        let rules = rules_of(store, stacks)?;
+        let (overrides, system1) = decisions_of(store, stacks)?;
+        Ok(Curation {
             rules,
             overrides,
             system1,
@@ -83,7 +88,18 @@ impl Curation {
             label_set: label_set.map_or(Value::Null, |l| {
                 json!({"id": l.id, "digest": l.digest, "label": format!("{}@{}", l.name, l.version)})
             }),
-        }
+        })
+    }
+
+    /// What a unit records when the state could not be read when it ran:
+    /// `unknown`, with the registry's words, which the doors answer as they
+    /// stand (never `current`).
+    pub(crate) fn unknown(why: &str) -> Value {
+        json!({
+            "state": "unknown",
+            "words": format!("unknown: the curation state could not be read when the unit ran ({why})"),
+            "at": nils_registry::time::now_iso(),
+        })
     }
 
     /// The state of one unit's stacks, as the unit records it.
@@ -106,8 +122,9 @@ impl Curation {
 }
 
 /// Per stack, `{stack, pack, version, overlay, epoch}` of its
-/// classification.
-fn rules_of(store: &mut Store, stacks: &[i64]) -> Vec<Value> {
+/// classification; the registry's error where the query fails.
+fn rules_of(store: &mut Store, stacks: &[i64]) -> Result<Vec<Value>, String> {
+    let err = |e: nils_registry::Error| format!("the classification rows: {e}");
     let mut out = Vec::new();
     for chunk in stacks.chunks(500) {
         let list = chunk
@@ -119,22 +136,25 @@ fn rules_of(store: &mut Store, stacks: &[i64]) -> Vec<Value> {
             "SELECT stack_id, pack, pack_version, overlay, epoch FROM {} WHERE stack_id IN ({list}) ORDER BY stack_id",
             store.qualified("classification")
         );
-        for r in store.query(&sql, &[]).unwrap_or_default() {
+        for r in store.query(&sql, &[]).map_err(err)? {
             out.push(json!({
-                "stack": r.int(0).unwrap_or_default(),
-                "pack": r.text(1).unwrap_or_default(),
-                "version": r.text(2).unwrap_or_default(),
-                "overlay": r.opt_text(3).ok().flatten(),
-                "epoch": r.opt_int(4).ok().flatten(),
+                "stack": r.int(0).map_err(err)?,
+                "pack": r.text(1).map_err(err)?,
+                "version": r.text(2).map_err(err)?,
+                "overlay": r.opt_text(3).map_err(err)?,
+                "epoch": r.opt_int(4).map_err(err)?,
             }));
         }
     }
-    out
+    Ok(out)
 }
 
 /// The committed decisions on the stacks: a person's as overrides `{stack,
-/// axis, by, at}`, a model's as System 1's `{stack, axis, model, version}`.
-fn decisions_of(store: &mut Store, stacks: &[i64]) -> (Vec<Value>, Vec<Value>) {
+/// axis, by, at}`, a model's as System 1's `{stack, axis, model, version}`;
+/// the registry's error where the query fails.
+#[allow(clippy::type_complexity)]
+fn decisions_of(store: &mut Store, stacks: &[i64]) -> Result<(Vec<Value>, Vec<Value>), String> {
+    let err = |e: nils_registry::Error| format!("the decision rows: {e}");
     let mut overrides = Vec::new();
     let mut system1 = Vec::new();
     for chunk in stacks.chunks(500) {
@@ -149,28 +169,24 @@ fn decisions_of(store: &mut Store, stacks: &[i64]) -> (Vec<Value>, Vec<Value>) {
              ORDER BY ref, axis, id",
             store.qualified("decision")
         );
-        for r in store.query(&sql, &[]).unwrap_or_default() {
-            let stack: i64 = r
-                .text(0)
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or_default();
-            let axis = r.text(1).unwrap_or_default().to_string();
-            let kind = r.text(3).unwrap_or_default().to_string();
+        for r in store.query(&sql, &[]).map_err(err)? {
+            let stack: i64 = r.text(0).map_err(err)?.parse().unwrap_or_default();
+            let axis = r.text(1).map_err(err)?.to_string();
+            let kind = r.text(3).map_err(err)?.to_string();
             match kind.as_str() {
                 "model" => system1.push(json!({
                     "stack": stack, "axis": axis,
-                    "model": r.opt_int(5).ok().flatten(),
-                    "version": r.opt_text(4).ok().flatten(),
+                    "model": r.opt_int(5).map_err(err)?,
+                    "version": r.opt_text(4).map_err(err)?,
                 })),
                 _ => overrides.push(json!({
-                    "stack": stack, "axis": axis, "by": r.text(2).unwrap_or_default(),
-                    "kind": kind, "at": r.opt_text(6).ok().flatten(),
+                    "stack": stack, "axis": axis, "by": r.text(2).map_err(err)?,
+                    "kind": kind, "at": r.opt_text(6).map_err(err)?,
                 })),
             }
         }
     }
-    (overrides, system1)
+    Ok((overrides, system1))
 }
 
 /// The digest of a pack folder: sha256 over its files' names and bytes, in
@@ -203,28 +219,39 @@ pub(crate) fn pack_digest(dir: &std::path::Path) -> Option<String> {
 /// What holds now of some stacks' curation, read once for every unit a
 /// door answers (after review, finding 6: not twice per unit): the rules
 /// per stack and the overrides.
+#[derive(Debug)]
 pub(crate) struct States {
     now: Vec<Value>,
     overrides: Vec<Value>,
 }
 
 impl States {
-    pub(crate) fn read(store: &mut Store, stacks: &[i64]) -> States {
-        let now = rules_of(store, stacks);
-        let (overrides, _) = decisions_of(store, stacks);
-        States { now, overrides }
+    /// What holds now, or the registry's error (never an empty state that
+    /// would read every unit `current`).
+    pub(crate) fn read(store: &mut Store, stacks: &[i64]) -> Result<States, String> {
+        let now = rules_of(store, stacks)?;
+        let (overrides, _) = decisions_of(store, stacks)?;
+        Ok(States { now, overrides })
     }
 
     /// The curation state of a unit as a door answers it: what was
     /// recorded, what holds now, and `state`: `current`, `stale` (a rules
     /// version on an input changed, with [`stale_words`]) or `unknown` (a
-    /// unit from before recorded none).
+    /// unit from before recorded none, or one whose state could not be read
+    /// when it ran, in the words it recorded).
     pub(crate) fn of(&self, recorded: &Value, stacks: &[i64]) -> Value {
         if !recorded.is_object() {
             return json!({
                 "state": "unknown",
                 "words": "no curation state was recorded for this unit (it ran before the provenance door)",
                 "recorded": Value::Null,
+            });
+        }
+        if recorded["state"] == "unknown" {
+            return json!({
+                "state": "unknown",
+                "words": recorded["words"],
+                "recorded": recorded,
             });
         }
         let then: BTreeMap<i64, (String, String)> = recorded["rules"]
@@ -409,9 +436,9 @@ struct Made {
 }
 
 impl Made {
-    fn read(&mut self, store: &mut Store, run: i64) {
+    fn read(&mut self, store: &mut Store, run: i64) -> Result<(), String> {
         if self.derivatives.contains_key(&run) {
-            return;
+            return Ok(());
         }
         let files = nils_registry::derivative::list(
             store,
@@ -421,38 +448,45 @@ impl Made {
                 ..Default::default()
             },
         )
-        .unwrap_or_default()
+        .map_err(|e| format!("the derivatives of run {run}: {e}"))?
         .into_iter()
         .filter(|d| d.withdrawn_at.is_none())
         .collect();
         self.derivatives.insert(run, files);
         let mut by_unit: BTreeMap<String, usize> = BTreeMap::new();
-        for m in nils_registry::measure::of_run(store, run).unwrap_or_default() {
+        for m in nils_registry::measure::of_run(store, run)
+            .map_err(|e| format!("the measures of run {run}: {e}"))?
+        {
             *by_unit.entry(m.unit_id).or_default() += 1;
         }
         self.measures.insert(run, by_unit);
+        Ok(())
     }
 
     /// The results of one unit: its files as derivatives and how many
     /// measures it wrote, from the run that made them (the unit's own, or
-    /// the one it reused).
-    fn of(&mut self, store: &mut Store, run: i64, unit: &rows::Unit, stacks: &[i64]) -> Value {
+    /// the one it reused). A file is the unit's as the reuse decides it
+    /// ([`crate::reuse::belongs`]): a stack's by its stack, a session's by
+    /// the unit's subject and day, a subject's by a subject unit's subject
+    /// (after review, finding 1 of the second review: never every `sub-`
+    /// unit's).
+    fn of(
+        &mut self,
+        store: &mut Store,
+        run: i64,
+        unit: &rows::Unit,
+        stacks: &[i64],
+        subject_id: Option<i64>,
+        session_day: Option<&str>,
+    ) -> Result<Value, String> {
         let source = unit.reused_from_run.unwrap_or(run);
-        self.read(store, source);
+        self.read(store, source)?;
         let files: Vec<Value> = self
             .derivatives
             .get(&source)
             .into_iter()
             .flatten()
-            .filter(|d| match (d.scope.as_str(), d.stack_id) {
-                ("stack", Some(s)) => stacks.contains(&s),
-                _ => {
-                    unit.outcome["derivatives"]
-                        .as_array()
-                        .is_none_or(|ids| ids.iter().any(|i| i.as_i64() == Some(d.id)))
-                        && unit.unit.starts_with("sub-")
-                }
-            })
+            .filter(|d| crate::reuse::belongs(d, stacks, subject_id, session_day))
             .map(|d| {
                 json!({
                     "id": d.id, "kind": d.kind, "path": d.path, "sha256": d.sha256,
@@ -466,7 +500,28 @@ impl Made {
             .and_then(|m| m.get(&unit.unit))
             .copied()
             .unwrap_or(0);
-        json!({"derivatives": files, "measures": measures, "from_run": source})
+        Ok(json!({"derivatives": files, "measures": measures, "from_run": source}))
+    }
+}
+
+/// A unit's subject and its session's day, as the runs name it: a
+/// `sub-<s>_ses-<t>` unit is its stacks' session, a `sub-<s>` unit its
+/// subject with no day, a `stack-<id>` unit neither.
+fn unit_scope(
+    unit: &str,
+    stacks: &[i64],
+    sessions: &BTreeMap<i64, (i64, String)>,
+) -> (Option<i64>, Option<String>) {
+    if !unit.starts_with("sub-") {
+        return (None, None);
+    }
+    let Some((subject, day)) = stacks.iter().find_map(|s| sessions.get(s)) else {
+        return (None, None);
+    };
+    if unit.contains("_ses-") {
+        (Some(*subject), Some(day.clone()))
+    } else {
+        (Some(*subject), None)
     }
 }
 
@@ -507,20 +562,15 @@ pub(crate) fn answer(store: &mut Store, t: &Target) -> Result<Value, String> {
         touched.push((run, p, units));
     }
     let every_stack: Vec<i64> = every_stack.into_iter().collect();
-    let states = States::read(store, &every_stack);
+    let states = States::read(store, &every_stack)?;
+    let sessions = crate::pipelines::stack_sessions(store, &every_stack)?;
     let mut made = Made::default();
     let mut steps: Vec<Value> = Vec::new();
-    let mut stale = 0usize;
-    let mut unknown = 0usize;
     for (run, p, units) in &touched {
         let run_id = run.id;
         for (u, its) in units {
             let curation = states.of(&u.curation, its);
-            match curation["state"].as_str() {
-                Some("stale") => stale += 1,
-                Some("unknown") => unknown += 1,
-                _ => {}
-            }
+            let (subject_id, session_day) = unit_scope(&u.unit, its, &sessions);
             steps.push(json!({
                 "run": run_id, "pipeline": p.label(), "pipeline_id": p.id,
                 "run_status": run.status, "started_at": run.started_at, "finished_at": run.finished_at,
@@ -535,7 +585,7 @@ pub(crate) fn answer(store: &mut Store, t: &Target) -> Result<Value, String> {
                 },
                 "knobs": u.pack["knobs"], "caveats": u.pack["caveats"], "flags": u.pack["flags"],
                 "pack_status": u.pack["status"], "words": u.pack["words"],
-                "results": made.of(store, run_id, u, its),
+                "results": made.of(store, run_id, u, its, subject_id, session_day.as_deref())?,
                 "stacks": its,
                 "curation": curation,
             }));
@@ -547,13 +597,63 @@ pub(crate) fn answer(store: &mut Store, t: &Target) -> Result<Value, String> {
             .cmp(&b["run"].as_i64())
             .then(a["unit"].as_str().cmp(&b["unit"].as_str()))
     });
-    Ok(json!({
-        "of": t.doc(),
+    Ok(assembled(t.doc(), stacks, steps))
+}
+
+/// The door's answer over these steps: the counts and the stale words are
+/// of the steps answered, so a withholding recomputes them (after review,
+/// finding 5 of the second review).
+fn assembled(of: Value, stacks: Vec<i64>, steps: Vec<Value>) -> Value {
+    let count = |state: &str| {
+        steps
+            .iter()
+            .filter(|s| s["curation"]["state"] == state)
+            .count()
+    };
+    let stale = count("stale");
+    json!({
+        "of": of,
         "stacks": stacks,
-        "steps": steps,
-        "counts": {"steps": steps.len(), "stale": stale, "unknown": unknown},
+        "counts": {"steps": steps.len(), "stale": stale, "unknown": count("unknown")},
         "stale_words": if stale > 0 { Some("stale: the rules version on an input changed; the result is read apart from current ones and never pooled with them, at every door") } else { None },
-    }))
+        "steps": steps,
+    })
+}
+
+/// The answer with the steps of a stack of a sample sealed now withheld,
+/// and the stack itself, the counts and the stale words with them: a
+/// caller without `sealed:see` learns nothing of a sealed stack, not even
+/// its id or that something on it is stale.
+fn withheld(mut v: Value, sealed: &BTreeSet<i64>) -> Value {
+    if sealed.is_empty() {
+        return v;
+    }
+    let is_sealed = |x: &Value| x.as_i64().is_some_and(|x| sealed.contains(&x));
+    let before = v["steps"].as_array().map_or(0, Vec::len);
+    let kept: Vec<Value> = v["steps"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|s| {
+            !s["stacks"]
+                .as_array()
+                .is_some_and(|ss| ss.iter().any(is_sealed))
+        })
+        .collect();
+    let stacks: Vec<i64> = v["stacks"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|x| !is_sealed(x))
+        .filter_map(Value::as_i64)
+        .collect();
+    let mut out = assembled(v["of"].take(), stacks, kept);
+    out["withheld"] = json!({
+        "steps": before - out["steps"].as_array().map_or(0, Vec::len),
+        "why": crate::sealed::refusal("the steps of a stack of a sample sealed now"),
+    });
+    out
 }
 
 /// The door: `pipelines:see` or `data:see`; units are named only at detail
@@ -574,36 +674,23 @@ pub(crate) fn route(
     }
     Some((|| {
         let t = Target::parse(kind, id).map_err(|e| Reply::error(404, e))?;
-        let mut v = answer(registry.store(), &t).map_err(|e| Reply::error(500, e))?;
-        let stacks: Vec<i64> = v["stacks"]
+        let v = answer(registry.store(), &t).map_err(|e| Reply::error(500, e))?;
+        // every stack a step answered holds, not only the target's: a
+        // session's step may hold a stack of the target's subject that the
+        // target itself does not
+        let stacks: Vec<i64> = v["steps"]
             .as_array()
             .into_iter()
             .flatten()
-            .filter_map(Value::as_i64)
+            .flat_map(|s| s["stacks"].as_array().cloned().unwrap_or_default())
+            .chain(v["stacks"].as_array().cloned().unwrap_or_default())
+            .filter_map(|x| x.as_i64())
+            .collect::<BTreeSet<i64>>()
+            .into_iter()
             .collect();
         let sealed = crate::sealed::withheld(registry.store(), &caller.access, &stacks)
             .map_err(|e| Reply::error(500, e.to_string()))?;
-        if !sealed.is_empty() {
-            let before = v["steps"].as_array().map_or(0, Vec::len);
-            let kept: Vec<Value> = v["steps"]
-                .as_array()
-                .cloned()
-                .unwrap_or_default()
-                .into_iter()
-                .filter(|s| {
-                    !s["stacks"].as_array().is_some_and(|ss| {
-                        ss.iter()
-                            .filter_map(Value::as_i64)
-                            .any(|x| sealed.contains(&x))
-                    })
-                })
-                .collect();
-            v["withheld"] = json!({
-                "steps": before - kept.len(),
-                "why": crate::sealed::refusal("the steps of a stack of a sample sealed now"),
-            });
-            v["steps"] = Value::Array(kept);
-        }
+        let mut v = withheld(v, &sealed);
         if !quasi {
             crate::pipelines::plain(&mut v);
         }
@@ -659,4 +746,162 @@ pub(crate) fn command(home: &Home, args: ProvenanceArgs) -> Result<(), Exit> {
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn registry(name: &str) -> (nils_dicom::synth::TempDir, Registry) {
+        let dir = nils_dicom::synth::TempDir::new(name);
+        let home = Home::new(dir.path().join("registry"));
+        home.keys(None).add("k", b"nils-fixture-key").unwrap();
+        let registry = home
+            .init(&nils_registry::InitOptions {
+                backend: nils_registry::Backend::Sqlite,
+                dsn: None,
+                schema: None,
+                scheme: nils_registry::pseudonym::Scheme::Blake2b32,
+                key: "k".to_string(),
+                display_length: nils_registry::pseudonym::DEFAULT_DISPLAY_LENGTH,
+                session_scheme: None,
+            })
+            .unwrap();
+        (dir, registry)
+    }
+
+    /// After review (finding 4 of the second review): a registry error is
+    /// an error at every read, never a state with no rules and no
+    /// overrides that would read `current`; and the unknown state a run
+    /// records when the read failed reads `unknown` at the door.
+    #[test]
+    fn a_failing_query_is_an_error_not_a_current_state() {
+        let (_dir, mut registry) = registry("provenance-errors");
+        let store = registry.store();
+        assert!(States::read(store, &[1]).is_ok());
+        store
+            .execute(
+                "ALTER TABLE classification RENAME TO classification_gone",
+                &[],
+            )
+            .unwrap();
+        let e = States::read(store, &[1]).unwrap_err();
+        assert!(e.starts_with("the classification rows: "), "{e}");
+        let e = Curation::read(&mut registry, &[1], None, &None).unwrap_err();
+        assert!(e.starts_with("the classification rows: "), "{e}");
+        let store = registry.store();
+        store
+            .execute("ALTER TABLE derivative RENAME TO derivative_gone", &[])
+            .unwrap();
+        let mut made = Made::default();
+        let e = made.read(store, 1).unwrap_err();
+        assert!(e.starts_with("the derivatives of run 1: "), "{e}");
+        let states = States {
+            now: vec![json!({"stack": 1, "pack": "mri", "version": "1.0.0"})],
+            overrides: Vec::new(),
+        };
+        let v = states.of(&Curation::unknown("the classification rows: gone"), &[1]);
+        assert_eq!(v["state"], "unknown", "{v}");
+        assert!(
+            v["words"]
+                .as_str()
+                .unwrap()
+                .starts_with("unknown: the curation state could not be read when the unit ran"),
+            "{v}"
+        );
+    }
+
+    /// After review (finding 5 of the second review): withholding the steps
+    /// of a sealed stack withholds the stack from `stacks` too, and the
+    /// counts and the stale words are those of the steps kept.
+    #[test]
+    fn withholding_a_sealed_stack_takes_its_stack_counts_and_words_too() {
+        let v = assembled(
+            json!({"kind": "subject", "id": 1}),
+            vec![1, 2],
+            vec![
+                json!({"unit": "stack-1", "stacks": [1], "curation": {"state": "stale"}}),
+                json!({"unit": "stack-2", "stacks": [2], "curation": {"state": "current"}}),
+            ],
+        );
+        assert_eq!(v["counts"], json!({"steps": 2, "stale": 1, "unknown": 0}));
+        assert!(v["stale_words"].is_string(), "{v}");
+        let w = withheld(v.clone(), &BTreeSet::new());
+        assert_eq!(w, v, "nothing sealed, nothing withheld");
+        let w = withheld(v, &BTreeSet::from([1]));
+        assert_eq!(w["stacks"], json!([2]), "{w}");
+        assert_eq!(w["steps"].as_array().unwrap().len(), 1, "{w}");
+        assert_eq!(w["counts"], json!({"steps": 1, "stale": 0, "unknown": 0}));
+        assert!(w["stale_words"].is_null(), "{w}");
+        assert_eq!(w["withheld"]["steps"], 1, "{w}");
+    }
+
+    /// After review (finding 1 of the second review): a session unit's
+    /// files are its session's, a subject unit's its subject's, a stack
+    /// unit's its stack's; never another session's of the same run.
+    #[test]
+    fn a_units_files_are_its_own_sessions() {
+        let sessions: BTreeMap<i64, (i64, String)> = [
+            (1, (7, "2022-01-15".to_string())),
+            (2, (7, "2022-01-15".to_string())),
+            (3, (7, "2023-03-10".to_string())),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(
+            unit_scope("sub-x_ses-a", &[1, 2], &sessions),
+            (Some(7), Some("2022-01-15".to_string()))
+        );
+        assert_eq!(unit_scope("sub-x", &[1, 2, 3], &sessions), (Some(7), None));
+        assert_eq!(unit_scope("stack-1", &[1], &sessions), (None, None));
+        let d = |scope: &str, stack: Option<i64>, day: Option<&str>| {
+            nils_registry::derivative::Derivative {
+                id: 1,
+                kind: "image".into(),
+                scope: scope.into(),
+                stack_id: stack,
+                series_id: None,
+                subject_id: Some(7),
+                session_day: day.map(str::to_string),
+                place_id: 1,
+                path: "p".into(),
+                bytes: 0,
+                sha256: String::new(),
+                media_type: String::new(),
+                registered_by: None,
+                actor: Value::Null,
+                model_id: None,
+                run_id: Some(1),
+                preprocess_version: None,
+                supersedes_id: None,
+                created_at: String::new(),
+                withdrawn_at: None,
+                grid: Value::Null,
+                grid_stack_id: None,
+                grid_link: None,
+                part_sets: Value::Null,
+                check_status: None,
+                check_reasons: Value::Null,
+                check_decision_id: None,
+                checked_at: None,
+            }
+        };
+        let belongs = crate::reuse::belongs;
+        let a = d("session", None, Some("2022-01-15"));
+        let b = d("session", None, Some("2023-03-10"));
+        assert!(belongs(&a, &[1, 2], Some(7), Some("2022-01-15")));
+        assert!(!belongs(&b, &[1, 2], Some(7), Some("2022-01-15")));
+        assert!(
+            !belongs(&a, &[1, 2, 3], Some(7), None),
+            "a subject unit takes the subject's files"
+        );
+        assert!(belongs(
+            &d("subject", None, None),
+            &[1, 2, 3],
+            Some(7),
+            None
+        ));
+        assert!(belongs(&d("stack", Some(1), None), &[1], None, None));
+        assert!(!belongs(&d("stack", Some(3), None), &[1], None, None));
+    }
 }

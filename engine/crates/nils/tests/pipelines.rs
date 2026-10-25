@@ -1280,6 +1280,28 @@ fn a_bids_run_takes_what_an_earlier_bids_run_made_of_its_sessions() {
             std::fs::read_to_string(lab.work.path().join(d["path"].as_str().unwrap())).unwrap();
         assert_eq!(text.lines().count(), 2, "{d}: {text}");
     }
+    // after review (the second review, finding 1): a subject's provenance
+    // lists under each session's step the files of that session alone,
+    // never the other session's file of the same run
+    for p in prev {
+        let subject = p["subject_id"].as_i64().unwrap();
+        let prov = lab.json(&["provenance", "subject", &subject.to_string(), "--json"]);
+        let steps = prov["steps"].as_array().unwrap();
+        assert_eq!(steps.len(), 2, "two runs touched the subject: {prov}");
+        for s in steps {
+            let unit = s["unit"].as_str().unwrap();
+            let files = s["results"]["derivatives"].as_array().unwrap();
+            assert_eq!(files.len(), 1, "one file a session: {s}");
+            // the file is under derivatives/<pipeline>/<run>/<the unit's folder>
+            assert!(
+                files[0]["path"]
+                    .as_str()
+                    .unwrap()
+                    .contains(&format!("/{}/", unit.replace("_ses-", "/ses-"))),
+                "another session's file: {s}"
+            );
+        }
+    }
 
     // only the selection's own sessions and subjects: a file of another
     // day of one of its subjects is never taken, a file of the whole
@@ -14333,7 +14355,7 @@ command-line: |
   for s in m["stacks"]:
       u = s["unit"]; d = os.path.join(out, u); os.makedirs(d, exist_ok=True)
       mark("start", u)
-      seen = sorted(glob.glob(prev + "/*/" + u + "/out.txt"))
+      seen = sorted(glob.glob(prev + "/**/" + u + "/out.txt", recursive=True))
       open(os.path.join(d, "seen.txt"), "w").write("\n".join(open(f).read().strip() for f in seen) + "\n")
       units.append({{"unit_id": u, "status": "succeeded", "derivatives": [u + "/seen.txt"]}})
       mark("end", u)
@@ -14539,6 +14561,25 @@ fn g6_e5_a_workflow_runs_per_unit_reuses_kept_results_and_answers_provenance() {
         err.contains("the step b lets a person set no knob, not tag"),
         "{err}"
     );
+    // after review (the second review, finding 9): a knob naming a step the
+    // document lacks is refused, with the step ids named
+    let (good, _, err) = lab.run(
+        &[
+            "workflow",
+            "plan",
+            "chain",
+            "--select",
+            "selection:every@1",
+            "--knob",
+            "c.tag=b",
+        ],
+        None,
+    );
+    assert!(!good);
+    assert!(
+        err.contains("the knobs name a step c the workflow lacks; its steps are a, b"),
+        "{err}"
+    );
 
     // the run: both steps run, 4 units each, one container a unit
     let first = lab.json(&[
@@ -14630,7 +14671,42 @@ fn g6_e5_a_workflow_runs_per_unit_reuses_kept_results_and_answers_provenance() {
     assert_eq!(third["summary"]["units"]["succeeded"], 8, "{third}");
     assert_eq!(third["summary"]["units"]["reused"], 0, "{third}");
     assert_eq!(lab.podman_runs().len(), containers + 8, "{third}");
+    let run_a3 = third["steps"][0]["run"].as_i64().unwrap();
     let run_b3 = third["steps"][1]["run"].as_i64().unwrap();
+    // after review (the second review, finding 3): the link binds chain-b's
+    // input to chain-a's run of this workflow run, never to the kept file
+    // of another run: the manifest names that run alone for every file,
+    // the step says what fed it, each unit's key carries one upstream key,
+    // and each container saw one file
+    let manifest: Value = serde_json::from_str(
+        &std::fs::read_to_string(
+            lab.work
+                .path()
+                .join(format!("runs/{run_b3}/inputs/manifest.json")),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let prev = manifest["derivatives"]["prev"].as_array().unwrap();
+    assert_eq!(prev.len(), 4, "{manifest}");
+    for p in prev {
+        assert_eq!(p["made_by"]["run"], run_a3, "another run's file: {p}");
+    }
+    assert_eq!(manifest["links"][0]["input"], "prev", "{manifest}");
+    assert_eq!(manifest["links"][0]["run"], run_a3, "{manifest}");
+    let rb3 = lab.json(&["pipeline", "runs", &run_b3.to_string(), "--json"]);
+    for u in rb3["units_run"].as_array().unwrap() {
+        let upstream = u["key_members"]["upstream"].as_array().unwrap();
+        assert_eq!(upstream.len(), 1, "one upstream key, the fed run's: {u}");
+    }
+    let seen = lab.json(&["derivative", "list", "--run", &run_b3.to_string(), "--json"]);
+    assert_eq!(seen.as_array().unwrap().len(), 4, "{seen}");
+    for d in seen.as_array().unwrap() {
+        let text =
+            std::fs::read_to_string(lab.work.path().join(d["path"].as_str().unwrap())).unwrap();
+        assert_eq!(text.lines().count(), 1, "{d}: {text}");
+        assert!(text.contains("tag b"), "the fed run's file: {text}");
+    }
 
     // G6: a result a person rejected is never reused; the rest are
     let rejected = lab
@@ -14872,6 +14948,204 @@ fn g6_e5_a_workflow_runs_per_unit_reuses_kept_results_and_answers_provenance() {
         .filter(|j| j["kind"] == "pipeline" && j["args"]["workflow_run"] == newest["id"])
         .count();
     assert_eq!(steps_jobs, 2, "{jobs}");
+    // after review (the second review, finding 2): the workflow job reports
+    // its steps done of total while it runs
+    assert_eq!(ours["progress"]["steps_total"], 2, "{ours}");
+    assert_eq!(ours["progress"]["steps_done"], 2, "{ours}");
+
+    // after review (the second review, finding 5): without sealed:see, the
+    // steps of a stack of a sample sealed now are withheld, and so is the
+    // stack itself from `stacks`, with the counts and the stale words over
+    // the steps kept; with the grant, nothing is withheld
+    seal(&lab, "sealed_one", &[rejected_stack]);
+    let subject = lab.count(&format!(
+        "SELECT se.subject_id FROM stack st JOIN series se ON se.id = st.series_id WHERE st.id = {rejected_stack}"
+    ));
+    let served = lab.serve();
+    let (status, whole) = served.call(
+        "GET",
+        &format!("/api/provenance/subject/{subject}"),
+        None,
+        "a-token-that-sees",
+    );
+    assert_eq!(status, 200, "{whole}");
+    let all_steps = whole["steps"].as_array().unwrap().len();
+    assert!(
+        whole["stacks"]
+            .as_array()
+            .unwrap()
+            .contains(&json!(rejected_stack)),
+        "{whole}"
+    );
+    assert!(whole["withheld"].is_null(), "{whole}");
+    // the four runs from before the rules changed are stale on it; the
+    // door-started run recorded the version as it stands now
+    assert_eq!(whole["counts"]["stale"], 8, "{whole}");
+    let (status, held) = served.call(
+        "GET",
+        &format!("/api/provenance/subject/{subject}"),
+        None,
+        "a-token-of-a-reviewer",
+    );
+    assert_eq!(status, 200, "{held}");
+    assert!(
+        !held["stacks"]
+            .as_array()
+            .unwrap()
+            .contains(&json!(rejected_stack)),
+        "the sealed stack is withheld from the stacks: {held}"
+    );
+    let kept = held["steps"].as_array().unwrap();
+    assert_eq!(held["withheld"]["steps"], 10, "{held}");
+    assert_eq!(kept.len(), all_steps - 10, "{held}");
+    assert_eq!(held["counts"]["steps"], kept.len(), "{held}");
+    assert_eq!(held["counts"]["stale"], 0, "{held}");
+    assert!(held["stale_words"].is_null(), "{held}");
+    assert!(
+        kept.iter().all(|s| !s["stacks"]
+            .as_array()
+            .unwrap()
+            .contains(&json!(rejected_stack))),
+        "{held}"
+    );
+}
+
+/// After review (the second review, finding 2): a workflow job asked to
+/// stop stops. The worker's `workflow` job is beaten while the steps run,
+/// so `nils jobs cancel` on it is seen: the step run in flight is cancelled
+/// through the pipeline run's own cancel path, no step after it starts, and
+/// the workflow run and the job end `cancelled`.
+#[test]
+fn a_cancelled_workflow_job_stops_its_steps_and_ends_cancelled() {
+    if !have("python3") {
+        eprintln!(
+            "python3 is not installed; the stand-in podman needs it, so this test is skipped"
+        );
+        return;
+    }
+    let lab = Lab::new("pipelines-workflow-cancel");
+    let image_a = format!("example.org/chain-a@sha256:{}", "a".repeat(64));
+    let image_b = format!("example.org/chain-b@sha256:{}", "b".repeat(64));
+    let da = chain_a(&image_a);
+    let db = chain_b(&image_b);
+    let dig = |d: &str| nils_pipeline::descriptor::parse(d).unwrap().digest();
+    lab.add_pair("chain-a", &da, &chain_a_pack(&dig(&da)));
+    lab.add_pair("chain-b", &db, &chain_b_pack(&dig(&db)));
+    let dir = lab.work.path().join("wf-chain");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("nils.workflow.yml"), CHAIN_WORKFLOW).unwrap();
+    lab.json(&["workflow", "add", dir.to_str().unwrap(), "--json"]);
+
+    let served = lab.serve();
+    let (status, started) = served.call(
+        "POST",
+        "/api/workflows/chain/run",
+        Some(json!({"select": "selection:every@1"})),
+        "a-token-that-works",
+    );
+    assert_eq!(status, 202, "{started}");
+    let job = started["job"].as_i64().unwrap();
+    drop(served);
+    let said = lab.work.path().join("worker-stderr");
+    let mut worker = lab
+        .command(&lab.path)
+        .args(["jobs", "work", "--lane", "pipelines", "--once"])
+        .env("CHAIN_A_SLEEP", "60")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(std::fs::File::create(&said).unwrap())
+        .spawn()
+        .unwrap();
+    let a_runs = |lab: &Lab| {
+        lab.podman_runs()
+            .iter()
+            .filter(|r| r.iter().any(|w| w.contains("chain-a@")))
+            .count()
+    };
+    let b_runs = |lab: &Lab| {
+        lab.podman_runs()
+            .iter()
+            .filter(|r| r.iter().any(|w| w.contains("chain-b@")))
+            .count()
+    };
+    // the first step's containers are running: cancel the workflow job
+    let begun = std::time::Instant::now();
+    loop {
+        if a_runs(&lab) > 0 {
+            break;
+        }
+        if let Some(status) = worker.try_wait().unwrap() {
+            panic!(
+                "the worker ended ({status}) before a step ran: {}",
+                std::fs::read_to_string(&said).unwrap_or_default()
+            );
+        }
+        assert!(
+            begun.elapsed().as_secs() < 120,
+            "no step started within 120 s: {}",
+            std::fs::read_to_string(&said).unwrap_or_default()
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    lab.ok(&["jobs", "cancel", &job.to_string()], None);
+    let asked = std::time::Instant::now();
+    loop {
+        if worker.try_wait().unwrap().is_some() {
+            break;
+        }
+        if asked.elapsed().as_secs() >= 60 {
+            let _ = worker.kill();
+            let _ = worker.wait();
+            panic!(
+                "the worker did not end within 60 s of the cancel: {}",
+                std::fs::read_to_string(&said).unwrap_or_default()
+            );
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let jobs: Value =
+        serde_json::from_str(&lab.ok(&["jobs", "list", "--all", "--json"], None)).unwrap();
+    let ours = jobs
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|j| j["id"] == job)
+        .unwrap_or_else(|| panic!("{jobs}"));
+    assert_eq!(ours["state"], "cancelled", "{ours}");
+    assert_eq!(ours["progress"]["steps_total"], 2, "{ours}");
+    let runs = lab.json(&["workflow", "runs", "--json"]);
+    let newest = &runs["runs"][0];
+    assert_eq!(newest["job"], job, "{newest}");
+    assert_eq!(newest["status"], "cancelled", "{newest}");
+    let steps = newest["steps"].as_array().unwrap();
+    assert_eq!(steps[0]["status"], "cancelled", "{newest}");
+    let run_a = steps[0]["run"]
+        .as_i64()
+        .unwrap_or_else(|| panic!("{newest}"));
+    assert_eq!(steps[1]["status"], "cancelled", "{newest}");
+    assert!(
+        steps[1]["run"].is_null(),
+        "the second step never ran: {newest}"
+    );
+    assert!(
+        steps[1]["error"]
+            .as_str()
+            .unwrap()
+            .contains("the workflow run was cancelled"),
+        "{newest}"
+    );
+    // the first step's run went through its own cancel path, and no
+    // container of the second step ran
+    let ra = lab.json(&["pipeline", "runs", &run_a.to_string(), "--json"]);
+    assert_eq!(ra["status"], "cancelled", "{ra}");
+    assert_eq!(b_runs(&lab), 0, "{:?}", lab.podman_runs());
+    let step_job = jobs
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|j| j["kind"] == "pipeline" && j["args"]["workflow_run"] == newest["id"])
+        .unwrap_or_else(|| panic!("{jobs}"));
+    assert_eq!(step_job["state"], "cancelled", "{step_job}");
 }
 
 /// After review (finding 2): the steps of one workflow run share the

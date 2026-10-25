@@ -354,7 +354,8 @@ fn stack_units(
     // out where the input's check leaves them out (the T33 pipe test)
     let one: Vec<[i64; 1]> = stacks.iter().map(|&s| [s]).collect();
     let units: Vec<&[i64]> = one.iter().map(|s| s.as_slice()).collect();
-    let lacking = crate::pipelines::derivatives_missing(store, d, &units, place_ids)?;
+    let lacking =
+        crate::pipelines::derivatives_missing(store, d, &units, place_ids, &Default::default())?;
     Ok(stacks
         .iter()
         .zip(lacking)
@@ -781,7 +782,13 @@ fn bids_units(
     // the derivatives each unit's inputs need, as the run judges them: a
     // unit whose only one was rejected by its check is not ready either
     let units: Vec<&[i64]> = out.iter().map(|u| u.stacks.as_slice()).collect();
-    let lacking = crate::pipelines::derivatives_missing(registry.store(), d, &units, place_ids)?;
+    let lacking = crate::pipelines::derivatives_missing(
+        registry.store(),
+        d,
+        &units,
+        place_ids,
+        &Default::default(),
+    )?;
     for (u, lacks) in out.iter_mut().zip(lacking) {
         u.missing.extend(lacks);
     }
@@ -976,7 +983,13 @@ fn released_units(
             })
             .collect();
     let units: Vec<&[i64]> = out.iter().map(|u| u.stacks.as_slice()).collect();
-    let lacking = crate::pipelines::derivatives_missing(registry.store(), d, &units, place_ids)?;
+    let lacking = crate::pipelines::derivatives_missing(
+        registry.store(),
+        d,
+        &units,
+        place_ids,
+        &Default::default(),
+    )?;
     for (u, lacks) in out.iter_mut().zip(lacking) {
         u.missing.extend(lacks);
     }

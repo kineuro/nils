@@ -13,13 +13,25 @@
 //! write over each other; every exit of a step thread records a terminal
 //! status, and a step downstream of one that ended without a run ends too,
 //! skipped with the reason, so a workflow run always ends.
+//!
+//! After the second review (2026-10-25): the worker's `workflow` job is
+//! beaten while the steps run, with the steps done of total as its
+//! progress, so a cancel is seen: the step runs in flight are cancelled
+//! through the pipeline run's own cancel path, no step after them starts,
+//! and the workflow run and the job end `cancelled`. Each link of the
+//! document is carried into the step's run, bound to the run of the step
+//! it comes from, so a typed input takes that run's files and a fed role
+//! that run's image, never another run's kept result.
 
 use std::path::PathBuf;
-use std::time::Duration;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use clap::Parser;
 use nils_pipeline::workflow as doc;
 use nils_registry::home::Home;
+use nils_registry::job;
 use nils_registry::pipeline as prows;
 use nils_registry::workflow as rows;
 use nils_registry::{Registry, Store};
@@ -116,9 +128,9 @@ pub(crate) fn command(home: &Home, mut registry: Registry, args: PlanArgs) -> Re
     // the worker's job this command runs as, where it does (a `workflow`
     // job, never a pipeline one); the steps claim pipeline jobs of their
     // own, so the variable is taken off before they start
-    let job_id = nils_registry::job::adopted_job();
-    nils_registry::job::disown_adoption();
-    let id = start(home, &mut registry, &w, &scope, &person, job_id, &plan)?;
+    let job_id = job::adopted_job();
+    job::disown_adoption();
+    let id = start(home, &mut registry, &w, &scope, &person, job_id)?;
     let r = rows::run(registry.store(), id)
         .map_err(|e| fail(e.to_string()))?
         .ok_or_else(|| fail(format!("no workflow run {id}")))?;
@@ -131,14 +143,29 @@ pub(crate) fn command(home: &Home, mut registry: Registry, args: PlanArgs) -> Re
     } else {
         println!("{}", run_text(&v));
     }
-    if r.status == "done" {
-        Ok(())
-    } else {
-        Err(fail(format!(
-            "workflow run {id} ended {}: {}",
-            r.status,
+    match r.status.as_str() {
+        "done" => Ok(()),
+        // asked to stop: the job ends cancelled, as a pipeline run's does
+        "cancelled" => {
+            if let Some(j) = job_id {
+                let _ = job::finish(
+                    registry.store(),
+                    j,
+                    job::State::Cancelled,
+                    Some(&format!("workflow run {id} was cancelled")),
+                );
+            }
+            Err(Exit {
+                code: crate::STOPPED,
+                message: format!(
+                    "workflow run {id} was cancelled; the units its steps finished are kept"
+                ),
+            })
+        }
+        other => Err(fail(format!(
+            "workflow run {id} ended {other}: {}",
             r.error.unwrap_or_default()
-        )))
+        ))),
     }
 }
 
@@ -153,7 +180,6 @@ pub(crate) fn start(
     scope: &Scope,
     person: &Person,
     job_id: Option<i64>,
-    plan: &Value,
 ) -> Result<i64, Exit> {
     start_with(
         home,
@@ -162,9 +188,20 @@ pub(crate) fn start(
         scope,
         person,
         job_id,
-        plan,
         crate::pipelines::run_command,
     )
+}
+
+/// One link of the document into a step, as the step's thread carries it
+/// into its run once the step before has a run.
+struct StepLink {
+    from_step: usize,
+    from_id: String,
+    output: String,
+    input: String,
+    /// Whether the input is a pick role of the step's descriptor (else a
+    /// typed derivative input).
+    role: bool,
 }
 
 /// What one step's thread is given.
@@ -185,6 +222,11 @@ struct StepRun {
     /// Every step before it: the order of the document is the order of
     /// the run.
     before: Vec<usize>,
+    /// The document's links into this step.
+    links: Vec<StepLink>,
+    /// Set once the workflow run was asked to stop: a step not yet started
+    /// ends cancelled instead.
+    cancel: Arc<AtomicBool>,
     handle: i64,
     pack: String,
     pack_dir: Option<PathBuf>,
@@ -193,7 +235,6 @@ struct StepRun {
 /// [`start`] with the runner named: every step's parameters are checked
 /// before anything is made, every step thread records how it ended, and
 /// the run is finished whatever the threads did.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn start_with(
     home: &Home,
     registry: &mut Registry,
@@ -201,13 +242,14 @@ pub(crate) fn start_with(
     scope: &Scope,
     person: &Person,
     job_id: Option<i64>,
-    plan: &Value,
     runner: Runner,
 ) -> Result<i64, Exit> {
     let d = doc::from_value(w.document.clone()).map_err(|e| fail(format!("{}: {e}", w.label())))?;
     let resolved = crate::workflows::resolve_steps(registry.store(), &d);
-    // every step's parameters first: a knob a person may not set is
-    // refused before a row is made or a thread started
+    // every step's parameters first: a knob a person may not set, or a knob
+    // naming a step the document lacks, is refused before a row is made or
+    // a thread started
+    crate::workflows::knob_steps(&d, person).map_err(usage)?;
     let params: Vec<Vec<(String, String)>> = d
         .steps
         .iter()
@@ -266,12 +308,30 @@ pub(crate) fn start_with(
         },
     )
     .map_err(|e| fail(e.to_string()))?;
-    let _ = plan;
 
     // one thread a step
     let position = |id: &str| d.steps.iter().position(|q| q.id == id);
+    let cancel = Arc::new(AtomicBool::new(false));
     let mut handles = Vec::new();
     for (i, s) in d.steps.iter().enumerate() {
+        let links: Vec<StepLink> = d
+            .links
+            .iter()
+            .filter(|l| l.to_step == s.id)
+            .filter_map(|l| {
+                let desc = resolved[i].descriptor.as_ref()?;
+                let role = desc.roles.contains(&l.input);
+                let typed = desc.inputs.iter().any(|t| t.id == l.input);
+                let from_step = position(&l.from_step)?;
+                (role || typed).then(|| StepLink {
+                    from_step,
+                    from_id: l.from_step.clone(),
+                    output: l.output.clone(),
+                    input: l.input.clone(),
+                    role,
+                })
+            })
+            .collect();
         let run = StepRun {
             home: home.clone(),
             workflow_run: id,
@@ -283,11 +343,40 @@ pub(crate) fn start_with(
             waits_for: d.fed_by(&s.id).iter().filter_map(|q| position(q)).collect(),
             whole: fed_whole[i].iter().filter_map(|q| position(q)).collect(),
             before: (0..i).collect(),
+            links,
+            cancel: Arc::clone(&cancel),
             handle: scope.handle,
             pack: scope.pack.clone(),
             pack_dir: scope.pack_dir.clone(),
         };
         handles.push(std::thread::spawn(move || run_step(&run, runner)));
+    }
+    // the heart while the steps run: the worker's job is beaten once a
+    // second with the steps done of total, and a cancel asked of it stops
+    // the step runs in flight and starts no step after them (after review,
+    // finding 2 of the second review)
+    let mut cancelled = false;
+    let mut beaten: Option<Instant> = None;
+    while !handles.iter().all(|h| h.is_finished()) {
+        if let Some(j) = job_id
+            && beaten.is_none_or(|t| t.elapsed() >= Duration::from_secs(1))
+        {
+            beaten = Some(Instant::now());
+            let progress = progress_of(registry.store(), id).map_err(fail)?;
+            if matches!(
+                job::beat(registry.store(), j, Some(&progress)),
+                Ok(job::Asked::Cancel)
+            ) {
+                cancelled = true;
+                cancel.store(true, Ordering::SeqCst);
+            }
+            if cancelled {
+                // asked again each second: a step that claimed its run
+                // between two beats is cancelled too
+                cancel_steps(registry.store(), id).map_err(fail)?;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(100));
     }
     let mut errors: Vec<String> = Vec::new();
     for h in handles {
@@ -317,16 +406,60 @@ pub(crate) fn start_with(
             .map_err(fail)?;
         }
     }
-    finish(registry.store(), id, &errors).map_err(fail)?;
+    finish(registry.store(), id, &errors, cancelled).map_err(fail)?;
+    if let Some(j) = job_id {
+        let progress = progress_of(registry.store(), id).map_err(fail)?;
+        let _ = job::beat(registry.store(), j, Some(&progress));
+    }
     Ok(id)
+}
+
+/// The job's progress: the steps done of total, and each step's status
+/// and run.
+fn progress_of(store: &mut Store, id: i64) -> Result<Value, String> {
+    let r = rows::run(store, id)
+        .map_err(err)?
+        .ok_or_else(|| format!("no workflow run {id}"))?;
+    let steps = r.steps.as_array().cloned().unwrap_or_default();
+    Ok(json!({
+        "workflow_run": id,
+        "steps_total": steps.len(),
+        "steps_done": steps.iter().filter(|s| s["status"] == "done").count(),
+        "steps_over": steps.iter().filter(|s| TERMINAL.contains(&s["status"].as_str().unwrap_or("queued"))).count(),
+        "steps": steps.iter().map(|s| json!({"step": s["step"], "id": s["id"], "status": s["status"], "run": s["run"]})).collect::<Vec<_>>(),
+    }))
+}
+
+/// Ask every step run of the workflow run that is not over to stop, through
+/// its own job: the pipeline run sees the cancel at its next heartbeat, as
+/// `nils jobs cancel` on it would have it.
+fn cancel_steps(store: &mut Store, id: i64) -> Result<(), String> {
+    let r = rows::run(store, id)
+        .map_err(err)?
+        .ok_or_else(|| format!("no workflow run {id}"))?;
+    for st in r.steps.as_array().into_iter().flatten() {
+        let status = st["status"].as_str().unwrap_or("queued");
+        let Some(run) = st["run"].as_i64() else {
+            continue;
+        };
+        if TERMINAL.contains(&status) {
+            continue;
+        }
+        if let Some(pr) = prows::run(store, run).map_err(err)?
+            && let Some(j) = pr.job_id
+        {
+            job::request_cancel(store, j).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
 }
 
 /// What the steps before say to a step about to start.
 #[derive(Debug, PartialEq)]
 enum Wait {
     /// Every step before is far enough: the runs this step chains to per
-    /// unit.
-    Ready(Vec<i64>),
+    /// unit, each with the step it is.
+    Ready(Vec<(usize, i64)>),
     /// A step before has not yet made its run, or one read whole still
     /// runs.
     NotYet,
@@ -344,7 +477,7 @@ fn wait_of(
     whole: &[usize],
     pipeline_status: &mut dyn FnMut(i64) -> Result<Option<String>, String>,
 ) -> Result<Wait, String> {
-    let mut after: Vec<i64> = Vec::new();
+    let mut after: Vec<(usize, i64)> = Vec::new();
     let mut ready = true;
     for &k in before {
         let st = steps.get(k).cloned().unwrap_or(Value::Null);
@@ -353,7 +486,7 @@ fn wait_of(
         match st["run"].as_i64() {
             Some(run) => {
                 if waits_for.contains(&k) {
-                    after.push(run);
+                    after.push((k, run));
                 }
                 if whole.contains(&k) {
                     let pr = pipeline_status(run)?;
@@ -435,6 +568,17 @@ fn step_body(p: &StepRun, runner: Runner) -> Result<(), String> {
     // the runs of the steps before: chained per unit to those a link feeds
     // from, and started after those whose files it reads are done
     let after = loop {
+        if p.cancel.load(Ordering::SeqCst) {
+            return record_end(
+                registry.store(),
+                p.workflow_run,
+                p.step,
+                "cancelled",
+                Some("cancelled: the workflow run was cancelled before this step started"),
+                None,
+                None,
+            );
+        }
         let r = rows::run(registry.store(), p.workflow_run)
             .map_err(err)?
             .ok_or_else(|| format!("no workflow run {}", p.workflow_run))?;
@@ -489,10 +633,29 @@ fn step_body(p: &StepRun, runner: Runner) -> Result<(), String> {
     let mut args = StepCli::try_parse_from(&argv)
         .map_err(|e| format!("the step's run arguments: {e}"))?
         .run;
+    // each link bound to the run of the step it comes from (after review,
+    // finding 3 of the second review); a link from a step whose run is not
+    // among them is one the wait skipped this step for already
+    let links: Vec<crate::pipelines::ChainLink> = p
+        .links
+        .iter()
+        .filter_map(|l| {
+            let (_, run) = after.iter().find(|(k, _)| *k == l.from_step)?;
+            Some(crate::pipelines::ChainLink {
+                from_step: l.from_step,
+                from_id: l.from_id.clone(),
+                run: *run,
+                output: l.output.clone(),
+                input: l.input.clone(),
+                role: l.role,
+            })
+        })
+        .collect();
     args.chain = Some(crate::pipelines::Chain {
         workflow_run: p.workflow_run,
         step: p.step,
-        after,
+        after: after.iter().map(|(_, run)| *run).collect(),
+        links,
     });
     let outcome = runner(&p.home, args);
     let mut registry = crate::open(&p.home).map_err(|e| e.message)?;
@@ -540,9 +703,9 @@ struct StepCli {
     run: crate::pipelines::RunArgs,
 }
 
-/// Close the workflow run: its status from its steps', and a summary that
-/// sums each step's units.
-fn finish(store: &mut Store, id: i64, errors: &[String]) -> Result<(), String> {
+/// Close the workflow run: its status from its steps' (`cancelled` where it
+/// was asked to stop), and a summary that sums each step's units.
+fn finish(store: &mut Store, id: i64, errors: &[String], cancelled: bool) -> Result<(), String> {
     let r = rows::run(store, id)
         .map_err(err)?
         .ok_or_else(|| format!("no workflow run {id}"))?;
@@ -564,7 +727,9 @@ fn finish(store: &mut Store, id: i64, errors: &[String]) -> Result<(), String> {
         .iter()
         .map(|s| s["status"].as_str().unwrap_or("queued"))
         .collect();
-    let status = if !errors.is_empty() {
+    let status = if cancelled {
+        "cancelled"
+    } else if !errors.is_empty() {
         "failed"
     } else if statuses.iter().all(|s| *s == "done") {
         "done"
@@ -891,7 +1056,6 @@ links:
                 &scope,
                 &Person::default(),
                 None,
-                &json!({}),
                 runner,
             );
             let _ = tx.send(r);
@@ -958,7 +1122,7 @@ links:
         let s = steps(json!({"step": 0, "id": "a", "status": "running", "run": 7}));
         assert_eq!(
             wait_of(&s, &[0], &[0], &[], &mut running).unwrap(),
-            Wait::Ready(vec![7])
+            Wait::Ready(vec![(0, 7)])
         );
         assert_eq!(
             wait_of(&s, &[0], &[0], &[0], &mut running).unwrap(),
@@ -966,7 +1130,7 @@ links:
         );
         assert_eq!(
             wait_of(&s, &[0], &[0], &[0], &mut over).unwrap(),
-            Wait::Ready(vec![7])
+            Wait::Ready(vec![(0, 7)])
         );
     }
 
@@ -1102,9 +1266,84 @@ links:
         assert_eq!(steps[0]["id"], "a");
         assert_eq!(steps[1]["id"], "b");
         assert!(rows::step(registry.store(), id, 2).unwrap().is_none());
-        finish(registry.store(), id, &[]).unwrap();
+        finish(registry.store(), id, &[], false).unwrap();
         let r = rows::run(registry.store(), id).unwrap().unwrap();
         assert_eq!(r.status, "done");
         assert_eq!(r.summary["units"]["total"], 3);
+    }
+
+    /// After review (finding 2 of the second review): a workflow run asked
+    /// to stop ends cancelled whatever its steps say, and the steps not yet
+    /// started end cancelled with the reason once the flag is set.
+    #[test]
+    fn a_cancel_ends_the_run_cancelled() {
+        let (_dir, home, w) = lab("wf-cancel-status");
+        let mut registry = home.open().unwrap();
+        let id = rows::start(
+            registry.store(),
+            &rows::NewRun {
+                workflow_id: w.id,
+                job_id: None,
+                handle_id: Some(1),
+                selection: None,
+                person: &json!({}),
+                steps: &json!([{"id": "a", "pipeline": "stand-in@1"}, {"id": "b", "pipeline": "stand-in@1"}]),
+                principal: "test",
+                actor: None,
+                started_at: "2026-10-25T00:00:00Z",
+            },
+        )
+        .unwrap();
+        record_end(
+            registry.store(),
+            id,
+            0,
+            "done",
+            None,
+            Some(&json!({"total": 4, "succeeded": 4})),
+            None,
+        )
+        .unwrap();
+        record_end(
+            registry.store(),
+            id,
+            1,
+            "cancelled",
+            Some("cancelled: the workflow run was cancelled before this step started"),
+            None,
+            None,
+        )
+        .unwrap();
+        finish(registry.store(), id, &[], true).unwrap();
+        let r = rows::run(registry.store(), id).unwrap().unwrap();
+        assert_eq!(r.status, "cancelled", "{r:?}");
+        assert_eq!(r.summary["steps_done"], 1, "{r:?}");
+        let progress = progress_of(registry.store(), id).unwrap();
+        assert_eq!(progress["steps_total"], 2, "{progress}");
+        assert_eq!(progress["steps_done"], 1, "{progress}");
+        assert_eq!(progress["steps_over"], 2, "{progress}");
+        // without the cancel, the same steps read partial
+        let id2 = rows::start(
+            registry.store(),
+            &rows::NewRun {
+                workflow_id: w.id,
+                job_id: None,
+                handle_id: Some(1),
+                selection: None,
+                person: &json!({}),
+                steps: &json!([{"id": "a", "pipeline": "stand-in@1"}, {"id": "b", "pipeline": "stand-in@1"}]),
+                principal: "test",
+                actor: None,
+                started_at: "2026-10-25T00:00:00Z",
+            },
+        )
+        .unwrap();
+        record_end(registry.store(), id2, 0, "done", None, None, None).unwrap();
+        record_end(registry.store(), id2, 1, "cancelled", None, None, None).unwrap();
+        finish(registry.store(), id2, &[], false).unwrap();
+        assert_eq!(
+            rows::run(registry.store(), id2).unwrap().unwrap().status,
+            "partial"
+        );
     }
 }

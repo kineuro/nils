@@ -1067,6 +1067,28 @@ pub fn units(store: &mut Store, run_id: i64) -> Result<Vec<Unit>, Error> {
         .collect()
 }
 
+/// One unit of a run by its row id (after review: the scheduler reads the
+/// one row it judges again, not every row of the run).
+pub fn unit(store: &mut Store, id: i64) -> Result<Option<Unit>, Error> {
+    let d = store.dialect();
+    let t = table("pipeline_unit");
+    let cols: Vec<String> = UNIT_COLUMNS
+        .iter()
+        .map(|c| d.text_of(t.column(c).expect("a pipeline_unit column")))
+        .collect();
+    let sql = format!(
+        "SELECT {} FROM {} WHERE id = {}",
+        cols.join(", "),
+        store.qualified("pipeline_unit"),
+        d.param(1, Type::Int)
+    );
+    store
+        .query_opt(&sql, &[Param::Int(id)])?
+        .as_ref()
+        .map(unit_of)
+        .transpose()
+}
+
 /// Write the units of a run that it has no row for yet, queued, in the
 /// order given; the rows it has stand as they are. Answers every unit.
 pub fn ensure_units(store: &mut Store, run_id: i64, names: &[String]) -> Result<Vec<Unit>, Error> {

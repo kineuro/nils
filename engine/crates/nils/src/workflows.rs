@@ -578,6 +578,34 @@ pub(crate) fn scope_of(
                 args.workflow
             ))
         })?;
+    let scope = scope_from(
+        home,
+        registry,
+        &w,
+        args.select.as_deref(),
+        args.handle,
+        &args.pack,
+        args.pack_dir.clone(),
+    )?
+    .ok_or_else(|| {
+        usage("a workflow is planned or run over a scope: --select selection:<name>@<v>, --select main:<role>@dataset:<name> (or main@dataset:<name> for each role the steps need), or --handle <id>")
+    })?;
+    Ok((w, scope))
+}
+
+/// The frozen scope a workflow is planned or run over, from what the
+/// command or the door names: a selection or a scope's main scans
+/// (`select`), or a handle; none where neither is named. The one place for
+/// both (after review, finding 10 of the second review).
+pub(crate) fn scope_from(
+    home: &Home,
+    registry: &mut Registry,
+    w: &rows::Workflow,
+    select: Option<&str>,
+    handle: Option<i64>,
+    pack: &str,
+    pack_dir: Option<PathBuf>,
+) -> Result<Option<Scope>, Exit> {
     let d = doc::from_value(w.document.clone()).map_err(|e| fail(format!("{}: {e}", w.label())))?;
     // the roles the steps need, for a scope's main scans without a role
     let mut needs: Vec<String> = Vec::new();
@@ -588,27 +616,18 @@ pub(crate) fn scope_of(
             }
         }
     }
-    let (handle, main) = crate::preflight::frozen_over(
-        home,
-        args.select.as_deref(),
-        args.handle,
-        args.pack_dir.clone(),
-        &args.pack,
-        &needs,
-    )?
-    .ok_or_else(|| {
-        usage("a workflow is planned or run over a scope: --select selection:<name>@<v>, --select main:<role>@dataset:<name> (or main@dataset:<name> for each role the steps need), or --handle <id>")
-    })?;
-    Ok((
-        w,
-        Scope {
-            handle,
-            selection: args.select.clone(),
-            main,
-            pack: args.pack.clone(),
-            pack_dir: args.pack_dir.clone(),
-        },
-    ))
+    let Some((handle, main)) =
+        crate::preflight::frozen_over(home, select, handle, pack_dir.clone(), pack, &needs)?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(Scope {
+        handle,
+        selection: select.map(str::to_string),
+        main,
+        pack: pack.to_string(),
+        pack_dir,
+    }))
 }
 
 /// A step resolved against the catalog: the pipeline, its descriptor and
@@ -685,6 +704,31 @@ pub(crate) fn members<'a>(d: &'a Workflow, resolved: &'a [Resolved]) -> Vec<Memb
         .collect()
 }
 
+/// The steps a person's knobs name, checked against the document's: a knob
+/// on a step the document lacks is refused with the step ids named (after
+/// review, finding 9 of the second review), at the plan and at the start.
+pub(crate) fn knob_steps(d: &Workflow, person: &Person) -> Result<(), String> {
+    let unknown: Vec<&str> = person
+        .knobs
+        .keys()
+        .filter(|k| !d.steps.iter().any(|s| s.id == **k))
+        .map(String::as_str)
+        .collect();
+    if unknown.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "{}: the knobs name a step {} the workflow lacks; its steps are {}",
+        d.name,
+        unknown.join(", "),
+        d.steps
+            .iter()
+            .map(|s| s.id.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    ))
+}
+
 /// The knobs a person set for a step, checked against what the document
 /// lets them set.
 pub(crate) fn step_params(
@@ -736,6 +780,7 @@ pub(crate) fn plan(
     person: &Person,
 ) -> Result<Value, String> {
     let d = doc::from_value(w.document.clone()).map_err(|e| format!("{}: {e}", w.label()))?;
+    knob_steps(&d, person)?;
     let resolved = resolve_steps(registry.store(), &d);
     let verdicts = doc::plan_links(&d, &members(&d, &resolved));
     let pack = scope
@@ -935,24 +980,14 @@ pub(crate) fn scope_of_body(
     body: &Value,
     pack_dir: Option<&Path>,
 ) -> Result<Scope, Reply> {
-    let d = doc::from_value(w.document.clone()).map_err(|e| Reply::error(500, e))?;
-    let mut needs: Vec<String> = Vec::new();
-    for s in &d.steps {
-        for r in crate::preflight::needs_of(registry.store(), &s.reference()) {
-            if !needs.contains(&r) {
-                needs.push(r);
-            }
-        }
-    }
-    let selection = body["select"].as_str().map(str::to_string);
-    let pack = body["pack"].as_str().unwrap_or("mri").to_string();
-    let (handle, main) = crate::preflight::frozen_over(
+    scope_from(
         home,
-        selection.as_deref(),
+        registry,
+        w,
+        body["select"].as_str(),
         body["handle"].as_i64(),
+        body["pack"].as_str().unwrap_or("mri"),
         pack_dir.map(Path::to_path_buf),
-        &pack,
-        &needs,
     )
     .map_err(|e| Reply::error(400, e.message))?
     .ok_or_else(|| {
@@ -960,12 +995,5 @@ pub(crate) fn scope_of_body(
             400,
             "a workflow is planned or run over a scope: {select: \"selection:<name>@<v>\"}, a dataset's or a cohort's main scans {select: \"main:<role>@dataset:<name>\"} (or {select: \"main@dataset:<name>\"} for each role the steps need), or {handle: <id>}",
         )
-    })?;
-    Ok(Scope {
-        handle,
-        selection,
-        main,
-        pack,
-        pack_dir: pack_dir.map(Path::to_path_buf),
     })
 }

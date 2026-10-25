@@ -1152,14 +1152,14 @@ pub(crate) fn pipeline_doc_of(store: &mut Store, p: &Pipeline) -> Value {
 /// A run as `--json` answers it at the keyboard: the row, the pipeline by
 /// its label, the derivatives it made, and each unit with its curation
 /// state.
-pub(crate) fn run_doc(store: &mut Store, r: &Run) -> Value {
+pub(crate) fn run_doc(store: &mut Store, r: &Run) -> Result<Value, String> {
     run_doc_at(store, r, true)
 }
 
 /// [`run_doc`] as a door answers it: the units' curation state (the rules
 /// now against those that ran, record 58 P5) is read, once for every unit
 /// of the run, at detail quasi or above only.
-pub(crate) fn run_doc_at(store: &mut Store, r: &Run, quasi: bool) -> Value {
+pub(crate) fn run_doc_at(store: &mut Store, r: &Run, quasi: bool) -> Result<Value, String> {
     let mut doc = runs_docs(store, std::slice::from_ref(r))
         .pop()
         .unwrap_or(Value::Null);
@@ -1194,7 +1194,11 @@ pub(crate) fn run_doc_at(store: &mut Store, r: &Run, quasi: bool) -> Value {
         .collect::<std::collections::BTreeSet<i64>>()
         .into_iter()
         .collect();
-    let states = quasi.then(|| crate::provenance::States::read(store, &every_stack));
+    // the registry's error is the door's (after review, finding 4 of the
+    // second review), never every unit `current`
+    let states = quasi
+        .then(|| crate::provenance::States::read(store, &every_stack))
+        .transpose()?;
     doc["units_run"] = json!(
         units
             .iter()
@@ -1229,6 +1233,9 @@ pub(crate) fn run_doc_at(store: &mut Store, r: &Run, quasi: bool) -> Value {
                 // (`run`, or `start` for a chained unit judged again as it
                 // started), and the judgement at the run's start it replaced
                 "judged_at": u.pack["judged_at"], "forecast": u.pack["forecast"],
+                // after review (finding 8 of the second review): why no kept
+                // result was reused, where one was looked for
+                "reuse": u.pack["reuse"],
             }))
             .collect::<Vec<_>>()
     );
@@ -1237,7 +1244,7 @@ pub(crate) fn run_doc_at(store: &mut Store, r: &Run, quasi: bool) -> Value {
     if !units.is_empty() {
         doc["made"] = crate::made::of_units(&units);
     }
-    doc
+    Ok(doc)
 }
 
 /// The most runs one page of `GET /api/pipeline-runs` answers.
@@ -1987,7 +1994,8 @@ pub(crate) fn route(
             let r = rows::run(registry.store(), id)
                 .map_err(err)?
                 .ok_or_else(|| Reply::error(404, format!("no pipeline run {id}")))?;
-            let mut doc = run_doc_at(registry.store(), &r, quasi);
+            let mut doc =
+                run_doc_at(registry.store(), &r, quasi).map_err(|e| Reply::error(500, e))?;
             shown_unsealed(
                 registry,
                 caller,
@@ -2587,6 +2595,136 @@ pub(crate) struct Chain {
     pub(crate) workflow_run: i64,
     pub(crate) step: usize,
     pub(crate) after: Vec<i64>,
+    /// After review (finding 3 of the second review): what each link into
+    /// this step binds, carried from the plan into the run's resolution of
+    /// its inputs.
+    pub(crate) links: Vec<ChainLink>,
+}
+
+/// One link of the workflow into this step, bound to the run of the step
+/// it comes from: a typed derivative input takes that run's derivatives of
+/// the unit's stacks and no other run's; a pick role takes that run's
+/// image as the role's file for the unit. A unit the binding cannot be
+/// made for is skipped with the link's words.
+#[derive(Debug, Clone)]
+pub(crate) struct ChainLink {
+    /// The step the link comes from, by its place in the document.
+    pub(crate) from_step: usize,
+    /// The step's id in the document.
+    pub(crate) from_id: String,
+    /// That step's pipeline run in this workflow run.
+    pub(crate) run: i64,
+    pub(crate) output: String,
+    /// The input of this step: a typed derivative input's id, or a role.
+    pub(crate) input: String,
+    /// Whether `input` is a pick role (else a typed derivative input).
+    pub(crate) role: bool,
+}
+
+impl ChainLink {
+    /// `<from>.<output> -> <to>.<input>`, as the plan words it.
+    pub(crate) fn words(&self, to: &str) -> String {
+        format!("{}.{} -> {to}.{}", self.from_id, self.output, self.input)
+    }
+
+    fn doc(&self) -> Value {
+        json!({
+            "from_step": self.from_step, "from": self.from_id, "run": self.run,
+            "output": self.output, "input": self.input,
+            "binds": if self.role { "role" } else { "typed" },
+        })
+    }
+}
+
+/// A link bound to what the fed step's run made: its derivatives, and,
+/// where a unit of that run reused a kept result, the run it reused from,
+/// by the unit's stacks (a reused unit made no file of its own; the file
+/// it stands for is its source run's). No other run's file is taken.
+#[derive(Debug, Clone)]
+pub(crate) struct Fed {
+    pub(crate) link: ChainLink,
+    /// The fed run and every run its units reused from.
+    runs: BTreeSet<i64>,
+    /// By stack, the run that made the fed step's result for it: the fed
+    /// run, or the run its unit reused from.
+    by_stack: BTreeMap<i64, i64>,
+}
+
+impl Fed {
+    fn of(store: &mut Store, link: &ChainLink) -> Result<Fed, String> {
+        let mut runs: BTreeSet<i64> = BTreeSet::from([link.run]);
+        let mut by_stack: BTreeMap<i64, i64> = BTreeMap::new();
+        let stacks: BTreeMap<String, Vec<i64>> =
+            unit_stacks(store, link.run)?.into_iter().collect();
+        for u in rows::units(store, link.run).map_err(|e| e.to_string())? {
+            let source = u.reused_from_run.unwrap_or(link.run);
+            runs.insert(source);
+            for s in stacks.get(&u.unit).into_iter().flatten() {
+                by_stack.insert(*s, source);
+            }
+        }
+        Ok(Fed {
+            link: link.clone(),
+            runs,
+            by_stack,
+        })
+    }
+
+    /// Whether a registered derivative is one the link feeds: of a stack,
+    /// the run that made the fed step's result for that stack; of a
+    /// session or a subject, any run the fed step's units stand for.
+    fn takes(&self, r: &derivative::Derivative) -> bool {
+        let Some(run) = r.run_id else {
+            return false;
+        };
+        match r.stack_id {
+            Some(s) => self.by_stack.get(&s).copied().unwrap_or(self.link.run) == run,
+            None => self.runs.contains(&run),
+        }
+    }
+
+    /// The runs this link feeds from, in words.
+    fn words(&self) -> String {
+        let reused: Vec<String> = self
+            .runs
+            .iter()
+            .filter(|r| **r != self.link.run)
+            .map(i64::to_string)
+            .collect();
+        if reused.is_empty() {
+            format!("run {} of {}", self.link.run, self.link.from_id)
+        } else {
+            format!(
+                "run {} of {} (reusing run {})",
+                self.link.run,
+                self.link.from_id,
+                reused.join(", ")
+            )
+        }
+    }
+}
+
+/// The links of a run's chain by the typed input each feeds (after review,
+/// finding 3): what the run's derivative inputs are bound to.
+pub(crate) type Bound = BTreeMap<String, Fed>;
+
+/// The typed inputs a chain binds, and the roles it binds, of this
+/// descriptor, each with what the fed run made.
+fn bound_of(
+    store: &mut Store,
+    chain: Option<&Chain>,
+    d: &Descriptor,
+) -> Result<(Bound, Vec<Fed>), String> {
+    let mut typed = Bound::new();
+    let mut roles = Vec::new();
+    for l in chain.into_iter().flat_map(|c| c.links.iter()) {
+        if !l.role && d.inputs.iter().any(|t| t.id == l.input) {
+            typed.insert(l.input.clone(), Fed::of(store, l)?);
+        } else if l.role && d.roles.contains(&l.input) {
+            roles.push(Fed::of(store, l)?);
+        }
+    }
+    Ok((typed, roles))
 }
 
 /// The parts a run split with `--chunk` was made of, as each part's job
@@ -3368,7 +3506,7 @@ pub(crate) fn command(home: &Home, command: PipelineCommand) -> Result<(), Exit>
             if let Some(id) = id {
                 let r = rows::run(registry.store(), id)?
                     .ok_or_else(|| usage(format!("no pipeline run {id}")))?;
-                let mut doc = run_doc(registry.store(), &r);
+                let mut doc = run_doc(registry.store(), &r).map_err(fail)?;
                 if !unsealed {
                     summary_unsealed(registry.store(), r.id, &mut doc["summary"]).map_err(fail)?;
                     units_run_unsealed(registry.store(), r.id, &mut doc).map_err(fail)?;
@@ -4402,6 +4540,157 @@ fn released_of(
         u.stacks.push(stack);
     }
     Ok(units.into_values().collect())
+}
+
+/// After review (finding 3 of the second review): a pick role a workflow
+/// link feeds takes the fed step's run's image as the role's file for each
+/// unit: the newest image that run made of the unit (its stack, its session
+/// or its subject) is written over the file the release placed for the
+/// role's stack, and the manifest says so under `bound_roles`. A unit the
+/// fed run made no image of is answered under its id with the link's
+/// words, for the run to skip it; a unit whose role the release placed
+/// nothing for is left to [`units_missing`]'s words.
+#[allow(clippy::type_complexity)]
+fn bind_roles(
+    registry: &mut Registry,
+    x: &Execution<'_>,
+    m: &Materialised,
+    input: &Path,
+    links: &[Fed],
+    d: &Descriptor,
+) -> Result<(Vec<Value>, BTreeMap<String, Vec<String>>), String> {
+    let mut bound: Vec<Value> = Vec::new();
+    let mut unbound: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let (Some(release_id), false) = (m.release_id, links.is_empty()) else {
+        return Ok((bound, unbound));
+    };
+    let err = |e: nils_registry::Error| e.to_string();
+    let store = registry.store();
+    // where the release wrote each raw stack: its folder and its stem
+    let dialect = store.dialect();
+    let sql = format!(
+        "SELECT rs.stack_id, rs.dir, rs.stem FROM {} r \
+         JOIN {} rs ON rs.dataset_id = r.dataset_id WHERE r.id = {} AND rs.route = 'raw'",
+        store.qualified("release"),
+        store.qualified("release_stack"),
+        dialect.param(1, Type::Int)
+    );
+    let mut placed: BTreeMap<i64, (String, String)> = BTreeMap::new();
+    for r in store.query(&sql, &[Param::Int(release_id)]).map_err(err)? {
+        if let Some(stem) = r.opt_text(2).map_err(err)? {
+            placed.insert(
+                r.int(0).map_err(err)?,
+                (r.text(1).map_err(err)?.to_string(), stem.to_string()),
+            );
+        }
+    }
+    // which of the units' stacks stand for which role
+    let all: Vec<i64> = m
+        .units
+        .iter()
+        .flat_map(|u| u.stacks.iter().copied())
+        .collect();
+    let main = rows::run(store, x.run_id)
+        .map_err(err)?
+        .and_then(|r| r.handle_id)
+        .and_then(|h| crate::main_input::entry_of(store, h));
+    let picks: BTreeMap<i64, BTreeSet<String>> = match main {
+        Some(main) => crate::main_input::stack_roles(&main, &all),
+        None => match release_reading(store, release_id)?.picks() {
+            Some(picks) => crate::preflight::pick_roles(store, &all, &picks)?
+                .into_iter()
+                .map(|(s, p)| (s, p.roles))
+                .collect(),
+            None => BTreeMap::new(),
+        },
+    };
+    let places = crate::reuse::places(store)?;
+    for fed in links {
+        let l = &fed.link;
+        let mut made: Vec<derivative::Derivative> = Vec::new();
+        for run in &fed.runs {
+            made.extend(
+                derivative::list(
+                    store,
+                    &derivative::Filter {
+                        run_id: Some(*run),
+                        limit: 10_000,
+                        ..Default::default()
+                    },
+                )
+                .map_err(err)?
+                .into_iter()
+                .filter(|dv| {
+                    dv.withdrawn_at.is_none()
+                        && matches!(dv.kind.as_str(), "image" | "output")
+                        && fed.takes(dv)
+                }),
+            );
+        }
+        for u in &m.units {
+            let role_stacks: Vec<i64> = u
+                .stacks
+                .iter()
+                .filter(|s| picks.get(s).is_some_and(|roles| roles.contains(&l.input)))
+                .copied()
+                .collect();
+            if role_stacks.is_empty() {
+                continue;
+            }
+            let Some(dv) = made
+                .iter()
+                .filter(|dv| {
+                    crate::reuse::belongs(dv, &u.stacks, u.subject_id, u.session_day.as_deref())
+                })
+                .max_by_key(|dv| dv.id)
+            else {
+                unbound.entry(u.id.clone()).or_default().push(format!(
+                    "{}: {} made no image of it for the {} role",
+                    l.words(&d.name),
+                    fed.words(),
+                    l.input
+                ));
+                continue;
+            };
+            let Some(root) = places.get(&dv.place_id) else {
+                unbound.entry(u.id.clone()).or_default().push(format!(
+                    "{}: the place {} of {} is gone",
+                    l.words(&d.name),
+                    dv.place_id,
+                    dv.path
+                ));
+                continue;
+            };
+            let from = Path::new(root).join(&dv.path);
+            for s in role_stacks {
+                let Some((dir, stem)) = placed.get(&s) else {
+                    continue;
+                };
+                let folder = input.join(dir);
+                let mut files: Vec<String> = Vec::new();
+                for e in std::fs::read_dir(&folder)
+                    .map_err(|e| format!("{}: {e}", folder.display()))?
+                    .flatten()
+                {
+                    let name = e.file_name().to_string_lossy().into_owned();
+                    // the image files of the stem, never its sidecar
+                    if !name.starts_with(&format!("{stem}.")) || name.ends_with(".json") {
+                        continue;
+                    }
+                    let at = e.path();
+                    let _ = std::fs::remove_file(&at);
+                    std::fs::copy(&from, &at)
+                        .map_err(|e| format!("{}: binding {}: {e}", at.display(), dv.path))?;
+                    files.push(format!("{dir}/{name}"));
+                }
+                bound.push(json!({
+                    "unit": u.id, "role": l.input, "stack": s, "from": l.from_id, "run": l.run,
+                    "derivative": dv.id, "path": dv.path, "sha256": dv.sha256, "files": files,
+                }));
+            }
+        }
+    }
+    Ok((bound, unbound))
 }
 
 /// The units of a bids input that lack a role the descriptor names, by
@@ -6986,7 +7275,7 @@ fn conclude(
     }
     let r = rows::run(registry.store(), run_id)?
         .ok_or_else(|| fail(format!("no pipeline run {run_id}")))?;
-    let doc = run_doc(registry.store(), &r);
+    let doc = run_doc(registry.store(), &r).map_err(fail)?;
     if c.quiet {
         // the workflow run says it
     } else if c.json {
@@ -7609,11 +7898,27 @@ fn execute_run(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Resul
     // files and no other, and no bind reaches the derivatives tree
     let mut derivative_doc = serde_json::Map::new();
     let mut derivative_dirs: Vec<(String, PathBuf)> = Vec::new();
-    let taken = derivative_inputs(registry.store(), d, x.stacks, &lane_places(x))?;
+    // after review (finding 3 of the second review): what the workflow's
+    // links bind: a typed input to the fed step's run, a role to its image
+    let (bound, role_links) = bound_of(registry.store(), x.args.chain.as_ref(), d)?;
+    let (bound_roles, roles_unbound) = bind_roles(registry, x, &m, &input, &role_links, d)?;
+    let taken = derivative_inputs(registry.store(), d, x.stacks, &lane_places(x), &bound)?;
     let mut made_by = MadeBy::default();
     for t in d.inputs.iter().filter(|t| t.ty.starts_with("derivative:")) {
         let kind = t.ty.trim_start_matches("derivative:");
         let rows = taken.get(&t.id).cloned().unwrap_or_default();
+        if rows.is_empty()
+            && !t.optional
+            && let Some(fed) = bound.get(&t.id)
+        {
+            return Err(format!(
+                "{}: {} made no {kind} derivative of the selection's stacks for the input {} of {}, which the link feeds and which takes no other run's",
+                fed.link.words(&d.name),
+                fed.words(),
+                t.id,
+                p.label(),
+            ));
+        }
         if rows.is_empty() && !t.optional {
             return Err(format!(
                 "{} needs {kind} derivatives of the selection's stacks for its input {}, and none is registered that its check leaves {}",
@@ -7663,6 +7968,11 @@ fn execute_run(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Resul
         "models": models_doc,
         "label_set": label_doc,
         "derivatives": derivative_doc,
+        // after review (finding 3 of the second review): the workflow's
+        // links into this run, each bound to the fed step's run, and the
+        // role files the chain bound for each unit
+        "links": x.args.chain.as_ref().map_or_else(Vec::new, |c| c.links.iter().map(ChainLink::doc).collect::<Vec<_>>()),
+        "bound_roles": bound_roles,
         // the secrets it reads, by id and where it sees them: never a path
         // on the host or a byte of the file (record 49 R3)
         "secrets": x.secrets.iter().map(|g| json!({"id": g.secret.id, "mount": g.secret.mount})).collect::<Vec<_>>(),
@@ -7707,11 +8017,17 @@ fn execute_run(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Resul
     // having left out every one there is
     let place_ids: Vec<i64> = lane_places(x).iter().map(|pl| pl.id).collect();
     let stacks_of: Vec<&[i64]> = m.units.iter().map(|u| u.stacks.as_slice()).collect();
-    let lacking = derivatives_missing(registry.store(), d, &stacks_of, &place_ids)?;
+    let lacking = derivatives_missing(registry.store(), d, &stacks_of, &place_ids, &bound)?;
     for (u, why) in m.units.iter().zip(lacking) {
         if !why.is_empty() {
             missing.entry(u.id.clone()).or_default().extend(why);
         }
+    }
+    // nor a unit whose role a link feeds and the fed run made no image for
+    // (after review, finding 3 of the second review): skipped with the
+    // link's words
+    for (unit, why) in roles_unbound {
+        missing.entry(unit).or_default().extend(why);
     }
     if !missing.is_empty() {
         let now = nils_registry::time::now_iso();
@@ -7838,6 +8154,13 @@ fn execute_run(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Resul
             x.label_set,
             &x.args.pack_dir_or_default(home),
         );
+        // a read that failed is recorded as such on every unit, never as a
+        // state with nothing in it (after review, finding 4 of the second
+        // review)
+        let curation_of = |stacks: &[i64]| match &curation {
+            Ok(c) => c.of(stacks),
+            Err(e) => crate::provenance::Curation::unknown(e),
+        };
         let now = nils_registry::time::now_iso();
         let row_ids: BTreeMap<String, i64> = rows::units(registry.store(), x.run_id)
             .map_err(err)?
@@ -7849,17 +8172,16 @@ fn execute_run(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Resul
                 continue;
             };
             let (ck, rk, members) = jd.keys(registry.store(), u, of, j);
-            let doc = jd.record(u, of, j, members, "run");
-            rows::set_unit_pack(registry.store(), row_id, &doc, Some(&ck), Some(&rk))
-                .map_err(err)?;
-            rows::set_unit_curation(registry.store(), row_id, &curation.of(&u.stacks))
-                .map_err(err)?;
+            let mut doc = jd.record(u, of, j, members, "run");
             // section 8.5 (G6): a step whose result key matches a kept result
             // is not run again; the unit records "reused from run N". After
             // review (finding 9): the kept result is found here without
             // reading a file; its files are checked where the unit would
             // start, in the scheduler's pool, where units run apart (units
-            // together are checked here, since one container runs them all)
+            // together are checked here, since one container runs them all).
+            // After the second review (finding 8): where none is reused, the
+            // unit records why under `reuse.considered`, on both paths
+            let mut reused: Option<crate::reuse::Reused> = None;
             if j.status != nils_pipeline::pack::rules::Status::Skipped && x.resume.is_none() {
                 let of_unit = crate::reuse::Of {
                     run_id: x.run_id,
@@ -7869,30 +8191,38 @@ fn execute_run(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Resul
                     subject_id: u.subject_id,
                     session_day: u.session_day.as_deref(),
                 };
-                match d.units {
+                let refused = match d.units {
                     Units::Apart => {
-                        if let Some(c) =
-                            crate::reuse::candidate(registry.store(), &places, &of_unit, &rk)?
-                        {
-                            reuse_candidates.insert(u.id.clone(), c);
+                        match crate::reuse::candidate(registry.store(), &places, &of_unit, &rk)? {
+                            Ok(c) => {
+                                reuse_candidates.insert(u.id.clone(), c);
+                                Vec::new()
+                            }
+                            Err(refused) => refused,
                         }
                     }
                     Units::Together => {
-                        if let Some(reused) =
-                            crate::reuse::kept_for(registry.store(), &places, &of_unit, &rk)?
-                        {
-                            rows::unit_reused(
-                                registry.store(),
-                                row_id,
-                                reused.run,
-                                &reused.outcome,
-                                &now,
-                            )
-                            .map_err(err)?;
-                            continue;
+                        match crate::reuse::kept_for(registry.store(), &places, &of_unit, &rk)? {
+                            Ok(r) => {
+                                reused = Some(r);
+                                Vec::new()
+                            }
+                            Err(refused) => refused,
                         }
                     }
+                };
+                if !refused.is_empty() {
+                    doc["reuse"] = json!({"considered": refused});
                 }
+            }
+            rows::set_unit_pack(registry.store(), row_id, &doc, Some(&ck), Some(&rk))
+                .map_err(err)?;
+            rows::set_unit_curation(registry.store(), row_id, &curation_of(&u.stacks))
+                .map_err(err)?;
+            if let Some(reused) = reused {
+                rows::unit_reused(registry.store(), row_id, reused.run, &reused.outcome, &now)
+                    .map_err(err)?;
+                continue;
             }
             if j.status == nils_pipeline::pack::rules::Status::Skipped {
                 rows::unit_over(registry.store(), row_id, None, &pack_skipped(j), &now)
@@ -8638,9 +8968,25 @@ fn schedule(
                             .map_err(|e| e.to_string())?;
                         }
                     }
-                    Err(_) => {
+                    Err(why) => {
                         if let Ok(mut r) = shared.reuse.lock() {
                             r.remove(id);
+                        }
+                        // the refusal is the unit's record (after review,
+                        // finding 8 of the second review)
+                        if let Some((row_id, _)) = row_of.get(id)
+                            && let Ok(Some(row)) = rows::unit(registry.store(), *row_id)
+                        {
+                            let mut doc = row.pack.clone();
+                            doc["reuse"] = json!({"considered": cand.refused(&why)});
+                            rows::set_unit_pack(
+                                registry.store(),
+                                *row_id,
+                                &doc,
+                                row.comparability_key.as_deref(),
+                                row.result_key.as_deref(),
+                            )
+                            .map_err(|e| e.to_string())?;
                         }
                         rerun.push(u);
                     }
@@ -8676,7 +9022,6 @@ fn judge_again(
 ) -> Result<(), String> {
     let err = |e: nils_registry::Error| e.to_string();
     let now = nils_registry::time::now_iso();
-    let recorded = rows::units(registry.store(), x.run_id).map_err(err)?;
     let mut keep: Vec<usize> = Vec::new();
     for &i in &b.units {
         let u = &m.units[i];
@@ -8684,7 +9029,9 @@ fn judge_again(
             keep.push(i);
             continue;
         };
-        let Some(was) = recorded.iter().find(|r| r.id == *row_id) else {
+        // the one row judged again (after review, finding 6 of the second
+        // review: not every row of the run per batch)
+        let Some(was) = rows::unit(registry.store(), *row_id).map_err(err)? else {
             keep.push(i);
             continue;
         };
@@ -8728,8 +9075,23 @@ fn judge_again(
             )?;
             if let Ok(mut r) = shared.reuse.lock() {
                 match c {
-                    Some(c) => r.insert(u.id.clone(), c),
-                    None => r.remove(&u.id),
+                    Ok(c) => {
+                        r.insert(u.id.clone(), c);
+                    }
+                    Err(refused) => {
+                        r.remove(&u.id);
+                        if !refused.is_empty() {
+                            doc["reuse"] = json!({"considered": refused});
+                            rows::set_unit_pack(
+                                registry.store(),
+                                *row_id,
+                                &doc,
+                                Some(&ck),
+                                Some(&rk),
+                            )
+                            .map_err(err)?;
+                        }
+                    }
                 };
             }
         }
@@ -11422,6 +11784,7 @@ fn derivative_inputs(
     d: &Descriptor,
     stacks: &[i64],
     places: &[&nils_registry::place::Place],
+    bound: &Bound,
 ) -> Result<BTreeMap<String, Vec<derivative::Derivative>>, String> {
     let place_ids: Vec<i64> = places.iter().map(|pl| pl.id).collect();
     let mut out = derivative_candidates(store, d, stacks, &place_ids)?.rows;
@@ -11432,6 +11795,11 @@ fn derivative_inputs(
         let checked = t.checked.as_deref().unwrap_or("not_rejected");
         if let Some(rows) = out.get_mut(&t.id) {
             rows.retain(|r| takes_checked(checked, r.check_status.as_deref()));
+            // after review (finding 3 of the second review): an input a
+            // link feeds takes the fed run's derivatives and no other's
+            if let Some(fed) = bound.get(&t.id) {
+                rows.retain(|r| fed.takes(r));
+            }
         }
     }
     Ok(out)
@@ -11529,6 +11897,7 @@ pub(crate) fn derivatives_missing(
     d: &Descriptor,
     units: &[&[i64]],
     place_ids: &[i64],
+    bound: &Bound,
 ) -> Result<Vec<Vec<String>>, String> {
     let mut out: Vec<Vec<String>> = vec![Vec::new(); units.len()];
     let needed: Vec<&descriptor::TypedInput> = d
@@ -11565,6 +11934,31 @@ pub(crate) fn derivatives_missing(
                     _ => false,
                 })
                 .collect();
+            // after review (finding 3 of the second review): an input a
+            // link feeds is bound to the fed run; a unit that run made no
+            // file of is skipped with the link's words
+            if let Some(fed) = bound.get(&t.id) {
+                let made: Vec<&&derivative::Derivative> =
+                    own.iter().filter(|r| fed.takes(r)).collect();
+                if made
+                    .iter()
+                    .any(|r| takes_checked(checked, r.check_status.as_deref()))
+                {
+                    continue;
+                }
+                why.push(format!(
+                    "{}: {} made no {kind} derivative of it for the input {}{}",
+                    fed.link.words(&d.name),
+                    fed.words(),
+                    t.id,
+                    if made.is_empty() {
+                        String::new()
+                    } else {
+                        " that its check takes".to_string()
+                    }
+                ));
+                continue;
+            }
             if own
                 .iter()
                 .any(|r| takes_checked(checked, r.check_status.as_deref()))
@@ -12503,7 +12897,7 @@ x-nils:
             (", checked: any", vec!["p1", "p2", "p3", "p4"]),
         ] {
             let d = nils_pipeline::descriptor::parse(&yml(checked)).unwrap();
-            let taken = derivative_inputs(&mut store, &d, &[7], &[&pl]).unwrap();
+            let taken = derivative_inputs(&mut store, &d, &[7], &[&pl], &Bound::new()).unwrap();
             let paths: Vec<&str> = taken["prior"].iter().map(|r| r.path.as_str()).collect();
             assert_eq!(paths, want, "{checked}");
         }
