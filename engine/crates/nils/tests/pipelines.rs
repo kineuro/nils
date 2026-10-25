@@ -14303,6 +14303,10 @@ command-line: |
       mark("start", u)
       if s["stack_id"] % 2 == 1:
           time.sleep(float(os.environ.get("CHAIN_A_SLEEP", "0")))
+      if str(s["stack_id"]) == os.environ.get("CHAIN_A_FAIL", ""):
+          units.append({{"unit_id": u, "status": "failed", "error": "asked to fail"}})
+          mark("end", u)
+          continue
       open(os.path.join(d, "out.txt"), "w").write("stack %d tag %s\n" % (s["stack_id"], sys.argv[3]))
       units.append({{"unit_id": u, "status": "succeeded", "derivatives": [u + "/out.txt"], "metrics": {{"files": len(s["files"])}}}})
       mark("end", u)
@@ -14926,6 +14930,86 @@ fn g6_e5_a_workflow_runs_per_unit_reuses_kept_results_and_answers_provenance() {
             .contains("samseg.aligned_flair is fed by register"),
         "{into_samseg}"
     );
+    // after the third review (finding 4): the plan's pre-flight knows what
+    // the links feed: segcsvd's synthseg and aligned_flair inputs read "fed
+    // by step", and no unit of it lacks them; the step waits for both whole
+    let segcsvd = &shipped["steps"][3];
+    assert_eq!(segcsvd["step"], "segcsvd", "{segcsvd}");
+    assert_eq!(
+        segcsvd["preflight"]["fed"],
+        json!({"aligned_flair": "fed by step register", "synthseg": "fed by step synthseg"}),
+        "{segcsvd}"
+    );
+    assert_eq!(
+        segcsvd["waits_whole"],
+        json!(["register", "synthseg"]),
+        "{segcsvd}"
+    );
+    for m in segcsvd["preflight"]["missing"]
+        .as_array()
+        .into_iter()
+        .flatten()
+    {
+        for why in m["why"].as_array().into_iter().flatten() {
+            let why = why.as_str().unwrap();
+            assert!(
+                !why.contains("for the input synthseg")
+                    && !why.contains("for the input aligned_flair"),
+                "a fed input is never missing: {m}"
+            );
+        }
+    }
+    // after the third review (finding 5): a family step's goal the family
+    // does not offer, or a knob the step does not let a person set, refuses
+    // the plan as the run would refuse them
+    let (status, bad_goal) = served.call(
+        "POST",
+        "/api/workflows/flair-lesions/plan",
+        Some(json!({"select": "selection:every@1", "goal": "nonsense"})),
+        "a-token-that-sees",
+    );
+    assert_eq!(status, 200, "{bad_goal}");
+    // the document fixes the register step's goal, so the person's goal
+    // reaches a pipeline step only; a switch the family lacks is the
+    // document's to say: test it through a document of our own
+    assert!(bad_goal["runnable"].is_boolean(), "{bad_goal}");
+    let odd = lab.work.path().join("wf-odd-switch");
+    std::fs::create_dir_all(&odd).unwrap();
+    std::fs::write(
+        odd.join("nils.workflow.yml"),
+        "nils_workflow: 1\nname: odd-switch\nsteps:\n  - {id: reg, family: registration, switches: {task: sideways}}\n",
+    )
+    .unwrap();
+    let added_odd = lab.json(&["workflow", "add", odd.to_str().unwrap(), "--json"]);
+    assert_eq!(added_odd["added"], true, "{added_odd}");
+    let (status, odd_plan) = served.call(
+        "POST",
+        "/api/workflows/odd-switch/plan",
+        Some(json!({"select": "selection:every@1"})),
+        "a-token-that-sees",
+    );
+    assert_eq!(status, 200, "{odd_plan}");
+    assert_eq!(odd_plan["runnable"], false, "{odd_plan}");
+    let words = odd_plan["words"].as_str().unwrap();
+    assert!(
+        words.contains("not runnable: step reg: task takes") && words.contains("not sideways"),
+        "{odd_plan}"
+    );
+    assert!(odd_plan["steps"][0]["refused"].is_string(), "{odd_plan}");
+    let (status, odd_knob) = served.call(
+        "POST",
+        "/api/workflows/odd-switch/plan",
+        Some(json!({"select": "selection:every@1", "knobs": {"reg": {"x": "1"}}})),
+        "a-token-that-sees",
+    );
+    assert_eq!(status, 400, "{odd_knob}");
+    assert!(
+        odd_knob["error"]
+            .as_str()
+            .unwrap()
+            .contains("the step reg lets a person set no knob, not x"),
+        "{odd_knob}"
+    );
     // a family the catalog does not hold is refused by name, as before
     let (status, nowhere) = served.call(
         "POST",
@@ -15048,6 +15132,26 @@ fn g6_e5_a_workflow_runs_per_unit_reuses_kept_results_and_answers_provenance() {
         "{whole}"
     );
     assert!(whole["withheld"].is_null(), "{whole}");
+    // after the third review (finding 3): a session is named
+    // <subject>@<label>, and a client sends the @ percent-encoded; the door
+    // reads it decoded, as the pipelines doors read theirs
+    let (status, encoded) = served.call(
+        "GET",
+        &format!("/api/provenance/session/{subject}%40none"),
+        None,
+        "a-token-that-sees",
+    );
+    assert_eq!(status, 200, "{encoded}");
+    assert_eq!(encoded["of"]["kind"], "session", "{encoded}");
+    assert_eq!(encoded["of"]["session"], "none", "{encoded}");
+    let (status, raw) = served.call(
+        "GET",
+        &format!("/api/provenance/session/{subject}@none"),
+        None,
+        "a-token-that-sees",
+    );
+    assert_eq!(status, 200, "{raw}");
+    assert_eq!(encoded, raw);
     // the four runs from before the rules changed are stale on it; the
     // door-started run recorded the version as it stands now
     assert_eq!(whole["counts"]["stale"], 8, "{whole}");
@@ -15077,6 +15181,152 @@ fn g6_e5_a_workflow_runs_per_unit_reuses_kept_results_and_answers_provenance() {
             .unwrap()
             .contains(&json!(rejected_stack))),
         "{held}"
+    );
+}
+
+/// After the third review (finding 9): a link into an `optional` typed
+/// input lets a unit run where the unit before failed: the step after runs
+/// it without the input, recording `fed.prev` as "fed by no step for this
+/// unit: <the reason>", and its container saw no file; the same failure
+/// under a required input skips the unit downstream as before.
+#[test]
+fn an_optional_typed_input_fed_by_a_failed_unit_runs_without_it() {
+    if !have("python3") {
+        eprintln!(
+            "python3 is not installed; the stand-in podman needs it, so this test is skipped"
+        );
+        return;
+    }
+    let lab = Lab::new("pipelines-workflow-optional");
+    let image_a = format!("example.org/chain-a@sha256:{}", "a".repeat(64));
+    let image_b = format!("example.org/chain-b@sha256:{}", "b".repeat(64));
+    let image_d = format!("example.org/chain-d@sha256:{}", "d".repeat(64));
+    let da = chain_a(&image_a);
+    let db = chain_b(&image_b);
+    // chain-d is chain-b with its typed input optional
+    let dd = chain_b(&image_d)
+        .replace("name: chain-b", "name: chain-d")
+        .replace(
+            r#"{id: prev, type: "derivative:image"}"#,
+            r#"{id: prev, type: "derivative:image", optional: true}"#,
+        );
+    assert!(dd.contains("optional: true"), "{dd}");
+    let dig = |d: &str| nils_pipeline::descriptor::parse(d).unwrap().digest();
+    lab.add_pair("chain-a", &da, &chain_a_pack(&dig(&da)));
+    lab.add_pair("chain-b", &db, &chain_b_pack(&dig(&db)));
+    let d = lab.add_pair(
+        "chain-d",
+        &dd,
+        &chain_b_pack(&dig(&dd)).replace("chain-b", "chain-d"),
+    );
+    assert_eq!(d["added"], true, "{d}");
+    for (name, text) in [
+        ("wf-chain", CHAIN_WORKFLOW.to_string()),
+        (
+            "wf-optional",
+            CHAIN_WORKFLOW
+                .replace("name: chain\n", "name: optional\n")
+                .replace("pipeline: chain-b", "pipeline: chain-d"),
+        ),
+    ] {
+        let dir = lab.work.path().join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("nils.workflow.yml"), text).unwrap();
+        let added = lab.json(&["workflow", "add", dir.to_str().unwrap(), "--json"]);
+        assert_eq!(added["added"], true, "{added}");
+    }
+    let failing = lab.count("SELECT MIN(id) FROM stack");
+    let run_with_failure = |workflow: &str| -> Value {
+        let out = lab
+            .command(&lab.path)
+            .args([
+                "workflow",
+                "run",
+                workflow,
+                "--select",
+                "selection:every@1",
+                "--json",
+            ])
+            .env("CHAIN_A_FAIL", failing.to_string())
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        // a run that ended partial (one unit failed) exits as a pipeline run
+        // does, after printing the run
+        serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
+            panic!(
+                "workflow run {workflow}: {e}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            )
+        })
+    };
+    // the optional input: the failed unit's step after runs without it
+    let r = run_with_failure("optional");
+    assert_eq!(r["steps"][0]["status"], "partial", "{r}");
+    assert_eq!(r["steps"][0]["units"]["failed"], 1, "{r}");
+    assert_eq!(r["steps"][1]["status"], "done", "{r}");
+    assert_eq!(r["steps"][1]["units"]["succeeded"], 4, "{r}");
+    assert_eq!(r["steps"][1]["units"]["skipped"], 0, "{r}");
+    let run_d = r["steps"][1]["run"].as_i64().unwrap();
+    let rd = lab.json(&["pipeline", "runs", &run_d.to_string(), "--json"]);
+    let unit = rd["units_run"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|u| u["unit"] == format!("stack-{failing}"))
+        .unwrap_or_else(|| panic!("{rd}"));
+    assert_eq!(unit["status"], "succeeded", "{unit}");
+    let fed = unit["fed"]["prev"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{unit}"));
+    assert!(
+        fed.starts_with("fed by no step for this unit: ") && fed.contains("asked to fail"),
+        "{unit}"
+    );
+    for u in rd["units_run"].as_array().unwrap() {
+        if u["unit"] != format!("stack-{failing}") {
+            assert!(u["fed"].is_null(), "a fed unit records nothing: {u}");
+        }
+    }
+    // its container saw no file of the step before
+    let seen = lab
+        .json(&["derivative", "list", "--run", &run_d.to_string(), "--json"])
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| {
+            d["path"]
+                .as_str()
+                .is_some_and(|p| p.contains(&format!("stack-{failing}")))
+        })
+        .map(|d| d["path"].as_str().unwrap().to_string())
+        .unwrap_or_else(|| panic!("{rd}"));
+    let text = std::fs::read_to_string(lab.work.path().join(&seen)).unwrap();
+    assert_eq!(text.trim(), "", "nothing was fed: {text}");
+    // the required input: the same unit is skipped downstream, as before
+    let r = run_with_failure("chain");
+    assert_eq!(r["steps"][1]["units"]["skipped"], 1, "{r}");
+    assert_eq!(r["steps"][1]["units"]["succeeded"], 3, "{r}");
+    let run_b = r["steps"][1]["run"].as_i64().unwrap();
+    let rb = lab.json(&["pipeline", "runs", &run_b.to_string(), "--json"]);
+    let unit = rb["units_run"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|u| u["unit"] == format!("stack-{failing}"))
+        .unwrap_or_else(|| panic!("{rb}"));
+    assert_eq!(unit["status"], "skipped", "{unit}");
+    // skipped where the run bound its inputs (the fed run made nothing for
+    // it, in the link's words) or at the chain's gate: either is the skip
+    let error = unit["error"].as_str().unwrap();
+    assert!(
+        error.contains("made no image derivative of it for the input prev")
+            || error.starts_with("skipped at step 1"),
+        "{unit}"
+    );
+    assert!(
+        unit["fed"].is_null(),
+        "a required input records no note: {unit}"
     );
 }
 

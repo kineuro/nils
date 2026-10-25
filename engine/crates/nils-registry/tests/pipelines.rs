@@ -1951,3 +1951,90 @@ fn the_runs_ended_since_a_sweep_on_both_backends() {
         );
     }
 }
+
+/// Wave 7b A7, after the third review (finding 8): several writers adding
+/// versions of one workflow name at once each get a version of their own,
+/// or the words that the version was taken, never the unique key's words;
+/// and the same document again, however it raced, is the version it is.
+#[test]
+fn workflow_versions_added_at_once_are_distinct_or_said_taken() {
+    use nils_registry::workflow;
+    for lab in labs() {
+        let dsn = postgres_dsn().filter(|_| lab._guard.is_some());
+        let db = lab.dir.path().join("registry.db");
+        let open = move || -> Store {
+            match &dsn {
+                Some(dsn) => Store::connect_postgres(dsn, SCHEMA).expect("connect"),
+                None => Store::open_sqlite(&db).expect("open"),
+            }
+        };
+        let open = std::sync::Arc::new(open);
+        let n = 6usize;
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(n));
+        let threads: Vec<_> = (0..n)
+            .map(|k| {
+                let open = open.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    let mut store = open();
+                    barrier.wait();
+                    workflow::add(
+                        &mut store,
+                        "raced",
+                        &json!({"nils_workflow": 1, "name": "raced", "k": k}),
+                        &format!("digest-{k}"),
+                        "test",
+                        "2026-10-25T00:00:00Z",
+                        None,
+                    )
+                    .map_err(|e| e.to_string())
+                })
+            })
+            .collect();
+        let mut versions: Vec<i64> = Vec::new();
+        for t in threads {
+            match t.join().unwrap() {
+                Ok((w, fresh)) => {
+                    assert!(fresh, "{}: a new document is a new version", lab.name);
+                    versions.push(w.version);
+                }
+                Err(e) => assert!(
+                    e.contains(workflow::VERSION_TAKEN),
+                    "{}: only the version-taken words, never the constraint's: {e}",
+                    lab.name
+                ),
+            }
+        }
+        versions.sort_unstable();
+        versions.dedup();
+        let mut store = open();
+        let held = workflow::versions(&mut store, "raced").unwrap();
+        assert_eq!(
+            held.len(),
+            versions.len(),
+            "{}: every add that answered holds a version of its own",
+            lab.name
+        );
+        assert_eq!(
+            held.iter().map(|w| w.version).collect::<Vec<_>>(),
+            (1..=held.len() as i64).collect::<Vec<_>>(),
+            "{}: versions 1..n",
+            lab.name
+        );
+        assert!(!held.is_empty(), "{}: at least one add succeeded", lab.name);
+        // the same document again is the version it is
+        let first = &held[0];
+        let (again, fresh) = workflow::add(
+            &mut store,
+            "raced",
+            &first.document,
+            &first.digest,
+            "test",
+            "2026-10-25T00:00:00Z",
+            None,
+        )
+        .unwrap();
+        assert!(!fresh);
+        assert_eq!(again.id, first.id);
+    }
+}

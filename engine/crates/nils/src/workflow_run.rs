@@ -22,6 +22,15 @@
 //! document is carried into the step's run, bound to the run of the step
 //! it comes from, so a typed input takes that run's files and a fed role
 //! that run's image, never another run's kept result.
+//!
+//! After the third review (2026-10-25): a step fed through a role waits for
+//! the whole step before, as one fed through a typed input does (a run
+//! binds both as it starts); the per-unit chaining is for order-only steps.
+//! A step thread that ends with its pipeline run still `running` concludes
+//! that run (failed, in its words), and a run before that is `interrupted`,
+//! or whose step is over, is over to the steps after it. A link into an
+//! `optional` typed input lets the step run where the step before ended
+//! without a run, recording what fed nothing.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -58,6 +67,13 @@ const TERMINAL: [&str; 8] = [
 
 fn err(e: nils_registry::Error) -> String {
     e.to_string()
+}
+
+/// Whether a step's status is terminal: the chain's gate reads a run whose
+/// step is over as over, whatever the run row says (after the third
+/// review, finding 2).
+pub(crate) fn step_is_over(status: &str) -> bool {
+    TERMINAL.contains(&status)
 }
 
 /// What runs a step's pipeline run: `nils run`'s own command, or a stand-in
@@ -216,9 +232,14 @@ struct StepRun {
     goal: Option<String>,
     /// The steps whose results this one reads per unit (a link).
     waits_for: Vec<usize>,
-    /// Of those, the steps whose files it reads as a typed input: waited
-    /// for whole.
+    /// Of those, the steps whose files it reads as a typed input or whose
+    /// image it takes for a role: waited for whole (after the third review,
+    /// finding 1: a run binds both as it starts).
     whole: Vec<usize>,
+    /// Of those, the steps whose every link into this one feeds an
+    /// `optional` typed input: this step goes on without them where they
+    /// ended without a run (after the third review, finding 9).
+    optional: Vec<usize>,
     /// Every step before it: the order of the document is the order of
     /// the run.
     before: Vec<usize>,
@@ -256,27 +277,12 @@ pub(crate) fn start_with(
         .map(|s| crate::workflows::step_params(&d, s, person))
         .collect::<Result<_, _>>()
         .map_err(usage)?;
-    // the links that feed a typed input: a step so fed waits for the whole
-    // step before, since a run binds its derivative inputs at its start
-    let fed_whole: Vec<Vec<String>> = d
-        .steps
-        .iter()
-        .zip(&resolved)
-        .map(|(s, r)| {
-            let descs = r.descriptors();
-            let mut out = Vec::new();
-            for l in d.links.iter().filter(|l| l.to_step == s.id) {
-                if descs
-                    .iter()
-                    .any(|desc| desc.inputs.iter().any(|t| t.id == l.input))
-                    && !out.contains(&l.from_step)
-                {
-                    out.push(l.from_step.clone());
-                }
-            }
-            out
-        })
-        .collect();
+    // the links that feed a typed input or a role: a step so fed waits for
+    // the whole step before, since a run binds both at its start (after the
+    // third review, finding 1: a role too); the steps whose links all feed
+    // an optional input are not waited for where they ended without a run
+    let fed_whole = crate::workflows::waits_whole(&d, &resolved);
+    let fed_optional = crate::workflows::optional_from(&d, &resolved);
     let steps: Vec<Value> = d
         .steps
         .iter()
@@ -350,6 +356,7 @@ pub(crate) fn start_with(
             goal: s.goal.clone().or_else(|| person.goal.clone()),
             waits_for: d.fed_by(&s.id).iter().filter_map(|q| position(q)).collect(),
             whole: fed_whole[i].iter().filter_map(|q| position(q)).collect(),
+            optional: fed_optional[i].iter().filter_map(|q| position(q)).collect(),
             before: (0..i).collect(),
             links,
             cancel: Arc::clone(&cancel),
@@ -466,8 +473,14 @@ fn cancel_steps(store: &mut Store, id: i64) -> Result<(), String> {
 #[derive(Debug, PartialEq)]
 enum Wait {
     /// Every step before is far enough: the runs this step chains to per
-    /// unit, each with the step it is.
-    Ready(Vec<(usize, i64)>),
+    /// unit, each with the step it is, and the steps before that fed
+    /// nothing (an optional input's step that ended without a run), each
+    /// with the words recorded on the units (after the third review,
+    /// finding 9).
+    Ready {
+        after: Vec<(usize, i64)>,
+        unfed: Vec<(usize, String)>,
+    },
     /// A step before has not yet made its run, or one read whole still
     /// runs.
     NotYet,
@@ -478,14 +491,19 @@ enum Wait {
 
 /// Decide, from the steps before as recorded, whether a step may start:
 /// `pipeline_status` answers a run's status (none where the run is gone).
+/// A run before whose step is over, or that is `interrupted`, is over
+/// (after the third review, finding 2): only a step still running holds a
+/// step read whole.
 fn wait_of(
     steps: &[Value],
     before: &[usize],
     waits_for: &[usize],
     whole: &[usize],
+    optional: &[usize],
     pipeline_status: &mut dyn FnMut(i64) -> Result<Option<String>, String>,
 ) -> Result<Wait, String> {
     let mut after: Vec<(usize, i64)> = Vec::new();
+    let mut unfed: Vec<(usize, String)> = Vec::new();
     let mut ready = true;
     for &k in before {
         let st = steps.get(k).cloned().unwrap_or(Value::Null);
@@ -496,15 +514,27 @@ fn wait_of(
                 if waits_for.contains(&k) {
                     after.push((k, run));
                 }
-                if whole.contains(&k) {
+                if whole.contains(&k) && !TERMINAL.contains(&status) {
                     let pr = pipeline_status(run)?;
-                    if pr.is_some_and(|s| matches!(s.as_str(), "running" | "interrupted")) {
+                    if pr.as_deref() == Some("running") {
                         ready = false;
                     }
                 }
             }
             None if !TERMINAL.contains(&status) => ready = false,
-            // the step before ended with no run: nothing of it ran
+            // the step before ended with no run: nothing of it ran; a step
+            // whose links all feed an optional input goes on without it
+            None if optional.contains(&k) => {
+                unfed.push((
+                    k,
+                    format!(
+                        "fed by no step for this unit: {name} ended {status} without a run{}",
+                        st["error"]
+                            .as_str()
+                            .map_or(String::new(), |e| format!(": {e}"))
+                    ),
+                ));
+            }
             None if matches!(status, "done" | "partial") => {
                 if waits_for.contains(&k) || whole.contains(&k) {
                     return Ok(Wait::Skipped(format!(
@@ -521,10 +551,54 @@ fn wait_of(
         }
     }
     if ready {
-        Ok(Wait::Ready(after))
+        Ok(Wait::Ready { after, unfed })
     } else {
         Ok(Wait::NotYet)
     }
+}
+
+/// After the third review (finding 2): a step thread that ended in an
+/// error or a panic may have left its pipeline run `running` (the run was
+/// claimed, then the thread unwound before the run concluded): conclude it
+/// here, failed in the thread's words, and its job with it, so no run row
+/// says running for a run nothing runs, and the steps after it see it over.
+fn conclude_left_running(
+    store: &mut Store,
+    workflow_run: i64,
+    step: usize,
+    words: &str,
+) -> Result<Option<i64>, String> {
+    let Some(st) = rows::step(store, workflow_run, step).map_err(err)? else {
+        return Ok(None);
+    };
+    let Some(run) = st["run"].as_i64() else {
+        return Ok(None);
+    };
+    let Some(pr) = prows::run(store, run).map_err(err)? else {
+        return Ok(None);
+    };
+    if pr.status != "running" {
+        return Ok(None);
+    }
+    let now = nils_registry::time::now_iso();
+    prows::finish(
+        store,
+        run,
+        &prows::Finish {
+            status: "failed",
+            finished_at: &now,
+            exit_code: None,
+            results_digest: None,
+            summary: &json!({}),
+            error: Some(words),
+            failure: None,
+        },
+    )
+    .map_err(err)?;
+    if let Some(j) = pr.job_id {
+        let _ = job::finish(store, j, job::State::Failed, Some(words));
+    }
+    Ok(Some(run))
 }
 
 /// One step: wait for the runs it is chained to, run its pipeline over the
@@ -547,6 +621,9 @@ fn run_step(p: &StepRun, runner: Runner) -> Result<(), String> {
     if let Err(e) = &result
         && let Ok(mut registry) = crate::open(&p.home)
     {
+        // the step's run, where the thread left it running (after the third
+        // review, finding 2): concluded before the step is
+        let _ = conclude_left_running(registry.store(), p.workflow_run, p.step, e);
         let _ = record_end(
             registry.store(),
             p.workflow_run,
@@ -575,7 +652,7 @@ fn step_body(p: &StepRun, runner: Runner) -> Result<(), String> {
     };
     // the runs of the steps before: chained per unit to those a link feeds
     // from, and started after those whose files it reads are done
-    let after = loop {
+    let (after, unfed) = loop {
         if p.cancel.load(Ordering::SeqCst) {
             return record_end(
                 registry.store(),
@@ -595,8 +672,15 @@ fn step_body(p: &StepRun, runner: Runner) -> Result<(), String> {
         let mut status_of = |run: i64| -> Result<Option<String>, String> {
             Ok(prows::run(store, run).map_err(err)?.map(|pr| pr.status))
         };
-        match wait_of(&steps, &p.before, &p.waits_for, &p.whole, &mut status_of)? {
-            Wait::Ready(after) => break after,
+        match wait_of(
+            &steps,
+            &p.before,
+            &p.waits_for,
+            &p.whole,
+            &p.optional,
+            &mut status_of,
+        )? {
+            Wait::Ready { after, unfed } => break (after, unfed),
             Wait::NotYet => std::thread::sleep(POLL),
             Wait::Skipped(words) => {
                 return record_end(
@@ -659,11 +743,26 @@ fn step_body(p: &StepRun, runner: Runner) -> Result<(), String> {
             })
         })
         .collect();
+    // a link from a step that fed nothing (an optional input's step that
+    // ended without a run): the input takes nothing, and the units record
+    // why (after the third review, finding 9)
+    let unfed: Vec<crate::pipelines::Unfed> = p
+        .links
+        .iter()
+        .filter_map(|l| {
+            let (_, words) = unfed.iter().find(|(k, _)| *k == l.from_step)?;
+            Some(crate::pipelines::Unfed {
+                input: l.input.clone(),
+                words: words.clone(),
+            })
+        })
+        .collect();
     args.chain = Some(crate::pipelines::Chain {
         workflow_run: p.workflow_run,
         step: p.step,
         after: after.iter().map(|(_, run)| *run).collect(),
         links,
+        unfed,
     });
     let outcome = runner(&p.home, args);
     let mut registry = crate::open(&p.home).map_err(|e| e.message)?;
@@ -990,8 +1089,45 @@ links:
   - {from: a.out, to: b.prev}
 "#;
 
+    /// A bids stand-in with two pick roles: a step fed through its `flair`
+    /// role waits for the whole step before (after the third review,
+    /// finding 1).
+    const BIDS_DESCRIPTOR: &str = r#"name: stand-in-bids
+schema-version: "0.5"
+tool-version: "1"
+container-image:
+  type: docker
+  image: "example.org/stand-in-bids@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+command-line: "run [InputDataset] [OutputLocation]"
+x-nils:
+  analysis-level: session
+  input: {layout: bids, roles: [t1w, flair]}
+  outputs:
+    - {id: seen, kind: output, path-template: "sub-{subject}/ses-{session}/anat/*_desc-seen_T2w.nii.gz"}
+"#;
+
+    const ROLE_WORKFLOW: &str = r#"nils_workflow: 1
+name: into-a-role
+title: An image into a role
+what: "a's image as b's flair"
+steps:
+  - {id: a, pipeline: stand-in}
+  - {id: b, pipeline: stand-in-bids}
+links:
+  - {from: a.out, to: b.flair}
+"#;
+
     /// A registry with the stand-in pipeline and the two-step workflow.
     fn lab(name: &str) -> (nils_dicom::synth::TempDir, Home, rows::Workflow) {
+        lab_of(name, &[DESCRIPTOR], WORKFLOW)
+    }
+
+    /// A registry with these descriptors in the catalog and this workflow.
+    fn lab_of(
+        name: &str,
+        descriptors: &[&str],
+        workflow: &str,
+    ) -> (nils_dicom::synth::TempDir, Home, rows::Workflow) {
         let dir = nils_dicom::synth::TempDir::new(name);
         let home = Home::new(dir.path().join("registry"));
         home.keys(None).add("k", b"nils-fixture-key").unwrap();
@@ -1006,31 +1142,33 @@ links:
                 session_scheme: None,
             })
             .unwrap();
-        let d = nils_pipeline::descriptor::parse(DESCRIPTOR).unwrap();
-        let digest = d.digest();
-        prows::add(
-            registry.store(),
-            &prows::New {
-                name: "stand-in",
-                tool_version: "1",
-                descriptor: &d.document,
-                descriptor_digest: &digest,
-                image: "example.org/stand-in",
-                image_digest: "sha256:aaaa",
-                layout: "stacks",
-                level: "stack",
-                added_by: "test",
-                added_at: "2026-10-25T00:00:00Z",
-                pack: None,
-                pack_digest: None,
-                version_digest: &digest,
-            },
-        )
-        .unwrap();
-        let w = doc::parse(WORKFLOW).unwrap();
+        for text in descriptors {
+            let d = nils_pipeline::descriptor::parse(text).unwrap();
+            let digest = d.digest();
+            prows::add(
+                registry.store(),
+                &prows::New {
+                    name: &d.name,
+                    tool_version: "1",
+                    descriptor: &d.document,
+                    descriptor_digest: &digest,
+                    image: &format!("example.org/{}", d.name),
+                    image_digest: "sha256:aaaa",
+                    layout: d.layout.name(),
+                    level: d.level.name(),
+                    added_by: "test",
+                    added_at: "2026-10-25T00:00:00Z",
+                    pack: None,
+                    pack_digest: None,
+                    version_digest: &digest,
+                },
+            )
+            .unwrap();
+        }
+        let w = doc::parse(workflow).unwrap();
         let (w, _) = rows::add(
             registry.store(),
-            "two",
+            &w.name,
             &w.document,
             &w.digest(),
             "test",
@@ -1088,6 +1226,173 @@ links:
         Err(fail("no container runtime here"))
     }
 
+    /// A runner that claims its pipeline run, as `nils run` does before
+    /// its containers, and then unwinds: the run row is left `running`.
+    fn claims_then_blows_up(home: &Home, args: crate::pipelines::RunArgs) -> Result<(), Exit> {
+        let c = args.chain.as_ref().expect("the step's chain");
+        let mut registry = home.open().unwrap();
+        let p = prows::resolve(registry.store(), "stand-in")
+            .unwrap()
+            .unwrap();
+        let run = prows::start(
+            registry.store(),
+            &prows::NewRun {
+                pipeline_id: p.id,
+                job_id: None,
+                handle_id: Some(1),
+                selection: None,
+                params: &json!({}),
+                runtime: "stand-in",
+                runtime_version: "1",
+                host: "lab",
+                device: "cpu",
+                model_ids: &[],
+                label_set_id: None,
+                place_id: None,
+                scratch_place_id: None,
+                principal: "test",
+                actor: None,
+                started_at: "2026-10-25T00:00:00Z",
+            },
+        )
+        .unwrap();
+        record_step_run(registry.store(), c.workflow_run, c.step, run).unwrap();
+        drop(registry);
+        panic!("the stand-in run blew up after claiming run {run}")
+    }
+
+    /// After the third review (finding 1): a step fed through a pick role
+    /// waits for the whole step before, as one fed through a typed input
+    /// does, since a run binds both as it starts; the run's steps say so
+    /// (`waits_whole`).
+    #[test]
+    fn a_role_fed_step_waits_for_the_whole_step_before() {
+        let (_dir, home, w) = lab_of(
+            "wf-role-whole",
+            &[DESCRIPTOR, BIDS_DESCRIPTOR],
+            ROLE_WORKFLOW,
+        );
+        let r = run_bounded(&home, &w, done_without_a_run);
+        let steps = r.steps.as_array().unwrap();
+        assert_eq!(steps[1]["waits_for"], json!(["a"]), "{steps:?}");
+        assert_eq!(steps[1]["waits_whole"], json!(["a"]), "{steps:?}");
+        // and the wait itself: a run before still running holds it
+        let s = vec![
+            json!({"step": 0, "id": "a", "status": "running", "run": 7}),
+            json!({"step": 1, "id": "b", "status": "queued"}),
+        ];
+        let mut running = |_: i64| Ok(Some("running".to_string()));
+        assert_eq!(
+            wait_of(&s, &[0], &[0], &[0], &[], &mut running).unwrap(),
+            Wait::NotYet
+        );
+    }
+
+    /// After the third review (finding 2): a step thread that unwinds after
+    /// claiming its run leaves no run row `running`: the run is concluded
+    /// failed in the thread's words, the step is failed, and the workflow
+    /// run ends.
+    #[test]
+    fn a_step_whose_thread_dies_leaves_no_running_run() {
+        let (_dir, home, w) = lab("wf-run-left-running");
+        let r = run_bounded(&home, &w, claims_then_blows_up);
+        let steps = r.steps.as_array().unwrap();
+        // step b chains per unit to a's run, so it starts once a's run is
+        // claimed and dies the same way: both runs are concluded
+        let mut registry = home.open().unwrap();
+        for s in steps {
+            assert_eq!(s["status"], "failed", "{steps:?}");
+            let run = s["run"].as_i64().expect("the claimed run");
+            let pr = prows::run(registry.store(), run).unwrap().unwrap();
+            assert_eq!(pr.status, "failed", "{pr:?}");
+            assert!(
+                pr.error
+                    .as_deref()
+                    .unwrap()
+                    .contains("the stand-in run blew up after claiming"),
+                "{pr:?}"
+            );
+            assert!(pr.finished_at.is_some(), "{pr:?}");
+        }
+        assert!(
+            prows::runs_in(registry.store(), "running")
+                .unwrap()
+                .is_empty(),
+            "no run row is left running"
+        );
+        assert_eq!(r.status, "failed", "{r:?}");
+    }
+
+    /// After the third review (finding 2): a run before that is
+    /// `interrupted`, or whose step is over while its row still says
+    /// running, is over to a step read whole; and (finding 9) a step whose
+    /// links all feed an optional input goes on where that step ended
+    /// without a run, recording what fed nothing.
+    #[test]
+    fn an_interrupted_or_concluded_step_before_is_over_and_an_optional_one_may_feed_nothing() {
+        let b = json!({"step": 1, "id": "b", "status": "queued"});
+        let mut interrupted = |_: i64| Ok(Some("interrupted".to_string()));
+        let mut running = |_: i64| Ok(Some("running".to_string()));
+        let s = vec![
+            json!({"step": 0, "id": "a", "status": "running", "run": 7}),
+            b.clone(),
+        ];
+        assert_eq!(
+            wait_of(&s, &[0], &[0], &[0], &[], &mut interrupted).unwrap(),
+            Wait::Ready {
+                after: vec![(0, 7)],
+                unfed: vec![]
+            }
+        );
+        // the step is over though its run row still says running
+        let s = vec![
+            json!({"step": 0, "id": "a", "status": "failed", "run": 7, "error": "boom"}),
+            b.clone(),
+        ];
+        assert_eq!(
+            wait_of(&s, &[0], &[0], &[0], &[], &mut running).unwrap(),
+            Wait::Ready {
+                after: vec![(0, 7)],
+                unfed: vec![]
+            }
+        );
+        // an optional input's step ended without a run: not a skip
+        let s = vec![
+            json!({"step": 0, "id": "a", "status": "failed", "run": null, "error": "boom"}),
+            b.clone(),
+        ];
+        assert_eq!(
+            wait_of(&s, &[0], &[0], &[0], &[0], &mut running).unwrap(),
+            Wait::Ready {
+                after: vec![],
+                unfed: vec![(
+                    0,
+                    "fed by no step for this unit: step 1 (a) ended failed without a run: boom"
+                        .into()
+                )]
+            }
+        );
+        let s = vec![
+            json!({"step": 0, "id": "a", "status": "done", "run": null}),
+            b,
+        ];
+        assert_eq!(
+            wait_of(&s, &[0], &[0], &[0], &[0], &mut running).unwrap(),
+            Wait::Ready {
+                after: vec![],
+                unfed: vec![(
+                    0,
+                    "fed by no step for this unit: step 1 (a) ended done without a run".into()
+                )]
+            }
+        );
+        // a required one still skips
+        assert!(matches!(
+            wait_of(&s, &[0], &[0], &[0], &[], &mut running).unwrap(),
+            Wait::Skipped(_)
+        ));
+    }
+
     /// After review (finding 4): a step before that ended without a run is
     /// terminal to the step after it: one linked to it is skipped with the
     /// reason, one only ordered after it goes on; a step still to run, or a
@@ -1100,7 +1405,7 @@ links:
         // done, no run, linked: skipped and said why
         let s = steps(json!({"step": 0, "id": "a", "status": "done", "run": null}));
         assert_eq!(
-            wait_of(&s, &[0], &[0], &[], &mut over).unwrap(),
+            wait_of(&s, &[0], &[0], &[], &[], &mut over).unwrap(),
             Wait::Skipped(
                 "skipped: step 1 (a) ended done without a run, and this step reads its results"
                     .into()
@@ -1108,37 +1413,46 @@ links:
         );
         // done, no run, only ordered after: nothing to chain to
         assert_eq!(
-            wait_of(&s, &[0], &[], &[], &mut over).unwrap(),
-            Wait::Ready(vec![])
+            wait_of(&s, &[0], &[], &[], &[], &mut over).unwrap(),
+            Wait::Ready {
+                after: vec![],
+                unfed: vec![]
+            }
         );
         // failed with no run: skipped with its words, linked or not
         let s =
             steps(json!({"step": 0, "id": "a", "status": "failed", "run": null, "error": "boom"}));
         assert_eq!(
-            wait_of(&s, &[0], &[], &[], &mut over).unwrap(),
+            wait_of(&s, &[0], &[], &[], &[], &mut over).unwrap(),
             Wait::Skipped("skipped: step 1 (a) failed: boom".into())
         );
         // not yet started, or running without a run yet: waited for
         for status in ["queued", "running"] {
             let s = steps(json!({"step": 0, "id": "a", "status": status, "run": null}));
             assert_eq!(
-                wait_of(&s, &[0], &[0], &[], &mut over).unwrap(),
+                wait_of(&s, &[0], &[0], &[], &[], &mut over).unwrap(),
                 Wait::NotYet
             );
         }
         // a run claimed: chained to it per unit; read whole, waited for
         let s = steps(json!({"step": 0, "id": "a", "status": "running", "run": 7}));
         assert_eq!(
-            wait_of(&s, &[0], &[0], &[], &mut running).unwrap(),
-            Wait::Ready(vec![(0, 7)])
+            wait_of(&s, &[0], &[0], &[], &[], &mut running).unwrap(),
+            Wait::Ready {
+                after: vec![(0, 7)],
+                unfed: vec![]
+            }
         );
         assert_eq!(
-            wait_of(&s, &[0], &[0], &[0], &mut running).unwrap(),
+            wait_of(&s, &[0], &[0], &[0], &[], &mut running).unwrap(),
             Wait::NotYet
         );
         assert_eq!(
-            wait_of(&s, &[0], &[0], &[0], &mut over).unwrap(),
-            Wait::Ready(vec![(0, 7)])
+            wait_of(&s, &[0], &[0], &[0], &[], &mut over).unwrap(),
+            Wait::Ready {
+                after: vec![(0, 7)],
+                unfed: vec![]
+            }
         );
     }
 

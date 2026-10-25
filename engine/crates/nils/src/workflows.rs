@@ -315,14 +315,13 @@ pub(crate) fn add_text(
 pub(crate) fn seed(registry: &mut Registry) -> Result<Vec<Value>, String> {
     let mut added = Vec::new();
     for (name, text) in CATALOG {
-        let w = doc::parse(text).map_err(|e| format!("the shipped workflow {name}: {e}"))?;
-        let digest = w.digest();
-        let held = rows::versions(registry.store(), &w.name).map_err(|e| e.to_string())?;
-        if held.iter().any(|h| h.digest == digest) {
-            continue;
+        // the same document again is the version it is: one read decides
+        // (after the third review, finding 10)
+        let v = add_text(registry, text, Some(rows::STARTER))
+            .map_err(|e| format!("the shipped workflow {name}: {}", e.message))?;
+        if v["added"] == true {
+            added.push(json!({"id": v["id"], "label": v["label"]}));
         }
-        let v = add_text(registry, text, Some(rows::STARTER)).map_err(|e| e.message)?;
-        added.push(json!({"id": v["id"], "label": v["label"]}));
     }
     Ok(added)
 }
@@ -814,6 +813,98 @@ fn family_preflight(
     ))
 }
 
+/// The steps each step waits for whole, by the step's place: those whose
+/// link into it feeds a typed input or a pick role of its descriptor (or
+/// of every member's, for a family), since a run binds both as it starts
+/// (after the third review, finding 1: a role too). The per-unit chaining
+/// is for order-only links, those that meet a pack need.
+pub(crate) fn waits_whole(d: &Workflow, resolved: &[Resolved]) -> Vec<Vec<String>> {
+    d.steps
+        .iter()
+        .zip(resolved)
+        .map(|(s, r)| {
+            let descs = r.descriptors();
+            let mut out = Vec::new();
+            for l in d.links.iter().filter(|l| l.to_step == s.id) {
+                let typed = descs
+                    .iter()
+                    .any(|desc| desc.inputs.iter().any(|t| t.id == l.input));
+                let role = descs.iter().any(|desc| desc.roles.contains(&l.input));
+                if (typed || role) && !out.contains(&l.from_step) {
+                    out.push(l.from_step.clone());
+                }
+            }
+            out
+        })
+        .collect()
+}
+
+/// The steps each step may go on without, by the step's place: those whose
+/// every link into it feeds an `optional` typed input (after the third
+/// review, finding 9). Where such a step ended without a run, or a unit of
+/// it failed or was skipped, the unit here runs without what it fed and
+/// records why.
+pub(crate) fn optional_from(d: &Workflow, resolved: &[Resolved]) -> Vec<Vec<String>> {
+    d.steps
+        .iter()
+        .zip(resolved)
+        .map(|(s, r)| {
+            let descs = r.descriptors();
+            let optional = |input: &str| {
+                !descs.is_empty()
+                    && descs
+                        .iter()
+                        .all(|desc| desc.inputs.iter().any(|t| t.id == input && t.optional))
+            };
+            let froms: Vec<&String> = d
+                .links
+                .iter()
+                .filter(|l| l.to_step == s.id)
+                .map(|l| &l.from_step)
+                .collect();
+            let mut out = Vec::new();
+            for from in froms {
+                if out.contains(from) {
+                    continue;
+                }
+                let all_optional = d
+                    .links
+                    .iter()
+                    .filter(|l| l.to_step == s.id && &l.from_step == from)
+                    .all(|l| optional(&l.input));
+                if all_optional {
+                    out.push(from.clone());
+                }
+            }
+            out
+        })
+        .collect()
+}
+
+/// The plan's bindings of a step's typed inputs to the steps that feed
+/// them (after the third review, finding 4): no run yet, so the pre-flight
+/// reads each as fed by its step, never as missing.
+fn planned_bound(d: &Workflow, i: usize, r: &Resolved) -> crate::pipelines::Bound {
+    let s = &d.steps[i];
+    let mut bound = crate::pipelines::Bound::new();
+    for l in d.links.iter().filter(|l| l.to_step == s.id) {
+        let typed = r
+            .descriptors()
+            .iter()
+            .any(|desc| desc.inputs.iter().any(|t| t.id == l.input));
+        let Some(from) = d.steps.iter().position(|q| q.id == l.from_step) else {
+            continue;
+        };
+        if typed {
+            bound.insert(
+                l.input.clone(),
+                crate::pipelines::Fed::planned(from, &l.from_step, &l.output, &l.input),
+            );
+        }
+    }
+    bound
+}
+
 /// The steps a person's knobs name, checked against the document's: a knob
 /// on a step the document lacks is refused with the step ids named (after
 /// review, finding 9 of the second review), at the plan and at the start.
@@ -893,13 +984,21 @@ pub(crate) fn plan(
     knob_steps(&d, person)?;
     let resolved = resolve_steps(registry.store(), &d);
     let verdicts = doc::plan_links(&d, &members(&d, &resolved));
+    let whole = waits_whole(&d, &resolved);
     let pack = scope
         .pack_dir
         .clone()
         .or_else(|| crate::pack_dir(home, None).ok())
         .and_then(|dir| nils_pack::load(&dir.join(&scope.pack), None).ok());
     let mut steps = Vec::new();
-    for (s, r) in d.steps.iter().zip(&resolved) {
+    // a family step's goal and switches the family does not offer refuse
+    // the plan, as `nils run <family>` refuses them (after the third review,
+    // finding 5): a plan that says runnable is one the run accepts
+    let mut step_refusals: Vec<String> = Vec::new();
+    for (i, (s, r)) in d.steps.iter().zip(&resolved).enumerate() {
+        // the knobs of every step, a family's too: a knob the step does not
+        // let a person set is refused here as at the run
+        let params = step_params(&d, s, person)?;
         let mut doc_ = json!({
             "step": s.id, "of": s.of, "name": s.name, "reference": s.reference(),
             "pipeline": r.run_label(),
@@ -908,9 +1007,11 @@ pub(crate) fn plan(
             "switches": s.switches, "knobs": s.knobs,
             "refused": r.refusal,
             "waits_for": d.fed_by(&s.id),
+            // the steps it waits for whole (a typed input or a role fed by a
+            // link); the rest of its links chain per unit
+            "waits_whole": whole[i],
         });
         if let Some(p) = &r.pipeline {
-            let params = step_params(&d, s, person)?;
             let pre = crate::preflight::check(
                 registry,
                 &crate::preflight::Asked {
@@ -925,6 +1026,7 @@ pub(crate) fn plan(
                     resume: None,
                     replaced: false,
                     person: step_person(s, person),
+                    bound: planned_bound(&d, i, r),
                 },
             );
             doc_["preflight"] = match pre {
@@ -946,13 +1048,19 @@ pub(crate) fn plan(
             doc_["preflight"] =
                 match family_preflight(registry, stored, scope, &step_person(s, person)) {
                     Ok(v) => v,
-                    Err(e) => json!({"error": e}),
+                    Err(e) => {
+                        let words = format!("step {}: {e}", s.id);
+                        doc_["refused"] = json!(words);
+                        step_refusals.push(words);
+                        json!({"error": e})
+                    }
                 };
         }
         steps.push(doc_);
     }
     let counts = doc::verdict_counts(&verdicts);
     let runnable = resolved.iter().all(|r| r.refusal.is_none())
+        && step_refusals.is_empty()
         && verdicts.iter().all(|v| v.verdict != "refused");
     Ok(json!({
         "workflow": w.label(), "workflow_id": w.id, "name": w.name, "version": w.version,
@@ -966,6 +1074,7 @@ pub(crate) fn plan(
             format!("{} steps planned; every link holds", d.steps.len())
         } else {
             let refused: Vec<String> = resolved.iter().filter_map(|r| r.refusal.clone())
+                .chain(step_refusals.iter().cloned())
                 .chain(verdicts.iter().filter(|v| v.verdict == "refused").map(|v| v.words.clone()))
                 .collect();
             format!("not runnable: {}", refused.join("; "))
@@ -1047,7 +1156,16 @@ pub(crate) fn route(
                     ));
                 }
             };
-            let v = add_text(registry, &text, None).map_err(|e| Reply::error(400, e.message))?;
+            // two writers adding versions of one name at once: the one that
+            // lost the version answers 409, never a constraint's words
+            let v = add_text(registry, &text, None).map_err(|e| {
+                let code = if e.message.contains(rows::VERSION_TAKEN) {
+                    409
+                } else {
+                    400
+                };
+                Reply::error(code, e.message)
+            })?;
             Ok(Reply::ok(v))
         })(),
         ["api", "workflows", id] if get => (|| {
@@ -1123,4 +1241,107 @@ pub(crate) fn scope_of_body(
             "a workflow is planned or run over a scope: {select: \"selection:<name>@<v>\"}, a dataset's or a cohort's main scans {select: \"main:<role>@dataset:<name>\"} (or {select: \"main@dataset:<name>\"} for each role the steps need), or {handle: <id>}",
         )
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const STACKS: &str = r#"name: stand-in
+schema-version: "0.5"
+tool-version: "1"
+container-image:
+  type: docker
+  image: "example.org/stand-in@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+command-line: "run [Manifest] [OutputLocation]"
+x-nils:
+  analysis-level: stack
+  input: {layout: stacks}
+  units: apart
+  outputs:
+    - {id: out, kind: image, path-template: "stack-{stack}/out.nii.gz"}
+"#;
+
+    const BIDS: &str = r#"name: stand-in-bids
+schema-version: "0.5"
+tool-version: "1"
+container-image:
+  type: docker
+  image: "example.org/stand-in-bids@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+command-line: "run [InputDataset] [OutputLocation]"
+x-nils:
+  analysis-level: session
+  input: {layout: bids, roles: [t1w, flair]}
+  inputs:
+    - {id: mask, type: "derivative:mask", optional: true}
+    - {id: prior, type: "derivative:image"}
+  outputs:
+    - {id: seen, kind: output, path-template: "sub-{subject}/ses-{session}/anat/*_desc-seen_T2w.nii.gz"}
+"#;
+
+    fn resolved(text: &str) -> Resolved {
+        Resolved {
+            pipeline: None,
+            descriptor: Some(descriptor::parse(text).unwrap()),
+            pack: None,
+            family: None,
+            refusal: None,
+        }
+    }
+
+    /// After the third review (findings 1 and 9): a step fed through a
+    /// role waits for the whole step before, as one fed through a typed
+    /// input does; a step whose every link from another feeds an optional
+    /// input may go on without that step; an order-only link does neither.
+    #[test]
+    fn a_role_or_a_typed_input_waits_whole_and_an_optional_input_may_be_unfed() {
+        let text = r#"nils_workflow: 1
+name: waits
+steps:
+  - {id: a, pipeline: stand-in}
+  - {id: m, pipeline: stand-in}
+  - {id: o, pipeline: stand-in}
+  - {id: b, pipeline: stand-in-bids}
+links:
+  - {from: a.out, to: b.flair}
+  - {from: m.out, to: b.mask}
+  - {from: o.out, to: b.nothing}
+"#;
+        let d = doc::parse(text).unwrap();
+        let r = vec![
+            resolved(STACKS),
+            resolved(STACKS),
+            resolved(STACKS),
+            resolved(BIDS),
+        ];
+        let whole = waits_whole(&d, &r);
+        assert_eq!(
+            whole[3],
+            vec!["a".to_string(), "m".to_string()],
+            "{whole:?}"
+        );
+        assert!(whole[0].is_empty() && whole[1].is_empty() && whole[2].is_empty());
+        let optional = optional_from(&d, &r);
+        assert_eq!(optional[3], vec!["m".to_string()], "{optional:?}");
+        // the plan's bindings: the typed input, not the role
+        let bound = planned_bound(&d, 3, &r[3]);
+        assert_eq!(bound.len(), 1, "{bound:?}");
+        assert_eq!(bound["mask"].planned_words(), "fed by step m");
+        assert!(bound["mask"].is_planned());
+        // a step with a role link and a typed link from one step waits whole
+        // and is not optional, since the role is not
+        let text = r#"nils_workflow: 1
+name: both
+steps:
+  - {id: a, pipeline: stand-in}
+  - {id: b, pipeline: stand-in-bids}
+links:
+  - {from: a.out, to: b.flair}
+  - {from: a.out, to: b.mask}
+"#;
+        let d = doc::parse(text).unwrap();
+        let r = vec![resolved(STACKS), resolved(BIDS)];
+        assert_eq!(waits_whole(&d, &r)[1], vec!["a".to_string()]);
+        assert!(optional_from(&d, &r)[1].is_empty());
+    }
 }

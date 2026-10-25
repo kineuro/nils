@@ -2323,7 +2323,9 @@ fn routed(
     ) {
         return r;
     }
-    if let Some(r) = crate::provenance::route(registry, caller, quasi, get, &segs) {
+    // a session id, `<subject>@<label>`, arrives percent-encoded (`%40`),
+    // so the door reads the decoded segments as the pipelines doors do
+    if let Some(r) = crate::provenance::route(registry, caller, quasi, get, &pipeline_segs) {
         return r;
     }
     // record 56 §6.4, §6.5: the pack's quality, the proposed rule changes

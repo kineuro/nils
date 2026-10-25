@@ -1236,6 +1236,9 @@ pub(crate) fn run_doc_at(store: &mut Store, r: &Run, quasi: bool) -> Result<Valu
                 // after review (finding 8 of the second review): why no kept
                 // result was reused, where one was looked for
                 "reuse": u.pack["reuse"],
+                // after the third review (finding 9): the optional inputs the
+                // chain fed nothing for, each with why
+                "fed": u.pack["fed"],
             }))
             .collect::<Vec<_>>()
     );
@@ -2599,6 +2602,36 @@ pub(crate) struct Chain {
     /// this step binds, carried from the plan into the run's resolution of
     /// its inputs.
     pub(crate) links: Vec<ChainLink>,
+    /// After the third review (finding 9): the optional typed inputs whose
+    /// link comes from a step that ended without a run: each takes nothing,
+    /// and every unit records why under `fed`.
+    pub(crate) unfed: Vec<Unfed>,
+}
+
+/// An optional typed input a link feeds from a step that fed nothing.
+#[derive(Debug, Clone)]
+pub(crate) struct Unfed {
+    pub(crate) input: String,
+    pub(crate) words: String,
+}
+
+/// What the chain says fed nothing for a unit, by input (after the third
+/// review, finding 9): the step-level words of every unfed link, and the
+/// gate's per-unit notes where the unit before failed or was skipped at a
+/// step whose link feeds an optional input.
+fn fed_notes(chain: Option<&Chain>, notes: Option<&Vec<(String, String)>>) -> Value {
+    let mut fed = serde_json::Map::new();
+    for u in chain.into_iter().flat_map(|c| c.unfed.iter()) {
+        fed.insert(u.input.clone(), json!(u.words));
+    }
+    for (input, words) in notes.into_iter().flatten() {
+        fed.insert(input.clone(), json!(words));
+    }
+    if fed.is_empty() {
+        Value::Null
+    } else {
+        Value::Object(fed)
+    }
 }
 
 /// One link of the workflow into this step, bound to the run of the step
@@ -2648,9 +2681,41 @@ pub(crate) struct Fed {
     /// By stack, the run that made the fed step's result for it: the fed
     /// run, or the run its unit reused from.
     by_stack: BTreeMap<i64, i64>,
+    /// After the third review (finding 4): a binding the plan knows before
+    /// any run exists, the fed step's declared output; the pre-flight reads
+    /// such an input as fed by the step, never as missing.
+    planned: bool,
 }
 
 impl Fed {
+    /// The plan's binding of a typed input to the step that will feed it:
+    /// no run yet.
+    pub(crate) fn planned(from_step: usize, from_id: &str, output: &str, input: &str) -> Fed {
+        Fed {
+            link: ChainLink {
+                from_step,
+                from_id: from_id.to_string(),
+                run: 0,
+                output: output.to_string(),
+                input: input.to_string(),
+                role: false,
+            },
+            runs: BTreeSet::new(),
+            by_stack: BTreeMap::new(),
+            planned: true,
+        }
+    }
+
+    /// Whether this is the plan's binding, with no run behind it.
+    pub(crate) fn is_planned(&self) -> bool {
+        self.planned
+    }
+
+    /// `fed by step <X>`: how the pre-flight words a planned binding.
+    pub(crate) fn planned_words(&self) -> String {
+        format!("fed by step {}", self.link.from_id)
+    }
+
     fn of(store: &mut Store, link: &ChainLink) -> Result<Fed, String> {
         let mut runs: BTreeSet<i64> = BTreeSet::from([link.run]);
         let mut by_stack: BTreeMap<i64, i64> = BTreeMap::new();
@@ -2667,13 +2732,18 @@ impl Fed {
             link: link.clone(),
             runs,
             by_stack,
+            planned: false,
         })
     }
 
     /// Whether a registered derivative is one the link feeds: of a stack,
     /// the run that made the fed step's result for that stack; of a
-    /// session or a subject, any run the fed step's units stand for.
+    /// session or a subject, any run the fed step's units stand for. A
+    /// planned binding has no run, and takes nothing.
     fn takes(&self, r: &derivative::Derivative) -> bool {
+        if self.planned {
+            return false;
+        }
         let Some(run) = r.run_id else {
             return false;
         };
@@ -4542,6 +4612,58 @@ fn released_of(
     Ok(units.into_values().collect())
 }
 
+/// The image format of a file by its name: everything after the first `.`
+/// of the file name (`nii.gz`, `mgz`), or nothing for a name without one.
+fn image_format(name: &str) -> String {
+    name.split_once('.')
+        .map(|(_, ext)| ext.to_string())
+        .unwrap_or_default()
+}
+
+/// Write the fed image over the files the release placed for a role's
+/// stack (after the third review, finding 7): the image files of the stem
+/// in `folder`, never its sidecar, and only where their format is the fed
+/// image's (`.nii.gz` over `.nii.gz`); answers the files written, or the
+/// two formats where they differ (the fed image's, the placed file's) and
+/// nothing is written. An error is the folder or a copy failing.
+fn bind_role_files(
+    folder: &Path,
+    stem: &str,
+    from: &Path,
+) -> Result<Result<Vec<String>, (String, String)>, String> {
+    let fed_format = image_format(
+        &from
+            .file_name()
+            .map(|f| f.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+    );
+    let mut targets: Vec<(PathBuf, String)> = Vec::new();
+    for e in std::fs::read_dir(folder)
+        .map_err(|e| format!("{}: {e}", folder.display()))?
+        .flatten()
+    {
+        let name = e.file_name().to_string_lossy().into_owned();
+        // the image files of the stem, never its sidecar
+        if !name.starts_with(&format!("{stem}.")) || name.ends_with(".json") {
+            continue;
+        }
+        // what follows `<stem>.` is the placed file's format
+        let placed_format = name[stem.len() + 1..].to_string();
+        if placed_format != fed_format {
+            return Ok(Err((format!(".{fed_format}"), format!(".{placed_format}"))));
+        }
+        targets.push((e.path(), name));
+    }
+    let mut files = Vec::new();
+    for (at, name) in targets {
+        let _ = std::fs::remove_file(&at);
+        std::fs::copy(from, &at)
+            .map_err(|e| format!("{}: binding {}: {e}", at.display(), from.display()))?;
+        files.push(name);
+    }
+    Ok(Ok(files))
+}
+
 /// After review (finding 3 of the second review): a pick role a workflow
 /// link feeds takes the fed step's run's image as the role's file for each
 /// unit: the newest image that run made of the unit (its stack, its session
@@ -4667,22 +4789,27 @@ fn bind_roles(
                     continue;
                 };
                 let folder = input.join(dir);
-                let mut files: Vec<String> = Vec::new();
-                for e in std::fs::read_dir(&folder)
-                    .map_err(|e| format!("{}: {e}", folder.display()))?
-                    .flatten()
-                {
-                    let name = e.file_name().to_string_lossy().into_owned();
-                    // the image files of the stem, never its sidecar
-                    if !name.starts_with(&format!("{stem}.")) || name.ends_with(".json") {
-                        continue;
+                // after the third review (finding 7): bound only where the
+                // image formats agree; converting is out of scope, so a unit
+                // whose formats differ is skipped with both named
+                let files = match bind_role_files(&folder, stem, &from)? {
+                    Ok(files) => files
+                        .into_iter()
+                        .map(|name| format!("{dir}/{name}"))
+                        .collect::<Vec<_>>(),
+                    Err(formats) => {
+                        unbound.entry(u.id.clone()).or_default().push(format!(
+                            "{}: {} made {} as {}, and the release placed the {} role as {}; converting between the two formats is not done",
+                            l.words(&d.name),
+                            fed.words(),
+                            dv.path,
+                            formats.0,
+                            l.input,
+                            formats.1
+                        ));
+                        break;
                     }
-                    let at = e.path();
-                    let _ = std::fs::remove_file(&at);
-                    std::fs::copy(&from, &at)
-                        .map_err(|e| format!("{}: binding {}: {e}", at.display(), dv.path))?;
-                    files.push(format!("{dir}/{name}"));
-                }
+                };
                 bound.push(json!({
                     "unit": u.id, "role": l.input, "stack": s, "from": l.from_id, "run": l.run,
                     "derivative": dv.id, "path": dv.path, "sha256": dv.sha256, "files": files,
@@ -6247,9 +6374,9 @@ fn run_parts_at_once(
         todo.len(),
         plan.at_once
     );
-    let adopt: Option<i64> = std::env::var(job::ADOPT_VAR)
-        .ok()
-        .and_then(|v| v.trim().parse().ok());
+    // the worker's job this process runs as (after the third review, finding
+    // 6: as the parts in turn read it, never the variable by hand)
+    let adopt: Option<i64> = job::adopted_job();
     let (ended, stopped) = schedule_parts(home, todo, plan.at_once, count, adopt, run_part);
     let done: std::collections::BTreeSet<usize> = ended
         .iter()
@@ -7398,6 +7525,10 @@ struct Batch {
     /// Whether its units were judged again as the chain released them
     /// (after review, finding 10).
     judged_at_start: bool,
+    /// After the third review (finding 9): by unit, the optional inputs
+    /// the step before fed nothing for, with why, as the chain's gate
+    /// found when it released the batch.
+    unfed: BTreeMap<String, Vec<(String, String)>>,
 }
 
 /// What a reuse check answers for each unit of a batch: the unit, whether
@@ -7902,7 +8033,12 @@ fn execute_run(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Resul
     // links bind: a typed input to the fed step's run, a role to its image
     let (bound, role_links) = bound_of(registry.store(), x.args.chain.as_ref(), d)?;
     let (bound_roles, roles_unbound) = bind_roles(registry, x, &m, &input, &role_links, d)?;
-    let taken = derivative_inputs(registry.store(), d, x.stacks, &lane_places(x), &bound)?;
+    let mut taken = derivative_inputs(registry.store(), d, x.stacks, &lane_places(x), &bound)?;
+    // after the third review (finding 9): an optional input whose link comes
+    // from a step that fed nothing takes nothing, never another run's
+    for u in x.args.chain.iter().flat_map(|c| c.unfed.iter()) {
+        taken.insert(u.input.clone(), Vec::new());
+    }
     let mut made_by = MadeBy::default();
     for t in d.inputs.iter().filter(|t| t.ty.starts_with("derivative:")) {
         let kind = t.ty.trim_start_matches("derivative:");
@@ -7973,6 +8109,9 @@ fn execute_run(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Resul
         // role files the chain bound for each unit
         "links": x.args.chain.as_ref().map_or_else(Vec::new, |c| c.links.iter().map(ChainLink::doc).collect::<Vec<_>>()),
         "bound_roles": bound_roles,
+        // after the third review (finding 9): the optional inputs fed by
+        // no step, with why
+        "unfed": fed_notes(x.args.chain.as_ref(), None),
         // the secrets it reads, by id and where it sees them: never a path
         // on the host or a byte of the file (record 49 R3)
         "secrets": x.secrets.iter().map(|g| json!({"id": g.secret.id, "mount": g.secret.mount})).collect::<Vec<_>>(),
@@ -8173,6 +8312,12 @@ fn execute_run(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Resul
             };
             let (ck, rk, members) = jd.keys(registry.store(), u, of, j);
             let mut doc = jd.record(u, of, j, members, "run");
+            // after the third review (finding 9): the optional inputs the
+            // chain feeds nothing for, and why
+            let fed = fed_notes(x.args.chain.as_ref(), None);
+            if !fed.is_null() {
+                doc["fed"] = fed;
+            }
             // section 8.5 (G6): a step whose result key matches a kept result
             // is not run again; the unit records "reused from run N". After
             // review (finding 9): the kept result is found here without
@@ -8312,6 +8457,7 @@ fn execute_run(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Resul
                 rel_out: rel_out.clone(),
                 log: run_dir.join("log.txt"),
                 judged_at_start: false,
+                unfed: BTreeMap::new(),
             },
             Units::Apart => {
                 let key = folder_word(&m.units[units[0]].id)?.to_string();
@@ -8322,6 +8468,7 @@ fn execute_run(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Resul
                     log: run_dir.join("units").join(&key).join("log.txt"),
                     key: Some(key),
                     judged_at_start: false,
+                    unfed: BTreeMap::new(),
                 }
             }
         })
@@ -8794,7 +8941,7 @@ fn schedule(
             // or failed there is skipped here with the same reason
             let chained = x.args.chain.as_ref().filter(|c| !c.after.is_empty());
             if let Some(c) = chained {
-                match chain_gate(registry, c, m, row_of, pending, &mut watch)? {
+                match chain_gate(registry, c, d, m, row_of, pending, &mut watch)? {
                     Gate::Ready => {}
                     Gate::Waiting(words) => {
                         l.waiting = Some(words);
@@ -9042,6 +9189,12 @@ fn judge_again(
         };
         let (ck, rk, members) = jd.keys(registry.store(), u, &of, &j);
         let mut doc = jd.record(u, &of, &j, members, "start");
+        // after the third review (finding 9): what fed nothing for this
+        // unit, the step's unfed links and the gate's notes
+        let fed = fed_notes(x.args.chain.as_ref(), b.unfed.get(&u.id));
+        if !fed.is_null() {
+            doc["fed"] = fed;
+        }
         doc["forecast"] = json!({
             "judged_at": was.pack["judged_at"], "status": was.pack["status"], "words": was.pack["words"],
             "caveats": was.pack["caveats"], "knobs": was.pack["knobs"], "facts": was.pack["facts"],
@@ -9123,17 +9276,29 @@ struct ChainWatch {
     runs: BTreeMap<i64, WatchedRun>,
 }
 
-/// One run before this step: its status, its units' states and outcomes,
-/// and the unit that holds each stack.
+/// One run before this step: whether it is over (after the third review,
+/// finding 2: its row says done, partial, failed, cancelled, interrupted or
+/// gone, or its step is over while the row still says running), its
+/// status, its units' states and outcomes, and the unit that holds each
+/// stack.
 #[derive(Default)]
 struct WatchedRun {
     status: String,
+    over: bool,
     units: BTreeMap<String, (String, Value)>,
     held: BTreeMap<i64, String>,
 }
 
 impl ChainWatch {
-    fn refresh(&mut self, store: &mut Store, after: &[i64]) -> Result<(), String> {
+    /// Read the runs before again, once a second: `workflow_run` is the run
+    /// whose steps they are, so a step that is over (its thread ended, its
+    /// row terminal) makes its run over whatever the run row says.
+    fn refresh(
+        &mut self,
+        store: &mut Store,
+        workflow_run: i64,
+        after: &[i64],
+    ) -> Result<(), String> {
         if self
             .looked
             .is_some_and(|t| t.elapsed() < Duration::from_secs(1))
@@ -9141,6 +9306,21 @@ impl ChainWatch {
             return Ok(());
         }
         self.looked = Some(Instant::now());
+        // the steps of the workflow run that are over, by their run
+        let steps_over: BTreeSet<i64> = nils_registry::workflow::run(store, workflow_run)
+            .map_err(|e| e.to_string())?
+            .map(|r| {
+                r.steps
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter(|s| {
+                        crate::workflow_run::step_is_over(s["status"].as_str().unwrap_or("queued"))
+                    })
+                    .filter_map(|s| s["run"].as_i64())
+                    .collect()
+            })
+            .unwrap_or_default();
         for run in after {
             let status = rows::run(store, *run)
                 .map_err(|e| e.to_string())?
@@ -9159,6 +9339,7 @@ impl ChainWatch {
                     .flat_map(|(unit, stacks)| stacks.into_iter().map(move |s| (s, unit.clone())))
                     .collect();
             }
+            seen.over = status != "running" || steps_over.contains(run);
             seen.status = status;
             seen.units = units;
         }
@@ -9169,7 +9350,7 @@ impl ChainWatch {
     /// a result, else why this unit waits or is skipped.
     fn unit_says(
         run: i64,
-        run_status: &str,
+        w: &WatchedRun,
         name: &str,
         state: &str,
         outcome: &Value,
@@ -9188,13 +9369,22 @@ impl ChainWatch {
                 }),
             };
         }
-        if matches!(run_status, "running" | "interrupted") {
+        if !w.over {
             return Some(Upstream::NotYet);
         }
+        // the run is over with this unit not: interrupted, or its step ended
+        // (after the third review, finding 2), never "not yet" for ever
         Some(Upstream::Skipped {
             run,
-            status: run_status.to_string(),
-            words: format!("the step before ended {run_status} while its unit {name} was {state}"),
+            status: w.status.clone(),
+            words: format!(
+                "the step before was {} while its unit {name} was {state}",
+                if w.status == "running" {
+                    "over"
+                } else {
+                    w.status.as_str()
+                }
+            ),
         })
     }
 
@@ -9203,56 +9393,71 @@ impl ChainWatch {
     /// when every stack of it was in a unit before that is over and made a
     /// result; skipped with the reason where one of them was skipped or
     /// failed, or no unit before held it once that run is over; not yet
-    /// while the run before still runs.
-    fn of(&self, unit: &str, stacks: &[i64]) -> Upstream {
+    /// while the run before still runs. A run in `optional` (after the
+    /// third review, finding 9: every link from it feeds an optional typed
+    /// input) never skips the unit: what it would have said is answered as
+    /// a note with `Ready`, for the unit to record and run without it.
+    fn of(&self, unit: &str, stacks: &[i64], optional: &BTreeSet<i64>) -> Upstream {
+        let mut notes: Vec<(i64, String)> = Vec::new();
         for (run, w) in &self.runs {
-            let running = matches!(w.status.as_str(), "running" | "interrupted");
-            if let Some((state, outcome)) = w.units.get(unit) {
-                if let Some(says) = Self::unit_says(*run, &w.status, unit, state, outcome) {
-                    return says;
+            let says = self.one(*run, w, unit, stacks);
+            match says {
+                Upstream::Ready(_) => {}
+                Upstream::NotYet => return Upstream::NotYet,
+                Upstream::Skipped { run, words, .. } if optional.contains(&run) => {
+                    notes.push((run, words));
                 }
-                continue;
+                skipped => return skipped,
             }
-            if stacks.is_empty() || w.held.is_empty() {
-                if running {
-                    // its units may not be made yet
-                    return Upstream::NotYet;
+        }
+        Upstream::Ready(notes)
+    }
+
+    /// What one run before says of the unit.
+    fn one(&self, run: i64, w: &WatchedRun, unit: &str, stacks: &[i64]) -> Upstream {
+        if let Some((state, outcome)) = w.units.get(unit) {
+            return Self::unit_says(run, w, unit, state, outcome)
+                .unwrap_or(Upstream::Ready(Vec::new()));
+        }
+        if stacks.is_empty() || w.held.is_empty() {
+            if !w.over {
+                // its units may not be made yet
+                return Upstream::NotYet;
+            }
+            return Upstream::Skipped {
+                run,
+                status: w.status.clone(),
+                words: format!("the step before (run {run}) had no unit {unit}"),
+            };
+        }
+        for s in stacks {
+            match w.held.get(s) {
+                None if !w.over => return Upstream::NotYet,
+                None => {
+                    return Upstream::Skipped {
+                        run,
+                        status: w.status.clone(),
+                        words: format!("the step before (run {run}) had no unit holding stack {s}"),
+                    };
                 }
-                return Upstream::Skipped {
-                    run: *run,
-                    status: w.status.clone(),
-                    words: format!("the step before (run {run}) had no unit {unit}"),
-                };
-            }
-            for s in stacks {
-                match w.held.get(s) {
-                    None if running => return Upstream::NotYet,
-                    None => {
-                        return Upstream::Skipped {
-                            run: *run,
-                            status: w.status.clone(),
-                            words: format!(
-                                "the step before (run {run}) had no unit holding stack {s}"
-                            ),
-                        };
-                    }
-                    Some(name) => {
-                        let Some((state, outcome)) = w.units.get(name) else {
-                            return Upstream::NotYet;
-                        };
-                        if let Some(says) = Self::unit_says(*run, &w.status, name, state, outcome) {
-                            return says;
-                        }
+                Some(name) => {
+                    let Some((state, outcome)) = w.units.get(name) else {
+                        return Upstream::NotYet;
+                    };
+                    if let Some(says) = Self::unit_says(run, w, name, state, outcome) {
+                        return says;
                     }
                 }
             }
         }
-        Upstream::Ready
+        Upstream::Ready(Vec::new())
     }
 }
 
 enum Upstream {
-    Ready,
+    /// Fed, with the notes of the optional runs that fed nothing for the
+    /// unit: `(run, why)`.
+    Ready(Vec<(i64, String)>),
     NotYet,
     Skipped {
         run: i64,
@@ -9268,22 +9473,50 @@ enum Upstream {
 fn chain_gate(
     registry: &mut Registry,
     c: &Chain,
+    d: &Descriptor,
     m: &Materialised,
     row_of: &BTreeMap<String, (i64, String)>,
     pending: &mut std::collections::VecDeque<Batch>,
     watch: &mut ChainWatch,
 ) -> Result<Gate, String> {
-    watch.refresh(registry.store(), &c.after)?;
+    watch.refresh(registry.store(), c.workflow_run, &c.after)?;
+    // after the third review (finding 9): the runs before whose every link
+    // into this step feeds an optional typed input never skip a unit; the
+    // unit runs without what they fed, recording why
+    let optional: BTreeSet<i64> = c
+        .after
+        .iter()
+        .copied()
+        .filter(|run| {
+            let links: Vec<&ChainLink> = c.links.iter().filter(|l| l.run == *run).collect();
+            !links.is_empty()
+                && links
+                    .iter()
+                    .all(|l| !l.role && d.inputs.iter().any(|t| t.id == l.input && t.optional))
+        })
+        .collect();
     let n = pending.len();
     let mut waiting = 0usize;
     for _ in 0..n {
-        let Some(b) = pending.pop_front() else { break };
+        let Some(mut b) = pending.pop_front() else {
+            break;
+        };
         let mut skipped: Option<(String, i64, String, String)> = None;
         let mut not_yet = false;
+        let mut unfed: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
         for &i in &b.units {
             let id = &m.units[i].id;
-            match watch.of(id, &m.units[i].stacks) {
-                Upstream::Ready => {}
+            match watch.of(id, &m.units[i].stacks, &optional) {
+                Upstream::Ready(notes) => {
+                    for (run, why) in notes {
+                        for l in c.links.iter().filter(|l| l.run == run) {
+                            unfed.entry(id.clone()).or_default().push((
+                                l.input.clone(),
+                                format!("fed by no step for this unit: {why}"),
+                            ));
+                        }
+                    }
+                }
                 Upstream::NotYet => not_yet = true,
                 Upstream::Skipped { run, status, words } => {
                     skipped = Some((id.clone(), run, status, words));
@@ -9316,6 +9549,28 @@ fn chain_gate(
             pending.push_back(b);
             continue;
         }
+        // what fed nothing for each unit, on its record now (judged again,
+        // the record keeps it), so the unit says why it ran without it
+        for (unit, notes) in &unfed {
+            if let Some((row_id, _)) = row_of.get(unit)
+                && let Some(u) = rows::unit(registry.store(), *row_id).map_err(|e| e.to_string())?
+            {
+                let mut pack = u.pack.clone();
+                if !pack.is_object() {
+                    pack = json!({});
+                }
+                pack["fed"] = fed_notes(Some(c), Some(notes));
+                rows::set_unit_pack(
+                    registry.store(),
+                    *row_id,
+                    &pack,
+                    u.comparability_key.as_deref(),
+                    u.result_key.as_deref(),
+                )
+                .map_err(|e| e.to_string())?;
+            }
+        }
+        b.unfed = unfed;
         pending.push_front(b);
         return Ok(Gate::Ready);
     }
@@ -11936,8 +12191,13 @@ pub(crate) fn derivatives_missing(
                 .collect();
             // after review (finding 3 of the second review): an input a
             // link feeds is bound to the fed run; a unit that run made no
-            // file of is skipped with the link's words
+            // file of is skipped with the link's words. At the plan (after
+            // the third review, finding 4) the binding has no run yet: the
+            // input is fed by the step, not missing
             if let Some(fed) = bound.get(&t.id) {
+                if fed.is_planned() {
+                    continue;
+                }
                 let made: Vec<&&derivative::Derivative> =
                     own.iter().filter(|r| fed.takes(r)).collect();
                 if made
@@ -13238,11 +13498,13 @@ x-nils:
                 json!({"status": status, "error": format!("{status} upstream")}),
             )
         };
+        let none = BTreeSet::new();
         let mut w = ChainWatch::default();
         w.runs.insert(
             7,
             WatchedRun {
                 status: "running".into(),
+                over: false,
                 units: [
                     ("stack-1".to_string(), over("succeeded")),
                     ("stack-2".to_string(), over("reused")),
@@ -13262,8 +13524,11 @@ x-nils:
                 .collect(),
             },
         );
-        assert!(matches!(w.of("sub-1_ses-a", &[1, 2]), Upstream::Ready));
-        match w.of("sub-1_ses-b", &[2, 3]) {
+        assert!(matches!(
+            w.of("sub-1_ses-a", &[1, 2], &none),
+            Upstream::Ready(_)
+        ));
+        match w.of("sub-1_ses-b", &[2, 3], &none) {
             Upstream::Skipped { run, status, words } => {
                 assert_eq!(
                     (run, status.as_str(), words.as_str()),
@@ -13272,25 +13537,181 @@ x-nils:
             }
             _ => panic!("a session over a failed stack is skipped"),
         }
-        assert!(matches!(w.of("sub-2_ses-a", &[1, 4]), Upstream::NotYet));
-        assert!(matches!(w.of("sub-3_ses-a", &[9]), Upstream::NotYet));
+        assert!(matches!(
+            w.of("sub-2_ses-a", &[1, 4], &none),
+            Upstream::NotYet
+        ));
+        assert!(matches!(w.of("sub-3_ses-a", &[9], &none), Upstream::NotYet));
         // the same name still matches by name
-        assert!(matches!(w.of("stack-1", &[1]), Upstream::Ready));
-        assert!(matches!(w.of("stack-4", &[4]), Upstream::NotYet));
+        assert!(matches!(w.of("stack-1", &[1], &none), Upstream::Ready(_)));
+        assert!(matches!(w.of("stack-4", &[4], &none), Upstream::NotYet));
         // the run before over: a stack no unit held is skipped and says so
         w.runs.get_mut(&7).unwrap().status = "done".into();
-        match w.of("sub-3_ses-a", &[1, 9]) {
+        w.runs.get_mut(&7).unwrap().over = true;
+        match w.of("sub-3_ses-a", &[1, 9], &none) {
             Upstream::Skipped { words, .. } => {
                 assert_eq!(words, "the step before (run 7) had no unit holding stack 9");
             }
             _ => panic!("a stack no unit before held is skipped once that run is over"),
         }
         // a unit whose stacks the registry does not know is matched by name only
-        match w.of("sub-4", &[]) {
+        match w.of("sub-4", &[], &none) {
             Upstream::Skipped { words, .. } => {
                 assert_eq!(words, "the step before (run 7) had no unit sub-4");
             }
             _ => panic!("no stacks and no such name: skipped"),
         }
+    }
+
+    /// After the third review (finding 2): a run before that is
+    /// `interrupted`, or whose step is over while its row still says
+    /// running, is over to the gate: a unit of it not over is skipped with
+    /// the words, never "not yet" for ever. And (finding 9) a run whose
+    /// every link feeds an optional input never skips a unit: what it would
+    /// have said comes back as a note with `Ready`.
+    #[test]
+    fn an_over_run_before_skips_its_unfinished_units_and_an_optional_one_notes_them() {
+        let running = ("running".to_string(), Value::Null);
+        let failed = (
+            "over".to_string(),
+            json!({"status": "failed", "error": "failed upstream"}),
+        );
+        let good = ("over".to_string(), json!({"status": "succeeded"}));
+        let mut w = ChainWatch::default();
+        w.runs.insert(
+            7,
+            WatchedRun {
+                status: "interrupted".into(),
+                over: true,
+                units: [
+                    ("stack-1".to_string(), good.clone()),
+                    ("stack-2".to_string(), running.clone()),
+                    ("stack-3".to_string(), failed.clone()),
+                ]
+                .into_iter()
+                .collect(),
+                held: [(1, "stack-1"), (2, "stack-2"), (3, "stack-3")]
+                    .into_iter()
+                    .map(|(s, u)| (s, u.to_string()))
+                    .collect(),
+            },
+        );
+        let none = BTreeSet::new();
+        assert!(matches!(w.of("stack-1", &[1], &none), Upstream::Ready(_)));
+        match w.of("stack-2", &[2], &none) {
+            Upstream::Skipped { status, words, .. } => {
+                assert_eq!(status, "interrupted");
+                assert_eq!(
+                    words,
+                    "the step before was interrupted while its unit stack-2 was running"
+                );
+            }
+            _ => panic!("an interrupted run's unit is skipped, not waited for"),
+        }
+        // the row says running, but the step is over (its thread ended)
+        w.runs.get_mut(&7).unwrap().status = "running".into();
+        match w.of("stack-2", &[2], &none) {
+            Upstream::Skipped { status, words, .. } => {
+                assert_eq!(status, "running");
+                assert_eq!(
+                    words,
+                    "the step before was over while its unit stack-2 was running"
+                );
+            }
+            _ => panic!("a run whose step is over is over"),
+        }
+        // not over: waited for
+        w.runs.get_mut(&7).unwrap().over = false;
+        assert!(matches!(w.of("stack-2", &[2], &none), Upstream::NotYet));
+        // an optional run: the failed unit is a note, and the unit goes on
+        let optional: BTreeSet<i64> = [7].into_iter().collect();
+        match w.of("stack-3", &[3], &optional) {
+            Upstream::Ready(notes) => {
+                assert_eq!(notes, vec![(7, "failed upstream".to_string())]);
+            }
+            _ => panic!("an optional input's failed unit is a note"),
+        }
+        match w.of("stack-3", &[3], &none) {
+            Upstream::Skipped { words, .. } => assert_eq!(words, "failed upstream"),
+            _ => panic!("a required input's failed unit skips"),
+        }
+        // the notes name the inputs the run feeds, on the unit's record
+        let chain = Chain {
+            workflow_run: 1,
+            step: 1,
+            after: vec![7],
+            links: vec![ChainLink {
+                from_step: 0,
+                from_id: "a".into(),
+                run: 7,
+                output: "out".into(),
+                input: "prev".into(),
+                role: false,
+            }],
+            unfed: vec![Unfed {
+                input: "mask".into(),
+                words: "fed by no step for this unit: step 1 (m) ended done without a run".into(),
+            }],
+        };
+        let fed = fed_notes(
+            Some(&chain),
+            Some(&vec![(
+                "prev".to_string(),
+                "fed by no step for this unit: failed upstream".to_string(),
+            )]),
+        );
+        assert_eq!(fed["prev"], "fed by no step for this unit: failed upstream");
+        assert_eq!(
+            fed["mask"],
+            "fed by no step for this unit: step 1 (m) ended done without a run"
+        );
+        assert!(fed_notes(None, None).is_null());
+    }
+
+    /// After the third review (finding 7): a role's file is bound only
+    /// where the fed image's format is the placed file's; the sidecar is
+    /// never touched, and two formats are named where they differ, with
+    /// nothing written.
+    #[test]
+    fn a_role_is_bound_only_in_the_same_image_format() {
+        let dir = nils_dicom::synth::TempDir::new("bind-role-files");
+        let folder = dir.path().join("sub-1").join("anat");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("sub-1_FLAIR.nii.gz"), b"released").unwrap();
+        std::fs::write(folder.join("sub-1_FLAIR.json"), b"{}").unwrap();
+        std::fs::write(folder.join("sub-1_T1w.nii.gz"), b"other").unwrap();
+        let made = dir.path().join("made");
+        std::fs::create_dir_all(&made).unwrap();
+        std::fs::write(made.join("aligned.nii.gz"), b"aligned").unwrap();
+        std::fs::write(made.join("aligned.mgz"), b"aligned mgz").unwrap();
+        // the same format: the image file is written over, the sidecar kept
+        let files = bind_role_files(&folder, "sub-1_FLAIR", &made.join("aligned.nii.gz"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(files, vec!["sub-1_FLAIR.nii.gz".to_string()]);
+        assert_eq!(
+            std::fs::read(folder.join("sub-1_FLAIR.nii.gz")).unwrap(),
+            b"aligned"
+        );
+        assert_eq!(
+            std::fs::read(folder.join("sub-1_FLAIR.json")).unwrap(),
+            b"{}"
+        );
+        assert_eq!(
+            std::fs::read(folder.join("sub-1_T1w.nii.gz")).unwrap(),
+            b"other"
+        );
+        // another format: both named, nothing written
+        let formats = bind_role_files(&folder, "sub-1_FLAIR", &made.join("aligned.mgz"))
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(formats, (".mgz".to_string(), ".nii.gz".to_string()));
+        assert_eq!(
+            std::fs::read(folder.join("sub-1_FLAIR.nii.gz")).unwrap(),
+            b"aligned"
+        );
+        assert_eq!(image_format("x.nii.gz"), "nii.gz");
+        assert_eq!(image_format("x.mgz"), "mgz");
+        assert_eq!(image_format("noformat"), "");
     }
 }

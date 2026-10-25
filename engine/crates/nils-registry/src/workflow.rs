@@ -81,8 +81,36 @@ fn of(r: &Row) -> Result<Workflow, Error> {
     })
 }
 
+/// The words an [`add`] answers where another writer took the version it
+/// computed, every time it tried: the door answers 409 on them.
+pub const VERSION_TAKEN: &str = "was taken by another writer at the same time";
+
+/// How many times [`add`] computes the next version again after another
+/// writer took it.
+const ADD_TRIES: usize = 3;
+
+/// Whether an error is the unique key refusing a row: the (name, version)
+/// of a workflow another writer inserted between the read and the insert.
+fn is_unique_violation(e: &Error) -> bool {
+    match e {
+        Error::Sqlite(rusqlite::Error::SqliteFailure(f, _)) => {
+            f.code == rusqlite::ErrorCode::ConstraintViolation
+        }
+        Error::Postgres(e) => e
+            .as_db_error()
+            .is_some_and(|d| *d.code() == postgres::error::SqlState::UNIQUE_VIOLATION),
+        _ => false,
+    }
+}
+
 /// Add a document: the name's next version, or the version that already
-/// has this digest. Answers the entry and whether it is new.
+/// has this digest. Answers the entry and whether it is new. Two writers
+/// adding versions of one name at once (after the third review, finding
+/// 8): the version is read and the row inserted in one transaction, and
+/// where the unique key refuses the row because another writer took that
+/// version first, the versions are read again and the insert tried again,
+/// a few times, before the add answers [`VERSION_TAKEN`] in words, never
+/// the constraint's.
 pub fn add(
     store: &mut Store,
     name: &str,
@@ -92,36 +120,67 @@ pub fn add(
     added_at: &str,
     origin: Option<&str>,
 ) -> Result<(Workflow, bool), Error> {
-    let versions = versions(store, name)?;
-    if let Some(same) = versions.iter().find(|w| w.digest == digest) {
-        return Ok((same.clone(), false));
+    let mut version = 0;
+    for _ in 0..ADD_TRIES {
+        store.begin()?;
+        let attempt = (|| -> Result<Result<(Workflow, bool), i64>, Error> {
+            let versions = versions(store, name)?;
+            if let Some(same) = versions.iter().find(|w| w.digest == digest) {
+                return Ok(Ok((same.clone(), false)));
+            }
+            let version = versions.iter().map(|w| w.version).max().unwrap_or(0) + 1;
+            let inserted = store.insert(
+                &Insert::new(
+                    table("workflow"),
+                    &[
+                        "name", "version", "document", "digest", "state", "added_by", "added_at",
+                        "origin",
+                    ],
+                )
+                .returning(&["id"]),
+                &[vec![
+                    Param::from(name),
+                    Param::Int(version),
+                    Param::from(document.to_string()),
+                    Param::from(digest),
+                    Param::from("active"),
+                    Param::from(added_by),
+                    Param::from(added_at),
+                    origin.map_or(Param::Null, Param::from),
+                ]],
+            );
+            let rows = match inserted {
+                Ok(rows) => rows,
+                Err(e) if is_unique_violation(&e) => return Ok(Err(version)),
+                Err(e) => return Err(e),
+            };
+            let id = rows
+                .first()
+                .ok_or_else(|| Error::Message("the workflow was not written back".into()))?
+                .int(0)?;
+            let w = get(store, id)?.ok_or_else(|| Error::Message(format!("no workflow {id}")))?;
+            Ok(Ok((w, true)))
+        })();
+        match attempt {
+            Ok(Ok(answer)) => {
+                store.commit()?;
+                return Ok(answer);
+            }
+            Ok(Err(taken)) => {
+                // another writer took the version between the read and the
+                // insert: read again
+                store.rollback()?;
+                version = taken;
+            }
+            Err(e) => {
+                let _ = store.rollback();
+                return Err(e);
+            }
+        }
     }
-    let version = versions.iter().map(|w| w.version).max().unwrap_or(0) + 1;
-    let rows = store.insert(
-        &Insert::new(
-            table("workflow"),
-            &[
-                "name", "version", "document", "digest", "state", "added_by", "added_at", "origin",
-            ],
-        )
-        .returning(&["id"]),
-        &[vec![
-            Param::from(name),
-            Param::Int(version),
-            Param::from(document.to_string()),
-            Param::from(digest),
-            Param::from("active"),
-            Param::from(added_by),
-            Param::from(added_at),
-            origin.map_or(Param::Null, Param::from),
-        ]],
-    )?;
-    let id = rows
-        .first()
-        .ok_or_else(|| Error::Message("the workflow was not written back".into()))?
-        .int(0)?;
-    let w = get(store, id)?.ok_or_else(|| Error::Message(format!("no workflow {id}")))?;
-    Ok((w, true))
+    Err(Error::Message(format!(
+        "workflow {name}: the version {version} {VERSION_TAKEN}; try again"
+    )))
 }
 
 /// Every version of one name, oldest first.
