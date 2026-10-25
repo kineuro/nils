@@ -122,7 +122,10 @@ pub enum Why {
     /// no datatype for one.
     NoDatatype(String),
     /// Nothing the stack says names a suffix. An SWI image is the case: BIDS
-    /// has no word for one, and inventing one puts a claim in a filename.
+    /// has no word for one, and inventing one puts a claim in a filename. A
+    /// phase image with no base is the other: the run names it after the
+    /// magnitude image of its acquisition ([`build_as`]) and this stands only
+    /// where it has none.
     NoSuffix,
     /// The pack named a suffix the standard does not have in that datatype.
     /// A load-time check cannot catch this, because the datatype may come
@@ -188,6 +191,44 @@ pub fn build(facts: &Facts, map: &Mapping, naming: crate::name::Naming) -> Resul
         &facts.modifiers,
         facts.base,
     );
+    build_with(facts, map, naming, named)
+}
+
+/// Build the name under a suffix the stack did not name itself: the suffix
+/// and datatype of another stack of the same acquisition.
+///
+/// A phase image is the case (Wave 7b, agenda 3.8): the pack gives it no base,
+/// since a phase has no weighting, so nothing it says names a suffix, while
+/// BIDS names it `part-phase` with the suffix of its magnitude image
+/// (`_part-phase_T2starw`, `_part-phase_MEGRE` with its echo). The run finds
+/// the magnitude image and asks for the phase's name under its suffix; the
+/// phase's own facts still decide every entity and the `acq-` label, and the
+/// schema still decides whether `part` is admitted there. Where the standard
+/// has a datatype of its own for the pair the schema does not know it, so the
+/// phase goes beside its magnitude.
+pub fn build_as(
+    facts: &Facts,
+    map: &Mapping,
+    naming: crate::name::Naming,
+    datatype: &str,
+    suffix: &str,
+) -> Result<Name, Why> {
+    let named = nils_pack::bids::Named {
+        datatype: datatype.to_string(),
+        suffix: suffix.to_string(),
+        when_technique: None,
+        entities: BTreeMap::new(),
+        aslcontext: None,
+    };
+    build_with(facts, map, naming, Some(&named))
+}
+
+fn build_with(
+    facts: &Facts,
+    map: &Mapping,
+    naming: crate::name::Naming,
+    named: Option<&nils_pack::bids::Named>,
+) -> Result<Name, Why> {
     // The datatype comes from the suffix where the mapping fixes one, because
     // a suffix is the stronger statement: an ADC map is `dwi` whatever folder
     // the intent cascade put it in.
@@ -432,6 +473,27 @@ impl Name {
             .cloned()
             .collect();
         have.push(("run", n.to_string()));
+        let mut out = self.clone();
+        out.entities = ordered(have);
+        Some(out)
+    }
+
+    /// Say which part of the complex signal this is, `part-mag` on the
+    /// magnitude image whose phase the release names beside it (Wave 7b,
+    /// agenda 3.8). BIDS names the magnitude's part only where a phase of the
+    /// same acquisition is named too; alone, a magnitude image carries no
+    /// `part-`. A name that says its part already is kept. Nothing where the
+    /// group does not admit `part`, as [`Name::with_run`] does for `run`.
+    pub fn with_part(&self, part: &str) -> Option<Name> {
+        if self.entities.iter().any(|(k, _)| *k == "part") {
+            return Some(self.clone());
+        }
+        let group = schema::group_of(self.datatype, self.suffix)?;
+        if !group.allowed.contains(&"part") || !schema::admits("part", part) {
+            return None;
+        }
+        let mut have: Vec<(&'static str, String)> = self.entities.clone();
+        have.push(("part", part.to_string()));
         let mut out = self.clone();
         out.entities = ordered(have);
         Some(out)
@@ -917,6 +979,54 @@ mod tests {
             build(&nothing, &mapping(), Naming::Full),
             Err(Why::NoDatatype("localizer".into()))
         );
+    }
+
+    #[test]
+    fn a_phase_image_is_named_under_its_magnitudes_suffix_with_part_phase() {
+        // Wave 7b, agenda 3.8: the pack gives a phase image no base, so by
+        // itself it has no suffix; named under its magnitude's suffix it is
+        // `part-phase`, with its own acq- label and echo, and the magnitude
+        // beside it takes `part-mag`.
+        let phase = Facts {
+            intent: Some("anat"),
+            constructs: vec!["Phase"],
+            axes: axes(&[("technique", "ME-GRE")]),
+            ..Facts::default()
+        };
+        assert_eq!(build(&phase, &mapping(), Naming::Full), Err(Why::NoSuffix));
+        let named = build_as(&phase, &mapping(), Naming::Full, "anat", "T2starw").unwrap();
+        assert_eq!(
+            named.stem("x", "1"),
+            "sub-x_ses-1_acq-MEGRE_part-phase_T2starw"
+        );
+        assert_eq!(named.dir("x", "1"), "sub-x/ses-1/anat");
+        // with an echo, under a multi-echo suffix that requires it
+        let echo = Facts {
+            echo: Some(2),
+            ..phase.clone()
+        };
+        let named = build_as(&echo, &mapping(), Naming::Full, "anat", "MEGRE").unwrap();
+        assert_eq!(named.stem("x", "1"), "sub-x_ses-1_echo-2_part-phase_MEGRE");
+        // the magnitude: a plain image with a base takes part-mag beside it,
+        // one that says its part already is kept, and a suffix that does not
+        // admit part gives nothing
+        let mag = build(&t1w(), &mapping(), Naming::Full).unwrap();
+        assert_eq!(mag.stem("x", "1"), "sub-x_ses-1_T1w");
+        let both = mag.with_part("mag").unwrap();
+        assert_eq!(both.stem("x", "1"), "sub-x_ses-1_part-mag_T1w");
+        assert_eq!(both.with_part("mag").unwrap(), both);
+        let adc = Facts {
+            intent: Some("dwi"),
+            constructs: vec!["ADC"],
+            ..Facts::default()
+        };
+        let adc = build(&adc, &mapping(), Naming::Full).unwrap();
+        assert!(adc.with_part("mag").is_none());
+        // a suffix the schema does not have in that datatype is still refused
+        assert!(matches!(
+            build_as(&phase, &mapping(), Naming::Full, "anat", "nothing"),
+            Err(Why::NotInSchema(_, _))
+        ));
     }
 
     #[test]

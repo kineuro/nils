@@ -37,6 +37,7 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 - The post-contrast step's hint (how many scans its model would add an answer to) is counted in one pass over the axes of the stacks whose base is T1w: on 450,000 synthetic stacks under PostgreSQL 3.7 s where it took 20 s, the same count.
 - A run queued at the jobs door takes `--chunk N` as the keyboard does, a whole number of stacks above 0; the OpenAPI 7 contract is amended in place, additively.
 - The converter's advice names the software place: a run's dcm2niix failure, a release that cannot run dcm2niix and the pre-flight's converter check say `nils software install dcm2niix` or the desk's Settings > Software.
+- A phase image takes a BIDS name. The MRI pack gives a phase image no base, since a phase has no weighting, so nothing it said named a BIDS suffix and the release left it out of the tree (`sourcedata/`, counted `no_suffix`). A BIDS release now names it `part-phase` under the suffix and datatype of the magnitude image of its acquisition (same subject and session, same echo, the same series or a series of the same protocol and frame of reference), `_part-phase_T2starw`, `_echo-2_part-phase_MEGRE`, and that magnitude takes `part-mag` beside it, which BIDS asks only where a phase is named too. A phase with no magnitude keeps its reason. The release report counts the names decided this way (`part_phase`), as it counts the shared names.
 
 ## [1.0.0-beta.1] - 2026-10-17
 

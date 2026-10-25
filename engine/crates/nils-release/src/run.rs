@@ -222,6 +222,12 @@ pub struct Report {
     /// Among the copies of one acquisition whose original this version does
     /// not write, the first in stack order is written itself.
     pub written_twice: i64,
+    /// Wave 7b (agenda 3.8): the phase images this version holds that were
+    /// named `part-phase` under the suffix of the magnitude image of their
+    /// acquisition, which by themselves name no suffix and went nowhere
+    /// before. Counted as the shared names are, since each is a name the
+    /// release decided rather than read. Zero in a descriptive tree.
+    pub part_phase: i64,
     /// Wave 7a §8.1: every name a difference or a number decided, with the
     /// property and the value, which is the release's record of them.
     pub decided: Vec<DecidedName>,
@@ -1329,6 +1335,7 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
         report.repeats = held(&shared.repeated);
         report.not_repeats = held(&shared.separated);
         report.numbered = held(&shared.numbered);
+        report.part_phase = held(&shared.part_phase);
         report.shared_names = shared
             .name_groups
             .iter()
@@ -3802,6 +3809,20 @@ fn write_bids(
     let made = made.and_then(|made| {
         let datatype = job.place.dir.rsplit('/').next().unwrap_or("");
         let raw = job.place.dir.starts_with("sub-") && job.place.dir.split('/').count() == 3;
+        // Wave 7b (agenda 3.8): BIDS requires `Units` of a phase image, `rad`
+        // or `arbitrary`, and the converter writes none since no header says.
+        // The pixels are written as stored, so they are in arbitrary units;
+        // a sidecar that states its units already is kept.
+        if raw && stem.contains("_part-phase_") {
+            let sidecar = into.join(format!("{stem}.json"));
+            let stated = std::fs::read_to_string(&sidecar)
+                .ok()
+                .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+                .is_some_and(|d| d.get("Units").is_some_and(|u| !u.is_null()));
+            if !stated {
+                add_to_sidecar(&sidecar, "Units", serde_json::Value::from("arbitrary"));
+            }
+        }
         let lacks = match raw {
             true => crate::bids::sidecar::gaps(datatype, &stem, &into, &made.files),
             false => Vec::new(),
@@ -4605,8 +4626,8 @@ fn places(
                 f.slice_centre_mm, f.field_strength_normalized, f.pixel_spacing_row, \
                 f.pixel_spacing_col, f.n_instances, f.temporal_position, \
                 f.temporal_positions, f.series_number, f.centre_x_mm, f.centre_y_mm, \
-                f.centre_z_mm \
-         FROM {} f ORDER BY f.stack_id",
+                f.centre_z_mm, se.frame_of_reference_uid \
+         FROM {} f LEFT JOIN {} se ON se.id = f.series_id ORDER BY f.stack_id",
         text("orientation"),
         text("split_reason"),
         text("echo_numbers"),
@@ -4641,6 +4662,10 @@ fn places(
         text("earliest_acquisition_date"),
         text("earliest_acquisition_time"),
         store.qualified("stack_fingerprint"),
+        // 58: the series' frame of reference, which tells a phase image's
+        // magnitude image from another series of the same protocol (Wave 7b,
+        // agenda 3.8)
+        store.qualified("series"),
     );
 
     // Bucket by subject, session and folder, which is the directory a name has
@@ -4671,6 +4696,11 @@ fn places(
     let mut stated: HashMap<i64, BTreeMap<String, Vec<String>>> = HashMap::new();
     // record 55, ruling 23: each stack's acquisition family, for its sidecar
     let mut families: HashMap<i64, &'static str> = HashMap::new();
+    // Wave 7b (agenda 3.8): what finding a phase image's magnitude image reads
+    // of every stack, and the phase images that have no suffix of their own,
+    // named once every stack is read.
+    let mut mates: HashMap<i64, Mate> = HashMap::new();
+    let mut phases: Vec<(i64, PhaseFacts)> = Vec::new();
 
     for r in &rows {
         let stack = r.int(0)?;
@@ -4962,6 +4992,47 @@ fn places(
                     n.stem("s", "s"),
                 ));
         }
+        // Wave 7b (agenda 3.8): what a phase image's partner search reads
+        let part = pack
+            .bids
+            .part_of(&constructs.iter().map(String::as_str).collect::<Vec<_>>())
+            .map(|(_, p)| p.to_string());
+        // (with no base the intent cascade may give it no datatype either;
+        // the partner's datatype answers both)
+        if matches!(
+            built,
+            Err(crate::bids::name::Why::NoSuffix | crate::bids::name::Why::NoDatatype(_))
+        ) && part.as_deref() == Some("phase")
+        {
+            phases.push((stack, PhaseFacts::of(&facts)));
+        }
+        mates.insert(
+            stack,
+            Mate {
+                subject,
+                label: label.clone(),
+                series: r.int(3)?,
+                series_number: r.opt_int(54)?,
+                echo: facts.echo,
+                echo_time: r.opt_double(18)?,
+                protocol: r.opt_text(14)?.map(str::to_string),
+                frame: r
+                    .opt_text(58)?
+                    .map(str::trim)
+                    .filter(|f| !f.is_empty())
+                    .map(str::to_string),
+                part,
+                derivative,
+                placed: !matches!(get("disposition"), Some("scout" | "working_scan")),
+                when: (
+                    acquired_time.is_none(),
+                    acquired_date.clone().unwrap_or_default(),
+                    acquired_time.clone().unwrap_or_default(),
+                    r.opt_int(54)?.is_none(),
+                    r.opt_int(54)?.unwrap_or(0),
+                ),
+            },
+        );
         bids.insert(stack, built);
 
         buckets
@@ -4998,6 +5069,98 @@ fn places(
     // marks go on one at a time and the bucket is grouped again after each,
     // so that two true repeats inside a wider group still end as runs.
     let mut shared = Shared::default();
+    // Wave 7b (agenda 3.8): a phase image the pack gives no base (a phase has
+    // no weighting) names no suffix of its own, and before this it went
+    // nowhere. BIDS names it `part-phase` with the suffix of the magnitude
+    // image of the same acquisition, and that magnitude `part-mag`. The
+    // partner is a stack of the same subject and session that is a magnitude
+    // image or a plain image with a base, at the same echo, in the same
+    // series (one series split by component) or in a series of the same
+    // protocol and frame of reference (the vendors that write the phase as a
+    // series of its own); the nearest series number wins where several fit.
+    // The phase's own facts build its name under the partner's suffix and
+    // datatype, so the schema still decides every entity. Where no partner
+    // is found the phase keeps its reason and §9.3 routes it as before.
+    for (stack, owned) in &phases {
+        let Some(me) = mates.get(stack) else {
+            continue;
+        };
+        let mut candidates: Vec<(i64, i64)> = Vec::new();
+        for (other, m) in &mates {
+            if other == stack
+                || m.subject != me.subject
+                || m.label != me.label
+                || m.derivative
+                || !m.placed
+                || m.echo != me.echo
+                || m.part.as_deref().is_some_and(|p| p != "mag")
+            {
+                continue;
+            }
+            if let (Some(a), Some(b)) = (m.echo_time, me.echo_time)
+                && (a - b).abs() > 1e-3
+            {
+                continue;
+            }
+            let same_series = m.series == me.series;
+            let same_acquisition =
+                m.protocol.is_some() && m.protocol == me.protocol && m.frame == me.frame;
+            if !same_series && !same_acquisition {
+                continue;
+            }
+            let Some(Ok(n)) = bids.get(other) else {
+                continue;
+            };
+            if crate::bids::schema::group_of(n.datatype, n.suffix)
+                .is_none_or(|g| !g.allowed.contains(&"part"))
+            {
+                continue;
+            }
+            let distance = match (same_series, m.series_number, me.series_number) {
+                (true, _, _) => 0,
+                (false, Some(a), Some(b)) => (a - b).abs().max(1),
+                _ => i64::MAX,
+            };
+            candidates.push((distance, *other));
+        }
+        candidates.sort_unstable();
+        let Some((_, partner)) = candidates.first().copied() else {
+            continue;
+        };
+        let Some(Ok(partner_name)) = bids.get(&partner).cloned() else {
+            continue;
+        };
+        let facts = owned.facts();
+        let Ok(named) = crate::bids::name::build_as(
+            &facts,
+            &pack.bids,
+            naming,
+            partner_name.datatype,
+            partner_name.suffix,
+        ) else {
+            continue;
+        };
+        let Some(both) = partner_name.with_part("mag") else {
+            continue;
+        };
+        if both != partner_name {
+            let stem = both.stem("s", "s");
+            for bucket in bids_buckets.values_mut() {
+                for entry in bucket.iter_mut().filter(|e| e.1 == partner) {
+                    entry.2 = stem.clone();
+                }
+            }
+            bids.insert(partner, Ok(both));
+        }
+        if me.placed {
+            bids_buckets
+                .entry((me.subject, me.label.clone(), named.datatype))
+                .or_default()
+                .push((me.when.clone(), *stack, named.stem("s", "s")));
+        }
+        bids.insert(*stack, Ok(named));
+        shared.part_phase.insert(*stack);
+    }
     // Wave 7b (agenda 3.4b): one acquisition written twice, both acquisition
     // times recorded and equal and every fingerprint field the same, is one
     // stack with several paths. In the bucket's order the first is the one
@@ -5208,6 +5371,91 @@ struct Shared {
     /// twice, by the stack it is a copy of, which is the one written. Over
     /// the whole registry, so which is written never depends on the release.
     copies: BTreeMap<i64, i64>,
+    /// Wave 7b (agenda 3.8): the phase images named `part-phase` under the
+    /// suffix of the magnitude image of their acquisition, which by
+    /// themselves name no suffix.
+    part_phase: std::collections::BTreeSet<i64>,
+}
+
+/// Wave 7b (agenda 3.8): what finding a phase image's magnitude image reads
+/// of a stack, kept for every stack because the partner is known only once
+/// every stack is read.
+struct Mate {
+    subject: i64,
+    label: String,
+    series: i64,
+    series_number: Option<i64>,
+    echo: Option<i64>,
+    echo_time: Option<f64>,
+    /// The protocol name, folded and lower-cased as the fingerprint keeps it.
+    protocol: Option<String>,
+    /// The series' frame of reference UID.
+    frame: Option<String>,
+    /// The `part` label the pack gives its constructs, where it gives one.
+    part: Option<String>,
+    derivative: bool,
+    /// Whether it takes a BIDS name at all: a scout or a working scan does not.
+    placed: bool,
+    when: When,
+}
+
+/// A phase image's facts, owned, so its name can be built once the
+/// magnitude image it is named after is known.
+struct PhaseFacts {
+    intent: Option<String>,
+    constructs: Vec<String>,
+    technique: Option<String>,
+    modifiers: Vec<String>,
+    base: Option<String>,
+    provenance: Option<String>,
+    post_contrast: bool,
+    task: Option<String>,
+    echo: Option<i64>,
+    pe_direction: Option<String>,
+    axes: BTreeMap<String, Vec<String>>,
+}
+
+impl PhaseFacts {
+    fn of(f: &crate::bids::name::Facts) -> Self {
+        let owned = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        PhaseFacts {
+            intent: f.intent.map(str::to_string),
+            constructs: owned(&f.constructs),
+            technique: f.technique.map(str::to_string),
+            modifiers: owned(&f.modifiers),
+            base: f.base.map(str::to_string),
+            provenance: f.provenance.map(str::to_string),
+            post_contrast: f.post_contrast,
+            task: f.task.map(str::to_string),
+            echo: f.echo,
+            pe_direction: f.pe_direction.map(str::to_string),
+            axes: f
+                .axes
+                .iter()
+                .map(|(k, v)| (k.to_string(), owned(v)))
+                .collect(),
+        }
+    }
+
+    fn facts(&self) -> crate::bids::name::Facts<'_> {
+        crate::bids::name::Facts {
+            intent: self.intent.as_deref(),
+            constructs: self.constructs.iter().map(String::as_str).collect(),
+            technique: self.technique.as_deref(),
+            modifiers: self.modifiers.iter().map(String::as_str).collect(),
+            base: self.base.as_deref(),
+            provenance: self.provenance.as_deref(),
+            post_contrast: self.post_contrast,
+            task: self.task.as_deref(),
+            echo: self.echo,
+            pe_direction: self.pe_direction.as_deref(),
+            axes: self
+                .axes
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.iter().map(String::as_str).collect()))
+                .collect(),
+        }
+    }
 }
 
 /// What decided one stack's name where it shared one with others
