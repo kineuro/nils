@@ -72,6 +72,11 @@ jpeg2k = { version = "0.10", default-features = false, features = ["openjpeg-sys
 base64 = "0.22"
 lru.workspace = true
 
+# musl's malloc is slow under many threads; the digest and the pictures lane are
+# threaded, so the static Linux builds carry mimalloc. Other targets keep theirs.
+[target.'cfg(target_env = "musl")'.dependencies]
+mimalloc = "0.1"
+
 [dev-dependencies]
 
 [lints]

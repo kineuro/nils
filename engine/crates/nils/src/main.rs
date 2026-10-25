@@ -15,6 +15,10 @@
 //! was stopped by a signal (§10: what was read is written, and the report
 //! says so).
 
+#[cfg(target_env = "musl")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, Read as _};
