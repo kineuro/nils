@@ -6103,7 +6103,7 @@ printf 'subject,general white matter,general grey matter,general csf\nx,0.9,0.9,
             "fspython",
             r#"case "$2" in
 *affine_transform*) if mkdir "$(dirname "$0")/samseg-low" 2>/dev/null; then echo 0.60; else echo 0.97; fi;;
-*samseg.stats*) shift 3; s='"Intra-Cranial": 1500000.0, "Lesions": 1200.0'; while [ $# -gt 1 ]; do s="$s, \"$1\": $2"; shift 2; done; echo "{$s}";;
+*samseg.stats*) shift 3; s='"Intra-Cranial": 1500000.0, "Lesions": 1200.0'; while [ $# -gt 1 ]; do v=$2; [ "$1" = flair_source ] && v=\"$2\"; s="$s, \"$1\": $v"; shift 2; done; echo "{$s}";;
 *) for l; do :; done; printf x > "$l";;
 esac"#,
         ),
