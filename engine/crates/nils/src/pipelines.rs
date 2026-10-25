@@ -61,9 +61,11 @@ use crate::serve::{Caller, Reply};
 use crate::{Exit, fail, usage};
 
 /// The doors, as the capabilities list them.
-pub(crate) const DOORS: [&str; 9] = [
+pub(crate) const DOORS: [&str; 10] = [
     "GET /api/pipelines",
     "GET /api/pipelines/{id}",
+    // Wave 7b section 7: a family, the one row that opens to its members
+    "GET /api/pipelines/family/{name}",
     // Wave 7b: the pack as loaded, its replay, a run's numbers per key; the desk gates its features on these being listed
     "GET /api/pipelines/{id}/pack",
     "GET /api/pipelines/{id}/replay",
@@ -1183,6 +1185,8 @@ pub(crate) fn run_doc(store: &mut Store, r: &Run) -> Value {
                 // knob, the caveats, the flags and the two keys
                 "pack_status": u.pack["status"], "need": u.pack["need"], "words": u.pack["words"],
                 "variant": u.pack["variant"], "knobs": u.pack["knobs"], "caveats": u.pack["caveats"],
+                // Wave 7b section 7: the family a member's run ran under
+                "family": u.pack["family"],
                 "flags": u.pack["flags"], "cohort_checks": u.pack["cohort_checks"],
                 "key_members": u.pack["key_members"],
                 "keys": {"comparability": u.comparability_key, "result": u.result_key},
@@ -1756,12 +1760,32 @@ pub(crate) fn route(
     Some(match segs {
         ["api", "pipelines"] => (|| {
             let list = rows::list(registry.store()).map_err(err)?;
-            let (docs, names) = pipeline_docs(&list);
+            let (mut docs, names) = pipeline_docs(&list);
+            // Wave 7b section 7: each family one row that opens to its
+            // members, and a member's row names its family
+            let of = crate::pipeline_family::members_of_all(registry.store());
+            for d in &mut docs {
+                if let Some(f) = d["name"].as_str().and_then(|n| of.get(n)) {
+                    d["family"] = json!(f);
+                }
+            }
+            let families: Vec<Value> = crate::pipeline_family::list(registry.store())
+                .map_err(|e| Reply::error(500, e))?
+                .iter()
+                .map(|s| crate::pipeline_family::doc(registry.store(), s))
+                .collect();
             Ok(Reply::ok(json!({
                 "pipelines": docs,
                 "names": names,
+                "families": families,
                 "capability": capability(registry),
             })))
+        })(),
+        ["api", "pipelines", "family", name] => (|| {
+            let s = crate::pipeline_family::get(registry.store(), name)
+                .map_err(|e| Reply::error(500, e))?
+                .ok_or_else(|| Reply::error(404, format!("no family {name}")))?;
+            Ok(Reply::ok(crate::pipeline_family::doc(registry.store(), &s)))
         })(),
         ["api", "pipelines", id] => (|| {
             let id = id_of(id, "pipeline")?;
@@ -2408,8 +2432,13 @@ pub(crate) enum SecretCommand {
 }
 
 /// `nils run`: one pipeline over a frozen selection.
-#[derive(Debug, clap::Args)]
+#[derive(Debug, Clone, clap::Args)]
 pub(crate) struct RunArgs {
+    /// Wave 7b section 7: set by a family's run on the member's run it
+    /// starts, never from the command line; the runner records the family,
+    /// the member and the rule that chose on every unit.
+    #[arg(skip)]
+    pub(crate) family: Option<crate::pipeline_family::Route>,
     /// The pipeline: its id, name@version, or a name for its newest version
     #[arg(required_unless_present = "resume")]
     pub(crate) pipeline: Option<String>,
@@ -2561,6 +2590,10 @@ impl GoOn {
     }
 }
 
+pub(crate) fn print_json(v: &Value) -> Result<(), Exit> {
+    print(v)
+}
+
 fn print(v: &Value) -> Result<(), Exit> {
     println!(
         "{}",
@@ -2620,6 +2653,38 @@ fn validate(dir: PathBuf, json: bool) -> Result<(), Exit> {
 
 pub(crate) fn command(home: &Home, command: PipelineCommand) -> Result<(), Exit> {
     // validate is offline: it matches before the registry is opened
+    if let PipelineCommand::Validate { dir, json } = &command
+        && nils_pipeline::pack::family::is_family_dir(dir)
+    {
+        let doc = crate::pipeline_family::validate(dir)?;
+        if *json {
+            return print(&doc);
+        }
+        println!(
+            "family {}: digest {}, {} rules, tasks {}",
+            doc["family"].as_str().unwrap_or_default(),
+            doc["digest"].as_str().unwrap_or_default(),
+            doc["rules"].as_u64().unwrap_or_default(),
+            doc["tasks"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        for m in doc["members"].as_array().into_iter().flatten() {
+            println!(
+                "  {} ({}, {}): descriptor {}, pack {}",
+                m["member"].as_str().unwrap_or_default(),
+                m["pipeline"].as_str().unwrap_or_default(),
+                m["level"].as_str().unwrap_or_default(),
+                m["descriptor_digest"].as_str().unwrap_or_default(),
+                m["pack"]["digest"].as_str().unwrap_or("none")
+            );
+        }
+        return Ok(());
+    }
     if let PipelineCommand::Validate { dir, json } = command {
         return validate(dir, json);
     }
@@ -2632,6 +2697,40 @@ pub(crate) fn command(home: &Home, command: PipelineCommand) -> Result<(), Exit>
             channel,
             json,
         } => {
+            // Wave 7b section 7: a folder with a family document adds every
+            // member's pair, then the family
+            if release.is_none() && nils_pipeline::pack::family::is_family_dir(&file) {
+                let v = crate::pipeline_family::add_folder(&mut registry, &file)?;
+                if json {
+                    return print(&v);
+                }
+                println!(
+                    "family {} ({}): {}",
+                    v["name"].as_str().unwrap_or_default(),
+                    v["digest"]
+                        .as_str()
+                        .map(|d| &d[..12.min(d.len())])
+                        .unwrap_or_default(),
+                    if v["added"] == json!(true) {
+                        "added"
+                    } else {
+                        "already in the catalog"
+                    }
+                );
+                for m in v["members_added"].as_array().into_iter().flatten() {
+                    println!(
+                        "  {} -> {} ({})",
+                        m["member"].as_str().unwrap_or_default(),
+                        m["label"].as_str().unwrap_or_default(),
+                        if m["added"] == json!(true) {
+                            "added"
+                        } else {
+                            "the version it is"
+                        }
+                    );
+                }
+                return Ok(());
+            }
             let (text, from) = match release.as_deref().map(str::trim) {
                 None => {
                     // a folder names its nils.job.yml (record 57 P1)
@@ -2718,13 +2817,40 @@ pub(crate) fn command(home: &Home, command: PipelineCommand) -> Result<(), Exit>
                 let extra = lane_doc(&mut registry);
                 capability_with(registry.store(), &d, Some(extra))
             };
-            let (docs, names) = pipeline_docs(&list);
+            let (mut docs, names) = pipeline_docs(&list);
+            // Wave 7b section 7: the families, each one row over its members
+            let of = crate::pipeline_family::members_of_all(registry.store());
+            for d in &mut docs {
+                if let Some(f) = d["name"].as_str().and_then(|n| of.get(n)) {
+                    d["family"] = json!(f);
+                }
+            }
+            let families: Vec<Value> = crate::pipeline_family::list(registry.store())
+                .map_err(fail)?
+                .iter()
+                .map(|s| crate::pipeline_family::doc(registry.store(), s))
+                .collect();
             if json {
                 return print(&json!({
                     "pipelines": docs,
                     "names": names,
+                    "families": families,
                     "capability": cap,
                 }));
+            }
+            for f in &families {
+                println!(
+                    "family {}: {} (members {})",
+                    f["name"].as_str().unwrap_or_default(),
+                    f["words"].as_str().unwrap_or_default(),
+                    f["members"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .map(|m| m["label"].as_str().unwrap_or("?").to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
             }
             // 2026-10-12: each version as a new run takes it: current,
             // selectable, replaced or retired
@@ -2782,6 +2908,23 @@ pub(crate) fn command(home: &Home, command: PipelineCommand) -> Result<(), Exit>
             } else {
                 dir.parent().map(Path::to_path_buf).unwrap_or(dir)
             };
+            // Wave 7b section 7: a family replayed counts per member
+            if nils_pipeline::pack::family::is_family_dir(&dir) {
+                if against.is_some() {
+                    return Err(usage(
+                        "a family is replayed against the family the registry holds of its name; --against names no other",
+                    ));
+                }
+                let ask =
+                    crate::pipeline_pack::PersonAsk::of_args(goal.as_deref(), &switches, false)
+                        .map_err(usage)?;
+                let doc = crate::pipeline_family::replay(&mut registry, &dir, &ask)?;
+                if json {
+                    return print(&doc);
+                }
+                println!("{}", crate::pipeline_family::replay_words(&doc));
+                return Ok(());
+            }
             let d_path = dir.join(nils_pipeline::pack::DESCRIPTOR_FILE);
             let d_text = std::fs::read_to_string(&d_path)
                 .map_err(|e| usage(format!("{}: {e}", d_path.display())))?;
@@ -2813,8 +2956,38 @@ pub(crate) fn command(home: &Home, command: PipelineCommand) -> Result<(), Exit>
             Ok(())
         }
         PipelineCommand::Show { pipeline, json } => {
-            let p = rows::resolve(registry.store(), &pipeline)?
-                .ok_or_else(|| usage(format!("no pipeline {pipeline} in the catalog")))?;
+            let found = rows::resolve(registry.store(), &pipeline)?;
+            if found.is_none()
+                && let Some(s) =
+                    crate::pipeline_family::get(registry.store(), &pipeline).map_err(fail)?
+            {
+                let doc = crate::pipeline_family::doc(registry.store(), &s);
+                if json {
+                    return print(&doc);
+                }
+                println!(
+                    "family {}: {}",
+                    s.name,
+                    doc["words"].as_str().unwrap_or_default()
+                );
+                for m in doc["members"].as_array().into_iter().flatten() {
+                    println!(
+                        "  {:<12} {} ({}), tasks {}",
+                        m["member"].as_str().unwrap_or_default(),
+                        m["label"].as_str().unwrap_or("not in the catalog"),
+                        m["method"].as_str().unwrap_or_default(),
+                        m["tasks"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .filter_map(Value::as_str)
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    );
+                }
+                return Ok(());
+            }
+            let p = found.ok_or_else(|| usage(format!("no pipeline {pipeline} in the catalog")))?;
             let doc = pipeline_doc_of(registry.store(), &p);
             if json {
                 return print(&doc);
@@ -5075,6 +5248,21 @@ pub(crate) fn take_up_interrupted(store: &mut Store) -> Result<usize, String> {
 
 /// `nils run`.
 pub(crate) fn run_command(home: &Home, args: RunArgs) -> Result<(), Exit> {
+    // Wave 7b section 7: a name that is a family's, not a pipeline's,
+    // routes each unit and runs one member run per member
+    if let Some(name) = args.pipeline.as_deref()
+        && args.resume.is_none()
+        && args.go_on.is_none()
+        && args.family.is_none()
+    {
+        let mut registry = crate::open(home)?;
+        if rows::resolve(registry.store(), name)?.is_none()
+            && let Some(s) = crate::pipeline_family::get(registry.store(), name).map_err(fail)?
+        {
+            drop(registry);
+            return crate::pipeline_family::run(home, &args, &s);
+        }
+    }
     if args.preflight {
         return crate::preflight::command(home, &args);
     }
@@ -6423,6 +6611,7 @@ fn resume_command(home: &Home, args: &RunArgs, run_id: i64) -> Result<(), Exit> 
             let_run: args.let_run,
             json: args.json,
             go_on: Some(go_on),
+            family: None,
         },
     )
 }
@@ -7393,6 +7582,20 @@ fn execute_run(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Resul
             });
             let mut doc = j.doc();
             doc["key_members"] = members;
+            // Wave 7b section 7: a member's run under a family records on
+            // every unit the member and the rule that chose, and the family
+            if let Some(route) = &x.args.family
+                && let Some((variant, fam)) = route.record(&crate::pipeline_family::unit_key(
+                    u.subject_id,
+                    u.session_day.as_deref(),
+                ))
+            {
+                doc["variant"] = variant;
+                doc["family"] = fam;
+                if doc["status"] == json!("ready") {
+                    doc["status"] = json!("routed");
+                }
+            }
             // the main scan of the unit, which a cohort check stratifies
             // it by: the first of the pipeline's roles that has a stack,
             // else the first stack the unit read
@@ -10579,6 +10782,12 @@ fn derivative_candidates(
                 }
             }
         }
+        // Wave 7b section 8.2: an input that asks for a role, a contrast or
+        // a grid takes only a derivative whose typed output says the same
+        if t.role.is_some() || t.contrast.is_some() || t.grid.is_some() {
+            let mut typed = crate::typed_outputs::Outputs::default();
+            found.retain(|r| typed.takes(store, t, r));
+        }
         rows.insert(t.id.clone(), found);
     }
     Ok(Candidates {
@@ -10681,7 +10890,7 @@ pub(crate) fn derivative_lack(found: usize, kind: &str, input: &str, checked: &s
 
 /// The sessions of these stacks, each as its subject and its day, the day
 /// a run of the bids layout names a session's derivatives by, by stack.
-fn stack_sessions(
+pub(crate) fn stack_sessions(
     store: &mut Store,
     stacks: &[i64],
 ) -> Result<BTreeMap<i64, (i64, String)>, String> {

@@ -1585,7 +1585,7 @@ fn needs_of(store: &mut Store, pipeline: &str) -> Vec<String> {
 /// What a pre-flight is over: a dataset's or a cohort's main scans,
 /// resolved and frozen now with the visits with none named (record 55); a
 /// saved selection, frozen as a run freezes it; or a handle.
-fn frozen_over(
+pub(crate) fn frozen_over(
     home: &Home,
     spec: Option<&str>,
     handle: Option<i64>,

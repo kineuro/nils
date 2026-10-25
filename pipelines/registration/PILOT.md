@@ -72,7 +72,7 @@ Then the grading, per run:
 
 ```sh
 nils pipeline runs --json | jq '.runs[] | select(.pipeline | startswith("registration-"))'
-nils pipeline run <id> --json | jq '.units[] | {unit, status, variant, flags, caveats}'
+nils pipeline runs <id> --json | jq '.units[] | {unit, status, variant, family, flags, caveats}'
 nils pipeline numbers <id>
 ```
 

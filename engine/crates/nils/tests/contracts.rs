@@ -1182,3 +1182,102 @@ fn the_pipeline_pack_contract_is_the_loader_s_and_every_shipped_pack_loads() {
     let e = pack::load(&with_action, &d, None).unwrap_err();
     assert!(e.contains("knobs.a") && e.contains("has no input a"), "{e}");
 }
+
+/// The family document (`contracts/pipeline-pack/v1/nils-family.schema.json`,
+/// record 57 P6, Wave 7b section 7): the registration family validates
+/// against its schema and loads with its members, each member runs at its
+/// tasks' level, its outputs are typed (section 8.2), and each member's
+/// entry script is the descriptor's command.
+#[test]
+fn the_family_contract_is_the_loader_s_and_the_registration_family_loads() {
+    use nils_pipeline::pack::family;
+    let schema = json("pipeline-pack/v1/nils-family.schema.json");
+    assert_eq!(
+        schema["$schema"],
+        "https://json-schema.org/draft/2020-12/schema"
+    );
+    assert_eq!(
+        strings(&schema["$defs"]["task"]["properties"]["level"]["enum"]),
+        ["session", "participant"]
+    );
+    let dir = contracts().join("../pipelines/registration");
+    let text = std::fs::read_to_string(dir.join(family::FILE)).unwrap();
+    let value: serde_json::Value = serde_saphyr::from_str(&text).unwrap();
+    let broken = breaks(&schema, &schema, &value, "family");
+    assert!(broken.is_empty(), "{broken:#?}");
+    let (f, members) = family::load_dir(&dir, None).unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(f.name, "registration");
+    assert_eq!(
+        members.keys().cloned().collect::<Vec<_>>(),
+        ["ants", "robust", "synthmorph"]
+    );
+    for (k, (d, p)) in &members {
+        let p = p.as_ref().unwrap_or_else(|| panic!("{k} has no pack"));
+        assert_eq!(
+            p.descriptor_sha256,
+            d.digest(),
+            "{k}: the pack pins its descriptor"
+        );
+        // typed outputs (section 8.2): every image and transform says its
+        // role and lies on a grid or in a space
+        for o in &d.outputs {
+            if o.kind == "image" || o.kind == "transform" {
+                assert!(o.role.is_some(), "{k}: {} has no role", o.id);
+                assert!(
+                    o.grid.is_some() || o.space.is_some(),
+                    "{k}: {} is on no grid and in no space",
+                    o.id
+                );
+            }
+            if o.kind == "image" {
+                assert!(o.contrast.is_some(), "{k}: {} has no contrast", o.id);
+            }
+        }
+        // the entry script beside the descriptor is its command
+        let script = std::fs::read_to_string(dir.join(k).join("entry.sh")).unwrap();
+        let command = d.document["command-line"].as_str().unwrap();
+        let inner = command
+            .strip_prefix("bash -c '")
+            .and_then(|c| c.strip_suffix('\''))
+            .unwrap_or_else(|| panic!("{k}: the command is bash -c '<entry.sh>'"));
+        assert_eq!(
+            inner.trim_end(),
+            script.trim_end(),
+            "{k}: entry.sh and the command differ"
+        );
+        assert!(
+            !script.contains('\''),
+            "{k}: a single quote would end the command"
+        );
+    }
+    // the levels: a session member for the session tasks, a participant
+    // member for the visits
+    assert_eq!(members["ants"].0.level.name(), "session");
+    assert_eq!(members["synthmorph"].0.level.name(), "session");
+    assert_eq!(members["robust"].0.level.name(), "participant");
+    assert_eq!(f.tasks["across_visits"].members, ["robust"]);
+    // the two images, pinned by digest
+    let images: std::collections::BTreeSet<String> = members
+        .values()
+        .map(|(d, _)| d.image.reference.clone())
+        .collect();
+    assert_eq!(images.len(), 2, "{images:?}");
+    assert!(images.iter().all(|i| i.contains("@sha256:")), "{images:?}");
+    // SAMSEG and segcsvd declare the aligned FLAIR as a typed input
+    for name in ["samseg-lesions", "segcsvd"] {
+        let d = nils_pipeline::descriptor::parse(
+            &std::fs::read_to_string(contracts().join(format!("../pipelines/{name}/nils.job.yml")))
+                .unwrap(),
+        )
+        .unwrap();
+        let t = d
+            .inputs
+            .iter()
+            .find(|t| t.id == "aligned_flair")
+            .unwrap_or_else(|| panic!("{name} has no aligned_flair input"));
+        assert_eq!(t.ty, "derivative:image");
+        assert!(t.optional, "{name}: the header path stays as the fallback");
+        assert_eq!(t.role.as_deref(), Some("flair"));
+        assert_eq!(t.grid.as_deref(), Some("t1w"));
+    }
+}

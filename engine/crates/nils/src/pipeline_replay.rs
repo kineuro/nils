@@ -27,7 +27,7 @@ use crate::pipeline_pack::{self, PersonAsk, UnitOf};
 
 /// The sessions the registry's main-scan picks make, each with its stacks
 /// by role: the population a run over `main@dataset:<name>` would read.
-fn sessions(store: &mut Store) -> Result<Vec<UnitOf>, String> {
+pub(crate) fn sessions(store: &mut Store) -> Result<Vec<UnitOf>, String> {
     let of = nils_registry::pick_truth::Of::own(store).map_err(|e| e.to_string())?;
     let picks = nils_registry::pick_truth::Picks::Live(of);
     let day = store.dialect().text_of_qualified(

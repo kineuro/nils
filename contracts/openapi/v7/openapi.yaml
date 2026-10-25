@@ -2357,7 +2357,7 @@ paths:
       summary: The pipeline catalog, by name and version (record 43 S1; nils pipeline list)
       description: "Each entry: {id, name, version, label (name@version), tool_version, description, image (repository@sha256:<hex>), image_digest, descriptor_digest (sha256 of the descriptor's canonical JSON), layout (bids or stacks), level (participant, session or stack), state (active or retired), added_by, added_at, parameters, inputs, outputs, needs, proposals, descriptor}, the descriptor as contracts/job/v1 fixes it and as it was added, and `capability` as the capabilities answer it. An entry is added at the command line, nils pipeline add <nils.job.yml>, which refuses an image not pinned by its registry manifest digest; the same descriptor added again is the version it is, and one that differs is its name's next. pipelines:see. Added in place, additively, on 2026-10-12: `capability.preflight` {door, resume}, where `resume` true says the pre-flight takes a run taken up again (`{resume: <run>}`) and the jobs door checks one as it checks a new run. Added in place, additively, on 2026-10-12 (pipeline versions): each entry's `standing` (current: the newest active version of its name, which a name alone runs; selectable: an older active version no later one replaces; replaced: a later active version replaces it because it fixes it, x-nils.replaces of contracts/job/v1; retired), `replaced_by` (name@version) and `replaced_by_id`, `replaced_why`, and `current` (its name's current version, name@version); and beside `pipelines`, `names`: one entry a name, {name, current (the current version's id), current_label, offered (the ids of the versions a new run may take, current and selectable, newest first), versions: [{id, version, label, standing, replaced_by, replaced_why}], newest first}. A replaced version is not offered: a new run of it is refused at POST /api/jobs and named a blocker by the pre-flight, while its runs, derivatives and checks read and name it as before."
       responses:
-        "200": {description: "{pipelines: [...], capability}"}
+        "200": {description: "{pipelines: [...], names, families: [...] (Wave 7b section 7, added in place, additively: each family one row as GET /api/pipelines/family/{name} answers it; a member's row carries family: <name>), capability}"}
         "403": {description: No pipelines:see}
     post:
       summary: Add a pipeline to the catalog from its descriptor's text (nils pipeline add FILE --json; added in place, additively, on 2026-10-14, record 55 H2)
@@ -2454,6 +2454,15 @@ paths:
         "200": {description: "{id, declared_by, optional, set: false, readable: false}"}
         "400": {description: "An id that is not lowercase letters, digits and _"}
         "403": {description: No install:work}
+  /api/pipelines/family/{name}:
+    get:
+      summary: A pipeline family, the one catalog row that opens to its members (record 57 P6, Wave 7b section 7; nils pipeline show <family>)
+      description: "pipelines:see. A family is one entry for the person and several member pipelines behind it, with the family document's rules (nils-family.yaml, contracts/pipeline-pack/v1) choosing the member per unit. {family: true, name, version, words, digest (of the family document), roles, goals {goal, switches (task and the family's own)}, tasks {name: {level (session or participant), words, members}}, members [{member, pipeline, method, words, pipeline_id, label, level, standing, tasks}], needs (the roles with needs), rules [{id, when, route, why, source}], added_by, added_at, opens, document}. GET /api/pipelines lists every family under `families` with the same shape, and a member's own row says `family: <name>`. A run over a family (nils run <family>) makes one ordinary run per member over the units the rules sent it; every unit of such a run records `variant {variant (the member), pipeline, rule, why}` and `family {name, digest}` in its pack record, and reads `routed`."
+      parameters: [{name: name, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: The family}
+        "403": {description: No pipelines:see}
+        "404": {description: No such family}
   /api/pipelines/{id}:
     get:
       summary: One catalog entry (record 43 S1; nils pipeline show)
