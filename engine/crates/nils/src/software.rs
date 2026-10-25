@@ -2255,6 +2255,7 @@ pub(crate) fn accept(registry: &mut Registry, req: AcceptRequest) -> Result<Valu
     // the site file, placed
     let mut file_sha256 = None;
     let mut file_name = None;
+    let mut replaced: Vec<(String, Option<String>)> = Vec::new();
     if let Some(bytes) = &req.file {
         if bytes.is_empty() || bytes.len() as u64 > nils_pipeline::secrets::MAX_BYTES {
             return Err(refused(
@@ -2291,6 +2292,21 @@ pub(crate) fn accept(registry: &mut Registry, req: AcceptRequest) -> Result<Valu
             let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
         }
         let path = dir.join(&name);
+        // the files there now, named in the audit row once they are replaced
+        let before: Vec<(String, Option<String>)> = std::fs::read_dir(&dir)
+            .map(|rd| {
+                rd.flatten()
+                    .filter(|e| std::fs::symlink_metadata(e.path()).is_ok_and(|m| m.is_file()))
+                    .filter(|e| !e.file_name().to_string_lossy().starts_with('.'))
+                    .map(|e| {
+                        let sha = nils_pipeline::files::sha256_file(&e.path())
+                            .ok()
+                            .map(|(_, hex)| format!("sha256:{hex}"));
+                        (e.file_name().to_string_lossy().into_owned(), sha)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         let part = dir.join(format!(".{name}.part"));
         let _ = std::fs::remove_file(&part);
         nils_pipeline::files::write_new(&part, bytes)
@@ -2302,6 +2318,14 @@ pub(crate) fn accept(registry: &mut Registry, req: AcceptRequest) -> Result<Valu
         }
         std::fs::rename(&part, &path)
             .map_err(|e| refused(500, format!("{}: {e}", path.display())))?;
+        // a renewal under a new name leaves one file, not two: the pre-flight
+        // finds a licence file only where exactly one is there
+        for (old, _) in &before {
+            if *old != name {
+                let _ = std::fs::remove_file(dir.join(old));
+            }
+        }
+        replaced = before;
         file_sha256 = Some(nils_pipeline::sha256(bytes));
         file_name = Some(name);
     } else if let Some(existing) = licence_file(&l, &app, licence.as_ref()) {
@@ -2314,6 +2338,30 @@ pub(crate) fn accept(registry: &mut Registry, req: AcceptRequest) -> Result<Valu
         }
     }
     if let Some(a) = existing {
+        // the standing acceptance names the file now on disk
+        let mut a = a;
+        if req.file.is_some() {
+            let sets = [
+                (
+                    "file_sha256",
+                    file_sha256.as_deref().map_or(Param::Null, Param::from),
+                ),
+                (
+                    "file_name",
+                    file_name.as_deref().map_or(Param::Null, Param::from),
+                ),
+            ];
+            registry
+                .store()
+                .update_by_id(table("software_acceptance"), &sets, "id", a.id)
+                .map_err(|e| refused(500, e.to_string()))?;
+            a.file_sha256.clone_from(&file_sha256);
+            a.file_name.clone_from(&file_name);
+        }
+        let replaced_doc: Vec<Value> = replaced
+            .iter()
+            .map(|(n, h)| json!({"name": n, "sha256": h}))
+            .collect();
         let _ = nils_registry::audit::record(
             registry,
             &nils_registry::audit::Entry {
@@ -2325,6 +2373,7 @@ pub(crate) fn accept(registry: &mut Registry, req: AcceptRequest) -> Result<Valu
                 details: Some(json!({
                     "recorded": false, "acceptance": a.id,
                     "file_sha256": file_sha256, "file_name": file_name,
+                    "replaced": replaced_doc,
                 })),
             },
         );

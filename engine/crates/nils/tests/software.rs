@@ -1086,7 +1086,7 @@ fn terms_are_accepted_as_events_and_a_run_is_refused_until_then() {
     // Wave 7b (agenda 3.8, from the desk): a later call that brings only the
     // file (a renewed licence, say) to an accepted package places it and
     // records no new acceptance; the one that stands is answered, with the
-    // file it was recorded with
+    // file now on disk
     let renewed = "licence text renewed, never recorded either: q8zt-m2vk-5rdp-x1yn\n";
     let (status, placed) = server.send(
         "POST",
@@ -1100,13 +1100,21 @@ fn terms_are_accepted_as_events_and_a_run_is_refused_until_then() {
     assert_eq!(placed["acceptance"]["id"], a["id"], "{placed}");
     assert_eq!(
         placed["acceptance"]["file"]["sha256"],
-        sha256(licence_text.as_bytes()),
-        "{placed}"
+        sha256(renewed.as_bytes()),
+        "the standing acceptance names the file now on disk: {placed}"
     );
     assert_eq!(
         placed["file"]["sha256"],
         sha256(renewed.as_bytes()),
         "{placed}"
+    );
+    // the standing acceptance names the file on disk from now on
+    let (_, listed) = server.send("GET", "/api/software", ADMIN, None);
+    let p = Lab::package(&listed, "licensed-tool@3.0");
+    assert_eq!(
+        p["licence"]["accepted"]["file"]["sha256"],
+        sha256(renewed.as_bytes()),
+        "{p}"
     );
     assert_eq!(std::fs::read_to_string(&file).unwrap(), renewed);
     let (_, listed) = server.send("GET", "/api/software", ADMIN, None);
@@ -1132,6 +1140,31 @@ fn terms_are_accepted_as_events_and_a_run_is_refused_until_then() {
         sha256(renewed.as_bytes()),
         "the file in place is recorded with it: {again}"
     );
+    // a renewal under a new name replaces the old file: the folder holds one
+    let renamed = "licence text, a third time: b5hd-r7wc-2mtp-j9ve\n";
+    let (status, moved) = server.send(
+        "POST",
+        "/api/software/licensed-tool/3.0/accept",
+        ADMIN,
+        Some(&json!({"file": renamed, "file_name": "license-2027.txt"})),
+    );
+    assert_eq!(status, 200, "{moved}");
+    assert_eq!(
+        moved["acceptance"]["file"]["name"], "license-2027.txt",
+        "{moved}"
+    );
+    assert_eq!(
+        moved["acceptance"]["file"]["sha256"],
+        sha256(renamed.as_bytes()),
+        "{moved}"
+    );
+    let kept: Vec<String> = std::fs::read_dir(file.parent().unwrap())
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(kept, vec!["license-2027.txt".to_string()], "{kept:?}");
+
     drop(server);
     let registry = std::fs::read(lab.home.path().join("registry.db")).unwrap();
     for needle in [b"n4x7-q2zv-8kpm-w3rt".as_slice(), b"q8zt-m2vk-5rdp-x1yn"] {
