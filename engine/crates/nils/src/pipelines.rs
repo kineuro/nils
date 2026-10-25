@@ -10604,7 +10604,26 @@ fn finalize(
         };
         let o = &row.outcome;
         let status = o["status"].as_str().unwrap_or("failed").to_string();
-        digest_units.push(json!({"unit": u.id, "status": status, "files": o["files"]}));
+        // a unit that reused a kept result digests as the unit that made
+        // it did (its status and its files with their hashes), so a re-run
+        // that ran nothing gives the digest of the run it repeats
+        let kept = row
+            .reused_from_run
+            .and_then(|from| rows::units(registry.store(), from).ok())
+            .and_then(|us| us.into_iter().find(|k| k.unit == u.id))
+            .filter(|k| {
+                k.outcome["files"]
+                    .as_array()
+                    .is_some_and(|f| f.iter().all(Value::is_object))
+            });
+        let (digest_status, digest_files) = match &kept {
+            Some(k) => (
+                k.outcome["status"].as_str().unwrap_or("failed").to_string(),
+                k.outcome["files"].clone(),
+            ),
+            None => (status.clone(), o["files"].clone()),
+        };
+        digest_units.push(json!({"unit": u.id, "status": digest_status, "files": digest_files}));
         refused.extend(o["refused"].as_array().cloned().unwrap_or_default());
         for s in o["swept"].as_array().into_iter().flatten() {
             if s["why"].is_string() {

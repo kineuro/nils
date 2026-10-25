@@ -77,7 +77,7 @@ pub(crate) const POLICY: &[(&str, bool, bool, &str, &str, &str, &str)] = &[
         "POST /api/workflows/{id}/run",
         true,
         false,
-        "long",
+        "job",
         "one workflow run",
         "Starting a workflow",
         "Started a workflow",
