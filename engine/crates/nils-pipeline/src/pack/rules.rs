@@ -19,8 +19,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde_json::{Map, Value, json};
 
 use super::expr::{self, Expr};
-use super::facts::{Facts, Val};
-use super::{HOST, LINK, PipelinePack, SetBy};
+use super::facts::{Facts, Val, Vocabulary};
+use super::{HOST, LINK, PipelinePack, RoleNeeds, SetBy};
 use crate::descriptor::Descriptor;
 
 /// The person at the run: who, what they chose, and whether they let a
@@ -191,6 +191,112 @@ pub fn with_person(pack: &PipelinePack, facts: &Facts, person: &Person) -> Facts
     f
 }
 
+/// What the needs of a pack or a family say of one unit.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NeedsOutcome {
+    pub status: Status,
+    pub need: Option<String>,
+    pub words: Option<String>,
+    pub cannot_tell: Option<String>,
+    pub let_run_by: Option<String>,
+    pub caveats: Vec<Caveat>,
+}
+
+/// Judge a unit against needs, hard first: the first hard need it fails
+/// names it, a need that cannot be told skips the unit unless the person
+/// let it run, a soft need that fails is a caveat. A role named in
+/// `unscoped` (link, host, unit) reads its facts by their own names; any
+/// other scopes its expressions to its role. `note` sees every expression
+/// read. Packs and families judge their needs by this one function.
+pub fn judge_needs(
+    needs: &BTreeMap<String, RoleNeeds>,
+    unscoped: &[&str],
+    vocab: &Vocabulary,
+    f: &Facts,
+    person: &Person,
+    note: &mut dyn FnMut(&Expr),
+) -> NeedsOutcome {
+    let facts = f;
+    let mut out = NeedsOutcome {
+        status: Status::Ready,
+        need: None,
+        words: None,
+        cannot_tell: None,
+        let_run_by: None,
+        caveats: Vec::new(),
+    };
+    for (role, rn) in needs {
+        let scope = (!unscoped.contains(&role.as_str())).then_some(role.as_str());
+        let hard_on = match &rn.hard_if {
+            None => true,
+            Some(h) => {
+                let h = h.scoped(scope, vocab);
+                note(&h);
+                expr::eval(&h, facts) == Val::Bool(true)
+            }
+        };
+        if hard_on {
+            for n in &rn.hard {
+                let e = n.when.scoped(scope, vocab);
+                note(&e);
+                match expr::eval(&e, facts) {
+                    Val::Bool(true) => {}
+                    Val::Bool(false) => {
+                        if out.status == Status::Ready {
+                            out.status = Status::Skipped;
+                            out.need = Some(format!("{role}: {}", n.text));
+                            out.words = Some(n.words.clone());
+                        }
+                    }
+                    _ => {
+                        let fact = expr::first_unknown(&e, facts).unwrap_or_else(|| n.text.clone());
+                        if person.let_run {
+                            out.let_run_by = Some(format!("person:{}", person.user));
+                            out.caveats.push(Caveat {
+                                role: role.clone(),
+                                need: n.text.clone(),
+                                words: format!("cannot tell: {fact}; {} let it run", person.user),
+                                source: n.source.clone(),
+                                cannot_tell: Some(fact),
+                            });
+                        } else if out.status == Status::Ready {
+                            out.status = Status::Skipped;
+                            out.need = Some(format!("{role}: {}", n.text));
+                            out.words = Some(format!("cannot tell: {fact}"));
+                            out.cannot_tell = Some(fact);
+                        }
+                    }
+                }
+            }
+        }
+        for n in &rn.soft {
+            let e = n.when.scoped(scope, vocab);
+            note(&e);
+            match expr::eval(&e, facts) {
+                Val::Bool(true) => {}
+                Val::Bool(false) => out.caveats.push(Caveat {
+                    role: role.clone(),
+                    need: n.text.clone(),
+                    words: n.words.clone(),
+                    source: n.source.clone(),
+                    cannot_tell: None,
+                }),
+                _ => {
+                    let fact = expr::first_unknown(&e, facts).unwrap_or_else(|| n.text.clone());
+                    out.caveats.push(Caveat {
+                        role: role.clone(),
+                        need: n.text.clone(),
+                        words: format!("cannot tell: {fact}; {}", n.words),
+                        source: n.source.clone(),
+                        cannot_tell: Some(fact),
+                    });
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Judge one unit: its needs, then its rules, over `facts` (the registry's
 /// facts of the unit, which `person` completes), with `resolved` the
 /// parameters as the descriptor resolves the person's values and its
@@ -235,75 +341,13 @@ pub fn judge(
         facts: Facts::default(),
     };
     // the needs, hard first: the first hard need the unit fails names it
-    for (role, rn) in &pack.needs {
-        let scope = (role != LINK && role != HOST).then_some(role.as_str());
-        let hard_on = match &rn.hard_if {
-            None => true,
-            Some(h) => {
-                let h = h.scoped(scope, &vocab);
-                note(&h);
-                expr::eval(&h, &f) == Val::Bool(true)
-            }
-        };
-        if hard_on {
-            for n in &rn.hard {
-                let e = n.when.scoped(scope, &vocab);
-                note(&e);
-                match expr::eval(&e, &f) {
-                    Val::Bool(true) => {}
-                    Val::Bool(false) => {
-                        if j.status == Status::Ready {
-                            j.status = Status::Skipped;
-                            j.need = Some(format!("{role}: {}", n.text));
-                            j.words = Some(n.words.clone());
-                        }
-                    }
-                    _ => {
-                        let fact = expr::first_unknown(&e, &f).unwrap_or_else(|| n.text.clone());
-                        if person.let_run {
-                            j.let_run_by = Some(format!("person:{}", person.user));
-                            j.caveats.push(Caveat {
-                                role: role.clone(),
-                                need: n.text.clone(),
-                                words: format!("cannot tell: {fact}; {} let it run", person.user),
-                                source: n.source.clone(),
-                                cannot_tell: Some(fact),
-                            });
-                        } else if j.status == Status::Ready {
-                            j.status = Status::Skipped;
-                            j.need = Some(format!("{role}: {}", n.text));
-                            j.words = Some(format!("cannot tell: {fact}"));
-                            j.cannot_tell = Some(fact);
-                        }
-                    }
-                }
-            }
-        }
-        for n in &rn.soft {
-            let e = n.when.scoped(scope, &vocab);
-            note(&e);
-            match expr::eval(&e, &f) {
-                Val::Bool(true) => {}
-                Val::Bool(false) => j.caveats.push(Caveat {
-                    role: role.clone(),
-                    need: n.text.clone(),
-                    words: n.words.clone(),
-                    source: n.source.clone(),
-                    cannot_tell: None,
-                }),
-                _ => {
-                    let fact = expr::first_unknown(&e, &f).unwrap_or_else(|| n.text.clone());
-                    j.caveats.push(Caveat {
-                        role: role.clone(),
-                        need: n.text.clone(),
-                        words: format!("cannot tell: {fact}; {}", n.words),
-                        source: n.source.clone(),
-                        cannot_tell: Some(fact),
-                    });
-                }
-            }
-        }
-    }
+    let n = judge_needs(&pack.needs, &[LINK, HOST], &vocab, &f, person, &mut note);
+    j.status = n.status;
+    j.need = n.need;
+    j.words = n.words;
+    j.cannot_tell = n.cannot_tell;
+    j.let_run_by = n.let_run_by;
+    j.caveats = n.caveats;
     // the person's knobs first, then the rules, first match per knob
     for id in &person.given {
         if let Some(v) = resolved.get(id) {

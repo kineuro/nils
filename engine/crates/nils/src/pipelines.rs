@@ -1763,17 +1763,8 @@ pub(crate) fn route(
             let (mut docs, names) = pipeline_docs(&list);
             // Wave 7b section 7: each family one row that opens to its
             // members, and a member's row names its family
-            let of = crate::pipeline_family::members_of_all(registry.store());
-            for d in &mut docs {
-                if let Some(f) = d["name"].as_str().and_then(|n| of.get(n)) {
-                    d["family"] = json!(f);
-                }
-            }
-            let families: Vec<Value> = crate::pipeline_family::list(registry.store())
-                .map_err(|e| Reply::error(500, e))?
-                .iter()
-                .map(|s| crate::pipeline_family::doc(registry.store(), s))
-                .collect();
+            let families = crate::pipeline_family::decorate(registry.store(), &mut docs)
+                .map_err(|e| Reply::error(500, e))?;
             Ok(Reply::ok(json!({
                 "pipelines": docs,
                 "names": names,
@@ -2819,17 +2810,8 @@ pub(crate) fn command(home: &Home, command: PipelineCommand) -> Result<(), Exit>
             };
             let (mut docs, names) = pipeline_docs(&list);
             // Wave 7b section 7: the families, each one row over its members
-            let of = crate::pipeline_family::members_of_all(registry.store());
-            for d in &mut docs {
-                if let Some(f) = d["name"].as_str().and_then(|n| of.get(n)) {
-                    d["family"] = json!(f);
-                }
-            }
-            let families: Vec<Value> = crate::pipeline_family::list(registry.store())
-                .map_err(fail)?
-                .iter()
-                .map(|s| crate::pipeline_family::doc(registry.store(), s))
-                .collect();
+            let families =
+                crate::pipeline_family::decorate(registry.store(), &mut docs).map_err(fail)?;
             if json {
                 return print(&json!({
                     "pipelines": docs,
@@ -10762,6 +10744,8 @@ fn derivative_candidates(
         .collect::<std::collections::BTreeSet<i64>>()
         .into_iter()
         .collect();
+    // one cache of the producing pipelines' outputs for every input
+    let mut typed = crate::typed_outputs::Outputs::default();
     for t in d.inputs.iter().filter(|t| t.ty.starts_with("derivative:")) {
         let kind = t.ty.trim_start_matches("derivative:");
         let mut found = Vec::new();
@@ -10785,7 +10769,6 @@ fn derivative_candidates(
         // Wave 7b section 8.2: an input that asks for a role, a contrast or
         // a grid takes only a derivative whose typed output says the same
         if t.role.is_some() || t.contrast.is_some() || t.grid.is_some() {
-            let mut typed = crate::typed_outputs::Outputs::default();
             found.retain(|r| typed.takes(store, t, r));
         }
         rows.insert(t.id.clone(), found);

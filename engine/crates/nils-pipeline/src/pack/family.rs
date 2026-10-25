@@ -26,7 +26,7 @@ use serde_json::{Value, json};
 
 use super::expr::{self, Expr};
 use super::facts::{self, FactType, Facts, Goals, Val, Vocabulary};
-use super::rules::{Caveat, Person, Status};
+use super::rules::{Caveat, Person, Status, judge_needs};
 use super::{HOST, LINK, PipelinePack, RoleNeeds, expression, opt_text, text};
 use crate::descriptor::Descriptor;
 
@@ -524,75 +524,20 @@ pub fn route(f: &Family, facts: &Facts, person: &Person) -> Routing {
         caveats: Vec::new(),
         facts: Facts::default(),
     };
-    for (role, rn) in &f.needs {
-        let scope = (role != LINK && role != HOST && role != UNIT).then_some(role.as_str());
-        let hard_on = match &rn.hard_if {
-            None => true,
-            Some(h) => {
-                let h = h.scoped(scope, &vocab);
-                note(&h);
-                expr::eval(&h, &all) == Val::Bool(true)
-            }
-        };
-        if hard_on {
-            for n in &rn.hard {
-                let e = n.when.scoped(scope, &vocab);
-                note(&e);
-                match expr::eval(&e, &all) {
-                    Val::Bool(true) => {}
-                    Val::Bool(false) => {
-                        if r.status == Status::Ready {
-                            r.status = Status::Skipped;
-                            r.need = Some(format!("{role}: {}", n.text));
-                            r.words = Some(n.words.clone());
-                        }
-                    }
-                    _ => {
-                        let fact = expr::first_unknown(&e, &all).unwrap_or_else(|| n.text.clone());
-                        if person.let_run {
-                            r.let_run_by = Some(format!("person:{}", person.user));
-                            r.caveats.push(Caveat {
-                                role: role.clone(),
-                                need: n.text.clone(),
-                                words: format!("cannot tell: {fact}; {} let it run", person.user),
-                                source: n.source.clone(),
-                                cannot_tell: Some(fact),
-                            });
-                        } else if r.status == Status::Ready {
-                            r.status = Status::Skipped;
-                            r.need = Some(format!("{role}: {}", n.text));
-                            r.words = Some(format!("cannot tell: {fact}"));
-                            r.cannot_tell = Some(fact);
-                        }
-                    }
-                }
-            }
-        }
-        for n in &rn.soft {
-            let e = n.when.scoped(scope, &vocab);
-            note(&e);
-            match expr::eval(&e, &all) {
-                Val::Bool(true) => {}
-                Val::Bool(false) => r.caveats.push(Caveat {
-                    role: role.clone(),
-                    need: n.text.clone(),
-                    words: n.words.clone(),
-                    source: n.source.clone(),
-                    cannot_tell: None,
-                }),
-                _ => {
-                    let fact = expr::first_unknown(&e, &all).unwrap_or_else(|| n.text.clone());
-                    r.caveats.push(Caveat {
-                        role: role.clone(),
-                        need: n.text.clone(),
-                        words: format!("cannot tell: {fact}; {}", n.words),
-                        source: n.source.clone(),
-                        cannot_tell: Some(fact),
-                    });
-                }
-            }
-        }
-    }
+    let n = judge_needs(
+        &f.needs,
+        &[LINK, HOST, UNIT],
+        &vocab,
+        &all,
+        person,
+        &mut note,
+    );
+    r.status = n.status;
+    r.need = n.need;
+    r.words = n.words;
+    r.cannot_tell = n.cannot_tell;
+    r.let_run_by = n.let_run_by;
+    r.caveats = n.caveats;
     let members_of_task: Vec<String> = f
         .tasks
         .get(&task)

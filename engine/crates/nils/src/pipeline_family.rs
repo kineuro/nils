@@ -43,11 +43,42 @@ pub(crate) struct Stored {
     pub members: BTreeMap<String, i64>,
     pub added_by: String,
     pub added_at: String,
+    /// The document parsed once, when the row is read.
+    parsed: Result<Family, String>,
 }
 
 impl Stored {
-    pub(crate) fn family(&self) -> Result<Family, String> {
-        family::from_value(self.document.clone())
+    pub(crate) fn family(&self) -> Result<&Family, String> {
+        self.parsed.as_ref().map_err(Clone::clone)
+    }
+
+    /// Refuse a run or a replay whose stored member ids no longer exist in
+    /// the catalog, with the words to add the family again.
+    pub(crate) fn members_exist(&self, store: &mut Store) -> Result<(), String> {
+        let f = self.family()?;
+        let mut gone = Vec::new();
+        for k in f.members.keys() {
+            let there = match self.members.get(k) {
+                Some(id) => rows::get(store, *id).ok().flatten().is_some(),
+                None => false,
+            };
+            if !there {
+                gone.push(k.clone());
+            }
+        }
+        if gone.is_empty() {
+            return Ok(());
+        }
+        Err(format!(
+            "family {}: its member{} {} no longer in the catalog; add the family's folder again with `nils pipeline add <folder>`",
+            self.name,
+            if gone.len() == 1 { "" } else { "s" },
+            if gone.len() == 1 {
+                format!("{} is", gone[0])
+            } else {
+                format!("{} are", gone.join(", "))
+            }
+        ))
     }
 
     fn of_json(name: &str, v: &Value) -> Option<Stored> {
@@ -55,6 +86,7 @@ impl Stored {
             name: name.to_string(),
             digest: v["digest"].as_str()?.to_string(),
             document: v["document"].clone(),
+            parsed: family::from_value(v["document"].clone()),
             members: v["members"]
                 .as_object()
                 .map(|m| {
@@ -113,18 +145,26 @@ pub(crate) fn list(store: &mut Store) -> Result<Vec<Stored>, String> {
     Ok(out)
 }
 
-/// The member pipelines of every family, by pipeline name to family name:
-/// the catalog marks their rows.
-pub(crate) fn members_of_all(store: &mut Store) -> BTreeMap<String, String> {
-    let mut out = BTreeMap::new();
-    for s in list(store).unwrap_or_default() {
+/// The catalog's family decoration, for the door and the command line
+/// alike: each member's row names its family, and the families come back
+/// as their one row each, which opens to its members. The families are
+/// read, and each parsed, once.
+pub(crate) fn decorate(store: &mut Store, docs: &mut [Value]) -> Result<Vec<Value>, String> {
+    let stored = list(store)?;
+    let mut of: BTreeMap<String, String> = BTreeMap::new();
+    for s in &stored {
         if let Ok(f) = s.family() {
             for m in f.members.values() {
-                out.insert(m.pipeline.clone(), s.name.clone());
+                of.insert(m.pipeline.clone(), s.name.clone());
             }
         }
     }
-    out
+    for d in docs.iter_mut() {
+        if let Some(f) = d["name"].as_str().and_then(|n| of.get(n)) {
+            d["family"] = json!(f);
+        }
+    }
+    Ok(stored.iter().map(|s| doc(store, s)).collect())
 }
 
 /// A family as the doors and `--json` answer it: the one row, which opens
@@ -202,20 +242,45 @@ pub(crate) fn validate(dir: &Path) -> Result<Value, Exit> {
 /// Add a family's folder: every member's pair, then the family itself.
 pub(crate) fn add_folder(registry: &mut Registry, dir: &Path) -> Result<Value, Exit> {
     let (f, members) = family::load_dir(dir, None).map_err(usage)?;
-    let mut ids = BTreeMap::new();
-    let mut added = Vec::new();
-    for k in f.members.keys() {
+    // the member texts, read once, before anything is written
+    let mut texts: Vec<(&String, String, Option<String>)> = Vec::new();
+    for k in members.keys() {
         let folder = dir.join(k);
         let d_text = std::fs::read_to_string(folder.join(nils_pipeline::pack::DESCRIPTOR_FILE))
             .map_err(|e| usage(format!("{}: {e}", folder.display())))?;
-        let p_path = folder.join(nils_pipeline::pack::FILE);
-        let p_text = std::fs::read_to_string(&p_path).ok();
-        let v = crate::pipelines::add_descriptor(registry, &d_text, p_text.as_deref())?;
+        let p_text = std::fs::read_to_string(folder.join(nils_pipeline::pack::FILE)).ok();
+        texts.push((k, d_text, p_text));
+    }
+    // the members and the family are added together or not at all
+    registry.store().begin().map_err(|e| fail(e.to_string()))?;
+    let done = add_members_and_family(registry, &f, &texts);
+    match done {
+        Ok(v) => {
+            registry.store().commit().map_err(|e| fail(e.to_string()))?;
+            Ok(v)
+        }
+        Err(e) => {
+            let _ = registry.store().rollback();
+            Err(e)
+        }
+    }
+}
+
+type MemberTexts<'a> = [(&'a String, String, Option<String>)];
+
+fn add_members_and_family(
+    registry: &mut Registry,
+    f: &Family,
+    texts: &MemberTexts<'_>,
+) -> Result<Value, Exit> {
+    let mut ids = BTreeMap::new();
+    let mut added = Vec::new();
+    for (k, d_text, p_text) in texts {
+        let v = crate::pipelines::add_descriptor(registry, d_text, p_text.as_deref())?;
         let id = v["id"].as_i64().unwrap_or_default();
-        ids.insert(k.clone(), id);
+        ids.insert((*k).clone(), id);
         added.push(json!({"member": k, "pipeline": v["name"], "id": id, "label": v["label"], "added": v["added"]}));
     }
-    let _ = members;
     let digest = f.digest();
     let before = get(registry.store(), &f.name).map_err(fail)?;
     let same = before
@@ -481,9 +546,11 @@ pub(crate) fn preflight_words(doc: &Value) -> String {
         ));
     }
     for u in doc["units"].as_array().into_iter().flatten() {
+        let words = || u["words"].as_str().unwrap_or_default().to_string();
         let where_ = match u["member"].as_str() {
+            _ if u["status"] == "skipped" => words(),
             Some(m) => format!("{m} ({})", u["rule"].as_str().unwrap_or_default()),
-            None => u["words"].as_str().unwrap_or_default().to_string(),
+            None => words(),
         };
         out.push(format!(
             "  {} {}: {where_}",
@@ -550,10 +617,14 @@ pub(crate) fn run(
     s: &Stored,
 ) -> Result<(), Exit> {
     let f = s.family().map_err(fail)?;
+    {
+        let mut registry = crate::open(home)?;
+        s.members_exist(registry.store()).map_err(usage)?;
+    }
     let ask =
         PersonAsk::of_args(args.goal.as_deref(), &args.switches, args.let_run).map_err(usage)?;
     let who = crate::actor();
-    let person = person_of(&f, &ask, &who).map_err(usage)?;
+    let person = person_of(f, &ask, &who).map_err(usage)?;
     let (handle, _main) = crate::preflight::frozen_over(
         home,
         args.select.as_deref(),
@@ -570,8 +641,8 @@ pub(crate) fn run(
     })?;
     let mut registry = crate::open(home)?;
     let stacks = crate::pipelines::handle_stacks(registry.store(), handle)?;
-    let units = route_stacks(&mut registry, &f, &stacks, &person).map_err(fail)?;
-    let doc = preflight_doc(s, &f, &person, &ask, &units);
+    let units = route_stacks(&mut registry, f, &stacks, &person).map_err(fail)?;
+    let doc = preflight_doc(s, f, &person, &ask, &units);
     if args.preflight {
         if args.json {
             return crate::pipelines::print_json(&doc);
@@ -623,9 +694,10 @@ pub(crate) fn run(
         };
         // the member's pack takes the switches it offers; the rest are the
         // family's own
-        let offered: BTreeSet<String> = rows::resolve(registry.store(), &m.pipeline)
-            .ok()
-            .flatten()
+        let offered: BTreeSet<String> = s
+            .members
+            .get(&member)
+            .and_then(|id| rows::get(registry.store(), *id).ok().flatten())
             .and_then(|p| pipeline_pack::pack_of(&p))
             .map(|p| p.goals.switches.keys().cloned().collect())
             .unwrap_or_default();
@@ -646,7 +718,8 @@ pub(crate) fn run(
             m.pipeline
         );
         let member_args = crate::pipelines::RunArgs {
-            pipeline: Some(m.pipeline.clone()),
+            // the version the family record pins, by its id
+            pipeline: Some(s.members[&member].to_string()),
             select: None,
             handle: Some(h),
             switches,
@@ -673,6 +746,9 @@ pub(crate) fn replay(registry: &mut Registry, dir: &Path, ask: &PersonAsk) -> Re
         .map(|t| t.level.clone())
         .unwrap_or_else(|| "session".into());
     let before = get(registry.store(), &f.name).map_err(fail)?;
+    if let Some(b) = &before {
+        b.members_exist(registry.store()).map_err(usage)?;
+    }
     let host = pipeline_pack::host_facts(registry);
     let store = registry.store();
     let sessions = crate::pipeline_replay::sessions(store).map_err(fail)?;
@@ -738,10 +814,10 @@ pub(crate) fn replay(registry: &mut Registry, dir: &Path, ask: &PersonAsk) -> Re
     });
     if let Some(b) = before {
         let bf = b.family().map_err(fail)?;
-        let bperson = person_of(&bf, ask, &who).unwrap_or_else(|_| person.clone());
+        let bperson = person_of(bf, ask, &who).unwrap_or_else(|_| person.clone());
         let then: Vec<Routing> = facts
             .iter()
-            .map(|x| family::route(&bf, x, &bperson))
+            .map(|x| family::route(bf, x, &bperson))
             .collect();
         let then_refs: Vec<&Routing> = then.iter().collect();
         let mut moved: BTreeMap<(Option<String>, Option<String>), usize> = BTreeMap::new();
@@ -1156,5 +1232,62 @@ mod tests {
         assert_eq!(variant["rule"], "fine");
         assert_eq!(fam["name"], "registration");
         assert!(route.record("8").is_none());
+    }
+
+    /// A skipped unit prints its skip words, not the member a rule would
+    /// have chosen.
+    #[test]
+    fn a_skipped_unit_is_listed_with_its_words() {
+        let doc = json!({
+            "family": "registration", "task": "within_session", "level": "session",
+            "counts": {"units": 2, "ready": 0, "routed": 1, "skipped": 1, "cannot_tell": 0,
+                       "with_caveats": 0, "by_member": {"ants": 1}, "skipped_by_words": []},
+            "units": [
+                {"unit": "1:2026-01-01", "status": "skipped", "member": "ants", "rule": "r1",
+                 "words": "the scans are not brain scans"},
+                {"unit": "2:2026-01-02", "status": "routed", "member": "ants", "rule": "r1", "words": null},
+            ],
+        });
+        let words = super::preflight_words(&doc);
+        assert!(
+            words.contains("1:2026-01-01 skipped: the scans are not brain scans"),
+            "{words}"
+        );
+        assert!(words.contains("2:2026-01-02 routed: ants (r1)"), "{words}");
+    }
+
+    /// A family whose stored member ids are gone from the catalog is
+    /// refused with the words to add it again; one whose ids are there is
+    /// not.
+    #[test]
+    fn a_family_with_a_member_gone_from_the_catalog_is_refused() {
+        use nils_registry::{Backend, Home, InitOptions, Scheme};
+        let dir = std::env::temp_dir().join(format!("nils-family-members-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let home = Home::new(&dir);
+        home.keys(None).add("nils", b"a test passphrase").unwrap();
+        let mut registry = home
+            .init(&InitOptions {
+                backend: Backend::Sqlite,
+                dsn: None,
+                schema: None,
+                scheme: Scheme::DEFAULT,
+                key: "nils".into(),
+                display_length: 12,
+                session_scheme: None,
+            })
+            .unwrap();
+        super::add_folder(&mut registry, &repo()).unwrap_or_else(|_| panic!("add_folder"));
+        let s = super::get(registry.store(), "registration")
+            .unwrap()
+            .expect("the family is kept");
+        s.members_exist(registry.store()).unwrap();
+        let mut gone = s.clone();
+        gone.members.insert("ants".into(), 9999);
+        let e = gone.members_exist(registry.store()).unwrap_err();
+        assert!(e.contains("ants is no longer in the catalog"), "{e}");
+        assert!(e.contains("nils pipeline add"), "{e}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

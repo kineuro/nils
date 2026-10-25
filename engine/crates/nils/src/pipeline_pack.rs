@@ -326,6 +326,31 @@ pub(crate) fn facts_for(store: &mut Store, units: &[UnitOf], host: &HostFacts) -
     for chunk in all.chunks(500) {
         rows.extend(stack_rows(store, chunk));
     }
+    // a registration step's aligned FLAIR on the T1w's grid says aligned
+    // (Wave 7b section 7), read for every unit's session at once
+    let flair_sessions: Vec<(i64, String)> = units
+        .iter()
+        .filter_map(|u| match (u.subject_id, u.session_day.as_deref()) {
+            (Some(s), Some(day))
+                if u.by_role.get("flair").is_some_and(|v| !v.is_empty())
+                    && u.by_role.get("t1w").is_some_and(|v| !v.is_empty()) =>
+            {
+                Some((s, day.to_string()))
+            }
+            _ => None,
+        })
+        .collect();
+    let registered = crate::typed_outputs::aligned_by_registration(
+        store,
+        &mut crate::typed_outputs::Outputs::default(),
+        &flair_sessions,
+        "flair",
+        "t1w",
+    )
+    .unwrap_or_else(|e| {
+        eprintln!("the registration's aligned images could not be read: {e}");
+        BTreeSet::new()
+    });
     let mut diagnosis: BTreeMap<i64, Val> = BTreeMap::new();
     units
         .iter()
@@ -343,15 +368,12 @@ pub(crate) fn facts_for(store: &mut Store, units: &[UnitOf], host: &HostFacts) -
                 && f.roles.contains("flair")
                 && f.roles.contains("t1w")
             {
-                // a registration step's aligned FLAIR on the T1w's grid says
-                // aligned (Wave 7b section 7); else what a check measured
-                let aligned =
-                    if crate::typed_outputs::aligned_by_registration(store, s, day, "flair", "t1w")
-                    {
-                        Val::Bool(true)
-                    } else {
-                        aligned_from_check(store, s, day)
-                    };
+                // else what a check measured
+                let aligned = if registered.contains(&(s, day.to_string())) {
+                    Val::Bool(true)
+                } else {
+                    aligned_from_check(store, s, day)
+                };
                 f.set_aligned("flair", "t1w", aligned);
             }
             if let Some(s) = u.subject_id {

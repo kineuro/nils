@@ -7,12 +7,12 @@
 //! registration family's aligned FLAIR (kind image, role flair, grid t1w),
 //! which SAMSEG and segcsvd read in place of the header-only resampling,
 //! and which tells the pack's `aligned(flair, t1w)` fact true.
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use nils_pipeline::descriptor::{self, TypedInput};
 use nils_registry::derivative::Derivative;
 use nils_registry::pipeline as rows;
-use nils_registry::store::{Param, Store};
+use nils_registry::store::Store;
 
 /// What an output declares of its files.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -95,42 +95,254 @@ impl Outputs {
     }
 }
 
-/// Whether a registration step wrote an image of role `moving` on the grid
-/// of `fixed` for this session: a derivative of kind image of the session,
-/// not withdrawn, whose output says so. The pack fact `aligned(moving,
-/// fixed)` reads true where it did.
+/// The sessions among `sessions` (subject, day) for which a registration
+/// step wrote an image of role `moving` on the grid of `fixed`: a derivative
+/// of kind image of the session, not withdrawn, not rejected by the pack's
+/// checks, whose output says so. The pack fact `aligned(moving, fixed)`
+/// reads true for them. The images of all the sessions' subjects are read a
+/// few hundred subjects at a time, and one cache of outputs serves the whole
+/// call. A store failure is the caller's to say, never an empty answer.
 pub(crate) fn aligned_by_registration(
     store: &mut Store,
-    subject_id: i64,
-    day: &str,
+    outputs: &mut Outputs,
+    sessions: &[(i64, String)],
     moving: &str,
     fixed: &str,
-) -> bool {
-    let d = store.dialect();
-    let sql = format!(
-        "SELECT id FROM {} WHERE kind = 'image' AND subject_id = {} AND session_day = {} \
-         AND run_id IS NOT NULL AND withdrawn_at IS NULL ORDER BY id DESC",
-        store.qualified("derivative"),
-        d.param(1, nils_registry::schema::Type::Int),
-        d.param(2, nils_registry::schema::Type::Text)
-    );
-    let ids: Vec<i64> = store
-        .query(&sql, &[Param::Int(subject_id), Param::from(day)])
-        .unwrap_or_default()
+) -> Result<BTreeSet<(i64, String)>, String> {
+    let wanted: BTreeSet<&(i64, String)> = sessions.iter().collect();
+    let subjects: Vec<i64> = sessions
         .iter()
-        .filter_map(|r| r.int(0).ok())
+        .map(|(s, _)| *s)
+        .collect::<BTreeSet<i64>>()
+        .into_iter()
         .collect();
-    let mut outputs = Outputs::default();
-    for id in ids {
-        let Ok(Some(row)) = nils_registry::derivative::get(store, id) else {
-            continue;
-        };
-        if let Some(t) = outputs.of_derivative(store, &row)
-            && t.role.as_deref() == Some(moving)
-            && t.grid.as_deref() == Some(fixed)
-        {
-            return true;
+    let mut out = BTreeSet::new();
+    for chunk in subjects.chunks(500) {
+        let list = chunk
+            .iter()
+            .map(i64::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT id FROM {} WHERE kind = 'image' AND subject_id IN ({list}) \
+             AND session_day IS NOT NULL AND run_id IS NOT NULL AND withdrawn_at IS NULL \
+             AND (check_status IS NULL OR check_status <> 'rejected') ORDER BY id DESC",
+            store.qualified("derivative"),
+        );
+        let ids: Vec<i64> = store
+            .query(&sql, &[])
+            .map_err(|e| e.to_string())?
+            .iter()
+            .filter_map(|r| r.int(0).ok())
+            .collect();
+        for row in nils_registry::derivative::of_ids(store, &ids).map_err(|e| e.to_string())? {
+            let (Some(s), Some(day)) = (row.subject_id, row.session_day.clone()) else {
+                continue;
+            };
+            let key = (s, day);
+            if out.contains(&key) || !wanted.contains(&key) {
+                continue;
+            }
+            if let Some(t) = outputs.of_derivative(store, &row)
+                && t.role.as_deref() == Some(moving)
+                && t.grid.as_deref() == Some(fixed)
+            {
+                out.insert(key);
+            }
         }
     }
-    false
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nils_registry::store::{Insert, Param};
+    use nils_registry::{Backend, Home, InitOptions, Registry, Scheme};
+
+    fn registry(dir: &std::path::Path, postgres: Option<(&str, &str)>) -> Registry {
+        let home = Home::new(dir);
+        home.keys(None).add("nils", b"a test passphrase").unwrap();
+        home.init(&InitOptions {
+            backend: if postgres.is_some() {
+                Backend::Postgres
+            } else {
+                Backend::Sqlite
+            },
+            dsn: postgres.map(|(dsn, _)| dsn.to_string()),
+            schema: postgres.map(|(_, schema)| schema.to_string()),
+            scheme: Scheme::DEFAULT,
+            key: "nils".into(),
+            display_length: 12,
+            session_scheme: None,
+        })
+        .unwrap()
+    }
+
+    /// The registration's aligned FLAIR says `aligned(flair, t1w)` for the
+    /// sessions it was made for, on both backends: a rejected result, a
+    /// withdrawn one, another role and another session do not.
+    fn aligned_sessions_are_read(postgres: Option<&str>) {
+        use nils_registry::derivative::{self, New};
+        let dir = std::env::temp_dir().join(format!(
+            "nils-typed-aligned-{}-{}",
+            postgres.is_some(),
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let schema = "nils_typed_aligned";
+        if let Some(dsn) = postgres {
+            Store::connect_postgres(dsn, schema)
+                .unwrap()
+                .batch(&format!(
+                    "DROP SCHEMA IF EXISTS {schema} CASCADE; DROP SCHEMA IF EXISTS {schema}_linkage CASCADE"
+                ))
+                .unwrap();
+        }
+        let mut r = registry(&dir.join("reg"), postgres.map(|d| (d, schema)));
+        let text = include_str!("../../../../pipelines/registration/ants/nils.job.yml");
+        let added = crate::pipelines::add_descriptor(&mut r, text, None)
+            .unwrap_or_else(|_| panic!("add the descriptor"));
+        let pipeline = added["id"].as_i64().unwrap();
+        let store = r.store();
+        let table = nils_registry::schema::table;
+        let subject = |code: &str, store: &mut Store| {
+            store
+                .insert(
+                    &Insert::new(table("subject"), &["code", "created_at"]),
+                    &[vec![Param::from(code), Param::from("2026-10-11T10:00:00Z")]],
+                )
+                .unwrap();
+            let sql = format!(
+                "SELECT id FROM {} WHERE code = {}",
+                store.qualified("subject"),
+                store.dialect().param(1, nils_registry::schema::Type::Text)
+            );
+            store
+                .query_opt(&sql, &[Param::from(code)])
+                .unwrap()
+                .unwrap()
+                .int(0)
+                .unwrap()
+        };
+        let (s1, s2) = (subject("A1", store), subject("A2", store));
+        let place = nils_registry::place::add(
+            store,
+            &nils_registry::place::New {
+                name: "scratch",
+                role: nils_registry::place::Role::Working,
+                path: "/nowhere",
+                guarantees: json!({}),
+                probed: serde_json::Value::Null,
+                handling: serde_json::Value::Null,
+                dataset: serde_json::Value::Null,
+            },
+        )
+        .unwrap();
+        let run = nils_registry::pipeline::start(
+            store,
+            &nils_registry::pipeline::NewRun {
+                pipeline_id: pipeline,
+                job_id: None,
+                handle_id: None,
+                selection: None,
+                params: &json!({}),
+                runtime: "podman",
+                runtime_version: "test",
+                host: "lab",
+                device: "cpu",
+                model_ids: &[],
+                label_set_id: None,
+                place_id: Some(place),
+                scratch_place_id: None,
+                principal: "ops@lab",
+                actor: None,
+                started_at: "2026-10-11T10:00:00Z",
+            },
+        )
+        .unwrap();
+        let made = |store: &mut Store, subject: i64, day: &str, file: &str| {
+            let belongs = derivative::belongs(store, None, None, Some(subject), Some(day))
+                .unwrap_or_else(|_| panic!("subject {subject}"));
+            let rel = format!("derivatives/ants/{run}/sub-x/ses-1/anat/{file}");
+            derivative::insert_of_run(
+                store,
+                &New {
+                    kind: "image",
+                    belongs: &belongs,
+                    place_id: place,
+                    path: &rel,
+                    bytes: 1,
+                    sha256: &"0".repeat(64),
+                    media_type: "application/x-nifti+gzip",
+                    registered_by: "ops@lab",
+                    actor: None,
+                    model_id: None,
+                    run_id: None,
+                    preprocess_version: None,
+                    supersedes_id: None,
+                    created_at: "2026-10-11T10:00:00Z",
+                },
+                run,
+            )
+            .unwrap()
+        };
+        let flair = "sub-x_ses-1_space-T1w_desc-aligned_FLAIR.nii.gz";
+        let t2w = "sub-x_ses-1_space-T1w_desc-aligned_T2w.nii.gz";
+        // s1 on 2026-01-01: aligned FLAIR, taken; on 2026-02-01: only a T2w
+        made(store, s1, "2026-01-01", flair);
+        made(store, s1, "2026-02-01", t2w);
+        // s2 on 2026-01-01: an aligned FLAIR a check rejected
+        let rejected = made(store, s2, "2026-01-01", flair);
+        derivative::set_check(
+            store,
+            rejected,
+            Some("rejected"),
+            &json!([]),
+            None,
+            Some("2026-10-11T10:00:00Z"),
+        )
+        .unwrap();
+        let sessions: Vec<(i64, String)> = vec![
+            (s1, "2026-01-01".into()),
+            (s1, "2026-02-01".into()),
+            (s2, "2026-01-01".into()),
+            (s2, "2026-03-01".into()),
+        ];
+        let got =
+            aligned_by_registration(store, &mut Outputs::default(), &sessions, "flair", "t1w")
+                .unwrap();
+        assert_eq!(
+            got,
+            [(s1, "2026-01-01".to_string())]
+                .into_iter()
+                .collect::<BTreeSet<_>>()
+        );
+        drop(r);
+        if let Some(dsn) = postgres {
+            Store::connect_postgres(dsn, schema)
+                .unwrap()
+                .batch(&format!(
+                    "DROP SCHEMA IF EXISTS {schema} CASCADE; DROP SCHEMA IF EXISTS {schema}_linkage CASCADE"
+                ))
+                .unwrap();
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    use serde_json::json;
+
+    #[test]
+    fn the_registration_s_aligned_flair_tells_aligned() {
+        aligned_sessions_are_read(None);
+    }
+
+    #[test]
+    fn the_registration_s_aligned_flair_tells_aligned_on_postgres() {
+        match std::env::var("NILS_TEST_POSTGRES_DSN") {
+            Ok(dsn) if !dsn.is_empty() => aligned_sessions_are_read(Some(&dsn)),
+            _ => eprintln!("NILS_TEST_POSTGRES_DSN is not set; the Postgres test is skipped"),
+        }
+    }
 }
