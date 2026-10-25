@@ -181,7 +181,9 @@ pub fn from_value(document: Value) -> Result<Family, String> {
     for t in task_values {
         let t = facts::text_of(t);
         if !tasks.contains_key(&t) {
-            return Err(format!("goals.{TASK} names {t}, which tasks does not describe"));
+            return Err(format!(
+                "goals.{TASK} names {t}, which tasks does not describe"
+            ));
         }
     }
     let mut members = BTreeMap::new();
@@ -207,7 +209,9 @@ pub fn from_value(document: Value) -> Result<Family, String> {
     for (k, t) in &tasks {
         for m in &t.members {
             if !members.contains_key(m) {
-                return Err(format!("tasks.{k}.members names {m}, which members does not"));
+                return Err(format!(
+                    "tasks.{k}.members names {m}, which members does not"
+                ));
             }
         }
     }
@@ -338,10 +342,12 @@ impl Family {
 
     /// The task a person's choices name, or the default.
     pub fn task_of(&self, choices: &BTreeMap<String, Value>) -> String {
-        choices
-            .get(TASK)
-            .map(facts::text_of)
-            .unwrap_or_else(|| self.default_choices()[TASK].as_str().unwrap_or_default().to_string())
+        choices.get(TASK).map(facts::text_of).unwrap_or_else(|| {
+            self.default_choices()[TASK]
+                .as_str()
+                .unwrap_or_default()
+                .to_string()
+        })
     }
 
     fn check_expressions(&self) -> Result<(), String> {
@@ -366,7 +372,12 @@ impl Family {
             }
         }
         for (i, r) in self.rules.iter().enumerate() {
-            super::typed(&r.when, None, &vocab, &format!("rules[{i}].when ({})", r.id))?;
+            super::typed(
+                &r.when,
+                None,
+                &vocab,
+                &format!("rules[{i}].when ({})", r.id),
+            )?;
         }
         Ok(())
     }
@@ -375,13 +386,13 @@ impl Family {
     /// they have one): every member named is there, a member a task routes
     /// to runs at the task's level, and every member reads only roles the
     /// family names.
-    pub fn check(
-        &self,
-        members: &BTreeMap<String, (Descriptor, Option<PipelinePack>)>,
-    ) -> Result<(), String> {
+    pub fn check(&self, members: &Members) -> Result<(), String> {
         for (k, m) in &self.members {
             let Some((d, _)) = members.get(k) else {
-                return Err(format!("member {k} ({}) has no folder beside the family", m.pipeline));
+                return Err(format!(
+                    "member {k} ({}) has no folder beside the family",
+                    m.pipeline
+                ));
             };
             if d.name != m.pipeline {
                 return Err(format!(
@@ -582,7 +593,11 @@ pub fn route(f: &Family, facts: &Facts, person: &Person) -> Routing {
             }
         }
     }
-    let members_of_task: Vec<String> = f.tasks.get(&task).map(|t| t.members.clone()).unwrap_or_default();
+    let members_of_task: Vec<String> = f
+        .tasks
+        .get(&task)
+        .map(|t| t.members.clone())
+        .unwrap_or_default();
     let mut chosen = None;
     for rule in &f.rules {
         let e = rule.when.scoped(None, &vocab);
@@ -649,14 +664,15 @@ pub fn set_unit_facts(f: &mut Facts, visits: usize, same_protocol: Option<bool>)
     );
 }
 
+/// The members of a family as loaded from their folders: each a
+/// descriptor and its pack, by member key.
+pub type Members = BTreeMap<String, (Descriptor, Option<PipelinePack>)>;
+
 /// A family's folder read: `nils-family.yaml`, and each member's folder
 /// beside it, named as the member is, each a pair of descriptor and pack
 /// checked as [`super::load_dir`] checks it; then the family against its
 /// members.
-pub fn load_dir(
-    dir: &Path,
-    vocab: Option<&Vocabulary>,
-) -> Result<(Family, BTreeMap<String, (Descriptor, Option<PipelinePack>)>), String> {
+pub fn load_dir(dir: &Path, vocab: Option<&Vocabulary>) -> Result<(Family, Members), String> {
     let path = dir.join(FILE);
     let text_ = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
     let family = parse(&text_).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -672,7 +688,9 @@ pub fn load_dir(
         }
         members.insert(k.clone(), super::load_dir(&folder, vocab)?);
     }
-    family.check(&members).map_err(|e| format!("{}: {e}", path.display()))?;
+    family
+        .check(&members)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
     Ok((family, members))
 }
 
@@ -714,7 +732,10 @@ rules:
     fn person(choices: &[(&str, Value)]) -> Person {
         Person {
             user: "tester".into(),
-            choices: choices.iter().map(|(k, v)| (k.to_string(), v.clone())).collect(),
+            choices: choices
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.clone()))
+                .collect(),
             given: Default::default(),
             proposed: Default::default(),
             let_run: false,
@@ -782,7 +803,10 @@ rules:
         assert!(parse(&bad).unwrap_err().contains("members does not"));
         let bad = doc().replace("unit.visits >= 2", "unit.visits == 'two'");
         assert!(parse(&bad).is_err());
-        let bad = doc().replace("  across_visits: {level: participant, members: [robust]}\n", "");
+        let bad = doc().replace(
+            "  across_visits: {level: participant, members: [robust]}\n",
+            "",
+        );
         assert!(parse(&bad).unwrap_err().contains("tasks does not describe"));
         let bad = doc().replace("members: [robust]", "members: [ants]");
         assert!(parse(&bad).unwrap_err().contains("belongs to no task"));

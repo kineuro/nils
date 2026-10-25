@@ -967,7 +967,9 @@ pub fn from_value(document: Value) -> Result<Descriptor, String> {
         let role = opt_text(t, "role", &at)?;
         let contrast = opt_text(t, "contrast", &at)?;
         let grid = opt_text(t, "grid", &at)?;
-        if (role.is_some() || contrast.is_some() || grid.is_some()) && !ty.starts_with("derivative:") {
+        if (role.is_some() || contrast.is_some() || grid.is_some())
+            && !ty.starts_with("derivative:")
+        {
             return Err(format!(
                 "{at}role, contrast and grid belong to a derivative input: the typed output it takes"
             ));
@@ -976,7 +978,9 @@ pub fn from_value(document: Value) -> Result<Descriptor, String> {
             if let Some(v) = v
                 && !is_ident(v, true)
             {
-                return Err(format!("{at}{key} {v} is a role: lowercase letters, digits and _"));
+                return Err(format!(
+                    "{at}{key} {v} is a role: lowercase letters, digits and _"
+                ));
             }
         }
         inputs.push(TypedInput {
@@ -1088,7 +1092,9 @@ pub fn from_value(document: Value) -> Result<Descriptor, String> {
         if let Some(r) = &role
             && !is_ident(r, true)
         {
-            return Err(format!("{at}role {r} is a role: lowercase letters, digits and _"));
+            return Err(format!(
+                "{at}role {r} is a role: lowercase letters, digits and _"
+            ));
         }
         outputs.push(Output {
             id,
@@ -2441,7 +2447,10 @@ x-nils:
         }
         // only a mask has a grid and parts, and only a derivative input a check
         let e = parse(&base.replace("kind: output", "kind: output\n      grid: t1w")).unwrap_err();
-        assert!(e.contains("grid belongs to a mask, image or transform output"), "{e}");
+        assert!(
+            e.contains("grid belongs to a mask, image or transform output"),
+            "{e}"
+        );
         let e = parse(&base.replace(
             "kind: output",
             "kind: output\n      parts: [{key: a, words: A, kind: labels}]",

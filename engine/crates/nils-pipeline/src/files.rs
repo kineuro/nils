@@ -373,7 +373,10 @@ mod template_tests {
             t,
             "sub-01/ses-a/anat/sub-01_ses-a_from-FLAIR_to-T1w_mode-image_xfm.mat"
         ));
-        assert!(!matches_template(t, "sub-01/anat/x_space-T1w_desc-aligned_FLAIR.nii.gz"));
+        assert!(!matches_template(
+            t,
+            "sub-01/anat/x_space-T1w_desc-aligned_FLAIR.nii.gz"
+        ));
         assert!(matches_template(
             "sub-{subject}/anat/*_desc-registration_metrics.json",
             "sub-01/anat/sub-01_desc-registration_metrics.json"

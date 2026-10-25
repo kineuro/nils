@@ -304,7 +304,6 @@ fn string_list(v: &Value, key: &str, at: &str) -> Result<Vec<String>, String> {
     }
 }
 
-
 /// The `needs` of a document, per role (a pack's, or a family's: the
 /// family document reads the same shape).
 pub(crate) fn needs_of(document: &Value) -> Result<BTreeMap<String, RoleNeeds>, String> {
