@@ -1,0 +1,63 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# The pack of the robust member of the registration family (record 57 P6,
+# Wave 7b P2; research 07, Tables 5 and 6): a person's visits, the same
+# contrast acquired alike, onto their common space. The family's needs
+# skip a changed protocol or 2D visits in words (the SynthMorph visits
+# member is not shipped); this pack adds the method's own needs and the
+# checks of section 7: SynthSeg's quality scores at 0.65 fail the unit,
+# the rigid sanity and the inverse consistency are policy, calibrated on
+# the pilot, the label Dice is against the cohort.
+nils_pack: 1
+pipeline:
+  name: registration-robust
+  descriptor_sha256: "sha256:d8d988102aa7e96e44bf61ffc3f06626dd3d913c24c2c758ab5f2f9611e10d16"
+  version: "1.0"
+goals:
+  goal: [fast, standard, research]
+  task: [across_visits]
+needs:
+  t1w:
+    hard:
+      - when: "dimension == '3D'"
+        words: "the visits are 2D: mri_robust_register is for 3D images of one protocol; the SynthMorph visits member would take them, which this version does not ship"
+        source: "record 57 research 07, Table 5 R6 and R7"
+    soft:
+      - when: "voxel_max_mm <= 1.5"
+        words: "the visits are coarser than 1.5 mm: the longitudinal stream is validated on 1 mm T1w"
+        source: "record 57 research 07, Table 2 (mri_robust_register)"
+      - when: "post_contrast != 'given'"
+        words: "the T1w is labelled post-contrast: enhancement changes the intensities the robust registration reads; its outlier rejection helps, with no direct evidence"
+        source: "record 57 research 07, Table 5 R5"
+knobs:
+  threads:
+    what: "the threads one participant uses"
+    comparability: none
+    set_by: person
+checks:
+  - {metric: refused, op: "==", value: 0, action: fail, source: "Billot et al. 2023 (SynthSeg QC rejects at 0.65)", words: "a visit scored under 0.65 on SynthSeg's quality scores: nothing was registered"}
+  - {metric: qc_min, op: ">=", value: 0.65, action: fail, source: "Billot et al. 2023 (SynthSeg QC rejects at 0.65)", words: "a visit scores under 0.65 on SynthSeg's quality scores"}
+  - {metric: rigid_flip, op: "==", value: 0, action: fail, source: policy, words: "a visit's transform flips the image: a registration that found a mirror image is wrong"}
+  - {metric: rigid_determinant, op: ">=", value: 0.98, action: flag, source: policy, words: "a visit's transform has a determinant not near 1"}
+  - {metric: rigid_determinant, op: "<=", value: 1.02, action: flag, source: policy, words: "a visit's transform has a determinant not near 1"}
+  - {metric: rigid_translation_mm, op: "<=", value: 50, action: flag, source: policy, words: "a visit moved more than 50 mm onto the common space"}
+  - {metric: rigid_rotation_deg, op: "<=", value: 30, action: flag, source: policy, words: "a visit turned more than 30 degrees onto the common space"}
+  - {metric: inverse_consistency_mm, op: "<=", value: 0.1, action: flag, source: policy, words: "the registration composed with its halfway inverse moves the brain's corners by more than 0.1 mm on average"}
+  - {metric: alignment_dice, op: ">=", action: flag, cohort: true, stratum: [site, vendor, field_strength, sequence, post_contrast], min_sessions: 30, source: "policy (the label Dice after alignment far below the cohort's)", words: "a visit's labels agree with the common-space image's far below the cohort"}
+licence:
+  spdx: "LicenseRef-FreeSurfer"
+  redistributable: false
+  site_file: {env: FS_LICENSE, mount: /opt/fs/license.txt}
+  terms: {url: "https://surfer.nmr.mgh.harvard.edu/fswiki/FreeSurferSoftwareLicense", version: "1.0 (2011)"}
+  accept: false
+resources:
+  memory_gb: 16
+  minutes: 30
+  gpu: none
+comparability:
+  facts: [t1w.base]
+tests: []
+source:
+  image: "docker.io/freesurfer/freesurfer@sha256:5648104ca75a24f6ee5a8786146f99b405c2bda1da12bff723a15056da8ddf6b"
+  probe: {command: "recon-all -version", expect: "freesurfer"}
+  key_files: ["bin/mri_robust_register", "bin/mri_robust_template", "build-stamp.txt"]

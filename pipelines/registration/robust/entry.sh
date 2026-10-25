@@ -1,0 +1,41 @@
+set -u; shopt -s nullglob; cd [InputDataset];
+qc() { mri_synthseg --i "$1" --o "$2" --qc "$3" --robust --cpu --threads [THREADS] >/dev/null 2>&1 || return 1;
+fspython -c "import sys, csv; r = list(csv.reader(open(sys.argv[1])))[-1]; v = [float(x) for x in r[1:] if x.strip()]; print(\"%.3f\" % min(v))" "$3"; };
+dice() { fspython -c "import sys, numpy as np, nibabel as n; a = np.asarray(n.load(sys.argv[1]).dataobj).astype(int); b = np.asarray(n.load(sys.argv[2]).dataobj).astype(int);
+if a.shape != b.shape: print(\"\"); sys.exit(); L = [l for l in np.unique(a) if l > 0]; d = [2.0 * np.sum((a == l) & (b == l)) / max(np.sum(a == l) + np.sum(b == l), 1) for l in L]; print(\"%.3f\" % (np.mean(d) if d else 0))" "$1" "$2"; };
+sanity() { fspython -c "import sys, numpy as np;
+rows = [l.split() for l in open(sys.argv[1]) if len(l.split()) == 4 and all(x.replace(\".\", \"\").replace(\"-\", \"\").replace(\"e\", \"\").replace(\"+\", \"\").isdigit() for x in l.split())][:4];
+M = np.array(rows, float); R = M[:3, :3]; det = float(np.linalg.det(R)); a = max(-1.0, min(1.0, (np.trace(R) - 1) / 2)); rot = float(np.degrees(np.arccos(a))); tl = float(np.linalg.norm(M[:3, 3]));
+print(\"%.4f %d %.2f %.2f\" % (det, 1 if det < 0 else 0, tl, rot))" "$1"; };
+for s in sub-*/; do
+s=${s%/}; d=[OutputLocation]/$s/anat; mkdir -p "$d"; w=$(mktemp -d [OutputLocation]/.work-XXXXXX);
+vis=(); for f in "$s"/ses-*/anat/*_T1w.nii.gz; do vis+=("$f"); done; n=${#vis[@]};
+if [ $n -lt 2 ]; then echo "$s: $n visit with a T1w, nothing to align across visits"; rm -rf "$w"; continue; fi;
+refused=0; qcs=(); for f in "${vis[@]}"; do ses=$(basename "$(dirname "$(dirname "$f")")"); q=$(qc "$f" "$w/seg_$ses.nii.gz" "$w/qc_$ses.csv") || q="";
+qcs+=("${q:-?}"); if [ -n "$q" ] && fspython -c "import sys; sys.exit(0 if float(sys.argv[1]) < 0.65 else 1)" "$q"; then refused=1; fi; done;
+qmin=$(printf "%s\n" "${qcs[@]}" | grep -v "?" | sort -g | head -n 1);
+if [ $refused = 1 ]; then echo "$s: SynthSeg scores a visit below 0.65 (${qcs[*]}): refused"; printf "{\"visits\": %d, \"method\": \"robust\", \"qc_min\": %s, \"refused\": 1}\n" $n "$qmin" > "$d/${s}_desc-registration_metrics.json"; rm -rf "$w"; continue; fi;
+if [ $n -eq 2 ]; then
+a=${vis[0]}; b=${vis[1]}; sa=$(basename "$(dirname "$(dirname "$a")")"); sb=$(basename "$(dirname "$(dirname "$b")")");
+mri_robust_register --mov "$b" --dst "$a" --lta "$w/${sb}_to_${sa}.lta" --halfmov "$w/${sb}_to_mid.lta" --halfdst "$w/${sa}_to_mid.lta" --halfmovlta "$w/mid_${sb}.lta" --halfdstlta "$w/mid_${sa}.lta" --iscale --satit --mapmovhdr "$w/${sb}_in_${sa}.nii.gz" >/dev/null 2>&1 || { echo "$s: mri_robust_register of $sb onto $sa failed"; rm -rf "$w"; continue; };
+method=robust-register; ltas=("$w/${sa}_to_mid.lta" "$w/${sb}_to_mid.lta");
+mri_vol2vol --mov "$a" --targ "$a" --lta "$w/${sa}_to_mid.lta" --o "$w/${sa}_mid.nii.gz" >/dev/null 2>&1; mri_vol2vol --mov "$b" --targ "$a" --lta "$w/${sb}_to_mid.lta" --o "$w/${sb}_mid.nii.gz" >/dev/null 2>&1;
+mri_concat "$w/${sa}_mid.nii.gz" "$w/${sb}_mid.nii.gz" --mean --o "$w/template.nii.gz" >/dev/null 2>&1;
+ic=$(fspython -c "import sys, numpy as np; rd = lambda p: np.array([l.split() for l in open(p) if len(l.split()) == 4 and l.split()[0].lstrip(\"-\").replace(\".\", \"\").replace(\"e\", \"\").replace(\"+\", \"\").isdigit()][:4], float);
+A = rd(sys.argv[1]); B = rd(sys.argv[2]); C = A @ B; pts = np.array([[x, y, z, 1] for x in (-70, 70) for y in (-100, 70) for z in (-60, 80)], float).T; dv = (C @ pts - pts)[:3]; print(\"%.3f\" % float(np.sqrt((dv ** 2).sum(0)).mean()))" "$w/${sb}_to_${sa}.lta" "$w/mid_${sb}.lta" 2>/dev/null || echo "");
+else
+movs=(); for f in "${vis[@]}"; do movs+=("$f"); done; ltas=(); for f in "${vis[@]}"; do ses=$(basename "$(dirname "$(dirname "$f")")"); ltas+=("$w/${ses}_to_mid.lta"); done;
+mri_robust_template --mov "${movs[@]}" --template "$w/template.nii.gz" --lta "${ltas[@]}" --iscale --satit --average 1 --inittp 1 --fixtp >/dev/null 2>&1 || { echo "$s: mri_robust_template over $n visits failed"; rm -rf "$w"; continue; };
+method=robust-template; ic=""; fi;
+cp "$w/template.nii.gz" "$d/${s}_space-midspace_desc-template_T1w.nii.gz";
+mri_synthseg --i "$w/template.nii.gz" --o "$w/seg_template.nii.gz" --robust --cpu --threads [THREADS] >/dev/null 2>&1 || true;
+mind=""; maxtl=0; maxrot=0; mindet=1; flip=0;
+for i in $(seq 0 $((n - 1))); do f=${vis[$i]}; ses=$(basename "$(dirname "$(dirname "$f")")"); l=${ltas[$i]};
+cp "$l" "$d/${s}_${ses}_from-${ses}_to-midspace_mode-image_xfm.lta";
+mri_vol2vol --mov "$f" --targ "$w/template.nii.gz" --lta "$l" --o "$d/${s}_${ses}_space-midspace_desc-aligned_T1w.nii.gz" >/dev/null 2>&1 || continue;
+read det fl tl rot < <(sanity "$l") || continue;
+maxtl=$(fspython -c "import sys; print(max(float(sys.argv[1]), float(sys.argv[2])))" "$maxtl" "$tl"); maxrot=$(fspython -c "import sys; print(max(float(sys.argv[1]), float(sys.argv[2])))" "$maxrot" "$rot"); mindet=$(fspython -c "import sys; print(min(float(sys.argv[1]), float(sys.argv[2])))" "$mindet" "$det"); [ "$fl" = 1 ] && flip=1;
+if [ -f "$w/seg_template.nii.gz" ] && mri_synthseg --i "$d/${s}_${ses}_space-midspace_desc-aligned_T1w.nii.gz" --o "$w/seg_al_$ses.nii.gz" --robust --cpu --threads [THREADS] >/dev/null 2>&1; then ld=$(dice "$w/seg_template.nii.gz" "$w/seg_al_$ses.nii.gz"); [ -n "$ld" ] && mind=$(fspython -c "import sys; print(\"%.3f\" % min(float(sys.argv[1]), float(sys.argv[2])))" "${mind:-1}" "$ld"); fi; done;
+printf "{\"visits\": %d, \"method\": \"%s\", \"qc_min\": %s, \"rigid_flip\": %d, \"rigid_determinant\": %s, \"rigid_translation_mm\": %s, \"rigid_rotation_deg\": %s%s%s}\n" $n "$method" "${qmin:-null}" $flip "$mindet" "$maxtl" "$maxrot" "${ic:+, \"inverse_consistency_mm\": $ic}" "${mind:+, \"alignment_dice\": $mind}" > "$d/${s}_desc-registration_metrics.json";
+echo "$s: $n visits onto their common space, $method (quality min ${qmin:-?}; largest translation $maxtl mm, rotation $maxrot degrees; label Dice min ${mind:-?})";
+rm -rf "$w"; done

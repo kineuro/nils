@@ -1,0 +1,134 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# The registration family (record 57 P6, Wave 7b P2): one entry for the
+# person, three methods behind it, the rules choosing per unit from the
+# registry's facts and the person's task. Two pinned images: ANTs 2.6.2
+# (the release fMRIPrep 25.2 runs, pinned by its registry manifest digest,
+# resolved 2026-10-25 by a manifest request, not pulled) and FreeSurfer
+# 8.2.0 (the digest the SAMSEG and SynthSeg packs pin). The members are
+# the folders beside this file, each a descriptor and a pack of its own:
+# `ants` (rigid with Mattes mutual information within a session, SyN to the
+# template), `synthmorph` (contrast- and resolution-agnostic, no skull
+# strip: the thick and 2D scans within a session, the template at the fast
+# goal or without a fine 3D T1w) and `robust` (mri_robust_register for two
+# visits, mri_robust_template for three or more, inverse-consistent and
+# robust to lesion change). The tasks and their rules are section 7's
+# table; the research is studies/2026-10-12-pipeline-packs/results/07.
+#
+# What this version does not ship, said as needs so a unit is skipped in
+# words rather than run wrong: across visits with a changed protocol or 2D
+# scans (the SynthMorph visits member), the deformable step in the halfway
+# space at research grade (ANTs SyN after the rigid alignment), and labels
+# back to the person as a task of its own (the inverse transform is kept
+# with every result; a labels step reads it in a workflow).
+nils_family: 1
+family:
+  name: registration
+  version: "1.0"
+  words: "Align images: the other contrasts of a session onto its T1w, a person's visits onto each other, or a T1w onto the MNI template"
+roles: [t1w, flair, t2w]
+goals:
+  goal: [fast, standard, research]
+  task: [within_session, across_visits, to_template]
+  lesions: ["off", "on"]
+tasks:
+  within_session:
+    level: session
+    words: "the FLAIR and the T2w of a session onto its T1w"
+    members: [ants, synthmorph]
+  across_visits:
+    level: participant
+    words: "a person's T1w of every visit onto their common space"
+    members: [robust]
+  to_template:
+    level: session
+    words: "a session's T1w onto MNI152NLin2009cAsym"
+    members: [ants, synthmorph]
+members:
+  ants:
+    pipeline: registration-ants
+    method: "ANTs 2.6.2"
+    words: "rigid with Mattes mutual information within a session; SyN to the template"
+  synthmorph:
+    pipeline: registration-synthmorph
+    method: "SynthMorph, FreeSurfer 8.2.0"
+    words: "any contrast and resolution without skull stripping; rigid within a session, joint affine and deformable to the template"
+  robust:
+    pipeline: registration-robust
+    method: "mri_robust_register and mri_robust_template, FreeSurfer 8.2.0"
+    words: "a person's visits, inverse-consistent and robust to lesion change"
+needs:
+  t1w:
+    hard:
+      - when: "body_part in ['brain', 'brain-neck']"
+        words: "the T1w is not of the brain or head: registration here is of brain images"
+        source: "record 57 research 07, Table 5 R1 (SynthSeg QC needs segmentable anatomy)"
+  flair:
+    hard_if: "task == 'within_session' and present(flair)"
+    hard:
+      - when: "body_part in ['brain', 'brain-neck']"
+        words: "the FLAIR is not of the brain or head"
+        source: "record 57 research 07, Table 5 R1"
+  t2w:
+    hard_if: "task == 'within_session' and present(t2w)"
+    hard:
+      - when: "body_part in ['brain', 'brain-neck']"
+        words: "the T2w is not of the brain or head"
+        source: "record 57 research 07, Table 5 R1"
+  unit:
+    hard:
+      - when: "task != 'within_session' or present(flair) or present(t2w)"
+        words: "the session holds no FLAIR and no T2w beside its T1w, so there is nothing to align within it"
+        source: policy
+      - when: "task != 'across_visits' or unit.visits >= 2"
+        words: "one visit alone has nothing to align across visits"
+        source: policy
+      - when: "task != 'across_visits' or (unit.same_protocol and t1w.dimension == '3D')"
+        words: "the visits were not acquired alike, or are 2D: they need the SynthMorph visits member, which this version does not ship (research 07, Table 5 R7)"
+        source: "record 57 research 07, Table 5 R7; policy"
+    soft:
+      - when: "not (task == 'across_visits' and goal == 'research')"
+        words: "at research grade the deformable step in the halfway space (ANTs SyN after the rigid alignment, Table 5 R8) is not yet shipped; the rigid alignment stands"
+        source: "record 57 research 07, Table 5 R8"
+      - when: "task != 'to_template' or t1w.post_contrast != 'given'"
+        words: "the T1w is labelled post-contrast: the template registration has no evidence on an enhanced T1w"
+        source: "record 57 research 07, Table 5 R5 (no direct evidence; flag)"
+rules:
+  # within a session: both 3D at 1.5 mm or finer is ANTs rigid (Table 5
+  # R3); anything coarser or 2D is SynthMorph (R4), rigid where the pinned
+  # model has it, else affine with a flag. A session with a T2w alone is
+  # judged on the T2w.
+  - id: within-session-fine-3d
+    when: "task == 'within_session' and present(flair) and t1w.dimension == '3D' and flair.dimension == '3D' and max(t1w.voxel_max_mm, flair.voxel_max_mm) <= 1.5"
+    route: ants
+    why: "both images are 3D at 1.5 mm or finer: rigid with mutual information is the standard at near-isotropic resolution"
+    source: "record 57 research 07, Table 5 R3"
+  - id: within-session-fine-3d-t2w
+    when: "task == 'within_session' and not present(flair) and present(t2w) and t1w.dimension == '3D' and t2w.dimension == '3D' and max(t1w.voxel_max_mm, t2w.voxel_max_mm) <= 1.5"
+    route: ants
+    why: "both images are 3D at 1.5 mm or finer: rigid with mutual information is the standard at near-isotropic resolution"
+    source: "record 57 research 07, Table 5 R3"
+  - id: within-session-thick-or-2d
+    when: "task == 'within_session'"
+    route: synthmorph
+    why: "one image is 2D or coarser than 1.5 mm: SynthMorph is the most robust to slice thickness"
+    source: "record 57 research 07, Table 5 R4"
+  # across visits: same contrast, acquired alike, 3D (R6); the needs above
+  # skip the rest in words
+  - id: across-visits-rigid
+    when: "task == 'across_visits'"
+    route: robust
+    why: "the same contrast across a person's visits: inverse-consistent and robust to lesion change"
+    source: "record 57 research 07, Table 5 R6"
+  # to the template: a fine 3D T1w at the standard or research goal is SyN
+  # (R9); the fast goal, or no adequate T1w, is SynthMorph joint (R10)
+  - id: to-template-syn
+    when: "task == 'to_template' and goal != 'fast' and t1w.dimension == '3D' and t1w.voxel_max_mm <= 1.2"
+    route: ants
+    why: "a 3D T1w at 1.2 mm or finer: SyN to MNI152NLin2009cAsym after N4 and skull stripping, as fMRIPrep does"
+    source: "record 57 research 07, Table 5 R9"
+  - id: to-template-synthmorph
+    when: "task == 'to_template'"
+    route: synthmorph
+    why: "the fast goal, or no 3D T1w at 1.2 mm or finer: SynthMorph joint needs no preprocessing"
+    source: "record 57 research 07, Table 5 R10"

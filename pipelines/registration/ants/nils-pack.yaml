@@ -1,0 +1,105 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# The pack of the ANTs member of the registration family (record 57 P6,
+# Wave 7b P2; research 07, Tables 5 and 6). The family's rules decide which
+# session comes here; this pack carries the member's own switches (the
+# task and the lesion mask, set from the family's), the needs the method
+# has beyond the family's (3D images at 1.5 mm or finer within a session,
+# a 3D T1w at 1.2 mm or finer to the template), the checks of section 7
+# and the comparability key. The thresholds of the rigid sanity, the
+# folding and the inverse consistency are policy, to be calibrated on the
+# pilot (spec section 22, question 3).
+nils_pack: 1
+pipeline:
+  name: registration-ants
+  descriptor_sha256: "sha256:5d4024c38761a41c9b7c79f762aed2da7341a7389b83c8e168eac316da47e889"
+  version: "1.0"
+goals:
+  goal: [fast, standard, research]
+  task: [within_session, to_template]
+  lesions: ["off", "on"]
+needs:
+  t1w:
+    hard:
+      - when: "dimension == '3D'"
+        words: "the T1w is 2D: ANTs rigid with mutual information is for near-isotropic 3D images; SynthMorph takes this session"
+        source: "record 57 research 07, Table 5 R3 and R4"
+    soft:
+      - when: "task != 'to_template' or voxel_max_mm <= 1.2"
+        words: "the T1w is coarser than 1.2 mm: SyN to the template is validated on 1 mm T1w"
+        source: "record 57 research 07, Table 5 R9"
+  flair:
+    hard_if: "task == 'within_session' and present(flair)"
+    hard:
+      - when: "dimension == '3D' and voxel_max_mm <= 1.5"
+        words: "the FLAIR is 2D or coarser than 1.5 mm: SynthMorph takes this session"
+        source: "record 57 research 07, Table 5 R3 and R4"
+  t2w:
+    hard_if: "task == 'within_session' and present(t2w) and not present(flair)"
+    hard:
+      - when: "dimension == '3D' and voxel_max_mm <= 1.5"
+        words: "the T2w is 2D or coarser than 1.5 mm: SynthMorph takes this session"
+        source: "record 57 research 07, Table 5 R3 and R4"
+  host:
+    soft:
+      - when: "host.memory_gb >= 8"
+        words: "SyN at 1 mm wants 8 GB of memory"
+        source: policy
+knobs:
+  task:
+    what: "within a session, the FLAIR and the T2w onto the T1w, rigid; to the template, SyN of the T1w onto MNI152NLin2009cAsym"
+    changes: [flair_xfm, flair_aligned, t2w_xfm, t2w_aligned, template_xfm, template_xfm_inverse, template_aligned, metrics]
+    comparability: breaks
+    set_by: rule
+  lesions:
+    what: "pass the session's registered lesion mask as the moving mask of SyN, so lesions do not drive the deformation"
+    changes: [template_xfm, template_xfm_inverse, template_aligned]
+    comparability: breaks
+    set_by: rule
+  threads:
+    what: "the threads one session uses"
+    comparability: none
+    set_by: person
+rules:
+  - id: task-follows-the-family
+    when: "task == 'to_template'"
+    set: {task: "to_template"}
+    why: "the family's task is this run's"
+    source: policy
+  - id: within-session-follows-the-family
+    when: "task == 'within_session'"
+    set: {task: "within_session"}
+    why: "the family's task is this run's"
+    source: policy
+  - id: lesion-mask-follows-the-switch
+    when: "lesions == 'on'"
+    set: {lesions: "on"}
+    why: "lesions are on: the lesion mask is the moving mask of SyN"
+    source: "record 57 research 07, Table 5 R9 (lesion masking advised)"
+checks:
+  - {metric: rigid_flip, op: "==", value: 0, action: fail, source: policy, words: "the transform flips the image: a registration that found a mirror image is wrong"}
+  - {metric: rigid_determinant, op: ">=", value: 0.98, action: flag, source: policy, words: "the rigid transform's determinant is not near 1"}
+  - {metric: rigid_determinant, op: "<=", value: 1.02, action: flag, source: policy, words: "the rigid transform's determinant is not near 1"}
+  - {metric: rigid_translation_mm, op: "<=", value: 50, action: flag, source: policy, words: "the images moved more than 50 mm within a session: a patient who moved, or another series"}
+  - {metric: rigid_rotation_deg, op: "<=", value: 30, action: flag, source: policy, words: "the images turned more than 30 degrees within a session"}
+  - {metric: folding_pct, op: "<=", value: 0.01, action: flag, source: policy, words: "the deformation folds in more than 0.01 % of brain voxels"}
+  - {metric: inverse_consistency_mm, op: "<=", value: 0.1, action: flag, source: policy, words: "the forward and inverse transforms disagree by more than 0.1 mm on average"}
+  - {metric: alignment_dice, op: ">=", action: flag, cohort: true, stratum: [site, vendor, field_strength, sequence, post_contrast], min_sessions: 30, source: "policy (the overlap after alignment far below the cohort's)", words: "the overlap of the two images after alignment is far below the cohort's"}
+licence:
+  spdx: "Apache-2.0"
+  redistributable: true
+  terms: {url: "https://github.com/ANTsX/ANTs/blob/master/COPYING.txt", version: "2.0"}
+  accept: false
+resources:
+  memory_gb: 8
+  minutes: 40
+  gpu: none
+  by_input:
+    - {when: "task == 'within_session'", memory_gb: 4, minutes: 5}
+comparability:
+  facts: [t1w.base]
+tests: []
+source:
+  image: "docker.io/antsx/ants@sha256:d53ce1c7db686c5a3791fb42b917aaee819c1f34327dd5171ebc3d2a8520297e"
+  probe: {command: "antsRegistration --version", expect: "ANTs Version: v2.6.2"}
+  key_files: ["bin/antsRegistration", "bin/antsRegistrationSyN.sh"]
