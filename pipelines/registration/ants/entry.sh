@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 set -u; cd [InputDataset];
 flair() { local g s q; for g in "$1"/*_T2w.nii.gz "$1"/*_FLAIR.nii.gz; do [ -e "$g" ] || continue; s=$(basename "$g" .nii.gz);
 case "$s" in *_FLAIR) echo "$g"; return;; *_acq-*) q=${s#*_acq-};; *) continue;; esac;

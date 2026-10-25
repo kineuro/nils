@@ -13,7 +13,7 @@
 nils_pack: 1
 pipeline:
   name: registration-synthmorph
-  descriptor_sha256: "sha256:64c0c7840f184e8e82ee0659a28c30517e51997c2af85d53c2511802515fc90e"
+  descriptor_sha256: "sha256:d18203da06c74f626102543bc37007c276fe814153cb8192cf0b4ba06369031e"
   version: "1.0"
 goals:
   goal: [fast, standard, research]

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 set -u; cd [InputDataset];
 qc() { mri_synthseg --i "$1" --o "$2" --qc "$3" --robust --cpu --threads [THREADS] >/dev/null 2>&1 || return 1;
 fspython -c "import sys, csv; r = list(csv.reader(open(sys.argv[1])))[-1]; v = [float(x) for x in r[1:] if x.strip()]; print(\"%.3f\" % min(v))" "$3"; };
