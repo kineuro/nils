@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nils.kineuro.se/contracts/workflow/v1/nils.workflow.schema.json",
+  "title": "NILS workflow (nils.workflow.yml)",
+  "description": "SPDX-License-Identifier: Apache-2.0. Record 57 P7 (Wave 7b, section 8.2): a workflow is steps, each a pipeline or a family of the catalog at a version or current, with the goal and the knobs a person may set, and links, each an output of one step wired to an input of a later one. The file is YAML; this schema is of the value it parses to. A change makes the document's next version in the catalog; replaces decides whether the older stays selectable. The links are checked when the workflow is planned (section 8.3), against the typed outputs the descriptors declare (kind, role, contrast, grid or space) and the packs' needs and links sections: satisfied, missing, redundant, refused or fed, each with words.",
+  "$defs": {
+    "ident": {"type": "string", "pattern": "^[a-z][a-z0-9_-]*$"},
+    "step": {
+      "type": "object",
+      "required": ["id"],
+      "oneOf": [{"required": ["pipeline"]}, {"required": ["family"]}],
+      "properties": {
+        "id": {"$ref": "#/$defs/ident", "description": "The step's name within the workflow, which links name"},
+        "pipeline": {"$ref": "#/$defs/ident", "description": "A pipeline of the catalog, by name"},
+        "family": {"$ref": "#/$defs/ident", "description": "A family of the catalog, by name (section 7): one row, several member pipelines, the pack's rules choosing per session. A family the catalog does not hold refuses the plan, never the document"},
+        "version": {"oneOf": [{"const": "current"}, {"type": "integer", "minimum": 1}], "default": "current", "description": "current (the name's current version when the workflow runs) or a version number"},
+        "goal": {"enum": ["fast", "standard", "research"], "description": "The goal the step's pack judges under; standard where none"},
+        "knobs": {"type": "array", "items": {"$ref": "#/$defs/ident"}, "description": "The knobs a person may set when the workflow runs; every other knob is the pack's rules' or the descriptor's default"},
+        "switches": {"type": "object", "description": "The pack's switches fixed for the step (lesions: on)"}
+      },
+      "additionalProperties": true
+    },
+    "link": {
+      "type": "object",
+      "required": ["from", "to"],
+      "properties": {
+        "from": {"type": "string", "pattern": "^[a-z][a-z0-9_-]*\\.[a-z][a-z0-9_]*$", "description": "<step>.<output>: an output the step's descriptor declares (x-nils.outputs[].id)"},
+        "to": {"type": "string", "pattern": "^[a-z][a-z0-9_-]*\\.[a-z][a-z0-9_]*$", "description": "<step>.<input>: a pick role of the step's descriptor (x-nils.input.roles, such as flair) or one of its typed inputs (x-nils.inputs[].id, such as synthseg). The step comes after from's"}
+      },
+      "additionalProperties": true
+    }
+  },
+  "type": "object",
+  "required": ["nils_workflow", "name", "steps"],
+  "properties": {
+    "nils_workflow": {"const": 1},
+    "name": {"$ref": "#/$defs/ident", "description": "The catalog name; a change to the document makes the name's next version"},
+    "title": {"type": "string"},
+    "what": {"type": "string", "description": "A line for the person"},
+    "replaces": {"type": "object", "required": ["why"], "properties": {"why": {"type": "string"}, "versions": {"type": "array", "minItems": 1, "items": {"type": "integer", "minimum": 1}}}, "description": "As a descriptor's x-nils.replaces: the earlier versions this one replaces because it fixes them, which then run only when asked for by name; every earlier version where versions is left out"},
+    "steps": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/step"}},
+    "links": {"type": "array", "items": {"$ref": "#/$defs/link"}}
+  },
+  "additionalProperties": true
+}

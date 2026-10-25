@@ -52,6 +52,10 @@ resources:
   memory_gb: 32
   minutes: 240
   gpu: none
+# Wave 7b, section 8.3: what a workflow's plan says of a link into recon-all-clinical.
+links:
+  redundant:
+    bias_correction: "N4 before recon-all-clinical is redundant: its SynthSR and SynthSeg steps are trained on uncorrected scans and recon-all corrects the bias itself (record 57, research 03)"
 comparability: {}
 tests: []
 source:

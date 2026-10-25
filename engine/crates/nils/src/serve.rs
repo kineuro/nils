@@ -2309,6 +2309,25 @@ fn routed(
     ) {
         return r;
     }
+    // Wave 7b A7: the workflow catalog, the plan, the runs, and provenance
+    if let Some(r) = crate::workflows::route(
+        &doors.home,
+        doors.pack_dir.as_deref(),
+        registry,
+        caller,
+        quasi,
+        method.as_str(),
+        &pipeline_segs,
+        query,
+        body,
+    ) {
+        return r;
+    }
+    // a session id, `<subject>@<label>`, arrives percent-encoded (`%40`),
+    // so the door reads the decoded segments as the pipelines doors do
+    if let Some(r) = crate::provenance::route(registry, caller, quasi, get, &pipeline_segs) {
+        return r;
+    }
     // record 56 §6.4, §6.5: the pack's quality, the proposed rule changes
     // and their adoption
     if let Some(r) =
@@ -5847,6 +5866,17 @@ pub(crate) fn door(method: &str, segs: &[&str]) -> (Need, Detail) {
         ("GET", ["api", "pipeline-runs", _, "numbers"]) => (Need::One("pipelines:see"), Plain),
         // record 49 A3: the pre-flight reads and starts nothing
         ("POST", ["api", "pipelines", _, "preflight"]) => (Need::One("pipelines:see"), Plain),
+        // Wave 7b A7: the workflow catalog and its plan read the Pipelines
+        // page's data; adding a workflow and starting a run change what runs
+        ("GET", ["api", "workflows" | "workflow-runs"])
+        | ("GET", ["api", "workflows" | "workflow-runs", _])
+        | ("POST", ["api", "workflows", _, "plan"]) => (Need::One("pipelines:see"), Plain),
+        ("POST", ["api", "workflows"]) => (Need::One(nils_pipeline::failure::INSTALL_GRANT), Plain),
+        ("POST", ["api", "workflows", _, "run"]) => (Need::One("pipelines:work"), Plain),
+        // record 58 P5: provenance names a result's inputs and its steps
+        ("GET", ["api", "provenance", _, _]) => {
+            (Need::AnyOf(&["pipelines:see", "data:see"]), Plain)
+        }
         // 2026-10-12: what the engine runs beside itself is read on the
         // Pipelines page and the Parts page; installing it is an admin's
         ("GET", ["api", "tools"]) => (Need::AnyOf(&["install:see", "pipelines:see"]), Plain),
@@ -6637,6 +6667,8 @@ pub(crate) fn doors_list() -> Vec<String> {
     .chain(crate::derivatives::DOORS.iter())
     .chain(crate::pipelines::DOORS.iter())
     .chain(std::iter::once(&crate::preflight::DOOR))
+    .chain(crate::workflows::DOORS.iter())
+    .chain(std::iter::once(&crate::provenance::DOOR))
     .chain(crate::tools::DOORS.iter())
     .chain(crate::software::DOORS.iter())
     .chain(crate::pipelines::SETUP_DOORS.iter())
@@ -6978,6 +7010,10 @@ fn located(doors: &Doors, store: &mut Store, command: Vec<String>) -> Result<Vec
         // record 43 S2: a run names a pipeline and a frozen selection, and
         // the deployment's packs; never a path
         "run" => return crate::pipelines::located(doors.pack_dir.as_deref(), command),
+        // Wave 7b A7: a workflow run names a workflow and a handle
+        "workflow" if command.get(1).is_some_and(|w| w == "run") => {
+            return crate::workflow_run::located(command);
+        }
         // record 45 E1: a pyramid names a stack, a selection or a handle, and
         // the deployment's packs where a selection is frozen; never a path
         "pyramid" => return crate::pyramid::located(doors.pack_dir.as_deref(), command),
@@ -8887,6 +8923,8 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
             .chain(crate::main_scans::POLICY.iter())
             .chain(crate::review_rule::POLICY.iter())
             .chain(crate::pipelines::RUNTIME_POLICY.iter())
+            .chain(crate::workflows::POLICY.iter())
+            .chain(std::iter::once(&crate::provenance::POLICY))
             .chain(crate::clinical_doors::POLICY.iter())
             .chain(crate::rule_changes::POLICY.iter())
             .chain(crate::review_questions::POLICY.iter())

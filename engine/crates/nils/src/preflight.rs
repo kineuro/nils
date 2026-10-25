@@ -95,6 +95,11 @@ pub(crate) struct Asked<'a> {
     /// Record 57 P2 (Wave 7b A1): the goal, the switches and whether a
     /// unit whose hard need cannot be told runs.
     pub person: crate::pipeline_pack::PersonAsk,
+    /// Wave 7b A7 (after the third review, finding 4): the typed inputs a
+    /// workflow's links feed, bound by the plan to the step that feeds each
+    /// (no run yet): a unit is not missing such an input, and the answer
+    /// says `fed by step <X>` for it. Empty for a run on its own.
+    pub bound: crate::pipelines::Bound,
 }
 
 /// Record 57 P2: the roles each stack of a run is picked for, under the
@@ -317,6 +322,7 @@ fn stack_units(
     d: &Descriptor,
     stacks: &[i64],
     place_ids: &[i64],
+    bound: &crate::pipelines::Bound,
 ) -> Result<Vec<Unit>, String> {
     let err = |e: nils_registry::Error| e.to_string();
     let mut with_files: BTreeSet<i64> = BTreeSet::new();
@@ -354,7 +360,7 @@ fn stack_units(
     // out where the input's check leaves them out (the T33 pipe test)
     let one: Vec<[i64; 1]> = stacks.iter().map(|&s| [s]).collect();
     let units: Vec<&[i64]> = one.iter().map(|s| s.as_slice()).collect();
-    let lacking = crate::pipelines::derivatives_missing(store, d, &units, place_ids)?;
+    let lacking = crate::pipelines::derivatives_missing(store, d, &units, place_ids, bound)?;
     Ok(stacks
         .iter()
         .zip(lacking)
@@ -628,6 +634,7 @@ fn bids_units(
     pack: Option<&nils_pack::Pack>,
     place_ids: &[i64],
     main: Option<&Value>,
+    bound: &crate::pipelines::Bound,
 ) -> Result<(Vec<Unit>, LeftOut), String> {
     // a run's input is a selection, released under the main scans as the
     // release of one reads them: each subject's own dataset's once read,
@@ -781,7 +788,8 @@ fn bids_units(
     // the derivatives each unit's inputs need, as the run judges them: a
     // unit whose only one was rejected by its check is not ready either
     let units: Vec<&[i64]> = out.iter().map(|u| u.stacks.as_slice()).collect();
-    let lacking = crate::pipelines::derivatives_missing(registry.store(), d, &units, place_ids)?;
+    let lacking =
+        crate::pipelines::derivatives_missing(registry.store(), d, &units, place_ids, bound)?;
     for (u, lacks) in out.iter_mut().zip(lacking) {
         u.missing.extend(lacks);
     }
@@ -915,6 +923,7 @@ struct Planned {
 /// The units of a run over `stacks`: a new run's as its release would plan
 /// them; a run taken up again goes on with the bids input it released
 /// before, where it did, and its units over already are kept.
+#[allow(clippy::too_many_arguments)]
 fn plan_units(
     registry: &mut Registry,
     d: &Descriptor,
@@ -923,20 +932,21 @@ fn plan_units(
     place_ids: &[i64],
     main: Option<&Value>,
     taken: Option<&Taken>,
+    bound: &crate::pipelines::Bound,
 ) -> Result<Planned, String> {
     let released = taken
         .and_then(|t| t.run.input_release_id)
         .filter(|_| d.layout == Layout::Bids);
     let (mut units, left) = match (d.layout, released) {
         (Layout::Stacks, _) => (
-            stack_units(registry.store(), d, stacks, place_ids)?,
+            stack_units(registry.store(), d, stacks, place_ids, bound)?,
             LeftOut::new(),
         ),
         (Layout::Bids, Some(release)) => (
-            released_units(registry, d, release, place_ids, main)?,
+            released_units(registry, d, release, place_ids, main, bound)?,
             LeftOut::new(),
         ),
-        (Layout::Bids, None) => bids_units(registry, d, stacks, pack, place_ids, main)?,
+        (Layout::Bids, None) => bids_units(registry, d, stacks, pack, place_ids, main, bound)?,
     };
     let (kept, made) = match taken {
         Some(t) => {
@@ -962,6 +972,7 @@ fn released_units(
     release: i64,
     place_ids: &[i64],
     main: Option<&Value>,
+    bound: &crate::pipelines::Bound,
 ) -> Result<Vec<Unit>, String> {
     let mut out: Vec<Unit> =
         crate::pipelines::released_units(registry, release, d.level, &d.roles, main)?
@@ -976,7 +987,8 @@ fn released_units(
             })
             .collect();
     let units: Vec<&[i64]> = out.iter().map(|u| u.stacks.as_slice()).collect();
-    let lacking = crate::pipelines::derivatives_missing(registry.store(), d, &units, place_ids)?;
+    let lacking =
+        crate::pipelines::derivatives_missing(registry.store(), d, &units, place_ids, bound)?;
     for (u, lacks) in out.iter_mut().zip(lacking) {
         u.missing.extend(lacks);
     }
@@ -1077,6 +1089,7 @@ pub(crate) fn check(registry: &mut Registry, asked: &Asked<'_>) -> Result<Value,
         &place_ids,
         stored.as_ref(),
         taken.as_ref(),
+        &asked.bound,
     )?;
     // a run taken up again with every unit over has none left to run, and
     // taking it up closes it with what they made
@@ -1348,6 +1361,9 @@ pub(crate) fn check(registry: &mut Registry, asked: &Asked<'_>) -> Result<Value,
             "stack_id": u.stack_id, "why": u.missing, "lacks": briefs(&u.missing),
         })).collect::<Vec<_>>(),
         "cannot": cannot,
+        // Wave 7b A7 (after the third review, finding 4): the typed inputs a
+        // workflow's links feed, each `fed by step <X>`, which no unit lacks
+        "fed": asked.bound.iter().filter(|(_, f)| f.is_planned()).map(|(input, f)| (input.clone(), json!(f.planned_words()))).collect::<serde_json::Map<String, Value>>(),
         "resume": taken.as_ref().map(|t| json!({
             "run": t.run.id, "status": t.run.status, "job": t.run.job_id,
             "kept": kept, "made": made,
@@ -1461,6 +1477,7 @@ pub(crate) fn units_refusal(
         &place_ids,
         main.as_ref(),
         taken.as_ref(),
+        &Default::default(),
     )?;
     let missing: Vec<&Unit> = planned
         .units
@@ -1573,7 +1590,7 @@ pub(crate) fn plain(v: &mut Value) {
 /// The pick roles a pipeline's units need (`x-nils.input.roles`), which a
 /// scope's main scans written without a role take (2026-10-12); none where
 /// the catalog holds no such pipeline, which the pre-flight says itself.
-fn needs_of(store: &mut Store, pipeline: &str) -> Vec<String> {
+pub(crate) fn needs_of(store: &mut Store, pipeline: &str) -> Vec<String> {
     rows::resolve(store, pipeline)
         .ok()
         .flatten()
@@ -1720,6 +1737,7 @@ pub(crate) fn route(
                 replaced: false,
                 person: crate::pipeline_pack::PersonAsk::of_body(&doc)
                     .map_err(|e| Reply::error(400, e))?,
+                bound: Default::default(),
             },
         )
         .map_err(|e| {
@@ -1807,6 +1825,7 @@ pub(crate) fn command(home: &Home, args: &crate::pipelines::RunArgs) -> Result<(
                 args.let_run,
             )
             .map_err(usage)?,
+            bound: Default::default(),
         },
     )
     .map_err(usage)?;

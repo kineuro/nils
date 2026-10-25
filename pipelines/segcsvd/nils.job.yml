@@ -197,6 +197,9 @@ x-nils:
   inputs:
     - id: synthseg
       type: "derivative:mask"
+      role: t1w
+      contrast: T1w
+      grid: t1w
       description: "The sessions' SynthSeg label maps (*_desc-synthseg_dseg.nii.gz), from a run of the synthseg starter"
     - id: aligned_flair
       type: "derivative:image"
@@ -210,6 +213,8 @@ x-nils:
       kind: mask
       path-template: "sub-{subject}/ses-{session}/anat/*_label-WMH_desc-segcsvd_mask.nii.gz"
       media-type: application/x-nifti+gzip
+      role: flair
+      contrast: FLAIR
       parts:
         - {key: wmh, words: White-matter hyperintensities, kind: components, labels: nonzero}
     - id: wmh_probability
@@ -221,6 +226,8 @@ x-nils:
       path-template: "sub-{subject}/ses-{session}/anat/*_label-PVS_desc-segcsvd_mask.nii.gz"
       media-type: application/x-nifti+gzip
       grid: t1w
+      role: t1w
+      contrast: T1w
       parts:
         - {key: pvs, words: Perivascular spaces, kind: components, labels: nonzero}
     - id: pvs_probability

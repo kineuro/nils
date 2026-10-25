@@ -3170,6 +3170,10 @@ fn build_registry() -> Vec<Table> {
                 // Wave 7b A1: the person's choices at the pack (goal, switches,
                 // let-run), kept so a resume judges under the same ones
                 col("person", Type::Json),
+                // Wave 7b A7 (section 8.4): the workflow run this run is a
+                // step of, and which step (from 0); none for a run of its own
+                col("workflow_run_id", Type::Int),
+                col("step", Type::Int),
             ],
         )
         .index(&["pipeline_id"])
@@ -3216,10 +3220,93 @@ fn build_registry() -> Vec<Table> {
                 col("pack", Type::Json),
                 col("comparability_key", Type::Text),
                 col("result_key", Type::Text),
+                // Wave 7b A7 (section 8.5, G6): the run whose kept result
+                // this unit reused in place of running, none where it ran
+                col("reused_from_run", Type::Int),
+                // Wave 7b A7 (record 58 P5): the curation state of the
+                // unit's inputs when it ran, {rules {pack, version, digest},
+                // label_set {id, digest}, system1 {model, version}, overrides
+                // [{stack, axis, by}]}, which the provenance door compares
+                // with the inputs' state now
+                col("curation", Type::Json),
             ],
         )
         .unique(&["run_id", "unit"])
         .index(&["state"]),
+        // Wave 7b A7 (record 57 P7): a workflow of the catalog, versioned
+        // as a pipeline is: its document (contracts/workflow/v1) kept
+        // whole with its digest, the same document again is the version it
+        // is, and `replaces` in the document decides whether an older
+        // version stays selectable.
+        Table::new(
+            "workflow",
+            vec![
+                col("id", Type::Id),
+                req("name", Type::Text),
+                req("version", Type::Int),
+                req("document", Type::Json),
+                req("digest", Type::Text),
+                // active | retired
+                req("state", Type::Text),
+                req("added_by", Type::Text),
+                req("added_at", Type::Timestamp),
+                // starter for a version the engine seeded, none for one a
+                // person added
+                col("origin", Type::Text),
+            ],
+        )
+        .unique(&["name", "version"]),
+        // Wave 7b A7 (record 57 P7, section 8.4): one run of a workflow
+        // over a frozen scope: the handle it pinned, the person's choices,
+        // and a summary that sums each step's units; each step's pipeline
+        // run as the chain makes it is a `workflow_step` row. A step's
+        // pipeline run names it back (pipeline_run.workflow_run_id, step).
+        Table::new(
+            "workflow_run",
+            vec![
+                col("id", Type::Id),
+                req("workflow_id", Type::Int),
+                col("job_id", Type::Int),
+                col("handle_id", Type::Int),
+                col("selection", Type::Text),
+                // {goal, switches, knobs}
+                col("person", Type::Json),
+                // running | done | partial | failed | cancelled | interrupted
+                req("status", Type::Text),
+                req("started_at", Type::Timestamp),
+                col("finished_at", Type::Timestamp),
+                col("summary", Type::Json),
+                req("principal", Type::Text),
+                col("actor", Type::Json),
+                col("error", Type::Text),
+            ],
+        )
+        .index(&["workflow_id"])
+        .index(&["status"]),
+        // Wave 7b A7 (section 8.4, after review): one step of a workflow
+        // run, a row of its own, so the step threads of one run never
+        // read, change and write one JSON over each other: what the
+        // document said of the step (`doc`: {step, id, of, name, pipeline,
+        // waits_for, ...}), and what the chain records as it goes (its
+        // pipeline run, its status, its error, its units summed, when it
+        // ended), each written by (run, step).
+        Table::new(
+            "workflow_step",
+            vec![
+                col("id", Type::Id),
+                req("workflow_run_id", Type::Int),
+                req("step", Type::Int),
+                req("doc", Type::Json),
+                col("run_id", Type::Int),
+                // queued | running | done | partial | failed | cancelled |
+                // interrupted | refused | skipped
+                req("status", Type::Text),
+                col("error", Type::Text),
+                col("units", Type::Json),
+                col("finished_at", Type::Timestamp),
+            ],
+        )
+        .unique(&["workflow_run_id", "step"]),
         // Record 49 A3: one measure of one unit from one run, loaded from a
         // table the run wrote (or a metric its results declared), so the
         // ask reads it as a field of the unit's grain. A newer run of the

@@ -153,6 +153,8 @@ x-nils:
       path-template: "sub-{subject}/ses-{session}/anat/*_desc-samseg_dseg.nii.gz"
       media-type: application/x-nifti+gzip
       grid: t1w
+      role: t1w
+      contrast: T1w
       parts:
         - {key: lesions, words: Lesions, kind: components, labels: [99]}
         - key: structures

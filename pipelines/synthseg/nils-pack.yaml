@@ -10,7 +10,7 @@
 nils_pack: 1
 pipeline:
   name: synthseg
-  descriptor_sha256: "sha256:7aabbd8b6a1b4186965156974b194d702d930bf85dc00683e45a856483717c1b"
+  descriptor_sha256: "sha256:be13e61e774e6a2e8196f0ddd023818a621f97b909b2a93747a26d7d8a5a10a0"
   version: "1.0"
 goals:
   goal: [fast, standard, research]

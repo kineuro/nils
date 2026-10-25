@@ -9,7 +9,7 @@
 nils_pack: 1
 pipeline:
   name: synthstrip
-  descriptor_sha256: "sha256:6df0474d8551bb081d7e713ba4905e8760d06ace9a7b41eb855ed347cd532ff6"
+  descriptor_sha256: "sha256:32b9c7f70e47c1609ee885aca806c503458c7179f409b528f52caa4e01936c93"
   version: "1.0"
 goals:
   goal: [fast, standard, research]

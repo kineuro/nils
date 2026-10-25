@@ -94,10 +94,16 @@ x-nils:
       kind: mask
       path-template: "sub-{subject}/ses-{session}/anat/*_desc-brain_mask.nii.gz"
       media-type: application/x-nifti+gzip
+      grid: t1w
+      role: t1w
+      contrast: T1w
     - id: brain
-      kind: output
+      kind: image
       path-template: "sub-{subject}/ses-{session}/anat/*_desc-brain_T1w.nii.gz"
       media-type: application/x-nifti+gzip
+      grid: t1w
+      role: t1w
+      contrast: T1w
     - id: brain_volume
       kind: table
       format: csv

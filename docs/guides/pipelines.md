@@ -220,6 +220,51 @@ A family is one entry for you and several pipelines behind it, its members, with
 
 The checks of the registration family are its members' packs': SynthSeg's quality score of either input under 0.65 fails the unit (the FreeSurfer members score both inputs first), a flip fails, and the determinant near 1, a translation under 50 mm and a rotation under 30 degrees within a session, folding above 0.01 % of brain voxels and inverse consistency above 0.1 mm flag; these last are policy, to be calibrated on the family's pilot on the research side (`pipelines/registration/PILOT.md`), which has not run yet. The ANTs member's template task reads the site file `mni_template` (TemplateFlow's `tpl-MNI152NLin2009cAsym_res-01_T1w.nii.gz`, set with `nils pipeline secret set mni_template --file <path>`); the SynthMorph member falls back to FreeSurfer's own copy of the template.
 
+## Chain pipelines into a workflow
+
+A workflow is a document, `nils.workflow.yml` (the contract is `contracts/workflow/v1`), kept in the catalog beside the pipelines and versioned as a pipeline is: `steps`, each a pipeline or a family at a version or `current`, with the goal, the pack's switches fixed for the step and the knobs a person may set, and `links`, an output of one step wired to an input of a later one. Outputs are typed where their descriptor declares them (kind, `role`, `contrast`, `grid` or `space`), and a derivative input may say what it takes, so the plan can check every link. The engine ships `flair-lesions` (the registration family, then SAMSEG with lesions, SynthSeg, then segcsvd over it) and `cortical` (SynthStrip, then recon-all), seeded with the starters.
+
+1. Write the document and check it offline, then add it:
+
+   ```sh
+   nils workflow validate workflows/my-chain
+   nils workflow add workflows/my-chain
+   nils workflow list
+   ```
+
+2. Plan it over a scope. Nothing runs; every link gets a verdict with words, and every step its pre-flight:
+
+   ```sh
+   nils workflow plan flair-lesions --select main@dataset:study-anon
+   ```
+
+   The verdicts: `satisfied` (the registration's aligned FLAIR meets SAMSEG's `aligned(flair, t1w)`), `missing` (SAMSEG with lesions and no registration step is accepted only with its header-alignment check on, and the plan says so; a typed input no step feeds takes the newest kept result of each session), `redundant` (N4 before SAMSEG or recon-all, which correct bias themselves; N4 before a FLAIR lesion model, possibly harmful: what a pack says of its links is its `links` section), `refused` (a type that does not meet the input, both types named; a family or a pipeline the catalog does not hold, refused by name) and `fed` (SynthSeg before segcsvd, naming which SynthSeg the segcsvd key carries; the registration's aligned FLAIR into SAMSEG's and segcsvd's typed input `aligned_flair`, which they read in place of the header resampling, so the words say it meets their `aligned(flair, t1w)`). A workflow with a refused step or link does not run.
+
+   A step may name a family (`family: registration`, with the task among its `switches`): the plan resolves it to the family's members in the catalog, whose typed outputs (`flair_aligned`, `flair_xfm`, ...) are the sources of the links out of it, and its pre-flight is the family's routing of the scope's units, member by member. The step runs as `nils run registration` runs: one member run over the units routed to it, so under a workflow the scope's units must route to one member; a scope that routes to several is refused in words, and the plan's routing counts show it beforehand.
+
+3. Run it. Each step is a pipeline run over the same frozen scope (the steps of one workflow run share it, where two runs over the same stacks would otherwise be refused); a session's next step starts when its previous step is done, without waiting for the whole selection, and a step of another grain (a session step after a stack step, or the reverse) starts a unit when every stack it holds is done at the step before; a unit skipped or failed at one step is skipped downstream with the same reason, unless the link into it feeds an `optional` typed input, when the unit runs without it and records `fed: {<input>: "fed by no step for this unit: <the reason>"}`; a step fed through a typed input or a pick role waits for the whole step before (a run binds both as it starts), and the plan says which under each step's `waits_whole`, so the per-unit chaining is for order-only steps, whose link meets a pack need. A link is bound to the run of the step it comes from: a typed input a link feeds takes that run's files of the unit and no other run's kept result, a role a link feeds (the registration's aligned FLAIR into SAMSEG's `flair`) takes that run's image as the role's file for the unit where the two are of one image format (`.nii.gz` over `.nii.gz`; converting is not done, and a unit whose formats differ is skipped with both named), and a unit the fed run made nothing for is skipped with the link's words; a typed input no link feeds takes the newest kept result, as before. The plan's pre-flight of a step knows what the links feed: a fed input reads `fed: {<input>: "fed by step <X>"}` and no unit lacks it, and a family step's goal, switches and knobs are checked as `nils run <family>` checks them, so a plan that says runnable is one the run accepts. A chained unit's pack facts are read again as it starts, so a registration step's aligned FLAIR makes `aligned(flair, t1w)` true for SAMSEG (the unit says `judged_at: start`, and keeps the judgement at the run's start as `forecast`). A step that ends in an error is recorded failed, in the error's words, its pipeline run concluded failed where the error left it running, and the steps after it end skipped with the reason; a step before that is `interrupted`, or whose step is over while its run row still says running, is over to the steps after it: a workflow run always ends. A run started at the door is a job; `nils jobs cancel` on it cancels the step run in flight, starts no step after it, and ends the workflow run and the job `cancelled`, the job's progress saying the steps done of total throughout. The run's line sums each step's units:
+
+   ```sh
+   nils workflow run flair-lesions --select main@dataset:study-anon --goal standard --knob segcsvd.wmh_threshold=0.4
+   nils workflow runs
+   ```
+
+   `POST /api/workflows/{id}/plan` and `POST /api/workflows/{id}/run` do the same at the doors (the run is queued as a `workflow` job on the pipelines lane, and each step claims a `pipeline` job of its own beside it); `GET /api/workflows`, `GET /api/workflow-runs` and `GET /api/workflow-runs/{id}` list the catalog and the runs.
+
+**Results are kept and reused.** Every result is kept with its two keys; a step whose result key matches a kept result is not run again: the unit records `reused from run N` and links the result, and the run counts it under `reused`. The same workflow run twice over the same inputs runs nothing and says so; a `breaks` knob changed reruns that step and the steps after it, since their keys carry the step before. A result is never reused when a person rejected it in a check, when a newer version replaced its pipeline as wrong (`replaces`), or when its files fail their sha256; the files are checked where the unit would start, in the run's pool, so a run over many units starts without reading them all first.
+
+## Read a result's provenance
+
+For a subject, a session or a stack, the provenance door answers which steps ran on it, with which keys and which results, and for every result its curation state: the MRI pack and version that classified its inputs (with the pack folder's digest), the label set digest, System 1's answers with the model's version, and whether a person overrode an axis on an input, and which. A change of the rules version on an input marks the result `stale`, in the same words at every door.
+
+```sh
+nils provenance stack 4821
+nils provenance session 17@20230310
+nils provenance subject 17 --json
+```
+
+`GET /api/provenance/{subject|session|stack}/{id}` answers the same (`pipelines:see` or `data:see`); `GET /api/pipeline-runs/{id}` says each unit's state under `units_run[].curation`. A unit from before the door recorded no state and reads `unknown`. Units are named only at detail quasi, and the steps of a stack of a sample sealed now are withheld without `sealed:see`.
+
 ## Choose a version
 
 A name keeps every version added under it. A version that fixes the earlier ones says so in its descriptor, and a new run no longer takes them:

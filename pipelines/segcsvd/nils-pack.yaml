@@ -18,7 +18,7 @@
 nils_pack: 1
 pipeline:
   name: segcsvd
-  descriptor_sha256: "sha256:d01ecd21ec8975f301a7dec825650d08da4bd84050f55a96b5fcf8a120216ac9"
+  descriptor_sha256: "sha256:1837b8576ca9f565c40bed1eb8f863777a98b3c914421907cc4ab87080ce42fb"
   version: "1.1"
 goals:
   goal: [fast, standard, research]
@@ -96,6 +96,10 @@ resources:
   memory_gb: 8
   minutes: 30
   gpu: none
+# Wave 7b, section 8.3: what a workflow's plan says of a link into segcsvd.
+links:
+  harmful:
+    bias_correction: "N4 before a FLAIR lesion model is possibly harmful: segcsvd's WMH network was trained on uncorrected FLAIRs (record 57, research 03)"
 comparability: {}
 tests: []
 source:

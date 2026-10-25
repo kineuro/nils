@@ -150,17 +150,23 @@ x-nils:
     - id: brain_mask
       type: "derivative:mask"
       optional: true
+      role: t1w
+      grid: t1w
       description: "The sessions' brain masks (*_desc-brain_mask.nii.gz) from a run of the synthstrip starter; where a session has one the fit is held to it (-x), where it has none the whole image is read"
   units: apart
   outputs:
     - id: n4_image
-      kind: output
+      kind: image
       path-template: "sub-{subject}/ses-{session}/anat/*_desc-n4_T1w.nii.gz"
       media-type: application/x-nifti+gzip
+      grid: t1w
+      role: t1w
+      contrast: T1w
     - id: bias_field
-      kind: output
+      kind: image
       path-template: "sub-{subject}/ses-{session}/anat/*_desc-n4_biasfield.nii.gz"
       media-type: application/x-nifti+gzip
+      grid: t1w
     - id: field
       kind: table
       format: json

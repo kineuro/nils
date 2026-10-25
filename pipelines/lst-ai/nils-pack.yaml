@@ -75,6 +75,10 @@ licence:
 resources:
   memory_gb: 16
   gpu: none
+# Wave 7b, section 8.3: what a workflow's plan says of a link into LST-AI.
+links:
+  harmful:
+    bias_correction: "N4 before a FLAIR lesion model is possibly harmful: LST-AI was trained on uncorrected images and its own preprocessing normalises the intensities (record 57, research 03)"
 comparability: {}
 tests: []
 source:

@@ -79,6 +79,8 @@ x-nils:
       path-template: "sub-{subject}/ses-{session}/anat/*_desc-synthseg_dseg.nii.gz"
       media-type: application/x-nifti+gzip
       grid: t1w
+      role: t1w
+      contrast: T1w
       parts:
         - key: structures
           words: Structures

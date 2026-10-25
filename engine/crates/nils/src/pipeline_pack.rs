@@ -610,18 +610,6 @@ pub(crate) fn input_identities(store: &mut Store, stacks: &[i64]) -> Vec<String>
     out
 }
 
-/// The comparability keys of the units whose results a unit read through
-/// its derivative inputs: by the runs that made them.
-pub(crate) fn upstream_keys(store: &mut Store, made_by_runs: &[i64]) -> Vec<String> {
-    rows::unit_keys(store, made_by_runs)
-        .unwrap_or_default()
-        .into_iter()
-        .map(|(_, _, k)| k)
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect()
-}
-
 /// The two keys of one unit's results.
 pub(crate) struct KeysOf<'a> {
     pub pipeline: &'a Pipeline,

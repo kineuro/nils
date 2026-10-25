@@ -84,12 +84,14 @@ mod places;
 mod preflight;
 mod preview;
 mod profile;
+mod provenance;
 mod pyramid;
 mod reader;
 mod rehearse;
 mod releases;
 mod requirements;
 mod results;
+mod reuse;
 mod review_questions;
 mod review_rule;
 mod rule_changes;
@@ -117,6 +119,8 @@ mod update;
 mod versions;
 mod viewer;
 mod worker;
+mod workflow_run;
+mod workflows;
 use nils_digest::{Cancel, Cancelled, DigestError, Filter, Report, Rule, Settings};
 use nils_registry::day::Day;
 use nils_registry::home::{
@@ -357,6 +361,14 @@ enum Command {
         #[command(subcommand)]
         command: Option<tools::ToolsCommand>,
     },
+    /// Workflows (record 57 P7, Wave 7b section 8): the catalog of nils.workflow.yml documents, the plan that checks every link before anything runs, and the runs that go per unit through the chain
+    #[command(alias = "workflows")]
+    Workflow {
+        #[command(subcommand)]
+        command: workflows::WorkflowCommand,
+    },
+    /// Provenance (record 57 P8, record 58 P5): which steps ran on a subject, a session or a stack, with which keys and results, and each result's curation state
+    Provenance(provenance::ProvenanceArgs),
     /// The software place (record 57 P5): the tools installed by digest and the installs a site registers, verified, with their licences as recorded acceptances
     Software {
         #[command(subcommand)]
@@ -2410,6 +2422,8 @@ fn main() -> ExitCode {
         Command::Run(args) => pipelines::run_command(&home, *args),
         Command::Tools { command } => tools::command(&home, command),
         Command::Software { command } => software::command(&home, command),
+        Command::Workflow { command } => workflows::command(&home, command),
+        Command::Provenance(args) => provenance::command(&home, args),
         Command::Login(args) => login_command(args),
         Command::Logout => {
             if login::logout() {

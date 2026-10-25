@@ -1280,6 +1280,28 @@ fn a_bids_run_takes_what_an_earlier_bids_run_made_of_its_sessions() {
             std::fs::read_to_string(lab.work.path().join(d["path"].as_str().unwrap())).unwrap();
         assert_eq!(text.lines().count(), 2, "{d}: {text}");
     }
+    // after review (the second review, finding 1): a subject's provenance
+    // lists under each session's step the files of that session alone,
+    // never the other session's file of the same run
+    for p in prev {
+        let subject = p["subject_id"].as_i64().unwrap();
+        let prov = lab.json(&["provenance", "subject", &subject.to_string(), "--json"]);
+        let steps = prov["steps"].as_array().unwrap();
+        assert_eq!(steps.len(), 2, "two runs touched the subject: {prov}");
+        for s in steps {
+            let unit = s["unit"].as_str().unwrap();
+            let files = s["results"]["derivatives"].as_array().unwrap();
+            assert_eq!(files.len(), 1, "one file a session: {s}");
+            // the file is under derivatives/<pipeline>/<run>/<the unit's folder>
+            assert!(
+                files[0]["path"]
+                    .as_str()
+                    .unwrap()
+                    .contains(&format!("/{}/", unit.replace("_ses-", "/ses-"))),
+                "another session's file: {s}"
+            );
+        }
+    }
 
     // only the selection's own sessions and subjects: a file of another
     // day of one of its subjects is never taken, a file of the whole
@@ -14247,4 +14269,1301 @@ x-nils:
     unit-minutes: 1
 "#
     )
+}
+
+/// The first step of a chain over stacks: for each stack one file, typed
+/// as an image, with a tag the pack lets the person set and that breaks
+/// comparability.
+fn chain_a(image: &str) -> String {
+    format!(
+        r#"name: chain-a
+schema-version: "0.5"
+tool-version: "1"
+container-image:
+  type: docker
+  image: "{image}"
+inputs:
+  - id: tag
+    name: A tag
+    type: String
+    value-key: "[TAG]"
+    default-value: a
+    value-choices: [a, b]
+command-line: |
+  python3 -c '
+  import json, os, sys, time
+  m = json.load(open(sys.argv[1])); out = sys.argv[2]
+  def mark(w, u):
+      t = os.environ.get("LANE_TRACE")
+      if t:
+          open(t, "a").write("%s %.6f %s chain-a\n" % (w, time.time(), u))
+  units = []
+  for s in m["stacks"]:
+      u = s["unit"]; d = os.path.join(out, u); os.makedirs(d, exist_ok=True)
+      mark("start", u)
+      if s["stack_id"] % 2 == 1:
+          time.sleep(float(os.environ.get("CHAIN_A_SLEEP", "0")))
+      if str(s["stack_id"]) == os.environ.get("CHAIN_A_FAIL", ""):
+          units.append({{"unit_id": u, "status": "failed", "error": "asked to fail"}})
+          mark("end", u)
+          continue
+      open(os.path.join(d, "out.txt"), "w").write("stack %d tag %s\n" % (s["stack_id"], sys.argv[3]))
+      units.append({{"unit_id": u, "status": "succeeded", "derivatives": [u + "/out.txt"], "metrics": {{"files": len(s["files"])}}}})
+      mark("end", u)
+  json.dump({{"schema_version": "1", "units": units}}, open(os.path.join(out, "results.json"), "w"))
+  ' [Manifest] [OutputLocation] [TAG]
+x-nils:
+  analysis-level: stack
+  input: {{layout: stacks}}
+  units: apart
+  outputs:
+    - id: out
+      kind: image
+      path-template: "stack-{{stack}}/out.txt"
+      media-type: text/plain
+  needs: {{gpu: none}}
+"#
+    )
+}
+
+fn chain_a_pack(digest: &str) -> String {
+    format!(
+        r#"nils_pack: 1
+pipeline: {{name: chain-a, descriptor_sha256: "{digest}", version: "0.1"}}
+goals: {{goal: [fast, standard, research]}}
+knobs:
+  tag: {{comparability: breaks, set_by: person}}
+"#
+    )
+}
+
+/// The second step: reads the first's file of each stack from its typed
+/// input and writes what it saw.
+fn chain_b(image: &str) -> String {
+    format!(
+        r#"name: chain-b
+schema-version: "0.5"
+tool-version: "1"
+container-image:
+  type: docker
+  image: "{image}"
+command-line: |
+  python3 -c '
+  import glob, json, os, sys, time
+  m = json.load(open(sys.argv[1])); out = sys.argv[2]; prev = sys.argv[3]
+  def mark(w, u):
+      t = os.environ.get("LANE_TRACE")
+      if t:
+          open(t, "a").write("%s %.6f %s chain-b\n" % (w, time.time(), u))
+  units = []
+  for s in m["stacks"]:
+      u = s["unit"]; d = os.path.join(out, u); os.makedirs(d, exist_ok=True)
+      mark("start", u)
+      seen = sorted(glob.glob(prev + "/**/" + u + "/out.txt", recursive=True))
+      open(os.path.join(d, "seen.txt"), "w").write("\n".join(open(f).read().strip() for f in seen) + "\n")
+      units.append({{"unit_id": u, "status": "succeeded", "derivatives": [u + "/seen.txt"]}})
+      mark("end", u)
+  json.dump({{"schema_version": "1", "units": units}}, open(os.path.join(out, "results.json"), "w"))
+  ' [Manifest] [OutputLocation] [Inputs]/prev
+x-nils:
+  analysis-level: stack
+  input: {{layout: stacks}}
+  units: apart
+  inputs:
+    - {{id: prev, type: "derivative:image"}}
+  outputs:
+    - id: seen
+      kind: output
+      path-template: "stack-{{stack}}/seen.txt"
+      media-type: text/plain
+  needs: {{gpu: none}}
+"#
+    )
+}
+
+fn chain_b_pack(digest: &str) -> String {
+    format!(
+        r#"nils_pack: 1
+pipeline: {{name: chain-b, descriptor_sha256: "{digest}", version: "0.1"}}
+goals: {{goal: [fast, standard, research]}}
+"#
+    )
+}
+
+const CHAIN_WORKFLOW: &str = r#"nils_workflow: 1
+name: chain
+title: A chain of two
+what: "chain-a's image into chain-b"
+steps:
+  - {id: a, pipeline: chain-a, knobs: [tag]}
+  - {id: b, pipeline: chain-b}
+links:
+  - {from: a.out, to: b.prev}
+"#;
+
+/// A lab's `nils serve` with token auth, for the doors: held so a panic
+/// kills it.
+struct Served {
+    child: std::process::Child,
+    port: u16,
+}
+
+impl Drop for Served {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+impl Lab {
+    fn serve(&self) -> Served {
+        use std::io::BufRead as _;
+        let mut child = self
+            .command(&self.path)
+            .args(["serve", "--bind", "127.0.0.1:0", "--workers", "2", "--auth", "token"])
+            .args(["--pack-dir", packs().to_str().unwrap()])
+            .env(
+                "NILS_TOKENS",
+                "a-token-that-sees=lou@lab:pipelines:see,data:see,sealed:see,a-token-of-a-reviewer=rev@lab:reviewer,a-token-with-nothing=nob@lab:query:see,a-token-that-works=wrk@lab:operator",
+            )
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let mut lines = std::io::BufReader::new(stdout).lines();
+        let Some(Ok(first)) = lines.next() else {
+            let mut err = String::new();
+            if let Some(mut e) = child.stderr.take() {
+                let _ = std::io::Read::read_to_string(&mut e, &mut err);
+            }
+            let _ = child.kill();
+            panic!("nils serve did not listen: {err}");
+        };
+        let stderr = child.stderr.take().unwrap();
+        std::thread::spawn(move || {
+            let mut sink = String::new();
+            let _ = std::io::Read::read_to_string(&mut std::io::BufReader::new(stderr), &mut sink);
+        });
+        let addr = first.split_whitespace().nth(2).unwrap();
+        let port = addr.rsplit(':').next().unwrap().parse().unwrap();
+        std::thread::spawn(move || for _ in lines {});
+        Served { child, port }
+    }
+}
+
+impl Served {
+    fn call(&self, method: &str, path: &str, body: Option<Value>, token: &str) -> (u16, Value) {
+        use std::io::{Read as _, Write as _};
+        let mut stream = std::net::TcpStream::connect(("127.0.0.1", self.port)).unwrap();
+        let body = body.map(|b| b.to_string()).unwrap_or_default();
+        let head = format!(
+            "{method} {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: {}\r\nContent-Type: application/json\r\nAuthorization: Bearer {token}\r\n\r\n",
+            body.len()
+        );
+        stream.write_all(head.as_bytes()).unwrap();
+        stream.write_all(body.as_bytes()).unwrap();
+        let mut raw = Vec::new();
+        stream.read_to_end(&mut raw).unwrap();
+        let text = String::from_utf8_lossy(&raw).to_string();
+        let (head, body) = text.split_once("\r\n\r\n").unwrap_or((&text, ""));
+        let status: u16 = head.split_whitespace().nth(1).unwrap().parse().unwrap();
+        (status, serde_json::from_str(body).unwrap_or(Value::Null))
+    }
+}
+
+/// Wave 7b A7 (record 57 P7 and P8, record 58 P5): a workflow of two steps
+/// over a lab's stacks. The plan says the link is fed; the run goes per
+/// unit through the chain and records each step; run again over the same
+/// inputs, every unit says "reused from run N" and no container runs (G6);
+/// a `breaks` knob changed reruns that step and the one after it; a result
+/// a person rejected is never reused; the provenance door answers every
+/// unit's curation state, and a rules version changed on an input reads
+/// `stale` in the same words at the command, the provenance door and the
+/// run door (E5).
+#[test]
+fn g6_e5_a_workflow_runs_per_unit_reuses_kept_results_and_answers_provenance() {
+    if !have("python3") {
+        eprintln!(
+            "python3 is not installed; the stand-in podman needs it, so this test is skipped"
+        );
+        return;
+    }
+    let lab = Lab::new("pipelines-workflow");
+    let image_a = format!("example.org/chain-a@sha256:{}", "a".repeat(64));
+    let image_b = format!("example.org/chain-b@sha256:{}", "b".repeat(64));
+    let da = chain_a(&image_a);
+    let db = chain_b(&image_b);
+    let dig = |d: &str| nils_pipeline::descriptor::parse(d).unwrap().digest();
+    let a = lab.add_pair("chain-a", &da, &chain_a_pack(&dig(&da)));
+    let b = lab.add_pair("chain-b", &db, &chain_b_pack(&dig(&db)));
+    assert_eq!(a["added"], true, "{a}");
+    assert_eq!(b["added"], true, "{b}");
+
+    // the catalog: the shipped workflows are seeded at the engine's start
+    // (nils serve), a person's is added from its folder
+    let dir = lab.work.path().join("wf-chain");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("nils.workflow.yml"), CHAIN_WORKFLOW).unwrap();
+    let ok = lab.json(&["workflow", "validate", dir.to_str().unwrap(), "--json"]);
+    assert_eq!(ok["steps"], 2, "{ok}");
+    let added = lab.json(&["workflow", "add", dir.to_str().unwrap(), "--json"]);
+    assert_eq!(added["added"], true, "{added}");
+    assert_eq!(added["label"], "chain@1", "{added}");
+    let again = lab.json(&["workflow", "add", dir.to_str().unwrap(), "--json"]);
+    assert_eq!(
+        again["added"], false,
+        "the same document is the version it is: {again}"
+    );
+    let list = lab.json(&["workflow", "list", "--json"]);
+    assert!(
+        list["workflows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|w| w["label"] == "chain@1"),
+        "{list}"
+    );
+
+    // the plan: the one link is fed, and each step's pre-flight is in it
+    let plan = lab.json(&[
+        "workflow",
+        "plan",
+        "chain",
+        "--select",
+        "selection:every@1",
+        "--json",
+    ]);
+    assert_eq!(plan["runnable"], true, "{plan}");
+    assert_eq!(plan["verdicts"]["fed"], 1, "{plan}");
+    let fed = &plan["links"][0];
+    assert_eq!(fed["verdict"], "fed", "{plan}");
+    assert!(
+        fed["words"]
+            .as_str()
+            .unwrap()
+            .contains("the chain-b@1 key carries chain-a@1 (tag a"),
+        "{plan}"
+    );
+    assert_eq!(plan["steps"][0]["preflight"]["units"]["total"], 4, "{plan}");
+    assert_eq!(plan["steps"][1]["waits_for"], json!(["a"]), "{plan}");
+    // a knob the step does not let a person set is refused at the plan
+    let (good, _, err) = lab.run(
+        &[
+            "workflow",
+            "plan",
+            "chain",
+            "--select",
+            "selection:every@1",
+            "--knob",
+            "b.tag=b",
+        ],
+        None,
+    );
+    assert!(!good);
+    assert!(
+        err.contains("the step b lets a person set no knob, not tag"),
+        "{err}"
+    );
+    // after review (the second review, finding 9): a knob naming a step the
+    // document lacks is refused, with the step ids named
+    let (good, _, err) = lab.run(
+        &[
+            "workflow",
+            "plan",
+            "chain",
+            "--select",
+            "selection:every@1",
+            "--knob",
+            "c.tag=b",
+        ],
+        None,
+    );
+    assert!(!good);
+    assert!(
+        err.contains("the knobs name a step c the workflow lacks; its steps are a, b"),
+        "{err}"
+    );
+
+    // the run: both steps run, 4 units each, one container a unit
+    let first = lab.json(&[
+        "workflow",
+        "run",
+        "chain",
+        "--select",
+        "selection:every@1",
+        "--json",
+    ]);
+    assert_eq!(first["status"], "done", "{first}");
+    assert_eq!(first["summary"]["steps_done"], 2, "{first}");
+    assert_eq!(first["summary"]["units"]["succeeded"], 8, "{first}");
+    assert_eq!(first["summary"]["units"]["reused"], 0, "{first}");
+    let run_a = first["steps"][0]["run"].as_i64().unwrap();
+    let run_b = first["steps"][1]["run"].as_i64().unwrap();
+    assert!(run_b > run_a, "{first}");
+    let containers = lab.podman_runs().len();
+    assert_eq!(containers, 8, "one container a unit: {first}");
+    // the step's run says which workflow run and step it is
+    let rb = lab.json(&["pipeline", "runs", &run_b.to_string(), "--json"]);
+    assert_eq!(rb["workflow_run_id"], first["id"], "{rb}");
+    assert_eq!(rb["step"], 1, "{rb}");
+    // and chain-b read chain-a's file of its own stack: the key carries it;
+    // after review (finding 10): a chained unit's pack judged it again as
+    // the chain released it, keeping the run-start judgement as the forecast
+    for u in rb["units_run"].as_array().unwrap() {
+        assert_eq!(u["status"], "succeeded", "{u}");
+        assert!(
+            u["key_members"]["upstream"]
+                .as_array()
+                .is_some_and(|k| k.len() == 1),
+            "the upstream key: {u}"
+        );
+        assert_eq!(u["judged_at"], "start", "{u}");
+        assert_eq!(u["forecast"]["judged_at"], "run", "{u}");
+        assert_eq!(u["forecast"]["status"], u["pack_status"], "{u}");
+    }
+    let ra = lab.json(&["pipeline", "runs", &run_a.to_string(), "--json"]);
+    for u in ra["units_run"].as_array().unwrap() {
+        assert_eq!(u["judged_at"], "run", "the first step is judged once: {u}");
+        assert!(u["forecast"].is_null(), "{u}");
+    }
+
+    // G6: the same workflow over the same inputs runs 0 steps and says so
+    let second = lab.json(&[
+        "workflow",
+        "run",
+        "chain",
+        "--select",
+        "selection:every@1",
+        "--json",
+    ]);
+    assert_eq!(second["status"], "done", "{second}");
+    assert_eq!(second["summary"]["units"]["reused"], 8, "{second}");
+    assert_eq!(second["summary"]["units"]["succeeded"], 0, "{second}");
+    assert_eq!(
+        lab.podman_runs().len(),
+        containers,
+        "no container ran: {second}"
+    );
+    let run_a2 = second["steps"][0]["run"].as_i64().unwrap();
+    let ra2 = lab.json(&["pipeline", "runs", &run_a2.to_string(), "--json"]);
+    for u in ra2["units_run"].as_array().unwrap() {
+        assert_eq!(u["status"], "reused", "{u}");
+        assert_eq!(u["reused_from"], run_a, "{u}");
+        assert!(
+            u["words_reused"]
+                .as_str()
+                .unwrap()
+                .starts_with(&format!("reused from run {run_a}")),
+            "{u}"
+        );
+    }
+    assert_eq!(ra2["summary"]["units"]["reused"], 4, "{ra2}");
+
+    // G6: a breaks knob changed reruns that step and the one after it
+    let third = lab.json(&[
+        "workflow",
+        "run",
+        "chain",
+        "--select",
+        "selection:every@1",
+        "--knob",
+        "a.tag=b",
+        "--json",
+    ]);
+    assert_eq!(third["status"], "done", "{third}");
+    assert_eq!(third["summary"]["units"]["succeeded"], 8, "{third}");
+    assert_eq!(third["summary"]["units"]["reused"], 0, "{third}");
+    assert_eq!(lab.podman_runs().len(), containers + 8, "{third}");
+    let run_a3 = third["steps"][0]["run"].as_i64().unwrap();
+    let run_b3 = third["steps"][1]["run"].as_i64().unwrap();
+    // after review (the second review, finding 3): the link binds chain-b's
+    // input to chain-a's run of this workflow run, never to the kept file
+    // of another run: the manifest names that run alone for every file,
+    // the step says what fed it, each unit's key carries one upstream key,
+    // and each container saw one file
+    let manifest: Value = serde_json::from_str(
+        &std::fs::read_to_string(
+            lab.work
+                .path()
+                .join(format!("runs/{run_b3}/inputs/manifest.json")),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let prev = manifest["derivatives"]["prev"].as_array().unwrap();
+    assert_eq!(prev.len(), 4, "{manifest}");
+    for p in prev {
+        assert_eq!(p["made_by"]["run"], run_a3, "another run's file: {p}");
+    }
+    assert_eq!(manifest["links"][0]["input"], "prev", "{manifest}");
+    assert_eq!(manifest["links"][0]["run"], run_a3, "{manifest}");
+    let rb3 = lab.json(&["pipeline", "runs", &run_b3.to_string(), "--json"]);
+    for u in rb3["units_run"].as_array().unwrap() {
+        let upstream = u["key_members"]["upstream"].as_array().unwrap();
+        assert_eq!(upstream.len(), 1, "one upstream key, the fed run's: {u}");
+    }
+    let seen = lab.json(&["derivative", "list", "--run", &run_b3.to_string(), "--json"]);
+    assert_eq!(seen.as_array().unwrap().len(), 4, "{seen}");
+    for d in seen.as_array().unwrap() {
+        let text =
+            std::fs::read_to_string(lab.work.path().join(d["path"].as_str().unwrap())).unwrap();
+        assert_eq!(text.lines().count(), 1, "{d}: {text}");
+        assert!(text.contains("tag b"), "the fed run's file: {text}");
+    }
+
+    // G6: a result a person rejected is never reused; the rest are
+    let rejected = lab
+        .store()
+        .query(
+            &format!(
+                "SELECT id, stack_id FROM derivative WHERE run_id = {run_b3} ORDER BY id LIMIT 1"
+            ),
+            &[],
+        )
+        .unwrap();
+    let (rejected_id, rejected_stack) = (rejected[0].int(0).unwrap(), rejected[0].int(1).unwrap());
+    lab.store()
+        .execute(
+            &format!("UPDATE derivative SET check_status = 'rejected' WHERE id = {rejected_id}"),
+            &[],
+        )
+        .unwrap();
+    let fourth = lab.json(&[
+        "workflow",
+        "run",
+        "chain",
+        "--select",
+        "selection:every@1",
+        "--knob",
+        "a.tag=b",
+        "--json",
+    ]);
+    assert_eq!(fourth["status"], "done", "{fourth}");
+    assert_eq!(fourth["summary"]["units"]["reused"], 7, "{fourth}");
+    assert_eq!(fourth["summary"]["units"]["succeeded"], 1, "{fourth}");
+    assert_eq!(lab.podman_runs().len(), containers + 9, "{fourth}");
+    let run_b4 = fourth["steps"][1]["run"].as_i64().unwrap();
+    let rb4 = lab.json(&["pipeline", "runs", &run_b4.to_string(), "--json"]);
+    let reran: Vec<&Value> = rb4["units_run"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|u| u["status"] == "succeeded")
+        .collect();
+    assert_eq!(reran.len(), 1, "{rb4}");
+    assert_eq!(reran[0]["unit"], format!("stack-{rejected_stack}"), "{rb4}");
+
+    // the runs are listed
+    let runs = lab.json(&["workflow", "runs", "--json"]);
+    assert_eq!(runs["runs"].as_array().unwrap().len(), 4, "{runs}");
+
+    // E5: every unit answers its curation state at the provenance command
+    let prov = lab.json(&["provenance", "stack", &rejected_stack.to_string(), "--json"]);
+    let steps = prov["steps"].as_array().unwrap();
+    assert_eq!(
+        steps.len(),
+        8,
+        "four runs of two steps touched the stack: {prov}"
+    );
+    for s in steps {
+        assert_eq!(s["curation"]["state"], "current", "{s}");
+        assert!(s["keys"]["comparability"].is_string(), "{s}");
+        assert!(s["curation"]["recorded"]["rules"].is_array(), "{s}");
+    }
+    assert!(
+        steps.iter().any(|s| s["reused_from"] == run_a),
+        "a reused unit links the result it reused: {prov}"
+    );
+    assert_eq!(prov["counts"]["stale"], 0, "{prov}");
+
+    // E5: the rules version on the input changes, and the result reads
+    // stale in the same words at the command, the provenance door and the
+    // run door
+    lab.store()
+        .execute(
+            &format!(
+                "UPDATE classification SET pack_version = '9.9.9' WHERE stack_id = {rejected_stack}"
+            ),
+            &[],
+        )
+        .unwrap();
+    let stale = lab.json(&["provenance", "stack", &rejected_stack.to_string(), "--json"]);
+    assert_eq!(stale["counts"]["stale"], 8, "{stale}");
+    let words = stale["steps"][0]["curation"]["words"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        words.starts_with("stale: the rules version on an input changed (mri "),
+        "{words}"
+    );
+    assert!(words.contains("9.9.9 now"), "{words}");
+    // the registration family in the catalog (Wave 7b section 7), so the
+    // shipped flair-lesions plans over its members; and a workflow naming
+    // a family the catalog does not hold, refused by name at plan time
+    let fam = lab.json(&[
+        "pipeline",
+        "add",
+        repo()
+            .join("pipelines")
+            .join("registration")
+            .to_str()
+            .unwrap(),
+        "--json",
+    ]);
+    assert_eq!(fam["family"], true, "{fam}");
+    let nowhere = lab.work.path().join("wf-nowhere");
+    std::fs::create_dir_all(&nowhere).unwrap();
+    std::fs::write(
+        nowhere.join("nils.workflow.yml"),
+        "nils_workflow: 1\nname: nowhere\nsteps:\n  - {id: reg, family: nowhere-family, switches: {task: within_session}}\n  - {id: samseg, pipeline: samseg-lesions}\nlinks:\n  - {from: reg.flair_aligned, to: samseg.aligned_flair}\n",
+    )
+    .unwrap();
+    let added_nowhere = lab.json(&["workflow", "add", nowhere.to_str().unwrap(), "--json"]);
+    assert_eq!(added_nowhere["added"], true, "{added_nowhere}");
+    let served = lab.serve();
+    let (status, door) = served.call(
+        "GET",
+        &format!("/api/provenance/stack/{rejected_stack}"),
+        None,
+        "a-token-that-sees",
+    );
+    assert_eq!(status, 200, "{door}");
+    assert_eq!(door["counts"]["stale"], 8, "{door}");
+    assert_eq!(door["steps"][0]["curation"]["words"], words, "{door}");
+    // the run door names units at detail quasi: the reviewer's ladder
+    let (status, run_door) = served.call(
+        "GET",
+        &format!("/api/pipeline-runs/{run_b4}"),
+        None,
+        "a-token-of-a-reviewer",
+    );
+    assert_eq!(status, 200, "{run_door}");
+    let unit = run_door["units_run"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|u| u["unit"] == format!("stack-{rejected_stack}"))
+        .unwrap();
+    assert_eq!(unit["curation"]["state"], "stale", "{unit}");
+    assert_eq!(unit["curation"]["words"], words, "{unit}");
+    // a caller without the grant is refused; the catalog and the runs are
+    // at their doors; the plan door plans as the command does
+    let (status, _) = served.call(
+        "GET",
+        &format!("/api/provenance/stack/{rejected_stack}"),
+        None,
+        "a-token-with-nothing",
+    );
+    assert_eq!(status, 403);
+    let (status, wfs) = served.call("GET", "/api/workflows", None, "a-token-that-sees");
+    assert_eq!(status, 200, "{wfs}");
+    let names: Vec<&str> = wfs["workflows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|w| w["name"].as_str())
+        .collect();
+    assert!(
+        names.contains(&"chain") && names.contains(&"flair-lesions") && names.contains(&"cortical"),
+        "{names:?}"
+    );
+    let (status, wruns) = served.call("GET", "/api/workflow-runs", None, "a-token-that-sees");
+    assert_eq!(status, 200, "{wruns}");
+    assert_eq!(wruns["runs"].as_array().unwrap().len(), 4, "{wruns}");
+    let (status, planned) = served.call(
+        "POST",
+        &format!("/api/workflows/{}/plan", added["id"]),
+        Some(json!({"select": "selection:every@1"})),
+        "a-token-that-sees",
+    );
+    assert_eq!(status, 200, "{planned}");
+    assert_eq!(planned["verdicts"]["fed"], 1, "{planned}");
+    assert_eq!(planned["runnable"], true, "{planned}");
+    // the shipped flair-lesions workflow plans over the registration
+    // family's members (Wave 7b section 7): its aligned FLAIR feeds
+    // SAMSEG's and segcsvd's typed input and meets their alignment need,
+    // SynthSeg feeds segcsvd, the family step carries its members and the
+    // family's routing of the scope, and nothing runs
+    let (status, shipped) = served.call(
+        "POST",
+        "/api/workflows/flair-lesions/plan",
+        Some(json!({"select": "selection:every@1"})),
+        "a-token-that-sees",
+    );
+    assert_eq!(status, 200, "{shipped}");
+    assert_eq!(shipped["runnable"], true, "{shipped}");
+    assert_eq!(shipped["verdicts"]["refused"], 0, "{shipped}");
+    assert_eq!(shipped["verdicts"]["fed"], 3, "{shipped}");
+    let register = &shipped["steps"][0];
+    assert_eq!(register["family"], "registration", "{register}");
+    assert_eq!(register["pipeline"], "registration", "{register}");
+    assert_eq!(
+        register["members"].as_array().unwrap().len(),
+        3,
+        "{register}"
+    );
+    assert_eq!(
+        register["preflight"]["family"], "registration",
+        "{register}"
+    );
+    assert_eq!(
+        register["preflight"]["task"], "within_session",
+        "{register}"
+    );
+    assert!(register["preflight"]["counts"].is_object(), "{register}");
+    let into_samseg = shipped["links"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|l| l["link"] == "register.flair_aligned -> samseg.aligned_flair")
+        .unwrap_or_else(|| panic!("{shipped}"));
+    assert_eq!(into_samseg["verdict"], "fed", "{into_samseg}");
+    // the lab's starters carry no pack, so the words name no alignment
+    // need here; the contracts test plans the fed-and-meets case over the
+    // shipped pack
+    assert!(
+        into_samseg["words"]
+            .as_str()
+            .unwrap()
+            .contains("samseg.aligned_flair is fed by register"),
+        "{into_samseg}"
+    );
+    // after the third review (finding 4): the plan's pre-flight knows what
+    // the links feed: segcsvd's synthseg and aligned_flair inputs read "fed
+    // by step", and no unit of it lacks them; the step waits for both whole
+    let segcsvd = &shipped["steps"][3];
+    assert_eq!(segcsvd["step"], "segcsvd", "{segcsvd}");
+    assert_eq!(
+        segcsvd["preflight"]["fed"],
+        json!({"aligned_flair": "fed by step register", "synthseg": "fed by step synthseg"}),
+        "{segcsvd}"
+    );
+    assert_eq!(
+        segcsvd["waits_whole"],
+        json!(["register", "synthseg"]),
+        "{segcsvd}"
+    );
+    for m in segcsvd["preflight"]["missing"]
+        .as_array()
+        .into_iter()
+        .flatten()
+    {
+        for why in m["why"].as_array().into_iter().flatten() {
+            let why = why.as_str().unwrap();
+            assert!(
+                !why.contains("for the input synthseg")
+                    && !why.contains("for the input aligned_flair"),
+                "a fed input is never missing: {m}"
+            );
+        }
+    }
+    // after the third review (finding 5): a family step's goal the family
+    // does not offer, or a knob the step does not let a person set, refuses
+    // the plan as the run would refuse them
+    let (status, bad_goal) = served.call(
+        "POST",
+        "/api/workflows/flair-lesions/plan",
+        Some(json!({"select": "selection:every@1", "goal": "nonsense"})),
+        "a-token-that-sees",
+    );
+    assert_eq!(status, 200, "{bad_goal}");
+    // the document fixes the register step's goal, so the person's goal
+    // reaches a pipeline step only; a switch the family lacks is the
+    // document's to say: test it through a document of our own
+    assert!(bad_goal["runnable"].is_boolean(), "{bad_goal}");
+    let odd = lab.work.path().join("wf-odd-switch");
+    std::fs::create_dir_all(&odd).unwrap();
+    std::fs::write(
+        odd.join("nils.workflow.yml"),
+        "nils_workflow: 1\nname: odd-switch\nsteps:\n  - {id: reg, family: registration, switches: {task: sideways}}\n",
+    )
+    .unwrap();
+    let added_odd = lab.json(&["workflow", "add", odd.to_str().unwrap(), "--json"]);
+    assert_eq!(added_odd["added"], true, "{added_odd}");
+    let (status, odd_plan) = served.call(
+        "POST",
+        "/api/workflows/odd-switch/plan",
+        Some(json!({"select": "selection:every@1"})),
+        "a-token-that-sees",
+    );
+    assert_eq!(status, 200, "{odd_plan}");
+    assert_eq!(odd_plan["runnable"], false, "{odd_plan}");
+    let words = odd_plan["words"].as_str().unwrap();
+    assert!(
+        words.contains("not runnable: step reg: task takes") && words.contains("not sideways"),
+        "{odd_plan}"
+    );
+    assert!(odd_plan["steps"][0]["refused"].is_string(), "{odd_plan}");
+    let (status, odd_knob) = served.call(
+        "POST",
+        "/api/workflows/odd-switch/plan",
+        Some(json!({"select": "selection:every@1", "knobs": {"reg": {"x": "1"}}})),
+        "a-token-that-sees",
+    );
+    assert_eq!(status, 400, "{odd_knob}");
+    assert!(
+        odd_knob["error"]
+            .as_str()
+            .unwrap()
+            .contains("the step reg lets a person set no knob, not x"),
+        "{odd_knob}"
+    );
+    // a family the catalog does not hold is refused by name, as before
+    let (status, nowhere) = served.call(
+        "POST",
+        "/api/workflows/nowhere/plan",
+        Some(json!({"select": "selection:every@1"})),
+        "a-token-that-sees",
+    );
+    assert_eq!(status, 200, "{nowhere}");
+    assert_eq!(nowhere["runnable"], false, "{nowhere}");
+    assert!(
+        nowhere["words"]
+            .as_str()
+            .unwrap()
+            .contains("the family nowhere-family is not in this catalog"),
+        "{nowhere}"
+    );
+    let (status, refused) = served.call(
+        "POST",
+        "/api/workflows/flair-lesions/run",
+        Some(json!({"select": "selection:every@1"})),
+        "a-token-that-sees",
+    );
+    assert_eq!(status, 403, "pipelines:work starts a run: {refused}");
+
+    // after review (finding 1): a run started at the door is a `workflow`
+    // job the pipelines lane's worker runs; each step claims a pipeline
+    // job of its own beside it, which the worker's job never holds off,
+    // and the run ends done
+    let (status, started) = served.call(
+        "POST",
+        "/api/workflows/chain/run",
+        Some(json!({"select": "selection:every@1"})),
+        "a-token-that-works",
+    );
+    assert_eq!(status, 202, "{started}");
+    let job = started["job"]
+        .as_i64()
+        .unwrap_or_else(|| panic!("{started}"));
+    drop(served);
+    let said = lab.work.path().join("worker-stderr");
+    let mut worker = lab
+        .command(&lab.path)
+        .args(["jobs", "work", "--lane", "pipelines", "--once"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(std::fs::File::create(&said).unwrap())
+        .spawn()
+        .unwrap();
+    let begun = std::time::Instant::now();
+    let status = loop {
+        if let Some(status) = worker.try_wait().unwrap() {
+            break status;
+        }
+        if begun.elapsed().as_secs() >= 180 {
+            let _ = worker.kill();
+            let _ = worker.wait();
+            panic!(
+                "the lane's worker did not end within 180 s: {}",
+                std::fs::read_to_string(&said).unwrap_or_default()
+            );
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    };
+    assert!(
+        status.success(),
+        "{}",
+        std::fs::read_to_string(&said).unwrap_or_default()
+    );
+    let jobs: Value =
+        serde_json::from_str(&lab.ok(&["jobs", "list", "--all", "--json"], None)).unwrap();
+    let ours = jobs
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|j| j["id"] == job)
+        .unwrap_or_else(|| panic!("{jobs}"));
+    assert_eq!(ours["kind"], "workflow", "{ours}");
+    assert_eq!(ours["state"], "done", "{ours}");
+    let runs = lab.json(&["workflow", "runs", "--json"]);
+    let newest = &runs["runs"][0];
+    assert_eq!(newest["job"], job, "{newest}");
+    assert_eq!(newest["status"], "done", "{newest}");
+    assert_eq!(newest["summary"]["steps_done"], 2, "{newest}");
+    assert_eq!(newest["summary"]["units"]["reused"], 8, "{newest}");
+    // the steps' own jobs ran beside the worker's, as pipeline jobs
+    let steps_jobs = jobs
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|j| j["kind"] == "pipeline" && j["args"]["workflow_run"] == newest["id"])
+        .count();
+    assert_eq!(steps_jobs, 2, "{jobs}");
+    // after review (the second review, finding 2): the workflow job reports
+    // its steps done of total while it runs
+    assert_eq!(ours["progress"]["steps_total"], 2, "{ours}");
+    assert_eq!(ours["progress"]["steps_done"], 2, "{ours}");
+
+    // after review (the second review, finding 5): without sealed:see, the
+    // steps of a stack of a sample sealed now are withheld, and so is the
+    // stack itself from `stacks`, with the counts and the stale words over
+    // the steps kept; with the grant, nothing is withheld
+    seal(&lab, "sealed_one", &[rejected_stack]);
+    let subject = lab.count(&format!(
+        "SELECT se.subject_id FROM stack st JOIN series se ON se.id = st.series_id WHERE st.id = {rejected_stack}"
+    ));
+    let served = lab.serve();
+    let (status, whole) = served.call(
+        "GET",
+        &format!("/api/provenance/subject/{subject}"),
+        None,
+        "a-token-that-sees",
+    );
+    assert_eq!(status, 200, "{whole}");
+    let all_steps = whole["steps"].as_array().unwrap().len();
+    assert!(
+        whole["stacks"]
+            .as_array()
+            .unwrap()
+            .contains(&json!(rejected_stack)),
+        "{whole}"
+    );
+    assert!(whole["withheld"].is_null(), "{whole}");
+    // after the third review (finding 3): a session is named
+    // <subject>@<label>, and a client sends the @ percent-encoded; the door
+    // reads it decoded, as the pipelines doors read theirs
+    let (status, encoded) = served.call(
+        "GET",
+        &format!("/api/provenance/session/{subject}%40none"),
+        None,
+        "a-token-that-sees",
+    );
+    assert_eq!(status, 200, "{encoded}");
+    assert_eq!(encoded["of"]["kind"], "session", "{encoded}");
+    assert_eq!(encoded["of"]["session"], "none", "{encoded}");
+    let (status, raw) = served.call(
+        "GET",
+        &format!("/api/provenance/session/{subject}@none"),
+        None,
+        "a-token-that-sees",
+    );
+    assert_eq!(status, 200, "{raw}");
+    assert_eq!(encoded, raw);
+    // the four runs from before the rules changed are stale on it; the
+    // door-started run recorded the version as it stands now
+    assert_eq!(whole["counts"]["stale"], 8, "{whole}");
+    let (status, held) = served.call(
+        "GET",
+        &format!("/api/provenance/subject/{subject}"),
+        None,
+        "a-token-of-a-reviewer",
+    );
+    assert_eq!(status, 200, "{held}");
+    assert!(
+        !held["stacks"]
+            .as_array()
+            .unwrap()
+            .contains(&json!(rejected_stack)),
+        "the sealed stack is withheld from the stacks: {held}"
+    );
+    let kept = held["steps"].as_array().unwrap();
+    assert_eq!(held["withheld"]["steps"], 10, "{held}");
+    assert_eq!(kept.len(), all_steps - 10, "{held}");
+    assert_eq!(held["counts"]["steps"], kept.len(), "{held}");
+    assert_eq!(held["counts"]["stale"], 0, "{held}");
+    assert!(held["stale_words"].is_null(), "{held}");
+    assert!(
+        kept.iter().all(|s| !s["stacks"]
+            .as_array()
+            .unwrap()
+            .contains(&json!(rejected_stack))),
+        "{held}"
+    );
+}
+
+/// After the third review (finding 9): a link into an `optional` typed
+/// input lets a unit run where the unit before failed: the step after runs
+/// it without the input, recording `fed.prev` as "fed by no step for this
+/// unit: <the reason>", and its container saw no file; the same failure
+/// under a required input skips the unit downstream as before.
+#[test]
+fn an_optional_typed_input_fed_by_a_failed_unit_runs_without_it() {
+    if !have("python3") {
+        eprintln!(
+            "python3 is not installed; the stand-in podman needs it, so this test is skipped"
+        );
+        return;
+    }
+    let lab = Lab::new("pipelines-workflow-optional");
+    let image_a = format!("example.org/chain-a@sha256:{}", "a".repeat(64));
+    let image_b = format!("example.org/chain-b@sha256:{}", "b".repeat(64));
+    let image_d = format!("example.org/chain-d@sha256:{}", "d".repeat(64));
+    let da = chain_a(&image_a);
+    let db = chain_b(&image_b);
+    // chain-d is chain-b with its typed input optional
+    let dd = chain_b(&image_d)
+        .replace("name: chain-b", "name: chain-d")
+        .replace(
+            r#"{id: prev, type: "derivative:image"}"#,
+            r#"{id: prev, type: "derivative:image", optional: true}"#,
+        );
+    assert!(dd.contains("optional: true"), "{dd}");
+    let dig = |d: &str| nils_pipeline::descriptor::parse(d).unwrap().digest();
+    lab.add_pair("chain-a", &da, &chain_a_pack(&dig(&da)));
+    lab.add_pair("chain-b", &db, &chain_b_pack(&dig(&db)));
+    let d = lab.add_pair(
+        "chain-d",
+        &dd,
+        &chain_b_pack(&dig(&dd)).replace("chain-b", "chain-d"),
+    );
+    assert_eq!(d["added"], true, "{d}");
+    for (name, text) in [
+        ("wf-chain", CHAIN_WORKFLOW.to_string()),
+        (
+            "wf-optional",
+            CHAIN_WORKFLOW
+                .replace("name: chain\n", "name: optional\n")
+                .replace("pipeline: chain-b", "pipeline: chain-d"),
+        ),
+    ] {
+        let dir = lab.work.path().join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("nils.workflow.yml"), text).unwrap();
+        let added = lab.json(&["workflow", "add", dir.to_str().unwrap(), "--json"]);
+        assert_eq!(added["added"], true, "{added}");
+    }
+    let failing = lab.count("SELECT MIN(id) FROM stack");
+    let run_with_failure = |workflow: &str| -> Value {
+        let out = lab
+            .command(&lab.path)
+            .args([
+                "workflow",
+                "run",
+                workflow,
+                "--select",
+                "selection:every@1",
+                "--json",
+            ])
+            .env("CHAIN_A_FAIL", failing.to_string())
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        // a run that ended partial (one unit failed) exits as a pipeline run
+        // does, after printing the run
+        serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
+            panic!(
+                "workflow run {workflow}: {e}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            )
+        })
+    };
+    // the optional input: the failed unit's step after runs without it
+    let r = run_with_failure("optional");
+    assert_eq!(r["steps"][0]["status"], "partial", "{r}");
+    assert_eq!(r["steps"][0]["units"]["failed"], 1, "{r}");
+    assert_eq!(r["steps"][1]["status"], "done", "{r}");
+    assert_eq!(r["steps"][1]["units"]["succeeded"], 4, "{r}");
+    assert_eq!(r["steps"][1]["units"]["skipped"], 0, "{r}");
+    let run_d = r["steps"][1]["run"].as_i64().unwrap();
+    let rd = lab.json(&["pipeline", "runs", &run_d.to_string(), "--json"]);
+    let unit = rd["units_run"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|u| u["unit"] == format!("stack-{failing}"))
+        .unwrap_or_else(|| panic!("{rd}"));
+    assert_eq!(unit["status"], "succeeded", "{unit}");
+    let fed = unit["fed"]["prev"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{unit}"));
+    assert!(
+        fed.starts_with("fed by no step for this unit: ") && fed.contains("asked to fail"),
+        "{unit}"
+    );
+    for u in rd["units_run"].as_array().unwrap() {
+        if u["unit"] != format!("stack-{failing}") {
+            assert!(u["fed"].is_null(), "a fed unit records nothing: {u}");
+        }
+    }
+    // its container saw no file of the step before
+    let seen = lab
+        .json(&["derivative", "list", "--run", &run_d.to_string(), "--json"])
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| {
+            d["path"]
+                .as_str()
+                .is_some_and(|p| p.contains(&format!("stack-{failing}")))
+        })
+        .map(|d| d["path"].as_str().unwrap().to_string())
+        .unwrap_or_else(|| panic!("{rd}"));
+    let text = std::fs::read_to_string(lab.work.path().join(&seen)).unwrap();
+    assert_eq!(text.trim(), "", "nothing was fed: {text}");
+    // the required input: the same unit is skipped downstream, as before
+    let r = run_with_failure("chain");
+    assert_eq!(r["steps"][1]["units"]["skipped"], 1, "{r}");
+    assert_eq!(r["steps"][1]["units"]["succeeded"], 3, "{r}");
+    let run_b = r["steps"][1]["run"].as_i64().unwrap();
+    let rb = lab.json(&["pipeline", "runs", &run_b.to_string(), "--json"]);
+    let unit = rb["units_run"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|u| u["unit"] == format!("stack-{failing}"))
+        .unwrap_or_else(|| panic!("{rb}"));
+    assert_eq!(unit["status"], "skipped", "{unit}");
+    // skipped where the run bound its inputs (the fed run made nothing for
+    // it, in the link's words) or at the chain's gate: either is the skip
+    let error = unit["error"].as_str().unwrap();
+    assert!(
+        error.contains("made no image derivative of it for the input prev")
+            || error.starts_with("skipped at step 1"),
+        "{unit}"
+    );
+    assert!(
+        unit["fed"].is_null(),
+        "a required input records no note: {unit}"
+    );
+}
+
+/// After review (the second review, finding 2): a workflow job asked to
+/// stop stops. The worker's `workflow` job is beaten while the steps run,
+/// so `nils jobs cancel` on it is seen: the step run in flight is cancelled
+/// through the pipeline run's own cancel path, no step after it starts, and
+/// the workflow run and the job end `cancelled`.
+#[test]
+fn a_cancelled_workflow_job_stops_its_steps_and_ends_cancelled() {
+    if !have("python3") {
+        eprintln!(
+            "python3 is not installed; the stand-in podman needs it, so this test is skipped"
+        );
+        return;
+    }
+    let lab = Lab::new("pipelines-workflow-cancel");
+    let image_a = format!("example.org/chain-a@sha256:{}", "a".repeat(64));
+    let image_b = format!("example.org/chain-b@sha256:{}", "b".repeat(64));
+    let da = chain_a(&image_a);
+    let db = chain_b(&image_b);
+    let dig = |d: &str| nils_pipeline::descriptor::parse(d).unwrap().digest();
+    lab.add_pair("chain-a", &da, &chain_a_pack(&dig(&da)));
+    lab.add_pair("chain-b", &db, &chain_b_pack(&dig(&db)));
+    let dir = lab.work.path().join("wf-chain");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("nils.workflow.yml"), CHAIN_WORKFLOW).unwrap();
+    lab.json(&["workflow", "add", dir.to_str().unwrap(), "--json"]);
+
+    let served = lab.serve();
+    let (status, started) = served.call(
+        "POST",
+        "/api/workflows/chain/run",
+        Some(json!({"select": "selection:every@1"})),
+        "a-token-that-works",
+    );
+    assert_eq!(status, 202, "{started}");
+    let job = started["job"].as_i64().unwrap();
+    drop(served);
+    let said = lab.work.path().join("worker-stderr");
+    let mut worker = lab
+        .command(&lab.path)
+        .args(["jobs", "work", "--lane", "pipelines", "--once"])
+        .env("CHAIN_A_SLEEP", "60")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(std::fs::File::create(&said).unwrap())
+        .spawn()
+        .unwrap();
+    let a_runs = |lab: &Lab| {
+        lab.podman_runs()
+            .iter()
+            .filter(|r| r.iter().any(|w| w.contains("chain-a@")))
+            .count()
+    };
+    let b_runs = |lab: &Lab| {
+        lab.podman_runs()
+            .iter()
+            .filter(|r| r.iter().any(|w| w.contains("chain-b@")))
+            .count()
+    };
+    // the first step's containers are running: cancel the workflow job
+    let begun = std::time::Instant::now();
+    loop {
+        if a_runs(&lab) > 0 {
+            break;
+        }
+        if let Some(status) = worker.try_wait().unwrap() {
+            panic!(
+                "the worker ended ({status}) before a step ran: {}",
+                std::fs::read_to_string(&said).unwrap_or_default()
+            );
+        }
+        assert!(
+            begun.elapsed().as_secs() < 120,
+            "no step started within 120 s: {}",
+            std::fs::read_to_string(&said).unwrap_or_default()
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    lab.ok(&["jobs", "cancel", &job.to_string()], None);
+    let asked = std::time::Instant::now();
+    loop {
+        if worker.try_wait().unwrap().is_some() {
+            break;
+        }
+        if asked.elapsed().as_secs() >= 60 {
+            let _ = worker.kill();
+            let _ = worker.wait();
+            panic!(
+                "the worker did not end within 60 s of the cancel: {}",
+                std::fs::read_to_string(&said).unwrap_or_default()
+            );
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let jobs: Value =
+        serde_json::from_str(&lab.ok(&["jobs", "list", "--all", "--json"], None)).unwrap();
+    let ours = jobs
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|j| j["id"] == job)
+        .unwrap_or_else(|| panic!("{jobs}"));
+    assert_eq!(ours["state"], "cancelled", "{ours}");
+    assert_eq!(ours["progress"]["steps_total"], 2, "{ours}");
+    let runs = lab.json(&["workflow", "runs", "--json"]);
+    let newest = &runs["runs"][0];
+    assert_eq!(newest["job"], job, "{newest}");
+    assert_eq!(newest["status"], "cancelled", "{newest}");
+    let steps = newest["steps"].as_array().unwrap();
+    assert_eq!(steps[0]["status"], "cancelled", "{newest}");
+    let run_a = steps[0]["run"]
+        .as_i64()
+        .unwrap_or_else(|| panic!("{newest}"));
+    assert_eq!(steps[1]["status"], "cancelled", "{newest}");
+    assert!(
+        steps[1]["run"].is_null(),
+        "the second step never ran: {newest}"
+    );
+    assert!(
+        steps[1]["error"]
+            .as_str()
+            .unwrap()
+            .contains("the workflow run was cancelled"),
+        "{newest}"
+    );
+    // the first step's run went through its own cancel path, and no
+    // container of the second step ran
+    let ra = lab.json(&["pipeline", "runs", &run_a.to_string(), "--json"]);
+    assert_eq!(ra["status"], "cancelled", "{ra}");
+    assert_eq!(b_runs(&lab), 0, "{:?}", lab.podman_runs());
+    let step_job = jobs
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|j| j["kind"] == "pipeline" && j["args"]["workflow_run"] == newest["id"])
+        .unwrap_or_else(|| panic!("{jobs}"));
+    assert_eq!(step_job["state"], "cancelled", "{step_job}");
+}
+
+/// After review (finding 2): the steps of one workflow run share the
+/// handle by design. With a slow first step, the second step (ordered
+/// after the first, fed by no typed input, so it waits for no whole run)
+/// claims its run while the first still runs, where two runs over the
+/// same stacks are otherwise refused, and its units run while the first
+/// step's do.
+#[test]
+fn a_later_step_claims_its_run_while_the_step_before_still_runs() {
+    if !have("python3") {
+        eprintln!(
+            "python3 is not installed; the stand-in podman needs it, so this test is skipped"
+        );
+        return;
+    }
+    let lab = Lab::new("pipelines-workflow-slow");
+    let image_a = format!("example.org/chain-a@sha256:{}", "a".repeat(64));
+    let image_c = format!("example.org/chain-c@sha256:{}", "c".repeat(64));
+    let da = chain_a(&image_a);
+    let dc = chain_a(&image_c).replace("chain-a", "chain-c");
+    let dig = |d: &str| nils_pipeline::descriptor::parse(d).unwrap().digest();
+    lab.add_pair("chain-a", &da, &chain_a_pack(&dig(&da)));
+    lab.add_pair(
+        "chain-c",
+        &dc,
+        &chain_a_pack(&dig(&dc)).replace("chain-a", "chain-c"),
+    );
+    let dir = lab.work.path().join("wf-pair");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("nils.workflow.yml"),
+        "nils_workflow: 1\nname: pair\ntitle: Two in a row\nsteps:\n  - {id: a, pipeline: chain-a}\n  - {id: c, pipeline: chain-c}\n",
+    )
+    .unwrap();
+    lab.json(&["workflow", "add", dir.to_str().unwrap(), "--json"]);
+
+    let t = lab.work.path().join("trace");
+    let out = lab
+        .command(&lab.path)
+        .args([
+            "workflow",
+            "run",
+            "pair",
+            "--select",
+            "selection:every@1",
+            "--json",
+        ])
+        .env("LANE_TRACE", &t)
+        .env("CHAIN_A_SLEEP", "4")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap()
+        .wait_with_output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(out.status.success(), "{stdout}{stderr}");
+    let run: Value = serde_json::from_str(&stdout).unwrap_or_else(|e| panic!("{e}: {stdout}"));
+    assert_eq!(run["status"], "done", "{run}");
+    assert_eq!(run["summary"]["units"]["succeeded"], 8, "{run}");
+
+    let events = trace(&t);
+    let a_ended_last = events
+        .iter()
+        .filter(|e| e.0 == "end" && e.3 == "chain-a")
+        .map(|e| e.1)
+        .fold(0.0, f64::max);
+    let c_started_first = events
+        .iter()
+        .filter(|e| e.0 == "start" && e.3 == "chain-c")
+        .map(|e| e.1)
+        .fold(f64::MAX, f64::min);
+    assert!(
+        c_started_first < a_ended_last,
+        "no unit of the second step started before the first step's run ended: {events:?}"
+    );
+    // the second step's run was claimed while the first one ran, and both
+    // are steps of the one workflow run
+    let run_a = run["steps"][0]["run"].as_i64().unwrap();
+    let run_c = run["steps"][1]["run"].as_i64().unwrap();
+    let ra = lab.json(&["pipeline", "runs", &run_a.to_string(), "--json"]);
+    let rc = lab.json(&["pipeline", "runs", &run_c.to_string(), "--json"]);
+    assert!(
+        rc["started_at"].as_str().unwrap() <= ra["finished_at"].as_str().unwrap(),
+        "the second step waited for the whole first step: {ra} {rc}"
+    );
+    assert_eq!(rc["workflow_run_id"], run["id"], "{rc}");
+    let jobs: Value =
+        serde_json::from_str(&lab.ok(&["jobs", "list", "--all", "--json"], None)).unwrap();
+    let steps_jobs: Vec<&Value> = jobs
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|j| j["kind"] == "pipeline" && j["args"]["workflow_run"] == run["id"])
+        .collect();
+    assert_eq!(steps_jobs.len(), 2, "{jobs}");
+    assert!(steps_jobs.iter().all(|j| j["state"] == "done"), "{jobs}");
 }
