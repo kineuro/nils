@@ -12214,10 +12214,18 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
     // QC decision or a renamed technique should leave nearly everything alone.
     if report.previous.is_some() {
         println!("  this version");
+        // A stack whose files were gone from the tree is counted in
+        // `rewritten` and in `restored` both; it is said once, as restored
+        // (Wave 7b agenda 3.8, a partner site's report said "written again"
+        // twice with two numbers).
         for (n, what) in [
             (report.unchanged, "stacks left alone"),
             (report.moved, "renamed, not rewritten"),
-            (report.rewritten, "written again"),
+            (report.rewritten - report.restored, "written again"),
+            (
+                report.restored,
+                "restored: their files were gone from the tree",
+            ),
             (report.added, "new"),
             (report.removed, "no longer in the release"),
         ] {
@@ -12332,12 +12340,6 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
         // Wave 4a §7.4: what the clinical layer put in the tree, counted.
         for (what, n) in &report.clinical {
             println!("      {n:>10}   clinical: {what}");
-        }
-        if report.restored > 0 {
-            println!(
-                "      {:>10}   written again: their files were gone from the tree",
-                report.restored
-            );
         }
         for (what, choice) in &report.placements {
             println!("  {what:<16} {choice}");

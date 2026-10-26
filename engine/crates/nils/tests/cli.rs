@@ -2254,6 +2254,29 @@ fn a_release_is_versioned_and_a_re_run_writes_nothing() {
     assert!(text.contains("2   stacks left alone"), "{text}");
     assert!(text.contains("0   files written"), "{text}");
 
+    // Wave 7b agenda 3.8: a tree emptied under the same name and root is the
+    // next version of the same dataset, every stack restored, said once and
+    // as that (a partner site read "written again" twice with two numbers).
+    for entry in std::fs::read_dir(out.path()).unwrap().flatten() {
+        match entry.path().is_dir() {
+            true => std::fs::remove_dir_all(entry.path()).unwrap(),
+            false => std::fs::remove_file(entry.path()).unwrap(),
+        }
+    }
+    let third = nils()
+        .args(registry)
+        .args(release)
+        .arg(out.path())
+        .output()
+        .unwrap();
+    assert!(third.status.success(), "{}", stderr(&third));
+    let text = stdout(&third);
+    assert!(
+        text.contains("2   restored: their files were gone from the tree"),
+        "{text}"
+    );
+    assert!(!text.contains("written again"), "{text}");
+
     // And what every version did is a query, not a diff of two trees. It needs
     // no output directory, because it writes nothing.
     let history = nils()
