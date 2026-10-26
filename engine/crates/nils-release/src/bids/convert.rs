@@ -36,6 +36,20 @@
 //! nobody chose, and `sub-x_ses-1_T1w_Eq_1.nii.gz` is not a BIDS name. So the
 //! output directory is read afterwards and anything unexpected is a refusal
 //! with the extra files named.
+//!
+//! **And the refusal says why** (Wave 7b, agenda 3.8, a partner site's beta.1
+//! report: about forty stacks refused for a file named `<stem>a`). `dcm2niix`
+//! appends `a` to a name it would write twice (`-w`, its default "add suffix").
+//! Under `--terse` that happens on two routes: one file list that comes out as
+//! two volumes (two echo numbers, even under one echo time; a magnitude and
+//! its phase), where `--terse` dropped the `_e2` or `_ph` that would have
+//! told them apart, so the second collides with the first; and a stem another
+//! stack of the run wrote already. Measured on `v1.0.20260724`: its stdout
+//! holds one `Convert N DICOM as <path> (dims)` line per volume it wrote, so
+//! two such lines is the first route and one line naming `<stem>a` the second.
+//! For the first route the converter runs once more into a scratch directory
+//! without `--terse`, so the refusal names the postfix it wanted (`_e2`,
+//! `_ph`) and the report's tally groups the cause rather than the file.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -113,7 +127,6 @@ pub fn convert(
         return Err("no files to convert".to_string());
     }
     std::fs::create_dir_all(into).map_err(|e| format!("no directory to write into ({e})"))?;
-    let before = listing(into);
 
     // The list goes in a file because a stack is not a directory: a multi-echo
     // series shares one, and converting the directory would make one output for
@@ -129,25 +142,23 @@ pub fn convert(
         text.push('\n');
     }
     std::fs::write(&list, text).map_err(|e| format!("could not write the file list ({e})"))?;
-
-    let run = Command::new(&converter.path)
-        .args(["-s", "y"])
-        .args(["-z", if compress { "y" } else { "n" }])
-        // The sidecar, which is half of what makes the tree a BIDS dataset.
-        .args(["-b", "y"])
-        // And its anonymiser on top of ours. It is not a de-identification and
-        // the files are already scrubbed; it costs nothing and removes what it
-        // does remove.
-        .args(["-ba", "y"])
-        // Omit `_e2`, `_ph` and the rest: the name is already decided.
-        .arg("--terse")
-        .args(["-f", stem])
-        .arg("-o")
-        .arg(into)
-        .arg(&list)
-        .output();
+    let made = converted(converter, &list, work, into, stem, compress);
     std::fs::remove_file(&list).ok();
-    let run = run.map_err(|e| format!("dcm2niix could not be run ({e})"))?;
+    made
+}
+
+/// One run of the converter over `list`, and what appeared.
+fn converted(
+    converter: &Converter,
+    list: &Path,
+    work: &Path,
+    into: &Path,
+    stem: &str,
+    compress: bool,
+) -> Result<Made, String> {
+    let before = listing(into);
+    let run = run_converter(converter, list, into, stem, Flags::Release { compress })
+        .map_err(|e| format!("dcm2niix could not be run ({e})"))?;
     if !run.status.success() {
         // What it wrote before it failed is no output either (Wave 7a §8.2:
         // a failure that converted 26 of 32 files left letter-suffixed images
@@ -186,17 +197,147 @@ pub fn convert(
         for f in &made {
             std::fs::remove_file(into.join(f)).ok();
         }
-        return Err(format!(
-            "dcm2niix wrote {} it was not asked for ({}); the volume is probably not \
-             equally spaced, and a name nobody chose is not a BIDS name",
-            match named.len() {
-                1 => "a file".to_string(),
-                n => format!("{n} files"),
-            },
-            named.join(", ")
-        ));
+        // Why, from what the converter said: the first line is the cause, the
+        // same words for the same cause so the report's tally groups them,
+        // and never a file name; the names are the second line.
+        let why = match route(&written_names(&String::from_utf8_lossy(&run.stdout)), stem) {
+            Some(Route::Several(volumes)) => {
+                let postfixes = postfixes_without_terse(converter, list, work, stem);
+                let wanted = match postfixes.is_empty() {
+                    true => String::new(),
+                    false => format!(" ({})", postfixes.join(", ")),
+                };
+                format!(
+                    "dcm2niix made {volumes} volumes of one stack{wanted}: the digest holds \
+                     them as one stack\nthe volume was left out and written as DICOM; not \
+                     asked for: {}",
+                    named.join(", ")
+                )
+            }
+            Some(Route::NameTaken) => format!(
+                "dcm2niix found the name already written by another stack of this run\n\
+                 the volume was left out and written as DICOM; not asked for: {}",
+                named.join(", ")
+            ),
+            None => format!(
+                "dcm2niix wrote {} it was not asked for ({}); the volume is probably not \
+                 equally spaced, and a name nobody chose is not a BIDS name",
+                match named.len() {
+                    1 => "a file".to_string(),
+                    n => format!("{n} files"),
+                },
+                named.join(", ")
+            ),
+        };
+        return Err(why);
     }
     Ok(Made { files: made })
+}
+
+/// How the converter is run: for the tree, or once more to learn a name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Flags {
+    /// The release's flags: the sidecar, its anonymiser, `--terse`.
+    Release { compress: bool },
+    /// No sidecar, no compression, no `--terse`: the names it would have
+    /// given, in a scratch directory nobody keeps.
+    Names,
+}
+
+fn run_converter(
+    converter: &Converter,
+    list: &Path,
+    into: &Path,
+    stem: &str,
+    flags: Flags,
+) -> std::io::Result<std::process::Output> {
+    let mut run = Command::new(&converter.path);
+    run.args(["-s", "y"]);
+    match flags {
+        Flags::Release { compress } => {
+            run.args(["-z", if compress { "y" } else { "n" }])
+                // The sidecar, which is half of what makes the tree a BIDS dataset.
+                .args(["-b", "y"])
+                // And its anonymiser on top of ours. It is not a de-identification and
+                // the files are already scrubbed; it costs nothing and removes what it
+                // does remove.
+                .args(["-ba", "y"])
+                // Omit `_e2`, `_ph` and the rest: the name is already decided.
+                .arg("--terse");
+        }
+        Flags::Names => {
+            run.args(["-z", "n"]).args(["-b", "n"]);
+        }
+    }
+    run.args(["-f", stem])
+        .arg("-o")
+        .arg(into)
+        .arg(list)
+        .output()
+}
+
+/// The two ways a conversion comes out as a name nobody chose.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Route {
+    /// One file list came out as this many volumes, which `--terse` named alike.
+    Several(usize),
+    /// The stem was in the folder already, written by another stack of the run.
+    NameTaken,
+}
+
+/// The names the converter said it wrote, one per `Convert N DICOM as <path>
+/// (dims)` line of its stdout, without their directories.
+fn written_names(stdout: &str) -> Vec<String> {
+    stdout
+        .lines()
+        .map(str::trim)
+        .filter(|l| l.starts_with("Convert "))
+        .filter_map(|l| l.split_once(" DICOM as ").map(|(_, path)| path))
+        .map(|path| path.rsplit_once(" (").map_or(path, |(p, _)| p).trim())
+        .filter_map(|path| Path::new(path).file_name())
+        .map(|name| name.to_string_lossy().into_owned())
+        .collect()
+}
+
+/// Which route, from the names the converter wrote; none where it said nothing
+/// or wrote the one name it was asked for (an `_Eq_1` beside it, say).
+fn route(names: &[String], stem: &str) -> Option<Route> {
+    match names {
+        [] => None,
+        [one] if *one == format!("{stem}a") => Some(Route::NameTaken),
+        [_] => None,
+        several => Some(Route::Several(several.len())),
+    }
+}
+
+/// What the converter would have called the volumes without `--terse`: the
+/// same list, converted once more into a scratch directory under `work`, the
+/// postfixes beyond the stem read (`_e1`, `_e2`, `_ph`, `_real`...), and the
+/// scratch removed. Empty where that run says nothing usable.
+fn postfixes_without_terse(
+    converter: &Converter,
+    list: &Path,
+    work: &Path,
+    stem: &str,
+) -> Vec<String> {
+    let scratch = work.join("names");
+    if std::fs::create_dir_all(&scratch).is_err() {
+        return Vec::new();
+    }
+    let mut found: Vec<String> = match run_converter(converter, list, &scratch, stem, Flags::Names)
+    {
+        Ok(_) => listing(&scratch)
+            .iter()
+            .filter_map(|f| f.strip_prefix(stem)?.strip_suffix(".nii"))
+            .filter(|rest| !rest.is_empty())
+            .map(str::to_string)
+            .collect(),
+        Err(_) => Vec::new(),
+    };
+    std::fs::remove_dir_all(&scratch).ok();
+    found.sort();
+    found.dedup();
+    found
 }
 
 /// What the converter said, with the paths taken out.
@@ -353,5 +494,236 @@ mod tests {
         // The name is built here, so this is where the fact belongs.
         let work = std::path::Path::new("/tmp/nils-convert-probe");
         assert_eq!(work.join("files.txt").extension().unwrap(), "txt");
+    }
+
+    /// The lines dcm2niix v1.0.20260724 prints, measured on five synthetic
+    /// series (Wave 7b, agenda 3.8 round 2): one `Convert` line per volume.
+    #[test]
+    fn the_names_the_converter_said_it_wrote_are_read_from_its_lines() {
+        let two = "Chris Rorden's dcm2niiX version v1.0.20260724  (JP2:OpenJPEG) (JP-LS:CharLS) GCC11.4.0 x86-64 (64-bit Linux)\n\
+            Found 6 files in '/data/case//files.txt'\n\
+            Found 6 DICOM file(s)\n\
+            Slices not stacked: echo varies (TE 5, 5; echo 1, 2). Use 'merge 2D slices' option to force stacking\n\
+            ::autoBids:Siemens CSAseqFname:'' pulseSeq:'' seqName:''\n\
+            Warning: Siemens MoCo? Bogus slice timing (range -1..-1, TR=500 seconds)\n\
+            Convert 3 DICOM as /data/case//out/sub-01_ses-01_T2starw (16x16x3x1)\n\
+            ::autoBids:Siemens CSAseqFname:'' pulseSeq:'' seqName:''\n\
+            Convert 3 DICOM as /data/case//out/sub-01_ses-01_T2starwa (16x16x3x1)\n\
+            Conversion required 0.006898 seconds (0.006876 for core code).\n";
+        let names = written_names(two);
+        assert_eq!(names, ["sub-01_ses-01_T2starw", "sub-01_ses-01_T2starwa"]);
+        assert_eq!(
+            route(&names, "sub-01_ses-01_T2starw"),
+            Some(Route::Several(2))
+        );
+        // the stem was in the folder already: one line, the name with an `a`
+        let taken =
+            written_names("Convert 3 DICOM as /data/out/sub-01_ses-01_T2starwa (16x16x3x1)\n");
+        assert_eq!(
+            route(&taken, "sub-01_ses-01_T2starw"),
+            Some(Route::NameTaken)
+        );
+        // the clean case and the resampled one: the name asked for, no route
+        let clean =
+            written_names("Convert 3 DICOM as /data/out/sub-01_ses-01_T2starw (16x16x3x1)\n");
+        assert_eq!(route(&clean, "sub-01_ses-01_T2starw"), None);
+        assert_eq!(route(&[], "sub-01_ses-01_T2starw"), None);
+    }
+
+    /// A stand-in for dcm2niix v1.0.20260724 on PATH: reads the flags the
+    /// release passes, logs each call, prints the lines the real one prints
+    /// and runs `body` with `$terse`, `$sidecar`, `$stem` and `$out` set.
+    #[cfg(unix)]
+    fn stand_in(dir: &Path, body: &str) -> Converter {
+        use std::os::unix::fs::PermissionsExt as _;
+        let fake = dir.join("dcm2niix");
+        let log = dir.join("calls.log");
+        std::fs::write(
+            &fake,
+            format!(
+                "#!/bin/sh\n\
+                 terse=n; sidecar=y; stem=; out=\n\
+                 while [ $# -gt 1 ]; do\n\
+                 case \"$1\" in\n\
+                 --terse) terse=y;;\n\
+                 -f) stem=$2; shift;;\n\
+                 -o) out=$2; shift;;\n\
+                 -b) sidecar=$2; shift;;\n\
+                 esac\n\
+                 shift\n\
+                 done\n\
+                 echo \"terse=$terse sidecar=$sidecar\" >> '{}'\n\
+                 echo \"Chris Rorden's dcm2niiX version v1.0.20260724  (JP2:OpenJPEG) (JP-LS:CharLS) GCC11.4.0 x86-64 (64-bit Linux)\"\n\
+                 echo \"Found 3 DICOM file(s)\"\n\
+                 {body}\n\
+                 echo \"Conversion required 0.006898 seconds (0.006876 for core code).\"\n",
+                log.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        Converter {
+            path: fake,
+            version: "stand-in".into(),
+        }
+    }
+
+    #[cfg(unix)]
+    fn calls(dir: &Path) -> Vec<String> {
+        std::fs::read_to_string(dir.join("calls.log"))
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    #[cfg(unix)]
+    fn names_in(dir: &Path) -> Vec<String> {
+        listing(dir).into_iter().collect()
+    }
+
+    /// Wave 7b, agenda 3.8 round 2: two echo numbers under one echo time are
+    /// one stack to the digest and two volumes to dcm2niix, which `--terse`
+    /// names alike, so the second is `<stem>a`. The refusal says so and names
+    /// the postfixes a second run without `--terse` gives them.
+    #[cfg(unix)]
+    #[test]
+    fn two_volumes_of_one_stack_are_refused_with_the_names_the_converter_wanted() {
+        let dir = nils_dicom::synth::TempDir::new("convert-two-volumes");
+        let c = stand_in(
+            dir.path(),
+            "if [ \"$terse\" = y ]; then\n\
+             : > \"$out/$stem.nii\"; : > \"$out/$stem.json\"; : > \"$out/${stem}a.nii\"; : > \"$out/${stem}a.json\"\n\
+             echo \"Slices not stacked: echo varies (TE 5, 5; echo 1, 2). Use 'merge 2D slices' option to force stacking\"\n\
+             echo \"Convert 3 DICOM as $out/$stem (16x16x3x1)\"\n\
+             echo \"Convert 3 DICOM as $out/${stem}a (16x16x3x1)\"\n\
+             else\n\
+             : > \"$out/${stem}_e1.nii\"; : > \"$out/${stem}_e2.nii\"\n\
+             [ \"$sidecar\" = y ] && : > \"$out/${stem}_e1.json\"\n\
+             echo \"Convert 3 DICOM as $out/${stem}_e1 (16x16x3x1)\"\n\
+             echo \"Convert 3 DICOM as $out/${stem}_e2 (16x16x3x1)\"\n\
+             fi",
+        );
+        let into = dir.path().join("out");
+        let work = dir.path().join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let e = convert(
+            &c,
+            &[dir.path().join("1.dcm")],
+            &work,
+            &into,
+            "s_T2starw",
+            false,
+        )
+        .unwrap_err();
+        assert_eq!(
+            e.lines().next().unwrap(),
+            "dcm2niix made 2 volumes of one stack (_e1, _e2): the digest holds them as one stack"
+        );
+        assert!(e.contains("left out and written as DICOM"), "{e}");
+        assert!(e.contains("s_T2starwa.nii"), "{e}");
+        assert!(!e.contains('/'), "no path in a refusal: {e}");
+        // the second run learnt the names: no --terse, no sidecar
+        assert_eq!(
+            calls(dir.path()),
+            ["terse=y sidecar=y", "terse=n sidecar=n"]
+        );
+        // and left nothing: not in the tree, not under work
+        assert!(names_in(&into).is_empty(), "{:?}", names_in(&into));
+        assert!(!work.join("names").exists());
+        assert!(!work.join("files.txt").exists());
+    }
+
+    /// The other route: the stem was in the folder already, written by another
+    /// stack of this run, so dcm2niix wrote `<stem>a` and said so in one line.
+    #[cfg(unix)]
+    #[test]
+    fn a_name_another_stack_wrote_is_refused_as_that_and_the_first_is_kept() {
+        let dir = nils_dicom::synth::TempDir::new("convert-name-taken");
+        let c = stand_in(
+            dir.path(),
+            ": > \"$out/${stem}a.nii\"; : > \"$out/${stem}a.json\"\n\
+             echo \"Convert 3 DICOM as $out/${stem}a (16x16x3x1)\"",
+        );
+        let into = dir.path().join("out");
+        std::fs::create_dir_all(&into).unwrap();
+        std::fs::write(into.join("s_T2starw.nii"), b"0").unwrap();
+        std::fs::write(into.join("s_T2starw.json"), b"{}").unwrap();
+        let work = dir.path().join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let e = convert(
+            &c,
+            &[dir.path().join("1.dcm")],
+            &work,
+            &into,
+            "s_T2starw",
+            false,
+        )
+        .unwrap_err();
+        assert_eq!(
+            e.lines().next().unwrap(),
+            "dcm2niix found the name already written by another stack of this run"
+        );
+        assert!(e.contains("left out and written as DICOM"), "{e}");
+        // one run was enough to tell; the other stack's files stay
+        assert_eq!(calls(dir.path()), ["terse=y sidecar=y"]);
+        assert_eq!(names_in(&into), ["s_T2starw.json", "s_T2starw.nii"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_clean_conversion_makes_the_image_and_its_sidecar() {
+        let dir = nils_dicom::synth::TempDir::new("convert-clean");
+        let c = stand_in(
+            dir.path(),
+            ": > \"$out/$stem.nii\"; : > \"$out/$stem.json\"\n\
+             echo \"Convert 3 DICOM as $out/$stem (16x16x3x1)\"",
+        );
+        let into = dir.path().join("out");
+        let work = dir.path().join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let made = convert(
+            &c,
+            &[dir.path().join("1.dcm")],
+            &work,
+            &into,
+            "s_T2starw",
+            false,
+        )
+        .unwrap();
+        assert_eq!(made.files, ["s_T2starw.json", "s_T2starw.nii"]);
+        assert_eq!(calls(dir.path()), ["terse=y sidecar=y"]);
+        assert!(!work.join("files.txt").exists());
+    }
+
+    /// The resampled volume (`_Eq_1`) is neither route: one `Convert` line,
+    /// the name asked for, and the refusal is the one it always was.
+    #[cfg(unix)]
+    #[test]
+    fn a_file_beside_the_name_with_no_second_volume_keeps_the_old_refusal() {
+        let dir = nils_dicom::synth::TempDir::new("convert-eq");
+        let c = stand_in(
+            dir.path(),
+            ": > \"$out/$stem.nii\"; : > \"$out/$stem.json\"; : > \"$out/${stem}_Eq_1.nii\"\n\
+             echo \"Convert 3 DICOM as $out/$stem (16x16x3x1)\"",
+        );
+        let into = dir.path().join("out");
+        let work = dir.path().join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let e = convert(
+            &c,
+            &[dir.path().join("1.dcm")],
+            &work,
+            &into,
+            "s_T1w",
+            false,
+        )
+        .unwrap_err();
+        assert!(
+            e.starts_with("dcm2niix wrote a file it was not asked for (s_T1w_Eq_1.nii)"),
+            "{e}"
+        );
+        assert_eq!(calls(dir.path()), ["terse=y sidecar=y"]);
+        assert!(names_in(&into).is_empty());
     }
 }
