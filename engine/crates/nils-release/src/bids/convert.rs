@@ -35,7 +35,7 @@
 //! given. A tree that took the exit code at its word holds files whose names
 //! nobody chose, and `sub-x_ses-1_T1w_Eq_1.nii.gz` is not a BIDS name. So the
 //! output directory is read afterwards and anything unexpected is a refusal
-//! with the extra files named.
+//! (the refusal is one stable line; the files are removed).
 //!
 //! **And the refusal says why** (Wave 7b, agenda 3.8, a partner site's beta.1
 //! report: about forty stacks refused for a file named `<stem>a`). `dcm2niix`
@@ -50,6 +50,9 @@
 //! For the first route the converter runs once more into a scratch directory
 //! without `--terse`, so the refusal names the postfix it wanted (`_e2`,
 //! `_ph`) and the report's tally groups the cause rather than the file.
+//! That second full conversion runs only on a refusal of the first route (about
+//! forty of six hundred stacks at the site that reported it), never on a clean
+//! stack.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -199,7 +202,7 @@ fn converted(
         }
         // Why, from what the converter said: the first line is the cause, the
         // same words for the same cause so the report's tally groups them,
-        // and never a file name; the names are the second line.
+        // and never a file name, in one line.
         let why = match route(&written_names(&String::from_utf8_lossy(&run.stdout)), stem) {
             Some(Route::Several(volumes)) => {
                 let postfixes = postfixes_without_terse(converter, list, work, stem);
@@ -209,25 +212,15 @@ fn converted(
                 };
                 format!(
                     "dcm2niix made {volumes} volumes of one stack{wanted}: the digest holds \
-                     them as one stack\nthe volume was left out and written as DICOM; not \
-                     asked for: {}",
-                    named.join(", ")
+                     them as one stack"
                 )
             }
-            Some(Route::NameTaken) => format!(
-                "dcm2niix found the name already written by another stack of this run\n\
-                 the volume was left out and written as DICOM; not asked for: {}",
-                named.join(", ")
-            ),
-            None => format!(
-                "dcm2niix wrote {} it was not asked for ({}); the volume is probably not \
-                 equally spaced, and a name nobody chose is not a BIDS name",
-                match named.len() {
-                    1 => "a file".to_string(),
-                    n => format!("{n} files"),
-                },
-                named.join(", ")
-            ),
+            Some(Route::NameTaken) => "dcm2niix found the name already in the folder: another \
+                 stack of this run, or a file an earlier run left"
+                .to_string(),
+            None => "dcm2niix wrote a file it was not asked for: the volume is probably not \
+                 equally spaced and a name nobody chose is not a BIDS name"
+                .to_string(),
         };
         return Err(why);
     }
@@ -281,7 +274,8 @@ fn run_converter(
 enum Route {
     /// One file list came out as this many volumes, which `--terse` named alike.
     Several(usize),
-    /// The stem was in the folder already, written by another stack of the run.
+    /// The stem was in the folder already: another stack of the run wrote it,
+    /// or an earlier run left it.
     NameTaken,
 }
 
@@ -306,7 +300,10 @@ fn route(names: &[String], stem: &str) -> Option<Route> {
         [] => None,
         [one] if *one == format!("{stem}a") => Some(Route::NameTaken),
         [_] => None,
-        several => Some(Route::Several(several.len())),
+        // Two or more names: volumes only where the bare stem was written;
+        // without it the stem was taken and the count is not the point.
+        several if several.iter().any(|n| n == stem) => Some(Route::Several(several.len())),
+        _ => Some(Route::NameTaken),
     }
 }
 
@@ -326,9 +323,9 @@ fn postfixes_without_terse(
     }
     let mut found: Vec<String> = match run_converter(converter, list, &scratch, stem, Flags::Names)
     {
-        Ok(_) => listing(&scratch)
+        Ok(run) => written_names(&String::from_utf8_lossy(&run.stdout))
             .iter()
-            .filter_map(|f| f.strip_prefix(stem)?.strip_suffix(".nii"))
+            .filter_map(|n| n.strip_prefix(stem))
             .filter(|rest| !rest.is_empty())
             .map(str::to_string)
             .collect(),
@@ -528,6 +525,16 @@ mod tests {
             written_names("Convert 3 DICOM as /data/out/sub-01_ses-01_T2starw (16x16x3x1)\n");
         assert_eq!(route(&clean, "sub-01_ses-01_T2starw"), None);
         assert_eq!(route(&[], "sub-01_ses-01_T2starw"), None);
+        // the stem taken and two volumes: `<stem>a`, `<stem>aa`, no bare stem
+        let both = written_names(
+            "Convert 3 DICOM as /data/out/sub-01_ses-01_T2starwa (16x16x3x1)\n\
+             Convert 3 DICOM as /data/out/sub-01_ses-01_T2starwaa (16x16x3x1)\n",
+        );
+        assert_eq!(both, ["sub-01_ses-01_T2starwa", "sub-01_ses-01_T2starwaa"]);
+        assert_eq!(
+            route(&both, "sub-01_ses-01_T2starw"),
+            Some(Route::NameTaken)
+        );
     }
 
     /// A stand-in for dcm2niix v1.0.20260724 on PATH: reads the flags the
@@ -620,8 +627,7 @@ mod tests {
             e.lines().next().unwrap(),
             "dcm2niix made 2 volumes of one stack (_e1, _e2): the digest holds them as one stack"
         );
-        assert!(e.contains("left out and written as DICOM"), "{e}");
-        assert!(e.contains("s_T2starwa.nii"), "{e}");
+        assert_eq!(e.lines().count(), 1, "{e}");
         assert!(!e.contains('/'), "no path in a refusal: {e}");
         // the second run learnt the names: no --terse, no sidecar
         assert_eq!(
@@ -662,9 +668,9 @@ mod tests {
         .unwrap_err();
         assert_eq!(
             e.lines().next().unwrap(),
-            "dcm2niix found the name already written by another stack of this run"
+            "dcm2niix found the name already in the folder: another stack of this run, or a file an earlier run left"
         );
-        assert!(e.contains("left out and written as DICOM"), "{e}");
+        assert_eq!(e.lines().count(), 1, "{e}");
         // one run was enough to tell; the other stack's files stay
         assert_eq!(calls(dir.path()), ["terse=y sidecar=y"]);
         assert_eq!(names_in(&into), ["s_T2starw.json", "s_T2starw.nii"]);
@@ -719,9 +725,9 @@ mod tests {
             false,
         )
         .unwrap_err();
-        assert!(
-            e.starts_with("dcm2niix wrote a file it was not asked for (s_T1w_Eq_1.nii)"),
-            "{e}"
+        assert_eq!(
+            e,
+            "dcm2niix wrote a file it was not asked for: the volume is probably not equally spaced and a name nobody chose is not a BIDS name"
         );
         assert_eq!(calls(dir.path()), ["terse=y sidecar=y"]);
         assert!(names_in(&into).is_empty());
