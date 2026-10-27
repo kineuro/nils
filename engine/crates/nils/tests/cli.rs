@@ -2291,6 +2291,71 @@ fn a_release_is_versioned_and_a_re_run_writes_nothing() {
     assert!(text.contains("stacks left alone"), "{text}");
 }
 
+/// Wave 7b agenda 3.8: the release report names the converter build that ran,
+/// the first line of `dcm2niix --version`, so a site's report says which
+/// build made its tree (a partner site's refusals were a question of which
+/// dcm2niix they had).
+#[cfg(unix)]
+#[test]
+fn a_bids_release_report_names_the_converter_build_that_ran() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let home = home();
+    let dir = tree();
+    let out = TempDir::new("cli-release-converter");
+    let packs = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packs");
+    let registry = ["--registry", home.path().to_str().unwrap()];
+    // A stand-in dcm2niix: answers its version as the real one does and
+    // writes the image and its sidecar it was asked for.
+    let fake = out.path().join("dcm2niix");
+    std::fs::write(
+        &fake,
+        "#!/bin/sh\n\
+         if [ \"$1\" = --version ]; then echo \"Chris Rorden's dcm2niiX version v1.0.20260724  (JP2:OpenJPEG) (JP-LS:CharLS) GCC11.4.0 x86-64 (64-bit Linux)\"; exit 0; fi\n\
+         stem=; dest=\n\
+         while [ $# -gt 1 ]; do case \"$1\" in -f) stem=$2; shift;; -o) dest=$2; shift;; esac; shift; done\n\
+         : > \"$dest/$stem.nii.gz\"; echo '{\"EchoTime\": 0.1, \"RepetitionTime\": 3}' > \"$dest/$stem.json\"\n\
+         echo \"Convert 1 DICOM as $dest/$stem (16x16x1x1)\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let done = nils()
+        .args(registry)
+        .args(["digest", "--name", "first"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert!(done.status.success(), "{}", stderr(&done));
+    let released = nils()
+        .args(registry)
+        .args([
+            "release",
+            "--name",
+            "a-bids-dataset",
+            "--layout",
+            "bids",
+            "--on-unknown",
+            "write",
+            "--pack-dir",
+            packs.to_str().unwrap(),
+            "--dcm2niix",
+            fake.to_str().unwrap(),
+            "--out",
+            out.path().join("tree").to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(released.status.success(), "{}", stderr(&released));
+    let text = stdout(&released);
+    assert!(
+        text.contains(
+            "converted by     Chris Rorden's dcm2niiX version v1.0.20260724  (JP2:OpenJPEG) (JP-LS:CharLS) GCC11.4.0 x86-64 (64-bit Linux)"
+        ),
+        "{text}"
+    );
+    assert!(text.contains("(as given)"), "{text}");
+}
+
 /// Record 35: a release says under what rule its files were de-identified,
 /// and not only which tags moved. The categories have been on the release
 /// row since the sixth of them was added, and were printed nowhere, so a
