@@ -57,14 +57,17 @@
 //! **And one split is undone.** The digest holds slices as one stack when
 //! their echo times agree to two decimals; `dcm2niix` splits a series on any
 //! difference, so slices at 26.731 and 26.734 ms are one stack here and two
-//! volumes there, both with the same echo postfix (`_e10` and `_e10a`, the
-//! second with its conflict letter). Measured on every release from 2021 to
-//! 2026. When the no-terse names say exactly that, one echo postfix repeated,
-//! the stack is converted once more with `-m y`, `dcm2niix`'s merge of a
-//! series' 2D slices, which folds them into the one volume they are. The
-//! merge is taken only on that evidence: `-m y` would also fold two real
-//! echoes (`_e1`, `_e2`) or a magnitude and its phase into one, so it is never
-//! a default and every other postfix set keeps the refusal.
+//! volumes there. Its stdout says so on the first run, `Slices not stacked:
+//! echo varies (TE 26.731, 26.734; echo 10, 10)`. When every such line names
+//! the same echo number and echo times equal to two decimals, the digest's own
+//! rule for one stack, the stack is converted once more with `-m y`,
+//! `dcm2niix`'s merge of a series' 2D slices, which folds them into the one
+//! volume they are. The merge is decided from those lines and from nothing
+//! else: `-m y` would also fold two real echoes (`echo 1, 2`) or a magnitude
+//! and its phase into one, so it is never a default and every other split
+//! keeps the refusal. A common stack is converted once; a split is converted
+//! twice (the merge); a refused merge adds the run that learns the names, and
+//! the refusal's second line says why the merge was refused.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -212,12 +215,8 @@ fn converted(
         .filter(|f| !is_expected(f, stem, compress))
         .collect();
     if !unexpected.is_empty() {
-        let named: Vec<&str> = unexpected.iter().map(|f| f.as_str()).collect();
         // Removed, because a name nobody chose in a BIDS tree is worse than a
         // stack that did not convert, and the refusal says what it was.
-        for f in &named {
-            std::fs::remove_file(into.join(f)).ok();
-        }
         for f in &made {
             std::fs::remove_file(into.join(f)).ok();
         }
@@ -226,24 +225,33 @@ fn converted(
         // and never a file name, in one line.
         let why = match route(&written_names(&String::from_utf8_lossy(&run.stdout)), stem) {
             Some(Route::Several(volumes)) => {
-                let postfixes = postfixes_without_terse(converter, list, work, stem);
-                // One echo postfix repeated: the volumes are one echo dcm2niix
-                // split on a difference past the digest's second decimal, and
-                // its own merge of a series' 2D slices folds them back. Taken
-                // only on that evidence, never by default (see the module).
-                if one_echo_repeated(&postfixes)
-                    && let Some(made) = merged(converter, list, into, stem, compress, &before)
-                {
-                    return Ok(made);
+                // The volumes are one echo dcm2niix split on a difference past
+                // the digest's second decimal when its own lines say so, and
+                // its merge of a series' 2D slices folds them back. Decided
+                // from the first run's stdout only (see the module).
+                let mut tried = None;
+                if one_echo_split(&String::from_utf8_lossy(&run.stdout)) {
+                    match merged(converter, list, into, stem, compress, &before) {
+                        Ok(made) => return Ok(made),
+                        Err(Merge::CouldNotRun(e)) => {
+                            return Err(format!("dcm2niix could not be run ({e})"));
+                        }
+                        Err(Merge::Refused(why)) => tried = Some(why),
+                    }
                 }
+                let postfixes = postfixes_without_terse(converter, list, work, stem);
                 let wanted = match postfixes.is_empty() {
                     true => String::new(),
                     false => format!(" ({})", postfixes.join(", ")),
                 };
-                format!(
+                let mut line = format!(
                     "dcm2niix made {volumes} volumes of one stack{wanted}: the digest holds \
                      them as one stack"
-                )
+                );
+                if let Some(why) = tried {
+                    line.push_str(&format!("\na merge of the slices was tried: {why}"));
+                }
+                line
             }
             Some(Route::NameTaken) => "dcm2niix found the name already in the folder: another \
                  stack of this run, or a file an earlier run left"
@@ -261,7 +269,7 @@ fn converted(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Flags {
     /// The release's flags: the sidecar, its anonymiser, `--terse`; and with
-    /// `merge`, `-m y`, only on the evidence `one_echo_repeated` asks for.
+    /// `merge`, `-m y`, only on the evidence `one_echo_split` asks for.
     Release { compress: bool, merge: bool },
     /// No sidecar, no compression, no `--terse`: the names it would have
     /// given, in a scratch directory nobody keeps.
@@ -373,35 +381,54 @@ fn postfixes_without_terse(
     found
 }
 
-/// Whether the postfixes are one echo postfix repeated: every one is
-/// `_e<digits>` with the same digits once the trailing lowercase conflict
-/// letters are stripped (`_e10`, `_e10a`, `_e10b`). Two echoes (`_e1`, `_e2`),
-/// a phase (`_ph`), a resampled volume (`_Eq_1`) or a mix are not.
-fn one_echo_repeated(postfixes: &[String]) -> bool {
-    let mut digits: Option<&str> = None;
-    for postfix in postfixes {
-        let Some(echo) = postfix
-            .trim_end_matches(|c: char| c.is_ascii_lowercase())
-            .strip_prefix("_e")
-        else {
+/// Whether the first run's stdout says the volumes are one echo split on a
+/// difference past the second decimal: at least one `Slices not stacked: echo
+/// varies (TE a, b; echo n, m)` line, and every such line has n equal to m and
+/// a and b equal once rounded to two decimals. A line that cannot be read
+/// counts against.
+fn one_echo_split(stdout: &str) -> bool {
+    let mut seen = false;
+    for line in stdout.lines() {
+        let Some((_, rest)) = line.split_once("Slices not stacked: echo varies (") else {
+            continue;
+        };
+        seen = true;
+        let Some((inside, _)) = rest.split_once(')') else {
             return false;
         };
-        if echo.is_empty() || !echo.chars().all(|c| c.is_ascii_digit()) {
+        let Some((times, echoes)) = inside.split_once(';') else {
+            return false;
+        };
+        let pair = |text: &str, prefix: &str| -> Option<(String, String)> {
+            let (a, b) = text.trim().strip_prefix(prefix)?.split_once(',')?;
+            Some((a.trim().to_string(), b.trim().to_string()))
+        };
+        let (Some((a, b)), Some((n, m))) = (pair(times, "TE"), pair(echoes, "echo")) else {
+            return false;
+        };
+        let (Ok(a), Ok(b)) = (a.parse::<f64>(), b.parse::<f64>()) else {
+            return false;
+        };
+        if n != m || (a * 100.0).round() != (b * 100.0).round() {
             return false;
         }
-        match digits {
-            None => digits = Some(echo),
-            Some(first) if first == echo => {}
-            Some(_) => return false,
-        }
     }
-    digits.is_some()
+    seen
+}
+
+/// Why a merge did not give the stack.
+#[derive(Debug)]
+enum Merge {
+    /// The converter would not start: the same error as any other run.
+    CouldNotRun(String),
+    /// It ran and did not give exactly the files asked for.
+    Refused(String),
 }
 
 /// The stack converted once more into the tree with the release's flags and
 /// `-m y`, after the first run's files are gone. What it made where that is
-/// exactly the files the name asked for; nothing where it failed or wrote
-/// anything else, and then nothing of it is left in the tree.
+/// exactly the files the name asked for; otherwise why not, and then nothing
+/// of it is left in the tree.
 fn merged(
     converter: &Converter,
     list: &Path,
@@ -409,7 +436,7 @@ fn merged(
     stem: &str,
     compress: bool,
     before: &BTreeSet<String>,
-) -> Option<Made> {
+) -> Result<Made, Merge> {
     let run = run_converter(
         converter,
         list,
@@ -420,19 +447,43 @@ fn merged(
             merge: true,
         },
     )
-    .ok()?;
+    .map_err(|e| Merge::CouldNotRun(e.to_string()))?;
     let mut made: Vec<String> = listing(into).difference(before).cloned().collect();
     made.sort();
-    let clean = run.status.success()
-        && !made.is_empty()
-        && made.iter().all(|f| is_expected(f, stem, compress));
-    if clean {
-        return Some(Made { files: made });
+    let unexpected: Vec<&str> = made
+        .iter()
+        .filter(|f| !is_expected(f, stem, compress))
+        .map(String::as_str)
+        .collect();
+    let why = if !run.status.success() {
+        let text = String::from_utf8_lossy(&run.stderr);
+        let text = match text.trim().is_empty() {
+            true => String::from_utf8_lossy(&run.stdout).trim().to_string(),
+            false => text.trim().to_string(),
+        };
+        Some(format!(
+            "dcm2niix failed ({})",
+            reason(text.lines().last().unwrap_or("no output"))
+        ))
+    } else if made.is_empty() {
+        Some("dcm2niix wrote nothing".to_string())
+    } else if !unexpected.is_empty() {
+        Some(format!(
+            "dcm2niix wrote files it was not asked for ({})",
+            unexpected.join(", ")
+        ))
+    } else {
+        None
+    };
+    match why {
+        None => Ok(Made { files: made }),
+        Some(why) => {
+            for f in &made {
+                std::fs::remove_file(into.join(f)).ok();
+            }
+            Err(Merge::Refused(why))
+        }
     }
-    for f in &made {
-        std::fs::remove_file(into.join(f)).ok();
-    }
-    None
 }
 
 /// What the converter said, with the paths taken out.
@@ -701,7 +752,7 @@ mod tests {
             dir.path(),
             "if [ \"$terse\" = y ]; then\n\
              : > \"$out/$stem.nii\"; : > \"$out/$stem.json\"; : > \"$out/${stem}a.nii\"; : > \"$out/${stem}a.json\"\n\
-             echo \"Slices not stacked: echo varies (TE 5, 5; echo 1, 2). Use 'merge 2D slices' option to force stacking\"\n\
+             echo \"Slices not stacked: echo varies (TE 5, 10; echo 1, 2). Use 'merge 2D slices' option to force stacking\"\n\
              echo \"Convert 3 DICOM as $out/$stem (16x16x3x1)\"\n\
              echo \"Convert 3 DICOM as $out/${stem}a (16x16x3x1)\"\n\
              else\n\
@@ -835,19 +886,27 @@ mod tests {
     }
 
     #[test]
-    fn one_echo_postfix_repeated_is_told_from_every_other_set() {
-        let set = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<Vec<_>>();
-        assert!(one_echo_repeated(&set(&["_e10", "_e10a"])));
-        assert!(one_echo_repeated(&set(&["_e1", "_e1a", "_e1b"])));
-        // two echoes, a phase, a resampled volume, a mix, nothing
-        assert!(!one_echo_repeated(&set(&["_e1", "_e2"])));
-        assert!(!one_echo_repeated(&set(&["", "_ph"])));
-        assert!(!one_echo_repeated(&set(&["_ph"])));
-        assert!(!one_echo_repeated(&set(&["_Eq_1"])));
-        assert!(!one_echo_repeated(&set(&["_e1", "_e1a", "_ph"])));
-        assert!(!one_echo_repeated(&set(&["_e", "_ea"])));
-        assert!(!one_echo_repeated(&set(&["_e10", "_e1"])));
-        assert!(!one_echo_repeated(&[]));
+    fn the_converters_echo_varies_lines_decide_the_merge() {
+        // real lines, v1.0.20260724 and v1.0.20220720 alike
+        let one = "Slices not stacked: echo varies (TE 26.734, 26.731; echo 10, 10). Use 'merge 2D slices' option to force stacking\n";
+        let two = "Slices not stacked: echo varies (TE 5, 10; echo 1, 2). Use 'merge 2D slices' option to force stacking\n";
+        assert!(one_echo_split(one));
+        assert!(!one_echo_split(two));
+        // differing at the second decimal: the digest would have split them
+        assert!(!one_echo_split(
+            "Slices not stacked: echo varies (TE 26.73, 26.74; echo 10, 10). Use 'merge'\n"
+        ));
+        // every such line must agree; a geometry split has none
+        assert!(!one_echo_split(&format!("{one}{two}")));
+        assert!(one_echo_split(&format!("{one}{one}")));
+        assert!(!one_echo_split("Convert 3 DICOM as /x/y (16x16x3x1)\n"));
+        assert!(!one_echo_split(""));
+        assert!(!one_echo_split(
+            "Slices not stacked: echo varies (TE x, y; echo 1, 1)\n"
+        ));
+        assert!(!one_echo_split(
+            "Slices not stacked: echo varies (garbled\n"
+        ));
     }
 
     /// Slices whose echo times differ past the digest's second decimal are one
@@ -888,22 +947,18 @@ mod tests {
         .unwrap();
         assert_eq!(made.files, ["s_T2starw.json", "s_T2starw.nii.gz"]);
         assert_eq!(names_in(&into), ["s_T2starw.json", "s_T2starw.nii.gz"]);
-        // the release's run, the run that learnt the names, and the merge,
-        // which is the only call `-m y` is passed to
+        // the release's run and the merge, which is the only call `-m y` is
+        // passed to; the names are not needed
         assert_eq!(
             calls(dir.path()),
-            [
-                "terse=y sidecar=y merge=n",
-                "terse=n sidecar=n merge=n",
-                "terse=y sidecar=y merge=y"
-            ]
+            ["terse=y sidecar=y merge=n", "terse=y sidecar=y merge=y"]
         );
         assert!(!work.join("names").exists());
         assert!(!work.join("files.txt").exists());
     }
 
     /// The same evidence, but the merge still writes a file nobody asked for:
-    /// the refusal is the Several line, and nothing of it is left in the tree.
+    /// the refusal is the Several line with the merge's reason, and nothing of it is left in the tree.
     #[cfg(unix)]
     #[test]
     fn a_merge_that_still_writes_extra_files_is_refused_as_several_volumes() {
@@ -912,6 +967,7 @@ mod tests {
             dir.path(),
             "if [ \"$terse\" = y ]; then\n\
              : > \"$out/$stem.nii\"; : > \"$out/$stem.json\"; : > \"$out/${stem}a.nii\"; : > \"$out/${stem}a.json\"\n\
+             echo \"Slices not stacked: echo varies (TE 26.731, 26.734; echo 10, 10). Use 'merge 2D slices' option to force stacking\"\n\
              echo \"Convert 3 DICOM as $out/$stem (16x16x3x1)\"\n\
              echo \"Convert 3 DICOM as $out/${stem}a (16x16x3x1)\"\n\
              else\n\
@@ -933,18 +989,63 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(
-            e,
+            e.lines().next().unwrap(),
             "dcm2niix made 2 volumes of one stack (_e10, _e10a): the digest holds them as one stack"
         );
+        assert_eq!(
+            e.lines().nth(1).unwrap(),
+            "a merge of the slices was tried: dcm2niix wrote files it was not asked for (s_T2starwa.json, s_T2starwa.nii)"
+        );
+        assert_eq!(e.lines().count(), 2, "{e}");
         assert_eq!(
             calls(dir.path()),
             [
                 "terse=y sidecar=y merge=n",
-                "terse=n sidecar=n merge=n",
-                "terse=y sidecar=y merge=y"
+                "terse=y sidecar=y merge=y",
+                "terse=n sidecar=n merge=n"
             ]
         );
         assert!(names_in(&into).is_empty(), "{:?}", names_in(&into));
         assert!(!work.join("names").exists());
+    }
+
+    /// A merge that exits non-zero is refused with the converter's last line,
+    /// and the failed merge leaves nothing in the tree.
+    #[cfg(unix)]
+    #[test]
+    fn a_merge_that_fails_says_so_in_the_second_line() {
+        let dir = nils_dicom::synth::TempDir::new("convert-merge-exit");
+        let c = stand_in(
+            dir.path(),
+            "if [ \"$merge\" = y ]; then\n\
+             : > \"$out/$stem.nii\"\n\
+             echo 'Error: merge failed' >&2; exit 2\n\
+             elif [ \"$terse\" = y ]; then\n\
+             : > \"$out/$stem.nii\"; : > \"$out/${stem}a.nii\"\n\
+             echo \"Slices not stacked: echo varies (TE 26.731, 26.734; echo 10, 10). Use 'merge 2D slices' option to force stacking\"\n\
+             echo \"Convert 3 DICOM as $out/$stem (16x16x3x1)\"\n\
+             echo \"Convert 3 DICOM as $out/${stem}a (16x16x3x1)\"\n\
+             else\n\
+             echo \"Convert 3 DICOM as $out/${stem}_e10 (16x16x3x1)\"\n\
+             echo \"Convert 3 DICOM as $out/${stem}_e10a (16x16x3x1)\"\n\
+             fi",
+        );
+        let into = dir.path().join("out");
+        let work = dir.path().join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let e = convert(
+            &c,
+            &[dir.path().join("1.dcm")],
+            &work,
+            &into,
+            "s_T2starw",
+            false,
+        )
+        .unwrap_err();
+        assert_eq!(
+            e.lines().nth(1).unwrap(),
+            "a merge of the slices was tried: dcm2niix failed (Error: merge failed)"
+        );
+        assert!(names_in(&into).is_empty(), "{:?}", names_in(&into));
     }
 }
