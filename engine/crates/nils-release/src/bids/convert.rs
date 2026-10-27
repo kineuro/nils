@@ -53,6 +53,18 @@
 //! That second full conversion runs only on a refusal of the first route (about
 //! forty of six hundred stacks at the site that reported it), never on a clean
 //! stack.
+//!
+//! **And one split is undone.** The digest holds slices as one stack when
+//! their echo times agree to two decimals; `dcm2niix` splits a series on any
+//! difference, so slices at 26.731 and 26.734 ms are one stack here and two
+//! volumes there, both with the same echo postfix (`_e10` and `_e10a`, the
+//! second with its conflict letter). Measured on every release from 2021 to
+//! 2026. When the no-terse names say exactly that, one echo postfix repeated,
+//! the stack is converted once more with `-m y`, `dcm2niix`'s merge of a
+//! series' 2D slices, which folds them into the one volume they are. The
+//! merge is taken only on that evidence: `-m y` would also fold two real
+//! echoes (`_e1`, `_e2`) or a magnitude and its phase into one, so it is never
+//! a default and every other postfix set keeps the refusal.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -160,8 +172,17 @@ fn converted(
     compress: bool,
 ) -> Result<Made, String> {
     let before = listing(into);
-    let run = run_converter(converter, list, into, stem, Flags::Release { compress })
-        .map_err(|e| format!("dcm2niix could not be run ({e})"))?;
+    let run = run_converter(
+        converter,
+        list,
+        into,
+        stem,
+        Flags::Release {
+            compress,
+            merge: false,
+        },
+    )
+    .map_err(|e| format!("dcm2niix could not be run ({e})"))?;
     if !run.status.success() {
         // What it wrote before it failed is no output either (Wave 7a §8.2:
         // a failure that converted 26 of 32 files left letter-suffixed images
@@ -206,6 +227,15 @@ fn converted(
         let why = match route(&written_names(&String::from_utf8_lossy(&run.stdout)), stem) {
             Some(Route::Several(volumes)) => {
                 let postfixes = postfixes_without_terse(converter, list, work, stem);
+                // One echo postfix repeated: the volumes are one echo dcm2niix
+                // split on a difference past the digest's second decimal, and
+                // its own merge of a series' 2D slices folds them back. Taken
+                // only on that evidence, never by default (see the module).
+                if one_echo_repeated(&postfixes)
+                    && let Some(made) = merged(converter, list, into, stem, compress, &before)
+                {
+                    return Ok(made);
+                }
                 let wanted = match postfixes.is_empty() {
                     true => String::new(),
                     false => format!(" ({})", postfixes.join(", ")),
@@ -230,8 +260,9 @@ fn converted(
 /// How the converter is run: for the tree, or once more to learn a name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Flags {
-    /// The release's flags: the sidecar, its anonymiser, `--terse`.
-    Release { compress: bool },
+    /// The release's flags: the sidecar, its anonymiser, `--terse`; and with
+    /// `merge`, `-m y`, only on the evidence `one_echo_repeated` asks for.
+    Release { compress: bool, merge: bool },
     /// No sidecar, no compression, no `--terse`: the names it would have
     /// given, in a scratch directory nobody keeps.
     Names,
@@ -247,7 +278,7 @@ fn run_converter(
     let mut run = Command::new(&converter.path);
     run.args(["-s", "y"]);
     match flags {
-        Flags::Release { compress } => {
+        Flags::Release { compress, merge } => {
             run.args(["-z", if compress { "y" } else { "n" }])
                 // The sidecar, which is half of what makes the tree a BIDS dataset.
                 .args(["-b", "y"])
@@ -257,6 +288,11 @@ fn run_converter(
                 .args(["-ba", "y"])
                 // Omit `_e2`, `_ph` and the rest: the name is already decided.
                 .arg("--terse");
+            if merge {
+                // Merge the series' 2D slices into one volume. Never a default:
+                // it folds real echoes, and a magnitude and its phase, too.
+                run.args(["-m", "y"]);
+            }
         }
         Flags::Names => {
             run.args(["-z", "n"]).args(["-b", "n"]);
@@ -335,6 +371,68 @@ fn postfixes_without_terse(
     found.sort();
     found.dedup();
     found
+}
+
+/// Whether the postfixes are one echo postfix repeated: every one is
+/// `_e<digits>` with the same digits once the trailing lowercase conflict
+/// letters are stripped (`_e10`, `_e10a`, `_e10b`). Two echoes (`_e1`, `_e2`),
+/// a phase (`_ph`), a resampled volume (`_Eq_1`) or a mix are not.
+fn one_echo_repeated(postfixes: &[String]) -> bool {
+    let mut digits: Option<&str> = None;
+    for postfix in postfixes {
+        let Some(echo) = postfix
+            .trim_end_matches(|c: char| c.is_ascii_lowercase())
+            .strip_prefix("_e")
+        else {
+            return false;
+        };
+        if echo.is_empty() || !echo.chars().all(|c| c.is_ascii_digit()) {
+            return false;
+        }
+        match digits {
+            None => digits = Some(echo),
+            Some(first) if first == echo => {}
+            Some(_) => return false,
+        }
+    }
+    digits.is_some()
+}
+
+/// The stack converted once more into the tree with the release's flags and
+/// `-m y`, after the first run's files are gone. What it made where that is
+/// exactly the files the name asked for; nothing where it failed or wrote
+/// anything else, and then nothing of it is left in the tree.
+fn merged(
+    converter: &Converter,
+    list: &Path,
+    into: &Path,
+    stem: &str,
+    compress: bool,
+    before: &BTreeSet<String>,
+) -> Option<Made> {
+    let run = run_converter(
+        converter,
+        list,
+        into,
+        stem,
+        Flags::Release {
+            compress,
+            merge: true,
+        },
+    )
+    .ok()?;
+    let mut made: Vec<String> = listing(into).difference(before).cloned().collect();
+    made.sort();
+    let clean = run.status.success()
+        && !made.is_empty()
+        && made.iter().all(|f| is_expected(f, stem, compress));
+    if clean {
+        return Some(Made { files: made });
+    }
+    for f in &made {
+        std::fs::remove_file(into.join(f)).ok();
+    }
+    None
 }
 
 /// What the converter said, with the paths taken out.
@@ -539,7 +637,8 @@ mod tests {
 
     /// A stand-in for dcm2niix v1.0.20260724 on PATH: reads the flags the
     /// release passes, logs each call, prints the lines the real one prints
-    /// and runs `body` with `$terse`, `$sidecar`, `$stem` and `$out` set.
+    /// and runs `body` with `$terse`, `$sidecar`, `$merge`, `$stem` and `$out`
+    /// set.
     #[cfg(unix)]
     fn stand_in(dir: &Path, body: &str) -> Converter {
         use std::os::unix::fs::PermissionsExt as _;
@@ -549,17 +648,18 @@ mod tests {
             &fake,
             format!(
                 "#!/bin/sh\n\
-                 terse=n; sidecar=y; stem=; out=\n\
+                 terse=n; sidecar=y; merge=n; stem=; out=\n\
                  while [ $# -gt 1 ]; do\n\
                  case \"$1\" in\n\
                  --terse) terse=y;;\n\
                  -f) stem=$2; shift;;\n\
                  -o) out=$2; shift;;\n\
                  -b) sidecar=$2; shift;;\n\
+                 -m) merge=$2; shift;;\n\
                  esac\n\
                  shift\n\
                  done\n\
-                 echo \"terse=$terse sidecar=$sidecar\" >> '{}'\n\
+                 echo \"terse=$terse sidecar=$sidecar merge=$merge\" >> '{}'\n\
                  echo \"Chris Rorden's dcm2niiX version v1.0.20260724  (JP2:OpenJPEG) (JP-LS:CharLS) GCC11.4.0 x86-64 (64-bit Linux)\"\n\
                  echo \"Found 3 DICOM file(s)\"\n\
                  {body}\n\
@@ -629,10 +729,11 @@ mod tests {
         );
         assert_eq!(e.lines().count(), 1, "{e}");
         assert!(!e.contains('/'), "no path in a refusal: {e}");
-        // the second run learnt the names: no --terse, no sidecar
+        // the second run learnt the names: no --terse, no sidecar; and two
+        // real echoes are never merged into one volume
         assert_eq!(
             calls(dir.path()),
-            ["terse=y sidecar=y", "terse=n sidecar=n"]
+            ["terse=y sidecar=y merge=n", "terse=n sidecar=n merge=n"]
         );
         // and left nothing: not in the tree, not under work
         assert!(names_in(&into).is_empty(), "{:?}", names_in(&into));
@@ -672,7 +773,7 @@ mod tests {
         );
         assert_eq!(e.lines().count(), 1, "{e}");
         // one run was enough to tell; the other stack's files stay
-        assert_eq!(calls(dir.path()), ["terse=y sidecar=y"]);
+        assert_eq!(calls(dir.path()), ["terse=y sidecar=y merge=n"]);
         assert_eq!(names_in(&into), ["s_T2starw.json", "s_T2starw.nii"]);
     }
 
@@ -698,7 +799,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(made.files, ["s_T2starw.json", "s_T2starw.nii"]);
-        assert_eq!(calls(dir.path()), ["terse=y sidecar=y"]);
+        assert_eq!(calls(dir.path()), ["terse=y sidecar=y merge=n"]);
         assert!(!work.join("files.txt").exists());
     }
 
@@ -729,7 +830,121 @@ mod tests {
             e,
             "dcm2niix wrote a file it was not asked for: the volume is probably not equally spaced and a name nobody chose is not a BIDS name"
         );
-        assert_eq!(calls(dir.path()), ["terse=y sidecar=y"]);
+        assert_eq!(calls(dir.path()), ["terse=y sidecar=y merge=n"]);
         assert!(names_in(&into).is_empty());
+    }
+
+    #[test]
+    fn one_echo_postfix_repeated_is_told_from_every_other_set() {
+        let set = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+        assert!(one_echo_repeated(&set(&["_e10", "_e10a"])));
+        assert!(one_echo_repeated(&set(&["_e1", "_e1a", "_e1b"])));
+        // two echoes, a phase, a resampled volume, a mix, nothing
+        assert!(!one_echo_repeated(&set(&["_e1", "_e2"])));
+        assert!(!one_echo_repeated(&set(&["", "_ph"])));
+        assert!(!one_echo_repeated(&set(&["_ph"])));
+        assert!(!one_echo_repeated(&set(&["_Eq_1"])));
+        assert!(!one_echo_repeated(&set(&["_e1", "_e1a", "_ph"])));
+        assert!(!one_echo_repeated(&set(&["_e", "_ea"])));
+        assert!(!one_echo_repeated(&set(&["_e10", "_e1"])));
+        assert!(!one_echo_repeated(&[]));
+    }
+
+    /// Slices whose echo times differ past the digest's second decimal are one
+    /// stack here and two volumes to dcm2niix, both with the same echo postfix
+    /// (`_e10`, `_e10a`). On that evidence the stack is converted once more
+    /// with `-m y`, and the result is the normal file set.
+    #[cfg(unix)]
+    #[test]
+    fn one_echo_split_past_the_second_decimal_is_merged_into_the_one_volume() {
+        let dir = nils_dicom::synth::TempDir::new("convert-one-echo-split");
+        let c = stand_in(
+            dir.path(),
+            "if [ \"$merge\" = y ]; then\n\
+             : > \"$out/$stem.nii.gz\"; : > \"$out/$stem.json\"\n\
+             echo \"Convert 6 DICOM as $out/$stem (16x16x6x1)\"\n\
+             elif [ \"$terse\" = y ]; then\n\
+             : > \"$out/$stem.nii.gz\"; : > \"$out/$stem.json\"; : > \"$out/${stem}a.nii.gz\"; : > \"$out/${stem}a.json\"\n\
+             echo \"Slices not stacked: echo varies (TE 26.731, 26.734; echo 10, 10). Use 'merge 2D slices' option to force stacking\"\n\
+             echo \"Convert 3 DICOM as $out/$stem (16x16x3x1)\"\n\
+             echo \"Convert 3 DICOM as $out/${stem}a (16x16x3x1)\"\n\
+             else\n\
+             : > \"$out/${stem}_e10.nii\"; : > \"$out/${stem}_e10a.nii\"\n\
+             echo \"Convert 3 DICOM as $out/${stem}_e10 (16x16x3x1)\"\n\
+             echo \"Convert 3 DICOM as $out/${stem}_e10a (16x16x3x1)\"\n\
+             fi",
+        );
+        let into = dir.path().join("out");
+        let work = dir.path().join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let made = convert(
+            &c,
+            &[dir.path().join("1.dcm")],
+            &work,
+            &into,
+            "s_T2starw",
+            true,
+        )
+        .unwrap();
+        assert_eq!(made.files, ["s_T2starw.json", "s_T2starw.nii.gz"]);
+        assert_eq!(names_in(&into), ["s_T2starw.json", "s_T2starw.nii.gz"]);
+        // the release's run, the run that learnt the names, and the merge,
+        // which is the only call `-m y` is passed to
+        assert_eq!(
+            calls(dir.path()),
+            [
+                "terse=y sidecar=y merge=n",
+                "terse=n sidecar=n merge=n",
+                "terse=y sidecar=y merge=y"
+            ]
+        );
+        assert!(!work.join("names").exists());
+        assert!(!work.join("files.txt").exists());
+    }
+
+    /// The same evidence, but the merge still writes a file nobody asked for:
+    /// the refusal is the Several line, and nothing of it is left in the tree.
+    #[cfg(unix)]
+    #[test]
+    fn a_merge_that_still_writes_extra_files_is_refused_as_several_volumes() {
+        let dir = nils_dicom::synth::TempDir::new("convert-merge-failed");
+        let c = stand_in(
+            dir.path(),
+            "if [ \"$terse\" = y ]; then\n\
+             : > \"$out/$stem.nii\"; : > \"$out/$stem.json\"; : > \"$out/${stem}a.nii\"; : > \"$out/${stem}a.json\"\n\
+             echo \"Convert 3 DICOM as $out/$stem (16x16x3x1)\"\n\
+             echo \"Convert 3 DICOM as $out/${stem}a (16x16x3x1)\"\n\
+             else\n\
+             : > \"$out/${stem}_e10.nii\"; : > \"$out/${stem}_e10a.nii\"\n\
+             echo \"Convert 3 DICOM as $out/${stem}_e10 (16x16x3x1)\"\n\
+             echo \"Convert 3 DICOM as $out/${stem}_e10a (16x16x3x1)\"\n\
+             fi",
+        );
+        let into = dir.path().join("out");
+        let work = dir.path().join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let e = convert(
+            &c,
+            &[dir.path().join("1.dcm")],
+            &work,
+            &into,
+            "s_T2starw",
+            false,
+        )
+        .unwrap_err();
+        assert_eq!(
+            e,
+            "dcm2niix made 2 volumes of one stack (_e10, _e10a): the digest holds them as one stack"
+        );
+        assert_eq!(
+            calls(dir.path()),
+            [
+                "terse=y sidecar=y merge=n",
+                "terse=n sidecar=n merge=n",
+                "terse=y sidecar=y merge=y"
+            ]
+        );
+        assert!(names_in(&into).is_empty(), "{:?}", names_in(&into));
+        assert!(!work.join("names").exists());
     }
 }
