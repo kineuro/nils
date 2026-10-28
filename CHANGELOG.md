@@ -4,6 +4,15 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [pack-mri-v1.4.0] - 2026-10-28
+
+The MRI pack 1.4.0, the coil rule after a partner site's first report (Wave 7b, the maintenance track). It declares pack contract 11 as 1.3.0 did and relies on no engine fix, so it installs on every engine 1.3.0 installs on.
+
+### Changed
+
+- A brain-sized 3D volume received on a spine coil in an exam registered as a brain is the brain (`body_part.yml`, rule `spine_coil_brain_volume`, ahead of `spine_coil`): a 3D acquisition with both sides of its field of view between 200 and 300 mm and at least 100 slices of 1.5 mm or thinner, on a coil named for the spine alone, with a brain stated. A site that acquires brain scans in the spine array alone, and whose stated body part is per exam, had every 3D T1 and 3D FLAIR of a brain session called spine from the coil. A sagittal spine series on the same coil is narrower or thicker and keeps its spine, so the four such series the coil rule was written for are unchanged. Replayed over the whole archive before release: 325 of 546,440 stacks move from spine to brain, every one a 1 mm isotropic 3D volume of 230 to 260 mm (sagittal 3D FLAIR, sagittal 3D T1 Dixon, MPRAGE); the partner's own shape, the coil deciding only without a stated brain, would have moved 1,811, among them plainly spinal series, and was not taken.
+- The Dutch segment abbreviations name a spine: `CWK`, `TWK` and `LWK` (the cervical, thoracic and lumbar spine) and the ranges `CTWK` and `TLWK` are spelled out by the anatomy normaliser and read by `wervelkolom` in the spine words. Three and four letters are too short to be keywords, so they are token replacements as `WS` is. On the archive they stand in 9 stacks, every one a spine already by another word, so nothing moves here.
+
 ## [1.0.0-beta.2] - 2026-10-28
 
 The second beta: Wave 7b steps 1 to 3 (pipeline packs, the software place, workflows, the registration family, verify mode and the audit stream) and the fixes from the first partner site's report on the first beta (record 57 and record 58).

@@ -59,3 +59,12 @@ token_removals: []
 token_replacements:
   'cou': 'neck'
   'ws': 'wirbelsaeule'
+  # The Dutch segment abbreviations (a partner site, 2026-10-27): CWK, TWK and
+  # LWK are the cervicale, thoracale and lumbale wervelkolom, CTWK and TLWK the
+  # two-segment ranges. Three and four letters are too short to be keywords, so
+  # the tokens are spelled out here and `wervelkolom` in the spine list reads them.
+  'cwk': 'cervicale wervelkolom'
+  'twk': 'thoracale wervelkolom'
+  'lwk': 'lumbale wervelkolom'
+  'ctwk': 'cervicothoracale wervelkolom'
+  'tlwk': 'thoracolumbale wervelkolom'

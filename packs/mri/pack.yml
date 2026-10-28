@@ -9,7 +9,7 @@
 # in slices 3, 4 and 6 of the wave.
 
 pack: mri
-version: 1.3.0
+version: 1.4.0
 contract: 11
 # The engines this pack works with (pack contract 10, record 55 B5): from the
 # first engine that reads rules releases on. An engine before it speaks pack
