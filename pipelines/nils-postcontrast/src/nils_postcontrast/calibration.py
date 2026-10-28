@@ -16,10 +16,11 @@ site its own pair without a new model bundle or image:
    gives a finite pair), refusing under 20 rows of either class (model r2's
    rule), and writes it as a pair file with its fit per label source;
 3. a run given that file (``--calibration``, or the descriptor's site file
-   through ``NILS_PC_CALIBRATION``) merges its pairs over the fusion's and
+   through ``NILS_PC_CALIBRATION``) adds its pairs beside the fusion's and
    scores the site as any calibrated one; a pair file fitted on another
-   fusion than the run's is refused, and a file naming no fusion is taken
-   as it is and said to be unchecked.
+   fusion than the run's is refused, as is one naming a site the frozen
+   (certified) fusion has a pair for, which no site file replaces; a file
+   naming no fusion is taken as it is and said to be unchecked.
 
 The site file is configuration, not a secret: the descriptor declares it
 ``sweep: false``, so the engine keeps it where secrets are kept but does
@@ -104,12 +105,18 @@ def load_pairs(path, fusion_digest=None) -> tuple:
 
 
 def apply(F: Fusion, path, fusion_digest=None) -> tuple:
-    """The fusion with the file's pairs merged over its own: (fusion, the
+    """The fusion with the file's pairs added beside its own: (fusion, the
     sites the file set, whether the file was held to the run's fusion,
-    ``load_pairs``). The fusion keeps its own sites apart (``frozen_keys``),
-    so ``evidence.cohort_of`` resolves a stack against them first and
-    against the file's cohorts only where they name none."""
+    ``load_pairs``). A file naming a site the frozen fusion has a pair for
+    is refused: a certified pair is never replaced. The fusion keeps its own
+    sites apart (``frozen_keys``), so ``evidence.cohort_of`` resolves a
+    stack against them first and against the file's cohorts only where they
+    name none."""
     pairs, checked = load_pairs(path, fusion_digest)
+    frozen = sorted(set(pairs) & F.frozen_sites())
+    if frozen:
+        raise CalibrationError("the calibration file names a site the frozen fusion is certified for, which no site file replaces: "
+                               + ", ".join(frozen))
     cal = dict(F.cal)
     cal.update(pairs)
     G = Fusion(cols=F.cols, mean=F.mean, scale=F.scale, coef=F.coef, intercept=F.intercept, cal=cal, t=F.t, use_V=F.use_V,
@@ -119,10 +126,11 @@ def apply(F: Fusion, path, fusion_digest=None) -> tuple:
 
 def for_run(F: Fusion, path, extra: dict, fusion_digest=None) -> Fusion:
     """The fusion a run scores with: its own pairs, with a calibration
-    file's merged over them where there is one, the file ``--calibration``
+    file's added beside them where there is one, the file ``--calibration``
     names, else the one the engine mounted as the descriptor's site file
     (``NILS_PC_CALIBRATION``). A file whose ``model.fusion_digest`` names
-    another fusion than the run's is refused. The run records in its
+    another fusion than the run's is refused, as is one naming a site the
+    frozen fusion has a pair for (``apply``). The run records in its
     results (``calibration``) the sites the file set, each with the stacks
     the pair calibrated once ``record`` has counted them, and ``unchecked``
     where the file named no fusion; never the pairs."""
@@ -162,7 +170,7 @@ def add_run_options(c) -> None:
                    help="score T1-type brain stacks at a site with no calibration too and write their fused log-odds (score_raw), "
                         "never a probability or a proposal, for the site to fit its pair on")
     c.add_argument("--calibration", default=None,
-                   help="a JSON file of site pairs ({site: [a, b]}, or one pair file from calibrate) merged over the fusion's; "
+                   help="a JSON file of site pairs ({site: [a, b]}, or one pair file from calibrate) added beside the fusion's (a site the fusion has a pair for is refused); "
                         f"default: the file ${ENV} names, where the engine mounted the site file")
 
 
@@ -207,6 +215,8 @@ def read_labels(path) -> dict:
 
 
 def _tables(path: Path):
+    """(file, table) of each table under a path: a run's output folder (its
+    ``postcontrast/<stack>.json``) or one file."""
     if path.is_dir():
         sub = path / "postcontrast"
         folder = sub if sub.is_dir() else path
@@ -217,9 +227,25 @@ def _tables(path: Path):
         try:
             doc = json.loads(f.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as e:
-            raise CalibrationError("a scores file is not readable JSON") from e
+            raise CalibrationError(f"the scores file {f} is not readable JSON") from e
         if isinstance(doc, dict) and "stack_id" in doc:
-            yield doc
+            yield f, doc
+
+
+def _candidates_of(f: Path, doc: dict):
+    """The ``cohort_candidates`` column of a table as the names it lists (a
+    JSON list in the text column), None where an older table has no such
+    column or it is null; anything else is refused by the file's path."""
+    v = doc.get("cohort_candidates")
+    if v is None:
+        return None
+    try:
+        names = json.loads(v) if isinstance(v, str) else v
+    except json.JSONDecodeError:
+        names = None
+    if not isinstance(names, list) or not all(isinstance(c, str) for c in names):
+        raise CalibrationError(f"the table {f} has a cohort_candidates column that is not a JSON list of names")
+    return names
 
 
 def read_scores(paths) -> dict:
@@ -227,24 +253,28 @@ def read_scores(paths) -> dict:
     path a run's output folder (its ``postcontrast/<stack>.json`` tables)
     or one table. ``{stack: {"z", "site", "make", "cohort_candidates",
     "fusion_digest", "cascade_digest"}}`` (``cohort_candidates`` the
-    column's words, or None where an older table has no such column); a
-    stack in several outputs keeps the last."""
+    column's names, or None where an older table has no such column); a
+    stack in several outputs keeps the last. A table that is not what a run
+    writes (a stack id that is not an integer, a score that is not a
+    number) is refused by its path, never by a value."""
     out: dict = {}
     for p in paths:
         p = Path(p)
         if not p.exists():
             raise CalibrationError("a scores path does not exist")
-        for doc in _tables(p):
+        for f, doc in _tables(p):
             z = doc.get("score_raw")
             if z is None:
                 continue
+            sid = doc["stack_id"]
+            if isinstance(sid, bool) or not isinstance(sid, int):
+                raise CalibrationError(f"the table {f} has no integer stack_id")
             try:
                 z = float(z)
             except (TypeError, ValueError) as e:
-                raise CalibrationError("a table's score_raw is not a number") from e
-            cands = str(doc.get("cohort_candidates") or "").split() if "cohort_candidates" in doc else None
-            out[int(doc["stack_id"])] = {"z": z, "site": doc.get("site"), "make": doc.get("make"), "cohort_candidates": cands,
-                                         "fusion_digest": doc.get("fusion_digest"), "cascade_digest": doc.get("cascade_digest")}
+                raise CalibrationError(f"the table {f} has a score_raw that is not a number") from e
+            out[sid] = {"z": z, "site": doc.get("site"), "make": doc.get("make"), "cohort_candidates": _candidates_of(f, doc),
+                        "fusion_digest": doc.get("fusion_digest"), "cascade_digest": doc.get("cascade_digest")}
     return out
 
 
@@ -330,9 +360,10 @@ def calibrate(labels: dict, scores: dict, site: str) -> dict:
     is written as the run spells it (``site_key``). Rows with no score,
     rows whose table names another site, rows of another make than the
     key's (compared without case) and rows whose ``cohort_candidates`` do
-    not name the key's cohort are counted and left out; a row from an older
-    table with no candidates column is taken and counted; fewer than 20
-    rows of a class refuse."""
+    not name the key's cohort are counted and left out; a row whose table
+    names the key itself as its site needs no candidates check (the site
+    proves the cohort), and a row from an older table with no candidates
+    column is taken and counted; fewer than 20 rows of a class refuse."""
     site = site_key(site)
     key_cohort, _, key_make = site.rpartition(" ")
     key_make = key_make.lower()
@@ -350,12 +381,15 @@ def calibrate(labels: dict, scores: dict, site: str) -> dict:
         if str(r.get("make") or "").strip().lower() != key_make:
             n_other_make += 1
             continue
-        cands = r.get("cohort_candidates")
-        if cands is None:
-            n_without_candidates += 1
-        elif key_cohort not in cands:
-            n_other_cohort += 1
-            continue
+        if r["site"] != site:
+            # the table names no site: the key's cohort must be among the
+            # stack's candidates (the run writes them alias-resolved)
+            cands = r.get("cohort_candidates")
+            if cands is None:
+                n_without_candidates += 1
+            elif key_cohort not in cands:
+                n_other_cohort += 1
+                continue
         zs.append(r["z"])
         ys.append(y)
         srcs.append(src)
@@ -405,8 +439,12 @@ def cmd_calibrate(a) -> int:
         print(f"nils-postcontrast calibrate: {e}", file=sys.stderr)
         return 1
     out = Path(a.out)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+    try:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+    except OSError as e:
+        print(f"nils-postcontrast calibrate: the pair file {out} cannot be written ({e.strerror or e.__class__.__name__})", file=sys.stderr)
+        return 1
     print(report(doc))
     return 0
 

@@ -22,6 +22,7 @@ model r1's frame made it from the registry (the study's ``w_base.py``,
 
 from __future__ import annotations
 
+import json
 import re
 
 import numpy as np
@@ -150,29 +151,43 @@ def _cohort_candidates(e) -> list:
     return cands
 
 
-def cohort_candidates(e) -> list:
-    """The names of ``_cohort_candidates``, each once, in the order
-    ``cohort_of`` tries them: what a site builds its key from
-    (``<name> <make>``) when the fusion knows none of them."""
+def cohort_candidates(e, aliases=None) -> list:
+    """The names of ``_cohort_candidates`` through the fusion's cohort
+    aliases, each once, in the order ``cohort_of`` tries them: what a site
+    builds its key from (``<name> <make>``) when the fusion knows none of
+    them. Written as the stack's ``cohort_candidates`` column (a JSON
+    list), so the names are the ones a site key is looked up by."""
+    al = aliases or {}
     out: list = []
     for c, _ in _cohort_candidates(e):
+        c = al.get(c, c)
         if c not in out:
             out.append(c)
     return out
 
 
-def cohort_of(e, fusion) -> tuple:
+def cohort_pools(fusion) -> tuple:
+    """(the cohorts the frozen fusion calibrates, with its aliases' targets;
+    the cohorts a site file added, ``calibration.apply``): what
+    ``cohort_of`` resolves a stack against, computed once per run
+    (``rows_for``)."""
+    frozen = fusion.frozen_sites()
+    known = {k.rsplit(" ", 1)[0] for k in frozen} | set(fusion.cohort_aliases.values())
+    added = {k.rsplit(" ", 1)[0] for k in fusion.sites() - frozen} - known
+    return known, added
+
+
+def cohort_of(e, fusion, pools=None) -> tuple:
     """The stack's calibration cohort and where it was found: a dataset
     holding its files (through the fusion's aliases), its first ingest
     batch, the batch's dash-suffixes, its subject's open cohorts. The
     frozen fusion's cohorts are tried first over every candidate; only a
     stack none of them names is resolved against the cohorts a site file
     added (``calibration.apply``), so a merged file never re-routes a stack
-    the frozen fusion calibrates."""
+    the frozen fusion calibrates. ``pools`` is ``cohort_pools(fusion)``,
+    computed by the caller once for many stacks."""
     al = fusion.cohort_aliases
-    frozen = fusion.frozen_sites()
-    known = {k.rsplit(" ", 1)[0] for k in frozen} | set(al.values())
-    added = {k.rsplit(" ", 1)[0] for k in fusion.sites() - frozen} - known
+    known, added = pools if pools is not None else cohort_pools(fusion)
     cands = [(al.get(c, c), where) for c, where in _cohort_candidates(e)]
     for pool in (known, added):
         for c2, where in cands:
@@ -186,20 +201,21 @@ def raw_columns(rows: dict, by_id: dict, sid: int) -> dict:
     same in the cascade's and the full pipeline's: its site key as the
     fusion sees it (null where its cohort is none the fusion knows), its
     make as the key spells it, and the cohort candidates the key could be
-    built from, space separated, in the order ``cohort_of`` tries them."""
-    e = by_id[sid]
-    return {"site": rows[sid]["site"], "make": make_of(e), "cohort_candidates": " ".join(cohort_candidates(e)) or None}
+    built from, alias-resolved, as a JSON list in the text column, in the
+    order ``cohort_of`` tries them."""
+    return {"site": rows[sid]["site"], "make": make_of(by_id[sid]), "cohort_candidates": json.dumps(rows[sid]["cohort_candidates"])}
 
 
 def table_row(rows: dict, by_id: dict, sid: int, raw: bool, base_table, **kw) -> dict:
-    """A stack's table through the pipeline's own ``base_table(sid, raw=...,
-    **columns)``; in the raw-score mode the site columns (``raw_columns``)
-    are filled first where the caller gave none. The cascade and the full
-    pipeline build every row through this."""
+    """A stack's table through the pipeline's own ``base_table(sid,
+    **columns)``, whose shape never changes with the mode: in the raw-score
+    mode the site columns (``raw_columns``) are filled first where the
+    caller gave none, and without it they stay null. The cascade and the
+    full pipeline build every row through this."""
     if raw:
         for k, v in raw_columns(rows, by_id, sid).items():
             kw.setdefault(k, v)
-    return base_table(sid, raw=raw, **kw)
+    return base_table(sid, **kw)
 
 
 def _spearman(x, y) -> float:
@@ -241,8 +257,11 @@ def time_trusted(series: list, cohort, untrusted: list) -> bool:
 
 
 def rows_for(stacks: list, context: list, fusion) -> dict:
-    """Each scored stack's fusion row: the header columns, the site, brain,
-    the (absent) pair tier, and the facts behind them, by stack id."""
+    """Each scored stack's fusion row: the header columns, the site and the
+    cohort candidates it could be built from, brain, the (absent) pair
+    tier, and the facts behind them, by stack id. The fusion's cohort pools
+    are computed once here (``cohort_pools``)."""
+    pools = cohort_pools(fusion)
     by_study: dict = {}
     for e in list(stacks) + list(context):
         if e.study is None or e.sealed:
@@ -268,7 +287,7 @@ def rows_for(stacks: list, context: list, fusion) -> dict:
                     ser[key][1] = n
         coh = None
         for e in B:
-            coh, _ = cohort_of(e, fusion)
+            coh, _ = cohort_of(e, fusion, pools)
             break
         trusted = time_trusted([tuple(v) for v in ser.values()], coh, fusion.untrusted_time_cohorts) if B else False
         sess[study] = {"any": any(ag) if B else False, "all": all(ag) if B else False, "first": first, "trusted": trusted, "n": len(B)}
@@ -277,7 +296,7 @@ def rows_for(stacks: list, context: list, fusion) -> dict:
         s = sess.get(e.study, {"any": False, "all": False, "first": None, "trusted": False, "n": 0})
         t = tsec(e)
         tr = bool(s["trusted"])
-        coh, where = cohort_of(e, fusion)
+        coh, where = cohort_of(e, fusion, pools)
         pc = axis_max(e, "post_contrast")
         rules = set(contrast(e).get("post_contrast_rules") or [])
         out[e.stack_id] = {
@@ -292,6 +311,7 @@ def rows_for(stacks: list, context: list, fusion) -> dict:
             "has_pair": 0.0,
             "site": f"{coh} {make_of(e)}" if coh else None,
             "cohort_from": where,
+            "cohort_candidates": cohort_candidates(e, fusion.cohort_aliases),
             "brain": brain(e),
             "family": family(e),
             "acquired": acquired(e),

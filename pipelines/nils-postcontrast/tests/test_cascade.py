@@ -159,15 +159,22 @@ def test_the_student_is_three_seeds(tmp_path):
 
 # ---------------------------------------------------------------- a site's calibration (0.3.0)
 
-FROZEN_COLUMNS = ["p_given", "value", "confidence", "answers", "stage", "stage1", "reason", "margin", "seeds_agree", "files_read",
-                  "cascade_digest", "student_digest", "fusion_digest", "stack_id"]
+# the columns before 0.3.0, and the raw-score mode's five, on every row of every run (null without the mode), so the table's
+# shape is constant and the engine's measures never miss a declared column
+EARLIER_COLUMNS = ["p_given", "value", "confidence", "answers", "stage", "stage1", "reason", "margin", "seeds_agree", "files_read",
+                   "cascade_digest", "student_digest", "fusion_digest", "stack_id"]
+RAW_COLUMNS = ["score_raw", "score_raw_seeds", "site", "make", "cohort_candidates"]
+COLUMNS = EARLIER_COLUMNS[:10] + RAW_COLUMNS + EARLIER_COLUMNS[10:]
 
 
-def test_without_the_raw_scores_flag_the_output_is_the_earlier_versions(tmp_path):
+def test_without_the_raw_scores_flag_the_output_is_the_earlier_versions_with_the_five_columns_null(tmp_path):
     rc, out = run(tmp_path, 9.0)
     assert rc == 0
-    for doc in tables(out).values():
-        assert list(doc) == FROZEN_COLUMNS
+    T = tables(out)
+    for doc in T.values():
+        assert list(doc) == COLUMNS
+        assert all(doc[k] is None for k in RAW_COLUMNS), doc
+    assert T[1]["answers"] == 1 and T[1]["value"] == "given" and T[7]["reason"] == "no-calibration" and T[6]["reason"] == "deferred"
     res = json.loads((out / "results.json").read_text())
     assert res["params"] == {"workers": 2, "batch": 64, "device": "cpu"} and "calibration" not in res
     assert all(set(u["metrics"]) == {"value", "confidence", "stage", "stage1", "reason", "files_read"} for u in res["units"])
@@ -185,12 +192,12 @@ def test_raw_scores_write_the_log_odds_of_a_stack_with_no_calibration_and_never_
     assert abs(t7["score_raw"] - 9.0) < 1e-5  # every coefficient 0: the log-odds is the intercept
     seeds = [float(x) for x in t7["score_raw_seeds"].split()]
     assert len(seeds) == 3 and all(abs(z - 9.0) < 1e-5 for z in seeds)
-    assert t7["site"] is None and t7["make"] == "Siemens" and t7["cohort_candidates"] == "cohort-c" and t7["files_read"] == 3
-    # every other stack as before, its new columns empty
+    assert t7["site"] is None and t7["make"] == "Siemens" and t7["cohort_candidates"] == json.dumps(["cohort-c"]) and t7["files_read"] == 3
+    # every other stack as before, its site columns filled and no raw score
     assert T[1]["answers"] == 1 and T[1]["value"] == "given" and T[1]["score_raw"] is None and T[1]["site"] == "cohort-a Siemens"
-    assert T[1]["cohort_candidates"] == "cohort-a"
+    assert T[1]["cohort_candidates"] == json.dumps(["cohort-a"])
     assert T[3]["reason"] == "not-t1-brain" and T[3]["score_raw"] is None and T[6]["reason"] == "deferred"
-    assert list(T[1]) == FROZEN_COLUMNS[:10] + ["score_raw", "score_raw_seeds", "site", "make", "cohort_candidates"] + FROZEN_COLUMNS[10:]
+    assert list(T[1]) == COLUMNS
     res = json.loads((out / "results.json").read_text())
     assert {p["stack_id"] for p in res["proposals"]} == {1, 2} and res["params"]["raw_scores"] is True
     units = {u["unit_id"]: u for u in res["units"]}
@@ -210,7 +217,7 @@ def test_raw_scores_defer_a_stack_the_student_could_not_read_at_a_site_with_no_p
     rc = cli.main(["cascade", "--stacks", str(stacks), "--inputs", str(I), "--output", str(out), "--threads", "2", "--device", "cpu", "--raw-scores"])
     assert rc == 0
     T = tables(out)
-    assert T[8]["reason"] == "deferred" and T[8]["stage1"] == "no-geometry" and T[8]["score_raw"] is None and T[8]["cohort_candidates"] == "cohort-c"
+    assert T[8]["reason"] == "deferred" and T[8]["stage1"] == "no-geometry" and T[8]["score_raw"] is None and T[8]["cohort_candidates"] == json.dumps(["cohort-c"])
     assert T[7]["reason"] == "no-calibration" and T[7]["score_raw"] is not None
     res = json.loads((out / "results.json").read_text())
     assert res["metrics"]["deferred"] == [6, 8] and res["metrics"]["raw_scored"] == 1 and res["metrics"]["by_outcome"]["no-calibration"] == 1
@@ -225,7 +232,7 @@ def test_a_calibration_file_scores_a_site_the_fusion_has_no_pair_for(tmp_path, m
                    "--calibration", str(cal)])
     assert rc == 0
     T = tables(out)
-    assert T[7]["answers"] == 1 and T[7]["value"] == "given" and T[7]["reason"] is None and list(T[7]) == FROZEN_COLUMNS
+    assert T[7]["answers"] == 1 and T[7]["value"] == "given" and T[7]["reason"] is None and list(T[7]) == COLUMNS and T[7]["site"] is None
     res = json.loads((out / "results.json").read_text())
     # a map names no fusion: taken as it is, and said to be unchecked
     assert {p["stack_id"] for p in res["proposals"]} == {1, 2, 7} and res["calibration"] == {"sites": {"cohort-c Siemens": 1}, "unchecked": True}

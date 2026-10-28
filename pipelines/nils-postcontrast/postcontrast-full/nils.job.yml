@@ -56,8 +56,10 @@
 # site file post_contrast_calibration (`nils pipeline secret set
 # post_contrast_calibration --file /absolute/path/pair.json`; the engine
 # takes an absolute path, since it reads the file where it runs), which
-# every run then merges over the fusion's pairs. The run records the sites
-# the file set, never the pairs.
+# every run then adds beside the fusion's pairs (a site the fusion has a
+# pair for is refused: a certified pair is never replaced). The run records
+# the sites the file set, never the pairs. The raw-score columns below are
+# on every row of every run, null without the switch.
 name: postcontrast-full
 schema-version: "0.5"
 tool-version: "0.3.0"
@@ -163,10 +165,10 @@ x-nils:
         - {name: reason, type: text, description: "Why the stack has no answer: sealed, not-mr, not-t1-brain, no-calibration, no-files, not-sure, no-usable-volume, no-segmentation, no-image-arm, worker-died or step-failed (no image arm, so no certified answer; the last two are the run's own failures, not the data's); null when answered"}
         - {name: arms, type: text, description: "The image arms the stack had (T, U, V); a failed tool leaves the arms it could not feed out, as model r1"}
         - {name: failed_steps, type: text, description: "The steps that failed for the stack: convert, tools, base, tail, features"}
-        - {name: score_raw, description: "With raw_scores: the fused log-odds before any calibration of a T1-type brain stack at a site with no calibration that has an image arm, for the site to fit its pair on; null elsewhere. Never a probability"}
-        - {name: site, type: text, description: "With raw_scores: the stack's site key as the fusion sees it (<cohort> <make>); null where its cohort is none the fusion knows"}
-        - {name: make, type: text, description: "With raw_scores: the scanner's make as the site key spells it (Siemens, GE, Philips, Canon/Toshiba or other)"}
-        - {name: cohort_candidates, type: text, description: "With raw_scores: the dataset, batch and cohort names the stack belongs to, space separated, in the order the site key is looked for; a site builds its key as one of them and the make"}
+        - {name: score_raw, description: "With raw_scores: the fused log-odds before any calibration of a T1-type brain stack at a site with no calibration that has an image arm, for the site to fit its pair on; null elsewhere and without raw_scores. Never a probability"}
+        - {name: site, type: text, description: "With raw_scores: the stack's site key as the fusion sees it (<cohort> <make>); null where its cohort is none the fusion knows, and without raw_scores"}
+        - {name: make, type: text, description: "With raw_scores: the scanner's make as the site key spells it (Siemens, GE, Philips, Canon/Toshiba or other); null without it"}
+        - {name: cohort_candidates, type: text, description: "With raw_scores: a JSON list of the dataset, batch and cohort names the stack belongs to, through the fusion's cohort aliases, in the order the site key is looked for; a site builds its key as one of them and the make. Null without raw_scores"}
         - {name: cascade_digest, type: text, description: The cascade}
         - {name: fusion_digest, type: text, description: The cascade's fusion}
         - {name: arms_digest, type: text, description: The arms}

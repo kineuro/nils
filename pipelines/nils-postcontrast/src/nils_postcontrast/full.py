@@ -30,12 +30,15 @@ With ``--raw-scores`` (0.3.0) a T1-type brain stack at a site with no
 calibration is converted, segmented and scored too, and its table carries
 the fused log-odds before any calibration (``score_raw``) beside the
 ``no-calibration`` reason where it has an image arm, with its ``site``,
-``make`` and ``cohort_candidates`` (the names a site key may be built
-from); its ``p_given`` and ``value`` stay empty, so it is never a proposal.
-A stack whose conversion or tools failed keeps that reason, with no raw
-score. A run given a calibration file (``--calibration``, or the
-descriptor's site file through ``NILS_PC_CALIBRATION``) merges the file's
-site pairs over the fusion's first (``calibration.py``).
+``make`` and ``cohort_candidates`` (a JSON list of the names a site key
+may be built from); its ``p_given`` and ``value`` stay empty, so it is
+never a proposal. A stack whose conversion or tools failed keeps that
+reason, with no raw score, and one with no files is ``no-files``. Every
+table carries the four columns, null without the flag. A run given a
+calibration file (``--calibration``, or the descriptor's site file through
+``NILS_PC_CALIBRATION``) adds the file's site pairs beside the fusion's
+first (``calibration.py``); a site the frozen fusion has a pair for is
+refused.
 
 **Where it runs.** With a card, the tools run in waves on it (``tools.wave``)
 while worker processes convert the stacks before and compute the features
@@ -333,12 +336,14 @@ def candidates(stacks, context, F: Fusion, features_all: bool = False, raw: bool
             why[e.stack_id] = "not-mr"
         elif not (r["acquired"] and r["family"] == "T1-type" and r["brain"]):
             why[e.stack_id] = "not-t1-brain"
+        elif not e.files:
+            # before the calibration test: no-calibration is the reason of a
+            # stack the model could score, and a file-less one it cannot
+            why[e.stack_id] = "no-files"
         elif r["site"] is None or r["site"] not in F.cal:
             why[e.stack_id] = "no-calibration"
-        elif not e.files:
-            why[e.stack_id] = "no-files"
         if e.stack_id not in why or (features_all and why[e.stack_id] in ("not-t1-brain", "no-calibration") and e.files) \
-                or (raw and why[e.stack_id] == "no-calibration" and e.files):
+                or (raw and why[e.stack_id] == "no-calibration"):
             todo.append(e)
     return rows, why, todo
 
@@ -564,12 +569,11 @@ def _cards(asked: str, budget_frac: float, budget_mib: int) -> list:
     return out
 
 
-def _table(sid, P: FullParts, raw: bool = False, **kw) -> dict:
+def _table(sid, P: FullParts, **kw) -> dict:
+    # the raw-score mode's four columns are on every row of every run, null
+    # without the mode, so the table's shape is constant
     doc = {"p_given": None, "value": None, "confidence": None, "answers": 0, "stage": None, "reason": None, "arms": None, "failed_steps": None,
-           "seconds": None}
-    if raw:
-        # the raw-score mode's columns, on every row of such a run
-        doc.update(score_raw=None, site=None, make=None, cohort_candidates=None)
+           "seconds": None, "score_raw": None, "site": None, "make": None, "cohort_candidates": None}
     doc.update(kw)
     doc.update(cascade_digest=P.cascade.digest, fusion_digest=P.fusion.digest, arms_digest=P.arms_part.digest, stack_id=sid)
     return doc

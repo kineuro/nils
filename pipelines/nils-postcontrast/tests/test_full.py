@@ -567,8 +567,8 @@ def test_raw_scores_give_a_stack_with_no_calibration_its_log_odds_and_no_answer(
     t5 = T[5]  # a cohort the fusion has no pair for
     assert t5["reason"] == "no-calibration" and t5["stage"] == "full" and t5["answers"] == 0 and t5["p_given"] is None and t5["value"] is None
     assert isinstance(t5["score_raw"], float) and "V" in t5["arms"] and t5["site"] is None and t5["make"] == "Siemens"
-    assert t5["cohort_candidates"] == "cohort-c"
-    assert T[1]["answers"] == 1 and T[1]["score_raw"] is None and T[1]["site"] == "cohort-a Siemens" and T[1]["cohort_candidates"] == "cohort-a"
+    assert t5["cohort_candidates"] == json.dumps(["cohort-c"])
+    assert T[1]["answers"] == 1 and T[1]["score_raw"] is None and T[1]["site"] == "cohort-a Siemens" and T[1]["cohort_candidates"] == json.dumps(["cohort-a"])
     assert T[3]["reason"] == "not-t1-brain" and T[3]["score_raw"] is None and T[4]["reason"] == "sealed"
     res = json.loads((out / "results.json").read_text())
     assert {p["stack_id"] for p in res["proposals"]} == {1, 2} and res["params"]["raw_scores"] is True
@@ -585,11 +585,28 @@ def test_raw_scores_keep_a_failed_stacks_own_reason_and_no_score(standin_env, mo
     rc, out = run(standin_env, "--raw-scores")
     assert rc == 0
     T = tables(out)
-    assert T[5]["reason"] == "no-segmentation" and T[5]["score_raw"] is None and T[5]["answers"] == 0 and T[5]["cohort_candidates"] == "cohort-c"
+    assert T[5]["reason"] == "no-segmentation" and T[5]["score_raw"] is None and T[5]["answers"] == 0 and T[5]["cohort_candidates"] == json.dumps(["cohort-c"])
     assert T[1]["answers"] == 1 and T[1]["score_raw"] is None
     res = json.loads((out / "results.json").read_text())
     assert "no-calibration" not in res["metrics"]["by_outcome"] and res["metrics"]["by_outcome"]["no-segmentation"] == 1
     assert res["metrics"]["candidates"] == 2 and res["metrics"]["raw_scored"] == 0
+
+
+def test_raw_scores_say_no_files_of_a_file_less_stack_at_an_uncalibrated_site(standin_env):
+    stacks, I = setup_run(standin_env)
+    m = json.loads(stacks.read_text())
+    # a stack at the uncalibrated site with no files: nothing could be scored, so its reason is no-files, not no-calibration
+    m["stacks"].append(dict(m["stacks"][-1], unit="stack-6", stack_id=6, series_id=16, files=[]))
+    stacks.write_text(json.dumps(m))
+    out = standin_env / "out"
+    rc = cli.main(["full", "--stacks", str(stacks), "--inputs", str(I), "--output", str(out), "--threads", "2", "--convert-workers", "2",
+                   "--device", "cpu", "--work", str(standin_env / "work"), "--raw-scores"])
+    assert rc == 0
+    T = tables(out)
+    assert T[6]["reason"] == "no-files" and T[6]["score_raw"] is None and T[6]["answers"] == 0 and T[6]["cohort_candidates"] == json.dumps(["cohort-c"])
+    assert T[5]["reason"] == "no-calibration" and isinstance(T[5]["score_raw"], float)
+    res = json.loads((out / "results.json").read_text())
+    assert res["metrics"]["by_outcome"]["no-files"] == 1 and res["metrics"]["by_outcome"]["no-calibration"] == 1 and res["metrics"]["raw_scored"] == 1
 
 
 def test_a_calibration_file_scores_a_site_the_fusion_has_no_pair_for(standin_env):
@@ -598,6 +615,9 @@ def test_a_calibration_file_scores_a_site_the_fusion_has_no_pair_for(standin_env
     rc, out = run(standin_env, "--calibration", str(cal))
     assert rc == 0
     T = tables(out)
-    assert T[5]["answers"] == 1 and T[5]["value"] == "given" and "score_raw" not in T[5]
+    # the raw-score mode's four columns are on every row, null without the mode
+    assert T[5]["answers"] == 1 and T[5]["value"] == "given" and all(T[5][k] is None for k in ("score_raw", "site", "make", "cohort_candidates"))
+    assert list(T[5]) == ["p_given", "value", "confidence", "answers", "stage", "reason", "arms", "failed_steps", "seconds", "score_raw", "site",
+                          "make", "cohort_candidates", "cascade_digest", "fusion_digest", "arms_digest", "stack_id"]
     res = json.loads((out / "results.json").read_text())
     assert {p["stack_id"] for p in res["proposals"]} == {1, 2, 5} and res["calibration"] == {"sites": {"cohort-c Siemens": 1}, "unchecked": True}

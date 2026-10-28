@@ -41,15 +41,18 @@ fits its own pair, with no new model bundle or image:
    and its table carries `score_raw`, the fused log-odds before any
    calibration (the cascade adds each seed's in `score_raw_seeds`), with its
    `site` (empty where the fusion knows none of its cohorts), its `make` as
-   the key spells it and `cohort_candidates`, the dataset, batch and cohort
-   names the stack belongs to, space separated, in the order the site key is
-   looked for, so the site builds its key as `<one of them> <make>`;
-   `p_given` and `value` stay empty, so nothing becomes a proposal. A stack
-   whose conversion or tools failed keeps that reason (`no-segmentation`,
-   `worker-died`, ...) with no raw score; `no-calibration` is a scored
-   stack's. The run's metrics count the stacks the rule accepted as
-   `candidates`, as before, and the raw-scored stacks as `raw_scored`. Every
-   other stack is as without the switch.
+   the key spells it and `cohort_candidates`, a JSON list (in the text
+   column, so a name with a space survives) of the dataset, batch and cohort
+   names the stack belongs to, through the fusion's cohort aliases, in the
+   order the site key is looked for, so the site builds its key as `<one of
+   them> <make>`; `p_given` and `value` stay empty, so nothing becomes a
+   proposal. A stack whose conversion or tools failed keeps that reason
+   (`no-segmentation`, `worker-died`, ...) with no raw score, and one with
+   no files is `no-files`; `no-calibration` is a scored stack's. The run's
+   metrics count the stacks the rule accepted as `candidates`, as before,
+   and the raw-scored stacks as `raw_scored`. These columns are on every
+   row of every run, so a table's shape never changes: without the switch
+   they are null and every stack is as before.
 2. Label those stacks in a tab-separated file with a header, `stack`,
    `label` (`given` or `not_given`) and `source` (`header`, `name` or
    `manual`), and fit the pair:
@@ -63,8 +66,11 @@ fits its own pair, with no new model bundle or image:
    the fusion does not know is refused); rows of another make are counted
    as `n_other_make`, rows whose table names another site as
    `n_other_site`, and rows whose `cohort_candidates` do not name the
-   key's cohort as `n_other_cohort` (a row from an older table with no
-   such column is taken and counted as `n_without_candidates`). It needs
+   key's cohort as `n_other_cohort` (a row whose table names the key
+   itself as its site needs no such check; a row from an older table with
+   no such column is taken and counted as `n_without_candidates`). A table
+   that is not what a run writes, or a pair file that cannot be written, is
+   refused by one line naming the path, never a value. It needs
    at least 20 labelled stacks of each class with a score, refuses a bad
    row by its line number and never by its content, and writes `{site, a,
    b, n, n_given, n_not_given, n_without_score, n_other_site,
@@ -80,9 +86,11 @@ fits its own pair, with no new model bundle or image:
    takes an absolute path, since it reads the file where it runs), which
    the engine mounts and names through `NILS_PC_CALIBRATION`; outside the
    engine, `--calibration FILE`. The file is one pair file or a map `{site: [a, b]}`; its pairs are
-   merged over the fusion's before any stack is judged. A pair file whose
-   `model.fusion_digest` names another fusion than the run's is refused
-   (the run fails before any stack is read). The run's `results.json`
+   added beside the fusion's before any stack is judged. A pair file whose
+   `model.fusion_digest` names another fusion than the run's is refused, and
+   so is a file naming a site the frozen (certified) fusion has a pair for:
+   no site file replaces a certified pair (the run fails before any stack is
+   read, naming the key). The run's `results.json`
    records under `calibration` the sites the file set, each with the number
    of stacks its pair calibrated (`sites: {key: n}`), `unchecked: true`
    where the file named no fusion to check against, and `matched_none:

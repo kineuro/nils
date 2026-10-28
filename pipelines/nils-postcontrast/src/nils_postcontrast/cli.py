@@ -17,8 +17,8 @@ Per stack, in order:
    stack is "not sure" with ``not-t1-brain``; a site the fusion has no
    calibration for is ``no-calibration`` (a run given a calibration file,
    ``--calibration`` or the site file the descriptor names through
-   ``NILS_PC_CALIBRATION``, merges the file's site pairs over the fusion's
-   first);
+   ``NILS_PC_CALIBRATION``, adds the file's site pairs beside the fusion's
+   first; a site the frozen fusion has a pair for is refused);
 3. stage 1: three native slices chosen from the manifest's geometry, the
    student's three seeds, each fused and their mean fused with the stack's
    header evidence; accepted where the three seeds give the mean's answer
@@ -34,11 +34,12 @@ With ``--raw-scores`` (0.3.0) a T1-type brain stack at a site with no
 calibration is still read and scored, and its table carries the fused
 log-odds before any calibration (``score_raw``, with each seed's in
 ``score_raw_seeds``) beside the ``no-calibration`` reason, with its
-``site``, ``make`` and ``cohort_candidates``; its ``p_given`` and ``value``
-stay empty, so it is never a proposal, and a stack the student could not
-read is deferred as any other. The site fits its
-Platt pair on those scores with ``nils-postcontrast calibrate``
-(``calibration.py``). Without the flag the output is as before.
+``site``, ``make`` and ``cohort_candidates`` (a JSON list); its ``p_given``
+and ``value`` stay empty, so it is never a proposal, and a stack the student
+could not read is deferred as any other. The site fits its Platt pair on
+those scores with ``nils-postcontrast calibrate`` (``calibration.py``).
+Every table carries the five columns; without the flag they are null and
+the rest of the output is as before.
 """
 
 from __future__ import annotations
@@ -92,12 +93,11 @@ def _device(asked: str) -> str:
     return "cpu"
 
 
-def _table(sid: int, cas, raw: bool = False, **kw) -> dict:
+def _table(sid: int, cas, **kw) -> dict:
+    # the raw-score mode's five columns are on every row of every run, null
+    # without the mode, so the table's shape is constant
     doc = {"p_given": None, "value": None, "confidence": None, "answers": 0, "stage": None, "stage1": None, "reason": None, "margin": None,
-           "seeds_agree": None, "files_read": 0}
-    if raw:
-        # the raw-score mode's columns, on every row of such a run
-        doc.update(score_raw=None, score_raw_seeds=None, site=None, make=None, cohort_candidates=None)
+           "seeds_agree": None, "files_read": 0, "score_raw": None, "score_raw_seeds": None, "site": None, "make": None, "cohort_candidates": None}
     doc.update(kw)
     doc.update(cascade_digest=cas.digest, student_digest=cas.student.digest, fusion_digest=cas.fusion.digest, stack_id=sid)
     return doc
