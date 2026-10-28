@@ -266,6 +266,18 @@ pub struct Report {
     /// as a rule's or a person's.
     pub models: Vec<crate::bids::dataset::Model>,
     pub seconds: f64,
+    /// Wave 7b (the maintenance track): set when the release was asked to
+    /// stop and did, after this many of its planned stacks were handled.
+    /// What was written stays written; the stacks after it were not
+    /// written, the dataset files were not, and the next run of the same
+    /// name into the same root goes on from the tree as it is. Absent from
+    /// the report of a release that ran to the end.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stopped_after: Option<i64>,
+    /// One line when the root held the lock of a release that is over
+    /// ([`crate::lock`]), taken over by this one. Absent otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lock_taken_over: Option<String>,
 }
 
 /// Which of the two layouts of §9 a release writes.
@@ -515,11 +527,37 @@ struct Wrote {
     bytes: i64,
 }
 
+/// What a stopped release's job says, and what the command exits with as
+/// its word (Wave 7b, the maintenance track).
+pub const STOPPED: &str = "stopped: what was written stays written; run the release again to go on";
+
+/// Who watches a release go: called with the store after each stack is
+/// handled and the job's heart beaten, with the job's id and the stacks
+/// handled so far. Tests read the row and set a cancel through it; the
+/// command line watches nothing.
+pub type Watch<'a> = dyn FnMut(&mut Store, i64, i64) + 'a;
+
 /// Run one release.
 /// A release is a job (Wave 4a §9.1): claimed before anything is read,
 /// finished with what happened, refused while another release is fresh.
 pub fn run(registry: &mut Registry, settings: &Settings) -> Result<Report, Error> {
+    run_watched(registry, settings, &mut |_, _, _| {})
+}
+
+/// [`run`], with a [`Watch`].
+pub fn run_watched(
+    registry: &mut Registry,
+    settings: &Settings,
+    watch: &mut Watch<'_>,
+) -> Result<Report, Error> {
     use nils_registry::job;
+    // Wave 7b (the maintenance track): the folder's own lock, read before
+    // the claim, which would fail the other release's job as stale on a
+    // heartbeat this node has not heard. A release still beating refuses
+    // this one on any host; one that is over or silent is taken over.
+    let registry_id = registry.meta().registry_id.clone();
+    let taken_over = crate::lock::check(registry.store(), &registry_id, settings.root)
+        .map_err(Error::Refused)?;
     let job_id = job::claim(
         registry.store(),
         &job::Claim {
@@ -536,8 +574,29 @@ pub fn run(registry: &mut Registry, settings: &Settings) -> Result<Report, Error
         job::Error::Store(e) => Error::Store(e),
         other => Error::Refused(other.to_string()),
     })?;
-    let result = run_release(registry, settings);
+    let lock = crate::lock::Lock {
+        job: job_id,
+        registry: Some(registry_id),
+        host: job::hostname(),
+        pid: std::process::id(),
+        started_at: now_iso(),
+    };
+    let mut result = match crate::lock::take(settings.root, &lock) {
+        Ok(()) => {
+            let result = run_release(registry, settings, job_id, watch);
+            crate::lock::release(settings.root, job_id);
+            result
+        }
+        Err(e) => Err(Error::Refused(format!(
+            "{} cannot be written into ({e})",
+            settings.root.display()
+        ))),
+    };
+    if let (Ok(report), Some(taken)) = (&mut result, &taken_over) {
+        report.lock_taken_over = Some(taken.line());
+    }
     let (state, error) = match &result {
+        Ok(r) if r.stopped_after.is_some() => (job::State::Cancelled, Some(STOPPED.to_string())),
         Ok(_) => (job::State::Done, None),
         Err(e) => (job::State::Failed, Some(e.to_string())),
     };
@@ -578,7 +637,73 @@ pub fn run(registry: &mut Registry, settings: &Settings) -> Result<Report, Error
     result
 }
 
-fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, Error> {
+/// The release job's heartbeat (Wave 7b, the maintenance track): beaten
+/// after every stack handled and, where a step takes long, every few
+/// seconds, with the stacks done of the stacks planned and the version
+/// being written; and the one place a cancel is read. Before this a release
+/// never beat, so another node took it for stale after a minute and a
+/// second release wrote into the same tree.
+struct Heart {
+    job_id: i64,
+    version: String,
+    planned: i64,
+    done: i64,
+    last: std::time::Instant,
+    /// Someone asked the job to stop. Read at the top of each stack: the
+    /// stack in hand is finished whole, no further one is begun.
+    cancelled: bool,
+}
+
+impl Heart {
+    /// How long between two beats at most, where no stack ends in between.
+    /// Well inside the minute a claim allows before it fails a job as stale.
+    const EVERY: std::time::Duration = std::time::Duration::from_secs(5);
+
+    fn new(job_id: i64, version: &str) -> Heart {
+        Heart {
+            job_id,
+            version: version.to_string(),
+            planned: 0,
+            done: 0,
+            last: std::time::Instant::now(),
+            cancelled: false,
+        }
+    }
+
+    fn progress(&self, doing: &str) -> serde_json::Value {
+        serde_json::json!({
+            "do": doing,
+            "version": self.version,
+            "stacks": self.planned,
+            "done": self.done,
+        })
+    }
+
+    /// Beat now. A beat the store refuses is let go, as every verb lets it
+    /// go: the release is not stopped by a hiccup in writing its own pulse.
+    fn beat(&mut self, store: &mut Store, doing: &str) {
+        self.last = std::time::Instant::now();
+        if let Ok(nils_registry::job::Asked::Cancel) =
+            nils_registry::job::beat(store, self.job_id, Some(&self.progress(doing)))
+        {
+            self.cancelled = true;
+        }
+    }
+
+    /// Beat if [`Self::EVERY`] has passed since the last one.
+    fn tick(&mut self, store: &mut Store, doing: &str) {
+        if self.last.elapsed() >= Self::EVERY {
+            self.beat(store, doing);
+        }
+    }
+}
+
+fn run_release(
+    registry: &mut Registry,
+    settings: &Settings,
+    job_id: i64,
+    watch: &mut Watch<'_>,
+) -> Result<Report, Error> {
     let started = std::time::Instant::now();
     // Record 26 §13: the policies in play, the run's own and each
     // dataset's, every one checked by name before anything is read.
@@ -679,6 +804,8 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
     let dataset = dataset_of(registry.store(), settings.name, settings.root)?;
     let earlier = newest_version(registry.store(), dataset)?;
     let version = crate::version::next(today(), earlier.as_ref().map(|p| p.version.as_str()));
+    let mut heart = Heart::new(job_id, &version);
+    heart.beat(registry.store(), "plan");
 
     let mut placements: BTreeMap<String, String> = BTreeMap::new();
     if settings.layout == Layout::Bids {
@@ -818,6 +945,7 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
     // depends on what else a release took.
     let mut in_version: std::collections::BTreeSet<i64> = std::collections::BTreeSet::new();
     for (subject, code) in selected_subjects(registry.store(), &settings.selection, picks)? {
+        heart.tick(registry.store(), "plan");
         let mine = select_subject(registry.store(), &settings.selection, subject, picks)?;
         if mine.is_empty() {
             continue;
@@ -1003,6 +1131,8 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
     planned.clear();
     report.stacks = stacks_planned;
     report.subjects = people.len() as i64;
+    heart.planned = stacks_planned;
+    heart.beat(registry.store(), "compare");
 
     // ---------------------------------------------------------------- diff
     //
@@ -1016,6 +1146,7 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
         if page.is_empty() {
             break;
         }
+        heart.tick(registry.store(), "compare");
         for (planned, was) in page {
             after = planned.stack;
             let mut route = planned.route.clone();
@@ -1160,6 +1291,18 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
     let mut moves: Vec<Vec<Param>> = Vec::new();
     let mut scans: BTreeMap<(String, String), Vec<crate::bids::dataset::Scan>> = BTreeMap::new();
     for job in &mut jobs {
+        // Wave 7b (the maintenance track): asked to stop, the release writes
+        // no further stack. A stack that needs no writing is still recorded,
+        // since the tree holds it as the state will say; one that needs
+        // writing is left to the next run, which finds its files gone or
+        // never there and writes it then.
+        if heart.cancelled
+            && job.change.is_work()
+            && (job.change != crate::version::Change::Moved || !moved.contains(&job.stack))
+        {
+            report.stopped_after.get_or_insert(heart.done);
+            continue;
+        }
         // A move whose source is not where the last version left it is not a
         // move. Somebody emptied the tree, and the stack is written again.
         if job.change == crate::version::Change::Moved && !moved.contains(&job.stack) {
@@ -1212,15 +1355,22 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
                         let dir = job.place.dir.clone();
                         write_dicom(job, &plan, settings.root, &dir)
                     }
-                    Layout::Bids => write_bids(
-                        job,
-                        &plan,
-                        settings,
-                        &mut report,
-                        body_parts.get(&job.stack).map(String::as_str),
-                        asl_contexts.get(&job.stack).map(String::as_str),
-                        cards.get(&job.stack),
-                    ),
+                    Layout::Bids => {
+                        // the heart beats through a long conversion, from
+                        // the converter's wait; the store is free meanwhile
+                        let store = registry.store();
+                        let mut tick = || heart.tick(store, "write");
+                        write_bids(
+                            job,
+                            &plan,
+                            settings,
+                            &mut report,
+                            body_parts.get(&job.stack).map(String::as_str),
+                            asl_contexts.get(&job.stack).map(String::as_str),
+                            cards.get(&job.stack),
+                            &mut tick,
+                        )
+                    }
                 };
                 let mut wrote: Vec<Wrote> = Vec::new();
                 for w in written {
@@ -1314,6 +1464,13 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
             upsert_state(registry.store(), &rows)?;
             rows.clear();
         }
+        heart.done += 1;
+        if job.change.is_work() {
+            heart.beat(registry.store(), "write");
+        } else {
+            heart.tick(registry.store(), "write");
+        }
+        watch(registry.store(), job_id, heart.done);
     }
     upsert_state(registry.store(), &rows)?;
     for (stack, state) in &gone {
@@ -1350,8 +1507,10 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
             .count() as i64;
     }
     // §9.5. The files that make the tree a dataset rather than a pile of
-    // correctly named images. v0 writes none of them.
-    if settings.layout == Layout::Bids {
+    // correctly named images. v0 writes none of them. A stopped release
+    // writes none either: the tree is not a version until a run ends, and
+    // the run that goes on writes them over the whole tree.
+    if settings.layout == Layout::Bids && report.stopped_after.is_none() {
         let mut codes: Vec<String> = people.into_iter().collect();
         codes.sort();
         let clinical = clinical_rows(
@@ -1406,7 +1565,15 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
     // stack of it.
     ask_about_tasks(registry.store(), &report, &absent, settings)?;
     forget_plan(registry.store(), report.release_id)?;
-    close_row(registry.store(), &report)?;
+    // the row of a stopped release closes with what it did and says so in
+    // its error, as the job's row does
+    let stopped = report.stopped_after.map(|n| {
+        format!(
+            "stopped after {n} of {} stacks; what was written stays written",
+            report.stacks
+        )
+    });
+    close_row(registry.store(), &report, stopped.as_deref())?;
     report.seconds = started.elapsed().as_secs_f64();
     Ok(report)
 }
@@ -3783,6 +3950,7 @@ fn write_dicom(job: &Job, plan: &Plan, root: &Path, dir: &str) -> Vec<Result<Wri
 /// `v1.0.20260724`, `-ba y` leaves `InstitutionName` and `AcquisitionTime` in
 /// the JSON. Converting the scrubbed file means the sidecar inherits the
 /// release's policy for free, including its dates.
+#[allow(clippy::too_many_arguments)]
 fn write_bids(
     job: &mut Job,
     plan: &Plan,
@@ -3791,6 +3959,7 @@ fn write_bids(
     body_part: Option<&str>,
     aslcontext: Option<&str>,
     card: Option<&serde_json::Value>,
+    tick: &mut dyn FnMut(),
 ) -> Vec<Result<Written, String>> {
     let root = settings.root;
     let staging = root.join(".nils-convert").join(job.stack.to_string());
@@ -3827,13 +3996,14 @@ fn write_bids(
     };
     let stem = job.place.stem.clone().unwrap_or_default();
     let into = root.join(&job.place.dir);
-    let made = crate::bids::convert::convert(
+    let made = crate::bids::convert::convert_ticking(
         converter,
         &staged,
         &staging,
         &into,
         &stem,
         settings.compress,
+        tick,
     );
     // Wave 7a §8.2: an image BIDS cannot admit from its headers alone is no
     // BIDS image; it goes under `sourcedata/` as one that did not convert
@@ -4249,11 +4419,12 @@ fn models_in_force(
         .collect::<Result<_, StoreError>>()?)
 }
 
-fn close_row(store: &mut Store, report: &Report) -> Result<(), Error> {
+fn close_row(store: &mut Store, report: &Report, error: Option<&str>) -> Result<(), Error> {
     let d = store.dialect();
     let sql = format!(
         "UPDATE {} SET finished_at = {}, files = {}, subjects = {}, unchanged = {}, moved = {}, \
-         rewritten = {}, added = {}, removed = {}, burned_in = {}, unjudged = {}, models = {} WHERE id = {}",
+         rewritten = {}, added = {}, removed = {}, burned_in = {}, unjudged = {}, models = {}, \
+         error = {} WHERE id = {}",
         store.qualified("release"),
         d.param(1, Type::Timestamp),
         d.param(2, Type::Int),
@@ -4266,7 +4437,8 @@ fn close_row(store: &mut Store, report: &Report) -> Result<(), Error> {
         d.param(9, Type::Int),
         d.param(10, Type::Int),
         d.param(11, Type::Json),
-        d.param(12, Type::Int),
+        d.param(12, Type::Text),
+        d.param(13, Type::Int),
     );
     store.execute(
         &sql,
@@ -4286,6 +4458,10 @@ fn close_row(store: &mut Store, report: &Report) -> Result<(), Error> {
             Param::Int(report.burned_in),
             Param::Int(report.unjudged),
             Param::from(serde_json::to_string(&report.models).unwrap_or_else(|_| "[]".into())),
+            match error {
+                Some(e) => Param::from(e),
+                None => Param::Null,
+            },
             Param::Int(report.release_id),
         ],
     )?;

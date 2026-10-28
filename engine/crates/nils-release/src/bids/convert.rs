@@ -141,6 +141,22 @@ pub fn convert(
     stem: &str,
     compress: bool,
 ) -> Result<Made, String> {
+    convert_ticking(converter, files, work, into, stem, compress, &mut || {})
+}
+
+/// [`convert`], calling `tick` every few seconds while the converter runs,
+/// so a release can beat its job's heart through a long conversion (Wave
+/// 7b, the maintenance track): a row that falls silent for a minute is
+/// taken for stale by another node's claim.
+pub fn convert_ticking(
+    converter: &Converter,
+    files: &[PathBuf],
+    work: &Path,
+    into: &Path,
+    stem: &str,
+    compress: bool,
+    tick: &mut dyn FnMut(),
+) -> Result<Made, String> {
     if files.is_empty() {
         return Err("no files to convert".to_string());
     }
@@ -160,7 +176,7 @@ pub fn convert(
         text.push('\n');
     }
     std::fs::write(&list, text).map_err(|e| format!("could not write the file list ({e})"))?;
-    let made = converted(converter, &list, work, into, stem, compress);
+    let made = converted(converter, &list, work, into, stem, compress, tick);
     std::fs::remove_file(&list).ok();
     made
 }
@@ -173,6 +189,7 @@ fn converted(
     into: &Path,
     stem: &str,
     compress: bool,
+    tick: &mut dyn FnMut(),
 ) -> Result<Made, String> {
     let before = listing(into);
     let run = run_converter(
@@ -184,6 +201,7 @@ fn converted(
             compress,
             merge: false,
         },
+        tick,
     )
     .map_err(|e| format!("dcm2niix could not be run ({e})"))?;
     if !run.status.success() {
@@ -231,7 +249,7 @@ fn converted(
                 // from the first run's stdout only (see the module).
                 let mut tried = None;
                 if one_echo_split(&String::from_utf8_lossy(&run.stdout)) {
-                    match merged(converter, list, into, stem, compress, &before) {
+                    match merged(converter, list, into, stem, compress, &before, tick) {
                         Ok(made) => return Ok(made),
                         Err(Merge::CouldNotRun(e)) => {
                             return Err(format!("dcm2niix could not be run ({e})"));
@@ -239,7 +257,7 @@ fn converted(
                         Err(Merge::Refused(why)) => tried = Some(why),
                     }
                 }
-                let postfixes = postfixes_without_terse(converter, list, work, stem);
+                let postfixes = postfixes_without_terse(converter, list, work, stem, tick);
                 let wanted = match postfixes.is_empty() {
                     true => String::new(),
                     false => format!(" ({})", postfixes.join(", ")),
@@ -282,6 +300,7 @@ fn run_converter(
     into: &Path,
     stem: &str,
     flags: Flags,
+    tick: &mut dyn FnMut(),
 ) -> std::io::Result<std::process::Output> {
     let mut run = Command::new(&converter.path);
     run.args(["-s", "y"]);
@@ -306,11 +325,62 @@ fn run_converter(
             run.args(["-z", "n"]).args(["-b", "n"]);
         }
     }
-    run.args(["-f", stem])
-        .arg("-o")
-        .arg(into)
-        .arg(list)
-        .output()
+    run.args(["-f", stem]).arg("-o").arg(into).arg(list);
+    output_ticking(&mut run, tick)
+}
+
+/// How often `tick` is called while a child runs.
+const TICK_EVERY: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// `Command::output`, calling `tick` every [`TICK_EVERY`] while the child
+/// runs. Its stdout and stderr are drained on threads of their own, as
+/// `output` drains them, so a child that writes more than a pipe holds is
+/// never stuck on a full pipe while this waits on it.
+fn output_ticking(
+    run: &mut Command,
+    tick: &mut dyn FnMut(),
+) -> std::io::Result<std::process::Output> {
+    use std::io::Read;
+    use std::process::Stdio;
+    let mut child = run
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let drain = |pipe: Option<std::process::ChildStdout>| {
+        std::thread::spawn(move || {
+            let mut out = Vec::new();
+            if let Some(mut pipe) = pipe {
+                pipe.read_to_end(&mut out).ok();
+            }
+            out
+        })
+    };
+    let stdout = drain(child.stdout.take());
+    let stderr = child.stderr.take();
+    let stderr = std::thread::spawn(move || {
+        let mut out = Vec::new();
+        if let Some(mut pipe) = stderr {
+            pipe.read_to_end(&mut out).ok();
+        }
+        out
+    });
+    let mut ticked = std::time::Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if ticked.elapsed() >= TICK_EVERY {
+            ticked = std::time::Instant::now();
+            tick();
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    Ok(std::process::Output {
+        status,
+        stdout: stdout.join().unwrap_or_default(),
+        stderr: stderr.join().unwrap_or_default(),
+    })
 }
 
 /// The two ways a conversion comes out as a name nobody chose.
@@ -360,21 +430,22 @@ fn postfixes_without_terse(
     list: &Path,
     work: &Path,
     stem: &str,
+    tick: &mut dyn FnMut(),
 ) -> Vec<String> {
     let scratch = work.join("names");
     if std::fs::create_dir_all(&scratch).is_err() {
         return Vec::new();
     }
-    let mut found: Vec<String> = match run_converter(converter, list, &scratch, stem, Flags::Names)
-    {
-        Ok(run) => written_names(&String::from_utf8_lossy(&run.stdout))
-            .iter()
-            .filter_map(|n| n.strip_prefix(stem))
-            .filter(|rest| !rest.is_empty())
-            .map(str::to_string)
-            .collect(),
-        Err(_) => Vec::new(),
-    };
+    let mut found: Vec<String> =
+        match run_converter(converter, list, &scratch, stem, Flags::Names, tick) {
+            Ok(run) => written_names(&String::from_utf8_lossy(&run.stdout))
+                .iter()
+                .filter_map(|n| n.strip_prefix(stem))
+                .filter(|rest| !rest.is_empty())
+                .map(str::to_string)
+                .collect(),
+            Err(_) => Vec::new(),
+        };
     std::fs::remove_dir_all(&scratch).ok();
     found.sort();
     found.dedup();
@@ -436,6 +507,7 @@ fn merged(
     stem: &str,
     compress: bool,
     before: &BTreeSet<String>,
+    tick: &mut dyn FnMut(),
 ) -> Result<Made, Merge> {
     let run = run_converter(
         converter,
@@ -446,6 +518,7 @@ fn merged(
             compress,
             merge: true,
         },
+        tick,
     )
     .map_err(|e| Merge::CouldNotRun(e.to_string()))?;
     let mut made: Vec<String> = listing(into).difference(before).cloned().collect();

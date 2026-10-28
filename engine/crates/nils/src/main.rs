@@ -12091,6 +12091,15 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
     })?;
 
     let converter_path = converter.as_ref().map(|c| c.path.display().to_string());
+    // Wave 7b (the maintenance track): a release asked to stop printed its
+    // report and exits as every stopped verb does, so the worker and the
+    // keyboard read it as stopped and not as failed.
+    let stopped = || {
+        report.stopped_after.map(|_| Exit {
+            code: STOPPED,
+            message: run::STOPPED.to_string(),
+        })
+    };
     if args.json {
         let mut doc =
             serde_json::to_value(&report).map_err(|e| fail(format!("will not serialize: {e}")))?;
@@ -12101,13 +12110,23 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
             serde_json::to_string_pretty(&doc)
                 .map_err(|e| fail(format!("will not serialize: {e}")))?
         );
-        return Ok(());
+        return stopped().map_or(Ok(()), Err);
     }
     println!(
         "release {} version {} ({}, {})",
         report.name, report.version, report.layout, report.policy
     );
     println!("  into             {}", report.root);
+    if let Some(line) = &report.lock_taken_over {
+        println!("  lock             {line}");
+    }
+    if let Some(n) = report.stopped_after {
+        println!(
+            "  stopped          after {n} of {} stacks; what was written stays written, run the \
+             release again to go on",
+            report.stacks
+        );
+    }
     // Record 37 S7: what the names carry, which the row records too.
     println!(
         "  names            {}",
@@ -12350,7 +12369,7 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
     // version that wrote no file changed no tag, and says nothing here.
     if report.changes.is_empty() {
         println!("  {:.1} s", report.seconds);
-        return Ok(());
+        return stopped().map_or(Ok(()), Err);
     }
     println!("  what changed");
     let mut changes: Vec<(&String, &i64)> = report.changes.iter().collect();
@@ -12362,7 +12381,7 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
         println!("      {:>10}   more, in release_change", changes.len() - 8);
     }
     println!("  {:.1} s", report.seconds);
-    Ok(())
+    stopped().map_or(Ok(()), Err)
 }
 
 /// `nils release --withdraw VERSION --why TEXT` (Wave 4a section 13.1): the

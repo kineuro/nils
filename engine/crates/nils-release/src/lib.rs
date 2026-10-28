@@ -13,6 +13,7 @@ pub mod burned;
 pub mod dates;
 pub mod family;
 pub mod handover;
+pub mod lock;
 pub mod name;
 pub mod policy;
 pub mod run;
