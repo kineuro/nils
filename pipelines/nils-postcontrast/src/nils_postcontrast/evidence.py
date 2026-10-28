@@ -54,6 +54,10 @@ def contrast(e) -> dict:
     return e.contrast if isinstance(e.contrast, dict) else {}
 
 
+# the make words a site key ends in, as make_of spells them
+MAKES = ("Siemens", "GE", "Philips", "Canon/Toshiba", "other")
+
+
 def make_of(e) -> str:
     mk = str((e.header.get("fingerprint") or {}).get("manufacturer") or "").lower()
     if "siemens" in mk:
@@ -160,13 +164,20 @@ def cohort_candidates(e) -> list:
 def cohort_of(e, fusion) -> tuple:
     """The stack's calibration cohort and where it was found: a dataset
     holding its files (through the fusion's aliases), its first ingest
-    batch, the batch's dash-suffixes, its subject's open cohorts."""
-    known = {k.rsplit(" ", 1)[0] for k in fusion.sites()} | set(fusion.cohort_aliases.values())
+    batch, the batch's dash-suffixes, its subject's open cohorts. The
+    frozen fusion's cohorts are tried first over every candidate; only a
+    stack none of them names is resolved against the cohorts a site file
+    added (``calibration.apply``), so a merged file never re-routes a stack
+    the frozen fusion calibrates."""
     al = fusion.cohort_aliases
-    for c, where in _cohort_candidates(e):
-        c2 = al.get(c, c)
-        if c2 in known:
-            return c2, where
+    frozen = fusion.frozen_sites()
+    known = {k.rsplit(" ", 1)[0] for k in frozen} | set(al.values())
+    added = {k.rsplit(" ", 1)[0] for k in fusion.sites() - frozen} - known
+    cands = [(al.get(c, c), where) for c, where in _cohort_candidates(e)]
+    for pool in (known, added):
+        for c2, where in cands:
+            if c2 in pool:
+                return c2, where
     return None, None
 
 
@@ -178,6 +189,17 @@ def raw_columns(rows: dict, by_id: dict, sid: int) -> dict:
     built from, space separated, in the order ``cohort_of`` tries them."""
     e = by_id[sid]
     return {"site": rows[sid]["site"], "make": make_of(e), "cohort_candidates": " ".join(cohort_candidates(e)) or None}
+
+
+def table_row(rows: dict, by_id: dict, sid: int, raw: bool, base_table, **kw) -> dict:
+    """A stack's table through the pipeline's own ``base_table(sid, raw=...,
+    **columns)``; in the raw-score mode the site columns (``raw_columns``)
+    are filled first where the caller gave none. The cascade and the full
+    pipeline build every row through this."""
+    if raw:
+        for k, v in raw_columns(rows, by_id, sid).items():
+            kw.setdefault(k, v)
+    return base_table(sid, raw=raw, **kw)
 
 
 def _spearman(x, y) -> float:

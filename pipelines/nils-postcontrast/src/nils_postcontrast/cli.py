@@ -44,6 +44,7 @@ Platt pair on those scores with ``nils-postcontrast calibrate``
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import logging
 import os
@@ -103,22 +104,20 @@ def _table(sid: int, cas, raw: bool = False, **kw) -> dict:
 
 
 def score(stacks, context, cas, F: Fusion, device: str = "cpu", workers: int = 8, batch: int = 64, threads: int | None = None,
-          raw: bool = False) -> dict:
-    """Every stack's table, by stack id (the run's logic without its files).
+          raw: bool = False) -> tuple:
+    """(every stack's table by stack id, the evidence rows the fusion read
+    them from, ``evidence.rows_for``): the run's logic without its files.
     With ``raw`` (the raw-score mode) a T1-type brain stack at a site with
     no calibration is read and scored too, for its log-odds alone."""
     rows = evidence.rows_for(stacks, context, F)
     out: dict = {}
     tasks = []
     uncal: set = set()
+    by_id = {e.stack_id: e for e in stacks}
 
     def table(sid, **kw):
-        if raw:
-            for k, v in evidence.raw_columns(rows, by_id, sid).items():
-                kw.setdefault(k, v)
-        return _table(sid, cas, raw=raw, **kw)
+        return evidence.table_row(rows, by_id, sid, raw, functools.partial(_table, cas=cas), **kw)
 
-    by_id = {e.stack_id: e for e in stacks}
     for e in stacks:
         r = rows[e.stack_id]
         mod = e.modality or (e.header.get("fingerprint") or {}).get("modality")
@@ -136,7 +135,7 @@ def score(stacks, context, cas, F: Fusion, device: str = "cpu", workers: int = 8
             iop = (e.geometry or {}).get("image_orientation_patient")
             tasks.append((e.stack_id, iop, manifest.ordered_files(e), manifest.multi_frame(e), r["acq3d"], r["thick"] or 0.0))
     if not tasks:
-        return out
+        return out, rows
     from .student import Student
 
     stu = Student(cas.student.artifact, device=device, threads=threads)
@@ -178,7 +177,7 @@ def score(stacks, context, cas, F: Fusion, device: str = "cpu", workers: int = 8
             if len(buf) >= batch:
                 flush()
         flush()
-    return out
+    return out, rows
 
 
 def cmd_cascade(a: argparse.Namespace) -> int:
@@ -201,7 +200,7 @@ def cmd_cascade(a: argparse.Namespace) -> int:
         print(f"nils-postcontrast: {e}", file=sys.stderr)
         return 1
     t0 = time.time()
-    tables = score(stacks, context, cas, F, device=device, workers=a.threads, batch=a.batch, threads=a.student_threads, raw=bool(a.raw_scores))
+    tables, rows = score(stacks, context, cas, F, device=device, workers=a.threads, batch=a.batch, threads=a.student_threads, raw=bool(a.raw_scores))
     counts: dict = {}
     for e in stacks:
         doc = tables[e.stack_id]
@@ -222,8 +221,7 @@ def cmd_cascade(a: argparse.Namespace) -> int:
                    "deferred": [e.stack_id for e in stacks if tables[e.stack_id]["reason"] == "deferred"]}
     if a.raw_scores:
         run.metrics["raw_scored"] = sum(1 for d in tables.values() if d["score_raw"] is not None)
-    sites = evidence.rows_for(stacks, context, F)
-    calibration.record(run.extra, {sid: r["site"] for sid, r in sites.items()}, tables)
+    calibration.record(run.extra, {sid: r["site"] for sid, r in rows.items()}, tables)
     run.models = [cas.part.ref(), cas.student.ref(), cas.fusion.ref()]
     run.write()
     return 0

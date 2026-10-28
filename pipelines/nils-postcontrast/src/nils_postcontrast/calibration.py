@@ -40,6 +40,7 @@ from pathlib import Path
 import numpy as np
 
 from . import __version__
+from .evidence import MAKES
 from .fusion import Fusion
 
 LABELS = {"given": 1, "not_given": 0}
@@ -81,38 +82,39 @@ def _read_file(path) -> tuple:
         if isinstance(v, dict):
             digest_of(v)
             v = [v.get("a"), v.get("b")]
-        try:
-            a, b = (float(x) for x in v)
-        except (TypeError, ValueError) as e:
-            raise CalibrationError(f"the pair of site {site!r} is not two numbers") from e
+        # a value is [a, b], two numbers, or a pair file's object; nothing else
+        if not isinstance(v, (list, tuple)) or len(v) != 2 or not all(isinstance(x, (int, float)) and not isinstance(x, bool) for x in v):
+            raise CalibrationError(f"the pair of site {site!r} is not a list of two numbers, [a, b]")
+        a, b = float(v[0]), float(v[1])
         if not (isinstance(site, str) and site.strip()) or not (math.isfinite(a) and math.isfinite(b)):
             raise CalibrationError(f"the pair of site {site!r} is not two finite numbers under a site key")
         out[site] = (a, b)
     return out, digests
 
 
-def load_pairs(path, fusion_digest=None) -> dict:
-    """The site pairs of a calibration file (``_read_file``); with the run's
-    fusion digest, a file fitted on another fusion is refused."""
+def load_pairs(path, fusion_digest=None) -> tuple:
+    """(the site pairs of a calibration file, whether they were held to the
+    run's fusion): ``_read_file``'s pairs; with the run's fusion digest, a
+    file fitted on another fusion is refused, and a file naming none, or a
+    call giving no digest to hold it to, is unchecked (False)."""
     pairs, digests = _read_file(path)
     if fusion_digest is not None and any(d != fusion_digest for d in digests):
         raise CalibrationError("the calibration file was fitted on another fusion than this run's: one pair fits one model")
-    return pairs
+    return pairs, fusion_digest is not None and bool(digests)
 
 
 def apply(F: Fusion, path, fusion_digest=None) -> tuple:
     """The fusion with the file's pairs merged over its own: (fusion, the
-    sites the file set, whether the file was held to the run's fusion). A
-    file naming another fusion is refused; one naming none, or a run that
-    gives no digest to hold it to, is unchecked."""
-    pairs, digests = _read_file(path)
-    if fusion_digest is not None and any(d != fusion_digest for d in digests):
-        raise CalibrationError("the calibration file was fitted on another fusion than this run's: one pair fits one model")
+    sites the file set, whether the file was held to the run's fusion,
+    ``load_pairs``). The fusion keeps its own sites apart (``frozen_keys``),
+    so ``evidence.cohort_of`` resolves a stack against them first and
+    against the file's cohorts only where they name none."""
+    pairs, checked = load_pairs(path, fusion_digest)
     cal = dict(F.cal)
     cal.update(pairs)
     G = Fusion(cols=F.cols, mean=F.mean, scale=F.scale, coef=F.coef, intercept=F.intercept, cal=cal, t=F.t, use_V=F.use_V,
-               cohort_aliases=F.cohort_aliases, untrusted_time_cohorts=F.untrusted_time_cohorts)
-    return G, sorted(pairs), fusion_digest is not None and bool(digests)
+               cohort_aliases=F.cohort_aliases, untrusted_time_cohorts=F.untrusted_time_cohorts, frozen_keys=frozenset(F.frozen_sites()))
+    return G, sorted(pairs), checked
 
 
 def for_run(F: Fusion, path, extra: dict, fusion_digest=None) -> Fusion:
@@ -223,8 +225,10 @@ def _tables(path: Path):
 def read_scores(paths) -> dict:
     """The raw scores by stack id from the raw-score mode's outputs: each
     path a run's output folder (its ``postcontrast/<stack>.json`` tables)
-    or one table. ``{stack: {"z", "site", "make", "fusion_digest",
-    "cascade_digest"}}``; a stack in several outputs keeps the last."""
+    or one table. ``{stack: {"z", "site", "make", "cohort_candidates",
+    "fusion_digest", "cascade_digest"}}`` (``cohort_candidates`` the
+    column's words, or None where an older table has no such column); a
+    stack in several outputs keeps the last."""
     out: dict = {}
     for p in paths:
         p = Path(p)
@@ -238,7 +242,8 @@ def read_scores(paths) -> dict:
                 z = float(z)
             except (TypeError, ValueError) as e:
                 raise CalibrationError("a table's score_raw is not a number") from e
-            out[int(doc["stack_id"])] = {"z": z, "site": doc.get("site"), "make": doc.get("make"),
+            cands = str(doc.get("cohort_candidates") or "").split() if "cohort_candidates" in doc else None
+            out[int(doc["stack_id"])] = {"z": z, "site": doc.get("site"), "make": doc.get("make"), "cohort_candidates": cands,
                                          "fusion_digest": doc.get("fusion_digest"), "cascade_digest": doc.get("cascade_digest")}
     return out
 
@@ -306,18 +311,33 @@ def _measures(z: np.ndarray, y: np.ndarray, a: float, b: float) -> dict:
     return {"log_loss": round(ll, 6), "accuracy": round(acc, 6)}
 
 
+def site_key(site: str) -> str:
+    """The site key ``<cohort> <make>`` as a run spells it: the make word
+    is taken without case and written as ``evidence.make_of`` spells it
+    (``MAKES``); a make word the fusion does not know is refused."""
+    cohort, _, make = site.strip().rpartition(" ")
+    if not cohort.strip() or not make:
+        raise CalibrationError("the site key is <cohort> <make>, the make as the tables spell it")
+    canon = {m.lower(): m for m in MAKES}.get(make.lower())
+    if canon is None:
+        raise CalibrationError("the site key's make is none the fusion knows: " + ", ".join(MAKES))
+    return f"{cohort.strip()} {canon}"
+
+
 def calibrate(labels: dict, scores: dict, site: str) -> dict:
     """The site's pair document from the labels and the raw scores: the
-    fit, its counts and its measures overall and per label source. Rows
-    with no score, rows whose table names another site, and rows of another
-    make than the key's (``<cohort> <make>``, the make as the fusion spells
-    it, compared without case) are counted and left out; fewer than 20 rows
-    of a class refuse."""
-    if " " not in site.strip() or not site.rsplit(" ", 1)[1].strip():
-        raise CalibrationError("the site key is <cohort> <make>, the make as the tables spell it")
-    key_make = site.rsplit(" ", 1)[1].strip().lower()
+    fit, its counts and its measures overall and per label source. The key
+    is written as the run spells it (``site_key``). Rows with no score,
+    rows whose table names another site, rows of another make than the
+    key's (compared without case) and rows whose ``cohort_candidates`` do
+    not name the key's cohort are counted and left out; a row from an older
+    table with no candidates column is taken and counted; fewer than 20
+    rows of a class refuse."""
+    site = site_key(site)
+    key_cohort, _, key_make = site.rpartition(" ")
+    key_make = key_make.lower()
     zs, ys, srcs = [], [], []
-    n_without_score = n_other_site = n_other_make = 0
+    n_without_score = n_other_site = n_other_make = n_other_cohort = n_without_candidates = 0
     digests = {"fusion": set(), "cascade": set()}
     for sid, (y, src) in labels.items():
         r = scores.get(sid)
@@ -329,6 +349,12 @@ def calibrate(labels: dict, scores: dict, site: str) -> dict:
             continue
         if str(r.get("make") or "").strip().lower() != key_make:
             n_other_make += 1
+            continue
+        cands = r.get("cohort_candidates")
+        if cands is None:
+            n_without_candidates += 1
+        elif key_cohort not in cands:
+            n_other_cohort += 1
             continue
         zs.append(r["z"])
         ys.append(y)
@@ -350,7 +376,8 @@ def calibrate(labels: dict, scores: dict, site: str) -> dict:
         if m.any():
             per[s] = {"n": int(m.sum()), "n_given": int(y[m].sum()), **_measures(z[m], y[m], a, b)}
     return {"site": site, "a": round(a, 8), "b": round(b, 8), "n": int(len(y)), "n_given": n_given, "n_not_given": n_not,
-            "n_without_score": n_without_score, "n_other_site": n_other_site, "n_other_make": n_other_make, "fit": fit,
+            "n_without_score": n_without_score, "n_other_site": n_other_site, "n_other_make": n_other_make, "n_other_cohort": n_other_cohort,
+            "n_without_candidates": n_without_candidates, "fit": fit,
             "per_source": per, "overall": _measures(z, y, a, b),
             "model": {"fusion_digest": next(iter(digests["fusion"]), None), "cascade_digests": sorted(digests["cascade"]),
                       "image": "nils-postcontrast", "version": __version__},
@@ -360,7 +387,8 @@ def calibrate(labels: dict, scores: dict, site: str) -> dict:
 def report(doc: dict) -> str:
     lines = [f"site {doc['site']}: a = {doc['a']:.6f}, b = {doc['b']:.6f}",
              f"{doc['n']} stacks fitted ({doc['n_given']} given, {doc['n_not_given']} not_given); "
-             f"{doc['n_without_score']} labelled with no score, {doc['n_other_site']} at another site, {doc['n_other_make']} of another make",
+             f"{doc['n_without_score']} labelled with no score, {doc['n_other_site']} at another site, {doc['n_other_make']} of another make, "
+             f"{doc['n_other_cohort']} of another cohort, {doc['n_without_candidates']} from a table naming no cohort candidates",
              f"fit: {doc['fit']['iterations']} iterations, {'converged' if doc['fit']['converged'] else 'stuck before it converged'}",
              f"overall: log loss {doc['overall']['log_loss']:.4f}, accuracy {doc['overall']['accuracy']:.4f}"]
     for s, m in doc["per_source"].items():
@@ -387,7 +415,7 @@ def add_parser(sub) -> None:
     c = sub.add_parser("calibrate", help="fit a site's Platt pair on the raw scores a run wrote and the site's labels")
     c.add_argument("--labels", required=True, help="a tab-separated file with a header: stack, label (given or not_given), source (header, name, manual)")
     c.add_argument("--scores", nargs="+", required=True, help="the output folders (or tables) of runs with --raw-scores")
-    c.add_argument("--site", required=True, help="the site key the pair is for, <cohort> <make> (the make as the tables spell it; "
-                                                 "a scored stack's cohort_candidates column names the cohorts the key may use)")
+    c.add_argument("--site", required=True, help="the site key the pair is for, <cohort> <make> (the make as the tables spell it, taken "
+                                                 "without case; a scored stack's cohort_candidates column names the cohorts the key may use)")
     c.add_argument("--out", required=True, help="the pair file to write")
     c.set_defaults(fn=cmd_calibrate)

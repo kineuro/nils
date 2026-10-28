@@ -39,9 +39,10 @@
 # labels them and fits the pair with `nils-postcontrast calibrate`
 # (at least 20 labelled stacks of each class), and sets the pair file as the
 # site file post_contrast_calibration (`nils pipeline secret set
-# post_contrast_calibration --file <pair file>`), which every run then
-# merges over the fusion's pairs. The run records the sites the file set,
-# never the pairs.
+# post_contrast_calibration --file /absolute/path/pair.json`; the engine
+# takes an absolute path, since it reads the file where it runs), which
+# every run then merges over the fusion's pairs. The run records the sites
+# the file set, never the pairs.
 name: postcontrast-cascade
 schema-version: "0.5"
 tool-version: "0.3.0"
@@ -150,6 +151,7 @@ x-nils:
         - {name: score_raw_seeds, type: text, description: "With raw_scores: each seed's fused log-odds, space separated"}
         - {name: site, type: text, description: "With raw_scores: the stack's site key as the fusion sees it (<cohort> <make>); null where its cohort is none the fusion knows"}
         - {name: make, type: text, description: "With raw_scores: the scanner's make as the site key spells it (Siemens, GE, Philips, Canon/Toshiba or other)"}
+        - {name: cohort_candidates, type: text, description: "With raw_scores: the dataset, batch and cohort names the stack belongs to, space separated, in the order the site key is looked for; a site builds its key as one of them and the make"}
         - {name: cascade_digest, type: text, description: The cascade}
         - {name: student_digest, type: text, description: The cascade's student}
         - {name: fusion_digest, type: text, description: The cascade's fusion}

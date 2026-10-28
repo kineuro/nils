@@ -46,6 +46,9 @@ class Fusion:
     use_V: bool
     cohort_aliases: dict
     untrusted_time_cohorts: list
+    # the sites the frozen fusion carries pairs for, where a site file's pairs
+    # were merged into cal over them (calibration.apply); None: all of cal
+    frozen_keys: frozenset | None = None
 
     @classmethod
     def load(cls, path) -> "Fusion":
@@ -67,6 +70,11 @@ class Fusion:
 
     def sites(self) -> set:
         return set(self.cal)
+
+    def frozen_sites(self) -> set:
+        """The sites the frozen fusion itself has a pair for; a site file's
+        merged pairs (``calibration.apply``) are the rest of ``sites()``."""
+        return set(self.frozen_keys) if self.frozen_keys is not None else set(self.cal)
 
 
 def logit32(p):

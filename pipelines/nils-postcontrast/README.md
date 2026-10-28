@@ -58,22 +58,28 @@ fits its own pair, with no new model bundle or image:
    nils-postcontrast calibrate --labels labels.tsv --scores <run output>... --site "<cohort> <make>" --out pair.json
    ```
 
-   It joins on the stack id, takes only rows of the key's make (compared
-   without case; rows of another make are counted as `n_other_make`, rows
-   whose table names another site as `n_other_site`), needs at least 20
-   labelled stacks of each class with a score, refuses a bad row by its
-   line number and never by its content, and writes `{site, a, b, n,
-   n_given, n_not_given, n_without_score, n_other_site, n_other_make, fit,
-   per_source, overall, model, fitted_at}` with the log loss and accuracy
-   overall and per source, printed as a short report. `fit` says how many
+   It joins on the stack id and takes only the key's rows: the make is
+   compared without case and written as the tables spell it (a make word
+   the fusion does not know is refused); rows of another make are counted
+   as `n_other_make`, rows whose table names another site as
+   `n_other_site`, and rows whose `cohort_candidates` do not name the
+   key's cohort as `n_other_cohort` (a row from an older table with no
+   such column is taken and counted as `n_without_candidates`). It needs
+   at least 20 labelled stacks of each class with a score, refuses a bad
+   row by its line number and never by its content, and writes `{site, a,
+   b, n, n_given, n_not_given, n_without_score, n_other_site,
+   n_other_make, n_other_cohort, n_without_candidates, fit, per_source,
+   overall, model, fitted_at}` with the log loss and accuracy overall and
+   per source, printed as a short report. `fit` says how many
    Newton iterations the pair took and whether it converged (a step is
    adopted only when it lowers the loss; where none does, the fit stops and
    says so); `model.fusion_digest` names the fusion the scores came from.
 3. Give the pair to every run: the descriptor's optional site file
    `post_contrast_calibration` (`nils pipeline secret set
-   post_contrast_calibration --file pair.json`), which the engine mounts and
-   names through `NILS_PC_CALIBRATION`; outside the engine, `--calibration
-   FILE`. The file is one pair file or a map `{site: [a, b]}`; its pairs are
+   post_contrast_calibration --file /absolute/path/pair.json`; the engine
+   takes an absolute path, since it reads the file where it runs), which
+   the engine mounts and names through `NILS_PC_CALIBRATION`; outside the
+   engine, `--calibration FILE`. The file is one pair file or a map `{site: [a, b]}`; its pairs are
    merged over the fusion's before any stack is judged. A pair file whose
    `model.fusion_digest` names another fusion than the run's is refused
    (the run fails before any stack is read). The run's `results.json`

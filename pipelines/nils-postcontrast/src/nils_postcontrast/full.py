@@ -54,6 +54,7 @@ it held are tried again, so one stack never ends the run.
 from __future__ import annotations
 
 import base64
+import functools
 import hashlib
 import json
 import logging
@@ -613,10 +614,7 @@ def cmd_full(a) -> int:
     by_id = {e.stack_id: e for e in stacks}
 
     def table(sid, **kw):
-        if raw:
-            for k, v in evidence.raw_columns(rows, by_id, sid).items():
-                kw.setdefault(k, v)
-        return _table(sid, P, raw=raw, **kw)
+        return evidence.table_row(rows, by_id, sid, raw, functools.partial(_table, P=P), **kw)
 
     atlas, hpn, vxn = P.write_atlas(work / "atlas")
     opts = {"workers": a.threads, "convert_workers": a.convert_workers, "wave": a.wave, "card_waves": a.card_waves,
@@ -687,12 +685,15 @@ def cmd_full(a) -> int:
                                   "probabilities": {GIVEN: round(pg, 6), NOT_GIVEN: round(1 - pg, 6)}, "model_digest": P.cascade.digest})
     sec = time.time() - t0
     # the candidates are the stacks the rule accepted; the raw-score mode's
-    # stacks are counted apart, as raw_scored
+    # stacks are counted apart, as raw_scored. candidates_per_s is the run's
+    # throughput: the stacks it scored (the candidates, and in the raw-score
+    # mode the raw-scored stacks too) per second of the whole run
     n_cand = sum(1 for e in todo if not (raw and why.get(e.stack_id) == "no-calibration"))
+    raw_scored = sum(1 for d in tables.values() if d["score_raw"] is not None) if raw else 0
     run.metrics = {"stacks": len(stacks), "candidates": n_cand, "by_outcome": counts, "seconds": round(sec, 3),
-                   "candidates_per_s": round(n_cand / sec, 4) if sec > 0 else None, "stats": stats}
+                   "candidates_per_s": round((n_cand + raw_scored) / sec, 4) if sec > 0 else None, "stats": stats}
     if raw:
-        run.metrics["raw_scored"] = sum(1 for d in tables.values() if d["score_raw"] is not None)
+        run.metrics["raw_scored"] = raw_scored
     calibration.record(run.extra, {sid: r["site"] for sid, r in rows.items()}, tables)
     run.models = [P.cascade.ref(), P.fusion.ref(), P.arms_part.ref()]
     run.write()

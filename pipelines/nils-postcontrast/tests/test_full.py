@@ -574,6 +574,8 @@ def test_raw_scores_give_a_stack_with_no_calibration_its_log_odds_and_no_answer(
     assert {p["stack_id"] for p in res["proposals"]} == {1, 2} and res["params"]["raw_scores"] is True
     # the candidates are still the stacks the rule accepted; the raw-score mode's are counted apart
     assert res["metrics"]["candidates"] == 2 and res["metrics"]["raw_scored"] == 1 and res["metrics"]["by_outcome"]["no-calibration"] == 1
+    # candidates_per_s is the run's throughput: the candidates and the raw-scored stacks over the run's seconds
+    assert abs(res["metrics"]["candidates_per_s"] - 3 / res["metrics"]["seconds"]) < 0.01 * res["metrics"]["candidates_per_s"]
     units = {u["unit_id"]: u for u in res["units"]}
     assert units["stack-5"]["metrics"]["score_raw"] == t5["score_raw"]
 
