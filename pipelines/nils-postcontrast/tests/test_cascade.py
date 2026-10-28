@@ -155,3 +155,125 @@ def test_the_student_is_three_seeds(tmp_path):
     save_file({k: v for k, v in sd.items() if not k.startswith("s2.")}, str(tmp_path / "two.safetensors"))
     with pytest.raises(ValueError, match="seed 2"):
         Student(tmp_path / "two.safetensors")
+
+
+# ---------------------------------------------------------------- a site's calibration (0.3.0)
+
+# the columns before 0.3.0, and the raw-score mode's five, on every row of every run (null without the mode), so the table's
+# shape is constant and the engine's measures never miss a declared column
+EARLIER_COLUMNS = ["p_given", "value", "confidence", "answers", "stage", "stage1", "reason", "margin", "seeds_agree", "files_read",
+                   "cascade_digest", "student_digest", "fusion_digest", "stack_id"]
+RAW_COLUMNS = ["score_raw", "score_raw_seeds", "site", "make", "cohort_candidates"]
+COLUMNS = EARLIER_COLUMNS[:10] + RAW_COLUMNS + EARLIER_COLUMNS[10:]
+
+
+def test_without_the_raw_scores_flag_the_output_is_the_earlier_versions_with_the_five_columns_null(tmp_path):
+    rc, out = run(tmp_path, 9.0)
+    assert rc == 0
+    T = tables(out)
+    for doc in T.values():
+        assert list(doc) == COLUMNS
+        assert all(doc[k] is None for k in RAW_COLUMNS), doc
+    assert T[1]["answers"] == 1 and T[1]["value"] == "given" and T[7]["reason"] == "no-calibration" and T[6]["reason"] == "deferred"
+    res = json.loads((out / "results.json").read_text())
+    assert res["params"] == {"workers": 2, "batch": 64, "device": "cpu"} and "calibration" not in res
+    # every unit's metrics carry score_raw, null without the mode, as the table's column does
+    assert all(set(u["metrics"]) == {"value", "confidence", "stage", "stage1", "reason", "files_read", "score_raw"} for u in res["units"])
+    assert all(u["metrics"]["score_raw"] is None for u in res["units"])
+
+
+def test_raw_scores_write_the_log_odds_of_a_stack_with_no_calibration_and_never_propose(tmp_path):
+    stacks, I = setup_run(tmp_path, 9.0)
+    out = tmp_path / "out"
+    rc = cli.main(["cascade", "--stacks", str(stacks), "--inputs", str(I), "--output", str(out), "--threads", "2", "--device", "cpu", "--raw-scores"])
+    assert rc == 0
+    T = tables(out)
+    t7 = T[7]  # a cohort the fusion has no pair for
+    assert t7["reason"] == "no-calibration" and t7["stage1"] == "raw" and t7["answers"] == 0
+    assert t7["p_given"] is None and t7["value"] is None and t7["confidence"] is None
+    assert abs(t7["score_raw"] - 9.0) < 1e-5  # every coefficient 0: the log-odds is the intercept
+    seeds = [float(x) for x in t7["score_raw_seeds"].split()]
+    assert len(seeds) == 3 and all(abs(z - 9.0) < 1e-5 for z in seeds)
+    assert t7["site"] is None and t7["make"] == "Siemens" and t7["cohort_candidates"] == json.dumps(["cohort-c"]) and t7["files_read"] == 3
+    # every other stack as before, its site columns filled and no raw score
+    assert T[1]["answers"] == 1 and T[1]["value"] == "given" and T[1]["score_raw"] is None and T[1]["site"] == "cohort-a Siemens"
+    assert T[1]["cohort_candidates"] == json.dumps(["cohort-a"])
+    assert T[3]["reason"] == "not-t1-brain" and T[3]["score_raw"] is None and T[6]["reason"] == "deferred"
+    assert list(T[1]) == COLUMNS
+    res = json.loads((out / "results.json").read_text())
+    assert {p["stack_id"] for p in res["proposals"]} == {1, 2} and res["params"]["raw_scores"] is True
+    units = {u["unit_id"]: u for u in res["units"]}
+    assert units["stack-7"]["status"] == "succeeded" and units["stack-7"]["metrics"]["score_raw"] == t7["score_raw"]
+    assert units["stack-1"]["metrics"]["score_raw"] is None and "score_raw" in units["stack-6"]["metrics"]
+    assert res["metrics"]["by_outcome"]["no-calibration"] == 1 and res["metrics"]["deferred"] == [6] and res["metrics"]["raw_scored"] == 1
+
+
+def test_raw_scores_keep_no_calibration_for_a_stack_the_student_could_not_read_at_a_site_with_no_pair(tmp_path):
+    stacks, I = setup_run(tmp_path, 9.0)
+    # a stack at the uncalibrated site with no files: nothing was scored, so
+    # score_raw stays null and stage1 says why, but the reason stays
+    # no-calibration, never deferred, so the run's deferral list (what the
+    # engine runs the full pipeline over) keeps its meaning
+    m = json.loads(stacks.read_text())
+    eight = dict(m["stacks"][-1], unit="stack-8", stack_id=8, series_id=18, files=[])
+    m["stacks"].append(eight)
+    stacks.write_text(json.dumps(m))
+    out = tmp_path / "out"
+    rc = cli.main(["cascade", "--stacks", str(stacks), "--inputs", str(I), "--output", str(out), "--threads", "2", "--device", "cpu", "--raw-scores"])
+    assert rc == 0
+    T = tables(out)
+    assert T[8]["reason"] == "no-calibration" and T[8]["stage1"] == "no-geometry" and T[8]["score_raw"] is None and T[8]["answers"] == 0
+    assert T[8]["cohort_candidates"] == json.dumps(["cohort-c"]) and T[8]["p_given"] is None
+    assert T[7]["reason"] == "no-calibration" and T[7]["score_raw"] is not None
+    assert T[6]["reason"] == "deferred" and T[6]["stage1"] == "no-geometry"  # a calibrated stack not read is deferred as before
+    res = json.loads((out / "results.json").read_text())
+    assert res["metrics"]["deferred"] == [6] and res["metrics"]["raw_scored"] == 1 and res["metrics"]["by_outcome"]["no-calibration"] == 2
+    units = {u["unit_id"]: u for u in res["units"]}
+    assert units["stack-8"]["status"] == "succeeded" and units["stack-8"]["metrics"]["score_raw"] is None
+
+
+def test_a_calibration_file_scores_a_site_the_fusion_has_no_pair_for(tmp_path, monkeypatch):
+    stacks, I = setup_run(tmp_path, 9.0)
+    cal = tmp_path / "pairs.json"
+    cal.write_text(json.dumps({"cohort-c Siemens": [1.0, 0.0]}))
+    out = tmp_path / "out"
+    rc = cli.main(["cascade", "--stacks", str(stacks), "--inputs", str(I), "--output", str(out), "--threads", "2", "--device", "cpu",
+                   "--calibration", str(cal)])
+    assert rc == 0
+    T = tables(out)
+    assert T[7]["answers"] == 1 and T[7]["value"] == "given" and T[7]["reason"] is None and list(T[7]) == COLUMNS and T[7]["site"] is None
+    res = json.loads((out / "results.json").read_text())
+    # a map names no fusion: taken as it is, and said to be unchecked
+    assert {p["stack_id"] for p in res["proposals"]} == {1, 2, 7} and res["calibration"] == {"sites": {"cohort-c Siemens": 1}, "unchecked": True}
+    # the descriptor's site file reaches the run through the environment
+    monkeypatch.setenv("NILS_PC_CALIBRATION", str(cal))
+    out2 = tmp_path / "out2"
+    rc = cli.main(["cascade", "--stacks", str(stacks), "--inputs", str(I), "--output", str(out2), "--threads", "2", "--device", "cpu"])
+    assert rc == 0 and tables(out2)[7]["answers"] == 1
+    monkeypatch.delenv("NILS_PC_CALIBRATION")
+    # a pair file fitted on this fusion is checked; one fitted on another is refused
+    fdg = "sha256:" + hashlib.sha256((I / "fusion" / "fusion.json").read_bytes()).hexdigest()
+    pair = tmp_path / "pair.json"
+    pair.write_text(json.dumps({"site": "cohort-c Siemens", "a": 1.0, "b": 0.0, "model": {"fusion_digest": fdg}}))
+    out4 = tmp_path / "out4"
+    rc = cli.main(["cascade", "--stacks", str(stacks), "--inputs", str(I), "--output", str(out4), "--threads", "2", "--device", "cpu",
+                   "--calibration", str(pair)])
+    res = json.loads((out4 / "results.json").read_text())
+    assert rc == 0 and res["calibration"] == {"sites": {"cohort-c Siemens": 1}}
+    pair.write_text(json.dumps({"site": "cohort-c Siemens", "a": 1.0, "b": 0.0, "model": {"fusion_digest": "sha256:" + "e" * 64}}))
+    out5 = tmp_path / "out5"
+    rc = cli.main(["cascade", "--stacks", str(stacks), "--inputs", str(I), "--output", str(out5), "--device", "cpu", "--calibration", str(pair)])
+    assert rc == 1 and "another fusion" in json.loads((out5 / "results.json").read_text())["error"]
+    # a file none of whose keys is any stack's site runs, and the results say so
+    cal.write_text(json.dumps({"cohort-z Siemens": [1.0, 0.0]}))
+    out6 = tmp_path / "out6"
+    rc = cli.main(["cascade", "--stacks", str(stacks), "--inputs", str(I), "--output", str(out6), "--threads", "2", "--device", "cpu",
+                   "--calibration", str(cal)])
+    res = json.loads((out6 / "results.json").read_text())
+    assert rc == 0 and res["calibration"] == {"sites": {"cohort-z Siemens": 0}, "unchecked": True, "matched_none": ["cohort-z Siemens"]}
+    assert tables(out6)[7]["reason"] == "no-calibration"
+    # a file that is not there refuses the run
+    out3 = tmp_path / "out3"
+    rc = cli.main(["cascade", "--stacks", str(stacks), "--inputs", str(I), "--output", str(out3), "--device", "cpu",
+                   "--calibration", str(tmp_path / "missing.json")])
+    assert rc == 1 and "calibration file" in json.loads((out3 / "results.json").read_text())["error"]

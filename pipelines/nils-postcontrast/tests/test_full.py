@@ -342,6 +342,9 @@ def test_the_full_pipeline_answers_candidates_and_gives_every_other_stack_its_re
     props = {p["stack_id"]: p for p in res["proposals"]}
     assert set(props) == {1, 2} and props[1]["model_digest"] == T[1]["cascade_digest"]
     assert res["metrics"]["candidates"] == 2 and res["metrics"]["by_outcome"]["answered"] == 2
+    # every unit's metrics carry score_raw, null without the raw-score mode, as the table's column does
+    assert all(set(u["metrics"]) == {"value", "confidence", "stage", "reason", "arms", "score_raw"} for u in res["units"])
+    assert all(u["metrics"]["score_raw"] is None for u in res["units"])
     rec = {json.loads(line)["stack_id"]: json.loads(line) for line in (standin_env / "records.jsonl").read_text().splitlines()}
     assert rec[2]["convert"]["attempts"] == 2 and rec[1]["convert"]["attempts"] == 1
     assert all(k.startswith(("HP", "V", "T:")) for k in rec[1]["cols"])
@@ -556,3 +559,74 @@ def test_a_lane_gives_a_dead_workers_task_again_and_then_gives_up(tmp_path):
             break
     lane.shutdown()
     assert dead == ["dies"] and got["lives"] == 4 and lane.rebuilt >= 2
+
+
+# ---------------------------------------------------------------- a site's calibration (0.3.0)
+
+def test_raw_scores_give_a_stack_with_no_calibration_its_log_odds_and_no_answer(standin_env):
+    rc, out = run(standin_env, "--raw-scores")
+    assert rc == 0
+    T = tables(out)
+    t5 = T[5]  # a cohort the fusion has no pair for
+    assert t5["reason"] == "no-calibration" and t5["stage"] == "full" and t5["answers"] == 0 and t5["p_given"] is None and t5["value"] is None
+    assert isinstance(t5["score_raw"], float) and "V" in t5["arms"] and t5["site"] is None and t5["make"] == "Siemens"
+    assert t5["cohort_candidates"] == json.dumps(["cohort-c"])
+    assert T[1]["answers"] == 1 and T[1]["score_raw"] is None and T[1]["site"] == "cohort-a Siemens" and T[1]["cohort_candidates"] == json.dumps(["cohort-a"])
+    assert T[3]["reason"] == "not-t1-brain" and T[3]["score_raw"] is None and T[4]["reason"] == "sealed"
+    res = json.loads((out / "results.json").read_text())
+    assert {p["stack_id"] for p in res["proposals"]} == {1, 2} and res["params"]["raw_scores"] is True
+    # the candidates are still the stacks the rule accepted; the raw-score mode's are counted apart
+    assert res["metrics"]["candidates"] == 2 and res["metrics"]["raw_scored"] == 1 and res["metrics"]["by_outcome"]["no-calibration"] == 1
+    # candidates_per_s is the candidates over the run's seconds, as before; raw_scored_per_s the raw-scored stacks over them
+    assert abs(res["metrics"]["candidates_per_s"] - 2 / res["metrics"]["seconds"]) < 0.01 * res["metrics"]["candidates_per_s"]
+    assert abs(res["metrics"]["raw_scored_per_s"] - 1 / res["metrics"]["seconds"]) < 0.01 * res["metrics"]["raw_scored_per_s"]
+    units = {u["unit_id"]: u for u in res["units"]}
+    assert units["stack-5"]["metrics"]["score_raw"] == t5["score_raw"] and units["stack-1"]["metrics"]["score_raw"] is None
+
+
+def test_raw_scores_keep_a_failed_stacks_own_reason_and_no_score(standin_env, monkeypatch):
+    monkeypatch.setenv("STANDIN_NO_TOOLS", "5")  # the uncalibrated stack: every tool fails, so no segmentation
+    rc, out = run(standin_env, "--raw-scores")
+    assert rc == 0
+    T = tables(out)
+    assert T[5]["reason"] == "no-segmentation" and T[5]["score_raw"] is None and T[5]["answers"] == 0 and T[5]["cohort_candidates"] == json.dumps(["cohort-c"])
+    assert T[1]["answers"] == 1 and T[1]["score_raw"] is None
+    res = json.loads((out / "results.json").read_text())
+    assert "no-calibration" not in res["metrics"]["by_outcome"] and res["metrics"]["by_outcome"]["no-segmentation"] == 1
+    assert res["metrics"]["candidates"] == 2 and res["metrics"]["raw_scored"] == 0
+
+
+@pytest.mark.parametrize("raw", [True, False])
+def test_a_file_less_stack_at_an_uncalibrated_site_is_no_files_in_every_run(standin_env, raw):
+    stacks, I = setup_run(standin_env)
+    m = json.loads(stacks.read_text())
+    # a stack at the uncalibrated site with no files: nothing could be scored, so its reason is no-files, not no-calibration,
+    # with the raw-score mode and without it (0.2.x said no-calibration of it)
+    m["stacks"].append(dict(m["stacks"][-1], unit="stack-6", stack_id=6, series_id=16, files=[]))
+    stacks.write_text(json.dumps(m))
+    out = standin_env / "out"
+    rc = cli.main(["full", "--stacks", str(stacks), "--inputs", str(I), "--output", str(out), "--threads", "2", "--convert-workers", "2",
+                   "--device", "cpu", "--work", str(standin_env / "work"), *(["--raw-scores"] if raw else [])])
+    assert rc == 0
+    T = tables(out)
+    assert T[6]["reason"] == "no-files" and T[6]["score_raw"] is None and T[6]["answers"] == 0
+    assert T[6]["cohort_candidates"] == (json.dumps(["cohort-c"]) if raw else None)
+    assert T[5]["reason"] == "no-calibration" and (isinstance(T[5]["score_raw"], float) if raw else T[5]["score_raw"] is None)
+    res = json.loads((out / "results.json").read_text())
+    assert res["metrics"]["by_outcome"]["no-files"] == 1 and res["metrics"]["by_outcome"]["no-calibration"] == 1
+    assert res["metrics"].get("raw_scored") == (1 if raw else None) and ("raw_scored_per_s" in res["metrics"]) is raw
+    assert abs(res["metrics"]["candidates_per_s"] - 2 / res["metrics"]["seconds"]) < 0.01 * res["metrics"]["candidates_per_s"]
+
+
+def test_a_calibration_file_scores_a_site_the_fusion_has_no_pair_for(standin_env):
+    cal = standin_env / "pairs.json"
+    cal.write_text(json.dumps({"site": "cohort-c Siemens", "a": 1.0, "b": 0.0, "n": 40}))
+    rc, out = run(standin_env, "--calibration", str(cal))
+    assert rc == 0
+    T = tables(out)
+    # the raw-score mode's four columns are on every row, null without the mode
+    assert T[5]["answers"] == 1 and T[5]["value"] == "given" and all(T[5][k] is None for k in ("score_raw", "site", "make", "cohort_candidates"))
+    assert list(T[5]) == ["p_given", "value", "confidence", "answers", "stage", "reason", "arms", "failed_steps", "seconds", "score_raw", "site",
+                          "make", "cohort_candidates", "cascade_digest", "fusion_digest", "arms_digest", "stack_id"]
+    res = json.loads((out / "results.json").read_text())
+    assert {p["stack_id"] for p in res["proposals"]} == {1, 2, 5} and res["calibration"] == {"sites": {"cohort-c Siemens": 1}, "unchecked": True}

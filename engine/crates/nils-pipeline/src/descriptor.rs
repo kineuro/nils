@@ -237,6 +237,11 @@ pub struct Secret {
     /// An environment variable that names `mount`, such as FS_LICENSE.
     pub env: Option<String>,
     pub optional: bool,
+    /// Whether what a container leaves is swept for it (true unless the
+    /// descriptor says `sweep: false`): a licence is; a site file whose
+    /// contents the outputs may echo, such as a calibration a run merges
+    /// over a model's, is kept where secrets are kept but not swept.
+    pub sweep: bool,
 }
 
 /// What a version replaces because it fixes it (`x-nils.replaces`, Nima's
@@ -1275,6 +1280,7 @@ pub fn from_value(document: Value) -> Result<Descriptor, String> {
             mount,
             env,
             optional: opt_bool(s, "optional", &at)?.unwrap_or(false),
+            sweep: opt_bool(s, "sweep", &at)?.unwrap_or(true),
         });
     }
     let mut proposals: Vec<String> = Vec::new();
@@ -2921,10 +2927,19 @@ x-nils:
                 mount: "/opt/fs/license.txt".into(),
                 env: Some("FS_LICENSE".into()),
                 optional: false,
+                sweep: true,
             }]
         );
         let d = parse(&with("{gpu: none}", "  secrets: [{id: key}]\n")).unwrap();
         assert_eq!(d.secrets[0].mount, "/secrets/key");
+        assert!(d.secrets[0].sweep);
+        // a site file the outputs may echo is declared sweep: false
+        let d = parse(&with(
+            "{gpu: none}",
+            "  secrets: [{id: calibration, optional: true, sweep: false}]\n",
+        ))
+        .unwrap();
+        assert!(d.secrets[0].optional && !d.secrets[0].sweep);
         for (needs, extra, words) in [
             ("{cores: 0}", "", "whole number from 1"),
             ("{cores: 1.5}", "", "whole number from 1"),

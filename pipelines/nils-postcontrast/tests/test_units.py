@@ -244,12 +244,12 @@ def test_candidacy(F):
 
 def test_cohort_aliases_and_batch(F):
     e = entry(1, 10, 7, datasets=("dataset-a",))
-    assert evidence.cohort_of(e, F) == ("cohort-a", "dataset")
+    assert evidence.cohort_of(e, F) == ("cohort-a", "dataset", ["cohort-a"])
     e = entry(1, 10, 7, datasets=())
     e.header["batch"] = "reread-2026-cohort-a"
-    assert evidence.cohort_of(e, F) == ("cohort-a", "batch_part")
+    assert evidence.cohort_of(e, F) == ("cohort-a", "batch_part", ["reread-2026-cohort-a", "2026-cohort-a", "cohort-a", "a"])
     e.header["batch"] = "dcm-raw-2026-10-01"
-    assert evidence.cohort_of(e, F) == (None, None)
+    assert evidence.cohort_of(e, F) == (None, None, ["dcm-raw-2026-10-01", "raw-2026-10-01", "2026-10-01", "10-01", "01"])
 
 
 def test_times_parse_both_ways():

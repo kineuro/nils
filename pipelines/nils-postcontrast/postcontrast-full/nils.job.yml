@@ -45,9 +45,24 @@
 # build needs more disk than a hosted runner): it is published from a
 # machine with the room by scripts/publish-postcontrast-full.sh, which
 # pins the digest below, and the release ships this pin as it is.
+#
+# A site the fusion has no calibration pair for gets no answer
+# (no-calibration). Since 0.3.0 it can fit its own pair without a new
+# model bundle or image: the raw_scores switch has the run score such
+# T1-type brain stacks too and write their fused log-odds before any
+# calibration (score_raw), never a probability or a proposal; the site
+# labels them and fits the pair with `nils-postcontrast calibrate`
+# (at least 20 labelled stacks of each class), and sets the pair file as the
+# site file post_contrast_calibration (`nils pipeline secret set
+# post_contrast_calibration --file /absolute/path/pair.json`; the engine
+# takes an absolute path, since it reads the file where it runs), which
+# every run then adds beside the fusion's pairs (a site the fusion has a
+# pair for is refused: a certified pair is never replaced). The run records
+# the sites the file set, never the pairs. The raw-score columns below are
+# on every row of every run, null without the switch.
 name: postcontrast-full
 schema-version: "0.5"
-tool-version: "0.2.2"
+tool-version: "0.3.0"
 description: >-
   Answer post_contrast with model r1's full pipeline on the T1-type brain
   stacks the cascade defers; "not sure" elsewhere.
@@ -90,8 +105,15 @@ inputs:
     command-line-flag: --synthseg-procs
     default-value: 2
     optional: true
+  - id: raw_scores
+    name: Raw scores
+    type: Flag
+    description: "Score T1-type brain stacks at a site with no calibration too and write their fused log-odds (score_raw), never a probability or a proposal, for the site to fit its calibration pair on with nils-postcontrast calibrate."
+    value-key: "[RAW]"
+    command-line-flag: "--raw-scores"
+    default-value: false
 
-command-line: "nils-postcontrast full --stacks [Manifest] --inputs [Inputs] --output [OutputLocation] [THREADS] [MEMORY] [SSPROCS]"
+command-line: "nils-postcontrast full --stacks [Manifest] --inputs [Inputs] --output [OutputLocation] [THREADS] [MEMORY] [SSPROCS] [RAW]"
 
 output-files:
   - id: scores
@@ -121,6 +143,14 @@ x-nils:
     - id: cascade
       type: model
       description: The cascade (task axis:post_contrast), whose card names the fusion and the arms by digest
+  secrets:
+    - id: post_contrast_calibration
+      mount: /secrets/post_contrast_calibration.json
+      env: NILS_PC_CALIBRATION
+      optional: true
+      # a site file (the site's calibration pair), not a secret: the tables echo its digest and site lines, so it is not swept.
+      # An engine before 1.0.0-beta.3 ignores sweep and sweeps it line by line, which the one-line file calibrate writes survives
+      sweep: false
   outputs:
     - id: scores
       kind: table
@@ -136,6 +166,10 @@ x-nils:
         - {name: reason, type: text, description: "Why the stack has no answer: sealed, not-mr, not-t1-brain, no-calibration, no-files, not-sure, no-usable-volume, no-segmentation, no-image-arm, worker-died or step-failed (no image arm, so no certified answer; the last two are the run's own failures, not the data's); null when answered"}
         - {name: arms, type: text, description: "The image arms the stack had (T, U, V); a failed tool leaves the arms it could not feed out, as model r1"}
         - {name: failed_steps, type: text, description: "The steps that failed for the stack: convert, tools, base, tail, features"}
+        - {name: score_raw, description: "With raw_scores: the fused log-odds before any calibration of a T1-type brain stack at a site with no calibration that has an image arm, for the site to fit its pair on; null elsewhere and without raw_scores. Never a probability"}
+        - {name: site, type: text, description: "With raw_scores: the stack's site key as the fusion sees it (<cohort> <make>); null where its cohort is none the fusion knows, and without raw_scores"}
+        - {name: make, type: text, description: "With raw_scores: the scanner's make as the site key spells it (Siemens, GE, Philips, Canon/Toshiba or other); null without it"}
+        - {name: cohort_candidates, type: text, description: "With raw_scores: a JSON list of the dataset, batch and cohort names the stack belongs to, through the fusion's cohort aliases, in the order the site key is looked for; a site builds its key as one of them and the make. Null without raw_scores"}
         - {name: cascade_digest, type: text, description: The cascade}
         - {name: fusion_digest, type: text, description: The cascade's fusion}
         - {name: arms_digest, type: text, description: The arms}

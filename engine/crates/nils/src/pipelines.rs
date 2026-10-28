@@ -604,7 +604,9 @@ pub(crate) fn set_secret_file(registry: &mut Registry, id: &str, file: &Path) ->
             file.display()
         )));
     }
-    secrets::read(id, file).map_err(usage)?;
+    // checked as a secret is (there, a file, within the size, not empty);
+    // the needles are built when a run starts, and for a swept secret alone
+    secrets::check(id, file).map_err(usage)?;
     let path = file.display().to_string();
     if path.contains(':') || path.contains(',') {
         return Err(usage(format!(
@@ -731,7 +733,7 @@ pub(crate) fn secrets_answer(registry: &mut Registry) -> Result<Value, Exit> {
         let path = secret_path(registry, &id).filter(|p| !p.trim().is_empty());
         let readable = path
             .as_deref()
-            .is_some_and(|p| secrets::read(&id, Path::new(p)).is_ok());
+            .is_some_and(|p| secrets::check(&id, Path::new(p)).is_ok());
         out.push(json!({
             "id": id,
             "declared_by": by,
@@ -3445,7 +3447,7 @@ pub(crate) fn command(home: &Home, command: PipelineCommand) -> Result<(), Exit>
                 let mut docs = Vec::new();
                 for id in ids {
                     let readable = secret_path(&mut registry, &id)
-                        .is_some_and(|p| secrets::read(&id, Path::new(&p)).is_ok());
+                        .is_some_and(|p| secrets::check(&id, Path::new(&p)).is_ok());
                     docs.push(json!({"id": id, "readable": readable}));
                 }
                 if json {
@@ -5436,12 +5438,21 @@ fn device_for(
 }
 
 /// A secret a run was given (record 49 R3): what the descriptor declares,
-/// the file the site set, and what is looked for in what the run leaves.
+/// the file the site set, and what is looked for in what the run leaves,
+/// which is nothing for a site file the descriptor declares `sweep: false`
+/// (checked and mounted as a secret is, its needles never built).
 #[derive(Debug, Clone)]
 pub(crate) struct Given {
     secret: descriptor::Secret,
     path: PathBuf,
-    held: secrets::Held,
+    held: Option<secrets::Held>,
+}
+
+/// What the sweep looks for after a container: the secrets given, less
+/// those the descriptor declares `sweep: false` (a site file whose contents
+/// the outputs may echo, such as a calibration a run adds beside a model's).
+fn held_to_sweep(given: &[Given]) -> Vec<secrets::Held> {
+    given.iter().filter_map(|g| g.held.clone()).collect()
 }
 
 /// The file the site set for a secret, where it set one.
@@ -5477,7 +5488,12 @@ fn secrets_for(registry: &mut Registry, d: &Descriptor, p: &Pipeline) -> Result<
                 )));
             }
             Some(path) => {
-                let held = secrets::read(&s.id, Path::new(&path)).map_err(usage)?;
+                let held = if s.sweep {
+                    Some(secrets::read(&s.id, Path::new(&path)).map_err(usage)?)
+                } else {
+                    secrets::check(&s.id, Path::new(&path)).map_err(usage)?;
+                    None
+                };
                 out.push(Given {
                     secret: s.clone(),
                     path: PathBuf::from(path),
@@ -10203,10 +10219,10 @@ fn sweep_batch(
 ) -> Result<(Vec<Value>, Vec<String>), String> {
     let mut swept: Vec<Value> = Vec::new();
     let mut shut: Vec<String> = Vec::new();
-    if x.secrets.is_empty() {
+    let held = held_to_sweep(x.secrets);
+    if held.is_empty() {
         return Ok((swept, shut));
     }
-    let held: Vec<secrets::Held> = x.secrets.iter().map(|g| g.held.clone()).collect();
     let scratch = scratch_of(x, b);
     let results_path = b.out.join(nils_pipeline::results::FILE);
     let done = secrets::sweep(
@@ -12656,6 +12672,39 @@ fn found_for(outputs: &[descriptor::Output], out: &Path, u: &Unit) -> Vec<String
 
 #[cfg(test)]
 mod tests {
+    /// Wave 7b (P3), after review: a site file declared `sweep: false` is
+    /// given to the run with no needles, so the sweep looks for the swept
+    /// secrets alone.
+    #[test]
+    fn a_site_file_declared_sweep_false_is_given_with_no_needles() {
+        let secret = |id: &str, sweep: bool| super::descriptor::Secret {
+            id: id.to_string(),
+            mount: format!("/secrets/{id}"),
+            env: None,
+            optional: !sweep,
+            sweep,
+        };
+        let given = vec![
+            super::Given {
+                secret: secret("freesurfer_license", true),
+                path: "/site/license.txt".into(),
+                held: Some(super::secrets::Held::new(
+                    "freesurfer_license",
+                    b"someone@lab.example\n*CxYz0123abcdEF\n",
+                )),
+            },
+            super::Given {
+                secret: secret("post_contrast_calibration", false),
+                path: "/site/pair.json".into(),
+                held: None,
+            },
+        ];
+        let held = super::held_to_sweep(&given);
+        assert_eq!(held.len(), 1);
+        assert_eq!(held[0].id, "freesurfer_license");
+        assert!(!held[0].needles.is_empty());
+    }
+
     /// Wave 7b review: every `api/pipelines` and `api/pipeline-runs` route
     /// this file serves is in the doors list, which the desk reads to
     /// decide what to show.

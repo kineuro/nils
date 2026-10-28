@@ -132,7 +132,8 @@
         "id": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$", "description": "The secret's name, which the site sets to a file: nils pipeline secret set <id> --file <path>"},
         "mount": {"type": "string", "pattern": "^/[^:,]*$", "default": "/secrets/<id>", "description": "Where the container sees the file, read-only; never at or under /input, /inputs, /output or /source"},
         "env": {"type": "string", "pattern": "^[A-Z_][A-Z0-9_]*$", "description": "An environment variable the container is given naming the mount, such as FS_LICENSE"},
-        "optional": {"type": "boolean", "description": "Run without it where the site has not set it; otherwise a run is refused before it starts"}
+        "optional": {"type": "boolean", "description": "Run without it where the site has not set it; otherwise a run is refused before it starts"},
+        "sweep": {"type": "boolean", "default": true, "description": "Whether what a container leaves is swept for it. false declares a site file kept where secrets are kept whose contents the outputs may echo (a calibration a run merges over a model's, say): it is mounted and named as any secret, but not swept"}
       }
     },
     "proposal": {

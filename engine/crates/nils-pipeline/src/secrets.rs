@@ -43,8 +43,23 @@ pub const MAX_BYTES: u64 = 64 * 1024;
 const MAX_DEPTH: usize = 4;
 
 /// Read a secret for a run: a regular file, no larger than [`MAX_BYTES`],
-/// and not empty. The error names the id and the cure, never the bytes.
+/// and not empty, held by the needles of its bytes. The error names the id
+/// and the cure, never the bytes.
 pub fn read(id: &str, path: &Path) -> Result<Held, String> {
+    let bytes = read_bytes(id, path)?;
+    Ok(Held::new(id, &bytes))
+}
+
+/// Check a site file declared `sweep: false` as `read` checks a secret (it
+/// is there, a regular file, readable, within [`MAX_BYTES`] and not
+/// empty), without building the needles nothing will look for: such a file
+/// is mounted and named as a secret is, and not swept.
+pub fn check(id: &str, path: &Path) -> Result<(), String> {
+    read_bytes(id, path).map(|_| ())
+}
+
+/// The bytes of a secret's file, with the checks `read` and `check` share.
+fn read_bytes(id: &str, path: &Path) -> Result<Vec<u8>, String> {
     let meta = std::fs::metadata(path).map_err(|e| {
         format!(
             "the secret {id} is set to a file that cannot be read ({e}); nils pipeline secret set {id} --file <path>"
@@ -63,11 +78,10 @@ pub fn read(id: &str, path: &Path) -> Result<Held, String> {
     std::fs::File::open(path)
         .and_then(|mut f| f.read_to_end(&mut bytes))
         .map_err(|e| format!("the secret {id} cannot be read: {e}"))?;
-    let held = Held::new(id, &bytes);
-    if held.needles.is_empty() {
+    if bytes.iter().all(u8::is_ascii_whitespace) {
         return Err(format!("the secret {id} is an empty file"));
     }
-    Ok(held)
+    Ok(bytes)
 }
 
 /// The plain needles of a secret: the whole of it, trimmed, and each line
@@ -598,6 +612,32 @@ mod tests {
             serde_json::json!({"units": [{"error": "read *CxYz0123abcdEF", "metrics": {"n": 3}}]});
         assert!(redact_json(&mut v, &h));
         assert!(!v.to_string().contains("CxYz"), "{v}");
+    }
+
+    #[test]
+    fn a_site_file_is_checked_as_a_secret_is_and_read_builds_the_needles() {
+        let dir = std::env::temp_dir().join(format!("nils-secret-check-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("pair.json");
+        std::fs::write(&file, b"{\"site\": \"cohort-x Maker\", \"a\": 1.0}\n").unwrap();
+        assert_eq!(check("post_contrast_calibration", &file), Ok(()));
+        assert!(
+            !read("post_contrast_calibration", &file)
+                .unwrap()
+                .needles
+                .is_empty()
+        );
+        // the same refusals as a secret's: missing, a folder, empty
+        assert!(
+            check("x", &dir.join("none"))
+                .unwrap_err()
+                .contains("cannot be read")
+        );
+        assert!(check("x", &dir).unwrap_err().contains("not a file"));
+        std::fs::write(&file, b"  \n").unwrap();
+        assert!(check("x", &file).unwrap_err().contains("empty"));
+        assert!(read("x", &file).unwrap_err().contains("empty"));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
