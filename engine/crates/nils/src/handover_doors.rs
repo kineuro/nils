@@ -90,6 +90,13 @@ pub(crate) fn queue(registry: &mut Registry, caller: &Caller, body: &str) -> Res
         std::path::Path::new(&out),
     )
     .map_err(|r| Reply::error(409, r.message))?;
+    // Wave 7b (the maintenance track): a folder a newer release stopped in,
+    // or is writing, is a mixture of versions and is not handed over
+    if let Some(words) = run::refusal_for(registry.store(), &release)
+        .map_err(|e| Reply::error(500, e.to_string()))?
+    {
+        return Err(Reply::error(409, words));
+    }
     let encrypt = match &doc["encrypt"] {
         serde_json::Value::Null => true,
         serde_json::Value::Bool(b) => *b,

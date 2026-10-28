@@ -134,11 +134,11 @@ impl From<nils_registry::store::Error> for Error {
 }
 
 /// The version of a release that a handover packs, with its root.
-struct Version {
-    id: i64,
-    dataset: i64,
-    version: String,
-    root: String,
+pub struct Version {
+    pub id: i64,
+    pub dataset: i64,
+    pub version: String,
+    pub root: String,
 }
 
 /// Pack a release into archives, and record what was sent.
@@ -199,6 +199,9 @@ fn run_handover(registry: &mut Registry, settings: &Settings) -> Result<Report, 
             settings.release
         )));
     };
+    if let Some(words) = not_whole(registry.store(), &found)? {
+        return Err(Error::Refused(words));
+    }
     // The tree as the release recorded it, and the tree as it is now. A file
     // the record names and the disk does not is reported rather than skipped:
     // a handover of a tree somebody edited is not a handover of the release.
@@ -532,6 +535,84 @@ pub fn password_of(registry: &Registry, kept: &Kept) -> Result<Option<String>, E
             Some(opened)
         }
     })
+}
+
+/// Why the root of a release's newest finished version cannot be handed
+/// over as it is (Wave 7b, the maintenance track), in plain words; none
+/// when the folder is that version. A release lock in the folder says a
+/// release is writing it, or died in it; a release newer than the version
+/// into the same folder that stopped, failed or did not finish, left the
+/// folder a mixture of two versions, unless it stopped before it wrote or
+/// removed anything ([`crate::run::WROTE_NOTHING`]), in which case the
+/// folder is the version still. The handover refuses either, and so does
+/// its door before it queues one.
+pub fn not_whole(store: &mut Store, found: &Version) -> Result<Option<String>, Error> {
+    let root = Path::new(&found.root);
+    if crate::lock::path(root).exists() {
+        let who = match crate::lock::read(root) {
+            Some(lock) => format!("a release (job {} on {})", lock.job, lock.host),
+            None => "a release whose lock cannot be read".to_string(),
+        };
+        return Ok(Some(format!(
+            "the folder holds a release lock: {who} is writing it, or did not finish; wait for it, \
+             or run the release again, before handing it over"
+        )));
+    }
+    let d = store.dialect();
+    let sql = format!(
+        "SELECT error FROM {} WHERE dataset_id = {} AND root = {} AND id > {} AND finished_at IS \
+         NULL ORDER BY id DESC",
+        store.qualified("release"),
+        d.param(1, Type::Int),
+        d.param(2, Type::Text),
+        d.param(3, Type::Int),
+    );
+    let newer = store.query(
+        &sql,
+        &[
+            Param::Int(found.dataset),
+            Param::from(found.root.as_str()),
+            Param::Int(found.id),
+        ],
+    )?;
+    for r in newer {
+        let what = match r.opt_text(0)? {
+            // a stop that wrote and removed nothing left the folder as it was
+            Some(error) if error.contains(crate::run::WROTE_NOTHING) => continue,
+            // one that failed once its row was open says why, and the tree
+            // may be a mixture as after a stop
+            Some(error) => match (
+                crate::run::why_failed(error),
+                error.find(crate::run::STOPPED_WORDS),
+            ) {
+                (Some(why), _) => format!("failed ({why})"),
+                (None, Some(at)) => error[at..].split(';').next().unwrap_or(error).to_string(),
+                (None, None) => format!("did not finish ({error})"),
+            },
+            // no finish and no word: a release is at it, or died at it
+            None => {
+                return Ok(Some(
+                    "the folder holds a release that is running or died here; wait for it or run \
+                     it again before handing it over"
+                        .to_string(),
+                ));
+            }
+        };
+        return Ok(Some(format!(
+            "the folder holds a release that {what}; run the release again to finish it before \
+             handing it over"
+        )));
+    }
+    Ok(None)
+}
+
+/// [`not_whole`] by the release's name, for the door: none as well when the
+/// release has no finished version, which the handover itself refuses.
+pub fn refusal_for(store: &mut Store, name: &str) -> Result<Option<String>, Error> {
+    match newest(store, name)? {
+        Some(found) => not_whole(store, &found),
+        None => Ok(None),
+    }
 }
 
 /// The newest finished version of a release, by id: a version string sorts by

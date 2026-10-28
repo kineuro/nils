@@ -323,6 +323,29 @@ fn each_handover_has_its_own_password_and_only_its_maker_and_the_grant_see_it() 
     let server = Server::start(home.path(), &log, &path);
     let out = |name: &str| ship.join(name).display().to_string();
 
+    // --- a folder a release is writing, or died in, is not handed over
+    // (Wave 7b, the maintenance track): the door refuses before it queues
+    let lock = nils_release::lock::path(&release_out);
+    std::fs::write(
+        &lock,
+        r#"{"job": 77, "host": "a-node", "pid": 1, "started_at": "2026-10-28T10:00:00Z"}"#,
+    )
+    .unwrap();
+    let a = server.post(
+        "/api/handovers",
+        serde_json::json!({ "release": "r", "out": out("locked") }),
+        ADMIN,
+    );
+    assert_eq!(a.status, 409, "{}", a.text);
+    assert!(
+        a.text
+            .contains("a release (job 77 on a-node) is writing it, or did not finish")
+            && a.text.contains("before handing it over"),
+        "{}",
+        a.text
+    );
+    std::fs::remove_file(&lock).unwrap();
+
     // --- typing a password: the maker, never an operator without the grant
     let typed = serde_json::json!({ "release": "r", "out": out("typed"), "password": "typed", "typed": TYPED });
     let a = server.post("/api/handovers", typed.clone(), OPERATOR);

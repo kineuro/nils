@@ -2769,7 +2769,7 @@ fn classify(home: &Home, args: ClassifyArgs) -> Result<(), Exit> {
         settings.review_below = Some(r);
     }
 
-    let cancel = stop_on_signal()?;
+    let cancel = stop_on_signal(Stopping::Batch)?;
     let mut registry = open(home)?;
     // record 56 §6.5: a scoped re-sort judges the stacks its scope holds
     if !args.scope.is_empty() {
@@ -3870,7 +3870,7 @@ fn place_command(home: &Home, command: PlaceCommand) -> Result<(), Exit> {
             if !json {
                 print!("{}", originals::as_text(&dataset, &surveyed));
             }
-            let cancel = stop_on_signal()?;
+            let cancel = stop_on_signal(Stopping::Batch)?;
             let done = originals::run(
                 &mut registry,
                 &dataset,
@@ -5297,7 +5297,7 @@ fn fingerprint(home: &Home, args: FingerprintArgs) -> Result<(), Exit> {
         }
         settings.window = n;
     }
-    let cancel = stop_on_signal()?;
+    let cancel = stop_on_signal(Stopping::Batch)?;
     let mut registry = open(home)?;
     let report = nils_classify::run(&mut registry, &settings, &cancel).map_err(|e| match e {
         nils_classify::Error::Busy { .. } => Exit {
@@ -5486,7 +5486,7 @@ fn digest(home: &Home, args: DigestArgs) -> Result<(), Exit> {
         print!("{}", settings.describe());
         return Ok(());
     }
-    let cancel = stop_on_signal()?;
+    let cancel = stop_on_signal(Stopping::Batch)?;
     let result = if settings.dry_run {
         nils_digest::digest_with(&settings, None, &cancel)
     } else {
@@ -5593,7 +5593,7 @@ fn pseudonymize(home: &Home, args: PseudonymizeArgs) -> Result<(), Exit> {
         Err(e) if asked => return Err(e),
         Err(_) => {}
     }
-    let cancel = stop_on_signal()?;
+    let cancel = stop_on_signal(Stopping::Batch)?;
     match nils_pseudonymize::pseudonymize_with(&settings, &mut registry, &cancel) {
         Ok(report) => {
             // Wave 7a (2026-10-10): the run counts its dataset's trees again
@@ -5713,9 +5713,45 @@ fn bring_in(home: &Home, args: BringInArgs) -> Result<(), Exit> {
     Ok(())
 }
 
+/// What the signal handler says it does, in the verb's own words: a batch
+/// verb writes what it has read and abandons the batch in flight on a
+/// second signal; a release finishes the stack in hand and, on a second
+/// signal, ends the converter and gives the stack up (Wave 7b, the
+/// maintenance track).
+#[derive(Clone, Copy)]
+enum Stopping {
+    Batch,
+    Release,
+}
+
+impl Stopping {
+    fn first(self) -> &'static str {
+        match self {
+            Stopping::Batch => {
+                "nils: stopping: what is read is written, then the job ends \
+                 (a second signal abandons the batch in flight)"
+            }
+            Stopping::Release => {
+                "nils: stopping: the stack in hand is finished, then the release ends \
+                 (a second signal ends the converter and gives the stack up)"
+            }
+        }
+    }
+
+    fn second(self) -> &'static str {
+        match self {
+            Stopping::Batch => "nils: aborting: the batch in flight is abandoned",
+            Stopping::Release => {
+                "nils: aborting: the converter is ended and the stack in hand is given up"
+            }
+        }
+    }
+}
+
 /// The token a run is asked to stop through (§10): one signal asks for a
-/// stop, a second for an abort. SIGINT and SIGTERM both count.
-fn stop_on_signal() -> Result<Cancel, Exit> {
+/// stop, a second for an abort. SIGINT and SIGTERM both count. `saying`
+/// is what each signal is answered with on stderr.
+fn stop_on_signal(saying: Stopping) -> Result<Cancel, Exit> {
     let cancel = Cancel::new();
     let token = cancel.clone();
     let mut asked = 0u8;
@@ -5723,11 +5759,8 @@ fn stop_on_signal() -> Result<Cancel, Exit> {
         token.request();
         asked = asked.saturating_add(1);
         match asked {
-            1 => eprintln!(
-                "nils: stopping: what is read is written, then the job ends \
-                 (a second signal abandons the batch in flight)"
-            ),
-            2 => eprintln!("nils: aborting: the batch in flight is abandoned"),
+            1 => eprintln!("{}", saying.first()),
+            2 => eprintln!("{}", saying.second()),
             _ => {}
         }
     })
@@ -6121,7 +6154,7 @@ fn preview_command(home: &Home, command: PreviewCommand) -> Result<(), Exit> {
         },
     )
     .map_err(|e| fail(e.to_string()))?;
-    let cancel = stop_on_signal()?;
+    let cancel = stop_on_signal(Stopping::Batch)?;
     let total = stacks.len();
     let mut go_on = |store: &mut nils_registry::Store, so_far: &crate::preview::Many| {
         let done = so_far.built.len() + so_far.current.len() + so_far.failed.len();
@@ -10478,7 +10511,7 @@ fn jobs_command(home: &Home, command: JobsCommand) -> Result<(), Exit> {
                 },
                 other => fail(other.to_string()),
             })?;
-            let cancel = stop_on_signal()?;
+            let cancel = stop_on_signal(Stopping::Batch)?;
             crate::worker::run(
                 home,
                 store,
@@ -12085,12 +12118,37 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
         authors: &args.author,
         observations: &args.observation,
     };
-    let report = run::run(&mut registry, &settings).map_err(|e| match e {
-        run::Error::Refused(m) => usage(m),
-        other => fail(other.to_string()),
-    })?;
+    // Wave 7b (the maintenance track): Ctrl-C or a termination stops the
+    // release as a cancel on its job does, at the top of the next stack,
+    // with the stack in hand whole; a second signal aborts, and the stack
+    // in hand is given up too.
+    let cancel = stop_on_signal(Stopping::Release)?;
+    let stop = || {
+        if cancel.abort() {
+            run::Asked::Abort
+        } else if cancel.stop() {
+            run::Asked::Stop
+        } else {
+            run::Asked::Nothing
+        }
+    };
+    let report = run::run_with(&mut registry, &settings, Some(&stop), &mut |_, _, _| {}).map_err(
+        |e| match e {
+            run::Error::Refused(m) => usage(m),
+            other => fail(other.to_string()),
+        },
+    )?;
 
     let converter_path = converter.as_ref().map(|c| c.path.display().to_string());
+    // Wave 7b (the maintenance track): a release asked to stop printed its
+    // report and exits as every stopped verb does, so the worker and the
+    // keyboard read it as stopped and not as failed.
+    let stopped = || {
+        report.stopped_after.map(|_| Exit {
+            code: STOPPED,
+            message: run::STOPPED.to_string(),
+        })
+    };
     if args.json {
         let mut doc =
             serde_json::to_value(&report).map_err(|e| fail(format!("will not serialize: {e}")))?;
@@ -12101,13 +12159,22 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
             serde_json::to_string_pretty(&doc)
                 .map_err(|e| fail(format!("will not serialize: {e}")))?
         );
-        return Ok(());
+        return stopped().map_or(Ok(()), Err);
     }
     println!(
         "release {} version {} ({}, {})",
         report.name, report.version, report.layout, report.policy
     );
     println!("  into             {}", report.root);
+    if let Some(line) = &report.lock_taken_over {
+        println!("  lock             {line}");
+    }
+    if let Some(n) = report.stopped_after {
+        println!(
+            "  stopped          {}; run the release again to go on",
+            run::stopped_words(n, &report)
+        );
+    }
     // Record 37 S7: what the names carry, which the row records too.
     println!(
         "  names            {}",
@@ -12350,7 +12417,7 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
     // version that wrote no file changed no tag, and says nothing here.
     if report.changes.is_empty() {
         println!("  {:.1} s", report.seconds);
-        return Ok(());
+        return stopped().map_or(Ok(()), Err);
     }
     println!("  what changed");
     let mut changes: Vec<(&String, &i64)> = report.changes.iter().collect();
@@ -12362,7 +12429,7 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
         println!("      {:>10}   more, in release_change", changes.len() - 8);
     }
     println!("  {:.1} s", report.seconds);
-    Ok(())
+    stopped().map_or(Ok(()), Err)
 }
 
 /// `nils release --withdraw VERSION --why TEXT` (Wave 4a section 13.1): the
@@ -12376,8 +12443,12 @@ fn release_withdraw(home: &Home, name: &str, version: &str, why: &str) -> Result
     let mut registry = open(home)?;
     let store = registry.store();
     let d = store.dialect();
+    // a release that stopped or died left its row unfinished under the
+    // version number its next run goes on with: the version is the finished
+    // row
     let sql = format!(
-        "SELECT id, withdrawn_at IS NOT NULL FROM {} WHERE name = {} AND version = {}",
+        "SELECT id, withdrawn_at IS NOT NULL FROM {} WHERE name = {} AND version = {} \
+         AND finished_at IS NOT NULL",
         store.qualified("release"),
         d.param(1, Type::Text),
         d.param(2, Type::Text)
@@ -12433,6 +12504,7 @@ fn releases_doc(
     let policies = text_of(store, "release", "policies");
     let scheme = text_of(store, "release", "session_scheme");
     let pick_rules = text_of(store, "release", "pick_rules");
+    let finished = text_of(store, "release", "finished_at");
     let mut wheres = String::new();
     let mut params: Vec<Param> = Vec::new();
     if let Some(name) = name {
@@ -12447,7 +12519,8 @@ fn releases_doc(
     let sql = format!(
         "SELECT id, name, version, root, {started}, files, subjects, unchanged, moved, rewritten, \
          added, removed, layout, actor, {withdrawn}, withdrawn_by, withdrawn_why, {policy}, \
-         {policies}, {scheme}, session_naming, categories, naming, purpose, {pick_rules} \
+         {policies}, {scheme}, session_naming, categories, naming, purpose, {pick_rules}, \
+         {finished}, error \
          FROM {}{wheres} ORDER BY id DESC LIMIT {}",
         store.qualified("release"),
         limit.max(1)
@@ -12517,6 +12590,17 @@ fn releases_doc(
                 // 6, carried to releases, `frozen`, what it kept of them,
                 // which every reader of its picks after it reads
                 "picks": json(r.opt_text(24)?),
+                // Wave 7b (the maintenance track): a row without a finish is
+                // no version. One whose `error` begins with the stopped words
+                // was asked to stop and did, after some of its stacks; the
+                // next run of the release goes on with it under the same
+                // number. One whose error says the converter could not be
+                // run failed (the next run goes on with it too), and one
+                // without a word died: neither is `stopped`.
+                "finished_at": r.opt_text(25)?,
+                "error": r.opt_text(26)?,
+                "stopped": r.opt_text(25)?.is_none()
+                    && r.opt_text(26)?.is_some_and(nils_release::run::is_stopped),
             }))
         })
         .collect::<Result<_, nils_registry::Error>>()?;
@@ -12581,6 +12665,10 @@ struct Version {
     counts: [i64; 5],
     /// Record 55, decision 6: the main scans it read, where it read any.
     picks: Option<serde_json::Value>,
+    /// Whether the row finished: an unfinished one is no version.
+    finished: bool,
+    /// What the row says went wrong, or that it stopped.
+    error: Option<String>,
 }
 
 /// What a release read of the main scans, in words, for its history: the
@@ -12667,9 +12755,10 @@ fn history(home: &Home, args: &ReleaseArgs) -> Result<(), Exit> {
             .expect("release.started_at is a column"),
     );
     let pick_rules = text_of(store, "release", "pick_rules");
+    let finished = text_of(store, "release", "finished_at");
     let sql = format!(
         "SELECT id, name, version, root, {started}, files, unchanged, moved, rewritten, added, \
-         removed, {pick_rules} FROM {}{wheres} ORDER BY id",
+         removed, {pick_rules}, {finished}, error FROM {}{wheres} ORDER BY id",
         store.qualified("release"),
     );
     let rows = store
@@ -12697,6 +12786,11 @@ fn history(home: &Home, args: &ReleaseArgs) -> Result<(), Exit> {
                 .opt_text(11)
                 .map_err(|e| fail(e.to_string()))?
                 .and_then(|t| serde_json::from_str(t).ok()),
+            finished: r.opt_text(12).map_err(|e| fail(e.to_string()))?.is_some(),
+            error: r
+                .opt_text(13)
+                .map_err(|e| fail(e.to_string()))?
+                .map(str::to_string),
         });
     }
     let mut last_name = String::new();
@@ -12708,7 +12802,18 @@ fn history(home: &Home, args: &ReleaseArgs) -> Result<(), Exit> {
         }
         let when = v.started.split('T').next().unwrap_or(&v.started);
         let (version, files) = (&v.version, v.files);
-        println!("  {version:<16} {when}   {files:>9} files in the tree");
+        // Wave 7b (the maintenance track): a row without a finish is no
+        // version, and says why it is not (stopped, failed, or no word)
+        match (v.finished, &v.error) {
+            (true, _) => println!("  {version:<16} {when}   {files:>9} files in the tree"),
+            (false, Some(why)) => match nils_release::run::why_failed(why) {
+                Some(failed) => {
+                    println!("  {version:<16} {when}   not a version: failed ({failed})")
+                }
+                None => println!("  {version:<16} {when}   not a version: {why}"),
+            },
+            (false, None) => println!("  {version:<16} {when}   not a version: did not finish"),
+        }
         if let Some(p) = &v.picks {
             println!("      main scans   {}", picks_line(p));
         }

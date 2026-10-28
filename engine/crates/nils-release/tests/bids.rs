@@ -2670,3 +2670,63 @@ fn each_stack_of_an_enhanced_file_is_converted_from_its_own_frames() {
         );
     }
 }
+
+/// Wave 7b (the maintenance track): a stale file of our own, left in the
+/// tree by a run a hard kill ended before the state could say so, is
+/// replaced when the stack is written, not refused. dcm2niix finds the name
+/// taken and appends its letter suffix otherwise, and the stack would be
+/// refused for ever: a planted `stem.nii.gz` for an added stack goes before
+/// the conversion, and the tree comes out as it would have without it.
+#[test]
+fn a_stale_file_of_our_own_is_replaced_and_not_refused() {
+    let Some(converter) = converter() else { return };
+    // the tree as a run makes it, to learn the names
+    let source = tree();
+    let home_dir = TempDir::new("bids-home");
+    let out = TempDir::new("bids-out");
+    let (_reg, report) = released(&source, &home_dir, &out, &converter);
+    assert_eq!(report.refused.len(), 0, "{report:?}");
+    let files = files_under(out.path());
+    let image = files
+        .iter()
+        .find(|f| f.contains("/anat/") && f.ends_with("_T1w.nii.gz"))
+        .expect("a T1w image")
+        .clone();
+
+    // the same release into a folder that holds the stale image already: a
+    // fresh registry, so the state holds nothing for the stack
+    let home_dir = TempDir::new("bids-home-again");
+    let stale = TempDir::new("bids-out-stale");
+    let planted = stale.path().join(&image);
+    std::fs::create_dir_all(planted.parent().unwrap()).unwrap();
+    std::fs::write(&planted, b"half an image a killed run left").unwrap();
+    let (_reg, again) = released(&source, &home_dir, &stale, &converter);
+    assert_eq!(again.refused.len(), 0, "{again:?}");
+    assert_eq!(again.added, report.added);
+    // the same tree, no letter suffix (the files under `sourcedata/` are
+    // numbered in the order a registry read them, so those are compared by
+    // their folders)
+    let shape = |files: &[String]| -> Vec<String> {
+        let mut shape: Vec<String> = files
+            .iter()
+            .map(|f| match f.starts_with("sourcedata/") {
+                true => f
+                    .rsplit_once('/')
+                    .map_or(f.clone(), |(dir, _)| format!("{dir}/")),
+                false => f.clone(),
+            })
+            .collect();
+        shape.dedup();
+        shape
+    };
+    assert_eq!(
+        shape(&files_under(stale.path())),
+        shape(&files),
+        "the same tree, no letter suffix"
+    );
+    assert_ne!(
+        std::fs::read(&planted).unwrap(),
+        b"half an image a killed run left",
+        "the stale file was replaced"
+    );
+}
