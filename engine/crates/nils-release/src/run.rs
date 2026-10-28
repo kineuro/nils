@@ -289,6 +289,12 @@ pub struct Report {
     /// its end.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub removed_before_stop: Option<i64>,
+    /// Wave 7b (the maintenance track): of a release that stopped because
+    /// its folder's lock was lost between two beats (another release took
+    /// the folder over, or the file was removed or written over), to whom
+    /// or how, in one line. The stopped words carry it. Absent otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lock_lost: Option<String>,
 }
 
 /// Which of the two layouts of §9 a release writes.
@@ -405,13 +411,21 @@ pub enum Error {
     Store(StoreError),
     Refused(String),
     Io(std::io::Error),
+    /// The release stopped by itself, not asked to (Wave 7b, the
+    /// maintenance track): the converter could not be run any more
+    /// although the preflight found it. The words name the cause and after
+    /// how many stacks; the stacks done are recorded, the row is left
+    /// unfinished with the words, the job fails with them, and the next run
+    /// goes on under the same version. A failure, not a misuse: the command
+    /// line exits as it does for one.
+    Stopped(String),
 }
 
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Error::Store(e) => write!(f, "{e}"),
-            Error::Refused(m) => f.write_str(m),
+            Error::Refused(m) | Error::Stopped(m) => f.write_str(m),
             Error::Io(e) => write!(f, "{e}"),
         }
     }
@@ -542,18 +556,74 @@ struct Wrote {
 /// its word (Wave 7b, the maintenance track).
 pub const STOPPED: &str = "stopped: what was written stays written; run the release again to go on";
 
-/// What a stopped release's row says, and the command's stopped line: after
-/// how many of its stacks it stopped, and, where files of the version
-/// before were removed before the stop (stacks that left the selection),
-/// how many stacks' files were.
-pub fn stopped_words(after: i64, report: &Report) -> String {
+/// How the row of a release that was asked to stop begins its `error`: the
+/// one mark of a stopped release, which `GET /api/releases` reads as
+/// `stopped` and the next run reads to go on under the same version.
+pub const STOPPED_WORDS: &str = "stopped after";
+
+/// How the row of a release that stopped because its converter could not be
+/// run any more begins its `error` ([`Error::Stopped`]): a failure, not a
+/// stop asked for, which the next run goes on with all the same.
+pub const CONVERTER_GONE_WORDS: &str = "dcm2niix could not be run";
+
+/// What the stopped words say of a stop that wrote and removed nothing: the
+/// folder is the version before, whole, and a handover of it goes on.
+pub const WROTE_NOTHING: &str = "stopped before anything was written";
+
+/// Whether a release row's `error` says it was asked to stop and did.
+pub fn is_stopped(error: &str) -> bool {
+    error.starts_with(STOPPED_WORDS)
+}
+
+/// Whether a release row's `error` is one the next run of the release goes
+/// on with under the same version: asked to stop, or the converter gone.
+pub fn goes_on(error: &str) -> bool {
+    is_stopped(error) || error.starts_with(CONVERTER_GONE_WORDS)
+}
+
+/// Where files of the version before were removed before the stop (stacks
+/// that left the selection, stacks rewritten to another place), how many
+/// stacks' files were; and where the folder's lock was lost, to whom.
+fn stop_details(report: &Report) -> String {
     let removed = match report.removed_before_stop.unwrap_or(report.removed) {
         0 => String::new(),
         n => format!("; {n} stacks' files of the version before were removed"),
     };
+    let lost = match &report.lock_lost {
+        Some(lost) => format!("; {lost}"),
+        None => String::new(),
+    };
+    format!("{removed}{lost}")
+}
+
+/// What a stopped release's row says, and the command's stopped line: after
+/// how many of its stacks it stopped, and what else there is to say
+/// ([`stop_details`]). A stop that wrote and removed nothing says so
+/// ([`WROTE_NOTHING`]), so a handover of the folder, which is the version
+/// before, whole, goes on.
+pub fn stopped_words(after: i64, report: &Report) -> String {
+    let wrote_nothing = after == 0 && report.removed_before_stop.unwrap_or(report.removed) == 0;
+    let details = stop_details(report);
+    match wrote_nothing {
+        true => format!(
+            "{STOPPED_WORDS} 0 of {} stacks{details}; {WROTE_NOTHING}",
+            report.stacks
+        ),
+        false => format!(
+            "{STOPPED_WORDS} {after} of {} stacks{details}; what was written stays written",
+            report.stacks
+        ),
+    }
+}
+
+/// What the row of a release whose converter could not be run any more
+/// says ([`Error::Stopped`]): why, after how many stacks, and what else
+/// there is to say, as [`stopped_words`] says it.
+fn converter_gone_words(why: &str, after: i64, report: &Report) -> String {
     format!(
-        "stopped after {after} of {} stacks{removed}; what was written stays written",
-        report.stacks
+        "{why}: the release stopped after {after} of {} stacks{}",
+        report.stacks,
+        stop_details(report)
     )
 }
 
@@ -728,6 +798,10 @@ struct Heart<'a> {
     /// The command line asked for an abort: read at every tick, and the
     /// stack in hand is given up.
     aborted: bool,
+    /// The folder's lock was found to be another's, gone or written over at
+    /// a beat: the folder is no longer this release's to write, which is
+    /// read as an abort, and the words say to whom it was lost.
+    lost: Option<String>,
 }
 
 /// The lock, held for as long as this lives: taken after the preflight,
@@ -774,6 +848,7 @@ impl<'a> Heart<'a> {
             stop,
             cancelled: false,
             aborted: false,
+            lost: None,
         }
     }
 
@@ -824,7 +899,11 @@ impl<'a> Heart<'a> {
 
     /// Beat now, the job's row and the folder's lock both. A beat the store
     /// refuses is let go, as every verb lets it go: the release is not
-    /// stopped by a hiccup in writing its own pulse.
+    /// stopped by a hiccup in writing its own pulse. A lock that is no
+    /// longer this release's (another release took the folder over, or the
+    /// file was removed or written over) is read as an abort: the stack in
+    /// hand is given up, nothing more is written, and the other's lock is
+    /// left as it is.
     fn beat(&mut self, store: &mut Store, doing: &str) {
         self.last = std::time::Instant::now();
         self.beats += 1;
@@ -833,8 +912,12 @@ impl<'a> Heart<'a> {
         {
             self.cancelled = true;
         }
-        if self.held {
-            crate::lock::beat(&self.root, &mut self.lock);
+        if self.held
+            && let Err(lost) = crate::lock::beat(&self.root, &mut self.lock)
+        {
+            self.lost.get_or_insert_with(|| lost.to_string());
+            self.cancelled = true;
+            self.aborted = true;
         }
         self.asked();
     }
@@ -1489,6 +1572,9 @@ fn run_release(
     // And only now is anything written.
     let mut rows: Vec<Vec<Param>> = Vec::new();
     let mut moves: Vec<Vec<Param>> = Vec::new();
+    // why the converter could not be run any more, where that stopped the
+    // release (Wave 7b, the maintenance track)
+    let mut converter_gone: Option<String> = None;
     let mut scans: BTreeMap<(String, String), Vec<crate::bids::dataset::Scan>> = BTreeMap::new();
     for job in &mut jobs {
         // Wave 7b (the maintenance track): asked to stop, the release writes
@@ -1618,40 +1704,38 @@ fn run_release(
                         }
                         if heart.asked() {
                             report.stopped_after.get_or_insert(heart.done);
+                            if leaving.contains(&job.stack) {
+                                *report.removed_before_stop.get_or_insert(0) += 1;
+                            }
                             continue;
                         }
                         *report.refused.entry(why).or_insert(0) += 1;
                         heart.done += 1;
-                        heart.beat(registry.store(), "write");
+                        heart.tick(registry.store(), "write");
                         watch(registry.store(), job_id, heart.done);
                         continue;
                     }
                     Outcome::ConverterGone(why) => {
                         // The converter cannot be run at all, so the release
-                        // stops with the error: what the stacks done wrote is
-                        // recorded, nothing of this one or of those after it,
-                        // and the row is left unfinished with the words, as a
-                        // stopped release's is, so the next run goes on under
-                        // the same version.
+                        // stops here as a stop asked for would: nothing of
+                        // this stack or of those after it is written, the
+                        // bookkeeping after the loop records what the stacks
+                        // done wrote and what left the version, and the row
+                        // is left unfinished with the words, so the next run
+                        // goes on under the same version; the run ends as a
+                        // failure with the words ([`Error::Stopped`]).
                         job.instances.clear();
                         if in_place {
                             std::fs::remove_dir_all(&scratch).ok();
                             prune(settings.root, scratch.parent());
                         }
-                        let words = format!(
-                            "{why}: the release stopped after {} of {} stacks",
-                            heart.done, report.stacks
-                        );
-                        upsert_state(registry.store(), &rows)?;
-                        write_rows(
-                            registry.store(),
-                            "release_move",
-                            &["release_id", "stack_id", "action", "was", "now"],
-                            &moves,
-                        )?;
-                        forget_plan(registry.store(), report.release_id)?;
-                        close_row(registry.store(), &report, Some(&words))?;
-                        return Err(Error::Refused(words));
+                        report.stopped_after.get_or_insert(heart.done);
+                        if leaving.contains(&job.stack) {
+                            *report.removed_before_stop.get_or_insert(0) += 1;
+                        }
+                        heart.cancelled = true;
+                        converter_gone.get_or_insert(why);
+                        continue;
                     }
                 };
                 if in_place && let Some(was) = &job.was {
@@ -1761,18 +1845,17 @@ fn run_release(
             rows.clear();
         }
         heart.done += 1;
-        if job.change.is_work() {
-            heart.beat(registry.store(), "write");
-        } else {
-            heart.tick(registry.store(), "write");
-        }
+        // the heart ticks, and beats once its interval has passed: the
+        // row's `done` may lag a stack or two for at most that long, and
+        // the beat after the loop makes it exact
+        heart.tick(registry.store(), "write");
         watch(registry.store(), job_id, heart.done);
     }
-    // One beat more, so a cancel set while the last stacks were in hand, or
-    // while every stack left needed no work and none beat, is read; and a
-    // cancel in by now still ends the release as stopped, after every stack
-    // it handled: a stop the person asked for is never turned into a done
-    // release.
+    // One beat more, so the final progress is exact, a cancel set while the
+    // last stacks were in hand, or while every stack left needed no work, is
+    // read, and a cancel in by now still ends the release as stopped, after
+    // every stack it handled: a stop the person asked for is never turned
+    // into a done release.
     heart.beat(registry.store(), "finish");
     if heart.asked() {
         report.stopped_after.get_or_insert(heart.done);
@@ -1888,11 +1971,20 @@ fn run_release(
     forget_plan(registry.store(), report.release_id)?;
     // the row of a stopped release keeps what it did and says in its error
     // that it stopped, as the job's row does, and is left unfinished: a
-    // stopped release is not a version
-    let stopped = report.stopped_after.map(|n| stopped_words(n, &report));
+    // stopped release is not a version; one whose converter could not be
+    // run any more says why, and the run fails with the same words
+    report.lock_lost = heart.lost.clone();
+    let stopped = match (&converter_gone, report.stopped_after) {
+        (Some(why), Some(n)) => Some(converter_gone_words(why, n, &report)),
+        (None, Some(n)) => Some(stopped_words(n, &report)),
+        _ => None,
+    };
     close_row(registry.store(), &report, stopped.as_deref())?;
     report.seconds = started.elapsed().as_secs_f64();
-    Ok(report)
+    match (converter_gone, stopped) {
+        (Some(_), Some(words)) => Err(Error::Stopped(words)),
+        _ => Ok(report),
+    }
 }
 
 /// How many plan rows and state rows are written at once.
@@ -3255,10 +3347,11 @@ fn newest_version(store: &mut Store, dataset: i64) -> Result<Option<Earlier>, Er
 }
 
 /// The version of a release stopped since the newest finished one, whose
-/// row is unfinished and says so in its `error`, and which the next run
-/// goes on with (Wave 7b, the maintenance track). A row left unfinished
-/// without a word is a release that died, which is no version to go on
-/// with: the next run numbers its own.
+/// row is unfinished and says so in its `error` (asked to stop, or its
+/// converter gone: [`goes_on`]), and which the next run goes on with (Wave
+/// 7b, the maintenance track). A row left unfinished without such a word
+/// is a release that died, which is no version to go on with: the next run
+/// numbers its own.
 fn stopped_version(
     store: &mut Store,
     dataset: i64,
@@ -3266,17 +3359,19 @@ fn stopped_version(
 ) -> Result<Option<String>, Error> {
     let d = store.dialect();
     let sql = format!(
-        "SELECT version FROM {} WHERE dataset_id = {} AND id > {} AND finished_at IS NULL \
-         AND error IS NOT NULL ORDER BY id DESC LIMIT 1",
+        "SELECT version, error FROM {} WHERE dataset_id = {} AND id > {} AND finished_at IS NULL \
+         AND error IS NOT NULL ORDER BY id DESC",
         store.qualified("release"),
         d.param(1, Type::Int),
         d.param(2, Type::Int),
     );
     let after = earlier.map_or(0, |e| e.id);
-    Ok(store
-        .query_opt(&sql, &[Param::Int(dataset), Param::Int(after)])?
-        .map(|r| r.text(0).map(str::to_string))
-        .transpose()?)
+    for r in store.query(&sql, &[Param::Int(dataset), Param::Int(after)])? {
+        if goes_on(r.text(1)?) {
+            return Ok(Some(r.text(0)?.to_string()));
+        }
+    }
+    Ok(None)
 }
 
 /// Rename every moved stack's files, and say which arrived.

@@ -193,11 +193,20 @@ fn the_release_job(reg: &mut Registry) -> job::Job {
     found.remove(0)
 }
 
-/// (a) The job's row moves with every stack: the heartbeat is later after
-/// the second stack than after the first, and the progress names the
-/// stacks done of the stacks planned and the version being written.
+/// How long the heart goes between two beats at most, and a little: a
+/// watch that sleeps this long makes the tick after the next stack beat.
+fn past_the_hearts_interval() -> std::time::Duration {
+    std::time::Duration::from_millis(job::fresh_secs() * 1000 / 12 + 100)
+}
+
+/// (a) The job's row moves with the release: the heart ticks after every
+/// stack and beats once its interval has passed, so the row's progress
+/// names the stacks done so far (lagging at most one interval, never
+/// ahead), the stacks planned and the version being written, the heartbeat
+/// is later after the interval than before it, and the beat after the last
+/// stack makes the final progress exact.
 #[test]
-fn the_release_beats_its_heart_once_per_stack_with_the_stacks_done() {
+fn the_release_beats_its_heart_through_the_stacks_and_the_final_progress_is_exact() {
     let source = tree(3);
     let home_dir = TempDir::new("one-writer-home");
     let out = TempDir::new("one-writer-out");
@@ -213,8 +222,9 @@ fn the_release_beats_its_heart_once_per_stack_with_the_stacks_done() {
             let j = job::show(store, job_id).unwrap().unwrap();
             seen.push((done, j.heartbeat_at.unwrap(), j.progress.unwrap()));
             if done == 1 {
-                // the stamps are whole seconds: let one pass
-                std::thread::sleep(std::time::Duration::from_millis(1100));
+                // past the heart's interval, so the tick after the second
+                // stack beats (and the stamps, whole seconds, move)
+                std::thread::sleep(past_the_hearts_interval());
             }
         },
     )
@@ -224,30 +234,40 @@ fn the_release_beats_its_heart_once_per_stack_with_the_stacks_done() {
     assert_eq!(report.stopped_after, None);
     assert_eq!(seen.len(), 3, "{seen:?}");
     for (done, _, progress) in &seen {
-        assert_eq!(progress["done"], *done, "{progress}");
+        assert!(
+            progress["done"].as_i64().is_some_and(|d| d <= *done),
+            "never ahead: {progress}"
+        );
         assert_eq!(progress["stacks"], 3, "{progress}");
         assert_eq!(progress["version"], report.version, "{progress}");
-        assert_eq!(progress["do"], "write", "{progress}");
-        assert!(
-            progress["beats"].as_i64().is_some_and(|b| b >= *done),
-            "{progress}"
-        );
     }
+    // the first tick inside the second stack beat, past the interval: the
+    // row says one done and writing, a stack behind until the next beat
+    assert_eq!(seen[1].2["done"], 1, "{:?}", seen[1]);
+    assert_eq!(seen[1].2["do"], "write", "{:?}", seen[1]);
+    assert!(
+        seen[1].2["beats"].as_i64() > seen[0].2["beats"].as_i64(),
+        "{seen:?}"
+    );
     assert!(seen[1].1 > seen[0].1, "the heartbeat moved: {seen:?}");
     let j = the_release_job(&mut reg);
     assert_eq!(j.state, State::Done);
-    assert_eq!(j.progress.unwrap()["done"], 3);
+    let last = j.progress.unwrap();
+    assert_eq!(last["done"], 3, "{last}");
+    assert_eq!(last["do"], "finish", "{last}");
     // (e) and the lock is gone once the release is over
     assert_eq!(lock::read(out.path()), None);
     assert_eq!(files_under(out.path()).len(), 3);
 }
 
-/// (b) A cancel set on the row while the second stack is in hand stops the
-/// release after that stack: the job ends cancelled with the words, the two
-/// stacks written are whole, the rest were not written, the report says it
-/// stopped, the lock is gone; the release's row is left unfinished with the
-/// stopped words, so it is not the newest finished version; and the next
-/// run writes the rest under the same version number and finishes it.
+/// (b) A cancel set on the row after the first stack is read at the next
+/// beat, which the tick after the second stack is once the heart's
+/// interval has passed, and stops the release after that stack: the job
+/// ends cancelled with the words, the two stacks written are whole, the
+/// rest were not written, the report says it stopped, the lock is gone; the
+/// release's row is left unfinished with the stopped words, so it is not
+/// the newest finished version; and the next run writes the rest under the
+/// same version number and finishes it.
 #[test]
 fn a_cancel_stops_the_release_after_the_stack_in_hand_and_the_next_run_goes_on() {
     let source = tree(4);
@@ -264,6 +284,7 @@ fn a_cancel_stops_the_release_after_the_stack_in_hand_and_the_next_run_goes_on()
             if done == 1 {
                 let now = job::request_cancel(store, job_id).unwrap();
                 assert_eq!(now, Some(State::Cancelling));
+                std::thread::sleep(past_the_hearts_interval());
             }
         },
     )
@@ -449,7 +470,7 @@ fn a_stop_in_before_the_compare_stops_there() {
     let (error, finished) = row_of(&mut reg, report.release_id);
     assert_eq!(
         error.as_deref(),
-        Some("stopped after 0 of 2 stacks; what was written stays written")
+        Some("stopped after 0 of 2 stacks; stopped before anything was written")
     );
     assert_eq!(finished, None);
     assert_eq!(lock::read(out.path()), None);
@@ -1009,7 +1030,7 @@ fn an_abort_mid_rewrite_leaves_the_old_files_or_the_new_never_neither() {
     let (error, finished) = row_of(&mut reg, report.release_id);
     assert_eq!(
         error.as_deref(),
-        Some("stopped after 0 of 2 stacks; what was written stays written")
+        Some("stopped after 0 of 2 stacks; stopped before anything was written")
     );
     assert_eq!(finished, None);
 

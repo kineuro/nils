@@ -574,6 +574,61 @@ fn a_folder_a_newer_release_stopped_in_or_holds_a_lock_is_not_handed_over() {
         handover::refusal_for(reg.store(), "a cohort").unwrap(),
         None
     );
+
+    // a newer release that stopped at the compare wrote and removed
+    // nothing: the folder is the version still, and the handover goes on
+    let at_once = || Asked::Stop;
+    let nothing = run::run_with(&mut reg, &release, Some(&at_once), &mut |_, _, _| {
+        panic!("no stack is handled")
+    })
+    .unwrap();
+    assert_eq!(nothing.stopped_after, Some(0), "{nothing:?}");
+    assert_eq!((nothing.removed, nothing.written), (0, 0));
+    let words = {
+        let store = reg.store();
+        let sql = format!(
+            "SELECT error FROM {} WHERE id = {}",
+            store.qualified("release"),
+            nothing.release_id
+        );
+        let r = store.query_opt(&sql, &[]).unwrap().unwrap();
+        r.opt_text(0).unwrap().unwrap().to_string()
+    };
+    assert_eq!(
+        words,
+        "stopped after 0 of 2 stacks; stopped before anything was written"
+    );
+    assert_eq!(
+        handover::refusal_for(reg.store(), "a cohort").unwrap(),
+        None,
+        "a stop that wrote nothing refuses no handover"
+    );
+    // the handover itself gets past the folder (the stand-in archiver packs
+    // nothing, so what it says after is its own and not the folder's)
+    if let Err(e) = handover::run(&mut reg, &s) {
+        let e = e.to_string();
+        assert!(!e.contains("the folder holds"), "{e}");
+    }
+    // a row without a finish and without a word is a release at it, or
+    // one that died at it: the handover waits
+    {
+        let store = reg.store();
+        let sql = format!(
+            "UPDATE {} SET error = NULL WHERE id = {}",
+            store.qualified("release"),
+            nothing.release_id
+        );
+        store.execute(&sql, &[]).unwrap();
+    }
+    assert_eq!(
+        handover::refusal_for(reg.store(), "a cohort")
+            .unwrap()
+            .as_deref(),
+        Some(
+            "the folder holds a release that is running or died here; wait for it or run it \
+             again before handing it over"
+        )
+    );
     // and a release nobody finished refuses nothing here: the handover
     // itself says there is no finished release
     assert_eq!(

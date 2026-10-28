@@ -386,7 +386,7 @@ pub fn take(root: &Path, lock: &Lock, over: Option<&TakenOver>) -> Result<(), No
         Ok(file) => file,
         Err(e) => {
             if let Some(mine) = &aside {
-                std::fs::remove_file(mine).ok();
+                remove_aside(mine);
             }
             return Err(match e.kind() {
                 std::io::ErrorKind::AlreadyExists => NotTaken::Theirs(settled(root)),
@@ -400,7 +400,7 @@ pub fn take(root: &Path, lock: &Lock, over: Option<&TakenOver>) -> Result<(), No
     drop(file);
     // the one `check` saw is of no further use once ours is in place
     if let Some(mine) = &aside {
-        std::fs::remove_file(mine).ok();
+        remove_aside(mine);
     }
     written.map_err(NotTaken::Io)?;
     // Ours, and nobody else's, before a byte of the release is written. A
@@ -414,6 +414,18 @@ pub fn take(root: &Path, lock: &Lock, over: Option<&TakenOver>) -> Result<(), No
         }
     }
     Err(NotTaken::Theirs(None))
+}
+
+/// Take away what was put aside: a file, or a directory that stood at the
+/// lock's name (which `check` saw as a lock that cannot be read, and took
+/// over once it was old), which `remove_file` refuses. Nothing is reported:
+/// what was put aside is nobody's by now.
+fn remove_aside(path: &Path) {
+    if let Err(e) = std::fs::remove_file(path)
+        && e.kind() == std::io::ErrorKind::IsADirectory
+    {
+        std::fs::remove_dir_all(path).ok();
+    }
 }
 
 /// A name of this taker's own for the lock it puts out of the way: in the
@@ -455,19 +467,58 @@ fn rewrite(root: &Path, lock: &Lock) -> std::io::Result<()> {
     std::fs::rename(&tmp, path(root))
 }
 
+/// How a release lost its folder's lock between two beats: the file names
+/// another release by now (one that took the folder over on a word this
+/// release's beats should have contradicted), is gone, or was written over
+/// with something that does not read. The release that lost it reads this
+/// as an abort: whatever it has in hand is given up, nothing more is
+/// written, and the other's lock is left as it is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Lost {
+    Theirs(Lock),
+    Gone,
+    Unreadable(String),
+}
+
+impl std::fmt::Display for Lost {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Lost::Theirs(lock) => write!(
+                f,
+                "the folder's lock was lost to release job {} on {}{}",
+                lock.job,
+                lock.host,
+                match &lock.registry {
+                    Some(r) => format!(", of registry {r}"),
+                    None => String::new(),
+                }
+            ),
+            Lost::Gone => f.write_str("the folder's lock was removed"),
+            Lost::Unreadable(why) => write!(
+                f,
+                "the folder's lock was written over and cannot be read ({why})"
+            ),
+        }
+    }
+}
+
 /// Move the lock's beat to now and write it again, where the file is still
-/// this release's (or gone, in which case it is put back). A lock that
-/// names another release by now is left as it is. A write that fails is
-/// let go, as a beat the store refuses is: the lock is a guard, and the
-/// release is not stopped by a hiccup in writing it.
-pub fn beat(root: &Path, lock: &mut Lock) {
+/// this release's. The answer says whether it is: a lock that names
+/// another release by now is left as it is, and a file that is gone is not
+/// put back, since either means the folder is no longer this release's to
+/// write ([`Lost`]). A write that fails is let go, as a beat the store
+/// refuses is: the lock is a guard, and the release is not stopped by a
+/// hiccup in writing it.
+pub fn beat(root: &Path, lock: &mut Lock) -> Result<(), Lost> {
     lock.beat_at = Some(now_iso());
     match found(root) {
-        Found::Lock(now) if !now.same_release(lock) => {}
-        Found::Unreadable { .. } => {}
-        _ => {
+        Found::Lock(now) if now.same_release(lock) => {
             rewrite(root, lock).ok();
+            Ok(())
         }
+        Found::Lock(theirs) => Err(Lost::Theirs(theirs)),
+        Found::Nothing => Err(Lost::Gone),
+        Found::Unreadable { why, .. } => Err(Lost::Unreadable(why)),
     }
 }
 
@@ -502,7 +553,7 @@ mod tests {
         let mut lock = a_lock(7);
         take(&root, &lock, None).unwrap();
         assert_eq!(read(&root), Some(lock.clone()));
-        beat(&root, &mut lock);
+        assert_eq!(beat(&root, &mut lock), Ok(()));
         let beaten = read(&root).unwrap();
         assert!(beaten.beat_at.is_some());
         assert_eq!(beaten, lock);
@@ -664,16 +715,81 @@ mod tests {
         assert_eq!(read(&root).map(|l| l.job), Some(4));
     }
 
+    /// A beat says when the lock is no longer this release's: another's
+    /// is left as it is, a file that is gone is not put back, one written
+    /// over with something that does not read is named.
     #[test]
-    fn a_beat_never_writes_over_another_releases_lock() {
+    fn a_beat_never_writes_over_another_releases_lock_and_says_it_was_lost() {
         let dir = nils_dicom::synth::TempDir::new("release-lock");
         let root = dir.path().join("tree");
         let mut mine = a_lock(1);
         take(&root, &mine, None).unwrap();
         release(&root, &mine);
+        assert_eq!(beat(&root, &mut mine), Err(Lost::Gone));
+        assert_eq!(read(&root), None, "not put back");
         let theirs = a_lock(2);
         take(&root, &theirs, None).unwrap();
-        beat(&root, &mut mine);
+        let lost = beat(&root, &mut mine);
+        assert_eq!(lost, Err(Lost::Theirs(theirs.clone())));
+        assert_eq!(
+            lost.unwrap_err().to_string(),
+            "the folder's lock was lost to release job 2 on h, of registry r"
+        );
         assert_eq!(read(&root), Some(theirs));
+        std::fs::write(path(&root), "{ not json").unwrap();
+        assert!(matches!(
+            beat(&root, &mut mine),
+            Err(Lost::Unreadable(why)) if why.contains("does not parse")
+        ));
+        assert_eq!(std::fs::read_to_string(path(&root)).unwrap(), "{ not json");
+    }
+
+    /// A directory at the lock's name is a lock that cannot be read: it
+    /// refuses while it is fresh, is taken over once it is old, and the
+    /// take-over puts it aside and takes it away, a directory or not.
+    #[test]
+    fn a_directory_at_the_locks_name_is_taken_over_once_old_and_taken_away() {
+        let dir = nils_dicom::synth::TempDir::new("release-lock");
+        let root = dir.path().join("tree");
+        std::fs::create_dir_all(path(&root)).unwrap();
+        std::fs::write(path(&root).join("inside"), "a file in it").unwrap();
+        let home = nils_dicom::synth::TempDir::new("release-lock-home");
+        let mut reg = {
+            let home = nils_registry::home::Home::new(home.path());
+            home.keys(None).add("k", b"a key of some length").unwrap();
+            home.init(&nils_registry::home::InitOptions {
+                backend: nils_registry::Backend::Sqlite,
+                dsn: None,
+                schema: None,
+                scheme: nils_registry::Scheme::Blake2b32,
+                key: "k".to_string(),
+                display_length: 12,
+                session_scheme: None,
+            })
+            .unwrap();
+            home.open().unwrap()
+        };
+        let fresh = check(reg.store(), "r", &root).unwrap_err();
+        assert!(
+            matches!(&fresh, Refusal::Refused(w) if w.contains("cannot be read") && w.contains("is a directory")),
+            "{fresh:?}"
+        );
+        // old: untouched for longer than the window
+        let long_ago =
+            std::time::SystemTime::now() - std::time::Duration::from_secs(job::fresh_secs() + 3600);
+        std::fs::File::open(path(&root))
+            .unwrap()
+            .set_modified(long_ago)
+            .unwrap();
+        let over = check(reg.store(), "r", &root).unwrap().expect("taken over");
+        assert!(over.was.starts_with("was untouched for"), "{over:?}");
+        assert_eq!(over.lock, None);
+        take(&root, &a_lock(5), Some(&over)).unwrap();
+        assert_eq!(read(&root).map(|l| l.job), Some(5));
+        let left: Vec<String> = std::fs::read_dir(&root)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(left, vec![FILE.to_string()], "{left:?}");
     }
 }

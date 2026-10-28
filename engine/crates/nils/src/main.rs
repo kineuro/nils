@@ -12558,13 +12558,16 @@ fn releases_doc(
                 // which every reader of its picks after it reads
                 "picks": json(r.opt_text(24)?),
                 // Wave 7b (the maintenance track): a row without a finish is
-                // no version. One with the stopped words in `error` was
-                // asked to stop and did, after some of its stacks; the next
-                // run of the release goes on with it under the same number.
-                // One without a word died.
+                // no version. One whose `error` begins with the stopped words
+                // was asked to stop and did, after some of its stacks; the
+                // next run of the release goes on with it under the same
+                // number. One whose error says the converter could not be
+                // run failed (the next run goes on with it too), and one
+                // without a word died: neither is `stopped`.
                 "finished_at": r.opt_text(25)?,
                 "error": r.opt_text(26)?,
-                "stopped": r.opt_text(25)?.is_none() && r.opt_text(26)?.is_some(),
+                "stopped": r.opt_text(25)?.is_none()
+                    && r.opt_text(26)?.is_some_and(nils_release::run::is_stopped),
             }))
         })
         .collect::<Result<_, nils_registry::Error>>()?;

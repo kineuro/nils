@@ -437,22 +437,22 @@ fn output_ticking(
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) => {}
-            Err(e) => {
-                // the child is not left behind with its pipes' threads: it
-                // is ended and reaped, and the pipes read to their end,
-                // before the error is given back
-                end(&mut child).ok();
-                stdout.join().ok();
-                stderr.join().ok();
-                return Err(e);
-            }
+            // The child cannot be waited on: it is not left behind. It is
+            // ended and reaped, and its status is what it came to (a
+            // signal, which the callers read as a run that did not run to
+            // an end of its own, so nothing is said of the stack and the
+            // release goes on; never a converter that could not be
+            // started, which would stop the release).
+            Err(_) => break end(&mut child).unwrap_or_else(|_| killed()),
         }
         if ticked.elapsed() >= every {
             ticked = std::time::Instant::now();
             if tick() {
                 // an abort: the child and everything it started are ended
-                // and the child reaped, and its status says a signal did
-                break end(&mut child)?;
+                // and the child reaped, and its status says a signal did;
+                // where the reaping itself fails, the status says so all
+                // the same, since the group was sent the signal
+                break end(&mut child).unwrap_or_else(|_| killed());
             }
         }
         std::thread::sleep(Duration::from_millis(50));
@@ -489,6 +489,15 @@ fn end(child: &mut std::process::Child) -> std::io::Result<std::process::ExitSta
     }
     child.kill().ok();
     child.wait()
+}
+
+/// The status of a child this process ended with SIGKILL, for when `wait`
+/// cannot say so itself (the child was reaped already, or could not be
+/// waited on): the callers read it as a run a signal ended.
+#[cfg(unix)]
+fn killed() -> std::process::ExitStatus {
+    use std::os::unix::process::ExitStatusExt;
+    std::process::ExitStatus::from_raw(libc::SIGKILL)
 }
 
 /// `Command::spawn`, tried again a few times on `ETXTBSY`: a file another

@@ -178,9 +178,9 @@ fn settings<'a>(out: &'a Path, policy: &'a Policy, scheme: &'a SessionScheme) ->
     }
 }
 
-/// A Descriptive-layout release of a small stack and then a long one: the
-/// heart beats more than once while the long stack is written, and the
-/// folder's lock moves with it.
+/// A Descriptive-layout release of two long stacks (the order the release
+/// takes them in is the stacks' own): the heart beats more than once while
+/// the second is written, and the folder's lock moves with it.
 #[test]
 // the one place a test sets the environment in process: see the module
 #[allow(unsafe_code)]
@@ -192,7 +192,11 @@ fn the_heart_beats_inside_one_long_stack() {
     unsafe { std::env::set_var(job::FRESH_VAR, "1") };
     assert_eq!(job::fresh_secs(), 1);
 
-    let source = tree(&[1, 1500]);
+    // each long enough to outlast the heart's interval many times over: the
+    // heart no longer beats at a stack's end of its own accord, so every
+    // beat between the two watches is one the ticks inside the second stack
+    // made, whichever of the two it is
+    let source = tree(&[1500, 1500]);
     let home_dir = TempDir::new("heart-home");
     let out = TempDir::new("heart-out");
     let (_home, mut reg) = registry(&home_dir, &source);
@@ -201,11 +205,13 @@ fn the_heart_beats_inside_one_long_stack() {
 
     let mut beats: Vec<(i64, i64, String)> = Vec::new();
     let mut lock_beats: Vec<Option<String>> = Vec::new();
+    let mut at: Vec<std::time::Instant> = Vec::new();
     let root = out.path().to_path_buf();
     let report = run::run_watched(
         &mut reg,
         &settings(out.path(), &policy, &scheme),
         &mut |store, job_id, done| {
+            at.push(std::time::Instant::now());
             let j = job::show(store, job_id).unwrap().unwrap();
             let progress = j.progress.unwrap();
             beats.push((
@@ -215,7 +221,7 @@ fn the_heart_beats_inside_one_long_stack() {
             ));
             lock_beats.push(nils_release::lock::read(&root).and_then(|l| l.beat_at));
             if done == 1 {
-                // the stamps are whole seconds: let one pass, so the long
+                // the stamps are whole seconds: let one pass, so the second
                 // stack's beats are later than this one
                 std::thread::sleep(std::time::Duration::from_millis(1100));
             }
@@ -224,15 +230,15 @@ fn the_heart_beats_inside_one_long_stack() {
     .unwrap();
     assert_eq!(report.stacks, 2);
     assert_eq!(report.stopped_after, None);
-    assert_eq!(report.written, 1501);
+    assert_eq!(report.written, 3000);
     assert_eq!(beats.len(), 2, "{beats:?}");
-    // between the beat after the small stack and the beat after the long
-    // one, the heart beat inside the long stack at least once more
+    // between the watch after the first stack and the watch after the
+    // second, the heart beat inside the second stack more than once
     let inside = beats[1].1 - beats[0].1;
     assert!(
         inside >= 2,
-        "the heart beat {inside} time(s) for the long stack, the one at its end included: \
-         {beats:?}"
+        "the heart beat {inside} time(s) inside the second stack, which took {:?}: {beats:?}",
+        at[1] - at[0]
     );
     assert!(beats[1].2 > beats[0].2, "the heartbeat moved: {beats:?}");
     // and the lock moved with it
@@ -241,6 +247,88 @@ fn the_heart_beats_inside_one_long_stack() {
         "the lock's beat moved: {lock_beats:?}"
     );
     assert_eq!(nils_release::lock::read(out.path()), None);
+
+    // A release that loses its folder's lock stops: another release's lock
+    // planted over it between two stacks is found at the next beat, the
+    // first tick inside the next stack, which is given up as at an abort
+    // before a file of it is written; nothing more is
+    // written, the row is stopped with words naming the other, the job is
+    // cancelled, and the other's lock is left as it is.
+    let source = tree(&[1, 1, 1]);
+    let home_dir = TempDir::new("heart-home-lost");
+    let out = TempDir::new("heart-out-lost");
+    let (_home, mut reg) = registry(&home_dir, &source);
+    let theirs = nils_release::lock::Lock {
+        job: 999,
+        registry: None,
+        host: "elsewhere".to_string(),
+        pid: 4242,
+        started_at: nils_registry::time::now_iso(),
+        beat_at: Some(nils_registry::time::now_iso()),
+    };
+    let root = out.path().to_path_buf();
+    let mut handled: Vec<i64> = Vec::new();
+    let report = run::run_watched(
+        &mut reg,
+        &settings(out.path(), &policy, &scheme),
+        &mut |_, _, done| {
+            handled.push(done);
+            if done == 1 {
+                std::fs::write(
+                    nils_release::lock::path(&root),
+                    serde_json::to_string_pretty(&theirs).unwrap(),
+                )
+                .unwrap();
+                // past the heart's interval, so the first tick inside the
+                // next stack beats and finds the lock another's
+                std::thread::sleep(std::time::Duration::from_millis(120));
+            }
+        },
+    )
+    .unwrap();
+    assert_eq!(report.stacks, 3);
+    assert_eq!(report.stopped_after, Some(1), "{report:?}");
+    assert_eq!((report.added, report.written), (1, 1), "{report:?}");
+    assert_eq!(handled, vec![1], "no stack after the lost lock was handled");
+    assert_eq!(
+        report.lock_lost.as_deref(),
+        Some("the folder's lock was lost to release job 999 on elsewhere")
+    );
+    let j = {
+        let jobs = job::list(reg.store(), true, 100).unwrap();
+        jobs.into_iter()
+            .filter(|j| j.kind == "release")
+            .max_by_key(|j| j.id)
+            .unwrap()
+    };
+    assert_eq!(j.state, job::State::Cancelled);
+    assert_eq!(j.error.as_deref(), Some(run::STOPPED));
+    let (error, finished) = {
+        let store = reg.store();
+        let sql = format!(
+            "SELECT error, finished_at FROM {} WHERE id = {}",
+            store.qualified("release"),
+            report.release_id
+        );
+        let r = store.query_opt(&sql, &[]).unwrap().unwrap();
+        (
+            r.opt_text(0).unwrap().map(str::to_string),
+            r.opt_text(1).unwrap().map(str::to_string),
+        )
+    };
+    assert_eq!(
+        error.as_deref(),
+        Some(
+            "stopped after 1 of 3 stacks; the folder's lock was lost to release job 999 on \
+             elsewhere; what was written stays written"
+        )
+    );
+    assert_eq!(finished, None);
+    assert_eq!(
+        nils_release::lock::read(out.path()),
+        Some(theirs),
+        "the other's lock is left as it is"
+    );
 
     // and a conversion ticks at the heart's interval too: a BIDS release of
     // two stacks through a converter that takes two seconds each beats

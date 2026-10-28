@@ -244,12 +244,17 @@ fn a_converter_that_is_gone_stops_the_release_and_an_abort_mid_rewrite_keeps_the
     let gone = stand_in(&fake, "rm -f \"$0\"");
     let refused = run::run(&mut reg, &settings(out.path(), &policy, &scheme, &gone)).unwrap_err();
     let words = refused.to_string();
-    assert!(matches!(refused, run::Error::Refused(_)), "{words}");
     assert!(
-        words.starts_with("dcm2niix could not be run (")
+        matches!(refused, run::Error::Stopped(_)),
+        "a failure the command exits as one, not a misuse: {words}"
+    );
+    assert!(
+        words.starts_with(run::CONVERTER_GONE_WORDS)
+            && words.starts_with("dcm2niix could not be run (")
             && words.ends_with("): the release stopped after 1 of 2 stacks"),
         "{words}"
     );
+    assert!(run::goes_on(&words) && !run::is_stopped(&words));
     let j = newest_release_job(&mut reg);
     assert_eq!(j.state, State::Failed);
     assert_eq!(j.error.as_deref(), Some(words.as_str()));

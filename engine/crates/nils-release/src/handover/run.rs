@@ -539,42 +539,14 @@ pub fn password_of(registry: &Registry, kept: &Kept) -> Result<Option<String>, E
 
 /// Why the root of a release's newest finished version cannot be handed
 /// over as it is (Wave 7b, the maintenance track), in plain words; none
-/// when the folder is that version. A release newer than it into the same
-/// folder that stopped, or did not finish, left the folder a mixture of two
-/// versions; a release lock in the folder says a release is writing it, or
-/// died in it. The handover refuses either, and so does its door before it
-/// queues one.
+/// when the folder is that version. A release lock in the folder says a
+/// release is writing it, or died in it; a release newer than the version
+/// into the same folder that stopped, or did not finish, left the folder a
+/// mixture of two versions, unless it stopped before it wrote or removed
+/// anything ([`crate::run::WROTE_NOTHING`]), in which case the folder is
+/// the version still. The handover refuses either, and so does its door
+/// before it queues one.
 pub fn not_whole(store: &mut Store, found: &Version) -> Result<Option<String>, Error> {
-    let d = store.dialect();
-    let sql = format!(
-        "SELECT error FROM {} WHERE dataset_id = {} AND root = {} AND id > {} AND finished_at IS \
-         NULL ORDER BY id DESC LIMIT 1",
-        store.qualified("release"),
-        d.param(1, Type::Int),
-        d.param(2, Type::Text),
-        d.param(3, Type::Int),
-    );
-    let newer = store.query_opt(
-        &sql,
-        &[
-            Param::Int(found.dataset),
-            Param::from(found.root.as_str()),
-            Param::Int(found.id),
-        ],
-    )?;
-    if let Some(r) = newer {
-        let what = match r.opt_text(0)? {
-            Some(error) => match error.find("stopped after") {
-                Some(at) => error[at..].split(';').next().unwrap_or(error).to_string(),
-                None => format!("did not finish ({error})"),
-            },
-            None => "did not finish".to_string(),
-        };
-        return Ok(Some(format!(
-            "the folder holds a release that {what}; run the release again to finish it before \
-             handing it over"
-        )));
-    }
     let root = Path::new(&found.root);
     if crate::lock::path(root).exists() {
         let who = match crate::lock::read(root) {
@@ -584,6 +556,45 @@ pub fn not_whole(store: &mut Store, found: &Version) -> Result<Option<String>, E
         return Ok(Some(format!(
             "the folder holds a release lock: {who} is writing it, or did not finish; wait for it, \
              or run the release again, before handing it over"
+        )));
+    }
+    let d = store.dialect();
+    let sql = format!(
+        "SELECT error FROM {} WHERE dataset_id = {} AND root = {} AND id > {} AND finished_at IS \
+         NULL ORDER BY id DESC",
+        store.qualified("release"),
+        d.param(1, Type::Int),
+        d.param(2, Type::Text),
+        d.param(3, Type::Int),
+    );
+    let newer = store.query(
+        &sql,
+        &[
+            Param::Int(found.dataset),
+            Param::from(found.root.as_str()),
+            Param::Int(found.id),
+        ],
+    )?;
+    for r in newer {
+        let what = match r.opt_text(0)? {
+            // a stop that wrote and removed nothing left the folder as it was
+            Some(error) if error.contains(crate::run::WROTE_NOTHING) => continue,
+            Some(error) => match error.find(crate::run::STOPPED_WORDS) {
+                Some(at) => error[at..].split(';').next().unwrap_or(error).to_string(),
+                None => format!("did not finish ({error})"),
+            },
+            // no finish and no word: a release is at it, or died at it
+            None => {
+                return Ok(Some(
+                    "the folder holds a release that is running or died here; wait for it or run \
+                     it again before handing it over"
+                        .to_string(),
+                ));
+            }
+        };
+        return Ok(Some(format!(
+            "the folder holds a release that {what}; run the release again to finish it before \
+             handing it over"
         )));
     }
     Ok(None)
