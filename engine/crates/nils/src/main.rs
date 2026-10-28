@@ -12803,10 +12803,15 @@ fn history(home: &Home, args: &ReleaseArgs) -> Result<(), Exit> {
         let when = v.started.split('T').next().unwrap_or(&v.started);
         let (version, files) = (&v.version, v.files);
         // Wave 7b (the maintenance track): a row without a finish is no
-        // version, and says why it is not
+        // version, and says why it is not (stopped, failed, or no word)
         match (v.finished, &v.error) {
             (true, _) => println!("  {version:<16} {when}   {files:>9} files in the tree"),
-            (false, Some(why)) => println!("  {version:<16} {when}   not a version: {why}"),
+            (false, Some(why)) => match nils_release::run::why_failed(why) {
+                Some(failed) => {
+                    println!("  {version:<16} {when}   not a version: failed ({failed})")
+                }
+                None => println!("  {version:<16} {when}   not a version: {why}"),
+            },
             (false, None) => println!("  {version:<16} {when}   not a version: did not finish"),
         }
         if let Some(p) = &v.picks {

@@ -245,7 +245,7 @@ fn converted(
     tick: &mut Tick<'_>,
 ) -> Result<Made, Fail> {
     let before = listing(into);
-    let run = run_converter(
+    let run = match run_converter(
         converter,
         list,
         into,
@@ -256,8 +256,24 @@ fn converted(
         },
         every,
         tick,
-    )
-    .map_err(|e| Fail::CouldNotStart(format!("dcm2niix could not be run ({e})")))?;
+    ) {
+        Ok(run) => run,
+        Err(NotRun::Start(e)) => {
+            return Err(Fail::CouldNotStart(format!(
+                "dcm2niix could not be run ({e})"
+            )));
+        }
+        // ended without a status to read: as a run a signal ended, what it
+        // wrote goes and nothing is said of the stack
+        Err(NotRun::Ended(e)) => {
+            for f in listing(into).difference(&before) {
+                std::fs::remove_file(into.join(f)).ok();
+            }
+            return Err(Fail::CouldNotRun(format!(
+                "dcm2niix was ended and could not be waited on ({e})"
+            )));
+        }
+    };
     if !run.status.success() {
         // What it wrote before it failed is no output either (Wave 7a §8.2:
         // a failure that converted 26 of 32 files left letter-suffixed images
@@ -376,7 +392,7 @@ fn run_converter(
     flags: Flags,
     every: Duration,
     tick: &mut Tick<'_>,
-) -> std::io::Result<std::process::Output> {
+) -> Result<std::process::Output, NotRun> {
     let mut run = Command::new(&converter.path);
     run.args(["-s", "y"]);
     match flags {
@@ -404,21 +420,37 @@ fn run_converter(
     output_ticking(&mut run, every, tick)
 }
 
+/// Why a run of the converter gave no output to read (Wave 7b, the
+/// maintenance track). The two are told apart because the callers read
+/// them apart: a converter that could not be started at all is gone, and a
+/// stack's first run says so and stops the release ([`Fail::CouldNotStart`]);
+/// one that started and was ended without a status to read said nothing
+/// about the stack, so the release goes on past it ([`Fail::CouldNotRun`]).
+#[derive(Debug)]
+enum NotRun {
+    /// `spawn` failed: the converter is gone, or not to be run.
+    Start(std::io::Error),
+    /// The child started, was ended by this process (an abort, or it could
+    /// not be waited on), and its end could not be read either.
+    Ended(std::io::Error),
+}
+
 /// `Command::output`, calling `tick` every `every` while the child runs,
 /// and ending the child when a tick asks for an abort. Its stdout and
 /// stderr are drained on threads of their own, as `output` drains them, so
 /// a child that writes more than a pipe holds is never stuck on a full pipe
 /// while this waits on it.
 ///
-/// The child runs in a process group of its own (as the pipeline runtime
-/// starts its tools), so a Ctrl-C at the keyboard reaches the release and
-/// not the converter: the release finishes the stack in hand, and the
-/// converter is ended only when a second signal asks for an abort.
+/// The child runs in a process group of its own where the platform has
+/// them (as the pipeline runtime starts its tools), so a Ctrl-C at the
+/// keyboard reaches the release and not the converter: the release finishes
+/// the stack in hand, and the converter is ended only when a second signal
+/// asks for an abort.
 fn output_ticking(
     run: &mut Command,
     every: Duration,
     tick: &mut Tick<'_>,
-) -> std::io::Result<std::process::Output> {
+) -> Result<std::process::Output, NotRun> {
     use std::process::Stdio;
     run.stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -428,13 +460,13 @@ fn output_ticking(
         use std::os::unix::process::CommandExt;
         run.process_group(0);
     }
-    let mut child = spawn(run)?;
+    let mut child = spawn(run).map_err(NotRun::Start)?;
     let stdout = drain(child.stdout.take());
     let stderr = drain(child.stderr.take());
     let mut ticked = std::time::Instant::now();
     let status = loop {
         match child.try_wait() {
-            Ok(Some(status)) => break status,
+            Ok(Some(status)) => break Ok(status),
             Ok(None) => {}
             // The child cannot be waited on: it is not left behind. It is
             // ended and reaped, and its status is what it came to (a
@@ -442,34 +474,41 @@ fn output_ticking(
             // an end of its own, so nothing is said of the stack and the
             // release goes on; never a converter that could not be
             // started, which would stop the release).
-            Err(_) => break end(&mut child).unwrap_or_else(|_| killed()),
+            Err(_) => break end(&mut child),
         }
         if ticked.elapsed() >= every {
             ticked = std::time::Instant::now();
             if tick() {
                 // an abort: the child and everything it started are ended
-                // and the child reaped, and its status says a signal did;
-                // where the reaping itself fails, the status says so all
-                // the same, since the group was sent the signal
-                break end(&mut child).unwrap_or_else(|_| killed());
+                // and the child reaped, and its status says a signal did
+                break end(&mut child);
             }
         }
         std::thread::sleep(Duration::from_millis(50));
     };
     // the pipes are read to their end: a helper of the converter still
     // holding one (a compressor writing the image) ends before this returns
+    let stdout = stdout.join().unwrap_or_default();
+    let stderr = stderr.join().unwrap_or_default();
+    // Where the reaping itself failed there is no status to read: the child
+    // was ended all the same (the group was sent the signal), and the
+    // callers read the failure as a run that did not run to an end of its
+    // own, on every platform alike, since no status can be made up for one
+    // that has no `from_raw` everywhere.
+    let status = status.map_err(NotRun::Ended)?;
     Ok(std::process::Output {
         status,
-        stdout: stdout.join().unwrap_or_default(),
-        stderr: stderr.join().unwrap_or_default(),
+        stdout,
+        stderr,
     })
 }
 
-/// End the child and everything it started, and reap it. The child is the
-/// leader of a process group of its own (`process_group(0)` above), so the
-/// group is signalled, which reaches a compressor it started to write the
-/// image: ending the child alone would let that helper finish the `.nii.gz`
-/// after the stack's files were cleaned away.
+/// End the child and everything it started, and reap it. On a platform
+/// with process groups the child is the leader of one of its own
+/// (`process_group(0)` above), so the group is signalled, which reaches a
+/// compressor it started to write the image: ending the child alone would
+/// let that helper finish the `.nii.gz` after the stack's files were cleaned
+/// away. Elsewhere the child alone is ended, which is all the platform has.
 fn end(child: &mut std::process::Child) -> std::io::Result<std::process::ExitStatus> {
     #[cfg(unix)]
     #[allow(
@@ -488,15 +527,6 @@ fn end(child: &mut std::process::Child) -> std::io::Result<std::process::ExitSta
     }
     child.kill().ok();
     child.wait()
-}
-
-/// The status of a child this process ended with SIGKILL, for when `wait`
-/// cannot say so itself (the child was reaped already, or could not be
-/// waited on): the callers read it as a run a signal ended.
-#[cfg(unix)]
-fn killed() -> std::process::ExitStatus {
-    use std::os::unix::process::ExitStatusExt;
-    std::process::ExitStatus::from_raw(libc::SIGKILL)
 }
 
 /// `Command::spawn`, tried again a few times on `ETXTBSY`: a file another
@@ -592,8 +622,16 @@ fn postfixes_without_terse(
     }
     let run = run_converter(converter, list, &scratch, stem, Flags::Names, every, tick);
     std::fs::remove_dir_all(&scratch).ok();
-    let Ok(run) = run else {
-        return Ok(Vec::new());
+    let run = match run {
+        Ok(run) => run,
+        // the converter ran a moment before on this stack: a start that
+        // fails now is no word on the converter, and the names are none
+        Err(NotRun::Start(_)) => return Ok(Vec::new()),
+        Err(NotRun::Ended(e)) => {
+            return Err(Fail::CouldNotRun(format!(
+                "dcm2niix was ended and could not be waited on ({e})"
+            )));
+        }
     };
     if let Some(signal) = ended_by(&run.status) {
         return Err(Fail::CouldNotRun(format!(
@@ -686,14 +724,25 @@ fn merged(
         },
         every,
         tick,
-    )
-    .map_err(|e| {
-        Merge::Refused(format!(
-            "a second run of dcm2niix could not be started ({e})"
-        ))
-    })?;
+    );
     let mut made: Vec<String> = listing(into).difference(before).cloned().collect();
     made.sort();
+    let run = match run {
+        Ok(run) => run,
+        Err(NotRun::Start(e)) => {
+            return Err(Merge::Refused(format!(
+                "a second run of dcm2niix could not be started ({e})"
+            )));
+        }
+        Err(NotRun::Ended(e)) => {
+            for f in &made {
+                std::fs::remove_file(into.join(f)).ok();
+            }
+            return Err(Merge::CouldNotRun(format!(
+                "dcm2niix was ended and could not be waited on ({e})"
+            )));
+        }
+    };
     // a run a signal ended did not run (an abort, a kill from outside), as
     // in [`converted`]: what it wrote goes, and nothing is said of the stack
     if let Some(signal) = ended_by(&run.status) {
@@ -756,7 +805,7 @@ fn reason(line: &str) -> String {
 }
 
 /// The names one conversion of `stem` may produce.
-fn is_expected(file: &str, stem: &str, compress: bool) -> bool {
+pub(crate) fn is_expected(file: &str, stem: &str, compress: bool) -> bool {
     let image = match compress {
         true => format!("{stem}.nii.gz"),
         false => format!("{stem}.nii"),

@@ -417,15 +417,20 @@ pub enum Error {
     /// how many stacks; the stacks done are recorded, the row is left
     /// unfinished with the words, the job fails with them, and the next run
     /// goes on under the same version. A failure, not a misuse: the command
-    /// line exits as it does for one.
-    Stopped(String),
+    /// line exits as it does for one. The report of what the run did before
+    /// it stopped comes with the words, so the job's result and the audit
+    /// row say what was written, as they do for a run that ended.
+    Stopped {
+        words: String,
+        report: Box<Report>,
+    },
 }
 
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Error::Store(e) => write!(f, "{e}"),
-            Error::Refused(m) | Error::Stopped(m) => f.write_str(m),
+            Error::Refused(m) | Error::Stopped { words: m, .. } => f.write_str(m),
             Error::Io(e) => write!(f, "{e}"),
         }
     }
@@ -570,6 +575,18 @@ pub const CONVERTER_GONE_WORDS: &str = "dcm2niix could not be run";
 /// folder is the version before, whole, and a handover of it goes on.
 pub const WROTE_NOTHING: &str = "stopped before anything was written";
 
+/// How the row of a release that failed after its row was opened (the
+/// store or the disk refused it) begins its `error`, followed by the
+/// error's own words: the row is left unfinished, so it is no version, and
+/// says why instead of looking like a release still at it. The next run
+/// numbers a new version, as it does after a release that died.
+pub const FAILED_WORDS: &str = "failed: ";
+
+/// Why a release row's `error` says it failed, where it does.
+pub fn why_failed(error: &str) -> Option<&str> {
+    error.strip_prefix(FAILED_WORDS)
+}
+
 /// Whether a release row's `error` says it was asked to stop and did.
 pub fn is_stopped(error: &str) -> bool {
     error.starts_with(STOPPED_WORDS)
@@ -596,12 +613,15 @@ fn stop_details(report: &Report) -> String {
     format!("{removed}{lost}")
 }
 
-/// Whether a release that stopped after `after` stacks changed nothing of
-/// the tree: no stack written, no files of the version before removed, and
-/// no stack moved. A move renames files, so a stop after the moves is a
-/// stop that changed the tree, however many stacks it wrote.
-fn wrote_nothing(after: i64, report: &Report) -> bool {
-    after == 0 && report.removed_before_stop.unwrap_or(report.removed) == 0 && report.moved == 0
+/// Whether a release that stopped changed nothing of the tree: no file
+/// written, no files of the version before removed, and no stack moved. The
+/// stacks handled before the stop do not say: those were unchanged ones,
+/// which the tree held already. A move renames files, so a stop after the
+/// moves is a stop that changed the tree, however many stacks it wrote.
+fn wrote_nothing(report: &Report) -> bool {
+    report.written == 0
+        && report.removed_before_stop.unwrap_or(report.removed) == 0
+        && report.moved == 0
 }
 
 /// What a stopped release's row says, and the command's stopped line: after
@@ -611,7 +631,7 @@ fn wrote_nothing(after: i64, report: &Report) -> bool {
 /// before, whole, goes on.
 pub fn stopped_words(after: i64, report: &Report) -> String {
     let details = stop_details(report);
-    match wrote_nothing(after, report) {
+    match wrote_nothing(report) {
         true => format!(
             "{STOPPED_WORDS} 0 of {} stacks{details}; {WROTE_NOTHING}",
             report.stacks
@@ -723,32 +743,50 @@ pub fn run_with(
     };
     // the lock itself is taken inside, once the preflight has passed and
     // before anything is written, so a refused release leaves no folder
-    let mut result = run_release(
-        registry,
-        settings,
-        Heart::new(job_id, lock, settings.root, stop),
-        taken_over.as_ref(),
-        watch,
-    );
-    if let (Ok(report), Some(taken)) = (&mut result, &taken_over) {
-        report.lock_taken_over = Some(taken.line());
+    let mut heart = Heart::new(job_id, lock, settings.root, stop);
+    let mut result = run_release(registry, settings, &mut heart, taken_over.as_ref(), watch);
+    // A release that failed once its row was open (the store or the disk
+    // refused it) leaves the row unfinished with the failed words: no
+    // version, and not a release still at it either. A stopped release
+    // closed its own row. Best effort: what refused the release may refuse
+    // this too, and then the row says nothing, as it did before.
+    if let (Err(e), Some(row)) = (&result, heart.row)
+        && !matches!(e, Error::Stopped { .. })
+    {
+        fail_row(registry.store(), row, &format!("{FAILED_WORDS}{e}")).ok();
     }
     let (state, error) = match &result {
         Ok(r) if r.stopped_after.is_some() => (job::State::Cancelled, Some(STOPPED.to_string())),
         Ok(_) => (job::State::Done, None),
         Err(e) => (job::State::Failed, Some(e.to_string())),
     };
+    // the report of the run: what it did, whether it ended or stopped
+    // because its converter was gone, which fails with the report in hand
+    let report: Option<&mut Report> = match &mut result {
+        Ok(report) => Some(report),
+        Err(Error::Stopped { report, .. }) => Some(report.as_mut()),
+        Err(_) => None,
+    };
+    let report = match (report, &taken_over) {
+        (Some(report), Some(taken)) => {
+            report.lock_taken_over = Some(taken.line());
+            Some(&*report)
+        }
+        (report, None) => report.map(|r| &*r),
+        (None, Some(_)) => None,
+    };
     // Lab 26b, finding 5: the report is the job's result, so a release queued
     // at a door says what it wrote, where each stack went and what it left
     // out, as the command line says it. Counts and reasons, never a path.
-    if let Ok(report) = &result
+    if let Some(report) = report
         && let Ok(doc) = serde_json::to_value(report)
     {
         let _ = job::set_result(registry.store(), job_id, &doc);
     }
     let _ = job::finish(registry.store(), job_id, state, error.as_deref());
-    // Wave 4a §9.2: the audit row, under the policy it ran under.
-    if let Ok(report) = &result {
+    // Wave 4a §9.2: the audit row, under the policy it ran under, for every
+    // run that wrote (one that stopped with its converter gone wrote too).
+    if let Some(report) = report {
         nils_registry::audit::record(
             registry,
             &nils_registry::audit::Entry {
@@ -773,6 +811,20 @@ pub fn run_with(
         .map_err(Error::Store)?;
     }
     result
+}
+
+/// Leave the row of a release that failed unfinished, with the failed
+/// words in its `error` ([`FAILED_WORDS`]), where no run closed it.
+fn fail_row(store: &mut Store, release_id: i64, words: &str) -> Result<(), Error> {
+    let d = store.dialect();
+    let sql = format!(
+        "UPDATE {} SET error = {} WHERE id = {} AND finished_at IS NULL",
+        store.qualified("release"),
+        d.param(1, Type::Text),
+        d.param(2, Type::Int),
+    );
+    store.execute(&sql, &[Param::from(words), Param::Int(release_id)])?;
+    Ok(())
 }
 
 /// The release job's heartbeat (Wave 7b, the maintenance track): beaten
@@ -809,6 +861,9 @@ struct Heart<'a> {
     /// a beat: the folder is no longer this release's to write, which is
     /// read as an abort, and the words say to whom it was lost.
     lost: Option<String>,
+    /// The release's row, once it is open: what a failure after that point
+    /// is written into ([`fail_row`]).
+    row: Option<i64>,
 }
 
 /// The lock, held for as long as this lives: taken after the preflight,
@@ -856,6 +911,7 @@ impl<'a> Heart<'a> {
             cancelled: false,
             aborted: false,
             lost: None,
+            row: None,
         }
     }
 
@@ -943,7 +999,7 @@ impl<'a> Heart<'a> {
 fn run_release(
     registry: &mut Registry,
     settings: &Settings,
-    mut heart: Heart<'_>,
+    heart: &mut Heart<'_>,
     taken_over: Option<&crate::lock::TakenOver>,
     watch: &mut Watch<'_>,
 ) -> Result<Report, Error> {
@@ -1128,6 +1184,7 @@ fn run_release(
         &report.policies,
         pick_rules.as_ref(),
     )?;
+    heart.row = Some(report.release_id);
     // record 55 (rulings of 2026-10-12, item 6, carried to releases): what
     // the release reads of the picks is frozen with it before it takes a
     // stack, and it takes its stacks by the list it froze, so every reader
@@ -1919,7 +1976,7 @@ fn run_release(
             &subjects_seen,
             &sessions_seen,
             &mut report,
-            &mut heart,
+            heart,
         )?;
         let store = registry.store();
         let mut tick = || {
@@ -1956,9 +2013,7 @@ fn run_release(
     // the top of its first stack, no stack moved) raises nothing: the
     // questions are the version's to ask, and the run that writes it asks
     // them (Wave 7b, the maintenance track).
-    let wrote_nothing = report
-        .stopped_after
-        .is_some_and(|after| wrote_nothing(after, &report));
+    let wrote_nothing = report.stopped_after.is_some() && wrote_nothing(&report);
     if !held.is_empty() && !wrote_nothing {
         raise_review(registry.store(), &report, &held, &pixels)?;
     }
@@ -1993,7 +2048,10 @@ fn run_release(
     close_row(registry.store(), &report, stopped.as_deref())?;
     report.seconds = started.elapsed().as_secs_f64();
     match (converter_gone, stopped) {
-        (Some(_), Some(words)) => Err(Error::Stopped(words)),
+        (Some(_), Some(words)) => Err(Error::Stopped {
+            words,
+            report: Box::new(report),
+        }),
         _ => Ok(report),
     }
 }
@@ -4548,6 +4606,26 @@ fn write_bids(
     };
     let stem = job.place.stem.clone().unwrap_or_default();
     let into = root.join(&job.place.dir);
+    // A run a hard kill ended can have left this stack's own files in its
+    // folder with no state row to say so: the state holds nothing for an
+    // added stack, and nothing at this place for one written to a new
+    // place. dcm2niix finds the name taken and appends its letter suffix
+    // for a stale file of our own, and the stack would be refused for ever.
+    // So the names this conversion may produce go first, at a place the
+    // state does not know; a stack rewritten in its place converts under a
+    // scratch root, which is empty, and keeps its old files until its new
+    // ones are staged (Wave 7b, the maintenance track).
+    if job.was.as_ref().is_none_or(|was| was.place != job.place)
+        && let Ok(entries) = std::fs::read_dir(&into)
+    {
+        for e in entries.flatten() {
+            if let Some(name) = e.file_name().to_str()
+                && crate::bids::convert::is_expected(name, &stem, settings.compress)
+            {
+                std::fs::remove_file(e.path()).ok();
+            }
+        }
+    }
     let made = match crate::bids::convert::convert_ticking(
         converter,
         &staged,
@@ -7005,9 +7083,30 @@ mod tests {
             stopped_words(0, &moved),
             format!("{STOPPED_WORDS} 0 of 2 stacks; what was written stays written")
         );
-        assert!(!wrote_nothing(0, &moved));
-        assert!(wrote_nothing(0, &untouched));
-        assert!(!wrote_nothing(1, &untouched));
+        assert!(!wrote_nothing(&moved));
+        assert!(wrote_nothing(&untouched));
+        // the stacks handled before the stop say nothing: unchanged ones,
+        // which the tree held already, leave it the version before's
+        let unchanged = Report {
+            stacks: 2,
+            unchanged: 1,
+            ..Report::default()
+        };
+        assert!(wrote_nothing(&unchanged));
+        assert_eq!(
+            stopped_words(1, &unchanged),
+            format!("{STOPPED_WORDS} 0 of 2 stacks; {WROTE_NOTHING}")
+        );
+        let written = Report {
+            stacks: 2,
+            written: 1,
+            ..Report::default()
+        };
+        assert!(!wrote_nothing(&written));
+        assert_eq!(
+            stopped_words(1, &written),
+            format!("{STOPPED_WORDS} 1 of 2 stacks; what was written stays written")
+        );
     }
 
     /// Wave 7b (the maintenance track): a preflight that refuses takes away

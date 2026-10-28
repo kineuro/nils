@@ -457,21 +457,6 @@ fn settled(root: &Path) -> Option<Lock> {
     read(root)
 }
 
-/// Write the lock again, beside and renamed over, so a reader never sees
-/// half a file. The temporary name carries the pid, so two processes
-/// cannot share one.
-fn rewrite(root: &Path, lock: &Lock) -> std::io::Result<()> {
-    let text = serde_json::to_string_pretty(lock).map_err(std::io::Error::other)?;
-    let tmp = root.join(format!("{FILE}.{}.tmp", std::process::id()));
-    let written = std::fs::write(&tmp, text).and_then(|()| std::fs::rename(&tmp, path(root)));
-    if written.is_err() {
-        // a temporary that could not be written whole or moved into place
-        // is not left beside the lock
-        std::fs::remove_file(&tmp).ok();
-    }
-    written
-}
-
 /// How a release lost its folder's lock between two beats: the file names
 /// another release by now (one that took the folder over on a word this
 /// release's beats should have contradicted), is gone, or was written over
@@ -514,16 +499,111 @@ impl std::fmt::Display for Lost {
 /// write ([`Lost`]). A write that fails is let go, as a beat the store
 /// refuses is: the lock is a guard, and the release is not stopped by a
 /// hiccup in writing it.
+///
+/// The write never goes over another's lock. A rename over the file would:
+/// a taker that found this lock stale can put it aside and write its own
+/// between the look and the rename, and the rename would then bury the
+/// taker's lock under a fresh copy of this one, two writers after it. So
+/// the fresh copy is written the way [`take`] writes: this release's file
+/// is moved aside by a rename to a name of this beat's own (the one step a
+/// taker's own rename and this cannot both win), read once more to be sure
+/// it is still this release's (a taker's lock that got in between goes
+/// back where it was), and the fresh copy is made with an exclusive create,
+/// which a taker that got the moment in between wins; then the file is read
+/// back and must name this release.
 pub fn beat(root: &Path, lock: &mut Lock) -> Result<(), Lost> {
-    lock.beat_at = Some(now_iso());
+    beat_between(root, lock, || {})
+}
+
+/// [`beat`], with `between` run after the lock is found to be this
+/// release's and before it is moved aside: the gap a take-over can fall
+/// into, which the tests fill.
+fn beat_between(root: &Path, lock: &mut Lock, between: impl FnOnce()) -> Result<(), Lost> {
     match found(root) {
-        Found::Lock(now) if now.same_release(lock) => {
-            rewrite(root, lock).ok();
-            Ok(())
+        Found::Lock(now) if now.same_release(lock) => {}
+        other => return Err(lost_to(other)),
+    }
+    between();
+    let path = path(root);
+    let mine = root.join(aside_name());
+    match std::fs::rename(&path, &mine) {
+        Ok(()) => {}
+        // someone moved it first: whoever holds the folder now, it is not
+        // this release
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(whose(root, lock)),
+        // the file could not be moved: the beat is let go, the lock as it was
+        Err(_) => return Ok(()),
+    }
+    match found_at(&mine) {
+        Found::Lock(now) if now.same_release(lock) => {}
+        // not this release's: a taker's lock got between the look and the
+        // rename; back it goes, and the folder is the taker's
+        other => {
+            std::fs::rename(&mine, &path).ok();
+            return Err(lost_to(other));
         }
-        Found::Lock(theirs) => Err(Lost::Theirs(theirs)),
-        Found::Nothing => Err(Lost::Gone),
-        Found::Unreadable { why, .. } => Err(Lost::Unreadable(why)),
+    }
+    lock.beat_at = Some(now_iso());
+    let text = match serde_json::to_string_pretty(lock) {
+        Ok(text) => text,
+        Err(_) => {
+            std::fs::rename(&mine, &path).ok();
+            return Ok(());
+        }
+    };
+    let created = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path);
+    match created {
+        Ok(mut file) => {
+            let written = file
+                .write_all(text.as_bytes())
+                .and_then(|()| file.sync_all());
+            drop(file);
+            if written.is_err() {
+                // half a file is worse than the copy before: that goes back
+                // over it, and the beat is let go
+                std::fs::rename(&mine, &path).ok();
+                return Ok(());
+            }
+            remove_aside(&mine);
+        }
+        // a taker got the moment the folder read as free: theirs, and the
+        // copy put aside is nobody's
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            remove_aside(&mine);
+            return Err(whose(root, lock));
+        }
+        Err(_) => {
+            std::fs::rename(&mine, &path).ok();
+            return Ok(());
+        }
+    }
+    match found(root) {
+        Found::Lock(now) if now.same_release(lock) => Ok(()),
+        other => Err(lost_to(other)),
+    }
+}
+
+/// What a beat lost the folder to, by what the file holds.
+fn lost_to(found: Found) -> Lost {
+    match found {
+        Found::Lock(theirs) => Lost::Theirs(theirs),
+        Found::Nothing => Lost::Gone,
+        Found::Unreadable { why, .. } => Lost::Unreadable(why),
+    }
+}
+
+/// Whose the folder is when this release's file was found moved or
+/// replaced under its beat: the other's lock, given a moment to be written
+/// ([`settled`]), or gone. A lock that reads as this release's all the
+/// same is a lock nobody else wrote, and no loss.
+fn whose(root: &Path, lock: &Lock) -> Lost {
+    match settled(root) {
+        Some(now) if now.same_release(lock) => Lost::Gone,
+        Some(theirs) => Lost::Theirs(theirs),
+        None => lost_to(found(root)),
     }
 }
 
@@ -747,6 +827,107 @@ mod tests {
             Err(Lost::Unreadable(why)) if why.contains("does not parse")
         ));
         assert_eq!(std::fs::read_to_string(path(&root)).unwrap(), "{ not json");
+    }
+
+    /// What `check` would have found of `lock` as the file holds it now:
+    /// the lock a taker may put out of the way.
+    fn as_found(root: &Path) -> TakenOver {
+        TakenOver {
+            job: None,
+            was: "stale".into(),
+            lock: read(root),
+        }
+    }
+
+    /// Every name in the root.
+    fn names_in(root: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(root)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// A take-over that falls into the beat's gap, between the look and the
+    /// write, is not written over: the beat finds the file no longer its
+    /// own, puts the taker's lock back where it was and says the folder was
+    /// lost to it, and nothing is left beside the lock.
+    #[test]
+    fn a_beat_never_buries_a_take_over_that_fell_into_its_gap() {
+        let dir = nils_dicom::synth::TempDir::new("release-lock");
+        let root = dir.path().join("tree");
+        let mut mine = a_lock(1);
+        take(&root, &mine, None).unwrap();
+        let theirs = a_lock(2);
+        let over = as_found(&root);
+        let lost = beat_between(&root, &mut mine, || {
+            take(&root, &theirs, Some(&over)).unwrap();
+        });
+        assert_eq!(lost, Err(Lost::Theirs(theirs.clone())));
+        assert_eq!(read(&root), Some(theirs.clone()), "the taker's lock stays");
+        assert_eq!(names_in(&root), vec![FILE.to_string()]);
+        // a take-over that fell in and let go again (the taker's release)
+        // leaves the folder empty: the beat finds its lock gone
+        release(&root, &theirs);
+        take(&root, &mine, None).unwrap();
+        let over = as_found(&root);
+        let lost = beat_between(&root, &mut mine, || {
+            take(&root, &theirs, Some(&over)).unwrap();
+            release(&root, &theirs);
+        });
+        assert_eq!(lost, Err(Lost::Gone));
+        assert_eq!(read(&root), None, "not put back");
+        assert_eq!(names_in(&root), Vec::<String>::new());
+        // and with nothing in the gap the beat is this release's: the beat
+        // moved, the file is the one file in the folder
+        take(&root, &mine, None).unwrap();
+        assert_eq!(beat(&root, &mut mine), Ok(()));
+        let now = read(&root).unwrap();
+        assert!(now.same_release(&mine) && now.beat_at.is_some(), "{now:?}");
+        assert_eq!(names_in(&root), vec![FILE.to_string()]);
+    }
+
+    /// A beat and a take-over racing for the same lock, twenty rounds on
+    /// two threads: never both win, the file holds the winner's lock, and
+    /// nothing is left beside it.
+    #[test]
+    fn a_beat_and_a_take_over_never_both_win() {
+        let dir = nils_dicom::synth::TempDir::new("release-lock");
+        let root = dir.path().join("tree");
+        let theirs = a_lock(2);
+        for round in 0..20 {
+            let mut mine = a_lock(1);
+            take(&root, &mine, None).unwrap();
+            let over = as_found(&root);
+            let gate = std::sync::Barrier::new(2);
+            let (beaten, taken) = std::thread::scope(|s| {
+                let beating = s.spawn(|| {
+                    gate.wait();
+                    beat(&root, &mut mine)
+                });
+                let taking = s.spawn(|| {
+                    gate.wait();
+                    take(&root, &theirs, Some(&over))
+                });
+                (beating.join().unwrap(), taking.join().unwrap())
+            });
+            assert!(
+                !(beaten.is_ok() && taken.is_ok()),
+                "round {round}: two writers ({beaten:?}, {taken:?})"
+            );
+            let holds = read(&root).unwrap_or_else(|| panic!("round {round}: no lock"));
+            match (&beaten, &taken) {
+                (Ok(()), Err(_)) => assert!(holds.same_release(&mine), "round {round}: {holds:?}"),
+                (Err(_), Ok(())) => assert_eq!(holds, theirs, "round {round}"),
+                (Err(lost), Err(not)) => {
+                    panic!("round {round}: nobody holds the folder ({lost:?}, {not:?})")
+                }
+                (Ok(()), Ok(())) => unreachable!(),
+            }
+            assert_eq!(names_in(&root), vec![FILE.to_string()], "round {round}");
+            std::fs::remove_file(path(&root)).unwrap();
+        }
     }
 
     /// A directory at the lock's name is a lock that cannot be read: it

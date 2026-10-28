@@ -1119,3 +1119,95 @@ fn a_stop_at_the_compare_counts_nothing_restored() {
     assert_eq!((again.restored, again.rewritten), (1, 1), "{again:?}");
     assert!(gone.is_file());
 }
+
+/// A release that fails once its row is open (the store refuses a write,
+/// here through a trigger a test put on one of its tables) leaves the row
+/// unfinished with the failed words: no version, and not a release still
+/// at it either. The handover reads it as a folder that may be a mixture
+/// and says why, the job fails with the error's own words, and the next
+/// run, with the store back, finishes and lifts the refusal.
+#[test]
+fn a_release_that_fails_after_its_row_is_open_says_so_in_the_row() {
+    use nils_release::handover::run as handover;
+    let source = tree(2);
+    let home_dir = TempDir::new("one-writer-home");
+    let out = TempDir::new("one-writer-out");
+    let (_home, mut reg) = registry(&home_dir, &source);
+    let policy = Policy::default();
+    let scheme = SessionScheme::default();
+    let first = run::run(&mut reg, &settings(out.path(), &policy, &scheme)).unwrap();
+    assert_eq!(first.added, 2);
+    assert!(
+        !first.changes.is_empty(),
+        "the scrub changed tags, so the run writes change rows"
+    );
+    // a stack of the version before is gone from the disk: the next run
+    // restores it, writing files, and then the store refuses its change rows
+    let gone = files_under(out.path()).remove(0);
+    std::fs::remove_dir_all(gone.parent().unwrap()).unwrap();
+    {
+        let store = reg.store();
+        let sql = format!(
+            "CREATE TRIGGER the_test_says_no BEFORE INSERT ON {} BEGIN SELECT RAISE(ABORT, 'the \
+             test says no'); END",
+            store.qualified("release_change")
+        );
+        store.execute(&sql, &[]).unwrap();
+    }
+    let failed = run::run(&mut reg, &settings(out.path(), &policy, &scheme)).unwrap_err();
+    assert!(matches!(failed, run::Error::Store(_)), "{failed:?}");
+    let words = failed.to_string();
+    assert!(words.contains("the test says no"), "{words}");
+    assert!(gone.is_file(), "what was written stays written");
+    let release_id = {
+        let store = reg.store();
+        let sql = format!(
+            "SELECT id FROM {} ORDER BY id DESC LIMIT 1",
+            store.qualified("release")
+        );
+        store.query_opt(&sql, &[]).unwrap().unwrap().int(0).unwrap()
+    };
+    let (error, finished) = row_of(&mut reg, release_id);
+    assert_eq!(finished, None, "not a version");
+    assert_eq!(
+        error.as_deref(),
+        Some(format!("{}{words}", run::FAILED_WORDS).as_str())
+    );
+    assert_eq!(
+        run::why_failed(error.as_deref().unwrap()),
+        Some(words.as_str())
+    );
+    assert!(!run::goes_on(error.as_deref().unwrap()));
+    let jobs: Vec<job::Job> = job::list(reg.store(), true, 100)
+        .unwrap()
+        .into_iter()
+        .filter(|j| j.kind == "release")
+        .collect();
+    let newest = jobs.iter().max_by_key(|j| j.id).unwrap();
+    assert_eq!(newest.state, State::Failed);
+    assert_eq!(newest.error.as_deref(), Some(words.as_str()));
+    assert_eq!(lock::read(out.path()), None, "the lock went with the run");
+    // the handover: a folder a release failed in, with the reason
+    assert_eq!(
+        handover::refusal_for(reg.store(), "test").unwrap(),
+        Some(format!(
+            "the folder holds a release that failed ({words}); run the release again to finish \
+             it before handing it over"
+        ))
+    );
+    assert_eq!(finished_versions(&mut reg), vec![first.version.clone()]);
+
+    // the store back, the next run finishes: a new version, as after a
+    // release that died, and nothing left to refuse
+    {
+        let store = reg.store();
+        store.execute("DROP TRIGGER the_test_says_no", &[]).unwrap();
+    }
+    let again = run::run(&mut reg, &settings(out.path(), &policy, &scheme)).unwrap();
+    assert_eq!(again.stopped_after, None);
+    assert_ne!(again.version, first.version);
+    let (error, finished) = row_of(&mut reg, again.release_id);
+    assert_eq!(error, None);
+    assert!(finished.is_some());
+    assert_eq!(handover::refusal_for(reg.store(), "test").unwrap(), None);
+}

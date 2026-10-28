@@ -244,10 +244,13 @@ fn a_converter_that_is_gone_stops_the_release_and_an_abort_mid_rewrite_keeps_the
     let gone = stand_in(&fake, "rm -f \"$0\"");
     let refused = run::run(&mut reg, &settings(out.path(), &policy, &scheme, &gone)).unwrap_err();
     let words = refused.to_string();
-    assert!(
-        matches!(refused, run::Error::Stopped(_)),
-        "a failure the command exits as one, not a misuse: {words}"
-    );
+    let run::Error::Stopped { report, .. } = &refused else {
+        panic!("a failure the command exits as one, not a misuse: {words}");
+    };
+    // the report of what was done before the converter went comes with the
+    // words: one stack added, one of two
+    assert_eq!((report.added, report.stacks), (1, 2), "{report:?}");
+    assert_eq!(report.stopped_after, Some(1));
     assert!(
         words.starts_with(run::CONVERTER_GONE_WORDS)
             && words.starts_with("dcm2niix could not be run (")
@@ -258,6 +261,23 @@ fn a_converter_that_is_gone_stops_the_release_and_an_abort_mid_rewrite_keeps_the
     let j = newest_release_job(&mut reg);
     assert_eq!(j.state, State::Failed);
     assert_eq!(j.error.as_deref(), Some(words.as_str()));
+    // the job's result is the report, as it is for a run that ended, and
+    // the audit row is written: the run wrote
+    let result = j.result.clone().expect("the report is the job's result");
+    assert_eq!(result["added"], 1, "{result}");
+    assert_eq!(result["stopped_after"], 1, "{result}");
+    let audited = nils_registry::audit::list(
+        reg.store(),
+        &nils_registry::audit::Filter {
+            action: Some("release".to_string()),
+            limit: 10,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(audited.len(), 1, "{audited:?}");
+    assert_eq!(audited[0].job_id, Some(j.id));
+    assert_eq!(audited[0].scope["version"], result["version"]);
     // the row: unfinished, the words, the one stack done recorded
     let release_id = {
         let store = reg.store();

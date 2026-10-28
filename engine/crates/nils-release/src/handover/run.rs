@@ -541,11 +541,11 @@ pub fn password_of(registry: &Registry, kept: &Kept) -> Result<Option<String>, E
 /// over as it is (Wave 7b, the maintenance track), in plain words; none
 /// when the folder is that version. A release lock in the folder says a
 /// release is writing it, or died in it; a release newer than the version
-/// into the same folder that stopped, or did not finish, left the folder a
-/// mixture of two versions, unless it stopped before it wrote or removed
-/// anything ([`crate::run::WROTE_NOTHING`]), in which case the folder is
-/// the version still. The handover refuses either, and so does its door
-/// before it queues one.
+/// into the same folder that stopped, failed or did not finish, left the
+/// folder a mixture of two versions, unless it stopped before it wrote or
+/// removed anything ([`crate::run::WROTE_NOTHING`]), in which case the
+/// folder is the version still. The handover refuses either, and so does
+/// its door before it queues one.
 pub fn not_whole(store: &mut Store, found: &Version) -> Result<Option<String>, Error> {
     let root = Path::new(&found.root);
     if crate::lock::path(root).exists() {
@@ -579,9 +579,15 @@ pub fn not_whole(store: &mut Store, found: &Version) -> Result<Option<String>, E
         let what = match r.opt_text(0)? {
             // a stop that wrote and removed nothing left the folder as it was
             Some(error) if error.contains(crate::run::WROTE_NOTHING) => continue,
-            Some(error) => match error.find(crate::run::STOPPED_WORDS) {
-                Some(at) => error[at..].split(';').next().unwrap_or(error).to_string(),
-                None => format!("did not finish ({error})"),
+            // one that failed once its row was open says why, and the tree
+            // may be a mixture as after a stop
+            Some(error) => match (
+                crate::run::why_failed(error),
+                error.find(crate::run::STOPPED_WORDS),
+            ) {
+                (Some(why), _) => format!("failed ({why})"),
+                (None, Some(at)) => error[at..].split(';').next().unwrap_or(error).to_string(),
+                (None, None) => format!("did not finish ({error})"),
             },
             // no finish and no word: a release is at it, or died at it
             None => {
