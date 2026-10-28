@@ -131,24 +131,53 @@ def brain(e) -> bool:
     return bp is not None and "brain" in str(bp)
 
 
-def cohort_of(e, fusion) -> tuple:
-    """The stack's calibration cohort and where it was found: a dataset
-    holding its files (through the fusion's aliases), its first ingest
-    batch, the batch's dash-suffixes, its subject's open cohorts."""
-    known = {k.rsplit(" ", 1)[0] for k in fusion.sites()} | set(fusion.cohort_aliases.values())
-    al = fusion.cohort_aliases
-    cands = [(d, "dataset") for d in (e.header.get("datasets") or [])]
+def _cohort_candidates(e) -> list:
+    """The names a stack's calibration cohort is looked for under, each
+    with where it comes from, in the order ``cohort_of`` tries them: the
+    datasets holding its files, its first ingest batch, the batch's
+    dash-suffixes, its subject's open cohorts."""
+    cands = [(str(d), "dataset") for d in (e.header.get("datasets") or [])]
     b = e.header.get("batch")
     if isinstance(b, str) and b:
         cands.append((b, "batch"))
         parts = b.split("-")
         cands += [("-".join(parts[i:]), "batch_part") for i in range(1, len(parts))]
     cands += [(c, "cohort") for c in sorted(str(c) for c in e.header.get("cohorts") or [])]
-    for c, where in cands:
+    return cands
+
+
+def cohort_candidates(e) -> list:
+    """The names of ``_cohort_candidates``, each once, in the order
+    ``cohort_of`` tries them: what a site builds its key from
+    (``<name> <make>``) when the fusion knows none of them."""
+    out: list = []
+    for c, _ in _cohort_candidates(e):
+        if c not in out:
+            out.append(c)
+    return out
+
+
+def cohort_of(e, fusion) -> tuple:
+    """The stack's calibration cohort and where it was found: a dataset
+    holding its files (through the fusion's aliases), its first ingest
+    batch, the batch's dash-suffixes, its subject's open cohorts."""
+    known = {k.rsplit(" ", 1)[0] for k in fusion.sites()} | set(fusion.cohort_aliases.values())
+    al = fusion.cohort_aliases
+    for c, where in _cohort_candidates(e):
         c2 = al.get(c, c)
         if c2 in known:
             return c2, where
     return None, None
+
+
+def raw_columns(rows: dict, by_id: dict, sid: int) -> dict:
+    """The raw-score mode's site columns of a stack's table (0.3.0), the
+    same in the cascade's and the full pipeline's: its site key as the
+    fusion sees it (null where its cohort is none the fusion knows), its
+    make as the key spells it, and the cohort candidates the key could be
+    built from, space separated, in the order ``cohort_of`` tries them."""
+    e = by_id[sid]
+    return {"site": rows[sid]["site"], "make": make_of(e), "cohort_candidates": " ".join(cohort_candidates(e)) or None}
 
 
 def _spearman(x, y) -> float:

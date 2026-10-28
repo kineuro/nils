@@ -26,7 +26,7 @@ def fusion() -> Fusion:
                   use_V=True, cohort_aliases={}, untrusted_time_cohorts=[])
 
 
-def write_run(tmp: Path, n: int, seed: int = 0, site=None, start: int = 1) -> dict:
+def write_run(tmp: Path, n: int, seed: int = 0, site=None, start: int = 1, make: str = "Siemens") -> dict:
     """A raw-score run's output folder: n tables with z drawn wide and the
     label each z would get under the known pair, by stack id."""
     rng = np.random.default_rng(seed)
@@ -38,7 +38,8 @@ def write_run(tmp: Path, n: int, seed: int = 0, site=None, start: int = 1) -> di
     for i in range(n):
         sid = start + i
         (folder / f"{sid}.json").write_text(json.dumps({"stack_id": sid, "p_given": None, "value": None, "reason": "no-calibration",
-                                                         "score_raw": round(float(z[i]), 6), "site": site, "fusion_digest": FUSION,
+                                                         "score_raw": round(float(z[i]), 6), "site": site, "make": make,
+                                                         "cohort_candidates": "cohort-c", "fusion_digest": FUSION,
                                                          "cascade_digest": "sha256:" + "c" * 64}))
         labels[sid] = int(y[i])
     # a table with no raw score, as a calibrated stack's, is passed over
@@ -62,14 +63,55 @@ def test_a_pair_file_and_a_map_of_pairs_both_load_and_merge_over_the_fusion(tmp_
     assert load_pairs(one) == {"cohort-c Siemens": (0.7, -0.2)}
     many = tmp_path / "many.json"
     many.write_text(json.dumps({"cohort-c Siemens": [0.7, -0.2], "cohort-a Siemens": {"a": 2.0, "b": 0.5}}))
-    G, sites = calibration.apply(fusion(), many)
-    assert sites == ["cohort-a Siemens", "cohort-c Siemens"]
+    G, sites, checked = calibration.apply(fusion(), many)
+    assert sites == ["cohort-a Siemens", "cohort-c Siemens"] and checked is False  # a map names no fusion
     assert G.cal == {"cohort-a Siemens": (2.0, 0.5), "cohort-c Siemens": (0.7, -0.2)} and G.sites() == set(G.cal)
     for bad in ("not json", "{}", json.dumps({"cohort-c Siemens": [1.0]}), json.dumps({"cohort-c Siemens": ["a", 0.0]}),
-                json.dumps({"cohort-c Siemens": [float("nan"), 0.0]}).replace("NaN", "1e999")):
+                json.dumps({"cohort-c Siemens": [float("nan"), 0.0]}).replace("NaN", "1e999"),
+                json.dumps({"site": ["cohort-c", "Siemens"], "a": 0.7, "b": -0.2}), json.dumps({"site": 7, "a": 0.7, "b": -0.2})):
         (tmp_path / "bad.json").write_text(bad)
-        with pytest.raises(CalibrationError):
+        with pytest.raises(CalibrationError) as e:
             load_pairs(tmp_path / "bad.json")
+        assert "\n" not in str(e.value)
+
+
+def test_a_pair_file_fitted_on_another_fusion_is_refused_and_one_naming_none_is_unchecked(tmp_path):
+    fitted = tmp_path / "fitted.json"
+    fitted.write_text(json.dumps({"site": "cohort-c Siemens", "a": 0.7, "b": -0.2, "model": {"fusion_digest": FUSION}}))
+    assert load_pairs(fitted) == {"cohort-c Siemens": (0.7, -0.2)}  # with no digest to hold it to
+    G, sites, checked = calibration.apply(fusion(), fitted, FUSION)
+    assert sites == ["cohort-c Siemens"] and checked is True
+    other = "sha256:" + "e" * 64
+    with pytest.raises(CalibrationError, match="another fusion"):
+        calibration.apply(fusion(), fitted, other)
+    with pytest.raises(CalibrationError, match="another fusion"):
+        load_pairs(fitted, other)
+    # a map whose values are pair files is held to its digests too
+    many = tmp_path / "many.json"
+    many.write_text(json.dumps({"cohort-c Siemens": {"a": 0.7, "b": -0.2, "model": {"fusion_digest": FUSION}}, "cohort-d GE": [1.0, 0.0]}))
+    assert calibration.apply(fusion(), many, FUSION)[2] is True
+    with pytest.raises(CalibrationError, match="another fusion"):
+        calibration.apply(fusion(), many, other)
+    extra: dict = {}
+    calibration.for_run(fusion(), str(fitted), extra, FUSION)
+    assert extra == {"calibration": {"sites": {"cohort-c Siemens": 0}}}
+    extra = {}
+    calibration.for_run(fusion(), str(many), extra)
+    assert extra == {"calibration": {"sites": {"cohort-c Siemens": 0, "cohort-d GE": 0}, "unchecked": True}}
+
+
+def test_the_results_count_the_stacks_each_pair_calibrated_and_name_keys_that_matched_no_stack():
+    extra = {"calibration": {"sites": {"cohort-c Siemens": 0, "cohort-d GE": 0}}}
+    sites_of = {1: "cohort-a Siemens", 2: "cohort-c Siemens", 3: "cohort-c Siemens", 4: "cohort-c Siemens", 5: None}
+    tables = {1: {"p_given": 0.9}, 2: {"p_given": 0.8}, 3: {"p_given": 0.2}, 4: {"p_given": None, "reason": "deferred"}, 5: {"p_given": None}}
+    calibration.record(extra, sites_of, tables)
+    assert extra == {"calibration": {"sites": {"cohort-c Siemens": 2, "cohort-d GE": 0}}}
+    extra = {"calibration": {"sites": {"cohort-z Siemens": 0}, "unchecked": True}}
+    calibration.record(extra, sites_of, tables)
+    assert extra == {"calibration": {"sites": {"cohort-z Siemens": 0}, "unchecked": True, "matched_none": ["cohort-z Siemens"]}}
+    extra = {}
+    calibration.record(extra, sites_of, tables)
+    assert extra == {}
 
 
 def test_the_run_reads_the_site_file_the_engine_mounted(tmp_path, monkeypatch):
@@ -79,7 +121,7 @@ def test_the_run_reads_the_site_file_the_engine_mounted(tmp_path, monkeypatch):
     assert calibration.for_run(fusion(), None, extra).cal == {"cohort-a Siemens": (1.0, 0.0)} and extra == {}
     monkeypatch.setenv(calibration.ENV, str(f))
     G = calibration.for_run(fusion(), None, extra)
-    assert "cohort-c Siemens" in G.cal and extra == {"calibration": {"sites": ["cohort-c Siemens"]}}
+    assert "cohort-c Siemens" in G.cal and extra == {"calibration": {"sites": {"cohort-c Siemens": 0}, "unchecked": True}}
     with pytest.raises(CalibrationError):
         calibration.for_run(fusion(), str(tmp_path / "missing.json"), {})
 
@@ -114,10 +156,22 @@ def test_the_fit_recovers_a_known_pair_and_stays_finite_on_a_separable_set():
     rng = np.random.default_rng(1)
     z = rng.normal(0.0, 3.0, 4000)
     y = (rng.random(4000) < 1 / (1 + np.exp(-(A * z + B)))).astype(float)
-    a, b = fit_platt(z, y)
+    a, b, fit = fit_platt(z, y)
     assert abs(a - A) < 0.08 and abs(b - B) < 0.1, (a, b)
-    a, b = fit_platt(np.array([-3.0, -2.0, -1.0, 1.0, 2.0, 3.0]), np.array([0, 0, 0, 1, 1, 1.0]))
-    assert math.isfinite(a) and math.isfinite(b) and a > 0
+    assert fit["converged"] is True and 0 < fit["iterations"] <= 200
+    sep_z, sep_y = np.array([-3.0, -2.0, -1.0, 1.0, 2.0, 3.0]), np.array([0, 0, 0, 1, 1, 1.0])
+    a, b, fit = fit_platt(sep_z, sep_y)
+    assert math.isfinite(a) and math.isfinite(b) and a > 0 and isinstance(fit["converged"], bool)
+    # the fit never adopts a step that raises the loss: every budget of
+    # iterations ends at or below the loss of the pair before it
+    def loss(a, b):
+        p = 1 / (1 + np.exp(-(a * z + b)))
+        npos, nneg = y.sum(), (1 - y).sum()
+        t = np.where(y > 0.5, (npos + 1) / (npos + 2), 1 / (nneg + 2))
+        return float(np.mean(-(t * np.log(p) + (1 - t) * np.log(1 - p))))
+    losses = [loss(*fit_platt(z, y, iters=k)[:2]) for k in range(0, 8)]
+    assert all(l2 <= l1 + 1e-12 for l1, l2 in zip(losses, losses[1:])), losses
+    assert fit_platt(z, y, iters=0) == (0.0, 0.0, {"iterations": 0, "converged": False})
 
 
 def test_calibrate_fits_the_sites_pair_from_a_runs_raw_scores_and_reports_per_source(tmp_path, capsys):
@@ -131,13 +185,16 @@ def test_calibrate_fits_the_sites_pair_from_a_runs_raw_scores_and_reports_per_so
     d = json.loads(out.read_text())
     assert d["site"] == "cohort-c Siemens" and abs(d["a"] - A) < 0.15 and abs(d["b"] - B) < 0.2, (d["a"], d["b"])
     assert d["n"] == 2000 and d["n_given"] + d["n_not_given"] == 2000 and d["n_without_score"] == 3 and d["n_other_site"] == 0
+    assert d["n_other_make"] == 0 and d["fit"]["converged"] is True and d["fit"]["iterations"] > 0
     assert set(d["per_source"]) == {"header", "name", "manual"} and sum(m["n"] for m in d["per_source"].values()) == 2000
     for m in list(d["per_source"].values()) + [d["overall"]]:
         assert 0 < m["log_loss"] < math.log(2) and 0.5 < m["accuracy"] <= 1
     assert d["model"]["fusion_digest"] == FUSION and d["model"]["version"] == cli.__version__ and d["fitted_at"].endswith("Z")
-    assert set(d) == {"site", "a", "b", "n", "n_given", "n_not_given", "n_without_score", "n_other_site", "per_source", "overall", "model", "fitted_at"}
+    assert set(d) == {"site", "a", "b", "n", "n_given", "n_not_given", "n_without_score", "n_other_site", "n_other_make", "fit", "per_source",
+                      "overall", "model", "fitted_at"}
     text = capsys.readouterr().out
     assert "site cohort-c Siemens" in text and "3 labelled with no score" in text and "header:" in text and "manual:" in text
+    assert "0 of another make" in text and "converged" in text
     # the pair file is a calibration file a run takes as it is
     assert load_pairs(out) == {"cohort-c Siemens": (d["a"], d["b"])}
 
@@ -160,15 +217,21 @@ def test_calibrate_refuses_under_twenty_of_a_class_and_a_bad_source_by_line(tmp_
     assert rc == 1 and f"line {len(labels) + 2}" in err and "someword" not in err
 
 
-def test_calibrate_takes_several_runs_and_keeps_another_sites_rows_out(tmp_path):
+def test_calibrate_takes_several_runs_and_keeps_another_sites_and_another_makes_rows_out(tmp_path):
     la = write_run(tmp_path / "run-a", 80, seed=5, start=1)
     lb = write_run(tmp_path / "run-b", 80, seed=6, start=1000)
     lc = write_run(tmp_path / "run-c", 30, seed=7, site="cohort-a Siemens", start=5000)
-    labels = {**la, **lb, **lc}
+    # the same cohort on another make: its rows are not this key's
+    ld = write_run(tmp_path / "run-d", 10, seed=8, start=7000, make="GE")
+    labels = {**la, **lb, **lc, **ld}
     write_labels(tmp_path / "labels.tsv", labels)
-    scores = calibration.read_scores([tmp_path / "run-a", tmp_path / "run-b", tmp_path / "run-c" / "postcontrast" / "5000.json"])
-    assert len(scores) == 161
+    scores = calibration.read_scores([tmp_path / "run-a", tmp_path / "run-b", tmp_path / "run-c" / "postcontrast" / "5000.json", tmp_path / "run-d"])
+    assert len(scores) == 171 and scores[7000]["make"] == "GE" and scores[1]["make"] == "Siemens"
     d = calibration.calibrate(read_labels(tmp_path / "labels.tsv"), scores, "cohort-c Siemens")
-    assert d["n"] == 160 and d["n_other_site"] == 1 and d["n_without_score"] == 29
+    assert d["n"] == 160 and d["n_other_site"] == 1 and d["n_without_score"] == 29 and d["n_other_make"] == 10
+    # the make is compared without case, and a key without a make is refused
+    assert calibration.calibrate(read_labels(tmp_path / "labels.tsv"), scores, "cohort-c siemens")["n"] == 160
+    with pytest.raises(CalibrationError, match="<cohort> <make>"):
+        calibration.calibrate(read_labels(tmp_path / "labels.tsv"), scores, "cohort-c")
     with pytest.raises(CalibrationError, match="does not exist"):
         calibration.read_scores([tmp_path / "nowhere"])

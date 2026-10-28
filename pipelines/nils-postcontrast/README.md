@@ -40,8 +40,16 @@ fits its own pair, with no new model bundle or image:
    pipelines). A T1-type brain stack at a site with no pair is scored too
    and its table carries `score_raw`, the fused log-odds before any
    calibration (the cascade adds each seed's in `score_raw_seeds`), with its
-   `site` and `make`; `p_given` and `value` stay empty, so nothing becomes a
-   proposal. Every other stack is as without the switch.
+   `site` (empty where the fusion knows none of its cohorts), its `make` as
+   the key spells it and `cohort_candidates`, the dataset, batch and cohort
+   names the stack belongs to, space separated, in the order the site key is
+   looked for, so the site builds its key as `<one of them> <make>`;
+   `p_given` and `value` stay empty, so nothing becomes a proposal. A stack
+   whose conversion or tools failed keeps that reason (`no-segmentation`,
+   `worker-died`, ...) with no raw score; `no-calibration` is a scored
+   stack's. The run's metrics count the stacks the rule accepted as
+   `candidates`, as before, and the raw-scored stacks as `raw_scored`. Every
+   other stack is as without the switch.
 2. Label those stacks in a tab-separated file with a header, `stack`,
    `label` (`given` or `not_given`) and `source` (`header`, `name` or
    `manual`), and fit the pair:
@@ -50,19 +58,34 @@ fits its own pair, with no new model bundle or image:
    nils-postcontrast calibrate --labels labels.tsv --scores <run output>... --site "<cohort> <make>" --out pair.json
    ```
 
-   It joins on the stack id, needs at least 20 labelled stacks of each
-   class with a score, refuses a bad row by its line number and never by
-   its content, and writes `{site, a, b, n, n_given, n_not_given,
-   n_without_score, n_other_site, per_source, overall, model, fitted_at}`
-   with the log loss and accuracy overall and per source, printed as a short
-   report.
+   It joins on the stack id, takes only rows of the key's make (compared
+   without case; rows of another make are counted as `n_other_make`, rows
+   whose table names another site as `n_other_site`), needs at least 20
+   labelled stacks of each class with a score, refuses a bad row by its
+   line number and never by its content, and writes `{site, a, b, n,
+   n_given, n_not_given, n_without_score, n_other_site, n_other_make, fit,
+   per_source, overall, model, fitted_at}` with the log loss and accuracy
+   overall and per source, printed as a short report. `fit` says how many
+   Newton iterations the pair took and whether it converged (a step is
+   adopted only when it lowers the loss; where none does, the fit stops and
+   says so); `model.fusion_digest` names the fusion the scores came from.
 3. Give the pair to every run: the descriptor's optional site file
    `post_contrast_calibration` (`nils pipeline secret set
    post_contrast_calibration --file pair.json`), which the engine mounts and
    names through `NILS_PC_CALIBRATION`; outside the engine, `--calibration
    FILE`. The file is one pair file or a map `{site: [a, b]}`; its pairs are
-   merged over the fusion's before any stack is judged, and the run records
-   the sites it set, never the pairs.
+   merged over the fusion's before any stack is judged. A pair file whose
+   `model.fusion_digest` names another fusion than the run's is refused
+   (the run fails before any stack is read). The run's `results.json`
+   records under `calibration` the sites the file set, each with the number
+   of stacks its pair calibrated (`sites: {key: n}`), `unchecked: true`
+   where the file named no fusion to check against, and `matched_none:
+   [keys]` where no key was any stack's site (the run still completes);
+   never the pairs. The file is kept where secrets are kept and reaches the
+   container as one, but it is a site file, not a secret: the descriptor
+   declares it `sweep: false`, so the engine does not sweep the run's
+   outputs for its lines (the tables echo the fusion digest and site it
+   names).
 
 ## The full pipeline
 

@@ -17,9 +17,14 @@ site its own pair without a new model bundle or image:
    rule), and writes it as a pair file with its fit per label source;
 3. a run given that file (``--calibration``, or the descriptor's site file
    through ``NILS_PC_CALIBRATION``) merges its pairs over the fusion's and
-   scores the site as any calibrated one.
+   scores the site as any calibrated one; a pair file fitted on another
+   fusion than the run's is refused, and a file naming no fusion is taken
+   as it is and said to be unchecked.
 
-A refusal names a row by its line number, never by its content.
+The site file is configuration, not a secret: the descriptor declares it
+``sweep: false``, so the engine keeps it where secrets are kept but does
+not remove the tables, which echo its digest and site lines. A refusal
+names a row by its line number, never by its content.
 """
 
 from __future__ import annotations
@@ -49,21 +54,32 @@ class CalibrationError(ValueError):
 
 # ---------------------------------------------------------------- the pairs
 
-def load_pairs(path) -> dict:
-    """The site pairs of a calibration file: one pair file (``site``, ``a``,
-    ``b``) or a map of ``{site: [a, b]}`` (a value may also be a pair
-    file's object)."""
+def _read_file(path) -> tuple:
+    """(the site pairs of a calibration file, the fusion digests it names):
+    one pair file (``site``, ``a``, ``b``, its ``model.fusion_digest``) or a
+    map of ``{site: [a, b]}`` (a value may also be a pair file's object)."""
     try:
         d = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as e:
         raise CalibrationError("the calibration file is not readable JSON") from e
     if not isinstance(d, dict) or not d:
         raise CalibrationError("the calibration file holds no site pair")
+    digests: list = []
+
+    def digest_of(obj: dict) -> None:
+        m = obj.get("model")
+        if isinstance(m, dict) and isinstance(m.get("fusion_digest"), str) and m["fusion_digest"] not in digests:
+            digests.append(m["fusion_digest"])
+
     if {"site", "a", "b"} <= set(d):
+        if not isinstance(d["site"], str):
+            raise CalibrationError("the pair file's site is not a string (the site key, <cohort> <make>)")
+        digest_of(d)
         d = {d["site"]: [d["a"], d["b"]]}
     out: dict = {}
     for site, v in d.items():
         if isinstance(v, dict):
+            digest_of(v)
             v = [v.get("a"), v.get("b")]
         try:
             a, b = (float(x) for x in v)
@@ -72,32 +88,69 @@ def load_pairs(path) -> dict:
         if not (isinstance(site, str) and site.strip()) or not (math.isfinite(a) and math.isfinite(b)):
             raise CalibrationError(f"the pair of site {site!r} is not two finite numbers under a site key")
         out[site] = (a, b)
-    return out
+    return out, digests
 
 
-def apply(F: Fusion, path) -> tuple:
+def load_pairs(path, fusion_digest=None) -> dict:
+    """The site pairs of a calibration file (``_read_file``); with the run's
+    fusion digest, a file fitted on another fusion is refused."""
+    pairs, digests = _read_file(path)
+    if fusion_digest is not None and any(d != fusion_digest for d in digests):
+        raise CalibrationError("the calibration file was fitted on another fusion than this run's: one pair fits one model")
+    return pairs
+
+
+def apply(F: Fusion, path, fusion_digest=None) -> tuple:
     """The fusion with the file's pairs merged over its own: (fusion, the
-    sites the file set)."""
-    pairs = load_pairs(path)
+    sites the file set, whether the file was held to the run's fusion). A
+    file naming another fusion is refused; one naming none, or a run that
+    gives no digest to hold it to, is unchecked."""
+    pairs, digests = _read_file(path)
+    if fusion_digest is not None and any(d != fusion_digest for d in digests):
+        raise CalibrationError("the calibration file was fitted on another fusion than this run's: one pair fits one model")
     cal = dict(F.cal)
     cal.update(pairs)
     G = Fusion(cols=F.cols, mean=F.mean, scale=F.scale, coef=F.coef, intercept=F.intercept, cal=cal, t=F.t, use_V=F.use_V,
                cohort_aliases=F.cohort_aliases, untrusted_time_cohorts=F.untrusted_time_cohorts)
-    return G, sorted(pairs)
+    return G, sorted(pairs), fusion_digest is not None and bool(digests)
 
 
-def for_run(F: Fusion, path, extra: dict) -> Fusion:
+def for_run(F: Fusion, path, extra: dict, fusion_digest=None) -> Fusion:
     """The fusion a run scores with: its own pairs, with a calibration
     file's merged over them where there is one, the file ``--calibration``
     names, else the one the engine mounted as the descriptor's site file
-    (``NILS_PC_CALIBRATION``). The run records the sites the file set in
-    its results (``calibration``), never the pairs."""
+    (``NILS_PC_CALIBRATION``). A file whose ``model.fusion_digest`` names
+    another fusion than the run's is refused. The run records in its
+    results (``calibration``) the sites the file set, each with the stacks
+    the pair calibrated once ``record`` has counted them, and ``unchecked``
+    where the file named no fusion; never the pairs."""
     path = path or os.environ.get(ENV) or None
     if not path:
         return F
-    G, sites = apply(F, path)
-    extra["calibration"] = {"sites": sites}
+    G, sites, checked = apply(F, path, fusion_digest)
+    extra["calibration"] = {"sites": {s: 0 for s in sites}}
+    if not checked:
+        extra["calibration"]["unchecked"] = True
     return G
+
+
+def record(extra: dict, sites_of: dict, tables: dict) -> None:
+    """After the run: per site key of the file, the stacks the pair
+    calibrated (``calibration.sites: {key: n}``, a stack with a probability
+    from it), and ``calibration.matched_none: [keys]`` where no key was the
+    site of any stack of the run, which is no refusal."""
+    cal = extra.get("calibration")
+    if not cal:
+        return
+    matched: set = set()
+    for sid, doc in tables.items():
+        site = sites_of.get(sid)
+        if site in cal["sites"]:
+            matched.add(site)
+            if doc.get("p_given") is not None:
+                cal["sites"][site] += 1
+    if not matched:
+        cal["matched_none"] = sorted(cal["sites"])
 
 
 def add_run_options(c) -> None:
@@ -170,8 +223,8 @@ def _tables(path: Path):
 def read_scores(paths) -> dict:
     """The raw scores by stack id from the raw-score mode's outputs: each
     path a run's output folder (its ``postcontrast/<stack>.json`` tables)
-    or one table. ``{stack: {"z", "site", "fusion_digest", "cascade_digest"}}``;
-    a stack in several outputs keeps the last."""
+    or one table. ``{stack: {"z", "site", "make", "fusion_digest",
+    "cascade_digest"}}``; a stack in several outputs keeps the last."""
     out: dict = {}
     for p in paths:
         p = Path(p)
@@ -185,20 +238,24 @@ def read_scores(paths) -> dict:
                 z = float(z)
             except (TypeError, ValueError) as e:
                 raise CalibrationError("a table's score_raw is not a number") from e
-            out[int(doc["stack_id"])] = {"z": z, "site": doc.get("site"), "fusion_digest": doc.get("fusion_digest"),
-                                         "cascade_digest": doc.get("cascade_digest")}
+            out[int(doc["stack_id"])] = {"z": z, "site": doc.get("site"), "make": doc.get("make"),
+                                         "fusion_digest": doc.get("fusion_digest"), "cascade_digest": doc.get("cascade_digest")}
     return out
 
 
 # ---------------------------------------------------------------- the fit
 
 def fit_platt(z: np.ndarray, y: np.ndarray, iters: int = 200) -> tuple:
-    """Platt's pair (a, b) for p = sigmoid(a z + b): the logistic regression
-    of the labels on z with Platt's smoothed targets ((n+ + 1) / (n+ + 2) for
-    a positive, 1 / (n- + 2) for a negative), by Newton's method with
-    halving where a step does not lower the loss."""
+    """Platt's pair (a, b) for p = sigmoid(a z + b), and its fit: the
+    logistic regression of the labels on z with Platt's smoothed targets
+    ((n+ + 1) / (n+ + 2) for a positive, 1 / (n- + 2) for a negative), by
+    Newton's method with halving. A candidate is adopted only when it lowers
+    the mean loss; when no halving does, the fit stops where it stands,
+    converged if the gradient is flat there and stuck otherwise. Returns
+    ``(a, b, {"iterations": n, "converged": bool})``."""
     z = np.asarray(z, np.float64)
     y = np.asarray(y, np.float64)
+    n = max(1, len(z))
     npos, nneg = float(y.sum()), float((1 - y).sum())
     t = np.where(y > 0.5, (npos + 1) / (npos + 2), 1 / (nneg + 2))
     X = np.column_stack([z, np.ones_like(z)])
@@ -206,26 +263,40 @@ def fit_platt(z: np.ndarray, y: np.ndarray, iters: int = 200) -> tuple:
 
     def loss(w):
         f = X @ w
-        return float(np.sum(np.logaddexp(0, f) - t * f))
+        return float(np.sum(np.logaddexp(0, f) - t * f)) / n
 
     cur = loss(w)
-    for _ in range(iters):
+    done, converged = 0, False
+    while done < iters:
         p = 1 / (1 + np.exp(-(X @ w)))
-        g = X.T @ (p - t)
-        H = (X * (p * (1 - p))[:, None]).T @ X + 1e-12 * np.eye(2)
+        g = X.T @ (p - t) / n
+        flat = float(np.max(np.abs(g))) < 1e-8
+        if flat:
+            converged = True
+            break
+        H = (X * (p * (1 - p))[:, None]).T @ X / n + 1e-12 * np.eye(2)
         step = np.linalg.solve(H, g)
+        better = None
         s = 1.0
         while s > 1e-6:
             cand = w - s * step
             new = loss(cand)
-            if new <= cur:
+            if new < cur:
+                better = (cand, new)
                 break
             s /= 2
-        if abs(cur - new) < 1e-12 and float(np.max(np.abs(s * step))) < 1e-9:
-            w = cand
+        if better is None:
+            # no halving lowers the loss: the fit stands here, converged where
+            # the gradient is flat at working precision, stuck otherwise
+            converged = float(np.max(np.abs(g))) < 1e-6
             break
-        w, cur = cand, new
-    return float(w[0]), float(w[1])
+        done += 1
+        moved = float(np.max(np.abs(better[0] - w)))
+        w, cur = better
+        if moved < 1e-9:
+            converged = True
+            break
+    return float(w[0]), float(w[1]), {"iterations": done, "converged": converged}
 
 
 def _measures(z: np.ndarray, y: np.ndarray, a: float, b: float) -> dict:
@@ -238,10 +309,15 @@ def _measures(z: np.ndarray, y: np.ndarray, a: float, b: float) -> dict:
 def calibrate(labels: dict, scores: dict, site: str) -> dict:
     """The site's pair document from the labels and the raw scores: the
     fit, its counts and its measures overall and per label source. Rows
-    with no score, and rows whose table names another site, are counted
-    and left out; fewer than 20 rows of a class refuse."""
+    with no score, rows whose table names another site, and rows of another
+    make than the key's (``<cohort> <make>``, the make as the fusion spells
+    it, compared without case) are counted and left out; fewer than 20 rows
+    of a class refuse."""
+    if " " not in site.strip() or not site.rsplit(" ", 1)[1].strip():
+        raise CalibrationError("the site key is <cohort> <make>, the make as the tables spell it")
+    key_make = site.rsplit(" ", 1)[1].strip().lower()
     zs, ys, srcs = [], [], []
-    n_without_score = n_other_site = 0
+    n_without_score = n_other_site = n_other_make = 0
     digests = {"fusion": set(), "cascade": set()}
     for sid, (y, src) in labels.items():
         r = scores.get(sid)
@@ -250,6 +326,9 @@ def calibrate(labels: dict, scores: dict, site: str) -> dict:
             continue
         if r["site"] is not None and r["site"] != site:
             n_other_site += 1
+            continue
+        if str(r.get("make") or "").strip().lower() != key_make:
+            n_other_make += 1
             continue
         zs.append(r["z"])
         ys.append(y)
@@ -264,14 +343,15 @@ def calibrate(labels: dict, scores: dict, site: str) -> dict:
     if n_given < FLOOR or n_not < FLOOR:
         raise CalibrationError(f"a site's pair needs at least {FLOOR} labelled stacks of each class with a score: "
                                f"{n_given} given and {n_not} not_given here")
-    a, b = fit_platt(z, y)
+    a, b, fit = fit_platt(z, y)
     per: dict = {}
     for s in SOURCES:
         m = np.array([x == s for x in srcs], bool)
         if m.any():
             per[s] = {"n": int(m.sum()), "n_given": int(y[m].sum()), **_measures(z[m], y[m], a, b)}
     return {"site": site, "a": round(a, 8), "b": round(b, 8), "n": int(len(y)), "n_given": n_given, "n_not_given": n_not,
-            "n_without_score": n_without_score, "n_other_site": n_other_site, "per_source": per, "overall": _measures(z, y, a, b),
+            "n_without_score": n_without_score, "n_other_site": n_other_site, "n_other_make": n_other_make, "fit": fit,
+            "per_source": per, "overall": _measures(z, y, a, b),
             "model": {"fusion_digest": next(iter(digests["fusion"]), None), "cascade_digests": sorted(digests["cascade"]),
                       "image": "nils-postcontrast", "version": __version__},
             "fitted_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
@@ -280,7 +360,8 @@ def calibrate(labels: dict, scores: dict, site: str) -> dict:
 def report(doc: dict) -> str:
     lines = [f"site {doc['site']}: a = {doc['a']:.6f}, b = {doc['b']:.6f}",
              f"{doc['n']} stacks fitted ({doc['n_given']} given, {doc['n_not_given']} not_given); "
-             f"{doc['n_without_score']} labelled with no score, {doc['n_other_site']} at another site",
+             f"{doc['n_without_score']} labelled with no score, {doc['n_other_site']} at another site, {doc['n_other_make']} of another make",
+             f"fit: {doc['fit']['iterations']} iterations, {'converged' if doc['fit']['converged'] else 'stuck before it converged'}",
              f"overall: log loss {doc['overall']['log_loss']:.4f}, accuracy {doc['overall']['accuracy']:.4f}"]
     for s, m in doc["per_source"].items():
         lines.append(f"  {s}: {m['n']} stacks ({m['n_given']} given), log loss {m['log_loss']:.4f}, accuracy {m['accuracy']:.4f}")
@@ -306,6 +387,7 @@ def add_parser(sub) -> None:
     c = sub.add_parser("calibrate", help="fit a site's Platt pair on the raw scores a run wrote and the site's labels")
     c.add_argument("--labels", required=True, help="a tab-separated file with a header: stack, label (given or not_given), source (header, name, manual)")
     c.add_argument("--scores", nargs="+", required=True, help="the output folders (or tables) of runs with --raw-scores")
-    c.add_argument("--site", required=True, help="the site key the pair is for, <cohort> <make>")
+    c.add_argument("--site", required=True, help="the site key the pair is for, <cohort> <make> (the make as the tables spell it; "
+                                                 "a scored stack's cohort_candidates column names the cohorts the key may use)")
     c.add_argument("--out", required=True, help="the pair file to write")
     c.set_defaults(fn=cmd_calibrate)

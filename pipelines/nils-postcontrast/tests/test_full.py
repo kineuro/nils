@@ -567,13 +567,27 @@ def test_raw_scores_give_a_stack_with_no_calibration_its_log_odds_and_no_answer(
     t5 = T[5]  # a cohort the fusion has no pair for
     assert t5["reason"] == "no-calibration" and t5["stage"] == "full" and t5["answers"] == 0 and t5["p_given"] is None and t5["value"] is None
     assert isinstance(t5["score_raw"], float) and "V" in t5["arms"] and t5["site"] is None and t5["make"] == "Siemens"
-    assert T[1]["answers"] == 1 and T[1]["score_raw"] is None and T[1]["site"] == "cohort-a Siemens"
+    assert t5["cohort_candidates"] == "cohort-c"
+    assert T[1]["answers"] == 1 and T[1]["score_raw"] is None and T[1]["site"] == "cohort-a Siemens" and T[1]["cohort_candidates"] == "cohort-a"
     assert T[3]["reason"] == "not-t1-brain" and T[3]["score_raw"] is None and T[4]["reason"] == "sealed"
     res = json.loads((out / "results.json").read_text())
     assert {p["stack_id"] for p in res["proposals"]} == {1, 2} and res["params"]["raw_scores"] is True
-    assert res["metrics"]["candidates"] == 3 and res["metrics"]["by_outcome"]["no-calibration"] == 1
+    # the candidates are still the stacks the rule accepted; the raw-score mode's are counted apart
+    assert res["metrics"]["candidates"] == 2 and res["metrics"]["raw_scored"] == 1 and res["metrics"]["by_outcome"]["no-calibration"] == 1
     units = {u["unit_id"]: u for u in res["units"]}
     assert units["stack-5"]["metrics"]["score_raw"] == t5["score_raw"]
+
+
+def test_raw_scores_keep_a_failed_stacks_own_reason_and_no_score(standin_env, monkeypatch):
+    monkeypatch.setenv("STANDIN_NO_TOOLS", "5")  # the uncalibrated stack: every tool fails, so no segmentation
+    rc, out = run(standin_env, "--raw-scores")
+    assert rc == 0
+    T = tables(out)
+    assert T[5]["reason"] == "no-segmentation" and T[5]["score_raw"] is None and T[5]["answers"] == 0 and T[5]["cohort_candidates"] == "cohort-c"
+    assert T[1]["answers"] == 1 and T[1]["score_raw"] is None
+    res = json.loads((out / "results.json").read_text())
+    assert "no-calibration" not in res["metrics"]["by_outcome"] and res["metrics"]["by_outcome"]["no-segmentation"] == 1
+    assert res["metrics"]["candidates"] == 2 and res["metrics"]["raw_scored"] == 0
 
 
 def test_a_calibration_file_scores_a_site_the_fusion_has_no_pair_for(standin_env):
@@ -584,4 +598,4 @@ def test_a_calibration_file_scores_a_site_the_fusion_has_no_pair_for(standin_env
     T = tables(out)
     assert T[5]["answers"] == 1 and T[5]["value"] == "given" and "score_raw" not in T[5]
     res = json.loads((out / "results.json").read_text())
-    assert {p["stack_id"] for p in res["proposals"]} == {1, 2, 5} and res["calibration"] == {"sites": ["cohort-c Siemens"]}
+    assert {p["stack_id"] for p in res["proposals"]} == {1, 2, 5} and res["calibration"] == {"sites": {"cohort-c Siemens": 1}, "unchecked": True}

@@ -29,11 +29,13 @@ by construction.
 With ``--raw-scores`` (0.3.0) a T1-type brain stack at a site with no
 calibration is converted, segmented and scored too, and its table carries
 the fused log-odds before any calibration (``score_raw``) beside the
-``no-calibration`` reason where it has an image arm; its ``p_given`` and
-``value`` stay empty, so it is never a proposal. A run given a calibration
-file (``--calibration``, or the descriptor's site file through
-``NILS_PC_CALIBRATION``) merges the file's site pairs over the fusion's
-first (``calibration.py``).
+``no-calibration`` reason where it has an image arm, with its ``site``,
+``make`` and ``cohort_candidates`` (the names a site key may be built
+from); its ``p_given`` and ``value`` stay empty, so it is never a proposal.
+A stack whose conversion or tools failed keeps that reason, with no raw
+score. A run given a calibration file (``--calibration``, or the
+descriptor's site file through ``NILS_PC_CALIBRATION``) merges the file's
+site pairs over the fusion's first (``calibration.py``).
 
 **Where it runs.** With a card, the tools run in waves on it (``tools.wave``)
 while worker processes convert the stacks before and compute the features
@@ -566,7 +568,7 @@ def _table(sid, P: FullParts, raw: bool = False, **kw) -> dict:
            "seconds": None}
     if raw:
         # the raw-score mode's columns, on every row of such a run
-        doc.update(score_raw=None, site=None, make=None)
+        doc.update(score_raw=None, site=None, make=None, cohort_candidates=None)
     doc.update(kw)
     doc.update(cascade_digest=P.cascade.digest, fusion_digest=P.fusion.digest, arms_digest=P.arms_part.digest, stack_id=sid)
     return doc
@@ -582,7 +584,7 @@ def cmd_full(a) -> int:
     work = (Path(a.work) if a.work else Path(tempfile.mkdtemp(prefix="nils-postcontrast-full-"))).absolute()
     try:
         P = FullParts(a.inputs)
-        P.F = calibration.for_run(P.F, a.calibration, run.extra)
+        P.F = calibration.for_run(P.F, a.calibration, run.extra, P.fusion.digest)
         stacks, context = manifest.read(a.stacks, a.source_root)
         env = tools.Env.from_environ()
         cards = _cards(a.cards, a.card_share, a.card_budget_mib) if a.device != "cpu" else []
@@ -612,8 +614,8 @@ def cmd_full(a) -> int:
 
     def table(sid, **kw):
         if raw:
-            kw.setdefault("site", rows[sid]["site"])
-            kw.setdefault("make", evidence.make_of(by_id[sid]))
+            for k, v in evidence.raw_columns(rows, by_id, sid).items():
+                kw.setdefault(k, v)
         return _table(sid, P, raw=raw, **kw)
 
     atlas, hpn, vxn = P.write_atlas(work / "atlas")
@@ -645,15 +647,17 @@ def cmd_full(a) -> int:
         segmented = os.path.exists(tools.paths(str(work / "stacks" / str(sid)))["ss"])
         died = bool(r.get("tools_died") or r.get("features_died") or r.get("tools_killed"))
         lost = no_arm_reason(armset, r.get("fail") or None, segmented, died, bool(r.get("tools_error")))
-        if uncal:
-            # the raw-score mode: the log-odds alone where the stack has an
-            # image arm, no probability, no answer, so never a proposal
-            tables[sid] = table(sid, stage="full", reason="no-calibration", arms=armset, failed_steps=failed or None, seconds=r["stage"],
-                                score_raw=None if lost else round(float(z[i]), 6))
-            continue
         if lost:
-            # record 55 E3: no image arm, so not where model r1 is certified
+            # record 55 E3: no image arm, so not where model r1 is certified;
+            # in the raw-score mode too, the stack keeps its own reason and
+            # no raw score, since the model did not score it
             tables[sid] = table(sid, stage="full", reason=lost, arms=armset, failed_steps=failed or None, seconds=r["stage"])
+            continue
+        if uncal:
+            # the raw-score mode: the log-odds alone, no probability, no
+            # answer, so never a proposal
+            tables[sid] = table(sid, stage="full", reason="no-calibration", arms=armset, failed_steps=failed or None, seconds=r["stage"],
+                                score_raw=round(float(z[i]), 6))
             continue
         if a_ in VALUE:
             tables[sid] = table(sid, p_given=round(pi, 6), value=VALUE[a_], confidence=round(max(pi, 1 - pi), 6), answers=1, stage="full",
@@ -682,8 +686,14 @@ def cmd_full(a) -> int:
             run.proposals.append({"stack_id": e.stack_id, "axis": AXIS, "value": doc["value"],
                                   "probabilities": {GIVEN: round(pg, 6), NOT_GIVEN: round(1 - pg, 6)}, "model_digest": P.cascade.digest})
     sec = time.time() - t0
-    run.metrics = {"stacks": len(stacks), "candidates": len(todo), "by_outcome": counts, "seconds": round(sec, 3),
-                   "candidates_per_s": round(len(todo) / sec, 4) if sec > 0 else None, "stats": stats}
+    # the candidates are the stacks the rule accepted; the raw-score mode's
+    # stacks are counted apart, as raw_scored
+    n_cand = sum(1 for e in todo if not (raw and why.get(e.stack_id) == "no-calibration"))
+    run.metrics = {"stacks": len(stacks), "candidates": n_cand, "by_outcome": counts, "seconds": round(sec, 3),
+                   "candidates_per_s": round(n_cand / sec, 4) if sec > 0 else None, "stats": stats}
+    if raw:
+        run.metrics["raw_scored"] = sum(1 for d in tables.values() if d["score_raw"] is not None)
+    calibration.record(run.extra, {sid: r["site"] for sid, r in rows.items()}, tables)
     run.models = [P.cascade.ref(), P.fusion.ref(), P.arms_part.ref()]
     run.write()
     if a.records:

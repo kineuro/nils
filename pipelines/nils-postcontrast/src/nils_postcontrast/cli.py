@@ -33,8 +33,10 @@ a ``post_contrast`` proposal by the cascade's digest.
 With ``--raw-scores`` (0.3.0) a T1-type brain stack at a site with no
 calibration is still read and scored, and its table carries the fused
 log-odds before any calibration (``score_raw``, with each seed's in
-``score_raw_seeds``) beside the ``no-calibration`` reason; its ``p_given``
-and ``value`` stay empty, so it is never a proposal. The site fits its
+``score_raw_seeds``) beside the ``no-calibration`` reason, with its
+``site``, ``make`` and ``cohort_candidates``; its ``p_given`` and ``value``
+stay empty, so it is never a proposal, and a stack the student could not
+read is deferred as any other. The site fits its
 Platt pair on those scores with ``nils-postcontrast calibrate``
 (``calibration.py``). Without the flag the output is as before.
 """
@@ -94,7 +96,7 @@ def _table(sid: int, cas, raw: bool = False, **kw) -> dict:
            "seeds_agree": None, "files_read": 0}
     if raw:
         # the raw-score mode's columns, on every row of such a run
-        doc.update(score_raw=None, score_raw_seeds=None, site=None, make=None)
+        doc.update(score_raw=None, score_raw_seeds=None, site=None, make=None, cohort_candidates=None)
     doc.update(kw)
     doc.update(cascade_digest=cas.digest, student_digest=cas.student.digest, fusion_digest=cas.fusion.digest, stack_id=sid)
     return doc
@@ -112,9 +114,8 @@ def score(stacks, context, cas, F: Fusion, device: str = "cpu", workers: int = 8
 
     def table(sid, **kw):
         if raw:
-            r = rows[sid]
-            kw.setdefault("site", r["site"])
-            kw.setdefault("make", evidence.make_of(by_id[sid]))
+            for k, v in evidence.raw_columns(rows, by_id, sid).items():
+                kw.setdefault(k, v)
         return _table(sid, cas, raw=raw, **kw)
 
     by_id = {e.stack_id: e for e in stacks}
@@ -169,7 +170,9 @@ def score(stacks, context, cas, F: Fusion, device: str = "cpu", workers: int = 8
     with ProcessPoolExecutor(max(1, workers), mp_context=multiprocessing.get_context("spawn")) as ex:
         for sid, why, x, opened in ex.map(_read_one, tasks, chunksize=2):
             if x is None:
-                out[sid] = table(sid, stage1=why, reason="no-calibration" if sid in uncal else "deferred", files_read=opened)
+                # not read, so not scored: deferred, in the raw-score mode too
+                # (no-calibration is a scored stack's reason there)
+                out[sid] = table(sid, stage1=why, reason="deferred", files_read=opened)
                 continue
             buf.append((sid, x, opened))
             if len(buf) >= batch:
@@ -185,7 +188,7 @@ def cmd_cascade(a: argparse.Namespace) -> int:
     run = Run("postcontrast-cascade", a.output, params, "cpu")
     try:
         cas = parts.cascade(a.inputs)
-        F = calibration.for_run(Fusion.load(cas.fusion.artifact), a.calibration, run.extra)
+        F = calibration.for_run(Fusion.load(cas.fusion.artifact), a.calibration, run.extra, cas.fusion.digest)
         ct = cas.part.card.get("threshold")
         if isinstance(ct, bool) or not isinstance(ct, (int, float)) or abs(float(ct) - F.t) > 1e-9:
             raise parts.PartsError("the cascade's card names no threshold, or not the fusion's")
@@ -217,6 +220,10 @@ def cmd_cascade(a: argparse.Namespace) -> int:
                                   "probabilities": {GIVEN: round(p, 6), NOT_GIVEN: round(1 - p, 6)}, "model_digest": cas.digest})
     run.metrics = {"stacks": len(stacks), "by_outcome": counts, "seconds": round(time.time() - t0, 3),
                    "deferred": [e.stack_id for e in stacks if tables[e.stack_id]["reason"] == "deferred"]}
+    if a.raw_scores:
+        run.metrics["raw_scored"] = sum(1 for d in tables.values() if d["score_raw"] is not None)
+    sites = evidence.rows_for(stacks, context, F)
+    calibration.record(run.extra, {sid: r["site"] for sid, r in sites.items()}, tables)
     run.models = [cas.part.ref(), cas.student.ref(), cas.fusion.ref()]
     run.write()
     return 0
