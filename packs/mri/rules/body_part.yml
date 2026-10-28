@@ -38,7 +38,7 @@ rule_set: body_part
 decides: [body_part]
 tiers: {keywords: 0.65}
 
-order: [spine, spine_levels, brain_neck, neck, brain, spine_coil, stated_spine, stated_brain_neck, stated_neck, stated_brain, portrait_sagittal]
+order: [spine, spine_levels, brain_neck, neck, brain, spine_coil_brain_volume, spine_coil, stated_spine, stated_brain_neck, stated_neck, stated_brain, portrait_sagittal]
 
 rules:
 
@@ -98,9 +98,48 @@ rules:
   # named for the spine and for the head or neck as well, such as Philips'
   # dS HeadNeckSpine, images all of them and says nothing either.
 
+  # A brain-sized 3D volume received on a spine coil in an exam registered as a
+  # brain is the brain (a partner site acquires brain scans in the spine array
+  # alone, and its BodyPartExamined is per exam): a 3D acquisition, the short
+  # side of the field of view at least 150 mm and the long side between 200 and
+  # 300 mm, at least 100 slices of 1.5 mm or thinner (the thickness, or the
+  # spacing where a volume is exported without one). A sagittal spine series on
+  # the same coil is narrower or thicker and keeps its spine. A spine stated
+  # beside the brain keeps the stated tier's precedence: a spine mentioned at
+  # all decides it. A stated neck beside the brain word is not read as a brain
+  # volume either (the spine coil then decides).
+  spine_coil_brain_volume:
+    clauses:
+      - when:
+          all:
+            - spine_coil_alone
+            - {text: stated_anatomy_text, any_substring: *brain}
+            - {not: {text: stated_anatomy_text, any_substring: *spine}}
+            - {not: {text: stated_anatomy_text, any_substring: *neck}}
+            - is_3d
+            - {field: fov_x, le: 300}
+            - {field: fov_y, le: 300}
+            - {field: fov_x, ge: 150}
+            - {field: fov_y, ge: 150}
+            - any:
+                - {field: fov_x, ge: 200}
+                - {field: fov_y, ge: 200}
+            - {field: n_slices, ge: 100}
+            - any:
+                - {field: slice_thickness, le: 1.5}
+                - all:
+                    - {field: slice_thickness, present: false}
+                    - {field: spacing_between_slices, le: 1.5}
+        cite: 'a brain-sized 3D volume on a spine coil, with a brain stated'
+        source: geometry
+        tier: keywords
+    set: {body_part: brain}
+    confidence: 0.65
+    why: 'a brain-sized 3D volume received on a spine coil in an exam registered as a brain'
+
   spine_coil:
     clauses:
-      - {when: {all: [{text: receive_coil_name, substring: spine}, {not: {text: receive_coil_name, substring: head}}, {not: {text: receive_coil_name, substring: neck}}]}, cite: 'a spine coil', source: coil, tier: keywords}
+      - {when: spine_coil_alone, cite: 'a spine coil', source: coil, tier: keywords}
     set: {body_part: spine}
     confidence: 0.65
     why: 'the series was received on a spine coil'

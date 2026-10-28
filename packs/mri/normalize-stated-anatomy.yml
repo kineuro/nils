@@ -29,3 +29,10 @@ token_removals: ['vertebralcranium']
 # that no keyword has to be three letters long.
 token_replacements:
   'cou': 'neck'
+  # The Dutch segment abbreviations, spelled out as in `normalize-anatomy.yml`
+  # so that `stated_spine` reads them too.
+  'cwk': 'cervicale wervelkolom'
+  'twk': 'thoracale wervelkolom'
+  'lwk': 'lumbale wervelkolom'
+  'ctwk': 'cervicothoracale wervelkolom'
+  'tlwk': 'thoracolumbale wervelkolom'

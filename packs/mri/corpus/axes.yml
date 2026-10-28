@@ -661,6 +661,144 @@ cases:
     axes:
       body_part: spine
 
+  - name: a brain-sized 3D volume received on a spine coil in an exam registered as a brain is the brain
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND\NORM'
+      scanning_sequence: 'GR\IR'
+      mr_acquisition_type: '3D'
+      text_body_part: 'BRAIN,HEAD'
+      text_sequence_name: '*tfl3d1_16ns'
+      text_series_description: 'Sag T1 3D GRE IR MPRAGE'
+      receive_coil_name: 'Spine_32_RS'
+      fov_x: 250
+      fov_y: 250
+      n_slices: 176
+      slice_thickness: 1.0
+    axes:
+      body_part: brain
+
+  - name: a 40-slice 2 mm sagittal 3D slab on a spine coil keeps its spine in an exam registered as a brain
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND\NORM'
+      scanning_sequence: 'SE'
+      mr_acquisition_type: '3D'
+      text_body_part: 'BRAIN,HEAD'
+      text_sequence_name: '*spc3d1_16'
+      text_series_description: 'Sag T2 3D SPACE'
+      receive_coil_name: 'Spine_32_RS'
+      fov_x: 230
+      fov_y: 230
+      n_slices: 40
+      slice_thickness: 2.0
+    axes:
+      body_part: spine
+
+  - name: a tall sagittal 3D slab on a spine coil with a brain stated keeps its spine, the short side is under 150 mm
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND\NORM'
+      scanning_sequence: 'SE'
+      mr_acquisition_type: '3D'
+      text_body_part: 'BRAIN,HEAD'
+      text_sequence_name: '*spc3d1_16'
+      text_series_description: 'Sag T2 3D SPACE'
+      receive_coil_name: 'Spine_32_RS'
+      fov_x: 120
+      fov_y: 300
+      n_slices: 120
+      slice_thickness: 1.0
+    axes:
+      body_part: spine
+
+  - name: a stated spine beside the brain keeps its spine
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND\NORM'
+      scanning_sequence: 'GR\IR'
+      mr_acquisition_type: '3D'
+      text_body_part: 'SPINE,BRAIN'
+      text_sequence_name: '*tfl3d1_16ns'
+      text_series_description: 'Sag T1 3D GRE IR MPRAGE'
+      receive_coil_name: 'Spine_32_RS'
+      fov_x: 250
+      fov_y: 250
+      n_slices: 176
+      slice_thickness: 1.0
+    axes:
+      body_part: spine
+
+  - name: a volume exported without a slice thickness is read by its spacing and is the brain
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND\NORM'
+      scanning_sequence: 'GR\IR'
+      mr_acquisition_type: '3D'
+      text_body_part: 'BRAIN,HEAD'
+      text_sequence_name: '*tfl3d1_16ns'
+      text_series_description: 'Sag T1 3D GRE IR MPRAGE'
+      receive_coil_name: 'Spine_32_RS'
+      fov_x: 250
+      fov_y: 250
+      n_slices: 176
+      spacing_between_slices: 1.0
+    axes:
+      body_part: brain
+
+  - name: a field of view over 300 mm on a spine coil keeps its spine
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND\NORM'
+      scanning_sequence: 'GR\IR'
+      mr_acquisition_type: '3D'
+      text_body_part: 'BRAIN,HEAD'
+      text_sequence_name: '*tfl3d1_16ns'
+      text_series_description: 'Sag T1 3D GRE IR MPRAGE'
+      receive_coil_name: 'Spine_32_RS'
+      fov_x: 350
+      fov_y: 350
+      n_slices: 176
+      slice_thickness: 1.0
+    axes:
+      body_part: spine
+
+  - name: a volume of under 100 slices on a spine coil keeps its spine
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND\NORM'
+      scanning_sequence: 'GR\IR'
+      mr_acquisition_type: '3D'
+      text_body_part: 'BRAIN,HEAD'
+      text_sequence_name: '*tfl3d1_16ns'
+      text_series_description: 'Sag T1 3D GRE IR MPRAGE'
+      receive_coil_name: 'Spine_32_RS'
+      fov_x: 250
+      fov_y: 250
+      n_slices: 60
+      slice_thickness: 1.0
+    axes:
+      body_part: spine
+
+  - name: a stated neck beside the brain is not read as a brain volume, the spine coil decides
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND\NORM'
+      scanning_sequence: 'GR\IR'
+      mr_acquisition_type: '3D'
+      text_body_part: 'HEAD,NECK'
+      text_sequence_name: '*tfl3d1_16ns'
+      text_series_description: 'Sag T1 3D GRE IR MPRAGE'
+      receive_coil_name: 'Spine_32_RS'
+      fov_x: 250
+      fov_y: 250
+      n_slices: 176
+      slice_thickness: 1.0
+    axes:
+      body_part: spine
+
+  - name: the Dutch segment abbreviations name a spine
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND\NORM'
+      scanning_sequence: SE
+      text_body_part: 'BRAIN,HEAD'
+      text_sequence_name: '*tse2d1_17'
+      text_series_description: 'T2 TSE sag CWK'
+    axes:
+      body_part: spine
+
   - name: a head, neck and spine coil says nothing about which of the three was scanned
     stack:
       image_type: 'ORIGINAL\PRIMARY\M\ND'

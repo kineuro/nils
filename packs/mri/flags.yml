@@ -363,6 +363,16 @@ flags:
     any:
       - {field: mr_acquisition_type, eq: '2D'}
       - all: [{field: mr_acquisition_type, present: false}, image_type.is_2d_view]
+
+  # --- the coil
+  # A coil named for the spine and for neither the head nor the neck: the
+  # three-clause test the two spine-coil body-part rules share.
+  spine_coil_alone:
+    all:
+      - {text: receive_coil_name, substring: spine}
+      - {not: {text: receive_coil_name, substring: head}}
+      - {not: {text: receive_coil_name, substring: neck}}
+
   # v0 reads these three off a stack key its fingerprint query never selects,
   # so all three are permanently false there. The rule below is the one v0
   # meant, against the fingerprint column Wave 2 slice 1 added; the difference
